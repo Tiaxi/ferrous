@@ -5,9 +5,9 @@ import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
 
 // The scrollbar of the library tree and the queue: it lies over the 8 px
-// lane on the right that rows leave free (RowBackground.scrollbarLane), and
-// shows only while the list is longer than its view. A 4 px thumb that
-// widens under the pointer.
+// lane on the right that the rows' text keeps clear of, drawing its thumb
+// over their tints, which run to the edge, and shows only while the list is
+// longer than its view. A 4 px thumb that widens under the pointer.
 ScrollBar {
     id: root
 

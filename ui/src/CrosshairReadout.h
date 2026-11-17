@@ -14,6 +14,7 @@
 #include <QString>
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 // A crosshair's readout on the axes of a plot, as the waveform and the
@@ -30,6 +31,11 @@ constexpr int kPadding = 3;
 constexpr int kEdgeMargin = 2;
 // Between the value's plate and the time's, and a scale along the right edge.
 constexpr int kGap = 4;
+// Between the value's plate and the corner's controls beside it: a gap
+// between groups, so that where a lane is too short for the value to go
+// under the corner, it doesn't read as one more plate in the corner's row,
+// as it did ViewCorner::kLabelGap from it (#373 H8).
+constexpr int kCornerGap = 16;
 constexpr int kRadius = 3;
 
 // A plate's colours. A plate with an edge has it 1 px wide around its fill,
@@ -42,9 +48,15 @@ struct Colors {
     bool hasEdge() const { return edge.alpha() > 0; }
 };
 
+// The readout's text: the application's font at the small size of the
+// design (UiPalette.smallPointSize), as the plot's lane labels, so it grows
+// with a larger font: 12 px at the default 10 pt. It is sized in pixels, at
+// Qt's logical 96 dpi as QML's text is, so the plates it is measured for and
+// the images it is drawn in agree whatever the device pixel ratio.
 inline QFont font() {
     QFont font;
-    font.setPixelSize(10);
+    const double points = font.pointSizeF() > 0.0 ? font.pointSizeF() : font.pixelSize() * 0.75;
+    font.setPixelSize(std::max(1, static_cast<int>(std::lround(points * 0.9 * 96.0 / 72.0))));
     return font;
 }
 
@@ -133,7 +145,7 @@ inline Rows rowsClearOf(const Rows &rows, const QRect &head, int plateHeight) {
 // out. Each follows its own line and nothing else, so neither jumps:
 // - The value's plate is centred on the horizontal line at the right edge,
 //   or left of the scale along it, and keeps out from under the corner's
-//   controls (see ViewCorner). Where the lane is tall enough, it stays
+//   controls, kCornerGap from them (see ViewCorner). Where the lane is tall enough, it stays
 //   above the time's.
 // - The time's plate is centred on the vertical line at the bottom edge. It
 //   stops left of the scale where one of its labels is beside it, right of
@@ -183,7 +195,7 @@ inline std::pair<QRect, QRect> plateRects(
         // that doesn't move as the pointer moves.
         const int widestHome = right - valueRoom;
         const int leftmost = ViewCorner::labelXClearOfCorner(
-            widestHome, kEdgeMargin, valueRoom, valuePlate.height(), width, reservedCorner);
+            widestHome, kEdgeMargin, valueRoom, valuePlate.height(), width, reservedCorner, kCornerGap);
         const bool besideHead = laneHead.isValid() && leftmost < laneHead.right() + 1 + kGap;
         const auto clearOfHead = [&](const Rows &rows) {
             return besideHead ? rowsClearOf(rows, laneHead, valuePlate.height()) : rows;
@@ -203,7 +215,8 @@ inline std::pair<QRect, QRect> plateRects(
             const int top = std::clamp(y - valuePlate.height() / 2, rows.first, rows.last);
             value = QRect(
                 std::max(0, ViewCorner::labelXClearOfCorner(
-                    home, top, valuePlate.width(), valuePlate.height(), width, reservedCorner)),
+                    home, top, valuePlate.width(), valuePlate.height(), width, reservedCorner,
+                    kCornerGap)),
                 top, valuePlate.width(), valuePlate.height());
             if (hasTime && beside) {
                 timeRight = std::min(timeRight, leftmost - kGap);
@@ -246,6 +259,21 @@ inline void drawPlate(QPainter &painter, const QRect &rect, const QString &text,
     const QFontMetrics metrics(font);
     painter.drawText(QPointF(fill.left() + kPadding, fill.top() + kPadding + metrics.ascent()), text);
     painter.restore();
+}
+
+// A readout's number with `decimals` decimals, its minus the typographic
+// minus sign (U+2212), as the plots' scale labels: "−12.5", "0.0", "3.0".
+// A value that rounds to zero has no sign.
+inline QString signedNumber(double value, int decimals) {
+    const double scale = std::pow(10.0, decimals);
+    const double rounded = std::round(value * scale) / scale;
+    const QString digits = QString::number(std::abs(rounded), 'f', decimals);
+    return rounded < 0.0 ? QStringLiteral("\u2212") + digits : digits;
+}
+
+// The level of silence: "−∞".
+inline QString minusInfinity() {
+    return QStringLiteral("\u2212\u221e");
 }
 
 } // namespace CrosshairReadout

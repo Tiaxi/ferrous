@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The visualization mode switch's Spectrogram glyph, drawn for 16 px at 1x: the app icon's
+     small-size pair of traces, a glide and its 3rd harmonic, each starting on its own at the left
+     as the icon's traces do, in the icon's weight order, the lower one the heavier. The lower is the
+     icon's fundamental, a 2 px stroke from x 2 to 14 that rises 2.5 px along its length, most of it
+     in its first half, bending over as a glide does. The harmonic, the icon's top trace, a 1.5 px
+     stroke, starts 4 px above it and rises at some 45 degrees, bending over to 20: two arcs fanning
+     apart, some 4 px clear of each other half way across and 6 px at the end, and 1.75 px or more
+     everywhere. Round caps, a weight beside Breeze's waveform glyph. A one-colour mask, drawn in the
+     plot's text colour. -->
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" d="M2.75 13.25C5.25 12.1 8.75 11.15 13.25 10.75"/>
+<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M2.75 9.25C5 6.9 8.5 5 13.25 3.25"/>
+</svg>

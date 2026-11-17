@@ -17,6 +17,7 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QQmlApplicationEngine>
+#include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlListReference>
 #include <QQmlProperty>
@@ -30,9 +31,13 @@
 #include <QtTest/QtTest>
 #include <qqml.h>
 
+#include <algorithm>
+#include <cmath>
 #include <functional>
+#include <memory>
 #include <tuple>
 
+#include "../src/InputModality.h"
 #include "../src/LevelMeterItem.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/Localization.h"
@@ -398,6 +403,105 @@ void rightClick(QQuickWindow *window, QQuickItem *item) {
     QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, at);
 }
 
+
+// WCAG's relative luminance and contrast ratio of opaque colours.
+double relativeLuminance(const QColor &color) {
+    const auto linear = [](double channel) {
+        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
+}
+
+double contrastRatio(const QColor &a, const QColor &b) {
+    const double la = relativeLuminance(a);
+    const double lb = relativeLuminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+// The largest difference of the colours' 8-bit channels.
+int channelDistance(const QColor &a, const QColor &b) {
+    return std::max({std::abs(a.red() - b.red()), std::abs(a.green() - b.green()),
+                     std::abs(a.blue() - b.blue())});
+}
+
+// The menu bar's title at `index`, its delegate.
+QQuickItem *menuBarItemAt(QObject *menuBar, int index) {
+    QQuickItem *item = nullptr;
+    QMetaObject::invokeMethod(menuBar, "itemAt", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, index));
+    return item;
+}
+
+QQuickItem *childNamed(QQuickItem *root, const char *name) {
+    const QList<QQuickItem *> found = itemsNamed(root, QString::fromLatin1(name));
+    return found.isEmpty() ? nullptr : found.first();
+}
+
+// The colours of a Breeze scheme that UiPalette reads, from Breeze's
+// .colors files: window, view, text, inactive text and accent.
+struct Scheme {
+    const char *window;
+    const char *view;
+    const char *text;
+    const char *inactiveText;
+    const char *highlight;
+};
+
+const Scheme kBreezeDark{"#202326", "#141618", "#fcfcfc", "#a1a9b1", "#3daee9"};
+const Scheme kBreezeLight{"#eff0f1", "#ffffff", "#232629", "#707d8a", "#3daee9"};
+
+// A window in `scheme` whose menu bar has Main.qml's titles, File and Edit.
+QByteArray menuBarHarnessQml(const Scheme &scheme) {
+    return QStringLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import org.kde.kirigami 2.20 as Kirigami
+import "components" as Components
+
+ApplicationWindow {
+    id: window
+    width: 600
+    height: 300
+    visible: true
+    palette.window: "%1"
+    palette.base: "%2"
+    palette.text: "%3"
+    palette.windowText: "%3"
+    property alias tokens: tokens
+
+    Item {
+        Kirigami.Theme.inherit: false
+        Kirigami.Theme.textColor: "%3"
+        Kirigami.Theme.disabledTextColor: "%4"
+        Kirigami.Theme.highlightColor: "%5"
+
+        Components.UiPalette {
+            id: tokens
+            windowRoot: window
+        }
+    }
+
+    menuBar: MenuBar {
+        objectName: "harnessMenuBar"
+        delegate: Components.AppMenuBarItem {
+            uiPalette: tokens
+        }
+        Components.AppMenu {
+            objectName: "harnessFileMenu"
+            title: "&File"
+            MenuItem { text: "&Open" }
+        }
+        Components.AppMenu {
+            objectName: "harnessEditMenu"
+            title: "&Edit"
+            MenuItem { text: "&Undo" }
+        }
+    }
+}
+)QML")
+        .arg(QLatin1String(scheme.window), QLatin1String(scheme.view), QLatin1String(scheme.text),
+             QLatin1String(scheme.inactiveText), QLatin1String(scheme.highlight))
+        .toUtf8();
+}
 } // namespace
 
 // Takes the URLs Qt.openUrlExternally would open, so no browser starts.
@@ -421,6 +525,9 @@ private slots:
     void cleanupTestCase();
     void drawsOffscreenUnlessAPlatformIsChosen();
     void menuBarHasTheSixKdeMenusInOrder();
+    void menuBarTitlesAreLitWithTheSelectionTint();
+    void menuBarTitleReadsWhenOpenOrHovered_data();
+    void menuBarTitleReadsWhenOpenOrHovered();
     void menusListTheirItemsInOrder();
     void wordingIsTitleCaseWithOneCharacterEllipsis();
     void playPauseItemNamesWhatItDoes();
@@ -429,12 +536,14 @@ private slots:
     void repeatRadiosFollowTheBackendAndSetIt();
     void visualizationRadiosFollowThePlotSwitch();
     void scaleItemIsOffInWaveformMode();
+    void levelMeterIsPartOfThePlot();
     void editMenuNamesItsUndoAndClearsTheQueue();
     void findOpensSearchOnCtrlF();
     void shortcutsAreTakenOnceEach();
     void shortcutsTriggerTheirActions();
     void queueContextMenuShowsKeysItDoesNotTake();
     void libraryContextMenuNamesWhatItActsOn();
+    void coverMenusGiveReplaceFromItunesAnIcon();
     void menusHaveNoTransitionsOfTheirOwn();
     void settingsAndHelpOpenTheirPages();
     void aboutKdeLinksTakeTheKeyboard();
@@ -449,6 +558,7 @@ void UiMenusTest::initTestCase() {
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
+    InputModality::registerQmlType();
 }
 
 void UiMenusTest::init() {
@@ -482,6 +592,147 @@ void UiMenusTest::menuBarHasTheSixKdeMenusInOrder() {
     QCOMPARE(titles, (QStringList{QStringLiteral("&File"), QStringLiteral("&Edit"), QStringLiteral("&View"),
                                   QStringLiteral("&Playback"), QStringLiteral("&Settings"),
                                   QStringLiteral("&Help")}));
+}
+
+// Main.qml's titles are the app's: plain, they show the bar; lit, the
+// selection tint of the lists, with the text colour on both.
+void UiMenusTest::menuBarTitlesAreLitWithTheSelectionTint() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    auto *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QObject *menuBar = menuBarOf(window);
+    QVERIFY(palette != nullptr && menuBar != nullptr);
+    const QColor text = palette->property("text").value<QColor>();
+    const QColor selection = palette->property("selection").value<QColor>();
+
+    const QList<QObject *> menus = menusOf(window);
+    QCOMPARE(menuBar->property("count").toInt(), menus.size());
+    for (int i = 0; i < menus.size(); ++i) {
+        QQuickItem *title = menuBarItemAt(menuBar, i);
+        QVERIFY(title != nullptr);
+        const QString name = withoutMnemonic(menus.at(i)->property("title").toString());
+        QQuickItem *label = childNamed(title, "menuBarItemLabel");
+        QQuickItem *background = childNamed(title, "menuBarItemBackground");
+        QVERIFY2(label != nullptr && background != nullptr, qPrintable(name));
+        QCOMPARE(label->property("color").value<QColor>(), text);
+        QCOMPARE(background->property("color").value<QColor>(), selection);
+        QVERIFY2(!background->isVisible(), qPrintable(name));
+    }
+
+    // Opened, View is lit; closed, it is plain again. Escape can leave the
+    // keyboard on the bar, with View the current title and lit; a second
+    // Escape leaves the bar.
+    QQuickItem *view = menuBarItemAt(menuBar, 2);
+    QQuickItem *viewBackground = childNamed(view, "menuBarItemBackground");
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(view).center().toPoint());
+    QTRY_VERIFY(menus.at(2)->property("visible").toBool());
+    QTRY_COMPARE(viewBackground->opacity(), 1.0);
+    QTest::mouseMove(window, QPoint(window->width() / 2, window->height() / 2));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!menus.at(2)->property("visible").toBool());
+    if (view->property("highlighted").toBool()) {
+        QTRY_COMPARE(viewBackground->opacity(), 1.0);
+        QTest::keyClick(window, Qt::Key_Escape);
+    }
+    QTRY_VERIFY(!view->property("highlighted").toBool());
+    QTRY_VERIFY(!viewBackground->isVisible());
+}
+
+void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("dark") << true;
+    QTest::newRow("light") << false;
+}
+
+// The open or hovered title is the text colour on the selection tint, as
+// in the lists, and well over 4.5:1 in both themes (#373 H4: the style's
+// white on a translucent accent was 2.08:1 in light). It keeps the style's
+// size, padding and Alt mnemonics, and Alt+letter opens its menu.
+void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered() {
+    QFETCH(bool, dark);
+    const Scheme &scheme = dark ? kBreezeDark : kBreezeLight;
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(menuBarHarnessQml(scheme),
+                      QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/MenuBarHarness.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    QVERIFY2(root != nullptr, qPrintable(component.errorString()));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    window->requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(window));
+    auto *tokens = qvariant_cast<QObject *>(root->property("tokens"));
+    QObject *menuBar = qvariant_cast<QObject *>(root->property("menuBar"));
+    QVERIFY(tokens != nullptr && menuBar != nullptr);
+    QObject *fileMenu = root->findChild<QObject *>(QStringLiteral("harnessFileMenu"));
+    QQuickItem *file = menuBarItemAt(menuBar, 0);
+    QQuickItem *edit = menuBarItemAt(menuBar, 1);
+    QVERIFY(fileMenu != nullptr && file != nullptr && edit != nullptr);
+    QQuickItem *label = childNamed(file, "menuBarItemLabel");
+    QQuickItem *background = childNamed(file, "menuBarItemBackground");
+    QVERIFY(label != nullptr && background != nullptr);
+
+    // The declared colours: the text on the selection tint.
+    const QColor text = tokens->property("text").value<QColor>();
+    const QColor selection = tokens->property("selection").value<QColor>();
+    QCOMPARE(text, QColor(QLatin1String(scheme.text)));
+    QCOMPARE(selection.alpha(), 255);
+    const double ratio = contrastRatio(text, selection);
+    QVERIFY2(ratio >= 4.5, qPrintable(QStringLiteral("%1 on %2 is %3:1")
+                                          .arg(text.name(), selection.name()).arg(ratio, 0, 'f', 2)));
+    QVERIFY2(ratio >= (dark ? 10.0 : 10.5), qPrintable(QString::number(ratio)));
+
+    // The style's size and padding.
+    QCOMPARE(file->property("leftPadding").toReal(), file->property("rightPadding").toReal());
+    QVERIFY(file->property("leftPadding").toReal() > 0.0);
+    QCOMPARE(file->property("topPadding").toReal(), file->property("bottomPadding").toReal());
+    QVERIFY(file->property("topPadding").toReal() > 0.0);
+    QCOMPARE(file->width(), std::max(file->property("implicitBackgroundWidth").toReal(),
+                                     file->property("implicitContentWidth").toReal()
+                                         + file->property("leftPadding").toReal()
+                                         + file->property("rightPadding").toReal()));
+
+    // Plain: the bar shows through, and the text is the text colour.
+    QVERIFY(!background->isVisible());
+    QCOMPARE(label->property("color").value<QColor>(), text);
+
+    // Hovered: lit.
+    QTest::mouseMove(window, sceneRect(file).center().toPoint());
+    QTRY_COMPARE(background->opacity(), 1.0);
+    QCOMPARE(background->property("color").value<QColor>(), selection);
+    QCOMPARE(label->property("color").value<QColor>(), text);
+    QVERIFY(!childNamed(edit, "menuBarItemBackground")->isVisible());
+
+    // Open: lit, and drawn so.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(file).center().toPoint());
+    QTRY_VERIFY(fileMenu->property("visible").toBool());
+    QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 10));
+    QTRY_COMPARE(background->opacity(), 1.0);
+    QCOMPARE(label->property("color").value<QColor>(), text);
+    QTest::qWait(50);
+    const QImage image = window->grabWindow();
+    const qreal scale = static_cast<qreal>(image.width()) / window->width();
+    const QPointF corner = sceneRect(file).topLeft() + QPointF(2, 2);
+    const QColor drawn = image.pixelColor(static_cast<int>(corner.x() * scale), static_cast<int>(corner.y() * scale));
+    QVERIFY2(channelDistance(drawn, selection) <= 1,
+             qPrintable(QStringLiteral("drawn %1, selection %2").arg(drawn.name(), selection.name())));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!fileMenu->property("visible").toBool());
+    QTRY_VERIFY(!background->isVisible());
+
+    // Alt underlines the mnemonics, and Alt+F opens File.
+    QVERIFY(!label->property("text").toString().contains(QStringLiteral("<u>")));
+    QTest::keyPress(window, Qt::Key_Alt, Qt::AltModifier);
+    QTRY_VERIFY2(label->property("text").toString().contains(QStringLiteral("<u>F</u>")),
+                 qPrintable(label->property("text").toString()));
+    QTest::keyClick(window, Qt::Key_F, Qt::AltModifier);
+    QTest::keyRelease(window, Qt::Key_Alt, Qt::NoModifier);
+    QTRY_VERIFY(fileMenu->property("visible").toBool());
+    QTRY_COMPARE(background->opacity(), 1.0);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!fileMenu->property("visible").toBool());
 }
 
 void UiMenusTest::menusListTheirItemsInOrder() {
@@ -867,6 +1118,108 @@ void UiMenusTest::scaleItemIsOffInWaveformMode() {
     QTRY_VERIFY(!meter->property("checked").toBool());
 }
 
+// The level meter as part of the plot (#373 H7 P11, H8): its column runs
+// out to the pane's edge, which is the window's and the right edge of the
+// queue's scrollbar above the pane, with no strip of the plot's floor
+// beside it; its bar is far wider than the scrollbar's thumb, and nothing
+// of either overlaps the other. Its fill is the plot set's meterFill, the
+// app icon's magenta on the spectrogram (#373 H15 H2). It is one meter
+// for both visualization modes, of the same input, scale and marks, so
+// one signal reads the same in either: only its colours change, and on
+// the waveform its bar is framed by the trough (#373 H16 I3).
+void UiMenusTest::levelMeterIsPartOfThePlot() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = child(window, "viewerController");
+    bridge->setProperty("showLevelMeter", true);
+    // A queue longer than its view, scrolled to its end: the thumb at the
+    // bottom of its lane, as near the meter as it comes.
+    bridge->setProperty("queueRows", sampleQueueRows(200));
+    bridge->setProperty("queueLength", 200);
+    auto *meter = qobject_cast<LevelMeterItem *>(child(window, "levelMeter"));
+    auto *scrollBar = qobject_cast<QQuickItem *>(child(window, "queueScrollBar"));
+    auto *queueView = qobject_cast<QQuickItem *>(child(window, "playlistView"));
+    QVERIFY(viewer != nullptr && meter != nullptr && scrollBar != nullptr && queueView != nullptr);
+    QTRY_VERIFY(meter->isVisible() && meter->width() > 0);
+    QTRY_VERIFY(scrollBar->isVisible() && scrollBar->width() > 0);
+    QVERIFY(QMetaObject::invokeMethod(queueView, "positionViewAtEnd"));
+    QTRY_VERIFY(scrollBar->property("position").toReal() + scrollBar->property("size").toReal() > 0.999);
+    QQuickItem *thumb = nullptr;
+    QTRY_VERIFY((thumb = childNamed(scrollBar, "laneScrollBarThumb")) != nullptr
+                && thumb->isVisible());
+    const auto sceneRect = [](QQuickItem *item) {
+        return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+    };
+
+    // The pane's edge, the window's, and the scrollbar's lane's.
+    const QRectF meterRect = sceneRect(meter);
+    const QRectF laneRect = sceneRect(scrollBar);
+    const QRectF thumbRect = sceneRect(thumb);
+    QCOMPARE(meterRect.right(), double(window->width()));
+    QVERIFY2(std::abs(meterRect.right() - laneRect.right()) < 1.0,
+             qPrintable(QStringLiteral("meter ends at %1, the lane at %2").arg(meterRect.right()).arg(laneRect.right())));
+    QCOMPARE(meter->implicitWidth(), LevelMeterItem::kColumnWidth);
+    // The bar out to that edge, 10 px: a ladder of 3 px rungs on a 4 px
+    // pitch rather than a solid bar, which tells it from the scrollbar's
+    // solid thumb (#373 H14 G3; H16 I3: 2 px on 3 read as a hatch).
+    QCOMPARE(LevelMeterItem::kBarLeft + LevelMeterItem::kBarWidth, meter->width());
+    QCOMPARE(LevelMeterItem::kBarWidth, 10.0);
+    QCOMPARE(LevelMeterItem::kRungHeight, 3.0);
+    QCOMPARE(LevelMeterItem::kRungPitch, 4.0);
+    // Neither overlaps the other: the thumb ends above the pane.
+    QVERIFY2(!meterRect.intersects(laneRect) && !meterRect.intersects(thumbRect),
+             qPrintable(QStringLiteral("meter %1, %2 lane %3, %4, thumb to %5")
+                            .arg(meterRect.top()).arg(meterRect.left())
+                            .arg(laneRect.bottom()).arg(laneRect.left()).arg(thumbRect.bottom())));
+    QVERIFY(thumbRect.bottom() <= meterRect.top());
+
+    // The spectrogram: the set's fill; the ticks with the scale.
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    const auto fillOf = [&](const char *set) {
+        return qvariant_cast<QObject *>(palette->property(set))->property("meterFill").value<QColor>();
+    };
+    QCOMPARE(meter->property("fillColor").value<QColor>(), fillOf("spectrogramPlot"));
+    QCOMPARE(fillOf("spectrogramPlot"), QColor(QStringLiteral("#c149a0")));
+    QVERIFY(!meter->framed());
+    // Every property of the meter but its colours and frame, which decide
+    // what it reads and where on its scale: the same in either mode, and
+    // with or without the spectrogram's scale.
+    const auto reading = [&]() {
+        QVariantMap values;
+        for (const char *name : {"sourcePath", "laneCount", "active", "playing", "durationSeconds",
+                                 "channelCountHint", "clock", "width", "height"}) {
+            values.insert(QString::fromLatin1(name), meter->property(name));
+        }
+        return values;
+    };
+    const QVariantMap spectrogramReading = reading();
+    bridge->setProperty("showSpectrogramScale", true);
+    QTest::qWait(50);
+    QCOMPARE(reading(), spectrogramReading);
+    // The waveform: its own fill, the bar framed, and the same meter.
+    QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1));
+    QTRY_COMPARE(meter->property("fillColor").value<QColor>(), fillOf("waveformPlot"));
+    QVERIFY(meter->framed());
+    QCOMPARE(qobject_cast<LevelMeterItem *>(child(window, "levelMeter")), meter);
+    QCOMPARE(reading(), spectrogramReading);
+    QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0));
+    QTRY_VERIFY(meter->property("fillColor").value<QColor>() == fillOf("spectrogramPlot") && !meter->framed());
+    // Its marks are where its scale puts -6, -12 and -24 dB, whatever the
+    // mode: the meter's own mapping, the same as the levels'.
+    const double scaleHeight = 300;
+    const std::vector<int> gaps = LevelMeterItem::markGaps(scaleHeight);
+    QCOMPARE(gaps.size(), std::size_t(3));
+    const double levels[] = {-24.0, -12.0, -6.0};
+    for (std::size_t i = 0; i < gaps.size(); ++i) {
+        QCOMPARE(gaps[i] + 1, int(std::lround(LevelMeterItem::meterPosition(levels[i], scaleHeight))));
+    }
+    QCOMPARE(LevelMeterItem::meterPosition(-6.0, scaleHeight), 0.8 * scaleHeight);
+}
+
 void UiMenusTest::editMenuNamesItsUndoAndClearsTheQueue() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1064,6 +1417,29 @@ void UiMenusTest::queueContextMenuShowsKeysItDoesNotTake() {
     QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
+// The cover's menus, on the now playing cover and in the album art viewer,
+// give Replace from iTunes an icon, as the other menus give their items, so
+// its text starts where theirs does (#373 H7).
+void UiMenusTest::coverMenusGiveReplaceFromItunesAnIcon() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QStringList found;
+    for (const QString &name : {QStringLiteral("albumArtMenu"), QStringLiteral("albumArtViewerContextMenu")}) {
+        const QList<QObject *> menus = window->findChildren<QObject *>(name);
+        for (QObject *menu : menus) {
+            const QStringList rows = rowsOf(menu);
+            QVERIFY2(!rows.isEmpty(), qPrintable(name));
+            QCOMPARE(rows.first(), QStringLiteral("item|Replace from iTunes\u2026||download"));
+        }
+        if (!menus.isEmpty()) {
+            found << name;
+        }
+    }
+    QVERIFY2(found.contains(QStringLiteral("albumArtMenu")), qPrintable(found.join(QLatin1Char(' '))));
+}
+
 void UiMenusTest::libraryContextMenuNamesWhatItActsOn() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1211,10 +1587,16 @@ void UiMenusTest::aboutKdeLinksTakeTheKeyboard() {
                            QStringLiteral("https://community.kde.org/Get_Involved"),
                            QStringLiteral("https://kde.org/donate/"), QStringLiteral("https://kde.org/")};
     QList<QQuickItem *> links;
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(palette != nullptr);
     for (int i = 0; i < 4; ++i) {
         auto *link = dialog->findChild<QQuickItem *>(QStringLiteral("aboutKdeLink%1").arg(i));
         QVERIFY(link != nullptr);
         QCOMPARE(link->property("url").toString(), urls.at(i));
+        // The window's link colour, which reads on the dialog (the theme's
+        // own link was 4.3:1 on Breeze Light's view).
+        QCOMPARE(link->property("color").value<QColor>().name(QColor::HexArgb),
+                 palette->property("link").value<QColor>().name(QColor::HexArgb));
         // A link to assistive technology, named as it reads.
         QAccessibleInterface *iface = QAccessible::queryAccessibleInterface(link);
         QVERIFY(iface != nullptr);

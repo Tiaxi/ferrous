@@ -14,6 +14,8 @@ Rectangle {
     required property var libraryModel
     required property var uiPalette
     required property real splitPreferredWidth
+    // The least width, which follows the font (WindowLayoutController).
+    property real minimumWidth: 250
     required property var replaceFromItunesAction
     required property var currentTrackItunesArtworkDisabledReason
     required property var openAlbumArtViewer
@@ -24,11 +26,15 @@ Rectangle {
     // The tracks the playback failed to read, which the tree marks.
     property var errorController: null
 
+    // The library rows the now-playing panel leaves room for, under the
+    // library's header: under them, it takes its narrow layout.
+    readonly property int leastLibraryRows: 6
+
     // Content: the view colour, from the now-playing cover to the bottom
     // of the library.
     color: root.uiPalette.view
     SplitView.preferredWidth: root.splitPreferredWidth
-    SplitView.minimumWidth: 250
+    SplitView.minimumWidth: root.minimumWidth
 
     ColumnLayout {
         anchors.fill: parent
@@ -39,6 +45,8 @@ Rectangle {
             objectName: "nowPlayingPanel"
             Layout.fillWidth: true
             Layout.preferredHeight: implicitHeight
+            availableHeight: root.height
+            libraryReserve: (1 + root.leastLibraryRows) * root.uiPalette.rowHeight
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             replaceFromItunesAction: root.replaceFromItunesAction

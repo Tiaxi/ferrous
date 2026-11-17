@@ -203,7 +203,8 @@ void ErrorsSmokeTest::repeatedErrorsAreCounted() {
     QCOMPARE(entries->index(0, 0).data(entries->roleNames().key("count")).toInt(), 3);
     QVERIFY(QMetaObject::invokeMethod(errors, "historyRequested"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    QTRY_COMPARE(visibleTextItems(popupContent(dialog), QStringLiteral("Playback (\u00d73)")).size(), 1);
+    // The title names the problem, with how often it came.
+    QTRY_COMPARE(visibleTextItems(popupContent(dialog), message + QStringLiteral(" (\u00d73)")).size(), 1);
 
     // The same message about another file, or of another category, is another error.
     QVERIFY(sendBridgeError(bridge, message, 1, 0, QStringLiteral("/music/other.flac")));
@@ -271,8 +272,25 @@ void ErrorsSmokeTest::aLongErrorIsShownWhole() {
     QCOMPARE(errorHistoryMessages(errors), QStringList{message});
     QVERIFY(QMetaObject::invokeMethod(errors, "historyRequested"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    QTRY_COMPARE(visibleTextItems(popupContent(dialog), message).size(), 1);
-    QQuickItem *row = visibleTextItems(popupContent(dialog), message).first();
+    // The message's label, which shows it with its path broken between
+    // folders and its "(os error 28)" whole (#373 H47).
+    const auto messageLabels = [&] {
+        QList<QQuickItem *> labels;
+        for (const QString &name : {QStringLiteral("errorHistoryHeading"), QStringLiteral("errorHistoryMessage")}) {
+            for (QQuickItem *label : visibleItemsNamed(popupContent(dialog), name)) {
+                if (label->property("message").toString() == message) {
+                    labels << label;
+                }
+            }
+        }
+        return labels;
+    };
+    QTRY_COMPARE(messageLabels().size(), 1);
+    QQuickItem *row = messageLabels().first();
+    const QString shown = row->property("text").toString();
+    QCOMPARE(QString(shown).remove(QChar(0x200b)).remove(QChar(0x2060)).replace(QChar(0x00a0), QLatin1Char(' ')),
+             message);
+    QVERIFY(shown.contains(QStringLiteral("(os\u00a0error\u00a028)")));
     QVERIFY(!row->property("truncated").toBool());
     QTRY_VERIFY(row->property("lineCount").toInt() > 1);
     QVERIFY(row->property("contentWidth").toReal() <= row->width() + 1);
@@ -458,8 +476,45 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     window->close();
 
     QTRY_VERIFY(dialog->property("visible").toBool());
-    QCOMPARE(message->property("text").toString(), error);
+    // The error as it is; shown with its path broken between folders and
+    // its "(os error 28)" whole (#373 H47).
+    QCOMPARE(message->property("message").toString(), error);
+    QCOMPARE(message->property("text").toString().remove(QChar(0x200b)).remove(QChar(0x2060))
+                 .replace(QChar(0x00a0), QLatin1Char(' ')),
+             error);
+    QVERIFY(message->property("text").toString().contains(QStringLiteral("(os\u00a0error\u00a028)")));
     QVERIFY(window->isVisible());
+    // The heading says what happened in words; the system's error is the
+    // line below it, in the secondary colour, not the heading (#373 H37).
+    {
+        auto *heading = window->findChild<QQuickItem *>(QStringLiteral("quitSaveFailedHeading"));
+        auto *messageItem = qobject_cast<QQuickItem *>(message);
+        QVERIFY(heading != nullptr && messageItem != nullptr);
+        QTRY_VERIFY(heading->isVisible() && messageItem->isVisible());
+        const QString headingText = heading->property("text").toString();
+        // It says so once, on one line, and not in the title's words
+        // again; what the changes can be is in the text below (#373 H38,
+        // H41).
+        QCOMPARE(headingText, QStringLiteral("Some recent changes were not saved."));
+        QVERIFY(!headingText.contains(QStringLiteral("could not be saved")));
+        QCOMPARE(heading->property("lineCount").toInt(), 1);
+        // The lead, semibold, as every dialog's first sentence is (#373
+        // H40); the error and what follows regular, secondary.
+        QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
+        QCOMPARE(messageItem->property("font").value<QFont>().weight(), QFont::Normal);
+        auto *details = window->findChild<QQuickItem *>(QStringLiteral("quitSaveFailedDetails"));
+        QVERIFY(details != nullptr);
+        QCOMPARE(details->property("text").toString(),
+                 QStringLiteral("Unsaved changes can include settings, queue changes and Last.fm scrobbles. "
+                                "Retry saves again, for example after freeing disk space. Quit Anyway closes "
+                                "Ferrous and loses them."));
+        QVERIFY(details->mapToScene(QPointF(0, 0)).y() >= messageItem->mapToScene(QPointF(0, messageItem->height())).y());
+        QVERIFY2(!headingText.contains(QStringLiteral("os error")), qPrintable(headingText));
+        QVERIFY(messageItem->mapToScene(QPointF(0, 0)).y()
+                >= heading->mapToScene(QPointF(0, heading->height())).y());
+        QCOMPARE(message->property("textFormat").toInt(), int(Qt::PlainText));
+        QVERIFY(message->property("color").value<QColor>() != heading->property("color").value<QColor>());
+    }
 
     // The disk has room again.
     QVERIFY(bridge->setProperty("stateSaveError", QString()));
@@ -532,15 +587,20 @@ void ErrorsSmokeTest::retryTakesNoSecondAnswerAsTheDialogFades() {
     const int first = bridge->property("lastStateSaveRequestId").toInt();
     QVERIFY(answerStateSave(bridge, first, false, QStringLiteral("Settings could not be saved")));
     QTRY_VERIFY(dialog->property("opened").toBool());
+    // A window of its own above the main window (#373 H5).
+    auto *dialogWindow = qobject_cast<QQuickWindow *>(dialog);
+    QVERIFY(dialogWindow != nullptr);
+    QCOMPARE(dialogWindow->transientParent(), window);
+    QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
 
-    // A quick second click on Retry, as the dialog fades out, saves no
-    // second time.
+    // A quick second click on Retry, as the dialog goes, saves no second
+    // time.
     QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("quitSaveFailedRetryButton"), dialog));
     const int retry = bridge->property("lastStateSaveRequestId").toInt();
     QCOMPARE(retry, first + 1);
-    // Nor does Escape, as it still fades out, give up on the retry.
-    QVERIFY(popupFadingOut(dialog));
-    QTest::keyClick(window, Qt::Key_Escape);
+    // Nor does Escape, as it goes, give up on the retry.
+    QVERIFY(dialogClosing(dialog));
+    QTest::keyClick(dialogWindow, Qt::Key_Escape);
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), retry);
 
@@ -568,13 +628,15 @@ void ErrorsSmokeTest::enterRetriesAsSoonAsTheSaveFailureShows() {
     const int first = bridge->property("lastStateSaveRequestId").toInt();
     QVERIFY(answerStateSave(bridge, first, false, QStringLiteral("Settings could not be saved")));
     QTRY_VERIFY(dialog->property("visible").toBool());
+    auto *dialogWindow = qobject_cast<QQuickWindow *>(dialog);
+    QVERIFY(dialogWindow != nullptr);
     QVERIFY(keyboardInPopupContent(dialog));
-    QTest::keyClick(window, Qt::Key_Return);
+    QTest::keyClick(dialogWindow, Qt::Key_Return);
     const int retry = bridge->property("lastStateSaveRequestId").toInt();
     QCOMPARE(retry, first + 1);
-    // Enter again, as the dialog fades out, saves no second time.
-    QVERIFY(popupFadingOut(dialog));
-    QTest::keyClick(window, Qt::Key_Return);
+    // Enter again, as the dialog goes, saves no second time.
+    QVERIFY(dialogClosing(dialog));
+    QTest::keyClick(dialogWindow, Qt::Key_Return);
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), retry);
 
@@ -582,7 +644,7 @@ void ErrorsSmokeTest::enterRetriesAsSoonAsTheSaveFailureShows() {
     QVERIFY(answerStateSave(bridge, retry, false, QStringLiteral("Settings could not be saved")));
     QTRY_VERIFY(dialog->property("visible").toBool());
     QVERIFY(keyboardInPopupContent(dialog));
-    QTest::keyClick(window, Qt::Key_Escape);
+    QTest::keyClick(dialogWindow, Qt::Key_Escape);
     QTRY_VERIFY(popupsSettled());
     QVERIFY(!dialog->property("visible").toBool());
     QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), retry);
@@ -678,7 +740,7 @@ void ErrorsSmokeTest::escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerCome
     const int requestId = bridge->property("lastStateSaveRequestId").toInt();
     QVERIFY(timeOutStateSave(window));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    QTest::keyClick(window, Qt::Key_Escape);
+    QTest::keyClick(qobject_cast<QQuickWindow *>(dialog), Qt::Key_Escape);
     QTRY_VERIFY(!dialog->property("visible").toBool());
 
     QVERIFY(answerStateSave(bridge, requestId, true));
@@ -887,7 +949,10 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
     QTRY_VERIFY(dialog->property("opened").toBool());
 
-    // The popup fits the window; the list scrolls, and has the keyboard.
+    // The popup fits the window; the list scrolls. Opened with the
+    // pointer, its content has the keyboard, not a control, which would
+    // show no ring (#373 H38), so no focus frame wraps the whole list; the
+    // list's keys scroll it from there.
     QVERIFY(shownInsideItsWindow(content));
     QVERIFY(shownInsideItsWindow(diagnostics));
     QVERIFY(shownInsideItsWindow(clearAll));
@@ -895,7 +960,15 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     auto *flickable = qvariant_cast<QQuickItem *>(view->property("contentItem"));
     QVERIFY(flickable != nullptr);
     QTRY_VERIFY(flickable->property("contentHeight").toReal() > view->height());
-    QTRY_VERIFY(view->hasActiveFocus());
+    QList<QQuickItem *> actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
+    QCOMPARE(actions.size(), limit);
+    QTRY_COMPARE(window->activeFocusItem(), content);
+    QVERIFY(!view->property("framed").toBool());
+    QQuickItem *frame = itemNamed(view, QStringLiteral("keyScrollViewFrame"));
+    QVERIFY(frame != nullptr);
+    QCOMPARE(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>().alpha(), 0);
+    // Nor a ring on the action: it does not have the keyboard.
+    QVERIFY(!actions.first()->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Down);
     QTRY_VERIFY(flickable->property("contentY").toReal() > 0.0);
     QTest::keyClick(window, Qt::Key_End);
@@ -920,7 +993,24 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
     QTRY_VERIFY(dialog->property("opened").toBool());
     QCOMPARE(flickable->property("contentY").toReal(), 0.0);
-    QTRY_VERIFY(view->hasActiveFocus());
+    QTRY_COMPARE(window->activeFocusItem(), content);
+    // The keys scroll the list from the header's and the footer's
+    // controls too.
+    clearAll->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_End);
+    QTRY_VERIFY(flickable->property("contentY").toReal() > 0.0);
+    diagnostics->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_Home);
+    QTRY_COMPARE(flickable->property("contentY").toReal(), 0.0);
+    // Tab from Clear All goes on to the first action, with no frame round
+    // the list; with the keyboard on the list itself, its frame shows.
+    clearAll->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(itemsNamed(content, QStringLiteral("errorHistoryActionButton")).first()->hasActiveFocus());
+    QVERIFY(!view->property("framed").toBool());
+    flickable->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(view->property("framed").toBool());
+    QVERIFY(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>().alpha() > 0);
 
     // Everything has a name.
     QAccessibleInterface *popupAccessible = QAccessible::queryAccessibleInterface(content);
@@ -931,7 +1021,7 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
              QStringLiteral("Recent issues"));
 
     // Tab goes on to each row's action, scrolling the row into view.
-    QList<QQuickItem *> actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
+    actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
     QCOMPARE(actions.size(), limit);
     QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(actions.first()->hasActiveFocus());
@@ -961,18 +1051,39 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_COMPARE(toggled.count(), 1);
 
-    // Space presses a focused action rather than playing or pausing.
+    // Opened with the pointer, Space neither plays nor pauses nor presses
+    // an action; Tab marks the first one, and Space presses that.
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    QTRY_VERIFY(view->hasActiveFocus());
     actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
     QVERIFY(!actions.isEmpty());
+    QTRY_COMPARE(window->activeFocusItem(), content);
+    QTest::keyClick(window, Qt::Key_Space);
+    QCoreApplication::processEvents();
+    QVERIFY(dialog->property("visible").toBool());
+    QCOMPARE(toggled.count(), 1);
     QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(actions.first()->hasActiveFocus());
+    QVERIFY(actions.first()->property("visualFocus").toBool());
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QCOMPARE(toggled.count(), 1);
     QCOMPARE(bridge->property("shownInLibrary").toStringList(), QStringList{QStringLiteral("/music/track 0.flac")});
+
+    // With no entry that has an action, Tab takes the keyboard to Open
+    // Diagnostics, never Clear All.
+    QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
+    QTRY_COMPARE(errors->property("count").toInt(), 0);
+    QVERIFY(sendBridgeError(bridge, QStringLiteral("Playback stopped unexpectedly"), 1, 1));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    QCOMPARE(itemsNamed(content, QStringLiteral("errorHistoryActionButton")).first()->isVisible(), false);
+    QTRY_COMPARE(window->activeFocusItem(), content);
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(diagnostics->hasActiveFocus());
+    QVERIFY(!view->property("framed").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!dialog->property("visible").toBool());
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
     QVERIFY2(log.isEmpty(), qPrintable(log));
@@ -1052,7 +1163,7 @@ void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
         QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, centerInWindow(historyButton));
         QTRY_VERIFY2(dialog->property("opened").toBool(), name.constData());
         QVERIFY(viewer->property(shown.openProperty).toBool());
-        QTRY_VERIFY2(view->hasActiveFocus(), name.constData());
+        QTRY_VERIFY2(content->hasActiveFocus(), name.constData());
 
         // In the window the user is looking at, and on top of it. A press
         // outside closes it alone: the viewer stays open.
@@ -1070,7 +1181,7 @@ void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
         // is open, and Escape closes the dialog alone.
         QVERIFY(QMetaObject::invokeMethod(errors, "historyRequested"));
         QTRY_VERIFY(dialog->property("opened").toBool());
-        QTRY_VERIFY2(view->hasActiveFocus(), name.constData());
+        QTRY_VERIFY2(content->hasActiveFocus(), name.constData());
         const int toggles = toggled.count();
         QTest::keyClick(host, Qt::Key_Space);
         QCoreApplication::processEvents();

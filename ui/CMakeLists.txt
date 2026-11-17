@@ -120,6 +120,7 @@ qt_add_executable(ferrous
     src/PlaybackClock.cpp
     src/PlaybackFrameScheduler.cpp
     src/WindowPresence.cpp
+    src/InputModality.cpp
     src/WaveformReaderLease.cpp
     src/TagEditorController.cpp
     src/TagEditorTableModel.cpp
@@ -138,11 +139,16 @@ target_compile_definitions(ferrous PRIVATE FERROUS_APP_VERSION="${FERROUS_APP_VE
 add_dependencies(ferrous ferrous_rust_bridge)
 ferrous_enable_strict_warnings(ferrous)
 
-# The app icon: a drawing of its own for each size (src/AppIcon.h), installed
+# The app icon: a drawing of its own for each size (src/AppIcon.h), the 24
+# px one the 22 px drawing in a larger canvas, and for 2x
+# scaling the 16 and 22 px drawings doubled, the 64 px composition in the 32,
+# 36 and 48 px slots and the 64 px drawing doubled in its own (the @2
+# directories; none for 24 px, whose slot the hicolor theme's 22 px
+# directories serve at 1x and 2x), installed
 # in the hicolor icon theme and built in, for the window icon and the queue's
 # first-run image. The QML that shows it is loaded from the source directory
 # by the tests, which link this library too.
-set(FERROUS_APP_ICON_DIRS 16x16 22x22 32x32 48x48 64x64 128x128 256x256 scalable)
+set(FERROUS_APP_ICON_DIRS 16x16 16x16@2 22x22 22x22@2 24x24 32x32 32x32@2 36x36 36x36@2 48x48 48x48@2 64x64 64x64@2 128x128 256x256 scalable)
 set(FERROUS_APP_ICON_FILES "")
 foreach(_icon_dir IN LISTS FERROUS_APP_ICON_DIRS)
     list(APPEND FERROUS_APP_ICON_FILES assets/icons/hicolor/${_icon_dir}/apps/ferrous.svg)
@@ -173,11 +179,13 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/ActionShortcuts.qml
         qml/components/AlbumArtTile.qml
         qml/components/AppMenu.qml
+        qml/components/AppMenuBarItem.qml
+        qml/components/CompactDialogWindow.qml
         qml/components/DialogButtons.qml
         qml/components/DialogComboBox.qml
         qml/components/DialogFooter.qml
-        qml/components/DialogHeader.qml
-        qml/components/DialogSurface.qml
+        qml/components/DialogWindow.qml
+        qml/components/FormGroupGap.qml
         qml/components/FormHelpText.qml
         qml/components/FullscreenControlsAutoHide.qml
         qml/components/KeyScrollView.qml
@@ -186,20 +194,24 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/MenuHeading.qml
         qml/components/NowFadeOut.qml
         qml/components/NowPlayingPanel.qml
+        qml/components/MessageLabel.qml
+        qml/components/PathLabel.qml
         qml/components/PlotLaneHead.qml
         qml/components/PlotModeSwitch.qml
         qml/components/PlotPlate.qml
         qml/components/PlotToolButton.qml
+        qml/components/PlotZoomPlate.qml
         qml/components/PopupClosing.qml
-        qml/components/PopupInitialFocus.qml
         qml/components/RegionHeader.qml
         qml/components/RowBackground.qml
         qml/components/ScrobbleIndicator.qml
+        qml/components/TextToolButton.qml
         qml/components/UiPalette.qml
         qml/components/ViewerControls.qml
         qml/components/ViewerCornerControls.qml
         qml/components/ViewerStrip.qml
         qml/components/ViewerToolButton.qml
+        qml/components/ZoomReadout.qml
         qml/controllers/ErrorController.qml
         qml/controllers/GlobalSearchController.qml
         qml/controllers/LibraryController.qml
@@ -229,12 +241,11 @@ qt_add_qml_module(ferrous_ui_qml
         qml/panes/SpectrogramPane.qml
         qml/panes/StatusBar.qml
         qml/panes/TransportBar.qml
-        qml/preferences/DisplayPage.qml
+        qml/preferences/GeneralPage.qml
         qml/preferences/LastFmPage.qml
         qml/preferences/LibraryPage.qml
         qml/preferences/PreferencesPage.qml
-        qml/preferences/SpectrogramPage.qml
-        qml/preferences/SystemMediaPage.qml
+        qml/preferences/VisualizationPage.qml
         qml/viewers/AlbumArtSurface.qml
         qml/viewers/AlbumArtViewerShell.qml
         qml/viewers/PlotLayer.qml
@@ -246,13 +257,26 @@ qt_add_qml_module(ferrous_ui_qml
         qml/assets/lastfm-paused.svg
         qml/assets/status-offline.svg
         qml/assets/status-warning.svg
+        qml/assets/transport-next.svg
+        qml/assets/transport-pause.svg
+        qml/assets/transport-play.svg
+        qml/assets/transport-previous.svg
+        qml/assets/transport-stop.svg
+        qml/assets/no-art-mark-20.svg
+        qml/assets/spectrogram-symbolic.svg
+        qml/assets/ferrous-mark-symbolic.svg
+        qml/assets/volume.svg
+        qml/assets/volume-muted.svg
+        qml/logic/BreakableText.js
         qml/logic/ChannelLabels.js
         qml/logic/ColorUtils.js
         qml/logic/ErrorUtils.js
         qml/logic/FormatUtils.js
         qml/logic/KeyUtils.js
+        qml/logic/ListRows.js
         qml/logic/PathUtils.js
         qml/logic/PlotLanes.js
+        qml/logic/VisualizationModes.js
         qml/logic/WheelUtils.js
 )
 
@@ -556,7 +580,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(ferrous_transport_status_tests PRIVATE
         Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Widgets Qt6::Test
-        KF6::I18n KF6::I18nQml
+        KF6::KirigamiPlatform KF6::I18n KF6::I18nQml
     )
     ferrous_enable_strict_warnings(ferrous_transport_status_tests)
     add_test(NAME ferrous_transport_status_tests COMMAND ferrous_transport_status_tests)
@@ -624,6 +648,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -732,6 +757,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -804,6 +830,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -832,6 +859,7 @@ if(BUILD_TESTING)
         Qt6::Network
         Qt6::Widgets
         Qt6::Test
+        Qt6::QuickTest
         KF6::Kirigami
         KF6::I18n
         KF6::I18nQml
@@ -876,6 +904,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -949,6 +978,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -977,6 +1007,7 @@ if(BUILD_TESTING)
         Qt6::Network
         Qt6::Widgets
         Qt6::Test
+        Qt6::QuickTest
         KF6::Kirigami
         KF6::KirigamiPlatform
         KF6::I18n
@@ -997,11 +1028,28 @@ if(BUILD_TESTING)
     set_target_properties(ferrous_ui_motion_tests PROPERTIES
         QT_QML_MODULE_NO_IMPORT_SCAN TRUE
     )
-    add_test(NAME ferrous_ui_motion_tests COMMAND ferrous_ui_motion_tests)
-    set_tests_properties(ferrous_ui_motion_tests PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-        TIMEOUT 180
+    # Its tests run in shards, each in a process of its own and in parallel
+    # with the others: run alone, the binary takes minutes. FERROUS_TEST_SHARD
+    # picks a shard's tests; see testShardFromEnvironment().
+    set(ferrous_ui_motion_shards 4)
+    foreach(shard RANGE 1 ${ferrous_ui_motion_shards})
+        set(shard_test ferrous_ui_motion_tests_shard_${shard}_of_${ferrous_ui_motion_shards})
+        add_test(NAME ${shard_test} COMMAND ferrous_ui_motion_tests)
+        set_tests_properties(${shard_test} PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;FERROUS_TEST_SHARD=${shard}/${ferrous_ui_motion_shards}"
+            TIMEOUT 180
+            # For ctest -j, as the costs at the end of this file: about each
+            # shard's seconds when run alone.
+            COST 42
+        )
+    endforeach()
+    add_test(NAME ferrous_ui_motion_tests_shards_run_every_test
+        COMMAND "${CMAKE_COMMAND}"
+            -DBINARY=$<TARGET_FILE:ferrous_ui_motion_tests>
+            -DSHARDS=${ferrous_ui_motion_shards}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_test_shards.cmake"
     )
+    set_tests_properties(ferrous_ui_motion_tests_shards_run_every_test PROPERTIES TIMEOUT 60)
     ferrous_add_default_platform_test(ferrous_ui_motion_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The menus of #373, in a session of its own: no desktop's platform
@@ -1022,6 +1070,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -1191,6 +1240,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/QmlTypes.cpp
         src/SpectrogramItem.cpp
@@ -1310,6 +1360,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -1453,9 +1504,9 @@ if(BUILD_TESTING)
     # end waiting on a long test that started last. CTest takes the times of
     # the build directory's last run instead where it has them; these, about
     # each test's seconds when run alone, are for a first run, as in CI.
+    # The shards of ferrous_ui_motion_tests have theirs where they are added.
     foreach(test_and_cost IN ITEMS
             ferrous_qml_smoke_transport_input:80
-            ferrous_ui_motion_tests:60
             ferrous_qml_smoke_tag_editor:50
             ferrous_ui_dialogs_tests:40
             ferrous_qml_smoke_waveform:32

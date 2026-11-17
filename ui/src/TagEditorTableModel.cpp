@@ -90,6 +90,7 @@ QHash<int, QByteArray> TagEditorTableModel::roleNames() const {
         {ErrorRole, "errorText"},
         {SelectedRole, "selected"},
         {ExtraValuesRole, "extraValues"},
+        {RenameFailedRole, "renameFailed"},
     };
 }
 
@@ -100,6 +101,7 @@ void TagEditorTableModel::setRows(QVector<TagEditorRowState> rows) {
     endResetModel();
     emit rowsChanged();
     emit dirtyStateChanged();
+    refreshRowErrors();
 }
 
 void TagEditorTableModel::clear() {
@@ -112,6 +114,7 @@ void TagEditorTableModel::clear() {
     endResetModel();
     emit rowsChanged();
     emit dirtyStateChanged();
+    refreshRowErrors();
 }
 
 const TagEditorRowState *TagEditorTableModel::rowAt(int row) const {
@@ -140,7 +143,15 @@ bool TagEditorTableModel::setFieldValue(int row, const QString &field, const QSt
 
     const bool wasDirty = hasDirtyRows();
     *target = value;
-    item->errorText.clear();
+    // An edit clears the row's error, one row at a time, so the count
+    // follows here rather than by counting every row again.
+    if (!item->errorText.isEmpty()) {
+        item->errorText.clear();
+        item->renameFailed = false;
+        if (--m_errorRowCount == 0) {
+            emit rowErrorsChanged();
+        }
+    }
     refreshDirtyState(*item);
     // The caller announces a batch of edits once it is done, so an edit of
     // thousands of rows does not recompute summaries after every row.
@@ -188,6 +199,19 @@ QStringList TagEditorTableModel::loadedPaths() const {
 
 bool TagEditorTableModel::hasDirtyRows() const {
     return m_dirtyRowCount > 0;
+}
+
+bool TagEditorTableModel::hasRowErrors() const {
+    return m_errorRowCount > 0;
+}
+
+void TagEditorTableModel::refreshRowErrors() {
+    const bool had = hasRowErrors();
+    m_errorRowCount = static_cast<int>(std::count_if(
+        m_rows.cbegin(), m_rows.cend(), [](const TagEditorRowState &row) { return !row.errorText.isEmpty(); }));
+    if (had != hasRowErrors()) {
+        emit rowErrorsChanged();
+    }
 }
 
 void TagEditorTableModel::countDirtyRows() {
@@ -249,9 +273,11 @@ void TagEditorTableModel::clearErrors() {
             continue;
         }
         item.errorText.clear();
+        item.renameFailed = false;
         emitRowChanged(row);
     }
     emit rowsChanged();
+    refreshRowErrors();
 }
 
 void TagEditorTableModel::applySaveResults(
@@ -272,8 +298,10 @@ void TagEditorTableModel::applySaveResults(
                 item.*field.original = item.*field.value;
             }
             item.errorText.clear();
+            item.renameFailed = false;
         } else if (!error.isEmpty()) {
             item.errorText = error;
+            item.renameFailed = false;
         }
         const bool dirtyChanged = refreshDirtyState(item);
         if (success || !error.isEmpty() || dirtyChanged) {
@@ -284,6 +312,7 @@ void TagEditorTableModel::applySaveResults(
     if (wasDirty != hasDirtyRows()) {
         emit dirtyStateChanged();
     }
+    refreshRowErrors();
 }
 
 void TagEditorTableModel::applyRenameResults(
@@ -299,14 +328,17 @@ void TagEditorTableModel::applyRenameResults(
             item.fileName = info.fileName();
             item.directory = info.dir().absolutePath();
             item.errorText.clear();
+            item.renameFailed = false;
         } else if (errorsByPath.contains(item.path)) {
             item.errorText = errorsByPath.value(item.path);
+            item.renameFailed = true;
         } else {
             continue;
         }
         emitRowChanged(row);
     }
     emit rowsChanged();
+    refreshRowErrors();
 }
 
 QVariant TagEditorTableModel::fieldData(const TagEditorRowState &row, int role) const {
@@ -345,6 +377,8 @@ QVariant TagEditorTableModel::fieldData(const TagEditorRowState &row, int role) 
         return row.dirty;
     case ErrorRole:
         return row.errorText;
+    case RenameFailedRole:
+        return row.renameFailed;
     case SelectedRole:
         return row.selected;
     case ExtraValuesRole: {

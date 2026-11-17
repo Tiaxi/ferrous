@@ -6,8 +6,16 @@ import "." as Components
 
 // A lane's label, and 8 px right of it its Mute and Solo buttons on one
 // plate. The buttons show while the pointer is on the lane or the plate, and
-// while keyboard focus is on either of them; hidden, they stay Tab stops,
-// so the keyboard reveals them.
+// while keyboard focus is on either of them, and in a viewer with its
+// controls; hidden, they stay Tab stops, so the keyboard reveals them.
+// A `compact` head, in a short lane, such as each of 5.1's in the main
+// window (#373 H8), has a 16 px label with 11 px text and 20 px buttons,
+// larger with a larger font, and its buttons show only on the pointer or
+// keyboard focus, not with a viewer's controls: there, every lane's would
+// show at once and crowd the lanes. A lane that is muted or soloed keeps
+// its buttons shown, compact or not, so the checked one says why the lane
+// is silent, or why the others are, and is there to undo it (#373 H16 I4:
+// a muted lane and one silenced by another's Solo looked the same).
 Item {
     id: root
 
@@ -20,17 +28,53 @@ Item {
     // Never (0), on the pointer or keyboard focus (1), or always (2), as
     // Settings › Display › Channel buttons say.
     property int buttonsVisibility: 1
+    // Whether a viewer shows its controls: hidden, the buttons fade out with
+    // them, whatever `buttonsVisibility` says, and then take no pointer.
+    property bool controlsShown: true
+    // The viewer's controls as they fade, which the buttons fade with.
+    property real controlsLevel: root.controlsShown ? 1 : 0
+    // In a viewer, buttons that show on the pointer show with the viewer's
+    // controls, which the pointer's activity shows, on their level alone.
+    property bool revealedWithControls: false
+    property bool compact: false
     property bool laneHovered: false
     property var toggleMute: function() {}
     property var toggleSolo: function() {}
     property var pointerActivity: null
     readonly property bool focusInside: muteButton.activeFocus || soloButton.activeFocus
+    // Where the pointer is over the plot, in the head's parent's
+    // coordinates, while `pointerKnown`: the label takes no hover of its
+    // own, which would take it from the plot under it and its crosshair.
+    property point pointerPosition: Qt.point(0, 0)
+    property bool pointerKnown: false
+    readonly property bool labelHovered: root.pointerKnown
+        && root.pointerPosition.x >= root.x && root.pointerPosition.x < root.x + labelPlate.width
+        && root.pointerPosition.y >= root.y && root.pointerPosition.y < root.y + labelPlate.height
+    // Whether the pointer is on the label's plate or the buttons': the
+    // plot's crosshair gives way there (PlotLayer's crosshairLevel).
+    readonly property bool plateHovered: root.labelHovered || buttonsHover.hovered
+    // Whether the buttons show by their own rule; the viewer's controls
+    // hiding fades them through `controlsLevel` instead, on its curve.
     readonly property bool buttonsRevealed: root.buttonsVisibility === 2
         || (root.buttonsVisibility === 1
-            && (root.laneHovered || buttonsHover.hovered || root.focusInside))
+            && ((root.revealedWithControls && !root.compact) || root.laneHovered
+                || buttonsHover.hovered || root.focusInside || root.muted || root.soloed))
+    // The buttons' size: the label's height and 2 px above and below it,
+    // compact; otherwise the design's small tool button.
+    readonly property real buttonSize: root.compact
+        ? labelPlate.height + 4
+        : root.uiPalette.toolButtonSize
+    readonly property real glyphPointSize: root.compact
+        ? root.uiPalette.compactPointSize
+        : root.uiPalette.smallPointSize
 
-    // The label's box: the buttons' plate, taller, is centred on it and
-    // overhangs it above and below.
+    // The label's box; the buttons' plate, taller, is centred on it, so
+    // that the label's letters and M and S stand on one centre line (#373
+    // H18 C4: with the plates' tops on one line, H16 I5, they stood 6 px
+    // apart). It reaches `plateReach` above the label, which the plot layer
+    // insets the head by, so that the plate's top is on one line with the
+    // mode switch's, and its centre line with the label's is the switch's.
+    readonly property real plateReach: Math.max(0, -buttons.y)
     implicitWidth: buttons.visible ? buttons.x + buttons.width : labelPlate.width
     implicitHeight: labelPlate.height
     // What the head takes of its lane, from its own top left, with the
@@ -52,17 +96,25 @@ Item {
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         text: root.label
+        compact: root.compact
+
     }
 
     Components.PlotPlate {
         id: buttons
         objectName: "plotLaneButtons"
         x: labelPlate.width + 8
-        anchors.verticalCenter: labelPlate.verticalCenter
+        y: Math.round((labelPlate.height - buttons.height) / 2)
+        // 4 px around the buttons and between them, as on the mode switch,
+        // so a button's focus ring, 3 px out from it, keeps 1 px of the
+        // plate outside it (#373 H16 I5).
+        padding: 4
+        contentSpacing: 4
         plotColors: root.plotColors
         uiPalette: root.uiPalette
-        visible: root.buttonsVisibility !== 0
+        visible: root.buttonsVisibility !== 0 && (root.controlsShown || root.controlsLevel > 0)
         revealed: root.buttonsRevealed
+        fadeLevel: root.controlsLevel
         Accessible.name: I18n.i18nc("@label %1 is a channel", "Channel %1", root.label)
 
         HoverHandler {
@@ -79,12 +131,19 @@ Item {
             objectName: "plotLaneMuteButton"
             plotColors: root.plotColors
             uiPalette: root.uiPalette
+            implicitWidth: root.buttonSize
+            implicitHeight: root.buttonSize
+            glyphPointSize: root.glyphPointSize
             glyphText: I18n.i18nc("@action:button one-letter abbreviation of mute", "M")
             text: I18n.i18nc("@action:button %1 is a channel", "Mute %1", root.label)
+            // Checkable, so that assistive technology hears it is a toggle
+            // and whether it is on (#373 H14 F6: the accessible state's
+            // checkable alone, set over a button that is not, was lost).
+            // The lane's state is what it shows: a click's own toggle goes
+            // back to it, which the click then changes.
+            checkable: true
             checked: root.muted
-            Accessible.role: Accessible.CheckBox
-            Accessible.checkable: true
-            Accessible.checked: checked
+            onToggled: muteButton.checked = Qt.binding(function() { return root.muted })
             Accessible.onPressAction: root.toggleMute()
             onClicked: root.toggleMute()
         }
@@ -94,12 +153,19 @@ Item {
             objectName: "plotLaneSoloButton"
             plotColors: root.plotColors
             uiPalette: root.uiPalette
+            implicitWidth: root.buttonSize
+            implicitHeight: root.buttonSize
+            glyphPointSize: root.glyphPointSize
             glyphText: I18n.i18nc("@action:button one-letter abbreviation of solo", "S")
             text: I18n.i18nc("@action:button %1 is a channel", "Solo %1", root.label)
+            // Checkable, so that assistive technology hears it is a toggle
+            // and whether it is on (#373 H14 F6: the accessible state's
+            // checkable alone, set over a button that is not, was lost).
+            // The lane's state is what it shows: a click's own toggle goes
+            // back to it, which the click then changes.
+            checkable: true
             checked: root.soloed
-            Accessible.role: Accessible.CheckBox
-            Accessible.checkable: true
-            Accessible.checked: checked
+            onToggled: soloButton.checked = Qt.binding(function() { return root.soloed })
             Accessible.onPressAction: root.toggleSolo()
             onClicked: root.toggleSolo()
         }

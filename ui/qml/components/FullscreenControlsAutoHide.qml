@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
+import org.kde.kirigami 2.20 as Kirigami
 
 QtObject {
     id: root
@@ -10,6 +11,21 @@ QtObject {
     // Keeps the controls shown, such as while one has keyboard focus.
     property bool held: false
     readonly property bool controlsVisible: !root.active || root.held || state.controlsVisible
+    // The controls as they fade, 1 shown and 0 hidden, over shortDuration on
+    // OutCubic: every overlay that hides with them, the title strip, the
+    // corner controls, the mode switch, the lanes' Mute and Solo and the
+    // crosshair, takes its opacity from this one level, so none of them
+    // cuts while another fades. They take no pointer only once it is 0, and
+    // the pointer hides then too.
+    property real level: root.controlsVisible ? 1 : 0
+    // Kirigami's durations are 0 with animations turned off.
+    Behavior on level {
+        enabled: Kirigami.Units.shortDuration > 0
+        NumberAnimation {
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+        }
+    }
 
     function pointerMoved(x, y) {
         if (!root.active) {

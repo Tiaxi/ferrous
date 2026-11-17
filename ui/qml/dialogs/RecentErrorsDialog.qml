@@ -11,8 +11,9 @@ import "../logic/ErrorUtils.js" as ErrorUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
 // Recent Issues: a popup above the status bar's issues button, newest
-// first. Each entry has a glyph, a title (semibold while new), its time, a
-// description and at most one action. The entries count as seen when it
+// first. Each entry has a glyph, its category and time on a small line, a
+// title that names the problem (semibold while new), the rest of the
+// message and at most one action. The entries count as seen when it
 // closes.
 Popup {
     id: root
@@ -129,6 +130,21 @@ Popup {
         historyView.contentItem.contentY = 0
     }
 
+    // The control that has the keyboard as the popup opens from the
+    // keyboard: the newest entry's action, otherwise Open Diagnostics; not
+    // Clear All, which a stray Space would press. The list keeps no frame
+    // around it then, and its scroll keys still work from either (see the
+    // content's keys).
+    function initialFocusItem() {
+        for (let i = 0; i < historyList.count; ++i) {
+            const row = historyList.itemAt(i)
+            if (row && row.actionItem.visible) {
+                return row.actionItem
+            }
+        }
+        return diagnosticsButton
+    }
+
     parent: Overlay.overlay
     // Modal so that a press outside only closes it, also on the issues
     // button that opened it; with no dim, as a plain popup.
@@ -137,7 +153,14 @@ Popup {
     focus: true
     // Above the viewer popups.
     z: 100
-    width: Math.min(460, root.hostWidth - 2 * root.edgeMargin)
+    // 460 px with the default font, as much wider as a larger font makes
+    // the text (#373 H45: at 24 pt it kept 460 px, and its heading wrapped
+    // after four words), or as wide as the header needs, which puts its
+    // title, how many are new and Clear All on one line (#373 H10); within
+    // the window.
+    width: Math.min(Math.max(root.uiPalette.scaledSize(460), Math.ceil(errorHistoryHeader.implicitWidth
+            + errorHistoryHeader.Layout.leftMargin + errorHistoryHeader.Layout.rightMargin)),
+        root.hostWidth - 2 * root.edgeMargin)
     height: Math.min(root.implicitHeight, root.hostHeight - root.statusBarClearance - root.edgeMargin)
     x: Math.round(root.hostWidth - root.width - root.edgeMargin)
     y: Math.round(root.hostHeight - root.height - root.statusBarClearance)
@@ -157,7 +180,23 @@ Popup {
     }
     onVisibleChanged: root.refreshQueuedSubjects()
     // Over a viewer the keyboard would otherwise stay with the viewer.
-    onOpened: historyView.forceActiveFocus(Qt.PopupFocusReason)
+    // Opened from the keyboard, the first action has it, with its focus
+    // ring, as Tab would give it. Opened with the pointer, no control
+    // shows a ring, so none has the keyboard, and Enter presses no button
+    // the user cannot see marked (#373 H38: a popup's focus reason drew no
+    // ring on the action Enter pressed); the content does, whose keys
+    // scroll the list, and Tab goes on to the controls. The control is
+    // the list's focus within it all the same, which Tab into the list
+    // gives the keyboard, rather than the list itself.
+    onOpened: {
+        const first = root.initialFocusItem()
+        if (InputModality.keyboard) {
+            first.forceActiveFocus(Qt.TabFocusReason)
+        } else {
+            first.focus = true
+            popupContent.forceActiveFocus(Qt.PopupFocusReason)
+        }
+    }
     // Issues that arrived while it was open have been seen too.
     onClosed: {
         root.errorController.markSeen()
@@ -211,6 +250,8 @@ Popup {
     }
 
     contentItem: ColumnLayout {
+        id: popupContent
+        objectName: "errorHistoryContent"
         spacing: 0
         Accessible.role: Accessible.Dialog
         Accessible.name: I18n.i18nc("@title:window", "Recent Issues")
@@ -220,16 +261,37 @@ Popup {
         Keys.onShortcutOverride: function(event) {
             event.accepted = KeyUtils.isPlainSpace(event)
         }
+        // The arrow, Page, Home and End keys scroll the list from any
+        // control of the popup: a key from an entry's action reaches the
+        // list itself, and one from the header or the footer arrives here.
+        Keys.onPressed: function(event) {
+            historyView.scrollForKey(event)
+        }
+        // Opened with the pointer, the content has the keyboard: Tab goes
+        // to the control the keyboard would have opened it on.
+        Keys.onTabPressed: function(event) {
+            event.accepted = popupContent.Window.activeFocusItem === popupContent
+            if (event.accepted) {
+                root.initialFocusItem().forceActiveFocus(Qt.TabFocusReason)
+            }
+        }
 
         RowLayout {
+            id: errorHistoryHeader
             objectName: "errorHistoryHeader"
             Layout.fillWidth: true
-            Layout.preferredHeight: Kirigami.Units.gridUnit + 2 * Kirigami.Units.smallSpacing + 6
+            // 32 px with the default font, and at a larger one as tall as
+            // the title with 4 px above and below, and Clear All: at 24 pt,
+            // the title ran into the first issue (#373 H10).
+            Layout.preferredHeight: Math.max(Kirigami.Units.gridUnit + 2 * Kirigami.Units.smallSpacing + 6,
+                Math.ceil(errorHistoryTitle.implicitHeight) + 2 * Kirigami.Units.smallSpacing,
+                Math.ceil(errorHistoryClearButton.implicitHeight))
             Layout.leftMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
             Layout.rightMargin: Kirigami.Units.smallSpacing + 2
             spacing: Kirigami.Units.largeSpacing
 
             Label {
+                id: errorHistoryTitle
                 objectName: "errorHistoryTitle"
                 text: I18n.i18nc("@title", "Recent Issues")
                 font.weight: Font.DemiBold
@@ -248,9 +310,13 @@ Popup {
 
             Item { Layout.fillWidth: true }
 
-            ToolButton {
+            Components.TextToolButton {
+                id: errorHistoryClearButton
                 objectName: "errorHistoryClearButton"
                 text: I18n.i18nc("@action:button", "Clear All")
+                // A glyph, as every dialog action has: without one it read
+                // as a label of the header (#373 H46).
+                icon.name: "edit-clear-history"
                 flat: true
                 enabled: !closingState.closing
                 onClicked: root.errorController.clear()
@@ -292,6 +358,7 @@ Popup {
                         required property bool unseen
                         readonly property var entry: ({ category: historyRow.category, message: historyRow.message,
                                                         count: historyRow.count })
+                        readonly property string categoryText: ErrorUtils.categoryLabel(historyRow.category)
                         readonly property string title: ErrorUtils.issueTitle(historyRow.entry)
                         readonly property string description: ErrorUtils.issueDescription(historyRow.entry)
                         readonly property string timeText: ErrorUtils.issueTimeText(historyRow.lastSeenMs)
@@ -301,12 +368,16 @@ Popup {
                         // The file the entry is about, when its text does not name it.
                         readonly property bool showsSubject: historyRow.subject.length > 0
                             && historyRow.message.indexOf(historyRow.subject.split("/").pop()) < 0
+                        readonly property Item actionItem: actionButton
 
                         width: historyColumn.width
                         implicitHeight: rowLayout.implicitHeight + Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + 2
                         Accessible.role: Accessible.ListItem
-                        Accessible.name: I18n.i18nc("@info issue title, time, description", "%1, %2: %3",
-                            historyRow.title, historyRow.timeText, historyRow.description)
+                        Accessible.name: historyRow.description.length > 0
+                            ? I18n.i18nc("@info issue title, category, time, description", "%1 (%2, %3): %4",
+                                historyRow.title, historyRow.categoryText, historyRow.timeText, historyRow.description)
+                            : I18n.i18nc("@info issue title, category, time", "%1 (%2, %3)",
+                                historyRow.title, historyRow.categoryText, historyRow.timeText)
                         Accessible.description: historyRow.subject
 
                         RowLayout {
@@ -319,12 +390,19 @@ Popup {
                             anchors.rightMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                             spacing: Kirigami.Units.largeSpacing + 2
 
+                            // The only mark between an error and a notice: as
+                            // large as a line of text holds, and centred on the
+                            // category's lowercase, the middle of its x-height,
+                            // 2 px under the line's top with the default font
+                            // (#373 H45: it stayed 16 px at the top of a 24 pt
+                            // line).
                             Kirigami.Icon {
                                 objectName: "errorHistoryGlyph"
                                 Layout.alignment: Qt.AlignTop
-                                Layout.topMargin: 2
-                                implicitWidth: Kirigami.Units.iconSizes.small
-                                implicitHeight: Kirigami.Units.iconSizes.small
+                                Layout.topMargin: Math.round(categoryLabel.y + categoryLabel.baselineOffset
+                                    - categoryMetrics.xHeight / 2 - implicitHeight / 2)
+                                implicitWidth: root.uiPalette.labelIconSize
+                                implicitHeight: root.uiPalette.labelIconSize
                                 source: historyRow.glyph === ErrorUtils.GlyphOffline
                                     ? Qt.resolvedUrl("../assets/status-offline.svg")
                                     : (historyRow.glyph === ErrorUtils.GlyphInformation
@@ -341,24 +419,32 @@ Popup {
                                 Layout.fillWidth: true
                                 spacing: 2
 
+                                // What the issue is about and when, as a
+                                // notification's header line: the quietest
+                                // text of the entry.
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: Kirigami.Units.largeSpacing
 
                                     Label {
-                                        objectName: "errorHistoryHeading"
+                                        id: categoryLabel
+                                        objectName: "errorHistoryCategory"
                                         Layout.fillWidth: true
-                                        text: historyRow.title
+                                        text: historyRow.categoryText
                                         textFormat: Text.PlainText
-                                        wrapMode: Text.Wrap
-                                        font.weight: historyRow.unseen ? Font.DemiBold : Font.Normal
-                                        color: root.uiPalette.text
+                                        elide: Text.ElideRight
+                                        font.pointSize: root.uiPalette.smallPointSize
+                                        color: root.uiPalette.textTertiary
                                         Accessible.ignored: true
+
+                                        FontMetrics {
+                                            id: categoryMetrics
+                                            font: categoryLabel.font
+                                        }
                                     }
 
                                     Label {
                                         objectName: "errorHistoryTime"
-                                        Layout.alignment: Qt.AlignTop
                                         text: historyRow.timeText
                                         font.pointSize: root.uiPalette.smallPointSize
                                         font.features: root.uiPalette.tabularFigures
@@ -367,13 +453,22 @@ Popup {
                                     }
                                 }
 
-                                Label {
+                                // The problem itself. A path or a system
+                                // error in it wraps as a message's does.
+                                Components.MessageLabel {
+                                    objectName: "errorHistoryHeading"
+                                    Layout.fillWidth: true
+                                    message: historyRow.title
+                                    font.weight: historyRow.unseen ? Font.DemiBold : Font.Normal
+                                    color: root.uiPalette.text
+                                    Accessible.ignored: true
+                                }
+
+                                Components.MessageLabel {
                                     objectName: "errorHistoryMessage"
                                     Layout.fillWidth: true
-                                    visible: text.length > 0
-                                    text: historyRow.description
-                                    textFormat: Text.PlainText
-                                    wrapMode: Text.Wrap
+                                    visible: message.length > 0
+                                    message: historyRow.description
                                     font.pointSize: root.uiPalette.smallPointSize
                                     color: root.uiPalette.textSecondary
                                     Accessible.ignored: true
@@ -406,22 +501,37 @@ Popup {
                                     // Link-coloured small text on a flat button: the style
                                     // draws the text of its own background, so both are
                                     // drawn here.
+                                    // The tint under the text while hovered or pressed,
+                                    // the press a clear step past the hover, 1.65:1 on
+                                    // the popup's window colour, as the transport's
+                                    // (#373 H45: at 10% it read as the hover); the
+                                    // link is darker where the tint takes it under
+                                    // 4.5:1 on the window colour.
+                                    readonly property color tint: actionButton.down
+                                        ? root.uiPalette.pressedOn(root.uiPalette.chrome)
+                                        : (actionButton.hovered ? root.uiPalette.hover : "transparent")
                                     contentItem: Label {
                                         text: actionButton.text
                                         font.pointSize: root.uiPalette.smallPointSize
-                                        color: root.uiPalette.link
+                                        color: actionButton.tint.a > 0
+                                            ? root.uiPalette.linkOn(ColorUtils.drawnOver(actionButton.tint,
+                                                                                         root.uiPalette.chrome))
+                                            : root.uiPalette.link
                                         Accessible.ignored: true
                                     }
                                     background: Rectangle {
                                         radius: 3
-                                        color: actionButton.down
-                                            ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
-                                            : (actionButton.hovered ? root.uiPalette.hover : "transparent")
+                                        color: actionButton.tint
                                         border.width: actionButton.visualFocus ? 2 : 0
                                         border.color: root.uiPalette.focusRing
 
+                                        // The hover and the release fade; the press
+                                        // shows on its first frame. The button tells
+                                        // `pressed` before `down`, which the tint
+                                        // follows, so the fade is off by the time the
+                                        // tint turns.
                                         Behavior on color {
-                                            enabled: Kirigami.Units.shortDuration > 0
+                                            enabled: Kirigami.Units.shortDuration > 0 && !actionButton.pressed
                                             ColorAnimation {
                                                 duration: Kirigami.Units.shortDuration
                                                 easing.type: Easing.OutCubic
@@ -451,12 +561,16 @@ Popup {
                 root.uiPalette.chrome, root.uiPalette.text, Kirigami.Theme.frameContrast)
         }
 
-        ToolButton {
+        // On the header's x, with the glyph of Help's Diagnostics…, as Clear
+        // All has its own (#373 H46: they were the only dialog actions with
+        // none). Not ⓘ, which marks a notice in the list (#373 H40).
+        Components.TextToolButton {
+            id: diagnosticsButton
             objectName: "errorHistoryDiagnosticsButton"
-            Layout.leftMargin: Kirigami.Units.smallSpacing + 2
+            Layout.leftMargin: errorHistoryHeader.Layout.leftMargin - diagnosticsButton.leftPadding
             flat: true
-            icon.name: "help-about"
             text: I18n.i18nc("@action:button", "Open Diagnostics…")
+            icon.name: "view-list-details"
             enabled: !closingState.closing
             onClicked: {
                 root.chosenAction = { kind: "diagnostics", subject: "" }

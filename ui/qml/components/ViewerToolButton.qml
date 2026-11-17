@@ -6,14 +6,19 @@ import org.kde.kirigami 2.20 as Kirigami
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
-// A flat 24 px tool button on the window's chrome or view colour, such as
-// the viewers' info and close buttons: a theme icon (`icon.name`), or its
-// text with `display: AbstractButton.TextOnly`. Its `text` is the tooltip
-// and the accessible name; `toolTipText` replaces the tooltip. Checked is
-// the selection tint alone; the 2 px ring is for keyboard focus only.
+// A flat 24 px tool button, larger with a larger font, on the window's
+// chrome or view colour, such as the viewers' info and close buttons: a
+// theme icon (`icon.name`), a symbolic mask of the app's own
+// (`icon.source`), or its text with `display:
+// AbstractButton.TextOnly`. Its `text` is the tooltip and the accessible
+// name; `toolTipText` replaces the tooltip. Checked is the selection tint
+// alone on the window's colours; the 2 px ring is for keyboard focus only.
 // With `plotColors` (UiPalette's PlotColors), it takes its colours from the
 // plot it sits on rather than the window, as on a viewer's title strip
-// over the view.
+// over the view, and checked is the mode switch's chosen segment: the
+// plot's text colour at 18 % inside a 1 px edge of its segmentEdge, so the
+// plates have one way to show a choice that is on (#373 H14 F4: an accent
+// tint).
 ToolButton {
     id: root
 
@@ -23,27 +28,33 @@ ToolButton {
     readonly property color baseTextColor: root.plotColors
         ? root.plotColors.plotText : root.uiPalette.text
     property color glyphColor: root.baseTextColor
-    // The window's hover tint, worked out the same way on the plot's floor.
+    // On a plot, hover is a wash of its text colour that reads on the
+    // strip and the plates: 14 % on a dark one, some 1.4:1, and 12 % on a
+    // light one, where the same tint steps more (#373 H42: 6.5 %, 1.15:1 on
+    // a 24 px target, hardly showed); pressed is 22 %. On the window's
+    // colours, its hover tint.
     readonly property bool _plotIsDark: root.plotColors !== null
         && ColorUtils.colorLuma(root.plotColors.plotBg) < 0.45
     readonly property color hoverColor: root.plotColors
-        ? ColorUtils.withAlpha(root.baseTextColor, root._plotIsDark ? 0.065 : 0.08)
+        ? ColorUtils.withAlpha(root.baseTextColor, root._plotIsDark ? 0.14 : 0.12)
         : root.uiPalette.hover
+    readonly property color pressedColor: ColorUtils.withAlpha(root.baseTextColor,
+        root.plotColors ? 0.22 : 0.10)
     readonly property color checkedColor: root.plotColors
-        ? root.plotColors.checkedTint : root.uiPalette.selection
+        ? ColorUtils.withAlpha(root.plotColors.plotText, 0.18) : root.uiPalette.selection
     readonly property color focusRingColor: root.plotColors
         ? root.plotColors.plotFocusRing : root.uiPalette.focusRing
 
     implicitWidth: root.display === AbstractButton.TextOnly
-        ? Math.max(24, label.implicitWidth + 2 * 6)
-        : 24
-    implicitHeight: 24
+        ? Math.max(root.uiPalette.toolButtonSize, label.implicitWidth + 2 * 6)
+        : root.uiPalette.toolButtonSize
+    implicitHeight: root.uiPalette.toolButtonSize
     padding: 0
     flat: true
     hoverEnabled: true
     display: AbstractButton.IconOnly
-    icon.width: Kirigami.Units.iconSizes.small
-    icon.height: Kirigami.Units.iconSizes.small
+    icon.width: root.uiPalette.toolIconSize
+    icon.height: root.uiPalette.toolIconSize
     focusPolicy: Qt.TabFocus
 
     Accessible.name: root.text
@@ -65,7 +76,8 @@ ToolButton {
             width: root.icon.width
             height: root.icon.height
             visible: root.display !== AbstractButton.TextOnly
-            source: root.icon.name
+            // A theme icon by name, or the app's own glyph by its URL.
+            source: root.icon.name.length > 0 ? root.icon.name : root.icon.source
             color: root.glyphColor
             isMask: true
         }
@@ -88,9 +100,7 @@ ToolButton {
             objectName: "viewerToolButtonHover"
             anchors.fill: parent
             radius: 3
-            color: root.down
-                ? ColorUtils.withAlpha(root.baseTextColor, 0.10)
-                : root.hoverColor
+            color: root.down ? root.pressedColor : root.hoverColor
             opacity: (root.hovered || root.down) && !root.checked ? 1 : 0
             visible: opacity > 0
 
@@ -103,13 +113,23 @@ ToolButton {
             }
         }
 
-        // Checked: the tint alone, never a ring.
+        // Checked: the fill, and on a plot its edge; never the focus ring.
         Rectangle {
             objectName: "viewerToolButtonChecked"
             anchors.fill: parent
             radius: 3
             visible: root.checked
             color: root.checkedColor
+        }
+
+        Rectangle {
+            objectName: "viewerToolButtonCheckedEdge"
+            anchors.fill: parent
+            radius: 3
+            visible: root.checked && root.plotColors !== null
+            color: "transparent"
+            border.width: 1
+            border.color: root.plotColors ? root.plotColors.segmentEdge : "transparent"
         }
 
         Rectangle {

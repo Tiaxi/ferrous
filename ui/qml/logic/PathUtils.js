@@ -131,3 +131,27 @@ function droppedExternalPaths(drop) {
     }
     return paths
 }
+
+// The name of the folder that holds the file at `pathValue`, a local path
+// or a file URL: "Album A" for "/music/Artist A/Album A/02.flac"; empty
+// for a file at the root or a path without a folder.
+// Whether `title` is only the file's own name, with or without its
+// extension: the title a track without a title tag is given (its queue
+// row's, or the bridge's fallback), not a tag.
+function isFileNameTitle(title, pathValue) {
+    const text = String(title || "").trim()
+    const parts = urlToLocalPath(String(pathValue || "").trim()).replace(/\\/g, "/").split("/")
+        .filter(part => part.length > 0)
+    if (text.length === 0 || parts.length === 0) {
+        return false
+    }
+    const name = parts[parts.length - 1]
+    const dot = name.lastIndexOf(".")
+    return text === name || (dot > 0 && text === name.slice(0, dot))
+}
+
+function containingFolderName(pathValue) {
+    const parts = urlToLocalPath(String(pathValue || "").trim()).replace(/\\/g, "/").split("/")
+        .filter(part => part.length > 0)
+    return parts.length >= 2 ? parts[parts.length - 2] : ""
+}

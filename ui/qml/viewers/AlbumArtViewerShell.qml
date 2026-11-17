@@ -42,6 +42,9 @@ Item {
     property bool stripEnabled: true
 
     property alias popupHost: albumArtPopupHost
+    // Whether the viewer in the main window shows: while it is open, and
+    // while it fades out after it closes, when it still shows the art.
+    readonly property bool popupShown: albumArtViewer.visible
     // The window of the viewer over the whole screen, and the item in it
     // that holds the album art; null until the viewer first opens there.
     readonly property Window fullscreenWindow: albumArtFullscreenWindowLoader.item
@@ -57,17 +60,37 @@ Item {
     // art's top edge while it shows; none while it is turned off.
     readonly property real stripHeight: root.fullscreenWindow && root.stripEnabled
         ? root.fullscreenWindow.strip.implicitHeight : 0
+    // How far down the controls' plate in the main window reaches, from the
+    // top of the art: its margin and its height, which follows the font.
+    readonly property real popupControlsBottom: albumArtPopupControls.y + albumArtPopupControls.height
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
+    // The controls as they fade: 1 shown, 0 hidden.
+    readonly property real fullscreenControlsLevel: fullscreenControlsAutoHide.level
 
-    // Over the whole screen, the title strip hides while the pointer rests,
-    // as the visualization viewer's does, and stays while one of its buttons
-    // has keyboard focus. In the main window, the controls stay.
+    // Whether `item` is inside `scope`.
+    function isInside(item, scope) {
+        for (let parentItem = item; parentItem; parentItem = parentItem.parent) {
+            if (parentItem === scope) {
+                return true
+            }
+        }
+        return false
+    }
+
+    // The viewer's controls hide while the pointer rests, as the
+    // visualization viewer's do: over the whole screen the title strip, in
+    // the main window the corner plate (#373 H8: it stayed while the
+    // visualization viewer's hid). They stay while one of them has keyboard
+    // focus.
     Components.FullscreenControlsAutoHide {
         id: fullscreenControlsAutoHide
         objectName: "albumArtFullscreenControlsAutoHide"
-        active: root.wholeScreenOpen
-        held: root.fullscreenWindow !== null && root.fullscreenWindow.strip.focusInside
+        active: root.viewerOpen
+        held: root.wholeScreenOpen
+            ? root.fullscreenWindow !== null && root.fullscreenWindow.strip.focusInside
+            : albumArtViewer.visible && root.windowRoot !== null
+                && root.isInside(root.windowRoot.activeFocusItem, albumArtPopupControls)
     }
 
     // Made the first time the viewer opens over the whole screen and kept,
@@ -170,11 +193,22 @@ Item {
         // was before, so the popup does not close for it.
         contentItem: FocusScope {
             focus: true
+            // Any key brings the controls back, so Tab reaches them.
+            Keys.onPressed: function(event) {
+                fullscreenControlsAutoHide.wake()
+                event.accepted = false
+            }
             Keys.onEscapePressed: function(event) {
                 event.accepted = root.previewActive
                 if (root.previewActive) {
                     root.closeViewer()
                 }
+            }
+
+            // The pointer anywhere in the viewer brings the controls back.
+            HoverHandler {
+                onPointChanged: fullscreenControlsAutoHide.pointerMoved(
+                    point.scenePosition.x, point.scenePosition.y)
             }
 
             // Takes focus from the viewer's buttons when the art is pressed,
@@ -233,9 +267,15 @@ Item {
             }
         }
 
-        // The art on the view colour.
-        background: Rectangle {
-            color: root.uiPalette.view
+        // Nothing of its own: the art's surface, which is in the popup while
+        // it shows, fading in and out too, has the media surface's black
+        // floor, in both themes. A second floor here doubled it as the popup
+        // faded: its children fade one by one, not as one layer, so two
+        // floors at half opacity left a quarter of the window, and as the
+        // viewer opened the window went dark before the art came in (#373
+        // H37: a blink of 33 ms).
+        background: Item {
+            objectName: "albumArtPopupBackground"
         }
 
         // The art, under the controls' plate.
@@ -265,19 +305,30 @@ Item {
         // its controls are on a plate in the top right corner, on the art.
         // The plate is sized from the controls, which place themselves at
         // once, rather than by the plate's Row, which would wait for the
-        // next frame.
+        // next frame. As the visualization viewer's corner plate, it shows
+        // at once, so the key that brings the controls back can move focus
+        // to them, fades out on the controls' level, and hidden it takes no
+        // pointer.
         Item {
+            id: albumArtPopupControls
             objectName: "albumArtPopupControls"
             z: 20
             anchors.top: parent.top
             anchors.right: parent.right
-            anchors.margins: 4
+            anchors.margins: 5
             implicitWidth: popupControls.implicitWidth + 4
             implicitHeight: popupControls.implicitHeight + 4
+            opacity: root.fullscreenControlsLevel
+            visible: root.fullscreenControlsVisible || root.fullscreenControlsLevel > 0
+
+            HoverHandler {
+                onPointChanged: fullscreenControlsAutoHide.pointerMoved(
+                    point.scenePosition.x, point.scenePosition.y)
+            }
 
             Components.PlotPlate {
                 anchors.fill: parent
-                plotColors: root.uiPalette.waveformPlot
+                plotColors: root.uiPalette.mediaPlot
                 uiPalette: root.uiPalette
                 takesPointer: true
                 Accessible.ignored: true
@@ -289,6 +340,8 @@ Item {
                 y: 2
                 uiPalette: root.uiPalette
                 closeButtonName: "albumArtPopupCloseButton"
+                plotColors: root.uiPalette.mediaPlot
+                dividers: true
                 zoomLevel: root.zoomLevel
                 resetView: root.resetView
                 resetToolTip: I18n.i18nc("@info:tooltip", "Fit the Image to the Window")
@@ -297,6 +350,7 @@ Item {
 
                 InfoButton {
                     objectName: "albumArtPopupInfoButton"
+                    plotColors: popupControls.plotColors
                 }
             }
         }
@@ -322,7 +376,7 @@ Item {
                 visibility: root.viewerOpen && root.useWholeScreenViewerMode
                     ? Window.FullScreen
                     : Window.Hidden
-                color: root.uiPalette.view
+                color: root.uiPalette.mediaPlot.plotBg
                 title: root.titleText
 
                 onVisibilityChanged: function() {
@@ -419,12 +473,14 @@ Item {
                         anchors.top: parent.top
                         z: 1
                         uiPalette: root.uiPalette
-                        // The art is on the view colour, as the waveform is.
-                        plotColors: root.uiPalette.waveformPlot
+                        // The art is on the media surface's black, as the
+                        // spectrogram is, in both themes.
+                        plotColors: root.uiPalette.mediaPlot
                         uiBridge: root.uiBridge
                         positionText: root.positionText
                         closeButtonName: "albumArtFullscreenCloseButton"
                         controlsVisible: root.fullscreenControlsVisible
+                        controlsLevel: root.fullscreenControlsLevel
                         available: root.stripEnabled
                         pointerActivity: fullscreenControlsAutoHide.pointerMoved
                         zoomLevel: root.zoomLevel

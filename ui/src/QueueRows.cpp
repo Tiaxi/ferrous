@@ -2,6 +2,7 @@
 
 #include "QueueRows.h"
 
+#include <KLocalizedString>
 #include <QChar>
 
 #include <algorithm>
@@ -9,9 +10,19 @@
 #include <iterator>
 #include <utility>
 
+namespace {
+
+// A length that is not known, as the transport writes a time it does not
+// know: en dashes, not hyphens (#373 H35 AC2).
+QString unknownLength() {
+    return i18nc("@info:status no time", "–:––");
+}
+
+} // namespace
+
 QString formatQueueDuration(double seconds) {
     if (!std::isfinite(seconds) || seconds < 0.0) {
-        return QStringLiteral("--:--");
+        return unknownLength();
     }
     const int total = static_cast<int>(seconds + 0.5);
     const int hours = total / 3600;
@@ -38,7 +49,7 @@ QueueRowData queueRowFromTrack(const BinaryBridgeCodec::DecodedQueueTrack &track
     row.genre = track.genre;
     row.lengthText = track.lengthSeconds >= 0.0f
         ? formatQueueDuration(static_cast<double>(track.lengthSeconds))
-        : QStringLiteral("--:--");
+        : unknownLength();
     row.path = track.path;
     row.trackNumber = track.trackNumber;
     row.year = track.year;

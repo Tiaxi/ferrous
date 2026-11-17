@@ -7,8 +7,11 @@ import org.kde.kirigami 2.20 as Kirigami
 // A plate on a visualization, in the plot's own colours (UiPalette's
 // PlotColors) with a 1 px edge outside it. With `text`, it is a lane label;
 // otherwise it holds the items declared inside it, such as PlotToolButtons,
-// 2 px apart with 2 px around them. A plate that is not `revealed` fades
+// 2 px apart with 2 px around them, or `contentSpacing` apart with
+// `padding` around them. A plate that is not `revealed` fades
 // out but keeps its place and its Tab stops, so the keyboard can reveal it.
+// A `compact` label, for a short lane, is 16 px tall with 11 px text, both
+// larger with a larger font, rather than 20 px with 12 px text.
 Item {
     id: root
 
@@ -16,23 +19,41 @@ Item {
     required property var uiPalette
     property string text: ""
     readonly property bool isLabel: root.text.length > 0
-    property real horizontalPadding: root.isLabel ? 6 : 2
-    property real verticalPadding: root.isLabel ? 0 : 2
+    property bool compact: false
+    // The smallest the plate is either way: a label's height, and the
+    // narrowest it is.
+    readonly property real minimumSize: root.compact ? 16 : 20
+    property real padding: 2
+    property real horizontalPadding: root.isLabel ? (root.compact ? 4 : 6) : root.padding
+    property real verticalPadding: root.isLabel ? 0 : root.padding
+    property real contentSpacing: 2
     property real radius: root.isLabel ? 3 : 4
     // Whether presses, clicks and double-clicks on the plate, between its
     // buttons too, stay on it rather than reach the view under it.
     property bool takesPointer: false
+    // Without a fill and an edge of its own, on a plate it shares with
+    // other controls, such as the windowed viewer's corner (#373 H37).
+    property bool bare: false
     property bool revealed: true
+    // A level the plate fades with besides its own reveal, such as a
+    // viewer's controls as they hide: from 1 to 0.
+    property real fadeLevel: 1
     default property alias contentData: content.data
+    // How far the plate is revealed, from 0 to 1, as it fades in or out.
+    property real revealLevel: root.revealed ? 1 : 0
 
-    implicitWidth: Math.max(20, content.implicitWidth + 2 * root.horizontalPadding)
-    implicitHeight: Math.max(20, content.implicitHeight + 2 * root.verticalPadding)
+    implicitWidth: Math.max(root.minimumSize, content.implicitWidth + 2 * root.horizontalPadding)
+    implicitHeight: Math.max(root.minimumSize, content.implicitHeight + 2 * root.verticalPadding)
 
-    opacity: root.revealed ? 1 : 0
+    opacity: root.revealLevel * root.fadeLevel
 
-    // Kirigami's durations are 0 with animations turned off.
-    Behavior on opacity {
-        enabled: Kirigami.Units.shortDuration > 0
+    // Kirigami's durations are 0 with animations turned off. While the
+    // plate fades with `fadeLevel`, such as a viewer's controls coming back
+    // with the pointer on the view, its own reveal follows at once: the
+    // plate, its fill and its glyphs, come in on that one level rather than
+    // on two curves, one after the other (#373 H5).
+    Behavior on revealLevel {
+        enabled: Kirigami.Units.shortDuration > 0 && root.fadeLevel >= 1
         NumberAnimation {
             duration: Kirigami.Units.shortDuration
             easing.type: Easing.OutCubic
@@ -45,6 +66,7 @@ Item {
     // Outside the plate: a border drawn inside a rectangle 1 px larger.
     Rectangle {
         objectName: "plotPlateEdge"
+        visible: !root.bare
         x: -1
         y: -1
         width: parent.width + 2
@@ -57,6 +79,7 @@ Item {
 
     Rectangle {
         objectName: "plotPlateFill"
+        visible: !root.bare
         anchors.fill: parent
         radius: root.radius
         color: root.plotColors.plotPlate
@@ -76,19 +99,26 @@ Item {
     Row {
         id: content
         anchors.centerIn: parent
-        spacing: 2
+        spacing: root.contentSpacing
 
         // Text, not a Label: the desktop style's Label has a hover handler,
-        // which would take the hover from the view under the plate.
+        // which would take the hover from the view under the plate. Its
+        // letters are drawn as curves, with grey antialiasing (#373 H14
+        // G8: the platform's subpixel antialiasing fringed them in colour
+        // on the plate, which is not the window's).
         Text {
             objectName: "plotPlateLabel"
             visible: root.isLabel
+            renderType: Text.CurveRendering
             text: root.text
             font.family: root.uiPalette.baseFont.family
-            font.pointSize: root.uiPalette.smallPointSize
+            font.pointSize: root.compact ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize
             font.weight: Font.DemiBold
             color: root.plotColors.plotText
-            height: 20
+            // 20 px: its line and 1 or 2 px above and below it, more with
+            // a larger font; compact, 16 px: its line and 1 px.
+            height: Math.max(root.minimumSize, Math.ceil(implicitHeight)
+                             + Math.round((root.compact ? 1 : 3) * root.uiPalette.fontScale))
             verticalAlignment: Text.AlignVCenter
             Accessible.ignored: true
         }

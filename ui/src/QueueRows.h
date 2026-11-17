@@ -35,7 +35,7 @@ struct QueueRowData {
 };
 
 // A length as the queue and the search results show it: m:ss, or h:mm:ss
-// from an hour on, and --:-- when it is not known.
+// from an hour on, and –:–– when it is not known.
 QString formatQueueDuration(double seconds);
 QueueRowData queueRowFromTrack(const BinaryBridgeCodec::DecodedQueueTrack &track);
 QVector<QueueRowData> queueRowsFromTracks(

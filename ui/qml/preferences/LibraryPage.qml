@@ -20,12 +20,28 @@ Preferences.PreferencesPage {
     required property var openLibraryRootNameDialog
 
     readonly property var rootEntries: root.uiBridge.libraryRootEntries || []
-    // The folder the buttons act on.
-    property int currentRootIndex: 0
+    // The folder the buttons act on: the one the user selects, none at
+    // first, so the list shows no selection until there is one.
+    property int currentRootIndex: -1
     readonly property var currentRoot: root.currentRootIndex >= 0
         && root.currentRootIndex < root.rootEntries.length
         ? root.rootEntries[root.currentRootIndex]
         : null
+
+    // The rows' name column: as wide as the widest folder name, up to 8
+    // grid units scaled with the font, past which a name elides, so every path starts at one x
+    // (#373 H43: each began where its own name ended). A row without a
+    // name leaves the column empty; with no names, there is no column.
+    readonly property real rootNameColumnWidth: {
+        let widest = 0
+        for (let i = 0; i < rootNameMeasures.count; ++i) {
+            const measure = rootNameMeasures.itemAt(i)
+            if (measure) {
+                widest = Math.max(widest, measure.implicitWidth)
+            }
+        }
+        return Math.min(widest, root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 8))
+    }
 
     function rootDisplayName(entry) {
         return entry ? (entry.displayName || entry.path || "") : ""
@@ -35,9 +51,11 @@ Preferences.PreferencesPage {
     // first.
     function requestRemoveRoot(path, displayName, trackCount) {
         removeRootConfirmDialog.rootPath = path
+        // The path on a line of its own, elided in the middle.
         removeRootConfirmDialog.message = displayName === path
-            ? I18n.i18nc("@info", "Remove the library folder “%1”?", path)
-            : I18n.i18nc("@info folder name, path", "Remove the library folder “%1” (%2)?", displayName, path)
+            ? I18n.i18nc("@info", "Remove this library folder?")
+            : I18n.i18nc("@info folder name", "Remove the library folder “%1”?", displayName)
+        removeRootConfirmDialog.path = path
         removeRootConfirmDialog.details = I18n.i18ncp("@info",
             "This removes its %1 track from the library. "
                 + "The files themselves stay on disk, and adding the folder again brings them back.",
@@ -77,29 +95,66 @@ Preferences.PreferencesPage {
 
     onRootEntriesChanged: {
         if (root.currentRootIndex >= root.rootEntries.length) {
-            root.currentRootIndex = Math.max(0, root.rootEntries.length - 1)
+            root.currentRootIndex = root.rootEntries.length - 1
         }
     }
 
     title: I18n.i18nc("@title preferences page", "Library")
 
+    // The folders take the column's width up to 29 grid units, scaled with
+    // the font (#373 H45: at 24 pt the list stopped at its buttons' width
+    // and cut the path beside free room), and no less than their buttons
+    // need: a long path elides.
     ColumnLayout {
         Kirigami.FormData.label: I18n.i18nc("@label", "Library folders:")
-        // Next to the label's first line.
-        Kirigami.FormData.labelAlignment: Qt.AlignTop
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 29
+        // On the first folder's line: the form centres its label on the
+        // line's height, at its top (#373 H47: at the list's top, the label
+        // was 5 px above the folder's name).
+        Kirigami.FormData.buddyFor: firstRootLine
+        Layout.fillWidth: true
+        Layout.minimumWidth: rootButtons.implicitWidth
+        Layout.preferredWidth: Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 16), rootButtons.implicitWidth)
+        Layout.maximumWidth: Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 29), rootButtons.implicitWidth)
         spacing: Kirigami.Units.largeSpacing
 
+        // A framed list, as the app's other lists: the view colour in a
+        // 1 px seam, its rows edge to edge inside it (#373 H4). Three rows
+        // tall at least, so a single folder sits in a visible list rather
+        // than reading as a text field (#373 H38), and up to eight before
+        // it scrolls.
         Rectangle {
+            id: rootListFrame
+            objectName: "libraryRootListFrame"
+            readonly property int frameWidth: 1
             Layout.fillWidth: true
-            implicitHeight: rootList.visible
-                ? Math.min(rootList.contentHeight, root.uiPalette.rowHeight * 8) + 6
-                : emptyRootsLabel.implicitHeight + 2 * Kirigami.Units.largeSpacing
+            implicitHeight: Math.max(root.uiPalette.rowHeight * 3, rootList.visible
+                ? Math.min(rootList.contentHeight, root.uiPalette.rowHeight * 8)
+                : emptyRootsLabel.implicitHeight + 2 * Kirigami.Units.largeSpacing) + 2 * frameWidth
             color: root.uiPalette.view
-            radius: 3
-            border.width: 1
-            border.color: Kirigami.ColorUtils.linearInterpolation(
-                root.uiPalette.view, root.uiPalette.text, Kirigami.Theme.frameContrast)
+            border.width: frameWidth
+            border.color: root.uiPalette.seam
+
+            // Where the first folder's line is, inside the frame, a row tall:
+            // the form's label sits beside it, on its folder's baseline.
+            Item {
+                id: firstRootLine
+                objectName: "libraryFirstRootLine"
+                y: rootListFrame.frameWidth
+                width: parent.width
+                height: root.uiPalette.rowHeight
+            }
+
+            // Measures the folder names as the rows draw them.
+            Repeater {
+                id: rootNameMeasures
+                model: root.rootEntries
+
+                Label {
+                    required property var modelData
+                    visible: false
+                    text: (modelData && modelData.name) || ""
+                }
+            }
 
             Label {
                 id: emptyRootsLabel
@@ -117,7 +172,7 @@ Preferences.PreferencesPage {
                 id: rootList
                 objectName: "libraryRootList"
                 anchors.fill: parent
-                anchors.margins: 3
+                anchors.margins: rootListFrame.frameWidth
                 visible: root.rootEntries.length > 0
                 clip: true
                 model: root.rootEntries
@@ -130,11 +185,23 @@ Preferences.PreferencesPage {
                 Accessible.role: Accessible.List
                 Accessible.name: I18n.i18nc("@label", "Library folders")
                 onCurrentIndexChanged: root.currentRootIndex = currentIndex
+                // The keyboard arriving with no folder selected selects
+                // the first, where its ring then shows; a click selects
+                // the folder it is on.
+                onActiveFocusChanged: {
+                    if (activeFocus && InputModality.keyboard && currentIndex < 0 && count > 0) {
+                        currentIndex = 0
+                    }
+                }
 
                 Keys.onReturnPressed: root.openCurrentRoot()
                 Keys.onEnterPressed: root.openCurrentRoot()
                 Keys.onDeletePressed: root.removeCurrentRoot()
-                Keys.onMenuPressed: rootContextMenu.popup(rootList.currentItem)
+                Keys.onMenuPressed: {
+                    if (rootList.currentItem) {
+                        rootContextMenu.popup(rootList.currentItem)
+                    }
+                }
 
                 delegate: ItemDelegate {
                     id: rootRow
@@ -149,9 +216,18 @@ Preferences.PreferencesPage {
                     readonly property int trackCount: rootEntry.trackCount || 0
 
                     width: ListView.view.width
-                    implicitHeight: Math.max(root.uiPalette.rowHeight + Kirigami.Units.smallSpacing,
-                        rowColumn.implicitHeight + 2 * Kirigami.Units.smallSpacing)
+                    // A list row, and a note under it, with a small
+                    // spacing under the note.
+                    readonly property bool hasNotes: rootRow.unwatchedReason.length > 0
+                        || rootRow.scanProblem.length > 0
+                    implicitHeight: rowColumn.implicitHeight + rootRow.bottomPadding
                     padding: 0
+                    // Set here: the style gives every row but a list's last
+                    // a bottom padding of its own, which `padding` does not
+                    // reset, so each folder's line was 2 px above the last
+                    // one's (#373 H40).
+                    topPadding: 0
+                    bottomPadding: rootRow.hasNotes ? Kirigami.Units.smallSpacing : 0
                     highlighted: ListView.isCurrentItem
                     focusPolicy: Qt.NoFocus
                     Accessible.role: Accessible.ListItem
@@ -186,23 +262,31 @@ Preferences.PreferencesPage {
                         hovered: rootRow.hovered
                         selected: rootRow.highlighted
                         active: rootList.activeFocus
-                        focused: rootRow.highlighted && rootList.activeFocus
+                        // The ring only while the keyboard is in use, as
+                        // in the app's other lists.
+                        focused: rootRow.highlighted && rootList.activeFocus && InputModality.keyboard
                     }
 
                     contentItem: ColumnLayout {
                         id: rowColumn
                         spacing: 0
 
+                        // The folder's line, a list row's height.
                         RowLayout {
                             Layout.fillWidth: true
+                            Layout.preferredHeight: root.uiPalette.rowHeight
                             Layout.leftMargin: Kirigami.Units.largeSpacing + 2
                             Layout.rightMargin: Kirigami.Units.largeSpacing + 2
                             spacing: Kirigami.Units.largeSpacing + 2
 
                             Kirigami.Icon {
-                                implicitWidth: Kirigami.Units.iconSizes.small
-                                implicitHeight: Kirigami.Units.iconSizes.small
-                                source: "folder"
+                                objectName: "libraryRootIcon"
+                                implicitWidth: root.uiPalette.labelIconSize
+                                implicitHeight: root.uiPalette.labelIconSize
+                                // The symbolic glyph, which Breeze has in one
+                                // colour at every size: its 32 px "folder" is
+                                // in full colour, which the mask left blue.
+                                source: "folder-symbolic"
                                 color: root.uiPalette.textSecondary
                                 isMask: true
                                 Accessible.ignored: true
@@ -210,53 +294,58 @@ Preferences.PreferencesPage {
 
                             Label {
                                 objectName: "libraryRootName"
-                                visible: rootRow.rootName.length > 0
-                                Layout.preferredWidth: Math.min(implicitWidth, Kirigami.Units.gridUnit * 8)
+                                visible: root.rootNameColumnWidth > 0
+                                Layout.preferredWidth: root.rootNameColumnWidth
+                                // The gap to the path: the row's 10 px with
+                                // the default font, and larger with a larger
+                                // one, so the two columns stay apart (#373
+                                // H45: 10 px between 24 pt names and paths).
+                                Layout.rightMargin: root.uiPalette.scaledSize(parent.spacing) - parent.spacing
                                 text: rootRow.rootName
                                 color: root.uiPalette.text
                                 elide: Text.ElideRight
                                 Accessible.ignored: true
                             }
 
-                            Label {
+                            Components.PathLabel {
                                 objectName: "libraryRootPath"
                                 Layout.fillWidth: true
-                                text: rootRow.rootPath
+                                path: rootRow.rootPath
                                 color: rootRow.rootName.length > 0 ? root.uiPalette.textSecondary : root.uiPalette.text
-                                elide: Text.ElideMiddle
                                 Accessible.ignored: true
                             }
 
                             Label {
+                                objectName: "libraryRootTrackCount"
                                 text: I18n.i18ncp("@info", "%1 track", "%1 tracks", rootRow.trackCount)
                                 font.pointSize: root.uiPalette.smallPointSize
                                 font.features: root.uiPalette.tabularFigures
-                                color: root.uiPalette.textTertiaryOn(rootRow.highlighted)
+                                color: root.uiPalette.textTertiaryOn(rootRow.highlighted, rootRow.hovered)
                                 Accessible.ignored: true
                             }
                         }
 
-                        Label {
+                        // A path or a system error in the reasons wraps
+                        // as a message's does.
+                        Components.MessageLabel {
                             objectName: "libraryRootUnwatchedLabel"
                             Layout.fillWidth: true
-                            Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + Kirigami.Units.iconSizes.small
+                            Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + root.uiPalette.labelIconSize
                             Layout.rightMargin: Kirigami.Units.largeSpacing + 2
                             visible: rootRow.unwatchedReason.length > 0
-                            text: I18n.i18nc("@info:status", "Not watched for changes: %1", rootRow.unwatchedReason)
-                            wrapMode: Text.Wrap
+                            message: I18n.i18nc("@info:status", "Not watched for changes: %1", rootRow.unwatchedReason)
                             font.pointSize: root.uiPalette.smallPointSize
                             color: root.uiPalette.textSecondary
                         }
 
                         // Stays until a rescan of the whole folder finds nothing wrong.
-                        Label {
+                        Components.MessageLabel {
                             objectName: "libraryRootScanProblemLabel"
                             Layout.fillWidth: true
-                            Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + Kirigami.Units.iconSizes.small
+                            Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + root.uiPalette.labelIconSize
                             Layout.rightMargin: Kirigami.Units.largeSpacing + 2
                             visible: rootRow.scanProblem.length > 0
-                            text: I18n.i18nc("@info:status problem the last library scan found", "Last scan: %1", rootRow.scanProblem)
-                            wrapMode: Text.Wrap
+                            message: I18n.i18nc("@info:status problem the last library scan found", "Last scan: %1", rootRow.scanProblem)
                             font.pointSize: root.uiPalette.smallPointSize
                             color: root.uiPalette.negative
                             Accessible.role: Accessible.AlertMessage
@@ -269,11 +358,17 @@ Preferences.PreferencesPage {
             }
         }
 
+        // The folders' actions, their glyphs as large as their captions'
+        // font calls for, as the dialogs' buttons (#373 H43).
         RowLayout {
+            id: rootButtons
+            readonly property real glyphSize: root.uiPalette.labelIconSize
             spacing: Kirigami.Units.largeSpacing
 
             Button {
                 objectName: "libraryRootAddButton"
+                icon.width: rootButtons.glyphSize
+                icon.height: rootButtons.glyphSize
                 icon.name: "folder-add"
                 text: I18n.i18nc("@action:button", "Add…")
                 Accessible.name: I18n.i18nc("@action:button", "Add Library Folder")
@@ -282,6 +377,8 @@ Preferences.PreferencesPage {
 
             Button {
                 objectName: "libraryRootRenameButton"
+                icon.width: rootButtons.glyphSize
+                icon.height: rootButtons.glyphSize
                 icon.name: "edit-rename"
                 text: I18n.i18nc("@action:button", "Rename…")
                 enabled: root.currentRoot !== null
@@ -290,6 +387,8 @@ Preferences.PreferencesPage {
 
             Button {
                 objectName: "libraryRootRescanButton"
+                icon.width: rootButtons.glyphSize
+                icon.height: rootButtons.glyphSize
                 icon.name: "view-refresh"
                 text: I18n.i18nc("@action:button", "Rescan")
                 enabled: root.currentRoot !== null
@@ -298,6 +397,8 @@ Preferences.PreferencesPage {
 
             Button {
                 objectName: "libraryRootRemoveButton"
+                icon.width: rootButtons.glyphSize
+                icon.height: rootButtons.glyphSize
                 // Removing from the list: the files stay on disk.
                 icon.name: "list-remove"
                 text: I18n.i18nc("@action:button", "Remove")
@@ -328,7 +429,7 @@ Preferences.PreferencesPage {
     Components.DialogComboBox {
         objectName: "librarySortComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Sort albums by:")
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 9
+        Layout.preferredWidth: Math.max(Kirigami.Units.gridUnit * 9, implicitWidth)
         model: [
             I18n.i18nc("@item:inlistbox album sort", "Year"),
             I18n.i18nc("@item:inlistbox album sort", "Title")
@@ -375,6 +476,12 @@ Preferences.PreferencesPage {
         windowRoot: root.windowRoot
         title: I18n.i18nc("@title:window", "Remove Library Folder")
         confirmText: I18n.i18nc("@action:button", "Remove Folder")
+        // As the page's Remove button.
+        confirmIcon: "list-remove"
+        // Its tracks leave the library, so Cancel is the default, as KDE's
+        // guidelines ask of an action that destroys (#373 H37): Enter as
+        // it shows keeps the folder.
+        destructive: true
         onConfirmed: root.uiBridge.removeLibraryRoot(rootPath)
     }
 }

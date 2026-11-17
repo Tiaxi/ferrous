@@ -3,13 +3,22 @@
 import QtQuick 2.15
 import FerrousUi 1.0
 import "." as Components
+import "../logic/VisualizationModes.js" as VisualizationModes
 
 // The visualization's mode switch: two tool buttons on one plate,
-// Spectrogram and Waveform, the current one checked. Set `revealed` from
-// the pane's pointer and `focusInside`: hidden, the buttons stay Tab stops.
+// Spectrogram and Waveform, the current one checked, as a neutral plate
+// (PlotToolButton's `segment`). Set `revealed` from the pane's pointer and
+// `focusInside`: hidden, the buttons stay Tab stops. The buttons are 4 px
+// apart with 4 px around them, so a button's focus ring, 3 px out from it,
+// stays inside the plate with 1 px of the plate outside it, and 1 px clear
+// of the other button, whose checked edge it never touches (#373 H14 G4:
+// 2 px apart and in, the ring ran over the plate's edge and onto the
+// chosen one's; H16 I5: at 3 px around them it met the plate's edge).
 Components.PlotPlate {
     id: root
     objectName: "visualizationModeSwitch"
+    padding: 4
+    contentSpacing: 4
 
     required property int selectedMode
     required property var setMode
@@ -39,12 +48,7 @@ Components.PlotPlate {
 
     Repeater {
         id: buttons
-        model: [
-            { name: I18n.i18nc("@option:radio visualization mode", "Spectrogram"),
-              icon: "view-statistics" },
-            { name: I18n.i18nc("@option:radio visualization mode", "Waveform"),
-              icon: "waveform" }
-        ]
+        model: VisualizationModes.modes(String(Qt.resolvedUrl("../assets/")))
 
         delegate: Components.PlotToolButton {
             required property int index
@@ -53,11 +57,10 @@ Components.PlotPlate {
             plotColors: root.plotColors
             uiPalette: root.uiPalette
             text: modelData.name
-            icon.name: modelData.icon
+            icon.name: modelData.iconName
+            icon.source: modelData.iconSource
+            segment: true
             checked: root.selectedMode === index
-            Accessible.role: Accessible.RadioButton
-            Accessible.checkable: true
-            Accessible.checked: checked
             Accessible.onPressAction: root.setMode(index)
             onClicked: root.setMode(index)
         }

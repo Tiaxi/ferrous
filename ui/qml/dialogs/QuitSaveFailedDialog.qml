@@ -3,55 +3,27 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
-import QtQuick.Window 2.15
-import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
-import "../logic/KeyUtils.js" as KeyUtils
 
 // Shown when the settings, the queue, or Last.fm's scrobbles could not be
 // saved before quitting.
-Dialog {
+Components.CompactDialogWindow {
     id: root
 
-    required property var uiPalette
-    required property var windowRoot
     property string message: ""
 
     signal retryRequested()
     signal quitRequested()
 
     objectName: "quitSaveFailedDialog"
-    parent: Overlay.overlay
-    modal: true
-    x: Math.round((root.windowRoot.width - width) / 2)
-    y: Math.round((root.windowRoot.height - height) / 2)
-    width: Math.min(Kirigami.Units.gridUnit * 25, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
     title: I18n.i18nc("@title:window", "Couldn\u2019t Save Before Quitting")
-    // Escape keeps Ferrous open.
-    closePolicy: Popup.CloseOnEscape
-
-    // An answer closes it, and its buttons take no other as it fades out.
-    Components.PopupClosing {
-        id: closingState
-        popup: root
-    }
-
-    // The keyboard in the content, whose Enter presses the default button,
-    // from the moment the dialog shows.
-    Components.PopupInitialFocus {
-        popup: root
-        item: root.contentItem
-    }
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
+    // Escape and the title bar's close button keep Ferrous open.
+    // At least as wide as the heading, which is one line in any font.
+    contentWidth: quitSaveFailedHeading.implicitWidth
 
     footer: Components.DialogFooter {
-
         id: dialogButtons
-        enabled: !closingState.closing
         primary: quitSaveFailedRetryButton
         Button {
             id: quitSaveFailedRetryButton
@@ -60,7 +32,8 @@ Dialog {
             icon.name: "view-refresh"
             DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             onClicked: {
-                root.close()
+                // Hidden at once: a second click finds no button.
+                root.dismiss()
                 root.retryRequested()
             }
         }
@@ -70,32 +43,54 @@ Dialog {
             icon.name: "application-exit"
             DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole
             onClicked: {
-                root.close()
+                root.dismiss()
                 root.quitRequested()
             }
         }
     }
 
-    contentItem: ColumnLayout {
-        // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
-
-        spacing: 12
+    // What happened, in words, with the error that stopped it on a line
+    // of its own below, as the confirmations name their file (#373 H37):
+    // the error is the system's, such as "Permission denied (os error
+    // 13)", and reads as a detail, not as the heading.
+    ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 2
 
         Label {
+            id: quitSaveFailedHeading
+            objectName: "quitSaveFailedHeading"
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            // Short enough for one line: what it can be is in the text
+            // below (#373 H38: the list in it left "saved." alone on a
+            // second line). The lead, semibold, as every dialog's first
+            // sentence is (#373 H40: the three lines read as one grey
+            // block). It says what happened, not again what the title says
+            // (#373 H41: "could not be saved" twice).
+            font.weight: Font.DemiBold
+            text: I18n.i18nc("@info", "Some recent changes were not saved.")
+        }
+
+        // A path in it breaks between its folders, and the error's code
+        // stays whole (#373 H47: "13)" alone on a line).
+        Components.MessageLabel {
             objectName: "quitSaveFailedMessage"
             Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            text: root.message
-        }
-
-        Label {
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
+            visible: root.message.length > 0
             color: root.uiPalette.textSecondary
-            text: I18n.i18nc("@info", "Retry saves again, for example after freeing disk space. Quit Anyway "
-                + "closes Ferrous, and the settings, queue changes, and Last.fm scrobbles "
-                + "that could not be saved are lost.")
+            message: root.message
         }
+    }
+
+    Label {
+        objectName: "quitSaveFailedDetails"
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        color: root.uiPalette.textSecondary
+        // It names what it speaks of, rather than "They", which could be
+        // read as the error above it (#373 H41).
+        text: I18n.i18nc("@info", "Unsaved changes can include settings, queue changes and Last.fm scrobbles. "
+            + "Retry saves again, for example after freeing disk space. Quit Anyway closes Ferrous and loses them.")
     }
 }

@@ -32,57 +32,118 @@ Rectangle {
     property var errorController: null
     // What the first-run message's button does.
     property var addLibraryFolderAction: null
+    // Whether the keyboard is in use, which the current row's ring shows
+    // only then. Read as the pane is made, so the app follows the input
+    // from the start, before the queue first has the focus.
+    readonly property bool keyboardInUse: InputModality.keyboard
+    // The widest the queue's minimum width gets while the title alone fits
+    // in it: what the narrowest window the design is drawn for, 1000 px,
+    // leaves the queue. A larger font drops Artist there rather than push
+    // the window wider than the screen.
+    property real minimumWidthLimit: Infinity
 
     // The columns, which the header and the rows share: the state glyph,
     // the number, then Title, Artist, Album and Length. Text that does not
-    // fit its column is elided, so it never runs into the next. The title
-    // takes the width the others leave, about 40% of the table by default,
-    // with Artist and Album about 25% each. Artist, Album and Length have
+    // fit its column is elided, so it never runs into the next. Length has
+    // its room first, as wide as its longest value and a little more; of
+    // the room left for the text, the title takes what the others leave,
+    // a little under half by default, with Artist a little over a quarter
+    // and Album a little less, as album names run shorter. Artist, Album
+    // and Length have
     // the widths the user dragged their handles to, which the settings
     // keep, or those defaults. A column's width is that of its text; the
     // gaps between the columns come on top. Sizes are those of the design
     // at the default font, and grow with it as the rows do.
     readonly property real sizeScale: root.uiPalette.rowHeight / 26
+    // An unreadable row's mark: the status bar's warning sign, at its
+    // size, in the negative colour, as the status bar marks the same
+    // failure (#373 H35 AC1: Breeze's dialog-warning as a mask was a solid
+    // triangle that read as a transport glyph).
+    readonly property string warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
+    readonly property int warningGlyphSize: root.uiPalette.scaledSize(16)
     // Between the number and the title, and between the other columns.
     readonly property real titleGap: Math.round(12 * root.sizeScale)
     readonly property real columnGap: Math.round(16 * root.sizeScale)
     // From the length's right end to the queue's: the scrollbar lane and
     // the inset.
     readonly property real rightPadding: Math.round(24 * root.sizeScale)
-    // The table's share each of Artist and Album has by default.
-    readonly property real defaultTextColumnShare: 0.25
-    readonly property real defaultArtistColumnWidth: root.defaultTextColumnWidth()
-    readonly property real defaultAlbumColumnWidth: root.defaultTextColumnWidth()
-    readonly property real defaultLengthColumnWidth: root.minimumLengthColumnWidth
+    // The share of the text columns' room Artist and Album have by default;
+    // the title has the rest, 45%. Half left a gap after short titles and
+    // elided artists at a large font while the title had room; these give
+    // Artist and Album about 24 px more each at 1600 px (#373 H6).
+    readonly property real defaultArtistColumnShare: 0.283
+    readonly property real defaultAlbumColumnShare: 0.263
+    readonly property real defaultTitleColumnShare: 1 - root.defaultArtistColumnShare - root.defaultAlbumColumnShare
+    // What Title, Artist and Album share: the table, less the columns that
+    // have their room first and the gaps before Artist and Album.
+    readonly property real defaultTextColumnsRoom: Math.max(0,
+        root.width - root.reservedColumnsWidth - 2 * root.columnGap)
+    // Artist by default: its share, or, where that is narrower, as with a
+    // large font, minimumArtistColumnWidth, which the title gives way to
+    // as far as its own minimum (#373 H8: at 24 pt Artist showed eleven
+    // characters of a name beside a title column twice as wide as its
+    // titles).
+    readonly property real defaultArtistColumnWidth: Math.max(
+        root.defaultTextColumnWidth(root.defaultArtistColumnShare),
+        Math.min(root.minimumArtistColumnWidth, root.artistRoomAtTitleMinimum))
+    // The width Artist takes from the title before Artist's share: sixteen
+    // characters of the font, as many as most artists' names have; under
+    // its share with the default font but in the narrowest windows.
+    readonly property real minimumArtistColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 16)
+    // What the title leaves Artist at the title's minimum, with Album and
+    // Length at their defaults.
+    readonly property real artistRoomAtTitleMinimum: Math.floor(root.width - root.reservedColumnsWidth
+        - root.minimumTitleColumnWidth - root.columnGap
+        - (root.albumColumnVisible ? root.columnGap + root.defaultAlbumColumnWidth : 0))
+    readonly property real defaultAlbumColumnWidth: root.defaultTextColumnWidth(root.defaultAlbumColumnShare)
+    // Length: its longest value and two characters' room before it, apart
+    // from the album; about 56 px at the default font.
+    readonly property real defaultLengthColumnWidth: Math.max(root.minimumLengthColumnWidth,
+        Math.ceil(lengthValueMetrics.advanceWidth + 2 * columnFontMetrics.averageCharacterWidth))
     readonly property real artistColumnWidth: root.columnWidths.artist
     readonly property real albumColumnWidth: root.columnWidths.album
     readonly property real lengthColumnWidth: root.columnWidths.length
-    // The width of the glyph, number and length columns and of every gap,
-    // with Album shown.
-    readonly property real fixedColumnsWidth: root.playlistIndicatorColumnWidth
-        + root.playlistOrderColumnWidth + root.titleGap + 3 * root.columnGap
+    // What the columns other than Title, Artist and Album take, which they
+    // have first: the glyph and number columns, Length at its measured
+    // width, the gaps before the title and Length, and the right padding.
+    readonly property real reservedColumnsWidth: root.playlistIndicatorColumnWidth
+        + root.playlistOrderColumnWidth + root.titleGap + root.columnGap
         + root.defaultLengthColumnWidth + root.rightPadding
-    // Album drops before the title would go under its minimum with the
-    // default widths, as in a narrow window.
-    readonly property bool albumColumnVisible: root.width * (1 - 2 * root.defaultTextColumnShare)
-        - root.fixedColumnsWidth + 2 * root.columnGap >= root.minimumTitleColumnWidth
+    // Album drops first, as in a narrow window: it shows only where half
+    // the table, less the columns that have their room first, would still
+    // hold the title at its minimum, so a narrow window gives the title
+    // the room rather than three cramped columns.
+    readonly property bool albumColumnVisible: root.artistColumnVisible
+        && root.width / 2 - root.reservedColumnsWidth >= root.minimumTitleColumnWidth
+    // Artist drops next, when what the title leaves would show only a few
+    // of its characters, as in a narrow window at a large font.
+    readonly property bool artistColumnVisible: root.width - root.reservedColumnsWidth
+        - root.minimumTitleColumnWidth - root.columnGap >= root.minimumShownTextColumnWidth
+    // The least width at which the queue shows all its columns: Album,
+    // the first to drop, shows from here (albumColumnVisible). The number
+    // column is counted as the queue's minimum counts it, for up to 99,999
+    // tracks, so that it does not change as tracks are queued. The window
+    // gives the library pane more than its share only past this (#373 H11).
+    readonly property real widthWithAllColumns: Math.ceil(2 * (root.playlistIndicatorColumnWidth
+        + root.minimumOrderColumnWidth + root.titleGap + root.columnGap + root.defaultLengthColumnWidth
+        + root.rightPadding + root.minimumTitleColumnWidth))
     readonly property var resizableColumns: root.albumColumnVisible
         ? ["artist", "album", "length"]
-        : ["artist", "length"]
+        : (root.artistColumnVisible ? ["artist", "length"] : ["length"])
     // The narrowest Artist and Album can be dragged: a few characters, and
     // no narrower than the backend keeps. Length keeps room for its
     // heading and the longest length it shows.
     readonly property real minimumResizedColumnWidth: Math.max(
         16, Math.ceil(columnFontMetrics.averageCharacterWidth * 4))
+    // The narrowest Artist is shown at.
+    readonly property real minimumShownTextColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 6)
     readonly property real minimumLengthColumnWidth: Math.max(16, Math.ceil(Math.max(
         lengthHeaderMetrics.advanceWidth,
         lengthValueMetrics.advanceWidth)))
 
-    // Artist's or Album's default: its share of the table, less the gap
-    // before the next column.
-    function defaultTextColumnWidth() {
-        return Math.max(root.minimumResizedColumnWidth,
-                        Math.round(root.width * root.defaultTextColumnShare) - root.columnGap)
+    // Artist's or Album's default: its share of the text columns' room.
+    function defaultTextColumnWidth(share) {
+        return Math.max(root.minimumResizedColumnWidth, Math.round(root.defaultTextColumnsRoom * share))
     }
     // How far Left or Right moves a focused handle.
     readonly property real keyboardResizeStep: Math.max(
@@ -145,12 +206,12 @@ Rectangle {
     // The widths the columns are shown at for `preferred` widths. When the
     // queue is too narrow for them with the title at its minimum, as in a
     // window made smaller after a column was widened, each gives up a share
-    // of what it has beyond its minimum.
+    // of what it has beyond its minimum, down to that minimum.
     function fittedColumnWidths(preferred) {
         const minimum = root.resizableColumns.map(root.minimumColumnWidth)
         const room = root.resizableColumnsRoom
         const total = preferred.reduce((sum, width) => sum + width, 0)
-        if (room <= 0 || total <= room) {
+        if (total <= room) {
             return preferred
         }
         const slack = preferred.map((width, i) => Math.max(0, width - minimum[i]))
@@ -167,7 +228,7 @@ Rectangle {
         const shown = {}
         root.resizableColumns.forEach((column, i) => shown[column] = Math.round(widths[i]))
         return {
-            "artist": shown.artist,
+            "artist": shown.artist !== undefined ? shown.artist : 0,
             "album": shown.album !== undefined ? shown.album : 0,
             "length": shown.length
         }
@@ -283,13 +344,33 @@ Rectangle {
     // the window's minimum does not change as tracks are queued, and the
     // default widths of the others, so that it does not change as they are
     // resized either: narrower windows shrink resized columns.
-    readonly property real minimumTitleColumnWidth: Math.ceil(240 * root.sizeScale)
+    // The title's is 240 px at the default font, smaller with a smaller one;
+    // a larger font keeps 240 px as long as it holds a dozen characters, so
+    // that a narrow window at a large font has room for the other columns.
+    readonly property real minimumTitleColumnWidth: Math.ceil(Math.min(240 * root.sizeScale,
+        Math.max(240, columnFontMetrics.averageCharacterWidth * 12)))
     readonly property real minimumOrderColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 6.5)
-    // Without Album, with Artist at its default share of the width.
-    readonly property real minimumContentWidth: Math.ceil((root.playlistIndicatorColumnWidth
+    // Without Album, and the title at its minimum: with Artist at
+    // minimumArtistColumnShare of the width and Length at its default, or, where that
+    // is wider than minimumWidthLimit, without Artist, as wide as the limit
+    // allows. Without Artist, Length counts at its least width, its heading
+    // or its longest value: in the narrowest queue it gives up the two
+    // characters' room before it, as the resized columns give up theirs,
+    // so that the narrow window at a large font, with the wider sidebar,
+    // keeps the title at its minimum (#373 H6).
+    readonly property real minimumTitleOnlyWidth: root.playlistIndicatorColumnWidth
         + root.minimumOrderColumnWidth + root.titleGap + root.minimumTitleColumnWidth
-        + root.columnGap + root.defaultLengthColumnWidth + root.rightPadding)
-        / (1 - root.defaultTextColumnShare))
+        + root.columnGap + root.minimumLengthColumnWidth + root.rightPadding
+    readonly property real minimumWithArtistWidth: (root.minimumTitleOnlyWidth
+        - root.minimumLengthColumnWidth + root.defaultLengthColumnWidth)
+        / (1 - root.minimumArtistColumnShare)
+    // The share of the width the narrowest queue is counted with for Artist:
+    // the one it had before its default grew (#373 H6), so the window's
+    // minimum width stays. There Artist gives way to the title's minimum.
+    readonly property real minimumArtistColumnShare: 0.26
+    readonly property real minimumContentWidth: Math.ceil(Math.min(
+        root.minimumWithArtistWidth,
+        Math.max(root.minimumTitleOnlyWidth, root.minimumWidthLimit)))
 
     FontMetrics {
         id: columnFontMetrics
@@ -320,8 +401,10 @@ Rectangle {
     readonly property bool firstRun: root.uiBridge.queueLength === 0
         && root.uiBridge.libraryRootCount === 0
 
-    // A track change: the row that becomes now is amber at once, from its
-    // own state; the row that was now fades its amber out (#373 Motion).
+    // A track change: the row that was now fades its amber out as the row
+    // that becomes now fades it in, over the same time on the same curve,
+    // so no two rows are ever both fully amber (#373 Motion). With nothing
+    // fading out, as at the first track, the new row is amber at once.
     // `nowRow` is the row that is amber, as last seen; the playing row's
     // index, path and state change together, and are read together here.
     // A row is matched by its index and its path, so an edit that moves
@@ -332,6 +415,7 @@ Rectangle {
 
     Components.NowFadeOut {
         id: queueNowFade
+        fadesIn: true
     }
 
     function followNowRow() {
@@ -360,10 +444,18 @@ Rectangle {
     onPlaybackStateChanged: root.followNowRow()
     Component.onCompleted: root.followNowRow()
 
+    // Where the list starts in the pane, and the height of its rows: the
+    // default split puts the list on their grid.
+    readonly property real listTop: queueHeader.implicitHeight
+    readonly property real rowPitch: playlistView.rowHeight
+
     color: root.uiPalette.view
     SplitView.fillWidth: true
     SplitView.preferredHeight: root.preferredHeight
-    SplitView.minimumHeight: 220
+    // Its header and four rows, and never under 220 px: about eight rows
+    // with the default font, and five at 24 pt, where the window's least
+    // height, 720 px, still has room for the visualization's minimum.
+    SplitView.minimumHeight: Math.max(220, 5 * root.uiPalette.rowHeight)
 
     ColumnLayout {
         anchors.fill: parent
@@ -380,9 +472,16 @@ Rectangle {
             implicitHeight: root.uiPalette.rowHeight
 
             Components.RegionHeader {
+                objectName: "queueRegionHeader"
                 anchors.fill: parent
                 uiPalette: root.uiPalette
-                leftInset: queueHeaderRow.x + titleHeader.x
+                // Over the Title column, or with no rows to align with, at
+                // the panes' 12 px inset, where "Library" is beside it
+                // (#373 H13: an empty queue's name stood alone at the
+                // Title column's 66 px).
+                leftInset: root.uiBridge.queueLength > 0
+                    ? queueHeaderRow.x + titleHeader.x
+                    : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                 rightInset: Math.max(0, parent.width - (queueHeaderRow.x + titleHeader.x + titleHeader.width))
                 title: I18n.i18nc("@title queue region", "Queue")
                 totals: root.totalsText
@@ -432,6 +531,7 @@ Rectangle {
                     id: artistHeader
                     opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_artist"
+                    visible: root.artistColumnVisible
                     text: I18n.i18nc("@title:column", "Artist")
                     Layout.leftMargin: root.columnGap
                     Layout.preferredWidth: root.artistColumnWidth
@@ -468,116 +568,6 @@ Rectangle {
                     font.family: root.uiPalette.baseFont.family
                     font.pointSize: root.uiPalette.smallPointSize
                     color: root.uiPalette.textSecondary
-                }
-            }
-
-            // A handle on the left of each resizable column, in the gap
-            // before it: the title fills the width the others leave, so
-            // dragging it left widens the column after it. Double-click,
-            // or Home, restores the column's default width; Left and Right
-            // move it from the keyboard. It shows only under the pointer
-            // and with keyboard focus.
-            Repeater {
-                model: [
-                    { "column": "artist", "label": I18n.i18nc("@title:column", "Artist"), "header": artistHeader },
-                    { "column": "album", "label": I18n.i18nc("@title:column", "Album"), "header": albumHeader },
-                    { "column": "length", "label": I18n.i18nc("@title:column", "Length"), "header": lengthHeader }
-                ]
-
-                delegate: Item {
-                    id: resizeHandle
-                    objectName: "queueColumnHandle_" + modelData.column
-                    required property var modelData
-                    readonly property string column: modelData.column
-                    readonly property bool highlighted: resizeMouseArea.containsMouse
-                        || resizeMouseArea.pressed || resizeHandle.activeFocus
-                    // Where the pointer was when the drag started, in the
-                    // pane, which stays put as the columns move.
-                    property real pressX: 0
-
-                    visible: modelData.header.visible
-                    x: queueHeaderRow.x + modelData.header.x - root.columnGap / 2 - width / 2
-                    width: Kirigami.Units.largeSpacing
-                    height: parent.height
-                    // An empty queue's columns have no labels to resize.
-                    activeFocusOnTab: visible && root.uiBridge.queueLength > 0
-
-                    Accessible.role: Accessible.Separator
-                    Accessible.name: I18n.i18nc("@action %1 is a column title", "Resize the %1 column", modelData.label)
-                    Accessible.description: I18n.i18nc("@info", "Left or Right to resize, Home for the default width")
-                    Accessible.focusable: true
-
-                    Rectangle {
-                        objectName: "queueColumnHandleLine"
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.top: parent.top
-                        anchors.bottom: parent.bottom
-                        anchors.topMargin: Kirigami.Units.smallSpacing
-                        anchors.bottomMargin: Kirigami.Units.smallSpacing
-                        width: resizeHandle.activeFocus ? 2 : 1
-                        visible: resizeHandle.highlighted
-                        color: resizeHandle.activeFocus || resizeMouseArea.pressed
-                            ? root.uiPalette.focusRing
-                            : root.uiPalette.seam
-                    }
-
-                    MouseArea {
-                        id: resizeMouseArea
-                        anchors.fill: parent
-                        hoverEnabled: root.uiBridge.queueLength > 0
-                        preventStealing: true
-                        cursorShape: Qt.SplitHCursor
-
-                        onPressed: function(mouse) {
-                            resizeHandle.pressX = mapToItem(root, mouse.x, 0).x
-                            root.beginColumnResize(resizeHandle.column)
-                        }
-                        onPositionChanged: function(mouse) {
-                            if (pressed && root.resizingColumn === resizeHandle.column) {
-                                const x = mapToItem(root, mouse.x, 0).x
-                                root.resizeColumnBy(resizeHandle.column, resizeHandle.pressX - x)
-                            }
-                        }
-                        onReleased: root.finishColumnResize()
-                        onCanceled: root.cancelColumnResize()
-                        onDoubleClicked: root.restoreDefaultColumnWidth(resizeHandle.column)
-                    }
-
-                    function keyResizes(event) {
-                        return KeyUtils.isUnmodified(event)
-                            && (event.key === Qt.Key_Left || event.key === Qt.Key_Right
-                                || event.key === Qt.Key_Home)
-                    }
-                    // The keys move the focused handle rather than seeking.
-                    Keys.onShortcutOverride: function(event) {
-                        event.accepted = resizeHandle.keyResizes(event)
-                    }
-                    Keys.onPressed: function(event) {
-                        if (!resizeHandle.keyResizes(event)) {
-                            return
-                        }
-                        event.accepted = true
-                        if (event.key === Qt.Key_Home) {
-                            root.restoreDefaultColumnWidth(resizeHandle.column)
-                            return
-                        }
-                        root.beginColumnResize(resizeHandle.column)
-                        root.resizeColumnBy(resizeHandle.column, root.resizeDelta
-                            + (event.key === Qt.Key_Left ? root.keyboardResizeStep : -root.keyboardResizeStep))
-                    }
-                    // A held key moves the handle until it is let go, when
-                    // the width is kept.
-                    Keys.onReleased: function(event) {
-                        if (!event.isAutoRepeat && resizeHandle.keyResizes(event)) {
-                            event.accepted = true
-                            root.finishColumnResize()
-                        }
-                    }
-                    onActiveFocusChanged: {
-                        if (!resizeHandle.activeFocus && !resizeMouseArea.pressed) {
-                            root.finishColumnResize()
-                        }
-                    }
                 }
             }
         }
@@ -633,6 +623,12 @@ Rectangle {
                 }
 
                 Component.onCompleted: root.controller.registerView(playlistView)
+                // The keyboard comes in: a row shows where it is.
+                onActiveFocusChanged: {
+                    if (playlistView.activeFocus) {
+                        root.controller.ensureCurrentRow()
+                    }
+                }
 
                 // The row being dragged, which Escape stops.
                 property var draggingRow: null
@@ -695,7 +691,8 @@ Rectangle {
                     readonly property string titleValue: rowValues.title || ""
                     readonly property string artistValue: rowValues.artist || ""
                     readonly property string albumValue: rowValues.album || ""
-                    readonly property string lengthTextValue: rowValues.lengthText || "--:--"
+                    readonly property string lengthTextValue: rowValues.lengthText
+                        || I18n.i18nc("@info:status no time", "–:––")
                     readonly property string pathValue: rowValues.path || ""
                     readonly property bool isCurrentQueueRow: index === root.uiBridge.playingQueueIndex
                     // Playing or paused: amber marks only what is playing now.
@@ -709,6 +706,10 @@ Rectangle {
                             && pathValue === fading.path
                             ? queueNowFade.level : 0
                     }
+                    // The share of its amber the row that is now has: less
+                    // than 1 only while it takes it over from the row that
+                    // was now.
+                    readonly property real amberIn: isNow ? queueNowFade.levelIn : 0
                     readonly property string unreadableReason: root.errorController
                         && pathValue.length > 0
                         ? (root.errorController.unreadablePaths[pathValue] || "")
@@ -717,8 +718,11 @@ Rectangle {
                     readonly property bool draggableQueueItem: true
                     readonly property int queueRowIndex: index
                     readonly property bool rowSelected: root.controller.isIndexSelected(index)
-                    // The row the keyboard is on, in a queue with focus.
+                    // The row the keyboard is on, in a queue with focus,
+                    // while the keyboard is in use: a click selects with the
+                    // tint alone.
                     readonly property bool rowCurrent: playlistView.activeFocus
+                        && root.keyboardInUse
                         && index === root.controller.currentRowIndex
                     readonly property string playbackStateText: !isCurrentQueueRow
                         ? ""
@@ -727,12 +731,19 @@ Rectangle {
                             : (root.uiBridge.playbackState === "Stopped"
                                 ? I18n.i18nc("@info accessible state of the current queue row", "stopped")
                                 : I18n.i18nc("@info accessible state of the current queue row", "playing")))
-                    readonly property string stateGlyph: isCurrentQueueRow
+                    // Playing or paused, what the playback does; otherwise
+                    // the warning of an unreadable file before the stop
+                    // mark, as a file that fails to play stays the
+                    // current row, stopped, and the warning says why
+                    // (#373 H35 AB7: it showed the stop mark, with the
+                    // error as its tooltip, until another row played).
+                    readonly property bool showsWarning: !isNow && unreadable
+                    readonly property string stateGlyph: isNow
                         ? (root.uiBridge.playbackState === "Paused"
-                            ? "media-playback-pause"
-                            : (root.uiBridge.playbackState === "Stopped"
-                                ? "media-playback-stop" : "media-playback-start"))
-                        : (unreadable ? "dialog-warning" : "")
+                            ? "media-playback-pause" : "media-playback-start")
+                        : (showsWarning
+                            ? root.warningGlyph
+                            : (isCurrentQueueRow ? "media-playback-stop" : ""))
 
                     width: ListView.view.width
                     height: playlistView.rowHeight
@@ -757,9 +768,15 @@ Rectangle {
                         uiPalette: root.uiPalette
                         opaque: true
                         hovered: playlistRowMouseArea.containsMouse
+                        hoverColor: root.uiPalette.rowHover
                         selected: playlistRow.rowSelected
+                        // A selected row answers the pointer too.
+                        selectedHover: true
                         active: playlistView.activeFocus
                         focused: playlistRow.rowCurrent
+                        // The ring stops at the scrollbar's lane while it
+                        // shows, clear of its thumb, as the library's.
+                        focusRingLane: playlistVerticalScrollBar.visible ? playlistVerticalScrollBar.lane : 0
                     }
 
                     // The cells are where the header's columns are, which
@@ -782,11 +799,22 @@ Rectangle {
                             readonly property string glyph: playlistRow.stateGlyph
                             visible: glyph.length > 0
                             anchors.centerIn: parent
-                            width: 12
-                            height: 12
+                            // The warning at the status bar's size, the
+                            // transport's marks smaller.
+                            width: playlistRow.showsWarning ? root.warningGlyphSize : root.uiPalette.scaledSize(12)
+                            height: width
+                            // At its size, which grows with the font
+                            // (#373 H9: Kirigami drew the 29 px glyph of a
+                            // 24 pt font at 22 px).
+                            roundToIconSize: false
                             source: glyph
                             isMask: true
-                            color: playlistRow.isNow ? root.uiPalette.now : root.uiPalette.textSecondary
+                            color: playlistRow.isNow
+                                ? root.uiPalette.now
+                                : (playlistRow.showsWarning ? root.uiPalette.negative : root.uiPalette.textSecondary)
+                            // The amber glyph fades in as the old row's
+                            // fades out.
+                            opacity: playlistRow.isNow ? playlistRow.amberIn : 1
 
                             ToolTip.visible: stateHover.hovered && playlistRow.unreadable
                             ToolTip.delay: Kirigami.Units.toolTipDelay
@@ -803,8 +831,9 @@ Rectangle {
                             objectName: "queueRowFadingState"
                             visible: playlistRow.amberLeft > 0
                             anchors.centerIn: parent
-                            width: 12
-                            height: 12
+                            width: root.uiPalette.scaledSize(12)
+                            height: root.uiPalette.scaledSize(12)
+                            roundToIconSize: false
                             source: visible ? queueNowFade.target.glyph : ""
                             isMask: true
                             color: root.uiPalette.now
@@ -823,7 +852,8 @@ Rectangle {
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignRight
                         text: root.playlistOrderText(index)
-                        color: root.uiPalette.textTertiaryOn(playlistRow.rowSelected)
+                        color: root.uiPalette.textTertiaryOn(playlistRow.rowSelected,
+                            playlistRowMouseArea.containsMouse)
                     }
 
                     Text {
@@ -834,21 +864,28 @@ Rectangle {
                         width: titleHeader.width
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
-                        font.weight: playlistRow.isNow ? Font.DemiBold : Font.Normal
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignLeft
                         text: playlistRow.titleValue
                         readonly property color plainColor: playlistRow.unreadable
                             ? root.uiPalette.textSecondary : root.uiPalette.text
-                        color: playlistRow.isNow
+                        // The title's share of amber, taken in by the row
+                        // that becomes now as the row that was now gives it
+                        // up. It sets the weight and the colour together, so
+                        // the two change in the same frame: semibold while
+                        // the title is mostly amber, which the two rows swap
+                        // at the fade's midpoint.
+                        readonly property real amber: playlistRow.isNow
+                            ? playlistRow.amberIn : playlistRow.amberLeft
+                        font.weight: amber >= 0.5 ? Font.DemiBold : Font.Normal
+                        color: amber >= 1
                             ? root.uiPalette.now
-                            : (playlistRow.amberLeft > 0
-                                ? ColorUtils.mixColor(plainColor, root.uiPalette.now, playlistRow.amberLeft)
-                                : plainColor)
+                            : (amber > 0 ? ColorUtils.mixColor(plainColor, root.uiPalette.now, amber) : plainColor)
                     }
 
                     Text {
                         objectName: "queueCell_artist"
+                        visible: artistHeader.visible
                         x: queueHeaderRow.x + artistHeader.x
                         y: playlistRow.cellY
                         width: artistHeader.width
@@ -1135,17 +1172,42 @@ Rectangle {
                 }
             }
 
-            // Library folders but nothing queued: one quiet line.
-            Text {
-                objectName: "queueEmptyLabel"
+            // Library folders but nothing queued: what fills the queue, as
+            // the first-run message says its first step, with no glyph and
+            // no button.
+            // It keeps 24 px clear of the pane's sides, and its lines wrap
+            // to that width.
+            ColumnLayout {
+                id: emptyQueueMessage
+                objectName: "queueEmptyMessage"
                 visible: root.uiBridge.queueLength === 0 && !root.firstRun
                 anchors.centerIn: parent
-                width: Math.min(implicitWidth, parent.width - 2 * Kirigami.Units.gridUnit)
-                horizontalAlignment: Text.AlignHCenter
-                elide: Text.ElideRight
-                text: I18n.i18nc("@info:placeholder", "The queue is empty")
-                font: root.uiPalette.baseFont
-                color: root.uiPalette.textSecondary
+                width: Math.max(0, Math.min(parent.width - 6 * Kirigami.Units.largeSpacing,
+                                            Math.max(implicitWidth, Kirigami.Units.gridUnit * 20)))
+                spacing: Kirigami.Units.smallSpacing
+
+                Text {
+                    objectName: "queueEmptyLabel"
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    text: I18n.i18nc("@info:placeholder", "The queue is empty")
+                    font.family: root.uiPalette.baseFont.family
+                    font.pointSize: root.uiPalette.basePointSize * 15 / 13
+                    font.weight: Font.DemiBold
+                    color: root.uiPalette.text
+                }
+
+                Text {
+                    objectName: "queueEmptyExplanation"
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    text: I18n.i18nc("@info:placeholder",
+                        "Double-click music in the library to play it, or drag it here.")
+                    font: root.uiPalette.baseFont
+                    color: root.uiPalette.textSecondary
+                }
             }
 
             Connections {
@@ -1207,7 +1269,9 @@ Rectangle {
                     const contentLineY = playlistView.originY + insertIndex * rowHeight
                     const lineY = playlistDropArea.mapFromItem(content, 0, contentLineY).y
                     const top = playlistDropArea.mapFromItem(playlistView, 0, 0).y
-                    queueDropIndicatorY = Math.max(top, Math.min(top + playlistView.height - 2, lineY))
+                    // One pixel up, so the 2 px line straddles the
+                    // boundary; inside the view at its ends.
+                    queueDropIndicatorY = Math.max(top, Math.min(top + playlistView.height - 2, lineY - 1))
                 }
 
                 function finishDrop() {
@@ -1261,18 +1325,146 @@ Rectangle {
                 }
             }
 
-            // Where a drop lands: a 2 px line in the focus colour between
-            // the rows, as wide as their tint.
+            // Where a drop lands: a 2 px line in the focus colour, centred
+            // on the boundary between the rows, which runs to the
+            // scrollbar's lane while it shows, as the focus ring does
+            // (#373 H35 AC4).
             Rectangle {
                 objectName: "queueDropIndicator"
                 x: playlistView.x
-                width: Math.max(0, playlistView.width - Kirigami.Units.largeSpacing)
+                width: Math.max(0, playlistView.width
+                    - (playlistVerticalScrollBar.visible ? playlistVerticalScrollBar.lane : 0))
                 height: 2
                 y: playlistDropArea.queueDropIndicatorY
                 color: root.uiPalette.focusRing
                 visible: playlistDropArea.containsDrag
                     && playlistDropArea.queueDropAccepted
                     && playlistDropArea.queueDropInsertIndex >= 0
+            }
+        }
+    }
+
+    // The resize handles over the header. They come after the list in the
+    // item tree, which orders the Tab chain, so Tab goes from the library
+    // to the queue's rows, and on to the handles only after them.
+    Item {
+        objectName: "queueColumnHandles"
+        // The header's place: the column layout fills the pane.
+        x: queueHeader.x
+        y: queueHeader.y
+        width: queueHeader.width
+        height: queueHeader.height
+
+        // A handle on the left of each resizable column, in the gap
+        // before it: the title fills the width the others leave, so
+        // dragging it left widens the column after it. Double-click,
+        // or Home, restores the column's default width; Left and Right
+        // move it from the keyboard. It shows only under the pointer
+        // and with keyboard focus.
+        Repeater {
+            model: [
+                { "column": "artist", "label": I18n.i18nc("@title:column", "Artist"), "header": artistHeader },
+                { "column": "album", "label": I18n.i18nc("@title:column", "Album"), "header": albumHeader },
+                { "column": "length", "label": I18n.i18nc("@title:column", "Length"), "header": lengthHeader }
+            ]
+
+            delegate: Item {
+                id: resizeHandle
+                objectName: "queueColumnHandle_" + modelData.column
+                required property var modelData
+                readonly property string column: modelData.column
+                readonly property bool highlighted: resizeMouseArea.containsMouse
+                    || resizeMouseArea.pressed || resizeHandle.activeFocus
+                // Where the pointer was when the drag started, in the
+                // pane, which stays put as the columns move.
+                property real pressX: 0
+
+                visible: modelData.header.visible
+                x: queueHeaderRow.x + modelData.header.x - root.columnGap / 2 - width / 2
+                width: Kirigami.Units.largeSpacing
+                height: parent.height
+                // An empty queue's columns have no labels to resize.
+                activeFocusOnTab: visible && root.uiBridge.queueLength > 0
+
+                Accessible.role: Accessible.Separator
+                Accessible.name: I18n.i18nc("@action %1 is a column title", "Resize the %1 column", modelData.label)
+                Accessible.description: I18n.i18nc("@info", "Left or Right to resize, Home for the default width")
+                Accessible.focusable: true
+
+                // A 1 px seam under the pointer; with keyboard focus, a
+                // 2 px line in the focus colour the header's full height,
+                // which reads as focus where a short tick did not (#373 H6).
+                Rectangle {
+                    objectName: "queueColumnHandleLine"
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.topMargin: resizeHandle.activeFocus ? 0 : Kirigami.Units.smallSpacing
+                    anchors.bottomMargin: resizeHandle.activeFocus ? 0 : Kirigami.Units.smallSpacing
+                    width: resizeHandle.activeFocus ? 2 : 1
+                    visible: resizeHandle.highlighted
+                    color: resizeHandle.activeFocus || resizeMouseArea.pressed
+                        ? root.uiPalette.focusRing
+                        : root.uiPalette.seam
+                }
+
+                MouseArea {
+                    id: resizeMouseArea
+                    anchors.fill: parent
+                    hoverEnabled: root.uiBridge.queueLength > 0
+                    preventStealing: true
+                    cursorShape: Qt.SplitHCursor
+
+                    onPressed: function(mouse) {
+                        resizeHandle.pressX = mapToItem(root, mouse.x, 0).x
+                        root.beginColumnResize(resizeHandle.column)
+                    }
+                    onPositionChanged: function(mouse) {
+                        if (pressed && root.resizingColumn === resizeHandle.column) {
+                            const x = mapToItem(root, mouse.x, 0).x
+                            root.resizeColumnBy(resizeHandle.column, resizeHandle.pressX - x)
+                        }
+                    }
+                    onReleased: root.finishColumnResize()
+                    onCanceled: root.cancelColumnResize()
+                    onDoubleClicked: root.restoreDefaultColumnWidth(resizeHandle.column)
+                }
+
+                function keyResizes(event) {
+                    return KeyUtils.isUnmodified(event)
+                        && (event.key === Qt.Key_Left || event.key === Qt.Key_Right
+                            || event.key === Qt.Key_Home)
+                }
+                // The keys move the focused handle rather than seeking.
+                Keys.onShortcutOverride: function(event) {
+                    event.accepted = resizeHandle.keyResizes(event)
+                }
+                Keys.onPressed: function(event) {
+                    if (!resizeHandle.keyResizes(event)) {
+                        return
+                    }
+                    event.accepted = true
+                    if (event.key === Qt.Key_Home) {
+                        root.restoreDefaultColumnWidth(resizeHandle.column)
+                        return
+                    }
+                    root.beginColumnResize(resizeHandle.column)
+                    root.resizeColumnBy(resizeHandle.column, root.resizeDelta
+                        + (event.key === Qt.Key_Left ? root.keyboardResizeStep : -root.keyboardResizeStep))
+                }
+                // A held key moves the handle until it is let go, when
+                // the width is kept.
+                Keys.onReleased: function(event) {
+                    if (!event.isAutoRepeat && resizeHandle.keyResizes(event)) {
+                        event.accepted = true
+                        root.finishColumnResize()
+                    }
+                }
+                onActiveFocusChanged: {
+                    if (!resizeHandle.activeFocus && !resizeMouseArea.pressed) {
+                        root.finishColumnResize()
+                    }
+                }
             }
         }
     }

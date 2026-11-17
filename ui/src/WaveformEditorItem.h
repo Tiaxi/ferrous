@@ -60,6 +60,9 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     Q_PROPERTY(bool zoomEnabled READ zoomEnabled WRITE setZoomEnabled NOTIFY zoomEnabledChanged)
     Q_PROPERTY(bool gridEnabled READ gridEnabled WRITE setGridEnabled NOTIFY gridEnabledChanged)
     Q_PROPERTY(bool crosshairEnabled READ crosshairEnabled WRITE setCrosshairEnabled NOTIFY crosshairEnabledChanged)
+    // How much the crosshair, its lines and its readout, shows, from 0 to 1:
+    // a viewer's controls fade it out and in with them.
+    Q_PROPERTY(double crosshairOpacity READ crosshairOpacity WRITE setCrosshairOpacity NOTIFY crosshairOpacityChanged)
     Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
     // What the controls over the top right corner take of it; see ViewCorner.
     Q_PROPERTY(QSizeF reservedCorner READ reservedCorner WRITE setReservedCorner NOTIFY reservedCornerChanged)
@@ -90,12 +93,39 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     Q_PROPERTY(QColor laneSeamColor READ laneSeamColor WRITE setLaneSeamColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor playheadColor READ playheadColor WRITE setPlayheadColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor playheadCasingColor READ playheadCasingColor WRITE setPlayheadCasingColor NOTIFY colorsChanged)
+    // The crosshair's readout plates, in the plot's colours (UiPalette's
+    // PlotColors), as the spectrogram's, and its dashed lines in the text's
+    // colour (#373 H18 C5: translucent grey plates and a dotted line of
+    // their own).
+    Q_PROPERTY(QColor readoutPlateColor READ readoutPlateColor WRITE setReadoutPlateColor NOTIFY readoutColorsChanged)
+    Q_PROPERTY(QColor readoutPlateEdgeColor READ readoutPlateEdgeColor WRITE setReadoutPlateEdgeColor NOTIFY readoutColorsChanged)
+    Q_PROPERTY(QColor readoutTextColor READ readoutTextColor WRITE setReadoutTextColor NOTIFY readoutColorsChanged)
+    // Whether the playhead is drawn: the plot going out under another as
+    // the visualization mode switches draws none, so only one shows.
+    Q_PROPERTY(bool playheadVisible READ playheadVisible WRITE setPlayheadVisible NOTIFY playheadVisibleChanged)
+    // Whether the item has its source's picture: a frame of it has drawn
+    // the waveform, from the overview or the detail, or has drawn without
+    // it while no detail is on its way, as for a file that cannot be read.
+    // False from a change of source, and from when the item stops being
+    // shown, until then: what shows the item over
+    // something else, such as the visualization's mode switch over the
+    // spectrogram, waits for it rather than show the bare floor (#373 H11:
+    // the per-channel view, which the overview has no lanes for, was empty
+    // for 80 to 170 ms, until its detail was decoded). A frame of the
+    // overview where it is not to the detail's scale, as in the mixed view
+    // of a source of more than one channel, is not the picture while the
+    // detail is on its way (see overviewProvisionalLocked), nor is detail
+    // that covers only part of the view. Hidden, the item keeps the detail
+    // it has (#373 H14): shown again, it has the picture at once when that
+    // detail covers the view at its resolution, as its next frame draws.
+    Q_PROPERTY(bool pictureReady READ pictureReady NOTIFY pictureReadyChanged)
 
 public:
     explicit WaveformEditorItem(QQuickItem *parent = nullptr);
     ~WaveformEditorItem() override;
 
     QString sourcePath() const;
+    bool pictureReady() const;
     void setSourcePath(const QString &value);
     QByteArray overviewData() const;
     void setOverviewData(const QByteArray &value);
@@ -118,6 +148,8 @@ public:
     void setGridEnabled(bool value);
     bool crosshairEnabled() const;
     void setCrosshairEnabled(bool value);
+    double crosshairOpacity() const;
+    void setCrosshairOpacity(double value);
     bool showFpsOverlay() const;
     void setShowFpsOverlay(bool value);
     QSizeF reservedCorner() const;
@@ -160,6 +192,14 @@ public:
     void setPlayheadColor(const QColor &value);
     QColor playheadCasingColor() const;
     void setPlayheadCasingColor(const QColor &value);
+    QColor readoutPlateColor() const;
+    void setReadoutPlateColor(const QColor &value);
+    QColor readoutPlateEdgeColor() const;
+    void setReadoutPlateEdgeColor(const QColor &value);
+    QColor readoutTextColor() const;
+    void setReadoutTextColor(const QColor &value);
+    bool playheadVisible() const;
+    void setPlayheadVisible(bool value);
 
     Q_INVOKABLE void resetZoom();
     Q_INVOKABLE double maximumZoomLevel() const;
@@ -180,6 +220,7 @@ signals:
     void zoomEnabledChanged();
     void gridEnabledChanged();
     void crosshairEnabledChanged();
+    void crosshairOpacityChanged();
     void showFpsOverlayChanged();
     void reservedCornerChanged();
     void laneHeadBoundsChanged();
@@ -191,6 +232,9 @@ signals:
     void sampleRateHzChanged();
     void samplePointsVisibleChanged();
     void colorsChanged();
+    void readoutColorsChanged();
+    void playheadVisibleChanged();
+    void pictureReadyChanged();
     void markerSecondsChanged();
     void markerXChanged();
     void seekRequested(double seconds);
@@ -344,6 +388,10 @@ private:
         QColor playheadCasing{8, 18, 14, 235};
     };
     void setColor(QColor Colors::*member, const QColor &value);
+    void setReadoutColor(QColor CrosshairReadout::Colors::*member, const QColor &value);
+    // The readout's plates: the spectrogram's plot colours until set.
+    CrosshairReadout::Colors m_readoutColors{
+        QColor(20, 20, 20, 224), QColor(0xec, 0xec, 0xec), QColor(255, 255, 255, 36)};
 
     // What the workers that make playback tiles share with the item: they
     // hand a tile over only while the item lives, and only for the tiles
@@ -370,6 +418,21 @@ private:
     static bool parseWindow(const QByteArray &bytes, DetailWindow *window);
     void scheduleDetailRequest(bool immediate = false);
     void requestDetailWindow();
+    // Asks for the detail the view misses; false when none is on its way
+    // after it, as without a source or a duration.
+    bool startDetailRequest();
+    // Whether the overview has a waveform for `channels` lanes.
+    bool overviewDrawableLocked(int channels) const;
+    // Whether the overview, drawn, is not to the scale of the picture the
+    // detail gives: in the mixed view of a source of more than one
+    // channel, the overview is the peak of every channel and the detail
+    // their average, the downmix, far lower for channels that differ, as a
+    // 5.1 track's (#373 H12 Z6: a switch to the waveform showed a near
+    // solid envelope for some 300 ms, then the downmix).
+    bool overviewProvisionalLocked() const;
+    // Follows pictureReady, on the GUI thread: after a frame is painted,
+    // and when a detail request ends without one.
+    void updatePictureReady();
     void clearDetailLocked();
     void clearPendingRequestLocked();
     // The playback position and the view at a time on the clock. A frame
@@ -480,8 +543,18 @@ private:
     // The item or its window came on screen or left it.
     void shownChanged();
     // Tells the detail service which file the view reads: its source while
-    // it is shown, none otherwise.
+    // it is shown or fetches its standby detail, none otherwise.
     void updateReaderLease();
+    // Hidden in a window on screen, the item fetches the detail of its
+    // picture once, on the worker path, when its overview cannot be that
+    // picture: so that the mode switch to it has its picture at the click
+    // (#373 H18 C1: the first switch of a track to the per-channel view held
+    // the spectrogram some 200 ms for that decode, later ones a frame). It
+    // does so once the track's overview has begun to come, and only for a
+    // view of the whole track, which playback does not move: it never
+    // follows playback while hidden, and draws nothing until shown.
+    void updateStandbyFetch();
+    bool standbyFetchWantedLocked() const;
     // The window's scheduler, or the item's own outside a window.
     PlaybackFrameScheduler *frameScheduler();
     bool cacheCoversRangeLocked(double start, double end) const;
@@ -503,7 +576,7 @@ private:
     // m_cacheDetailArrivals.
     bool cacheRedrawDueLocked(double visibleStart, double visibleEnd) const;
     void queueGuiContinuationFromPaint(
-        bool notifySamplePointsChanged, bool requestRepaint);
+        bool notifySamplePointsChanged, bool requestRepaint, bool pictureChanged = false);
     void rebuildCacheLocked(
         int width, int height, double visibleStart, double visibleEnd);
     void rebuildCacheLocked(int width, int height);
@@ -545,7 +618,12 @@ private:
         QPainter &painter, const QLineF &line,
         const QColor &foreground, const QColor &contrast);
     static QPainterPath buildSamplePath(const QPolygonF &samples);
-    static QString formatCrosshairTime(double seconds);
+    // The crosshair's time, "1:46.0", with `decimals` decimals, 1 to 3.
+    static QString formatCrosshairTime(double seconds, int decimals);
+    // Its decimals: one at the default zoom, as the spectrogram's; zoomed
+    // in, as many as tell a column of `secondsPerColumn` from the next,
+    // up to milliseconds.
+    static int crosshairTimeDecimals(double secondsPerColumn, double zoomLevel);
     // The lowest lane's label and buttons, in a plot `height` tall of
     // `lanes` lanes.
     QRect lowestLaneHeadLocked(int height, int lanes) const;
@@ -553,7 +631,8 @@ private:
         int width, int height, int x, int y,
         int valueTextWidth, int timeTextWidth, int textHeight,
         const QSizeF &reservedCorner = QSizeF(), const QRect &laneHead = QRect(),
-        int widestValueTextWidth = 0, int widestTimeTextWidth = 0);
+        int widestValueTextWidth = 0, int widestTimeTextWidth = 0,
+        const CrosshairReadout::Colors &colors = CrosshairReadout::Colors());
     // These draw in the painter's pixels, pixelScale to a logical pixel
     // and deviceScale device pixels to one of the painter's.
     void drawOverviewLocked(QPainter &painter, int width, int height,
@@ -634,6 +713,7 @@ private:
     bool m_zoomEnabled{true};
     bool m_gridEnabled{false};
     bool m_crosshairEnabled{false};
+    double m_crosshairOpacity{1.0};
     bool m_showFpsOverlay{false};
     QSizeF m_reservedCorner;
     QRectF m_laneHeadBounds;
@@ -644,6 +724,7 @@ private:
     qulonglong m_soloedChannelsMask{0};
     Colors m_colors;
     double m_markerSeconds{-1.0};
+    bool m_playheadVisible{true};
     double m_markerXLaidOut{std::numeric_limits<double>::quiet_NaN()};
     double m_markerX{std::numeric_limits<double>::quiet_NaN()};
     void publishMarkerX(double x);
@@ -677,6 +758,24 @@ private:
     // pixels.
     QImage m_cache;
     bool m_cacheDirty{true};
+    // Whether the cache holds a waveform, rather than the bare floor, and
+    // whether it stands in for the view's detail: the overview at a scale
+    // that is not the picture's (overviewProvisionalLocked), or detail of
+    // another zoom or of part of the view.
+    bool m_cacheShowsWaveform{false};
+    bool m_cacheWaveformProvisional{false};
+    // Whether a frame has been painted for the source, and whether one of
+    // them drew its waveform (see pictureReady).
+    bool m_framePainted{false};
+    bool m_waveformPainted{false};
+    // pictureReady; the GUI thread's.
+    bool m_pictureReady{false};
+    // Whether the hidden item fetches its standby detail (see
+    // updateStandbyFetch); the GUI thread's. A source whose standby detail
+    // could not be read is not fetched again while hidden: shown, the item
+    // asks for its detail as ever.
+    bool m_standbyFetch{false};
+    bool m_standbyFetchFailed{false};
     int m_cachedViewportWidth{0};
     int m_cachedViewportHeight{0};
     double m_cacheStartSeconds{0.0};
@@ -757,6 +856,7 @@ private:
     std::atomic_bool m_guiContinuationQueued{false};
     std::atomic_bool m_guiRepaintPending{false};
     std::atomic_bool m_samplePointsNotificationPending{false};
+    std::atomic_bool m_pictureCheckPending{false};
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     ProfileState m_profile;
 #endif

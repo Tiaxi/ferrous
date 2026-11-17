@@ -6,9 +6,11 @@
 #include "WindowPresence.h"
 
 #include <QFutureWatcher>
+#include <QImage>
 #include <QAccessible>
 #include <QQuickWindow>
 #include <QSGSimpleRectNode>
+#include <QSGSimpleTextureNode>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtEndian>
 #include <algorithm>
@@ -25,16 +27,34 @@ constexpr double kRequestLeadSeconds = 0.5;
 constexpr double kLookaheadSeconds = 0.5;
 // How often readers of the levels hear of new ones.
 constexpr int kReadoutIntervalMs = 250;
-// The scale's gaps, in dB.
-constexpr double kGapsDb[] = {-6.0, -12.0, -24.0};
-// Per lane: the column's floor, the trough, the lamp, the gap under it, the
-// fill, the three gaps of the scale and the peak tick.
-constexpr int kNodesPerLane = 9;
+// The meter's marks, in dB, and those of a short lane.
+constexpr double kMarksDb[] = {-6.0, -12.0, -24.0};
+constexpr double kShortLaneMarksDb[] = {-6.0, -24.0};
+// Per lane: the column's floor, the track, the lamp, the gap under it, the
+// fill, the three marks' ticks, the gap under the peak tick and the peak
+// tick.
+constexpr int kNodesPerLane = 10;
+// Which of a lane's nodes is the fill, a texture of its rungs; the others
+// are rectangles of one colour.
+constexpr int kRampNode = 4;
 
 using Self = LevelMeterItem;
 
 struct MeterNode : QSGNode {
     int lanes{-1};
+};
+
+// The fill: a column of texels, one per device pixel of the lane's scale,
+// of which the fill shows the rows from the bottom up to its level. Its
+// rungs are in the fill's colour; the gaps between them are clear, so the
+// trough under the fill shows in them.
+struct RampNode : QSGSimpleTextureNode {
+    std::unique_ptr<QSGTexture> ramp;
+    // What the ramp is drawn for: the scale's device pixels, the device
+    // pixel ratio and the fill's colour.
+    double scalePixels{-1.0};
+    double devicePixelRatio{0.0};
+    QColor color;
 };
 
 int fillPixels(double level, double scalePixels) {
@@ -85,6 +105,62 @@ void setRect(QSGNode *node, const QRectF &rect, const QColor &color) {
     if (rectNode->rect() != rect) rectNode->setRect(rect);
     if (rectNode->color() != color) rectNode->setColor(color);
 }
+
+// The ramp of a scale `scalePixels` device pixels tall at `dpr` device
+// pixels to the logical one, from its top row down: rungs of `color`;
+// drawn again only when any of them changes.
+void updateRamp(RampNode *node, QQuickWindow *window, double scalePixels, double dpr, const QColor &color) {
+    if (node->ramp && node->scalePixels == scalePixels && node->devicePixelRatio == dpr && node->color == color) {
+        return;
+    }
+    const QRgb rung = qPremultiply(color.rgba());
+    const int rows = std::max(1, static_cast<int>(std::ceil(scalePixels)));
+    QImage image(1, rows, QImage::Format_ARGB32_Premultiplied);
+    for (int row = 0; row < rows; ++row) {
+        // The row's middle, in device pixels up from the scale's foot.
+        const double fromFoot = rows - row - 0.5;
+        image.setPixel(0, row, Self::isRung(fromFoot / dpr, scalePixels / dpr) ? rung : qRgba(0, 0, 0, 0));
+    }
+    // The old texture goes once the node no longer draws it.
+    std::unique_ptr<QSGTexture> texture(window->createTextureFromImage(image));
+    node->setTexture(texture.get());
+    node->ramp = std::move(texture);
+    node->scalePixels = scalePixels;
+    node->devicePixelRatio = dpr;
+    node->color = color;
+}
+}
+
+std::vector<double> LevelMeterItem::marksDb(double laneHeight) {
+    return laneHeight < kFullScaleLaneHeight
+        ? std::vector<double>(std::begin(kShortLaneMarksDb), std::end(kShortLaneMarksDb))
+        : std::vector<double>(std::begin(kMarksDb), std::end(kMarksDb));
+}
+
+std::vector<int> LevelMeterItem::markGaps(double scaleHeight) {
+    std::vector<int> gaps;
+    const double laneHeight = scaleHeight + 2 * kInset + kLampHeight + 1.0;
+    // From the lowest mark up.
+    std::vector<double> marks = marksDb(laneHeight);
+    std::sort(marks.begin(), marks.end());
+    for (const double db : marks) {
+        gaps.push_back(static_cast<int>(std::lround(meterPosition(db, scaleHeight) - kMarkGap / 2)));
+    }
+    return gaps;
+}
+
+bool LevelMeterItem::isRung(double fromFoot, double scaleHeight) {
+    if (fromFoot < 0.0) return false;
+    const double row = std::floor(fromFoot);
+    // The rungs start again over each gap, so each mark has whole rungs
+    // under and over it.
+    double from = 0.0;
+    for (const int gap : markGaps(scaleHeight)) {
+        if (row < gap) break;
+        if (row < gap + kMarkGap) return false;
+        from = gap + kMarkGap;
+    }
+    return std::fmod(row - from, kRungPitch) < kRungHeight;
 }
 
 double LevelMeterItem::meterPosition(double db, double height) {
@@ -259,6 +335,14 @@ void LevelMeterItem::setActive(bool value) {
     // An inactive meter reads nothing: its readers hear of it.
     noteReadout();
 }
+
+void LevelMeterItem::setFramed(bool value) {
+    if (m_framed == value) return;
+    m_framed = value;
+    emit framedChanged();
+    update();
+}
+
 
 void LevelMeterItem::setReadoutWanted(bool value) {
     if (m_readoutWanted == value) return;
@@ -615,49 +699,95 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         }
         // The seam: the column's left edge and the rows between lanes.
         node->appendChildNode(new QSGSimpleRectNode);
-        for (int i = 0; i < m_laneCount * kNodesPerLane; ++i) node->appendChildNode(new QSGSimpleRectNode);
+        for (int i = 0; i < m_laneCount * kNodesPerLane; ++i) {
+            if (i % kNodesPerLane == kRampNode) {
+                auto *ramp = new RampNode;
+                ramp->setFiltering(QSGTexture::Nearest);
+                // In the tree, a texture node has a texture to draw: the
+                // software renderer looks at it as soon as it is added.
+                updateRamp(ramp, window(), scalePixels(i / kNodesPerLane), window()->effectiveDevicePixelRatio(),
+                           m_fillColor);
+                node->appendChildNode(ramp);
+            } else {
+                node->appendChildNode(new QSGSimpleRectNode);
+            }
+        }
+        // The line across the column's top, over the lanes.
+        node->appendChildNode(new QSGSimpleRectNode);
         node->lanes = m_laneCount;
     }
     setRect(node->firstChild(), boundingRect(), m_seamColor);
     const double dpr = window()->effectiveDevicePixelRatio();
-    const auto snap = [dpr](double value) { return std::round(value * dpr) / dpr; };
     m_painted = painted(m_shown);
-    const double left = 1.0;
-    const double meterWidth = std::max(0.0, width() - left);
     QSGNode *child = node->firstChild()->nextSibling();
     const auto next = [&child](const QRectF &rect, const QColor &color) {
         setRect(child, rect, color);
         child = child->nextSibling();
     };
+    // The fill, showing `rows` device pixels of its ramp.
+    const auto nextRamp = [&child, dpr, this](const QRectF &rect, double scalePixels, int rows) {
+        auto *ramp = static_cast<RampNode *>(child);
+        updateRamp(ramp, window(), scalePixels, dpr, m_fillColor);
+        const int height = ramp->ramp->textureSize().height();
+        rows = std::clamp(rows, 0, height);
+        const QRectF source(0, height - rows, 1, rows);
+        if (ramp->sourceRect() != source) ramp->setSourceRect(source);
+        if (ramp->rect() != rect) ramp->setRect(rect);
+        child = child->nextSibling();
+    };
+    // Across the track, and along the bar on it.
+    const auto track = [](double y, double height) { return QRectF(kTrackLeft, y, kTrackWidth, height); };
+    const auto bar = [this](double y, double height) {
+        return m_framed ? QRectF(kFramedInset, y, kFramedBarWidth, height) : QRectF(kBarLeft, y, kBarWidth, height);
+    };
     for (int lane = 0; lane < m_laneCount; ++lane) {
         const auto [top, bottom] = laneRows(lane, m_laneCount, height());
-        next(QRectF(left, top, meterWidth, bottom - top), m_backgroundColor);
+        next(QRectF(kTrackLeft, top, std::max(0.0, width() - kTrackLeft), bottom - top), m_backgroundColor);
         const double meterTop = top + kInset;
         const double meterBottom = std::max(meterTop, bottom - kInset);
-        next(QRectF(left, meterTop, meterWidth, meterBottom - meterTop), m_troughColor);
+        next(track(meterTop, meterBottom - meterTop), m_troughColor);
         const Painted &shown = m_painted[static_cast<std::size_t>(lane)];
         const double scaleTop = meterTop + kLampHeight + 1.0;
         const double scaleHeight = std::max(0.0, meterBottom - scaleTop);
+        // The marks' ticks, across the track, each in the upper row of its
+        // gap in the ladder.
+        const auto nextMarks = [&]() {
+            const std::vector<int> gaps = scaleHeight > 0.0 ? markGaps(scaleHeight) : std::vector<int>{};
+            for (std::size_t i = 0; i < std::size(kMarksDb); ++i) {
+                const double y = i < gaps.size() ? std::max(scaleTop, meterBottom - gaps[i] - kMarkGap) : 0.0;
+                next(i < gaps.size() ? track(y, 1.0) : QRectF(), m_tickColor);
+            }
+        };
         if (!m_active || scaleHeight <= 0.0) {
-            for (int i = 2; i < kNodesPerLane; ++i) next(QRectF(), m_backgroundColor);
+            // At rest the marks alone, where they are while playing, with
+            // no lamp, fill or peak: a meter waiting rather than a blank
+            // trough (#373 H30: at the first run it read as a scrollbar's).
+            next(QRectF(), m_backgroundColor);
+            next(QRectF(), m_backgroundColor);
+            nextRamp(QRectF(), scaleHeight * dpr, 0);
+            nextMarks();
+            next(QRectF(), m_backgroundColor);
+            next(QRectF(), m_backgroundColor);
             continue;
         }
-        next(QRectF(left, meterTop, meterWidth, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
-        next(QRectF(left, meterTop + kLampHeight, meterWidth, 1.0), m_backgroundColor);
+        next(bar(meterTop, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
+        next(track(meterTop + kLampHeight, 1.0), m_gapColor);
         // The fill and the tick end on device pixels; frames are drawn only
-        // when these change.
+        // when these change. The fill is a ladder of rungs from the scale's
+        // foot (#373 H14 G3), of one colour.
         const double fill = shown.fill / dpr;
-        next(QRectF(left, meterBottom - fill, meterWidth, fill), m_fillColor);
-        const bool shortLane = bottom - top < kFullScaleLaneHeight;
-        for (const double gapDb : kGapsDb) {
-            const bool shown = !(shortLane && gapDb == -12.0);
-            const double y = snap(meterBottom - meterPosition(gapDb, scaleHeight));
-            next(shown ? QRectF(left, y, meterWidth, 1.0) : QRectF(), m_backgroundColor);
-        }
-        // The 2 px tick is centred on its level, inside the scale.
+        nextRamp(bar(meterBottom - fill, fill), scaleHeight * dpr, shown.fill);
+        nextMarks();
+        // The 2 px tick is centred on its level, inside the scale. On the
+        // fill, a 1 px gap under it keeps it a mark of its own, whatever
+        // the fill's colour.
         const double tickY = std::clamp(meterBottom - shown.peak / dpr - 1.0, scaleTop, meterBottom - 2.0);
-        next(shown.peak >= 0 ? QRectF(left, tickY, meterWidth, 2.0) : QRectF(), m_peakColor);
+        const bool onFill = shown.peak >= 0 && meterBottom - fill < tickY + 3.0 && tickY + 3.0 <= meterBottom;
+        next(onFill ? track(tickY + 2.0, 1.0) : QRectF(), m_gapColor);
+        next(shown.peak >= 0 ? track(tickY, 2.0) : QRectF(), m_peakColor);
     }
+    setRect(node->lastChild(), m_topSeamColor.alpha() > 0 ? QRectF(0.0, 0.0, width(), 1.0) : QRectF(),
+            m_topSeamColor);
     return node;
 }
 

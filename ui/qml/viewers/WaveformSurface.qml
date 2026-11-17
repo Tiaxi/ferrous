@@ -16,6 +16,15 @@ Item {
     property var clock: null
     property var seekCommitted: null
     property bool interactiveOverlaysVisible: true
+    // The overlays as they fade with the viewer's controls, from 1 to 0:
+    // the crosshair shows until they have faded out. Without a level of
+    // the viewer's, they show and hide at once.
+    property real interactiveOverlaysLevel: root.interactiveOverlaysVisible ? 1 : 0
+    // How much of the crosshair shows besides that: none while the pointer
+    // is on a plate of the plot (PlotLayer's crosshairLevel).
+    property real crosshairLevel: 1
+    // Whether the plot draws the playhead; see Main.qml's mode switch.
+    property bool playheadVisible: true
     property var pointerActivity: null
     property size reservedCorner: Qt.size(0, 0)
     // What the lowest lane's label and buttons take of it; see PlotLayer.
@@ -30,10 +39,18 @@ Item {
     readonly property var plotColors: root.uiPalette.waveformPlot
     // The lanes: one per channel in the per-channel view, one otherwise.
     readonly property int laneCount: waveform.viewMode === 1 ? Math.max(1, waveform.channelCount) : 1
+    // Before any audio, with neither a track nor its channels, the pane is
+    // at rest, as the spectrogram's (#373 H14 F3): per channel, the lanes of
+    // a stereo track, named, each with its centre line; the plot layer
+    // gives them no Mute and Solo then. A track change keeps the lanes
+    // while the new track's channels are not known yet.
+    readonly property bool atRest: (root.uiBridge.currentTrackPath || "").length === 0
+        && !(root.uiBridge.currentTrackChannels > 0)
     readonly property var laneLabels: {
         const labels = []
+        const named = waveform.viewMode === 1
         for (let i = 0; i < root.laneCount; ++i) {
-            labels.push(waveform.viewMode === 1 ? root.channelLabel(i) : "")
+            labels.push(named ? root.channelLabel(i) : "")
         }
         return labels
     }
@@ -44,9 +61,15 @@ Item {
     // Kept for the tests and the per-channel lanes: the channel row the
     // pointer is on, or -1.
     readonly property int hoveredChannel: waveform.viewMode === 1 ? root.hoveredLane : -1
+    // Where the pointer is on the plot, in the scene, while it is on it.
+    readonly property point pointerScenePosition: waveformHover.point.scenePosition
     // Whether the plot waits for the track's overview.
     readonly property bool awaitingData: !root.uiBridge.waveformComplete
         && root.uiBridge.waveformCoverageSeconds <= 0
+    // Whether the plot has drawn the track's waveform, or has none to wait
+    // for (WaveformEditorItem's pictureReady): false from when it is shown
+    // until its first frame that draws the track's detail of the view.
+    readonly property bool pictureReady: waveform.pictureReady
 
     Accessible.role: Accessible.Graphic
     Accessible.name: I18n.i18nc("@label", "Waveform")
@@ -68,7 +91,10 @@ Item {
         objectName: "waveformEditorItem"
         width: root.plotWidth
         height: root.height
-        sourcePath: root.visible ? root.uiBridge.currentTrackPath : ""
+        // Hidden too: the item decodes nothing while it is not shown, and
+        // keeps the detail it has, so that the mode switch back draws it at
+        // once (#373 H14). A new track while hidden clears it.
+        sourcePath: root.uiBridge.currentTrackPath
         overviewData: root.uiBridge.waveformPeaksPacked
         overviewCoverageSeconds: root.uiBridge.waveformCoverageSeconds
         overviewComplete: root.uiBridge.waveformComplete
@@ -80,30 +106,63 @@ Item {
         // labels collide with the data.
         gridEnabled: false
         crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
-            && root.interactiveOverlaysVisible
+            && (root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0)
+        crosshairOpacity: root.interactiveOverlaysLevel * root.crosshairLevel
         showFpsOverlay: root.uiBridge.showFps
         reservedCorner: root.reservedCorner
         laneHeadBounds: root.laneHeadBounds
         viewMode: root.uiBridge.spectrogramViewMode
-        channelCountHint: Math.max(1, root.uiBridge.currentTrackChannels)
+        channelCountHint: root.atRest ? 2 : Math.max(1, root.uiBridge.currentTrackChannels)
         markerSeconds: root.markerSeconds
         // Per channel: a 64-bit mask loses its low bits as a QML number.
         mutedChannels: root.uiBridge.mutedChannels || []
         soloedChannels: root.uiBridge.soloedChannels || []
-        // The waveform plot set: on the view colour, in the seek bar's
-        // waveform colour.
+        // The waveform plot set: on the view colour, in the pane's waveform
+        // colour, the seek bar's in a light theme and quieter in a dark one.
         backgroundColor: root.plotColors.plotBg
-        waveformColor: root.uiPalette.wave
-        mutedWaveformColor: ColorUtils.mixColor(root.uiPalette.wave, root.plotColors.plotBg, 0.65)
+        waveformColor: root.uiPalette.paneWave
+        mutedWaveformColor: ColorUtils.mixColor(root.uiPalette.paneWave, root.plotColors.plotBg, 0.65)
         centerLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.08)
         laneSeamColor: root.plotColors.plotLaneSeam
+        // The crosshair's readout on the plot's plates, as the
+        // spectrogram's, and its dashes in the plot's text (#373 H18 C5).
+        readoutPlateColor: root.plotColors.plotPlate
+        readoutPlateEdgeColor: root.plotColors.plotPlateEdge
+        readoutTextColor: root.plotColors.plotText
         // Dark: a light core in a black casing; light: a dark core in white.
         playheadColor: root.uiPalette.themeIsDark ? "#e8e8e8" : "#202326"
         playheadCasingColor: root.uiPalette.themeIsDark
             ? Qt.rgba(0, 0, 0, 0.6) : Qt.rgba(1, 1, 1, 0.85)
+        playheadVisible: root.playheadVisible
         onSeekRequested: function(seconds) {
             if (root.seekCommitted) {
                 root.seekCommitted(seconds)
+            }
+        }
+
+        // Before any audio, each lane's rest lines at half of full scale
+        // over and under its centre line, which the item draws, so the
+        // pane waits as an instrument, as the spectrogram's does with its
+        // rest lines (#373 H16 I8). Gone with the first track, whose lanes
+        // they are in.
+        Repeater {
+            model: root.atRest ? root.laneCount * 2 : 0
+
+            delegate: Rectangle {
+                required property int index
+                // The item's lane: the centre line between its top and
+                // foot, its full scale a pixel inside them.
+                readonly property int lane: Math.floor(index / 2)
+                readonly property real laneTop: lane * waveform.height / root.laneCount
+                readonly property real laneBottom: (lane + 1) * waveform.height / root.laneCount
+                readonly property real centre: Math.floor((laneTop + laneBottom) / 2)
+                readonly property real fullScale: (laneBottom - laneTop) / 2 - 1
+                objectName: "waveformRestLine"
+                x: 0
+                y: Math.round(centre + (index % 2 === 0 ? -1 : 1) * fullScale / 2)
+                width: waveform.width
+                height: 1
+                color: root.uiPalette.waveformRestLine
             }
         }
 
@@ -114,7 +173,9 @@ Item {
         HoverHandler {
             id: waveformHover
             objectName: "waveformSurfaceHoverHandler"
-            cursorShape: root.interactiveOverlaysVisible ? Qt.ArrowCursor : Qt.BlankCursor
+            // The pointer hides once the overlays have faded out.
+            cursorShape: root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0
+                ? Qt.ArrowCursor : Qt.BlankCursor
             // A touch ends without a hover leave for the item.
             onHoveredChanged: {
                 if (!hovered) {

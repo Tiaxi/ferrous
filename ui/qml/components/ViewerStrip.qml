@@ -8,18 +8,28 @@ import FerrousUi 1.0
 import "." as Components
 import "../logic/FormatUtils.js" as FormatUtils
 
-// The title strip of a viewer over the whole screen: a 32 px band over the
-// top edge of the view, with a 1 px edge under it, in the colours of the
+// The title strip of a viewer over the whole screen: a 38 px band over the
+// top edge of the view (taller with a larger font, by its line and 4 px
+// above and below it), with a 1 px edge under it, in the colours of the
 // plot it sits on (UiPalette's PlotColors), so it reads over the plot or
-// the art alike. On the left the playing track's title (semibold),
-// "Artist — Album" and "1:17 / 3:49"; on the right flat 24 px tool
-// buttons: a zoom readout and Reset while the view is zoomed, the new
-// issues while there are any, the viewer's own buttons (declared inside
-// the strip, from the left, each taking the strip's `plotColors`) and
-// Close. The whole strip shows and hides with the viewer's controls,
-// fading as they do; it is drawn over the view, which never resizes for it.
-// Turned off in Preferences (`available` false), it never shows: the
-// viewer's keys, a double-click and a middle click do what its buttons do.
+// the art alike. Shown, it is opaque (plotStrip): the plot, its playhead
+// and its crosshair end at its lower edge rather than show through. On the
+// left the playing track's title (semibold), "Artist — Album" and
+// "1:17 / 3:49", on the type scale of the viewer's text over the whole
+// screen (UiPalette.fullscreenTextScale), as the album art's details under
+// it are (#373 H40: at the window's size they were a second scale); on the
+// right, 8 px in from the edge, flat 24 px tool buttons: a zoom readout and
+// Reset while the view is zoomed, the new issues while there are any, the
+// viewer's own buttons (declared inside the strip, from the left, each taking
+// the strip's `plotColors`) and Close: the album art's info toggle, or the
+// visualization's mode switch, which with its zoom moves here from the
+// plot's corner while the strip is on, so the strip is the viewer's one
+// place for its controls (#373 H40: a plate of them under the strip's Close
+// read as a second cluster). The whole strip
+// shows and hides with the viewer's controls, fading as they do; it is
+// drawn over the view, which never resizes for it. Turned off in
+// Preferences (`available` false), it never shows: the viewer's keys, a
+// double-click and a middle click do what its buttons do.
 Rectangle {
     id: root
 
@@ -31,6 +41,9 @@ Rectangle {
     // The playback clock's text of the position, which changes once a second.
     property string positionText: "00:00"
     property bool controlsVisible: true
+    // The controls as they fade (FullscreenControlsAutoHide's level); at
+    // once without one.
+    property real controlsLevel: root.controlsVisible ? 1 : 0
     // Whether the strip may show at all.
     property bool available: true
     property var pointerActivity: null
@@ -42,8 +55,14 @@ Rectangle {
     // as the viewer covers the status bar.
     property var errorController: null
     property string closeButtonName: "viewerCloseButton"
+    // The zoom, and the viewer's own buttons, each set off from what follows
+    // by a 1 px divider (ViewerControls' `dividers` and `closeDivided`).
+    property bool dividers: false
+    property bool closeDivided: false
     // The viewer's own buttons, before Close.
     default property alias viewerControls: controls.viewerControls
+    // Whether the pointer is on the strip, which counts as on the view.
+    readonly property bool hovered: stripHover.hovered
     // Whether keyboard focus is on one of the strip's buttons, which keeps
     // the viewer's controls shown.
     readonly property bool focusInside: {
@@ -78,21 +97,21 @@ Rectangle {
             FormatUtils.clockText(root.positionText),
             FormatUtils.clockText(root.track.durationText))
 
-    implicitHeight: 33
-    color: root.plotColors.plotPlate
-    opacity: root.available && root.controlsVisible ? 1 : 0
+    // Its text's size, as a factor of the window's.
+    readonly property real textScale: root.uiPalette.fullscreenTextScale
+    readonly property real textPointSize: root.uiPalette.basePointSize * root.textScale
+    // The band over the edge: 32 px as the text grows, 38 px, or the line
+    // of its text or its buttons and 4 px above and below them, whichever
+    // is taller.
+    readonly property real bandHeight: Math.max(Math.round(32 * root.textScale),
+        Math.ceil(Math.max(titleLabel.implicitHeight, contextLabel.implicitHeight, timeLabel.implicitHeight)) + 8,
+        controls.implicitHeight + 8)
+    implicitHeight: root.bandHeight + 1
+    color: root.plotColors.plotStrip
+    opacity: root.available ? root.controlsLevel : 0
     // Shown at once, so the key that brings the controls back can move
     // focus to them; it fades out, and hidden it takes no pointer.
-    visible: root.available && (root.controlsVisible || opacity > 0)
-
-    // Kirigami's durations are 0 with animations turned off.
-    Behavior on opacity {
-        enabled: Kirigami.Units.shortDuration > 0
-        NumberAnimation {
-            duration: Kirigami.Units.shortDuration
-            easing.type: Easing.OutCubic
-        }
-    }
+    visible: root.available && (root.controlsVisible || root.controlsLevel > 0)
 
     Accessible.role: Accessible.ToolBar
     Accessible.name: I18n.i18nc("@label", "Viewer")
@@ -104,6 +123,7 @@ Rectangle {
     }
 
     HoverHandler {
+        id: stripHover
         onPointChanged: {
             if (root.pointerActivity) {
                 root.pointerActivity(point.scenePosition.x, point.scenePosition.y)
@@ -121,9 +141,11 @@ Rectangle {
         readonly property real textRoom: Math.max(0, track.room - (timeLabel.visible
             ? timeLabel.implicitWidth + track.spacing : 0) - (contextLabel.visible ? track.spacing : 0))
         readonly property real contextNeed: contextLabel.visible ? contextLabel.implicitWidth : 0
-        x: 12
-        height: 32
-        spacing: 12
+        // 16 px in from the edge (#373 H11: at 12 px, the gap between its
+        // own texts, the title sat too near the edge).
+        x: 2 * Kirigami.Units.largeSpacing
+        height: root.bandHeight
+        spacing: Math.round(12 * root.textScale)
 
         Label {
             id: titleLabel
@@ -133,6 +155,7 @@ Rectangle {
                             Math.max(track.textRoom * 0.6, track.textRoom - track.contextNeed))
             text: root.titleText
             visible: text.length > 0
+            font.pointSize: root.textPointSize
             font.weight: Font.DemiBold
             color: root.plotColors.plotText
             elide: Text.ElideRight
@@ -145,6 +168,7 @@ Rectangle {
             width: Math.min(implicitWidth, Math.max(0, track.textRoom - titleLabel.width))
             text: root.artistAlbumText
             visible: text.length > 0 && root.titleText.length > 0
+            font.pointSize: root.textPointSize
             color: root.plotColors.plotTextSecondary
             elide: Text.ElideRight
         }
@@ -156,6 +180,7 @@ Rectangle {
             text: root.timeText
             visible: text.length > 0
             color: root.plotColors.plotTextSecondary
+            font.pointSize: root.textPointSize
             font.features: root.uiPalette.tabularFigures
         }
     }
@@ -164,8 +189,10 @@ Rectangle {
         id: controls
         objectName: "viewerStripControls"
         anchors.right: parent.right
-        anchors.rightMargin: 4
-        y: 4
+        // 8 px in from the screen's edge (#373 H40: at 4 px, Close's focus
+        // ring met the screen's corner).
+        anchors.rightMargin: Kirigami.Units.largeSpacing
+        y: Math.round((root.bandHeight - height) / 2)
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         closeViewer: root.closeViewer
@@ -174,6 +201,8 @@ Rectangle {
         resetToolTip: root.resetToolTip
         errorController: root.errorController
         closeButtonName: root.closeButtonName
+        dividers: root.dividers
+        closeDivided: root.closeDivided
     }
 
     Rectangle {

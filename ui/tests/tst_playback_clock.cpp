@@ -66,6 +66,7 @@ private:
 
 private slots:
     void monotonicClockIsTheSteadyClock();
+    void unknownTimeIsWrittenWithEnDashes();
     void steadyPlaybackAdvancesInRealTime();
     void lateDeliveryDoesNotDelayThePosition();
     void pauseHoldsAndResumeStartsFromTheNewSample();
@@ -93,6 +94,15 @@ private slots:
     void samplesKeepAShortTracksPlayheadToItsFrames();
     void sparseStepsAfterASeekComeAtTheirBoundaries();
 };
+
+// A time that is not known, as the transport and the queue write it: en
+// dashes, not hyphens (#373 H37).
+void PlaybackClockTest::unknownTimeIsWrittenWithEnDashes() {
+    const QString unknown = QStringLiteral("\u2013:\u2013\u2013");
+    QCOMPARE(PlaybackClock::formatSeconds(-1.0), unknown);
+    QCOMPARE(PlaybackClock::formatSeconds(std::numeric_limits<double>::quiet_NaN()), unknown);
+    QCOMPARE(PlaybackClock::formatSeconds(std::numeric_limits<double>::infinity()), unknown);
+}
 
 void PlaybackClockTest::monotonicClockIsTheSteadyClock() {
     // The engine stamps samples with CLOCK_MONOTONIC; render code converts

@@ -23,8 +23,14 @@ class TagEditorController final : public QObject {
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(bool saving READ saving NOTIFY savingChanged)
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
+    // Whether a row holds the error of a save or rename that failed for it.
+    Q_PROPERTY(bool hasRowErrors READ hasRowErrors NOTIFY rowErrorsChanged)
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusChanged)
     Q_PROPERTY(QString statusDetails READ statusDetails NOTIFY statusChanged)
+    // statusDetails' sections, for the Details window to set out: each a
+    // map of its `heading`, such as "Failed:", its `items`, one line for
+    // each file, and `failed`, whether it lists the files that failed.
+    Q_PROPERTY(QVariantList statusDetailSections READ statusDetailSections NOTIFY statusChanged)
     // Whether the status reports something that failed.
     Q_PROPERTY(bool statusIsError READ statusIsError NOTIFY statusChanged)
     Q_PROPERTY(int selectedCount READ selectedCount NOTIFY selectionChanged)
@@ -40,8 +46,10 @@ public:
     bool loading() const;
     bool saving() const;
     bool dirty() const;
+    bool hasRowErrors() const;
     QString statusText() const;
     QString statusDetails() const;
+    QVariantList statusDetailSections() const;
     bool statusIsError() const;
     int selectedCount() const;
     QStringList operationFiles() const;
@@ -108,6 +116,7 @@ signals:
     void loadingChanged();
     void savingChanged();
     void dirtyChanged();
+    void rowErrorsChanged();
     void statusChanged();
     void selectionChanged();
     void bulkSummaryChanged();
@@ -172,7 +181,7 @@ private:
     bool anyFieldChanged(const QVector<int> &rows, const QString &field) const;
     void revertRows(const QVector<int> &rows, const QString &field);
     void reportFailures(const QString &status, const QStringList &failureLines);
-    void setStatusText(const QString &text, const QString &details = QString(),
+    void setStatusText(const QString &text, const QVariantList &detailSections = {},
                        bool isError = false);
     void setSelection(QSet<int> rows);
     void resetSelection();
@@ -184,6 +193,7 @@ private:
     QStringList m_loadedPaths;
     QString m_statusText;
     QString m_statusDetails;
+    QVariantList m_statusDetailSections;
     bool m_statusIsError{false};
     bool m_open{false};
     bool m_loading{false};

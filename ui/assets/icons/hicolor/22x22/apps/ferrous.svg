@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ferrous, 22 px. At 22 px the glide rises from the floor band to about 70% of the width, heavier, with a 1.5 px harmonic. -->
+<!-- Ferrous, 22 px, on the pixel grid in Breeze's 2 px margin, inside a 1 px mid-violet rim: two strokes, the glide in amber, 3 px tall, so that it outweighs its 3rd harmonic in magenta, 2 px tall, 3 rows over its first climb, as wide across its 45 degree slope as on its flats. From a common start at the lower left they rise 1 : 3 and fan apart, a clear row or more apart, each a closed shape with every vertex on a whole pixel: crisp flats and 45 degree climbs, square at the start. They run out flush to the tile's inner edge on the right, a crop of an endless spectrogram rather than a chart's series ending in the tile. Hicolor's 22 px directories serve 20 to 24 px, so this drawing, and at 2x its 2x one, also shows in a 24 px slot. The magenta is a step lighter than the larger drawings', as its antialiased climbs cover less of each pixel, so that it shows as bright on the tile as theirs. -->
 <svg width="22" height="22" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg">
-  <path id="tile" fill="#3a1490" d="M1 19 V3 A2 2 0 0 1 3 1 H19 A2 2 0 0 1 21 3 V19 Z"/>
-  <path id="floor" fill="#a6006e" d="M1 19 H21 V19 A2 2 0 0 1 19 21 H3 A2 2 0 0 1 1 19 Z"/>
-  <path id="harmonic" fill="none" stroke="#f0602a" stroke-width="1.5" stroke-linecap="round" d="M5 12.5 L12 4.5"/>
-  <path id="glide" fill="none" stroke="#ffb000" stroke-width="3" stroke-linecap="round" d="M5 17.5 L15.5 11.5"/>
+  <rect id="rim" fill="#5a3fb0" x="2" y="2" width="18" height="18" rx="2"/>
+  <rect id="tile" fill="#3a1490" x="3" y="3" width="16" height="16" rx="1"/>
+  <path id="h3" fill="#ea6cc2" d="M4 11 9 6 11 6 12 5 14 5 15 4 19 4 19 6 16 6 15 7 13 7 12 8 11 8 10 9 9 9 4 14Z"/>
+  <path id="fundamental" fill="#f2b035" d="M4 15 6 15 7 14 9 14 10 13 13 13 14 12 19 12 19 15 15 15 14 16 11 16 10 17 8 17 7 18 4 18Z"/>
 </svg>

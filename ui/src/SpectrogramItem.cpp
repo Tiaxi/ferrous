@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "SpectrogramItem.h"
+#include "SpectrogramColorMap.h"
 #include "FerrousBridgeFfi.h"
 
 #include "SpectrogramSeekTrace.h"
@@ -19,6 +20,7 @@
 #include <QPainter>
 #include <QQuickWindow>
 #include <QSGNode>
+#include <QSGOpacityNode>
 #include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
 #include <QSGRendererInterface>
@@ -124,10 +126,8 @@ constexpr qint64 kSmoothnessWindowMs = 2000;
 constexpr qint64 kSmoothnessIdleMs = 450;
 #endif
 // The spectrogram's plot set (UiPalette.spectrogramPlot), the same in both
-// themes: plotBg, the floor of its colour map, and what is drawn on it.
-// The floor is black, the lowest entry of both the colour and the greyscale
-// map (rebuildPalette), so where no column is drawn looks like silence.
-const QColor kBackgroundColor(0, 0, 0);
+// themes: what is drawn on the plot. Its floor, plotBg, is the item's
+// floorColor.
 // Where the canvas has no column, it is transparent: the backdrop, or the
 // floor under it, shows there (see SpectrogramBackdrop).
 constexpr QRgb kNoColumn = 0;
@@ -139,6 +139,19 @@ const QColor kScaleTextColor(0xec, 0xec, 0xec);
 const QColor kScaleOutlineColor(0, 0, 0);
 // plotTick.
 const QColor kScaleTickColor(236, 236, 236, 191);
+// The lane at rest, before it has columns: a line across it at each of the
+// scale's ticks in white 20%, #433858 and 1.78:1 on the floor (#373 H15 H7:
+// 8% was 1.19:1 and faint; H28 V4: at 11%, 1.3:1, the never-played pane
+// read as an empty slab, and the seam between its lanes as one more of its
+// lines), over the lane seam at rest, which is darker than the floor, and
+// while the scale shows, the scale's text in plotTextSecondary.
+const QColor kRestGridLineColor(255, 255, 255, 51);
+// A rest line in the band of a plate over the lane, its label or the mode
+// switch, within kRestQuietReach of its top or foot: white 10 %, some
+// 1.3:1, so that beside the plate it reads as the grid going on behind it
+// rather than a connector cut into it (#373 H31 Y4).
+const QColor kRestGridQuietLineColor(255, 255, 255, 26);
+const QColor kRestScaleTextColor(236, 236, 236, 184);
 // The playhead: a 1 px light core cased in 1 px of black 60% on each side.
 // The core is all but opaque, as the playhead has always been translucent:
 // with an opaque one, Qt's software renderer leaves a seam of background in
@@ -294,19 +307,28 @@ struct SpectrogramPlacedOverlayImage {
 // What an overlay draws in a frame, in logical pixels.
 struct SpectrogramOverlayFrame {
     QVector<QRectF> lines;
+    // As SpectrogramOverlayLayout's lineColors.
+    QVector<QColor> lineColors;
     QVector<SpectrogramPlacedOverlayImage> images;
 };
 
 // An overlay's nodes: rectangles for its lines, then its images above them.
 struct SpectrogramOverlayLayer {
     QSGNode *root{nullptr};
+    // The root of a layer that fades as a whole, or null.
+    QSGOpacityNode *opacity{nullptr};
     QSGNode *linesRoot{nullptr};
     QSGNode *imagesRoot{nullptr};
     QVector<QSGSimpleRectNode *> lines;
     QVector<QSGSimpleTextureNode *> images;
 
-    SpectrogramOverlayLayer() {
-        root = new QSGNode();
+    explicit SpectrogramOverlayLayer(bool fades = false) {
+        if (fades) {
+            opacity = new QSGOpacityNode();
+            root = opacity;
+        } else {
+            root = new QSGNode();
+        }
         linesRoot = new QSGNode();
         imagesRoot = new QSGNode();
         root->appendChildNode(linesRoot);
@@ -484,6 +506,7 @@ struct SpectrogramSceneNode final : public QSGNode {
         background = new QSGSimpleRectNode();
         tilesRoot = new QSGNode();
         latest = new QSGSimpleTextureNode();
+        pastEnd = new QSGSimpleRectNode();
         playheadCasing = new QSGSimpleRectNode();
         playhead = new QSGSimpleRectNode();
         overlay = new QSGSimpleTextureNode();
@@ -495,9 +518,15 @@ struct SpectrogramSceneNode final : public QSGNode {
             span = new QSGSimpleTextureNode();
             background->appendChildNode(span);
         }
+        // On the floor, under everything else: the lane at rest, which shows
+        // only while nothing is drawn over it.
+        background->appendChildNode(restGridLayer.root);
         appendChildNode(background);
         appendChildNode(tilesRoot);
         appendChildNode(latest);
+        // Over the whole canvas, the latest span last: its child, so the
+        // nodes after it keep their places.
+        latest->appendChildNode(pastEnd);
         appendChildNode(playheadCasing);
         appendChildNode(playhead);
         appendChildNode(freqGridLayer.root);
@@ -537,8 +566,10 @@ struct SpectrogramSceneNode final : public QSGNode {
         for (int i = 0; i < layer.lines.size(); ++i) {
             QSGSimpleRectNode *line = layer.lines[i];
             const QRectF rect = i < frame.lines.size() ? frame.lines[i] : QRectF();
-            if (line->color() != lineColor) {
-                line->setColor(lineColor);
+            const QColor color = i < frame.lineColors.size() && frame.lineColors[i].isValid()
+                ? frame.lineColors[i] : lineColor;
+            if (line->color() != color) {
+                line->setColor(color);
             }
             if (line->rect() != rect) {
                 line->setRect(rect);
@@ -731,11 +762,19 @@ struct SpectrogramSceneNode final : public QSGNode {
     quint64 backdropSerial{0};
     QSGNode *tilesRoot{nullptr};
     QSGSimpleTextureNode *latest{nullptr};
+    // Over the canvas, from where the file is cut off (markerSeconds) to
+    // the view's end: the floor, as the time after a track's end is not
+    // the track's (#373 H12 Z10: the analysis's columns there, silence to
+    // the length the file claims, drew black).
+    QSGSimpleRectNode *pastEnd{nullptr};
     QSGSimpleRectNode *playheadCasing{nullptr};
     QSGSimpleRectNode *playhead{nullptr};
+    // The lane at rest's lines and labels, on the floor.
+    SpectrogramOverlayLayer restGridLayer;
     SpectrogramOverlayLayer freqGridLayer;
     SpectrogramOverlayLayer timeGridLayer;
-    SpectrogramOverlayLayer crosshairLayer;
+    // The crosshair fades as a whole, its lines and plates alike.
+    SpectrogramOverlayLayer crosshairLayer{true};
     QSGSimpleTextureNode *overlay{nullptr};
     QVector<QSGSimpleTextureNode *> tileFragments;
     // How the canvas reaches the GPU: with the OpenGL renderer, in textures
@@ -972,6 +1011,76 @@ double selectGridInterval(
         }
     }
     return candidates[candidateCount - 1];
+}
+
+// The bin each device row of a lane `height` rows tall shows, from its
+// bottom row up: of `bins` bins `binHz` apart, spread linearly, or on a log
+// scale from kMinFreqHz up to the top bin. `lowResEnd` gets the last row of
+// the log scale that shows the same bin as the row below it.
+std::vector<int> frequencyRowBins(int height, int bins, double binHz, bool logScale, int *lowResEnd) {
+    std::vector<int> rowBins(static_cast<size_t>(std::max(0, height)));
+    int lowRes = 0;
+    if (height > 0 && bins > 0 && logScale) {
+        // Up to the top bin: Nyquist, or with the frequency cap, the cap.
+        const double topHz = std::max(static_cast<double>(bins - 1) * binHz, kMinFreqHz * 1.1);
+        const double logStep = (std::log2(topHz) - std::log2(kMinFreqHz)) / std::max(1, height);
+        const double freqRes = std::max(1.0, binHz);
+        for (int i = 0; i < height; ++i) {
+            const double freq = std::pow(2.0, static_cast<double>(i) * logStep + std::log2(kMinFreqHz));
+            const int bin = std::clamp(static_cast<int>(std::lround(freq / freqRes)), 0, bins - 1);
+            rowBins[static_cast<size_t>(i)] = bin;
+            if (i > 0 && rowBins[static_cast<size_t>(i - 1)] == bin) {
+                lowRes = i;
+            }
+        }
+    } else if (height > 0 && bins > 0) {
+        for (int i = 0; i < height; ++i) {
+            const int bin = static_cast<int>(std::floor(
+                (static_cast<double>(i) / std::max(1, height - 1))
+                * static_cast<double>(bins - 1)));
+            rowBins[static_cast<size_t>(i)] = std::clamp(bin, 0, bins - 1);
+        }
+    }
+    if (lowResEnd != nullptr) {
+        *lowResEnd = lowRes;
+    }
+    return rowBins;
+}
+
+// The device row, from the top, that shows `hz` in a lane whose rows show
+// `rowBins` (frequencyRowBins), or -1 without bins.
+int frequencyRowFromTop(const std::vector<int> &rowBins, int bins, double binHz, double hz) {
+    const int height = static_cast<int>(rowBins.size());
+    if (height <= 0 || bins <= 1 || binHz <= 0.0) {
+        return -1;
+    }
+    const int targetBin = std::clamp(static_cast<int>(std::round(hz / binHz)), 0, bins - 1);
+    // The rows' bins do not decrease: a binary search for targetBin.
+    auto it = std::lower_bound(rowBins.begin(), rowBins.end(), targetBin);
+    if (it == rowBins.end()) {
+        return 0; // above range -> top pixel
+    }
+    int row = static_cast<int>(std::distance(rowBins.begin(), it));
+    // If the row below's bin is closer, it is that row.
+    if (row > 0
+        && std::abs(rowBins[static_cast<size_t>(row - 1)] - targetBin) < std::abs(*it - targetBin)) {
+        --row;
+    }
+    return height - 1 - row;
+}
+
+// The bins a session sends of an `fftSize`-point spectrum of audio at
+// `sampleRateHz`: all of them, or with `capped`, those up to the audible
+// band of the rate's family, half its base rate (as the analysis's
+// frequency_cap::shown_bins).
+int shownFrequencyBins(int fftSize, int sampleRateHz, bool capped) {
+    const int all = fftSize / 2 + 1;
+    if (!capped || sampleRateHz <= 0) {
+        return all;
+    }
+    const qint64 familyBase = sampleRateHz % 11'025 == 0 ? 44'100 : 48'000;
+    const qint64 topBin = familyBase / 2 * fftSize / sampleRateHz;
+    return static_cast<int>(std::min<qint64>(all, topBin + 1));
 }
 
 // Rasterizations run here, off the UI and render threads. Each item has at
@@ -1379,6 +1488,71 @@ QSize scaleLabelSize(const QString &text) {
             metrics.height() + 2 * kScaleLabelOutline};
 }
 
+// A tick of the frequency scale: its device row, from the top, and its
+// label, in logical pixels.
+struct FrequencyScaleTick {
+    int pixelY{0};
+    QString label;
+    QRectF labelRect;
+};
+
+// The frequency scale's ticks in a lane `width` x `height` device pixels,
+// `scale` to a logical one, whose rows show `rowBins` (frequencyRowBins):
+// round numbers of kilohertz, one to a label, each label 10 px from the
+// lane's right edge and centred on its tick. Labels closer to the lane's
+// top than `topClearance` logical pixels are left out, ticks and all.
+QVector<FrequencyScaleTick> frequencyScaleTicks(
+    const std::vector<int> &rowBins, int bins, double binHz,
+    int width, int height, double scale, int topClearance) {
+    QVector<FrequencyScaleTick> ticks;
+    if (width <= 0 || height <= 0 || bins <= 1 || binHz <= 0.0
+        || static_cast<int>(rowBins.size()) != height) {
+        return ticks;
+    }
+    const int logicalWidth = std::max(1, static_cast<int>(std::floor(width / scale + 1e-6)));
+    const int logicalHeight = std::max(1, static_cast<int>(std::floor(height / scale + 1e-6)));
+    constexpr int kLabelGap = 10;
+    // A label's height and 12 px: 5 kHz apart in a lane of about 125 px.
+    const int minPixelSpacing = scaleLabelSize(QStringLiteral("0")).height() + 12;
+
+    // Nyquist, or with the frequency cap, the cap.
+    const double topHz = static_cast<double>(bins - 1) * binHz;
+
+    // Round numbers of kilohertz go 1, 5, 10: a taller lane keeps 5 kHz
+    // steps rather than crowding its edge with 2 kHz ones.
+    static constexpr double kFreqCandidates[] = {
+        50, 100, 200, 500, 1000, 5000, 10000, 20000
+    };
+    const double hzPerPixel = topHz / static_cast<double>(logicalHeight);
+    const double freqInterval = selectGridInterval(
+        kFreqCandidates,
+        static_cast<int>(std::size(kFreqCandidates)),
+        hzPerPixel,
+        minPixelSpacing);
+
+    int prevPixelY = -1;
+    for (double freq = freqInterval; freq < topHz; freq += freqInterval) {
+        const int pixelY = frequencyRowFromTop(rowBins, bins, binHz, freq);
+        if (pixelY < 0 || pixelY >= height) {
+            continue;
+        }
+        if (prevPixelY >= 0
+            && std::abs(pixelY - prevPixelY) < minPixelSpacing * scale) {
+            continue;
+        }
+        const QString label = formatFrequencyLabel(freq);
+        const QSize size = scaleLabelSize(label);
+        const int labelY = static_cast<int>(std::round(pixelY / scale)) - size.height() / 2;
+        if (labelY < topClearance || labelY + size.height() > logicalHeight) {
+            continue;
+        }
+        prevPixelY = pixelY;
+        ticks.push_back({pixelY, label,
+            QRectF(logicalWidth - kLabelGap - size.width(), labelY, size.width(), size.height())});
+    }
+    return ticks;
+}
+
 // The name of an overlay image's texture; a readout's plate is in `plate`.
 QString overlayImageKey(
     const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate) {
@@ -1466,7 +1640,8 @@ QImage renderOverlayImage(
             if (dx != 0 || dy != 0) painter.drawText(origin + QPointF(dx, dy), image.text);
         }
     }
-    painter.setPen(kScaleTextColor);
+    painter.setPen(image.kind == SpectrogramOverlayImage::RestScaleLabel
+        ? kRestScaleTextColor : kScaleTextColor);
     painter.drawText(origin, image.text);
     painter.end();
     return label;
@@ -1744,6 +1919,10 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
     setClip(true);
+    // The lane's columns going clear whether it has shown its whole view;
+    // the GUI thread hears it then, rather than once the queued notice of
+    // publishViewFilledLocked arrives.
+    connect(this, &SpectrogramItem::precomputedReadyChanged, this, &SpectrogramItem::viewFilledChanged);
     m_forceFpsOverlay = qEnvironmentVariableIsSet("FERROUS_UI_SHOW_FPS");
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_forceFpsOverlay = m_forceFpsOverlay
@@ -2284,6 +2463,23 @@ bool SpectrogramItem::crosshairEnabled() const {
     return m_crosshairEnabled;
 }
 
+double SpectrogramItem::crosshairOpacity() const {
+    return m_crosshairOpacity;
+}
+
+void SpectrogramItem::setCrosshairOpacity(double value) {
+    value = std::clamp(value, 0.0, 1.0);
+    if (qFuzzyCompare(m_crosshairOpacity + 1.0, value + 1.0)) {
+        return;
+    }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_crosshairOpacity = value;
+    }
+    emit crosshairOpacityChanged();
+    update();
+}
+
 void SpectrogramItem::setCrosshairEnabled(bool value) {
     if (m_crosshairEnabled == value) {
         return;
@@ -2329,6 +2525,40 @@ void SpectrogramItem::setLaneHeadBounds(const QRectF &value) {
         m_crosshairDirty = true;
     }
     emit laneHeadBoundsChanged();
+    update();
+}
+
+QRectF SpectrogramItem::laneLabelBounds() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_laneLabelBounds;
+}
+
+void SpectrogramItem::setLaneLabelBounds(const QRectF &value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_laneLabelBounds == value) {
+            return;
+        }
+        m_laneLabelBounds = value;
+    }
+    emit laneLabelBoundsChanged();
+    update();
+}
+
+QColor SpectrogramItem::floorColor() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_floorColor;
+}
+
+void SpectrogramItem::setFloorColor(const QColor &value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_floorColor == value) {
+            return;
+        }
+        m_floorColor = value;
+    }
+    emit floorColorChanged();
     update();
 }
 
@@ -2393,6 +2623,54 @@ void SpectrogramItem::setGridEnabled(bool value) {
     update();
 }
 
+int SpectrogramItem::analysisFftSize() const {
+    return m_analysisFftSize;
+}
+
+void SpectrogramItem::setAnalysisFftSize(int value) {
+    // An unknown size keeps the one before.
+    if (value <= 1 || value == m_analysisFftSize) {
+        return;
+    }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_analysisFftSize = value;
+    }
+    emit analysisFftSizeChanged();
+    update();
+}
+
+bool SpectrogramItem::frequencyCap() const {
+    return m_frequencyCap;
+}
+
+void SpectrogramItem::setFrequencyCap(bool value) {
+    if (value == m_frequencyCap) {
+        return;
+    }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_frequencyCap = value;
+    }
+    emit frequencyCapChanged();
+    update();
+}
+
+bool SpectrogramItem::viewFilled() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_viewFilled;
+}
+
+void SpectrogramItem::publishViewFilledLocked(bool filled) {
+    if (filled == m_viewFilled) {
+        return;
+    }
+    m_viewFilled = filled;
+    // Laid out on the render thread, or cleared with the mutex held: the
+    // view's bindings read it on the GUI thread, once the mutex is free.
+    QMetaObject::invokeMethod(this, [this] { emit viewFilledChanged(); }, Qt::QueuedConnection);
+}
+
 bool SpectrogramItem::showTimeLabels() const {
     return m_showTimeLabels;
 }
@@ -2446,6 +2724,21 @@ void SpectrogramItem::setChannelMuted(bool muted) {
         markCanvasStaleLocked();
     }
     emit channelMutedChanged();
+    update();
+}
+
+bool SpectrogramItem::playheadVisible() const {
+    return m_playheadVisible;
+}
+
+void SpectrogramItem::setPlayheadVisible(bool value) {
+    if (m_playheadVisible == value) {
+        return;
+    }
+    // Read while the scene graph synchronizes, with the GUI thread blocked;
+    // the canvas under the playhead keeps.
+    m_playheadVisible = value;
+    emit playheadVisibleChanged();
     update();
 }
 
@@ -3255,6 +3548,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_zoomFillActive = true;
         } else {
             m_precomputedReady = false;
+            publishViewFilledLocked(false);
             m_precomputedCanvasDisplayLeft = 0;
             m_precomputedCanvasDisplayRight = -1;
             invalidateCanvas();
@@ -3293,6 +3587,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedPendingResetGeneration = 0;
         m_precomputedPendingResetClearHistory = false;
         m_precomputedReady = false;
+        publishViewFilledLocked(false);
         m_precomputedBinsPerColumn = bins;
         m_precomputedFftSize = std::max(0, fftSize);
         if (totalEstimate > 0) {
@@ -4010,6 +4305,7 @@ void SpectrogramItem::clearPrecomputed() {
     }
     const bool wasReady = m_precomputedReady;
     m_precomputedReady = false;
+    publishViewFilledLocked(false);
     invalidateCanvas();
     lock.unlock();
     if (wasReady) {
@@ -4404,7 +4700,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
     node->background->setRect(0.0, 0.0, static_cast<double>(w), static_cast<double>(h));
-    node->background->setColor(kBackgroundColor);
+    QColor floorColor;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        floorColor = m_floorColor;
+    }
+    node->background->setColor(floorColor);
 
     // The canvas and the overlays are in device pixels, `scale` to a
     // logical one: cw x ch for the item.
@@ -4454,11 +4755,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     QSize overlaySize;
     QSizeF reservedCorner;
 
+    SpectrogramOverlayFrame restGridFrame;
     SpectrogramOverlayFrame freqGridFrame;
     SpectrogramOverlayFrame timeGridFrame;
     // Where markerSeconds is drawn; NaN if it is not.
     double markerX = std::numeric_limits<double>::quiet_NaN();
     SpectrogramOverlayFrame crosshairFrame;
+    double crosshairOpacity = 1.0;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     size_t profilePendingColumns = 0;
     size_t profileColumnCount = 0;
@@ -4546,6 +4849,47 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             }
         }
 #endif
+
+        // The overlays draw lines and small images in place, and lay
+        // them out again only when what they show changes.
+        const QRectF pane(0.0, 0.0, cw / scale, ch / scale);
+        const auto placeOverlay = [&](const SpectrogramOverlayLayout &layout,
+                                      int shift,
+                                      SpectrogramOverlayFrame &frame,
+                                      QRectF shown = QRectF()) {
+            // `shift` moves it that many device pixels left. With
+            // `shown`, lines that start outside it are left out, and
+            // so are images centred outside it.
+            if (shown.isNull()) shown = pane;
+            for (qsizetype i = 0; i < layout.lines.size(); ++i) {
+                const QRect &line = layout.lines[i];
+                const QRectF rect((line.x() - shift) / scale, line.y() / scale,
+                    line.width() / scale, line.height() / scale);
+                if (rect.intersects(pane) && rect.left() >= shown.left()
+                    && rect.left() <= shown.right()) {
+                    frame.lines.push_back(rect);
+                    frame.lineColors.push_back(layout.lineColors.value(i));
+                }
+            }
+            for (const SpectrogramOverlayImage &image : layout.images) {
+                // Whole device pixels, one texel to each.
+                const QSize pixels = overlayImagePixels(image, scale);
+                const QRectF rect(
+                    std::round((image.rect.x() * scale) - shift) / scale,
+                    std::round(image.rect.y() * scale) / scale,
+                    pixels.width() / scale,
+                    pixels.height() / scale);
+                if (!rect.intersects(pane) || rect.center().x() < shown.left()
+                    || rect.center().x() > shown.right()) {
+                    continue;
+                }
+                SpectrogramPlacedOverlayImage placed{image.key, rect, QImage()};
+                if (!node->overlayTextures.contains(placed.key)) {
+                    placed.image = renderOverlayImage(image, scale, m_readoutColors);
+                }
+                frame.images.push_back(std::move(placed));
+            }
+        };
 
         if (usePrecomputed) {
             bool needInvalidateMapping = false;
@@ -5023,44 +5367,17 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 m_idleView.changeSeconds = static_cast<double>(column) / columnsPerSecond;
             }
 
-            // The overlays draw lines and small images in place, and lay
-            // them out again only when what they show changes.
-            const QRectF pane(0.0, 0.0, cw / scale, ch / scale);
-            const auto placeOverlay = [&](const SpectrogramOverlayLayout &layout,
-                                          int shift,
-                                          SpectrogramOverlayFrame &frame,
-                                          QRectF shown = QRectF()) {
-                // `shift` moves it that many device pixels left. With
-                // `shown`, lines that start outside it are left out, and
-                // so are images centred outside it.
-                if (shown.isNull()) shown = pane;
-                for (const QRect &line : layout.lines) {
-                    const QRectF rect((line.x() - shift) / scale, line.y() / scale,
-                        line.width() / scale, line.height() / scale);
-                    if (rect.intersects(pane) && rect.left() >= shown.left()
-                        && rect.left() <= shown.right()) {
-                        frame.lines.push_back(rect);
-                    }
-                }
-                for (const SpectrogramOverlayImage &image : layout.images) {
-                    // Whole device pixels, one texel to each.
-                    const QSize pixels = overlayImagePixels(image, scale);
-                    const QRectF rect(
-                        std::round((image.rect.x() * scale) - shift) / scale,
-                        std::round(image.rect.y() * scale) / scale,
-                        pixels.width() / scale,
-                        pixels.height() / scale);
-                    if (!rect.intersects(pane) || rect.center().x() < shown.left()
-                        || rect.center().x() > shown.right()) {
-                        continue;
-                    }
-                    SpectrogramPlacedOverlayImage placed{image.key, rect, QImage()};
-                    if (!node->overlayTextures.contains(placed.key)) {
-                        placed.image = renderOverlayImage(image, scale, m_readoutColors);
-                    }
-                    frame.images.push_back(std::move(placed));
-                }
-            };
+            // The lane has shown its whole view once this frame shows a
+            // canvas of this view with every column of it that there is:
+            // the visualization's mode switch brings it in only then.
+            if (hasCanvas && canvasIsView && !canvasFreeze && !zoomPreviewShown
+                && !m_rasterPending && !m_precomputedCanvasDirty
+                && m_precomputedCanvasDisplayLeft == displayLeft
+                && viewShownWholeLocked(displayLeft, displayRight, rollingMode, canvasZoom, cw,
+                    m_rollingEpoch + static_cast<qint64>(std::max(nowCol, 0)),
+                    static_cast<int>(std::ceil(static_cast<double>(cw) / canvasZoom)))) {
+                publishViewFilledLocked(true);
+            }
 
             // Frequency grid — only depends on static parameters.
             // Never laid out again during normal playback.
@@ -5174,6 +5491,15 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             }
         }
 
+        // At rest, without columns to show (before any audio, with nothing
+        // playing, or waiting for a session's first columns), the lane keeps
+        // its floor and, while the scale shows, shows it faintly
+        // (#373 H6 P6, H10 P18).
+        if (!usePrecomputed && !hasCanvas) {
+            updateRestGridOverlayLocked(cw, ch);
+            placeOverlay(m_restGrid, 0, restGridFrame);
+        }
+
         // A pane that shows no crosshair reads nothing, and lays the
         // crosshair out again when it shows it.
         if (crosshairFrame.images.isEmpty() && !m_crosshairLaidOutReadout.isEmpty()) {
@@ -5181,6 +5507,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             m_crosshairDirty = true;
         }
 
+        crosshairOpacity = m_crosshairOpacity;
         showOverlay = m_showFpsOverlay && m_fpsValue > 0;
         reservedCorner = m_reservedCorner;
         if (showOverlay) {
@@ -5357,7 +5684,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             node->tileFragments[i], nullptr, QRectF(), QRect(), canvasPlaceholder));
     }
 
-    if (showPlayhead) {
+    if (showPlayhead && m_playheadVisible) {
         // The casing: a line as wide as the core on each side of it, within
         // the item.
         const double casingLeft = std::max(0.0, playheadRect.left() - playheadRect.width());
@@ -5374,10 +5701,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
     // The scale and the crosshair: ticks, and small images one texel to a
     // device pixel.
+    node->showOverlay(node->restGridLayer, restGridFrame, kRestGridLineColor, currentWindow);
     node->showOverlay(node->freqGridLayer, freqGridFrame, kScaleTickColor, currentWindow);
     node->showOverlay(node->timeGridLayer, timeGridFrame, kScaleTickColor, currentWindow);
     node->showOverlay(node->crosshairLayer, crosshairFrame, QColor(), currentWindow);
+    if (node->crosshairLayer.opacity->opacity() != crosshairOpacity) {
+        node->crosshairLayer.opacity->setOpacity(crosshairOpacity);
+    }
     const QVector<QSGTexture *> unusedOverlayTextures = node->takeUnusedOverlayTextures();
+    if (!std::isnan(markerX) && markerX < static_cast<double>(w)) {
+        const double left = std::max(0.0, markerX);
+        node->pastEnd->setRect(QRectF(left, 0.0, static_cast<double>(w) - left, static_cast<double>(h)));
+        node->pastEnd->setColor(floorColor);
+    } else {
+        node->pastEnd->setRect(QRectF());
+    }
     publishMarkerX(markerX);
 
     if (showOverlay && node->overlayTexture != nullptr && !overlaySize.isEmpty()) {
@@ -5722,22 +6060,7 @@ int SpectrogramItem::frequencyToPixelYLocked(double freqHz, int viewHeight) cons
         || static_cast<int>(m_iToBin.size()) != viewHeight) {
         return -1;
     }
-    const double freqRes = binHzLocked();
-    const int targetBin = std::clamp(
-        static_cast<int>(std::round(freqHz / freqRes)), 0, m_binsPerColumn - 1);
-    // m_iToBin is non-decreasing: binary search for targetBin.
-    auto it = std::lower_bound(m_iToBin.begin(), m_iToBin.end(), targetBin);
-    if (it == m_iToBin.end()) {
-        return 0; // above range -> top pixel
-    }
-    int row = static_cast<int>(std::distance(m_iToBin.begin(), it));
-    // If previous row's bin is closer, prefer it.
-    if (row > 0
-        && std::abs(m_iToBin[static_cast<size_t>(row - 1)] - targetBin)
-               < std::abs(*it - targetBin)) {
-        --row;
-    }
-    return viewHeight - 1 - row;
+    return frequencyRowFromTop(m_iToBin, m_binsPerColumn, binHzLocked(), freqHz);
 }
 
 void SpectrogramItem::updateCrosshairOverlayLocked(
@@ -5963,59 +6286,96 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
     // its tick. Ticks on the canvas's device rows; labels laid out in
     // logical pixels.
     const double scale = m_canvasScale;
-    const int logicalWidth = std::max(1, static_cast<int>(std::floor(width / scale + 1e-6)));
-    const int logicalHeight = std::max(1, static_cast<int>(std::floor(height / scale + 1e-6)));
     const int lineWidth = deviceLineWidth(scale);
     const int tickWidth = devicePixels(6.0, scale);
     constexpr int kLabelGap = 10;
+    for (const FrequencyScaleTick &tick : frequencyScaleTicks(
+             m_iToBin, m_binsPerColumn, binHzLocked(), width, height, scale,
+             frequencyScaleTopClearanceLocked())) {
+        m_freqScaleWidth = std::max(
+            m_freqScaleWidth, kLabelGap + static_cast<int>(tick.labelRect.width()));
+        m_freqGrid.lines.push_back(QRect(width - tickWidth, tick.pixelY, tickWidth, lineWidth));
+        m_freqGrid.images.push_back(
+            {SpectrogramOverlayImage::ScaleLabel, tick.label, 0, tick.labelRect, QString()});
+    }
+    nameOverlayImagesLocked(m_freqGrid);
+}
+
+int SpectrogramItem::frequencyScaleTopClearanceLocked() const {
     // Labels this close to the lane's top, where its label and the mode
     // switch are, are left out: 34 px, or 2 px past the controls in the
     // corner when they reach further down, as below a viewer's title strip.
     constexpr int kTopClearance = 34;
-    const int topClearance = std::max(
-        kTopClearance, static_cast<int>(std::ceil(m_reservedCorner.height())) + 2);
-    // A label's height and 12 px: 5 kHz apart in a lane of about 125 px.
-    const int minPixelSpacing = scaleLabelSize(QStringLiteral("0")).height() + 12;
+    return std::max(kTopClearance, static_cast<int>(std::ceil(m_reservedCorner.height())) + 2);
+}
 
-    // Nyquist, or with the frequency cap, the cap.
-    const double topHz = topFrequencyHzLocked();
-
-    // Round numbers of kilohertz go 1, 5, 10: a taller lane keeps 5 kHz
-    // steps rather than crowding its edge with 2 kHz ones.
-    static constexpr double kFreqCandidates[] = {
-        50, 100, 200, 500, 1000, 5000, 10000, 20000
-    };
-    const double hzPerPixel = topHz / static_cast<double>(logicalHeight);
-    const double freqInterval = selectGridInterval(
-        kFreqCandidates,
-        static_cast<int>(std::size(kFreqCandidates)),
-        hzPerPixel,
-        minPixelSpacing);
-
-    int prevPixelY = -1;
-    for (double freq = freqInterval; freq < topHz; freq += freqInterval) {
-        const int pixelY = frequencyToPixelYLocked(freq, height);
-        if (pixelY < 0 || pixelY >= height) {
-            continue;
-        }
-        if (prevPixelY >= 0
-            && std::abs(pixelY - prevPixelY) < minPixelSpacing * scale) {
-            continue;
-        }
-        const QString label = formatFrequencyLabel(freq);
-        const QSize size = scaleLabelSize(label);
-        const int labelY = static_cast<int>(std::round(pixelY / scale)) - size.height() / 2;
-        if (labelY < topClearance || labelY + size.height() > logicalHeight) {
-            continue;
-        }
-        prevPixelY = pixelY;
-        m_freqScaleWidth = std::max(m_freqScaleWidth, kLabelGap + size.width());
-        m_freqGrid.lines.push_back(QRect(width - tickWidth, pixelY, tickWidth, lineWidth));
-        m_freqGrid.images.push_back({SpectrogramOverlayImage::ScaleLabel, label, 0,
-            QRectF(logicalWidth - kLabelGap - size.width(), labelY, size.width(), size.height()),
-            QString()});
+void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
+    // width and height are in device pixels.
+    m_restGrid = SpectrogramOverlayLayout{};
+    m_restGrid.size = QSize(width, height);
+    if (width <= 0 || height <= 0 || m_analysisFftSize <= 1 || m_sampleRateHz <= 0) {
+        return;
     }
-    nameOverlayImagesLocked(m_freqGrid);
+    m_restGrid.valid = true;
+    // The bins and rows a session at the analysis's settings will have at
+    // the lane's rate, for the ticks the scale will then show (#373 H6 P6).
+    const int bins = shownFrequencyBins(m_analysisFftSize, m_sampleRateHz, m_frequencyCap);
+    const double binHz = static_cast<double>(m_sampleRateHz) / static_cast<double>(m_analysisFftSize);
+    const std::vector<int> rowBins = frequencyRowBins(height, bins, binHz, m_logScale, nullptr);
+    const double scale = m_canvasScale;
+    const int lineWidth = deviceLineWidth(scale);
+    // With the scale hidden there are no labels to keep clear of the lane's
+    // head and the mode switch: every tick has its line, so the lines are
+    // evenly spaced (#373 H15 H7: the top one left out, the lane's top band
+    // was some 80 px to the others' 45).
+    const int topClearance = m_gridEnabled ? frequencyScaleTopClearanceLocked() : 0;
+    // A line on a row beside a plate, the mode switch's in the corner or the
+    // lane's label, or within kPlateReach under or over it, ends, or
+    // starts, kPlateGap clear of it, rather than run along its edge (#373
+    // H29 W4: the first line ran along the switch's foot, 1 px under it).
+    // One rule for every lane: within 8 px rather than 4 (#373 H30: at
+    // 1600x1000 the first lane's top line, 4 px under its label, ran on
+    // while the second's, 3 px under its, was cut). Every tick keeps its
+    // line. The plates' rects are logical, with their 1 px edges.
+    constexpr double kPlateGap = 6.0;
+    constexpr double kPlateReach = 8.0;
+    // A line within kRestQuietReach of a plate's top or foot, in its band,
+    // is quieter (kRestGridQuietLineColor), its cuts kept.
+    constexpr double kRestQuietReach = 4.0;
+    const double logicalWidth = static_cast<double>(width) / scale;
+    const QRectF corner = m_reservedCorner.isEmpty()
+        ? QRectF()
+        : QRectF(logicalWidth - m_reservedCorner.width(), 0.0, m_reservedCorner.width(), m_reservedCorner.height());
+    const auto besidePlate = [&](const QRectF &plate, double row, double rowHeight) {
+        return !plate.isEmpty() && row + rowHeight > plate.top() - kPlateReach && row < plate.bottom() + kPlateReach;
+    };
+    for (const FrequencyScaleTick &tick : frequencyScaleTicks(
+             rowBins, bins, binHz, width, height, scale, topClearance)) {
+        // Across the lane, where the scale's tick is, with the scale hidden
+        // too: the pane at rest is an instrument waiting, not a hole
+        // (#373 H14 F3, P23; H10 P18 left the floor plain). The label over
+        // it, where the scale's goes, only with the scale shown.
+        const double row = static_cast<double>(tick.pixelY) / scale;
+        const double rowHeight = static_cast<double>(lineWidth) / scale;
+        const int left = besidePlate(m_laneLabelBounds, row, rowHeight)
+            ? std::clamp(static_cast<int>(std::ceil((m_laneLabelBounds.right() + kPlateGap) * scale)), 0, width)
+            : 0;
+        const int right = besidePlate(corner, row, rowHeight)
+            ? std::clamp(static_cast<int>(std::floor((corner.left() - kPlateGap) * scale)), 0, width)
+            : width;
+        m_restGrid.lines.push_back(QRect(left, tick.pixelY, std::max(0, right - left), lineWidth));
+        const bool inPlateBand = std::ranges::any_of(
+            std::array{m_laneLabelBounds, corner}, [&](const QRectF &plate) {
+                return !plate.isEmpty() && row + rowHeight > plate.top() - kRestQuietReach
+                    && row < plate.bottom() + kRestQuietReach;
+            });
+        m_restGrid.lineColors.push_back(inPlateBand ? kRestGridQuietLineColor : QColor());
+        if (m_gridEnabled) {
+            m_restGrid.images.push_back(
+                {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});
+        }
+    }
+    nameOverlayImagesLocked(m_restGrid);
 }
 
 void SpectrogramItem::updateTimeGridOverlayLocked(
@@ -6104,50 +6464,12 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
 }
 
 void SpectrogramItem::rebuildPalette() {
-    // SoX spectrogram default palette (from spectrogram.c, perm=0).
-    // Procedural sin/cos curves produce:
-    //   Black → Dark Blue → Purple → Magenta → Red → Orange → Yellow → White
-    // This matches Adobe Audition 3.0's spectral display gradient.
-    //
-    // Our palette array: index 0 = brightest (x=1), index N-1 = darkest (x=0).
-
+    // SpectrogramColorMap's colours. Our palette array: index 0 = brightest
+    // (x=1), index N-1 = darkest (x=0).
     for (int i = 0; i < kGradientTableSize; ++i) {
-        // x: 1.0 at index 0 (loud/bright), 0.0 at last index (quiet/dark).
         const double x = 1.0
             - static_cast<double>(i) / static_cast<double>(kGradientTableSize - 1);
-
-        // c0 (red): sin ramp from x=0.13 to x=0.73, then saturated.
-        double c0;
-        if (x < 0.13)
-            c0 = 0.0;
-        else if (x < 0.73)
-            c0 = std::sin((x - 0.13) / 0.60 * M_PI / 2.0);
-        else
-            c0 = 1.0;
-
-        // c1 (green): sin ramp from x=0.60 to x=0.91, then saturated.
-        double c1;
-        if (x < 0.60)
-            c1 = 0.0;
-        else if (x < 0.91)
-            c1 = std::sin((x - 0.60) / 0.31 * M_PI / 2.0);
-        else
-            c1 = 1.0;
-
-        // c2 (blue): half-sine from 0 to 0.60, gap, linear ramp 0.78-1.0.
-        double c2;
-        if (x < 0.60)
-            c2 = 0.5 * std::sin(x / 0.60 * M_PI);
-        else if (x < 0.78)
-            c2 = 0.0;
-        else
-            c2 = (x - 0.78) / 0.22;
-
-        // perm=0: R=c[0], G=c[1], B=c[2] (no channel swapping).
-        m_palette32[static_cast<size_t>(i)] = qRgb(
-            std::clamp(static_cast<int>(0.5 + 255.0 * c0), 0, 255),
-            std::clamp(static_cast<int>(0.5 + 255.0 * c1), 0, 255),
-            std::clamp(static_cast<int>(0.5 + 255.0 * c2), 0, 255));
+        m_palette32[static_cast<size_t>(i)] = SpectrogramColorMap::colorAt(x);
     }
 
     // Build matching grayscale palette using luminance weights.
@@ -6363,29 +6685,7 @@ void SpectrogramItem::ensureMapping(int height) {
         return;
     }
 
-    m_iToBin.resize(static_cast<size_t>(height));
-    m_lowResEnd = 0;
-    if (m_logScale) {
-        // Up to the top bin: Nyquist, or with the frequency cap, the cap.
-        const double topHz = std::max(topFrequencyHzLocked(), kMinFreqHz * 1.1);
-        const double logStep = (std::log2(topHz) - std::log2(kMinFreqHz)) / std::max(1, height);
-        const double freqRes = std::max(1.0, binHzLocked());
-        for (int i = 0; i < height; ++i) {
-            const double freq = std::pow(2.0, static_cast<double>(i) * logStep + std::log2(kMinFreqHz));
-            const int bin = std::clamp(static_cast<int>(std::lround(freq / freqRes)), 0, m_binsPerColumn - 1);
-            m_iToBin[static_cast<size_t>(i)] = bin;
-            if (i > 0 && m_iToBin[static_cast<size_t>(i - 1)] == bin) {
-                m_lowResEnd = i;
-            }
-        }
-    } else {
-        for (int i = 0; i < height; ++i) {
-            const int bin = static_cast<int>(std::floor(
-                (static_cast<double>(i) / std::max(1, height - 1))
-                * static_cast<double>(m_binsPerColumn - 1)));
-            m_iToBin[static_cast<size_t>(i)] = std::clamp(bin, 0, m_binsPerColumn - 1);
-        }
-    }
+    m_iToBin = frequencyRowBins(height, m_binsPerColumn, binHzLocked(), m_logScale, &m_lowResEnd);
 
     m_mappingHeight = height;
 }
@@ -6525,13 +6825,7 @@ std::array<quint8, 256> SpectrogramItem::buildPrecomputedDbRemapLocked() const {
     for (int i = 1; i < 256; ++i) {
         const double db = (static_cast<double>(i - 1) / 254.0)
             * kBakedDbRange - kBakedDbRange;
-        const double xdb = std::clamp(db + userDbRange, 0.0, userDbRange);
-        const double normalized = xdb / userDbRange;
-        static constexpr double kB = 1.3;
-        const double gamma = (normalized > 0.0)
-            ? std::pow(normalized, 2.0 - kB * normalized)
-            : 0.0;
-        const double remapped = gamma * 255.0;
+        const double remapped = SpectrogramColorMap::position(db, userDbRange) * 255.0;
         dbRemap[static_cast<size_t>(i)] = static_cast<quint8>(std::clamp(
             static_cast<int>(std::lround(remapped)),
             0,
@@ -7184,6 +7478,29 @@ bool SpectrogramItem::canvasShowsWholeViewLocked(
     return first > last || ringHoldsColumnsLocked(first, last);
 }
 
+bool SpectrogramItem::viewShownWholeLocked(
+    qint64 displayLeft, qint64 displayRight, bool rollingMode, double canvasZoom, int cw,
+    qint64 displaySeq, int visibleWindowCols) const {
+    if (displayRight < displayLeft) {
+        return false;
+    }
+    if (!rollingMode) {
+        return canvasShowsWholeViewLocked(displayLeft, displayRight, false, canvasZoom, cw);
+    }
+    // Rolling, the ring's columns run without gaps from its oldest to its
+    // newest, and the view shows them up to the playhead. A few columns
+    // short of either end are what a session's history reckoned in
+    // seconds, or the decoder's last columns of a file, leave out.
+    constexpr qint64 kSlackColumns = 4;
+    const bool reachesPlayhead = displayRight + kSlackColumns >= displaySeq;
+    // As far left as the view goes, or to the track's first column, which
+    // is at the epoch.
+    const bool reachesLeft =
+        displayRight - displayLeft + 1 + kSlackColumns >= static_cast<qint64>(visibleWindowCols)
+        || displayLeft <= m_rollingEpoch;
+    return reachesPlayhead && reachesLeft;
+}
+
 void SpectrogramItem::cancelPendingRasterLocked() {
     if (!m_rasterPending) {
         return;
@@ -7732,6 +8049,7 @@ void SpectrogramItem::releaseStorageLocked() {
     m_zoomFillActive = false;
     m_seekFillActive = false;
     m_precomputedReady = false;
+    publishViewFilledLocked(false);
     m_idleView = {};
     invalidateCanvas();
     // Once shown, the columns come from a fresh session, which starts with

@@ -203,6 +203,26 @@ void WaveformItem::setBgColor(const QColor &color) {
     update(dirtyRect);
 }
 
+QColor WaveformItem::emptyLineColor() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_emptyLineColor;
+}
+
+void WaveformItem::setEmptyLineColor(const QColor &color) {
+    QRect dirtyRect;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_emptyLineColor == color) {
+            return;
+        }
+        m_emptyLineColor = color;
+        markDirtyAllLocked();
+        dirtyRect = m_dirtyRect;
+    }
+    emit emptyLineColorChanged();
+    update(dirtyRect);
+}
+
 void WaveformItem::itemChange(ItemChange change, const ItemChangeData &value) {
     QQuickPaintedItem::itemChange(change, value);
     if (change == ItemDevicePixelRatioHasChanged) {
@@ -368,7 +388,15 @@ void WaveformItem::updateWaveformCacheLocked() {
     // In device pixels.
     cachePainter.setWorldTransform(QTransform::fromScale(1.0 / scale, 1.0 / scale));
     cachePainter.fillRect(dirty, m_bgColor);
+    // Where the waveform ends: nothing drawn past it but the empty line.
+    int drawWidth = 0;
     if (!m_peaksData.isEmpty()) {
+        drawWidth = std::clamp(
+            static_cast<int>(std::floor(static_cast<double>(drawnWidthLocked(
+                m_generatedSeconds, m_waveformComplete, m_durationSeconds))
+                * scale + 1e-6)),
+            0,
+            m_waveformCache.width());
         cachePainter.setPen(Qt::NoPen);
         cachePainter.setBrush(m_barColor);
         const int count = m_peaksData.size();
@@ -376,12 +404,6 @@ void WaveformItem::updateWaveformCacheLocked() {
         // The thinnest bar is a logical pixel either way of the middle.
         const int minimumBar = std::max(1, static_cast<int>(std::lround(scale)));
         const auto *src = reinterpret_cast<const uchar *>(m_peaksData.constData());
-        const int drawWidth = std::clamp(
-            static_cast<int>(std::floor(static_cast<double>(drawnWidthLocked(
-                m_generatedSeconds, m_waveformComplete, m_durationSeconds))
-                * scale + 1e-6)),
-            0,
-            m_waveformCache.width());
         const int right = std::min(dirty.right() + 1, drawWidth);
         for (int x = dirty.x(); x < right; ++x) {
             const int idx = (count <= 1 || drawWidth <= 1) ? 0 : (x * (count - 1) / (drawWidth - 1));
@@ -390,6 +412,17 @@ void WaveformItem::updateWaveformCacheLocked() {
             const int y = static_cast<int>(half) - bar;
             cachePainter.drawRect(x, y, 1, bar * 2);
         }
+    }
+    // The empty line, a logical pixel thick through the middle, from the
+    // waveform's end to the item's, so that a waveform that ends early, or
+    // isn't analysed to the end yet, doesn't leave the rest of the bar
+    // blank (#373 H10).
+    const int lineLeft = std::max(dirty.x(), drawWidth);
+    const int lineRight = dirty.right() + 1;
+    if (m_emptyLineColor.alpha() > 0 && lineLeft < lineRight) {
+        const int thickness = std::max(1, static_cast<int>(std::lround(scale)));
+        const int lineTop = m_waveformCache.height() / 2 - thickness / 2;
+        cachePainter.fillRect(QRect(lineLeft, lineTop, lineRight - lineLeft, thickness), m_emptyLineColor);
     }
     cachePainter.end();
 

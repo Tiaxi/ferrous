@@ -2,18 +2,30 @@
 
 import QtQuick 2.15
 import org.kde.kirigami 2.20 as Kirigami
+import "../logic/ColorUtils.js" as ColorUtils
 
 // The background of a list row, shared by the library tree and the queue.
-// Put it first in a row delegate, which it fills except for the scrollbar
-// lane on the right: rows never cover the scrollbar.
+// Put it first in a row delegate, which it fills to the list's right edge,
+// so a tint ends where the pane does, with a scrollbar or without; the
+// list's overlay scrollbar draws its thumb over it (#373 H6). A list whose
+// scrollbar is not an overlay leaves its lane with scrollbarLane.
 //
-// - hovered: the hover tint, which fades in and out;
+// - hovered: the hover tint, which fades in and out: the main window's
+//   library and queue set the stronger rowHover;
 // - selected: the selection tint, or the inactive one while the list has
 //   no keyboard focus;
-// - focused (the current row of a list with keyboard focus): a 1 px ring;
+// - focused (the current row of a list with keyboard focus, while the
+//   keyboard is in use): a 1 px ring;
 //   on a selected row, the tint and the ring are one rectangle; on an
-//   unselected row, the ring alone, as in Breeze.
+//   unselected row, the ring alone, as in Breeze. A list whose scrollbar
+//   lies over the rows' right end sets focusRingLane, and the ring stops
+//   short of it, so the thumb never runs over the ring (#373 H12 Z12);
+//   the tint goes on under the lane.
 // Selection and focus change at once.
+//
+// - selectedHover (the queue's): a selected row under the pointer steps
+//   its selection tint toward the text colour, with the hover tint's own
+//   fade, so it answers the pointer as the other rows do.
 //
 // - opaque: the row also paints the view colour under its tints, so a row
 //   that slides over another while its list moves rows hides it.
@@ -22,18 +34,35 @@ Item {
 
     required property var uiPalette
     property bool hovered: false
+    // The hover tint: the window's, or a list's own.
+    property color hoverColor: root.uiPalette.hover
     property bool selected: false
     // Whether the list has keyboard focus: its selection is the inactive
     // tint otherwise.
     property bool active: true
     property bool focused: false
     property bool opaque: false
-    // The scrollbar lane on the right, which the row leaves free.
-    property real scrollbarLane: Kirigami.Units.largeSpacing
+    // The room on the right the row leaves free, for a scrollbar that
+    // takes a lane of its own.
+    property real scrollbarLane: 0
+    // The room on the right the focus ring keeps clear of, for an overlay
+    // scrollbar's lane while it shows.
+    property real focusRingLane: 0
+    readonly property real ringLane: root.focused ? root.focusRingLane : 0
+    property bool selectedHover: false
 
-    readonly property color tintColor: root.selected
-        ? (root.active ? root.uiPalette.selection : root.uiPalette.selectionInactive)
-        : "transparent"
+    readonly property color selectionColor: root.active ? root.uiPalette.selection : root.uiPalette.selectionInactive
+    // How far the selection has stepped toward its hovered colour: the
+    // hover tint's opacity, which fades in and out.
+    readonly property real selectionHoverLevel: root.selectedHover ? hoverTint.opacity : 0
+    readonly property color tintColor: !root.selected
+        ? "transparent"
+        : (root.selectionHoverLevel > 0
+            ? ColorUtils.mixColor(root.selectionColor,
+                                  root.active ? root.uiPalette.selectionHovered
+                                              : root.uiPalette.selectionInactiveHovered,
+                                  root.selectionHoverLevel)
+            : root.selectionColor)
 
     anchors.fill: parent
     anchors.rightMargin: root.scrollbarLane
@@ -49,7 +78,7 @@ Item {
         id: hoverTint
         objectName: "rowBackgroundHover"
         anchors.fill: parent
-        color: root.uiPalette.hover
+        color: root.hoverColor
         opacity: root.hovered ? 1 : 0
         visible: opacity > 0
 
@@ -66,9 +95,21 @@ Item {
         id: tint
         objectName: "rowBackgroundTint"
         anchors.fill: parent
+        anchors.rightMargin: root.ringLane
         color: root.tintColor
         border.width: root.focused ? 1 : 0
         border.color: root.uiPalette.focusRing
         visible: root.selected || root.focused
+    }
+
+    // The tint under the lane the ring keeps clear of.
+    Rectangle {
+        objectName: "rowBackgroundTintLane"
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: root.ringLane
+        color: root.tintColor
+        visible: root.selected && root.ringLane > 0
     }
 }

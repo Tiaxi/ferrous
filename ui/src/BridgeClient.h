@@ -52,7 +52,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(PlaybackClock *playbackClock READ playbackClock CONSTANT)
     Q_PROPERTY(QString durationText READ durationText NOTIFY playbackChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds NOTIFY playbackChanged)
-    Q_PROPERTY(double volume READ volume NOTIFY snapshotChanged)
+    // The volume asked for last, from the time it is asked for, or the
+    // backend's once it has taken every request: see setVolume.
+    Q_PROPERTY(double volume READ volume NOTIFY volumeChanged)
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
     Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
     Q_PROPERTY(QObject* queueRows READ queueRows CONSTANT)
@@ -194,6 +196,11 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QVariantList itunesArtworkResults READ itunesArtworkResults NOTIFY itunesArtworkChanged)
     Q_PROPERTY(bool itunesArtworkLoading READ itunesArtworkLoading NOTIFY itunesArtworkChanged)
     Q_PROPERTY(QString itunesArtworkStatusText READ itunesArtworkStatusText NOTIFY itunesArtworkChanged)
+    // Whether the last search failed, as opposed to finding nothing, and
+    // the system's words for why, such as "Connection refused"; the status
+    // text says it in a sentence.
+    Q_PROPERTY(bool itunesArtworkFailed READ itunesArtworkFailed NOTIFY itunesArtworkChanged)
+    Q_PROPERTY(QString itunesArtworkErrorText READ itunesArtworkErrorText NOTIFY itunesArtworkChanged)
     // The track the suggestions were searched for, which applying one
     // changes: its trackPath, album, artist and the coverPath it had then
     // (empty without art). It stays that track while playback moves on.
@@ -358,6 +365,8 @@ public:
     QVariantList itunesArtworkResults() const;
     bool itunesArtworkLoading() const;
     QString itunesArtworkStatusText() const;
+    bool itunesArtworkFailed() const;
+    QString itunesArtworkErrorText() const;
     QVariantMap itunesArtworkTarget() const;
     QString diagnosticsText() const;
     QString diagnosticsLogPath() const;
@@ -543,6 +552,10 @@ signals:
     void trackIdentityChanged();
     void trackMetadataChanged();
     void snapshotChanged();
+    // The volume changed: at once for a request of the UI's, and with the
+    // snapshot for one of the backend's, such as a change made outside the
+    // app.
+    void volumeChanged();
     // The library's rows, roots, counts, view state and sort mode changed.
     void libraryChanged();
     // A scan's progress changed; it changes many times a second.
@@ -745,6 +758,12 @@ private:
     // The largest rendition of the iTunes artwork whose 100 px thumbnail is
     // `artworkUrl100`, or empty when it is not an Apple thumbnail URL.
     static QString itunesArtworkUrl(const QString &artworkUrl100);
+    // The line over `count` iTunes artwork suggestions, in plain words.
+    static QString itunesArtworkFoundText(int count);
+    // A suggestion's details before its full-size image has come, and while
+    // it downloads.
+    static QString itunesArtworkPendingDetailsText();
+    static QString itunesArtworkLoadingDetailsText();
     void startItunesArtworkAssetDownload(int candidateIndex);
     void applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult result);
     void resetItunesArtworkTempDir();
@@ -845,9 +864,15 @@ private:
     QString m_durationText{"00:00"};
     double m_durationSeconds{0.0};
     double m_volume{1.0};
+    // The volume requests sent to the backend. A snapshot's volume is the
+    // backend's once it has taken them all; one built before then still
+    // has the volume from before the latest.
+    quint64 m_volumeRequestsSent{0};
+    // The volume requests the latest snapshot says the backend had taken.
+    quint64 m_volumeRequestsTaken{0};
     // The rows' count, which follows the model's row signals.
     int m_queueLength{0};
-    QString m_queueDurationText{"00:00"};
+    QString m_queueDurationText{"0:00"};
     QueueRowsModel m_queueRowsModel;
     // Decodes large snapshots and frees dropped queue rows off the GUI
     // thread; stopped first when the client goes.
@@ -1006,6 +1031,8 @@ private:
     QVariantList m_itunesArtworkResults;
     bool m_itunesArtworkLoading{false};
     QString m_itunesArtworkStatusText;
+    // The system's error of a search that failed, empty otherwise.
+    QString m_itunesArtworkErrorText;
     // What itunesArtworkTarget describes.
     QVariantMap m_itunesArtworkTarget;
     quint64 m_itunesArtworkGeneration{0};

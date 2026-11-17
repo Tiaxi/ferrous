@@ -15,7 +15,13 @@ import "../logic/ColorUtils.js" as ColorUtils
 // album row shows its thumbnail after the chevron and its year at the right
 // end; a track row shows its playing or warning glyph in its album's chevron
 // column, its number under the album's thumbnail and its title where the
-// album's name starts.
+// album's name starts. A library folder's row is a folder header: a folder
+// glyph where an album has its thumbnail, its name semibold, and its track
+// count at the right end.
+//
+// What is playing is amber: the playing track's row, its glyph and its
+// title; a collapsed row that holds it, its name alone, with no glyph, so
+// that nothing on it reads as a play button (#373 H5).
 Rectangle {
     id: root
 
@@ -31,16 +37,60 @@ Rectangle {
     property var errorController: null
     // A narrow sidebar: the header shows only the track total.
     property bool narrow: false
+    // Whether the keyboard is in use, which the current row's ring shows
+    // only then. Read as the pane is made, so the app follows the input
+    // from the start, before the tree first has the focus.
+    readonly property bool keyboardInUse: InputModality.keyboard
 
     // The tree's geometry: the inset of the first chevron, the indent step,
-    // and the chevron, thumbnail and gaps after it.
+    // and the chevron, thumbnail and gaps after it. The chevrons and the
+    // state glyphs, and so the indent step, grow with a larger font.
     readonly property int rowInset: 12
-    readonly property int indentStep: 16
-    readonly property int chevronSize: 16
+    readonly property int indentStep: root.chevronSize
+    readonly property int chevronSize: root.uiPalette.scaledSize(16)
     readonly property int chevronGap: 6
     readonly property int thumbnailSize: 20
     readonly property int thumbnailGap: 8
-    readonly property int stateGlyphSize: 12
+    // An album without a cover, or whose cover failed to load: the
+    // now-playing stand-in's mark, drawn for 20 px, on a tile of the plot's
+    // floor with a 1 px edge, in the thumbnail's place, so its name lines
+    // up with its neighbours' and the app has one way to say "no cover"
+    // (#373 H14 F2; H12 Z2: the floor's swatch alone, at about 1:1 on the
+    // view, read as a cover that failed to load; H13: Breeze's audio disc
+    // glyph). A cover that has not loaded yet has the hover tint for the
+    // moment it takes, so that rows coming into view do not flash the
+    // mark before their covers.
+    readonly property url thumbnailPlaceholderMark: Qt.resolvedUrl("../assets/no-art-mark-20.svg")
+    readonly property color thumbnailLoadingColor: root.uiPalette.hover
+    // No fill of the thumbnail's own under the tile: the loading tint,
+    // wholly transparent, so that the fill changes as a cover loads, which
+    // the thumbnail repaints on (Kirigami's ShadowedTexture does not for
+    // its image alone under the software renderer).
+    readonly property color thumbnailMissingColor: ColorUtils.withAlpha(root.thumbnailLoadingColor, 0)
+    // The year, and a library folder's track count, 4 px in from the
+    // text's right end (#373 H11), clear of the scrollbar.
+    readonly property int yearInset: Kirigami.Units.smallSpacing
+    readonly property int stateGlyphSize: root.uiPalette.scaledSize(12)
+    // An unreadable track's mark: the status bar's warning sign, at its
+    // size, in the negative colour, as the queue's (#373 H35 AC1). It fills
+    // the chevron column it is centred in.
+    readonly property string warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
+    readonly property int warningGlyphSize: root.uiPalette.scaledSize(16)
+    // A library folder's glyph, in the thumbnail's column.
+    readonly property int folderGlyphSize: root.uiPalette.scaledSize(16)
+
+    // Each library folder's track count, by its path.
+    readonly property var rootTrackCounts: {
+        const counts = {}
+        const entries = root.uiBridge.libraryRootEntries || []
+        for (let i = 0; i < entries.length; ++i) {
+            const path = String(entries[i].path || "")
+            if (path.length > 0) {
+                counts[path] = Number(entries[i].trackCount) || 0
+            }
+        }
+        return counts
+    }
 
     // The playing track, and what the playback is doing with it.
     readonly property string currentTrackPath: root.uiBridge.currentTrackPath || ""
@@ -148,18 +198,63 @@ Rectangle {
 
                 // Expanding a row opens its children downward: they are in
                 // place at once, under the rows below, which slide down and
-                // uncover them; collapsing slides those rows back up over
-                // the children as they fade. The toggled row and the rows
-                // above it stay put. Only a toggle moves: the controller
-                // sets `animatesToggle` while the view lays it out, so
-                // scans, searches and restores change the rows at once.
+                // uncover them; collapsing is the same played back, the
+                // rows sliding up over the children, on the same duration
+                // and curve (#373 H7, H9 T5). The children show only above
+                // the fold, the top of the rows sliding: no child's text is
+                // ever under a sliding row's, and none shows below the last
+                // row either. The toggled row and the rows above it stay
+                // put. Only a toggle moves: the controller sets
+                // `animatesToggle` while the view lays it out, and starts
+                // the fold with it, so scans, searches and restores change
+                // the rows at once.
                 property bool animatesToggle: false
-                readonly property int toggleDuration: Kirigami.Units.shortDuration
+                readonly property int toggleDuration: Kirigami.Units.longDuration
                 readonly property bool togglesMove: libraryAlbumView.animatesToggle
                     && libraryAlbumView.toggleDuration > 0
                 readonly property QtObject openAnimation: treeOpenAnimation
                 readonly property QtObject closeAnimation: treeCloseAnimation
-                readonly property QtObject closeFadeAnimation: treeCloseFadeAnimation
+                readonly property QtObject foldAnimation: treeFoldAnimation
+                // Where the rows below the toggled one are, in content
+                // coordinates: the top of the first, as it slides.
+                property real foldEdge: 0
+                readonly property bool folding: treeFoldAnimation.running
+
+                // Starts the fold of a toggle that inserted (`delta` > 0)
+                // or removed rows under the row at `index`, as the view
+                // starts sliding the rows below.
+                function startFold(index, delta) {
+                    if (!libraryAlbumView.togglesMove || index < 0 || delta === 0) {
+                        return
+                    }
+                    const row = libraryAlbumView.itemAtIndex(index)
+                    const top = (row ? row.y : index * libraryAlbumView.rowHeight) + libraryAlbumView.rowHeight
+                    const span = Math.abs(delta) * libraryAlbumView.rowHeight
+                    treeFoldAnimation.stop()
+                    treeFoldAnimation.from = delta > 0 ? top : top + span
+                    treeFoldAnimation.to = delta > 0 ? top + span : top
+                    libraryAlbumView.foldEdge = treeFoldAnimation.from
+                    treeFoldAnimation.start()
+                }
+
+                NumberAnimation {
+                    id: treeFoldAnimation
+                    objectName: "libraryFoldAnimation"
+                    target: libraryAlbumView
+                    property: "foldEdge"
+                    duration: libraryAlbumView.toggleDuration
+                    easing.type: Easing.OutCubic
+                }
+
+                add: Transition {
+                    objectName: "libraryOpenAddTransition"
+                    enabled: libraryAlbumView.togglesMove
+                    SequentialAnimation {
+                        PropertyAction { property: "folded"; value: true }
+                        PauseAnimation { duration: libraryAlbumView.toggleDuration }
+                        PropertyAction { property: "folded"; value: false }
+                    }
+                }
                 addDisplaced: Transition {
                     objectName: "libraryOpenTransition"
                     enabled: libraryAlbumView.togglesMove
@@ -175,20 +270,14 @@ Rectangle {
                         PropertyAction { property: "z"; value: 1 }
                     }
                 }
+                // The children stay, whole, until the rows below have
+                // covered them; then the view pools them.
                 remove: Transition {
                     objectName: "libraryCloseRemoveTransition"
                     enabled: libraryAlbumView.togglesMove
                     SequentialAnimation {
-                        NumberAnimation {
-                            id: treeCloseFadeAnimation
-                            objectName: "libraryCloseFadeAnimation"
-                            property: "opacity"
-                            to: 0
-                            duration: libraryAlbumView.toggleDuration
-                            easing.type: Easing.OutCubic
-                        }
-                        // Pooled for reuse, the row must come back whole.
-                        PropertyAction { property: "opacity"; value: 1 }
+                        PropertyAction { property: "folded"; value: true }
+                        PauseAnimation { duration: libraryAlbumView.toggleDuration }
                     }
                 }
                 removeDisplaced: Transition {
@@ -208,6 +297,12 @@ Rectangle {
                 }
 
                 Component.onCompleted: root.controller.registerView(libraryAlbumView)
+                // The keyboard comes in: a row shows where it is.
+                onActiveFocusChanged: {
+                    if (libraryAlbumView.activeFocus) {
+                        root.controller.ensureCurrentRow()
+                    }
+                }
                 onContentYChanged: root.controller.scheduleLibraryViewStatePersist()
 
                 onContentHeightChanged: {
@@ -219,6 +314,7 @@ Rectangle {
                 }
 
                 ScrollBar.vertical: Components.LaneScrollBar {
+                    id: libraryScrollBar
                     objectName: "libraryScrollBar"
                     uiPalette: root.uiPalette
                 }
@@ -263,6 +359,7 @@ Rectangle {
                     readonly property bool isAlbumRow: rowTypeResolved === "album"
                     readonly property bool isSectionRow: rowTypeResolved === "section"
                     readonly property bool isTrackRow: rowTypeResolved === "track"
+                    readonly property bool isRootRow: rowTypeResolved === "root"
                     readonly property bool hasChildren: !isTrackRow && (count || 0) > 0
                     readonly property bool isExpanded: !!expanded
                     readonly property string selectionKeyResolved: selectionKey || ""
@@ -284,6 +381,9 @@ Rectangle {
                         : (title || name || artist || "")
                     readonly property bool showsThumbnail: isAlbumRow
                         || (isSectionRow && (coverPath || "") !== "")
+                    // A library folder's tracks, which its header counts.
+                    readonly property int rootTrackCount: isRootRow
+                        ? (root.rootTrackCounts[openPathResolved] || 0) : 0
                     readonly property bool albumCoverInViewport: showsThumbnail
                         && (y + height >= libraryAlbumView.contentY - 48)
                         && (y <= libraryAlbumView.contentY + libraryAlbumView.height + 48)
@@ -292,10 +392,13 @@ Rectangle {
                     // The model's role, so a row costs the same with any
                     // number of rows selected.
                     readonly property bool rowSelected: !!model.selected
-                    // The row the keyboard is on, in a list with focus.
+                    // The row the keyboard is on, in a list with focus,
+                    // while the keyboard is in use: a click selects with the
+                    // tint alone, and nothing is ringed at launch.
                     readonly property bool rowCurrent: libraryAlbumView.activeFocus
+                        && root.keyboardInUse
                         && selectionKeyResolved.length > 0
-                        && selectionKeyResolved === root.controller.selectedSelectionKey
+                        && selectionKeyResolved === root.controller.currentRowKey
                     readonly property string rowKindText: isTrackRow
                         ? I18n.i18nc("@info library row kind", "Track")
                         : (isAlbumRow
@@ -314,7 +417,8 @@ Rectangle {
                     readonly property string unreadableReason: isTrackRow && root.errorController
                         ? (root.errorController.unreadablePaths[trackPathResolved] || "")
                         : ""
-                    // A collapsed row that holds the playing track.
+                    // A collapsed row that holds the playing track: its
+                    // name is amber, quieter while the playback is paused.
                     readonly property bool holdsNow: hasChildren && !isExpanded
                         && root.playbackState !== "Stopped"
                         && root.currentTrackTreeKeys.indexOf(key || "") >= 0
@@ -333,15 +437,18 @@ Rectangle {
                             && fading.keys.indexOf(key || "") >= 0
                             ? treeNowFade.level : 0
                     }
+                    // As the queue's: an unreadable file's warning before
+                    // the stop mark of a track that failed to play.
+                    readonly property bool showsWarning: !isNow && unreadableReason.length > 0
                     readonly property string stateGlyph: {
-                        if (isNow || holdsNow) {
+                        if (isNow) {
                             return root.playbackState === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                         }
-                        if (isCurrentTrack) {
-                            return "media-playback-stop"
+                        if (showsWarning) {
+                            return root.warningGlyph
                         }
-                        return unreadableReason.length > 0 ? "dialog-warning" : ""
+                        return isCurrentTrack ? "media-playback-stop" : ""
                     }
 
                     // Where the chevron of this row's level is; a track's
@@ -351,10 +458,13 @@ Rectangle {
                     // level above: where a track's album has its chevron,
                     // and left of a collapsed album's or artist's own.
                     readonly property real stateX: Math.max(0, chevronX - root.indentStep)
+                    // The right end of the row's text: clear of the
+                    // scrollbar lane, and the inset.
+                    readonly property real textEnd: width - Kirigami.Units.largeSpacing - root.rowInset
                     readonly property real titleX: isTrackRow
                         ? stateX + root.chevronSize + root.chevronGap + root.thumbnailSize + root.thumbnailGap
                         : chevronX + root.chevronSize + root.chevronGap
-                            + (showsThumbnail ? root.thumbnailSize + root.thumbnailGap : 0)
+                            + (showsThumbnail || isRootRow ? root.thumbnailSize + root.thumbnailGap : 0)
 
                     function actionRowMap() {
                         return {
@@ -380,12 +490,18 @@ Rectangle {
                     // The rows below a toggled row over its children; see
                     // the view's transitions.
                     z: 1
+                    // A child of a toggled row, shown only above the fold
+                    // while its transition runs, and until the view pools it.
+                    property bool folded: false
+                    readonly property real shownHeight: folded
+                        ? Math.max(0, Math.min(height, libraryAlbumView.foldEdge - y))
+                        : height
 
                     // A pooled row comes back plain, whatever transition
                     // it left in.
                     ListView.onReused: {
                         libraryRow.z = 1
-                        libraryRow.opacity = 1
+                        libraryRow.folded = false
                     }
 
                     Accessible.role: Accessible.TreeItem
@@ -403,151 +519,241 @@ Rectangle {
                     Accessible.selectable: true
                     Accessible.selected: rowSelected
 
-                    Components.RowBackground {
-                        uiPalette: root.uiPalette
-                        opaque: true
-                        hovered: libraryRowMouseArea.containsMouse
-                        selected: libraryRow.rowSelected
-                        active: libraryAlbumView.activeFocus
-                        focused: libraryRow.rowCurrent
-                    }
+                    // The row as drawn, cut at the fold.
+                    Item {
+                        objectName: "libraryRowClip"
+                        width: libraryRow.width
+                        height: libraryRow.shownHeight
+                        clip: libraryRow.shownHeight < libraryRow.height
+                        visible: libraryRow.shownHeight > 0
 
-                    Kirigami.Icon {
-                        id: expanderIcon
-                        objectName: "libraryRowChevron"
-                        visible: libraryRow.hasChildren
-                        x: libraryRow.chevronX
-                        y: Math.round((libraryRow.height - height) / 2)
-                        width: root.chevronSize
-                        height: root.chevronSize
-                        source: !libraryRow.hasChildren
-                            ? ""
-                            : (libraryRow.isExpanded
-                                ? "arrow-down"
-                                : (Qt.application.layoutDirection === Qt.RightToLeft
-                                    ? "arrow-left" : "arrow-right"))
-                        isMask: true
-                        color: root.uiPalette.textSecondary
-                    }
+                        Item {
+                            objectName: "libraryRowContent"
+                            width: libraryRow.width
+                            height: libraryRow.height
 
-                    // Playing, paused or stopped, or unreadable; a dim
-                    // amber mark on a collapsed row holding the playing
-                    // track.
-                    Kirigami.Icon {
-                        objectName: "libraryRowState"
-                        readonly property string glyph: libraryRow.stateGlyph
-                        visible: glyph.length > 0
-                        x: Math.round(libraryRow.stateX + (root.chevronSize - width) / 2)
-                        y: Math.round((libraryRow.height - height) / 2)
-                        width: root.stateGlyphSize
-                        height: root.stateGlyphSize
-                        source: glyph
-                        isMask: true
-                        color: libraryRow.isNow || libraryRow.holdsNow
-                            ? root.uiPalette.now
-                            : root.uiPalette.textSecondary
-                        opacity: libraryRow.holdsNow ? 0.6 : 1
+                            Components.RowBackground {
+                                uiPalette: root.uiPalette
+                                opaque: true
+                                hovered: libraryRowMouseArea.containsMouse
+                                hoverColor: root.uiPalette.rowHover
+                                selected: libraryRow.rowSelected
+                                active: libraryAlbumView.activeFocus
+                                focused: libraryRow.rowCurrent
+                                // The ring stops at the scrollbar's lane
+                                // while it shows, clear of its thumb.
+                                focusRingLane: libraryScrollBar.visible ? libraryScrollBar.lane : 0
+                            }
 
-                        ToolTip.visible: stateHover.hovered && libraryRow.unreadableReason.length > 0
-                        ToolTip.delay: Kirigami.Units.toolTipDelay
-                        ToolTip.text: libraryRow.unreadableReason
+                            Kirigami.Icon {
+                                id: expanderIcon
+                                objectName: "libraryRowChevron"
+                                visible: libraryRow.hasChildren
+                                x: libraryRow.chevronX
+                                y: Math.round((libraryRow.height - height) / 2)
+                                width: root.chevronSize
+                                height: root.chevronSize
+                                source: !libraryRow.hasChildren
+                                    ? ""
+                                    : (libraryRow.isExpanded
+                                        ? "arrow-down"
+                                        : (Qt.application.layoutDirection === Qt.RightToLeft
+                                            ? "arrow-left" : "arrow-right"))
+                                isMask: true
+                                color: root.uiPalette.textSecondary
+                            }
 
-                        HoverHandler {
-                            id: stateHover
+                            // A track's state: playing, paused or stopped, or
+                            // unreadable.
+                            Kirigami.Icon {
+                                objectName: "libraryRowState"
+                                readonly property string glyph: libraryRow.stateGlyph
+                                visible: glyph.length > 0
+                                x: Math.round(libraryRow.stateX + (root.chevronSize - width) / 2)
+                                y: Math.round((libraryRow.height - height) / 2)
+                                width: libraryRow.showsWarning ? root.warningGlyphSize : root.stateGlyphSize
+                                height: width
+                                // At its size, which grows with the font.
+                                roundToIconSize: false
+                                source: glyph
+                                isMask: true
+                                color: libraryRow.isNow
+                                    ? root.uiPalette.now
+                                    : (libraryRow.showsWarning ? root.uiPalette.negative : root.uiPalette.textSecondary)
+
+                                ToolTip.visible: stateHover.hovered && libraryRow.unreadableReason.length > 0
+                                ToolTip.delay: Kirigami.Units.toolTipDelay
+                                ToolTip.text: libraryRow.unreadableReason
+
+                                HoverHandler {
+                                    id: stateHover
+                                }
+                            }
+
+                            // The glyph a track row had while it was now, fading
+                            // out over whatever it shows next.
+                            Kirigami.Icon {
+                                objectName: "libraryRowFadingState"
+                                visible: libraryRow.isTrackRow && libraryRow.amberLeft > 0
+                                x: Math.round(libraryRow.stateX + (root.chevronSize - width) / 2)
+                                y: Math.round((libraryRow.height - height) / 2)
+                                width: root.stateGlyphSize
+                                height: root.stateGlyphSize
+                                source: visible ? treeNowFade.target.glyph : ""
+                                isMask: true
+                                color: root.uiPalette.now
+                                opacity: libraryRow.amberLeft
+                            }
+
+                            // A library folder: the folder glyph in the thumbnail's
+                            // column, centred in it.
+                            Kirigami.Icon {
+                                objectName: "libraryRowFolderGlyph"
+                                visible: libraryRow.isRootRow
+                                x: Math.round(libraryRow.chevronX + root.chevronSize + root.chevronGap
+                                    + (root.thumbnailSize - width) / 2)
+                                y: Math.round((libraryRow.height - height) / 2)
+                                width: root.folderGlyphSize
+                                height: root.folderGlyphSize
+                                source: visible ? "folder" : ""
+                                isMask: true
+                                color: root.uiPalette.textSecondary
+                            }
+
+                            Kirigami.ShadowedImage {
+                                id: rowThumbnail
+                                objectName: "libraryRowThumbnail"
+                                // No cover to show: none, or one that failed.
+                                readonly property bool missing: status !== Image.Ready
+                                    && ((coverPath || "") === "" || status === Image.Error)
+                                visible: libraryRow.showsThumbnail
+                                x: libraryRow.chevronX + root.chevronSize + root.chevronGap
+                                y: Math.round((libraryRow.height - height) / 2)
+                                width: root.thumbnailSize
+                                height: root.thumbnailSize
+                                radius: 2
+                                color: status === Image.Ready ? "transparent"
+                                    : (rowThumbnail.missing ? root.thumbnailMissingColor
+                                                            : root.thumbnailLoadingColor)
+                                source: libraryRow.albumCoverInViewport
+                                    ? root.uiBridge.libraryThumbnailSource(coverPath || "", coverStamp || "")
+                                    : ""
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true
+                                sourceSize.width: Math.ceil(root.thumbnailSize * Screen.devicePixelRatio)
+                                sourceSize.height: Math.ceil(root.thumbnailSize * Screen.devicePixelRatio)
+                            }
+
+                            // An album without a cover: the no-art tile in
+                            // the thumbnail's place. Its mark's source never
+                            // changes, as a recycled row's would on every
+                            // scroll, which would load it again.
+                            Rectangle {
+                                objectName: "libraryRowCoverPlaceholder"
+                                visible: libraryRow.showsThumbnail && rowThumbnail.missing
+                                x: rowThumbnail.x
+                                y: rowThumbnail.y
+                                width: root.thumbnailSize
+                                height: root.thumbnailSize
+                                radius: rowThumbnail.radius
+                                color: root.uiPalette.plotFloor
+                                border.width: 1
+                                border.color: root.uiPalette.plotFloorEdge
+
+                                Image {
+                                    objectName: "libraryRowCoverPlaceholderMark"
+                                    anchors.fill: parent
+                                    source: root.thumbnailPlaceholderMark
+                                    sourceSize.width: root.thumbnailSize
+                                    sourceSize.height: root.thumbnailSize
+                                    smooth: false
+                                    cache: true
+                                    opacity: 0.85
+                                }
+                            }
+
+                            Text {
+                                objectName: "libraryRowNumber"
+                                visible: libraryRow.isTrackRow && libraryRow.trackNumberResolved > 0
+                                x: libraryRow.stateX + root.chevronSize + root.chevronGap
+                                width: root.thumbnailSize
+                                height: libraryRow.height
+                                verticalAlignment: Text.AlignVCenter
+                                horizontalAlignment: Text.AlignRight
+                                text: libraryRow.trackNumberResolved > 0 ? String(libraryRow.trackNumberResolved) : ""
+                                font.family: root.uiPalette.baseFont.family
+                                font.pointSize: root.uiPalette.basePointSize
+                                font.features: root.uiPalette.tabularFigures
+                                color: root.uiPalette.textTertiaryOn(libraryRow.rowSelected,
+                                    libraryRowMouseArea.containsMouse)
+                            }
+
+                            Text {
+                                id: rowTitleText
+                                objectName: "libraryRowTitle"
+                                x: libraryRow.titleX
+                                // Up to the year or the track count, or the
+                                // text's end.
+                                width: Math.max(0, yearText.x - x - (yearText.shown ? root.thumbnailGap : 0))
+                                height: libraryRow.height
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
+                                text: libraryRow.rowTitle
+                                font.family: root.uiPalette.baseFont.family
+                                font.pointSize: root.uiPalette.basePointSize
+                                readonly property color plainColor: libraryRow.unreadableReason.length > 0
+                                    ? root.uiPalette.textSecondary
+                                    : root.uiPalette.text
+                                // The title's share of amber, which sets its weight
+                                // and its colour together, so the two change in the
+                                // same frame: semibold while it is mostly amber. A
+                                // library folder's name is always semibold.
+                                readonly property real amber: libraryRow.isNow || libraryRow.holdsNow
+                                    ? 1 : libraryRow.amberLeft
+                                // The amber of a collapsed row that holds the
+                                // playing track while it is paused: quieter, yet
+                                // still 4.5:1 on the row (UiPalette.nowPausedOpacity).
+                                readonly property color nowColor: libraryRow.holdsNow && root.playbackState === "Paused"
+                                    ? ColorUtils.withAlpha(root.uiPalette.now, root.uiPalette.nowPausedOpacity)
+                                    : root.uiPalette.now
+                                font.weight: amber >= 0.5 || libraryRow.isRootRow ? Font.DemiBold : Font.Normal
+                                color: amber >= 1
+                                    ? nowColor
+                                    : (amber > 0 ? ColorUtils.mixColor(plainColor, nowColor, amber) : plainColor)
+                            }
+
+                            // An album's year, or a library folder's track count.
+                            Text {
+                                id: yearText
+                                objectName: libraryRow.isRootRow ? "libraryRowCount" : "libraryRowYear"
+                                // From the row's data, not from `visible`, which
+                                // also follows the row's own visibility. A row
+                                // without a year has no text, so its width is 0
+                                // and the title reaches the right end.
+                                readonly property bool shown: libraryRow.isRootRow
+                                    ? libraryRow.rootTrackCount > 0
+                                    : libraryRow.yearResolved > 0 && !libraryRow.isTrackRow
+                                visible: shown
+                                // At the text's right end. The width is the
+                                // implicit one: binding it again relays out the
+                                // text, whose implicit width the binding reads
+                                // (#474).
+                                x: libraryRow.textEnd - root.yearInset - implicitWidth
+                                height: libraryRow.height
+                                verticalAlignment: Text.AlignVCenter
+                                text: !shown
+                                    ? ""
+                                    : (libraryRow.isRootRow
+                                        ? I18n.i18ncp("@info library folder's track count", "%1 track", "%1 tracks",
+                                                      libraryRow.rootTrackCount)
+                                        : String(libraryRow.yearResolved))
+                                font.family: root.uiPalette.baseFont.family
+                                font.pointSize: root.uiPalette.smallPointSize
+                                font.features: root.uiPalette.tabularFigures
+                                color: root.uiPalette.textTertiaryOn(libraryRow.rowSelected,
+                                    libraryRowMouseArea.containsMouse)
+                            }
                         }
-                    }
-
-                    // The glyph the row had while it was now, or held
-                    // what was, fading out over whatever it shows next.
-                    Kirigami.Icon {
-                        objectName: "libraryRowFadingState"
-                        visible: libraryRow.amberLeft > 0
-                        x: Math.round(libraryRow.stateX + (root.chevronSize - width) / 2)
-                        y: Math.round((libraryRow.height - height) / 2)
-                        width: root.stateGlyphSize
-                        height: root.stateGlyphSize
-                        source: visible ? treeNowFade.target.glyph : ""
-                        isMask: true
-                        color: root.uiPalette.now
-                        opacity: libraryRow.amberLeft * (libraryRow.isTrackRow ? 1 : 0.6)
-                    }
-
-                    Kirigami.ShadowedImage {
-                        objectName: "libraryRowThumbnail"
-                        visible: libraryRow.showsThumbnail
-                        x: libraryRow.chevronX + root.chevronSize + root.chevronGap
-                        y: Math.round((libraryRow.height - height) / 2)
-                        width: root.thumbnailSize
-                        height: root.thumbnailSize
-                        radius: 2
-                        color: "transparent"
-                        source: libraryRow.albumCoverInViewport
-                            ? root.uiBridge.libraryThumbnailSource(coverPath || "", coverStamp || "")
-                            : ""
-                        fillMode: Image.PreserveAspectCrop
-                        asynchronous: true
-                        sourceSize.width: Math.ceil(root.thumbnailSize * Screen.devicePixelRatio)
-                        sourceSize.height: Math.ceil(root.thumbnailSize * Screen.devicePixelRatio)
-                    }
-
-                    Text {
-                        objectName: "libraryRowNumber"
-                        visible: libraryRow.isTrackRow && libraryRow.trackNumberResolved > 0
-                        x: libraryRow.stateX + root.chevronSize + root.chevronGap
-                        width: root.thumbnailSize
-                        height: libraryRow.height
-                        verticalAlignment: Text.AlignVCenter
-                        horizontalAlignment: Text.AlignRight
-                        text: libraryRow.trackNumberResolved > 0 ? String(libraryRow.trackNumberResolved) : ""
-                        font.family: root.uiPalette.baseFont.family
-                        font.pointSize: root.uiPalette.basePointSize
-                        font.features: root.uiPalette.tabularFigures
-                        color: root.uiPalette.textTertiaryOn(libraryRow.rowSelected)
-                    }
-
-                    Text {
-                        objectName: "libraryRowTitle"
-                        x: libraryRow.titleX
-                        width: Math.max(0, yearText.x - x - (yearText.shown ? root.thumbnailGap : 0))
-                        height: libraryRow.height
-                        verticalAlignment: Text.AlignVCenter
-                        elide: Text.ElideRight
-                        text: libraryRow.rowTitle
-                        font.family: root.uiPalette.baseFont.family
-                        font.pointSize: root.uiPalette.basePointSize
-                        font.weight: libraryRow.isNow ? Font.DemiBold : Font.Normal
-                        readonly property color plainColor: libraryRow.unreadableReason.length > 0
-                            ? root.uiPalette.textSecondary
-                            : root.uiPalette.text
-                        // A collapsed row's title is never amber.
-                        color: libraryRow.isNow
-                            ? root.uiPalette.now
-                            : (libraryRow.isTrackRow && libraryRow.amberLeft > 0
-                                ? ColorUtils.mixColor(plainColor, root.uiPalette.now, libraryRow.amberLeft)
-                                : plainColor)
-                    }
-
-                    Text {
-                        id: yearText
-                        objectName: "libraryRowYear"
-                        // From the row's data, not from `visible`, which
-                        // also follows the row's own visibility. A row
-                        // without a year has no text, so its width is 0
-                        // and the title reaches the right end.
-                        readonly property bool shown: libraryRow.yearResolved > 0 && !libraryRow.isTrackRow
-                        visible: shown
-                        // The right end: the scrollbar lane and the inset.
-                        // The width is the implicit one: binding it again
-                        // relays out the text, whose implicit width the
-                        // binding reads (#474).
-                        x: libraryRow.width - Kirigami.Units.largeSpacing - root.rowInset - implicitWidth
-                        height: libraryRow.height
-                        verticalAlignment: Text.AlignVCenter
-                        text: shown ? String(libraryRow.yearResolved) : ""
-                        font.family: root.uiPalette.baseFont.family
-                        font.pointSize: root.uiPalette.smallPointSize
-                        font.features: root.uiPalette.tabularFigures
-                        color: root.uiPalette.textTertiaryOn(libraryRow.rowSelected)
                     }
 
                     Drag.active: libraryRowMouseArea.drag.active && draggableLibraryItem
@@ -587,6 +793,7 @@ Rectangle {
                             libraryAlbumView.forceActiveFocus()
                             const rowMap = libraryRow.actionRowMap()
                             if (mouse.button === Qt.LeftButton && onChevron(mouse.x)) {
+                                root.controller.focusRow(libraryRow.selectionKeyResolved)
                                 root.controller.toggleNode(key)
                                 return
                             }

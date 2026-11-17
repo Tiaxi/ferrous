@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The transport's volume glyph while muted or at no volume: volume.svg's speaker with a 2 px cross
+     in place of the waves, a clear column between them. A one-colour mask, drawn in the text colour. -->
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+<path fill="#000" d="M6 2h2v1h-2z M5 3h3v1h-3z M4 4h4v1h-4z M1 5h7v1h-7z M10 5h2v1h-2z M14 5h2v1h-2z M1 6h7v1h-7z M11 6h4v1h-4z M1 7h7v1h-7z M12 7h2v1h-2z M1 8h7v1h-7z M12 8h2v1h-2z M1 9h7v1h-7z M11 9h4v1h-4z M1 10h7v1h-7z M10 10h2v1h-2z M14 10h2v1h-2z M4 11h4v1h-4z M5 12h3v1h-3z M6 13h2v1h-2z"/>
+</svg>

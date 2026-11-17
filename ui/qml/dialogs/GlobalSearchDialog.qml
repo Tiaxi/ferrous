@@ -7,7 +7,8 @@ import FerrousUi 1.0
 import "../components" as Components
 
 // The search palette (#373): an 800 px palette 32 px under the transport,
-// over a dim that covers the whole window. The field, then the results in
+// over a dim that covers the whole window; wider with a larger font, as its
+// text is (UiPalette.scaledSize). The field, then the results in
 // sections in the order of their best match, then the keys for the
 // selected row.
 Dialog {
@@ -51,17 +52,51 @@ Dialog {
 
     // The amber of the playing glyph over a cover's scrim.
     readonly property color nowOnScrim: "#f2b035"
-    // The palette's sizes at 1×.
-    readonly property real fieldHeight: 44
-    readonly property real headingHeight: 28
-    readonly property real resultHeight: 32
-    readonly property real footerHeight: 28
+    // The palette's sizes at 1×: these with the default font, and taller
+    // with a larger one, by its line.
+    readonly property real fieldHeight: Math.max(44, Math.round(regularMetrics.height) + 20)
+    readonly property real headingHeight: Math.max(28, Math.round(smallMetrics.height) + 8)
+    readonly property real resultHeight: Math.max(32, Math.round(regularMetrics.height) + 12)
+    // The footer's line of key hints, and the footer: 28 px, or as many
+    // lines as the hints wrap to and 4 px above and below them.
+    readonly property real footerLineHeight: Math.round(smallMetrics.height) + 4
+    readonly property real footerHeight: Math.max(28, footerHints.implicitHeight + 8)
+    // The line under the no-results title.
+    readonly property real hintHeight: Math.max(20, Math.round(smallMetrics.height) + 4)
+    // The footer's gaps: between a key and its action, half again a word
+    // space, so "Ctrl+Enter Add to Queue" reads as a key and an action, not
+    // as one phrase; between pairs three times that, so the pairs read
+    // apart (#373 H37: 4 px, a word space, and 22 px). 6 and 18 px at
+    // 10 pt; they grow with the font.
+    readonly property real hintKeyGap: Math.max(Kirigami.Units.mediumSpacing,
+                                                Math.round(1.5 * smallMetrics.advanceWidth(" ")))
+    readonly property real hintPairGap: 3 * root.hintKeyGap
     readonly property real sideInset: 16
-    readonly property real leadSize: 24
+    // The glyphs, the lead and the field's buttons are sized for the
+    // default font and grow with a larger one, as the transport's do
+    // (UiPalette.scaledSize): the glyphs 16 px, the playing glyph 12 px,
+    // the lead (a cover or a glyph's room) 24 px, and the clear and help
+    // buttons 28 px. The lead keeps 4 px clear of its row's edges, and the
+    // buttons 8 px of the field's. All are even, so a glyph centres on
+    // whole pixels in its button and over a cover.
+    readonly property int glyphSize: 2 * Math.round(root.uiPalette.toolIconSize / 2)
+    readonly property int nowGlyphSize: 2 * Math.round(root.uiPalette.scaledSize(12) / 2)
+    readonly property int leadSize: 2 * Math.floor(Math.min(root.uiPalette.scaledSize(24), root.resultHeight - 8) / 2)
+    readonly property int fieldButtonSize: 2 * Math.floor(Math.min(root.uiPalette.scaledSize(28), root.fieldHeight - 16) / 2)
     readonly property real titleX: root.sideInset + root.leadSize + 12
-    readonly property real titleWidth: 300
-    readonly property real contextX: root.titleX + root.titleWidth + 12
-    readonly property real lengthWidth: 44
+    // A track's length at the right: 44 px, or as wide as "00:00" in its
+    // font, and 12 px clear of the context. The title takes up to 300 px
+    // of what is left beside it (more with a larger font, as the palette is
+    // wider), and the context the rest, so the three never meet, whatever
+    // the font and the width of the palette.
+    readonly property real lengthWidth: Math.max(44, Math.ceil(lengthMetrics.advanceWidth))
+    readonly property real columnGap: 12
+    readonly property real titleWidth: {
+        const lengthLeft = root.width - root.sideInset - Kirigami.Units.largeSpacing - root.lengthWidth - root.columnGap
+        const room = lengthLeft - root.columnGap - root.titleX
+        return Math.max(0, Math.min(root.uiPalette.scaledSize(300), Math.round(room * 0.6)))
+    }
+    readonly property real contextX: root.titleX + root.titleWidth + root.columnGap
     // Where the palette's top is: set when it opens, from where the
     // transport is then.
     property real paletteTop: 32
@@ -88,7 +123,10 @@ Dialog {
     bottomPadding: 0
     leftPadding: 0
     rightPadding: 0
-    width: Math.min(800, (root.parent ? root.parent.width : 800) - 2 * root.sideInset)
+    // 800 px with the default font, wider with a larger one so its columns
+    // keep their measure (#373 H41), and 16 px clear of the window's sides.
+    readonly property int designWidth: root.uiPalette.scaledSize(800)
+    width: Math.min(root.designWidth, (root.parent ? root.parent.width : root.designWidth) - 2 * root.sideInset)
     height: Math.min(contentColumn.implicitHeight, root.maximumHeight)
     // At most 16 result rows tall, as a palette rather than a page (and
     // as many rows as a query has to bind as it changes), and 32 px clear
@@ -107,9 +145,10 @@ Dialog {
         objectName: "globalSearchBackground"
         color: root.uiPalette.view
         radius: 6
+        // The seam where two regions meet, all round: it parts the palette
+        // from the dimmed window, which on dark is nearly its colour.
         border.width: 1
-        border.color: Kirigami.ColorUtils.linearInterpolation(root.uiPalette.view, root.uiPalette.text,
-                                                              Kirigami.Theme.frameContrast)
+        border.color: root.uiPalette.seam
         shadow.xOffset: 0
         shadow.yOffset: 4
         shadow.size: 8
@@ -211,27 +250,42 @@ Dialog {
     readonly property int maxTitleRuns: 5
     function titleRuns(label, allEmphasized) {
         const text = String(label || "")
-        let segments = allEmphasized || !root.controller.globalSearchModelApi.highlightSegments
+        const segments = allEmphasized || !root.controller.globalSearchModelApi.highlightSegments
             ? [{ text: text, match: allEmphasized }]
             : root.controller.globalSearchModelApi.highlightSegments(text, queryField.text)
-        if (segments.length > root.maxTitleRuns) {
-            // Matches past the fourth run stay regular.
-            const tail = segments.slice(root.maxTitleRuns - 1).map(function(segment) { return segment.text }).join("")
-            segments = segments.slice(0, root.maxTitleRuns - 1).concat([{ text: tail, match: false }])
+        return root.layOutRuns(segments, root.maxTitleRuns, root.titleWidth, regularMetrics, semiboldMetrics)
+    }
+    // A result emphasises its match in its title only (#373 H10, H12): its
+    // context, such as the artist an album was found by, stays whole and
+    // regular, so it never outweighs the title.
+    // `segments` as at most `maxRuns` runs side by side in `room`: matches
+    // past the last run but one stay regular in the last.
+    function layOutRuns(segments, maxRuns, room, regular, semibold) {
+        if (segments.length > maxRuns) {
+            const tail = segments.slice(maxRuns - 1).map(function(segment) { return segment.text }).join("")
+            segments = segments.slice(0, maxRuns - 1).concat([{ text: tail, match: false }])
         }
         let runs = []
         let x = 0
         for (let i = 0; i < segments.length; ++i) {
-            const metrics = segments[i].match ? semiboldMetrics : regularMetrics
+            const metrics = segments[i].match ? semibold : regular
             const advance = metrics.advanceWidth(segments[i].text)
-            const room = Math.max(0, root.titleWidth - x)
-            runs.push({ text: segments[i].text, match: !!segments[i].match, x: Math.round(x), width: Math.min(advance, room) })
+            runs.push({ text: segments[i].text, match: !!segments[i].match, x: Math.round(x),
+                        width: Math.min(advance, Math.max(0, room - x)) })
             x += advance
         }
         return runs
     }
     FontMetrics { id: regularMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize }
     FontMetrics { id: semiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize; font.weight: Font.DemiBold }
+    FontMetrics { id: smallMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.smallPointSize }
+    TextMetrics {
+        id: lengthMetrics
+        text: "00:00"
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.smallPointSize
+        font.features: root.uiPalette.tabularFigures
+    }
 
     // What the keys act on: the selected result's type, "more", "recent",
     // "suggestion", or "none".
@@ -318,7 +372,7 @@ Dialog {
 
     contentItem: Item {
         id: contentColumn
-        implicitWidth: 800
+        implicitWidth: root.designWidth
         implicitHeight: root.fieldHeight + 1 + body.implicitHeight + 1 + root.footerHeight
 
         // The field: a search glyph, the query, and the clear and help
@@ -332,8 +386,8 @@ Dialog {
                 objectName: "globalSearchFieldIcon"
                 x: root.sideInset
                 y: Math.round((parent.height - height) / 2)
-                width: 16
-                height: 16
+                width: root.glyphSize
+                height: root.glyphSize
                 source: "search"
                 isMask: true
                 color: root.uiPalette.textSecondary
@@ -369,13 +423,13 @@ Dialog {
                 objectName: "globalSearchClearButton"
                 x: helpButton.x - width
                 y: Math.round((parent.height - height) / 2)
-                width: 28
-                height: 28
+                width: root.fieldButtonSize
+                height: root.fieldButtonSize
                 visible: queryField.text.length > 0
                 display: AbstractButton.IconOnly
                 icon.name: "edit-clear"
-                icon.width: 16
-                icon.height: 16
+                icon.width: root.glyphSize
+                icon.height: root.glyphSize
                 icon.color: root.uiPalette.textSecondary
                 text: I18n.i18nc("@action:button clear the search field", "Clear")
                 Accessible.name: text
@@ -392,12 +446,12 @@ Dialog {
                 objectName: "globalSearchHelpButton"
                 x: parent.width - 8 - width
                 y: Math.round((parent.height - height) / 2)
-                width: 28
-                height: 28
+                width: root.fieldButtonSize
+                height: root.fieldButtonSize
                 display: AbstractButton.IconOnly
                 icon.name: "question"
-                icon.width: 16
-                icon.height: 16
+                icon.width: root.glyphSize
+                icon.height: root.glyphSize
                 icon.color: root.uiPalette.textSecondary
                 text: I18n.i18nc("@action:button", "Search Syntax and Keys")
                 Accessible.name: text
@@ -423,8 +477,28 @@ Dialog {
             width: parent.width
             height: Math.max(0, contentColumn.height - y - 1 - root.footerHeight)
             clip: true
+            // The results' height: all of them, and 6 px under the last,
+            // where the palette has the room; otherwise as many rows, from
+            // the first, as fit it whole, and the rest scroll (#373 H11: the
+            // list ended in half a row). From the rows' kinds, not from the
+            // view's content height, which is an estimate while only some
+            // of its rows have items.
+            readonly property real resultsHeight: {
+                const room = root.maximumHeight - root.fieldHeight - 2 - root.footerHeight
+                const rows = root.controller.globalSearchModelApi
+                let used = 0
+                for (let i = 0; root.rowsRevision >= 0 && i < resultsView.count; ++i) {
+                    const kind = rows.rowDataAt(i).kind || ""
+                    const rowHeight = kind === "item" ? root.resultHeight : (kind === "" ? 0 : root.headingHeight)
+                    if (used + rowHeight > room) {
+                        return used
+                    }
+                    used += rowHeight
+                }
+                return used + resultsView.bottomMargin <= room ? used + resultsView.bottomMargin : used
+            }
             implicitHeight: root.resultsShown
-                ? resultsView.contentHeight + 6
+                ? body.resultsHeight
                 : (noResultsMessage.visible ? noResultsMessage.y + noResultsMessage.height : 0)
                     + (auxColumn.visible ? auxColumn.implicitHeight : 0)
                     + (noResultsMessage.visible || auxColumn.visible ? 8 : 0)
@@ -457,12 +531,18 @@ Dialog {
                 maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
                 opacity: root.searching ? 0.5 : 1
                 enabled: !root.searching
-                ScrollBar.vertical: ScrollBar {
+                // The app's lane scrollbar, as the library's and the
+                // queue's (#373 H12: Breeze's own was another hand here):
+                // over the lane the rows' text keeps clear of, its thumb
+                // over their tints, which run to the edge.
+                ScrollBar.vertical: Components.LaneScrollBar {
                     id: resultScrollBar
-                    policy: ScrollBar.AsNeeded
+                    objectName: "globalSearchScrollBar"
+                    uiPalette: root.uiPalette
                 }
-                // The lane the rows leave for the scrollbar, when it shows.
-                readonly property real scrollbarLane: resultScrollBar.size < 1 ? Kirigami.Units.largeSpacing : 0
+                // The lane the rows' text leaves for the scrollbar, when it
+                // shows.
+                readonly property real scrollbarLane: resultScrollBar.visible ? resultScrollBar.lane : 0
                 Keys.onPressed: function(event) {
                     if (root.handleResultKeys(event)) return
                     if (event.key === Qt.Key_Home || event.key === Qt.Key_End) {
@@ -495,6 +575,11 @@ Dialog {
                         && (root.controller.uiBridge.playbackState || "Stopped") !== "Stopped"
                     readonly property var titleRuns: isResult ? root.titleRuns(model.label, isNow) : []
                     readonly property string context: isResult ? root.rowContext(model, false) : ""
+                    // The context's room: up to the length's column, or the
+                    // row's end.
+                    readonly property real contextWidth: Math.max(0, (lengthText.visible
+                        ? lengthText.x - root.columnGap
+                        : width - root.sideInset - resultsView.scrollbarLane) - root.contextX)
                     // Asked for only when the shared tooltip shows.
                     function toolTipText() {
                         return model.label + "\n" + root.rowContext(model, true)
@@ -520,7 +605,6 @@ Dialog {
                         selected: resultRow.selected
                         active: true
                         focused: false
-                        scrollbarLane: resultsView.scrollbarLane
                     }
 
                     // A section's heading.
@@ -566,14 +650,14 @@ Dialog {
                     // file up again on the GUI thread whenever its source
                     // changes, which recycled rows would do on every query.
                     Loader {
-                        x: root.sideInset + (root.leadSize - 16) / 2
-                        y: Math.round((parent.height - 16) / 2)
+                        x: root.sideInset + (root.leadSize - root.glyphSize) / 2
+                        y: Math.round((parent.height - root.glyphSize) / 2)
                         active: resultRow.isResult && resultRow.rowType === "artist"
                         sourceComponent: artistGlyph
                     }
                     Loader {
-                        x: root.sideInset + (root.leadSize - 16) / 2
-                        y: Math.round((parent.height - 16) / 2)
+                        x: root.sideInset + (root.leadSize - root.glyphSize) / 2
+                        y: Math.round((parent.height - root.glyphSize) / 2)
                         active: resultRow.isResult && resultRow.rowType !== "artist"
                             && (model.coverUrl || "").length === 0 && !resultRow.isNow
                         sourceComponent: resultRow.rowType === "album" ? albumPlaceholder : trackPlaceholder
@@ -605,13 +689,13 @@ Dialog {
                         color: Qt.rgba(0, 0, 0, 0.55)
                     }
                     Loader {
-                        x: root.sideInset + (root.leadSize - 12) / 2
-                        y: Math.round((parent.height - 12) / 2)
+                        x: root.sideInset + (root.leadSize - root.nowGlyphSize) / 2
+                        y: Math.round((parent.height - root.nowGlyphSize) / 2)
                         active: resultRow.isNow
                         sourceComponent: Kirigami.Icon {
                             objectName: "globalSearchNowGlyph"
-                            width: 12
-                            height: 12
+                            width: root.nowGlyphSize
+                            height: root.nowGlyphSize
                             source: (root.controller.uiBridge.playbackState || "") === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                             isMask: true
@@ -707,11 +791,12 @@ Dialog {
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
                         color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
                     }
+                    // The context, whole and regular.
                     Text {
                         objectName: "globalSearchResultContext"
                         visible: resultRow.isResult
                         x: root.contextX
-                        width: Math.max(0, (lengthText.visible ? lengthText.x - 12 : parent.width - root.sideInset - resultsView.scrollbarLane) - x)
+                        width: resultRow.contextWidth
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
                         text: resultRow.context
@@ -726,7 +811,8 @@ Dialog {
                         objectName: "globalSearchResultLength"
                         visible: resultRow.isResult && resultRow.rowType === "track"
                         x: parent.width - root.sideInset - resultsView.scrollbarLane - width
-                        width: root.lengthWidth
+                        // Wider for a length of an hour or more.
+                        width: Math.max(root.lengthWidth, Math.ceil(implicitWidth))
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
                         horizontalAlignment: Text.AlignRight
@@ -754,7 +840,9 @@ Dialog {
                                 root.controller.activateSelection()
                             } else if (mouse.button === Qt.RightButton && resultRow.isResult) {
                                 root.contextRowData = root.controller.globalSearchModelApi.rowDataAt(resultRow.index)
-                                resultMenu.popup()
+                                // Where the click was, from the event rather
+                                // than the cursor's last known place.
+                                resultMenu.popup(rowMouse, mouse.x, mouse.y)
                             } else resultsView.forceActiveFocus()
                         }
                         onDoubleClicked: function(mouse) {
@@ -772,7 +860,7 @@ Dialog {
                 visible: root.noResults
                 y: 8
                 width: parent.width
-                height: root.suggestion.length > 0 ? root.resultHeight : root.resultHeight + 20
+                height: root.suggestion.length > 0 ? root.resultHeight : root.resultHeight + root.hintHeight
                 Text {
                     objectName: "globalSearchNoResultsTitle"
                     x: root.titleX
@@ -791,7 +879,7 @@ Dialog {
                     x: root.titleX
                     y: root.resultHeight - 6
                     width: parent.width - x - root.sideInset
-                    height: 20
+                    height: root.hintHeight
                     verticalAlignment: Text.AlignVCenter
                     elide: Text.ElideRight
                     text: I18n.i18nc("@info", "Check the spelling, or try fewer words.")
@@ -849,8 +937,8 @@ Dialog {
                         Kirigami.Icon {
                             x: root.sideInset + (root.leadSize - width) / 2
                             y: Math.round((parent.height - height) / 2)
-                            width: 16
-                            height: 16
+                            width: root.glyphSize
+                            height: root.glyphSize
                             source: auxRow.modelData.kind === "recent" ? "view-history" : "search"
                             isMask: true
                             color: root.uiPalette.textSecondary
@@ -900,19 +988,23 @@ Dialog {
             y: parent.height - height
             width: parent.width
             height: root.footerHeight
-            Row {
+            // The pairs wrap inside the palette when they don't fit on one
+            // line, as with a large font.
+            Flow {
+                id: footerHints
                 x: root.titleX
-                height: parent.height
-                spacing: 18
+                y: Math.round((parent.height - height) / 2)
+                width: parent.width - x - root.sideInset
                 Repeater {
                     model: root.keyHints
                     delegate: Row {
                         required property var modelData
+                        required property int index
                         objectName: "globalSearchKeyHint"
                         readonly property string keyText: modelData.key
                         readonly property string actionText: modelData.action
-                        height: footerBar.height
-                        spacing: 4
+                        height: root.footerLineHeight
+                        spacing: root.hintKeyGap
                         Text {
                             objectName: "globalSearchKeyHintKey"
                             height: parent.height
@@ -930,6 +1022,13 @@ Dialog {
                             font.family: root.uiPalette.baseFont.family
                             font.pointSize: root.uiPalette.smallPointSize
                             color: root.uiPalette.textSecondary
+                        }
+                        // The gap to the next pair; a Flow's spacing
+                        // would put it between the lines too.
+                        Item {
+                            visible: index < root.keyHints.length - 1
+                            width: root.hintPairGap - parent.spacing
+                            height: 1
                         }
                     }
                 }
@@ -951,7 +1050,7 @@ Dialog {
             id: searchHelp
             objectName: "globalSearchHelp"
             focus: true
-            width: Math.min(480, root.width - 2 * root.sideInset)
+            width: Math.min(root.uiPalette.scaledSize(480), root.width - 2 * root.sideInset)
             x: root.width - width - 8
             y: root.fieldHeight
             padding: 12
@@ -973,7 +1072,7 @@ Dialog {
             id: resultMenu
             MenuItem { text: I18n.i18nc("@action:inmenu", "Play"); icon.name: "media-playback-start"; onTriggered: root.controller.activateRow(root.contextRowData) }
             MenuItem { text: I18n.i18nc("@action:inmenu", "Add to Queue"); icon.name: "list-add"; onTriggered: root.controller.queueRow(root.contextRowData) }
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Show in Library"); onTriggered: root.controller.navigateSelectionToLibrary() }
+            MenuItem { text: I18n.i18nc("@action:inmenu", "Show in Library"); icon.name: "go-jump"; onTriggered: root.controller.navigateSelectionToLibrary() }
             MenuSeparator {}
             MenuItem { text: I18n.i18nc("@action:inmenu", "Open Containing Folder"); icon.name: "document-open-folder"; onTriggered: root.controller.openRowInFileBrowser(root.contextRowData) }
         }
@@ -985,8 +1084,8 @@ Dialog {
         id: artistGlyph
         Kirigami.Icon {
             objectName: "globalSearchArtistGlyph"
-            width: 16
-            height: 16
+            width: root.glyphSize
+            height: root.glyphSize
             source: "view-media-artist"
             isMask: true
             color: root.uiPalette.textSecondary
@@ -996,8 +1095,8 @@ Dialog {
         id: albumPlaceholder
         Kirigami.Icon {
             objectName: "globalSearchCoverPlaceholder"
-            width: 16
-            height: 16
+            width: root.glyphSize
+            height: root.glyphSize
             source: "media-optical-audio"
             isMask: true
             color: root.uiPalette.textSecondary
@@ -1007,8 +1106,8 @@ Dialog {
         id: trackPlaceholder
         Kirigami.Icon {
             objectName: "globalSearchCoverPlaceholder"
-            width: 16
-            height: 16
+            width: root.glyphSize
+            height: root.glyphSize
             source: "audio-x-generic"
             isMask: true
             color: root.uiPalette.textSecondary

@@ -14,12 +14,14 @@
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlExpression>
+#include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickItemGrabResult>
 #include <QQuickRenderControl>
 #include <QQuickRenderTarget>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QWheelEvent>
 #include <QtEndian>
@@ -30,12 +32,14 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <tuple>
 
 #include "../src/BridgeClient.h"
 // The plot layer's tests give the meter levels to draw.
 #define private public
+#include "../src/InputModality.h"
 #include "../src/LevelMeterItem.h"
 #undef private
 #include "../src/LibraryTreeModel.h"
@@ -330,7 +334,7 @@ private slots:
     void seekHoverShowsTheTimeUnderThePointer();
     void seekHoverShowsTheTimeAClickSeeksTo();
     void seekHoverFollowsTheWindowsDevicePixels();
-    void seekGesturesShowTheTimeBesideThePlayhead();
+    void seekGesturesShowTheTimeOverThePlayhead();
     void seekHoverShowsNothingWithoutATrack();
     void seekTimeFadesOutWhereItWas();
     void seekTouchShowsNoHoverTime();
@@ -351,8 +355,12 @@ private slots:
     void queueColumnTextStaysInsideItsColumnAtTheMinimum();
     void lightPaletteLeavesNoFixedColours();
     void modeSwitchIconFollowsTheMode();
+    void modeSwitchSegmentsAreCheckableRadioButtons();
+    void modeSwitchStatesStayApart_data();
+    void modeSwitchStatesStayApart();
     void visualizationsHaveAccessibleRoles();
     void laneButtonsAreTabStopsThatRevealThemselves();
+    void laneButtonsAreCheckableToggles();
     void levelMeterReservesItsColumnAndReadsOut();
     void plotLayerDrawsWithContrast();
     void plotLayerShowsThePaneStates();
@@ -368,6 +376,7 @@ void AccessibilityTest::initTestCase() {
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
+    InputModality::registerQmlType();
 }
 
 void AccessibilityTest::init() {
@@ -392,17 +401,22 @@ void AccessibilityTest::everyPreferencesPageIsReachableByTab() {
     QObject *dialog = window->findChild<QObject *>(QStringLiteral("preferencesDialog"));
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    // Configure Ferrous has a window of its own, which takes the keys.
+    auto *prefs = qobject_cast<QQuickWindow *>(dialog);
+    QVERIFY(prefs != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(prefs));
+    QVERIFY(QTest::qWaitForWindowActive(prefs));
     QObject *pages = nullptr;
-    QTRY_VERIFY((pages = visibleItemNamed(window, QStringLiteral("preferencesPages"))) != nullptr);
+    QTRY_VERIFY((pages = visibleItemNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
     // The page list is a list of page tabs, and has the keyboard first.
-    QQuickItem *pageList = visibleItemNamed(window, QStringLiteral("preferencesPageList"));
+    QQuickItem *pageList = visibleItemNamed(prefs, QStringLiteral("preferencesPageList"));
     QVERIFY(pageList != nullptr);
     QCOMPARE(accessibleRole(pageList), QAccessible::PageTabList);
     QTRY_VERIFY(pageList->hasActiveFocus());
-    const int pageCount = 5;
+    const int pageCount = 4;
     for (int i = 0; i < pageCount; ++i) {
         QQuickItem *page = nullptr;
-        QTRY_VERIFY((page = visibleItemNamed(window, QStringLiteral("preferencesPage_%1").arg(i))) != nullptr);
+        QTRY_VERIFY((page = visibleItemNamed(prefs, QStringLiteral("preferencesPage_%1").arg(i))) != nullptr);
         QCOMPARE(accessibleRole(page), QAccessible::PageTab);
     }
     QCOMPARE(pages->property("currentIndex").toInt(), 0);
@@ -410,41 +424,41 @@ void AccessibilityTest::everyPreferencesPageIsReachableByTab() {
     // The arrow keys move down the list, and Ctrl+Tab cycles the pages.
     const auto tabTo = [&](QQuickItem *target) {
         for (int presses = 0; presses < 60 && !target->hasActiveFocus(); ++presses) {
-            QTest::keyClick(window, Qt::Key_Tab);
+            QTest::keyClick(prefs, Qt::Key_Tab);
         }
         return target->hasActiveFocus();
     };
     for (int i = 1; i < pageCount; ++i) {
-        QTest::keyClick(window, Qt::Key_Down);
+        QTest::keyClick(prefs, Qt::Key_Down);
         QTRY_COMPARE(pages->property("currentIndex").toInt(), i);
     }
-    QTest::keyClick(window, Qt::Key_Tab, Qt::ControlModifier);
+    QTest::keyClick(prefs, Qt::Key_Tab, Qt::ControlModifier);
     QTRY_COMPARE(pages->property("currentIndex").toInt(), 0);
-    QTest::keyClick(window, Qt::Key_PageUp, Qt::ControlModifier);
+    QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
     QTRY_COMPARE(pages->property("currentIndex").toInt(), pageCount - 1);
-    QTest::keyClick(window, Qt::Key_Backtab, Qt::ControlModifier | Qt::ShiftModifier);
+    QTest::keyClick(prefs, Qt::Key_Backtab, Qt::ControlModifier | Qt::ShiftModifier);
     QTRY_COMPARE(pages->property("currentIndex").toInt(), pageCount - 2);
 
     // The check boxes on the pages take focus too, and Space toggles them;
     // OK applies the change.
-    QTest::keyClick(window, Qt::Key_PageUp, Qt::ControlModifier);
-    QTRY_COMPARE(pages->property("currentIndex").toInt(), 2);
-    QQuickItem *levelMeterBox = visibleItemNamed(window, QStringLiteral("showLevelMeterCheckBox"));
+    QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
+    QTRY_COMPARE(pages->property("currentIndex").toInt(), 1);
+    QQuickItem *levelMeterBox = visibleItemNamed(prefs, QStringLiteral("showLevelMeterCheckBox"));
     QVERIFY(levelMeterBox != nullptr);
     // Off by default for a new install.
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QVERIFY(!bridge->property("showLevelMeter").toBool());
     QVERIFY(!levelMeterBox->property("checked").toBool());
     QVERIFY(tabTo(levelMeterBox));
-    QTest::keyClick(window, Qt::Key_Space);
+    QTest::keyClick(prefs, Qt::Key_Space);
     QTRY_VERIFY(levelMeterBox->property("checked").toBool());
     // Nothing changes until OK.
     QVERIFY(!bridge->property("showLevelMeter").toBool());
-    QQuickItem *ok = visibleItemNamed(window, QStringLiteral("preferencesOkButton"));
+    QQuickItem *ok = visibleItemNamed(prefs, QStringLiteral("preferencesOkButton"));
     QVERIFY(ok != nullptr);
     QVERIFY(tabTo(ok));
-    QTest::keyClick(window, Qt::Key_Space);
-    QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("preferencesPages")) == nullptr);
+    QTest::keyClick(prefs, Qt::Key_Space);
+    QTRY_VERIFY(!prefs->isVisible());
     QVERIFY(bridge->property("showLevelMeter").toBool());
 }
 
@@ -1254,7 +1268,8 @@ std::optional<SeekPoint> pointBetweenSteps(QQuickItem *seek, qreal fraction) {
     return std::nullopt;
 }
 
-// The seek bar's time: a native tooltip under the bar.
+// The seek bar's time: a native tooltip above the bar, over the line it
+// names.
 struct SeekTimeBox {
     QObject *box = nullptr;
 
@@ -1278,28 +1293,39 @@ struct SeekTimeBox {
     }
 };
 
-// Why `box` is not centred on `anchorX` under the bar, in the slider's
-// coordinates, to within the device pixel it is rounded to, as drawn; or an
-// empty text.
+// Why `box` is not over `anchorX`, in the slider's coordinates, as drawn:
+// above the bar, its bottom edge on the bar's top, so it covers none of the
+// waveform (#373 H33 AA2) and nothing under the bar (#373 H5); centred on
+// the line, to within the device pixel it is rounded to, or against the
+// bar's end where centring would take it past it; or an empty text.
 QString timeBoxPlacementError(QQuickItem *seek, const SeekTimeBox &box, qreal anchorX, qreal dpr) {
     auto *content = box.box->property("contentItem").value<QQuickItem *>();
     QQuickItem *popup = content != nullptr ? content->parentItem() : nullptr;
-    if (popup == nullptr) {
+    // A hover's time shows after a moment.
+    if (popup == nullptr || !QTest::qWaitFor([&]() { return popup->isVisible(); })) {
         return QStringLiteral("not drawn");
     }
     const QRectF drawn = popup->mapRectToScene(QRectF(0, 0, popup->width(), popup->height()));
     const QRectF bar = seek->mapRectToScene(QRectF(0, 0, seek->width(), seek->height()));
-    const qreal centre = drawn.center().x() - bar.left();
+    const qreal left = drawn.left() - bar.left();
+    const qreal right = drawn.right() - bar.left();
     const qreal slack = 0.5 / dpr + 1e-6;
     QStringList errors;
-    if (std::abs(centre - anchorX) > slack) {
-        errors.push_back(QStringLiteral("centred on %1, not %2").arg(centre).arg(anchorX));
+    const bool centred = std::abs((left + right) / 2 - anchorX) <= slack;
+    const bool atStart = std::abs(left) <= slack && anchorX < drawn.width() / 2 + slack;
+    const bool atEnd = std::abs(right - bar.width()) <= slack && anchorX > bar.width() - drawn.width() / 2 - slack;
+    if (!centred && !atStart && !atEnd) {
+        errors.push_back(QStringLiteral("from %1 to %2, not over %3").arg(left).arg(right).arg(anchorX));
+    }
+    if (left > anchorX + slack || right < anchorX - slack) {
+        errors.push_back(QStringLiteral("not over the line at %1").arg(anchorX));
     }
     if (!fuzzyEqual(drawn.left() * dpr, std::round(drawn.left() * dpr))) {
         errors.push_back(QStringLiteral("at %1 device pixels").arg(drawn.left() * dpr));
     }
-    if (drawn.top() < bar.bottom()) {
-        errors.push_back(QStringLiteral("over the bar"));
+    if (std::abs(drawn.bottom() - bar.top()) > slack) {
+        errors.push_back(QStringLiteral("its bottom at %1, not on the bar's top at %2")
+                             .arg(drawn.bottom()).arg(bar.top()));
     }
     return errors.join(QStringLiteral("; "));
 }
@@ -1685,8 +1711,11 @@ void AccessibilityTest::seekBarPlayheadStaysOnTheBarAtEitherEnd() {
         QSet<qint64> barWidths;
         int oddBars = 0;
         // Harness widths, some fractional, that give the bar even and odd
-        // widths; the layout gives it whole logical pixels.
-        for (const qreal width : {1000.0, 1001.0, 1002.0, 1003.0, 1004.5, 1005.25, 1006.75, 1007.0}) {
+        // widths, three or more of each whatever the width of the time
+        // beside it, which follows the font; the layout gives it whole
+        // logical pixels.
+        for (const qreal width :
+             {1000.0, 1001.0, 1002.0, 1003.0, 1004.5, 1005.25, 1006.75, 1007.0, 1008.0}) {
             harness->setWidth(width);
             control.polishItems();
             const qreal barWidth = bar->width();
@@ -1746,7 +1775,7 @@ void AccessibilityTest::seekHoverShowsTheTimeUnderThePointer() {
     QVERIFY(between.has_value());
 
     // Across the bar and at either end, the tooltip shows the second under
-    // the pointer, centred under it.
+    // the pointer, over it.
     struct Expected {
         qreal x;
         QString time;
@@ -1804,7 +1833,7 @@ void AccessibilityTest::seekHoverShowsTheTimeAClickSeeksTo() {
         const QPoint scene = seek->mapToScene(QPointF(x, y)).toPoint();
         QTest::mouseMove(window, scene);
         const QString hovered = timeBox.shown();
-        QVERIFY(!hovered.isEmpty());
+        QVERIFY2(!hovered.isEmpty(), qPrintable(QStringLiteral("at %1").arg(x)));
         QCOMPARE(recordedValues(root.data(), "seeks").size(), clicks);
 
         // A click there seeks to the time the box showed, and the box,
@@ -1859,7 +1888,7 @@ void AccessibilityTest::seekHoverFollowsTheWindowsDevicePixels() {
         const qreal width = seek->width();
 
         // At fractional pointer positions, and at either end, the box shows
-        // the time a click there seeks to, beside the pointer.
+        // the time a click there seeks to, over the pointer.
         for (const qreal x : {0.0, 0.4, 3.3, width * 0.37 + 0.6, width * 0.62 + 0.15, width - 0.2}) {
             hover(x);
             const QString time = minutesAndSeconds(secondsAtX(seek, x));
@@ -1870,7 +1899,7 @@ void AccessibilityTest::seekHoverFollowsTheWindowsDevicePixels() {
             } else if (x > width - 1) {
                 QCOMPARE(time, QStringLiteral("3:20"));
             }
-            // It is centred on the pointer; seekHoverShowsTheTimeUnderThePointer
+            // It is placed from the pointer; seekHoverShowsTheTimeUnderThePointer
             // checks where a window draws it.
             QVERIFY2(fuzzyEqual(timeBox.box->property("anchorX").toReal(), x),
                      qPrintable(QStringLiteral("at %1, %2: centred on %3")
@@ -1915,7 +1944,7 @@ void AccessibilityTest::seekHoverFollowsTheWindowsDevicePixels() {
     }
 }
 
-void AccessibilityTest::seekGesturesShowTheTimeBesideThePlayhead() {
+void AccessibilityTest::seekGesturesShowTheTimeOverThePlayhead() {
     QQmlEngine engine;
     QScopedPointer<QObject> root;
     QString errorText;
@@ -1929,8 +1958,8 @@ void AccessibilityTest::seekGesturesShowTheTimeBesideThePlayhead() {
     const qreal y = seek->height() / 2;
     const auto lineCentre = [&]() { return line->mapToItem(seek, QPointF(line->width() / 2, 0)).x(); };
 
-    // A drag past the bar's end shows the time beside the playhead, at the
-    // end, not beside the pointer.
+    // A drag past the bar's end shows the time over the playhead, at the
+    // end, not over the pointer.
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier,
                       seek->mapToScene(QPointF(seek->width() * 0.5, y)).toPoint());
     QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() * 0.7, y)).toPoint());
@@ -1963,7 +1992,7 @@ void AccessibilityTest::seekGesturesShowTheTimeBesideThePlayhead() {
     placementError = timeBoxPlacementError(seek, timeBox, dragEndX, dpr);
     QVERIFY2(placementError.isEmpty(), qPrintable(placementError));
 
-    // Held arrow keys show their time beside the playhead while the mouse
+    // Held arrow keys show their time over the playhead while the mouse
     // hovers elsewhere on the bar; the hover's returns when they end.
     QVERIFY(tabTo(window, seek));
     const QPoint hovered = seek->mapToScene(QPointF(seek->width() * 0.8, y)).toPoint();
@@ -2033,12 +2062,17 @@ struct SeekTimeFade {
 };
 
 // Hides the seek bar's time, shown in full, by `hide`, and follows its fade
-// out to its end: it fades where it was, with the time it showed.
-SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, const std::function<void()> &hide) {
+// out to its end: it fades where it was, with the time it showed. The hover
+// line, when given, fades with it, at its opacity in every frame and where
+// it was, if `lineFades`; otherwise it shows in none (#373 H3: it went at
+// once while the time faded).
+SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, const std::function<void()> &hide,
+                                QQuickItem *hoverLine = nullptr, bool lineFades = false) {
     SeekTimeFade fade;
     auto *content = box.box->property("contentItem").value<QQuickItem *>();
     QQuickItem *popup = content != nullptr ? content->parentItem() : nullptr;
-    if (popup == nullptr || !popup->isVisible() || !QTest::qWaitFor([&]() { return popup->opacity() >= 1.0; })) {
+    // A hover's time shows after a moment.
+    if (popup == nullptr || !QTest::qWaitFor([&]() { return popup->isVisible() && popup->opacity() >= 1.0; })) {
         fade.error = QStringLiteral("not shown in full");
         return fade;
     }
@@ -2048,9 +2082,25 @@ SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, co
     QSignalSpy moves(box.box, SIGNAL(xChanged()));
     QSignalSpy texts(box.box, SIGNAL(textChanged()));
     QStringList errors;
+    const qreal lineX = hoverLine != nullptr ? hoverLine->x() : 0.0;
+    if (hoverLine != nullptr && lineFades && !(hoverLine->isVisible() && hoverLine->opacity() >= 1.0)) {
+        errors.push_back(QStringLiteral("no hover line shown in full"));
+    }
+    const auto lineOpacity = [&]() {
+        return hoverLine->isVisible() ? hoverLine->opacity() : 0.0;
+    };
     const auto check = [&]() {
         if (!popup->isVisible()) {
             return;
+        }
+        if (hoverLine != nullptr) {
+            const qreal expected = lineFades ? popup->opacity() : 0.0;
+            if (std::abs(lineOpacity() - expected) > 1e-9 || (lineFades && hoverLine->x() != lineX)) {
+                errors.push_back(QStringLiteral("hover line at opacity %1 at %2, the time at %3")
+                                     .arg(lineOpacity())
+                                     .arg(hoverLine->x())
+                                     .arg(popup->opacity()));
+            }
         }
         if (popup->opacity() > 0.0 && popup->opacity() < 1.0) {
             ++fade.fadingFrames;
@@ -2070,6 +2120,9 @@ SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, co
     QObject::disconnect(frames);
     if (!ended) {
         errors.push_back(QStringLiteral("did not end"));
+    }
+    if (hoverLine != nullptr && hoverLine->isVisible()) {
+        errors.push_back(QStringLiteral("hover line still shown at %1").arg(hoverLine->opacity()));
     }
     if (!box.shown().isEmpty()) {
         errors.push_back(QStringLiteral("still shows %1").arg(box.shown()));
@@ -2099,9 +2152,12 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     const qreal dpr = window->effectiveDevicePixelRatio();
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QQuickItem *line = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
+    const QList<QQuickItem *> hoverLines = itemsNamed(window->contentItem(), QStringLiteral("seekHoverLine"));
+    QQuickItem *hoverLine = hoverLines.size() == 1 ? hoverLines.first() : nullptr;
     auto *bridge = qvariant_cast<QObject *>(root->property("bridge"));
     SeekTimeBox timeBox;
-    QVERIFY(seek != nullptr && line != nullptr && bridge != nullptr && timeBox.find(window));
+    QVERIFY(seek != nullptr && line != nullptr && hoverLine != nullptr && bridge != nullptr
+            && timeBox.find(window));
     // The app's style fades a tooltip out.
     QVERIFY(timeBox.box->property("exit").value<QObject *>() != nullptr);
     const qreal y = seek->height() / 2;
@@ -2119,8 +2175,9 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
         }
         return timeBoxPlacementError(seek, timeBox, anchorX, dpr);
     };
-    const auto expectFade = [&](const std::function<void()> &hide) {
-        const SeekTimeFade fade = followSeekTimeFade(window, timeBox, hide);
+    // The hover's time fades with its line; a gesture's has none.
+    const auto expectFade = [&](const std::function<void()> &hide, bool lineFades) {
+        const SeekTimeFade fade = followSeekTimeFade(window, timeBox, hide, hoverLine, lineFades);
         if (!fade.error.isEmpty()) {
             return fade.error;
         }
@@ -2133,7 +2190,7 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     QTest::mouseMove(window, middle->scene);
     error = expectShown(middleTime, middleX);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    error = expectFade([&]() { QTest::mouseMove(window, away); });
+    error = expectFade([&]() { QTest::mouseMove(window, away); }, true);
     QVERIFY2(error.isEmpty(), qPrintable(error));
 
     // A hover elsewhere shows its own time there, and so does a hover that
@@ -2146,7 +2203,7 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     error = expectShown(middleTime, middleX);
     QVERIFY2(error.isEmpty(), qPrintable(error));
 
-    // A drag shows the playhead's time beside it, and the hover's comes back
+    // A drag shows the playhead's time over it, and the hover's comes back
     // at the pointer where it ends.
     const QPoint dragEnd = seek->mapToScene(QPointF(seek->width() * 0.3, y)).toPoint();
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, middle->scene);
@@ -2163,20 +2220,21 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QCOMPARE(recordedValues(root.data(), "seeks").size(), 1);
 
-    // A touch's drag, which has no hover, fades its time out beside the
+    // A touch's drag, which has no hover, fades its time out over the
     // playhead.
     QTest::mouseMove(window, away);
     QPointingDevice *touchScreen = QTest::createTouchDevice();
     const QPoint touched = seek->mapToScene(QPointF(seek->width() * 0.2, y)).toPoint();
     QTest::touchEvent(window, touchScreen).press(0, touched, window);
     QTest::touchEvent(window, touchScreen).move(0, touched + QPoint(20, 0), window);
-    error = expectFade([&]() { QTest::touchEvent(window, touchScreen).release(0, touched + QPoint(20, 0), window); });
+    error = expectFade([&]() { QTest::touchEvent(window, touchScreen).release(0, touched + QPoint(20, 0), window); },
+                       false);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QCOMPARE(recordedValues(root.data(), "seeks").size(), 2);
 
     // Stopping fades the time out where it was; playing again shows it.
     QTest::mouseMove(window, later->scene);
-    error = expectFade([&]() { bridge->setProperty("playbackState", QStringLiteral("Stopped")); });
+    error = expectFade([&]() { bridge->setProperty("playbackState", QStringLiteral("Stopped")); }, true);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     error = expectShown(laterTime, laterX);
@@ -2188,7 +2246,7 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     error = expectShown(minutesAndSeconds(secondsAtX(seek, laterX)), laterX);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QVERIFY(minutesAndSeconds(secondsAtX(seek, laterX)) != laterTime);
-    error = expectFade([&]() { bridge->setProperty("durationSeconds", 0.0); });
+    error = expectFade([&]() { bridge->setProperty("durationSeconds", 0.0); }, true);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     bridge->setProperty("durationSeconds", 200.0);
     error = expectShown(laterTime, laterX);
@@ -2241,9 +2299,10 @@ void AccessibilityTest::seekTouchShowsNoHoverTime() {
 namespace {
 
 // The transport bar under a palette of the given colours, as Kirigami's
-// theme and the window's palette give them.
+// theme and the window's palette give them, and the transport's Header
+// colour set's background, `header`.
 QByteArray paletteTransportHarnessQml(const QString &window, const QString &base, const QString &alternateBase,
-                                      const QString &text, const QString &highlight) {
+                                      const QString &text, const QString &highlight, const QString &header) {
     return QStringLiteral(R"QML(
 import QtQuick 2.15
 import QtQuick.Controls 2.15
@@ -2294,6 +2353,9 @@ ApplicationWindow {
 
         Panes.TransportBar {
             width: parent.width
+            // The Header colour set's background, as the platform theme
+            // gives it to the transport.
+            Kirigami.Theme.backgroundColor: "%6"
             uiBridge: bridge
             uiPalette: uiPalette
             previousAction: previousAction
@@ -2312,7 +2374,7 @@ ApplicationWindow {
     }
 }
 )QML")
-        .arg(window, base, alternateBase, text, highlight)
+        .arg(window, base, alternateBase, text, highlight, header)
         .toUtf8();
 }
 
@@ -2347,13 +2409,16 @@ void AccessibilityTest::seekBarPlayheadContrastsWithTheBar_data() {
     QTest::addColumn<QString>("alternateBase");
     QTest::addColumn<QString>("text");
     QTest::addColumn<QString>("highlight");
+    QTest::addColumn<QString>("header");
     QTest::addColumn<bool>("dark");
-    QTest::newRow("breeze light") << "#eff0f1" << "#ffffff" << "#f7f7f7" << "#232629" << "#3daee9" << false;
-    QTest::newRow("breeze dark") << "#202326" << "#141618" << "#1d1f22" << "#fcfcfc" << "#3daee9" << true;
+    QTest::newRow("breeze light") << "#eff0f1" << "#ffffff" << "#f7f7f7" << "#232629" << "#3daee9" << "#dee0e2"
+                                  << false;
+    QTest::newRow("breeze dark") << "#202326" << "#141618" << "#1d1f22" << "#fcfcfc" << "#3daee9" << "#292c30"
+                                 << true;
     QTest::newRow("light, orange accent") << "#f3eee4" << "#fffbf2" << "#ece4d6" << "#1d1b16" << "#f67400"
-                                          << false;
+                                          << "#e6dccb" << false;
     QTest::newRow("dark, purple accent") << "#2a2e32" << "#1b1e20" << "#232629" << "#eff0f1" << "#9b59b6"
-                                         << true;
+                                         << "#31363b" << true;
 }
 
 void AccessibilityTest::seekBarPlayheadContrastsWithTheBar() {
@@ -2362,11 +2427,12 @@ void AccessibilityTest::seekBarPlayheadContrastsWithTheBar() {
     QFETCH(QString, alternateBase);
     QFETCH(QString, text);
     QFETCH(QString, highlight);
+    QFETCH(QString, header);
     QFETCH(bool, dark);
     QQmlEngine engine;
     QString errorText;
-    QScopedPointer<QObject> root(
-        createQml(engine, paletteTransportHarnessQml(window, base, alternateBase, text, highlight), &errorText));
+    QScopedPointer<QObject> root(createQml(
+        engine, paletteTransportHarnessQml(window, base, alternateBase, text, highlight, header), &errorText));
     auto *quickWindow = qobject_cast<QQuickWindow *>(root.data());
     QVERIFY2(quickWindow != nullptr, qPrintable(errorText));
     QVERIFY(QTest::qWaitForWindowExposed(quickWindow));
@@ -2394,12 +2460,13 @@ void AccessibilityTest::seekBarPlayheadContrastsWithTheBar() {
     QCOMPARE(casing.rgb() & 0xffffff, dark ? 0x000000u : 0xffffffu);
     QVERIFY(casing.alphaF() > 0.5f && casing.alphaF() < 1.0f);
 
-    // The bar is the chrome; the waveform is drawn on it, and the unplayed
-    // part is the chrome over it.
+    // The bar is the transport's chrome, its Header colour (#373 H13 P24);
+    // the waveform is drawn on it, and the unplayed part is the chrome over
+    // it.
     const QColor chrome = background->property("color").value<QColor>();
     const QColor played = waveform->property("barColor").value<QColor>();
     const QColor cover = unplayed->property("color").value<QColor>();
-    QCOMPARE(chrome, palette->property("chrome").value<QColor>());
+    QCOMPARE(chrome, QColor::fromString(header));
     QCOMPARE(waveform->property("bgColor").value<QColor>(), chrome);
     QCOMPARE(chrome.alphaF(), 1.0f);
     QCOMPARE(played.alphaF(), 1.0f);
@@ -2933,10 +3000,9 @@ void AccessibilityTest::queueHeaderAndRowsShareTheColumnWidths() {
     QTRY_VERIFY2((defaults = alignedWidths()).size() == columns.size(), qPrintable(problem));
     auto *pane = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
     QVERIFY(pane != nullptr);
-    // By default Artist and Album have a quarter of the table each, with the
-    // gap after them, and the title the rest: about 40% at the default
-    // font, where the glyph, number and length columns and the gaps take
-    // 130 px of a 1239 px table.
+    // By default Artist and Album have a little over a quarter and a little
+    // less of the room the text columns have, after the glyph, number and
+    // length columns and the gaps, and the title the rest.
     const auto checkShares = [&](const QList<qreal> &widths) {
         const qreal table = pane->width();
         const qreal gap = pane->property("columnGap").toReal();
@@ -2945,9 +3011,11 @@ void AccessibilityTest::queueHeaderAndRowsShareTheColumnWidths() {
             all << QString::number(width);
         }
         const QString described = QStringLiteral("%1 of %2").arg(all.join(QLatin1Char(' '))).arg(table);
-        for (int column : {3, 4}) {
-            QVERIFY2(std::abs(widths[column] + gap - table / 4) <= 1, qPrintable(described));
-        }
+        const qreal room = pane->property("defaultTextColumnsRoom").toReal();
+        QVERIFY2(std::abs(widths[3] - room * pane->property("defaultArtistColumnShare").toReal()) <= 1,
+                 qPrintable(described));
+        QVERIFY2(std::abs(widths[4] - room * pane->property("defaultAlbumColumnShare").toReal()) <= 1,
+                 qPrintable(described));
         const qreal rest = table - widths[0] - widths[1] - pane->property("titleGap").toReal()
             - widths[3] - widths[4] - widths[5] - 3 * gap - pane->property("rightPadding").toReal();
         QVERIFY2(std::abs(widths[2] - rest) <= 1, qPrintable(described));
@@ -3274,6 +3342,7 @@ static QByteArray lightHarnessQml() {
     return QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import org.kde.kirigami 2.20 as Kirigami
 import "components" as Components
 import "dialogs" as Dialogs
 import "panes" as Panes
@@ -3316,6 +3385,8 @@ ApplicationWindow {
 
     Panes.TransportBar {
         width: parent.width
+        // The theme's Header colour, a step darker than its window colour.
+        Kirigami.Theme.backgroundColor: "#e6dccb"
         uiBridge: bridge
         uiPalette: uiPalette
         previousAction: previousAction
@@ -3337,17 +3408,17 @@ ApplicationWindow {
         ListElement {
             fileName: "a.flac"; directory: "/music"; formatKind: "FLAC"; title: "A"
             artist: "X"; album: "Y"; genre: ""; year: ""; trackNo: "1"; discNo: ""
-            dirty: false; selected: true; errorText: ""; extraValues: ""
+            dirty: false; selected: true; errorText: ""; renameFailed: false; extraValues: ""
         }
         ListElement {
             fileName: "b.flac"; directory: "/music"; formatKind: "FLAC"; title: "B"
             artist: "X"; album: "Y"; genre: ""; year: ""; trackNo: "2"; discNo: ""
-            dirty: false; selected: false; errorText: ""; extraValues: ""
+            dirty: false; selected: false; errorText: ""; renameFailed: false; extraValues: ""
         }
         ListElement {
             fileName: "c.flac"; directory: "/music"; formatKind: "FLAC"; title: "C"
             artist: "X"; album: "Y"; genre: ""; year: ""; trackNo: "3"; discNo: ""
-            dirty: false; selected: false; errorText: ""; extraValues: ""
+            dirty: false; selected: false; errorText: ""; renameFailed: false; extraValues: ""
         }
     }
 
@@ -3418,14 +3489,15 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
         return a.red() == b.red() && a.green() == b.green() && a.blue() == b.blue();
     };
 
-    // The seek bar.
+    // The seek bar, on the transport's chrome: the theme's Header colour
+    // (#373 H13 P24).
+    const QColor header(QStringLiteral("#e6dccb"));
     QQuickItem *background = visibleItemNamed(window, QStringLiteral("seekBackground"));
     QVERIFY(background != nullptr);
-    QCOMPARE(background->property("color").value<QColor>(), QColor(QStringLiteral("#f3eee4")));
-    QCOMPARE(background->property("color").value<QColor>(), paletteColor("chrome"));
+    QCOMPARE(background->property("color").value<QColor>(), header);
     QQuickItem *unplayed = visibleItemNamed(window, QStringLiteral("seekUnplayed"));
     QVERIFY(unplayed != nullptr);
-    QVERIFY(sameRgb(unplayed->property("color").value<QColor>(), paletteColor("chrome")));
+    QVERIFY(sameRgb(unplayed->property("color").value<QColor>(), header));
     QQuickItem *playhead = visibleItemNamed(window, QStringLiteral("seekPlayhead"));
     QQuickItem *playheadLine = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
     QVERIFY(playhead != nullptr && playheadLine != nullptr);
@@ -3442,14 +3514,14 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     };
     findWaveforms(window->contentItem());
     QCOMPARE(waveforms.size(), 1);
-    QCOMPARE(waveforms.first()->property("bgColor").value<QColor>(), paletteColor("chrome"));
-    // The theme's `wave`, mixed 20% toward the text on a light theme.
+    QCOMPARE(waveforms.first()->property("bgColor").value<QColor>(), header);
+    // The theme's `wave`, mixed 30% toward the text on a light theme.
     const QColor wave = paletteColor("wave");
     const QColor text = paletteColor("text");
     const QColor played = waveforms.first()->property("barColor").value<QColor>();
-    QVERIFY2(std::abs(played.redF() - (wave.redF() * 0.8 + text.redF() * 0.2)) < 0.01
-                 && std::abs(played.greenF() - (wave.greenF() * 0.8 + text.greenF() * 0.2)) < 0.01
-                 && std::abs(played.blueF() - (wave.blueF() * 0.8 + text.blueF() * 0.2)) < 0.01,
+    QVERIFY2(std::abs(played.redF() - (wave.redF() * 0.7 + text.redF() * 0.3)) < 0.01
+                 && std::abs(played.greenF() - (wave.greenF() * 0.7 + text.greenF() * 0.3)) < 0.01
+                 && std::abs(played.blueF() - (wave.blueF() * 0.7 + text.blueF() * 0.3)) < 0.01,
              qPrintable(played.name()));
     QQuickItem *mute = visibleItemNamed(window, QStringLiteral("muteButton"));
     QVERIFY(mute != nullptr);
@@ -3460,8 +3532,11 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     // view, and a changed column's header is the text colour.
     QObject *tagEditor = qvariant_cast<QObject *>(root->property("tagEditor"));
     QVERIFY(QMetaObject::invokeMethod(tagEditor, "open"));
+    // Edit Tags has a window of its own.
+    auto *tags = qobject_cast<QQuickWindow *>(tagEditor);
+    QVERIFY(tags != nullptr && QTest::qWaitForWindowExposed(tags));
     QList<QQuickItem *> rows;
-    QTRY_COMPARE((rows = visibleRows(window->contentItem(), QStringLiteral("tagEditorRow"))).size(), 3);
+    QTRY_COMPARE((rows = visibleRows(tags->contentItem(), QStringLiteral("tagEditorRow"))).size(), 3);
     const auto rowTint = [](QQuickItem *row) {
         const QList<QQuickItem *> tints = row->findChildren<QQuickItem *>(QStringLiteral("rowBackgroundTint"));
         return tints.isEmpty() ? nullptr : tints.first();
@@ -3471,8 +3546,8 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
             || sameRgb(rowTint(rows[0])->property("color").value<QColor>(), paletteColor("selection")));
     QVERIFY(!rowTint(rows[1])->isVisible());
     QVERIFY(!rowTint(rows[2])->isVisible());
-    QQuickItem *genre = visibleItemNamed(window, QStringLiteral("tagEditorColumn_genre"));
-    QQuickItem *title = visibleItemNamed(window, QStringLiteral("tagEditorColumn_title"));
+    QQuickItem *genre = visibleItemNamed(tags, QStringLiteral("tagEditorColumn_genre"));
+    QQuickItem *title = visibleItemNamed(tags, QStringLiteral("tagEditorColumn_title"));
     QVERIFY(genre != nullptr && title != nullptr);
     const auto columnLabelColor = [](QQuickItem *column) {
         return column->findChildren<QQuickItem *>(QStringLiteral("tagEditorColumnLabel")).first()
@@ -3480,9 +3555,76 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     };
     QVERIFY(sameRgb(columnLabelColor(genre), paletteColor("text")));
     QVERIFY(sameRgb(columnLabelColor(title), paletteColor("textSecondary")));
-    QQuickItem *status = visibleItemNamed(window, QStringLiteral("tagEditorStatusLabel"));
+    QQuickItem *status = visibleItemNamed(tags, QStringLiteral("tagEditorStatusLabel"));
     QVERIFY(status != nullptr);
     QVERIFY(sameRgb(status->property("color").value<QColor>(), paletteColor("textSecondary")));
+}
+
+namespace {
+// Defined with the plot's contrast tests, below.
+QColor drawnAt(const QImage &image, const QQuickWindow *window, QQuickItem *item, QPointF point);
+} // namespace
+
+// The mode switch's segments tell assistive technology what they are:
+// radio buttons, checkable, the chosen one checked (#373 H12: they told of
+// their checked state changing but never that they could be checked, and
+// read as plain buttons). A click, Space and the press action choose a
+// mode; choosing the chosen one again leaves it chosen.
+void AccessibilityTest::modeSwitchSegmentsAreCheckableRadioButtons() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
+    QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
+    QVERIFY(viewer != nullptr && spectrogramButton != nullptr && waveformButton != nullptr);
+    const auto states = [&](QQuickItem *button) {
+        QAccessibleInterface *iface = inAccessibleTree(window, button);
+        return iface != nullptr ? iface->state() : QAccessible::State();
+    };
+    // Why the switch does not say `mode` is chosen, or "".
+    const auto problem = [&](int mode) -> QString {
+        for (QQuickItem *button : {spectrogramButton, waveformButton}) {
+            const bool chosen = button == (mode == 0 ? spectrogramButton : waveformButton);
+            const QAccessible::State state = states(button);
+            if (accessibleRole(button) != QAccessible::RadioButton) {
+                return QStringLiteral("%1 is not a radio button").arg(button->objectName());
+            }
+            if (!state.checkable) {
+                return QStringLiteral("%1 is not checkable").arg(button->objectName());
+            }
+            if (bool(state.checked) != chosen || button->property("checked").toBool() != chosen) {
+                return QStringLiteral("%1 checked %2").arg(button->objectName()).arg(bool(state.checked));
+            }
+        }
+        return {};
+    };
+    QCOMPARE(viewer->property("visualizationMode").toInt(), 0);
+    QTRY_VERIFY2(problem(0).isEmpty(), qPrintable(problem(0)));
+
+    // A click on the other one chooses it.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      waveformButton->mapToScene(QPointF(12, 12)).toPoint());
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
+    QTRY_VERIFY2(problem(1).isEmpty(), qPrintable(problem(1)));
+    // A click on the chosen one leaves it chosen.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      waveformButton->mapToScene(QPointF(12, 12)).toPoint());
+    QTest::qWait(50);
+    QCOMPARE(viewer->property("visualizationMode").toInt(), 1);
+    QVERIFY2(problem(1).isEmpty(), qPrintable(problem(1)));
+    // The press action, as a screen reader's, chooses the other.
+    QAccessibleInterface *iface = inAccessibleTree(window, spectrogramButton);
+    QVERIFY(iface != nullptr && iface->actionInterface() != nullptr);
+    iface->actionInterface()->doAction(QAccessibleActionInterface::pressAction());
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
+    QTRY_VERIFY2(problem(0).isEmpty(), qPrintable(problem(0)));
+    // The mode set elsewhere, as from the menu: the switch follows.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+    QTRY_VERIFY2(problem(1).isEmpty(), qPrintable(problem(1)));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
+    QTRY_VERIFY2(problem(0).isEmpty(), qPrintable(problem(0)));
 }
 
 void AccessibilityTest::modeSwitchIconFollowsTheMode() {
@@ -3494,35 +3636,387 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
     QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
     QVERIFY(viewer != nullptr && spectrogramButton != nullptr && waveformButton != nullptr);
-    // Real tool buttons with Breeze icons, tooltips and accessible names.
+    // Real tool buttons with glyphs, tooltips and accessible names: the
+    // spectrogram's the app icon's glide and harmonic as a 16 px symbolic
+    // mask (#373 H14 G7: Breeze's bar chart said statistics), the
+    // waveform's Breeze's.
     for (const auto &[button, name, icon] : {
-             std::tuple{spectrogramButton, QStringLiteral("Spectrogram"), QStringLiteral("view-statistics")},
+             std::tuple{spectrogramButton, QStringLiteral("Spectrogram"), QStringLiteral("spectrogram-symbolic.svg")},
              std::tuple{waveformButton, QStringLiteral("Waveform"), QStringLiteral("waveform")}}) {
         QVERIFY(button->inherits("QQuickToolButton"));
         QCOMPARE(accessibleRole(button), QAccessible::RadioButton);
         QCOMPARE(accessibleText(button, QAccessible::Name), name);
         // The tool button's text is its tooltip.
         QCOMPARE(button->property("text").toString(), name);
-        QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), icon);
+        QQuickItem *glyph = button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
+        QVERIFY(glyph != nullptr);
+        QVERIFY(glyph->property("isMask").toBool());
+        QTRY_VERIFY2(glyph->property("valid").toBool(), qPrintable(name));
+        if (button == spectrogramButton) {
+            QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), QString());
+            const QString source = evaluateOn(button, QStringLiteral("icon.source")).toUrl().toString();
+            QVERIFY2(source.endsWith(QStringLiteral("/assets/") + icon), qPrintable(source));
+            QCOMPARE(glyph->property("source").toUrl().toString(), source);
+        } else {
+            QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), icon);
+            QCOMPARE(glyph->property("source").toString(), icon);
+        }
     }
-    // The checked one is the mode: a solid fill, not a tint.
+    {
+        // The glyph's 16 px source: the app icon's small-size pair in its
+        // weight order, a 2 px lowest stroke from x 2 to 14, the icon's
+        // fundamental (#373 H16 I7: without it the other read as "/"), under
+        // a 1.5 px one, its 3rd harmonic (#373 H24: a 1.5 px glide under a
+        // 1.75 px harmonic, the reverse of the icon's taper, read as "/" over
+        // "_"), with round caps; no middle trace (#373 H22: at 16 px it
+        // crowded the two). Each starts on its own, in the same column, as the
+        // icon's traces do, with 1.5 px or more of clear space between them
+        // everywhere (#373 H23: from one vertex the two read as an angle
+        // sign). The lowest rises 2.5 px along its length, most of it in its
+        // first half, a glide (#373 H24: rising 1 px it read as a baseline;
+        // H20: level, as a chart's). The upper one's end is 1.5 px or more
+        // clear of the lowest stroke's end, and half way across 3 px or more
+        // clear of it; both inside the 16 px square with their caps. It is the
+        // app icon's top harmonic, a glide (#373 H19: it rose at 81 degrees and
+        // read as a hook): it starts at 40 to 55 degrees and bends over to
+        // under 35, steeper than the lowest everywhere, so that the two fan
+        // apart.
+        QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QString svg = QString::fromUtf8(file.readAll());
+        QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
+        QCOMPARE(svg.count(QStringLiteral("<path ")), 2);
+        // The lowest first, then the upper one.
+        const QRegularExpression stroke(QStringLiteral("stroke-width=\"([0-9.]+)\" stroke-linecap=\"round\" d=\"M"));
+        QList<double> widths;
+        for (auto match = stroke.globalMatch(svg); match.hasNext();) {
+            widths.push_back(match.next().captured(1).toDouble());
+        }
+        QCOMPARE(widths, (QList<double>{2.0, 1.5}));
+        const double halfWidths = (widths[0] + widths[1]) / 2;
+        const QRegularExpression path(QStringLiteral(
+            "d=\"M([0-9.]+) ([0-9.]+)C([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+)\""));
+        QList<QList<QPointF>> curves;
+        QList<QList<QPointF>> controlPoints;
+        for (auto match = path.globalMatch(svg); match.hasNext();) {
+            const QRegularExpressionMatch each = match.next();
+            QList<QPointF> controls;
+            for (int i = 1; i <= 8; i += 2) {
+                controls.push_back(QPointF(each.captured(i).toDouble(), each.captured(i + 1).toDouble()));
+            }
+            controlPoints.push_back(controls);
+            QList<QPointF> points;
+            for (int step = 0; step <= 200; ++step) {
+                const double t = step / 200.0;
+                const double u = 1 - t;
+                points.push_back(u * u * u * controls[0] + 3 * u * u * t * controls[1] + 3 * u * t * t * controls[2]
+                                 + t * t * t * controls[3]);
+            }
+            curves.push_back(points);
+        }
+        // The lowest stroke first, then the one over it.
+        QCOMPARE(curves.size(), 2);
+        const QList<QPointF> lowest = curves.takeFirst();
+        controlPoints.removeFirst();
+        {
+            // With its round caps, x 2 to 14; rising 2.5 px, never falling,
+            // more in its first half than in its second.
+            QCOMPARE(lowest.first().x(), 2.75);
+            QCOMPARE(lowest.last().x(), 13.25);
+            const double rise = lowest.first().y() - lowest.last().y();
+            QVERIFY2(rise >= 2.25 && rise <= 2.75, qPrintable(QString::number(rise)));
+            const QPointF middle = lowest[lowest.size() / 2];
+            QVERIFY(lowest.first().y() - middle.y() > middle.y() - lowest.last().y());
+            for (qsizetype i = 1; i < lowest.size(); ++i) {
+                QVERIFY(lowest[i].y() <= lowest[i - 1].y() + 1e-9);
+            }
+            for (const QPointF &point : lowest) {
+                QVERIFY(point.y() + widths[0] / 2 <= 16.0);
+            }
+        }
+        {
+            const QList<QPointF> &top = controlPoints.first();
+            const auto degrees = [](QPointF from, QPointF to) {
+                return std::atan2(from.y() - to.y(), to.x() - from.x()) * 180.0 / std::numbers::pi;
+            };
+            const double start = degrees(top[0], top[1]);
+            const double end = degrees(top[2], top[3]);
+            QVERIFY2(start >= 40 && start <= 55, qPrintable(QString::number(start)));
+            QVERIFY2(end > 0 && end < 35, qPrintable(QString::number(end)));
+        }
+        // Half way across, x 8, 3 px or more of clear space between them.
+        const auto heightAt = [](const QList<QPointF> &curve, double x) {
+            return std::min_element(curve.cbegin(), curve.cend(), [x](QPointF a, QPointF b) {
+                       return std::abs(a.x() - x) < std::abs(b.x() - x);
+                   })->y();
+        };
+        const double halfWay = heightAt(lowest, 8) - heightAt(curves[0], 8) - halfWidths;
+        QVERIFY2(halfWay >= 3.0, qPrintable(QString::number(halfWay)));
+        // Fanning apart: the height between them grows all the way across.
+        for (double x = 3.25; x <= 13.25; x += 0.5) {
+            const double before = heightAt(lowest, x - 0.5) - heightAt(curves[0], x - 0.5);
+            const double after = heightAt(lowest, x) - heightAt(curves[0], x);
+            QVERIFY2(after >= before - 0.05, qPrintable(QStringLiteral("at x %1: %2 after %3").arg(x).arg(after).arg(before)));
+        }
+        for (const QList<QPointF> &curve : curves) {
+            // Its own start, in the lowest one's column and above it, and
+            // 1.5 px or more of clear space between the strokes everywhere,
+            // caps included: no shared vertex.
+            QCOMPARE(curve.first().x(), lowest.first().x());
+            QVERIFY(curve.first().y() < lowest.first().y());
+            double nearest = 1e9;
+            for (const QPointF &p : curve) {
+                for (const QPointF &q : lowest) {
+                    nearest = std::min(nearest, std::hypot(p.x() - q.x(), p.y() - q.y()));
+                }
+            }
+            QVERIFY2(nearest - halfWidths >= 1.5, qPrintable(QString::number(nearest)));
+            QVERIFY2(lowest.last().y() - curve.last().y() - halfWidths >= 1.5, qPrintable(QString::number(curve.last().y())));
+            const double half = widths[1] / 2;
+            for (const QPointF &point : curve) {
+                QVERIFY(point.x() - half >= 0.0 && point.x() + half <= 16.0);
+                QVERIFY(point.y() - half >= 0.0 && point.y() + half <= 16.0);
+            }
+        }
+    }
+    // The checked one is the mode: a neutral plate, the plot's text colour
+    // over the switch's plate, 3:1 on it (#373 H28 V3; PlotToolButton's
+    // segmentFillOpacity), with its glyph in the text colour
+    // whole; the other's glyph is at 72 % but while pressed (#373 H11: the
+    // accent's solid fill read as keyboard focus; H12 Z4: whole under the
+    // pointer, it rivalled the chosen one). Nothing of the switch is in the
+    // accent, or in the plot's checked fill, without the keyboard's focus.
     const auto checkedFill = [](QQuickItem *button) {
         return button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonChecked"));
     };
+    const auto glyph = [](QQuickItem *button) {
+        return button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
+    };
+    QObject *tokens = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(tokens != nullptr);
+    const QColor accent = tokens->property("accent").value<QColor>();
+    const auto neutralPlate = [&](QQuickItem *chosen, QQuickItem *other, int mode) -> QString {
+        QVariant set;
+        QMetaObject::invokeMethod(tokens, "plotColors", Q_RETURN_ARG(QVariant, set), Q_ARG(QVariant, mode));
+        QObject *plot = set.value<QObject *>();
+        const QColor text = plot->property("plotText").value<QColor>();
+        const QColor fill = checkedFill(chosen)->property("color").value<QColor>();
+        if (!chosen->property("segment").toBool() || !other->property("segment").toBool()) {
+            return QStringLiteral("not segments");
+        }
+        if (!checkedFill(chosen)->isVisible() || checkedFill(other)->isVisible()) {
+            return QStringLiteral("the chosen one's plate does not show, or the other's does");
+        }
+        if (fill.red() != text.red() || fill.green() != text.green() || fill.blue() != text.blue()
+            || fill.alphaF() < 0.3f || fill.alphaF() > 0.55f
+            || std::abs(fill.alphaF() - chosen->property("segmentFillOpacity").toFloat()) > 0.005f) {
+            return QStringLiteral("the plate is %1").arg(fill.name(QColor::HexArgb));
+        }
+        if (fill == accent || fill == plot->property("checkedFill").value<QColor>()) {
+            return QStringLiteral("the plate is the accent");
+        }
+        for (QQuickItem *button : {chosen, other}) {
+            if (glyph(button)->property("color").value<QColor>() != text) {
+                return QStringLiteral("a glyph in %1").arg(glyph(button)->property("color").value<QColor>().name());
+            }
+        }
+        if (glyph(chosen)->opacity() != 1.0) {
+            return QStringLiteral("the chosen glyph at %1").arg(glyph(chosen)->opacity());
+        }
+        // Quiet with the keyboard's focus too, less so under the pointer:
+        // whole only while pressed (#373 H14 G4).
+        const double quiet = other->property("hovered").toBool() ? 0.85 : 0.72;
+        if (!other->property("down").toBool() && std::abs(glyph(other)->opacity() - quiet) > 0.005) {
+            return QStringLiteral("the other glyph at %1").arg(glyph(other)->opacity());
+        }
+        // The focus ring, the plot's, shows only with the keyboard's focus.
+        for (QQuickItem *button : {chosen, other}) {
+            QQuickItem *ring = button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonFocusRing"));
+            if (ring->isVisible() != button->property("visualFocus").toBool()) {
+                return QStringLiteral("a focus ring without the keyboard's focus");
+            }
+        }
+        return {};
+    };
     QVERIFY(spectrogramButton->property("checked").toBool());
-    QVERIFY(checkedFill(spectrogramButton)->isVisible());
-    QVERIFY(!checkedFill(waveformButton)->isVisible());
+    QVERIFY2(neutralPlate(spectrogramButton, waveformButton, 0).isEmpty(),
+             qPrintable(neutralPlate(spectrogramButton, waveformButton, 0)));
+    {
+        // As drawn, on the spectrogram's plate: neutral, with nothing of
+        // the accent's blue in it.
+        QTest::mouseMove(window, QPoint(20, 20));
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        const QColor drawn = drawnAt(image, window, spectrogramButton, QPointF(2.5, 2.5));
+        QVERIFY2(std::abs(drawn.blue() - drawn.red()) <= 12 && std::abs(drawn.green() - drawn.red()) <= 12,
+                 qPrintable(drawn.name()));
+        const QColor plate = drawnAt(image, window, waveformButton, QPointF(waveformButton->width() - 2.5, 2.5));
+        QVERIFY2(contrastRatio(drawn, plate) >= 1.4,
+                 qPrintable(QStringLiteral("%1 on %2").arg(drawn.name(), plate.name())));
+    }
+    // The chosen one's 1 px edge, inside it, at 3:1 or more on the plate
+    // and on its fill, as drawn (#373 H14 F4: the fill alone was 1.4 to
+    // 1.7:1), in both modes' plot colours.
+    const auto edgeProblem = [&](QQuickItem *chosen, QQuickItem *other) -> QString {
+        QQuickItem *edge = chosen->findChild<QQuickItem *>(QStringLiteral("plotToolButtonCheckedEdge"));
+        QQuickItem *otherEdge = other->findChild<QQuickItem *>(QStringLiteral("plotToolButtonCheckedEdge"));
+        if (edge == nullptr || !edge->isVisible() || otherEdge == nullptr || otherEdge->isVisible()) {
+            return QStringLiteral("the edge does not show on the chosen one alone");
+        }
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        const QColor line = drawnAt(image, window, chosen, QPointF(chosen->width() / 2, 0.5));
+        // The fill between the edge and the glyph.
+        const QColor fill = drawnAt(image, window, chosen, QPointF(chosen->width() / 2, 2.5));
+        const QColor plate = drawnAt(image, window, other, QPointF(other->width() - 2.5, 2.5));
+        if (contrastRatio(line, plate) < 3.0 || contrastRatio(line, fill) < 3.0) {
+            return QStringLiteral("edge %1 on plate %2 and fill %3").arg(line.name(), plate.name(), fill.name());
+        }
+        return {};
+    };
+    QVERIFY2(edgeProblem(spectrogramButton, waveformButton).isEmpty(),
+             qPrintable(edgeProblem(spectrogramButton, waveformButton)));
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
                       waveformButton->mapToScene(QPointF(12, 12)).toPoint());
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
     QTRY_VERIFY(waveformButton->property("checked").toBool());
     QVERIFY(!spectrogramButton->property("checked").toBool());
     QVERIFY(checkedFill(waveformButton)->isVisible());
+    QTest::mouseMove(window, QPoint(20, 20));
+    QTRY_VERIFY2(neutralPlate(waveformButton, spectrogramButton, 1).isEmpty(),
+                 qPrintable(neutralPlate(waveformButton, spectrogramButton, 1)));
+    QTRY_VERIFY2(edgeProblem(waveformButton, spectrogramButton).isEmpty(),
+                 qPrintable(edgeProblem(waveformButton, spectrogramButton)));
     // Space on the focused button sets the mode rather than playing.
     QVERIFY(tabTo(window, spectrogramButton));
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
     QVERIFY(spectrogramButton->property("checked").toBool());
+}
+
+void AccessibilityTest::modeSwitchStatesStayApart_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// The mode switch's states stay apart (#373 H14 G4): its buttons are 4 px
+// apart with 3 px of plate around them, so the keyboard's 2 px focus ring,
+// with its 1 px gap in the plate's colour, stays inside the plate and
+// clear of the chosen button's edge; the chosen glyph is whole, the other
+// at 72 %, and under the pointer at 85 % on a 14 % wash, which shows on
+// the plate and stays under the chosen one's plate. On both plots; in both
+// Breeze themes, UiFoundationsTest's plotSegmentHoverStaysUnderTheChosenPlate
+// and plotToolButtonDrawsCheckedAndFocusApart draw the hover and the ring.
+void AccessibilityTest::modeSwitchStatesStayApart() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *tokens = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(tokens != nullptr);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(viewer != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, mode)));
+    QQuickItem *plate = visibleItemNamed(window, QStringLiteral("visualizationModeSwitch"));
+    QQuickItem *chosen = visibleItemNamed(window, QStringLiteral("visualizationModeButton%1").arg(mode));
+    QQuickItem *other = visibleItemNamed(window, QStringLiteral("visualizationModeButton%1").arg(1 - mode));
+    QVERIFY(plate != nullptr && chosen != nullptr && other != nullptr);
+    QTRY_VERIFY(chosen->property("checked").toBool());
+    QVERIFY(!other->property("checked").toBool());
+    const auto rectOf = [](QQuickItem *item) {
+        return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+    };
+    const auto part = [](QQuickItem *button, const char *name) {
+        return button->findChild<QQuickItem *>(QString::fromLatin1(name));
+    };
+
+    // 4 px of plate around the buttons, 4 px between them (#373 H16 I5).
+    QQuickItem *first = mode == 0 ? chosen : other;
+    QQuickItem *second = mode == 0 ? other : chosen;
+    const QRectF plateRect = rectOf(plate);
+    QCOMPARE(rectOf(first).left() - plateRect.left(), 4.0);
+    QCOMPARE(rectOf(first).top() - plateRect.top(), 4.0);
+    QCOMPARE(plateRect.right() - rectOf(second).right(), 4.0);
+    QCOMPARE(plateRect.bottom() - rectOf(second).bottom(), 4.0);
+    QCOMPARE(rectOf(second).left() - rectOf(first).right(), 4.0);
+
+    // The other one focused from the keyboard: its ring inside the plate,
+    // 1 px or more clear of the chosen one's edge, with its gap.
+    QVERIFY(tabTo(window, other));
+    QTRY_VERIFY(other->property("visualFocus").toBool());
+    QQuickItem *ring = part(other, "plotToolButtonFocusRing");
+    QQuickItem *gap = part(other, "plotToolButtonFocusGap");
+    QQuickItem *edge = part(chosen, "plotToolButtonCheckedEdge");
+    QVERIFY(ring != nullptr && gap != nullptr && edge != nullptr);
+    QTRY_VERIFY(ring->isVisible() && gap->isVisible() && edge->isVisible());
+    const QRectF ringRect = rectOf(ring);
+    // With 1 px of the plate outside it (#373 H16 I5).
+    QVERIFY2(plateRect.adjusted(1, 1, -1, -1).contains(ringRect),
+             qPrintable(QStringLiteral("ring %1,%2 %3x%4 in plate %5,%6 %7x%8")
+                            .arg(ringRect.left()).arg(ringRect.top()).arg(ringRect.width()).arg(ringRect.height())
+                            .arg(plateRect.left()).arg(plateRect.top()).arg(plateRect.width())
+                            .arg(plateRect.height())));
+    const QRectF edgeRect = rectOf(edge);
+    const double clearance = mode == 0 ? ringRect.left() - edgeRect.right() : edgeRect.left() - ringRect.right();
+    QVERIFY2(clearance >= 1.0, qPrintable(QString::number(clearance)));
+    QCOMPARE(QQmlProperty(ring, QStringLiteral("border.width")).read().toReal(), 2.0);
+    QCOMPARE(QQmlProperty(gap, QStringLiteral("border.width")).read().toReal(), 1.0);
+    QCOMPARE(rectOf(gap).left(), rectOf(other).left() - 1);
+    QCOMPARE(ringRect.left(), rectOf(other).left() - 3);
+
+    // The glyphs: the chosen one whole, the other quiet.
+    QQuickItem *chosenGlyph = part(chosen, "plotToolButtonIcon");
+    QQuickItem *otherGlyph = part(other, "plotToolButtonIcon");
+    QVERIFY(chosenGlyph != nullptr && otherGlyph != nullptr);
+    QVariant set;
+    QVERIFY(QMetaObject::invokeMethod(tokens, "plotColors", Q_RETURN_ARG(QVariant, set), Q_ARG(QVariant, mode)));
+    QObject *plot = set.value<QObject *>();
+    QVERIFY(plot != nullptr);
+    const QColor text = plot->property("plotText").value<QColor>();
+    QCOMPARE(chosenGlyph->property("color").value<QColor>(), text);
+    QCOMPARE(chosenGlyph->opacity(), 1.0);
+    QVERIFY2(std::abs(otherGlyph->opacity() - 0.72) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
+
+    // Under the pointer: a wash of 10 % or so, its glyph at 85 %; as drawn,
+    // it shows on the plate, under the chosen one's plate, which is 1.4:1
+    // or more on it (#373 H15 H4).
+    QTest::mouseMove(window, rectOf(other).center().toPoint() + QPoint(0, 1));
+    QTest::mouseMove(window, rectOf(other).center().toPoint());
+    QTRY_VERIFY(other->property("hovered").toBool());
+    QQuickItem *wash = part(other, "plotToolButtonHover");
+    QQuickItem *fill = part(chosen, "plotToolButtonChecked");
+    QVERIFY(wash != nullptr && fill != nullptr);
+    QTRY_COMPARE(wash->opacity(), 1.0);
+    QVERIFY2(std::abs(otherGlyph->opacity() - 0.85) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
+    const QColor washColor = wash->property("color").value<QColor>();
+    const QColor fillColor = fill->property("color").value<QColor>();
+    QVERIFY2(washColor.alphaF() >= 0.095 && washColor.alphaF() <= 0.135, qPrintable(QString::number(washColor.alphaF())));
+    QVERIFY(washColor.alphaF() < fillColor.alphaF());
+    // The plate whole, as the pointer on it reveals it.
+    const auto shownWhole = [&]() {
+        double opacity = 1.0;
+        for (QQuickItem *item = plate; item != nullptr; item = item->parentItem()) {
+            opacity *= item->opacity();
+        }
+        return opacity == 1.0;
+    };
+    QTRY_VERIFY(shownWhole());
+    QTest::qWait(50);
+    const QImage image = window->grabWindow();
+    const QColor drawnWash = drawnAt(image, window, other, QPointF(2.5, 2.5));
+    const QColor drawnFill = drawnAt(image, window, chosen, QPointF(2.5, 2.5));
+    // The plate beside the chosen one, clear of the other's focus ring.
+    const QColor drawnPlate =
+        drawnAt(image, window, plate, QPointF(mode == 0 ? 1.5 : plate->width() - 1.5, plate->height() / 2));
+    const double washStep = contrastRatio(drawnWash, drawnPlate);
+    const double fillStep = contrastRatio(drawnFill, drawnPlate);
+    QVERIFY2(washStep >= 1.25 && washStep < fillStep,
+             qPrintable(QStringLiteral("hovered %1:1, chosen %2:1 (%3, %4 on %5)").arg(washStep).arg(fillStep)
+                            .arg(drawnWash.name(), drawnFill.name(), drawnPlate.name())));
+    QVERIFY2(contrastRatio(drawnFill, drawnWash) >= 1.4,
+             qPrintable(QStringLiteral("chosen %1 on hovered %2").arg(drawnFill.name(), drawnWash.name())));
 }
 
 void AccessibilityTest::visualizationsHaveAccessibleRoles() {
@@ -3568,9 +4062,12 @@ QQuickItem *plotLayerOf(QQuickWindow *window) {
     return window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
 }
 
-// Two labelled lanes on the plot layer, as a stereo track's.
+// Two labelled lanes on the plot layer, as a stereo track's, with a track
+// loaded: before any audio, the lanes at rest have no Mute and Solo.
 bool showStereoLanes(QQuickItem *layer) {
-    return layer->setProperty("laneCount", 2)
+    QObject *bridge = qvariant_cast<QObject *>(layer->property("uiBridge"));
+    return bridge != nullptr && bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/track.flac"))
+        && layer->setProperty("laneCount", 2)
         && layer->setProperty("laneLabels", QVariantList{QStringLiteral("L"), QStringLiteral("R")});
 }
 }
@@ -3626,6 +4123,99 @@ void AccessibilityTest::laneButtonsAreTabStopsThatRevealThemselves() {
     QVERIFY(!mutes[0]->isVisible());
 }
 
+// A lane's Mute and Solo tell assistive technology that they are toggles
+// and whether each is on (#373 H14 F6: only "focused, focusable" reached
+// it). What they show is the lane's state: a click asks for the change
+// and leaves the button as the lane is until the lane changes.
+void AccessibilityTest::laneButtonsAreCheckableToggles() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *layer = plotLayerOf(window);
+    QVERIFY(layer != nullptr);
+    QVERIFY(showStereoLanes(layer));
+    QList<QQuickItem *> heads;
+    QTRY_COMPARE((heads = itemsNamed(layer, QStringLiteral("plotLaneHead"))).size(), 2);
+    QQuickItem *mute = itemsNamed(heads[0], QStringLiteral("plotLaneMuteButton")).value(0);
+    QQuickItem *solo = itemsNamed(heads[1], QStringLiteral("plotLaneSoloButton")).value(0);
+    QVERIFY(mute != nullptr && solo != nullptr);
+    const auto problem = [&](QQuickItem *button, bool on) -> QString {
+        QAccessibleInterface *iface = inAccessibleTree(window, button);
+        if (iface == nullptr) {
+            return QStringLiteral("%1 is not in the tree").arg(button->objectName());
+        }
+        if (iface->role() != QAccessible::CheckBox) {
+            return QStringLiteral("%1 is a %2").arg(button->objectName()).arg(int(iface->role()));
+        }
+        const QAccessible::State state = iface->state();
+        if (!state.checkable) {
+            return QStringLiteral("%1 is not checkable").arg(button->objectName());
+        }
+        if (bool(state.checked) != on || button->property("checked").toBool() != on) {
+            return QStringLiteral("%1 checked %2").arg(button->objectName()).arg(bool(state.checked));
+        }
+        return {};
+    };
+    QTRY_VERIFY2(problem(mute, false).isEmpty(), qPrintable(problem(mute, false)));
+    QTRY_VERIFY2(problem(solo, false).isEmpty(), qPrintable(problem(solo, false)));
+
+    // The lane muted, and the other soloed: each says so.
+    QVERIFY(heads[0]->setProperty("muted", true));
+    QVERIFY(heads[1]->setProperty("soloed", true));
+    QTRY_VERIFY2(problem(mute, true).isEmpty(), qPrintable(problem(mute, true)));
+    QTRY_VERIFY2(problem(solo, true).isEmpty(), qPrintable(problem(solo, true)));
+
+    // A click asks the lane to change, and the button stays as the lane
+    // is, which this test's bridge leaves alone; it still follows the lane.
+    QVERIFY(layer->setProperty("hoveredLane", 0));
+    QQuickItem *plate = itemsNamed(heads[0], QStringLiteral("plotLaneButtons")).value(0);
+    QTRY_COMPARE(plate->opacity(), 1.0);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      mute->mapToScene(QPointF(mute->width() / 2, mute->height() / 2)).toPoint());
+    QTest::qWait(50);
+    QVERIFY2(problem(mute, true).isEmpty(), qPrintable(problem(mute, true)));
+    QVERIFY(heads[0]->setProperty("muted", false));
+    QTRY_VERIFY2(problem(mute, false).isEmpty(), qPrintable(problem(mute, false)));
+
+    // The buttons' plate: 4 px around them and between them, its top on
+    // one line with the mode switch's, 5 px into the lane, and a button's
+    // focus ring inside it with 1 px of the plate outside it (#373 H16 I5:
+    // at 2 px, the ring ran past the plate's edge). The label is centred on
+    // it, so that L and M stand on one centre line (H18 C4: the plates'
+    // tops were on one line, their letters 6 px apart).
+    const auto rectOf = [](QQuickItem *item) {
+        return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+    };
+    QQuickItem *label = itemsNamed(heads[0], QStringLiteral("plotLaneLabel")).value(0);
+    QQuickItem *firstSolo = itemsNamed(heads[0], QStringLiteral("plotLaneSoloButton")).value(0);
+    QQuickItem *modeSwitch = itemsNamed(layer, QStringLiteral("visualizationModeSwitch")).value(0);
+    QVERIFY(label != nullptr && firstSolo != nullptr && modeSwitch != nullptr);
+    const QRectF plateRect = rectOf(plate);
+    QCOMPARE(rectOf(mute).left() - plateRect.left(), 4.0);
+    QCOMPARE(rectOf(mute).top() - plateRect.top(), 4.0);
+    QCOMPARE(rectOf(firstSolo).left() - rectOf(mute).right(), 4.0);
+    QCOMPARE(plateRect.right() - rectOf(firstSolo).right(), 4.0);
+    QCOMPARE(plateRect.bottom() - rectOf(mute).bottom(), 4.0);
+    QCOMPARE(plateRect.top(), rectOf(modeSwitch).top());
+    QCOMPARE(plateRect.top() - rectOf(layer).top(), 5.0);
+    QVERIFY2(std::abs(rectOf(label).center().y() - plateRect.center().y()) <= 0.5,
+             qPrintable(QStringLiteral("label centre %1, plate centre %2")
+                            .arg(rectOf(label).center().y()).arg(plateRect.center().y())));
+    QVERIFY2(std::abs(rectOf(modeSwitch).center().y() - plateRect.center().y()) <= 0.5,
+             qPrintable(QStringLiteral("switch centre %1, plate centre %2")
+                            .arg(rectOf(modeSwitch).center().y()).arg(plateRect.center().y())));
+    QCOMPARE(rectOf(label).left() - rectOf(layer).left(), 5.0);
+    mute->forceActiveFocus(Qt::TabFocusReason);
+    QQuickItem *ring = mute->findChild<QQuickItem *>(QStringLiteral("plotToolButtonFocusRing"));
+    QVERIFY(ring != nullptr);
+    QTRY_VERIFY(ring->isVisible());
+    QVERIFY2(plateRect.adjusted(1, 1, -1, -1).contains(rectOf(ring)),
+             qPrintable(QStringLiteral("ring at %1,%2 in a plate at %3,%4")
+                            .arg(rectOf(ring).left()).arg(rectOf(ring).top())
+                            .arg(plateRect.left()).arg(plateRect.top())));
+}
+
 void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -3641,18 +4231,19 @@ void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
     QVERIFY(!meter->isVisible());
     QCOMPARE(surface->property("plotWidth").toReal(), layer->width());
     QVERIFY(itemsNamed(layer, QStringLiteral("levelMeterLane")).isEmpty());
-    // On: a 10 px column at the end of each lane, also with nothing playing.
+    // On: its column at the end of each lane, also with nothing playing.
     QVERIFY(bridge->setProperty("showLevelMeter", true));
     QTRY_VERIFY(meter->isVisible());
-    QCOMPARE(meter->width(), 10.0);
+    const double column = LevelMeterItem::kColumnWidth;
+    QCOMPARE(meter->width(), column);
     QCOMPARE(meter->laneCount(), 2);
     QVERIFY(!meter->active());
-    QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - 10.0);
+    QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - column);
     // Play and stop leave the plot's width alone.
     for (const QString &state : {QStringLiteral("Playing"), QStringLiteral("Paused"), QStringLiteral("Stopped")}) {
         QVERIFY(bridge->setProperty("currentTrackPath", QStringLiteral("/music/a.flac")));
         QVERIFY(bridge->setProperty("playbackState", state));
-        QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - 10.0);
+        QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - column);
     }
     // Each lane's column: its channel and level for assistive technology,
     // and the exact levels in its tooltip.
@@ -3695,22 +4286,30 @@ void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
         return QPair<QColor, QColor>(image.pixelColor(int(5 * scale), int(4.5 * scale)),
                                      image.pixelColor(int(5 * scale), int(6.5 * scale)));
     };
-    const QColor trough = layer->property("plotColors").value<QObject *>()
-        ->property("meterTrough").value<QColor>();
+    // The trough as drawn on the plot's floor: the waveform's set, which
+    // the bare light pane takes, has a translucent one.
+    QObject *meterColors = layer->property("plotColors").value<QObject *>();
+    const QColor trough = drawnOver(meterColors->property("meterTrough").value<QColor>(),
+                                    meterColors->property("plotBg").value<QColor>());
+    // Blending rounds each channel.
+    const auto near = [](const QColor &a, const QColor &b) {
+        return std::abs(a.red() - b.red()) <= 1 && std::abs(a.green() - b.green()) <= 1
+            && std::abs(a.blue() - b.blue()) <= 1;
+    };
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Paused")));
     QTRY_VERIFY(!meter->active());
-    QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - 10.0);
+    QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - column);
     QVERIFY(meter->isVisible());
     auto [lamp, gap] = lampRow();
-    QCOMPARE(lamp, trough);
-    QCOMPARE(gap, trough);
+    QVERIFY2(near(lamp, trough), qPrintable(lamp.name() + QStringLiteral(" vs ") + trough.name()));
+    QVERIFY2(near(gap, trough), qPrintable(gap.name() + QStringLiteral(" vs ") + trough.name()));
     QTRY_VERIFY(accessibleText(lanes[1], QAccessible::Description).contains(QStringLiteral("\u2212\u221e dB")));
     QVERIFY(!accessibleText(lanes[1], QAccessible::Description).contains(QStringLiteral("clipping")));
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
     QTRY_VERIFY(meter->active());
     std::tie(lamp, gap) = lampRow();
-    QVERIFY(lamp != trough);
-    QVERIFY(gap != trough);
+    QVERIFY(!near(lamp, trough));
+    QVERIFY(!near(gap, trough));
     // Off again: the plot takes the column back.
     QVERIFY(bridge->setProperty("showLevelMeter", false));
     QTRY_COMPARE(surface->property("plotWidth").toReal(), layer->width());
@@ -3761,7 +4360,25 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         QQuickItem *labelText = label->findChild<QQuickItem *>(QStringLiteral("plotPlateLabel"));
         QQuickItem *switchPlate = visibleItemNamed(window, QStringLiteral("visualizationModeSwitch"));
         QVERIFY(label != nullptr && labelText != nullptr && switchPlate != nullptr);
-        QTest::qWait(50);
+        // The switch's plate beside the chosen mode, clear of the focused
+        // one's ring, which reaches the plate's edge on its side (#373 H14
+        // G4).
+        const QPointF plateSpot(mode == 0 ? 1.0 : switchPlate->width() - 1.0, switchPlate->height() / 2);
+        // The switch whole before sampling it. Tabbing to the other segment
+        // takes keyboard focus out of the switch and round the window, and
+        // a track's loading ends the bare plot's reveal: the switch fades
+        // out, and in again over shortDuration with the focus (PlotPlate's
+        // revealLevel), its fill, its plate and both glyphs at the plate's
+        // opacity. A wait for two like grabs in a row read it mid-fade, the
+        // glyphs at some 45 %: QTRY's first two checks are only a qWait(0)
+        // apart, in which no frame need render, and a grab advances no
+        // animation.
+        QTRY_COMPARE(switchPlate->opacity(), 1.0);
+        // The level again, which decayed while the switch faded in.
+        meter->m_channels.assign(2, {});
+        meter->m_channels[0].observe(-12, 0);
+        meter->m_shown = meter->m_channels;
+        meter->update();
         const QImage image = window->grabWindow();
         // The label's text on its plate.
         const QColor plate = drawnAt(image, window, label, QPointF(1.5, 1.5));
@@ -3769,11 +4386,45 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
                                             QRectF(0, 0, labelText->width(), labelText->height()), plate);
         QVERIFY2(contrastRatio(text, plate) >= 4.5,
                  qPrintable(QStringLiteral("%1 label: %2").arg(what).arg(contrastRatio(text, plate))));
-        // The checked fill on the switch's plate, and the focus ring.
-        const QColor switchFill = drawnAt(image, window, switchPlate, QPointF(1.0, switchPlate->height() / 2));
-        const QColor fill = drawnAt(image, window, checked, QPointF(2.5, 2.5));
-        QVERIFY2(contrastRatio(fill, switchFill) >= 3.0,
+        // The chosen mode's plate on the switch's, a neutral step from it
+        // (#373 H11: the plot's text colour at 20 %, not the accent's solid
+        // fill), its glyph whole on it and the other's on the switch's
+        // plate; and the focus ring.
+        const QColor switchFill = drawnAt(image, window, switchPlate, plateSpot);
+        // Between its 1 px edge (#373 H14 F4), rounded at the corners, and
+        // its glyph.
+        const QColor fill = drawnAt(image, window, checked, QPointF(checked->width() / 2, 2.5));
+        QVERIFY2(contrastRatio(fill, switchFill) >= 1.4,
                  qPrintable(QStringLiteral("%1 checked: %2").arg(what).arg(contrastRatio(fill, switchFill))));
+        QQuickItem *checkedGlyph = checked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
+        QQuickItem *uncheckedGlyph = unchecked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
+        QVERIFY(checkedGlyph != nullptr && uncheckedGlyph != nullptr);
+        // A glyph's ink as drawn on `background`. A mask of the app's own,
+        // from a file, as the spectrogram's (#373 H14 G7), is coloured by
+        // the platform's icon loader, which offscreen leaves it black, as
+        // the transport's own glyphs are (TransportStatusTest): its colour
+        // at its opacity over the background stands for it.
+        const auto inkOf = [&](QQuickItem *glyph, const QColor &background) {
+            if (glyph->property("source").metaType() != QMetaType::fromType<QUrl>()) {
+                return mostContrasting(image, window, glyph, QRectF(0, 0, glyph->width(), glyph->height()),
+                                       background);
+            }
+            const QColor color = glyph->property("color").value<QColor>();
+            const double alpha = glyph->opacity();
+            return QColor::fromRgbF(color.redF() * alpha + background.redF() * (1 - alpha),
+                                    color.greenF() * alpha + background.greenF() * (1 - alpha),
+                                    color.blueF() * alpha + background.blueF() * (1 - alpha));
+        };
+        const QColor checkedInk = inkOf(checkedGlyph, fill);
+        QVERIFY2(contrastRatio(checkedInk, fill) >= 4.5,
+                 qPrintable(QStringLiteral("%1 chosen glyph: %2 (%3 on %4)").arg(what)
+                                .arg(contrastRatio(checkedInk, fill)).arg(checkedInk.name(), fill.name())));
+        const QColor uncheckedInk = inkOf(uncheckedGlyph, switchFill);
+        QVERIFY2(contrastRatio(uncheckedInk, switchFill) >= 3.0,
+                 qPrintable(QStringLiteral("%1 other glyph: %2 (%3 on %4, %5 at %6)").arg(what)
+                                .arg(contrastRatio(uncheckedInk, switchFill)).arg(uncheckedInk.name(), switchFill.name(),
+                                     uncheckedGlyph->property("color").value<QColor>().name())
+                                .arg(uncheckedGlyph->opacity())));
         const QColor ring = drawnAt(image, window, unchecked, QPointF(unchecked->width() / 2, -2.5));
         QVERIFY2(contrastRatio(ring, switchFill) >= 3.0,
                  qPrintable(QStringLiteral("%1 ring: %2").arg(what).arg(contrastRatio(ring, switchFill))));
@@ -3790,11 +4441,35 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
             return meterImage.pixelColor(int(x * meterScale), int(y * meterScale));
         };
         const auto [top, bottom] = LevelMeterItem::laneRows(0, 2, meter->height());
-        const QColor meterFill = meterPixel(5.5, bottom - 5);
+        // The fill just under its top, where it meets the trough and shows
+        // the level: on the spectrogram, a ramp of the colour map, whose
+        // floor is darker (#373 H10 V2). A few dB under the level, as the
+        // level decays while the test runs; a rung of its ladder there,
+        // the trough showing between them (#373 H14 G3).
+        const double meterBottom = bottom - LevelMeterItem::kInset;
+        const double scaleHeight = bottom - top - 2 * LevelMeterItem::kInset - LevelMeterItem::kLampHeight - 1.0;
         const QColor trough = meterPixel(5.5, top + 9);
-        QVERIFY2(contrastRatio(meterFill, trough) >= 3.0,
-                 qPrintable(QStringLiteral("%1 meter: %2 on %3: %4").arg(what, meterFill.name(), trough.name())
-                                .arg(contrastRatio(meterFill, trough))));
+        QColor meterFill = trough;
+        for (double offset = 0.5; offset < 3.0; offset += 1.0) {
+            const QColor shown =
+                meterPixel(5.5, std::floor(meterBottom - LevelMeterItem::meterPosition(-15, scaleHeight)) + offset);
+            if (contrastRatio(shown, trough) > contrastRatio(meterFill, trough)) {
+                meterFill = shown;
+            }
+        }
+        // On the waveform, 3:1 on the trough. On the spectrogram the fill
+        // stops at the map's magenta, as its orange and yellow were
+        // louder than the plot (#373 H14 G3): 3:1 on the plot's floor
+        // around the column and 2:1 on the trough, the track, which is
+        // 1.3:1 on the floor to show; the peak tick marks the level at
+        // full contrast (meterPeak, near white).
+        const double onTrough = contrastRatio(meterFill, trough);
+        const QColor floor = layer->property("plotColors").value<QObject *>()->property("plotBg").value<QColor>();
+        const double onFloor = contrastRatio(meterFill, floor);
+        QVERIFY2(mode == 0 ? onTrough >= 2.0 && onFloor >= 3.0 : onTrough >= 3.0,
+                 qPrintable(QStringLiteral("%1 meter: %2 on %3: %4, on the floor %5: %6")
+                                .arg(what, meterFill.name(), trough.name()).arg(onTrough)
+                                .arg(floor.name()).arg(onFloor)));
     }
 }
 
@@ -3810,13 +4485,15 @@ void AccessibilityTest::plotLayerShowsThePaneStates() {
     QQuickItem *analysing = layer->findChild<QQuickItem *>(QStringLiteral("plotAnalysingText"));
     QQuickItem *endsEarly = layer->findChild<QQuickItem *>(QStringLiteral("plotEndsEarly"));
     QVERIFY(analysing != nullptr && endsEarly != nullptr);
-    // Before any audio: the plot's floor, no message; the switch shows.
+    // Before any audio: no message; the switch shows. The bare pane is the
+    // spectrogram's floor, the plot's indigo, in the light theme the tests
+    // run in too (#373 H4, H11 P19).
     QVERIFY(!analysing->isVisible());
     QVERIFY(!endsEarly->isVisible());
     QVERIFY(visibleItemNamed(window, QStringLiteral("visualizationModeSwitch")) != nullptr);
     QQuickItem *pane = window->findChild<QQuickItem *>(QStringLiteral("spectrogramPane"));
     QVERIFY(pane != nullptr);
-    QCOMPARE(pane->property("color").value<QColor>(), QColor(QStringLiteral("#000000")));
+    QCOMPARE(pane->property("color").value<QColor>(), QColor(QStringLiteral("#14062e")));
     // A track without its analysis yet: Analysing…, after a moment.
     QVERIFY(bridge->setProperty("currentTrackPath", QStringLiteral("/music/a.flac")));
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));

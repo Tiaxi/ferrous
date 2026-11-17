@@ -28,24 +28,39 @@ Preferences.PreferencesPage {
         objectName: "lastFmScrobblingCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Scrobbling:")
         text: I18n.i18nc("@option:check", "Scrobble played tracks to Last.fm")
+        // A build without Last.fm can't send a scrobble, as the account's
+        // line says.
+        enabled: root.buildConfigured
         checked: root.settings.value("lastFmScrobblingEnabled")
         onToggled: root.settings.setValue("lastFmScrobblingEnabled", checked)
     }
 
     Components.FormHelpText {
+        objectName: "lastFmScrobblingHelp"
         uiPalette: root.uiPalette
         indent: scrobblingCheckBox.contentItem.x
+        // Without the status check box, it ends the scrobbling group.
+        endsGroup: !showScrobbleProgressCheckBox.visible
         text: I18n.i18nc("@info", "Tracks longer than 30 seconds are scrobbled when playback stops or the track "
             + "ends, once half of the track or 4 minutes has been played, whichever comes first.")
     }
 
     CheckBox {
+        id: showScrobbleProgressCheckBox
         objectName: "lastFmShowScrobbleProgressCheckBox"
         // Only a connected account has scrobbles to show.
         visible: root.authState === 2
         text: I18n.i18nc("@option:check", "Show the Last.fm status in the status bar")
         checked: root.settings.value("lastFmShowScrobbleProgress")
         onToggled: root.settings.setValue("lastFmShowScrobbleProgress", checked)
+    }
+
+    // The account is a group of its own, as General's groups are apart
+    // (#373 H42: it stood 4 px under the scrobbling group's last row).
+    Components.FormGroupGap {
+        objectName: "lastFmAccountGap"
+        uiPalette: root.uiPalette
+        visible: showScrobbleProgressCheckBox.visible
     }
 
     Label {
@@ -64,14 +79,20 @@ Preferences.PreferencesPage {
     }
 
     Components.FormHelpText {
+        id: statusLabel
         objectName: "lastFmStatusLabel"
         uiPalette: root.uiPalette
+        // The waiting scrobbles' line goes on from it, as one status.
+        trailingSpace: pendingLabel.visible
+            ? 0
+            : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing - statusLabel.rowSpacing
         // The account line already says when the build has no Last.fm.
         visible: text.length > 0 && root.buildConfigured
         text: root.uiBridge.lastFmStatusText || ""
     }
 
     Components.FormHelpText {
+        id: pendingLabel
         objectName: "lastFmPendingLabel"
         uiPalette: root.uiPalette
         visible: (root.uiBridge.lastFmPendingScrobbleCount || 0) > 0

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
+import "../logic/ListRows.js" as ListRows
 
 QtObject {
     id: root
@@ -13,8 +14,18 @@ QtObject {
     property var view: null
     property var selectedIndices: []
     property var selectedIndexLookup: ({})
+    // The row the keyboard is on while no row is highlighted, which the
+    // queue rings and the keys move on from: the queue picks one as it
+    // gains focus (see ensureCurrentRow). It follows its row through edits.
+    property int focusRowIndex: -1
     // The row the keyboard is on: the queue rings it while it has focus.
-    readonly property int currentRowIndex: root.primarySelectedIndex()
+    readonly property int currentRowIndex: {
+        const primary = root.primarySelectedIndex()
+        if (primary >= 0) {
+            return primary
+        }
+        return root.focusRowIndex < root.uiBridge.queueLength ? root.focusRowIndex : -1
+    }
     property int selectionAnchorIndex: -1
     property int lastSyncedBridgeSelectedIndex: -2
     property bool _rowsChangedSinceSync: false
@@ -86,6 +97,7 @@ QtObject {
         }
 
         function onModelReset() {
+            root.focusRowIndex = -1
             root.resetSelectionForUpdatedQueue()
             root.lastSyncedBridgeSelectedIndex = root.uiBridge.selectedQueueIndex
         }
@@ -139,6 +151,9 @@ QtObject {
         if (root.selectionAnchorIndex >= 0) {
             root.selectionAnchorIndex = map(root.selectionAnchorIndex)
         }
+        if (root.focusRowIndex >= 0) {
+            root.focusRowIndex = map(root.focusRowIndex)
+        }
     }
 
     property Timer _scrollTimer: Timer {
@@ -170,6 +185,25 @@ QtObject {
             targetY = rowBottom - view.height
         }
         view.contentY = Math.max(0, Math.min(maxY, targetY))
+    }
+
+    // As the queue gains the keyboard with no row highlighted, a row it
+    // shows becomes the current one, so its ring shows where the keyboard
+    // is: the playing row, otherwise the first row shown. The selection
+    // stays as it is, and the view does not move: the row is one it shows.
+    function ensureCurrentRow() {
+        if (!root.view || root.primarySelectedIndex() >= 0) {
+            return
+        }
+        const range = ListRows.shownRange(root.view)
+        if (range.first < 0) {
+            return
+        }
+        if (root.currentRowIndex >= range.first && root.currentRowIndex <= range.last) {
+            return
+        }
+        const playing = root.uiBridge.playingQueueIndex
+        root.focusRowIndex = playing >= range.first && playing <= range.last ? playing : range.first
     }
 
     function registerView(view) {
@@ -235,6 +269,11 @@ QtObject {
     }
 
     function clearSelection() {
+        // The row the keyboard was on stays the current one.
+        const primary = root.primarySelectedIndex()
+        if (primary >= 0) {
+            root.focusRowIndex = primary
+        }
         root.setSelectedIndices([])
         root.selectionAnchorIndex = -1
         root.uiBridge.selectQueueIndex(-1)
@@ -323,6 +362,9 @@ QtObject {
             indices.push(index)
             indices.sort(function(a, b) { return a - b })
         }
+        if (indices.length === 0) {
+            root.focusRowIndex = index
+        }
         root.setSelectedIndices(indices)
         root.selectionAnchorIndex = index
         if (indices.length > 0) {
@@ -407,9 +449,8 @@ QtObject {
         if (root.uiBridge.queueLength <= 0) {
             return
         }
-        const primary = root.primarySelectedIndex()
-        const current = primary >= 0
-            ? primary
+        const current = root.currentRowIndex >= 0
+            ? root.currentRowIndex
             : (root.uiBridge.selectedQueueIndex >= 0
                 ? root.uiBridge.selectedQueueIndex
                 : root.uiBridge.playingQueueIndex)
@@ -558,7 +599,12 @@ QtObject {
 
         if (!ctrl && !shift
                 && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
-            root.playFirstSelectedTrack()
+            // With no row highlighted, the ringed row plays.
+            if (root.selectedIndices.length === 0 && root.currentRowIndex >= 0) {
+                root.playAt(root.currentRowIndex)
+            } else {
+                root.playFirstSelectedTrack()
+            }
             event.accepted = true
             return
         }
@@ -599,9 +645,8 @@ QtObject {
             return
         }
 
-        const primary = root.primarySelectedIndex()
-        const current = primary >= 0
-            ? primary
+        const current = root.currentRowIndex >= 0
+            ? root.currentRowIndex
             : (root.uiBridge.selectedQueueIndex >= 0
                 ? root.uiBridge.selectedQueueIndex
                 : (root.uiBridge.playingQueueIndex >= 0 ? root.uiBridge.playingQueueIndex : 0))

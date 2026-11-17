@@ -9,14 +9,15 @@ import FerrousUi 1.0
 import "../components" as Components
 import "../logic/FormatUtils.js" as FormatUtils
 import "." as Dialogs
-import "../logic/KeyUtils.js" as KeyUtils
 
-Dialog {
+// Edit Tags, in a window of its own: KWin draws its title bar, and it
+// moves and resizes beyond the main window's edges, which it blocks while
+// it shows. Its questions open over it. Escape and the title bar's close
+// button ask about unsaved edits first, as Cancel does.
+Components.DialogWindow {
     id: root
 
     required property var tagEditorApi
-    required property var uiPalette
-    required property var windowRoot
 
     property int selectionAnchor: -1
     readonly property int totalRows: tagEditorTable.count
@@ -35,8 +36,24 @@ Dialog {
     // without it, as quitting does for the settings and queue.
     readonly property int quitWaitBoundMs: 5000
     readonly property real tableRowHeight: root.uiPalette.rowHeight
+    // The status of a row with unsaved edits: its mark's tooltip and
+    // description, and its Status cell while that column shows.
+    readonly property string modifiedText: I18n.i18nc("@item tag editor row status", "Modified")
+    // The Status cell of a row whose save or rename failed: why is in its
+    // tooltip and in Details… (#373 H46: the system's own words, elided to
+    // "failed to …").
+    readonly property string notSavedText: I18n.i18nc("@item tag editor row status: saving the file's tags failed", "Not saved")
+    readonly property string notRenamedText: I18n.i18nc("@item tag editor row status: renaming the file failed", "Not renamed")
     // Shown in a field whose rows hold different values, which saving keeps.
     readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "Multiple values")
+    // The same, in a number field too narrow for it, as Track and Disc's
+    // with a large font (#373 H45: "Multiple values" elided in their 124 px
+    // fields at 24 pt; widening them took the table's room).
+    readonly property string keepShortText: I18n.i18nc("@info:placeholder short for Multiple values, in a narrow number field: the selected files keep their different values", "Mixed")
+    // Every field of the form says it in the same word: the short one in
+    // all of them once a number field needs it (#373 H46: "Multiple values"
+    // and "Mixed" in one form at 24 pt).
+    readonly property bool keepShortInForm: trackPair.needsKeepShort || discPair.needsKeepShort
     readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
     readonly property bool busy: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
     // Bumped whenever the selection or the edits change, for the bindings
@@ -55,33 +72,161 @@ Dialog {
         { key: "totalDiscs", label: I18n.i18nc("@label tag field", "Discs"), formLabel: "", allowTitleCase: false, allowCapitalize: false },
         { key: "comment", label: I18n.i18nc("@label tag field", "Comment"), formLabel: I18n.i18nc("@label:textbox tag field", "Comment:"), allowTitleCase: false, allowCapitalize: false }
     ]
-    // The table's columns; the last one takes the room that is left.
+    // The table's columns, each at its width with the default 10 pt font,
+    // scaled with a larger one, or wider when its header or sample needs
+    // it. `sample` is the widest value a short column holds whole: the
+    // numbers and Format are as narrow as that allows. Where the view is
+    // narrower than the columns together, the columns that may `give` way
+    // do, before the table scrolls sideways: first File Name, Folder and
+    // Status, down to their `least` widths, then the tags, down to theirs,
+    // which keep Title, Artist and Album at 160 px or more, scaled with the
+    // font; the numbers and Format keep their widths. In a table that
+    // scrolls anyway none gives way. Where the view is wider, File Name and
+    // Folder, which `stretch`, take the rest. Status takes no room until a
+    // save or a rename failed for a row; a row with unsaved edits has a
+    // mark in the # column instead, whose room is always there, so that an
+    // edit moves no column (#373 H11: Status came with the first edit and
+    // took its width from File Name and Folder). The window opens wide
+    // enough for every column, so none gives way on a large screen (#373
+    // H8: with too little room for them all, either the tags or the paths
+    // were cut short).
     readonly property var tableColumns: [
-        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true },
-        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 200 },
-        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 160 },
-        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 140 },
-        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 110 },
-        { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 56 },
-        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 48 },
-        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220 },
-        { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 64 },
-        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156 },
-        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120 }
+        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
+        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 160 },
+        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 160 },
+        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 160 },
+        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 100, give: 2, least: 70 },
+        { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 52, sample: "0000" },
+        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 40, sample: "00" },
+        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, stretch: true, path: true },
+        { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 56, sample: "FLAC" },
+        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, stretch: true, path: true },
+        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, samples: [root.modifiedText, root.notSavedText, root.notRenamedText], onlyWithStatus: true }
     ]
+    // Whether a row has a status to read: a save or rename that failed for
+    // it.
+    readonly property bool rowStatusShown: root.tagEditorApi.hasRowErrors === true
+    // The mark of a row with unsaved edits, in the # column's left padding:
+    // a 6 px dot at the default font, clear of a three-digit number.
+    readonly property int modifiedMarkSize: 2 * Math.round(root.uiPalette.scaledSize(6) / 2)
     readonly property real tableInset: Kirigami.Units.largeSpacing
-    readonly property real fixedColumnsWidth: root.tableColumns.reduce(
-        function(sum, column, index) {
-            return index === root.tableColumns.length - 1 ? sum : sum + column.width
-        }, 2 * root.tableInset)
-    readonly property real tableContentWidth: Math.max(
-        root.fixedColumnsWidth + root.tableColumns[root.tableColumns.length - 1].width,
-        tagEditorTable.width)
+    // The room a column's header takes beside its label for the column's
+    // Revert, while it shows; its glyph is as large as a line of text
+    // holds, 14 px in a 20 px button with the default font.
+    readonly property real columnRevertGlyph: root.uiPalette.labelIconSize - 2
+    readonly property real columnRevertRoom: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
+    // What a column needs whatever the room: its header whole, semibold and
+    // with its Revert while a row's value in it is changed, or its sample
+    // value, with the cell's padding, rather than a header elided to a
+    // letter. The narrow columns, as Disc, take the Revert's room only
+    // while they show it, as Status takes its own only with a failure.
+    function columnNeed(column) {
+        // The bindings that ask follow the fonts: advanceWidth() is a
+        // function, which they cannot follow.
+        columnHeaderMetrics.font
+        columnValueMetrics.font
+        const header = columnHeaderMetrics.advanceWidth(column.label)
+            + (root.fieldAt(column.key) !== null && root.columnMarked(column.key) ? root.columnRevertRoom : 0)
+        const samples = column.samples || (column.sample ? [column.sample] : [])
+        const value = samples.reduce(function(widest, sample) {
+            return Math.max(widest, columnValueMetrics.advanceWidth(sample))
+        }, 0)
+        return Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing
+    }
+    // Each column's width with room enough, or none for Status while no
+    // row has a failure.
+    readonly property var tableColumnWidths: root.tableColumns.map(function(column) {
+        if (column.onlyWithStatus && !root.rowStatusShown) {
+            return 0
+        }
+        return Math.max(root.uiPalette.scaledSize(column.width), root.columnNeed(column))
+    })
+    // The narrowest each column gives way to: its least width, or what its
+    // header or sample needs.
+    readonly property var tableColumnLeastWidths: root.tableColumns.map(function(column, index) {
+        const preferred = root.tableColumnWidths[index]
+        const least = column.give ? root.uiPalette.scaledSize(column.least) : preferred
+        return Math.min(preferred, Math.max(least, root.columnNeed(column)))
+    })
+    // The widths the columns are shown at in the table's width.
+    readonly property var shownColumnWidths: {
+        const preferred = root.tableColumnWidths
+        const least = root.tableColumnLeastWidths
+        const room = tagEditorTable.width - 2 * root.tableInset
+        const total = preferred.reduce(function(sum, width) { return sum + width }, 0)
+        const widths = preferred.slice()
+        let over = total - room
+        if (over <= 0) {
+            const stretching = root.tableColumns.filter(function(column) { return column.stretch }).length
+            const extra = Math.floor(-over / stretching)
+            root.tableColumns.forEach(function(column, i) {
+                if (column.stretch) {
+                    widths[i] += extra
+                }
+            })
+            over = 0
+        }
+        const slackOf = function(group) {
+            let slack = 0
+            root.tableColumns.forEach(function(column, i) {
+                if (column.give === group) {
+                    slack += widths[i] - least[i]
+                }
+            })
+            return slack
+        }
+        // The columns give way only where that spares the scroll bar: in a
+        // table that scrolls anyway, as at a large font, they keep their
+        // widths.
+        if (slackOf(1) + slackOf(2) < over) {
+            over = 0
+        }
+        for (const group of [1, 2]) {
+            const slack = slackOf(group)
+            if (slack <= 0 || over <= 0) {
+                continue
+            }
+            const taken = Math.min(over, slack)
+            root.tableColumns.forEach(function(column, i) {
+                if (column.give === group) {
+                    widths[i] = Math.max(least[i], Math.floor(widths[i] - taken * (widths[i] - least[i]) / slack))
+                }
+            })
+            over -= taken
+        }
+        // The whole pixels the rounding left go to the last column that
+        // stretches, so Status ends at the table's inset.
+        const left = Math.floor(room - widths.reduce(function(sum, width) { return sum + width }, 0))
+        if (left > 0) {
+            for (let i = root.tableColumns.length - 1; i >= 0; --i) {
+                if (root.tableColumns[i].stretch) {
+                    widths[i] += left
+                    break
+                }
+            }
+        }
+        return widths
+    }
+    // The rows' width: the view's, or the columns' where they are wider
+    // still, when the table scrolls sideways.
+    readonly property real tableContentWidth: Math.max(tagEditorTable.width,
+        root.shownColumnWidths.reduce(function(sum, width) { return sum + width }, 2 * root.tableInset))
 
     function columnWidth(index) {
-        return index === root.tableColumns.length - 1
-            ? root.tableContentWidth - root.fixedColumnsWidth
-            : root.tableColumns[index].width
+        return root.shownColumnWidths[index]
+    }
+
+    FontMetrics {
+        id: columnHeaderMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.smallPointSize
+        font.weight: Font.DemiBold
+    }
+
+    FontMetrics {
+        id: columnValueMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.basePointSize
     }
 
     // The fields the edits changed, by their labels.
@@ -138,14 +283,60 @@ Dialog {
             : I18n.i18nc("@info:tooltip", "Revert")
     }
 
-    modal: true
-    x: Math.round((root.windowRoot.width - width) / 2)
-    y: Math.round((root.windowRoot.height - height) / 2)
-    width: Math.min(root.windowRoot.width - 2 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 80)
-    height: Math.min(root.windowRoot.height - 2 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 46)
     title: I18n.i18nc("@title:window", "Edit Tags")
-    standardButtons: Dialog.NoButton
-    closePolicy: Popup.NoAutoClose
+    asksBeforeClosing: true
+    onCloseRequested: root.requestClose()
+
+    // The content's inset from the window's edges.
+    readonly property real contentPadding: Kirigami.Units.gridUnit
+    readonly property real contentSpacing: Kirigami.Units.gridUnit - 2
+    // The table's width up to the end of a column: its frame, its insets
+    // and the columns before it.
+    function tableWidthThrough(key) {
+        let width = 2 + 2 * root.tableInset
+        for (let i = 0; i < root.tableColumns.length; ++i) {
+            width += root.tableColumnWidths[i]
+            if (root.tableColumns[i].key === key) {
+                break
+            }
+        }
+        return width
+    }
+    readonly property real fieldsWidth: Math.max(Kirigami.Units.gridUnit * 19, root.fieldsMinimumWidth)
+    // The fields' narrowest: 16 grid units, or what their labels and a
+    // field need.
+    readonly property real fieldsLeastWidth: Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
+    // The fields' width as shown: narrower, down to their least, where
+    // that spares the table its sideways scroll bar with every column at
+    // its least width or wider, as on a 1400 px screen (#373 H8);
+    // otherwise their width.
+    readonly property real fieldsShownWidth: {
+        const tableLeast = 2 + 2 * root.tableInset
+            + root.tableColumnLeastWidths.reduce(function(sum, width) { return sum + width }, 0)
+        const spare = Math.floor(root.width - 2 * root.contentPadding - root.contentSpacing - tableLeast)
+        return spare < root.fieldsWidth && spare >= root.fieldsLeastWidth ? spare : root.fieldsWidth
+    }
+    // What the window holds, across: the fields and every column of the
+    // table at its width, clear of its scroll bar.
+    readonly property real fittedWidth: Math.ceil(2 * root.contentPadding + root.fieldsWidth
+        + root.contentSpacing + root.tableWidthThrough("directory") + Kirigami.Units.gridUnit)
+    // As wide as what it holds and no wider (#373 H11), within the screen
+    // and no wider than the window it opens from, frame and all, as the two
+    // have the same frame (#373 H9: 1624 px from a 1600 px main window):
+    // with less room, File Name and Folder give way first, then the tags.
+    defaultWidth: Math.min(root.fittedWidth,
+        root.windowRoot && root.windowRoot.width > 0 ? root.windowRoot.width : Number.POSITIVE_INFINITY)
+    // As tall as the fields, or a table of 12 rows, whichever is taller,
+    // and no taller than 46 grid units, scaled with the font: a few files
+    // leave no wide empty table, and the user may make it taller.
+    defaultHeight: Math.ceil(Math.min(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 46), Math.max(fieldsColumn.implicitHeight,
+            2 + root.tableRowHeight * 13 + Kirigami.Units.gridUnit))
+        + 2 * root.contentPadding + tagEditorFooter.implicitHeight)
+    // The fields at their narrowest beside some of the table, and room for
+    // a few of the fields above the buttons.
+    minimumWidth: Math.ceil(2 * root.contentPadding + root.fieldsLeastWidth
+        + root.contentSpacing + Kirigami.Units.gridUnit * 16)
+    minimumHeight: Math.ceil(2 * root.contentPadding + Kirigami.Units.gridUnit * 12 + tagEditorFooter.implicitHeight)
 
     // Sent when the edits that held up quitting are saved or dropped.
     signal quitMayProceed()
@@ -159,8 +350,41 @@ Dialog {
             return
         }
         root.tagEditorApi.close()
-        root.close()
+        root.reject()
     }
+
+    // The field whose typed text differs from what it holds and is not
+    // yet applied to the tracks, or null. A field applies its text as it
+    // loses focus or on Enter; until then the text is an unsaved change
+    // too, which Save and Ctrl+S apply and save (#373 H37: they stayed
+    // disabled while the user typed, and Ctrl+S did nothing).
+    property Item pendingEditField: null
+    readonly property bool hasUnsavedChanges: root.tagEditorApi.dirty || root.pendingEditField !== null
+    // The typed text marks its change at once, as it will once applied
+    // (#373 H38: nothing showed it until the field lost focus): its
+    // field's label and Revert, its column's header, and the rows it
+    // goes to.
+    readonly property string pendingEditKey: root.pendingEditField ? root.pendingEditField.field.key : ""
+    readonly property var pendingEditRows: {
+        const rows = ({})
+        const snapshot = root.pendingEditField ? root.pendingEditField.editRowsSnapshot : []
+        for (let i = 0; i < snapshot.length; ++i) {
+            rows[snapshot[i]] = true
+        }
+        return rows
+    }
+    // Whether the edits change a field in the selected rows, or in any
+    // row, typed text included.
+    function bulkFieldMarked(key) {
+        return root.pendingEditKey === key
+            || (root.summaryRevision >= 0 && root.tagEditorApi.bulkFieldChanged(key))
+    }
+    function columnMarked(key) {
+        return root.pendingEditKey === key
+            || (root.summaryRevision >= 0 && root.tagEditorApi.fieldChanged(key))
+    }
+    readonly property bool canSave: !root.tagEditorApi.loading && !root.tagEditorApi.saving
+        && root.hasUnsavedChanges
 
     // A field commits its typed text when it loses focus.
     function commitPendingEditorEdits() {
@@ -170,10 +394,15 @@ Dialog {
     }
 
     function triggerSave(closeAfterSuccess) {
-        if (root.tagEditorApi.loading || root.tagEditorApi.saving || !root.tagEditorApi.dirty) {
+        if (!root.canSave) {
             return false
         }
+        // The typed text first: it may be the only change, or none after
+        // all.
         root.commitPendingEditorEdits()
+        if (!root.tagEditorApi.dirty) {
+            return false
+        }
         root.operationInFlight = true
         root.operationText = I18n.i18nc("@info:status", "Saving tags…")
         root.closeAfterSave = closeAfterSuccess
@@ -247,14 +476,14 @@ Dialog {
 
     function saveAndClose() {
         if (!root.triggerSave(true)) {
-            tagEditorCloseConfirmDialog.close()
+            tagEditorCloseConfirmDialog.dismiss()
             root.continueQuit(!root.tagEditorApi.dirty)
             return
         }
         if (root.quitPending) {
             // Quitting waits for this save within the same bound as for any
             // other, so the confirmation gives way to the wait.
-            tagEditorCloseConfirmDialog.close()
+            tagEditorCloseConfirmDialog.dismiss()
             root.waitForOperationToQuit()
         }
     }
@@ -300,7 +529,7 @@ Dialog {
     // The save or rename that quitting waited for has finished.
     function stopWaitingForOperation() {
         tagEditorQuitWaitTimeout.stop()
-        tagEditorQuitWaitDialog.close()
+        tagEditorQuitWaitDialog.dismiss()
         root.quitWithoutOperation = false
     }
 
@@ -379,6 +608,26 @@ Dialog {
         event.accepted = true
     }
 
+    // The current row follows the selection, however it changes: when the
+    // current row is not selected, the first selected row becomes current
+    // and the anchor, so the ring and the tint are on one row and the
+    // keyboard goes on from the selection (#373 H12: after the selection was
+    // set elsewhere, the ring stayed on row 1 while row 2 was selected). A
+    // row that Ctrl or Space has just deselected stays current: it is set
+    // after the selection changes.
+    function followSelection() {
+        const rows = root.tagEditorApi.selectedRows()
+        if (rows.length === 0 || rows.indexOf(tagEditorTable.currentIndex) >= 0) {
+            return
+        }
+        // The controller's selection is a set, in no order.
+        const first = Math.min.apply(null, rows.map(Number))
+        tagEditorTable.currentIndex = first
+        if (rows.indexOf(root.selectionAnchor) < 0) {
+            root.selectionAnchor = first
+        }
+    }
+
     function initializeSelection() {
         if (root.totalRows > 0 && root.selectedCount === 0) {
             root.selectOnlyRow(0)
@@ -408,13 +657,20 @@ Dialog {
             return extra && extra.length > 0 ? [value].concat(extra).join("; ") : value
         }
         case "status":
-            return row.errorText.length > 0 ? row.errorText : (row.dirty ? I18n.i18nc("@item tag editor row status", "Modified") : "")
+            if (row.errorText.length > 0) {
+                return row.renameFailed ? root.notRenamedText : root.notSavedText
+            }
+            return row.dirty ? root.modifiedText : ""
+        case "trackNo":
+        case "discNo":
+            // As the queue shows a number: "1", whatever the tag pads it to.
+            return String(row[columnKey] || "").replace(/^0+(?=\d)/, "")
         default:
             return row[columnKey] || ""
         }
     }
 
-    onOpened: {
+    onAboutToShow: {
         root.initializeSelection()
         tagEditorTable.forceActiveFocus()
     }
@@ -431,11 +687,15 @@ Dialog {
         target: root.tagEditorApi
         ignoreUnknownSignals: true
 
+        function onSelectionChanged() {
+            root.followSelection()
+        }
+
         function onOpenChanged() {
             if (root.tagEditorApi.open && !root.visible) {
                 root.open()
             } else if (!root.tagEditorApi.open && root.visible) {
-                root.close()
+                root.reject()
             }
         }
 
@@ -452,7 +712,7 @@ Dialog {
             root.operationInFlight = false
             root.operationText = ""
             // A failure shows in the editor, under the confirmation.
-            tagEditorCloseConfirmDialog.close()
+            tagEditorCloseConfirmDialog.dismiss()
             if (success && root.closeAfterSave) {
                 root.closeEditor()
             }
@@ -515,13 +775,13 @@ Dialog {
         id: autoNumberDialog
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
+        windowRoot: root
     }
 
     Dialogs.RenamePreviewDialog {
         id: renamePreviewDialog
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
+        windowRoot: root
         onRenameRequested: root.renameNow()
         onClosed: rows = []
     }
@@ -530,7 +790,7 @@ Dialog {
         id: tagEditorCloseConfirmDialog
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
+        windowRoot: root
         onSaveRequested: root.saveAndClose()
         onDiscardRequested: {
             if (tagEditorCloseConfirmDialog.forReload) {
@@ -547,14 +807,14 @@ Dialog {
         id: tagEditorQuitWaitDialog
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
+        windowRoot: root
         onKeepWaitingRequested: {
             tagEditorQuitWaitDialog.offerChoice = false
             tagEditorQuitWaitTimeout.restart()
         }
         onQuitAnywayRequested: {
             tagEditorQuitWaitTimeout.stop()
-            tagEditorQuitWaitDialog.close()
+            tagEditorQuitWaitDialog.dismiss()
             root.quitPending = false
             root.quitWithoutOperation = true
             root.quitMayProceed()
@@ -576,19 +836,7 @@ Dialog {
         id: tagEditorStatusDetailsDialog
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
-    }
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
-
-    // The style's header closes at once; this one asks about unsaved edits.
-    header: Components.DialogHeader {
-        title: root.title
-        closeButtonName: "tagEditorCloseButton"
-        closeEnabled: !root.tagEditorApi.saving
-        onCloseRequested: root.requestClose()
+        windowRoot: root
     }
 
     // A text field of a tag: its label turns semibold and a revert button
@@ -597,10 +845,34 @@ Dialog {
         id: fieldEditor
 
         required property var field
+        // A number field, which says that its files differ in the short
+        // words where the whole ones do not fit.
+        property bool compact: false
+        // Its files hold different values, which saving keeps.
+        property bool mixed: false
+        readonly property bool keepTextFits: fieldMetrics.advanceWidth(root.keepText)
+            <= fieldEditor.width - fieldEditor.leftPadding - fieldEditor.rightPadding
+        // Its files differ, and it is too narrow to say so whole.
+        readonly property bool needsKeepShort: fieldEditor.compact && fieldEditor.mixed && !fieldEditor.keepTextFits
         property bool touched: false
+        // The text it shows for the tracks, before the user types.
+        property string committedText: ""
+        // Typed and not yet applied: see the dialog's pendingEditField.
+        readonly property bool pendingEdit: fieldEditor.touched && fieldEditor.text !== fieldEditor.committedText
+        onPendingEditChanged: {
+            if (fieldEditor.pendingEdit) {
+                root.pendingEditField = fieldEditor
+            } else if (root.pendingEditField === fieldEditor) {
+                root.pendingEditField = null
+            }
+        }
+        Component.onDestruction: {
+            if (root.pendingEditField === fieldEditor) {
+                root.pendingEditField = null
+            }
+        }
         property var editRowsSnapshot: []
-        readonly property bool changed: root.summaryRevision >= 0
-            && root.tagEditorApi.bulkFieldChanged(fieldEditor.field.key)
+        readonly property bool changed: root.bulkFieldMarked(fieldEditor.field.key)
 
         function captureEditRowsSnapshot() {
             editRowsSnapshot = root.tagEditorApi.selectedRows()
@@ -615,7 +887,8 @@ Dialog {
                 return
             }
             text = mixed ? "" : value
-            placeholderText = mixed ? root.keepText : ""
+            committedText = text
+            fieldEditor.mixed = mixed
             editRowsSnapshot = []
             touched = false
         }
@@ -624,6 +897,8 @@ Dialog {
         Layout.fillWidth: true
         selectByMouse: true
         persistentSelection: true
+        placeholderText: fieldEditor.mixed ? (root.keepShortInForm ? root.keepShortText : root.keepText) : ""
+        placeholderTextColor: root.uiPalette.placeholderText
         rightPadding: fieldEditor.changed
             ? revertButton.width + Kirigami.Units.smallSpacing
             : leftPadding
@@ -669,11 +944,13 @@ Dialog {
             anchors.right: parent.right
             anchors.rightMargin: 2
             anchors.verticalCenter: parent.verticalCenter
-            width: Kirigami.Units.iconSizes.small + 2 * Kirigami.Units.smallSpacing
+            width: root.fieldRevertWidth
             height: width
             visible: fieldEditor.changed
             enabled: !root.busy
             icon.name: "edit-undo"
+            icon.width: root.uiPalette.labelIconSize
+            icon.height: root.uiPalette.labelIconSize
             display: AbstractButton.IconOnly
             text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1", fieldEditor.field.label)
             ToolTip.visible: hovered || visualFocus
@@ -699,8 +976,7 @@ Dialog {
     // The label of a field: semibold while the edits change it.
     component FieldLabel: Label {
         required property var field
-        readonly property bool changed: root.summaryRevision >= 0
-            && root.tagEditorApi.bulkFieldChanged(field.key)
+        readonly property bool changed: root.bulkFieldMarked(field.key)
         objectName: "tagEditorLabel_" + field.key
         Layout.preferredWidth: root.fieldLabelWidth
         horizontalAlignment: Text.AlignRight
@@ -743,13 +1019,17 @@ Dialog {
         }
     }
 
+    // Tools, Reload and the status share the row with the buttons, on
+    // their inset from the window's edges.
     footer: RowLayout {
+        id: tagEditorFooter
         spacing: Kirigami.Units.largeSpacing
 
         Button {
             id: toolsButton
             objectName: "tagEditorToolsButton"
-            Layout.leftMargin: Kirigami.Units.largeSpacing * 2
+            Layout.leftMargin: dialogButtons.inset
+            Layout.bottomMargin: dialogButtons.bottomPadding
             text: I18n.i18nc("@action:button", "Tools")
             enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
             // A menu button, which Breeze draws with its arrow.
@@ -815,6 +1095,9 @@ Dialog {
 
         Button {
             objectName: "tagEditorReloadButton"
+            Layout.bottomMargin: dialogButtons.bottomPadding
+            icon.width: dialogButtons.glyphSize
+            icon.height: dialogButtons.glyphSize
             text: I18n.i18nc("@action:button", "Reload")
             icon.name: "view-refresh"
             enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
@@ -824,13 +1107,15 @@ Dialog {
         BusyIndicator {
             running: root.busy
             visible: running
-            Layout.preferredWidth: Kirigami.Units.iconSizes.small
-            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+            Layout.bottomMargin: dialogButtons.bottomPadding
+            Layout.preferredWidth: root.uiPalette.labelIconSize
+            Layout.preferredHeight: root.uiPalette.labelIconSize
         }
 
         Label {
             objectName: "tagEditorStatusLabel"
             Layout.fillWidth: true
+            Layout.bottomMargin: dialogButtons.bottomPadding
             Layout.leftMargin: Kirigami.Units.smallSpacing
             text: root.statusLine()
             font.pointSize: root.uiPalette.smallPointSize
@@ -841,6 +1126,7 @@ Dialog {
 
         Button {
             objectName: "tagEditorDetailsButton"
+            Layout.bottomMargin: dialogButtons.bottomPadding
             visible: !root.busy && root.tagEditorApi.statusDetails.length > 0
             text: I18n.i18nc("@action:button", "Details…")
             onClicked: tagEditorStatusDetailsDialog.open()
@@ -857,7 +1143,7 @@ Dialog {
                     ? I18n.i18nc("@action:button", "Saving…")
                     : I18n.i18nc("@action:button", "Save")
                 icon.name: "document-save"
-                enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
+                enabled: root.canSave
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
                 onClicked: root.triggerSave(false)
             }
@@ -872,16 +1158,20 @@ Dialog {
         }
     }
 
-    contentItem: RowLayout {
-        // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+    RowLayout {
+        id: tagEditorContent
+        anchors.fill: parent
+        anchors.margins: root.contentPadding
 
-        spacing: Kirigami.Units.gridUnit - 2
+        // Enter presses the default button, as in KDE's dialogs.
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, root.visible) }
+
+        spacing: root.contentSpacing
 
         Shortcut {
             sequences: ["Ctrl+S"]
             context: Qt.WindowShortcut
-            enabled: root.visible && !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
+            enabled: root.visible && root.canSave
             onActivated: root.triggerSave(false)
         }
 
@@ -892,21 +1182,11 @@ Dialog {
             onActivated: root.selectAllRows()
         }
 
-        Shortcut {
-            sequences: ["Esc"]
-            context: Qt.WindowShortcut
-            enabled: root.visible && !tagEditorCloseConfirmDialog.visible
-                && !autoNumberDialog.visible && !tagEditorStatusDetailsDialog.visible
-                && !tagEditorQuitWaitDialog.visible && !renamePreviewDialog.visible
-                && !toolsMenu.visible
-            onActivated: root.requestClose()
-        }
-
         ScrollView {
             id: tagEditorFieldsScroll
             objectName: "tagEditorFields"
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 19
-            Layout.minimumWidth: Kirigami.Units.gridUnit * 16
+            Layout.preferredWidth: root.fieldsShownWidth
+            Layout.minimumWidth: root.fieldsLeastWidth
             Layout.fillHeight: true
             clip: true
             contentWidth: availableWidth
@@ -923,8 +1203,8 @@ Dialog {
                 FieldRow { field: root.fieldAt("albumArtist") }
                 FieldRow { field: root.fieldAt("genre") }
                 FieldRow { field: root.fieldAt("year") }
-                NumberPair { first: root.fieldAt("trackNo"); second: root.fieldAt("totalTracks") }
-                NumberPair { first: root.fieldAt("discNo"); second: root.fieldAt("totalDiscs") }
+                NumberPair { id: trackPair; first: root.fieldAt("trackNo"); second: root.fieldAt("totalTracks") }
+                NumberPair { id: discPair; first: root.fieldAt("discNo"); second: root.fieldAt("totalDiscs") }
                 FieldRow { field: root.fieldAt("comment") }
             }
         }
@@ -985,11 +1265,13 @@ Dialog {
                                 required property var modelData
                                 required property int index
                                 readonly property bool editable: root.fieldAt(headerCell.modelData.key) !== null
-                                readonly property bool changed: headerCell.editable && root.summaryRevision >= 0
-                                    && root.tagEditorApi.fieldChanged(headerCell.modelData.key)
+                                readonly property bool changed: headerCell.editable
+                                    && root.columnMarked(headerCell.modelData.key)
                                 objectName: "tagEditorColumn_" + headerCell.modelData.key
                                 width: root.columnWidth(headerCell.index)
                                 height: parent.height
+                                // Status, while no row has one.
+                                visible: width > 0
 
                                 Row {
                                     anchors.fill: parent
@@ -1016,12 +1298,12 @@ Dialog {
                                         anchors.verticalCenter: parent.verticalCenter
                                         visible: headerCell.changed
                                         enabled: !root.busy
-                                        width: Kirigami.Units.iconSizes.small + Kirigami.Units.smallSpacing
+                                        width: root.uiPalette.labelIconSize + Kirigami.Units.smallSpacing
                                         height: width
                                         padding: 0
                                         icon.name: "edit-undo"
-                                        icon.width: Kirigami.Units.iconSizes.small - 2
-                                        icon.height: Kirigami.Units.iconSizes.small - 2
+                                        icon.width: root.columnRevertGlyph
+                                        icon.height: root.columnRevertGlyph
                                         display: AbstractButton.IconOnly
                                         text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1 in Every File",
                                             headerCell.modelData.label)
@@ -1061,30 +1343,41 @@ Dialog {
                     required property bool dirty
                     required property bool selected
                     required property string errorText
+                    required property bool renameFailed
                     required property var extraValues
                     readonly property bool current: ListView.isCurrentItem && tagEditorTable.activeFocus
+                    // Unsaved edits, typed text included.
+                    readonly property bool marked: tableRow.dirty || root.pendingEditRows[tableRow.index] === true
 
                     width: root.tableContentWidth
                     height: root.tableRowHeight
                     Accessible.role: Accessible.Row
                     Accessible.name: tableRow.fileName
+                    Accessible.description: tableRow.marked ? root.modifiedText : ""
                     Accessible.selected: tableRow.selected
 
                     Components.RowBackground {
                         objectName: "tagEditorRowBackground"
                         uiPalette: root.uiPalette
                         scrollbarLane: 0
-                        hovered: rowMouse.containsMouse
+                        hovered: rowHover.hovered
                         selected: tableRow.selected
                         active: tagEditorTable.activeFocus
                         focused: tableRow.current
+                    }
+
+                    // The row is under the pointer wherever the pointer is
+                    // on it: the cells above the click area take the hover
+                    // from a sibling under them, so the row's tint showed
+                    // only in its insets (#373 H45).
+                    HoverHandler {
+                        id: rowHover
                     }
 
                     MouseArea {
                         id: rowMouse
                         anchors.fill: parent
                         acceptedButtons: Qt.LeftButton
-                        hoverEnabled: true
                         onClicked: function(mouse) {
                             root.handleRowClick(tableRow.index, mouse.modifiers)
                         }
@@ -1098,24 +1391,65 @@ Dialog {
                         Repeater {
                             model: root.tableColumns
                             delegate: Label {
+                                id: tableCell
                                 required property var modelData
                                 required property int index
+                                objectName: "tagEditorCell_" + modelData.key
                                 width: root.columnWidth(index)
                                 height: parent.height
+                                visible: width > 0
                                 leftPadding: Kirigami.Units.largeSpacing
                                 rightPadding: Kirigami.Units.largeSpacing
                                 text: root.cellText(modelData.key, tableRow)
                                 font.features: modelData.number ? root.uiPalette.tabularFigures : ({})
-                                color: modelData.key === "status" && tableRow.errorText.length > 0
+                                color: tableCell.failureCell
                                     ? root.uiPalette.negative
                                     : (modelData.number
-                                        ? root.uiPalette.textTertiaryOn(tableRow.selected)
+                                        ? root.uiPalette.textTertiaryOn(tableRow.selected, rowHover.hovered)
                                         : root.uiPalette.text)
                                 verticalAlignment: Text.AlignVCenter
                                 horizontalAlignment: modelData.number ? Text.AlignRight : Text.AlignLeft
+                                // A file name or folder keeps its start: the
+                                // track number and title, or the folder's
+                                // year and album, rather than an extension
+                                // that Format shows. The whole is in a
+                                // tooltip while it is cut short.
                                 elide: Text.ElideRight
+                                // The # cell of a row with unsaved edits
+                                // says what its mark means, and the Status
+                                // cell of a row that failed, why.
+                                readonly property bool failureCell: modelData.key === "status"
+                                    && tableRow.errorText.length > 0
+                                readonly property string toolTipText: modelData.path && tableCell.truncated
+                                    ? (modelData.key === "directory" ? tableRow.directory : tableCell.text)
+                                    : (tableCell.failureCell ? tableRow.errorText
+                                        : (modelData.key === "trackNo" && tableRow.marked ? root.modifiedText : ""))
+                                Accessible.description: tableCell.failureCell ? tableRow.errorText : ""
+
+                                HoverHandler {
+                                    id: cellHover
+                                    enabled: tableCell.toolTipText.length > 0
+                                }
+
+                                ToolTip.visible: cellHover.hovered && tableCell.toolTipText.length > 0
+                                ToolTip.delay: Kirigami.Units.toolTipDelay
+                                ToolTip.text: tableCell.toolTipText
                             }
                         }
+                    }
+
+                    // Unsaved edits: a dot in the # column's left padding,
+                    // which is there in every row, so the edit that brings
+                    // it moves nothing.
+                    Rectangle {
+                        objectName: "tagEditorRowModifiedMark"
+                        visible: tableRow.marked
+                        x: root.tableInset + Math.round((Kirigami.Units.largeSpacing - width) / 2)
+                        y: Math.round((parent.height - height) / 2)
+                        width: root.modifiedMarkSize
+                        height: width
+                        radius: width / 2
+                        color: root.uiPalette.text
                     }
                 }
             }
@@ -1129,6 +1463,25 @@ Dialog {
             widest = Math.max(widest, boldLabelMetrics.advanceWidth(root.editorFields[i].formLabel))
         }
         return Math.ceil(widest)
+    }
+
+    // A field's Revert: its glyph as large as a line of the field's text
+    // holds, as the column's Revert: 16 px with the default font (#373 H46:
+    // 16 px beside 32 px text at 24 pt).
+    readonly property real fieldRevertWidth: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
+
+    // The least the fields' column takes: the labels and a field that shows
+    // about 16 characters, so a large font doesn't squeeze the fields, and
+    // Track and Disc whole. The table has the rest.
+    readonly property real fieldsMinimumWidth: Math.max(Math.ceil(root.fieldLabelWidth
+        + Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+        + 16 * fieldMetrics.averageCharacterWidth + 2 * Kirigami.Units.largeSpacing),
+        trackPair.leastWidth, discPair.leastWidth)
+
+    FontMetrics {
+        id: fieldMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.basePointSize
     }
 
     FontMetrics {
@@ -1166,34 +1519,54 @@ Dialog {
         }
     }
 
-    // Track and Disc: the number, "of", and the total.
+    // Track and Disc: the number, "of", and the total. "of" is 4 px from
+    // the field on either side of it, so the three read as one value
+    // (#373 H11: at the form's 12 px it stood apart from both). The two
+    // fields share what is left of the row equally, so the pair ends where
+    // the other fields do (#373 H41: it ended 35 px short).
     component NumberPair: RowLayout {
         id: pair
         required property var first
         required property var second
+        readonly property bool needsKeepShort: firstField.needsKeepShort || secondField.needsKeepShort
+        // Its fields at their narrowest: "Mixed" whole beside the Revert
+        // (#373 H47: "Mix…" at 24 pt once the Revert followed the font).
+        readonly property real fieldLeastWidth: Math.ceil(firstField.leftPadding
+            + fieldMetrics.advanceWidth(root.keepShortText)
+            + root.fieldRevertWidth + Kirigami.Units.smallSpacing)
+        // The pair at its narrowest: the label, the fields and "of".
+        readonly property real leastWidth: Math.ceil(root.fieldLabelWidth + Kirigami.Units.largeSpacing
+            + 3 * pair.spacing + ofLabel.implicitWidth + 2 * pair.fieldLeastWidth)
         Layout.fillWidth: true
-        spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+        spacing: Kirigami.Units.smallSpacing
 
-        FieldLabel { field: pair.first }
+        FieldLabel {
+            field: pair.first
+            Layout.rightMargin: Kirigami.Units.largeSpacing
+        }
 
         TagField {
+            id: firstField
             field: pair.first
-            Layout.fillWidth: false
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 7
+            compact: true
+            Layout.fillWidth: true
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 3
         }
 
         Label {
+            id: ofLabel
+            objectName: "tagEditorOf_" + pair.first.key
             text: I18n.i18nc("@label track or disc number of the total", "of")
             color: root.uiPalette.textSecondary
             Accessible.ignored: true
         }
 
         TagField {
+            id: secondField
             field: pair.second
-            Layout.fillWidth: false
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 3 + Kirigami.Units.largeSpacing
+            compact: true
+            Layout.fillWidth: true
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 3
         }
-
-        Item { Layout.fillWidth: true }
     }
 }

@@ -10,31 +10,32 @@ import "../components" as Components
 import "../preferences" as Preferences
 import "../logic/KeyUtils.js" as KeyUtils
 
-// Configure Ferrous: a KDE page list beside the pages. The settings change
-// on OK or Apply, Cancel drops what was changed since, and Defaults sets
-// every page back to the defaults, to be applied in turn. The library
-// folders and the Last.fm account are not settings: they change at once.
-Dialog {
+// Configure Ferrous: a KDE page list beside the pages, in a window of its
+// own, as KConfigDialog. The settings change on OK or Apply, Cancel drops
+// what was changed since, and Defaults sets every page back to the
+// defaults, to be applied in turn. The library folders and the Last.fm
+// account are not settings: they change at once.
+Components.DialogWindow {
     id: root
 
     required property var uiBridge
-    required property var uiPalette
-    required property var windowRoot
     required property var spectrogramFftChoices
     required property var promptAddLibraryRoot
     required property var openLibraryRootNameDialog
 
     property int pageIndex: 0
     readonly property var pages: [
-        { title: I18n.i18nc("@title:tab preferences page", "Library"), icon: "folder" },
-        { title: I18n.i18nc("@title:tab preferences page", "Spectrogram"), icon: "office-chart-bar" },
-        { title: I18n.i18nc("@title:tab preferences page", "Appearance"), icon: "monitor" },
-        { title: I18n.i18nc("@title:tab preferences page", "Last.fm"), icon: Qt.resolvedUrl("../assets/lastfm.svg") },
-        { title: I18n.i18nc("@title:tab preferences page", "Media Controls"), icon: "multimedia-player" }
+        // The symbolic folder: from 32 px, "folder" is the full-colour one.
+        { title: I18n.i18nc("@title:tab preferences page", "Library"), icon: "folder-symbolic" },
+        { title: I18n.i18nc("@title:tab preferences page", "Visualization"), icon: "view-media-visualization" },
+        { title: I18n.i18nc("@title:tab preferences page", "General"), icon: "configure" },
+        { title: I18n.i18nc("@title:tab preferences page", "Last.fm"), icon: Qt.resolvedUrl("../assets/lastfm.svg") }
     ]
     // Kept for the callers that name a page.
     readonly property var pageTitles: root.pages.map(function(page) { return page.title })
     readonly property int libraryPageIndex: 0
+    readonly property int visualizationPageIndex: 1
+    readonly property int generalPageIndex: 2
     readonly property int lastFmPageIndex: 3
 
     // What the user changed and has yet to apply.
@@ -155,37 +156,79 @@ Dialog {
         }
     }
 
-    modal: true
-    // Keyboard users start in the dialog, on the page list.
-    focus: true
     // KConfigDialog's caption: "Configure", with the application's name.
     title: I18n.i18nc("@title:window %1 is the application name", "Configure — %1", "Ferrous")
-    parent: Overlay.overlay
-    width: Math.min(Kirigami.Units.gridUnit * 49, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
-    height: Math.min(Kirigami.Units.gridUnit * 31, root.windowRoot.height - 2 * Kirigami.Units.gridUnit)
-    x: Math.round(((parent ? parent.width : root.windowRoot.width) - width) / 2)
-    y: Math.round(((parent ? parent.height : root.windowRoot.height) - height) / 2)
-    padding: 0
-    closePolicy: Popup.CloseOnEscape
+    // The page list's rows: the icon and the title, with its insets.
+    readonly property real pageRowLeftPadding: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+    readonly property real pageRowSpacing: Kirigami.Units.largeSpacing + 2
+    // The rows' icons are as large as their titles' font calls for: 16 px
+    // with the default font, larger with a larger one (#373 H38: they
+    // stayed 16 px beside 24 pt titles).
+    readonly property real pageIconSize: root.uiPalette.labelIconSize
+    // The page list: 176 px, or as wide as its longest title needs.
+    readonly property real pageListWidth: {
+        let widest = 0
+        for (let i = 0; i < root.pages.length; ++i) {
+            widest = Math.max(widest, pageTitleMetrics.advanceWidth(root.pages[i].title))
+        }
+        return Math.max(176, Math.ceil(root.pageRowLeftPadding + root.pageIconSize
+            + root.pageRowSpacing + widest + root.pageRowLeftPadding))
+    }
+    FontMetrics {
+        id: pageTitleMetrics
+        font: root.uiPalette.baseFont
+    }
+
+    // 49 grid units wide, or the page list and 39 of them for the pages
+    // when the list is wider, scaled with the font, or wider for every
+    // page's wide layout. As
+    // tall as the tallest page, Visualization with its three subheadings,
+    // measured whole at the default font, with the buttons under it and a
+    // margin for a font whose lines run taller for its size; or taller for
+    // the page it opens on. The height cannot follow the pages it is not
+    // on (#585): a page out of view has its form's rows hidden, and
+    // Kirigami's FormLayout leaves hidden rows out of its height, so only
+    // the page in view has one. A larger font makes the window larger,
+    // within the screen; it lays its pages out for the room it has, and
+    // the user may make it larger.
+    defaultWidth: Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 49), root.pageListWidth + 1
+        + Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 39),
+            pagesLoader.item ? pagesLoader.item.wideWidth : 0))
+    // Visualization's height at 10 pt: 684 px with Noto Sans, 38 grid
+    // units of the window's font, which it grows with (#373 H37: in 41 of
+    // Kirigami's, which do not, for the whole window, it scrolled by 8 px,
+    // and at 24 pt by half its height).
+    readonly property real tallestPageHeight: root.uiPalette.gridUnit * 38
+    defaultHeight: Math.max(Math.ceil(root.tallestPageHeight + Kirigami.Units.largeSpacing)
+            + preferencesFooter.implicitHeight,
+        preferencesContent.implicitHeight + preferencesFooter.implicitHeight)
+    // The page list, and a page with room for its widest control.
+    minimumWidth: Math.ceil(root.pageListWidth + 1 + Math.max(Kirigami.Units.gridUnit * 20,
+        pagesLoader.item ? pagesLoader.item.minimumWidth : 0))
+    minimumHeight: Math.ceil(Math.min(root.defaultHeight, Kirigami.Units.gridUnit * 18))
 
     onAboutToShow: {
         settingsState.discard()
         pagesLoader.active = true
+        // Keyboard users start on the page list.
+        pageList.forceActiveFocus(Qt.PopupFocusReason)
     }
-    onOpened: pageList.forceActiveFocus(Qt.PopupFocusReason)
     // Cancel, Escape and the close button drop what was not applied.
     onRejected: settingsState.discard()
     onAccepted: settingsState.apply()
 
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
-
     // Defaults on the left; OK, Apply and Cancel in KDE's order on the
     // right. A seam between the pages and the buttons.
     footer: Control {
+        id: preferencesFooter
         objectName: "preferencesButtons"
-        padding: 0
+        // Each side, which the style's Control sets to its layout margins
+        // otherwise; the buttons have the dialogs' inset. As far below the
+        // seam as they are above the window's edge.
+        leftPadding: 0
+        rightPadding: 0
+        topPadding: dialogButtons.inset
+        bottomPadding: 0
         background: Item {
             Rectangle {
                 anchors.left: parent.left
@@ -212,7 +255,10 @@ Dialog {
             Button {
                 id: defaultsButton
                 objectName: "preferencesDefaultsButton"
-                Layout.leftMargin: Kirigami.Units.largeSpacing * 2
+                Layout.leftMargin: dialogButtons.inset
+                Layout.bottomMargin: dialogButtons.bottomPadding
+                icon.width: dialogButtons.glyphSize
+                icon.height: dialogButtons.glyphSize
                 text: I18n.i18nc("@action:button", "Defaults")
                 icon.name: "document-revert"
                 enabled: !settingsState.atDefaults
@@ -252,11 +298,14 @@ Dialog {
         }
     }
 
-    contentItem: RowLayout {
+    RowLayout {
+        id: preferencesContent
+        anchors.fill: parent
+
         // Enter presses the default button, as in KDE's dialogs. The pages'
         // combo boxes pass it on from here too.
         function handleDialogEnter(event, focusItem) {
-            return dialogButtons.handleEnter(event, focusItem, KeyUtils.popupTakesKeys(root))
+            return dialogButtons.handleEnter(event, focusItem, root.visible)
         }
         Keys.onPressed: function(event) { handleDialogEnter(event, Window.activeFocusItem) }
 
@@ -264,21 +313,22 @@ Dialog {
 
         Shortcut {
             sequences: ["Ctrl+Tab", "Ctrl+PgDown"]
-            enabled: root.opened
+            enabled: root.visible
             onActivated: root.stepPage(1)
         }
 
         Shortcut {
             sequences: [StandardKey.PreviousChild, "Ctrl+PgUp"]
-            enabled: root.opened
+            enabled: root.visible
             onActivated: root.stepPage(-1)
         }
 
         // The page list: Tab reaches it, and the arrow keys move between
         // the pages.
         Rectangle {
-            Layout.preferredWidth: 176
+            Layout.preferredWidth: root.pageListWidth
             Layout.fillHeight: true
+            implicitHeight: pageList.anchors.topMargin + pageList.contentHeight
             color: root.uiPalette.view
 
             ListView {
@@ -305,7 +355,13 @@ Dialog {
                     width: ListView.view.width
                     implicitHeight: root.uiPalette.rowHeight + Kirigami.Units.smallSpacing
                     padding: 0
-                    leftPadding: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+                    // The style gives every row but a list's last a bottom
+                    // padding of its own, which `padding` does not reset:
+                    // each row's icon and title were 2 px above the last
+                    // one's (#373 H40), off the row's middle.
+                    topPadding: 0
+                    bottomPadding: 0
+                    leftPadding: root.pageRowLeftPadding
                     focusPolicy: Qt.NoFocus
                     text: pageRow.modelData.title
                     highlighted: ListView.isCurrentItem
@@ -327,11 +383,12 @@ Dialog {
                     }
 
                     contentItem: RowLayout {
-                        spacing: Kirigami.Units.largeSpacing + 2
+                        spacing: root.pageRowSpacing
 
                         Kirigami.Icon {
-                            implicitWidth: Kirigami.Units.iconSizes.small
-                            implicitHeight: Kirigami.Units.iconSizes.small
+                            objectName: "preferencesPageIcon"
+                            implicitWidth: root.pageIconSize
+                            implicitHeight: root.pageIconSize
                             source: pageRow.modelData.icon
                             color: root.uiPalette.text
                             isMask: true
@@ -339,6 +396,7 @@ Dialog {
                         }
 
                         Label {
+                            objectName: "preferencesPageListTitle"
                             Layout.fillWidth: true
                             text: pageRow.text
                             color: root.uiPalette.text
@@ -366,41 +424,58 @@ Dialog {
             active: false
             sourceComponent: Component {
                 StackLayout {
+                    id: pagesStack
                     objectName: "preferencesPages"
+                    // The width that fits every page, and the width for
+                    // every page's wide layout.
+                    readonly property real minimumWidth: pagesStack.widest("minimumWidth")
+                    readonly property real wideWidth: pagesStack.widest("wideWidth")
+                    // The labels' column of every page: the widest label of
+                    // them all, up to a limit that grows with the font,
+                    // past which a page with a longer one has a wider
+                    // column of its own.
+                    readonly property real labelWidth: Math.min(pagesStack.widest("labelWidth"),
+                        root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 14))
+
+                    function widest(property) {
+                        let widest = 0
+                        for (let i = 0; i < pagesStack.children.length; ++i) {
+                            widest = Math.max(widest, pagesStack.children[i][property] || 0)
+                        }
+                        return widest
+                    }
                     currentIndex: root.pageIndex
 
                     Preferences.LibraryPage {
+                        sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesLibraryPage"
                         uiBridge: root.uiBridge
                         uiPalette: root.uiPalette
                         settings: settingsState
-                        windowRoot: root.windowRoot
+                        windowRoot: root
                         promptAddLibraryRoot: root.promptAddLibraryRoot
                         openLibraryRootNameDialog: root.openLibraryRootNameDialog
                     }
 
-                    Preferences.SpectrogramPage {
-                        objectName: "preferencesSpectrogramPage"
+                    Preferences.VisualizationPage {
+                        sharedLabelWidth: pagesStack.labelWidth
+                        objectName: "preferencesVisualizationPage"
                         uiPalette: root.uiPalette
                         settings: settingsState
                         spectrogramFftChoices: root.spectrogramFftChoices
                     }
 
-                    Preferences.DisplayPage {
-                        objectName: "preferencesAppearancePage"
+                    Preferences.GeneralPage {
+                        sharedLabelWidth: pagesStack.labelWidth
+                        objectName: "preferencesGeneralPage"
                         uiPalette: root.uiPalette
                         settings: settingsState
                     }
 
                     Preferences.LastFmPage {
+                        sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesLastFmPage"
                         uiBridge: root.uiBridge
-                        uiPalette: root.uiPalette
-                        settings: settingsState
-                    }
-
-                    Preferences.SystemMediaPage {
-                        objectName: "preferencesMediaControlsPage"
                         uiPalette: root.uiPalette
                         settings: settingsState
                     }

@@ -39,6 +39,8 @@ struct TagEditorRowState {
     bool dirty{false};
     bool selected{false};
     QString errorText;
+    // Whether `errorText` is why a rename failed, rather than a save.
+    bool renameFailed{false};
     // The values after the first of fields that hold several, by field name.
     // Saving a changed field replaces them all with its one value.
     QHash<QString, QStringList> extraValues;
@@ -68,6 +70,7 @@ public:
         ErrorRole,
         SelectedRole,
         ExtraValuesRole,
+        RenameFailedRole,
     };
 
     explicit TagEditorTableModel(QObject *parent = nullptr);
@@ -87,6 +90,8 @@ public:
     QString originalFieldValue(int row, const QString &field) const;
     QStringList loadedPaths() const;
     bool hasDirtyRows() const;
+    // Whether a row holds the error of a save or rename that failed for it.
+    bool hasRowErrors() const;
     // Marks exactly `rows` selected, notifying only the rows that change.
     void setSelection(const QSet<int> &rows);
     // The extra values of `field` that a save would keep, which are those of
@@ -105,6 +110,7 @@ public:
 signals:
     void rowsChanged();
     void dirtyStateChanged();
+    void rowErrorsChanged();
 
 private:
     QVariant fieldData(const TagEditorRowState &row, int role) const;
@@ -114,7 +120,11 @@ private:
     bool refreshDirtyState(TagEditorRowState &row);
     void emitRowChanged(int row);
     void countDirtyRows();
+    // Counts the rows with errors again, and says when whether there are
+    // any changes.
+    void refreshRowErrors();
 
     QVector<TagEditorRowState> m_rows;
     int m_dirtyRowCount{0};
+    int m_errorRowCount{0};
 };

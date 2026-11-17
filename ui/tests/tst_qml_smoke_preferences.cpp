@@ -2,6 +2,8 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QIcon>
+
 // Preferences, diagnostics and album art.
 class PreferencesSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -375,6 +377,14 @@ ApplicationWindow {
     QObject *dialog = qvariant_cast<QObject *>(root->property("dialog"));
     QObject *confirm = root->findChild<QObject *>(QStringLiteral("replaceCoverConfirmDialog"));
     QVERIFY(dialog != nullptr && confirm != nullptr);
+    // Typographic apostrophes, as everywhere else (#373 H45).
+    const QString details = confirm->property("details").toString();
+    QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("album\u2019s cover image")),
+             qPrintable(details));
+    // Replace from iTunes has a window of its own, which its question opens
+    // in.
+    auto *dialogWindow = qobject_cast<QQuickWindow *>(dialog);
+    QVERIFY(dialogWindow != nullptr);
     const auto applied = [&root]() { return root->property("applied").toList(); };
     QObject *bridge = dialog->property("uiBridge").value<QObject *>();
     QVERIFY(bridge != nullptr);
@@ -395,6 +405,7 @@ ApplicationWindow {
     });
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
+    QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
 
     // The album has art: Apply asks, naming it, and Cancel keeps the art.
     QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionApply", Q_ARG(QVariant, 0)));
@@ -402,9 +413,43 @@ ApplicationWindow {
     QCOMPARE(confirm->property("message").toString(),
              QStringLiteral("Replace the album art of “Album A” by Artist A?"));
     QVERIFY(applied().isEmpty());
-    QVERIFY2(confirm->property("details").toString().contains(QStringLiteral("keeps no copy")),
-             qPrintable(confirm->property("details").toString()));
-    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogCancelButton")));
+    // What Replace does, in two short sentences (#373 H45: one sentence of
+    // 31 words): the folder's cover image, or the tracks' embedded art.
+    QCOMPARE(confirm->property("details").toString(),
+             QStringLiteral("The new artwork replaces the album\u2019s cover image file or, if it has none, the artwork "
+                            "embedded in its tracks. Ferrous keeps no copy of the current album art."));
+    // A window of its own above Replace from iTunes' (#373 H5), with
+    // Replace's icon beside Cancel's.
+    auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
+    QVERIFY(confirmWindow != nullptr);
+    QCOMPARE(confirmWindow->transientParent(), dialogWindow);
+    QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
+    // Replace's glyph is Breeze's swap, one image for the other, in the
+    // text's colour: "document-replace", a page with a red ×, read as Delete
+    // (#373 H47).
+    QCOMPARE(confirm->property("confirmIcon").toString(), QStringLiteral("document-swap"));
+    QQuickItem *replaceButton = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogConfirmButton"));
+    QVERIFY(replaceButton != nullptr);
+    QCOMPARE(replaceButton->property("text").toString(), QStringLiteral("Replace"));
+    QCOMPARE(QQmlProperty(replaceButton, QStringLiteral("icon.name")).read().toString(),
+             QStringLiteral("document-swap"));
+    QVERIFY(QIcon::hasThemeIcon(QStringLiteral("document-swap")));
+    // Whether a theme glyph draws anything red at 16 px.
+    const auto drawsRed = [](const QString &name) {
+        const QImage glyph = QIcon::fromTheme(name).pixmap(QSize(16, 16)).toImage().convertToFormat(QImage::Format_ARGB32);
+        for (int y = 0; y < glyph.height(); ++y) {
+            for (int x = 0; x < glyph.width(); ++x) {
+                const QColor pixel = glyph.pixelColor(x, y);
+                if (pixel.alpha() > 128 && pixel.red() > pixel.green() + 60 && pixel.red() > pixel.blue() + 60) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    QVERIFY(drawsRed(QStringLiteral("document-replace")));
+    QVERIFY(!drawsRed(QStringLiteral("document-swap")));
+    QVERIFY(clickVisibleButton(confirmWindow, QStringLiteral("confirmDialogCancelButton")));
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QVERIFY(applied().isEmpty());
     QVERIFY(dialog->property("visible").toBool());
@@ -420,7 +465,9 @@ ApplicationWindow {
     QCOMPARE(dialog->property("currentArtworkSource").toString(), coverUrl);
     // A quick second click on Replace, as the question fades out, applies
     // nothing more.
-    QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("confirmDialogConfirmButton"), confirm));
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
+    QVERIFY(clickTwiceAsItCloses(dialogWindow, QStringLiteral("confirmDialogConfirmButton"), confirm));
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(applied(), (QVariantList{0}));
     QVERIFY(!dialog->property("visible").toBool());
@@ -433,8 +480,14 @@ ApplicationWindow {
     });
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    // Nor does a quick second click on Apply, as the dialog fades out.
-    QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("itunesArtworkApplyButton"), dialog));
+    QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
+    // Nor does a quick second click on Apply: the window hides at once.
+    QQuickItem *apply = visibleItemNamed(dialogWindow, QStringLiteral("itunesArtworkApplyButton"));
+    QVERIFY(apply != nullptr);
+    const QPoint applyAt = centerInWindow(apply);
+    QTest::mouseClick(dialogWindow, Qt::LeftButton, Qt::NoModifier, applyAt);
+    QVERIFY(!dialog->property("visible").toBool());
+    QTest::mouseClick(dialogWindow, Qt::LeftButton, Qt::NoModifier, applyAt);
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(applied(), (QVariantList{0, 0}));
     QVERIFY(!confirm->property("visible").toBool());
@@ -446,10 +499,11 @@ ApplicationWindow {
                         QVariantList{QVariantMap{{QStringLiteral("normalizedPath"), QString()}}});
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    QVERIFY(clickVisibleButton(window, QStringLiteral("itunesArtworkApplyButton")));
+    QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
+    QVERIFY(clickVisibleButton(dialogWindow, QStringLiteral("itunesArtworkApplyButton")));
     QCOMPARE(dialog->property("pendingApplyIndex").toInt(), 0);
     QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
-    QVERIFY(popupFadingOut(dialog));
+    QVERIFY(!dialog->property("visible").toBool());
     bridge->setProperty("itunesArtworkResults", QVariantList{QVariantMap{
         {QStringLiteral("normalizedPath"), QStringLiteral("/fixture/cache/suggestion.jpg")}}});
     QVERIFY(QMetaObject::invokeMethod(bridge, "itunesArtworkChanged"));
@@ -471,18 +525,28 @@ void PreferencesSmokeTest::clearingDiagnosticsAsksFirst() {
     QVERIFY(dialog != nullptr && confirm != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
+    // Diagnostics and its question are windows of their own (#373 H5),
+    // the question above Diagnostics.
+    auto *logWindow = qobject_cast<QQuickWindow *>(dialog);
+    auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
+    QVERIFY(logWindow != nullptr && confirmWindow != nullptr);
+    QCOMPARE(logWindow->transientParent(), window);
+    QCOMPARE(confirmWindow->transientParent(), logWindow);
+    QVERIFY(QTest::qWaitForWindowExposed(logWindow));
 
-    QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
+    QVERIFY(clickVisibleButton(logWindow, QStringLiteral("diagnosticsClearButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
+    QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
     QCOMPARE(root->property("clears").toInt(), 0);
-    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogCancelButton")));
+    QVERIFY(clickVisibleButton(confirmWindow, QStringLiteral("confirmDialogCancelButton")));
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QCOMPARE(root->property("clears").toInt(), 0);
     QCOMPARE(dialog->property("diagnosticsText").toString(), QStringLiteral("a line worth keeping"));
 
-    QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
+    QVERIFY(clickVisibleButton(logWindow, QStringLiteral("diagnosticsClearButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
-    // A quick second click, as the question fades out, clears nothing more.
+    QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
+    // A quick second click, as the question goes, clears nothing more.
     QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("confirmDialogConfirmButton"), confirm));
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(root->property("clears").toInt(), 1);
@@ -505,34 +569,87 @@ void PreferencesSmokeTest::enterConfirmsAsSoonAsTheConfirmationShows() {
     QVERIFY(dialog != nullptr && confirm != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
+    // Diagnostics and its question are windows of their own (#373 H5),
+    // the question above Diagnostics.
+    auto *logWindow = qobject_cast<QQuickWindow *>(dialog);
+    auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
+    QVERIFY(logWindow != nullptr && confirmWindow != nullptr);
+    QCOMPARE(logWindow->transientParent(), window);
+    QCOMPARE(confirmWindow->transientParent(), logWindow);
+    QVERIFY(QTest::qWaitForWindowExposed(logWindow));
+
+    // The keyboard on Cancel, the safe answer, as it opens (#373 H37).
+    const auto keyboardOnCancel = [&]() {
+        QQuickItem *cancel = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogCancelButton"));
+        return cancel != nullptr && QTest::qWaitFor([&]() {
+            return confirmWindow->isActive() && confirmWindow->activeFocusItem() == cancel;
+        });
+    };
 
     // Escape, at once, keeps the log.
-    QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
+    QVERIFY(clickVisibleButton(logWindow, QStringLiteral("diagnosticsClearButton")));
     QVERIFY(confirm->property("visible").toBool());
-    QVERIFY(keyboardInPopupContent(confirm));
-    QTest::keyClick(window, Qt::Key_Escape);
+    QVERIFY(keyboardOnCancel());
+    QTest::keyClick(confirmWindow, Qt::Key_Escape);
     QTRY_VERIFY(popupsSettled());
     QVERIFY(!confirm->property("visible").toBool());
     QCOMPARE(root->property("clears").toInt(), 0);
 
     // Tab goes on from the content through the dialog to its buttons.
-    QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
+    QVERIFY(clickVisibleButton(logWindow, QStringLiteral("diagnosticsClearButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
+    QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
     QVERIFY(tabToPopupFooter(window, confirm));
-    QTest::keyClick(window, Qt::Key_Escape);
+    QTest::keyClick(confirmWindow, Qt::Key_Escape);
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(root->property("clears").toInt(), 0);
 
-    // Asked again, it has the keyboard in its content, not on the button
-    // Tab left it on, and Enter, as it fades in, clears the log once.
-    // Enter again, as it fades out, clears nothing more.
-    QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
-    QVERIFY(confirm->property("visible").toBool() && !confirm->property("opened").toBool());
+    // Deleting the log destroys it, so Cancel is the default button, as
+    // KDE's guidelines ask, and Delete Log is not. Asked again, the
+    // question has the keyboard on Cancel, not on the button Tab left it
+    // on, and Enter or Space, as it shows, answers Cancel: the log stays.
+    QVERIFY(confirm->property("destructive").toBool());
+    QVERIFY(clickVisibleButton(logWindow, QStringLiteral("diagnosticsClearButton")));
+    QVERIFY(confirm->property("visible").toBool());
+    QQuickItem *footer = qvariant_cast<QQuickItem *>(confirm->property("footer"));
+    QQuickItem *deleteButton = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogConfirmButton"));
+    QQuickItem *cancelButton = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogCancelButton"));
+    QVERIFY(footer != nullptr && deleteButton != nullptr && cancelButton != nullptr);
+    QCOMPARE(qvariant_cast<QQuickItem *>(footer->property("primary")), cancelButton);
+    const auto isDefault = [](QQuickItem *button) {
+        return QQmlExpression(qmlContext(button), button, QStringLiteral("Accessible.defaultButton"))
+            .evaluate().toBool();
+    };
+    QVERIFY(isDefault(cancelButton));
+    QVERIFY(!isDefault(deleteButton));
+    QCOMPARE(deleteButton->property("text").toString(), QStringLiteral("Delete Log"));
+    QVERIFY(keyboardOnCancel());
+    QVERIFY(!deleteButton->hasActiveFocus());
+    QTest::keyClick(confirmWindow, Qt::Key_Return);
+    QVERIFY(dialogClosing(confirm));
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(root->property("clears").toInt(), 0);
+    QVERIFY(clickVisibleButton(logWindow, QStringLiteral("diagnosticsClearButton")));
+    QVERIFY(keyboardOnCancel());
+    QTest::keyClick(confirmWindow, Qt::Key_Space);
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(!confirm->property("visible").toBool());
+    QCOMPARE(root->property("clears").toInt(), 0);
+    QCOMPARE(dialog->property("diagnosticsText").toString(), QStringLiteral("a line worth keeping"));
+
+    // A question whose action destroys nothing has its confirm button as
+    // the default: Enter, as it shows, answers it once. Enter again, as
+    // it fades out, answers nothing more.
+    QVERIFY(confirm->setProperty("destructive", false));
+    QVERIFY(clickVisibleButton(logWindow, QStringLiteral("diagnosticsClearButton")));
+    QVERIFY(confirm->property("visible").toBool());
+    QVERIFY(isDefault(deleteButton));
+    QVERIFY(!isDefault(cancelButton));
     QVERIFY(keyboardInPopupContent(confirm));
-    QTest::keyClick(window, Qt::Key_Return);
+    QTest::keyClick(confirmWindow, Qt::Key_Return);
     QCOMPARE(root->property("clears").toInt(), 1);
-    QVERIFY(popupFadingOut(confirm));
-    QTest::keyClick(window, Qt::Key_Return);
+    QVERIFY(dialogClosing(confirm));
+    QTest::keyClick(confirmWindow, Qt::Key_Return);
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(root->property("clears").toInt(), 1);
     QVERIFY(!confirm->property("visible").toBool());

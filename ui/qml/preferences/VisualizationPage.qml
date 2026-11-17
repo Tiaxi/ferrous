@@ -8,20 +8,30 @@ import FerrousUi 1.0
 import "../components" as Components
 import "." as Preferences
 
+// The Visualization page, in three groups under their subheadings: what
+// the plot analyses, what it shows, and how it answers the pointer. The
+// "Show:" check boxes stay together.
 Preferences.PreferencesPage {
     id: root
 
     required property var spectrogramFftChoices
 
-    // A control's width in the form.
+    // A combo box's width in the form, or what its longest option needs.
     readonly property real comboWidth: Kirigami.Units.gridUnit * 9
 
-    title: I18n.i18nc("@title preferences page", "Spectrogram")
+    title: I18n.i18nc("@title preferences page", "Visualization")
+
+    Components.FormGroupGap {
+        objectName: "visualizationAnalysisHeading"
+        uiPalette: root.uiPalette
+        first: true
+        heading: I18n.i18nc("@title:group visualization preferences", "Analysis")
+    }
 
     Components.DialogComboBox {
         objectName: "spectrogramViewComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Channels:")
-        Layout.preferredWidth: root.comboWidth
+        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
         model: [
             I18n.i18nc("@item:inlistbox spectrogram view", "Downmix"),
             I18n.i18nc("@item:inlistbox spectrogram view", "Per channel")
@@ -31,21 +41,9 @@ Preferences.PreferencesPage {
     }
 
     Components.DialogComboBox {
-        objectName: "spectrogramDisplayComboBox"
-        Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Scrolling:")
-        Layout.preferredWidth: root.comboWidth
-        model: [
-            I18n.i18nc("@item:inlistbox spectrogram display", "Rolling"),
-            I18n.i18nc("@item:inlistbox spectrogram display", "Centered")
-        ]
-        currentIndex: Math.max(0, Math.min(1, root.settings.value("spectrogramDisplayMode")))
-        onActivated: function(index) { root.settings.setValue("spectrogramDisplayMode", index) }
-    }
-
-    Components.DialogComboBox {
         objectName: "spectrogramFftComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "FFT window:")
-        Layout.preferredWidth: root.comboWidth
+        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
         model: root.spectrogramFftChoices
         currentIndex: {
             const index = root.spectrogramFftChoices.indexOf(root.settings.value("fftSize"))
@@ -56,15 +54,23 @@ Preferences.PreferencesPage {
         }
     }
 
+    // The slider takes the column's width up to 18 grid units, and gives
+    // way before its value does, which always shows.
     RowLayout {
+        id: dbRangeRow
+        objectName: "dbRangeRow"
         Kirigami.FormData.label: I18n.i18nc("@label:slider", "Dynamic range:")
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 18
+        Layout.fillWidth: true
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 12
+        Layout.minimumWidth: Kirigami.Units.gridUnit * 6 + dbRangeRow.spacing + dbRangeValueLabel.Layout.minimumWidth
+        Layout.maximumWidth: Kirigami.Units.gridUnit * 18
         spacing: Kirigami.Units.largeSpacing
 
         Slider {
             id: dbRangeSlider
             objectName: "dbRangeSlider"
             Layout.fillWidth: true
+            Layout.minimumWidth: Kirigami.Units.gridUnit * 6
             from: 50
             to: 150
             stepSize: 1
@@ -76,14 +82,16 @@ Preferences.PreferencesPage {
         }
 
         Label {
+            id: dbRangeValueLabel
             objectName: "dbRangeValueLabel"
             text: I18n.i18nc("@label:slider value in decibels", "%1 dB", Math.round(dbRangeSlider.value))
             font.features: root.uiPalette.tabularFigures
-            Layout.minimumWidth: dbRangeMetrics.advanceWidth
+            Layout.minimumWidth: Math.ceil(dbRangeMetrics.advanceWidth)
             horizontalAlignment: Text.AlignRight
 
             TextMetrics {
                 id: dbRangeMetrics
+                font: dbRangeValueLabel.font
                 text: I18n.i18nc("@label:slider value in decibels", "%1 dB", 150)
             }
         }
@@ -106,10 +114,31 @@ Preferences.PreferencesPage {
     }
 
     Components.FormHelpText {
+        objectName: "frequencyCapHelp"
         uiPalette: root.uiPalette
         indent: frequencyCapCheckBox.contentItem.x
+        // The next group's subheading leaves the room to it.
+        trailingSpace: 0
         text: I18n.i18nc("@info", "High-resolution tracks show up to 22.05 kHz for rates of the 44.1 kHz "
             + "family and 24 kHz for others, instead of up to half their sample rate.")
+    }
+
+    Components.FormGroupGap {
+        objectName: "visualizationDisplayHeading"
+        uiPalette: root.uiPalette
+        heading: I18n.i18nc("@title:group visualization preferences", "Display")
+    }
+
+    Components.DialogComboBox {
+        objectName: "spectrogramDisplayComboBox"
+        Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Scrolling:")
+        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
+        model: [
+            I18n.i18nc("@item:inlistbox spectrogram display", "Rolling"),
+            I18n.i18nc("@item:inlistbox spectrogram display", "Centered")
+        ]
+        currentIndex: Math.max(0, Math.min(1, root.settings.value("spectrogramDisplayMode")))
+        onActivated: function(index) { root.settings.setValue("spectrogramDisplayMode", index) }
     }
 
     CheckBox {
@@ -128,7 +157,17 @@ Preferences.PreferencesPage {
         onToggled: root.settings.setValue("showSpectrogramCrosshair", checked)
     }
 
+    CheckBox {
+        objectName: "spectrogramFpsCheckBox"
+        text: I18n.i18nc("@option:check", "Frame rate")
+        checked: root.settings.value("showFps")
+        onToggled: root.settings.setValue("showFps", checked)
+    }
+
+    // After the Show group's three check boxes, which stay together
+    // (#373 H38: Frame rate stood apart under this help text).
     Components.FormHelpText {
+        objectName: "crosshairHelp"
         uiPalette: root.uiPalette
         indent: crosshairCheckBox.contentItem.x
         text: I18n.i18nc("@info", "With the crosshair, right-clicking the spectrogram in centered mode "
@@ -136,10 +175,30 @@ Preferences.PreferencesPage {
     }
 
     CheckBox {
-        objectName: "spectrogramFpsCheckBox"
-        text: I18n.i18nc("@option:check", "Frame rate")
-        checked: root.settings.value("showFps")
-        onToggled: root.settings.setValue("showFps", checked)
+        objectName: "showLevelMeterCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Level meter:")
+        text: I18n.i18nc("@option:check", "Show a level meter at the end of each lane")
+        checked: root.settings.value("showLevelMeter")
+        onToggled: root.settings.setValue("showLevelMeter", checked)
+    }
+
+    Components.FormGroupGap {
+        objectName: "visualizationInteractionHeading"
+        uiPalette: root.uiPalette
+        heading: I18n.i18nc("@title:group visualization preferences", "Interaction")
+    }
+
+    Components.DialogComboBox {
+        objectName: "channelButtonsComboBox"
+        Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Mute and solo buttons:")
+        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
+        model: [
+            I18n.i18nc("@item:inlistbox channel buttons", "Never"),
+            I18n.i18nc("@item:inlistbox channel buttons", "On hover"),
+            I18n.i18nc("@item:inlistbox channel buttons", "Always")
+        ]
+        currentIndex: Math.max(0, Math.min(2, root.settings.value("channelButtonsVisibility")))
+        onActivated: function(index) { root.settings.setValue("channelButtonsVisibility", index) }
     }
 
     CheckBox {
@@ -152,21 +211,17 @@ Preferences.PreferencesPage {
     }
 
     Components.FormHelpText {
+        objectName: "zoomHelp"
         uiPalette: root.uiPalette
         indent: zoomCheckBox.contentItem.x
         text: I18n.i18nc("@info", "Scroll to zoom in or out; middle-click to reset.")
     }
 
-    Components.DialogComboBox {
-        objectName: "channelButtonsComboBox"
-        Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Mute and solo buttons:")
-        Layout.preferredWidth: root.comboWidth
-        model: [
-            I18n.i18nc("@item:inlistbox channel buttons", "Never"),
-            I18n.i18nc("@item:inlistbox channel buttons", "On hover"),
-            I18n.i18nc("@item:inlistbox channel buttons", "Always")
-        ]
-        currentIndex: Math.max(0, Math.min(2, root.settings.value("channelButtonsVisibility")))
-        onActivated: function(index) { root.settings.setValue("channelButtonsVisibility", index) }
+    CheckBox {
+        objectName: "stretchShortTracksCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Default zoom:")
+        text: I18n.i18nc("@option:check", "Stretch tracks shorter than the view to its full width")
+        checked: root.settings.value("stretchShortTracks")
+        onToggled: root.settings.setValue("stretchShortTracks", checked)
     }
 }

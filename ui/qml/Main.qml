@@ -187,6 +187,9 @@ ApplicationWindow {
     }
 
     readonly property int visualizationMinimumHeight: 220
+    // The narrowest window the design is drawn for: at a large font, the
+    // panes give up columns rather than make the window's minimum wider.
+    readonly property int narrowWindowWidth: 1000
     // The split handles are the seams between the panes, 1 px thick.
     readonly property int splitHandleAllowance: 1
     // The smallest window that shows every pane at its own minimum size,
@@ -234,10 +237,7 @@ ApplicationWindow {
     }
 
     function openItunesArtworkDialog() {
-        viewerController.openItunesArtworkDialog(
-            itunesArtworkDialog,
-            albumArtViewerShell.windowHost || root.overlayHost,
-            root.overlayHost)
+        viewerController.openItunesArtworkDialog(itunesArtworkDialog)
     }
 
     QtObject {
@@ -255,7 +255,7 @@ ApplicationWindow {
         property real durationSeconds: 0
         property real volume: 1.0
         property int queueLength: 0
-        property string queueDurationText: "00:00"
+        property string queueDurationText: "0:00"
         property var queueRows: []
         property int selectedQueueIndex: -1
         property int playingQueueIndex: -1
@@ -356,6 +356,8 @@ ApplicationWindow {
         property var itunesArtworkTarget: ({})
         property bool itunesArtworkLoading: false
         property string itunesArtworkStatusText: ""
+        property bool itunesArtworkFailed: false
+        property string itunesArtworkErrorText: ""
         property string diagnosticsText: ""
         property string diagnosticsLogPath: ""
         property bool diagnosticsLoading: false
@@ -587,6 +589,7 @@ ApplicationWindow {
         property bool dirty: false
         property string statusText: ""
         property string statusDetails: ""
+        property var statusDetailSections: []
         property bool statusIsError: false
         property int selectedCount: 0
         property var operationFiles: []
@@ -1156,6 +1159,9 @@ ApplicationWindow {
     Action {
         id: replaceFromItunesAction
         text: I18n.i18nc("@action:inmenu", "Replace from iTunes…")
+        // An icon, as every other menu's items have, so the cover's menu
+        // starts its text where they do.
+        icon.name: "download"
         enabled: viewerController.currentTrackItunesArtworkDisabledReason().length === 0
         onTriggered: root.openItunesArtworkDialog()
     }
@@ -1174,9 +1180,13 @@ ApplicationWindow {
         visualizationViewerAction, albumArtViewerAction,
         spectrogramModeAction, waveformModeAction, resetZoomAction, quitAction
     ]
-    // The menus take the style's size, icons and motion.
+    // The menus take the style's size, icons and motion. The open or hovered
+    // title is lit with the selection tint, as in the lists.
     menuBar: MenuBar {
         objectName: "mainMenuBar"
+        delegate: Components.AppMenuBarItem {
+            uiPalette: root.uiPalette
+        }
 
         Components.AppMenu {
             objectName: "fileMenu"
@@ -1277,6 +1287,7 @@ ApplicationWindow {
     Dialogs.AboutKdeDialog {
         id: aboutKdeDialog
         uiPalette: root.uiPalette
+        windowRoot: root
     }
 
     Dialogs.AboutDialog {
@@ -1296,12 +1307,14 @@ ApplicationWindow {
         openLibraryRootNameDialog: root.openLibraryRootNameDialog
     }
 
+    // Over Configure Ferrous while it is open, whose Library page asks for
+    // it; over the main window otherwise.
     Dialogs.LibraryRootNameDialog {
         id: libraryRootNameDialog
         objectName: "libraryRootNameDialog"
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
-        windowRoot: root
+        windowRoot: preferencesDialog.visible ? preferencesDialog : root
         dialogMode: root.pendingLibraryRootDialogMode
         pathValue: root.pendingLibraryRootPath
         nameValue: root.pendingLibraryRootName
@@ -1365,6 +1378,9 @@ ApplicationWindow {
     Platform.FolderDialog {
         id: scanFolderDialog
         objectName: "scanFolderDialog"
+        // Over Configure Ferrous while it is open, which blocks the main
+        // window.
+        parentWindow: preferencesDialog.visible ? preferencesDialog : root
         title: pendingFolderDialogContext === "append-external-folder"
             ? I18n.i18nc("@title:window", "Add Folder to Queue")
             : I18n.i18nc("@title:window", "Add Library Folder")
@@ -1428,7 +1444,9 @@ ApplicationWindow {
             pauseAction: pauseAction
             stopAction: stopAction
             nextAction: nextAction
+            playPauseAction: playPauseAction
             volumeMuted: playbackController.volumeMuted
+            mutedVolume: playbackController.rememberedVolumeBeforeMute
             keyboardSeekStepSeconds: root.keyboardSeekStepSeconds
             displayedPositionSeconds: playbackController.positionSeconds
             currentPositionSeconds: playbackController.currentPositionSeconds
@@ -1479,8 +1497,10 @@ ApplicationWindow {
                     mainSplit.width,
                     sidebarPane.SplitView.minimumWidth,
                     rightSplit.SplitView.minimumWidth + root.splitHandleAllowance,
-                    // 360 px in a 1600 px window, 260 px in a 1000 px one.
-                    Math.max(260, Math.min(360, Math.round(mainSplit.width * 0.225))))
+                    windowLayoutController.sidebarDefaultWidth(
+                        mainSplit.width, root.uiPalette.fontScale, root.uiPalette.gridUnit,
+                        queuePane.widthWithAllColumns + root.splitHandleAllowance))
+                minimumWidth: windowLayoutController.sidebarMinimumWidth(root.uiPalette.fontScale)
                 replaceFromItunesAction: replaceFromItunesAction
                 currentTrackItunesArtworkDisabledReason: viewerController.currentTrackItunesArtworkDisabledReason
                 openAlbumArtViewer: viewerController.openAlbumArtViewer
@@ -1515,7 +1535,10 @@ ApplicationWindow {
                         rightSplit.height,
                         queuePane.SplitView.minimumHeight,
                         spectrogramPane.SplitView.minimumHeight + root.splitHandleAllowance,
-                        Math.max(220, root.height * 0.58))
+                        windowLayoutController.queueDefaultHeight(
+                            rightSplit.height, root.uiPalette.rowHeight),
+                        queuePane.listTop,
+                        queuePane.rowPitch)
                     playlistIndicatorColumnWidth: root.playlistIndicatorColumnWidth
                     playlistOrderColumnWidth: root.playlistOrderColumnWidth
                     playlistOrderText: FormatUtils.playlistOrderText
@@ -1528,6 +1551,10 @@ ApplicationWindow {
                     droppedExternalPaths: PathUtils.droppedExternalPaths
                     errorController: errorController
                     addLibraryFolderAction: addLibraryFolderAction
+                    // What the narrow window, 1000 px wide, leaves the queue
+                    // beside the sidebar at its minimum.
+                    minimumWidthLimit: root.narrowWindowWidth - sidebarPane.SplitView.minimumWidth
+                        - root.splitHandleAllowance
                 }
 
                 Panes.SpectrogramPane {
@@ -1539,6 +1566,12 @@ ApplicationWindow {
                     openViewer: viewerController.openSpectrogramViewer
                     uiPalette: root.uiPalette
                     visualizationMode: viewerController.visualizationMode
+                    visualization: visualizationSurface
+                    // Under the viewer in this window, which fades in over
+                    // the pane; the one over the whole screen covers it.
+                    keepsLastFrame: viewerController.spectrogramViewerOpen
+                        && !root.useWholeScreenViewerMode
+                        && spectrogramPane.canKeepLastFrame
                 }
             }
         }
@@ -1550,21 +1583,156 @@ ApplicationWindow {
         // The fullscreen window is made as the viewer first opens, so for a
         // moment it may not be there yet: the views stay where they are
         // until it is, rather than leave every window.
+        // The viewer in the main window takes them once the pane has kept
+        // their last frame, which it shows under the viewer as that fades
+        // in. The whole-screen window takes them only once that frame no
+        // longer refers to them, as it would keep them in this window
+        // (#373 H6); the pane lets them go as soon as it keeps no frame.
+        // Closed, the viewer in the main window keeps their last frame as it
+        // fades out, and gives them back to the pane once it has (#373 H8);
+        // it too keeps them out of the whole-screen window while its frame
+        // refers to them.
         parent: viewerController.spectrogramViewerOpen
             ? (root.useWholeScreenViewerMode
-                ? (spectrogramViewerShell.windowHost || spectrogramPane.hostItem)
-                : spectrogramViewerShell.popupHost)
-            : spectrogramPane.hostItem
+                ? (spectrogramPane.holdsVisualization || spectrogramViewerShell.holdsVisualization
+                    ? spectrogramPane.hostItem
+                    : (spectrogramViewerShell.windowHost || spectrogramPane.hostItem))
+                : (spectrogramPane.lastFrameKept || !spectrogramPane.canKeepLastFrame
+                    ? spectrogramViewerShell.popupHost
+                    : spectrogramPane.hostItem))
+            : (spectrogramViewerShell.keepsVisualization
+                ? spectrogramViewerShell.popupHost
+                : spectrogramPane.hostItem)
         visible: parent !== null
         anchors.fill: parent
+        // Whether a viewer shows them: where they are, not whether a viewer
+        // is open, so that the pane's last frame is laid out as the pane
+        // showed it.
+        readonly property bool inViewer: visualizationSurface.parent !== spectrogramPane.hostItem
         // What the plot keeps clear of in its top right corner: the mode
         // switch, and in the viewer in the main window its controls beside it.
         readonly property size reservedCorner: Qt.size(
             plotLayer.reservedCorner.width - plotLayer.meterWidth,
             Math.max(plotLayer.reservedCorner.height,
-                     viewerController.spectrogramViewerOpen
+                     visualizationSurface.inViewer
                          ? spectrogramViewerShell.reservedCorner.height : 0))
         readonly property bool spectrogramShown: viewerController.visualizationMode === 0
+
+        // The mode switch (#373 Motion): the plot that shows whole stays on
+        // screen, under the chosen one, and the chosen one fades in over it
+        // over shortDuration from the click; the labels, the switch and the
+        // meter stay put. The plot before goes once the chosen one shows
+        // whole. With animations off the chosen one shows at once.
+        // The spectrogram stays live under the waveform, at 0 and taking no
+        // input (#373 H7): hidden, it gave its analysis and columns up, so
+        // that shown again it waited about 250 ms for a fresh session's
+        // columns to fill its view. Kept live, its view is drawn when it is
+        // chosen, and it comes in at the click. The waveform comes in once
+        // it has drawn its first frame of the track's detail
+        // (`pictureReady`), at 0 over the spectrogram until then (#373 H11:
+        // it faded in from the click, and its per-channel lanes, which wait
+        // for their detail, were an empty floor for 80 to 170 ms). Hidden,
+        // it keeps the detail it has (#373 H14), and fetches the detail of a
+        // new track's lanes once its overview comes (H18), so that frame is
+        // the first one after the click, from a track's first switch on.
+        readonly property int chosenMode: viewerController.visualizationMode
+        // The plot that shows whole, under the chosen one while it comes in.
+        property int settledMode: -1
+        // How far the chosen plot has come in over the settled one.
+        property real modeFade: 0
+        // Read through functions, so that a handler sees them as they are now
+        // rather than as a binding last left them.
+        function isModeSwitching() {
+            return visualizationSurface.settledMode >= 0
+                && viewerController.visualizationMode !== visualizationSurface.settledMode
+        }
+        function plotAwaitsData(mode) {
+            return mode === 0 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
+        }
+        // Whether `mode`'s plot can come in: the waveform once it has its
+        // data and has drawn it; the spectrogram, kept live, at once, with
+        // its view as it has drawn it: whole, unless no session has filled
+        // it yet, as right after a track starts, when its columns come in
+        // as they would were it shown.
+        function plotCanComeIn(mode) {
+            return mode === 0 || (!waveformSurface.awaitingData && waveformSurface.pictureReady)
+        }
+        // Whether the chosen plot still waits for its data while the one
+        // before has some to show. Without a track to wait for, or with
+        // nothing to show before either, it shows at once.
+        function chosenPlotWaits() {
+            return visualizationSurface.isModeSwitching()
+                && plotLayer.trackLoaded
+                && !visualizationSurface.plotCanComeIn(viewerController.visualizationMode)
+                && !visualizationSurface.plotAwaitsData(visualizationSurface.settledMode)
+        }
+        readonly property bool modeSwitching: visualizationSurface.isModeSwitching()
+        // What the switch follows: the mode chosen, and whether each plot
+        // has data to show. Not what it sets itself, so that settling in a
+        // handler of it is no binding loop.
+        readonly property var modeInputs: [viewerController.visualizationMode, plotLayer.trackLoaded,
+            spectrogramSurface.awaitingData, waveformSurface.awaitingData]
+        readonly property NumberAnimation modeFadeAnimation: NumberAnimation {
+            objectName: "visualizationModeFade"
+            target: visualizationSurface
+            property: "modeFade"
+            from: 0
+            to: 1
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+            onFinished: visualizationSurface.settleMode()
+        }
+        function settleMode() {
+            visualizationSurface.modeFadeAnimation.stop()
+            visualizationSurface.settledMode = viewerController.visualizationMode
+            visualizationSurface.modeFade = 0
+        }
+        function followMode() {
+            if (!visualizationSurface.isModeSwitching()) {
+                // Back to the plot that showed whole: the other goes.
+                visualizationSurface.modeFadeAnimation.stop()
+                visualizationSurface.modeFade = 0
+            } else if (visualizationSurface.chosenPlotWaits()) {
+                visualizationSurface.modeFadeAnimation.stop()
+                visualizationSurface.modeFade = 0
+            } else if (Kirigami.Units.shortDuration <= 0) {
+                visualizationSurface.settleMode()
+            } else if (!visualizationSurface.modeFadeAnimation.running) {
+                visualizationSurface.modeFadeAnimation.start()
+            }
+        }
+        onModeInputsChanged: visualizationSurface.followMode()
+        // The waveform's first frame of the track, which lets it come in.
+        // It gives its picture up when the switch hides it, so this is a
+        // handler of its own rather than one of modeInputs.
+        Connections {
+            target: waveformSurface
+            function onPictureReadyChanged() {
+                if (waveformSurface.pictureReady) {
+                    visualizationSurface.followMode()
+                }
+            }
+        }
+        Component.onCompleted: {
+            visualizationSurface.settledMode = viewerController.visualizationMode
+        }
+        // Whether `mode`'s plot shows: settled, or chosen and coming in.
+        function plotShown(mode) {
+            return visualizationSurface.settledMode === mode || visualizationSurface.chosenMode === mode
+        }
+        // The chosen plot over the settled one, at how far it has come in.
+        function plotOpacity(mode) {
+            return visualizationSurface.settledMode === mode || !visualizationSurface.modeSwitching
+                ? 1 : visualizationSurface.modeFade
+        }
+        // One playhead through the switch (H2: both showed): the settled
+        // plot's goes once the chosen one, with its own, has come in at all.
+        // Until then, the chosen plot is at 0, and the settled one keeps it.
+        function playheadShown(mode) {
+            return !(visualizationSurface.modeSwitching && visualizationSurface.modeFade > 0
+                && visualizationSurface.settledMode === mode)
+        }
+
         // The shown plot's zoom, 1 at the default: the spectrogram's
         // relative to its own, which stretches a short track.
         readonly property real zoomLevel: visualizationSurface.spectrogramShown
@@ -1599,13 +1767,28 @@ ApplicationWindow {
             Accessible.description: I18n.i18nc("@info", "Frequencies of the playing track over time")
             anchors.fill: parent
             plotWidth: plotLayer.plotWidth
-            visible: visualizationSurface.spectrogramShown
-            viewerMode: viewerController.spectrogramViewerOpen
+            // Live while the waveform shows, at 0, so that its analysis runs
+            // and its view is drawn for the switch back; then it takes no
+            // pointer or keys, and assistive technology skips it.
+            readonly property bool standby: !visualizationSurface.plotShown(0)
+            opacity: spectrogramSurface.standby ? 0 : visualizationSurface.plotOpacity(0)
+            enabled: !spectrogramSurface.standby
+            Accessible.ignored: spectrogramSurface.standby
+            playheadVisible: visualizationSurface.playheadShown(0)
+            // Under the waveform while it stands by, so that the waveform
+            // has the pointer and its hover.
+            z: spectrogramSurface.standby ? -1 : (visualizationSurface.settledMode === 0 ? 0 : 1)
+            // Its lanes, floors and seams fade in as one picture.
+            layer.enabled: opacity > 0 && opacity < 1
+            viewerMode: visualizationSurface.inViewer
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
+            interactiveOverlaysLevel: spectrogramViewerShell.fullscreenControlsLevel
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
             laneHeadBounds: plotLayer.lowestLaneHeadBounds
+            laneHeadBoundsByLane: plotLayer.laneHeadBoundsByLane
             markerSeconds: plotLayer.cutSeconds
+            crosshairLevel: plotLayer.crosshairLevel
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             clock: playbackController.playbackClock
@@ -1617,12 +1800,18 @@ ApplicationWindow {
             objectName: "mainWaveformSurface"
             anchors.fill: parent
             plotWidth: plotLayer.plotWidth
-            visible: !visualizationSurface.spectrogramShown
+            visible: visualizationSurface.plotShown(1)
+            opacity: visualizationSurface.plotOpacity(1)
+            playheadVisible: visualizationSurface.playheadShown(1)
+            z: visualizationSurface.settledMode === 1 ? 0 : 1
+            layer.enabled: opacity > 0 && opacity < 1
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
+            interactiveOverlaysLevel: spectrogramViewerShell.fullscreenControlsLevel
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
             laneHeadBounds: plotLayer.lowestLaneHeadBounds
             markerSeconds: plotLayer.cutSeconds
+            crosshairLevel: plotLayer.crosshairLevel
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             clock: playbackController.playbackClock
@@ -1633,6 +1822,8 @@ ApplicationWindow {
         // whichever plot shows, in its colours.
         Viewers.PlotLayer {
             id: plotLayer
+            // Over both plots while one comes in over the other.
+            z: 2
             anchors.fill: parent
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
@@ -1640,8 +1831,10 @@ ApplicationWindow {
             visualizationMode: viewerController.visualizationMode
             setVisualizationMode: viewerController.setVisualizationMode
             controlsVisible: spectrogramViewerShell.fullscreenControlsVisible
+            controlsLevel: spectrogramViewerShell.fullscreenControlsLevel
+            controlsAutoHide: visualizationSurface.inViewer
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
-            trailingInset: viewerController.spectrogramViewerOpen
+            trailingInset: visualizationSurface.inViewer
                 ? spectrogramViewerShell.reservedCorner.width : 0
             topInset: spectrogramViewerShell.controlsTopInset
             laneCount: visualizationSurface.spectrogramShown
@@ -1650,19 +1843,27 @@ ApplicationWindow {
                 ? spectrogramSurface.laneLabels : waveformSurface.laneLabels
             hoveredLane: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.hoveredLane : waveformSurface.hoveredLane
-            paneHovered: visualizationHover.hovered
+            paneHovered: visualizationHover.hovered || spectrogramViewerShell.controlsHovered
+            pointerKnown: plotLayer.hoveredLane >= 0
+            pointerPosition: plotLayer.mapFromItem(null, visualizationSurface.spectrogramShown
+                ? spectrogramSurface.pointerScenePosition : waveformSurface.pointerScenePosition)
             analysing: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
             markerX: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.markerX : waveformSurface.markerX
             openIssues: function() { errorController.historyRequested() }
+            zoomLevel: visualizationSurface.zoomLevel
+            resetZoom: visualizationSurface.resetZoom
+            controlsInViewer: spectrogramViewerShell.controlsInStrip
         }
     }
 
     Viewers.SpectrogramViewerShell {
         id: spectrogramViewerShell
+        objectName: "spectrogramViewerShell"
         windowRoot: root
         uiPalette: root.uiPalette
+        visualization: visualizationSurface
         viewerOpen: viewerController.spectrogramViewerOpen
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
         titleText: root.titleFor(root.visualizationViewerName)
@@ -1676,10 +1877,10 @@ ApplicationWindow {
         errorController: errorController
         uiBridge: root.uiBridge
         positionText: playbackController.positionText
-        zoomLevel: visualizationSurface.zoomLevel
-        resetView: visualizationSurface.resetZoom
-        cornerRightMargin: plotLayer.meterShown ? plotLayer.meterWidth + 6 : 4
+        cornerRightMargin: (plotLayer.meterShown ? plotLayer.meterWidth : 0) + plotLayer.plateInset
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
+        zoomLevel: visualizationSurface.zoomLevel
+        resetZoom: visualizationSurface.resetZoom
     }
 
     Dialogs.ItunesArtworkDialog {
@@ -1687,7 +1888,11 @@ ApplicationWindow {
         objectName: "itunesArtworkDialog"
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
-        windowRoot: root
+        // Over the album art viewer while it is open over the whole screen,
+        // as its own window; over the main window otherwise.
+        windowRoot: albumArtViewerShell.wholeScreenOpen && albumArtViewerShell.fullscreenWindow
+            ? albumArtViewerShell.fullscreenWindow
+            : root
         openAlbumArtViewerForSuggestion: viewerController.previewSuggestion
         openAlbumArtViewerForCurrentArt: viewerController.previewCurrentArt
         endAlbumArtPreview: viewerController.endAlbumArtPreview
@@ -1728,6 +1933,9 @@ ApplicationWindow {
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
     }
 
+    // The viewer in the main window shows the art until it has faded out,
+    // not only while it is open (#373 H8: the art went the moment the viewer
+    // closed, and its black floor faded out alone).
     Viewers.AlbumArtSurface {
         id: albumArtSurface
         objectName: "albumArtSurface"
@@ -1735,8 +1943,8 @@ ApplicationWindow {
             ? (root.useWholeScreenViewerMode
                 ? (albumArtViewerShell.windowHost || albumArtMainHost)
                 : albumArtViewerShell.popupHost)
-            : albumArtMainHost
-        visible: viewerController.albumArtViewerOpen
+            : (albumArtViewerShell.popupShown ? albumArtViewerShell.popupHost : albumArtMainHost)
+        visible: viewerController.albumArtViewerOpen || albumArtViewerShell.popupShown
         anchors.fill: parent
         viewerOpen: viewerController.albumArtViewerOpen
         viewerSource: viewerController.albumArtViewerSource
@@ -1751,11 +1959,14 @@ ApplicationWindow {
         comparisonModeAvailable: viewerController.comparisonModeAvailable
         switchComparisonImage: viewerController.switchComparisonImage
         uiPalette: root.uiPalette
+        fullscreen: root.useWholeScreenViewerMode
         fileInfo: viewerController.albumArtViewerFileInfo
         sourceKind: viewerController.albumArtSourceKind
-        // Clear of the viewer's controls over the art: the plate in the main
-        // window, or the title strip over the whole screen.
-        infoTopInset: root.useWholeScreenViewerMode ? albumArtViewerShell.stripHeight : 32
+        // Clear of the viewer's controls over the art, at any font: the plate
+        // in the main window, or the title strip over the whole screen.
+        infoTopInset: root.useWholeScreenViewerMode
+            ? albumArtViewerShell.stripHeight
+            : albumArtViewerShell.popupControlsBottom
         previewActive: viewerController.albumArtPreviewActive
         previewLabel: viewerController.comparisonLabel
         previewHasCandidate: itunesArtworkDialog.previewShown && itunesArtworkDialog.previewIndex >= 0
@@ -1833,7 +2044,7 @@ ApplicationWindow {
         }
         root.forgetStateSaveBeforeClosing()
         if (saved) {
-            quitSaveFailedDialog.close()
+            quitSaveFailedDialog.dismiss()
             root.closeNow()
         } else {
             root.showQuitSaveFailedDialog(message)
@@ -1841,16 +2052,19 @@ ApplicationWindow {
     }
 
     function showQuitSaveFailedDialog(message) {
-        // It is drawn above this dialog, which would hide the choice.
+        // The choice blocks the window, which takes no answer to the popup
+        // meanwhile.
         recentErrorsDialog.close()
         quitSaveFailedDialog.message = message
-        quitSaveFailedDialog.open()
+        // The window first, then the dialog above it, which takes the
+        // keyboard.
         root.bringWindowForward()
+        quitSaveFailedDialog.open()
     }
 
     // A quit from outside the window, such as from the desktop's media
     // controls, can find it minimized or behind other windows. Dialogs that
-    // quitting opens are drawn in the window, so the window comes forward
+    // quitting opens are above the window, so the window comes forward
     // too; window managers raise the window they activate. A fullscreen
     // viewer is a modal window over the main one, and the dialog would open
     // behind it, so the viewers close first.

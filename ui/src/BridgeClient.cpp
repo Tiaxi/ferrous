@@ -402,6 +402,26 @@ QVariantMap readImageFileDetails(const QString &path) {
 
 } // namespace
 
+QString BridgeClient::itunesArtworkFoundText(int count) {
+    // Only the small previews are fetched with the results; a full-size
+    // image comes when the user previews or applies it (#373 H6: once
+    // "loads on preview/apply"). Short enough for one line in the dialog at
+    // 24 pt (#373 H45: "it." wrapped alone onto a second line).
+    return i18ncp("@info:status",
+                  "Found %1 suggestion. Its full-size image downloads when you preview or apply it.",
+                  "Found %1 suggestions. Full-size images download when you preview or apply one.",
+                  count);
+}
+
+QString BridgeClient::itunesArtworkPendingDetailsText() {
+    // Not "loads on preview or apply" (#373 H7).
+    return i18nc("@info:status", "Its size and format show once you preview or apply it.");
+}
+
+QString BridgeClient::itunesArtworkLoadingDetailsText() {
+    return i18nc("@info:status", "Loading full-size image…");
+}
+
 QString BridgeClient::itunesArtworkUrl(const QString &artworkUrl100) {
     // Apple's image CDN no longer serves the original uploads
     // (a5.mzstatic.com/us/r1000/... answers 403) and rejects renditions over
@@ -442,7 +462,7 @@ BridgeClient::ItunesArtworkAssetJobResult BridgeClient::processItunesArtworkAsse
     result.candidateIndex = candidateIndex;
 
     if (payload.isEmpty()) {
-        result.errorMessage = i18nc("@info", "Failed to load high-resolution artwork.");
+        result.errorMessage = i18nc("@info", "Failed to load the full-size image.");
         return result;
     }
     if (tempDirPath.trimmed().isEmpty()) {
@@ -574,13 +594,15 @@ QString channelLayoutCode(int channels, const QStringList &labels) {
     }
 }
 
+// The layout as the status bar names it: "Stereo", "Mono", or a surround
+// code such as "5.1".
 QString channelLayoutText(int channels, const QStringList &labels) {
     const QString code = channelLayoutCode(channels, labels);
     if (code == QStringLiteral("mono")) {
-        return i18nc("@info:status channel layout", "mono");
+        return i18nc("@info:status channel layout", "Mono");
     }
     if (code == QStringLiteral("stereo")) {
-        return i18nc("@info:status channel layout", "stereo");
+        return i18nc("@info:status channel layout", "Stereo");
     }
     if (!code.isEmpty()) {
         return code;
@@ -966,10 +988,10 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
         row.insert(QStringLiteral("assetReady"), false);
         row.insert(
             QStringLiteral("assetError"),
-            i18nc("@info", "No high-resolution artwork URL was available."));
+            i18nc("@info", "No full-size image is available."));
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "High-resolution artwork could not be loaded."));
+            i18nc("@info", "The full-size image could not be loaded."));
         updateItunesArtworkResult(candidateIndex, row);
         return;
     }
@@ -981,7 +1003,7 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
             i18nc("@info", "Failed to prepare temporary artwork cache."));
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "High-resolution artwork could not be loaded."));
+            i18nc("@info", "The full-size image could not be loaded."));
         updateItunesArtworkResult(candidateIndex, row);
         return;
     }
@@ -1015,15 +1037,15 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
             row.insert(QStringLiteral("assetError"), message);
             row.insert(
                 QStringLiteral("detailStatusText"),
-                i18nc("@info", "High-resolution artwork could not be loaded."));
+                i18nc("@info", "The full-size image could not be loaded."));
             updateItunesArtworkResult(candidateIndex, row);
         };
 
         if (error != QNetworkReply::NoError || payload.isEmpty()) {
             failCandidate(
                 errorText.trimmed().isEmpty()
-                    ? i18nc("@info", "Failed to load high-resolution artwork.")
-                    : i18nc("@info", "Failed to load high-resolution artwork: %1", errorText));
+                    ? i18nc("@info", "Failed to load the full-size image.")
+                    : i18nc("@info", "Failed to load the full-size image: %1", errorText));
             return;
         }
 
@@ -1066,7 +1088,7 @@ void BridgeClient::applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult 
         row.insert(QStringLiteral("assetError"), result.errorMessage);
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "High-resolution artwork could not be loaded."));
+            i18nc("@info", "The full-size image could not be loaded."));
         updateItunesArtworkResult(result.candidateIndex, row);
         return;
     }
@@ -1508,9 +1530,8 @@ void BridgeClient::searchApplyWorkerLoop() {
                 item.trackNumber = row.trackNumber;
                 item.count = row.count;
                 item.lengthSeconds = row.lengthSeconds;
-                item.lengthText = row.lengthSeconds >= 0.0f
-                    ? BridgeClient::formatDurationCompact(static_cast<double>(row.lengthSeconds))
-                    : QStringLiteral("--:--");
+                // –:–– when not known, as the queue writes it.
+                item.lengthText = BridgeClient::formatDurationCompact(static_cast<double>(row.lengthSeconds));
 
                 QVariantMap legacyItem;
                 if (m_publishLegacySearchLists) {
@@ -2205,6 +2226,14 @@ QString BridgeClient::itunesArtworkStatusText() const {
     return m_itunesArtworkStatusText;
 }
 
+bool BridgeClient::itunesArtworkFailed() const {
+    return !m_itunesArtworkErrorText.isEmpty();
+}
+
+QString BridgeClient::itunesArtworkErrorText() const {
+    return m_itunesArtworkErrorText;
+}
+
 QString BridgeClient::diagnosticsText() const {
     return m_diagnosticsText;
 }
@@ -2342,10 +2371,26 @@ void BridgeClient::seek(double seconds) {
     m_playbackClock->holdAt(target);
 }
 
+// The volume shows what was asked for from the time it is asked for, as
+// the other settings do, rather than a round trip later: the mute button's
+// unmute showed the slider at 0 and the muted glyph for some 50 ms, until a
+// snapshot brought the restored volume (#373 H34 AA4). Snapshots that the
+// backend built before it took the request leave it as it is; see
+// applySnapshot.
 void BridgeClient::setVolume(double value) {
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(
-        BinaryBridgeCodec::CmdSetVolume,
-        std::clamp(value, 0.0, 1.0)));
+    if (!std::isfinite(value)) {
+        return;
+    }
+    const double volume = std::clamp(value, 0.0, 1.0);
+    if (!sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(BinaryBridgeCodec::CmdSetVolume, volume))) {
+        return;
+    }
+    ++m_volumeRequestsSent;
+    if (m_volume != volume) {
+        m_volume = volume;
+        emit volumeChanged();
+        scheduleSnapshotChanged();
+    }
 }
 
 void BridgeClient::setFftSize(int value) {
@@ -3675,6 +3720,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
     captureItunesArtworkTargetIdentity(m_itunesArtworkGeneration);
     m_itunesArtworkCandidates.clear();
     m_itunesArtworkResults.clear();
+    m_itunesArtworkErrorText.clear();
 
     if (album.isEmpty() || artist.isEmpty()) {
         m_itunesArtworkLoading = false;
@@ -3684,7 +3730,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
     }
 
     m_itunesArtworkLoading = true;
-    m_itunesArtworkStatusText = i18nc("@info:status", "Searching iTunes...");
+    m_itunesArtworkStatusText = i18nc("@info:status", "Searching iTunes…");
     emit itunesArtworkChanged();
 
     const quint64 generation = m_itunesArtworkGeneration;
@@ -3696,6 +3742,8 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
         int pendingRequests{0};
         int successfulRequests{0};
         QString firstError;
+        // The system's words for the first error.
+        QString firstErrorDetail;
     };
 
     QStringList searchTerms;
@@ -3809,6 +3857,8 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
             m_itunesArtworkLoading = false;
             if (aggregation->successfulRequests <= 0 && !aggregation->firstError.isEmpty()) {
                 m_itunesArtworkStatusText = aggregation->firstError;
+                m_itunesArtworkErrorText = aggregation->firstErrorDetail.isEmpty()
+                    ? aggregation->firstError : aggregation->firstErrorDetail;
             } else {
                 m_itunesArtworkStatusText = i18nc("@info:status", "No iTunes artwork suggestions found.");
             }
@@ -3834,17 +3884,13 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
             row.insert(QStringLiteral("assetError"), QString());
             row.insert(
                 QStringLiteral("detailStatusText"),
-                i18nc("@info:status", "High-resolution file info loads on preview or apply."));
+                itunesArtworkPendingDetailsText());
             rows.push_back(row);
         }
 
         m_itunesArtworkResults = rows;
         m_itunesArtworkLoading = false;
-        m_itunesArtworkStatusText =
-            i18ncp("@info:status",
-                   "Found %1 suggestion. High-resolution artwork loads on preview/apply.",
-                   "Found %1 suggestions. High-resolution artwork loads on preview/apply.",
-                   rows.size());
+        m_itunesArtworkStatusText = itunesArtworkFoundText(static_cast<int>(rows.size()));
         emit itunesArtworkChanged();
     };
 
@@ -3928,6 +3974,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
                 if (aggregation->firstError.isEmpty()) {
                     aggregation->firstError =
                         i18nc("@info:status", "iTunes search failed: %1", errorText);
+                    aggregation->firstErrorDetail = errorText;
                 }
             } else {
                 aggregation->successfulRequests += 1;
@@ -3966,6 +4013,7 @@ void BridgeClient::clearItunesArtworkSuggestions() {
     m_itunesArtworkResults.clear();
     m_itunesArtworkLoading = false;
     m_itunesArtworkStatusText.clear();
+    m_itunesArtworkErrorText.clear();
     emit itunesArtworkChanged();
 }
 
@@ -4068,7 +4116,7 @@ void BridgeClient::prepareItunesArtworkSuggestion(int index) {
 
     row.insert(QStringLiteral("assetLoading"), true);
     row.insert(QStringLiteral("assetError"), QString());
-    row.insert(QStringLiteral("detailStatusText"), i18nc("@info:status", "Loading high-resolution artwork..."));
+    row.insert(QStringLiteral("detailStatusText"), itunesArtworkLoadingDetailsText());
     updateItunesArtworkResult(index, row);
     startItunesArtworkAssetDownload(index);
 }
@@ -4468,9 +4516,8 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
         item.trackNumber = row.trackNumber;
         item.count = row.count;
         item.lengthSeconds = row.lengthSeconds;
-        item.lengthText = row.lengthSeconds >= 0.0f
-            ? formatDurationCompact(static_cast<double>(row.lengthSeconds))
-            : QStringLiteral("--:--");
+        // –:–– when not known, as the queue writes it.
+        item.lengthText = formatDurationCompact(static_cast<double>(row.lengthSeconds));
 
         QVariantMap legacyItem;
         if (m_publishLegacySearchLists) {
@@ -5512,10 +5559,12 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const double dur = snapshot.playback.present ? snapshot.playback.durationSeconds : m_durationSeconds;
     const int repeatMode = std::clamp(snapshot.playback.present ? snapshot.playback.repeatMode : m_repeatMode, 0, 2);
     const bool shuffleEnabled = snapshot.playback.present ? snapshot.playback.shuffleEnabled : m_shuffleEnabled;
-    const QString playbackCurrentPath = snapshot.playback.present ? snapshot.playback.currentPath : m_currentTrackPath;
-    const QString currentPath = isStopped && playbackCurrentPath.trimmed().isEmpty()
-        ? m_currentTrackPath
-        : playbackCurrentPath;
+    // The engine reports no current track only once its queue is empty: a
+    // stop keeps the track current. Nothing current, then, also while
+    // stopped, so that Stop then Clear leaves "Nothing playing" rather than
+    // the stopped track (#373 H18 C3: the track's path, and with it its
+    // text, outlived the queue).
+    const QString currentPath = snapshot.playback.present ? snapshot.playback.currentPath : m_currentTrackPath;
     int playing = snapshot.playback.present ? snapshot.playback.currentQueueIndex : m_playingQueueIndex;
 
     // A delta applies only to the rows of the revision it builds on.
@@ -5699,13 +5748,21 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         playbackSignalChanged = true;
     }
 
-    const double settingsVolume = snapshot.settings.present
+    // The backend's volume, once it has taken every volume request sent to
+    // it: until then, the latest request shows.
+    if (snapshot.settings.present && snapshot.settings.hasVolumeRequestsTaken) {
+        m_volumeRequestsTaken = snapshot.settings.volumeRequestsTaken;
+    }
+    const bool volumeRequestsTaken = !snapshot.settings.hasVolumeRequestsTaken
+        || snapshot.settings.volumeRequestsTaken >= m_volumeRequestsSent;
+    const double settingsVolume = snapshot.settings.present && volumeRequestsTaken
         ? static_cast<double>(snapshot.settings.volume)
         : m_volume;
     if (std::abs(m_volume - settingsVolume) > 0.0005) {
         m_volume = settingsVolume;
         changed = true;
         snapshotSignalChanged = true;
+        emit volumeChanged();
     }
 
     finishSnapshotSection(snapshotPlaybackMs);
@@ -5721,10 +5778,19 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (queue.present && !queueFits) {
         requestQueueResync();
     } else if (queueFits) {
+        // As the transport and the rows write a time: "1:49", "1:05:52",
+        // with no leading zero on the minutes; and, while a queued track's
+        // length is unknown (one that can't be read never gets one), a
+        // floor in words (#373 H35: "01:49+?").
         QString nextQueueDurationText = formatSeconds(queue.totalDurationSeconds);
-        const int queueUnknownDurationCount = std::max(0, queue.unknownDurationCount);
-        if (queueUnknownDurationCount > 0) {
-            nextQueueDurationText = QStringLiteral("%1+?").arg(nextQueueDurationText);
+        if (nextQueueDurationText.size() > 2 && nextQueueDurationText.at(0) == QLatin1Char('0')
+            && nextQueueDurationText.at(1).isDigit() && nextQueueDurationText.at(2) == QLatin1Char(':')) {
+            nextQueueDurationText.remove(0, 1);
+        }
+        if (std::max(0, queue.unknownDurationCount) > 0) {
+            nextQueueDurationText =
+                i18nc("@info queue total duration when some tracks' lengths are unknown", "at least %1",
+                      nextQueueDurationText);
         }
         if (m_queueDurationText != nextQueueDurationText) {
             m_queueDurationText = nextQueueDurationText;

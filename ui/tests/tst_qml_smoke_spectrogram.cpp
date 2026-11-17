@@ -2,6 +2,9 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QtMath>
+#include <QSGOpacityNode>
+
 // The spectrogram's controls and overlays, its crosshair and readout,
 // and click-to-seek.
 class SpectrogramSmokeTest : public QmlSmokeTest {
@@ -16,10 +19,14 @@ private slots:
     void spectrogramHoverChannelButtonsRemainClickable();
     void spectrogramSoloButtonsShowEverySoloedChannel();
     void spectrogramBackgroundsAreThePlotFloor();
+    void emptyPaneIsTheModesFloor_data();
+    void emptyPaneIsTheModesFloor();
     void testMutedChannelRendersGrayscale();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramFpsOverlayToggleKeepsSceneNode();
+    void timeAfterTheCutIsTheFloor();
     void spectrogramOverlaysKeepClearOfTheReservedCorner();
+    void crosshairReadoutKeepsItsGapFromTheCornerPlates();
     void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
     void spectrogramPixelToFrequency();
     void spectrogramOverlayBenchmark();
@@ -32,12 +39,14 @@ private slots:
     void crosshairReadoutPlatesFollowThePointerSmoothly_data();
     void crosshairReadoutPlatesFollowThePointerSmoothly();
     void spectrogramCrosshairTimeKeepsClearOfTheLaneHead();
+    void shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch();
     void crosshairReadoutLeavesAPlateOutInNarrowPlots_data();
     void crosshairReadoutLeavesAPlateOutInNarrowPlots();
     void spectrogramCrosshairReadoutStaysReadableInNarrowLanes_data();
     void spectrogramCrosshairReadoutStaysReadableInNarrowLanes();
     void spectrogramCrosshairReadoutKeepsItsPlatesAsTheLevelChanges();
     void crosshairReadoutWidestWidthsFollowTheFont();
+    void crosshairReadoutTextIsTheSmallTextOfTheDesign();
     void spectrogramSurfaceFollowsTheStretchedDefaultZoom();
     void spectrogramCrosshairWidestValueCoversRoundedHertz();
     void spectrogramCrosshairReadoutReadsEachView_data();
@@ -47,6 +56,14 @@ private slots:
     void spectrogramCrosshairReadoutPlatesTakeThePlotColors();
     void spectrogramCrosshairReadoutShowsAfterEveryClick();
     void spectrogramGridOverlayGeneratesWhenEnabled();
+    void spectrogramAtRestDrawsItsScaleFaintly_data();
+    void spectrogramAtRestDrawsItsScaleFaintly();
+    void spectrogramAtRestFollowsTheScaleSetting();
+    void spectrogramAtRestKeepsItsLinesClearOfThePlates_data();
+    void spectrogramAtRestKeepsItsLinesClearOfThePlates();
+    void spectrogramAtRestDrawsLabelsOnlyWithTheScale();
+    void spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty();
+    void spectrogramRollingViewFillsUpToThePlayhead();
     void spectrogramTimeScaleOfAStretchedShortTrackShowsTenths();
     void spectrogramOverlayDisabledProducesNullImage();
     void spectrogramOverlayDirtiedByGeometryChange();
@@ -64,6 +81,7 @@ private slots:
     void spectrogramClickToSeekDisabledInRollingMode();
     void spectrogramClickToSeekMatchesCrosshairAtDevicePixels();
     void spectrogramOverlaysDrawNoPaneSizedImages();
+    void spectrogramCrosshairFadesAsAWhole();
 };
 
 void SpectrogramSmokeTest::spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints() {
@@ -183,7 +201,8 @@ Item {
         property int channelButtonsVisibility: 2
         property var mutedChannels: []
         property bool showLevelMeter: false
-        property string currentTrackPath: ""
+        // A track: before any audio the lanes at rest have no Mute and Solo.
+        property string currentTrackPath: "/fixture/track.flac"
         property bool waveformEndsEarly: false
         property real waveformCoverageSeconds: 0
         property bool connected: true
@@ -334,7 +353,8 @@ Window {
         property var soloedChannels: []
         property int muteCalls: 0
         property bool showLevelMeter: false
-        property string currentTrackPath: ""
+        // A track: before any audio the lanes at rest have no Mute and Solo.
+        property string currentTrackPath: "/fixture/track.flac"
         property bool waveformEndsEarly: false
         property real waveformCoverageSeconds: 0
         property bool connected: true
@@ -444,6 +464,27 @@ Window {
     soloButton->setFocus(false);
     layer->forceActiveFocus();
     QTRY_COMPARE(buttons->opacity(), 0.0);
+
+    // A muted or soloed lane keeps its buttons shown with the pointer away,
+    // compact too, so the checked one stays in sight to undo it (#373 H16
+    // I4: they faded out as the pointer left).
+    QQuickItem *head = buttons->parentItem();
+    QVERIFY(head != nullptr && head->property("buttonsRevealed").isValid());
+    for (const bool compact : {false, true}) {
+        head->setProperty("compact", compact);
+        bridge->setProperty("mutedChannels", QVariantList{true});
+        QTRY_COMPARE(buttons->opacity(), 1.0);
+        QVERIFY(muteButton->property("checked").toBool());
+        QTest::qWait(250);
+        QCOMPARE(buttons->opacity(), 1.0);
+        bridge->setProperty("mutedChannels", QVariantList{});
+        QTRY_COMPARE(buttons->opacity(), 0.0);
+        bridge->setProperty("soloedChannels", QVariantList{true});
+        QTRY_COMPARE(buttons->opacity(), 1.0);
+        QVERIFY(soloButton->property("checked").toBool());
+        bridge->setProperty("soloedChannels", QVariantList{});
+        QTRY_COMPARE(buttons->opacity(), 0.0);
+    }
 }
 
 // The pane, each lane and the viewer are the spectrogram's floor colour,
@@ -535,16 +576,25 @@ ApplicationWindow {
     auto *pane = root->findChild<QQuickItem *>(QStringLiteral("floorPane"));
     auto *surface = root->findChild<QQuickItem *>(QStringLiteral("floorSurface"));
     QVERIFY(tokens != nullptr && pane != nullptr && surface != nullptr);
-    // The plot's floor is the colour map's: its lowest entry, for the colour
-    // and the greyscale (muted) map alike, which silence is drawn in.
+    // The plot's floor is the palette's plotFloor, its indigo (#373 H11
+    // P19), where the plot has no column to draw. Silence within a track
+    // is the colour map's lowest entry, black, for the colour and the
+    // greyscale (muted) map alike; a canvas pixel without a column is
+    // transparent, for the floor to show.
     QObject *plot = tokens->property("spectrogramPlot").value<QObject *>();
     QVERIFY(plot != nullptr);
     const QColor floor = plot->property("plotBg").value<QColor>();
-    QCOMPARE(plot->property("plotOutline").value<QColor>(), floor);
+    QCOMPARE(floor, QColor(QStringLiteral("#14062e")));
+    QCOMPARE(tokens->property("plotFloor").value<QColor>(), floor);
+    const QColor silence(Qt::black);
+    QCOMPARE(plot->property("plotOutline").value<QColor>(), silence);
     for (const bool muted : {false, true}) {
         SpectrogramItem item;
-        QCOMPARE(QColor(item.m_palette32.back()), floor);
-        QCOMPARE(QColor(item.m_palette32Gray.back()), floor);
+        // On its own, the item's floor is black; the surface gives it the
+        // plot's.
+        QCOMPARE(item.floorColor(), silence);
+        QCOMPARE(QColor(item.m_palette32.back()), silence);
+        QCOMPARE(QColor(item.m_palette32Gray.back()), silence);
         item.setWidth(200);
         item.setHeight(100);
         item.setDisplayMode(1);
@@ -555,9 +605,9 @@ ApplicationWindow {
             QByteArray(bins * 100, '\0'), bins, 0, 100,
             0, 400, 48000, 1024, false, true, 1, false, 1);
         QSGNode *node = paintSettled(item, nullptr);
-        // Silence, and the canvas past the columns, are the floor.
-        QCOMPARE(QColor(item.m_canvas.pixel(50, 50)), floor);
-        QCOMPARE(QColor(item.m_canvas.pixel(170, 50)), floor);
+        // Silence is black; the canvas past the columns is transparent.
+        QCOMPARE(item.m_canvas.pixel(50, 50), qRgb(0, 0, 0));
+        QCOMPARE(item.m_canvas.pixel(170, 50), kSpectrogramNoColumn);
         delete node;
     }
 
@@ -588,6 +638,10 @@ ApplicationWindow {
     for (QQuickItem *lane : std::as_const(lanes)) {
         QCOMPARE(lane->property("color").value<QColor>(), floor);
     }
+    // Each lane's item draws the floor itself, where it has no column.
+    for (QQuickItem *item : itemsNamed(surface, QStringLiteral("spectrogramPaneItem"))) {
+        QCOMPARE(qobject_cast<SpectrogramItem *>(item)->floorColor(), floor);
+    }
     QObject *popupFloor = root->findChild<QObject *>(QStringLiteral("spectrogramPopupFloor"));
     QVERIFY(popupFloor != nullptr);
     QCOMPARE(popupFloor->property("color").value<QColor>(), floor);
@@ -607,7 +661,86 @@ ApplicationWindow {
     QCOMPARE(drawn(160, 0.5), floor);
     QCOMPARE(drawn(160, 50), floor);
     QCOMPARE(drawn(160, 150), floor);
-    QCOMPARE(drawn(160, 100.5), plot->property("plotLaneSeam").value<QColor>());
+    // Never played: the seam at rest, in the floor's violet (#373 H15 H7).
+    QCOMPARE(drawn(160, 100.5).rgb(), tokens->property("plotRestLaneSeam").value<QColor>().rgb());
+}
+
+void SpectrogramSmokeTest::emptyPaneIsTheModesFloor_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<int>("visualizationMode");
+    QTest::newRow("dark spectrogram") << true << 0;
+    QTest::newRow("dark waveform") << true << 1;
+    QTest::newRow("light spectrogram") << false << 0;
+    QTest::newRow("light waveform") << false << 1;
+}
+
+// The pane's floor is the mode's, in both themes, with data or without, so
+// that the first Play keeps it (#373 H4, P5): the spectrogram's is the
+// plot's floor, its indigo; the waveform's the view colour. (H2 made the light theme's bare spectrogram pane the view
+// colour; H3 the dark theme's the map's floor.)
+void SpectrogramSmokeTest::emptyPaneIsTheModesFloor() {
+    QFETCH(bool, dark);
+    QFETCH(int, visualizationMode);
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+import "panes" as Panes
+
+ApplicationWindow {
+    id: window
+    property bool darkScheme: false
+
+    width: 320
+    height: 200
+    visible: true
+    palette.window: darkScheme ? "#202326" : "#eff0f1"
+    palette.base: darkScheme ? "#141618" : "#ffffff"
+
+    Components.UiPalette {
+        id: tokens
+        objectName: "tokens"
+        windowRoot: window
+    }
+
+    Panes.SpectrogramPane {
+        objectName: "emptyPane"
+        anchors.fill: parent
+        openViewer: function() {}
+        uiPalette: tokens
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY(window != nullptr);
+    window->setProperty("darkScheme", dark);
+    QObject *tokens = root->findChild<QObject *>(QStringLiteral("tokens"));
+    auto *pane = root->findChild<QQuickItem *>(QStringLiteral("emptyPane"));
+    QVERIFY(tokens != nullptr && pane != nullptr);
+    QTRY_COMPARE(tokens->property("themeIsDark").toBool(), dark);
+    pane->setProperty("visualizationMode", visualizationMode);
+
+    // The plot's floor: its indigo, in both themes (#373 H11 P19; before,
+    // the colour map's lowest entry, black).
+    const QColor mapFloor = tokens->property("plotFloor").value<QColor>();
+    const QColor view = tokens->property("view").value<QColor>();
+    const QColor wanted = visualizationMode == 1 ? view : mapFloor;
+    QCOMPARE(pane->property("color").value<QColor>(), wanted);
+    QCOMPARE(QColor(QStringLiteral("#14062e")), mapFloor);
+    // As drawn.
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QTRY_COMPARE(window->grabWindow().pixelColor(160, 100), wanted);
+
+    // The other mode: its floor.
+    pane->setProperty("visualizationMode", 1 - visualizationMode);
+    const QColor other = visualizationMode == 1 ? mapFloor : view;
+    QCOMPARE(pane->property("color").value<QColor>(), other);
+    QTRY_COMPARE(window->grabWindow().pixelColor(160, 100), other);
 }
 
 void SpectrogramSmokeTest::spectrogramSoloButtonsShowEverySoloedChannel() {
@@ -780,6 +913,50 @@ void SpectrogramSmokeTest::spectrogramForceFpsOverlayDoesNotOverrideQmlBinding()
     QCOMPARE(item.showFpsOverlay(), false);
 }
 
+// The time after where a file is cut off (markerSeconds), which the
+// analysis fills with silence to the length the file claims, is the plot's
+// floor, not black (#373 H12 Z10): one floor for everything that is not
+// the track. Silence within the track stays the colour map's black, data.
+void SpectrogramSmokeTest::timeAfterTheCutIsTheFloor() {
+    QQuickWindow window;
+    window.resize(200, 100);
+    window.setColor(Qt::white);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    const QColor floor(QStringLiteral("#14062e"));
+    item.setFloorColor(floor);
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    // Silence, all of it: 150 columns of 1024 frames at 48 kHz.
+    item.feedPrecomputedChunk(QByteArray(bins * 150, '\0'), bins, 0, 150, 0, 150, 48000, 1024, true, true, 1,
+                              false, 1);
+    const auto drawn = [&](double x) {
+        const QImage image = window.grabWindow();
+        const double scale = double(image.width()) / window.width();
+        return image.pixelColor(int(x * scale), int(50 * scale));
+    };
+    // No cut: silence is black wherever the track has it.
+    QTRY_COMPARE(drawn(100.5), QColor(Qt::black));
+    QVERIFY(std::isnan(item.markerX()));
+
+    // Cut off at its 80th column: past it the floor, before it silence.
+    item.setMarkerSeconds(80 * 1024 / 48000.0);
+    QTRY_VERIFY(!std::isnan(item.markerX()));
+    const double cut = item.markerX();
+    QVERIFY2(cut > 20 && cut < 180, qPrintable(QString::number(cut)));
+    QTRY_COMPARE(drawn(cut + 2.5), floor);
+    QCOMPARE(drawn(199.5), floor);
+    QCOMPARE(drawn(cut - 3.5), QColor(Qt::black));
+
+    // The cut gone: black again.
+    item.setMarkerSeconds(-1);
+    QTRY_COMPARE(drawn(cut + 2.5), QColor(Qt::black));
+}
+
 void SpectrogramSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
     QQuickWindow window;
     window.resize(400, 100);
@@ -806,6 +983,45 @@ void SpectrogramSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
         QCOMPARE(!overlay->rect().isEmpty(), shown);
     }
     delete node;
+}
+
+// The crosshair's value keeps 6 px from the plates in the corner (#373 H5:
+// in the first lane of 5.1, it butted against the mode switch), beside them
+// and just below them; further down it is back on the right edge.
+void SpectrogramSmokeTest::crosshairReadoutKeepsItsGapFromTheCornerPlates() {
+    QCOMPARE(ViewCorner::kLabelGap, 6);
+    // A lane 400 px wide and 120 tall; the corner's plates 60 px wide and
+    // 33 tall, with their edges.
+    const int width = 400;
+    const QSizeF corner(60, 33);
+    const int cornerLeft = width - 60;
+    const QSize plate(90, 20);
+    // The readout's plate keeps a group's gap from them (#373 H8): 6 px
+    // read as one more plate in their row.
+    constexpr int gap = CrosshairReadout::kCornerGap;
+    QVERIFY(gap >= 2 * ViewCorner::kLabelGap);
+    for (const int pointerY : {5, 20, 40, 48, 49, 58, 59, 60, 70}) {
+        const auto [value, time] = CrosshairReadout::plateRects(width, 120, 200, pointerY, plate, QSize(), corner);
+        QVERIFY(!value.isNull());
+        QVERIFY(time.isNull());
+        const QByteArray where = QByteArray::number(pointerY);
+        if (value.top() < 33 + gap) {
+            // Beside the plates, or within the gap below them: the gap
+            // left of them.
+            QVERIFY2(value.left() + value.width() + gap == cornerLeft, where.constData());
+        } else {
+            QVERIFY2(value.left() + value.width() == width - CrosshairReadout::kEdgeMargin, where.constData());
+        }
+    }
+    // On the edge as before where the corner has no plates.
+    const auto [bare, none] = CrosshairReadout::plateRects(width, 120, 200, 5, plate, QSize(), QSizeF());
+    QVERIFY(none.isNull());
+    QCOMPARE(bare.left() + bare.width(), width - CrosshairReadout::kEdgeMargin);
+    // A label already clear of the plates by 6 px stays where it is.
+    QCOMPARE(ViewCorner::labelXClearOfCorner(cornerLeft - 6 - 50, 0, 50, 20, width, corner), cornerLeft - 56);
+    QCOMPARE(ViewCorner::labelXClearOfCorner(cornerLeft - 5 - 50, 0, 50, 20, width, corner), cornerLeft - 56);
+    QCOMPARE(ViewCorner::labelXClearOfCorner(cornerLeft - 50, 39, 50, 20, width, corner), cornerLeft - 50);
+    QCOMPARE(ViewCorner::labelXClearOfCorner(cornerLeft - 50, 38, 50, 20, width, corner), cornerLeft - 56);
 }
 
 void SpectrogramSmokeTest::spectrogramOverlaysKeepClearOfTheReservedCorner() {
@@ -1719,6 +1935,42 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutKeepsItsPlatesAsTheLevelCh
     QVERIFY(valueShown && valueLeftOut);
 }
 
+void SpectrogramSmokeTest::crosshairReadoutTextIsTheSmallTextOfTheDesign() {
+    // The readout's text is the design's small text, as the lane labels':
+    // 12 px at the default 10 pt font, never under 11 px, and larger with
+    // a larger font; its plates grow to hold it.
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    const auto readoutAt = [](qreal points) {
+        QFont font = QGuiApplication::font();
+        font.setPointSizeF(points);
+        QGuiApplication::setFont(font);
+        return CrosshairReadout::font();
+    };
+    const QFont atDefault = readoutAt(10.0);
+    QCOMPARE(atDefault.pixelSize(), 12);
+    QCOMPARE(atDefault.family(), QGuiApplication::font().family());
+    const QFont atLarge = readoutAt(24.0);
+    QCOMPARE(atLarge.pixelSize(), 29);
+    const CrosshairReadout::Colors colors{Qt::black, Qt::white, Qt::transparent};
+    const QFontMetrics defaultMetrics(atDefault);
+    const QFontMetrics largeMetrics(atLarge);
+    const QString time = QStringLiteral("1:23.4");
+    const QSize defaultPlate =
+        CrosshairReadout::plateSize(defaultMetrics.horizontalAdvance(time), defaultMetrics, colors);
+    const QSize largePlate =
+        CrosshairReadout::plateSize(largeMetrics.horizontalAdvance(time), largeMetrics, colors);
+    QCOMPARE(defaultPlate.height(), defaultMetrics.height() + 2 * CrosshairReadout::kPadding);
+    QVERIFY(largePlate.width() > defaultPlate.width() && largePlate.height() > defaultPlate.height());
+    // A larger plate still goes in the plot's bottom-right corner, inside it.
+    const auto [value, timeRect] =
+        CrosshairReadout::plateRects(400, 200, 399, 199, largePlate, largePlate);
+    for (const QRect &plate : {value, timeRect}) {
+        QVERIFY(plate.isValid());
+        QVERIFY(QRect(0, 0, 400, 200).contains(plate));
+    }
+}
+
 void SpectrogramSmokeTest::crosshairReadoutWidestWidthsFollowTheFont() {
     // The readout's font takes its family and style from the application's,
     // which can change while the app runs: the widest frequency and level
@@ -1833,7 +2085,8 @@ Window {
         property var mutedChannels: []
         property var soloedChannels: []
         property bool showLevelMeter: false
-        property string currentTrackPath: ""
+        // A track: before any audio the lanes at rest have no Mute and Solo.
+        property string currentTrackPath: "/fixture/track.flac"
         property bool waveformEndsEarly: false
         property real waveformCoverageSeconds: 0
         property var currentTrackChannelLabels: []
@@ -1970,6 +2223,202 @@ Window {
         QVERIFY2(QRectF(0.0, 0.0, pane->width(), pane->height()).contains(plates[1].rect),
                  where.constData());
     }
+}
+
+// 5.1 in the main window at 1600 x 1000, six short lanes (#373 H8): each
+// lane's head is compact, a 16 px label with 11 px text and smaller Mute
+// and Solo buttons, which show only on the pointer; taller lanes keep the
+// full heads. The crosshair's readout in the top lane keeps a group's gap
+// from the mode switch, wherever the pointer is.
+void SpectrogramSmokeTest::shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    window->resize(1600, 1000);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    auto *layer = qobject_cast<QQuickItem *>(window->findChild<QObject *>(QStringLiteral("plotLayer")));
+    auto *surface = qobject_cast<QQuickItem *>(window->findChild<QObject *>(QStringLiteral("mainSpectrogramSurface")));
+    QVERIFY(bridge != nullptr && layer != nullptr && surface != nullptr);
+    QObject *palette = qvariant_cast<QObject *>(layer->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    bridge->setProperty("channelButtonsVisibility", 1);
+    // A lane per channel, each with its label.
+    bridge->setProperty("spectrogramViewMode", 1);
+    setPlayingTrack(bridge);
+
+    const auto showChannels = [&](int channels, const QStringList &labels) {
+        bridge->setProperty("currentTrackChannels", channels);
+        QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady",
+                                          Q_ARG(int, channels), Q_ARG(bool, true)));
+        bridge->setProperty("currentTrackChannelLabels", labels);
+        QTRY_COMPARE(layer->property("laneCount").toInt(), channels);
+        QTRY_COMPARE(visibleItemsNamed(layer, QStringLiteral("plotLaneHead")).size(), channels);
+    };
+    struct Head {
+        QQuickItem *head;
+        QQuickItem *label;
+        QQuickItem *text;
+        QQuickItem *buttons;
+        QQuickItem *mute;
+    };
+    const auto heads = [&]() {
+        QList<Head> found;
+        for (QQuickItem *head : visibleItemsNamed(layer, QStringLiteral("plotLaneHead"))) {
+            found.push_back({head, firstVisibleItemNamed(head, QStringLiteral("plotLaneLabel")),
+                             firstVisibleItemNamed(head, QStringLiteral("plotPlateLabel")),
+                             itemsNamed(head, QStringLiteral("plotLaneButtons")).value(0),
+                             itemsNamed(head, QStringLiteral("plotLaneMuteButton")).value(0)});
+        }
+        return found;
+    };
+    const double compactPoints = palette->property("compactPointSize").toReal();
+    const double smallPoints = palette->property("smallPointSize").toReal();
+    QVERIFY(compactPoints > 0 && compactPoints < smallPoints);
+
+    // Stereo: two tall lanes, full heads.
+    showChannels(2, {QStringLiteral("L"), QStringLiteral("R")});
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QVERIFY(layer->property("compactLaneHeight").toReal() >= 64.0);
+    QTRY_VERIFY(layer->property("height").toReal() / 2 > layer->property("compactLaneHeight").toReal());
+    double fullLabelHeight = 0;
+    for (const Head &head : heads()) {
+        QVERIFY(head.label && head.text && head.buttons && head.mute);
+        QVERIFY(!head.head->property("compact").toBool());
+        QCOMPARE(head.text->property("font").value<QFont>().pointSizeF(), smallPoints);
+        QVERIFY(head.label->height() >= 20.0);
+        QCOMPARE(head.mute->height(), palette->property("toolButtonSize").toReal());
+        fullLabelHeight = head.label->height();
+    }
+
+    // 5.1: six short lanes, compact heads.
+    const QStringList positions{QStringLiteral("L"), QStringLiteral("R"), QStringLiteral("C"),
+                                QStringLiteral("LFE"), QStringLiteral("RL"), QStringLiteral("RR")};
+    showChannels(6, positions);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    const double laneHeight = layer->height() / 6;
+    QVERIFY2(laneHeight < layer->property("compactLaneHeight").toReal(), qPrintable(QString::number(laneHeight)));
+    QTRY_VERIFY(heads().value(0).head->property("compact").toBool());
+    for (const Head &head : heads()) {
+        QVERIFY(head.label && head.text && head.buttons && head.mute);
+        QVERIFY(head.head->property("compact").toBool());
+        QCOMPARE(head.text->property("font").value<QFont>().pointSizeF(), compactPoints);
+        QVERIFY2(head.label->height() >= 16.0 && head.label->height() < fullLabelHeight,
+                 qPrintable(QString::number(head.label->height())));
+        QCOMPARE(head.mute->height(), head.label->height() + 4);
+        // Mute and Solo hidden until the pointer is on the lane.
+        QVERIFY(!head.buttons->property("revealed").toBool());
+        // Their plate centred on the label, inside the lane (#373 H18 C4).
+        const QRectF labelRect = head.label->mapRectToItem(layer, QRectF(0, 0, head.label->width(), head.label->height()));
+        const QRectF plateRect = head.buttons->mapRectToItem(layer, QRectF(0, 0, head.buttons->width(), head.buttons->height()));
+        QVERIFY2(std::abs(labelRect.center().y() - plateRect.center().y()) <= 0.5,
+                 qPrintable(QStringLiteral("label centre %1, plate centre %2")
+                                .arg(labelRect.center().y()).arg(plateRect.center().y())));
+        const int lane = static_cast<int>(std::floor((labelRect.top() + 1.0) / laneHeight));
+        QVERIFY2(plateRect.top() >= lane * laneHeight + 4.0 && plateRect.bottom() <= (lane + 1) * laneHeight,
+                 qPrintable(QStringLiteral("plate %1 to %2 in lane %3").arg(plateRect.top()).arg(plateRect.bottom()).arg(lane)));
+    }
+    // Back to stereo: the full heads again.
+    showChannels(2, {QStringLiteral("L"), QStringLiteral("R")});
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QTRY_VERIFY(!heads().value(0).head->property("compact").toBool());
+    QCOMPARE(heads().value(0).label->height(), fullLabelHeight);
+    showChannels(6, positions);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QTRY_VERIFY(heads().value(0).head->property("compact").toBool());
+
+    // The lanes and their panes, top to bottom.
+    QList<SpectrogramItem *> panes;
+    QTRY_VERIFY([&]() {
+        panes.clear();
+        collectQuickItems(surface, &panes);
+        return panes.size() == 6;
+    }());
+    std::sort(panes.begin(), panes.end(), [](SpectrogramItem *a, SpectrogramItem *b) {
+        return a->mapToScene(QPointF()).y() < b->mapToScene(QPointF()).y();
+    });
+    // Each head's plates inside its lane, buttons included while hidden.
+    const QList<Head> found = heads();
+    for (int lane = 0; lane < 6; ++lane) {
+        const QRectF laneRect = panes[lane]->mapRectToScene(
+            QRectF(0, 0, panes[lane]->width(), panes[lane]->height()));
+        for (const Head &head : found) {
+            const QRectF label = head.label->mapRectToScene(QRectF(0, 0, head.label->width(), head.label->height()));
+            if (!laneRect.contains(label.center())) {
+                continue;
+            }
+            const QRectF buttons = head.buttons->mapRectToScene(
+                QRectF(-1, -1, head.buttons->width() + 2, head.buttons->height() + 2));
+            QVERIFY2(laneRect.contains(label) && laneRect.contains(buttons),
+                     qPrintable(QStringLiteral("lane %1: %2 in %3").arg(lane).arg(buttons.top()).arg(laneRect.top())));
+        }
+    }
+    // The pointer on the third lane reveals its buttons, and only its.
+    const QPointF onThird = panes[2]->mapToScene(QPointF(panes[2]->width() / 2, panes[2]->height() / 2));
+    QTest::mouseMove(window, onThird.toPoint());
+    QTRY_COMPARE(layer->property("hoveredLane").toInt(), 2);
+    for (const Head &head : heads()) {
+        const double labelY = head.label->mapToScene(QPointF()).y();
+        const bool onIt = labelY >= panes[2]->mapToScene(QPointF()).y()
+            && labelY < panes[3]->mapToScene(QPointF()).y();
+        QTRY_COMPARE(head.buttons->property("revealed").toBool(), onIt);
+    }
+
+    // The readout in the top lane, as the pointer sweeps its right end.
+    SpectrogramItem *top = panes.first();
+    constexpr int bins = 4'097;
+    constexpr int columns = 2'000;
+    top->feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins, 0, columns, 0, columns,
+                              48'000, 1'024, true, true, 1, false);
+    QTRY_VERIFY(top->precomputedReady());
+    QQuickItem *modeSwitch = firstVisibleItemNamed(layer, QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
+    // With its plate's 1 px edge.
+    const QRectF switchRect = modeSwitch->mapRectToScene(
+        QRectF(-1, -1, modeSwitch->width() + 2, modeSwitch->height() + 2));
+    const QPointF origin = top->mapToScene(QPointF());
+    int checked = 0;
+    for (double x = top->width() - 2; x > top->width() - 400; x -= 37) {
+        for (double y = 1; y < top->height() - 1; y += 4) {
+            const QPointF at = origin + QPointF(x, y);
+            // Not on the switch, which takes the pointer from the plot.
+            if (switchRect.adjusted(-2, -2, 2, 2).contains(at)) {
+                continue;
+            }
+            QTest::mouseMove(window, at.toPoint());
+            SpectrogramOverlayImage value;
+            const bool laidOut = QTest::qWaitFor([&]() {
+                QMutexLocker lock(&top->m_stateMutex);
+                const QVector<SpectrogramOverlayImage> plates = readoutPlatesOf(top->m_crosshair);
+                value = plates.value(0);
+                return plates.size() == 1 && !top->m_crosshairDirty
+                    && std::abs(top->m_hoverPosition.x() - x) < 1.0 && std::abs(top->m_hoverPosition.y() - y) < 1.0;
+            }, 5'000);
+            QVERIFY2(laidOut, qPrintable(QStringLiteral("%1, %2").arg(x).arg(y)));
+            const QRectF plate = value.rect.translated(origin);
+            const auto edges = [](const QRectF &rect) {
+                return QStringLiteral("%1,%2 to %3,%4").arg(rect.left()).arg(rect.top())
+                    .arg(rect.right()).arg(rect.bottom());
+            };
+            const QByteArray where = QStringLiteral("at %1,%2: plate %3, switch %4")
+                .arg(at.x()).arg(at.y()).arg(edges(plate), edges(switchRect)).toUtf8();
+            QVERIFY2(!plate.intersects(switchRect), where.constData());
+            if (plate.top() < switchRect.bottom() + CrosshairReadout::kCornerGap) {
+                QVERIFY2(switchRect.left() - plate.right() >= CrosshairReadout::kCornerGap - 1, where.constData());
+            }
+            ++checked;
+        }
+    }
+    QVERIFY(checked > 20);
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairReadoutReadsEachView_data() {
@@ -2251,6 +2700,343 @@ Window {
     // Off the plot, none.
     QTest::mouseMove(window, QPoint(320, 300));
     QTRY_VERIFY(pane->crosshairReadout().isEmpty());
+}
+
+void SpectrogramSmokeTest::spectrogramAtRestDrawsItsScaleFaintly_data() {
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<bool>("logScale");
+    QTest::addColumn<int>("rate");
+    QTest::addColumn<bool>("capped");
+    for (const double scale : {1.0, 2.0}) {
+        for (const bool logScale : {false, true}) {
+            QTest::addRow("%gx%s", scale, logScale ? ", log" : "") << scale << logScale << 44'100 << false;
+        }
+    }
+    // A capped 96 kHz session sends the bins up to 24 kHz only.
+    QTest::newRow("96 kHz, capped") << 1.0 << false << 96'000 << true;
+}
+
+// The lane at rest (#373 H6 P6): before it has columns, a 1 px line across
+// it at each tick of the frequency scale, where a session at the analysis's
+// settings and the lane's rate puts the scale, and the scale's labels where
+// it puts them, in the secondary text colour.
+void SpectrogramSmokeTest::spectrogramAtRestDrawsItsScaleFaintly() {
+    QFETCH(double, scale);
+    QFETCH(bool, logScale);
+    QFETCH(int, rate);
+    QFETCH(bool, capped);
+    constexpr int fftSize = 4'096;
+    SpectrogramItem item;
+    item.setSampleRateHz(rate);
+    item.setAnalysisFftSize(fftSize);
+    item.setFrequencyCap(capped);
+    item.setLogScale(logScale);
+    item.setGridEnabled(true);
+    const QSize lane(600, 240);
+    const int width = static_cast<int>(std::lround(lane.width() * scale));
+    const int height = static_cast<int>(std::lround(lane.height() * scale));
+    SpectrogramOverlayLayout rest;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_canvasScale = scale;
+        item.updateRestGridOverlayLocked(width, height);
+        rest = item.m_restGrid;
+    }
+    QVERIFY(rest.valid);
+    QVERIFY(!rest.lines.isEmpty());
+    QCOMPARE(rest.images.size(), rest.lines.size());
+    for (const QRect &line : std::as_const(rest.lines)) {
+        // Across the lane.
+        QCOMPARE(line.x(), 0);
+        QCOMPARE(line.width(), width);
+    }
+    for (const SpectrogramOverlayImage &label : std::as_const(rest.images)) {
+        QCOMPARE(label.kind, SpectrogramOverlayImage::RestScaleLabel);
+    }
+
+    // The scale a session at those settings shows.
+    const int bins = capped ? fftSize / 4 + 1 : fftSize / 2 + 1;
+    constexpr int columns = 10;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins, 0, columns, 0, 100, rate, 1'024,
+                              false, true, 1, false, 0, 0, fftSize);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.m_fftSize = item.m_precomputedFftSize;
+        item.m_sampleRateHz = item.m_precomputedSampleRateHz;
+        item.invalidateMapping();
+        item.ensureMapping(height);
+        item.updateFreqGridOverlayLocked(width, height);
+    }
+    const SpectrogramOverlayLayout &scaleShown = item.m_freqGrid;
+    QCOMPARE(rest.lines.size(), scaleShown.lines.size());
+    for (qsizetype i = 0; i < rest.lines.size(); ++i) {
+        // On the tick's rows, as thick.
+        QCOMPARE(rest.lines.at(i).y(), scaleShown.lines.at(i).y());
+        QCOMPARE(rest.lines.at(i).height(), scaleShown.lines.at(i).height());
+        QCOMPARE(rest.images.at(i).text, scaleShown.images.at(i).text);
+        QCOMPARE(rest.images.at(i).rect, scaleShown.images.at(i).rect);
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates_data() {
+    QTest::addColumn<double>("scale");
+    QTest::newRow("1x") << 1.0;
+    QTest::newRow("2x") << 2.0;
+}
+
+// A line at rest on a row beside a plate, the mode switch's corner or the
+// lane's label, or within 8 px under or over it, ends 6 px before the
+// corner and starts 6 px after the label (#373 H29 W4: the first line ran
+// along the switch's foot; H30: one rule for both lanes, where the first
+// lane's top line 4 px under its label ran on); every tick keeps its line,
+// and a line clear of both runs the lane's width.
+void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates() {
+    QFETCH(double, scale);
+    SpectrogramItem item;
+    item.setSampleRateHz(48'000);
+    item.setGridEnabled(false);
+    const int width = qRound(600 * scale);
+    const int height = qRound(240 * scale);
+    const auto layOut = [&]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_canvasScale = scale;
+        item.updateRestGridOverlayLocked(width, height);
+        return item.m_restGrid;
+    };
+    const SpectrogramOverlayLayout plain = layOut();
+    QVERIFY(plain.lines.size() >= 3);
+    for (const QRect &line : plain.lines) {
+        QCOMPARE(line.x(), 0);
+        QCOMPARE(line.width(), width);
+    }
+    // Plates around the second line from the top, each past the 4 px the
+    // rule reached before and within its 8: the corner's foot 5 px over it,
+    // the label's top 6 px under it; the top line is beside the corner
+    // alone.
+    QList<int> rows;
+    for (const QRect &line : plain.lines) {
+        rows.push_back(line.y());
+    }
+    std::sort(rows.begin(), rows.end());
+    const double row = rows.at(1) / scale;
+    QVERIFY(row > 12);
+    constexpr double reach = 8.0;
+    const double cornerFoot = row - 5;
+    const double labelTop = row + 6;
+    item.setReservedCorner(QSizeF(70, cornerFoot));
+    item.setLaneLabelBounds(QRectF(4, labelTop, 20, 18));
+    const SpectrogramOverlayLayout clear = layOut();
+    QCOMPARE(clear.lines.size(), plain.lines.size());
+    int cornerOnly = 0;
+    int both = 0;
+    int neither = 0;
+    for (qsizetype i = 0; i < clear.lines.size(); ++i) {
+        const QRect line = clear.lines.at(i);
+        QCOMPARE(line.y(), plain.lines.at(i).y());
+        QCOMPARE(line.height(), plain.lines.at(i).height());
+        const double top = line.y() / scale;
+        const double bottom = (line.y() + line.height()) / scale;
+        const bool besideCorner = top < cornerFoot + reach;
+        const bool besideLabel = bottom > labelTop - reach && top < labelTop + 18 + reach;
+        QCOMPARE(line.x(), besideLabel ? qCeil((24 + 6) * scale) : 0);
+        QCOMPARE(line.x() + line.width(), besideCorner ? qFloor((600 - 70 - 6) * scale) : width);
+        cornerOnly += besideCorner && !besideLabel ? 1 : 0;
+        both += besideCorner && besideLabel ? 1 : 0;
+        neither += !besideCorner && !besideLabel ? 1 : 0;
+    }
+    QCOMPARE(cornerOnly, 1);
+    QCOMPARE(both, 1);
+    QVERIFY(neither >= 1);
+}
+
+// With the scale hidden (Preferences), the lane at rest keeps its lines,
+// without the labels: an instrument at rest rather than a hole (#373 H14
+// F3, P23; H10 P18 left it the plain floor). Without labels to keep clear
+// of the lane's head and the mode switch, it has a line at every tick, the
+// top one too, so they are evenly spaced (#373 H15 H7: with the top one
+// left out the lane's top band was some 80 px to the others' 45).
+void SpectrogramSmokeTest::spectrogramAtRestFollowsTheScaleSetting() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48'000);
+    const auto layOut = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.updateRestGridOverlayLocked(600, 240);
+        return item.m_restGrid;
+    };
+    item.setGridEnabled(true);
+    const SpectrogramOverlayLayout shown = layOut();
+    QVERIFY(!shown.images.isEmpty());
+    QSignalSpy updates(&item, &SpectrogramItem::gridEnabledChanged);
+    item.setGridEnabled(false);
+    QCOMPARE(updates.count(), 1);
+    const SpectrogramOverlayLayout hidden = layOut();
+    QVERIFY(hidden.valid);
+    QVERIFY(hidden.images.isEmpty());
+    // Every line of the scale's, and the one at the top it leaves out.
+    for (const QRect &line : std::as_const(shown.lines)) {
+        QVERIFY(hidden.lines.contains(line));
+    }
+    QCOMPARE(hidden.lines.size(), shown.lines.size() + 1);
+    QVERIFY(hidden.lines.constLast().y() < shown.lines.constLast().y());
+    // Evenly spaced, within a pixel, and the band over the top one no
+    // taller than the bands between them.
+    QList<int> rows;
+    for (const QRect &line : std::as_const(hidden.lines)) {
+        rows.push_back(line.y());
+    }
+    std::sort(rows.begin(), rows.end());
+    QVERIFY(rows.size() >= 3);
+    int least = 240;
+    int most = 0;
+    for (qsizetype i = 1; i < rows.size(); ++i) {
+        least = std::min(least, rows.at(i) - rows.at(i - 1));
+        most = std::max(most, rows.at(i) - rows.at(i - 1));
+    }
+    QVERIFY2(most - least <= 1, qPrintable(QStringLiteral("bands %1 to %2 px").arg(least).arg(most)));
+    QVERIFY2(rows.first() <= most, qPrintable(QStringLiteral("top band %1 px").arg(rows.first())));
+}
+
+// As drawn: the lane at rest has its lines in white 11% on the floor with
+// the scale hidden or shown, and the scale's labels only while it shows
+// (#373 H14 F3; H10 P18: black all the way down without the scale).
+void SpectrogramSmokeTest::spectrogramAtRestDrawsLabelsOnlyWithTheScale() {
+    QQuickWindow window;
+    window.resize(400, 200);
+    auto *item = new SpectrogramItem(window.contentItem());
+    item->setSize(QSizeF(400, 200));
+    item->setSampleRateHz(48'000);
+    item->setDisplayMode(1);
+    item->setGridEnabled(false);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    SpectrogramOverlayLayout rest;
+    QTRY_VERIFY(!(rest = [item]() {
+        QMutexLocker lock(&item->m_stateMutex);
+        return item->m_restGrid;
+    }()).lines.isEmpty());
+    QVERIFY(rest.images.isEmpty());
+    const auto grab = [&window]() { return window.grabWindow().convertToFormat(QImage::Format_RGB32); };
+    const QColor black(0, 0, 0);
+    // The rest lines, white 20 % over the black floor (#373 H28 V4).
+    const QColor line(51, 51, 51);
+    // The rows of the column at x that are not the floor, and the
+    // brightest pixel of them.
+    const auto litRows = [&black](const QImage &image, int x) {
+        int lit = 0;
+        for (int y = 0; y < image.height(); ++y) {
+            if (image.pixelColor(x, y) != black) ++lit;
+        }
+        return lit;
+    };
+    const auto brightest = [](const QImage &image) {
+        int value = 0;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                value = std::max(value, image.pixelColor(x, y).red());
+            }
+        }
+        return value;
+    };
+    QTRY_COMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), line);
+    const QImage linesOnly = grab();
+    QCOMPARE(linesOnly.height(), 200);
+    QCOMPARE(litRows(linesOnly, 100), rest.lines.size());
+    // No labels: nothing brighter than the lines.
+    QCOMPARE(brightest(linesOnly), 51);
+
+    // The scale shown: its lines, all but the top one, and its labels.
+    item->setGridEnabled(true);
+    QTRY_VERIFY(brightest(grab()) > 100);
+    QCOMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), line);
+
+    // Hidden again, the lines alone again.
+    item->setGridEnabled(false);
+    QTRY_COMPARE(brightest(grab()), 51);
+    QCOMPARE(litRows(grab(), 100), rest.lines.size());
+}
+
+// As drawn: in white 11% on the black floor, with labels in plotTextSecondary,
+// only while the lane has no columns to show.
+void SpectrogramSmokeTest::spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty() {
+    QQuickWindow window;
+    window.resize(400, 200);
+    auto *item = new SpectrogramItem(window.contentItem());
+    item->setSize(QSizeF(400, 200));
+    item->setSampleRateHz(48'000);
+    item->setDisplayMode(1);
+    item->setGridEnabled(true);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    SpectrogramOverlayLayout rest;
+    QTRY_VERIFY((rest = [item]() {
+        QMutexLocker lock(&item->m_stateMutex);
+        return item->m_restGrid;
+    }()).valid);
+    QVERIFY(!rest.lines.isEmpty() && !rest.images.isEmpty());
+    const auto grab = [&window]() { return window.grabWindow().convertToFormat(QImage::Format_RGB32); };
+    const QImage atRest = grab();
+    QCOMPARE(atRest.width(), 400);
+    const QColor black(0, 0, 0);
+    // The rest lines, white 20 % over the black floor (#373 H28 V4).
+    const QColor line(51, 51, 51);
+    for (const QRect &rule : std::as_const(rest.lines)) {
+        QCOMPARE(atRest.pixelColor(100, rule.y()), line);
+        QCOMPARE(atRest.pixelColor(100, rule.y() - 3), black);
+        QCOMPARE(atRest.pixelColor(100, rule.y() + 3), black);
+    }
+    // The labels: plotText at 72% on black, not plotText.
+    for (const SpectrogramOverlayImage &label : std::as_const(rest.images)) {
+        int brightest = 0;
+        const QRect area = label.rect.toAlignedRect();
+        for (int y = area.top(); y <= area.bottom(); ++y) {
+            for (int x = area.left(); x <= area.right(); ++x) {
+                brightest = std::max(brightest, atRest.pixelColor(x, y).red());
+            }
+        }
+        QVERIFY2(brightest >= 160 && brightest <= 175, qPrintable(QString::number(brightest)));
+    }
+
+    // Columns of silence, the floor: the lines go with the first of them.
+    constexpr int bins = 4'097;
+    constexpr int columns = 1'000;
+    item->feedPrecomputedChunk(QByteArray(bins * columns, '\0'), bins, 0, columns, 0, columns, 48'000,
+                               1'024, false, true, 1, false);
+    QTRY_VERIFY(item->viewFilled());
+    QTRY_COMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), black);
+    // Its columns gone, the lane is at rest again.
+    item->clearPrecomputed();
+    QTRY_COMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), line);
+    QVERIFY(!item->viewFilled());
+}
+
+// Rolling, the view shows the columns up to the playhead: it is filled once
+// the ring reaches the playhead and either the view's left edge or the
+// track's first column, give or take the few columns that a history
+// reckoned in seconds, or the end of a file, leaves out.
+void SpectrogramSmokeTest::spectrogramRollingViewFillsUpToThePlayhead() {
+    SpectrogramItem item;
+    QMutexLocker lock(&item.m_stateMutex);
+    constexpr int cw = 1'000;
+    constexpr int view = 1'000;
+    const auto filled = [&item](qint64 left, qint64 right, qint64 playhead) {
+        return item.viewShownWholeLocked(left, right, true, 1.0, cw, playhead, view);
+    };
+    // A session from the track's start (its first column at the epoch),
+    // a second in.
+    item.m_rollingEpoch = 0;
+    item.m_ringOldestSeq = 0;
+    QVERIFY(filled(0, 47, 47));
+    // The ring short of the playhead, as its columns still come.
+    QVERIFY(!filled(0, 30, 47));
+    QVERIFY(filled(0, 44, 47));
+    // A session from mid-track, as when the spectrogram shows again: its
+    // history fills the view, or not yet.
+    item.m_rollingEpoch = -5'000;
+    QVERIFY(filled(0, 999, 999));
+    QVERIFY(filled(3, 999, 999));
+    QVERIFY(!filled(0, 499, 499));
+    QVERIFY(!filled(0, 999, 1'200));
 }
 
 void SpectrogramSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
@@ -3048,6 +3834,54 @@ void SpectrogramSmokeTest::spectrogramOverlaysDrawNoPaneSizedImages() {
     item.setHeight(700);
     node = paintSettled(item, node);
     checkFrame("resize");
+    delete node;
+}
+
+// The crosshair, its lines and its readout's plates, fades as one, at the
+// opacity a viewer's controls give it as they fade (#373 H3: it went at
+// once while they faded); the scene keeps its layers where they were.
+void SpectrogramSmokeTest::spectrogramCrosshairFadesAsAWhole() {
+    QQuickWindow window;
+    if (!showOnScreen(window, 2.0)) {
+        QSKIP("Needs the offscreen platform's HiDPI test screens");
+    }
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(400);
+    item.setHeight(200);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setCrosshairEnabled(true);
+    constexpr int bins = 64;
+    constexpr int columns = 2'000;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    setTestPosition(item, 10.0);
+    QHoverEvent hover(QEvent::HoverEnter, QPointF(200.0, 100.0), QPointF(200.0, 100.0), QPointF());
+    item.hoverEnterEvent(&hover);
+    QCOMPARE(item.crosshairOpacity(), 1.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    // The crosshair's layer, child 7, under the scale's.
+    auto *layer = dynamic_cast<QSGOpacityNode *>(node->childAtIndex(7));
+    QVERIFY(layer != nullptr);
+    QCOMPARE(layer->opacity(), 1.0);
+    const OverlayOnScreen shown = overlayOnScreen(node, 7);
+    QVERIFY(!shown.images.isEmpty());
+
+    QSignalSpy changes(&item, &SpectrogramItem::crosshairOpacityChanged);
+    for (const double opacity : {0.5, 0.0, 1.0}) {
+        item.setCrosshairOpacity(opacity);
+        QCOMPARE(item.crosshairOpacity(), opacity);
+        node = item.updatePaintNode(node, nullptr);
+        QCOMPARE(node->childAtIndex(7), layer);
+        QCOMPARE(layer->opacity(), opacity);
+        // Its lines and plates stay laid out while it fades.
+        QCOMPARE(overlayOnScreen(node, 7).images.size(), shown.images.size());
+    }
+    QCOMPARE(changes.count(), 3);
+    // Out of range, it keeps to 0 to 1.
+    item.setCrosshairOpacity(2.0);
+    QCOMPARE(item.crosshairOpacity(), 1.0);
+    QCOMPARE(changes.count(), 3);
     delete node;
 }
 

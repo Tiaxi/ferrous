@@ -30,6 +30,15 @@ Item {
     property string closeButtonName: "viewerCloseButton"
     // The viewer's own button before Close, if it has one.
     default property alias viewerControls: viewerControlsRow.data
+    // On the windowed viewer's corner plate, the zoom is set off from the
+    // viewer's controls by a 1 px divider with the controls' 4 px either
+    // side, as on the visualization viewer's (#373 H37).
+    property bool dividers: false
+    // The viewer's own controls set off from Close by a 1 px divider, with
+    // the controls' 4 px either side: the visualization viewer's mode switch
+    // in its title strip, a choice of two, beside the button that closes it
+    // (#373 H40).
+    property bool closeDivided: false
 
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
@@ -41,22 +50,20 @@ Item {
     readonly property bool viewerControlsShown: viewerControlsRow.implicitWidth > 0
 
     implicitWidth: closeButton.x + closeButton.width
-    implicitHeight: 24
+    implicitHeight: root.uiPalette.toolButtonSize
 
-    // Quiet: only while the view is zoomed.
-    Label {
+    // Quiet: only while the view is zoomed. On the album art viewer's
+    // corner plate, 6 px in from its edge, as the plot's zoom readout is.
+    Components.ZoomReadout {
         id: readout
         objectName: "viewerZoomReadout"
         x: 0
+        leftPadding: 4
         visible: root.readoutShown
-        height: 24
+        uiPalette: root.uiPalette
+        plotColors: root.plotColors
+        zoomLevel: root.zoomLevel
         rightPadding: 4
-        verticalAlignment: Text.AlignVCenter
-        text: I18n.i18nc("@info:status zoom of the view in percent", "Zoom %1%",
-            Math.round(root.zoomLevel * 100))
-        font.pointSize: root.uiPalette.smallPointSize
-        font.features: root.uiPalette.tabularFigures
-        color: root.plotColors ? root.plotColors.plotTextSecondary : root.uiPalette.textSecondary
     }
 
     Components.ViewerToolButton {
@@ -72,10 +79,27 @@ Item {
         onClicked: root.resetView()
     }
 
+    // Where the zoom ends, and what follows it starts.
+    readonly property real _zoomEnd: root.resetShown ? resetButton.x + resetButton.width
+                                                     : readout.x + readout.width
+    readonly property bool _zoomDivided: root.dividers && root.readoutShown
+    readonly property real _afterZoom: !root.readoutShown ? 0
+        : root._zoomEnd + root.spacing + (root._zoomDivided ? 1 + root.spacing : 0)
+
+    Rectangle {
+        objectName: "viewerControlsDivider"
+        visible: root._zoomDivided
+        x: root._zoomEnd + root.spacing
+        y: 4
+        width: 1
+        height: Math.max(0, root.height - 8)
+        color: root.plotColors ? root.plotColors.plotPlateEdge : root.uiPalette.seam
+    }
+
     Components.ViewerToolButton {
         id: issuesButton
         objectName: "viewerIssuesButton"
-        x: resetButton.x + (root.resetShown ? resetButton.width + root.spacing : 0)
+        x: root._afterZoom
         visible: root.issuesShown
         uiPalette: root.uiPalette
         plotColors: root.plotColors
@@ -99,15 +123,28 @@ Item {
         id: viewerControlsRow
         x: issuesButton.x + (root.issuesShown ? issuesButton.width + root.spacing : 0)
         implicitWidth: childrenRect.width
-        implicitHeight: 24
+        implicitHeight: root.uiPalette.toolButtonSize
         width: implicitWidth
         height: implicitHeight
+    }
+
+    readonly property bool _closeDivided: root.closeDivided && root.viewerControlsShown
+
+    Rectangle {
+        objectName: "viewerControlsCloseDivider"
+        visible: root._closeDivided
+        x: viewerControlsRow.x + viewerControlsRow.implicitWidth + root.spacing
+        y: 4
+        width: 1
+        height: Math.max(0, root.height - 8)
+        color: root.plotColors ? root.plotColors.plotPlateEdge : root.uiPalette.seam
     }
 
     Components.ViewerToolButton {
         id: closeButton
         objectName: root.closeButtonName
         x: viewerControlsRow.x + (root.viewerControlsShown ? viewerControlsRow.implicitWidth + root.spacing : 0)
+            + (root._closeDivided ? 1 + root.spacing : 0)
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         text: I18n.i18nc("@action:button", "Close")

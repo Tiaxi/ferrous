@@ -75,9 +75,10 @@ function firstSentenceEnd(text) {
     return -1
 }
 
-// The title of an entry in Recent Issues: the first sentence of a message
-// of several ("04 - Static.flac ends early"), or else its category; with
-// how often it was reported.
+// The title of an entry in Recent Issues, which names the problem: the
+// first sentence of a message of several ("04 - Static.flac ends early"),
+// or else the whole message; with how often it was reported. Its category
+// is a label of its own, above it.
 function issueTitle(entry) {
     if (!entry) {
         return ""
@@ -85,19 +86,20 @@ function issueTitle(entry) {
     const text = String(entry.message || "")
     const end = firstSentenceEnd(text)
     const title = end < 0
-        ? categoryLabel(entry.category)
+        ? text
         : text.slice(0, text.charAt(end) === "." ? end : end + 1)
     return title + countSuffix(entry.count)
 }
 
-// The rest of the message, under the title.
+// The rest of the message, under the title, if it has more than one
+// sentence.
 function issueDescription(entry) {
     if (!entry) {
         return ""
     }
     const text = String(entry.message || "")
     const end = firstSentenceEnd(text)
-    return end < 0 ? text : text.slice(end + 2)
+    return end < 0 ? "" : text.slice(end + 2)
 }
 
 // The time of an entry, "23:41", with its date when it is not today's.

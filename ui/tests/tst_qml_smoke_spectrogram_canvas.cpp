@@ -5157,9 +5157,24 @@ void SpectrogramCanvasSmokeTest::spectrogramZoomShowsOlderDataUntilTheNewArrives
     QSGNode *node = nullptr;
     // Nothing shows before the first frame.
     QVector<bool> shown(width, false);
-    // Paints a frame, and checks that it shows data wherever the last did.
+    // Paints a frame, and checks that it shows data wherever the last did,
+    // and the new columns and the view before the zoom never in one place
+    // (#373 H7: a double trace was reported): the canvas is opaque wherever
+    // it has a column, so the backdrop and the reserve under it show only
+    // where it has none.
     const auto frame = [&](const char *step) {
         node = item.updatePaintNode(node, nullptr);
+        const QImage &canvas = item.m_canvas;
+        for (int y : {0, canvas.height() / 2, canvas.height() - 1}) {
+            for (int x = 0; x < canvas.width() && y >= 0; ++x) {
+                const int alpha = qAlpha(canvas.pixel(x, y));
+                if (alpha != 0 && alpha != 255) {
+                    QTest::qFail(qPrintable(QStringLiteral("%1: canvas pixel %2, %3 at alpha %4").arg(
+                        QString::fromLatin1(step)).arg(x).arg(y).arg(alpha)), __FILE__, __LINE__);
+                    return false;
+                }
+            }
+        }
         const QVector<bool> now = plotColumnsShown(item, node, width);
         for (int x = 0; x < width; ++x) {
             if (shown[x] && !now[x]) {

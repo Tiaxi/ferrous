@@ -2,6 +2,8 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QFontInfo>
+
 // The library tree, the queue and global search.
 class LibraryQueueSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -36,7 +38,10 @@ private slots:
     void emptyLibraryAndFileMenuAddALibraryFolder();
     void draggingAHighlightedQueueRowMovesEveryHighlightedRow();
     void queueRowsShowTheirStatesInThePaletteColours();
+    void queueStateGlyphGrowsWithTheFont_data();
+    void queueStateGlyphGrowsWithTheFont();
     void queueDropsFollowTheRowsAfterRowsAboveAreRemoved();
+    void queueDropLineKeepsTheScrollbarLaneOnlyWhileItShows();
     void aRevealDuringTheSavedViewRestoreKeepsSavingTheView();
     void escapeCancelsAQueueRowDrag();
     void aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore();
@@ -1846,7 +1851,12 @@ void LibraryQueueSmokeTest::libraryRowsLayOutTheirYearsWithoutWarnings() {
         for (QQuickItem *row : visibleItemsNamed(libraryView, QStringLiteral("libraryRow"))) {
             QQuickItem *year = nullptr;
             QQuickItem *title = nullptr;
-            for (QQuickItem *child : row->childItems()) {
+            // The row's drawing, under the clip it has while it folds.
+            auto *content = row->findChild<QQuickItem *>(QStringLiteral("libraryRowContent"));
+            if (content == nullptr) {
+                return QStringLiteral("a row without its content");
+            }
+            for (QQuickItem *child : content->childItems()) {
                 if (child->objectName() == QLatin1String("libraryRowYear")) {
                     year = child;
                 } else if (child->objectName() == QLatin1String("libraryRowTitle")) {
@@ -2195,28 +2205,77 @@ ApplicationWindow {
     QObject *confirm = root->findChild<QObject *>(QStringLiteral("removeLibraryRootConfirmDialog"));
     QVERIFY(confirm != nullptr);
 
+    // Remove acts on the selected folder: none at first, then the one
+    // clicked (#373 H4).
+    QQuickItem *removeButton = visibleItemNamed(window, QStringLiteral("libraryRootRemoveButton"));
+    QVERIFY(removeButton != nullptr);
+    QVERIFY(!removeButton->isEnabled());
+    QQuickItem *folder = visibleItemNamed(window, QStringLiteral("libraryRootRow"));
+    QVERIFY(folder != nullptr);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(folder));
+    QTRY_VERIFY(removeButton->isEnabled());
     QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
+    // A window of its own above the page's (#373 H5).
+    auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
+    QVERIFY(confirmWindow != nullptr);
+    QCOMPARE(confirmWindow->transientParent(), window);
+    QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
     QCOMPARE(root->property("removed").toStringList(), QStringList{});
     const QString message = confirm->property("message").toString();
-    QVERIFY2(message.contains(QStringLiteral("Jazz"))
-                 && message.contains(QStringLiteral("/fixture/Music/Jazz")),
-             qPrintable(message));
+    QVERIFY2(message.contains(QStringLiteral("Jazz")), qPrintable(message));
+    // The path on a line of its own, elided in the middle, whole in its
+    // tooltip.
+    QCOMPARE(confirm->property("path").toString(), QStringLiteral("/fixture/Music/Jazz"));
+    QQuickItem *path = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogPath"));
+    QVERIFY(path != nullptr);
+    QCOMPARE(path->property("text").toString(), QStringLiteral("/fixture/Music/Jazz"));
+    QCOMPARE(path->property("elide").toInt(), int(Qt::ElideMiddle));
+    QCOMPARE(path->property("lineCount").toInt(), 1);
     const QString details = confirm->property("details").toString();
     // Counts are written as the locale writes numbers.
     QVERIFY2(details.contains(QLocale().toString(1234) + QStringLiteral(" tracks"))
                  && details.contains(QStringLiteral("stay on disk")),
              qPrintable(details));
 
-    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogCancelButton")));
+    QVERIFY(clickVisibleButton(confirmWindow, QStringLiteral("confirmDialogCancelButton")));
+    QTRY_VERIFY(!confirm->property("visible").toBool());
+    QCOMPARE(root->property("removed").toStringList(), QStringList{});
+
+    // Removing takes the folder's tracks out of the library, so Cancel is
+    // the default button, as KDE's guidelines ask, and has the keyboard
+    // (#373 H37): Enter as the question shows keeps the folder.
+    QVERIFY(confirm->property("destructive").toBool());
+    QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
+    QTRY_VERIFY(confirm->property("opened").toBool());
+    QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
+    {
+        auto *footer = qvariant_cast<QQuickItem *>(confirm->property("footer"));
+        QQuickItem *cancelButton = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogCancelButton"));
+        QVERIFY(footer != nullptr && cancelButton != nullptr);
+        QCOMPARE(qvariant_cast<QQuickItem *>(footer->property("primary")), cancelButton);
+        // The keyboard is on it as the question opens.
+        QTRY_VERIFY(confirmWindow->isActive() && confirmWindow->activeFocusItem() == cancelButton);
+    }
+    QTest::keyClick(confirmWindow, Qt::Key_Return);
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QCOMPARE(root->property("removed").toStringList(), QStringList{});
 
     QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
-    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
+    QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
+    // A quick second click finds the window gone: the folder is removed
+    // once.
+    QQuickItem *confirmButton = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogConfirmButton"));
+    QVERIFY(confirmButton != nullptr);
+    const QPoint confirmCenter = centerInWindow(confirmButton);
+    QTest::mouseClick(confirmWindow, Qt::LeftButton, Qt::NoModifier, confirmCenter);
+    QVERIFY(!confirmWindow->isVisible());
+    QTest::mouseClick(confirmWindow, Qt::LeftButton, Qt::NoModifier, confirmCenter);
     QTRY_COMPARE(root->property("removed").toStringList(),
                  QStringList{QStringLiteral("/fixture/Music/Jazz")});
+    QCoreApplication::processEvents();
+    QCOMPARE(root->property("removed").toStringList(), QStringList{QStringLiteral("/fixture/Music/Jazz")});
 }
 
 namespace {
@@ -2998,8 +3057,19 @@ QList<int> queueSelection(QObject *controller) {
 } // namespace
 
 void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
+    // A length that is not known, as the transport writes it: en dashes
+    // (#373 H35 AC2), from the bridge and in the row's own fallback.
+    QCOMPARE(formatQueueDuration(-1.0), QStringLiteral("\u2013:\u2013\u2013"));
+    QCOMPARE(formatQueueDuration(std::numeric_limits<double>::infinity()), QStringLiteral("\u2013:\u2013\u2013"));
+    BinaryBridgeCodec::DecodedQueueTrack unknownTrack;
+    unknownTrack.path = QStringLiteral("/music/unknown.flac");
+    unknownTrack.lengthSeconds = -1.0f;
+    QCOMPARE(queueRowFromTrack(unknownTrack).lengthText, QStringLiteral("\u2013:\u2013\u2013"));
     QueueRowsModel rows;
     loadQueueRows(rows, 6);
+    QueueRowData unknownLength = *rows.rowAt(5);
+    unknownLength.lengthText.clear();
+    QVERIFY(rows.updateRow(5, unknownLength));
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -3081,6 +3151,7 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(cell(3, "order")->property("text").toString(), QStringLiteral("4"));
     QCOMPARE(cell(3, "length")->property("text").toString(), QStringLiteral("1:00"));
     QCOMPARE(cell(3, "artist")->property("text").toString(), QString());
+    QCOMPARE(cell(5, "length")->property("text").toString(), QStringLiteral("\u2013:\u2013\u2013"));
     QCOMPARE(glyphName(0), QString());
     QCOMPARE(tint(0), QStringLiteral("#00000000"));
     QCOMPARE(tint(1), QStringLiteral("#00000000"));
@@ -3117,36 +3188,66 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(weight(cell(2, "title")), QFont::Normal);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
 
-    // An unreadable file: a neutral warning glyph and a quieter title.
+    // An unreadable file: the status bar's warning sign, at its size and
+    // in its negative colour, and a quieter title (#373 H35 AC1: Breeze's
+    // dialog-warning as a mask was a solid grey triangle).
     QVERIFY(errors->setProperty("unreadablePaths",
                                 QVariantMap{{QStringLiteral("/music/3.flac"),
                                              QStringLiteral("Cannot read the file")}}));
-    QTRY_COMPARE(glyphName(3), QStringLiteral("dialog-warning"));
-    QCOMPARE(color(glyph(3)), paletteColor("textSecondary"));
+    QTRY_VERIFY(glyphName(3).endsWith(QStringLiteral("/assets/status-warning.svg")));
+    QCOMPARE(color(glyph(3)), paletteColor("negative"));
+    QVERIFY(glyph(3)->property("isMask").toBool());
+    QVariant warningSize;
+    QVERIFY(QMetaObject::invokeMethod(palette, "scaledSize", Q_RETURN_ARG(QVariant, warningSize), Q_ARG(QVariant, 16)));
+    QCOMPARE(glyph(3)->width(), warningSize.toReal());
+    QCOMPARE(glyph(3)->height(), warningSize.toReal());
+    QQuickItem *indicatorCell = cell(3, "indicator");
+    const QPointF warningCentre = glyph(3)->mapToItem(row(3), QPointF(glyph(3)->width() / 2, glyph(3)->height() / 2));
+    QVERIFY(std::abs(warningCentre.x() - (indicatorCell->x() + indicatorCell->width() / 2)) <= 0.5);
+    QVERIFY(std::abs(warningCentre.y() - row(3)->height() / 2) <= 0.5);
+    QVERIFY(glyph(3)->mapToItem(row(3), QPointF(glyph(3)->width(), 0)).x() <= cell(3, "order")->x());
     QCOMPARE(color(cell(3, "title")), paletteColor("textSecondary"));
     QCOMPARE(row(3)->property("unreadableReason").toString(), QStringLiteral("Cannot read the file"));
     QVERIFY(errors->setProperty("unreadablePaths", QVariantMap{}));
     QTRY_COMPARE(glyphName(3), QString());
 
     // Highlighted rows, the playing one among them: the inactive tint while
-    // the queue has no focus, and tertiary text steps up to secondary.
+    // the queue has no focus, and tertiary text steps up to the selected
+    // row's own.
     QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
         Q_ARG(QVariant, QVariant(QVariantList{2, 4}))));
     QTRY_COMPARE(tint(4), paletteColor("selectionInactive"));
     QCOMPARE(tint(2), paletteColor("selectionInactive"));
     QCOMPARE(tint(3), QStringLiteral("#00000000"));
-    QCOMPARE(color(cell(4, "order")), paletteColor("textSecondary"));
+    QCOMPARE(color(cell(4, "order")), paletteColor("textTertiarySelected"));
     QCOMPARE(color(cell(3, "order")), paletteColor("textTertiary"));
     QCOMPARE(color(cell(2, "title")), paletteColor("now"));
     QVERIFY(!ring(4));
-    // With focus: the active tint, and a ring on the current row only.
+    // With focus from the keyboard, in the active window: the active tint,
+    // and a ring on the current row only.
     bridge->setProperty("selectedQueueIndex", 4);
-    view->forceActiveFocus();
+    window->requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(window));
+    // The activation may hand the queue the focus, which is not the
+    // keyboard's: Tab brings it back.
+    view->setFocus(false);
+    QTRY_VERIFY(!view->hasActiveFocus());
+    view->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(view->hasActiveFocus());
     QTRY_COMPARE(tint(4), paletteColor("selection"));
     QCOMPARE(tint(2), paletteColor("selection"));
     QVERIFY(ring(4));
     QVERIFY(!ring(2));
+    // The pointer over a selected row steps its tint toward the text, with
+    // the hover's fade, and back; the other selected row keeps its own
+    // (#373 H35 AC3).
+    QTest::mouseMove(window, queueRowPoint(view, 4, 0.5));
+    QTRY_COMPARE(tint(4), paletteColor("selectionHovered"));
+    QCOMPARE(tint(2), paletteColor("selection"));
+    QCOMPARE(color(cell(2, "title")), paletteColor("now"));
+    QTest::mouseMove(window, queueRowPoint(view, 3, 0.5));
+    QTRY_COMPARE(tint(4), paletteColor("selection"));
+    QCOMPARE(tint(3), QStringLiteral("#00000000"));
     QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
         Q_ARG(QVariant, QVariant(QVariantList{4}))));
     QTRY_COMPARE(tint(2), QStringLiteral("#00000000"));
@@ -3171,6 +3272,102 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QTRY_COMPARE(row(1)->height(), palette->property("rowHeight").toReal());
     QQuickItem *titleCell = cell(1, "title");
     QVERIFY(titleCell->y() >= 0 && titleCell->y() + titleCell->height() <= row(1)->height() + 0.5);
+}
+
+void LibraryQueueSmokeTest::queueStateGlyphGrowsWithTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("side");
+    QTest::newRow("10 pt") << 10.0 << 12;
+    QTest::newRow("24 pt") << 24.0 << 29;
+}
+
+// The playing row's glyph grows with the font, from its 12 px at the
+// default 10 pt, on whole pixels, and is drawn at that size (#373 H9: at
+// 24 pt Kirigami rounded the 29 px glyph down to a 22 px theme icon, a
+// 16 px triangle beside 33 px text).
+void LibraryQueueSmokeTest::queueStateGlyphGrowsWithTheFont() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, side);
+    QueueRowsModel rows;
+    loadQueueRows(rows, 4);
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    // An application window, whose font the palette follows.
+    QByteArray source = kQueuePaneHarness;
+    source.replace("Window {\n    id: harness", "ApplicationWindow {\n    id: harness");
+    // The glyph's column as wide as the app makes it, which grows with the
+    // rows.
+    source.replace("playlistIndicatorColumnWidth: 22",
+                   "playlistIndicatorColumnWidth: Math.round(palette.rowHeight * 28 / 26)");
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, source, baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *controller = root->property("controller").value<QObject *>();
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QVERIFY(controller != nullptr && bridge != nullptr);
+    QFont font = root->property("font").value<QFont>();
+    font.setPointSizeF(pointSize);
+    QVERIFY(root->setProperty("font", font));
+    bridge->setProperty("playingQueueIndex", 1);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
+    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
+    QQuickItem *glyph = nullptr;
+    QTRY_VERIFY([&]() {
+        QQuickItem *row = nullptr;
+        QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, 1));
+        glyph = row != nullptr ? row->findChild<QQuickItem *>(QStringLiteral("queueRowState")) : nullptr;
+        return glyph != nullptr && glyph->isVisible() && glyph->width() == side;
+    }());
+    QCOMPARE(glyph->height(), qreal(side));
+    // At least 0.9 of the font's pixel size from 24 pt.
+    const int fontPixels = QFontInfo(font).pixelSize();
+    if (pointSize >= 24) {
+        QVERIFY2(side >= 0.9 * fontPixels, qPrintable(QStringLiteral("%1 for %2 px").arg(side).arg(fontPixels)));
+    }
+    QTRY_COMPARE(glyph->property("source").toString(), QStringLiteral("media-playback-start"));
+    // Painted at its size, not at a theme icon size under it.
+    QCOMPARE(glyph->property("paintedWidth").toReal(), qreal(side));
+
+    // As drawn: Breeze's play triangle is 3/4 of its 16 px icon's height
+    // and 2/3 of its 24 px one's, less its thin tips; rounded down to 22 px,
+    // it had 14 px of ink in the 29. The pixels at least half as strong as
+    // the strongest, so that how the mask is coloured offscreen doesn't
+    // count.
+    const QRect inked = [&]() {
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        const qreal scale = static_cast<qreal>(image.width()) / window->width();
+        const QRectF rect(glyph->mapToScene(QPointF(0, 0)), glyph->size());
+        const QRect device(QPoint(int(std::floor(rect.left() * scale)), int(std::floor(rect.top() * scale))),
+                           QPoint(int(std::ceil(rect.right() * scale)) - 1, int(std::ceil(rect.bottom() * scale)) - 1));
+        const QColor background = image.pixelColor(device.topLeft());
+        const auto distance = [&background](const QColor &pixel) {
+            return std::max({std::abs(pixel.red() - background.red()), std::abs(pixel.green() - background.green()),
+                             std::abs(pixel.blue() - background.blue())});
+        };
+        int strongest = 0;
+        for (int y = device.top(); y <= device.bottom(); ++y) {
+            for (int x = device.left(); x <= device.right(); ++x) {
+                strongest = std::max(strongest, distance(image.pixelColor(x, y)));
+            }
+        }
+        QRect bounds;
+        for (int y = device.top(); strongest >= 16 && y <= device.bottom(); ++y) {
+            for (int x = device.left(); x <= device.right(); ++x) {
+                if (distance(image.pixelColor(x, y)) * 2 >= strongest) {
+                    bounds |= QRect(int(x / scale), int(y / scale), 1, 1);
+                }
+            }
+        }
+        return bounds;
+    }();
+    QVERIFY2(inked.height() >= 0.55 * side,
+             qPrintable(QStringLiteral("%1 px of ink in a %2 px glyph").arg(inked.height()).arg(side)));
 }
 
 void LibraryQueueSmokeTest::draggingAHighlightedQueueRowMovesEveryHighlightedRow() {
@@ -3261,18 +3458,77 @@ void LibraryQueueSmokeTest::queueDropsFollowTheRowsAfterRowsAboveAreRemoved() {
     QCOMPARE(rows.rowAt(topIndex)->title, QStringLiteral("Track 20"));
 
     // A drop in the top row's upper half goes before it, one in the lower
-    // half of the row three down after that row, and the line is there.
+    // half of the row three down after that row, and the line is there:
+    // its 2 px straddle the boundary, one above it, inside the view at
+    // its top (#373 H35 AC4: it lay in the lower row).
     const auto dropAt = [&](double y) {
         QVERIFY(QMetaObject::invokeMethod(dropArea, "updateQueueDropIndicator", Q_ARG(QVariant, y)));
     };
     dropAt(topRowY + rowHeight * 0.25);
     QCOMPARE(dropArea->property("queueDropInsertIndex").toInt(), topIndex);
     QVERIFY(std::abs(dropArea->property("queueDropIndicatorY").toDouble()
-                     - std::max(viewTop, topRowY)) < 0.5);
+                     - std::max(viewTop, topRowY - 1)) < 0.5);
     dropAt(topRowY + rowHeight * 2.75);
     QCOMPARE(dropArea->property("queueDropInsertIndex").toInt(), topIndex + 3);
     QVERIFY(std::abs(dropArea->property("queueDropIndicatorY").toDouble()
-                     - (topRowY + rowHeight * 3)) < 0.5);
+                     - (topRowY + rowHeight * 3 - 1)) < 0.5);
+}
+
+// The drop line runs to the scrollbar's lane while the scrollbar shows,
+// and to the queue's edge when it does not, as the focus ring does (#373
+// H35 AC4: it stopped 8 px short with no scrollbar).
+void LibraryQueueSmokeTest::queueDropLineKeepsTheScrollbarLaneOnlyWhileItShows() {
+    QueueRowsModel rows;
+    loadQueueRows(rows, 4);
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kQueuePaneHarness, baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *controller = root->property("controller").value<QObject *>();
+    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
+    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
+    auto *indicator = root->findChild<QQuickItem *>(QStringLiteral("queueDropIndicator"));
+    auto *scrollBar = root->findChild<QQuickItem *>(QStringLiteral("queueScrollBar"));
+    auto *dropArea = root->findChild<QQuickItem *>(QStringLiteral("playlistDropArea"));
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QVERIFY(indicator != nullptr && scrollBar != nullptr && dropArea != nullptr && bridge != nullptr);
+    QTRY_VERIFY(view->height() > 0);
+    const double rowHeight = view->property("rowHeight").toDouble();
+    const double lane = scrollBar->property("lane").toDouble();
+    QVERIFY(lane > 0);
+
+    // A short queue: no scrollbar, and the line runs to the edge.
+    QTRY_VERIFY(view->property("count").toInt() == 4);
+    QVERIFY(!scrollBar->isVisible());
+    QCOMPARE(indicator->x(), dropArea->mapFromItem(view, QPointF(0, 0)).x());
+    QCOMPARE(indicator->width(), view->width());
+    QCOMPARE(indicator->height(), 2.0);
+    // Between rows 2 and 3: one pixel above the boundary and one below.
+    QVERIFY(QMetaObject::invokeMethod(dropArea, "updateQueueDropIndicator",
+                                      Q_ARG(QVariant, dropArea->mapFromItem(view, QPointF(0, rowHeight * 2.75)).y())));
+    QCOMPARE(dropArea->property("queueDropInsertIndex").toInt(), 3);
+    const double boundary = dropArea->mapFromItem(view, QPointF(0, rowHeight * 3)).y();
+    QCOMPARE(indicator->y(), boundary - 1);
+    QCOMPARE(indicator->y() + indicator->height() / 2, boundary);
+
+    // A long one: the scrollbar shows, and the line stops at its lane.
+    QVector<QueueRowData> more;
+    for (int number = 4; number < 60; ++number) {
+        QueueRowData data;
+        data.title = QStringLiteral("Track %1").arg(number);
+        data.path = QStringLiteral("/music/%1.flac").arg(number);
+        data.lengthText = QStringLiteral("1:00");
+        more.push_back(data);
+    }
+    QVERIFY(rows.insertRowsAt(4, more));
+    bridge->setProperty("queueLength", 60);
+    QTRY_VERIFY(scrollBar->isVisible());
+    QCOMPARE(indicator->width(), view->width() - lane);
 }
 
 namespace {

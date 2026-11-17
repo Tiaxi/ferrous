@@ -292,7 +292,9 @@ void PlaybackClock::scheduleTick(qint64 now, double position) {
 
 QString PlaybackClock::formatSeconds(double seconds) {
     if (!std::isfinite(seconds) || seconds < 0.0) {
-        return QStringLiteral("--:--");
+        // En dashes, as the transport and the queue write a time they do
+        // not know (#373 H35 AC2).
+        return QStringLiteral("\u2013:\u2013\u2013");
     }
     const int total = wholeSecond(seconds);
     const int hours = total / 3600;

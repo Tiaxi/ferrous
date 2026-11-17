@@ -100,6 +100,39 @@ QtObject {
         return Math.max(minimum, Math.min(maximum, value))
     }
 
+    // The library pane's least width at `fontScale` (UiPalette.fontScale):
+    // 250 px with the default font, and wider with a larger one, so that its
+    // names and the now-playing lines keep more than a few characters: 360 px
+    // at 24 pt (#373 H5).
+    function sidebarMinimumWidth(fontScale) {
+        return Math.max(250, Math.round(150 * fontScale))
+    }
+
+    // The library pane's width in a split `splitWidth` wide before the user
+    // drags it: 22.5% of it, 260 px in a 1000 px window and 360 px in a
+    // 1600 px one with the default font. With a larger font the share grows
+    // with the font's square root, between bounds that grow with it: at
+    // 24 pt, 360 px in a 1000 px window and 408 px in a 1600 px one, which
+    // leave the queue its columns.
+    // Where the window allows more with a larger font, the pane is the
+    // 360 px of the default font or 22 grid units of the font, `gridUnit`
+    // (UiPalette.gridUnit), whichever is more: a column as wide in
+    // characters as the default one (#373 H11: 408 px at 24 pt cut most
+    // names). The window allows what leaves the panes after it
+    // `otherWidth`, the queue with all its columns: at 24 pt nothing more
+    // in a 1600 px window, where Album would drop, some 640 px in a
+    // 1920 px one, and the whole 968 px from about 2250 px.
+    function sidebarDefaultWidth(splitWidth, fontScale, gridUnit, otherWidth) {
+        const least = Math.max(260, Math.round(150 * fontScale))
+        const most = Math.max(360, Math.round(170 * fontScale))
+        const width = root.clamp(Math.round(splitWidth * 0.225 * Math.sqrt(fontScale)), least, most)
+        if (!(fontScale > 1) || !(gridUnit > 0) || !(otherWidth > 0)) {
+            return width
+        }
+        const column = Math.max(360, 22 * gridUnit)
+        return Math.max(width, Math.min(column, Math.floor(splitWidth - otherWidth)))
+    }
+
     // The library pane's width in a split `splitWidth` wide, leaving the
     // pane after it `otherMinimum`.
     function sidebarWidth(splitWidth, minimum, otherMinimum, defaultWidth) {
@@ -109,13 +142,44 @@ QtObject {
         return Math.round(root.clamp(preferred, minimum, Math.max(minimum, splitWidth - otherMinimum)))
     }
 
+    // The share of the right column the visualization takes before the
+    // user drags the split: a little under half, so the window reads as an
+    // instrument with a queue rather than a playlist with a footer (#373
+    // H8: at 0.42 the pane was a 320 px band at 1600 by 1000). It is 423 px
+    // there, and a little more, as the queue keeps whole rows (queueHeight).
+    readonly property real visualizationDefaultShare: 0.47
+    // The rows, its header among them, the queue keeps by default before
+    // the visualization has its share, as with a large font in a short
+    // window, where the visualization then has its minimum.
+    readonly property int queueDefaultRows: 7
+
+    // The queue's height in a split `splitHeight` high before the user drags
+    // it, for rows `rowHeight` high.
+    function queueDefaultHeight(splitHeight, rowHeight) {
+        return Math.max(splitHeight * (1 - root.visualizationDefaultShare),
+                        root.queueDefaultRows * rowHeight)
+    }
+
     // The queue's height in a split `splitHeight` high, leaving the
-    // visualization `otherMinimum`.
-    function queueHeight(splitHeight, minimum, otherMinimum, defaultHeight) {
-        const preferred = root.queueHeightRatio > 0
-            ? splitHeight * root.queueHeightRatio
-            : defaultHeight
-        return Math.round(root.clamp(preferred, minimum, Math.max(minimum, splitHeight - otherMinimum)))
+    // visualization `otherMinimum`. Before the user drags the split, the
+    // queue's list, `listTop` down the pane, is a whole number of its rows,
+    // `rowPitch` high, and the visualization takes what is left over (#373
+    // H9 T8: a row cut at the seam); a dragged split stays where it was put.
+    function queueHeight(splitHeight, minimum, otherMinimum, defaultHeight, listTop, rowPitch) {
+        const most = Math.max(minimum, splitHeight - otherMinimum)
+        if (root.queueHeightRatio > 0) {
+            return Math.round(root.clamp(splitHeight * root.queueHeightRatio, minimum, most))
+        }
+        const height = Math.round(root.clamp(defaultHeight, minimum, most))
+        if (!(rowPitch > 0) || !(listTop >= 0) || height <= listTop) {
+            return height
+        }
+        const down = listTop + Math.floor((height - listTop) / rowPitch) * rowPitch
+        if (down >= minimum) {
+            return down
+        }
+        // Rounding down would take the queue under its minimum.
+        return down + rowPitch <= most ? down + rowPitch : height
     }
 
     // A handle was dragged to give the pane `size` of `splitSize`.
