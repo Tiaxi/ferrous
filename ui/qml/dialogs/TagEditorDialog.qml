@@ -944,10 +944,7 @@ Components.DialogWindow {
             anchors.right: parent.right
             anchors.rightMargin: 2
             anchors.verticalCenter: parent.verticalCenter
-            // Its glyph as large as a line of the field's text holds, as
-            // the column's Revert: 16 px with the default font (#373 H46:
-            // 16 px beside 32 px text at 24 pt).
-            width: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
+            width: root.fieldRevertWidth
             height: width
             visible: fieldEditor.changed
             enabled: !root.busy
@@ -1468,12 +1465,18 @@ Components.DialogWindow {
         return Math.ceil(widest)
     }
 
+    // A field's Revert: its glyph as large as a line of the field's text
+    // holds, as the column's Revert: 16 px with the default font (#373 H46:
+    // 16 px beside 32 px text at 24 pt).
+    readonly property real fieldRevertWidth: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
+
     // The least the fields' column takes: the labels and a field that shows
-    // about 16 characters, so a large font doesn't squeeze the fields. The
-    // table has the rest.
-    readonly property real fieldsMinimumWidth: Math.ceil(root.fieldLabelWidth
+    // about 16 characters, so a large font doesn't squeeze the fields, and
+    // Track and Disc whole. The table has the rest.
+    readonly property real fieldsMinimumWidth: Math.max(Math.ceil(root.fieldLabelWidth
         + Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
-        + 16 * fieldMetrics.averageCharacterWidth + 2 * Kirigami.Units.largeSpacing)
+        + 16 * fieldMetrics.averageCharacterWidth + 2 * Kirigami.Units.largeSpacing),
+        trackPair.leastWidth, discPair.leastWidth)
 
     FontMetrics {
         id: fieldMetrics
@@ -1526,6 +1529,14 @@ Components.DialogWindow {
         required property var first
         required property var second
         readonly property bool needsKeepShort: firstField.needsKeepShort || secondField.needsKeepShort
+        // Its fields at their narrowest: "Mixed" whole beside the Revert
+        // (#373 H47: "Mix…" at 24 pt once the Revert followed the font).
+        readonly property real fieldLeastWidth: Math.ceil(firstField.leftPadding
+            + fieldMetrics.advanceWidth(root.keepShortText)
+            + root.fieldRevertWidth + Kirigami.Units.smallSpacing)
+        // The pair at its narrowest: the label, the fields and "of".
+        readonly property real leastWidth: Math.ceil(root.fieldLabelWidth + Kirigami.Units.largeSpacing
+            + 3 * pair.spacing + ofLabel.implicitWidth + 2 * pair.fieldLeastWidth)
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
@@ -1543,6 +1554,7 @@ Components.DialogWindow {
         }
 
         Label {
+            id: ofLabel
             objectName: "tagEditorOf_" + pair.first.key
             text: I18n.i18nc("@label track or disc number of the total", "of")
             color: root.uiPalette.textSecondary

@@ -4251,17 +4251,31 @@ void UiDialogsTest::editTagsMultipleValuesPlaceholderReads() {
 
 void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole_data() {
     QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("10 pt") << 10.0;
-    QTest::newRow("24 pt") << 24.0;
+    QTest::addColumn<QSize>("windowSize");
+    QTest::addColumn<bool>("edited");
+    for (const qreal pointSize : {10.0, 24.0}) {
+        for (const QSize size : {QSize(1600, 1000), QSize(1000, 720)}) {
+            for (const bool edited : {false, true}) {
+                QTest::addRow("%g pt, %dx%d%s", pointSize, size.width(), size.height(),
+                              edited ? ", edited" : "")
+                    << pointSize << size << edited;
+            }
+        }
+    }
 }
 
 // Track's field says that its files' numbers differ, whole: "Multiple
 // values" where it fits, as with the default font, and "Mixed" in the
 // narrower field of a larger font, as every field of the form then says;
 // the fields keep their width, which the table needs (#373 H45: "Multiple
-// values" elided in a 124 px field at 24 pt).
+// values" elided in a 124 px field at 24 pt). Edited, with their Revert
+// showing, the fields still hold the word and their value whole, and Edit
+// Tags is no wider than its window (#373 H47: "Mix…" once the Revert
+// followed the font).
 void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
     QFETCH(qreal, pointSize);
+    QFETCH(QSize, windowSize);
+    QFETCH(bool, edited);
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
     QFont font(QStringLiteral("Noto Sans"));
@@ -4273,69 +4287,115 @@ void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowSize.width(), windowSize.height());
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
     QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
     QTRY_VERIFY(!editor.loading());
     QVERIFY(waitForDialogWindow(dialog));
     editor.selectAllRows();
+    // Edited in one file: Track and Disc stay mixed, and a total all of
+    // them take has its value, each with its Revert.
+    if (edited) {
+        editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("09"));
+        editor.setCell(0, QStringLiteral("discNo"), QStringLiteral("2"));
+        editor.setCell(0, QStringLiteral("title"), QStringLiteral("Paper Harbour, Revised"));
+        editor.applyBulkField(QStringLiteral("totalTracks"), QStringLiteral("12"));
+        QVERIFY(editor.bulkValueMixed(QStringLiteral("discNo")));
+        QVERIFY(!editor.bulkValueMixed(QStringLiteral("totalTracks")));
+    }
     QVERIFY(editor.bulkValueMixed(QStringLiteral("trackNo")));
     QQuickWindow *tags = windowOf(dialog);
-    // The fields' width as it was: 19 grid units with the default font,
-    // or what the labels and 16 characters need.
-    {
-        const qreal gridUnit = evaluate(paletteOf(window), QStringLiteral("Kirigami.Units.gridUnit")).toReal();
-        const qreal leastWidth = dialog->property("fieldsMinimumWidth").toReal();
-        QCOMPARE(dialog->property("fieldsWidth").toReal(), std::max(19 * gridUnit, leastWidth));
-        if (pointSize <= 10) {
-            QCOMPARE(dialog->property("fieldsWidth").toReal(), 19 * gridUnit);
-        }
+    const qreal gridUnit = evaluate(paletteOf(window), QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+    // The fields' width as it was with the default font: 19 grid units.
+    if (pointSize <= 10) {
+        QCOMPARE(dialog->property("fieldsWidth").toReal(), 19 * gridUnit);
     }
+    QVERIFY(dialog->property("fieldsWidth").toReal() >= 19 * gridUnit);
     QQuickItem *number = nullptr;
     QTRY_VERIFY((number = visibleNamed(tags, QStringLiteral("tagEditorField_trackNo"))) != nullptr);
-    const QString expected = pointSize <= 10 ? QStringLiteral("Multiple values") : QStringLiteral("Mixed");
+    // The whole word with the default font, but for the Revert's room.
+    const QString expected = pointSize <= 10 && !edited ? QStringLiteral("Multiple values") : QStringLiteral("Mixed");
     QTRY_COMPARE(number->property("placeholderText").toString(), expected);
+    QTRY_VERIFY(!layoutPending(number));
+    const QStringList keys{QStringLiteral("title"), QStringLiteral("artist"), QStringLiteral("album"),
+                           QStringLiteral("albumArtist"), QStringLiteral("genre"), QStringLiteral("year"),
+                           QStringLiteral("trackNo"), QStringLiteral("totalTracks"), QStringLiteral("discNo"),
+                           QStringLiteral("totalDiscs"), QStringLiteral("comment")};
+    // The style's text item that draws `text` in `field`.
+    const auto drawn = [](QQuickItem *field, const QString &text) {
+        QQuickItem *found = nullptr;
+        const std::function<void(QQuickItem *)> find = [&](QQuickItem *item) {
+            for (QQuickItem *child : item->childItems()) {
+                if (found == nullptr && child->inherits("QQuickText") && child->property("text").toString() == text) {
+                    found = child;
+                }
+                find(child);
+            }
+        };
+        find(field);
+        return found;
+    };
+    const QStringList numberKeys{QStringLiteral("trackNo"), QStringLiteral("totalTracks"),
+                                 QStringLiteral("discNo"), QStringLiteral("totalDiscs")};
     // Every field whose files differ says it in the same word, the short
     // one once a number field needs it, wide fields too (#373 H46:
-    // "Multiple values" and "Mixed" in one form at 24 pt).
+    // "Multiple values" and "Mixed" in one form at 24 pt), whole between
+    // its paddings, as is a number field's value beside its Revert; a
+    // longer text scrolls in its field.
     int mixedFields = 0;
-    for (const char *key : {"title", "artist", "album", "albumArtist", "genre", "year", "trackNo",
-                            "totalTracks", "discNo", "totalDiscs", "comment"}) {
-        QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_") + QLatin1String(key));
-        QVERIFY2(field != nullptr, key);
-        if (!editor.bulkValueMixed(QLatin1String(key))) {
+    int reverts = 0;
+    for (const QString &key : keys) {
+        QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_") + key);
+        QVERIFY2(field != nullptr, qPrintable(key));
+        QQuickItem *revert = named(tags, QStringLiteral("tagEditorRevert_") + key);
+        QVERIFY2(revert != nullptr, qPrintable(key));
+        QTRY_COMPARE(revert->isVisible(), editor.bulkFieldChanged(key));
+        reverts += revert->isVisible() ? 1 : 0;
+        const qreal textArea = field->width() - field->property("leftPadding").toReal()
+            - field->property("rightPadding").toReal();
+        const QString value = field->property("text").toString();
+        if (!value.isEmpty()) {
+            QCOMPARE(field->property("placeholderText").toString(), QString());
+            if (!numberKeys.contains(key)) {
+                continue;
+            }
+            const qreal advance = QFontMetricsF(field->property("font").value<QFont>()).horizontalAdvance(value);
+            QVERIFY2(advance <= textArea + 0.5,
+                     qPrintable(QStringLiteral("%1: \"%2\" %3 in %4 of %5").arg(key, value).arg(advance)
+                                    .arg(textArea).arg(describeItem(field))));
+            continue;
+        }
+        if (!editor.bulkValueMixed(key)) {
             QCOMPARE(field->property("placeholderText").toString(), QString());
             continue;
         }
         ++mixedFields;
         QCOMPARE(field->property("placeholderText").toString(), expected);
+        QQuickItem *placeholder = drawn(field, expected);
+        QVERIFY2(placeholder != nullptr && placeholder->isVisible(), qPrintable(key));
+        const QString at = QStringLiteral("%1: %2 in %3, text area %4")
+            .arg(key, describeItem(placeholder), describeItem(field)).arg(textArea);
+        QTRY_VERIFY2(!placeholder->property("truncated").toBool(), qPrintable(at));
+        QVERIFY2(placeholder->implicitWidth() <= textArea + 0.5, qPrintable(at));
     }
     QVERIFY(editor.bulkValueMixed(QStringLiteral("title")));
-    QVERIFY2(mixedFields >= 2, qPrintable(QString::number(mixedFields)));
+    QVERIFY2(mixedFields >= (edited ? 3 : 2), qPrintable(QString::number(mixedFields)));
+    QCOMPARE(reverts, edited ? 4 : 0);
     QQuickItem *title = visibleNamed(tags, QStringLiteral("tagEditorField_title"));
     QQuickItem *total = visibleNamed(tags, QStringLiteral("tagEditorField_totalTracks"));
     QVERIFY(title != nullptr && total != nullptr);
-    QTRY_VERIFY(!layoutPending(number));
-    // The style's placeholder text, as drawn.
-    QQuickItem *placeholder = nullptr;
-    const std::function<void(QQuickItem *)> find = [&](QQuickItem *item) {
-        for (QQuickItem *child : item->childItems()) {
-            if (placeholder == nullptr && child->inherits("QQuickText")
-                && child->property("text").toString() == expected) {
-                placeholder = child;
-            }
-            find(child);
-        }
-    };
-    find(number);
-    QVERIFY(placeholder != nullptr && placeholder->isVisible());
-    const QString at = QStringLiteral("%1 in %2, total %3, title %4")
-        .arg(describeItem(placeholder), describeItem(number), describeItem(total), describeItem(title));
-    QTRY_VERIFY2(!placeholder->property("truncated").toBool(), qPrintable(at));
-    // A total that differs would show it whole too: the two alike.
+    // A total that differs would show it whole too: the two alike. The
+    // pair ends where the other fields end.
+    const QString at = QStringLiteral("track %1, total %2, title %3")
+        .arg(describeItem(number), describeItem(total), describeItem(title));
     QVERIFY2(std::abs(number->width() - total->width()) <= 1.0, qPrintable(at));
     QCOMPARE(sceneRect(total).right(), sceneRect(title).right());
+    QCOMPARE(sceneRect(visibleNamed(tags, QStringLiteral("tagEditorField_totalDiscs"))).right(),
+             sceneRect(title).right());
+    // Edit Tags is no wider than the window it opens from.
+    QVERIFY2(tags->width() <= window->width(),
+             qPrintable(QStringLiteral("Edit Tags %1 wide, its window %2").arg(tags->width()).arg(window->width())));
     editor.close();
     QTRY_VERIFY(!tags->isVisible());
 }
