@@ -164,7 +164,7 @@ Components.DialogWindow {
     // The rows' icons are as large as their titles' font calls for: 16 px
     // with the default font, larger with a larger one (#373 H38: they
     // stayed 16 px beside 24 pt titles).
-    readonly property real pageIconSize: Kirigami.Units.iconSizes.sizeForLabels
+    readonly property real pageIconSize: root.uiPalette.labelIconSize
     // The page list: 176 px, or as wide as its longest title needs.
     readonly property real pageListWidth: {
         let widest = 0
@@ -180,7 +180,8 @@ Components.DialogWindow {
     }
 
     // 49 grid units wide, or the page list and 39 of them for the pages
-    // when the list is wider, or wider for every page's wide layout. As
+    // when the list is wider, scaled with the font, or wider for every
+    // page's wide layout. As
     // tall as the tallest page, Visualization with its three subheadings,
     // measured whole at the default font, with the buttons under it and a
     // margin for a font whose lines run taller for its size; or taller for
@@ -190,8 +191,9 @@ Components.DialogWindow {
     // the page in view has one. A larger font makes the window larger,
     // within the screen; it lays its pages out for the room it has, and
     // the user may make it larger.
-    defaultWidth: Math.max(Kirigami.Units.gridUnit * 49, root.pageListWidth + 1
-        + Math.max(Kirigami.Units.gridUnit * 39, pagesLoader.item ? pagesLoader.item.wideWidth : 0))
+    defaultWidth: Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 49), root.pageListWidth + 1
+        + Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 39),
+            pagesLoader.item ? pagesLoader.item.wideWidth : 0))
     // Visualization's height at 10 pt: 684 px with Noto Sans, 38 grid
     // units of the window's font, which it grows with (#373 H37: in 41 of
     // Kirigami's, which do not, for the whole window, it scrolled by 8 px,
@@ -429,10 +431,11 @@ Components.DialogWindow {
                     readonly property real minimumWidth: pagesStack.widest("minimumWidth")
                     readonly property real wideWidth: pagesStack.widest("wideWidth")
                     // The labels' column of every page: the widest label of
-                    // them all, up to a limit, past which a page with a
-                    // longer one has a wider column of its own.
+                    // them all, up to a limit that grows with the font,
+                    // past which a page with a longer one has a wider
+                    // column of its own.
                     readonly property real labelWidth: Math.min(pagesStack.widest("labelWidth"),
-                        Kirigami.Units.gridUnit * 14)
+                        root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 14))
 
                     function widest(property) {
                         let widest = 0

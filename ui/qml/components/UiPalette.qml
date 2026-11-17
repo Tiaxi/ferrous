@@ -602,6 +602,13 @@ QtObject {
     // the glyph and 4 px around it.
     readonly property int toolIconSize: root.scaledSize(Kirigami.Units.iconSizes.small)
     readonly property int toolButtonSize: Math.max(24, root.toolIconSize + 8)
+    // A glyph beside a line of text, a list row's or a button caption's:
+    // the largest icon size a line of the font holds, 16 px with the
+    // default 10 pt font and 32 px at 24 pt. The dialogs' measures that
+    // bound text, tuned at 10 pt, follow the font through scaledSize(), so
+    // the default font draws every dialog as it was (#373 H45: glyphs and
+    // widths stayed at their 10 pt sizes at 24 pt).
+    readonly property int labelIconSize: Kirigami.Units.iconSizes.sizeForLabels
 
     readonly property FontMetrics _baseFontMetrics: FontMetrics {
         font: root.baseFont

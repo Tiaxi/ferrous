@@ -55,10 +55,10 @@ Components.DialogWindow {
     minimumWidth: root.contentMinimumWidth
     // The heading and three lines of the page, which scrolls.
     minimumHeight: Math.ceil(root.chromeHeight + 3 * bodyMetrics.height)
-    // About Ferrous's 29 grid units, or wider when a large font makes the
-    // heading or the buttons need more; as tall as the page at that width,
+    // About Ferrous's 29 grid units, scaled with the font, or wider when
+    // the heading or the buttons need more; as tall as the page at that width,
     // within the screen, where the page scrolls.
-    defaultWidth: Math.max(Kirigami.Units.gridUnit * 29, root.contentMinimumWidth)
+    defaultWidth: Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 29), root.contentMinimumWidth)
     defaultHeight: Math.ceil(root.chromeHeight + aboutKdePage.implicitHeight)
 
     // The default button has the keyboard, as in KDE's dialogs; Tab goes
@@ -130,8 +130,9 @@ Components.DialogWindow {
 
             Kirigami.Icon {
                 objectName: "aboutKdeIcon"
-                implicitWidth: Kirigami.Units.iconSizes.large
-                implicitHeight: Kirigami.Units.iconSizes.large
+                // As About Ferrous's icon: larger with a larger font.
+                implicitWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+                implicitHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
                 source: "kde"
                 Accessible.ignored: true
             }

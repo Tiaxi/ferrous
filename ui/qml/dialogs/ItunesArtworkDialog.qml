@@ -344,7 +344,7 @@ Components.DialogWindow {
     // glyphs are as large as the captions' font calls for, Kirigami's size
     // for labels: 16 px with the default font, larger with a larger one
     // (#373 H42: 16 px beside 24 pt captions).
-    readonly property real actionIconSize: Kirigami.Units.iconSizes.sizeForLabels
+    readonly property real actionIconSize: root.uiPalette.labelIconSize
     readonly property real actionSpacing: Kirigami.Units.largeSpacing
     readonly property real textActionsGap: 16
     // A row, the current art's or a result's: the thumbnail, or the title
@@ -740,7 +740,7 @@ Components.DialogWindow {
                 // 3 grid units above the middle, room permitting.
                 anchors.verticalCenterOffset: -Math.min(3 * Kirigami.Units.gridUnit,
                     Math.max(0, (parent.height - placeholder.height) / 2))
-                width: Math.min(parent.width - 4 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 24)
+                width: Math.min(parent.width - 4 * Kirigami.Units.gridUnit, root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 24))
                 spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                 visible: itunesArtworkResultsView.count === 0
                     && (placeholder.searching || placeholderMessage.text.length > 0)

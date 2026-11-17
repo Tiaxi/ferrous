@@ -29,7 +29,7 @@ Preferences.PreferencesPage {
         : null
 
     // The rows' name column: as wide as the widest folder name, up to 8
-    // grid units, past which a name elides, so every path starts at one x
+    // grid units scaled with the font, past which a name elides, so every path starts at one x
     // (#373 H43: each began where its own name ended). A row without a
     // name leaves the column empty; with no names, there is no column.
     readonly property real rootNameColumnWidth: {
@@ -40,7 +40,7 @@ Preferences.PreferencesPage {
                 widest = Math.max(widest, measure.implicitWidth)
             }
         }
-        return Math.min(widest, Kirigami.Units.gridUnit * 8)
+        return Math.min(widest, root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 8))
     }
 
     function rootDisplayName(entry) {
@@ -101,16 +101,18 @@ Preferences.PreferencesPage {
 
     title: I18n.i18nc("@title preferences page", "Library")
 
-    // The folders take the column's width up to 29 grid units, and no less
-    // than their buttons need: a long path elides.
+    // The folders take the column's width up to 29 grid units, scaled with
+    // the font (#373 H45: at 24 pt the list stopped at its buttons' width
+    // and cut the path beside free room), and no less than their buttons
+    // need: a long path elides.
     ColumnLayout {
         Kirigami.FormData.label: I18n.i18nc("@label", "Library folders:")
         // Next to the label's first line.
         Kirigami.FormData.labelAlignment: Qt.AlignTop
         Layout.fillWidth: true
         Layout.minimumWidth: rootButtons.implicitWidth
-        Layout.preferredWidth: Math.max(Kirigami.Units.gridUnit * 16, rootButtons.implicitWidth)
-        Layout.maximumWidth: Math.max(Kirigami.Units.gridUnit * 29, rootButtons.implicitWidth)
+        Layout.preferredWidth: Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 16), rootButtons.implicitWidth)
+        Layout.maximumWidth: Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 29), rootButtons.implicitWidth)
         spacing: Kirigami.Units.largeSpacing
 
         // A framed list, as the app's other lists: the view colour in a
@@ -267,9 +269,12 @@ Preferences.PreferencesPage {
 
                             Kirigami.Icon {
                                 objectName: "libraryRootIcon"
-                                implicitWidth: Kirigami.Units.iconSizes.small
-                                implicitHeight: Kirigami.Units.iconSizes.small
-                                source: "folder"
+                                implicitWidth: root.uiPalette.labelIconSize
+                                implicitHeight: root.uiPalette.labelIconSize
+                                // The symbolic glyph, which Breeze has in one
+                                // colour at every size: its 32 px "folder" is
+                                // in full colour, which the mask left blue.
+                                source: "folder-symbolic"
                                 color: root.uiPalette.textSecondary
                                 isMask: true
                                 Accessible.ignored: true
@@ -306,7 +311,7 @@ Preferences.PreferencesPage {
                         Label {
                             objectName: "libraryRootUnwatchedLabel"
                             Layout.fillWidth: true
-                            Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + Kirigami.Units.iconSizes.small
+                            Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + root.uiPalette.labelIconSize
                             Layout.rightMargin: Kirigami.Units.largeSpacing + 2
                             visible: rootRow.unwatchedReason.length > 0
                             text: I18n.i18nc("@info:status", "Not watched for changes: %1", rootRow.unwatchedReason)
@@ -319,7 +324,7 @@ Preferences.PreferencesPage {
                         Label {
                             objectName: "libraryRootScanProblemLabel"
                             Layout.fillWidth: true
-                            Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + Kirigami.Units.iconSizes.small
+                            Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + root.uiPalette.labelIconSize
                             Layout.rightMargin: Kirigami.Units.largeSpacing + 2
                             visible: rootRow.scanProblem.length > 0
                             text: I18n.i18nc("@info:status problem the last library scan found", "Last scan: %1", rootRow.scanProblem)
@@ -340,7 +345,7 @@ Preferences.PreferencesPage {
         // font calls for, as the dialogs' buttons (#373 H43).
         RowLayout {
             id: rootButtons
-            readonly property real glyphSize: Kirigami.Units.iconSizes.sizeForLabels
+            readonly property real glyphSize: root.uiPalette.labelIconSize
             spacing: Kirigami.Units.largeSpacing
 
             Button {

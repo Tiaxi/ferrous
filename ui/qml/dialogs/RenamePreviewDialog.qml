@@ -52,14 +52,16 @@ Components.DialogWindow {
     readonly property Item body: renamePreviewContent
     minimumWidth: Kirigami.Units.gridUnit * 24
     minimumHeight: Kirigami.Units.gridUnit * 9
-    defaultWidth: Kirigami.Units.gridUnit * 42
+    // Its width and its limit below with the default font grow with a
+    // larger one, within the screen.
+    defaultWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 42)
     readonly property real contentSpacing: 10
     // The room right of the rows for the list's scroll bar, and a refused
     // file's error's indent under its name.
     readonly property real listGutter: 12
     readonly property real errorIndent: 16
     readonly property real listSpacing: 4
-    readonly property real maximumHeight: Kirigami.Units.gridUnit * 29
+    readonly property real maximumHeight: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 29)
     // As tall as the summary and the list, or the message that nothing is
     // renamed, up to a limit, each time it opens. They are measured at the
     // width the window opens at, by the sizers below: the content's layout

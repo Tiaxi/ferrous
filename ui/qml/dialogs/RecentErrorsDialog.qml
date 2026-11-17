@@ -153,9 +153,12 @@ Popup {
     focus: true
     // Above the viewer popups.
     z: 100
-    // 460 px, or as wide as the header needs at a larger font, which puts
-    // its title, how many are new and Clear All on one line (#373 H10).
-    width: Math.min(Math.max(460, Math.ceil(errorHistoryHeader.implicitWidth
+    // 460 px with the default font, as much wider as a larger font makes
+    // the text (#373 H45: at 24 pt it kept 460 px, and its heading wrapped
+    // after four words), or as wide as the header needs, which puts its
+    // title, how many are new and Clear All on one line (#373 H10); within
+    // the window.
+    width: Math.min(Math.max(root.uiPalette.scaledSize(460), Math.ceil(errorHistoryHeader.implicitWidth
             + errorHistoryHeader.Layout.leftMargin + errorHistoryHeader.Layout.rightMargin)),
         root.hostWidth - 2 * root.edgeMargin)
     height: Math.min(root.implicitHeight, root.hostHeight - root.statusBarClearance - root.edgeMargin)
@@ -384,12 +387,19 @@ Popup {
                             anchors.rightMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                             spacing: Kirigami.Units.largeSpacing + 2
 
+                            // The only mark between an error and a notice: as
+                            // large as a line of text holds, and centred on the
+                            // category's lowercase, the middle of its x-height,
+                            // 2 px under the line's top with the default font
+                            // (#373 H45: it stayed 16 px at the top of a 24 pt
+                            // line).
                             Kirigami.Icon {
                                 objectName: "errorHistoryGlyph"
                                 Layout.alignment: Qt.AlignTop
-                                Layout.topMargin: 2
-                                implicitWidth: Kirigami.Units.iconSizes.small
-                                implicitHeight: Kirigami.Units.iconSizes.small
+                                Layout.topMargin: Math.round(categoryLabel.y + categoryLabel.baselineOffset
+                                    - categoryMetrics.xHeight / 2 - implicitHeight / 2)
+                                implicitWidth: root.uiPalette.labelIconSize
+                                implicitHeight: root.uiPalette.labelIconSize
                                 source: historyRow.glyph === ErrorUtils.GlyphOffline
                                     ? Qt.resolvedUrl("../assets/status-offline.svg")
                                     : (historyRow.glyph === ErrorUtils.GlyphInformation
@@ -414,6 +424,7 @@ Popup {
                                     spacing: Kirigami.Units.largeSpacing
 
                                     Label {
+                                        id: categoryLabel
                                         objectName: "errorHistoryCategory"
                                         Layout.fillWidth: true
                                         text: historyRow.categoryText
@@ -422,6 +433,11 @@ Popup {
                                         font.pointSize: root.uiPalette.smallPointSize
                                         color: root.uiPalette.textTertiary
                                         Accessible.ignored: true
+
+                                        FontMetrics {
+                                            id: categoryMetrics
+                                            font: categoryLabel.font
+                                        }
                                     }
 
                                     Label {

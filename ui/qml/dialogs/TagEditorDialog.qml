@@ -98,8 +98,10 @@ Components.DialogWindow {
     readonly property int modifiedMarkSize: 2 * Math.round(root.uiPalette.scaledSize(6) / 2)
     readonly property real tableInset: Kirigami.Units.largeSpacing
     // The room a column's header takes beside its label for the column's
-    // Revert, while it shows.
-    readonly property real columnRevertRoom: Kirigami.Units.iconSizes.small + 2 * Kirigami.Units.smallSpacing
+    // Revert, while it shows; its glyph is as large as a line of text
+    // holds, 14 px in a 20 px button with the default font.
+    readonly property real columnRevertGlyph: root.uiPalette.labelIconSize - 2
+    readonly property real columnRevertRoom: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
     // What a column needs whatever the room: its header whole, semibold and
     // with its Revert while a row's value in it is changed, or its sample
     // value, with the cell's padding, rather than a header elided to a
@@ -309,9 +311,9 @@ Components.DialogWindow {
     defaultWidth: Math.min(root.fittedWidth,
         root.windowRoot && root.windowRoot.width > 0 ? root.windowRoot.width : Number.POSITIVE_INFINITY)
     // As tall as the fields, or a table of 12 rows, whichever is taller,
-    // and no taller than 46 grid units: a few files leave no wide empty
-    // table, and the user may make it taller.
-    defaultHeight: Math.ceil(Math.min(Kirigami.Units.gridUnit * 46, Math.max(fieldsColumn.implicitHeight,
+    // and no taller than 46 grid units, scaled with the font: a few files
+    // leave no wide empty table, and the user may make it taller.
+    defaultHeight: Math.ceil(Math.min(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 46), Math.max(fieldsColumn.implicitHeight,
             2 + root.tableRowHeight * 13 + Kirigami.Units.gridUnit))
         + 2 * root.contentPadding + tagEditorFooter.implicitHeight)
     // The fields at their narrowest beside some of the table, and room for
@@ -1075,8 +1077,8 @@ Components.DialogWindow {
             running: root.busy
             visible: running
             Layout.bottomMargin: dialogButtons.bottomPadding
-            Layout.preferredWidth: Kirigami.Units.iconSizes.small
-            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+            Layout.preferredWidth: root.uiPalette.labelIconSize
+            Layout.preferredHeight: root.uiPalette.labelIconSize
         }
 
         Label {
@@ -1265,12 +1267,12 @@ Components.DialogWindow {
                                         anchors.verticalCenter: parent.verticalCenter
                                         visible: headerCell.changed
                                         enabled: !root.busy
-                                        width: Kirigami.Units.iconSizes.small + Kirigami.Units.smallSpacing
+                                        width: root.uiPalette.labelIconSize + Kirigami.Units.smallSpacing
                                         height: width
                                         padding: 0
                                         icon.name: "edit-undo"
-                                        icon.width: Kirigami.Units.iconSizes.small - 2
-                                        icon.height: Kirigami.Units.iconSizes.small - 2
+                                        icon.width: root.columnRevertGlyph
+                                        icon.height: root.columnRevertGlyph
                                         display: AbstractButton.IconOnly
                                         text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1 in Every File",
                                             headerCell.modelData.label)

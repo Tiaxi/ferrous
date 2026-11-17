@@ -64,7 +64,7 @@ Components.DialogWindow {
         for (let i = 0; i < root.components.length; ++i) {
             widest = Math.max(widest, componentMetrics.advanceWidth(String(root.components[i].name)))
         }
-        return Math.max(Kirigami.Units.gridUnit * 9, Math.ceil(widest))
+        return Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 9), Math.ceil(widest))
     }
     readonly property real componentsWidth: {
         let widest = 0
@@ -85,10 +85,10 @@ Components.DialogWindow {
     minimumWidth: root.contentMinimumWidth
     // The heading, the tabs and three lines of a page, which scrolls.
     minimumHeight: Math.ceil(root.chromeHeight + 3 * componentMetrics.height)
-    // 29 grid units, or wider when a large font makes the tabs or the
-    // buttons need more; as tall as the tallest page at that width, within
+    // 29 grid units with the default font, as much wider as a larger font
+    // makes the text, or wider when the tabs or the buttons need more; as tall as the tallest page at that width, within
     // the screen, where the pages scroll.
-    defaultWidth: Math.max(Kirigami.Units.gridUnit * 29, root.contentMinimumWidth)
+    defaultWidth: Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 29), root.contentMinimumWidth)
     defaultHeight: Math.ceil(root.chromeHeight + aboutPages.implicitHeight)
 
     onAboutToShow: {
@@ -165,8 +165,10 @@ Components.DialogWindow {
 
             Kirigami.Icon {
                 objectName: "aboutIcon"
-                implicitWidth: Kirigami.Units.iconSizes.large
-                implicitHeight: Kirigami.Units.iconSizes.large
+                // 48 px with the default font, and larger with a larger
+                // one, beside the name and version it heads (#373 H45).
+                implicitWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+                implicitHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
                 // The built-in drawing, which shows whether the icon is
                 // installed or not.
                 source: "qrc:/icons/hicolor/48x48/apps/ferrous.svg"

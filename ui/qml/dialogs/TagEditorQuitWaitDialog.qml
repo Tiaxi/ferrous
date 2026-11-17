@@ -65,11 +65,13 @@ Components.CompactDialogWindow {
         Layout.fillWidth: true
         spacing: 8
 
+        // 22 px beside the line with the default font, and larger with a
+        // larger one.
         BusyIndicator {
             id: busyIndicator
             running: root.visible
-            implicitWidth: Kirigami.Units.iconSizes.smallMedium
-            implicitHeight: Kirigami.Units.iconSizes.smallMedium
+            implicitWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.smallMedium)
+            implicitHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.smallMedium)
         }
 
         Label {

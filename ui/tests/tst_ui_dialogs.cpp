@@ -547,6 +547,8 @@ private slots:
     void dialogsHoldTheirContentsWithALargeFont();
     void compactDialogsKeepTheirMeasureWithALargeFont_data();
     void compactDialogsKeepTheirMeasureWithALargeFont();
+    void dialogGlyphsAndMeasuresFollowTheFont_data();
+    void dialogGlyphsAndMeasuresFollowTheFont();
 };
 
 void UiDialogsTest::initTestCase() {
@@ -919,7 +921,8 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn_data() {
 }
 
 // The library's folders have their paths in one column: the names' column
-// is as wide as the widest name, up to 8 grid units, so every path starts
+// is as wide as the widest name, up to 8 grid units scaled with the font
+// (UiPalette.scaledSize), so every path starts
 // at one x, a row without a name included (#373 H43: each path began where
 // its own name ended). A single folder's row is as it was, and a list
 // without names has no names' column.
@@ -953,9 +956,13 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn() {
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
     QQuickWindow *prefs = windowOf(dialog);
-    // The cap is in Kirigami's grid units, as the page sets it.
-    const qreal gridUnit = evaluate(dialog, QStringLiteral("Kirigami.Units.gridUnit")).toReal();
-    QVERIFY(gridUnit > 0);
+    // The cap is in Kirigami's grid units, scaled with the font, as the
+    // page sets it.
+    const qreal nameCap = evaluate(dialog, QStringLiteral("uiPalette.scaledSize(Kirigami.Units.gridUnit * 8)")).toReal();
+    QVERIFY(nameCap > 0);
+    if (pointSize <= 0) {
+        QCOMPARE(nameCap, 8 * evaluate(dialog, QStringLiteral("Kirigami.Units.gridUnit")).toReal());
+    }
     QQuickItem *list = nullptr;
     QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
 
@@ -990,21 +997,21 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn() {
     QList<Row> rows;
     QTRY_VERIFY((rows = rowsOf(4)).size() == 4);
     const qreal pathX = sceneRect(rows.at(0).path).left();
-    const qreal column = std::min(rows.at(1).name->implicitWidth(), 8 * gridUnit);
+    const qreal column = std::min(rows.at(1).name->implicitWidth(), nameCap);
     for (const Row &row : rows) {
         QVERIFY2(qAbs(sceneRect(row.path).left() - pathX) < 0.5, qPrintable(describeItem(row.path)));
         QVERIFY2(row.name->isVisible(), qPrintable(describeItem(row.name)));
         QVERIFY2(qAbs(row.name->width() - column) < 0.5, qPrintable(describeItem(row.name)));
-        // A name elides only past 8 grid units, as the widest does at 24 pt.
-        QCOMPARE(row.name->property("truncated").toBool(), row.name->implicitWidth() > 8 * gridUnit + 0.5);
+        // A name elides only past the cap.
+        QCOMPARE(row.name->property("truncated").toBool(), row.name->implicitWidth() > nameCap + 0.5);
     }
     QCOMPARE(rows.at(1).name->property("text").toString(), QStringLiteral("Second Shelf Wide"));
     QCOMPARE(rows.at(2).name->property("text").toString(), QString());
     // The unnamed row's path is its only text: in the text's colour.
     QCOMPARE(hex(rows.at(2).path->property("color").value<QColor>()), hex(tokenOf(window, "text")));
 
-    // A name wider than 8 grid units elides at that width, and the paths
-    // follow it.
+    // A name wider than the cap elides at that width, and the paths follow
+    // it.
     QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
         folder(QStringLiteral("/fixture/one"), QStringLiteral("Shelf")),
         folder(QStringLiteral("/fixture/two"),
@@ -1012,7 +1019,7 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn() {
     }));
     QTRY_VERIFY((rows = rowsOf(2)).size() == 2);
     QTRY_VERIFY(rows.at(1).name->property("truncated").toBool());
-    QVERIFY2(qAbs(rows.at(1).name->width() - 8 * gridUnit) < 0.5, qPrintable(describeItem(rows.at(1).name)));
+    QVERIFY2(qAbs(rows.at(1).name->width() - nameCap) < 0.5, qPrintable(describeItem(rows.at(1).name)));
     QVERIFY2(qAbs(sceneRect(rows.at(0).path).left() - sceneRect(rows.at(1).path).left()) < 0.5,
              qPrintable(describeItem(rows.at(0).path)));
 
@@ -2476,7 +2483,7 @@ void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage() {
     QTRY_VERIFY(!layoutPending(view));
     // The heading, as About's.
     QCOMPARE(sceneRect(icon), aboutIcon);
-    QCOMPARE(icon->width(), 48.0);
+    QCOMPARE(icon->width(), evaluate(kdeDialog, QStringLiteral("uiPalette.scaledSize(48)")).toReal());
     QCOMPARE(sceneRect(name).topLeft(), aboutName.topLeft());
     QCOMPARE(sceneRect(motto).left(), aboutVersion.left());
     QCOMPARE(name->property("font").value<QFont>().pointSizeF(), nameFont.pointSizeF());
@@ -5194,6 +5201,155 @@ void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont() {
     QVERIFY(QMetaObject::invokeMethod(confirm, "reject"));
     QTRY_VERIFY(!confirmWindow->isVisible());
     QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
+}
+
+void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The dialogs' glyphs beside text are as large as a line of the font holds
+// (UiPalette.labelIconSize, Kirigami's size for labels), and their measures
+// tuned at 10 pt grow with the font (UiPalette.scaledSize); the default
+// 10 pt font draws them as they were (#373 H45: at 24 pt Configure's folder list
+// stopped at its buttons and cut the path beside free room, with a 16 px
+// folder glyph; Recent Issues kept 460 px and a 16 px severity glyph;
+// About's icon stayed 48 px).
+void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    // KDE's default font, at the size of the row.
+    QFont font(QStringLiteral("Noto Sans"));
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    const bool large = pointSize > 10;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *palette = paletteOf(window);
+    const qreal labelIcon = palette->property("labelIconSize").toReal();
+    const qreal fontScale = palette->property("fontScale").toReal();
+    const auto scaled = [&](qreal size) { return std::max(size, qreal(std::round(size * fontScale))); };
+    const qreal gridUnit = evaluate(palette, QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+    if (large) {
+        QCOMPARE(labelIcon, evaluate(palette, QStringLiteral("Kirigami.Units.iconSizes.sizeForLabels")).toReal());
+        QVERIFY2(labelIcon >= 32, qPrintable(QString::number(labelIcon)));
+        QCOMPARE(fontScale, pointSize / 10);
+    } else {
+        QCOMPARE(labelIcon, 16.0);
+        QCOMPARE(fontScale, 1.0);
+    }
+
+    // Configure's library folders: the list as wide as 29 grid units scaled
+    // with the font where the page has the room, the folder glyph as large
+    // as the row's text holds, and the note under a folder on its text's x.
+    QVERIFY(bridgeOf(window)->setProperty("libraryRootEntries", QVariantList{
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/a/folder/with/a/rather/long/path/to/its/music")},
+                    {QStringLiteral("name"), QStringLiteral("Shelf")},
+                    {QStringLiteral("trackCount"), 3},
+                    {QStringLiteral("unwatchedReason"), QStringLiteral("a network share")}},
+    }));
+    QObject *preferences = openPreferences(window, 0);
+    QVERIFY(preferences != nullptr);
+    QQuickWindow *prefs = windowOf(preferences);
+    prefs->resize(2400, prefs->height());
+    QTRY_COMPARE(prefs->width(), 2400);
+    QQuickItem *frame = nullptr;
+    QQuickItem *buttons = nullptr;
+    QTRY_VERIFY((frame = visibleNamed(prefs, QStringLiteral("libraryRootListFrame"))) != nullptr);
+    QTRY_VERIFY((buttons = visibleNamed(prefs, QStringLiteral("libraryRootAddButton"))) != nullptr);
+    const qreal listWidth = std::max(scaled(29 * gridUnit),
+                                     buttons->parentItem()->implicitWidth());
+    QTRY_COMPARE(frame->width(), listWidth);
+    if (!large) {
+        QCOMPARE(listWidth, 29 * gridUnit);
+    }
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = visibleNamed(prefs, QStringLiteral("libraryRootRow"))) != nullptr && !layoutPending(row));
+    QQuickItem *folderIcon = itemsNamed(row, QStringLiteral("libraryRootIcon")).value(0);
+    QQuickItem *name = itemsNamed(row, QStringLiteral("libraryRootName")).value(0);
+    QQuickItem *path = itemsNamed(row, QStringLiteral("libraryRootPath")).value(0);
+    QQuickItem *note = itemsNamed(row, QStringLiteral("libraryRootUnwatchedLabel")).value(0);
+    QVERIFY(folderIcon != nullptr && name != nullptr && path != nullptr && note != nullptr);
+    QCOMPARE(folderIcon->width(), labelIcon);
+    QCOMPARE(folderIcon->height(), labelIcon);
+    // Drawn in one colour at either size: Breeze's 32 px folder is in full
+    // colour.
+    {
+        QTRY_VERIFY(folderIcon->property("valid").toBool());
+        QTest::qWait(50);
+        const QImage shown = prefs->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal dpr = shown.devicePixelRatio();
+        const QRect pixels = QRectF(sceneRect(folderIcon).topLeft() * dpr, sceneRect(folderIcon).size() * dpr).toRect();
+        int saturated = 0;
+        for (int y = pixels.top(); y <= pixels.bottom(); ++y) {
+            for (int x = pixels.left(); x <= pixels.right(); ++x) {
+                saturated += QColor(shown.pixel(x, y)).hsvSaturation() > 80;
+            }
+        }
+        QVERIFY2(saturated == 0, qPrintable(QStringLiteral("%1 coloured pixels").arg(saturated)));
+    }
+    QVERIFY(note->isVisible());
+    QVERIFY2(qAbs(sceneRect(note).left() - sceneRect(name).left()) < 0.5,
+             qPrintable(describeItem(note) + QStringLiteral(" / ") + describeItem(name)));
+    // With the room, the path is whole.
+    QTRY_VERIFY2(!path->property("truncated").toBool(),
+                 qPrintable(describeItem(path)));
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+
+    // Recent Issues: 460 px scaled with the font, within the window, and
+    // its severity glyph as large as a line holds, centred on the
+    // category's lowercase.
+    report(window, 1, 0, kStaticPath, kEndsEarly);
+    QVERIFY(openIssues(window));
+    QObject *issues = object(window, QStringLiteral("recentErrorsDialog"));
+    QVERIFY(issues != nullptr);
+    const qreal edgeMargin = issues->property("edgeMargin").toReal();
+    const qreal issuesWidth = issues->property("width").toReal();
+    if (large) {
+        QVERIFY2(issuesWidth >= std::min(scaled(460), window->width() - 2 * edgeMargin) - 0.5,
+                 qPrintable(QString::number(issuesWidth)));
+        QVERIFY2(issuesWidth <= window->width() - 2 * edgeMargin + 0.5, qPrintable(QString::number(issuesWidth)));
+    } else {
+        QCOMPARE(issuesWidth, 460.0);
+    }
+    QList<QQuickItem *> rows;
+    QTRY_COMPARE((rows = itemsNamed(window->contentItem(), QStringLiteral("errorHistoryRow"))).size(), 1);
+    QQuickItem *glyph = itemsNamed(rows.first(), QStringLiteral("errorHistoryGlyph")).value(0);
+    QQuickItem *category = itemsNamed(rows.first(), QStringLiteral("errorHistoryCategory")).value(0);
+    QVERIFY(glyph != nullptr && category != nullptr);
+    QTRY_VERIFY(!layoutPending(rows.first()));
+    QCOMPARE(glyph->width(), labelIcon);
+    QCOMPARE(glyph->height(), labelIcon);
+    const qreal xMiddle = sceneRect(category).top() + category->baselineOffset()
+        - QFontMetricsF(category->property("font").value<QFont>()).xHeight() / 2;
+    QVERIFY2(qAbs(sceneRect(glyph).center().y() - xMiddle) <= 0.5,
+             qPrintable(describeItem(glyph) + QStringLiteral(", the category's x-height centred at %1").arg(xMiddle)));
+    if (!large && QFontInfo(category->property("font").value<QFont>()).family() == QStringLiteral("Noto Sans")) {
+        // Where it was with the default font: 2 px under the line's top.
+        QCOMPARE(sceneRect(glyph).top() - sceneRect(category).top(), 2.0);
+    }
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!issues->property("visible").toBool());
+
+    // About's icon, 48 px with the default font, larger with a larger one.
+    QObject *about = object(window, QStringLiteral("aboutDialog"));
+    QVERIFY(about != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(about, "open"));
+    QVERIFY(waitForDialogWindow(about));
+    QQuickItem *icon = visibleNamed(windowOf(about), QStringLiteral("aboutIcon"));
+    QVERIFY(icon != nullptr);
+    QCOMPARE(icon->width(), scaled(48));
+    QCOMPARE(icon->height(), scaled(48));
+    if (large) {
+        QVERIFY(icon->width() > 48);
+    }
+    QVERIFY(QMetaObject::invokeMethod(about, "close"));
+    QTRY_VERIFY(!about->property("visible").toBool());
 }
 
 int main(int argc, char **argv) {
