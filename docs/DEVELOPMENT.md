@@ -192,6 +192,10 @@ Other useful runtime controls:
 | `FERROUS_BRIDGE_PAUSED_HEARTBEAT_MS` | Paused heartbeat, 333 ms |
 | `FERROUS_BRIDGE_ANALYSIS_SNAPSHOT_MS` | Analysis snapshot interval, 16 ms |
 
+## UI design
+
+Follow the [UI design rules](UI_DESIGN.md) for colour tokens, sizing at large fonts, dialogs, states and motion. The same page lists what was tried and rejected, and why.
+
 ## Translations
 
 Ferrous translates its interface with [KI18n](https://invent.kde.org/frameworks/ki18n), from the `ferrous` gettext domain. There are no translations yet; the template and the code paths are in place.
