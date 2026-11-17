@@ -42,6 +42,8 @@ private slots:
     void albumArtDetailsLieOverTheArt();
     void albumArtDetailsLabelsStayWholeWithLargerFonts();
     void albumArtFolderPathTakesTheLinesItNeedsAtLargeFonts();
+    void albumArtKeepsAGutterBesideTheDetails_data();
+    void albumArtKeepsAGutterBesideTheDetails();
     void albumArtDetailsAreOnTheTypeScale_data();
     void albumArtDetailsAreOnTheTypeScale();
     void albumArtViewerShowsWhenItsImageCannotBeRead();
@@ -1127,6 +1129,83 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
     }
 }
 
+void AlbumArtSmokeTest::albumArtKeepsAGutterBesideTheDetails_data() {
+    QTest::addColumn<QSize>("size");
+    QTest::newRow("1000x720") << QSize(1000, 720);
+    QTest::newRow("1600x1000") << QSize(1600, 1000);
+}
+
+// While the details show, the art keeps 16 px clear of their seam and of
+// the view's left edge, centred in what is left (#373 H41: in a window as
+// wide as it was tall, the art met the seam); the gutter eases with the
+// details' reveal. Without them, the art fits the whole view.
+void AlbumArtSmokeTest::albumArtKeepsAGutterBesideTheDetails() {
+    QFETCH(QSize, size);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 300, 300);
+    QVERIFY(!coverPath.isEmpty());
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(createDetailsSurfaceWindow(engine, coverPath, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    window->resize(size);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QTRY_COMPARE(window->size(), size);
+    auto *surface = qvariant_cast<QQuickItem *>(root->property("surface"));
+    QVERIFY(surface != nullptr);
+    QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
+    QQuickItem *seam = itemNamed(surface, QStringLiteral("albumArtInfoSeam"));
+    QVERIFY(image != nullptr && seam != nullptr);
+    const auto paintedArt = [image]() {
+        const QSizeF painted(image->property("paintedWidth").toReal(), image->property("paintedHeight").toReal());
+        const QPointF topLeft = image->mapToScene(
+            QPointF((image->width() - painted.width()) / 2, (image->height() - painted.height()) / 2));
+        return QRectF(topLeft, painted);
+    };
+    // With the details: the art fits the view left of the seam, less 16 px
+    // on each side, and centred there.
+    QTRY_VERIFY(seam->isVisible() && sceneRectOf(seam).left() > 0);
+    const qreal seamLeft = sceneRectOf(seam).left();
+    const qreal room = std::min(seamLeft - 32, qreal(size.height()));
+    const auto describe = [&]() {
+        const QRectF art = paintedArt();
+        return QStringLiteral("art %1..%2, seam at %3").arg(art.left()).arg(art.right()).arg(seamLeft);
+    };
+    QTRY_VERIFY2(qAbs(paintedArt().width() - room) <= 1.0, qPrintable(describe()));
+    QVERIFY2(paintedArt().left() >= 16 - 0.5, qPrintable(describe()));
+    QVERIFY2(paintedArt().right() <= seamLeft - 16 + 0.5, qPrintable(describe()));
+    QVERIFY2(qAbs(paintedArt().center().x() - seamLeft / 2) <= 1.0, qPrintable(describe()));
+    QCOMPARE(surface->property("artMargin").toReal(), 16.0);
+    // During a preview, 24 px.
+    surface->setProperty("previewActive", true);
+    QTRY_COMPARE(surface->property("artMargin").toReal(), 24.0);
+    QTRY_VERIFY2(paintedArt().right() <= seamLeft - 24 + 0.5 && paintedArt().left() >= 24 - 0.5, qPrintable(describe()));
+    surface->setProperty("previewActive", false);
+
+    // Hiding the details eases the gutter with them, to none: the art fits
+    // the whole view.
+    QVERIFY(surface->property("infoRevealDuration").toInt() > 0);
+    // Each frame of the reveal, with the gutter at that frame.
+    QList<std::pair<qreal, qreal>> steps;
+    const QMetaObject::Connection stepped = connect(window, &QQuickWindow::afterAnimating, surface, [&]() {
+        steps << std::pair{surface->property("infoReveal").toReal(), surface->property("artMargin").toReal()};
+    });
+    surface->setProperty("infoVisible", false);
+    QTRY_COMPARE(surface->property("infoReveal").toReal(), 0.0);
+    disconnect(stepped);
+    QVERIFY(std::any_of(steps.cbegin(), steps.cend(), [](const auto &step) { return step.first > 0 && step.first < 1; }));
+    for (const auto &[reveal, margin] : steps) {
+        QCOMPARE(margin, 16 * reveal);
+    }
+    QCOMPARE(surface->property("artMargin").toReal(), 0.0);
+    const qreal whole = std::min(qreal(size.width()), qreal(size.height()));
+    QTRY_VERIFY2(qAbs(paintedArt().width() - whole) <= 1.0, qPrintable(describe()));
+    QVERIFY2(qAbs(paintedArt().center().x() - size.width() / 2.0) <= 1.0, qPrintable(describe()));
+}
+
 // At 24 pt in a window, a typical folder path is whole on the lines it
 // needs, broken after its slashes, rather than cut short on three over an
 // empty column (#373 H41: "…/2005 - Smal…").
@@ -1716,10 +1795,12 @@ void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails() {
     QTRY_VERIFY2(qAbs(paintedArt().center().x() - left.center().x()) < 0.5,
                  qPrintable(describe(view()) + QStringLiteral(" / %1").arg(left.center().x())));
     QVERIFY2(qAbs(paintedArt().center().y() - left.center().y()) < 0.5, qPrintable(describe(view())));
-    // The wide art fits the space's width, and runs under neither the seam
-    // nor the details.
-    QVERIFY2(qAbs(paintedArt().width() - left.width()) < 0.5, qPrintable(describe(view())));
-    QVERIFY(paintedArt().right() <= seamRect.left() + 0.5);
+    // The wide art fits the space's width less a 16 px gutter on each side
+    // (#373 H41: it met the seam), and runs under neither the seam nor the
+    // details.
+    QVERIFY2(qAbs(paintedArt().width() - (left.width() - 32)) < 0.5, qPrintable(describe(view())));
+    QVERIFY(paintedArt().left() >= left.left() + 16 - 0.5);
+    QVERIFY(paintedArt().right() <= seamRect.left() - 16 + 0.5);
     QCOMPARE(surface->property("zoom").toDouble(), 1.0);
     // The column draws on its own backing, and the art beside it shows.
     const QImage shown = shownIn->grabWindow().convertToFormat(QImage::Format_RGB32);

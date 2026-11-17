@@ -120,9 +120,11 @@ Item {
     // they are shown.
     readonly property real infoReserve: Math.round(root.infoReveal * (infoColumn.width + 1))
     // The space the art fits in, across: the whole view, or while the
-    // details show the space left of their seam, during a preview less 24 px
-    // on each side.
-    readonly property real artMargin: root.previewActive ? 24 * root.infoReveal : 0
+    // details show the space left of their seam less 16 px on each side,
+    // during a preview 24 px, so the art never touches their seam (#373
+    // H41: a wide window's art met it). The gutter eases with the details'
+    // reveal, as their reserve does.
+    readonly property real artMargin: (root.previewActive ? 24 : 16) * root.infoReveal
     readonly property real fitLeft: root.artMargin
     readonly property real fitWidth: Math.max(1, albumArtViewport.width - root.infoReserve - 2 * root.artMargin)
     readonly property real fitCenterX: root.fitLeft + root.fitWidth / 2
