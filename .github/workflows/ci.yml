@@ -258,12 +258,13 @@ jobs:
           workspaces: ". -> ui/build/cargo"
 
       # ccache keeps the C++ objects of earlier runs, so a run compiles only
-      # what its change affects. A cache cannot be overwritten, so each run
-      # saves one of its own and restores the newest that it may read: its
-      # branch's, or else main's. ccache is for CI only; the app's build does
-      # not need it.
-      - name: Cache C++ objects
-        uses: actions/cache@v6
+      # what its change affects. Every run restores main's newest cache. Only
+      # a push to main saves one, under a key of its own, since a cache
+      # cannot be overwritten: a repository has 10 GB for all its caches, and
+      # GitHub removes the least recently used ones beyond that. ccache is
+      # for CI only; the app's build does not need it.
+      - name: Restore C++ objects
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/ccache
           key: v0-ccache-ui-fedora-44-${{ matrix.build_type }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -286,6 +287,14 @@ jobs:
           ccache --zero-stats
           cmake --build ui/build --parallel "$(nproc)"
           ccache --show-stats
+
+      # After the build, whatever the tests then say: the objects are as good.
+      - name: Save C++ objects
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/ccache
+          key: v0-ccache-ui-fedora-44-${{ matrix.build_type }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Isolate test user directories
         run: |
