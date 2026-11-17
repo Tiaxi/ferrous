@@ -2333,6 +2333,10 @@ QStringList visibleTextsIn(QQuickItem *root) {
     return texts;
 }
 
+QString describeRect(const QRectF &rect) {
+    return QStringLiteral("%1,%2 %3x%4").arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
+}
+
 } // namespace
 
 void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
@@ -2653,11 +2657,27 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         texts.removeAll(QString());
         QCOMPARE(texts.count(text), 1);
     };
+    // The current art's Preview: in the results' column while it searches,
+    // so nothing moves as the rows arrive; with no rows to line up with, on
+    // the content's right inset, as Close under it (#373 H43: it hung on
+    // the absent column, 117 px short of Close).
+    QQuickItem *currentPreview = itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentPreviewButton"));
+    QQuickItem *close = itemNamed(qobject_cast<QQuickWindow *>(dialog)->contentItem(),
+                                  QStringLiteral("itunesArtworkCloseButton"));
+    QVERIFY(currentPreview != nullptr && close != nullptr && close->isVisible());
+    const auto previewMeetsClose = [&]() {
+        return qAbs(sceneRectOf(currentPreview).right() - sceneRectOf(close).right()) < 0.5;
+    };
+
     checkState(State::Searching, QStringLiteral("Searching iTunes…"));
+    const qreal columnX = sceneRectOf(currentPreview).left();
+    QVERIFY2(sceneRectOf(close).right() - sceneRectOf(currentPreview).right() > 50,
+             qPrintable(describeRect(sceneRectOf(currentPreview))));
 
     bridge->setProperty("itunesArtworkLoading", false);
     bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
     checkState(State::NothingFound, QStringLiteral("No iTunes artwork suggestions found."));
+    QTRY_VERIFY2(previewMeetsClose(), qPrintable(describeRect(sceneRectOf(currentPreview))));
 
     // As BridgeClient tells a failed search (BridgeClientTest::
     // aFailedArtworkSearchSaysSoApartFromFindingNothing).
@@ -2665,7 +2685,22 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     bridge->setProperty("itunesArtworkErrorText", QStringLiteral("Connection refused"));
     bridge->setProperty("itunesArtworkFailed", true);
     checkState(State::Failed, QStringLiteral("Connection refused"));
+    QVERIFY2(previewMeetsClose(), qPrintable(describeRect(sceneRectOf(currentPreview))));
 
+    // Searching again, back in the column; the rows then arrive under it.
+    bridge->setProperty("itunesArtworkFailed", false);
+    bridge->setProperty("itunesArtworkErrorText", QString());
+    bridge->setProperty("itunesArtworkLoading", true);
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("Searching iTunes…"));
+    QTRY_COMPARE(sceneRectOf(currentPreview).left(), columnX);
+    bridge->setProperty("itunesArtworkResults", itunesArtworkFixture(dir, 2));
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("Found 2 suggestions."));
+    bridge->setProperty("itunesArtworkLoading", false);
+    QTRY_VERIFY(results->isVisible());
+    QCOMPARE(sceneRectOf(currentPreview).left(), columnX);
+    QQuickItem *firstPreview = nullptr;
+    QTRY_VERIFY((firstPreview = itemNamed(results, QStringLiteral("itunesArtworkPreviewButton"))) != nullptr);
+    QTRY_COMPARE(sceneRectOf(firstPreview).left(), columnX);
 }
 
 namespace {
@@ -2714,10 +2749,6 @@ bool openItunesArtworkDialog(QQmlApplicationEngine &engine, const QTemporaryDir 
                return visibleItemsNamed(out.content, QStringLiteral("itunesArtworkResultRow")).size()
                    >= qMin(count, 5);
            });
-}
-
-QString describeRect(const QRectF &rect) {
-    return QStringLiteral("%1,%2 %3x%4").arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
 }
 
 int fontPixelSize(QQuickItem *item) {

@@ -255,6 +255,8 @@ Components.DialogWindow {
                 objectName: "preferencesDefaultsButton"
                 Layout.leftMargin: dialogButtons.inset
                 Layout.bottomMargin: dialogButtons.bottomPadding
+                icon.width: dialogButtons.glyphSize
+                icon.height: dialogButtons.glyphSize
                 text: I18n.i18nc("@action:button", "Defaults")
                 icon.name: "document-revert"
                 enabled: !settingsState.atDefaults

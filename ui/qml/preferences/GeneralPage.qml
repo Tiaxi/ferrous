@@ -8,8 +8,11 @@ import FerrousUi 1.0
 import "../components" as Components
 import "." as Preferences
 
-// The General page: the fullscreen viewers, and Plasma's media controls
-// under their own subheading.
+// The General page: the fullscreen viewers, and Plasma's media controls.
+// Two groups apart by the room between them, as on Last.fm, with "Plasma:"
+// naming the second: only a page of three or more groups, Visualization,
+// heads them (#373 H43: one heading over a single check box that its label
+// already named).
 Preferences.PreferencesPage {
     id: root
 
@@ -45,9 +48,8 @@ Preferences.PreferencesPage {
     }
 
     Components.FormGroupGap {
-        objectName: "desktopIntegrationHeading"
+        objectName: "desktopIntegrationGap"
         uiPalette: root.uiPalette
-        heading: I18n.i18nc("@title:group preferences", "Desktop Integration")
     }
 
     CheckBox {

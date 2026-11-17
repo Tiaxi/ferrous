@@ -481,6 +481,8 @@ private slots:
     void configurePageIconsFollowTheFont();
     void configureListRowsAreAlike_data();
     void configureListRowsAreAlike();
+    void libraryFolderPathsShareOneColumn_data();
+    void libraryFolderPathsShareOneColumn();
     void configurePagesMoveByKeyboardAndTabReachesEveryControl();
     void configureAppliesOnOkOrApplyAndCancelDropsTheChanges();
     void configureDefaultsSetsThePagesBackToBeApplied();
@@ -538,6 +540,8 @@ private slots:
     void editTagsFileColumnsGiveWayBeforeTheTags();
     void dialogsPutTheirButtonsInKdesOrder();
     void dialogsPutTheirButtonsOnTheContentInset();
+    void dialogButtonGlyphsFollowTheFont_data();
+    void dialogButtonGlyphsFollowTheFont();
     void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
     void dialogsShareOneHeadingStyle();
     void dialogsHoldTheirContentsWithALargeFont();
@@ -903,6 +907,136 @@ void UiDialogsTest::configureListRowsAreAlike() {
     }
     for (qreal baseline : baselines) {
         QCOMPARE(baseline, baselines.constFirst());
+    }
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
+void UiDialogsTest::libraryFolderPathsShareOneColumn_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The library's folders have their paths in one column: the names' column
+// is as wide as the widest name, up to 8 grid units, so every path starts
+// at one x, a row without a name included (#373 H43: each path began where
+// its own name ended). A single folder's row is as it was, and a list
+// without names has no names' column.
+void UiDialogsTest::libraryFolderPathsShareOneColumn() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    const auto folder = [](const QString &path, const QString &name) {
+        QVariantMap entry{{QStringLiteral("path"), path}, {QStringLiteral("trackCount"), 3}};
+        if (!name.isEmpty()) {
+            entry.insert(QStringLiteral("name"), name);
+        }
+        return entry;
+    };
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        folder(QStringLiteral("/fixture/one"), QStringLiteral("Shelf")),
+        folder(QStringLiteral("/fixture/two"), QStringLiteral("Second Shelf Wide")),
+        folder(QStringLiteral("/fixture/three"), QString()),
+        folder(QStringLiteral("/fixture/four"), QStringLiteral("Mid Shelf")),
+    }));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    // The cap is in Kirigami's grid units, as the page sets it.
+    const qreal gridUnit = evaluate(dialog, QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+    QVERIFY(gridUnit > 0);
+    QQuickItem *list = nullptr;
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
+
+    struct Row {
+        QQuickItem *icon = nullptr;
+        QQuickItem *name = nullptr;
+        QQuickItem *path = nullptr;
+    };
+    // The rows in the list's order, once laid out.
+    const auto rowsOf = [&](int count) {
+        QList<Row> rows;
+        QList<QQuickItem *> items = itemsNamed(list, QStringLiteral("libraryRootRow"));
+        if (items.size() != count) {
+            return rows;
+        }
+        std::sort(items.begin(), items.end(), [](QQuickItem *a, QQuickItem *b) { return a->y() < b->y(); });
+        for (QQuickItem *item : items) {
+            if (layoutPending(item)) {
+                return QList<Row>();
+            }
+            Row row;
+            row.name = itemsNamed(item, QStringLiteral("libraryRootName")).value(0);
+            row.path = itemsNamed(item, QStringLiteral("libraryRootPath")).value(0);
+            row.icon = itemsNamed(item, QStringLiteral("libraryRootIcon")).value(0);
+            rows << row;
+        }
+        return rows;
+    };
+
+    // Four folders, one without a name: every path at one x, the widest
+    // name whole, its path the row spacing after it.
+    QList<Row> rows;
+    QTRY_VERIFY((rows = rowsOf(4)).size() == 4);
+    const qreal pathX = sceneRect(rows.at(0).path).left();
+    const qreal column = std::min(rows.at(1).name->implicitWidth(), 8 * gridUnit);
+    for (const Row &row : rows) {
+        QVERIFY2(qAbs(sceneRect(row.path).left() - pathX) < 0.5, qPrintable(describeItem(row.path)));
+        QVERIFY2(row.name->isVisible(), qPrintable(describeItem(row.name)));
+        QVERIFY2(qAbs(row.name->width() - column) < 0.5, qPrintable(describeItem(row.name)));
+        // A name elides only past 8 grid units, as the widest does at 24 pt.
+        QCOMPARE(row.name->property("truncated").toBool(), row.name->implicitWidth() > 8 * gridUnit + 0.5);
+    }
+    QCOMPARE(rows.at(1).name->property("text").toString(), QStringLiteral("Second Shelf Wide"));
+    QCOMPARE(rows.at(2).name->property("text").toString(), QString());
+    // The unnamed row's path is its only text: in the text's colour.
+    QCOMPARE(hex(rows.at(2).path->property("color").value<QColor>()), hex(tokenOf(window, "text")));
+
+    // A name wider than 8 grid units elides at that width, and the paths
+    // follow it.
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        folder(QStringLiteral("/fixture/one"), QStringLiteral("Shelf")),
+        folder(QStringLiteral("/fixture/two"),
+               QStringLiteral("A Folder Name Far Wider Than Any Column Should Ever Be")),
+    }));
+    QTRY_VERIFY((rows = rowsOf(2)).size() == 2);
+    QTRY_VERIFY(rows.at(1).name->property("truncated").toBool());
+    QVERIFY2(qAbs(rows.at(1).name->width() - 8 * gridUnit) < 0.5, qPrintable(describeItem(rows.at(1).name)));
+    QVERIFY2(qAbs(sceneRect(rows.at(0).path).left() - sceneRect(rows.at(1).path).left()) < 0.5,
+             qPrintable(describeItem(rows.at(0).path)));
+
+    // A single folder: its name as wide as it is, the path after it.
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        folder(QStringLiteral("/fixture/one"), QStringLiteral("Shelf")),
+    }));
+    QTRY_VERIFY((rows = rowsOf(1)).size() == 1);
+    QQuickItem *single = rows.at(0).name;
+    QTRY_VERIFY(qAbs(single->width() - single->implicitWidth()) <= 1);
+    QVERIFY(!single->property("truncated").toBool());
+    const qreal nameToPath = sceneRect(rows.at(0).path).left() - sceneRect(single).right();
+
+    // Without names, no names' column: the path where a name would start.
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        folder(QStringLiteral("/fixture/one"), QString()),
+        folder(QStringLiteral("/fixture/two"), QString()),
+    }));
+    QTRY_VERIFY((rows = rowsOf(2)).size() == 2);
+    for (const Row &row : rows) {
+        QVERIFY2(!row.name->isVisible(), qPrintable(describeItem(row.name)));
+        QVERIFY(row.icon != nullptr);
+        QVERIFY2(qAbs(sceneRect(row.path).left() - sceneRect(row.icon).right() - nameToPath) < 0.5,
+                 qPrintable(describeItem(row.path)));
     }
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());
@@ -1648,25 +1782,20 @@ void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
     QVERIFY2(capHelp->property("lineCount").toInt() >= 2, qPrintable(describeItem(capHelp)));
     QVERIFY2(capHelp->width() <= 440.5 && capHelp->width() >= 420, qPrintable(describeItem(capHelp)));
 
-    // General: the viewers, then Plasma's media controls under a plain
-    // subheading where the fields start, 16 px below the group above it and
-    // 8 px above its row.
+    // General: the viewers, then Plasma's media controls, two groups apart
+    // by the room between them, with no subheading: only a page of three or
+    // more groups heads them, and "Plasma:" names the second (#373 H43: a
+    // heading over a single check box that its label already named).
     dialog->setProperty("pageIndex", 2);
     QQuickItem *media = nullptr;
     QTRY_VERIFY((media = named("systemMediaControlsCheckBox")) != nullptr);
     QTRY_VERIFY(!layoutPending(stack->childItems().at(2)));
-    QQuickItem *headingRow = named("desktopIntegrationHeading");
-    QVERIFY(headingRow != nullptr);
-    QQuickItem *heading = itemsNamed(headingRow, QStringLiteral("formSubheading")).value(0);
-    QVERIFY(heading != nullptr && heading->isVisible());
-    QCOMPARE(heading->property("text").toString(), QStringLiteral("Desktop Integration"));
-    const QFont headingFont = heading->property("font").value<QFont>();
-    QCOMPARE(headingFont.weight(), QFont::DemiBold);
-    QCOMPARE(headingFont.pointSizeF(), paletteOf(window)->property("basePointSize").toReal());
-    QCOMPARE(hex(heading->property("color").value<QColor>()), hex(tokenOf(window, "text")));
-    QVERIFY(gapIs(named("preventDisplaySleepInFullscreenCheckBox"), heading, 16));
-    QVERIFY(gapIs(heading, media, 8));
-    QCOMPARE(sceneRect(heading).left(), sceneRect(media).left());
+    QQuickItem *generalPage = stack->childItems().at(2);
+    QVERIFY(named("desktopIntegrationGap") != nullptr);
+    for (QQuickItem *subheading : itemsNamed(generalPage, QStringLiteral("formSubheading"))) {
+        QVERIFY2(!subheading->isVisible(), qPrintable(describeItem(subheading)));
+    }
+    QVERIFY(gapIs(named("preventDisplaySleepInFullscreenCheckBox"), media, 16));
     QQuickItem *mediaHelp = helpLabel("systemMediaControlsHelp");
     QVERIFY(mediaHelp != nullptr);
     QVERIFY(gapIs(media, mediaHelp, 4));
@@ -2200,14 +2329,12 @@ void UiDialogsTest::lastFmAccountIsAGroupApart() {
         return sceneRect(below).top() - sceneRect(above).bottom();
     };
     // General's room between its groups: from the viewers' last row to the
-    // desktop integration's subheading.
+    // media controls' check box.
     QTRY_VERIFY(!layoutPending(stack->childItems().at(2)));
     QQuickItem *sleep = visibleNamed(prefs, QStringLiteral("preventDisplaySleepInFullscreenCheckBox"));
-    QQuickItem *headingRow = visibleNamed(prefs, QStringLiteral("desktopIntegrationHeading"));
-    QVERIFY(sleep != nullptr && headingRow != nullptr);
-    QQuickItem *heading = itemsNamed(headingRow, QStringLiteral("formSubheading")).value(0);
-    QVERIFY(heading != nullptr);
-    const qreal generalGroupGap = gap(sleep, heading);
+    QQuickItem *media = visibleNamed(prefs, QStringLiteral("systemMediaControlsCheckBox"));
+    QVERIFY(sleep != nullptr && media != nullptr);
+    const qreal generalGroupGap = gap(sleep, media);
     QVERIFY2(qAbs(generalGroupGap - 16) < 1, qPrintable(QString::number(generalGroupGap)));
 
     dialog->setProperty("pageIndex", 3);
@@ -4481,6 +4608,131 @@ void UiDialogsTest::dialogsPutTheirButtonsOnTheContentInset() {
             QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
             QTRY_VERIFY2(!dialogWindow->isVisible(), test.name);
         }
+    }
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
+    editor.close();
+}
+
+void UiDialogsTest::dialogButtonGlyphsFollowTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The dialogs' buttons have glyphs as large as their captions' font calls
+// for, Kirigami's size for labels: 16 px with the default font, larger at
+// 24 pt, as the iTunes rows' (#373 H43: the footers kept 16 px glyphs
+// beside 24 pt captions). So do Configure's Defaults, the library
+// folders' buttons and the Diagnostics actions.
+void UiDialogsTest::dialogButtonGlyphsFollowTheFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(2); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(bridgeOf(window)->setProperty("libraryRootEntries", QVariantList{
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/one")}, {QStringLiteral("trackCount"), 3}},
+    }));
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
+    QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
+    QVERIFY(waitForDialogWindow(diagnostics));
+    QObject *preferences = openPreferences(window, 0);
+    QVERIFY(preferences != nullptr);
+    QTRY_VERIFY(object(window, QStringLiteral("removeLibraryRootConfirmDialog")) != nullptr);
+    const qreal forLabels = evaluate(preferences, QStringLiteral("Kirigami.Units.iconSizes.sizeForLabels")).toReal();
+    if (pointSize > 0) {
+        QVERIFY2(forLabels > 16, qPrintable(QString::number(forLabels)));
+    } else {
+        QCOMPARE(forLabels, 16.0);
+    }
+    const auto glyphIs = [&](QQuickItem *button, const QString &where) {
+        const QString name = evaluate(button, QStringLiteral("icon.name")).toString();
+        const qreal width = evaluate(button, QStringLiteral("icon.width")).toReal();
+        const qreal height = evaluate(button, QStringLiteral("icon.height")).toReal();
+        if (name.isEmpty() || (width == forLabels && height == forLabels)) {
+            return true;
+        }
+        qWarning().noquote() << QStringLiteral("%1: %2 has a %3x%4 glyph, not %5")
+                                    .arg(where, describeItem(button)).arg(width).arg(height).arg(forLabels);
+        return false;
+    };
+    // The visible buttons under an item.
+    const auto buttonsIn = [](QQuickItem *root) {
+        QList<QQuickItem *> buttons;
+        std::function<void(QQuickItem *)> collect = [&](QQuickItem *item) {
+            for (QQuickItem *child : item->childItems()) {
+                if (!child->isVisible()) {
+                    continue;
+                }
+                if (child->inherits("QQuickAbstractButton")) {
+                    buttons.push_back(child);
+                } else {
+                    collect(child);
+                }
+            }
+        };
+        if (root != nullptr) {
+            collect(root);
+        }
+        return buttons;
+    };
+
+    int glyphs = 0;
+    for (const char *dialogName : {"quitSaveFailedDialog", "libraryRootNameDialog", "removeLibraryRootConfirmDialog",
+                                   "tagEditorCloseConfirmDialog", "autoNumberDialog", "renamePreviewDialog",
+                                   "tagEditorStatusDetailsDialog", "clearDiagnosticsConfirmDialog",
+                                   "itunesArtworkDialog", "aboutDialog", "diagnosticsDialog", "preferencesDialog",
+                                   "tagEditorDialog"}) {
+        const QString name = QString::fromLatin1(dialogName);
+        QObject *dialog = object(window, name);
+        QVERIFY2(dialog != nullptr, dialogName);
+        const bool opened = dialog->property("opened").toBool();
+        if (!opened) {
+            QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        }
+        QVERIFY2(waitForDialogWindow(dialog), dialogName);
+        auto *footer = qvariant_cast<QQuickItem *>(dialog->property("footer"));
+        QTRY_VERIFY2(!buttonsIn(footer).isEmpty(), dialogName);
+        for (QQuickItem *button : buttonsIn(footer)) {
+            QVERIFY(glyphIs(button, name));
+            ++glyphs;
+        }
+        if (!opened) {
+            QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+            QTRY_VERIFY2(!windowOf(dialog)->isVisible(), dialogName);
+        }
+    }
+    QVERIFY(glyphs >= 20);
+
+    // Beside the footers: the library folders' buttons and the Diagnostics
+    // actions.
+    QQuickWindow *prefs = windowOf(preferences);
+    for (const char *buttonName : {"libraryRootAddButton", "libraryRootRenameButton", "libraryRootRescanButton",
+                                   "libraryRootRemoveButton"}) {
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY2((button = visibleNamed(prefs, QString::fromLatin1(buttonName))) != nullptr, buttonName);
+        QVERIFY(glyphIs(button, QStringLiteral("Library")));
+    }
+    QQuickWindow *diagnosticsWindow = windowOf(diagnostics);
+    for (const char *buttonName : {"diagnosticsReloadButton", "diagnosticsClearButton", "diagnosticsOpenFolderButton",
+                                   "diagnosticsCopyAllButton", "diagnosticsCopyWithoutPathsButton"}) {
+        QQuickItem *button = visibleNamed(diagnosticsWindow, QString::fromLatin1(buttonName));
+        QVERIFY2(button != nullptr, buttonName);
+        QVERIFY(glyphIs(button, QStringLiteral("Diagnostics")));
     }
     QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
     QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));

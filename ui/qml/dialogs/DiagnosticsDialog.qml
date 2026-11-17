@@ -109,7 +109,8 @@ Components.DialogWindow {
                 : diagnosticsLogActions.implicitHeight + Kirigami.Units.smallSpacing
                     + diagnosticsReadActions.implicitHeight
 
-            // The log's own actions.
+            // The log's own actions. The actions' glyphs are as large as the
+            // footer's, which their captions' font calls for (#373 H43).
             RowLayout {
                 id: diagnosticsLogActions
                 width: implicitWidth
@@ -117,6 +118,8 @@ Components.DialogWindow {
 
                 Button {
                     objectName: "diagnosticsReloadButton"
+                    icon.width: dialogButtons.glyphSize
+                    icon.height: dialogButtons.glyphSize
                     icon.name: "view-refresh"
                     text: I18n.i18nc("@action:button", "Reload")
                     onClicked: {
@@ -129,6 +132,8 @@ Components.DialogWindow {
                 // and its confirming button say (#373 H38: it was Clear…).
                 Button {
                     objectName: "diagnosticsClearButton"
+                    icon.width: dialogButtons.glyphSize
+                    icon.height: dialogButtons.glyphSize
                     icon.name: "edit-delete"
                     text: I18n.i18nc("@action:button", "Delete Log\u2026")
                     enabled: (root.diagnosticsText || "").length > 0
@@ -146,6 +151,8 @@ Components.DialogWindow {
 
                 Button {
                     objectName: "diagnosticsOpenFolderButton"
+                    icon.width: dialogButtons.glyphSize
+                    icon.height: dialogButtons.glyphSize
                     icon.name: "document-open-folder"
                     text: I18n.i18nc("@action:button", "Open Folder")
                     enabled: (root.uiBridge.diagnosticsLogPath || "").length > 0
@@ -154,6 +161,8 @@ Components.DialogWindow {
 
                 Button {
                     objectName: "diagnosticsCopyAllButton"
+                    icon.width: dialogButtons.glyphSize
+                    icon.height: dialogButtons.glyphSize
                     icon.name: "edit-copy"
                     text: I18n.i18nc("@action:button", "Copy All")
                     onClicked: {
@@ -166,6 +175,8 @@ Components.DialogWindow {
 
                 Button {
                     objectName: "diagnosticsCopyWithoutPathsButton"
+                    icon.width: dialogButtons.glyphSize
+                    icon.height: dialogButtons.glyphSize
                     icon.name: "edit-copy"
                     text: I18n.i18nc("@action:button", "Copy Log Without Paths")
                     enabled: (root.diagnosticsText || "").length > 0
