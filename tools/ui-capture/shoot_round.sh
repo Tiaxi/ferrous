@@ -100,6 +100,12 @@ export SHOT_KWIN=1
 # SHOT_BUILD_TAG: a separate source mirror and build dir ($SHOT_WORK/src$TAG, build$TAG), so a
 # test of the harness never shares a binary with a round someone else is shooting.
 TAG=${SHOT_BUILD_TAG:-}
+# The tag becomes part of two folder names the mirror step deletes inside (rsync --delete), so it may only be a
+# plain suffix: a "/" or ".." would point that deletion outside the work folder.
+if [[ ! "$TAG" =~ ^[A-Za-z0-9_-]*$ ]]; then
+    echo "!!! SHOT_BUILD_TAG must be letters, digits, '-' or '_' (got '$TAG')" >&2
+    exit 2
+fi
 # One run at a time per work folder, whatever its build tag, from the mirror and build through the shooting and
 # packing. Every tag shares the probes (probe/, and their build temporaries), the fixtures, the template DB and
 # the setup app (run/template, run/setup), the GStreamer registries and the bus sockets, so a per-tag lock let
@@ -159,6 +165,11 @@ echo "source: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); pri
 # change list let a sync whose build then failed leave a stale binary that the next run, seeing nothing
 # new to sync, captured anyway (an older binary under a newer source).
 mkdir -p "$CSRC" "$CBUILD"
+# The mirror deletes inside $CSRC, so it must be the work folder's own directory, not a link out of it.
+if [ -L "$CSRC" ] || [ "$(realpath "$CSRC")" != "$(realpath "$WORK")/src$TAG" ]; then
+    echo "!!! $CSRC is not a plain folder inside $WORK; refusing to mirror into it" >&2
+    exit 2
+fi
 rsync -a --delete --exclude .git --exclude /target --exclude '/ui/build*' --exclude /build "$SRC/" "$CSRC/"
 phase sync
 "${WRAP[@]}" bash -c '
