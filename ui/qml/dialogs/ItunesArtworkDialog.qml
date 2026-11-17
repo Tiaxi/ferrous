@@ -53,10 +53,12 @@ Components.DialogWindow {
     // The content's inset from the window's edges.
     readonly property real contentPadding: Kirigami.Units.gridUnit
     // 920 px wide with the default font, and as much wider as a larger font
-    // makes the text, within the screen; as tall as the current art and
-    // five results, which the list shows whole (#373 H9: a fixed 680 px
-    // left a framed empty band under them). The user may resize it.
-    defaultWidth: root.uiPalette.scaledSize(920)
+    // makes the text, up to 1280 px, within the screen: wider left a gulf
+    // between the titles and their actions (#373 H42: 1964 px at 24 pt);
+    // as tall as the current art and five results, which the list shows
+    // whole (#373 H9: a fixed 680 px left a framed empty band under them).
+    // The user may resize it.
+    defaultWidth: Math.min(root.uiPalette.scaledSize(920), 1280)
     defaultHeight: Math.ceil(2 * root.contentPadding + root.rowHeight + root.headingHeight
         + root.shownResultRows * root.rowHeight + 2 + itunesArtworkFooter.implicitHeight)
     // The current art's row whole, and a result under it.
@@ -325,18 +327,24 @@ Components.DialogWindow {
         }
     }
 
-    // The rows' grid, shared by the current art and the results: a 64 px
+    // The rows' grid, shared by the current art and the results: a
     // thumbnail at the search palette's side inset, the text 12 px after
-    // it, and the actions at the end.
+    // it, and the actions at the end. The thumbnail is 64 px, or half as
+    // tall again as the title and its line of details with a larger font
+    // (#373 H42: 64 px under 92 px of text at 24 pt).
     readonly property real sideInset: 16
-    readonly property real thumbnailSize: 64
+    readonly property real thumbnailSize: Math.max(64, Math.round(1.5 * (2 * lineMetrics.implicitHeight + 2)))
     readonly property real rowPadding: 8
     readonly property real textX: root.sideInset + root.thumbnailSize + 12
     // The actions' column: Preview and Apply 8 px apart, and the text at
     // least 16 px clear of them, in the buttons' own sizes. They are flat
     // push buttons, which the style draws in the general font, as the text
     // and Close: it draws a ToolButton's caption in the toolbar font, which
-    // KDE sets apart, so at 24 pt they stayed at 10 pt (#373 H9).
+    // KDE sets apart, so at 24 pt they stayed at 10 pt (#373 H9). Their
+    // glyphs are as large as the captions' font calls for, Kirigami's size
+    // for labels: 16 px with the default font, larger with a larger one
+    // (#373 H42: 16 px beside 24 pt captions).
+    readonly property real actionIconSize: Kirigami.Units.iconSizes.sizeForLabels
     readonly property real actionSpacing: Kirigami.Units.largeSpacing
     readonly property real textActionsGap: 16
     // A row, the current art's or a result's: the thumbnail, or the title
@@ -385,7 +393,7 @@ Components.DialogWindow {
             scaled.toLocaleString(Qt.locale(), "f", unit === 0 || scaled >= 10 ? 0 : 1), units[unit])
     }
 
-    // A row's thumbnail: the image fitted in a 64 px square, or a quiet
+    // A row's thumbnail: the image fitted in the rows' square, or a quiet
     // placeholder without one.
     component ArtworkThumbnail: Item {
         property alias source: thumbnailImage.source
@@ -407,7 +415,7 @@ Components.DialogWindow {
 
         Kirigami.Icon {
             anchors.centerIn: parent
-            width: Kirigami.Units.iconSizes.smallMedium
+            width: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.smallMedium)
             height: width
             visible: !thumbnailImage.visible
             source: "image-missing"
@@ -462,6 +470,8 @@ Components.DialogWindow {
         flat: true
         Kirigami.MnemonicData.enabled: false
         display: AbstractButton.TextBesideIcon
+        icon.width: root.actionIconSize
+        icon.height: root.actionIconSize
         icon.name: "dialog-ok-apply"
         text: I18n.i18nc("@action:button", "Apply")
     }
@@ -539,6 +549,8 @@ Components.DialogWindow {
                 y: Math.round((parent.height - height) / 2)
                 flat: true
                 display: AbstractButton.TextBesideIcon
+                icon.width: root.actionIconSize
+                icon.height: root.actionIconSize
                 icon.name: "view-preview"
                 text: I18n.i18nc("@action:button", "Preview")
                 // Hidden, it takes no click: one more, as it hides, would
@@ -658,6 +670,8 @@ Components.DialogWindow {
                             Kirigami.MnemonicData.enabled: false
                             flat: true
                             display: AbstractButton.TextBesideIcon
+                            icon.width: root.actionIconSize
+                            icon.height: root.actionIconSize
                             icon.name: "view-preview"
                             text: I18n.i18nc("@action:button", "Preview")
                             enabled: !suggestionRow.assetLoading && root.opened
@@ -670,6 +684,8 @@ Components.DialogWindow {
                             Kirigami.MnemonicData.enabled: false
                             flat: true
                             display: AbstractButton.TextBesideIcon
+                            icon.width: root.actionIconSize
+                            icon.height: root.actionIconSize
                             icon.name: "dialog-ok-apply"
                             text: I18n.i18nc("@action:button", "Apply")
                             enabled: !suggestionRow.assetLoading && root.opened

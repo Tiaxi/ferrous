@@ -31,8 +31,10 @@ ToolButton {
             objectName: "textToolButtonIcon"
             visible: root.icon.name.length > 0
             source: root.icon.name
-            Layout.preferredWidth: Kirigami.Units.iconSizes.small
-            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+            // As large as the caption's font calls for: 16 px with the
+            // default font, larger with a larger one (#373 H42).
+            Layout.preferredWidth: Kirigami.Units.iconSizes.sizeForLabels
+            Layout.preferredHeight: Kirigami.Units.iconSizes.sizeForLabels
             Layout.alignment: Qt.AlignVCenter
             Accessible.ignored: true
         }
