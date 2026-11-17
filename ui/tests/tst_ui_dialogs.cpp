@@ -35,6 +35,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <tuple>
 
 #include "../src/AboutComponents.h"
 #include "../src/InputModality.h"
@@ -542,6 +543,8 @@ private slots:
     void editTagsNumberPairsShowMultipleValuesWhole_data();
     void editTagsNumberPairsShowMultipleValuesWhole();
     void editTagsFileColumnsGiveWayBeforeTheTags();
+    void editTagsStatusSaysWhatFailedWhole_data();
+    void editTagsStatusSaysWhatFailedWhole();
     void dialogsPutTheirButtonsInKdesOrder();
     void dialogsPutTheirButtonsOnTheContentInset();
     void dialogButtonGlyphsFollowTheFont_data();
@@ -4580,6 +4583,88 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
                                          {});
     QTRY_COMPARE(columnWidth(QStringLiteral("status")), 120.0);
     QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(describeColumns()));
+    editor.close();
+    QTRY_VERIFY(!tags->isVisible());
+}
+
+void UiDialogsTest::editTagsStatusSaysWhatFailedWhole_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// A row whose save failed says "Not saved" in its Status cell, and one
+// whose rename failed "Not renamed", whole, in the negative colour, with
+// the system's words in its tooltip and for screen readers (they are in
+// Details… too); the column holds them whole at either font and width
+// (#373 H46: the system's text was elided to "failed to …").
+void UiDialogsTest::editTagsStatusSaysWhatFailedWhole() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font(QStringLiteral("Noto Sans"));
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(4); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading());
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *tags = windowOf(dialog);
+    const QStringList paths = editor.loadedPaths();
+    QVERIFY(paths.size() >= 2);
+    const QString saveError = QStringLiteral("failed to create temporary file in /fixture/a/rather/long/folder/"
+                                             "for/the/save: Permission denied (os error 13)");
+    const QString renameError = QStringLiteral("a file of that name is already there");
+    editor.setCell(0, QStringLiteral("genre"), QStringLiteral("Jazz"));
+    editor.m_tableModel.applySaveResults({{paths.at(0), saveError}}, {});
+    editor.m_tableModel.applyRenameResults({}, {{paths.at(1), renameError}});
+    QVERIFY(editor.hasRowErrors());
+    QObject *palette = paletteOf(window);
+    const QString negative = hex(palette->property("negative").value<QColor>());
+    // The Status cell of the row at `index`.
+    const auto statusCell = [&](int index) -> QQuickItem * {
+        for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
+            if (row->property("index").toInt() == index) {
+                return itemsNamed(row, QStringLiteral("tagEditorCell_status")).value(0);
+            }
+        }
+        return nullptr;
+    };
+    for (const QSize size : {QSize(1600, 1000), QSize(1000, 720)}) {
+        tags->resize(size);
+        QTRY_COMPARE(tags->contentItem()->width(), qreal(size.width()));
+        QQuickItem *saved = nullptr;
+        QQuickItem *renamed = nullptr;
+        QTRY_VERIFY((saved = statusCell(0)) != nullptr && (renamed = statusCell(1)) != nullptr
+                    && saved->width() > 0 && !layoutPending(saved));
+        for (const auto &[cell, text, error] : {std::tuple{saved, QStringLiteral("Not saved"), saveError},
+                                                std::tuple{renamed, QStringLiteral("Not renamed"), renameError}}) {
+            const QString at = QStringLiteral("%1 pt, %2 px: %3").arg(pointSize).arg(size.width()).arg(describeItem(cell));
+            QCOMPARE(cell->property("text").toString(), text);
+            QTRY_VERIFY2(!cell->property("truncated").toBool(), qPrintable(at));
+            QCOMPARE(hex(cell->property("color").value<QColor>()), negative);
+            QCOMPARE(cell->property("toolTipText").toString(), error);
+            QCOMPARE(evaluate(cell, QStringLiteral("Accessible.description")).toString(), error);
+        }
+        // A row with no failure says nothing there.
+        QQuickItem *other = statusCell(2);
+        QVERIFY(other != nullptr);
+        QCOMPARE(other->property("text").toString(), QString());
+        QCOMPARE(other->property("toolTipText").toString(), QString());
+    }
+    // With the default font, Status is as wide as it was.
+    if (pointSize <= 10) {
+        tags->resize(2000, tags->height());
+        QTRY_COMPARE(statusCell(0)->width(), 120.0);
+    }
     editor.close();
     QTRY_VERIFY(!tags->isVisible());
 }

@@ -90,6 +90,7 @@ QHash<int, QByteArray> TagEditorTableModel::roleNames() const {
         {ErrorRole, "errorText"},
         {SelectedRole, "selected"},
         {ExtraValuesRole, "extraValues"},
+        {RenameFailedRole, "renameFailed"},
     };
 }
 
@@ -146,6 +147,7 @@ bool TagEditorTableModel::setFieldValue(int row, const QString &field, const QSt
     // follows here rather than by counting every row again.
     if (!item->errorText.isEmpty()) {
         item->errorText.clear();
+        item->renameFailed = false;
         if (--m_errorRowCount == 0) {
             emit rowErrorsChanged();
         }
@@ -271,6 +273,7 @@ void TagEditorTableModel::clearErrors() {
             continue;
         }
         item.errorText.clear();
+        item.renameFailed = false;
         emitRowChanged(row);
     }
     emit rowsChanged();
@@ -295,8 +298,10 @@ void TagEditorTableModel::applySaveResults(
                 item.*field.original = item.*field.value;
             }
             item.errorText.clear();
+            item.renameFailed = false;
         } else if (!error.isEmpty()) {
             item.errorText = error;
+            item.renameFailed = false;
         }
         const bool dirtyChanged = refreshDirtyState(item);
         if (success || !error.isEmpty() || dirtyChanged) {
@@ -323,8 +328,10 @@ void TagEditorTableModel::applyRenameResults(
             item.fileName = info.fileName();
             item.directory = info.dir().absolutePath();
             item.errorText.clear();
+            item.renameFailed = false;
         } else if (errorsByPath.contains(item.path)) {
             item.errorText = errorsByPath.value(item.path);
+            item.renameFailed = true;
         } else {
             continue;
         }
@@ -370,6 +377,8 @@ QVariant TagEditorTableModel::fieldData(const TagEditorRowState &row, int role) 
         return row.dirty;
     case ErrorRole:
         return row.errorText;
+    case RenameFailedRole:
+        return row.renameFailed;
     case SelectedRole:
         return row.selected;
     case ExtraValuesRole: {

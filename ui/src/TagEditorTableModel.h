@@ -39,6 +39,8 @@ struct TagEditorRowState {
     bool dirty{false};
     bool selected{false};
     QString errorText;
+    // Whether `errorText` is why a rename failed, rather than a save.
+    bool renameFailed{false};
     // The values after the first of fields that hold several, by field name.
     // Saving a changed field replaces them all with its one value.
     QHash<QString, QStringList> extraValues;
@@ -68,6 +70,7 @@ public:
         ErrorRole,
         SelectedRole,
         ExtraValuesRole,
+        RenameFailedRole,
     };
 
     explicit TagEditorTableModel(QObject *parent = nullptr);

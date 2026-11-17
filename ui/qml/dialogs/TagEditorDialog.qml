@@ -39,6 +39,11 @@ Components.DialogWindow {
     // The status of a row with unsaved edits: its mark's tooltip and
     // description, and its Status cell while that column shows.
     readonly property string modifiedText: I18n.i18nc("@item tag editor row status", "Modified")
+    // The Status cell of a row whose save or rename failed: why is in its
+    // tooltip and in Details… (#373 H46: the system's own words, elided to
+    // "failed to …").
+    readonly property string notSavedText: I18n.i18nc("@item tag editor row status: saving the file's tags failed", "Not saved")
+    readonly property string notRenamedText: I18n.i18nc("@item tag editor row status: renaming the file failed", "Not renamed")
     // Shown in a field whose rows hold different values, which saving keeps.
     readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "Multiple values")
     // The same, in a number field too narrow for it, as Track and Disc's
@@ -96,7 +101,7 @@ Components.DialogWindow {
         { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, stretch: true, path: true },
         { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 56, sample: "FLAC" },
         { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, stretch: true, path: true },
-        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, sample: root.modifiedText, onlyWithStatus: true }
+        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, samples: [root.modifiedText, root.notSavedText, root.notRenamedText], onlyWithStatus: true }
     ]
     // Whether a row has a status to read: a save or rename that failed for
     // it.
@@ -122,7 +127,10 @@ Components.DialogWindow {
         columnValueMetrics.font
         const header = columnHeaderMetrics.advanceWidth(column.label)
             + (root.fieldAt(column.key) !== null && root.columnMarked(column.key) ? root.columnRevertRoom : 0)
-        const value = column.sample ? columnValueMetrics.advanceWidth(column.sample) : 0
+        const samples = column.samples || (column.sample ? [column.sample] : [])
+        const value = samples.reduce(function(widest, sample) {
+            return Math.max(widest, columnValueMetrics.advanceWidth(sample))
+        }, 0)
         return Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing
     }
     // Each column's width with room enough, or none for Status while no
@@ -649,7 +657,10 @@ Components.DialogWindow {
             return extra && extra.length > 0 ? [value].concat(extra).join("; ") : value
         }
         case "status":
-            return row.errorText.length > 0 ? row.errorText : (row.dirty ? root.modifiedText : "")
+            if (row.errorText.length > 0) {
+                return row.renameFailed ? root.notRenamedText : root.notSavedText
+            }
+            return row.dirty ? root.modifiedText : ""
         case "trackNo":
         case "discNo":
             // As the queue shows a number: "1", whatever the tag pads it to.
@@ -1335,6 +1346,7 @@ Components.DialogWindow {
                     required property bool dirty
                     required property bool selected
                     required property string errorText
+                    required property bool renameFailed
                     required property var extraValues
                     readonly property bool current: ListView.isCurrentItem && tagEditorTable.activeFocus
                     // Unsaved edits, typed text included.
@@ -1393,7 +1405,7 @@ Components.DialogWindow {
                                 rightPadding: Kirigami.Units.largeSpacing
                                 text: root.cellText(modelData.key, tableRow)
                                 font.features: modelData.number ? root.uiPalette.tabularFigures : ({})
-                                color: modelData.key === "status" && tableRow.errorText.length > 0
+                                color: tableCell.failureCell
                                     ? root.uiPalette.negative
                                     : (modelData.number
                                         ? root.uiPalette.textTertiaryOn(tableRow.selected, rowHover.hovered)
@@ -1407,10 +1419,15 @@ Components.DialogWindow {
                                 // tooltip while it is cut short.
                                 elide: Text.ElideRight
                                 // The # cell of a row with unsaved edits
-                                // says what its mark means.
+                                // says what its mark means, and the Status
+                                // cell of a row that failed, why.
+                                readonly property bool failureCell: modelData.key === "status"
+                                    && tableRow.errorText.length > 0
                                 readonly property string toolTipText: modelData.path && tableCell.truncated
                                     ? (modelData.key === "directory" ? tableRow.directory : tableCell.text)
-                                    : (modelData.key === "trackNo" && tableRow.marked ? root.modifiedText : "")
+                                    : (tableCell.failureCell ? tableRow.errorText
+                                        : (modelData.key === "trackNo" && tableRow.marked ? root.modifiedText : ""))
+                                Accessible.description: tableCell.failureCell ? tableRow.errorText : ""
 
                                 HoverHandler {
                                     id: cellHover

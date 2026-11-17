@@ -247,6 +247,7 @@ private slots:
     void tagEditorKeepsExtraValuesUntilTheirFieldIsSaved();
     void tagEditorSelectionIsAModelRole();
     void tagEditorTellsWhetherARowHasAnError();
+    void tagEditorTellsWhetherARowsRenameFailed();
     void tagEditorEditsOfManyRowsAnnounceOnce();
     void tagEditorTellsMixedValuesApartFromText();
     void tagEditorRenameKeepsRowsInPlace();
@@ -1402,6 +1403,43 @@ void BridgeClientTest::tagEditorTellsWhetherARowHasAnError() {
     editor.close();
     QVERIFY(!editor.hasRowErrors());
     QCOMPARE(changes.size(), 6);
+}
+
+// A row's error says whether a rename or a save failed, for its Status
+// cell: "Not renamed" or "Not saved" (#373 H46).
+void BridgeClientTest::tagEditorTellsWhetherARowsRenameFailed() {
+    TagEditorController editor(nullptr);
+    QVERIFY(loadTagEditorRows(editor, tagEditorRows(3, 3)));
+    TagEditorTableModel &model = editor.m_tableModel;
+    const QString first = model.rowAt(0)->path;
+    const QString second = model.rowAt(1)->path;
+    const auto renameFailed = [&model](int row) {
+        return model.data(model.index(row), TagEditorTableModel::RenameFailedRole).toBool();
+    };
+    const auto error = [&model](int row) {
+        return model.data(model.index(row), TagEditorTableModel::ErrorRole).toString();
+    };
+    QVERIFY(model.roleNames().values().contains("renameFailed"));
+    QVERIFY(!renameFailed(0) && !renameFailed(1));
+
+    model.applyRenameResults({}, {{first, QStringLiteral("exists")}});
+    QCOMPARE(error(0), QStringLiteral("exists"));
+    QVERIFY(renameFailed(0));
+    // A save that fails after it: the save's error.
+    model.applySaveResults({{first, QStringLiteral("refused")}, {second, QStringLiteral("refused")}}, {});
+    QCOMPARE(error(0), QStringLiteral("refused"));
+    QVERIFY(!renameFailed(0));
+    QVERIFY(!renameFailed(1));
+    // A rename that fails after it: the rename's.
+    model.applyRenameResults({}, {{second, QStringLiteral("exists")}});
+    QVERIFY(renameFailed(1));
+    // An edit clears it, as it clears the error; so does a clean slate.
+    editor.setCell(1, QStringLiteral("title"), QStringLiteral("Edited"));
+    QCOMPARE(error(1), QString());
+    QVERIFY(!renameFailed(1));
+    model.applyRenameResults({}, {{first, QStringLiteral("exists")}});
+    model.clearErrors();
+    QVERIFY(!renameFailed(0));
 }
 
 void BridgeClientTest::tagEditorSelectionIsAModelRole() {
