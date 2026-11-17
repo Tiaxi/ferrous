@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- The status bar's Last.fm glyph (#373 H8, H11), the first of a family of three with
+<!-- The status bar's Last.fm glyph, the first of a family of three with
      lastfm-paused.svg and status-offline.svg: outlines drawn for 16 px, with every straight edge on
      a whole pixel there and the corners as arcs, so that it is sharp at 1x and smooth at 2x and at
      a larger font (H8's was a grid of squares, which stayed a staircase at any size). A lowercase

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- The transport's volume glyph (#373 H8), drawn for 16 px at 1x on whole pixels at the weight of
+<!-- The transport's volume glyph, drawn for 16 px at 1x on whole pixels at the weight of
      the transport's glyphs beside it (Breeze's speaker, with 1 px waves, read lighter than Next): a
      solid speaker in columns 1 to 7 and rows 2 to 13, as tall as Next, and two 2 px waves, with a
      clear pixel between each part, corners included. A one-colour mask, drawn in the text colour. -->

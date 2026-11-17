@@ -3,7 +3,7 @@
 <!-- Ferrous's mark for 16 px at 1x, the now-playing panel's "Nothing playing" glyph: the
      now-playing stand-in's traces (AlbumArtTile), a glide and its 2nd and 3rd harmonics, each
      starting on its own in one column at the left, 3 px apart, 1.5 px clear, as the stand-in's do
-     (a common start read as an angle sign at 16 px, #373 H23), and rising 1 : 2 : 3, 2, 4 and 6 px,
+     (a common start read as an angle sign at 16 px), and rising 1 : 2 : 3, 2, 4 and 6 px,
      most of it in their first half, bending over as a glide does, so they fan apart to 5 px at the
      right, where they run out to the square's edge. Round caps; the glide, the lowest, a 1.75 px
      stroke over the harmonics' 1.5, in the app icon's weight order. A one-colour mask, drawn in the
