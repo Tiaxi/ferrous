@@ -3,12 +3,14 @@
 #include "FlacFixture.h"
 #include "QmlSmokeTest.h"
 
+#include <QAccessible>
 #include <QJSValue>
 #include <QQuickTextDocument>
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTextLayout>
 
+#include <algorithm>
 #include <functional>
 
 // The tag editor, renaming, and quitting with tag edits.
@@ -59,6 +61,8 @@ private slots:
     void renamePreviewOpensAsTallAsItsList();
     void renamePreviewOpensAsWideAsItsLines_data();
     void renamePreviewOpensAsWideAsItsLines();
+    void renamePreviewShowsTheNewNamesInAColumn_data();
+    void renamePreviewShowsTheNewNamesInAColumn();
 };
 
 namespace {
@@ -1922,7 +1926,8 @@ void TagEditorSmokeTest::renamePreviewOpensAsWideAsItsLines_data() {
 }
 
 // Rename Files opens as wide as its widest line: a file's line, with the
-// list's gutter, a sentence of the summary, or the buttons, within its
+// list's gutter, a renamed file's old name, arrow and new name in their
+// columns, a sentence of the summary, or the buttons, within its
 // minimum and 42 grid units scaled with the font, where longer lines elide
 // in their middle; each time it opens, so long names widen it and short
 // ones bring it back (#373 H45: a fixed 756 px held 390 px of lines at
@@ -1989,19 +1994,38 @@ void TagEditorSmokeTest::renamePreviewOpensAsWideAsItsLines() {
         auto *footer = qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(previewDialog->property("footer")));
         QVERIFY(list != nullptr && summary != nullptr && footer != nullptr);
         QTRY_COMPARE(list->property("count").toInt(), kFiles);
-        QTRY_VERIFY(!visibleItemsNamed(list, QStringLiteral("renamePreviewRowName")).isEmpty());
-        // Its widest line, measured as the labels draw them.
+        QTRY_VERIFY(!visibleItemsNamed(list, QStringLiteral("renamePreviewNewName")).isEmpty());
+        // Its widest line, measured as the labels draw them: a renamed
+        // file's widest old name, the arrow's column and its widest new
+        // name, which start at one x in every row (#373 H46), or the line
+        // of the file that can't be renamed.
         const QFontMetricsF rowMetrics(qvariant_cast<QFont>(
-            visibleItemsNamed(list, QStringLiteral("renamePreviewRowName")).first()->property("font")));
+            visibleItemsNamed(list, QStringLiteral("renamePreviewNewName")).first()->property("font")));
         const QVariantList rows = previewDialog->property("rows").toList();
         QCOMPARE(rows.size(), kFiles);
+        const qreal arrowColumn = previewDialog->property("arrowColumnWidth").toReal();
+        // The arrow has 8 px on either side with the default font, scaled
+        // with a larger one.
+        QCOMPARE(arrowColumn, std::ceil(rowMetrics.horizontalAdvance(previewDialog->property("arrowText").toString()))
+                                  + 2 * std::max(qreal(8), qreal(std::round(8 * fontScale))));
+        qreal widestOldName = 0;
+        qreal widestNewName = 0;
         qreal widest = 0;
         for (const QVariant &row : rows) {
+            const QVariantMap fields = row.toMap();
+            if (fields.value(QStringLiteral("ok")).toBool()) {
+                widestOldName = std::max(widestOldName,
+                                         rowMetrics.horizontalAdvance(fields.value(QStringLiteral("oldName")).toString()));
+                widestNewName = std::max(widestNewName,
+                                         rowMetrics.horizontalAdvance(fields.value(QStringLiteral("newName")).toString()));
+                continue;
+            }
             QVariant text;
             QVERIFY(QMetaObject::invokeMethod(previewDialog, "rowText", Q_RETURN_ARG(QVariant, text),
                                               Q_ARG(QVariant, row)));
-            widest = std::max(widest, rowMetrics.horizontalAdvance(text.toString()) + gutter);
+            widest = std::max(widest, std::ceil(rowMetrics.horizontalAdvance(text.toString())) + gutter);
         }
+        widest = std::max(widest, std::ceil(widestOldName) + arrowColumn + std::ceil(widestNewName) + gutter);
         QVariant sentences;
         QVERIFY(QMetaObject::invokeMethod(previewDialog, "summarySentences", Q_RETURN_ARG(QVariant, sentences)));
         const QFontMetricsF summaryMetrics(qvariant_cast<QFont>(summary->property("font")));
@@ -2028,7 +2052,10 @@ void TagEditorSmokeTest::renamePreviewOpensAsWideAsItsLines() {
             QVERIFY2(fitted < limit, qPrintable(where));
             QVERIFY2(previewWindow->width() <= std::max(previewWindow->minimumWidth(), qCeil(fitted)),
                      qPrintable(where));
-            for (QQuickItem *name : visibleItemsNamed(list, QStringLiteral("renamePreviewRowName"))) {
+            QList<QQuickItem *> names = visibleItemsNamed(list, QStringLiteral("renamePreviewRowName"));
+            names += visibleItemsNamed(list, QStringLiteral("renamePreviewOldName"));
+            names += visibleItemsNamed(list, QStringLiteral("renamePreviewNewName"));
+            for (QQuickItem *name : std::as_const(names)) {
                 QTRY_VERIFY2(!name->property("truncated").toBool(),
                          qPrintable(where + QStringLiteral(": ") + name->property("text").toString()));
             }
@@ -2036,6 +2063,166 @@ void TagEditorSmokeTest::renamePreviewOpensAsWideAsItsLines() {
                 QCOMPARE(previewWindow->width(), shortWidth);
             }
             shortWidth = previewWindow->width();
+        }
+        QVERIFY(clickVisibleButton(previewWindow, QStringLiteral("renamePreviewCancelButton")));
+        QTRY_VERIFY(!previewDialog->property("visible").toBool());
+    }
+}
+
+void TagEditorSmokeTest::renamePreviewShowsTheNewNamesInAColumn_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Rename Files shows a renamed file as columns: its old name and the arrow
+// muted, and its new name, which starts at one x in every row; a file that
+// keeps its name, or can't be renamed, is one line across the list. Screen
+// readers still read a renamed file's row as one line. Where the window
+// can't hold the names, the old names give way first, down to 40 % of the
+// list, and the new names keep their one x (#373 H46: the arrows stood at
+// seven places over 105 px, and the new names had no column).
+void TagEditorSmokeTest::renamePreviewShowsTheNewNamesInAColumn() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font(QStringLiteral("Noto Sans"));
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    constexpr int kFiles = 8;
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(kFiles, false));
+    const QByteArray loadResponse = tagEditorLoadResponse(kFiles);
+    // Old names of several lengths; every third file keeps its name, and
+    // the last can't be renamed.
+    const auto previewOf = [](bool longNames) {
+        const QStringList oldNames{QStringLiteral("track01.flac"), QStringLiteral("02 A Song.flac"),
+                                   QStringLiteral("03.flac"), QStringLiteral("04 - Fourth Song Here.flac"),
+                                   QStringLiteral("05 Fifth.flac"), QStringLiteral("06 - Kept.flac"),
+                                   QStringLiteral("x7.flac"), QStringLiteral("08 Last.flac")};
+        QJsonArray results;
+        for (int i = 0; i < kFiles; ++i) {
+            const QString directory = QStringLiteral("/fixture/Album");
+            const QString oldName = longNames
+                ? QStringLiteral("%1 An Old File Name Long Enough to Need Its Room in Any Window.flac").arg(i + 1)
+                : oldNames.at(i);
+            const bool kept = i % 3 == 2;
+            const QString newName = kept ? oldName
+                : longNames ? QStringLiteral("%1 - A New File Name Long Enough to Need Its Room in Any Window, "
+                                             "Remastered.flac").arg(i + 1, 2, 10, QLatin1Char('0'))
+                            : QStringLiteral("%1 - Song %2.flac").arg(i + 1, 2, 10, QLatin1Char('0')).arg(i + 1);
+            QJsonObject result{{QStringLiteral("path"), directory + QLatin1Char('/') + oldName},
+                               {QStringLiteral("newPath"), directory + QLatin1Char('/') + newName},
+                               {QStringLiteral("ok"), i < kFiles - 1}};
+            if (i == kFiles - 1) {
+                result.insert(QStringLiteral("error"), QStringLiteral("a file of that name is already there"));
+            }
+            results.push_back(result);
+        }
+        return QJsonDocument(QJsonObject{{QStringLiteral("results"), results},
+                                         {QStringLiteral("successfulPaths"), QJsonArray()}})
+            .toJson(QJsonDocument::Compact);
+    };
+    bool longNames = false;
+    fixture.editor.m_executeOperation = [&](TagEditorController::Operation operation, const QByteArray &,
+                                            const TagEditorController::RenameGate &) {
+        return operation == TagEditorController::Operation::PreviewRename ? previewOf(longNames) : loadResponse;
+    };
+    fixture.editor.selectAllRows();
+    QObject *previewDialog = fixture.window->findChild<QObject *>(QStringLiteral("renamePreviewDialog"));
+    QVERIFY(previewDialog != nullptr);
+    QObject *palette = qvariant_cast<QObject *>(previewDialog->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    const QRgb text = palette->property("text").value<QColor>().rgba();
+    const QRgb secondary = palette->property("textSecondary").value<QColor>().rgba();
+    const QRgb negative = palette->property("negative").value<QColor>().rgba();
+    const qreal gutter = previewDialog->property("listGutter").toReal();
+    const QString arrow = previewDialog->property("arrowText").toString();
+
+    for (const bool longOpening : {false, true}) {
+        longNames = longOpening;
+        const QString at = QStringLiteral("%1 pt, %2").arg(pointSize)
+            .arg(longNames ? QStringLiteral("long names") : QStringLiteral("short names"));
+        QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorRenameButton")));
+        QTRY_VERIFY(previewDialog->property("opened").toBool());
+        QQuickWindow *previewWindow = dialogWindowOf(previewDialog);
+        QVERIFY(QTest::qWaitForWindowExposed(previewWindow));
+        QQuickItem *list = visibleItemNamed(previewWindow, QStringLiteral("renamePreviewList"));
+        QVERIFY(list != nullptr);
+        QTRY_COMPARE(list->property("count").toInt(), kFiles);
+        const qreal line = list->width() - gutter;
+        // Five renamed, two kept and one refused rows, all in view.
+        QTRY_COMPARE(visibleItemsNamed(list, QStringLiteral("renamePreviewRenamedRow")).size(), 5);
+        const QList<QQuickItem *> renamedRows = visibleItemsNamed(list, QStringLiteral("renamePreviewRenamedRow"));
+        const QList<QQuickItem *> lines = visibleItemsNamed(list, QStringLiteral("renamePreviewRowName"));
+        QCOMPARE(lines.size(), 3);
+        const QList<QQuickItem *> newNames = visibleItemsNamed(list, QStringLiteral("renamePreviewNewName"));
+        const QList<QQuickItem *> oldNames = visibleItemsNamed(list, QStringLiteral("renamePreviewOldName"));
+        const QList<QQuickItem *> arrows = visibleItemsNamed(list, QStringLiteral("renamePreviewArrow"));
+        QCOMPARE(newNames.size(), 5);
+        QCOMPARE(oldNames.size(), 5);
+        QCOMPARE(arrows.size(), 5);
+        const qreal newNameX = newNames.first()->mapToItem(list, QPointF()).x();
+        for (QQuickItem *name : newNames) {
+            QCOMPARE(name->mapToItem(list, QPointF()).x(), newNameX);
+            QCOMPARE(name->property("color").value<QColor>().rgba(), text);
+            QCOMPARE(name->property("elide").toInt(), int(Qt::ElideMiddle));
+        }
+        for (QQuickItem *name : oldNames) {
+            QCOMPARE(name->mapToItem(list, QPointF()).x(), 0.0);
+            QCOMPARE(name->property("color").value<QColor>().rgba(), secondary);
+            QCOMPARE(name->property("elide").toInt(), int(Qt::ElideMiddle));
+        }
+        for (QQuickItem *glyph : arrows) {
+            QCOMPARE(glyph->property("text").toString(), arrow);
+            QCOMPARE(glyph->property("color").value<QColor>().rgba(), secondary);
+            QVERIFY(glyph->mapToItem(list, QPointF(glyph->width(), 0)).x() <= newNameX);
+        }
+        // Kept and refused files: one line across the list.
+        int kept = 0;
+        for (QQuickItem *row : lines) {
+            QCOMPARE(row->width(), line);
+            const QRgb color = row->property("color").value<QColor>().rgba();
+            QVERIFY2(color == secondary || color == negative, qPrintable(at));
+            kept += color == secondary ? 1 : 0;
+        }
+        QCOMPARE(kept, 2);
+        // A screen reader reads a renamed row as the line it was.
+        const QVariantList rows = previewDialog->property("rows").toList();
+        QStringList renamedTexts;
+        for (const QVariant &row : rows) {
+            const QVariantMap fields = row.toMap();
+            if (fields.value(QStringLiteral("ok")).toBool() && !fields.value(QStringLiteral("unchanged")).toBool()) {
+                QVariant rowText;
+                QVERIFY(QMetaObject::invokeMethod(previewDialog, "rowText", Q_RETURN_ARG(QVariant, rowText),
+                                                  Q_ARG(QVariant, row)));
+                renamedTexts.push_back(rowText.toString());
+            }
+        }
+        QStringList readTexts;
+        for (QQuickItem *row : renamedRows) {
+            QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(row);
+            QVERIFY(accessible != nullptr);
+            readTexts.push_back(accessible->text(QAccessible::Name));
+        }
+        std::sort(renamedTexts.begin(), renamedTexts.end());
+        std::sort(readTexts.begin(), readTexts.end());
+        QCOMPARE(readTexts, renamedTexts);
+        QVERIFY(renamedTexts.first().contains(arrow));
+
+        const qreal oldColumn = previewDialog->property("oldNameColumnWidth").toReal();
+        if (!longNames) {
+            // The window holds every name whole.
+            for (QQuickItem *name : oldNames + newNames + lines) {
+                QTRY_VERIFY2(!name->property("truncated").toBool(),
+                             qPrintable(at + QStringLiteral(": ") + name->property("text").toString()));
+            }
+        } else {
+            // The old names give way to the new ones, down to 40 % of the
+            // list: both elide in their middle.
+            QVERIFY2(oldColumn >= std::floor(0.4 * line), qPrintable(at));
+            QVERIFY2(oldColumn < 0.5 * line, qPrintable(at));
+            QTRY_VERIFY2(oldNames.first()->property("truncated").toBool(), qPrintable(at));
         }
         QVERIFY(clickVisibleButton(previewWindow, QStringLiteral("renamePreviewCancelButton")));
         QTRY_VERIFY(!previewDialog->property("visible").toBool());
