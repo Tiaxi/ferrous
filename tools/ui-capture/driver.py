@@ -2,7 +2,9 @@
 """Drives a Ferrous build offscreen with shotprobe.so for screenshots.
 
 Isolation: own HOME/XDG_* dirs, XDG_RUNTIME_DIR and TMPDIR under <work>/run/<name>,
-a private session bus (dbus-run-session), no display variables, fakeaudiosink.
+a private session bus (dbus-run-session), no display variables, fakeaudiosink. The app falls back to
+autoaudiosink (a real device) when it cannot create the sink it is given, so no app starts unless
+fakeaudiosink can be created (require_fake_sink).
 
 Environment:
   SHOT_APP   the ferrous binary to run (required)
@@ -59,6 +61,32 @@ follow_current_track=1
 """
 
 
+_FAKE_SINK_OK = False
+
+
+def require_fake_sink():
+    """Raises unless GStreamer can create and run fakeaudiosink, the sink every app is given. The app falls back
+    to autoaudiosink, a real audio device, when its sink cannot be created, so a missing plugin would play the
+    fixtures aloud: fail closed instead. Checked once per process, with a GStreamer registry in the work folder
+    (never the user's cache)."""
+    global _FAKE_SINK_OK
+    if _FAKE_SINK_OK:
+        return
+    os.makedirs(os.path.join(WORK, "run"), exist_ok=True)
+    env = dict(os.environ, GST_REGISTRY=os.path.join(WORK, "run", "gst-registry-sinkcheck.bin"))
+    try:
+        r = subprocess.run(["gst-launch-1.0", "-q", "audiotestsrc", "num-buffers=1", "!", "fakeaudiosink"],
+                           env=env, capture_output=True, text=True, timeout=60)
+        ok, why = r.returncode == 0, (r.stderr or r.stdout).strip()[-300:]
+    except (OSError, subprocess.TimeoutExpired) as e:
+        ok, why = False, str(e)
+    if not ok:
+        raise RuntimeError("GStreamer cannot create fakeaudiosink, and the app would fall back to a real audio "
+                           "device: install gstreamer1-plugins-bad-free (Fedora) and gst-launch-1.0 (gstreamer1). "
+                           + why)
+    _FAKE_SINK_OK = True
+
+
 def kdeglobals(scheme, pt=10, anim_off=False):
     src = f"/usr/share/color-schemes/{scheme}.colors"
     text = open(src, encoding="utf-8").read()
@@ -73,6 +101,7 @@ def kdeglobals(scheme, pt=10, anim_off=False):
 class App:
     def __init__(self, name, scheme="BreezeLight", scale=1, size=(1600, 1000), fresh=True,
                  db_from=None, extra_env=None, font_pt=10, settings_extra="", anim_off=False, app_defaults=False):
+        require_fake_sink()  # before anything starts: never an app that could play aloud
         self.name = name
         self.iso = os.path.join(WORK, "run", name)
         if fresh and os.path.isdir(self.iso):

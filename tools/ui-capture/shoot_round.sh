@@ -105,6 +105,15 @@ TAG=${SHOT_BUILD_TAG:-}
 # timing measurements: a second capture at the same time would skew them). A second command waits here, in the
 # order started, and needs no build once the first has built the same source.
 mkdir -p "$WORK"
+# Every app gets fakeaudiosink; the app falls back to autoaudiosink (a real device) when it cannot create it. So
+# no capture starts unless GStreamer can create and run it (driver.py checks again before each app it starts).
+mkdir -p "$WORK/run"
+if ! GST_REGISTRY="$WORK/run/gst-registry-sinkcheck.bin" \
+        gst-launch-1.0 -q audiotestsrc num-buffers=1 ! fakeaudiosink >/dev/null 2>&1; then
+    echo "!!! GStreamer cannot create fakeaudiosink, so the app would play to a real audio device: install" \
+        "gstreamer1-plugins-bad-free (Fedora) and gst-launch-1.0 (gstreamer1)" >&2
+    exit 2
+fi
 exec 9>"$WORK/.run$TAG.lock"
 if ! flock -n 9; then
     echo "another shoot_round holds the run lock ($(cat "$WORK/.run$TAG.holder" 2>/dev/null || echo '?')): waiting"

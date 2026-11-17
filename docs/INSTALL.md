@@ -56,13 +56,15 @@ The [UI capture harness](../tools/ui-capture/README.md), which takes and measure
 - KWin (`kwin_wayland`, run nested and headless), `dbus-run-session`, the KDE platform theme, the Breeze colour schemes, and Noto Sans
 - `unshare` (with unprivileged user namespaces), `flock`, `rsync`, `bc`, and `nm`
 - The KF6 IconThemes library, which one of its probes links
+- GStreamer's `fakeaudiosink` (bad-free plugins) and `gst-launch-1.0`: the harness plays every track to that sink and refuses to start without it, since the app would otherwise fall back to a real audio device
 
 On Fedora:
 
 ```bash
 sudo dnf install python3-pillow python3-numpy python3-mutagen python3-dbus \
   ImageMagick ffmpeg-free kwin plasma-integration plasma-breeze-common \
-  google-noto-sans-fonts kf6-kiconthemes rsync bc binutils util-linux-core
+  google-noto-sans-fonts kf6-kiconthemes rsync bc binutils util-linux-core \
+  gstreamer1 gstreamer1-plugins-bad-free
 ```
 
 With RPM Fusion's `ffmpeg` installed, leave out `ffmpeg-free`; either has the encoders.

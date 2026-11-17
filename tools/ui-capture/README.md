@@ -18,7 +18,8 @@ On Fedora, besides the [build dependencies](../../docs/INSTALL.md#build-dependen
 ```bash
 sudo dnf install python3-pillow python3-numpy python3-mutagen python3-dbus \
   ImageMagick ffmpeg-free kwin plasma-integration plasma-breeze-common \
-  google-noto-sans-fonts kf6-kiconthemes rsync bc binutils util-linux-core
+  google-noto-sans-fonts kf6-kiconthemes rsync bc binutils util-linux-core \
+  gstreamer1 gstreamer1-plugins-bad-free
 ```
 
 With RPM Fusion's `ffmpeg` installed, leave out `ffmpeg-free`; either has the encoders.
@@ -28,6 +29,9 @@ With RPM Fusion's `ffmpeg` installed, leave out `ffmpeg-free`; either has the en
 - ImageMagick (`magick`) and ffmpeg with the FLAC, MP3 (`libmp3lame`) and Opus encoders, for the fixtures.
 - `kwin_wayland`, `dbus-run-session`, `busctl`; the KDE platform theme (`plasma-integration`), the Breeze colour
   schemes and icons, and Noto Sans, so the app looks as it does on Plasma.
+- GStreamer's `fakeaudiosink` (`gstreamer1-plugins-bad-free`) and `gst-launch-1.0` (`gstreamer1`). Every app
+  plays to `fakeaudiosink`; the app falls back to a real audio device when it cannot create its sink, so
+  `shoot_round.sh` and `driver.py` refuse to start any app unless `gst-launch-1.0` can create and run it.
 - `unshare` (user and mount namespaces, for the neutral paths below), `flock`, `rsync`, `bc`, `nm`.
 - `g++`, `pkg-config` and the Qt 6 development files for the two probes, and the KF6 IconThemes library, which
   `iconprobe` links.
