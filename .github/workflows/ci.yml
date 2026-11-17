@@ -290,8 +290,7 @@ jobs:
 
       # After the build, whatever the tests then say: the objects are as good.
       - name: Save C++ objects
-        # TEMPORARY: also from this pull request, to measure a warm build.
-        if: true
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@v6
         with:
           path: ~/.cache/ccache
@@ -306,13 +305,11 @@ jobs:
             echo "XDG_CACHE_HOME=$RUNNER_TEMP/xdg/cache"
           } >> "$GITHUB_ENV"
 
-      # Two at a time, half the runner's CPUs, as scripts/run-tests.sh
-      # chooses; each test program has directories of its own.
+      # As many at a time as the runner has CPUs; each test program has
+      # directories of its own. scripts/run-tests.sh takes half the CPUs, to
+      # leave room for other work on a desktop; a runner has none.
       - name: Run UI smoke tests
-        # TEMPORARY, for measuring: every CPU, each test five times.
-        run: |
-          echo "CPUs: $(nproc)"; grep -E 'MemTotal|MemAvailable' /proc/meminfo
-          ctest --test-dir ui/build --output-on-failure --parallel "$(nproc)" --repeat until-fail:5
+        run: ctest --test-dir ui/build --output-on-failure --parallel "$(nproc)"
 
       - name: Compare native waveform and spectrogram rendering and texture reuse
         run: |
