@@ -800,9 +800,12 @@ Item {
                 // the path across the column's whole width, with Copy Path
                 // at its end (#373 H12: in the grid, the path had the
                 // values' part of the row and broke onto a second line). A
-                // long path wraps after a slash, on up to three lines, and
-                // what does not fit is elided (#373 H38: on one line, it
-                // was cut to its start and its last folder's end).
+                // long path wraps after a slash, on the lines it needs up to
+                // eight, and what does not fit is elided (#373 H38: on one
+                // line, it was cut to its start and its last folder's end;
+                // H41: on three, a large font cut a typical path short over
+                // an empty column). During a preview, under the candidate's
+                // label and Apply, it takes up to three.
                 ColumnLayout {
                     id: folderRow
                     objectName: "albumArtFolderRow"
@@ -867,7 +870,7 @@ Item {
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                             elide: Text.ElideRight
-                            maximumLineCount: 3
+                            maximumLineCount: root.previewActive ? 3 : 8
                             font.pointSize: root.infoPointSize
                             color: root.plot.plotText
                             Accessible.name: folderPathLabel.path

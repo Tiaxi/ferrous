@@ -41,6 +41,7 @@ private slots:
     void itunesArtworkListIsAsTallAsItsRows();
     void albumArtDetailsLieOverTheArt();
     void albumArtDetailsLabelsStayWholeWithLargerFonts();
+    void albumArtFolderPathTakesTheLinesItNeedsAtLargeFonts();
     void albumArtDetailsAreOnTheTypeScale_data();
     void albumArtDetailsAreOnTheTypeScale();
     void albumArtViewerShowsWhenItsImageCannotBeRead();
@@ -775,8 +776,9 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QCOMPARE(boxOf(folderRow).top() - boxOf(rows.last()).top(), rhythm);
     // The path from the column's start, not the values', to Copy Path at the
     // row's end, on the path's first line; a long one wraps after its slashes, on
-    // up to three lines, and what does not fit is elided (#373 H38: on one
-    // line, elided in its middle, a typical one lost its folders).
+    // the lines it needs up to eight, three during a preview, and what does
+    // not fit is elided (#373 H38: on one line, elided in its middle, a
+    // typical one lost its folders; H41: on three, a large font cut it short).
     QCOMPARE(boxOf(path).left(), boxOf(folderRow).left());
     QVERIFY(boxOf(path).left() < boxOf(sourceValue).left());
     QCOMPARE(boxOf(copy).right(), boxOf(folderRow).right());
@@ -801,8 +803,9 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
         QStringLiteral("/\u200bThe\u00a0Quiet\u00a0Meridian/\u200bSmall Hours (Remastered Deluxe")));
     QCOMPARE(path->property("wrapMode").toInt(), int(QTextOption::WrapAtWordBoundaryOrAnywhere));
     QCOMPARE(path->property("elide").toInt(), int(Qt::ElideRight));
-    QCOMPARE(path->property("maximumLineCount").toInt(), 3);
+    QCOMPARE(path->property("maximumLineCount").toInt(), 8);
     QTRY_COMPARE(path->property("lineCount").toInt(), 3);
+    QVERIFY(!path->property("elided").toBool());
     // Copy Path's glyph is centred on the path's first line, not on its
     // three lines' middle (#373 H38), the button clear of the folder's
     // label's text; over the whole screen, the button and its glyph are a
@@ -831,6 +834,8 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     checkCopyOnTheFirstLine(29, 19, QStringLiteral("over the whole screen"));
     surface->setProperty("fullscreen", false);
     QTRY_COMPARE(boxOf(copy).width(), 24.0);
+    // Once the details are laid out again at their width in a window.
+    QTRY_COMPARE(boxOf(folderRow).width(), column->width() - 32);
     const QFontMetricsF pathMetrics(qvariant_cast<QFont>(path->property("font")));
     QVERIFY(pathMetrics.horizontalAdvance(folder) > 2 * path->width());
     QVERIFY(path->height() >= 3 * pathMetrics.lineSpacing() - 1);
@@ -1120,6 +1125,67 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
             }
         }
     }
+}
+
+// At 24 pt in a window, a typical folder path is whole on the lines it
+// needs, broken after its slashes, rather than cut short on three over an
+// empty column (#373 H41: "…/2005 - Smal…").
+void AlbumArtSmokeTest::albumArtFolderPathTakesTheLinesItNeedsAtLargeFonts() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont larger = applicationFont;
+    larger.setPointSizeF(24);
+    QGuiApplication::setFont(larger);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 300, 300);
+    QVERIFY(!coverPath.isEmpty());
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(createDetailsSurfaceWindow(engine, coverPath, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    auto *surface = qvariant_cast<QQuickItem *>(root->property("surface"));
+    QVERIFY(surface != nullptr);
+    const QString folder =
+        QStringLiteral("/mnt/ferrous/council/inventory/fixtures/library/The Quiet Meridian/2005 - Small Hours");
+    surface->setProperty("fileInfo", QVariantMap{{QStringLiteral("path"), folder + QStringLiteral("/cover.jpg")},
+                                                 {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
+                                                 {QStringLiteral("width"), 1400},
+                                                 {QStringLiteral("height"), 1400}});
+    QQuickItem *path = itemNamed(surface, QStringLiteral("albumArtFolderPath"));
+    QVERIFY(path != nullptr);
+    QTRY_COMPARE(path->property("path").toString(), folder);
+    // Laid out in the details' column, inside its padding, beside Copy Path.
+    QQuickItem *folderRow = itemNamed(surface, QStringLiteral("albumArtFolderRow"));
+    QVERIFY(folderRow != nullptr);
+    QTRY_VERIFY(path->isVisible() && folderRow->width() > 0);
+    QTRY_VERIFY2(path->width() > folderRow->width() / 2,
+                 qPrintable(QStringLiteral("%1 of %2").arg(path->width()).arg(folderRow->width())));
+    QCOMPARE(path->property("maximumLineCount").toInt(), 8);
+    QTRY_VERIFY2(path->property("lineCount").toInt() > 3, qPrintable(path->property("lineCount").toString()));
+    QVERIFY(!path->property("elided").toBool());
+    QVERIFY(path->property("text").toString().endsWith(QStringLiteral("Hours")));
+    // The details' column holds the path's lines whole.
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QVERIFY(column != nullptr);
+    const QRectF pathBox = path->mapRectToScene(QRectF(0, 0, path->width(), path->height()));
+    QVERIFY(path->height() >= path->property("contentHeight").toReal() - 0.5);
+    QVERIFY2(pathBox.bottom() <= column->mapRectToScene(QRectF(0, 0, column->width(), column->height())).bottom(),
+             qPrintable(QString::number(pathBox.bottom())));
+
+    // During a preview, under the candidate's label and Apply, three lines,
+    // the rest elided; after it, the lines it needs again.
+    const int lines = path->property("lineCount").toInt();
+    surface->setProperty("previewActive", true);
+    QCOMPARE(path->property("maximumLineCount").toInt(), 3);
+    QTRY_COMPARE(path->property("lineCount").toInt(), 3);
+    QVERIFY(path->property("elided").toBool());
+    surface->setProperty("previewActive", false);
+    QTRY_COMPARE(path->property("lineCount").toInt(), lines);
+    QVERIFY(!path->property("elided").toBool());
 }
 
 void AlbumArtSmokeTest::albumArtDetailsAreOnTheTypeScale_data() {
