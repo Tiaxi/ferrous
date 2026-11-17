@@ -290,7 +290,8 @@ jobs:
 
       # After the build, whatever the tests then say: the objects are as good.
       - name: Save C++ objects
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        # TEMPORARY: also from this pull request, to measure a warm build.
+        if: true
         uses: actions/cache/save@v6
         with:
           path: ~/.cache/ccache
