@@ -499,6 +499,7 @@ private slots:
     void libraryFolderListIsThreeRowsTallAtLeast_data();
     void libraryFolderListIsThreeRowsTallAtLeast();
     void lastFmPageShowsOnlyTheButtonsThatApply();
+    void lastFmScrobblingNeedsABuildWithLastFm();
     void aboutShowsTheIconVersionTabsAndCopiesTheVersion();
     void aboutKdeHasAboutsHeadingAndPage_data();
     void aboutKdeHasAboutsHeadingAndPage();
@@ -824,6 +825,8 @@ void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    // Last.fm's controls are there to reach in a build with it.
+    QVERIFY(bridgeOf(window)->setProperty("lastFmBuildConfigured", true));
     QObject *dialog = openPreferences(window);
     QVERIFY(dialog != nullptr);
     // Configure Ferrous has a window of its own.
@@ -1161,6 +1164,7 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
     QVERIFY(bridge->setProperty("lastFmAuthState", 2));
     QVERIFY(bridge->setProperty("lastFmUsername", QStringLiteral("listener")));
     // The title strip's setting is for viewers over the whole screen.
@@ -2020,6 +2024,7 @@ void UiDialogsTest::lastFmPageShowsOnlyTheButtonsThatApply() {
     };
     QTRY_COMPARE(shownButtons(), QStringList{QStringLiteral("lastFmConnectButton")});
     QVERIFY(!visibleNamed(prefs, QStringLiteral("lastFmShowScrobbleProgressCheckBox")));
+    QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmScrobblingCheckBox"))->isEnabled());
     QVERIFY(bridge->setProperty("lastFmAuthState", 1));
     QTRY_COMPARE(shownButtons(), (QStringList{QStringLiteral("lastFmCompleteButton"),
                                               QStringLiteral("lastFmDisconnectButton")}));
@@ -2030,6 +2035,40 @@ void UiDialogsTest::lastFmPageShowsOnlyTheButtonsThatApply() {
     QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmShowScrobbleProgressCheckBox")));
     QCOMPARE(visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))->property("text").toString(),
              QStringLiteral("Connected as listener"));
+}
+
+// In a build without Last.fm, scrobbling can't be turned on: the build
+// can't send a scrobble, and the account's line says why (#373 H40: the
+// check box was there to tick). No button to connect either.
+void UiDialogsTest::lastFmScrobblingNeedsABuildWithLastFm() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("lastFmBuildConfigured", false));
+    QObject *dialog = openPreferences(window, 3);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *box = nullptr;
+    QTRY_VERIFY((box = visibleNamed(prefs, QStringLiteral("lastFmScrobblingCheckBox"))) != nullptr);
+    QVERIFY(!box->isEnabled());
+    QCOMPARE(visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))->property("text").toString(),
+             QStringLiteral("Last.fm isn\u2019t available in this build."));
+    for (const char *name : {"lastFmConnectButton", "lastFmCompleteButton", "lastFmReconnectButton",
+                             "lastFmDisconnectButton"}) {
+        QVERIFY2(visibleNamed(prefs, QString::fromLatin1(name)) == nullptr, name);
+    }
+    // Space on it changes nothing.
+    const bool before = box->property("checked").toBool();
+    box->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(prefs, Qt::Key_Space);
+    QCOMPARE(box->property("checked").toBool(), before);
+    // A build with Last.fm lets it be turned on.
+    QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
+    QTRY_VERIFY(box->isEnabled());
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
 }
 
 void UiDialogsTest::aboutShowsTheIconVersionTabsAndCopiesTheVersion() {
