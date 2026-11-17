@@ -101,12 +101,16 @@ Item {
     // animations off (#373 H38: the art jumped aside in one frame). The
     // space they take, their reserve, follows it: the column slides in
     // over the view's right edge, whole, as wide as it rests, and the art
-    // glides with it. Only showing or hiding them is eased: the reserve
-    // follows the view's size at once, as the zoom and the pan are.
+    // glides with it. Only showing or hiding them in the open viewer is
+    // eased: the reserve follows the view's size at once, as the zoom and
+    // the pan are, and a viewer that opens with them shown or hidden (the
+    // controller sets them before it opens it) has them at rest from its
+    // first frame. (They slid in as it opened, hidden, and so out of the
+    // Tab order, until the slide's first step.)
     readonly property int infoRevealDuration: Math.round(Kirigami.Units.shortDuration * 1.2)
     property real infoReveal: root.infoVisible ? 1 : 0
     Behavior on infoReveal {
-        enabled: root.infoRevealDuration > 0
+        enabled: root.infoRevealDuration > 0 && root.viewerOpen
         NumberAnimation {
             duration: root.infoRevealDuration
             easing.type: Easing.OutCubic
