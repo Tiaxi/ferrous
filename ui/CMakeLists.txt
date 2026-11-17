@@ -160,6 +160,36 @@ if(FERROUS_ENABLE_PROFILE_LOGS)
 endif()
 ferrous_enable_strict_warnings(ferrous_ui_core)
 
+# A program that links ferrous_ui_core compiles none of the library's sources
+# itself: the source would compile twice, and the program would use its own
+# copy, built with its own definitions. Checked once every target of this
+# file is defined, by the files' full paths.
+function(ferrous_check_core_sources_compile_once)
+    get_target_property(core_sources ferrous_ui_core SOURCES)
+    set(core_paths "")
+    foreach(source IN LISTS core_sources)
+        get_filename_component(path "${source}" ABSOLUTE)
+        list(APPEND core_paths "${path}")
+    endforeach()
+    get_property(targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(target IN LISTS targets)
+        get_target_property(libraries ${target} LINK_LIBRARIES)
+        if(target STREQUAL "ferrous_ui_core" OR NOT "ferrous_ui_core" IN_LIST libraries)
+            continue()
+        endif()
+        get_target_property(sources ${target} SOURCES)
+        foreach(source IN LISTS sources)
+            get_filename_component(path "${source}" ABSOLUTE)
+            if(path IN_LIST core_paths)
+                message(FATAL_ERROR
+                    "${target} links ferrous_ui_core and also compiles ${source}, which the library has. "
+                    "Remove the source from ${target}.")
+            endif()
+        endforeach()
+    endforeach()
+endfunction()
+cmake_language(DEFER CALL ferrous_check_core_sources_compile_once)
+
 qt_add_executable(ferrous
     src/AppInstanceController.cpp
     src/ConsoleTee.cpp
@@ -1017,25 +1047,6 @@ if(BUILD_TESTING)
         PASS_REGULAR_EXPRESSION "could[ \t\r\n]+not[ \t\r\n]+read"
         TIMEOUT 60
     )
-
-    # A program that links ferrous_ui_core compiles none of the library's
-    # sources itself: the source would compile twice, and the program would
-    # use its own copy, built with its own definitions.
-    get_target_property(ferrous_core_sources ferrous_ui_core SOURCES)
-    foreach(target IN LISTS ferrous_targets)
-        get_target_property(target_libraries ${target} LINK_LIBRARIES)
-        if(NOT "ferrous_ui_core" IN_LIST target_libraries)
-            continue()
-        endif()
-        get_target_property(target_sources ${target} SOURCES)
-        foreach(source IN LISTS target_sources)
-            if(source IN_LIST ferrous_core_sources)
-                message(FATAL_ERROR
-                    "${target} links ferrous_ui_core and also compiles ${source}, which the library has. "
-                    "Remove the source from ${target}.")
-            endif()
-        endforeach()
-    endforeach()
 
     # ctest -j starts the tests of most COST first, so that a run does not
     # end waiting on a long test that started last. CTest takes the times of
