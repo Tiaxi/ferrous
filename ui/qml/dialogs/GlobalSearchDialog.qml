@@ -7,7 +7,8 @@ import FerrousUi 1.0
 import "../components" as Components
 
 // The search palette (#373): an 800 px palette 32 px under the transport,
-// over a dim that covers the whole window. The field, then the results in
+// over a dim that covers the whole window; wider with a larger font, as its
+// text is (UiPalette.scaledSize). The field, then the results in
 // sections in the order of their best match, then the keys for the
 // selected row.
 Dialog {
@@ -85,14 +86,15 @@ Dialog {
     readonly property real titleX: root.sideInset + root.leadSize + 12
     // A track's length at the right: 44 px, or as wide as "00:00" in its
     // font, and 12 px clear of the context. The title takes up to 300 px
-    // of what is left beside it, and the context the rest, so the three
-    // never meet, whatever the font and the width of the palette.
+    // of what is left beside it (more with a larger font, as the palette is
+    // wider), and the context the rest, so the three never meet, whatever
+    // the font and the width of the palette.
     readonly property real lengthWidth: Math.max(44, Math.ceil(lengthMetrics.advanceWidth))
     readonly property real columnGap: 12
     readonly property real titleWidth: {
         const lengthLeft = root.width - root.sideInset - Kirigami.Units.largeSpacing - root.lengthWidth - root.columnGap
         const room = lengthLeft - root.columnGap - root.titleX
-        return Math.max(0, Math.min(300, Math.round(room * 0.6)))
+        return Math.max(0, Math.min(root.uiPalette.scaledSize(300), Math.round(room * 0.6)))
     }
     readonly property real contextX: root.titleX + root.titleWidth + root.columnGap
     // Where the palette's top is: set when it opens, from where the
@@ -121,7 +123,10 @@ Dialog {
     bottomPadding: 0
     leftPadding: 0
     rightPadding: 0
-    width: Math.min(800, (root.parent ? root.parent.width : 800) - 2 * root.sideInset)
+    // 800 px with the default font, wider with a larger one so its columns
+    // keep their measure (#373 H41), and 16 px clear of the window's sides.
+    readonly property int designWidth: root.uiPalette.scaledSize(800)
+    width: Math.min(root.designWidth, (root.parent ? root.parent.width : root.designWidth) - 2 * root.sideInset)
     height: Math.min(contentColumn.implicitHeight, root.maximumHeight)
     // At most 16 result rows tall, as a palette rather than a page (and
     // as many rows as a query has to bind as it changes), and 32 px clear
@@ -367,7 +372,7 @@ Dialog {
 
     contentItem: Item {
         id: contentColumn
-        implicitWidth: 800
+        implicitWidth: root.designWidth
         implicitHeight: root.fieldHeight + 1 + body.implicitHeight + 1 + root.footerHeight
 
         // The field: a search glyph, the query, and the clear and help
@@ -1045,7 +1050,7 @@ Dialog {
             id: searchHelp
             objectName: "globalSearchHelp"
             focus: true
-            width: Math.min(480, root.width - 2 * root.sideInset)
+            width: Math.min(root.uiPalette.scaledSize(480), root.width - 2 * root.sideInset)
             x: root.width - width - 8
             y: root.fieldHeight
             padding: 12
