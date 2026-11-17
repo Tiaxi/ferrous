@@ -97,15 +97,17 @@ Components.CompactDialogWindow {
     }
 
     Label {
+        objectName: "tagEditorCloseConfirmDetails"
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
+        // What Discard closes: the tag editor, not this question (#373 H45).
         text: root.forQuit
             ? I18n.i18nc("@info", "Save writes the current edits and quits. "
                 + "Discard drops every unsaved change and quits. Cancel keeps Ferrous open.")
             : (root.forReload
                 ? I18n.i18nc("@info", "Reloading drops every unsaved change. Cancel keeps editing.")
                 : I18n.i18nc("@info",
-                    "Save writes the current edits. Discard closes the dialog and drops every unsaved change."))
+                    "Save writes the current edits. Discard drops every unsaved change and closes the tag editor."))
     }
 }

@@ -3826,10 +3826,13 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QVERIFY(tags->isVisible());
     QVERIFY(editor.dirty());
-    // Escape asks too; Discard closes.
+    // Escape asks too; Discard closes, the tag editor, as the question
+    // says (#373 H45: "Discard closes the dialog" read as the question).
     QVERIFY(QTest::qWaitForWindowActive(tags));
     QTest::keyClick(tags, Qt::Key_Escape);
     QVERIFY(waitForDialogWindow(confirm));
+    QCOMPARE(visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDetails"))->property("text").toString(),
+             QStringLiteral("Save writes the current edits. Discard drops every unsaved change and closes the tag editor."));
     click(windowOf(confirm), visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDiscardButton")));
     QTRY_VERIFY(!tags->isVisible());
     QVERIFY(!editor.isOpen());
