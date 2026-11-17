@@ -5930,7 +5930,10 @@ void BridgeClientTest::itunesArtworkFoundTextIsPlainWords() {
     // with a one-character ellipsis while it downloads.
     QCOMPARE(BridgeClient::itunesArtworkPendingDetailsText(),
              QStringLiteral("Its size and format show once you preview or apply it."));
-    QCOMPARE(BridgeClient::itunesArtworkLoadingDetailsText(), QStringLiteral("Loading high-resolution artwork\u2026"));
+    // In the count line's term for the image, one term for it in the
+    // dialog (#373 H46: "high-resolution artwork" beside "Full-size images").
+    QCOMPARE(BridgeClient::itunesArtworkLoadingDetailsText(), QStringLiteral("Loading full-size image\u2026"));
+    QVERIFY(BridgeClient::itunesArtworkFoundText(1).contains(QStringLiteral("full-size image")));
 }
 
 void BridgeClientTest::itunesArtworkUrlRejectsUnexpectedSources_data() {
