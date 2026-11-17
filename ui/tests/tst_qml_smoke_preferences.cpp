@@ -2,6 +2,8 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QIcon>
+
 // Preferences, diagnostics and album art.
 class PreferencesSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -422,8 +424,31 @@ ApplicationWindow {
     QVERIFY(confirmWindow != nullptr);
     QCOMPARE(confirmWindow->transientParent(), dialogWindow);
     QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
-    QCOMPARE(confirm->property("confirmIcon").toString(),
-             QStringLiteral("document-replace"));
+    // Replace's glyph is Breeze's swap, one image for the other, in the
+    // text's colour: "document-replace", a page with a red ×, read as Delete
+    // (#373 H47).
+    QCOMPARE(confirm->property("confirmIcon").toString(), QStringLiteral("document-swap"));
+    QQuickItem *replaceButton = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogConfirmButton"));
+    QVERIFY(replaceButton != nullptr);
+    QCOMPARE(replaceButton->property("text").toString(), QStringLiteral("Replace"));
+    QCOMPARE(QQmlProperty(replaceButton, QStringLiteral("icon.name")).read().toString(),
+             QStringLiteral("document-swap"));
+    QVERIFY(QIcon::hasThemeIcon(QStringLiteral("document-swap")));
+    // Whether a theme glyph draws anything red at 16 px.
+    const auto drawsRed = [](const QString &name) {
+        const QImage glyph = QIcon::fromTheme(name).pixmap(QSize(16, 16)).toImage().convertToFormat(QImage::Format_ARGB32);
+        for (int y = 0; y < glyph.height(); ++y) {
+            for (int x = 0; x < glyph.width(); ++x) {
+                const QColor pixel = glyph.pixelColor(x, y);
+                if (pixel.alpha() > 128 && pixel.red() > pixel.green() + 60 && pixel.red() > pixel.blue() + 60) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    QVERIFY(drawsRed(QStringLiteral("document-replace")));
+    QVERIFY(!drawsRed(QStringLiteral("document-swap")));
     QVERIFY(clickVisibleButton(confirmWindow, QStringLiteral("confirmDialogCancelButton")));
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QVERIFY(applied().isEmpty());

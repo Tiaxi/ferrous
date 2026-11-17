@@ -837,7 +837,11 @@ Components.DialogWindow {
         details: I18n.i18nc("@info", "The new artwork replaces the album’s cover image file or, if it has none, "
             + "the artwork embedded in its tracks. Ferrous keeps no copy of the current album art.")
         confirmText: I18n.i18nc("@action:button", "Replace")
-        confirmIcon: "document-replace"
+        // Breeze's swap: one image for the other. Its "document-replace", a
+        // page with a red ×, read as Delete (#373 H47); red is the glyph of
+        // the confirmations that delete or remove. The question and Cancel
+        // as the default say that the current art is lost.
+        confirmIcon: "document-swap"
         // The current album art is gone once replaced.
         destructive: true
         // The answer takes the suggestion it was asked for, at once.
