@@ -732,6 +732,20 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     QObject *message = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitMessage"));
     QVERIFY(message != nullptr);
     QVERIFY(message->property("text").toString().contains(QStringLiteral("may be lost")));
+    // As a confirmation reads (#373 H40): what it waits for semibold, the
+    // files under its text rather than the spinner, the explanation in the
+    // secondary colour, and Keep Waiting with a glyph, as Quit Anyway.
+    QObject *palette = qvariant_cast<QObject *>(fixture.window->property("uiPalette"));
+    auto *status = fixture.window->findChild<QQuickItem *>(QStringLiteral("tagEditorQuitWaitStatus"));
+    QVERIFY(palette != nullptr && status != nullptr);
+    QCOMPARE(status->property("font").value<QFont>().weight(), QFont::DemiBold);
+    QCOMPARE(message->property("color").value<QColor>().rgba(), palette->property("textSecondary").value<QColor>().rgba());
+    QCOMPARE(files->property("color").value<QColor>().rgba(), palette->property("textSecondary").value<QColor>().rgba());
+    QTRY_COMPARE(sceneRectOf(qobject_cast<QQuickItem *>(files)).left(), sceneRectOf(status).left());
+    QVERIFY(sceneRectOf(qobject_cast<QQuickItem *>(message)).left() < sceneRectOf(status).left());
+    auto *keepWaiting = fixture.window->findChild<QQuickItem *>(QStringLiteral("tagEditorQuitWaitKeepWaitingButton"));
+    QVERIFY(keepWaiting != nullptr);
+    QCOMPARE(evaluateOn(keepWaiting, QStringLiteral("icon.name")).toString(), QStringLiteral("chronometer"));
 
     // Quit Anyway goes on to the usual shutdown: the settings and queue are
     // saved, and the window closes while the tag save still runs.

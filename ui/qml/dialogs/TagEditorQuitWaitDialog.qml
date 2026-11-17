@@ -7,7 +7,10 @@ import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
 
-// Shown while quitting waits for a tag save or rename to finish.
+// Shown while quitting waits for a tag save or rename to finish: what it
+// waits for, semibold, beside the spinner, the files under its text, and,
+// once it offers to quit anyway, why, in the secondary colour, as the
+// explanation of a confirmation is (#373 H40).
 Components.CompactDialogWindow {
     id: root
 
@@ -38,6 +41,7 @@ Components.CompactDialogWindow {
             id: tagEditorQuitWaitKeepWaitingButton
             objectName: "tagEditorQuitWaitKeepWaitingButton"
             text: I18n.i18nc("@action:button", "Keep Waiting")
+            icon.name: "chronometer"
             DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             onClicked: root.keepWaitingRequested()
         }
@@ -51,10 +55,12 @@ Components.CompactDialogWindow {
     }
 
     RowLayout {
+        id: statusRow
         Layout.fillWidth: true
         spacing: 8
 
         BusyIndicator {
+            id: busyIndicator
             running: root.visible
             implicitWidth: Kirigami.Units.iconSizes.smallMedium
             implicitHeight: Kirigami.Units.iconSizes.smallMedium
@@ -64,6 +70,7 @@ Components.CompactDialogWindow {
             objectName: "tagEditorQuitWaitStatus"
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
+            font.weight: Font.DemiBold
             text: I18n.i18ncp("@info:status", "Ferrous quits once the tag editor has written %1 file.",
                 "Ferrous quits once the tag editor has written %1 files.", root.files.length)
         }
@@ -72,6 +79,8 @@ Components.CompactDialogWindow {
     Label {
         objectName: "tagEditorQuitWaitFiles"
         Layout.fillWidth: true
+        // Under the status's text, not the spinner.
+        Layout.leftMargin: busyIndicator.implicitWidth + statusRow.spacing
         visible: root.files.length > 0
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
@@ -87,6 +96,7 @@ Components.CompactDialogWindow {
         Layout.fillWidth: true
         visible: root.offerChoice
         wrapMode: Text.WordWrap
+        color: root.uiPalette.textSecondary
         text: I18n.i18nc("@info", "This is taking longer than it should, for example on an unresponsive "
             + "network share. Quit Anyway stops waiting, and the tag changes not yet "
             + "written may be lost. Each file keeps its old tags or gets its new ones; "
