@@ -719,11 +719,15 @@ ToolBar {
             }
 
             // The mouse's hover; a touch has none. It only shows the time
-            // under the pointer, and never moves the slider or seeks.
+            // under the pointer, and never moves the slider or seeks. Off
+            // while the pointer is a finger: at each frame, Qt hovers what
+            // is under a held touch with an event that looks like the
+            // mouse's, which the accepted devices let through.
             HoverHandler {
                 id: seekHover
                 objectName: "seekHover"
                 acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                enabled: !InputModality.touch
             }
 
             // The time under the hovering pointer, shown while no gesture

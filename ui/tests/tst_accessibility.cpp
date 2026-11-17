@@ -338,6 +338,7 @@ private slots:
     void seekHoverShowsNothingWithoutATrack();
     void seekTimeFadesOutWhereItWas();
     void seekTouchShowsNoHoverTime();
+    void aFingerIsThePointerUntilTheMouseIsUsed();
     void seekBarPlayheadContrastsWithTheBar_data();
     void seekBarPlayheadContrastsWithTheBar();
     void playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds();
@@ -2267,33 +2268,131 @@ void AccessibilityTest::seekTouchShowsNoHoverTime() {
     QVERIFY(hover != nullptr);
     QPointingDevice *touchScreen = QTest::createTouchDevice();
     const QPoint touched = seek->mapToScene(QPointF(seek->width() * 0.75, seek->height() / 2)).toPoint();
+    const QPoint start = centerOf(qvariant_cast<QQuickItem *>(root->property("startButton")));
+
+    // At each frame that has something to draw, as playback's have, Qt
+    // hovers what is under a held touch's point with an event that looks
+    // like the mouse's (#604). A check made before the next frame would
+    // pass or fail by whether one was drawn yet, so each one here follows
+    // a frame that had an item to draw.
+    QQuickItem drawn(window->contentItem());
+    const auto drawFrame = [&]() {
+        QSignalSpy frames(window, &QQuickWindow::frameSwapped);
+        drawn.setX(drawn.x() + 1);
+        return frames.wait();
+    };
+    const auto hovered = [&]() { return hover->property("hovered").toBool(); };
 
     // A touch's drag shows the box as a mouse's does, and its end leaves
-    // none, as a touch has no hover; Qt would otherwise give a touch's
-    // point to a hover handler.
+    // none, as a touch has no hover.
     QTest::touchEvent(window, touchScreen).press(0, touched, window);
     QVERIFY(seek->property("adjusting").toBool());
     QVERIFY(!timeBox.shown().isEmpty());
-    QVERIFY(!hover->property("hovered").toBool());
-    QTest::touchEvent(window, touchScreen).release(0, touched, window);
+    QVERIFY(drawFrame());
+    QVERIFY(!hovered());
+    QTest::touchEvent(window, touchScreen).move(0, touched + QPoint(5, 0), window);
+    QVERIFY(drawFrame());
+    QVERIFY(!hovered());
+    QTest::touchEvent(window, touchScreen).release(0, touched + QPoint(5, 0), window);
     QVERIFY(!seek->property("adjusting").toBool());
     QCOMPARE(recordedValues(root.data(), "seeks").size(), 1);
     QCOMPARE(timeBox.shown(), QString());
-    QTest::qWait(50);
+    QVERIFY(drawFrame());
+    QVERIFY(!hovered());
     QCOMPARE(timeBox.shown(), QString());
 
     // A touch that begins off the bar and moves over it shows nothing.
-    const QPoint start = centerOf(qvariant_cast<QQuickItem *>(root->property("startButton")));
     QTest::touchEvent(window, touchScreen).press(0, start, window);
     QTest::touchEvent(window, touchScreen).move(0, (start + touched) / 2, window);
     QTest::touchEvent(window, touchScreen).move(0, touched, window);
+    QVERIFY(drawFrame());
+    QVERIFY(!hovered());
     QTest::touchEvent(window, touchScreen).move(0, touched + QPoint(5, 0), window);
+    QVERIFY(drawFrame());
+    QVERIFY(!hovered());
     QVERIFY(!seek->property("adjusting").toBool());
     QCOMPARE(timeBox.shown(), QString());
     QTest::touchEvent(window, touchScreen).release(0, touched + QPoint(5, 0), window);
-    QTest::qWait(50);
+    QVERIFY(drawFrame());
+    QVERIFY(!hovered());
     QCOMPARE(timeBox.shown(), QString());
     QCOMPARE(recordedValues(root.data(), "seeks").size(), 1);
+
+    // The mouse has its hover again once it moves.
+    const QString time = minutesAndSeconds(secondsAtX(seek, seek->mapFromScene(QPointF(touched)).x()));
+    QTest::mouseMove(window, touched);
+    QVERIFY(hovered());
+    QCOMPARE(timeBox.shown(), time);
+    QVERIFY(drawFrame());
+    QCOMPARE(timeBox.shown(), time);
+
+    // A touch elsewhere ends it, and it stays away until the mouse moves.
+    QTest::touchEvent(window, touchScreen).press(0, start, window);
+    QVERIFY(!hovered());
+    QCOMPARE(timeBox.shown(), QString());
+    QTest::touchEvent(window, touchScreen).release(0, start, window);
+    QVERIFY(drawFrame());
+    QVERIFY(!hovered());
+    QCOMPARE(timeBox.shown(), QString());
+    QTest::mouseMove(window, touched + QPoint(1, 0));
+    QVERIFY(hovered());
+    QVERIFY(!timeBox.shown().isEmpty());
+    QCOMPARE(recordedValues(root.data(), "seeks").size(), 1);
+}
+
+void AccessibilityTest::aFingerIsThePointerUntilTheMouseIsUsed() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    auto *modality = engine.singletonInstance<InputModality *>("FerrousUi", "InputModality");
+    QVERIFY(modality != nullptr);
+    QSignalSpy changes(modality, &InputModality::touchChanged);
+    QPointingDevice *touchScreen = QTest::createTouchDevice();
+    const QPoint start = centerOf(qvariant_cast<QQuickItem *>(root->property("startButton")));
+    // Under the transport bar, where nothing takes a press.
+    const QPoint empty(window->width() / 2, window->height() - 10);
+    QVERIFY(!modality->touch());
+
+    // The mouse's own moves and presses change nothing while it is the
+    // pointer.
+    QTest::mouseMove(window, empty);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, empty);
+    QVERIFY(!modality->touch());
+    QCOMPARE(changes.size(), 0);
+
+    // A finger is the pointer from its press, through its release, until
+    // the mouse moves.
+    QTest::touchEvent(window, touchScreen).press(0, start, window);
+    QVERIFY(modality->touch());
+    QTest::touchEvent(window, touchScreen).move(0, start + QPoint(2, 0), window);
+    QTest::touchEvent(window, touchScreen).release(0, start + QPoint(2, 0), window);
+    QVERIFY(modality->touch());
+    QTest::mouseMove(window, start);
+    QVERIFY(!modality->touch());
+
+    // The mouse events that Qt makes of a touch nothing took, which it
+    // sends to the window with the touchscreen as their device, are still
+    // the finger's.
+    QTest::touchEvent(window, touchScreen).press(0, empty, window);
+    QVERIFY(modality->touch());
+    const QPointF emptyGlobal = window->mapToGlobal(QPointF(empty));
+    for (const auto &[type, button, buttons] :
+         {std::tuple{QEvent::MouseButtonPress, Qt::LeftButton, Qt::MouseButtons(Qt::LeftButton)},
+          std::tuple{QEvent::MouseMove, Qt::NoButton, Qt::MouseButtons(Qt::LeftButton)},
+          std::tuple{QEvent::MouseButtonRelease, Qt::LeftButton, Qt::MouseButtons()}}) {
+        QMouseEvent fromTouch(type, QPointF(empty), emptyGlobal, button, buttons, Qt::NoModifier, touchScreen);
+        QCoreApplication::sendEvent(window, &fromTouch);
+        QVERIFY(modality->touch());
+    }
+    QTest::touchEvent(window, touchScreen).release(0, empty, window);
+    QVERIFY(modality->touch());
+
+    // Or until the mouse presses.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, empty);
+    QVERIFY(!modality->touch());
+    QCOMPARE(changes.size(), 4);
 }
 
 namespace {

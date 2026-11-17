@@ -5,6 +5,9 @@
 #include <QCoreApplication>
 #include <QFocusEvent>
 #include <QKeyEvent>
+#include <QMouseEvent>
+#include <QPointingDevice>
+#include <QTouchEvent>
 #include <qqml.h>
 
 namespace {
@@ -27,6 +30,19 @@ bool isModifierKey(int key) {
     default:
         return false;
     }
+}
+
+bool isFromTouchScreen(const QPointerEvent *event) {
+    const QPointingDevice *device = event->pointingDevice();
+    return device != nullptr && device->type() == QInputDevice::DeviceType::TouchScreen;
+}
+
+// A mouse's or touchpad's own event to a window. Qt sends a touch on as
+// mouse events, with the touchscreen as their device, to a window that
+// took none of it and to items that take only the mouse's; and the items
+// under the pointer get a window's mouse event after it.
+bool isMouseEventToWindow(const QObject *watched, const QEvent *event) {
+    return watched->isWindowType() && !isFromTouchScreen(static_cast<const QMouseEvent *>(event));
 }
 
 } // namespace
@@ -70,9 +86,24 @@ bool InputModality::eventFilter(QObject *watched, QEvent *event) {
             break;
         }
         break;
+    case QEvent::MouseMove:
+        if (m_touch && isMouseEventToWindow(watched, event)) {
+            setTouch(false);
+        }
+        break;
     case QEvent::MouseButtonPress:
     case QEvent::MouseButtonDblClick:
+        setKeyboard(false);
+        if (m_touch && isMouseEventToWindow(watched, event)) {
+            setTouch(false);
+        }
+        break;
     case QEvent::TouchBegin:
+        setKeyboard(false);
+        if (isFromTouchScreen(static_cast<const QTouchEvent *>(event))) {
+            setTouch(true);
+        }
+        break;
     case QEvent::TabletPress:
         setKeyboard(false);
         break;
@@ -86,5 +117,12 @@ void InputModality::setKeyboard(bool keyboard) {
     if (m_keyboard != keyboard) {
         m_keyboard = keyboard;
         emit keyboardChanged();
+    }
+}
+
+void InputModality::setTouch(bool touch) {
+    if (m_touch != touch) {
+        m_touch = touch;
+        emit touchChanged();
     }
 }
