@@ -725,7 +725,7 @@ void TransportInputSmokeTest::visualizationModeSwitchStaysClearOfTheCornerOverla
                     const double margin = modeSwitch.height();
                     // In the top right corner, off the centre line; over
                     // the whole screen, below the title strip over the view.
-                    const double stripHeight = controlsRoot->window() != window ? 33.0 : 0.0;
+                    const double stripHeight = controlsRoot->window() != window ? 39.0 : 0.0;
                     QVERIFY(view.contains(modeSwitch));
                     QVERIFY(modeSwitch.left() > view.center().x());
                     QVERIFY(modeSwitch.top() >= view.top() + stripHeight);
@@ -1670,18 +1670,19 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         QCOMPARE(fullscreen->title(), shown.title);
         QCOMPARE(window->title(), mainTitle);
 
-        // A 32 px band on the plot's strip colour, opaque, with its edge
-        // under it, over the top of the view.
+        // A 38 px band on the plot's strip colour, opaque, with its edge
+        // under it, over the top of the view: 32 px grown with its text, a
+        // step larger (#373 H40).
         QObject *plotColors = qvariant_cast<QObject *>(palette->property(shown.plotColors));
         QVERIFY(plotColors != nullptr);
         QQuickItem *strip = visibleItemNamed(fullscreen, shown.stripName);
         QVERIFY2(strip != nullptr, name.constData());
-        QTRY_COMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), 33));
+        QTRY_COMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), 39));
         QCOMPARE(colorOf(strip, "color"), colorOf(plotColors, "plotStrip"));
         QCOMPARE(qAlpha(colorOf(strip, "color")), 255);
         QQuickItem *hairline = itemNamed(strip, QStringLiteral("viewerStripHairline"));
         QVERIFY(hairline != nullptr);
-        QCOMPARE(sceneRectOf(hairline), QRectF(0, 32, fullscreen->width(), 1));
+        QCOMPARE(sceneRectOf(hairline), QRectF(0, 38, fullscreen->width(), 1));
         QCOMPARE(colorOf(hairline, "color"), colorOf(plotColors, "plotPlateEdge"));
 
         // The title semibold, then "Artist — Album" and the time, secondary.
@@ -1691,10 +1692,17 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         QVERIFY(title != nullptr && context != nullptr && time != nullptr);
         QCOMPARE(title->property("text").toString(), QStringLiteral("Morning Tide Field"));
         QCOMPARE(qvariant_cast<QFont>(title->property("font")).weight(), QFont::DemiBold);
-        // 16 px in from the view's edge (#373 H11: 12 px), and 12 px to
-        // "Artist — Album".
+        // Its text on the type scale of the viewer's text over the whole
+        // screen, 1.2 times the window's, as the album art's details are
+        // (#373 H40: the strip was at the window's size over them).
+        const qreal basePointSize = palette->property("basePointSize").toReal();
+        for (QQuickItem *label : {title, context, time}) {
+            QCOMPARE(qvariant_cast<QFont>(label->property("font")).pointSizeF(), basePointSize * 1.2);
+        }
+        // 16 px in from the view's edge (#373 H11: 12 px), and 14 px, 12 px
+        // a step larger, to "Artist — Album".
         QTRY_COMPARE(title->mapToScene(QPointF(0, 0)).x(), 16.0);
-        QCOMPARE(context->mapToScene(QPointF(0, 0)).x() - title->mapToScene(QPointF(title->width(), 0)).x(), 12.0);
+        QCOMPARE(context->mapToScene(QPointF(0, 0)).x() - title->mapToScene(QPointF(title->width(), 0)).x(), 14.0);
         QCOMPARE(colorOf(title, "color"), colorOf(plotColors, "plotText"));
         QCOMPARE(context->property("text").toString(),
                  QStringLiteral("The Quiet Meridian — Small Hours"));
@@ -1723,14 +1731,14 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
         QTRY_VERIFY(!title->property("truncated").toBool());
 
-        // A flat 24 px Close at the right, 4 px in, in the plot's colours;
-        // the view fills the window under the strip.
+        // A flat 24 px Close at the right, centred in the band, 4 px in, in
+        // the plot's colours; the view fills the window under the strip.
         QQuickItem *close = visibleItemNamed(fullscreen, shown.closeName);
         QVERIFY2(close != nullptr, name.constData());
         QVERIFY(strip->isAncestorOf(close));
         QCOMPARE(sceneRectOf(close).size(), QSizeF(24, 24));
         QCOMPARE(sceneRectOf(close).right(), fullscreen->width() - 4.0);
-        QCOMPARE(sceneRectOf(close).top(), 4.0);
+        QCOMPARE(sceneRectOf(close).top(), 7.0);
         QQuickItem *closeIcon = itemNamed(close, QStringLiteral("viewerToolButtonIcon"));
         QVERIFY(closeIcon != nullptr);
         QCOMPARE(colorOf(closeIcon, "color"), colorOf(plotColors, "plotText"));
@@ -1837,17 +1845,17 @@ void TransportInputSmokeTest::viewerStripHoldsItsTextAtALargeFont() {
             QQuickItem *label = itemNamed(strip, labelName);
             QVERIFY2(label != nullptr && label->isVisible(), name.constData());
             if (pointSize > 0) {
-                QCOMPARE(qvariant_cast<QFont>(label->property("font")).pointSizeF(), pointSize);
+                QCOMPARE(qvariant_cast<QFont>(label->property("font")).pointSizeF(), pointSize * 1.2);
             }
             line = std::max(line, label->implicitHeight());
             labels << label;
         }
-        const qreal band = std::max({32.0, std::ceil(line) + 8.0, close->height() + 8.0});
+        const qreal band = std::max({38.0, std::ceil(line) + 8.0, close->height() + 8.0});
         QTRY_COMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), band + 1.0));
         if (pointSize == 0) {
-            QCOMPARE(band, 32.0);
+            QCOMPARE(band, 38.0);
         } else {
-            QVERIFY2(band > 32.0, name.constData());
+            QVERIFY2(band > 38.0, name.constData());
         }
         // Each text whole inside the band, over the edge under it.
         for (QQuickItem *label : std::as_const(labels)) {
@@ -2022,7 +2030,7 @@ void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {
         // and the view has the whole window.
         QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
         QTRY_COMPARE(sceneRectOf(surface), wholeWindow);
-        QCOMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), 33));
+        QCOMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), 39));
         QVERIFY(strip->z() > 0);
         QTRY_COMPARE(strip->opacity(), 1.0);
 
@@ -2180,7 +2188,7 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
     QVERIFY(strip != nullptr);
     QTRY_COMPARE(sceneRectOf(surface).top(), 0.0);
-    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 5.0, 33.0 + 5.0));
+    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(39.0 + 5.0, 39.0 + 5.0));
     auto *spectrogram = qobject_cast<SpectrogramItem *>(
         firstVisibleItemNamed(surface, QStringLiteral("spectrogramPaneItem")));
     QVERIFY(spectrogram != nullptr);
@@ -2188,23 +2196,23 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QCOMPARE(sceneRectOf(spectrogram).top(), 0.0);
     // The plot keeps its corner clear of the mode switch where it now is,
     // and of the 1 px edge around its plate.
-    QTRY_COMPARE(spectrogram->reservedCorner().height(), 33.0 + 5.0 + 32.0 + 1.0);
+    QTRY_COMPARE(spectrogram->reservedCorner().height(), 39.0 + 5.0 + 32.0 + 1.0);
     for (const int mode : {1, 0}) {
         viewer->setProperty("visualizationMode", mode);
         QTRY_COMPARE(viewer->property("visualizationMode").toInt(), mode);
         QQuickItem *modeSwitch =
             firstVisibleItemNamed(fullscreen->contentItem(), QStringLiteral("visualizationModeSwitch"));
         QVERIFY(modeSwitch != nullptr);
-        QTRY_COMPARE(sceneRectOf(modeSwitch).top(), 33.0 + 5.0);
+        QTRY_COMPARE(sceneRectOf(modeSwitch).top(), 39.0 + 5.0);
         QVERIFY(!sceneRectOf(strip).intersects(sceneRectOf(modeSwitch)));
     }
-    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 5.0, 33.0 + 5.0));
+    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(39.0 + 5.0, 39.0 + 5.0));
     autoHide->setProperty("hideDelay", 1);
     QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
     QTRY_VERIFY(!strip->isVisible());
     QQuickItem *laneHead = firstVisibleItemNamed(fullscreen->contentItem(), QStringLiteral("plotLaneHead"));
     QVERIFY(laneHead != nullptr);
-    QCOMPARE(headPlatesTop(laneHead), 33.0 + 5.0);
+    QCOMPARE(headPlatesTop(laneHead), 39.0 + 5.0);
     autoHide->setProperty("hideDelay", 5000);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
@@ -3237,7 +3245,7 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
                 != nullptr);
     QTRY_COMPARE(modeSwitch->opacity(), 1.0);
     QVERIFY(sceneRectOf(modeSwitch).top() >= 0.0);
-    QVERIFY2(sceneRectOf(modeSwitch).top() < 33.0, qPrintable(QString::number(sceneRectOf(modeSwitch).top())));
+    QVERIFY2(sceneRectOf(modeSwitch).top() < 39.0, qPrintable(QString::number(sceneRectOf(modeSwitch).top())));
     // They still hide as the pointer rests.
     autoHide->setProperty("hideDelay", 50);
     QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
@@ -3246,12 +3254,12 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
 
     // Turned on again, it shows with the controls, which keep below it.
     QVERIFY(bridge->setProperty("showFullscreenTitleStrip", true));
-    QTRY_COMPARE(plotLayer->property("topInset").toReal(), 33.0);
+    QTRY_COMPARE(plotLayer->property("topInset").toReal(), 39.0);
     autoHide->setProperty("hideDelay", 600000);
     QTest::mouseMove(fullscreen, QPoint(300, 300));
     QTRY_VERIFY(strip->isVisible());
     QTRY_VERIFY(modeSwitch->isVisible());
-    QTRY_VERIFY(sceneRectOf(modeSwitch).top() >= 33.0);
+    QTRY_VERIFY(sceneRectOf(modeSwitch).top() >= 39.0);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!fullscreen->isVisible());
     window->requestActivate();
@@ -3281,7 +3289,7 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
     QTRY_VERIFY(!viewer->property("albumArtInfoVisible").toBool());
     // With the strip on, the details keep below it.
     QVERIFY(bridge->setProperty("showFullscreenTitleStrip", true));
-    QTRY_COMPARE(albumArt->property("infoTopInset").toReal(), 33.0);
+    QTRY_COMPARE(albumArt->property("infoTopInset").toReal(), 39.0);
     QTest::mouseMove(albumArtWindow, QPoint(300, 300));
     QTRY_VERIFY(albumArtStrip->isVisible());
     QTest::keyClick(albumArtWindow, Qt::Key_Escape);

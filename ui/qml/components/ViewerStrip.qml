@@ -8,14 +8,17 @@ import FerrousUi 1.0
 import "." as Components
 import "../logic/FormatUtils.js" as FormatUtils
 
-// The title strip of a viewer over the whole screen: a 32 px band over the
+// The title strip of a viewer over the whole screen: a 38 px band over the
 // top edge of the view (taller with a larger font, by its line and 4 px
 // above and below it), with a 1 px edge under it, in the colours of the
 // plot it sits on (UiPalette's PlotColors), so it reads over the plot or
 // the art alike. Shown, it is opaque (plotStrip): the plot, its playhead
 // and its crosshair end at its lower edge rather than show through. On the
 // left the playing track's title (semibold), "Artist — Album" and
-// "1:17 / 3:49"; on the right flat 24 px tool buttons: a zoom readout and
+// "1:17 / 3:49", on the type scale of the viewer's text over the whole
+// screen (UiPalette.fullscreenTextScale), as the album art's details under
+// it are (#373 H40: at the window's size they were a second scale); on the
+// right flat 24 px tool buttons: a zoom readout and
 // Reset while the view is zoomed (the album art's; the visualization shows
 // its zoom on the plot, beside its mode switch), the new issues while there
 // are any, the viewer's own buttons (declared inside the strip, from the
@@ -87,9 +90,13 @@ Rectangle {
             FormatUtils.clockText(root.positionText),
             FormatUtils.clockText(root.track.durationText))
 
-    // The band over the edge: 32 px, or the line of its text or its
-    // buttons and 4 px above and below them, whichever is taller.
-    readonly property real bandHeight: Math.max(32,
+    // Its text's size, as a factor of the window's.
+    readonly property real textScale: root.uiPalette.fullscreenTextScale
+    readonly property real textPointSize: root.uiPalette.basePointSize * root.textScale
+    // The band over the edge: 32 px as the text grows, 38 px, or the line
+    // of its text or its buttons and 4 px above and below them, whichever
+    // is taller.
+    readonly property real bandHeight: Math.max(Math.round(32 * root.textScale),
         Math.ceil(Math.max(titleLabel.implicitHeight, contextLabel.implicitHeight, timeLabel.implicitHeight)) + 8,
         controls.implicitHeight + 8)
     implicitHeight: root.bandHeight + 1
@@ -131,7 +138,7 @@ Rectangle {
         // own texts, the title sat too near the edge).
         x: 2 * Kirigami.Units.largeSpacing
         height: root.bandHeight
-        spacing: 12
+        spacing: Math.round(12 * root.textScale)
 
         Label {
             id: titleLabel
@@ -141,6 +148,7 @@ Rectangle {
                             Math.max(track.textRoom * 0.6, track.textRoom - track.contextNeed))
             text: root.titleText
             visible: text.length > 0
+            font.pointSize: root.textPointSize
             font.weight: Font.DemiBold
             color: root.plotColors.plotText
             elide: Text.ElideRight
@@ -153,6 +161,7 @@ Rectangle {
             width: Math.min(implicitWidth, Math.max(0, track.textRoom - titleLabel.width))
             text: root.artistAlbumText
             visible: text.length > 0 && root.titleText.length > 0
+            font.pointSize: root.textPointSize
             color: root.plotColors.plotTextSecondary
             elide: Text.ElideRight
         }
@@ -164,6 +173,7 @@ Rectangle {
             text: root.timeText
             visible: text.length > 0
             color: root.plotColors.plotTextSecondary
+            font.pointSize: root.textPointSize
             font.features: root.uiPalette.tabularFigures
         }
     }
