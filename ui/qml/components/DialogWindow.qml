@@ -57,6 +57,12 @@ ApplicationWindow {
     readonly property real _roomHeight: root.screen
         ? Math.min(root.screen.height, root.screen.desktopAvailableHeight) - 2 * Kirigami.Units.gridUnit
         : root.defaultHeight
+    // The width it opens at: its default, within the screen's room and its
+    // minimum. Its content is laid out at that width only once it shows,
+    // so a default height that follows text that wraps measures the text
+    // at this width rather than at the content's.
+    readonly property real openingWidth: Math.ceil(Math.max(root.minimumWidth,
+        Math.min(root.defaultWidth, root._roomWidth)))
 
     function open() {
         if (!root.visible) {
@@ -64,7 +70,7 @@ ApplicationWindow {
             root.aboutToShow()
             if (!root._sized || root.sizesOnEachOpen) {
                 root._sized = true
-                root.width = Math.ceil(Math.max(root.minimumWidth, Math.min(root.defaultWidth, root._roomWidth)))
+                root.width = root.openingWidth
                 root.height = Math.ceil(Math.max(root.minimumHeight, Math.min(root.defaultHeight, root._roomHeight)))
             }
             root.show()

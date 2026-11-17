@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "FlacFixture.h"
 #include "QmlSmokeTest.h"
+
+#include <QQuickTextDocument>
+#include <QTextBlock>
+#include <QTextDocument>
+#include <QTextLayout>
 
 #include <functional>
 
@@ -46,6 +52,8 @@ private slots:
     void tagEditorLibrarySupportGateMatchesSupportedRows();
     void renameFilesShowsTheNewNamesAndCancelRenamesNothing();
     void renameRenamesThePreviewedFilesAfterTheSelectionChanged();
+    void saveDetailsReadAsAReport_data();
+    void saveDetailsReadAsAReport();
 };
 
 namespace {
@@ -1591,6 +1599,145 @@ void TagEditorSmokeTest::renameRenamesThePreviewedFilesAfterTheSelectionChanged(
     QVERIFY(!renames().first().contains(second.toUtf8()));
     QTRY_VERIFY(!fixture.editor.saving());
     fixture.editor.m_bridge = nullptr;
+}
+
+void TagEditorSmokeTest::saveDetailsReadAsAReport_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The details of a save that failed for one file read as a report (#373
+// H40: a plain text dump in a window 522 px tall for six lines): the
+// editor's summary, semibold, then each section's heading, semibold, over
+// its files, each 16 px in, more with a larger font, the lines a long
+// error wraps to under its own start; the window as tall as all that.
+// The save is a real one, into a folder the user may not write to.
+void TagEditorSmokeTest::saveDetailsReadAsAReport() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont larger = applicationFont;
+        larger.setPointSizeF(pointSize);
+        QGuiApplication::setFont(larger);
+    }
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QDir root(dir.path());
+    QVERIFY(root.mkdir(QStringLiteral("writable")) && root.mkdir(QStringLiteral("read-only")));
+    const QString writable = root.filePath(QStringLiteral("writable/01 Brief Signal.flac"));
+    const QString readOnly = root.filePath(QStringLiteral("read-only/03 Long Exhale.flac"));
+    for (const QString &path : {writable, readOnly}) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray flac = flac_fixture::flacWithComments({QStringLiteral("TITLE=Old")});
+        QCOMPARE(file.write(flac), qint64(flac.size()));
+    }
+    const QString readOnlyFolder = root.filePath(QStringLiteral("read-only"));
+    QVERIFY(QFile::setPermissions(readOnlyFolder, QFile::ReadOwner | QFile::ExeOwner));
+    const auto restorePermissions = qScopeGuard([&] {
+        QFile::setPermissions(readOnlyFolder, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    });
+    if (QFileInfo(readOnlyFolder).isWritable()) {
+        QSKIP("The user may write to any folder, such as root.");
+    }
+
+    TagEditorController editor{nullptr};
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowWithTagEditor(engine, libraryModel, editor);
+    QVERIFY(window != nullptr);
+    QObject *tagsDialog = window->findChild<QObject *>(QStringLiteral("tagEditorDialog"));
+    QObject *details = window->findChild<QObject *>(QStringLiteral("tagEditorStatusDetailsDialog"));
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(tagsDialog != nullptr && details != nullptr && palette != nullptr);
+    QVERIFY(editor.openForPaths({writable, readOnly}));
+    QTRY_VERIFY(!editor.loading() && tagsDialog->property("opened").toBool());
+    QCOMPARE(editor.m_tableModel.rowCount(), 2);
+    editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+    editor.setCell(1, QStringLiteral("title"), QStringLiteral("New"));
+    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QCOMPARE(editor.statusText(), QStringLiteral("Saved 1 file; 1 failed."));
+
+    QQuickWindow *tags = dialogWindowOf(tagsDialog);
+    QVERIFY(tags != nullptr);
+    QTRY_VERIFY(clickVisibleButton(tags, QStringLiteral("tagEditorDetailsButton")));
+    QTRY_VERIFY(details->property("opened").toBool());
+    QQuickWindow *detailsWindow = dialogWindowOf(details);
+    QVERIFY(QTest::qWaitForWindowExposed(detailsWindow));
+
+    // The summary first, semibold, in the text colour.
+    QQuickItem *summary = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsSummary"));
+    QVERIFY(summary != nullptr);
+    QCOMPARE(summary->property("text").toString(), QStringLiteral("Saved 1 file; 1 failed."));
+    QCOMPARE(summary->property("font").value<QFont>().weight(), QFont::DemiBold);
+    QCOMPARE(summary->property("color").value<QColor>(), palette->property("text").value<QColor>());
+
+    // Each heading semibold over its files, each file indented, trimmed.
+    QQuickItem *text = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsText"));
+    QVERIFY(text != nullptr);
+    QCOMPARE(text->property("textFormat").toInt(), int(Qt::RichText));
+    auto *quickDocument = qvariant_cast<QQuickTextDocument *>(text->property("textDocument"));
+    QVERIFY(quickDocument != nullptr);
+    QTextDocument *document = quickDocument->textDocument();
+    QVERIFY(document != nullptr);
+    QStringList blocks;
+    for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
+        blocks << block.text();
+    }
+    QCOMPARE(blocks.size(), 4);
+    QCOMPARE(blocks.mid(0, 3), (QStringList{QStringLiteral("Succeeded:"), QStringLiteral("01 Brief Signal.flac"),
+                                            QStringLiteral("Failed:")}));
+    QVERIFY2(blocks[3].startsWith(QStringLiteral("03 Long Exhale.flac: ")), qPrintable(blocks[3]));
+    QVERIFY2(blocks[3].contains(QStringLiteral("ermission denied")), qPrintable(blocks[3]));
+    const qreal indent = std::max(16.0, std::round(16.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
+    const auto blockAt = [&](int index) { return document->findBlockByNumber(index); };
+    for (int index : {0, 2}) {
+        QCOMPARE(blockAt(index).charFormat().fontWeight(), int(QFont::DemiBold));
+        QCOMPARE(blockAt(index).blockFormat().leftMargin(), 0.0);
+    }
+    for (int index : {1, 3}) {
+        QVERIFY(blockAt(index).charFormat().fontWeight() < int(QFont::DemiBold));
+        QCOMPARE(blockAt(index).blockFormat().leftMargin(), indent);
+    }
+    // The error wraps, and its lines start under the file's name, the
+    // indent right of the heading.
+    const QTextLayout *errorLayout = blockAt(3).layout();
+    QVERIFY2(errorLayout->lineCount() > 1, qPrintable(QString::number(errorLayout->lineCount())));
+    const auto lineLeft = [](const QTextBlock &block, int line) {
+        return block.layout()->position().x() + block.layout()->lineAt(line).x();
+    };
+    for (int line = 0; line < errorLayout->lineCount(); ++line) {
+        QCOMPARE(lineLeft(blockAt(3), line), lineLeft(blockAt(2), 0) + indent);
+    }
+    QCOMPARE(lineLeft(blockAt(1), 0), lineLeft(blockAt(0), 0) + indent);
+    // The text on the summary's x.
+    QCOMPARE(text->mapToScene(QPointF(text->property("leftPadding").toReal(), 0)).x(),
+             sceneRectOf(summary).left());
+
+    // As tall as all that, with a grid unit's room above the buttons, up to
+    // 29 grid units, past which the details scroll.
+    QQuickItem *close = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton"));
+    QVERIFY(close != nullptr);
+    const qreal gridUnit = details->property("contentPadding").toReal();
+    QTRY_VERIFY(text->height() > 0);
+    const qreal textBottom = sceneRectOf(text).top() + text->property("contentHeight").toReal();
+    const QString where = QStringLiteral("text to %1, Close from %2 in a window %3 px tall")
+        .arg(textBottom).arg(sceneRectOf(close).top()).arg(detailsWindow->height());
+    if (pointSize == 0 || detailsWindow->height() < gridUnit * 29) {
+        QVERIFY2(detailsWindow->height() < gridUnit * 29, qPrintable(where));
+        QVERIFY2(std::abs(sceneRectOf(close).top() - textBottom - gridUnit) <= 1.0, qPrintable(where));
+    } else {
+        QCOMPARE(detailsWindow->height(), int(gridUnit * 29));
+        QVERIFY2(textBottom > sceneRectOf(close).top() - gridUnit, qPrintable(where));
+    }
+    QCOMPARE(sceneRectOf(summary).top(), gridUnit);
+
+    QVERIFY(clickVisibleButton(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton")));
+    QTRY_VERIFY(!details->property("visible").toBool());
 }
 
 std::unique_ptr<QmlSmokeTest> makeTagEditorSmokeTest(const QString &userDirectoriesParent) {

@@ -35,27 +35,36 @@ QString partialResultText(const QString &done, qsizetype failed) {
                  done, i18ncp("@info:status", "%1 failed", "%1 failed", failed));
 }
 
-QString buildActionDetails(const QStringList &successLines, const QStringList &failureLines) {
-    QStringList sections;
+// The details of an action: a section of the files it did, and one of the
+// files it failed for, each a heading and a line for each file.
+QVariantList buildActionDetails(const QStringList &successLines, const QStringList &failureLines) {
+    QVariantList sections;
     if (!successLines.isEmpty()) {
-        QStringList lines;
-        lines.reserve(successLines.size() + 1);
-        lines.push_back(i18nc("@title list of files", "Succeeded:"));
-        for (const QString &line : successLines) {
-            lines.push_back(QStringLiteral("  ") + line);
-        }
-        sections.push_back(lines.join(QLatin1Char('\n')));
+        sections.push_back(QVariantMap{{QStringLiteral("heading"), i18nc("@title list of files", "Succeeded:")},
+                                       {QStringLiteral("items"), successLines}});
     }
     if (!failureLines.isEmpty()) {
-        QStringList lines;
-        lines.reserve(failureLines.size() + 1);
-        lines.push_back(i18nc("@title list of files", "Failed:"));
-        for (const QString &line : failureLines) {
-            lines.push_back(QStringLiteral("  ") + line);
-        }
-        sections.push_back(lines.join(QLatin1Char('\n')));
+        sections.push_back(QVariantMap{{QStringLiteral("heading"), i18nc("@title list of files", "Failed:")},
+                                       {QStringLiteral("items"), failureLines}});
     }
-    return sections.join(QStringLiteral("\n\n"));
+    return sections;
+}
+
+// The details as plain text: each heading over its lines, indented, and a
+// blank line between sections.
+QString actionDetailsText(const QVariantList &sections) {
+    QStringList texts;
+    texts.reserve(sections.size());
+    for (const QVariant &section : sections) {
+        const QVariantMap map = section.toMap();
+        QStringList lines{map.value(QStringLiteral("heading")).toString()};
+        const QStringList items = map.value(QStringLiteral("items")).toStringList();
+        for (const QString &item : items) {
+            lines.push_back(QStringLiteral("  ") + item);
+        }
+        texts.push_back(lines.join(QLatin1Char('\n')));
+    }
+    return texts.join(QStringLiteral("\n\n"));
 }
 
 TagEditorRowState rowFromJson(const QJsonObject &object) {
@@ -458,6 +467,10 @@ QString TagEditorController::statusDetails() const {
     return m_statusDetails;
 }
 
+QVariantList TagEditorController::statusDetailSections() const {
+    return m_statusDetailSections;
+}
+
 bool TagEditorController::hasRowErrors() const {
     return m_tableModel.hasRowErrors();
 }
@@ -755,7 +768,7 @@ bool TagEditorController::renamePreviewedFiles() {
         setStatusText(i18nc("@info:status",
                             "The rename preview is out of date, so nothing was renamed. "
                             "Use Rename Files again."),
-                      QString(), true);
+                      {}, true);
         return false;
     }
     return startRename(std::move(request));
@@ -1295,12 +1308,14 @@ void TagEditorController::reportFailures(const QString &status, const QStringLis
     emit errorReported(lines.join(QLatin1Char('\n')));
 }
 
-void TagEditorController::setStatusText(const QString &text, const QString &details, bool isError) {
-    if (m_statusText == text && m_statusDetails == details && m_statusIsError == isError) {
+void TagEditorController::setStatusText(const QString &text, const QVariantList &detailSections,
+                                        bool isError) {
+    if (m_statusText == text && m_statusDetailSections == detailSections && m_statusIsError == isError) {
         return;
     }
     m_statusText = text;
-    m_statusDetails = details;
+    m_statusDetailSections = detailSections;
+    m_statusDetails = actionDetailsText(detailSections);
     m_statusIsError = isError;
     emit statusChanged();
 }
