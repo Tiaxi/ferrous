@@ -52,6 +52,7 @@ static bool lcNamesHome(QString t) {
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QTimer>
+#include <atomic>
 #include <QtConcurrent/QtConcurrentRun>
 #include <vector>
 #include <fcntl.h>
@@ -65,32 +66,52 @@ QString g_dir;
 // Frame-strip recorder: reads back every frame each hooked window renders,
 // on the render thread right after the scene graph has drawn it (public API:
 // QQuickWindow::afterRendering + beginExternalCommands, QOpenGLFunctions).
+// Threads: stripstart/stripstop run on the GUI thread, readbackFrame on each window's render thread. Everything
+// both read is guarded by g_stripMutex; g_recording is also atomic so the GUI thread and a render thread's fast
+// path can test it without the lock (it changes only with the lock held). A readback takes the settings and the
+// recording's generation under the lock, reads the frame without it, and keeps the frame only if the same
+// recording is still running: a frame of a stopped recording (a callback already past its check when stripstop
+// disconnected it) is dropped, never added to the next recording's buffer.
 struct StripFrame {
     qint64 ns;
     int win;
     QImage img;
 };
+struct StripSettings {
+    QRect crop;          // logical, of the target window (main, or win=); empty = whole window
+    int every = 1;       // every=N: keep every Nth rendered frame (per window)
+    double scale = 1.0;  // scale=F: downscale kept frames (memory budget for large windows)
+};
 QElapsedTimer g_clock;
 QMutex g_stripMutex;
+// guarded by g_stripMutex:
 std::vector<StripFrame> g_frames;
 std::vector<QString> g_marks;
-bool g_recording = false;
-QRect g_crop;  // logical, of the target window (main, or win=); empty = whole window
-QString g_winFilter;  // win=NAME: record only windows whose title/objectName contains NAME
-int g_every = 1;      // every=N: keep every Nth rendered frame (per window)
-double g_scale = 1.0; // scale=F: downscale kept frames (memory budget for large windows)
+StripSettings g_strip;
+quint64 g_stripGeneration = 0;  // bumped at every start and stop
 QHash<int, int> g_frameCount;
+// written only with g_stripMutex held; read with or without it
+std::atomic<bool> g_recording{false};
+// GUI thread only (stripstart, hookWindows):
+QString g_winFilter;  // win=NAME: record only windows whose title/objectName contains NAME
 
 void readbackFrame(QQuickWindow *w, int winIndex, bool isMain) {
-    if (!g_recording) {
+    if (!g_recording.load()) {
         return;
     }
     const qint64 ns = g_clock.nsecsElapsed();
+    StripSettings strip;
+    quint64 generation = 0;
     {
         QMutexLocker lock(&g_stripMutex);
-        if (g_frameCount[winIndex]++ % qMax(1, g_every) != 0) {
+        if (!g_recording.load()) {
             return;
         }
+        if (g_frameCount[winIndex]++ % qMax(1, g_strip.every) != 0) {
+            return;
+        }
+        strip = g_strip;
+        generation = g_stripGeneration;
     }
     QOpenGLContext *ctx = QOpenGLContext::currentContext();
     if (ctx == nullptr) {
@@ -102,9 +123,9 @@ void readbackFrame(QQuickWindow *w, int winIndex, bool isMain) {
     const int fw = qRound(w->width() * dpr);
     const int fh = qRound(w->height() * dpr);
     QRect r(0, 0, fw, fh);
-    if (isMain && !g_crop.isEmpty()) {
-        r = QRect(qRound(g_crop.x() * dpr), qRound(g_crop.y() * dpr), qRound(g_crop.width() * dpr),
-                  qRound(g_crop.height() * dpr)).intersected(r);
+    if (isMain && !strip.crop.isEmpty()) {
+        r = QRect(qRound(strip.crop.x() * dpr), qRound(strip.crop.y() * dpr), qRound(strip.crop.width() * dpr),
+                  qRound(strip.crop.height() * dpr)).intersected(r);
     }
     QImage img(r.width(), r.height(), QImage::Format_RGBA8888);
     f->glBindFramebuffer(GL_FRAMEBUFFER, ctx->defaultFramebufferObject());
@@ -112,12 +133,15 @@ void readbackFrame(QQuickWindow *w, int winIndex, bool isMain) {
     f->glReadPixels(r.x(), fh - r.y() - r.height(), r.width(), r.height(), GL_RGBA, GL_UNSIGNED_BYTE, img.bits());
     w->endExternalCommands();
     img = img.flipped(Qt::Vertical);
-    if (g_scale > 0 && g_scale < 1.0) {
-        img = img.scaled(qRound(img.width() * g_scale), qRound(img.height() * g_scale), Qt::IgnoreAspectRatio,
+    if (strip.scale > 0 && strip.scale < 1.0) {
+        img = img.scaled(qRound(img.width() * strip.scale), qRound(img.height() * strip.scale), Qt::IgnoreAspectRatio,
                          Qt::SmoothTransformation);
     }
     img.setDevicePixelRatio(1);
     QMutexLocker lock(&g_stripMutex);
+    if (!g_recording.load() || g_stripGeneration != generation) {
+        return;  // that recording stopped (and maybe another started) while this frame was read
+    }
     g_frames.push_back({ns, winIndex, std::move(img)});
 }
 
@@ -636,7 +660,7 @@ private:
             QCoreApplication::quit();
             return;
         }
-        if (g_recording) {
+        if (g_recording.load()) {
             QMutexLocker lock(&g_stripMutex);
             g_marks.push_back(QString::number(g_clock.nsecsElapsed() / 1e6, 'f', 3) + "\t" + line);
         }
@@ -645,35 +669,41 @@ private:
             return;
         }
         if (cmd == "stripstart") {
-            // stripstart [x y w h]: crop of the main window (logical px).
-            {
-                QMutexLocker lock(&g_stripMutex);
-                g_frames.clear();
-                g_marks.clear();
-                m_hooked.clear();
-                m_winInfo.clear();
-            }
-            // stripstart [x y w h] [win=NAME] [every=N] [scale=F]
+            // stripstart [x y w h] [win=NAME] [every=N] [scale=F]: [x y w h] is a crop of the main window
+            // (logical px).
             QStringList pos;
+            StripSettings strip;
             g_winFilter.clear();
-            g_every = 1;
-            g_scale = 1.0;
-            g_frameCount.clear();
             for (int i = 2; i < a.size(); ++i) {
                 const QString t = a.value(i);
                 if (t.startsWith("win=")) {
                     g_winFilter = t.mid(4);
                 } else if (t.startsWith("every=")) {
-                    g_every = qMax(1, t.mid(6).toInt());
+                    strip.every = qMax(1, t.mid(6).toInt());
                 } else if (t.startsWith("scale=")) {
-                    g_scale = t.mid(6).toDouble();
+                    strip.scale = t.mid(6).toDouble();
                 } else {
                     pos.append(t);
                 }
             }
-            g_crop = pos.size() >= 4 ? QRect(pos[0].toInt(), pos[1].toInt(), pos[2].toInt(), pos[3].toInt()) : QRect();
+            strip.crop = pos.size() >= 4 ? QRect(pos[0].toInt(), pos[1].toInt(), pos[2].toInt(), pos[3].toInt()) : QRect();
+            {
+                QMutexLocker lock(&g_stripMutex);
+                g_recording.store(false);  // (a start without a stop: the frames read so far are not this one's)
+                ++g_stripGeneration;
+                g_frames.clear();
+                g_marks.clear();
+                g_frameCount.clear();
+                g_strip = strip;
+            }
+            m_hooked.clear();
+            m_winInfo.clear();
             hookWindows();
-            g_recording = true;
+            {
+                QMutexLocker lock(&g_stripMutex);
+                ++g_stripGeneration;
+                g_recording.store(true);
+            }
             {
                 QQuickWindow *tw = mainWindow();
                 if (!g_winFilter.isEmpty()) {
@@ -681,11 +711,11 @@ private:
                         if (w->title().contains(g_winFilter) || w->objectName().contains(g_winFilter)) tw = w;
                     }
                 }
-                m_traceCrop = g_crop.isEmpty() ? QRectF() : QRectF(g_crop);
+                m_traceCrop = strip.crop.isEmpty() ? QRectF() : QRectF(strip.crop);
                 m_traceWin = tw;
                 traceStart(tw);
                 m_connections.append(QObject::connect(tw, &QQuickWindow::afterAnimating, this,
-                                                      [this, tw] { if (g_recording) traceSample(tw); }));
+                                                      [this, tw] { if (g_recording.load()) traceSample(tw); }));
             }
             m_hookTimer.start(5);
             if (QQuickWindow *mw = mainWindow()) {
@@ -696,7 +726,17 @@ private:
         }
         if (cmd == "stripstop") {
             // stripstop <dir>: writes <dir>/f<NNNN>_w<win>.png and <dir>/frames.tsv.
-            g_recording = false;
+            std::vector<StripFrame> frames;
+            std::vector<QString> marks;
+            {
+                // stopped and taken in one step: a readback still running keeps its frame only while the
+                // generation it read is current, so nothing reaches g_frames after this
+                QMutexLocker lock(&g_stripMutex);
+                g_recording.store(false);
+                ++g_stripGeneration;
+                frames.swap(g_frames);
+                marks.swap(g_marks);
+            }
             m_hookTimer.stop();
             for (const auto &c : m_connections) {
                 QObject::disconnect(c);
@@ -705,13 +745,6 @@ private:
             const QString dir = rest(line, 2);
             QDir().mkpath(dir);
             if (m_traceWin) traceWrite(dir);
-            std::vector<StripFrame> frames;
-            std::vector<QString> marks;
-            {
-                QMutexLocker lock(&g_stripMutex);
-                frames.swap(g_frames);
-                marks.swap(g_marks);
-            }
             QFile tsv(dir + "/frames.tsv");
             if (!tsv.open(QIODevice::WriteOnly | QIODevice::Truncate)) qWarning("shotprobe: cannot write %s", qPrintable(tsv.fileName()));
             QList<QFuture<void>> jobs;
@@ -1071,7 +1104,7 @@ private:
                 w, &QQuickWindow::afterRendering, w, [w, index, isMain] { readbackFrame(w, index, isMain); },
                 Qt::DirectConnection));
             m_connections.append(QObject::connect(w, &QWindow::visibleChanged, this, [this, w, index](bool v) {
-                if (g_recording) {
+                if (g_recording.load()) {
                     QMutexLocker lock(&g_stripMutex);
                     g_marks.push_back(QString::number(g_clock.nsecsElapsed() / 1e6, 'f', 3) +
                                       QString("\twindow %1 visible=%2 pos=%3,%4 size=%5x%6")
