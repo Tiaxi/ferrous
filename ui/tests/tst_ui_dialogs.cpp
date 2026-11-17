@@ -5314,8 +5314,12 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
     font.setPointSizeF(pointSize);
     QGuiApplication::setFont(font);
     const bool large = pointSize > 10;
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(8); };
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *palette = paletteOf(window);
@@ -5449,6 +5453,41 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
     }
     QVERIFY(QMetaObject::invokeMethod(about, "close"));
     QTRY_VERIFY(!about->property("visible").toBool());
+
+    // Edit Tags: a changed field's Revert, in the field, has a glyph as
+    // large as a line holds, as the column's Revert has, and 16 px with the
+    // default font (#373 H46: 16 px beside 32 px text at 24 pt).
+    QObject *tagDialog = object(window, QStringLiteral("tagEditorDialog"));
+    QVERIFY(tagDialog != nullptr);
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && tagDialog->property("opened").toBool());
+    QQuickWindow *tags = windowOf(tagDialog);
+    QVERIFY(QTest::qWaitForWindowActive(tags));
+    editor.selectAllRows();
+    QQuickItem *field = nullptr;
+    QTRY_VERIFY((field = visibleNamed(tags, QStringLiteral("tagEditorField_genre"))) != nullptr);
+    QQuickItem *revert = named(tags, QStringLiteral("tagEditorRevert_genre"));
+    QVERIFY(revert != nullptr);
+    field->forceActiveFocus();
+    QTest::keyClick(tags, Qt::Key_A, Qt::ControlModifier);
+    for (const char letter : QByteArrayLiteral("Ambient")) {
+        QTest::keyClick(tags, letter);
+    }
+    QTest::keyClick(tags, Qt::Key_Tab);
+    QTRY_VERIFY(revert->isVisible());
+    const qreal smallSpacing = evaluate(palette, QStringLiteral("Kirigami.Units.smallSpacing")).toReal();
+    QCOMPARE(revert->width(), labelIcon + 2 * smallSpacing);
+    QCOMPARE(revert->height(), revert->width());
+    QCOMPARE(evaluate(revert, QStringLiteral("icon.width")).toReal(), labelIcon);
+    QCOMPARE(evaluate(revert, QStringLiteral("icon.height")).toReal(), labelIcon);
+    if (!large) {
+        // As it was with the default font.
+        QCOMPARE(revert->width(), 24.0);
+    }
+    // Within the field, clear of its text.
+    QVERIFY2(sceneRect(field).contains(sceneRect(revert)),
+             qPrintable(describeItem(revert) + QStringLiteral(" / ") + describeItem(field)));
+    QCOMPARE(field->property("rightPadding").toReal(), revert->width() + smallSpacing);
 }
 
 // A Recent Issues link's press reads as a press: its tint is a clear step

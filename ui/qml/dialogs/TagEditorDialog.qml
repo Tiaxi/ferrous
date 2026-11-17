@@ -929,11 +929,16 @@ Components.DialogWindow {
             anchors.right: parent.right
             anchors.rightMargin: 2
             anchors.verticalCenter: parent.verticalCenter
-            width: Kirigami.Units.iconSizes.small + 2 * Kirigami.Units.smallSpacing
+            // Its glyph as large as a line of the field's text holds, as
+            // the column's Revert: 16 px with the default font (#373 H46:
+            // 16 px beside 32 px text at 24 pt).
+            width: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
             height: width
             visible: fieldEditor.changed
             enabled: !root.busy
             icon.name: "edit-undo"
+            icon.width: root.uiPalette.labelIconSize
+            icon.height: root.uiPalette.labelIconSize
             display: AbstractButton.IconOnly
             text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1", fieldEditor.field.label)
             ToolTip.visible: hovered || visualFocus
