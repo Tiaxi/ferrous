@@ -3018,6 +3018,43 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
         QVERIFY2(action->implicitWidth() >= metrics.horizontalAdvance(action->property("text").toString()) + forLabels,
                  qPrintable(QStringLiteral("%1: %2 px").arg(action->objectName()).arg(action->implicitWidth())));
     }
+
+    // A result whose high-resolution image loads says so beside the
+    // artist, whole: at 24 pt on two lines, inside the row, and on one
+    // with the default font (#373 H45: elided at 24 pt).
+    QObject *bridge = qvariant_cast<QObject *>(opened.root->property("bridge"));
+    QVERIFY(bridge != nullptr);
+    QVariantList loading = itunesArtworkFixture(dir, 2);
+    QVariantMap first = loading.first().toMap();
+    first.insert(QStringLiteral("assetReady"), false);
+    first.insert(QStringLiteral("assetLoading"), true);
+    loading.first() = first;
+    bridge->setProperty("itunesArtworkResults", loading);
+    QQuickItem *loadingRow = nullptr;
+    QQuickItem *loadingDetails = nullptr;
+    QTRY_VERIFY([&]() {
+        for (QQuickItem *row : visibleItemsNamed(opened.content, QStringLiteral("itunesArtworkResultRow"))) {
+            QQuickItem *details = itemNamed(row, QStringLiteral("itunesArtworkResultDetails"));
+            if (details != nullptr && details->property("text").toString().contains(QStringLiteral("Loading"))) {
+                loadingRow = row;
+                loadingDetails = details;
+                return true;
+            }
+        }
+        return false;
+    }());
+    QCOMPARE(loadingDetails->property("text").toString(),
+             QStringLiteral("The Quiet Meridian \u00b7 Loading high-resolution artwork\u2026"));
+    const QString loadingAt = QStringLiteral("details %1 in the row %2, %3 lines")
+        .arg(describeRect(sceneRectOf(loadingDetails)), describeRect(sceneRectOf(loadingRow)))
+        .arg(loadingDetails->property("lineCount").toInt());
+    QTRY_VERIFY2(!loadingDetails->property("truncated").toBool(), qPrintable(loadingAt));
+    QCOMPARE(loadingDetails->property("lineCount").toInt(), large ? 2 : 1);
+    QQuickItem *loadingTitle = itemNamed(loadingRow, QStringLiteral("itunesArtworkResultTitle"));
+    QVERIFY(loadingTitle != nullptr);
+    QVERIFY2(sceneRectOf(loadingTitle).top() >= sceneRectOf(loadingRow).top() + 8 - 0.5
+                 && sceneRectOf(loadingDetails).bottom() <= sceneRectOf(loadingRow).bottom() - 8 + 0.5,
+             qPrintable(loadingAt));
 }
 
 void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {

@@ -348,9 +348,10 @@ Components.DialogWindow {
     readonly property real actionSpacing: Kirigami.Units.largeSpacing
     readonly property real textActionsGap: 16
     // A row, the current art's or a result's: the thumbnail, or the title
-    // and a line of details, or the buttons, whichever is tallest, with
-    // 8 px above and below; 80 px with the default font.
-    readonly property real rowHeight: Math.max(root.thumbnailSize, 2 * lineMetrics.implicitHeight + 2,
+    // and up to two lines of details, or the buttons, whichever is
+    // tallest, with 8 px above and below; 80 px with the default font,
+    // where the thumbnail is the tallest.
+    readonly property real rowHeight: Math.max(root.thumbnailSize, 3 * lineMetrics.implicitHeight + 2,
         applyMetrics.implicitHeight) + 2 * root.rowPadding
     // What the search found, on a line with 8 px above and below.
     readonly property real headingHeight: lineMetrics.implicitHeight + 2 * Kirigami.Units.largeSpacing
@@ -424,8 +425,10 @@ Components.DialogWindow {
         }
     }
 
-    // A row's text: the title, then one secondary line, elided, with the
-    // whole of it in a tooltip when it does not fit.
+    // A row's text: the title, elided, then the secondary line, which
+    // wraps to a second line where it does not fit, as with a large font
+    // (#373 H45: the artist and "Loading high-resolution artwork…" elided
+    // at 24 pt), and elides past that, with the whole of it in a tooltip.
     component ArtworkText: Column {
         property string title: ""
         property string details: ""
@@ -451,6 +454,8 @@ Components.DialogWindow {
             text: parent.details
             color: parent.detailsColor
             font.features: root.uiPalette.tabularFigures
+            wrapMode: Text.Wrap
+            maximumLineCount: 2
             elide: Text.ElideRight
             ToolTip.text: text
             ToolTip.visible: detailsHover.hovered && truncated
@@ -643,7 +648,7 @@ Components.DialogWindow {
                         source: (suggestionRow.modelData && (suggestionRow.modelData.previewSource || "")) || ""
                     }
 
-                    // One secondary line: the artist and the image's
+                    // The secondary line: the artist and the image's
                     // details; while the high-resolution image loads, that;
                     // when it failed, why.
                     ArtworkText {
