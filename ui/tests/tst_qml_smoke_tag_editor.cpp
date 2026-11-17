@@ -747,7 +747,18 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     QCOMPARE(message->property("color").value<QColor>().rgba(), palette->property("textSecondary").value<QColor>().rgba());
     QCOMPARE(files->property("color").value<QColor>().rgba(), palette->property("textSecondary").value<QColor>().rgba());
     QTRY_COMPARE(sceneRectOf(qobject_cast<QQuickItem *>(files)).left(), sceneRectOf(status).left());
-    QVERIFY(sceneRectOf(qobject_cast<QQuickItem *>(message)).left() < sceneRectOf(status).left());
+    // The explanation on the same left edge, as wide as the status's text
+    // (#373 H40: it started under the spinner); the window wider by that
+    // indent, so it keeps the lines it had.
+    auto *messageItem = qobject_cast<QQuickItem *>(message);
+    QTRY_COMPARE(sceneRectOf(messageItem).left(), sceneRectOf(status).left());
+    QCOMPARE(messageItem->width(), status->width());
+    QObject *quitWait = fixture.quitWait();
+    const qreal indent = quitWait->property("textIndent").toReal();
+    QCOMPARE(indent, sceneRectOf(status).left() - sceneRectOf(qobject_cast<QQuickItem *>(files)->parentItem()).left());
+    QCOMPARE(quitWait->property("defaultWidth").toReal(),
+             std::max(evaluateOn(status, QStringLiteral("Kirigami.Units.gridUnit")).toReal() * 26 + indent,
+                      quitWait->property("minimumWidth").toReal()));
     auto *keepWaiting = fixture.window->findChild<QQuickItem *>(QStringLiteral("tagEditorQuitWaitKeepWaitingButton"));
     QVERIFY(keepWaiting != nullptr);
     QCOMPARE(evaluateOn(keepWaiting, QStringLiteral("icon.name")).toString(), QStringLiteral("chronometer"));
