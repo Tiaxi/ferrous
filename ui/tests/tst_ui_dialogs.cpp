@@ -479,6 +479,8 @@ private slots:
     void configureIsAPageListWithKdesCaptionAndButtons();
     void configurePageIconsFollowTheFont_data();
     void configurePageIconsFollowTheFont();
+    void configureListRowsAreAlike_data();
+    void configureListRowsAreAlike();
     void configurePagesMoveByKeyboardAndTabReachesEveryControl();
     void configureAppliesOnOkOrApplyAndCancelDropsTheChanges();
     void configureDefaultsSetsThePagesBackToBeApplied();
@@ -815,6 +817,88 @@ void UiDialogsTest::configurePageIconsFollowTheFont() {
         }
         QVERIFY2(saturated == 0, qPrintable(QStringLiteral("%1: %2 coloured pixels")
                                                 .arg(row->property("text").toString()).arg(saturated)));
+    }
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
+void UiDialogsTest::configureListRowsAreAlike_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Every row of Configure's lists has its text on the same line within it,
+// the last as the others, and centred on it (#373 H40: the style gives
+// every row but a list's last a bottom padding, which the rows' `padding:
+// 0` left, so the others' text sat 2 px above Last.fm's and the last
+// folder's).
+void UiDialogsTest::configureListRowsAreAlike() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(bridgeOf(window)->setProperty("libraryRootEntries", QVariantList{
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/one")}, {QStringLiteral("name"), QStringLiteral("One")},
+                    {QStringLiteral("trackCount"), 3}},
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/two")}, {QStringLiteral("trackCount"), 5}},
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/three")}, {QStringLiteral("trackCount"), 7}},
+    }));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+
+    // Where a text's baseline is in its row, and how far its middle is
+    // from the row's.
+    const auto baselineIn = [](QQuickItem *text, QQuickItem *row) {
+        return sceneRect(text).top() + text->property("baselineOffset").toReal() - sceneRect(row).top();
+    };
+    const auto offCentre = [](QQuickItem *item, QQuickItem *row) {
+        return sceneRect(item).center().y() - sceneRect(row).center().y();
+    };
+
+    // The pages: each title on one baseline in its row, the title and the
+    // icon on the row's middle.
+    QList<qreal> baselines;
+    for (int index = 0; index < 4; ++index) {
+        QQuickItem *row = visibleNamed(prefs, QStringLiteral("preferencesPage_%1").arg(index));
+        QVERIFY(row != nullptr);
+        QTRY_VERIFY(!layoutPending(row));
+        QQuickItem *title = itemsNamed(row, QStringLiteral("preferencesPageListTitle")).value(0);
+        QQuickItem *icon = itemsNamed(row, QStringLiteral("preferencesPageIcon")).value(0);
+        QVERIFY(title != nullptr && icon != nullptr);
+        QCOMPARE(row->property("bottomPadding").toReal(), 0.0);
+        QVERIFY2(qAbs(offCentre(title, row)) <= 0.5, qPrintable(describeItem(title)));
+        QVERIFY2(qAbs(offCentre(icon, row)) <= 0.5, qPrintable(describeItem(icon)));
+        baselines << baselineIn(title, row);
+    }
+    for (qreal baseline : baselines) {
+        QCOMPARE(baseline, baselines.constFirst());
+    }
+
+    // The library's folders: each path on one baseline in its row, its
+    // line on the row's middle.
+    QQuickItem *list = nullptr;
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
+    QTRY_COMPARE(itemsNamed(list, QStringLiteral("libraryRootRow")).size(), 3);
+    baselines.clear();
+    for (QQuickItem *row : itemsNamed(list, QStringLiteral("libraryRootRow"))) {
+        QTRY_VERIFY(!layoutPending(row));
+        QQuickItem *path = itemsNamed(row, QStringLiteral("libraryRootPath")).value(0);
+        QVERIFY(path != nullptr);
+        QVERIFY2(qAbs(offCentre(path, row)) <= 0.5, qPrintable(describeItem(path)));
+        baselines << baselineIn(path, row);
+    }
+    for (qreal baseline : baselines) {
+        QCOMPARE(baseline, baselines.constFirst());
     }
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());

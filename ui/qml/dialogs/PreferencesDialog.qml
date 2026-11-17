@@ -351,6 +351,12 @@ Components.DialogWindow {
                     width: ListView.view.width
                     implicitHeight: root.uiPalette.rowHeight + Kirigami.Units.smallSpacing
                     padding: 0
+                    // The style gives every row but a list's last a bottom
+                    // padding of its own, which `padding` does not reset:
+                    // each row's icon and title were 2 px above the last
+                    // one's (#373 H40), off the row's middle.
+                    topPadding: 0
+                    bottomPadding: 0
                     leftPadding: root.pageRowLeftPadding
                     focusPolicy: Qt.NoFocus
                     text: pageRow.modelData.title
@@ -386,6 +392,7 @@ Components.DialogWindow {
                         }
 
                         Label {
+                            objectName: "preferencesPageListTitle"
                             Layout.fillWidth: true
                             text: pageRow.text
                             color: root.uiPalette.text

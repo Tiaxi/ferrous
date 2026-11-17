@@ -179,8 +179,14 @@ Preferences.PreferencesPage {
                     // spacing under the note.
                     readonly property bool hasNotes: rootRow.unwatchedReason.length > 0
                         || rootRow.scanProblem.length > 0
-                    implicitHeight: rowColumn.implicitHeight + (rootRow.hasNotes ? Kirigami.Units.smallSpacing : 0)
+                    implicitHeight: rowColumn.implicitHeight + rootRow.bottomPadding
                     padding: 0
+                    // Set here: the style gives every row but a list's last
+                    // a bottom padding of its own, which `padding` does not
+                    // reset, so each folder's line was 2 px above the last
+                    // one's (#373 H40).
+                    topPadding: 0
+                    bottomPadding: rootRow.hasNotes ? Kirigami.Units.smallSpacing : 0
                     highlighted: ListView.isCurrentItem
                     focusPolicy: Qt.NoFocus
                     Accessible.role: Accessible.ListItem
