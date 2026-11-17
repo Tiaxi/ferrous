@@ -5924,7 +5924,7 @@ void BridgeClientTest::itunesArtworkFoundTextIsPlainWords() {
     QCOMPARE(BridgeClient::itunesArtworkFoundText(1),
              QStringLiteral("Found 1 suggestion. Its full-size image downloads when you preview or apply it."));
     QCOMPARE(BridgeClient::itunesArtworkFoundText(5),
-             QStringLiteral("Found 5 suggestions. Each full-size image downloads when you preview or apply it."));
+             QStringLiteral("Found 5 suggestions. Full-size images download when you preview or apply one."));
     QVERIFY(!BridgeClient::itunesArtworkFoundText(5).contains(QLatin1Char('/')));
     // So does each suggestion's line before its image has come (#373 H7),
     // with a one-character ellipsis while it downloads.

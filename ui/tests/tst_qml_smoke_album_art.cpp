@@ -38,6 +38,7 @@ private slots:
     void itunesArtworkResultsAreAFlatList();
     void itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWithNothingFound();
     void itunesArtworkActionsFollowTheTextFont();
+    void itunesArtworkCountLineHoldsAtLargeFonts();
     void itunesArtworkListIsAsTallAsItsRows();
     void itunesArtworkScalesAsAWholeWithTheFont_data();
     void itunesArtworkScalesAsAWholeWithTheFont();
@@ -2759,6 +2760,35 @@ int fontPixelSize(QQuickItem *item) {
 }
 
 } // namespace
+
+// The line over the results that says how many there are is one line in
+// the dialog at 24 pt, as wide as it opens on a 1600 px screen (#373 H45:
+// "it." wrapped alone onto a second line).
+void AlbumArtSmokeTest::itunesArtworkCountLineHoldsAtLargeFonts() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large(QStringLiteral("Noto Sans"));
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QQmlApplicationEngine engine;
+    OpenItunesArtworkDialog opened;
+    QVERIFY(openItunesArtworkDialog(engine, dir, 5, nullptr, opened));
+    QObject *bridge = qvariant_cast<QObject *>(opened.root->property("bridge"));
+    QVERIFY(bridge != nullptr);
+    // BridgeClient's words for five (itunesArtworkFoundTextIsPlainWords).
+    bridge->setProperty("itunesArtworkStatusText",
+                        QStringLiteral("Found 5 suggestions. Full-size images download when you preview or apply one."));
+    // The width it opens at with a 24 pt font, its most.
+    QCOMPARE(opened.dialog->property("defaultWidth").toReal(), 1280.0);
+    opened.dialogWindow->resize(1280, opened.dialogWindow->height());
+    QTRY_COMPARE(opened.dialogWindow->width(), 1280);
+    QQuickItem *heading = itemNamed(opened.content, QStringLiteral("itunesArtworkResultsHeading"));
+    QVERIFY(heading != nullptr);
+    QTRY_VERIFY(heading->isVisible());
+    QTRY_COMPARE(heading->property("lineCount").toInt(), 1);
+}
 
 void AlbumArtSmokeTest::itunesArtworkActionsFollowTheTextFont() {
     // At 24 pt, a row's Preview and Apply, and the current art's Preview,
