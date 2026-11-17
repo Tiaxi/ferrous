@@ -2969,7 +2969,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow_data() {
 // actions were over two rows with two ragged right edges): Reload and
 // Delete Log… on the left, Open Folder, Copy All and Copy Log Without
 // Paths on the right, ending where the log's frame does. The log's scroll
-// bars are inside its frame.
+// bars are inside its frame, and its text clear of the frame.
 void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -3054,6 +3054,26 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
         QVERIFY2(within(sceneRect(scrollBar), sceneRect(frame).adjusted(1, 1, -1, -1)),
                  qPrintable(QString::fromLatin1(bar) + QStringLiteral(" ") + describeItem(scrollBar)));
     }
+    // The log's text stands 8 px clear of the frame's sides and 6 px of
+    // its top and bottom, inside its 1 px edge (#373 H42: 5 px, nearly on
+    // the frame).
+    QQuickItem *textArea = visibleNamed(diagnostics, QStringLiteral("diagnosticsTextArea"));
+    QVERIFY(textArea != nullptr);
+    QCOMPARE(textArea->property("leftPadding").toReal(), 8.0);
+    QCOMPARE(textArea->property("rightPadding").toReal(), 8.0);
+    QCOMPARE(textArea->property("topPadding").toReal(), 6.0);
+    QCOMPARE(textArea->property("bottomPadding").toReal(), 6.0);
+    QObject *flickable = qvariant_cast<QObject *>(scrollView->property("contentItem"));
+    QVERIFY(flickable != nullptr);
+    QVERIFY(flickable->setProperty("contentX", 0.0) && flickable->setProperty("contentY", 0.0));
+    QRectF firstCharacter;
+    QVERIFY(QMetaObject::invokeMethod(textArea, "positionToRectangle", Q_RETURN_ARG(QRectF, firstCharacter),
+                                      Q_ARG(int, 0)));
+    const QPointF textStart = textArea->mapToScene(firstCharacter.topLeft());
+    QVERIFY2(qAbs(textStart.x() - (sceneRect(frame).left() + 1) - 8) < 0.5
+                 && qAbs(textStart.y() - (sceneRect(frame).top() + 1) - 6) < 0.5,
+             qPrintable(QStringLiteral("text at %1,%2 in the frame %3")
+                            .arg(textStart.x()).arg(textStart.y()).arg(describeItem(frame))));
     // Made as narrow as it goes, the actions on the right go under the
     // others, at the same right edge, each whole and none over another.
     diagnostics->resize(diagnostics->minimumWidth(), diagnostics->height());
