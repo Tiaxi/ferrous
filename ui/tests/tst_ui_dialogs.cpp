@@ -502,6 +502,8 @@ private slots:
     void libraryFolderListIsThreeRowsTallAtLeast();
     void lastFmPageShowsOnlyTheButtonsThatApply();
     void lastFmScrobblingNeedsABuildWithLastFm();
+    void lastFmAccountIsAGroupApart_data();
+    void lastFmAccountIsAGroupApart();
     void aboutShowsTheIconVersionTabsAndCopiesTheVersion();
     void aboutKdeHasAboutsHeadingAndPage_data();
     void aboutKdeHasAboutsHeadingAndPage();
@@ -2153,6 +2155,74 @@ void UiDialogsTest::lastFmScrobblingNeedsABuildWithLastFm() {
     // A build with Last.fm lets it be turned on.
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
     QTRY_VERIFY(box->isEnabled());
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
+void UiDialogsTest::lastFmAccountIsAGroupApart_data() {
+    QTest::addColumn<bool>("connected");
+    QTest::newRow("connected") << true;
+    QTest::newRow("not connected") << false;
+}
+
+// The Last.fm page's account stands apart from the scrobbling group above
+// it, as General's groups are: 16 px from the group's last row, the status
+// check box when connected or the help text without it, where the rows
+// within the group are 4 px apart (#373 H42: Account stood 4 px under the
+// status check box, closer than the help text above it).
+void UiDialogsTest::lastFmAccountIsAGroupApart() {
+    QFETCH(bool, connected);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
+    if (connected) {
+        QVERIFY(bridge->setProperty("lastFmAuthState", 2));
+        QVERIFY(bridge->setProperty("lastFmUsername", QStringLiteral("listener")));
+    }
+    QObject *dialog = openPreferences(window, 2);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    const auto gap = [](QQuickItem *above, QQuickItem *below) {
+        return sceneRect(below).top() - sceneRect(above).bottom();
+    };
+    // General's room between its groups: from the viewers' last row to the
+    // desktop integration's subheading.
+    QTRY_VERIFY(!layoutPending(stack->childItems().at(2)));
+    QQuickItem *sleep = visibleNamed(prefs, QStringLiteral("preventDisplaySleepInFullscreenCheckBox"));
+    QQuickItem *headingRow = visibleNamed(prefs, QStringLiteral("desktopIntegrationHeading"));
+    QVERIFY(sleep != nullptr && headingRow != nullptr);
+    QQuickItem *heading = itemsNamed(headingRow, QStringLiteral("formSubheading")).value(0);
+    QVERIFY(heading != nullptr);
+    const qreal generalGroupGap = gap(sleep, heading);
+    QVERIFY2(qAbs(generalGroupGap - 16) < 1, qPrintable(QString::number(generalGroupGap)));
+
+    dialog->setProperty("pageIndex", 3);
+    QQuickItem *account = nullptr;
+    QTRY_VERIFY((account = visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))) != nullptr);
+    QTRY_VERIFY(!layoutPending(stack->childItems().at(3)));
+    QQuickItem *box = visibleNamed(prefs, QStringLiteral("lastFmScrobblingCheckBox"));
+    QQuickItem *helpRow = visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp"));
+    QVERIFY(box != nullptr && helpRow != nullptr);
+    QQuickItem *help = itemsNamed(helpRow, QStringLiteral("formHelpTextLabel")).value(0);
+    QQuickItem *progress = visibleNamed(prefs, QStringLiteral("lastFmShowScrobbleProgressCheckBox"));
+    QVERIFY(help != nullptr);
+    QCOMPARE(progress != nullptr, connected);
+    QQuickItem *groupEnd = connected ? progress : help;
+    // Within the group: the help text 4 px under its check box, and the
+    // status check box 12 px under the help text.
+    QVERIFY2(qAbs(gap(box, help) - 4) < 1, qPrintable(describeItem(help)));
+    if (connected) {
+        QVERIFY2(qAbs(gap(help, progress) - 12) < 1, qPrintable(describeItem(progress)));
+    }
+    const qreal accountGap = gap(groupEnd, account);
+    QVERIFY2(qAbs(accountGap - generalGroupGap) < 1,
+             qPrintable(QStringLiteral("%1 px, General's %2 px: %3, %4")
+                            .arg(accountGap).arg(generalGroupGap).arg(describeItem(groupEnd), describeItem(account))));
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());
 }

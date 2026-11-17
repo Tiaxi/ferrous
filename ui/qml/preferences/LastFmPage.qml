@@ -36,19 +36,31 @@ Preferences.PreferencesPage {
     }
 
     Components.FormHelpText {
+        objectName: "lastFmScrobblingHelp"
         uiPalette: root.uiPalette
         indent: scrobblingCheckBox.contentItem.x
+        // Without the status check box, it ends the scrobbling group.
+        endsGroup: !showScrobbleProgressCheckBox.visible
         text: I18n.i18nc("@info", "Tracks longer than 30 seconds are scrobbled when playback stops or the track "
             + "ends, once half of the track or 4 minutes has been played, whichever comes first.")
     }
 
     CheckBox {
+        id: showScrobbleProgressCheckBox
         objectName: "lastFmShowScrobbleProgressCheckBox"
         // Only a connected account has scrobbles to show.
         visible: root.authState === 2
         text: I18n.i18nc("@option:check", "Show the Last.fm status in the status bar")
         checked: root.settings.value("lastFmShowScrobbleProgress")
         onToggled: root.settings.setValue("lastFmShowScrobbleProgress", checked)
+    }
+
+    // The account is a group of its own, as General's groups are apart
+    // (#373 H42: it stood 4 px under the scrobbling group's last row).
+    Components.FormGroupGap {
+        objectName: "lastFmAccountGap"
+        uiPalette: root.uiPalette
+        visible: showScrobbleProgressCheckBox.visible
     }
 
     Label {
