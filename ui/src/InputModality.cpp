@@ -5,9 +5,8 @@
 #include <QCoreApplication>
 #include <QFocusEvent>
 #include <QKeyEvent>
-#include <QMouseEvent>
 #include <QPointingDevice>
-#include <QTouchEvent>
+#include <QPointerEvent>
 #include <qqml.h>
 
 namespace {
@@ -37,14 +36,6 @@ bool isFromTouchScreen(const QPointerEvent *event) {
     return device != nullptr && device->type() == QInputDevice::DeviceType::TouchScreen;
 }
 
-// A mouse's or touchpad's own event to a window. Qt sends a touch on as
-// mouse events, with the touchscreen as their device, to a window that
-// took none of it and to items that take only the mouse's; and the items
-// under the pointer get a window's mouse event after it.
-bool isMouseEventToWindow(const QObject *watched, const QEvent *event) {
-    return watched->isWindowType() && !isFromTouchScreen(static_cast<const QMouseEvent *>(event));
-}
-
 } // namespace
 
 InputModality::InputModality(QObject *parent) : QObject(parent) {
@@ -59,10 +50,11 @@ InputModality::~InputModality() {
     }
 }
 
-void InputModality::registerQmlType() {
+void InputModality::registerQmlTypes() {
     qmlRegisterSingletonType<InputModality>(
         "FerrousUi", 1, 0, "InputModality",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new InputModality(); });
+    qmlRegisterType<WindowPointer>("FerrousUi", 1, 0, "WindowPointer");
 }
 
 bool InputModality::eventFilter(QObject *watched, QEvent *event) {
@@ -86,24 +78,9 @@ bool InputModality::eventFilter(QObject *watched, QEvent *event) {
             break;
         }
         break;
-    case QEvent::MouseMove:
-        if (m_touch && isMouseEventToWindow(watched, event)) {
-            setTouch(false);
-        }
-        break;
     case QEvent::MouseButtonPress:
     case QEvent::MouseButtonDblClick:
-        setKeyboard(false);
-        if (m_touch && isMouseEventToWindow(watched, event)) {
-            setTouch(false);
-        }
-        break;
     case QEvent::TouchBegin:
-        setKeyboard(false);
-        if (isFromTouchScreen(static_cast<const QTouchEvent *>(event))) {
-            setTouch(true);
-        }
-        break;
     case QEvent::TabletPress:
         setKeyboard(false);
         break;
@@ -120,7 +97,46 @@ void InputModality::setKeyboard(bool keyboard) {
     }
 }
 
-void InputModality::setTouch(bool touch) {
+WindowPointer::WindowPointer(QObject *parent) : QObject(parent) {}
+
+void WindowPointer::setWindow(QWindow *window) {
+    if (m_window == window) {
+        return;
+    }
+    if (m_window) {
+        m_window->removeEventFilter(this);
+    }
+    m_window = window;
+    setTouch(false);
+    if (m_window) {
+        m_window->installEventFilter(this);
+    }
+    emit windowChanged();
+}
+
+// The window's own events, as it filters no other object's: the items
+// under a pointer get the events Qt makes for them from these.
+bool WindowPointer::eventFilter(QObject *watched, QEvent *event) {
+    switch (event->type()) {
+    case QEvent::TouchBegin:
+    case QEvent::TouchUpdate:
+        if (isFromTouchScreen(static_cast<const QPointerEvent *>(event))) {
+            setTouch(true);
+        }
+        break;
+    case QEvent::MouseMove:
+    case QEvent::Enter:
+        if (m_touch && !isFromTouchScreen(static_cast<const QPointerEvent *>(event))) {
+            setTouch(false);
+        }
+        break;
+    default:
+        break;
+    }
+    return QObject::eventFilter(watched, event);
+}
+
+void WindowPointer::setTouch(bool touch) {
     if (m_touch != touch) {
         m_touch = touch;
         emit touchChanged();

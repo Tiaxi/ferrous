@@ -1005,7 +1005,7 @@ void UiMainWindowTest::initTestCase() {
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
-    InputModality::registerQmlType();
+    InputModality::registerQmlTypes();
 }
 
 void UiMainWindowTest::init() {

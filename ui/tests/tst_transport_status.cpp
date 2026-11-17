@@ -3775,7 +3775,7 @@ int main(int argc, char **argv) {
     QAccessible::setActive(true);
     FerrousLocalization::registerQmlTypes();
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
-    InputModality::registerQmlType();
+    InputModality::registerQmlTypes();
     TransportStatusTest test;
     return QTest::qExec(&test, argc, argv);
 }
