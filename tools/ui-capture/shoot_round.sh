@@ -100,10 +100,13 @@ export SHOT_KWIN=1
 # SHOT_BUILD_TAG: a separate source mirror and build dir ($SHOT_WORK/src$TAG, build$TAG), so a
 # test of the harness never shares a binary with a round someone else is shooting.
 TAG=${SHOT_BUILD_TAG:-}
-# one run at a time per build tag, from the mirror and build through the shooting and packing: two runs never
-# share a build in progress, the template DB or the machine while recording (latency, blink and "neither" are
-# timing measurements: a second capture at the same time would skew them). A second command waits here, in the
-# order started, and needs no build once the first has built the same source.
+# One run at a time per work folder, whatever its build tag, from the mirror and build through the shooting and
+# packing. Every tag shares the probes (probe/, and their build temporaries), the fixtures, the template DB and
+# the setup app (run/template, run/setup), the GStreamer registries and the bus sockets, so a per-tag lock let
+# two runs rebuild or rescan them under each other. One lock also keeps a second capture off the machine while
+# this one records (latency, blink and "neither" are timing measurements). A second command waits here, in the
+# order started, and needs no build once the first has built the same source; runs that must go side by side
+# need separate work folders (SHOT_WORK).
 mkdir -p "$WORK"
 # Every app gets fakeaudiosink; the app falls back to autoaudiosink (a real device) when it cannot create it. So
 # no capture starts unless GStreamer can create and run it (driver.py checks again before each app it starts).
@@ -114,12 +117,12 @@ if ! GST_REGISTRY="$WORK/run/gst-registry-sinkcheck.bin" \
         "gstreamer1-plugins-bad-free (Fedora) and gst-launch-1.0 (gstreamer1)" >&2
     exit 2
 fi
-exec 9>"$WORK/.run$TAG.lock"
+exec 9>"$WORK/.run.lock"
 if ! flock -n 9; then
-    echo "another shoot_round holds the run lock ($(cat "$WORK/.run$TAG.holder" 2>/dev/null || echo '?')): waiting"
+    echo "another shoot_round holds the run lock of $WORK ($(cat "$WORK/.run.holder" 2>/dev/null || echo '?')): waiting"
     flock 9
 fi
-echo "$OUTNAME since $(date +%T) (pid $$)" > "$WORK/.run$TAG.holder"
+echo "$OUTNAME${TAG:+ (tag $TAG)} since $(date +%T) (pid $$)" > "$WORK/.run.holder"
 CSRC=$WORK/src$TAG
 CBUILD=$WORK/build$TAG
 export SHOT_APP=$CBUILD/ferrous

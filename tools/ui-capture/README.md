@@ -52,7 +52,7 @@ only and are rebuilt when their source changes or the system Qt does:
 | `--out DIR` or `SHOT_OUT_ROOT` | `$SHOT_WORK/rounds` | where `<round>/` and `<round>-focus/` go |
 | `SHOT_WORK` | `$XDG_CACHE_HOME/ferrous-ui-capture` | source mirror (`src/`), build (`build/`), probes (`probe/`), fixtures (`fixtures/`), app folders and the template library DB (`run/`), bus sockets (`b/`), `tmp-<round>/` |
 | `SHOT_BUILD_WRAPPER` | none | a command the compiles run under, e.g. one that holds a build slot or lowers priority |
-| `SHOT_BUILD_TAG` | none | a separate mirror and build (`src$TAG`, `build$TAG`), to test the harness beside a real run |
+| `SHOT_BUILD_TAG` | none | a separate mirror and build (`src$TAG`, `build$TAG`), so a test of the harness never shares a binary with a real round; runs of every tag still take turns (see the run lock below) |
 | `SHOT_NEUTRAL=0` | `1` | run the app at the real paths instead of `/mnt/ferrous` |
 
 The icon comparison sheets read candidate icon trees from outside the source, and only when set:
@@ -171,8 +171,10 @@ rect, and `pack.py` paints those out of every shot and frame and fails if any re
   binary under a newer source.
 - **Don't overlap captures with builds.** A full capture and a focus capture use about 11 GB together over the
   idle baseline; with a build beside them, a 32 GB machine can run out of memory. The recordings are also timing
-  measurements, which a busy machine skews. Runs take a lock per build tag (`$SHOT_WORK/.run$TAG.lock`): a second
-  run waits for the first. Use `SHOT_BUILD_WRAPPER` to keep the compile step in line with your other builds.
+  measurements, which a busy machine skews. Runs take one lock per work folder (`$SHOT_WORK/.run.lock`), whatever
+  their build tag: a second run waits for the first. Every tag shares the probes, the fixtures, the template
+  database, the setup app and the bus sockets, so runs that must go side by side need separate work folders
+  (`SHOT_WORK`). Use `SHOT_BUILD_WRAPPER` to keep the compile step in line with your other builds.
 - **Neutral paths need user namespaces.** `neutral_ns.sh` needs unprivileged user and mount namespaces (on by
   default on Fedora); the work folder must not be under `/mnt`, which the namespace covers. Paths outside the work
   folder (such as the source tree) stay real. `SHOT_NEUTRAL=0` runs without; the pack then paints the paths out.
