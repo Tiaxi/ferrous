@@ -303,7 +303,7 @@ Preferences.PreferencesPage {
                                 text: I18n.i18ncp("@info", "%1 track", "%1 tracks", rootRow.trackCount)
                                 font.pointSize: root.uiPalette.smallPointSize
                                 font.features: root.uiPalette.tabularFigures
-                                color: root.uiPalette.textTertiaryOn(rootRow.highlighted)
+                                color: root.uiPalette.textTertiaryOn(rootRow.highlighted, rootRow.hovered)
                                 Accessible.ignored: true
                             }
                         }

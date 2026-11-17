@@ -554,6 +554,7 @@ private slots:
     void recentIssuesLinkPressShowsAtOnce();
     void autoNumberCheckBoxesStartOnTheFieldsEdge_data();
     void autoNumberCheckBoxesStartOnTheFieldsEdge();
+    void dialogListNumbersReadAsDrawn();
 };
 
 void UiDialogsTest::initTestCase() {
@@ -5485,6 +5486,178 @@ void UiDialogsTest::autoNumberCheckBoxesStartOnTheFieldsEdge() {
     }
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!numbers->isVisible());
+    editor.close();
+}
+
+namespace {
+
+// The strongest ink of `text` as drawn in `shown`: the pixel in its box
+// furthest in contrast from `background`, as the reviews measure it.
+std::pair<double, QColor> strongestInk(const QImage &shown, QQuickItem *text, const QColor &background) {
+    const qreal dpr = shown.devicePixelRatio();
+    const QRect pixels = QRectF(sceneRect(text).topLeft() * dpr, sceneRect(text).size() * dpr).toAlignedRect()
+        .intersected(shown.rect());
+    double best = 1;
+    QColor ink = background;
+    for (int y = pixels.top(); y <= pixels.bottom(); ++y) {
+        for (int x = pixels.left(); x <= pixels.right(); ++x) {
+            const QColor pixel(shown.pixel(x, y));
+            const double ratio = contrastRatio(pixel, background);
+            if (ratio > best) {
+                best = ratio;
+                ink = pixel;
+            }
+        }
+    }
+    return {best, ink};
+}
+
+// The colour drawn at `scenePoint` of `window`.
+QColor drawnAt(const QImage &shown, const QPointF &scenePoint) {
+    return QColor(shown.pixel((scenePoint * shown.devicePixelRatio()).toPoint()));
+}
+
+} // namespace
+
+// The quiet numbers of the dialogs' lists read at 4.5:1 or more as drawn,
+// on their row at rest, under the pointer and selected, with the list
+// focused or not: Configure's library folders' track counts and Edit
+// Tags' track numbers (#373 H45: in Breeze Light, "3 tracks" on a hovered
+// folder drew at 4.48:1 and a selected row's "1" at 4.39:1, their
+// colours at 4.64:1 and 5.08:1, which small figures lose to subpixel
+// antialiasing). Their colours are rowFigureContrast on the row as drawn,
+// which keeps that margin, and quieter than the text.
+void UiDialogsTest::dialogListNumbersReadAsDrawn() {
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(3); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const QColor text = tokenOf(window, "text");
+    const double figureContrast = paletteOf(window)->property("rowFigureContrast").toDouble();
+    QVERIFY(figureContrast >= 5.0);
+    QStringList failures;
+    // Measures `number` on its row, whose background shows at `clear`.
+    const auto check = [&](QQuickWindow *shownIn, QQuickItem *number, const QPointF &clear, const QString &where) {
+        const QImage shown = shownIn->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const QColor background = drawnAt(shown, clear);
+        const QString name = QStringLiteral("%1: \"%2\"").arg(where, number->property("text").toString());
+        const auto [ratio, ink] = strongestInk(shown, number, background);
+        if (ratio < 4.5) {
+            failures << QStringLiteral("%1 drawn %2 on %3, %4:1").arg(name, ink.name(), background.name())
+                            .arg(ratio, 0, 'f', 2);
+        }
+        const QColor color = number->property("color").value<QColor>();
+        const double declared = contrastRatio(color, background);
+        // Half a step of a colour channel's rounding either way.
+        if (declared < figureContrast - 0.05) {
+            failures << QStringLiteral("%1 is %2 on %3, %4:1").arg(name, color.name(), background.name())
+                            .arg(declared, 0, 'f', 2);
+        }
+        if (declared >= contrastRatio(text, background)) {
+            failures << QStringLiteral("%1 (%2) is not quieter than the text (%3)").arg(name, color.name(), text.name());
+        }
+    };
+
+    // Configure's library folders.
+    QVERIFY(bridgeOf(window)->setProperty("libraryRootEntries", QVariantList{
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/one")}, {QStringLiteral("name"), QStringLiteral("Shelf")},
+                    {QStringLiteral("trackCount"), 3}},
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/two")}, {QStringLiteral("trackCount"), 180}},
+    }));
+    QObject *preferences = openPreferences(window, 0);
+    QVERIFY(preferences != nullptr);
+    QQuickWindow *prefs = windowOf(preferences);
+    QQuickItem *list = nullptr;
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
+    QList<QQuickItem *> folders;
+    QTRY_COMPARE((folders = itemsNamed(list, QStringLiteral("libraryRootRow"))).size(), 2);
+    std::sort(folders.begin(), folders.end(), [](QQuickItem *a, QQuickItem *b) { return a->y() < b->y(); });
+    QTRY_VERIFY(!layoutPending(folders.at(1)));
+    // Whether a row's hover tint has faded all the way in or out.
+    const auto settled = [](QQuickItem *row) {
+        for (QQuickItem *tint : itemsNamed(row, QStringLiteral("rowBackgroundHover"))) {
+            if (tint->opacity() != (tint->parentItem()->property("hovered").toBool() ? 1.0 : 0.0)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto folderCheck = [&](const QString &state) {
+        for (QQuickItem *row : folders) {
+            QTRY_VERIFY(settled(row));
+        }
+        for (QQuickItem *row : folders) {
+            QQuickItem *count = itemsNamed(row, QStringLiteral("libraryRootTrackCount")).value(0);
+            QVERIFY(count != nullptr);
+            // Between the path and the count.
+            const QPointF clear(sceneRect(count).left() - 3, sceneRect(count).center().y());
+            check(prefs, count, clear, QStringLiteral("library folder, %1").arg(state));
+        }
+    };
+    folderCheck(QStringLiteral("at rest"));
+    for (QQuickItem *row : folders) {
+        QTest::mouseMove(prefs, sceneRect(row).center().toPoint());
+        QTRY_VERIFY(row->property("hovered").toBool());
+        QTRY_VERIFY(settled(row));
+        folderCheck(QStringLiteral("hovered"));
+    }
+    click(prefs, folders.at(1));
+    QTRY_VERIFY(folders.at(1)->property("highlighted").toBool() && list->hasActiveFocus());
+    QTRY_VERIFY(settled(folders.at(1)));
+    folderCheck(QStringLiteral("selected, hovered"));
+    QTest::mouseMove(prefs, QPoint(2, 2));
+    QTRY_VERIFY(!folders.at(1)->property("hovered").toBool() && settled(folders.at(1)));
+    folderCheck(QStringLiteral("selected"));
+    visibleNamed(prefs, QStringLiteral("libraryWatchCheckBox"))->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(!list->hasActiveFocus());
+    folderCheck(QStringLiteral("selected, the list unfocused"));
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+
+    // Edit Tags' track numbers.
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
+    QVERIFY(waitForDialogWindow(object(window, QStringLiteral("tagEditorDialog"))));
+    QQuickWindow *tags = windowOf(object(window, QStringLiteral("tagEditorDialog")));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    QList<QQuickItem *> rows;
+    QTRY_COMPARE((rows = itemsNamed(table, QStringLiteral("tagEditorRow"))).size(), 3);
+    std::sort(rows.begin(), rows.end(), [](QQuickItem *a, QQuickItem *b) { return a->y() < b->y(); });
+    QTRY_VERIFY(!layoutPending(rows.at(0)));
+    const auto rowCheck = [&](const QString &state) {
+        for (QQuickItem *row : rows) {
+            QTRY_VERIFY(settled(row));
+        }
+        for (QQuickItem *row : rows) {
+            QQuickItem *number = itemsNamed(row, QStringLiteral("tagEditorCell_trackNo")).value(0);
+            QVERIFY(number != nullptr);
+            // The cell's left padding, clear of the number at its right.
+            const QPointF clear(sceneRect(number).left() + 2, sceneRect(number).center().y());
+            check(tags, number, clear, QStringLiteral("track number, %1").arg(state));
+        }
+    };
+    rowCheck(QStringLiteral("at rest"));
+    for (QQuickItem *row : rows) {
+        // Over its cells: the row's tint shows there too.
+        QTest::mouseMove(tags, sceneRect(row).center().toPoint());
+        QTRY_VERIFY(itemsNamed(row, QStringLiteral("rowBackgroundHover")).value(0)->opacity() == 1.0);
+        rowCheck(QStringLiteral("hovered"));
+    }
+    click(tags, rows.at(0));
+    QTRY_VERIFY(rows.at(0)->property("selected").toBool() && table->hasActiveFocus());
+    rowCheck(QStringLiteral("selected, hovered"));
+    QTest::mouseMove(tags, QPoint(2, 2));
+    QTRY_VERIFY(settled(rows.at(0)) && itemsNamed(rows.at(0), QStringLiteral("rowBackgroundHover")).value(0)->opacity() == 0);
+    rowCheck(QStringLiteral("selected"));
+    visibleNamed(tags, QStringLiteral("tagEditorField_title"))->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(!table->hasActiveFocus());
+    rowCheck(QStringLiteral("selected, the table unfocused"));
+    QVERIFY2(failures.isEmpty(), qPrintable(failures.join(QLatin1Char('\n'))));
     editor.close();
 }
 

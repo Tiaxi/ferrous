@@ -1328,17 +1328,24 @@ Components.DialogWindow {
                         objectName: "tagEditorRowBackground"
                         uiPalette: root.uiPalette
                         scrollbarLane: 0
-                        hovered: rowMouse.containsMouse
+                        hovered: rowHover.hovered
                         selected: tableRow.selected
                         active: tagEditorTable.activeFocus
                         focused: tableRow.current
+                    }
+
+                    // The row is under the pointer wherever the pointer is
+                    // on it: the cells above the click area take the hover
+                    // from a sibling under them, so the row's tint showed
+                    // only in its insets (#373 H45).
+                    HoverHandler {
+                        id: rowHover
                     }
 
                     MouseArea {
                         id: rowMouse
                         anchors.fill: parent
                         acceptedButtons: Qt.LeftButton
-                        hoverEnabled: true
                         onClicked: function(mouse) {
                             root.handleRowClick(tableRow.index, mouse.modifiers)
                         }
@@ -1366,7 +1373,7 @@ Components.DialogWindow {
                                 color: modelData.key === "status" && tableRow.errorText.length > 0
                                     ? root.uiPalette.negative
                                     : (modelData.number
-                                        ? root.uiPalette.textTertiaryOn(tableRow.selected)
+                                        ? root.uiPalette.textTertiaryOn(tableRow.selected, rowHover.hovered)
                                         : root.uiPalette.text)
                                 verticalAlignment: Text.AlignVCenter
                                 horizontalAlignment: modelData.number ? Text.AlignRight : Text.AlignLeft
