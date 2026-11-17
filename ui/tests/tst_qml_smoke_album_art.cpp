@@ -760,9 +760,9 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     // The label starts where the other labels do, on a line of its own,
     // over the path.
     QCOMPARE(boxOf(folderLabel).left(), boxOf(sourceLabel).left());
-    QVERIFY2(boxOf(folderLabel).bottom() <= boxOf(path).top() + 0.01
-                 && boxOf(folderLabel).bottom() <= boxOf(copy).top() + 0.01,
-             "the folder's label is not on a line of its own");
+    QVERIFY2(boxOf(folderLabel).bottom() <= boxOf(path).top() + 0.01, "the folder's label is not on a line of its own");
+    // Copy Path, which reaches up beside it, is clear of its text.
+    QVERIFY(boxOf(folderLabel).left() + folderLabel->property("contentWidth").toReal() < boxOf(copy).left());
     QCOMPARE(folderLabel->property("lineCount").toInt(), 1);
     // The labels' column: 80 px at the default font (#373 H11: 76, the
     // width of "Dimensions").
@@ -772,20 +772,47 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     const qreal rhythm = surface->property("infoRowHeight").toReal();
     QCOMPARE(boxOf(folderRow).top() - boxOf(rows.last()).top(), rhythm);
     // The path from the column's start, not the values', to Copy Path at the
-    // row's end, centred on the path; a long one wraps after its slashes, on
+    // row's end, on the path's first line; a long one wraps after its slashes, on
     // up to three lines, and what does not fit is elided (#373 H38: on one
     // line, elided in its middle, a typical one lost its folders).
     QCOMPARE(boxOf(path).left(), boxOf(folderRow).left());
     QVERIFY(boxOf(path).left() < boxOf(sourceValue).left());
     QCOMPARE(boxOf(copy).right(), boxOf(folderRow).right());
     QCOMPARE(boxOf(copy).left() - boxOf(path).right(), 4.0);
-    QVERIFY2(qAbs(boxOf(copy).center().y() - boxOf(path).center().y()) <= 0.5, "Copy Path is off the path's line");
     QCOMPARE(path->property("path").toString(), folder);
     QCOMPARE(path->property("text").toString(), QString(folder).replace(QLatin1Char('/'), QStringLiteral("/\u200b")));
     QCOMPARE(path->property("wrapMode").toInt(), int(QTextOption::WrapAtWordBoundaryOrAnywhere));
     QCOMPARE(path->property("elide").toInt(), int(Qt::ElideRight));
     QCOMPARE(path->property("maximumLineCount").toInt(), 3);
     QTRY_COMPARE(path->property("lineCount").toInt(), 3);
+    // Copy Path's glyph is centred on the path's first line, not on its
+    // three lines' middle (#373 H38), the button clear of the folder's
+    // label's text; over the whole screen, the button and its glyph are a
+    // step larger, as the details' text is: 24 and 16 px in a window, 29
+    // and 19 px there.
+    QQuickItem *copyGlyph = itemNamed(copy, QStringLiteral("viewerToolButtonIcon"));
+    QVERIFY(copyGlyph != nullptr);
+    const auto checkCopyOnTheFirstLine = [&](qreal buttonSize, qreal glyphSize, const QString &where) {
+        QTRY_VERIFY2(boxOf(copy).width() == buttonSize && boxOf(copy).height() == buttonSize,
+                     qPrintable(QStringLiteral("%1: %2 x %3").arg(where).arg(boxOf(copy).width()).arg(boxOf(copy).height())));
+        QCOMPARE(boxOf(copyGlyph).size(), QSizeF(glyphSize, glyphSize));
+        QTRY_COMPARE(path->property("lineCount").toInt(), 3);
+        const qreal lineHeight = path->property("contentHeight").toReal() / 3;
+        const qreal firstLine = boxOf(path).top() + lineHeight / 2;
+        QVERIFY2(qAbs(boxOf(copyGlyph).center().y() - firstLine) <= 0.5,
+                 qPrintable(QStringLiteral("%1: the glyph's centre at %2, the first line's at %3")
+                                .arg(where).arg(boxOf(copyGlyph).center().y()).arg(firstLine)));
+        QVERIFY2(boxOf(folderLabel).left() + folderLabel->property("contentWidth").toReal() < boxOf(copy).left(),
+                 qPrintable(where + QStringLiteral(": over the folder's label")));
+        QVERIFY2(boxOf(copy).top() >= boxOf(folderLabel).top(), qPrintable(where));
+        QCOMPARE(boxOf(copy).right(), boxOf(folderRow).right());
+        QCOMPARE(boxOf(copy).left() - boxOf(path).right(), 4.0);
+    };
+    checkCopyOnTheFirstLine(24, 16, QStringLiteral("in a window"));
+    surface->setProperty("fullscreen", true);
+    checkCopyOnTheFirstLine(29, 19, QStringLiteral("over the whole screen"));
+    surface->setProperty("fullscreen", false);
+    QTRY_COMPARE(boxOf(copy).width(), 24.0);
     const QFontMetricsF pathMetrics(qvariant_cast<QFont>(path->property("font")));
     QVERIFY(pathMetrics.horizontalAdvance(folder) > 2 * path->width());
     QVERIFY(path->height() >= 3 * pathMetrics.lineSpacing() - 1);
@@ -1519,6 +1546,8 @@ void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails() {
     QTest::keyClick(shownIn, Qt::Key_I);
     QTRY_VERIFY(viewer->property("albumArtInfoVisible").toBool());
     QTRY_VERIFY(column->isVisible() && seam->isVisible());
+    // They slide in, and rest at the view's right edge.
+    QTRY_COMPARE(sceneRectOf(column).right(), viewRect.right());
     QCOMPARE(sceneRectOf(viewport), viewRect);
     const QRectF columnRect = sceneRectOf(column);
     const QRectF seamRect = sceneRectOf(seam);
@@ -1736,15 +1765,17 @@ bool isWithin(const QQuickItem *item, const QQuickItem *ancestor) {
 
 // Clicks the preview's button `objectName` in `host` once it is enabled and
 // sits whole inside the image's details, at the same place on two looks in
-// a row: where the user sees it, not where the viewer opening might still
-// move it from. No popup is still fading in or out, such as the dialog that
-// opened the preview, which takes the click until it has gone.
+// a row, with the details slid in whole: where the user sees it, not where
+// the viewer opening or the details sliding in might still move it from.
+// No popup is still fading in or out, such as the dialog that opened the
+// preview, which takes the click until it has gone.
 bool clickPreviewButton(QQuickWindow *host, const QString &objectName) {
     QRectF last;
     const bool settled = QTest::qWaitFor([&]() {
         QQuickItem *column = visibleItemNamed(host, QStringLiteral("albumArtInfoColumn"));
         QQuickItem *button = visibleItemNamed(host, objectName);
-        if (column == nullptr || button == nullptr || !button->isEnabled() || !isWithin(button, column)) {
+        if (column == nullptr || button == nullptr || !button->isEnabled() || !isWithin(button, column)
+            || column->parentItem()->property("infoReveal").toReal() < 1.0) {
             last = QRectF();
             return false;
         }
@@ -1773,11 +1804,12 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     const auto rectOf = [](QQuickItem *item) {
         return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
     };
-    // The viewer can still be taking its size, as its window shows.
+    // The viewer can still be taking its size, as its window shows, and
+    // the details sliding in.
     const auto settled = [&]() {
         const QRectF rect = rectOf(column);
-        return rect.contains(rectOf(label)) && rect.contains(rectOf(back))
-            && rect.contains(rectOf(apply));
+        return column->parentItem()->property("infoReveal").toReal() >= 1.0 && rect.contains(rectOf(label))
+            && rect.contains(rectOf(back)) && rect.contains(rectOf(apply));
     };
     QTRY_VERIFY2(settled(), at.constData());
     const QRectF columnRect = rectOf(column);

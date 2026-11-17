@@ -1057,6 +1057,7 @@ private slots:
     void viewerPlatesAndGlyphsRevealOnOneLevel_data();
     void albumArtViewerFadesWithItsArt_data();
     void albumArtViewerFadesWithItsArt();
+    void albumArtGlidesAsideForItsDetails();
     void windowedViewerClosesOverItsLastFrame();
     void albumArtViewerControlsFadeOnOneLevel_data();
     void albumArtViewerControlsFadeOnOneLevel();
@@ -6718,6 +6719,215 @@ void UiMotionTest::albumArtViewerFadesWithItsArt() {
     QTRY_VERIFY(surface->parentItem() == mainHost);
     QVERIFY(!surface->isVisible());
     QVERIFY(frames > 0);
+}
+
+namespace {
+
+// What the album art viewer draws of its art and its details in a frame.
+struct ArtFrame {
+    QRectF art;
+    QRectF column;
+    double seamLeft = 0;
+    bool columnShown = false;
+};
+
+// The art as the viewer paints it, in the window.
+QRectF paintedArtOf(QQuickItem *image) {
+    const QSizeF painted(image->property("paintedWidth").toReal(), image->property("paintedHeight").toReal());
+    const QPointF origin((image->width() - painted.width()) / 2, (image->height() - painted.height()) / 2);
+    return QRectF(image->mapToScene(origin), image->mapToScene(origin + QPointF(painted.width(), painted.height())));
+}
+
+bool nearly(const QRectF &a, const QRectF &b) {
+    return std::abs(a.left() - b.left()) < 0.01 && std::abs(a.top() - b.top()) < 0.01
+           && std::abs(a.right() - b.right()) < 0.01 && std::abs(a.bottom() - b.bottom()) < 0.01;
+}
+
+QString describeRect(const QRectF &rect) {
+    return QStringLiteral("%1,%2 %3x%4").arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
+}
+
+// Whether `frames`, drawn from the resting `from` to the resting `to`, move
+// the art and the details one way, a step at a time, the art always whole
+// left of the details' seam and centred there: "" or what is wrong.
+QString glideFault(const QList<ArtFrame> &frames, const ArtFrame &from, const ArtFrame &to, double viewRight) {
+    const double artTravel = to.art.center().x() - from.art.center().x();
+    const double widthTravel = to.art.width() - from.art.width();
+    if (std::abs(artTravel) < 40) {
+        return QStringLiteral("the art travels only %1 px").arg(artTravel);
+    }
+    int between = 0;
+    double lastCentre = from.art.center().x();
+    double lastWidth = from.art.width();
+    double lastColumn = from.columnShown ? from.column.left() : viewRight + 1;
+    for (qsizetype index = 0; index < frames.size(); ++index) {
+        const ArtFrame &frame = frames.at(index);
+        const QString at = QStringLiteral("frame %1: art %2, column %3: ")
+                               .arg(index)
+                               .arg(describeRect(frame.art), describeRect(frame.column));
+        const double centre = frame.art.center().x();
+        const double column = frame.columnShown ? frame.column.left() : viewRight + 1;
+        // One way only.
+        if ((centre - lastCentre) * artTravel < -0.01 || (frame.art.width() - lastWidth) * widthTravel < -0.01
+            || (column - lastColumn) * artTravel < -0.01) {
+            return at + QStringLiteral("moves back");
+        }
+        // A step at a time: no frame covers most of the way at once.
+        if (std::abs(centre - lastCentre) > std::abs(artTravel) * 0.6) {
+            return at + QStringLiteral("cuts %1 px of %2 at once").arg(centre - lastCentre).arg(artTravel);
+        }
+        if (frame.columnShown) {
+            // The details whole, as wide as they rest, from the top to the
+            // bottom, the seam on their left; the art left of the seam,
+            // centred in the space there.
+            const QRectF &resting = to.columnShown ? to.column : from.column;
+            if (std::abs(frame.column.width() - resting.width()) > 0.01
+                || std::abs(frame.column.height() - resting.height()) > 0.01
+                || std::abs(frame.column.top() - resting.top()) > 0.01
+                || std::abs(frame.seamLeft - (frame.column.left() - 1)) > 0.01) {
+                return at + QStringLiteral("the details are not whole");
+            }
+            if (frame.art.right() > frame.seamLeft + 0.5) {
+                return at + QStringLiteral("the art runs under the seam at %1").arg(frame.seamLeft);
+            }
+        }
+        if (!nearly(frame.art, from.art) && !nearly(frame.art, to.art)) {
+            ++between;
+        }
+        lastCentre = centre;
+        lastWidth = frame.art.width();
+        lastColumn = column;
+    }
+    if (between < 3) {
+        return QStringLiteral("only %1 frames between the resting views").arg(between);
+    }
+    if (!nearly(frames.constLast().art, to.art)) {
+        return QStringLiteral("ends at %1, not %2").arg(describeRect(frames.constLast().art), describeRect(to.art));
+    }
+    return {};
+}
+
+bool sendWheelAt(QQuickWindow *window, QPointF scenePosition, QPoint angleDelta) {
+    QWheelEvent event(scenePosition, window->mapToGlobal(scenePosition), QPoint(), angleDelta, Qt::NoButton,
+                      Qt::NoModifier, Qt::NoScrollPhase, false);
+    QSpontaneKeyEvent::setSpontaneous(&event);
+    QCoreApplication::sendEvent(window, &event);
+    return event.isAccepted();
+}
+
+} // namespace
+
+// Showing the album art's details eases the art aside, and hiding them eases
+// it back (#373 H38: it jumped some 170 px in one frame as they toggled).
+// Over the details' 120 ms the space they take grows from nothing to their
+// width with their seam: they slide in over the view's edge whole, as wide
+// as they rest, and the art fits and centres in what they leave, frame by
+// frame. The art moves one way only, never most of the way at once, and
+// comes to rest where it rests with animations off; resizing the view and
+// zooming are not eased.
+void UiMotionTest::albumArtGlidesAsideForItsDetails() {
+    Covers covers;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QQuickItem *surface = named(window, "albumArtSurface");
+    QVERIFY(bridge && viewer && popup && surface);
+    QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QQuickItem *seam = itemNamed(surface, QStringLiteral("albumArtInfoSeam"));
+    QQuickItem *viewport = itemNamed(surface, QStringLiteral("albumArtViewport"));
+    QVERIFY(image && column && seam && viewport);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    // Wide, so the details narrow the art as well as moving it.
+    showTrack(bridge, QStringLiteral("/music/0.flac"), QStringLiteral("Track"), QStringLiteral("Album"),
+              covers.landscape);
+    units->setLongDuration(0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTRY_COMPARE(image->property("status").toInt(), 1);
+    const QRectF viewRect = sceneRectOf(viewport);
+
+    const auto frameNow = [&]() {
+        return ArtFrame{paintedArtOf(image), sceneRectOf(column), sceneRectOf(seam).left(),
+                        column->isVisible() && seam->isVisible()};
+    };
+    const auto toggle = [&]() {
+        return QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant()));
+    };
+
+    // The resting views with animations off: the details shown at once.
+    units->setShortDuration(0);
+    const ArtFrame hidden = frameNow();
+    QVERIFY(!hidden.columnShown);
+    QVERIFY(std::abs(hidden.art.center().x() - viewRect.center().x()) < 0.5);
+    QVERIFY(toggle());
+    QVERIFY(viewer->property("albumArtInfoVisible").toBool());
+    QVERIFY(column->isVisible());
+    QCOMPARE(sceneRectOf(column).right(), viewRect.right());
+    QTRY_VERIFY(std::abs(paintedArtOf(image).center().x() - (viewRect.left() + sceneRectOf(seam).left()) / 2)
+                < 0.5);
+    const ArtFrame shown = frameNow();
+    QVERIFY(shown.columnShown);
+    QVERIFY(shown.art.right() <= shown.seamLeft + 0.5);
+    QVERIFY(toggle());
+    QVERIFY(!column->isVisible());
+    QTRY_VERIFY(nearly(paintedArtOf(image), hidden.art));
+
+    // Eased, slowly enough for frames along the way.
+    units->setShortDuration(500);
+    QList<ArtFrame> frames;
+    QMetaObject::Connection connection =
+        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() { frames.append(frameNow()); });
+    QVERIFY(toggle());
+    // At once, nothing has moved.
+    QVERIFY(nearly(paintedArtOf(image), hidden.art));
+    QTRY_VERIFY(nearly(paintedArtOf(image), shown.art) && nearly(sceneRectOf(column), shown.column));
+    window->update();
+    QSignalSpy swapped(window, &QQuickWindow::frameSwapped);
+    QVERIFY(swapped.wait(2000));
+    QObject::disconnect(connection);
+    QString fault = glideFault(frames, hidden, shown, viewRect.right());
+    QVERIFY2(fault.isEmpty(), qPrintable(QStringLiteral("showing: ") + fault));
+
+    // Resizing the view is not eased: the details keep to its edge and the
+    // art to the middle of what they leave, at once.
+    window->resize(1300, 1000);
+    QTRY_COMPARE(window->width(), 1300);
+    QCoreApplication::processEvents();
+    QCOMPARE(sceneRectOf(column).right(), sceneRectOf(viewport).right());
+    QVERIFY2(std::abs(paintedArtOf(image).center().x() - (sceneRectOf(viewport).left() + sceneRectOf(seam).left()) / 2)
+                 < 0.5,
+             qPrintable(describeRect(paintedArtOf(image))));
+    window->resize(1600, 1000);
+    QTRY_COMPARE(window->width(), 1600);
+    QTRY_VERIFY(nearly(paintedArtOf(image), shown.art));
+
+    // Nor is the zoom: a wheel notch on the art zooms it at once.
+    const double zoom = surface->property("zoom").toDouble();
+    QVERIFY(sendWheelAt(window, shown.art.center(), QPoint(0, 120)));
+    QVERIFY(surface->property("zoom").toDouble() > zoom);
+    QVERIFY(QMetaObject::invokeMethod(surface, "resetView"));
+    QTRY_VERIFY(nearly(paintedArtOf(image), shown.art));
+
+    frames.clear();
+    connection = QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() { frames.append(frameNow()); });
+    QVERIFY(toggle());
+    QVERIFY(nearly(paintedArtOf(image), shown.art));
+    QTRY_VERIFY(nearly(paintedArtOf(image), hidden.art) && !column->isVisible());
+    window->update();
+    QVERIFY(swapped.wait(2000));
+    QObject::disconnect(connection);
+    fault = glideFault(frames, shown, hidden, viewRect.right());
+    QVERIFY2(fault.isEmpty(), qPrintable(QStringLiteral("hiding: ") + fault));
+
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!popup->property("visible").toBool());
 }
 
 // The visualization viewer in the window fades out over its last frame as

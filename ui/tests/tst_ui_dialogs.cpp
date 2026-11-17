@@ -477,6 +477,8 @@ private slots:
     void drawsOffscreenUnlessAPlatformIsChosen();
     void configureAndAboutAreWindowsOfTheirOwn();
     void configureIsAPageListWithKdesCaptionAndButtons();
+    void configurePageIconsFollowTheFont_data();
+    void configurePageIconsFollowTheFont();
     void configurePagesMoveByKeyboardAndTabReachesEveryControl();
     void configureAppliesOnOkOrApplyAndCancelDropsTheChanges();
     void configureDefaultsSetsThePagesBackToBeApplied();
@@ -494,10 +496,14 @@ private slots:
     void libraryFolderNameDialogShowsItsPath();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
     void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
+    void libraryFolderListIsThreeRowsTallAtLeast_data();
+    void libraryFolderListIsThreeRowsTallAtLeast();
     void lastFmPageShowsOnlyTheButtonsThatApply();
     void aboutShowsTheIconVersionTabsAndCopiesTheVersion();
     void aboutKdeHasAboutsHeadingAndPage_data();
     void aboutKdeHasAboutsHeadingAndPage();
+    void aboutPagesSitOnAFrameJoinedToTheTabs_data();
+    void aboutPagesSitOnAFrameJoinedToTheTabs();
     void aboutPagesNeverRunUnderTheButtons_data();
     void aboutPagesNeverRunUnderTheButtons();
     void recentIssuesIsAPopupAboveTheStatusBar();
@@ -507,6 +513,8 @@ private slots:
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesOpenWithTheirFocusShown();
+    void diagnosticsActionsShareOneRow_data();
+    void diagnosticsActionsShareOneRow();
     void recentIssuesAreSeenWhenThePopupCloses();
     void thePanesEndsEarlyLinkOpensItsIssue();
     void recentIssuesFollowAQueueReplacedWithOneOfTheSameLength();
@@ -736,6 +744,79 @@ void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
     QVERIFY(!apply->property("enabled").toBool());
     QTest::keyClick(prefs, Qt::Key_Escape);
     QTRY_VERIFY(!dialog->property("visible").toBool());
+}
+
+void UiDialogsTest::configurePageIconsFollowTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The page list's icons are as large as their titles' font calls for,
+// Kirigami's size for labels: 16 px with the default font, larger at 24 pt
+// (#373 H38: they stayed 16 px beside 24 pt titles), and drawn in the
+// text's colour at either size. The list is as wide
+// as a row with its icon and its longest title needs, centred on the row.
+void UiDialogsTest::configurePageIconsFollowTheFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = openPreferences(window);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *list = visibleNamed(prefs, QStringLiteral("preferencesPageList"));
+    QVERIFY(list != nullptr);
+    const qreal forLabels = evaluate(dialog, QStringLiteral("Kirigami.Units.iconSizes.sizeForLabels")).toReal();
+    if (pointSize > 0) {
+        QVERIFY2(forLabels > 16, qPrintable(QString::number(forLabels)));
+    } else {
+        QCOMPARE(forLabels, 16.0);
+        QCOMPARE(list->width(), 176.0);
+    }
+    for (int index = 0; index < 4; ++index) {
+        QQuickItem *row = visibleNamed(prefs, QStringLiteral("preferencesPage_%1").arg(index));
+        QVERIFY(row != nullptr);
+        QQuickItem *icon = itemsNamed(row, QStringLiteral("preferencesPageIcon")).value(0);
+        QVERIFY(icon != nullptr);
+        QTRY_VERIFY(!layoutPending(row));
+        QCOMPARE(icon->width(), forLabels);
+        QCOMPARE(icon->height(), forLabels);
+        QVERIFY2(within(sceneRect(icon), sceneRect(row)), qPrintable(describeItem(icon)));
+        // The title is whole beside it.
+        QQuickItem *title = nullptr;
+        for (QQuickItem *child : icon->parentItem()->childItems()) {
+            if (child != icon && child->property("text").isValid()) {
+                title = child;
+            }
+        }
+        QVERIFY(title != nullptr);
+        QVERIFY2(!title->property("truncated").toBool(), qPrintable(describeItem(title)));
+        QVERIFY(sceneRect(title).left() > sceneRect(icon).right());
+        // Drawn in the text's colour alone, at either size: no full-colour
+        // icon in the list.
+        const QImage shown = prefs->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal dpr = shown.devicePixelRatio();
+        const QRect iconPixels = QRectF(sceneRect(icon).topLeft() * dpr, sceneRect(icon).size() * dpr).toRect();
+        int saturated = 0;
+        for (int y = iconPixels.top(); y <= iconPixels.bottom(); ++y) {
+            for (int x = iconPixels.left(); x <= iconPixels.right(); ++x) {
+                saturated += QColor(shown.pixel(x, y)).hsvSaturation() > 80;
+            }
+        }
+        QVERIFY2(saturated == 0, qPrintable(QStringLiteral("%1: %2 coloured pixels")
+                                                .arg(row->property("text").toString()).arg(saturated)));
+    }
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
 }
 
 void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
@@ -1462,10 +1543,13 @@ void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
     }
     // Within a group, the rows are 4 px apart; a help text is 4 px under
     // its control and 12 px above the next row.
-    QVERIFY(gapIs(named("spectrogramFpsCheckBox"), named("showLevelMeterCheckBox"), 4));
+    // The Show group's three check boxes are together, the crosshair's help
+    // after them (#373 H38: Frame rate stood apart under it).
+    QVERIFY(gapIs(named("spectrogramScaleCheckBox"), named("spectrogramCrosshairCheckBox"), 4));
+    QVERIFY(gapIs(named("spectrogramCrosshairCheckBox"), named("spectrogramFpsCheckBox"), 4));
+    QVERIFY(gapIs(named("spectrogramFpsCheckBox"), crosshairHelp, 4));
+    QVERIFY(gapIs(crosshairHelp, named("showLevelMeterCheckBox"), 12));
     QVERIFY(gapIs(named("spectrogramFrequencyCapCheckBox"), capHelp, 4));
-    QVERIFY(gapIs(named("spectrogramCrosshairCheckBox"), crosshairHelp, 4));
-    QVERIFY(gapIs(crosshairHelp, named("spectrogramFpsCheckBox"), 12));
     QVERIFY(gapIs(named("spectrogramZoomCheckBox"), zoomHelp, 4));
     QVERIFY(gapIs(zoomHelp, named("stretchShortTracksCheckBox"), 12));
     // A long help text wraps at about 440 px.
@@ -1784,7 +1868,8 @@ void UiDialogsTest::libraryFoldersAreAFramedListWithNoSelectionAtFirst() {
         QCOMPARE(sceneRect(row).left(), sceneRect(list).left());
         QCOMPARE(sceneRect(row).right(), sceneRect(list).right());
     }
-    QCOMPARE(frame->height(), 2 * rowHeight + 2);
+    // Three rows tall, the third empty (#373 H38).
+    QCOMPARE(frame->height(), 3 * rowHeight + 2);
 
     // The look of a row: whether it has the tint, and its ring.
     const auto tintOf = [](QQuickItem *row) { return itemsNamed(row, QStringLiteral("rowBackgroundTint")).value(0); };
@@ -1844,6 +1929,69 @@ void UiDialogsTest::libraryFoldersAreAFramedListWithNoSelectionAtFirst() {
     QTRY_VERIFY(tintOf(rows.at(0))->isVisible());
     QCOMPARE(ringWidth(rows.at(0)), 1.0);
 
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
+void UiDialogsTest::libraryFolderListIsThreeRowsTallAtLeast_data() {
+    QTest::addColumn<int>("folders");
+    QTest::newRow("one folder") << 1;
+    QTest::newRow("three folders") << 3;
+    QTest::newRow("nine folders") << 9;
+}
+
+// The library folder list is three rows tall at least, so that one folder
+// sits in a visible list, the view colour under it inside the frame,
+// rather than reading as a text field (#373 H38). It grows with its
+// folders up to eight rows, and then scrolls.
+void UiDialogsTest::libraryFolderListIsThreeRowsTallAtLeast() {
+    QFETCH(int, folders);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVariantList entries;
+    for (int index = 0; index < folders; ++index) {
+        const QString path = QStringLiteral("/fixture/folder%1").arg(index);
+        entries.push_back(QVariantMap{{QStringLiteral("path"), path}, {QStringLiteral("displayName"), path},
+                                      {QStringLiteral("trackCount"), index + 1}});
+    }
+    QVERIFY(bridge->setProperty("libraryRootEntries", entries));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *list = nullptr;
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
+    QTRY_VERIFY(!itemsNamed(list, QStringLiteral("libraryRootRow")).isEmpty());
+    QQuickItem *frame = visibleNamed(prefs, QStringLiteral("libraryRootListFrame"));
+    QVERIFY(frame != nullptr);
+    const qreal rowHeight =
+        qvariant_cast<QObject *>(window->property("uiPalette"))->property("rowHeight").toReal();
+    const int rowsTall = std::clamp(folders, 3, 8);
+    QTRY_COMPARE(frame->height(), rowsTall * rowHeight + 2);
+    QCOMPARE(sceneRect(list), sceneRect(frame).adjusted(1, 1, -1, -1));
+    QCOMPARE(list->property("interactive").toBool() && list->property("contentHeight").toReal() > list->height(),
+             folders > 8);
+
+    // Under the folders, the list's own view colour, inside the frame.
+    if (folders < 3) {
+        QTRY_VERIFY(!layoutPending(frame));
+        const QImage shown = prefs->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal dpr = shown.devicePixelRatio();
+        const QRectF frameRect = sceneRect(frame);
+        const QColor view = tokenOf(window, "view");
+        for (const qreal y : {frameRect.top() + folders * rowHeight + rowHeight / 2, frameRect.bottom() - 3}) {
+            for (const qreal x : {frameRect.left() + 4, frameRect.center().x(), frameRect.right() - 4}) {
+                const QColor pixel(shown.pixel(int(x * dpr), int(y * dpr)));
+                QVERIFY2(pixel == view, qPrintable(QStringLiteral("%1 at %2,%3, not the view's %4")
+                                                       .arg(hex(pixel)).arg(x).arg(y).arg(hex(view))));
+            }
+        }
+        // The frame's seam is drawn round it.
+        const QColor seam(shown.pixel(int(frameRect.left() * dpr), int((frameRect.bottom() - 3) * dpr)));
+        QCOMPARE(hex(seam), hex(tokenOf(window, "seam")));
+    }
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());
 }
@@ -2047,6 +2195,99 @@ void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage() {
     QVERIFY(sceneRect(view).bottom() <= sceneRect(close).top() - 12 + 0.5);
     QVERIFY(QMetaObject::invokeMethod(kdeDialog, "reject"));
     QTRY_VERIFY(!kde->isVisible());
+}
+
+void UiDialogsTest::aboutPagesSitOnAFrameJoinedToTheTabs_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// About's pages sit on a frame joined to the tabs, as KDE's About dialog
+// draws them (#373 H38: the tabs' band stopped mid-window, with no page
+// under it): the frame is as wide as the content, its top edge on the
+// tabs' last row of pixels, open under the selected tab and drawn on
+// either side of it, and every page is inside it.
+void UiDialogsTest::aboutPagesSitOnAFrameJoinedToTheTabs() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("aboutDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *about = windowOf(dialog);
+    QQuickItem *tabs = visibleNamed(about, QStringLiteral("aboutTabs"));
+    QQuickItem *frame = visibleNamed(about, QStringLiteral("aboutPagesFrame"));
+    QQuickItem *view = visibleNamed(about, QStringLiteral("aboutPagesView"));
+    QQuickItem *heading = visibleNamed(about, QStringLiteral("aboutName"));
+    QVERIFY(tabs != nullptr && frame != nullptr && view != nullptr && heading != nullptr);
+    for (int tab = 0; tab < 4; ++tab) {
+        const QString at = QStringLiteral("tab %1").arg(tab);
+        dialog->setProperty("tabIndex", tab);
+        auto *selected = qvariant_cast<QQuickItem *>(tabs->property("currentItem"));
+        QVERIFY2(selected != nullptr, qPrintable(at));
+        QTRY_VERIFY2(!layoutPending(frame) && !layoutPending(view), qPrintable(at));
+        const QRectF frameRect = sceneRect(frame);
+        const QRectF tabsRect = sceneRect(tabs);
+        const QRectF tabRect = sceneRect(selected);
+        // As wide as the tabs' row, which spans the content, whatever the
+        // tabs' own width.
+        QCOMPARE(frameRect.left(), tabsRect.left());
+        QCOMPARE(frameRect.right(), tabsRect.right());
+        QCOMPARE(frameRect.top(), tabsRect.bottom() - 1);
+        QVERIFY2(within(sceneRect(view), frameRect.adjusted(1, 1, -1, -1)), qPrintable(at));
+
+        const QImage shown = about->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal dpr = shown.devicePixelRatio();
+        const auto pixel = [&](qreal x, qreal y) {
+            return QColor(shown.pixel(int(x * dpr), int(y * dpr)));
+        };
+        const qreal edgeY = frameRect.top();
+        // The window's own colour, between the frame and the buttons.
+        const QColor background = pixel(frameRect.center().x(), frameRect.bottom() + 4);
+        // Open under the selected tab, between its sides.
+        for (const qreal x : {tabRect.left() + 2, tabRect.center().x(), tabRect.right() - 3}) {
+            QVERIFY2(pixel(x, edgeY) == background,
+                     qPrintable(QStringLiteral("%1: %2 under the selected tab at %3")
+                                    .arg(at, hex(pixel(x, edgeY))).arg(x)));
+        }
+        // Drawn on beside it, up to the frame's corners.
+        const qreal beside = tabRect.right() + 4 < frameRect.right() - 8 ? frameRect.right() - 8
+                                                                        : tabRect.left() - 4;
+        QVERIFY2(beside > frameRect.left() + 6, qPrintable(at));
+        QVERIFY2(pixel(beside, edgeY) != background,
+                 qPrintable(QStringLiteral("%1: no edge at %2").arg(at).arg(beside)));
+        // The selected tab's sides run on down the frame's, whole, at the
+        // frame's corners too.
+        if (tabRect.left() <= frameRect.left() + 0.5) {
+            for (int dy = 0; dy < 6; ++dy) {
+                QVERIFY2(pixel(frameRect.left(), edgeY + dy) != background,
+                         qPrintable(QStringLiteral("%1: the left corner open %2 px down").arg(at).arg(dy)));
+                QVERIFY2(pixel(frameRect.left() + 1, edgeY + dy) == background,
+                         qPrintable(QStringLiteral("%1: the left corner drawn round %2 px down").arg(at).arg(dy)));
+            }
+        }
+        if (tabRect.right() >= frameRect.right() - 0.5) {
+            for (int dy = 0; dy < 6; ++dy) {
+                QVERIFY2(pixel(frameRect.right() - 1, edgeY + dy) != background,
+                         qPrintable(QStringLiteral("%1: the right corner open %2 px down").arg(at).arg(dy)));
+                QVERIFY2(pixel(frameRect.right() - 2, edgeY + dy) == background,
+                         qPrintable(QStringLiteral("%1: the right corner drawn round %2 px down").arg(at).arg(dy)));
+            }
+        }
+    }
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!about->isVisible());
 }
 
 void UiDialogsTest::aboutPagesNeverRunUnderTheButtons_data() {
@@ -2510,6 +2751,132 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
     QTRY_VERIFY(copyWithoutPaths->isEnabled());
     click(diagnosticsWindow, copyWithoutPaths);
     QTRY_COMPARE(bridge->property("diagnosticsCopiesWithoutPaths").toInt(), 1);
+}
+
+void UiDialogsTest::diagnosticsActionsShareOneRow_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Diagnostics has one verb for deleting its log and one row of actions
+// under the log's path (#373 H38: Clear… asked to delete the log, and the
+// actions were over two rows with two ragged right edges): Reload and
+// Delete Log… on the left, Open Folder, Copy All and Copy Log Without
+// Paths on the right, ending where the log's frame does. The log's scroll
+// bars are inside its frame.
+void UiDialogsTest::diagnosticsActionsShareOneRow() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QStringList lines;
+    for (int index = 0; index < 80; ++index) {
+        lines << QStringLiteral("[library] warning: could not read /fixture/library/Artist/Album/%1 - A track "
+                                "with a title long enough to run past the log's right edge.flac: %2")
+                     .arg(index)
+                     .arg(QString(160, QLatin1Char('x')));
+    }
+    QVERIFY(bridge->setProperty("diagnosticsText", lines.join(QLatin1Char('\n'))));
+    QVERIFY(bridge->setProperty("diagnosticsLogPath", QStringLiteral("/fixture/state/diagnostics.log")));
+    QObject *dialog = object(window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *diagnostics = windowOf(dialog);
+    QQuickItem *pathRow = visibleNamed(diagnostics, QStringLiteral("diagnosticsLogPathRow"));
+    QQuickItem *frame = visibleNamed(diagnostics, QStringLiteral("diagnosticsLogFrame"));
+    QQuickItem *scrollView = visibleNamed(diagnostics, QStringLiteral("diagnosticsScrollView"));
+    QVERIFY(pathRow != nullptr && frame != nullptr && scrollView != nullptr);
+    QList<QQuickItem *> buttons;
+    for (const char *name : {"diagnosticsReloadButton", "diagnosticsClearButton", "diagnosticsOpenFolderButton",
+                             "diagnosticsCopyAllButton", "diagnosticsCopyWithoutPathsButton"}) {
+        QQuickItem *button = visibleNamed(diagnostics, QString::fromLatin1(name));
+        QVERIFY2(button != nullptr, name);
+        buttons << button;
+    }
+    QTRY_VERIFY(!layoutPending(frame) && !layoutPending(buttons.constFirst()));
+
+    // One verb: Delete Log…, which asks Delete Diagnostics Log.
+    QCOMPARE(buttons.at(1)->property("text").toString(), QStringLiteral("Delete Log…"));
+    QCOMPARE(evaluate(buttons.at(1), QStringLiteral("icon.name")).toString(), QStringLiteral("edit-delete"));
+    QObject *confirm = object(window, QStringLiteral("clearDiagnosticsConfirmDialog"));
+    QVERIFY(confirm != nullptr);
+    QCOMPARE(confirm->property("title").toString(), QStringLiteral("Delete Diagnostics Log"));
+    QCOMPARE(confirm->property("message").toString(), QStringLiteral("Delete the diagnostics log?"));
+    QCOMPARE(confirm->property("confirmText").toString(), QStringLiteral("Delete Log"));
+
+    // The path's row holds no action.
+    for (QQuickItem *button : buttons) {
+        QVERIFY2(!pathRow->isAncestorOf(button), qPrintable(describeItem(button)));
+        QVERIFY2(sceneRect(button).top() >= sceneRect(pathRow).bottom(), qPrintable(describeItem(button)));
+    }
+    // One row, in order, two on the left and three on the right, under the
+    // path and above the log.
+    const qreal middle = sceneRect(buttons.constFirst()).center().y();
+    for (qsizetype index = 0; index < buttons.size(); ++index) {
+        const QRectF rect = sceneRect(buttons.at(index));
+        QVERIFY2(std::abs(rect.center().y() - middle) < 0.5, qPrintable(describeItem(buttons.at(index))));
+        QVERIFY2(rect.bottom() <= sceneRect(frame).top(), qPrintable(describeItem(buttons.at(index))));
+        if (index > 0) {
+            QVERIFY2(rect.left() > sceneRect(buttons.at(index - 1)).right(), qPrintable(describeItem(buttons.at(index))));
+        }
+    }
+    QCOMPARE(sceneRect(buttons.at(0)).left(), sceneRect(frame).left());
+    // The gap between the log's own actions and the others.
+    QVERIFY(sceneRect(buttons.at(2)).left() - sceneRect(buttons.at(1)).right()
+            > 2 * (sceneRect(buttons.at(1)).left() - sceneRect(buttons.at(0)).right()));
+    // One right edge: the last action's, the path's row's and the log's.
+    QCOMPARE(sceneRect(buttons.constLast()).right(), sceneRect(frame).right());
+    QCOMPARE(sceneRect(pathRow).right(), sceneRect(frame).right());
+
+    // The scroll bars, both shown by the long and many lines, are inside the
+    // log's frame.
+    for (const char *bar : {"ScrollBar.horizontal", "ScrollBar.vertical"}) {
+        auto *scrollBar = qobject_cast<QQuickItem *>(
+            qvariant_cast<QObject *>(evaluate(scrollView, QString::fromLatin1(bar))));
+        QVERIFY2(scrollBar != nullptr, bar);
+        QTRY_VERIFY2(scrollBar->isVisible() && scrollBar->width() > 0 && scrollBar->height() > 0, bar);
+        QVERIFY2(within(sceneRect(scrollBar), sceneRect(frame).adjusted(1, 1, -1, -1)),
+                 qPrintable(QString::fromLatin1(bar) + QStringLiteral(" ") + describeItem(scrollBar)));
+    }
+    // Made as narrow as it goes, the actions on the right go under the
+    // others, at the same right edge, each whole and none over another.
+    diagnostics->resize(diagnostics->minimumWidth(), diagnostics->height());
+    QTRY_COMPARE(diagnostics->width(), diagnostics->minimumWidth());
+    QTRY_VERIFY(!layoutPending(frame));
+    QTRY_VERIFY(sceneRect(buttons.at(2)).top() >= sceneRect(buttons.at(0)).bottom()
+                || sceneRect(buttons.at(2)).left() > sceneRect(buttons.at(1)).right());
+    for (qsizetype index = 0; index < buttons.size(); ++index) {
+        const QRectF rect = sceneRect(buttons.at(index));
+        QVERIFY2(rect.left() >= sceneRect(frame).left() - 0.5 && rect.right() <= sceneRect(frame).right() + 0.5
+                     && rect.bottom() <= sceneRect(frame).top(),
+                 qPrintable(describeItem(buttons.at(index))));
+        QVERIFY2(buttons.at(index)->width() >= buttons.at(index)->implicitWidth() - 0.5,
+                 qPrintable(describeItem(buttons.at(index))));
+        for (qsizetype other = 0; other < index; ++other) {
+            QVERIFY2(!rect.intersects(sceneRect(buttons.at(other))), qPrintable(describeItem(buttons.at(index))));
+        }
+    }
+    QCOMPARE(sceneRect(buttons.constLast()).right(), sceneRect(frame).right());
+    // The minimum stays put as the log empties and the buttons that act on
+    // it are disabled.
+    const int minimumWidth = diagnostics->minimumWidth();
+    QVERIFY(bridge->setProperty("diagnosticsText", QString()));
+    QVERIFY(QMetaObject::invokeMethod(bridge, "diagnosticsChanged"));
+    QTRY_VERIFY(!buttons.at(1)->isEnabled());
+    QCOMPARE(diagnostics->minimumWidth(), minimumWidth);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!diagnostics->isVisible());
 }
 
 // Recent Issues has the keyboard where it shows it (#373 H38): opened
@@ -3319,9 +3686,12 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// Auto Number is one form in reading order (#373 H38): the tracks' start;
-// Write disc numbers, then the disc's start it enables, then totals; then
-// when numbering starts over. The check boxes have no labels and start
+// Auto Number is one form in reading order (#373 H38): the tracks' start
+// and Write totals, which writes the tracks' totals with or without the
+// discs' (under the disc's start, it read as a disc option); Write disc
+// numbers, then the disc's start it enables; then when numbering starts
+// over. The groups are a FormGroupGap apart, 16 px with the default font,
+// and their rows the form's row spacing, 4 px. The check boxes have no labels and start
 // where the fields do, the description too, so the dialog has one left
 // edge; it had two, with Write disc numbers under the field it enables.
 // The start fields hold four digits, 5 grid units, and their errors wrap
@@ -3360,9 +3730,16 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
     const QRectF inside(padding, 0, numbers->width() - 2 * padding, numbers->height());
 
     // Every row within the window, whole, top to bottom in reading order.
-    const QStringList order{QStringLiteral("autoNumberStartingTrackField"), QStringLiteral("autoNumberWriteDiscCheck"),
-                            QStringLiteral("autoNumberStartingDiscField"), QStringLiteral("autoNumberWriteTotalsCheck"),
+    const QStringList order{QStringLiteral("autoNumberStartingTrackField"), QStringLiteral("autoNumberWriteTotalsCheck"),
+                            QStringLiteral("autoNumberWriteDiscCheck"), QStringLiteral("autoNumberStartingDiscField"),
                             QStringLiteral("autoNumberResetOnFolderCheck"), QStringLiteral("autoNumberResetOnDiscCheck")};
+    // The rows that start a group.
+    const QStringList groupStarts{QStringLiteral("autoNumberWriteDiscCheck"),
+                                  QStringLiteral("autoNumberResetOnFolderCheck")};
+    const qreal rowSpacing = evaluate(dialog, QStringLiteral("Kirigami.Units.smallSpacing")).toReal();
+    const qreal groupSpacing = evaluate(dialog, QStringLiteral("Kirigami.Units.largeSpacing * 2")).toReal();
+    QVERIFY(rowSpacing > 0 && groupSpacing > rowSpacing);
+    qreal bottom = -1;
     QQuickItem *form = visibleNamed(numbers, QStringLiteral("autoNumberForm"));
     QVERIFY(form != nullptr);
     qreal top = -1;
@@ -3377,7 +3754,17 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
             .arg(numbers->width());
         QVERIFY2(rect.left() >= inside.left() - 0.5 && rect.right() <= inside.right() + 0.5, qPrintable(where));
         QVERIFY2(rect.top() > top, qPrintable(where));
+        // The rhythm: the form's row spacing within a group, a group's gap
+        // between groups. A row's cell is a whole pixel taller than a check
+        // box's own fractional height.
+        if (bottom >= 0) {
+            const qreal expected = groupStarts.contains(name) ? groupSpacing : rowSpacing;
+            QVERIFY2(rect.top() - bottom >= expected - 0.01 && rect.top() - bottom < expected + 1,
+                     qPrintable(QStringLiteral("%1: %2 px below the row above, not %3")
+                                    .arg(where).arg(rect.top() - bottom).arg(expected)));
+        }
         top = rect.top();
+        bottom = rect.bottom();
         // One left edge: the fields' and the check boxes'.
         if (fieldsLeft < 0) {
             fieldsLeft = rect.left();

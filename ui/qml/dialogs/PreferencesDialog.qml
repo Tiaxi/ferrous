@@ -25,7 +25,8 @@ Components.DialogWindow {
 
     property int pageIndex: 0
     readonly property var pages: [
-        { title: I18n.i18nc("@title:tab preferences page", "Library"), icon: "folder" },
+        // The symbolic folder: from 32 px, "folder" is the full-colour one.
+        { title: I18n.i18nc("@title:tab preferences page", "Library"), icon: "folder-symbolic" },
         { title: I18n.i18nc("@title:tab preferences page", "Visualization"), icon: "view-media-visualization" },
         { title: I18n.i18nc("@title:tab preferences page", "General"), icon: "configure" },
         { title: I18n.i18nc("@title:tab preferences page", "Last.fm"), icon: Qt.resolvedUrl("../assets/lastfm.svg") }
@@ -160,13 +161,17 @@ Components.DialogWindow {
     // The page list's rows: the icon and the title, with its insets.
     readonly property real pageRowLeftPadding: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
     readonly property real pageRowSpacing: Kirigami.Units.largeSpacing + 2
+    // The rows' icons are as large as their titles' font calls for: 16 px
+    // with the default font, larger with a larger one (#373 H38: they
+    // stayed 16 px beside 24 pt titles).
+    readonly property real pageIconSize: Kirigami.Units.iconSizes.sizeForLabels
     // The page list: 176 px, or as wide as its longest title needs.
     readonly property real pageListWidth: {
         let widest = 0
         for (let i = 0; i < root.pages.length; ++i) {
             widest = Math.max(widest, pageTitleMetrics.advanceWidth(root.pages[i].title))
         }
-        return Math.max(176, Math.ceil(root.pageRowLeftPadding + Kirigami.Units.iconSizes.small
+        return Math.max(176, Math.ceil(root.pageRowLeftPadding + root.pageIconSize
             + root.pageRowSpacing + widest + root.pageRowLeftPadding))
     }
     FontMetrics {
@@ -371,8 +376,9 @@ Components.DialogWindow {
                         spacing: root.pageRowSpacing
 
                         Kirigami.Icon {
-                            implicitWidth: Kirigami.Units.iconSizes.small
-                            implicitHeight: Kirigami.Units.iconSizes.small
+                            objectName: "preferencesPageIcon"
+                            implicitWidth: root.pageIconSize
+                            implicitHeight: root.pageIconSize
                             source: pageRow.modelData.icon
                             color: root.uiPalette.text
                             isMask: true

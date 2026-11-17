@@ -157,19 +157,21 @@ Preferences.PreferencesPage {
         onToggled: root.settings.setValue("showSpectrogramCrosshair", checked)
     }
 
+    CheckBox {
+        objectName: "spectrogramFpsCheckBox"
+        text: I18n.i18nc("@option:check", "Frame rate")
+        checked: root.settings.value("showFps")
+        onToggled: root.settings.setValue("showFps", checked)
+    }
+
+    // After the Show group's three check boxes, which stay together
+    // (#373 H38: Frame rate stood apart under this help text).
     Components.FormHelpText {
         objectName: "crosshairHelp"
         uiPalette: root.uiPalette
         indent: crosshairCheckBox.contentItem.x
         text: I18n.i18nc("@info", "With the crosshair, right-clicking the spectrogram in centered mode "
             + "seeks to that position in the track.")
-    }
-
-    CheckBox {
-        objectName: "spectrogramFpsCheckBox"
-        text: I18n.i18nc("@option:check", "Frame rate")
-        checked: root.settings.value("showFps")
-        onToggled: root.settings.setValue("showFps", checked)
     }
 
     CheckBox {

@@ -82,9 +82,11 @@ Components.CompactDialogWindow {
         text: I18n.i18nc("@label", "Number the selected rows, or all rows if none are selected, using the current table order.")
     }
 
-    // One form in reading order: the tracks' start; the discs' option and
-    // the start it enables, then totals; then when numbering starts over.
-    // The check boxes have no labels, so they start where the fields do.
+    // One form in reading order, in three groups a FormGroupGap apart, the
+    // form's own row spacing within them: the tracks' start and totals;
+    // the discs' option and the start it enables; then when numbering
+    // starts over. The check boxes have no labels, so they start where the
+    // fields do.
     Kirigami.FormLayout {
         id: autoNumberForm
         objectName: "autoNumberForm"
@@ -112,6 +114,15 @@ Components.CompactDialogWindow {
             wrapMode: Text.WordWrap
             color: root.uiPalette.negative
             text: I18n.i18nc("@info", "Enter a starting track from 1 to %1.", root.maximumNumber)
+        }
+        // With the tracks (#373 H38: under the disc's start, it read as a
+        // disc option): it writes each track's total, and the discs' too
+        // when it writes disc numbers.
+        CheckBox {
+            id: writeTotalsCheck
+            objectName: "autoNumberWriteTotalsCheck"
+            checked: false
+            text: I18n.i18nc("@option:check", "Write totals")
         }
 
         Components.FormGroupGap {
@@ -144,12 +155,6 @@ Components.CompactDialogWindow {
             wrapMode: Text.WordWrap
             color: root.uiPalette.negative
             text: I18n.i18nc("@info", "Enter a starting disc from 1 to %1.", root.maximumNumber)
-        }
-        CheckBox {
-            id: writeTotalsCheck
-            objectName: "autoNumberWriteTotalsCheck"
-            checked: false
-            text: I18n.i18nc("@option:check", "Write totals")
         }
 
         Components.FormGroupGap {
