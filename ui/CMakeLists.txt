@@ -99,20 +99,21 @@ add_custom_target(ferrous_rust_bridge ALL
     VERBATIM
 )
 
-qt_add_executable(ferrous
+# The app's classes are a library of their own, which the app and the test
+# programs that use those classes link, so that each source compiles once for
+# a build, not once for each program. What it is compiled with and links is
+# public: a program that links it sees the same classes and needs the same
+# libraries. Its sources don't wait for the Rust library, so they compile
+# while Cargo runs; a program that links it waits, with add_dependencies.
+qt_add_library(ferrous_ui_core STATIC
     src/AboutComponents.cpp
-    src/AppInstanceController.cpp
-    src/ConsoleTee.cpp
-    src/main.cpp
+    src/BinaryBridgeCodec.cpp
+    src/BridgeClient.cpp
+    src/QueueRows.cpp
     src/CoverImageProvider.cpp
     src/DiagnosticsLog.cpp
     src/Localization.cpp
     src/DisplaySleepInhibitor.cpp
-    src/HeapAllocator.cpp
-    src/HeapTrimmer.cpp
-    src/BinaryBridgeCodec.cpp
-    src/BridgeClient.cpp
-    src/QueueRows.cpp
     src/GlobalSearchResultsModel.cpp
     src/LibraryTreeModel.cpp
     src/MprisController.cpp
@@ -132,6 +133,69 @@ qt_add_executable(ferrous
     src/WaveformEditorItem.cpp
     src/LevelMeterItem.cpp
     src/QmlTypes.cpp
+)
+target_include_directories(ferrous_ui_core PUBLIC src)
+target_link_libraries(ferrous_ui_core PUBLIC
+    Qt6::Core
+    Qt6::DBus
+    Qt6::Gui
+    Qt6::Qml
+    Qt6::Quick
+    Qt6::QuickControls2
+    Qt6::Concurrent
+    Qt6::Network
+    Qt6::Widgets
+    KF6::Kirigami
+    KF6::I18n
+    KF6::I18nQml
+    "${FERROUS_RUST_STATIC_LIB}"
+    PkgConfig::FERROUS_GSTREAMER
+    dl
+    m
+    pthread
+)
+if(FERROUS_ENABLE_PROFILE_LOGS)
+    target_sources(ferrous_ui_core PRIVATE src/SpectrogramSeekTrace.cpp)
+    target_compile_definitions(ferrous_ui_core PUBLIC FERROUS_ENABLE_PROFILE_LOGS=1)
+endif()
+ferrous_enable_strict_warnings(ferrous_ui_core)
+
+# A program that links ferrous_ui_core compiles none of the library's sources
+# itself: the source would compile twice, and the program would use its own
+# copy, built with its own definitions. Checked once every target of this
+# file is defined, by the files' full paths.
+function(ferrous_check_core_sources_compile_once)
+    get_target_property(core_sources ferrous_ui_core SOURCES)
+    set(core_paths "")
+    foreach(source IN LISTS core_sources)
+        get_filename_component(path "${source}" ABSOLUTE)
+        list(APPEND core_paths "${path}")
+    endforeach()
+    get_property(targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(target IN LISTS targets)
+        get_target_property(libraries ${target} LINK_LIBRARIES)
+        if(target STREQUAL "ferrous_ui_core" OR NOT "ferrous_ui_core" IN_LIST libraries)
+            continue()
+        endif()
+        get_target_property(sources ${target} SOURCES)
+        foreach(source IN LISTS sources)
+            get_filename_component(path "${source}" ABSOLUTE)
+            if(path IN_LIST core_paths)
+                message(FATAL_ERROR
+                    "${target} links ferrous_ui_core and also compiles ${source}, which the library has. "
+                    "Remove the source from ${target}.")
+            endif()
+        endforeach()
+    endforeach()
+endfunction()
+cmake_language(DEFER CALL ferrous_check_core_sources_compile_once)
+
+qt_add_executable(ferrous
+    src/AppInstanceController.cpp
+    src/ConsoleTee.cpp
+    src/HeapAllocator.cpp
+    src/HeapTrimmer.cpp
+    src/main.cpp
 )
 
 target_include_directories(ferrous PRIVATE src)
@@ -292,29 +356,8 @@ set_target_properties(ferrous_ui_qml PROPERTIES QT_QMLCACHEGEN_ARGUMENTS --only-
 set_target_properties(ferrous PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
 target_link_libraries(ferrous PRIVATE
     "$<LINK_LIBRARY:WHOLE_ARCHIVE,ferrous_ui_qml>"
-    "${FERROUS_RUST_STATIC_LIB}"
-    PkgConfig::FERROUS_GSTREAMER
-    Qt6::Core
-    Qt6::DBus
-    Qt6::Gui
-    Qt6::Qml
-    Qt6::Quick
-    Qt6::QuickControls2
-    Qt6::Concurrent
-    Qt6::Network
-    Qt6::Widgets
-    KF6::Kirigami
-    KF6::I18n
-    KF6::I18nQml
-    dl
-    m
-    pthread
+    ferrous_ui_core
 )
-
-if(FERROUS_ENABLE_PROFILE_LOGS)
-    target_sources(ferrous PRIVATE src/SpectrogramSeekTrace.cpp)
-    target_compile_definitions(ferrous PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
-endif()
 
 # Writes the translation template to <build>/po/ferrous.pot; see
 # docs/DEVELOPMENT.md. scripts/extract-messages.sh writes po/ferrous.pot.
@@ -375,6 +418,19 @@ if(BUILD_TESTING)
             PASS_REGULAR_EXPRESSION "${skip_line}"
             TIMEOUT 60
         )
+    endfunction()
+
+    # A test program that uses the app's classes: its own sources, linked
+    # with the app's library and, behind it, the Rust library.
+    function(ferrous_add_app_test target)
+        qt_add_executable(${target} ${ARGN})
+        add_dependencies(${target} ferrous_rust_bridge)
+        target_compile_definitions(${target} PRIVATE
+            FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+        target_link_libraries(${target} PRIVATE ferrous_ui_core Qt6::Test)
+        ferrous_enable_strict_warnings(${target})
+        set_target_properties(${target} PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
     endfunction()
 
     # Test class names may have digits and underscores.
@@ -616,7 +672,7 @@ if(BUILD_TESTING)
 
     # One program, its test classes in files of their own, so that they
     # compile in parallel and a change to one recompiles only its file.
-    qt_add_executable(ferrous_qml_smoke_tests
+    ferrous_add_app_test(ferrous_qml_smoke_tests
         tests/tst_qml_smoke.cpp
         tests/QmlSmokeTest.h
         tests/QmlSmokeTest.cpp
@@ -634,67 +690,8 @@ if(BUILD_TESTING)
         tests/tst_qml_smoke_errors.cpp
         tests/tst_qml_smoke_tag_editor.cpp
         tests/tst_qml_smoke_scrobble.cpp
-        src/QmlTypes.cpp
-        src/BinaryBridgeCodec.cpp
-        src/BridgeClient.cpp
-        src/QueueRows.cpp
-        src/CoverImageProvider.cpp
-        src/DiagnosticsLog.cpp
-        src/Localization.cpp
-        src/DisplaySleepInhibitor.cpp
-        src/GlobalSearchResultsModel.cpp
-        src/LibraryTreeModel.cpp
-        src/MprisController.cpp
-        src/CoverRevisionLinks.cpp
-        src/PlaybackClock.cpp
-        src/PlaybackFrameScheduler.cpp
-        src/WindowPresence.cpp
-        src/InputModality.cpp
-        src/WaveformReaderLease.cpp
-        src/TagEditorController.cpp
-        src/TagEditorTableModel.cpp
-        src/SpectrogramItem.cpp
-        src/WindowActivation.cpp
-        src/WaveformItem.cpp
-        src/WaveformSceneGraph.cpp
-        src/WaveformSceneGraph.h
-        src/WaveformEditorItem.cpp
-        src/LevelMeterItem.cpp
     )
-    target_include_directories(ferrous_qml_smoke_tests PRIVATE src)
-    add_dependencies(ferrous_qml_smoke_tests ferrous_rust_bridge)
-    target_compile_definitions(ferrous_qml_smoke_tests PRIVATE
-        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-    )
-    target_link_libraries(ferrous_qml_smoke_tests PRIVATE
-        ferrous_app_icon
-        Qt6::Core
-        Qt6::DBus
-        Qt6::Gui
-        Qt6::Qml
-        Qt6::Quick
-        Qt6::QuickControls2
-        Qt6::Concurrent
-        Qt6::Network
-        Qt6::Widgets
-        Qt6::Test
-        KF6::Kirigami
-        KF6::I18n
-        KF6::I18nQml
-        "${FERROUS_RUST_STATIC_LIB}"
-        PkgConfig::FERROUS_GSTREAMER
-        dl
-        m
-        pthread
-    )
-    ferrous_enable_strict_warnings(ferrous_qml_smoke_tests)
-    if(FERROUS_ENABLE_PROFILE_LOGS)
-        target_sources(ferrous_qml_smoke_tests PRIVATE src/SpectrogramSeekTrace.cpp)
-        target_compile_definitions(ferrous_qml_smoke_tests PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
-    endif()
-    set_target_properties(ferrous_qml_smoke_tests PROPERTIES
-        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
-    )
+    target_link_libraries(ferrous_qml_smoke_tests PRIVATE ferrous_app_icon)
     # The smoke tests run by area, each area in a process of its own, so a
     # crash or hang in one area costs only that area's results, and quickly.
     # An area has one or more test classes; see kSmokeTestAreas in
@@ -742,70 +739,10 @@ if(BUILD_TESTING)
     )
     ferrous_add_default_platform_test(ferrous_qml_smoke_tests drawsOffscreenUnlessAPlatformIsChosen)
 
-    qt_add_executable(ferrous_accessibility_tests
+    ferrous_add_app_test(ferrous_accessibility_tests
         tests/tst_accessibility.cpp
-        src/BinaryBridgeCodec.cpp
-        src/BridgeClient.cpp
-        src/QueueRows.cpp
-        src/CoverImageProvider.cpp
-        src/DiagnosticsLog.cpp
-        src/Localization.cpp
-        src/DisplaySleepInhibitor.cpp
-        src/GlobalSearchResultsModel.cpp
-        src/LibraryTreeModel.cpp
-        src/MprisController.cpp
-        src/CoverRevisionLinks.cpp
-        src/PlaybackClock.cpp
-        src/PlaybackFrameScheduler.cpp
-        src/WindowPresence.cpp
-        src/InputModality.cpp
-        src/WaveformReaderLease.cpp
-        src/TagEditorController.cpp
-        src/TagEditorTableModel.cpp
-        src/SpectrogramItem.cpp
-        src/WindowActivation.cpp
-        src/WaveformItem.cpp
-        src/WaveformSceneGraph.cpp
-        src/WaveformSceneGraph.h
-        src/WaveformEditorItem.cpp
-        src/LevelMeterItem.cpp
     )
-    target_include_directories(ferrous_accessibility_tests PRIVATE src)
-    add_dependencies(ferrous_accessibility_tests ferrous_rust_bridge)
-    target_compile_definitions(ferrous_accessibility_tests PRIVATE
-        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-    )
-    target_link_libraries(ferrous_accessibility_tests PRIVATE
-        ferrous_app_icon
-        Qt6::Core
-        Qt6::DBus
-        Qt6::Gui
-        Qt6::Qml
-        Qt6::Quick
-        Qt6::QuickControls2
-        Qt6::Concurrent
-        Qt6::Network
-        Qt6::Widgets
-        Qt6::Test
-        KF6::Kirigami
-        KF6::I18n
-        KF6::I18nQml
-        "${FERROUS_RUST_STATIC_LIB}"
-        PkgConfig::FERROUS_GSTREAMER
-        dl
-        m
-        pthread
-    )
-    ferrous_enable_strict_warnings(ferrous_accessibility_tests)
-    if(FERROUS_ENABLE_PROFILE_LOGS)
-        target_sources(ferrous_accessibility_tests PRIVATE src/SpectrogramSeekTrace.cpp)
-        target_compile_definitions(ferrous_accessibility_tests PRIVATE
-            FERROUS_ENABLE_PROFILE_LOGS=1
-        )
-    endif()
-    set_target_properties(ferrous_accessibility_tests PROPERTIES
-        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
-    )
+    target_link_libraries(ferrous_accessibility_tests PRIVATE ferrous_app_icon)
     add_test(NAME ferrous_accessibility_tests COMMAND ferrous_accessibility_tests)
     set_tests_properties(ferrous_accessibility_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
@@ -815,70 +752,12 @@ if(BUILD_TESTING)
 
     # The main window as one sheet (#373), in a session of its own: no
     # desktop's platform theme, colours or fonts.
-    qt_add_executable(ferrous_ui_main_window_tests
+    ferrous_add_app_test(ferrous_ui_main_window_tests
         tests/tst_ui_main_window.cpp
-        src/BinaryBridgeCodec.cpp
-        src/BridgeClient.cpp
-        src/QueueRows.cpp
-        src/CoverImageProvider.cpp
-        src/DiagnosticsLog.cpp
-        src/Localization.cpp
-        src/DisplaySleepInhibitor.cpp
-        src/GlobalSearchResultsModel.cpp
-        src/LibraryTreeModel.cpp
-        src/MprisController.cpp
-        src/CoverRevisionLinks.cpp
-        src/PlaybackClock.cpp
-        src/PlaybackFrameScheduler.cpp
-        src/WindowPresence.cpp
-        src/InputModality.cpp
-        src/WaveformReaderLease.cpp
-        src/TagEditorController.cpp
-        src/TagEditorTableModel.cpp
-        src/SpectrogramItem.cpp
-        src/WindowActivation.cpp
-        src/WaveformItem.cpp
-        src/WaveformSceneGraph.cpp
-        src/WaveformSceneGraph.h
-        src/WaveformEditorItem.cpp
-        src/LevelMeterItem.cpp
-    )
-    target_include_directories(ferrous_ui_main_window_tests PRIVATE src)
-    add_dependencies(ferrous_ui_main_window_tests ferrous_rust_bridge)
-    target_compile_definitions(ferrous_ui_main_window_tests PRIVATE
-        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(ferrous_ui_main_window_tests PRIVATE
         ferrous_app_icon
-        Qt6::Core
-        Qt6::DBus
-        Qt6::Gui
-        Qt6::Qml
-        Qt6::Quick
-        Qt6::QuickControls2
-        Qt6::Concurrent
-        Qt6::Network
-        Qt6::Widgets
-        Qt6::Test
         Qt6::QuickTest
-        KF6::Kirigami
-        KF6::I18n
-        KF6::I18nQml
-        "${FERROUS_RUST_STATIC_LIB}"
-        PkgConfig::FERROUS_GSTREAMER
-        dl
-        m
-        pthread
-    )
-    ferrous_enable_strict_warnings(ferrous_ui_main_window_tests)
-    if(FERROUS_ENABLE_PROFILE_LOGS)
-        target_sources(ferrous_ui_main_window_tests PRIVATE src/SpectrogramSeekTrace.cpp)
-        target_compile_definitions(ferrous_ui_main_window_tests PRIVATE
-            FERROUS_ENABLE_PROFILE_LOGS=1
-        )
-    endif()
-    set_target_properties(ferrous_ui_main_window_tests PROPERTIES
-        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
     )
     add_test(NAME ferrous_ui_main_window_tests COMMAND ferrous_ui_main_window_tests)
     set_tests_properties(ferrous_ui_main_window_tests PROPERTIES
@@ -888,71 +767,12 @@ if(BUILD_TESTING)
     ferrous_add_default_platform_test(ferrous_ui_main_window_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The dialogs of #373, from the QML sources.
-    qt_add_executable(ferrous_ui_dialogs_tests
+    ferrous_add_app_test(ferrous_ui_dialogs_tests
         tests/tst_ui_dialogs.cpp
-        src/AboutComponents.cpp
-        src/BinaryBridgeCodec.cpp
-        src/BridgeClient.cpp
-        src/QueueRows.cpp
-        src/CoverImageProvider.cpp
-        src/DiagnosticsLog.cpp
-        src/Localization.cpp
-        src/DisplaySleepInhibitor.cpp
-        src/GlobalSearchResultsModel.cpp
-        src/LibraryTreeModel.cpp
-        src/MprisController.cpp
-        src/CoverRevisionLinks.cpp
-        src/PlaybackClock.cpp
-        src/PlaybackFrameScheduler.cpp
-        src/WindowPresence.cpp
-        src/InputModality.cpp
-        src/WaveformReaderLease.cpp
-        src/TagEditorController.cpp
-        src/TagEditorTableModel.cpp
-        src/SpectrogramItem.cpp
-        src/WindowActivation.cpp
-        src/WaveformItem.cpp
-        src/WaveformSceneGraph.cpp
-        src/WaveformSceneGraph.h
-        src/WaveformEditorItem.cpp
-        src/LevelMeterItem.cpp
-    )
-    target_include_directories(ferrous_ui_dialogs_tests PRIVATE src)
-    add_dependencies(ferrous_ui_dialogs_tests ferrous_rust_bridge)
-    target_compile_definitions(ferrous_ui_dialogs_tests PRIVATE
-        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(ferrous_ui_dialogs_tests PRIVATE
         ferrous_app_icon
-        Qt6::Core
-        Qt6::DBus
-        Qt6::Gui
-        Qt6::Qml
-        Qt6::Quick
-        Qt6::QuickControls2
-        Qt6::Concurrent
-        Qt6::Network
-        Qt6::Widgets
-        Qt6::Test
         Qt6::QuickTest
-        KF6::Kirigami
-        KF6::I18n
-        KF6::I18nQml
-        "${FERROUS_RUST_STATIC_LIB}"
-        PkgConfig::FERROUS_GSTREAMER
-        dl
-        m
-        pthread
-    )
-    ferrous_enable_strict_warnings(ferrous_ui_dialogs_tests)
-    if(FERROUS_ENABLE_PROFILE_LOGS)
-        target_sources(ferrous_ui_dialogs_tests PRIVATE src/SpectrogramSeekTrace.cpp)
-        target_compile_definitions(ferrous_ui_dialogs_tests PRIVATE
-            FERROUS_ENABLE_PROFILE_LOGS=1
-        )
-    endif()
-    set_target_properties(ferrous_ui_dialogs_tests PROPERTIES
-        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
     )
     add_test(NAME ferrous_ui_dialogs_tests COMMAND ferrous_ui_dialogs_tests)
     set_tests_properties(ferrous_ui_dialogs_tests PROPERTIES
@@ -963,71 +783,13 @@ if(BUILD_TESTING)
 
     # The motion of the main window (#373), in a session of its own: no
     # desktop's platform theme, so Kirigami's own durations.
-    qt_add_executable(ferrous_ui_motion_tests
+    ferrous_add_app_test(ferrous_ui_motion_tests
         tests/tst_ui_motion.cpp
-        src/BinaryBridgeCodec.cpp
-        src/BridgeClient.cpp
-        src/QueueRows.cpp
-        src/CoverImageProvider.cpp
-        src/DiagnosticsLog.cpp
-        src/Localization.cpp
-        src/DisplaySleepInhibitor.cpp
-        src/GlobalSearchResultsModel.cpp
-        src/LibraryTreeModel.cpp
-        src/MprisController.cpp
-        src/CoverRevisionLinks.cpp
-        src/PlaybackClock.cpp
-        src/PlaybackFrameScheduler.cpp
-        src/WindowPresence.cpp
-        src/InputModality.cpp
-        src/WaveformReaderLease.cpp
-        src/TagEditorController.cpp
-        src/TagEditorTableModel.cpp
-        src/SpectrogramItem.cpp
-        src/WindowActivation.cpp
-        src/WaveformItem.cpp
-        src/WaveformSceneGraph.cpp
-        src/WaveformSceneGraph.h
-        src/WaveformEditorItem.cpp
-        src/LevelMeterItem.cpp
-    )
-    target_include_directories(ferrous_ui_motion_tests PRIVATE src)
-    add_dependencies(ferrous_ui_motion_tests ferrous_rust_bridge)
-    target_compile_definitions(ferrous_ui_motion_tests PRIVATE
-        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(ferrous_ui_motion_tests PRIVATE
         ferrous_app_icon
-        Qt6::Core
-        Qt6::DBus
-        Qt6::Gui
-        Qt6::Qml
-        Qt6::Quick
-        Qt6::QuickControls2
-        Qt6::Concurrent
-        Qt6::Network
-        Qt6::Widgets
-        Qt6::Test
         Qt6::QuickTest
-        KF6::Kirigami
         KF6::KirigamiPlatform
-        KF6::I18n
-        KF6::I18nQml
-        "${FERROUS_RUST_STATIC_LIB}"
-        PkgConfig::FERROUS_GSTREAMER
-        dl
-        m
-        pthread
-    )
-    ferrous_enable_strict_warnings(ferrous_ui_motion_tests)
-    if(FERROUS_ENABLE_PROFILE_LOGS)
-        target_sources(ferrous_ui_motion_tests PRIVATE src/SpectrogramSeekTrace.cpp)
-        target_compile_definitions(ferrous_ui_motion_tests PRIVATE
-            FERROUS_ENABLE_PROFILE_LOGS=1
-        )
-    endif()
-    set_target_properties(ferrous_ui_motion_tests PROPERTIES
-        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
     )
     # Its tests run in shards, each in a process of its own and in parallel
     # with the others: run alone, the binary takes minutes. FERROUS_TEST_SHARD
@@ -1055,70 +817,10 @@ if(BUILD_TESTING)
 
     # The menus of #373, in a session of its own: no desktop's platform
     # theme, colours or fonts.
-    qt_add_executable(ferrous_ui_menus_tests
+    ferrous_add_app_test(ferrous_ui_menus_tests
         tests/tst_ui_menus.cpp
-        src/BinaryBridgeCodec.cpp
-        src/BridgeClient.cpp
-        src/QueueRows.cpp
-        src/CoverImageProvider.cpp
-        src/DiagnosticsLog.cpp
-        src/Localization.cpp
-        src/DisplaySleepInhibitor.cpp
-        src/GlobalSearchResultsModel.cpp
-        src/LibraryTreeModel.cpp
-        src/MprisController.cpp
-        src/CoverRevisionLinks.cpp
-        src/PlaybackClock.cpp
-        src/PlaybackFrameScheduler.cpp
-        src/WindowPresence.cpp
-        src/InputModality.cpp
-        src/WaveformReaderLease.cpp
-        src/TagEditorController.cpp
-        src/TagEditorTableModel.cpp
-        src/SpectrogramItem.cpp
-        src/WindowActivation.cpp
-        src/WaveformItem.cpp
-        src/WaveformSceneGraph.cpp
-        src/WaveformSceneGraph.h
-        src/WaveformEditorItem.cpp
-        src/LevelMeterItem.cpp
     )
-    target_include_directories(ferrous_ui_menus_tests PRIVATE src)
-    add_dependencies(ferrous_ui_menus_tests ferrous_rust_bridge)
-    target_compile_definitions(ferrous_ui_menus_tests PRIVATE
-        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-    )
-    target_link_libraries(ferrous_ui_menus_tests PRIVATE
-        ferrous_app_icon
-        Qt6::Core
-        Qt6::DBus
-        Qt6::Gui
-        Qt6::Qml
-        Qt6::Quick
-        Qt6::QuickControls2
-        Qt6::Concurrent
-        Qt6::Network
-        Qt6::Widgets
-        Qt6::Test
-        KF6::Kirigami
-        KF6::I18n
-        KF6::I18nQml
-        "${FERROUS_RUST_STATIC_LIB}"
-        PkgConfig::FERROUS_GSTREAMER
-        dl
-        m
-        pthread
-    )
-    ferrous_enable_strict_warnings(ferrous_ui_menus_tests)
-    if(FERROUS_ENABLE_PROFILE_LOGS)
-        target_sources(ferrous_ui_menus_tests PRIVATE src/SpectrogramSeekTrace.cpp)
-        target_compile_definitions(ferrous_ui_menus_tests PRIVATE
-            FERROUS_ENABLE_PROFILE_LOGS=1
-        )
-    endif()
-    set_target_properties(ferrous_ui_menus_tests PROPERTIES
-        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
-    )
+    target_link_libraries(ferrous_ui_menus_tests PRIVATE ferrous_app_icon)
     add_test(NAME ferrous_ui_menus_tests COMMAND ferrous_ui_menus_tests)
     set_tests_properties(ferrous_ui_menus_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
@@ -1164,62 +866,8 @@ if(BUILD_TESTING)
     )
     set_tests_properties(ferrous_display_sleep_inhibitor_tests PROPERTIES TIMEOUT 60)
 
-    qt_add_executable(ferrous_bridge_client_tests
+    ferrous_add_app_test(ferrous_bridge_client_tests
         tests/tst_bridge_client.cpp
-        src/BinaryBridgeCodec.cpp
-        src/BridgeClient.cpp
-        src/QueueRows.cpp
-        src/CoverImageProvider.cpp
-        src/DiagnosticsLog.cpp
-        src/Localization.cpp
-        src/GlobalSearchResultsModel.cpp
-        src/LibraryTreeModel.cpp
-        src/MprisController.cpp
-        src/CoverRevisionLinks.cpp
-        src/PlaybackClock.cpp
-        src/PlaybackFrameScheduler.cpp
-        src/WindowPresence.cpp
-        src/WaveformReaderLease.cpp
-        src/TagEditorController.cpp
-        src/TagEditorTableModel.cpp
-        src/SpectrogramItem.cpp
-        src/WindowActivation.cpp
-        src/WaveformItem.cpp
-        src/WaveformSceneGraph.cpp
-        src/WaveformSceneGraph.h
-        src/WaveformEditorItem.cpp
-    )
-    target_include_directories(ferrous_bridge_client_tests PRIVATE src)
-    add_dependencies(ferrous_bridge_client_tests ferrous_rust_bridge)
-    target_link_libraries(ferrous_bridge_client_tests PRIVATE
-        Qt6::Core
-        Qt6::DBus
-        Qt6::Gui
-        Qt6::Qml
-        Qt6::Quick
-        Qt6::QuickControls2
-        Qt6::Concurrent
-        Qt6::Network
-        Qt6::Widgets
-        Qt6::Test
-        KF6::Kirigami
-        KF6::I18n
-        KF6::I18nQml
-        "${FERROUS_RUST_STATIC_LIB}"
-        PkgConfig::FERROUS_GSTREAMER
-        dl
-        m
-        pthread
-    )
-    ferrous_enable_strict_warnings(ferrous_bridge_client_tests)
-    if(FERROUS_ENABLE_PROFILE_LOGS)
-        target_sources(ferrous_bridge_client_tests PRIVATE src/SpectrogramSeekTrace.cpp)
-        target_compile_definitions(ferrous_bridge_client_tests PRIVATE
-            FERROUS_ENABLE_PROFILE_LOGS=1
-        )
-    endif()
-    set_target_properties(ferrous_bridge_client_tests PROPERTIES
-        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
     )
     add_test(NAME ferrous_bridge_client_tests COMMAND ferrous_bridge_client_tests)
     # Tests that start the real bridge must not depend on an audio device:
@@ -1231,57 +879,12 @@ if(BUILD_TESTING)
     ferrous_add_default_platform_test(ferrous_bridge_client_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The QML module as the app loads it; tests/tst_qml_module.cpp.
-    qt_add_executable(ferrous_qml_module_tests
+    ferrous_add_app_test(ferrous_qml_module_tests
         tests/tst_qml_module.cpp
-        src/BinaryBridgeCodec.cpp
-        src/CoverRevisionLinks.cpp
-        src/LevelMeterItem.cpp
-        src/LibraryTreeModel.cpp
-        src/Localization.cpp
-        src/PlaybackClock.cpp
-        src/PlaybackFrameScheduler.cpp
-        src/WindowPresence.cpp
-        src/InputModality.cpp
-        src/WaveformReaderLease.cpp
-        src/QmlTypes.cpp
-        src/SpectrogramItem.cpp
-        src/WaveformEditorItem.cpp
-        src/WaveformItem.cpp
-        src/WaveformSceneGraph.cpp
-        src/WaveformSceneGraph.h
-    )
-    target_include_directories(ferrous_qml_module_tests PRIVATE src)
-    add_dependencies(ferrous_qml_module_tests ferrous_rust_bridge)
-    target_compile_definitions(ferrous_qml_module_tests PRIVATE
-        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(ferrous_qml_module_tests PRIVATE
         ferrous_app_icon
         "$<LINK_LIBRARY:WHOLE_ARCHIVE,ferrous_ui_qml>"
-        Qt6::Core
-        Qt6::Gui
-        Qt6::Qml
-        Qt6::Quick
-        Qt6::QuickControls2
-        Qt6::Concurrent
-        Qt6::Widgets
-        Qt6::Test
-        KF6::Kirigami
-        KF6::I18n
-        KF6::I18nQml
-        "${FERROUS_RUST_STATIC_LIB}"
-        PkgConfig::FERROUS_GSTREAMER
-        dl
-        m
-        pthread
-    )
-    ferrous_enable_strict_warnings(ferrous_qml_module_tests)
-    if(FERROUS_ENABLE_PROFILE_LOGS)
-        target_sources(ferrous_qml_module_tests PRIVATE src/SpectrogramSeekTrace.cpp)
-        target_compile_definitions(ferrous_qml_module_tests PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
-    endif()
-    set_target_properties(ferrous_qml_module_tests PROPERTIES
-        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
     )
     add_test(NAME ferrous_qml_module_tests COMMAND ferrous_qml_module_tests)
     set_tests_properties(ferrous_qml_module_tests PROPERTIES
@@ -1344,70 +947,14 @@ if(BUILD_TESTING)
     )
     add_custom_target(ferrous_pseudo_catalog DEPENDS "${FERROUS_PSEUDO_CATALOG}")
 
-    qt_add_executable(ferrous_i18n_tests
+    ferrous_add_app_test(ferrous_i18n_tests
         tests/tst_i18n.cpp
-        src/QmlTypes.cpp
-        src/BinaryBridgeCodec.cpp
-        src/BridgeClient.cpp
-        src/QueueRows.cpp
-        src/CoverImageProvider.cpp
-        src/DiagnosticsLog.cpp
-        src/Localization.cpp
-        src/DisplaySleepInhibitor.cpp
-        src/GlobalSearchResultsModel.cpp
-        src/LibraryTreeModel.cpp
-        src/MprisController.cpp
-        src/CoverRevisionLinks.cpp
-        src/PlaybackClock.cpp
-        src/PlaybackFrameScheduler.cpp
-        src/WindowPresence.cpp
-        src/InputModality.cpp
-        src/WaveformReaderLease.cpp
-        src/TagEditorController.cpp
-        src/TagEditorTableModel.cpp
-        src/SpectrogramItem.cpp
-        src/WindowActivation.cpp
-        src/WaveformItem.cpp
-        src/WaveformSceneGraph.cpp
-        src/WaveformSceneGraph.h
-        src/WaveformEditorItem.cpp
-        src/LevelMeterItem.cpp
     )
-    target_include_directories(ferrous_i18n_tests PRIVATE src)
-    add_dependencies(ferrous_i18n_tests ferrous_rust_bridge ferrous_pseudo_catalog)
+    add_dependencies(ferrous_i18n_tests ferrous_pseudo_catalog)
     target_compile_definitions(ferrous_i18n_tests PRIVATE
-        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
         FERROUS_PSEUDO_LOCALE_DIR="${FERROUS_PSEUDO_LOCALE_DIR}"
     )
-    target_link_libraries(ferrous_i18n_tests PRIVATE
-        ferrous_app_icon
-        Qt6::Core
-        Qt6::DBus
-        Qt6::Gui
-        Qt6::Qml
-        Qt6::Quick
-        Qt6::QuickControls2
-        Qt6::Concurrent
-        Qt6::Network
-        Qt6::Widgets
-        Qt6::Test
-        KF6::Kirigami
-        KF6::I18n
-        KF6::I18nQml
-        "${FERROUS_RUST_STATIC_LIB}"
-        PkgConfig::FERROUS_GSTREAMER
-        dl
-        m
-        pthread
-    )
-    ferrous_enable_strict_warnings(ferrous_i18n_tests)
-    if(FERROUS_ENABLE_PROFILE_LOGS)
-        target_sources(ferrous_i18n_tests PRIVATE src/SpectrogramSeekTrace.cpp)
-        target_compile_definitions(ferrous_i18n_tests PRIVATE FERROUS_ENABLE_PROFILE_LOGS=1)
-    endif()
-    set_target_properties(ferrous_i18n_tests PROPERTIES
-        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
-    )
+    target_link_libraries(ferrous_i18n_tests PRIVATE ferrous_app_icon)
     add_test(NAME ferrous_i18n_tests COMMAND ferrous_i18n_tests)
     set_tests_properties(ferrous_i18n_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
