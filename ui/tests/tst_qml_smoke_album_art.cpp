@@ -3055,6 +3055,30 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
     QVERIFY2(sceneRectOf(loadingTitle).top() >= sceneRectOf(loadingRow).top() + 8 - 0.5
                  && sceneRectOf(loadingDetails).bottom() <= sceneRectOf(loadingRow).bottom() - 8 + 0.5,
              qPrintable(loadingAt));
+
+    // The search's glyph, the spinner or a failure's warning mark, is
+    // 32 px with the default font and scaled with a larger one, as the
+    // text under it (#373 H45: 32 px over 24 pt text).
+    const qreal fontScale = qvariant_cast<QObject *>(opened.dialog->property("uiPalette"))
+        ->property("fontScale").toReal();
+    const qreal stateGlyph = std::max(32.0, qreal(std::round(32 * fontScale)));
+    if (!large) {
+        QCOMPARE(stateGlyph, 32.0);
+    }
+    bridge->setProperty("itunesArtworkResults", QVariantList());
+    bridge->setProperty("itunesArtworkLoading", true);
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("Searching iTunes\u2026"));
+    QQuickItem *busy = itemNamed(opened.content, QStringLiteral("itunesArtworkBusyIndicator"));
+    QVERIFY(busy != nullptr);
+    QTRY_VERIFY(busy->isVisible());
+    QTRY_COMPARE(busy->size(), QSizeF(stateGlyph, stateGlyph));
+    bridge->setProperty("itunesArtworkLoading", false);
+    bridge->setProperty("itunesArtworkErrorText", QStringLiteral("Connection refused"));
+    bridge->setProperty("itunesArtworkFailed", true);
+    QQuickItem *warning = itemNamed(opened.content, QStringLiteral("itunesArtworkFailureIcon"));
+    QVERIFY(warning != nullptr);
+    QTRY_VERIFY(warning->isVisible());
+    QTRY_COMPARE(warning->size(), QSizeF(stateGlyph, stateGlyph));
 }
 
 void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {

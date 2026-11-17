@@ -284,6 +284,11 @@ Preferences.PreferencesPage {
                                 objectName: "libraryRootName"
                                 visible: root.rootNameColumnWidth > 0
                                 Layout.preferredWidth: root.rootNameColumnWidth
+                                // The gap to the path: the row's 10 px with
+                                // the default font, and larger with a larger
+                                // one, so the two columns stay apart (#373
+                                // H45: 10 px between 24 pt names and paths).
+                                Layout.rightMargin: root.uiPalette.scaledSize(parent.spacing) - parent.spacing
                                 text: rootRow.rootName
                                 color: root.uiPalette.text
                                 elide: Text.ElideRight

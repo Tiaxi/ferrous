@@ -1039,7 +1039,7 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn() {
     QQuickItem *single = rows.at(0).name;
     QTRY_VERIFY(qAbs(single->width() - single->implicitWidth()) <= 1);
     QVERIFY(!single->property("truncated").toBool());
-    const qreal nameToPath = sceneRect(rows.at(0).path).left() - sceneRect(single).right();
+    const qreal iconToName = sceneRect(single).left() - sceneRect(rows.at(0).icon).right();
 
     // Without names, no names' column: the path where a name would start.
     QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
@@ -1050,7 +1050,7 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn() {
     for (const Row &row : rows) {
         QVERIFY2(!row.name->isVisible(), qPrintable(describeItem(row.name)));
         QVERIFY(row.icon != nullptr);
-        QVERIFY2(qAbs(sceneRect(row.path).left() - sceneRect(row.icon).right() - nameToPath) < 0.5,
+        QVERIFY2(qAbs(sceneRect(row.path).left() - sceneRect(row.icon).right() - iconToName) < 0.5,
                  qPrintable(describeItem(row.path)));
     }
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
@@ -5381,6 +5381,16 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
     QVERIFY(note->isVisible());
     QVERIFY2(qAbs(sceneRect(note).left() - sceneRect(name).left()) < 0.5,
              qPrintable(describeItem(note) + QStringLiteral(" / ") + describeItem(name)));
+    // The name and the path 10 px apart, scaled with the font (#373 H45:
+    // 10 px between them at 24 pt).
+    {
+        const qreal rowSpacing = evaluate(palette, QStringLiteral("Kirigami.Units.largeSpacing")).toReal() + 2;
+        QCOMPARE(rowSpacing, 10.0);
+        // Within the pixel the name's measured width leaves.
+        const qreal gap = sceneRect(path).left() - sceneRect(name).right();
+        QVERIFY2(gap >= scaled(rowSpacing) && gap < scaled(rowSpacing) + 1,
+                 qPrintable(QStringLiteral("%1 px").arg(gap)));
+    }
     // With the room, the path is whole.
     QTRY_VERIFY2(!path->property("truncated").toBool(),
                  qPrintable(describeItem(path)));

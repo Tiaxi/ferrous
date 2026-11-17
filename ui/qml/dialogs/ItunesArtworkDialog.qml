@@ -750,12 +750,14 @@ Components.DialogWindow {
                 visible: itunesArtworkResultsView.count === 0
                     && (placeholder.searching || placeholderMessage.text.length > 0)
 
-                // The style's spinner, 32 px: the state's one glyph.
+                // The style's spinner, 32 px with the default font and
+                // larger with a larger one, as the text under it (#373 H45:
+                // 32 px over 24 pt text): the state's one glyph.
                 BusyIndicator {
                     objectName: "itunesArtworkBusyIndicator"
                     Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: Kirigami.Units.iconSizes.medium
-                    Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                    Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
+                    Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
                     running: placeholder.searching
                     visible: running
                 }
@@ -767,8 +769,8 @@ Components.DialogWindow {
                 Kirigami.Icon {
                     objectName: "itunesArtworkFailureIcon"
                     Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: Kirigami.Units.iconSizes.medium
-                    Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                    Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
+                    Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
                     visible: placeholder.failed
                     source: Qt.resolvedUrl("../assets/status-warning.svg")
                     isMask: true
