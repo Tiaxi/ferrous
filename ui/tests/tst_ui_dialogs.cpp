@@ -3821,8 +3821,9 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder_data() {
 // Auto Number is one form in reading order (#373 H38): the tracks' start
 // and Write totals, which writes the tracks' totals with or without the
 // discs' (under the disc's start, it read as a disc option); Write disc
-// numbers, then the disc's start it enables; then when numbering starts
-// over. The groups are a FormGroupGap apart, 16 px with the default font,
+// numbers, then the disc's start and the reset at each disc, which it
+// enables (#373 H41: the reset was in the last group, apart from it); then
+// the reset at each folder. The groups are a FormGroupGap apart, 16 px with the default font,
 // and their rows the form's row spacing, 4 px. The check boxes have no labels and start
 // where the fields do, the description too, so the dialog has one left
 // edge; it had two, with Write disc numbers under the field it enables.
@@ -3864,7 +3865,7 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
     // Every row within the window, whole, top to bottom in reading order.
     const QStringList order{QStringLiteral("autoNumberStartingTrackField"), QStringLiteral("autoNumberWriteTotalsCheck"),
                             QStringLiteral("autoNumberWriteDiscCheck"), QStringLiteral("autoNumberStartingDiscField"),
-                            QStringLiteral("autoNumberResetOnFolderCheck"), QStringLiteral("autoNumberResetOnDiscCheck")};
+                            QStringLiteral("autoNumberResetOnDiscCheck"), QStringLiteral("autoNumberResetOnFolderCheck")};
     // The rows that start a group.
     const QStringList groupStarts{QStringLiteral("autoNumberWriteDiscCheck"),
                                   QStringLiteral("autoNumberResetOnFolderCheck")};
