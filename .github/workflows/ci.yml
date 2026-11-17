@@ -258,11 +258,12 @@ jobs:
           workspaces: ". -> ui/build/cargo"
 
       # ccache keeps the C++ objects of earlier runs, so a run compiles only
-      # what its change affects. Every run restores main's newest cache. Only
-      # a push to main saves one, under a key of its own, since a cache
-      # cannot be overwritten: a repository has 10 GB for all its caches, and
-      # GitHub removes the least recently used ones beyond that. ccache is
-      # for CI only; the app's build does not need it.
+      # what its change affects. A run restores the newest cache that main
+      # has saved, when there is one. Only a push to main saves one, under a
+      # key of its own, since a cache cannot be overwritten: a repository has
+      # 10 GB for all its caches, and GitHub removes the least recently used
+      # ones beyond that. ccache is for CI only; the app's build does not
+      # need it.
       - name: Restore C++ objects
         uses: actions/cache/restore@v6
         with:
