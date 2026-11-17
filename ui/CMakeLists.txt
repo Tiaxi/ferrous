@@ -194,6 +194,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/MenuHeading.qml
         qml/components/NowFadeOut.qml
         qml/components/NowPlayingPanel.qml
+        qml/components/MessageLabel.qml
         qml/components/PathLabel.qml
         qml/components/PlotLaneHead.qml
         qml/components/PlotModeSwitch.qml
@@ -266,6 +267,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/assets/ferrous-mark-symbolic.svg
         qml/assets/volume.svg
         qml/assets/volume-muted.svg
+        qml/logic/BreakableText.js
         qml/logic/ChannelLabels.js
         qml/logic/ColorUtils.js
         qml/logic/ErrorUtils.js

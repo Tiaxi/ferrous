@@ -3,6 +3,7 @@
 // The dialogs of #373: Configure Ferrous, About, Edit Tags, Recent Issues
 // and the smaller dialogs, from the QML sources with the fallback bridge.
 
+#include <QAccessible>
 #include <QApplication>
 #include <QStyle>
 #include <QStyleFactory>
@@ -20,6 +21,8 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QQmlApplicationEngine>
+#include <QQmlComponent>
+#include <QQmlEngine>
 #include <QQmlContext>
 #include <QQmlExpression>
 #include <QQmlProperty>
@@ -27,14 +30,18 @@
 #include <QQuickWindow>
 #include <QScopeGuard>
 #include <QTemporaryDir>
+#include <QTextLayout>
+#include <QTextOption>
 #include <QtMath>
 #include <QtQuickTest/quicktest.h>
 #include <QtTest/QtTest>
 #include <qqml.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <tuple>
 
 #include "../src/AboutComponents.h"
@@ -505,6 +512,9 @@ private slots:
     void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
     void libraryFolderListIsThreeRowsTallAtLeast_data();
     void libraryFolderListIsThreeRowsTallAtLeast();
+    void quitFailureBreaksItsPathOnlyBetweenFolders_data();
+    void quitFailureBreaksItsPathOnlyBetweenFolders();
+    void breakableTextKeepsNamesAndErrorCodesWhole();
     void lastFmPageShowsOnlyTheButtonsThatApply();
     void lastFmScrobblingNeedsABuildWithLastFm();
     void lastFmAccountIsAGroupApart_data();
@@ -2242,6 +2252,155 @@ void UiDialogsTest::libraryFolderListIsThreeRowsTallAtLeast() {
     }
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());
+}
+
+void UiDialogsTest::quitFailureBreaksItsPathOnlyBetweenFolders_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<QString>("message");
+    const QString error = QStringLiteral("Settings could not be saved: Permission denied (os error 13)");
+    const QString path = QStringLiteral(
+        "Settings could not be saved: failed to create temporary file in /fixture/configuration/ferrous-settings/"
+        "2005 - Small Hours (Deluxe Edition)/read-only: Permission denied (os error 13)");
+    QTest::newRow("10 pt, an error") << 10.0 << error;
+    QTest::newRow("10 pt, a path") << 10.0 << path;
+    QTest::newRow("24 pt, an error") << 24.0 << error;
+    QTest::newRow("24 pt, a path") << 24.0 << path;
+}
+
+// The quit failure's message wraps as its words allow, but a path in it
+// breaks only after a slash, never inside a folder's name, and the
+// system's "(os error 13)" stays whole (#373 H47: "(os error" ended a line
+// and "13)" was alone on the next). Its accessible name is the message as
+// it is.
+void UiDialogsTest::quitFailureBreaksItsPathOnlyBetweenFolders() {
+    QFETCH(qreal, pointSize);
+    QFETCH(QString, message);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, message)));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *dialogWindow = windowOf(dialog);
+    QQuickItem *label = visibleNamed(dialogWindow, QStringLiteral("quitSaveFailedMessage"));
+    QVERIFY(label != nullptr);
+    QTRY_VERIFY(!layoutPending(label) && label->width() > 0);
+    // The lines as Qt lays out the label's text at its width, without the
+    // characters that only shape them.
+    const auto linesOf = [label] {
+        const QString text = label->property("text").toString();
+        QTextLayout layout(text, qvariant_cast<QFont>(label->property("font")));
+        QTextOption option;
+        option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        layout.setTextOption(option);
+        QStringList lines;
+        layout.beginLayout();
+        for (QTextLine line = layout.createLine(); line.isValid(); line = layout.createLine()) {
+            line.setLineWidth(label->width());
+            lines << text.mid(line.textStart(), line.textLength())
+                         .remove(QChar(0x200b))
+                         .remove(QChar(0x2060))
+                         .replace(QChar(0x00a0), QLatin1Char(' '));
+        }
+        layout.endLayout();
+        return lines;
+    };
+    QStringList lines;
+    QTRY_COMPARE(label->property("lineCount").toInt(), (lines = linesOf()).size());
+    const QString shown = lines.join(QLatin1Char('|'));
+    QCOMPARE(lines.join(QString()), message);
+    // At 24 pt the message wraps, and the error's code is whole on one
+    // line.
+    QVERIFY2(pointSize < 24 || lines.size() > 1, qPrintable(shown));
+    QVERIFY2(std::any_of(lines.cbegin(), lines.cend(),
+                         [](const QString &line) { return line.contains(QStringLiteral("(os error 13)")); }),
+             qPrintable(shown));
+    // Inside the path, each line ends after a slash.
+    const qsizetype pathStart = message.indexOf(QStringLiteral(" /")) + 1;
+    const qsizetype pathEnd = message.indexOf(QStringLiteral(": Permission"));
+    qsizetype lineEnd = 0;
+    int breaksInPath = 0;
+    for (qsizetype line = 0; pathStart > 0 && line + 1 < lines.size(); ++line) {
+        lineEnd += lines.at(line).size();
+        if (lineEnd > pathStart + 1 && lineEnd < pathEnd) {
+            ++breaksInPath;
+            QVERIFY2(message.at(lineEnd - 1) == QLatin1Char('/'), qPrintable(shown));
+        }
+    }
+    QVERIFY2(pathStart <= 0 || breaksInPath > 0, qPrintable(shown));
+    // The accessible name is the message as it is.
+    QCOMPARE(QAccessible::queryAccessibleInterface(label)->text(QAccessible::Name), message);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "dismiss"));
+    QTRY_VERIFY(!dialogWindow->isVisible());
+}
+
+// The shared rules for where a message's lines may break (BreakableText.js):
+// after a path's slashes but not after its first, never inside a name that
+// fits on a line or inside "(os error N)"; text without a path or a code
+// stays as it is, and plainText gives the message back.
+void UiDialogsTest::breakableTextKeepsNamesAndErrorCodesWhole() {
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(QByteArrayLiteral(
+        "import QtQml\n"
+        "import \"BreakableText.js\" as BreakableText\n"
+        "QtObject {\n"
+        "    function message(text, room) { return BreakableText.breakableMessage(text, n => n.length <= room) }\n"
+        "    function path(text, room) { return BreakableText.breakablePath(text, n => n.length <= room) }\n"
+        "    function plain(text) { return BreakableText.plainText(text) }\n"
+        "}\n"), QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/logic/BreakableTextTest.qml")));
+    std::unique_ptr<QObject> helper(component.create());
+    QVERIFY2(helper != nullptr, qPrintable(component.errorString()));
+    const auto call = [&](const char *function, const QString &text, int room = 0) {
+        QVariant result;
+        const bool called = std::strcmp(function, "plain") == 0
+            ? QMetaObject::invokeMethod(helper.get(), function, Q_RETURN_ARG(QVariant, result), Q_ARG(QVariant, text))
+            : QMetaObject::invokeMethod(helper.get(), function, Q_RETURN_ARG(QVariant, result), Q_ARG(QVariant, text),
+                                        Q_ARG(QVariant, room));
+        return called ? result.toString() : QStringLiteral("<not called>");
+    };
+    const QChar zwsp(0x200b);
+    const QChar joiner(0x2060);
+    const QChar nbsp(0x00a0);
+    // The album art viewer's path: a break after every slash, names that
+    // fit kept whole, a name wider than the line left to break between its
+    // words.
+    QCOMPARE(call("path", QStringLiteral("/music/The Quiet Meridian/2005 - Small Hours Deluxe"), 20),
+             QStringLiteral("/%1music/%1The%2Quiet%2Meridian/%1").arg(zwsp).arg(nbsp)
+                 + QStringLiteral("2005 - Small Hours Deluxe"));
+    QCOMPARE(call("path", QStringLiteral("/a/read-only"), 20), QStringLiteral("/%1a/%1read-%2only").arg(zwsp).arg(joiner));
+    // In a message: no break after the path's first slash, where the space
+    // before it is one; the path ends at ": ".
+    const QString message = QStringLiteral("failed to create temporary file in /tmp/tag-save/read-only: "
+                                           "Permission denied (os error 13)");
+    const QString expected = QStringLiteral("failed to create temporary file in /tmp/%1tag-%2save/%1read-%2only: "
+                                            "Permission denied (os%3error%3")
+                                 .arg(zwsp).arg(joiner).arg(nbsp)
+        + QStringLiteral("13)");
+    QCOMPARE(call("message", message, 40), expected);
+    QCOMPARE(call("plain", expected), message);
+    // A path at the start, one from the home folder, and one in quotes.
+    QCOMPARE(call("message", QStringLiteral("/a b/c"), 40), QStringLiteral("/a%1b/%2c").arg(nbsp).arg(zwsp));
+    QCOMPARE(call("message", QStringLiteral("in ~/Music/x."), 40), QStringLiteral("in ~/Music/%1x.").arg(zwsp));
+    QCOMPARE(call("message", QStringLiteral("to “/x/y”"), 40), QStringLiteral("to “/x/%1y”").arg(zwsp));
+    QCOMPARE(call("message", QStringLiteral("in '/a/Don't Stop/x': y"), 40),
+             QStringLiteral("in '/a/%1Don't%2Stop/%1x': y").arg(zwsp).arg(nbsp));
+    // A name wider than the line breaks between its words.
+    QCOMPARE(call("message", QStringLiteral("at /long folder name/x"), 8),
+             QStringLiteral("at /long folder name/%1x").arg(zwsp));
+    // Words with a slash inside them, a URL, and text without a path or a
+    // code are as they are.
+    for (const QString &text : {QStringLiteral("and/or 1/2"), QStringLiteral("see https://example.org/a-b"),
+                                QStringLiteral("Proxy connection refused"), QString()}) {
+        QCOMPARE(call("message", text, 40), text);
+    }
 }
 
 void UiDialogsTest::lastFmPageShowsOnlyTheButtonsThatApply() {

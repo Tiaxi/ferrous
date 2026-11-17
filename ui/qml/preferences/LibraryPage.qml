@@ -313,27 +313,27 @@ Preferences.PreferencesPage {
                             }
                         }
 
-                        Label {
+                        // A path or a system error in the reasons wraps
+                        // as a message's does.
+                        Components.MessageLabel {
                             objectName: "libraryRootUnwatchedLabel"
                             Layout.fillWidth: true
                             Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + root.uiPalette.labelIconSize
                             Layout.rightMargin: Kirigami.Units.largeSpacing + 2
                             visible: rootRow.unwatchedReason.length > 0
-                            text: I18n.i18nc("@info:status", "Not watched for changes: %1", rootRow.unwatchedReason)
-                            wrapMode: Text.Wrap
+                            message: I18n.i18nc("@info:status", "Not watched for changes: %1", rootRow.unwatchedReason)
                             font.pointSize: root.uiPalette.smallPointSize
                             color: root.uiPalette.textSecondary
                         }
 
                         // Stays until a rescan of the whole folder finds nothing wrong.
-                        Label {
+                        Components.MessageLabel {
                             objectName: "libraryRootScanProblemLabel"
                             Layout.fillWidth: true
                             Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + root.uiPalette.labelIconSize
                             Layout.rightMargin: Kirigami.Units.largeSpacing + 2
                             visible: rootRow.scanProblem.length > 0
-                            text: I18n.i18nc("@info:status problem the last library scan found", "Last scan: %1", rootRow.scanProblem)
-                            wrapMode: Text.Wrap
+                            message: I18n.i18nc("@info:status problem the last library scan found", "Last scan: %1", rootRow.scanProblem)
                             font.pointSize: root.uiPalette.smallPointSize
                             color: root.uiPalette.negative
                             Accessible.role: Accessible.AlertMessage

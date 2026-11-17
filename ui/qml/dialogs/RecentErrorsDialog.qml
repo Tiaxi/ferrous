@@ -453,25 +453,22 @@ Popup {
                                     }
                                 }
 
-                                // The problem itself.
-                                Label {
+                                // The problem itself. A path or a system
+                                // error in it wraps as a message's does.
+                                Components.MessageLabel {
                                     objectName: "errorHistoryHeading"
                                     Layout.fillWidth: true
-                                    text: historyRow.title
-                                    textFormat: Text.PlainText
-                                    wrapMode: Text.Wrap
+                                    message: historyRow.title
                                     font.weight: historyRow.unseen ? Font.DemiBold : Font.Normal
                                     color: root.uiPalette.text
                                     Accessible.ignored: true
                                 }
 
-                                Label {
+                                Components.MessageLabel {
                                     objectName: "errorHistoryMessage"
                                     Layout.fillWidth: true
-                                    visible: text.length > 0
-                                    text: historyRow.description
-                                    textFormat: Text.PlainText
-                                    wrapMode: Text.Wrap
+                                    visible: message.length > 0
+                                    message: historyRow.description
                                     font.pointSize: root.uiPalette.smallPointSize
                                     color: root.uiPalette.textSecondary
                                     Accessible.ignored: true

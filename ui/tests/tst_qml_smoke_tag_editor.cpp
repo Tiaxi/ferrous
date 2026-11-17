@@ -5,6 +5,8 @@
 
 #include <QAccessible>
 #include <QJSValue>
+#include <QQmlContext>
+#include <QQmlExpression>
 #include <QQuickTextDocument>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -1666,8 +1668,10 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     }
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
-    QDir root(dir.path());
-    QVERIFY(root.mkdir(QStringLiteral("writable")) && root.mkdir(QStringLiteral("read-only")));
+    // In an album's folder, whose names have spaces and hyphens, as a
+    // library's do: the path is longer than a line.
+    QDir root(QDir(dir.path()).filePath(QStringLiteral("The Quiet Meridian/2005 - Small Hours (Deluxe Edition)")));
+    QVERIFY(root.mkpath(QStringLiteral("writable")) && root.mkpath(QStringLiteral("read-only")));
     const QString writable = root.filePath(QStringLiteral("writable/01 Brief Signal.flac"));
     const QString readOnly = root.filePath(QStringLiteral("read-only/03 Long Exhale.flac"));
     for (const QString &path : {writable, readOnly}) {
@@ -1846,11 +1850,103 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     if (pointSize == 0 || detailsWindow->height() < limit) {
         QVERIFY2(detailsWindow->height() < limit, qPrintable(where));
         QVERIFY2(std::abs(sceneRectOf(close).top() - textBottom - gridUnit) <= 1.0, qPrintable(where));
+        // With no scroll bar: the window was laid out hidden and small,
+        // the bar shown, and the lines beside it took one more than the
+        // window had room for, so it stayed (#373 H47).
+        QQmlExpression barShown(qmlContext(text), text, QStringLiteral("detailsView.ScrollBar.vertical.visible"));
+        QTRY_VERIFY2(!barShown.evaluate().toBool(), qPrintable(where));
     } else {
         QCOMPARE(detailsWindow->height(), int(limit));
         QVERIFY2(textBottom > sceneRectOf(close).top() - gridUnit, qPrintable(where));
     }
     QCOMPARE(sceneRectOf(summary).top(), gridUnit);
+
+    // Copy, from the keyboard or the context menu, copies the details as
+    // they read, without the characters that only shape their lines.
+    const auto plain = [](QString text) {
+        return text.remove(QChar(0x200b)).remove(QChar(0x2060)).replace(QChar(0x00a0), QLatin1Char(' '));
+    };
+    QStringList documentText;
+    for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
+        documentText << plain(block.text());
+    }
+    const QString expectedCopy = documentText.join(QLatin1Char('\n'));
+    QVERIFY2(expectedCopy.contains(QStringLiteral("(os error 13)")), qPrintable(expectedCopy));
+    text->forceActiveFocus(Qt::OtherFocusReason);
+    QTRY_VERIFY(text->hasActiveFocus());
+    QVERIFY(QMetaObject::invokeMethod(text, "selectAll"));
+    QGuiApplication::clipboard()->clear();
+    QTest::keySequence(detailsWindow, QKeySequence::Copy);
+    QTRY_COMPARE(QGuiApplication::clipboard()->text(), expectedCopy);
+    QGuiApplication::clipboard()->clear();
+    QQmlExpression menuCopy(qmlContext(text), text, QStringLiteral("copy()"));
+    menuCopy.evaluate();
+    QVERIFY2(!menuCopy.hasError(), qPrintable(menuCopy.error().toString()));
+    QTRY_COMPARE(QGuiApplication::clipboard()->text(), expectedCopy);
+
+    // The failed file's line breaks inside the folder's path only after a
+    // slash, never inside a folder's name such as "2005 - Small Hours
+    // (Deluxe Edition)" or "read-only", and never inside "(os error 13)"
+    // (#373 H47: it broke in "ferrous-tagsave" at 24 pt). The narrowest
+    // window spreads the path over lines; the selection goes as the text
+    // is laid out anew, with no warning.
+    const QString failedItem = editor.statusDetailSections().last().toMap().value(QStringLiteral("items"))
+                                   .toList().value(0).toString().trimmed();
+    QVERIFY2(failedItem.contains(readOnlyFolder + QStringLiteral(": ")), qPrintable(failedItem));
+    QVERIFY2(failedItem.endsWith(QStringLiteral("(os error 13)")), qPrintable(failedItem));
+    const QFontMetricsF textMetrics(qvariant_cast<QFont>(text->property("font")));
+    const qreal openWidth = text->width();
+    detailsWindow->resize(detailsWindow->minimumWidth(), detailsWindow->height());
+    QTRY_COMPARE(detailsWindow->width(), detailsWindow->minimumWidth());
+    // What is wrong with the failed file's lines, once laid out at the
+    // narrow width; nothing, where they break as they should.
+    const qsizetype pathStart = failedItem.indexOf(readOnlyFolder);
+    const qsizetype pathEnd = pathStart + readOnlyFolder.size();
+    // The room a folder's name has whole: the line's, less the scroll
+    // bar's, whether it shows or not.
+    QQmlExpression nameRoomExpression(qmlContext(text), text,
+                                      QStringLiteral("root.lineWidth - root.itemIndent"));
+    const auto breakProblem = [&]() -> QString {
+        const qreal nameRoom = nameRoomExpression.evaluate().toReal();
+        const QTextBlock block = blockAt(3);
+        const QTextLayout *layout = block.layout();
+        QStringList lines;
+        for (int line = 0; line < layout->lineCount(); ++line) {
+            lines << plain(block.text().mid(layout->lineAt(line).textStart(), layout->lineAt(line).textLength()));
+        }
+        const QString shown = lines.join(QLatin1Char('|'));
+        if (text->width() >= openWidth || lines.join(QString()) != failedItem) {
+            return QStringLiteral("not laid out anew: ") + shown;
+        }
+        if (textMetrics.horizontalAdvance(readOnlyFolder) <= 1.5 * (text->width() - indent)) {
+            return QStringLiteral("the path fits in less than two lines");
+        }
+        qsizetype lineEnd = 0;
+        int breaksInPath = 0;
+        for (qsizetype line = 0; line + 1 < lines.size(); ++line) {
+            lineEnd += lines.at(line).size();
+            if (lineEnd > pathStart + 1 && lineEnd < pathEnd) {
+                ++breaksInPath;
+                // Inside a name only where the name is wider than the line.
+                const qsizetype nameStart = failedItem.lastIndexOf(QLatin1Char('/'), lineEnd - 1) + 1;
+                const qsizetype slash = failedItem.indexOf(QLatin1Char('/'), lineEnd);
+                const QString name = failedItem.mid(nameStart, (slash < 0 || slash > pathEnd ? pathEnd : slash) - nameStart);
+                if (failedItem.at(lineEnd - 1) != QLatin1Char('/')
+                    && textMetrics.horizontalAdvance(name + QLatin1Char('/')) <= nameRoom) {
+                    return QStringLiteral("a break inside the folder name \"%1\": ").arg(name) + shown;
+                }
+            }
+        }
+        if (breaksInPath == 0) {
+            return QStringLiteral("no break in the path: ") + shown;
+        }
+        if (std::none_of(lines.cbegin(), lines.cend(),
+                         [](const QString &line) { return line.contains(QStringLiteral("(os error 13)")); })) {
+            return QStringLiteral("the error's code broken: ") + shown;
+        }
+        return QString();
+    };
+    QTRY_COMPARE(breakProblem(), QString());
 
     QVERIFY(clickVisibleButton(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton")));
     QTRY_VERIFY(!details->property("visible").toBool());

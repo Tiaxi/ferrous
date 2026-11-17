@@ -7,6 +7,7 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/BreakableText.js" as BreakableText
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/KeyUtils.js" as KeyUtils
 import "../logic/PathUtils.js" as PathUtils
@@ -854,21 +855,13 @@ Item {
                             anchors.left: parent.left
                             anchors.right: copyPathButton.left
                             anchors.rightMargin: folderPathRow.spacing
-                            // The lines break only between folders: a
-                            // zero-width space after each slash is a break
-                            // point, and in a folder's name that fits on a
-                            // line the spaces are no-break spaces and a word
-                            // joiner follows each hyphen or dash, after which
-                            // a line may otherwise break (#373 H40: "…/2005 -
-                            // Small" broke before "Hours"). A name wider than
-                            // the line breaks between its words. The
-                            // tooltip, Copy Path and the accessible name keep
-                            // the path as it is.
-                            text: folderPathLabel.path.split("/").map(function(name) {
-                                return folderPathMetrics.advanceWidth(name + "/") <= folderPathLabel.width
-                                    ? name.replace(/ /g, "\u00a0").replace(/[-\u2010\u2012\u2013\u2014]/g, "$&\u2060")
-                                    : name
-                            }).join("/\u200b")
+                            // The lines break only between folders, never
+                            // inside a folder's name that fits on a line
+                            // (#373 H40). The tooltip, Copy Path and the
+                            // accessible name keep the path as it is.
+                            text: BreakableText.breakablePath(folderPathLabel.path, function(name) {
+                                return folderPathMetrics.advanceWidth(name) <= folderPathLabel.width
+                            })
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                             elide: Text.ElideRight

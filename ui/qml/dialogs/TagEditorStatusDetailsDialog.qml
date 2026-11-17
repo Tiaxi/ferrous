@@ -6,6 +6,7 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/BreakableText.js" as BreakableText
 
 // The whole of the tag editor's last status, such as each file a save
 // could not write, in a window of its own over the editor: the editor's
@@ -23,12 +24,38 @@ Components.DialogWindow {
 
     readonly property real contentPadding: Kirigami.Units.gridUnit
     readonly property real contentSpacing: Kirigami.Units.largeSpacing
+    readonly property real itemIndent: root.uiPalette.scaledSize(16)
+    // The details' scroll bar shows only while they are taller than the
+    // window, and their lines leave it room whether it shows or not: lines
+    // that wrapped anew, narrower beside it, could need it then, and it
+    // stayed (#373 H47: at 24 pt Details opened with the bar, its last line
+    // out of view, where the window had been laid out hidden and small).
+    readonly property real scrollBarRoom: detailsView.ScrollBar.vertical.width
+    readonly property real lineWidth: Math.max(0, detailsView.width - root.scrollBarRoom)
+    // The details as shown.
+    readonly property string detailsHtml: root.detailsHtmlAt(root.lineWidth)
+
+    // Set as they change, such as where a narrower window breaks a path
+    // anew. A new text drops the selection, which goes first: the style
+    // warns of a selection the text no longer has.
+    onDetailsHtmlChanged: {
+        detailsText.deselect()
+        detailsText.text = root.detailsHtml
+    }
+
     // TagEditorController.statusDetailSections as rich text: each heading
     // a paragraph, each item one of its own, indented, with 12 px before
-    // each section after the first (#373 H40: a grid unit, 18 px).
-    readonly property string detailsHtml: {
+    // each section after the first (#373 H40: a grid unit, 18 px). A path
+    // in an item breaks between its folders, those that fit on a line
+    // `width` wide whole, and an error's code stays whole (#373 H47: the
+    // line broke in "ferrous-tagsave").
+    function detailsHtmlAt(width) {
         const sections = root.tagEditorApi.statusDetailSections || []
-        const indent = root.uiPalette.scaledSize(16)
+        const indent = root.itemIndent
+        const itemWidth = width - indent
+        const fits = function(name) {
+            return detailsMetrics.advanceWidth(name) <= itemWidth
+        }
         const sectionGap = root.uiPalette.scaledSize(12)
         const textColor = root.cssColor(root.uiPalette.text)
         let html = ""
@@ -42,10 +69,24 @@ Components.DialogWindow {
             const items = section.items || []
             for (let j = 0; j < items.length; ++j) {
                 html += "<p style=\"margin-top:0px; margin-bottom:0px; margin-left:" + indent + "px; color:"
-                    + textColor + "\">" + root.escaped(String(items[j] || "").trim()) + "</p>"
+                    + textColor + "\">"
+                    + root.escaped(BreakableText.breakableMessage(String(items[j] || "").trim(), fits)) + "</p>"
             }
         }
         return html
+    }
+
+    // Copies the selected details as they read, without the characters
+    // that only shape their lines.
+    function copySelectedDetails() {
+        if (detailsText.selectionStart === detailsText.selectionEnd) {
+            return
+        }
+        detailsClipboardText.text = BreakableText.plainText(
+            detailsText.getText(detailsText.selectionStart, detailsText.selectionEnd))
+        detailsClipboardText.selectAll()
+        detailsClipboardText.copy()
+        detailsClipboardText.text = ""
     }
 
     // A colour as rich text's CSS takes it, opaque.
@@ -105,11 +146,22 @@ Components.DialogWindow {
 
         TextEdit {
             id: detailsSizer
-            width: parent.width - detailsText.leftPadding - detailsText.rightPadding
+            width: Math.max(0, parent.width - root.scrollBarRoom)
             textFormat: TextEdit.RichText
             wrapMode: TextEdit.Wrap
-            text: root.detailsHtml
+            text: root.detailsHtmlAt(detailsSizer.width)
             font: detailsText.font
+        }
+
+        FontMetrics {
+            id: detailsMetrics
+            font: detailsText.font
+        }
+
+        // Holds the text Copy puts on the clipboard.
+        TextEdit {
+            id: detailsClipboardText
+            textFormat: TextEdit.PlainText
         }
     }
 
@@ -134,6 +186,7 @@ Components.DialogWindow {
         }
 
         ScrollView {
+            id: detailsView
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
@@ -144,15 +197,30 @@ Components.DialogWindow {
                 readOnly: true
                 textFormat: TextEdit.RichText
                 wrapMode: TextEdit.Wrap
-                text: root.detailsHtml
+                Component.onCompleted: detailsText.text = root.detailsHtml
                 selectByMouse: true
-                // On the summary's x, as plain text on the window.
+                // On the summary's x, as plain text on the window; on the
+                // right, the scroll bar's room, where the view does not
+                // give it to the bar.
                 leftPadding: 0
-                rightPadding: 0
+                rightPadding: Math.max(0, root.scrollBarRoom - detailsView.rightPadding)
                 topPadding: 0
                 bottomPadding: 0
                 background: null
                 Accessible.name: I18n.i18nc("@label", "Details")
+
+                // Copy, from the keyboard or the context menu, copies the
+                // details as they read (see copySelectedDetails).
+                function copy() {
+                    root.copySelectedDetails()
+                }
+
+                Keys.onPressed: event => {
+                    if (event.matches(StandardKey.Copy)) {
+                        root.copySelectedDetails()
+                        event.accepted = true
+                    }
+                }
             }
         }
     }

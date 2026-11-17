@@ -72,15 +72,14 @@ Components.CompactDialogWindow {
             text: I18n.i18nc("@info", "Some recent changes were not saved.")
         }
 
-        Label {
+        // A path in it breaks between its folders, and the error's code
+        // stays whole (#373 H47: "13)" alone on a line).
+        Components.MessageLabel {
             objectName: "quitSaveFailedMessage"
             Layout.fillWidth: true
             visible: root.message.length > 0
-            // A path in it may have no space to break at.
-            wrapMode: Text.Wrap
-            textFormat: Text.PlainText
             color: root.uiPalette.textSecondary
-            text: root.message
+            message: root.message
         }
     }
 

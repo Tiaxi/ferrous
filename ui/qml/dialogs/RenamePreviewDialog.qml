@@ -271,11 +271,10 @@ Components.DialogWindow {
                 }
                 return errors
             }
-            delegate: Label {
+            delegate: Components.MessageLabel {
                 required property string modelData
                 width: parent.width - root.listGutter - root.errorIndent
-                wrapMode: Text.Wrap
-                text: modelData
+                message: modelData
                 font.pointSize: root.uiPalette.smallPointSize
             }
         }
@@ -442,12 +441,12 @@ Components.DialogWindow {
                     }
                 }
 
-                Label {
+                // A path or a system error in it wraps as a message's does.
+                Components.MessageLabel {
                     Layout.fillWidth: true
                     Layout.leftMargin: root.errorIndent
                     visible: !previewRow.modelData.ok
-                    wrapMode: Text.Wrap
-                    text: previewRow.modelData.error || ""
+                    message: previewRow.modelData.error || ""
                     color: root.uiPalette.negative
                     font.pointSize: root.uiPalette.smallPointSize
                 }
