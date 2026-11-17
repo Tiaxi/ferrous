@@ -584,6 +584,10 @@ QtObject {
         const factors = [1.35, 1.20, 1.15, 1.10, 1.05]
         return root.basePointSize * (factors[level - 1] || 1)
     }
+    // The text of a viewer over the whole screen, its title strip and the
+    // album art's details alike: a step larger, 1.2 times the window's
+    // (#373 H7, and H40: the strip and the details on one type scale).
+    readonly property real fullscreenTextScale: 1.2
     // Old-style figures line up in columns with tabular figures.
     readonly property var tabularFigures: ({ "tnum": 1 })
 

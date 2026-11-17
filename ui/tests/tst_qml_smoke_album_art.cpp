@@ -1861,12 +1861,13 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
              qPrintable(QStringLiteral("%1: %2 px").arg(QString::fromUtf8(at)).arg(column->width())));
     QCOMPARE(rectOf(label).left() - columnRect.left(), padding);
     QCOMPARE(columnRect.right() - rectOf(apply).right(), padding);
-    // The file's name a step larger than the body size: 12 pt to its 10,
-    // or over the whole screen, 18 px to the details' 16 px.
+    // The file's name a step larger than the body size: 12 pt to its 10;
+    // over the whole screen, the details' 16 px, as the title strip's
+    // track title over it (#373 H40: at 18 px it outranked it).
     QQuickItem *value = visibleItemsNamed(column, QStringLiteral("albumArtInfoValue")).value(0);
     QVERIFY2(value != nullptr, at.constData());
     const qreal bodyPointSize = value->property("font").value<QFont>().pointSizeF() / infoScale;
-    QVERIFY2(qAbs(title->property("font").value<QFont>().pointSizeF() - bodyPointSize * (fullscreen ? 1.35 : 1.2))
+    QVERIFY2(qAbs(title->property("font").value<QFont>().pointSizeF() - bodyPointSize * 1.2)
                  < 0.001,
              at.constData());
     // Apply is the style's default button, as a dialog's (#373 H10: it was
@@ -3992,16 +3993,17 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
     }
 
     // At the body size in the window; over the whole screen, 1.2 times it,
-    // the file's name 18 px at the default font: from the font, so a larger
-    // one scales them as well.
+    // 16 px at the default font, the file's name too, no larger than the
+    // title strip's track title over it (#373 H40: it was 18 px): from
+    // the font, so a larger one scales them as well.
     const qreal body = palette->property("basePointSize").toReal();
     QQuickItem *value = visibleItemsNamed(column, QStringLiteral("albumArtInfoValue")).value(0);
     QVERIFY(value != nullptr);
     QCOMPARE(qvariant_cast<QFont>(value->property("font")).pointSizeF(), body * (fullscreen ? 1.2 : 1.0));
-    QCOMPARE(qvariant_cast<QFont>(title->property("font")).pointSizeF(), body * (fullscreen ? 1.35 : 1.0));
+    QCOMPARE(qvariant_cast<QFont>(title->property("font")).pointSizeF(), body * (fullscreen ? 1.2 : 1.0));
     if (fullscreen && qFuzzyCompare(body, 10.0)) {
         QCOMPARE(QFontInfo(qvariant_cast<QFont>(value->property("font"))).pixelSize(), 16);
-        QCOMPARE(QFontInfo(qvariant_cast<QFont>(title->property("font"))).pixelSize(), 18);
+        QCOMPARE(QFontInfo(qvariant_cast<QFont>(title->property("font"))).pixelSize(), 16);
     }
     QCOMPARE(sceneRectOf(title).left() - sceneRectOf(column).left(), 16.0);
 

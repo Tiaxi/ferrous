@@ -8,22 +8,63 @@ import FerrousUi 1.0
 import "../components" as Components
 
 // The whole of the tag editor's last status, such as each file a save
-// could not write, in a window of its own over the editor.
+// could not write, in a window of its own over the editor: the editor's
+// summary, semibold, then each section of the details, its heading
+// semibold over its files, each file 16 px in, the lines it wraps to
+// under its own start (#373 H40: it was the plain text, every line at
+// the heading's x past the first). It opens as tall as they are, up to
+// a limit.
 Components.DialogWindow {
     id: root
 
     required property var tagEditorApi
 
+    readonly property real contentPadding: Kirigami.Units.gridUnit
+    readonly property real contentSpacing: Kirigami.Units.largeSpacing
+    // TagEditorController.statusDetailSections as rich text: each heading
+    // a paragraph, semibold, each item one of its own, indented, with a
+    // line's room before each section after the first.
+    readonly property string detailsHtml: {
+        const sections = root.tagEditorApi.statusDetailSections || []
+        const indent = root.uiPalette.scaledSize(16)
+        const sectionGap = Math.round(root.uiPalette.gridUnit)
+        let html = ""
+        for (let i = 0; i < sections.length; ++i) {
+            const section = sections[i] || {}
+            html += "<p style=\"margin-top:" + (i > 0 ? sectionGap : 0) + "px; margin-bottom:0px;"
+                + " font-weight:600\">" + root.escaped(section.heading) + "</p>"
+            const items = section.items || []
+            for (let j = 0; j < items.length; ++j) {
+                html += "<p style=\"margin-top:0px; margin-bottom:0px; margin-left:" + indent + "px\">"
+                    + root.escaped(String(items[j] || "").trim()) + "</p>"
+            }
+        }
+        return html
+    }
+
+    function escaped(value) {
+        return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    }
+
     objectName: "tagEditorStatusDetailsDialog"
     title: I18n.i18nc("@title:window", "Tag Editor Details")
     minimumWidth: Kirigami.Units.gridUnit * 20
-    minimumHeight: Kirigami.Units.gridUnit * 12
+    minimumHeight: Kirigami.Units.gridUnit * 9
     defaultWidth: Kirigami.Units.gridUnit * 36
-    defaultHeight: Kirigami.Units.gridUnit * 29
+    // As tall as the summary and the details at the width it opens at,
+    // each time it opens, up to a limit (#373 H40: it opened 522 px tall
+    // for six lines).
+    defaultHeight: Math.min(Kirigami.Units.gridUnit * 29,
+        root.contentPadding
+        + (summary.text.length > 0 ? Math.ceil(summarySizer.implicitHeight) + root.contentSpacing : 0)
+        + Math.ceil(detailsSizer.implicitHeight) + detailsText.topPadding + detailsText.bottomPadding
+        + root.contentPadding + statusDetailsButtons.implicitHeight)
+    sizesOnEachOpen: true
 
     onAboutToShow: statusDetailsCloseButton.forceActiveFocus(Qt.PopupFocusReason)
 
     footer: Components.DialogButtons {
+        id: statusDetailsButtons
         primary: statusDetailsCloseButton
         Button {
             id: statusDetailsCloseButton
@@ -35,20 +76,71 @@ Components.DialogWindow {
         }
     }
 
-    ScrollView {
-        anchors.fill: parent
-        anchors.leftMargin: Kirigami.Units.gridUnit
-        anchors.rightMargin: Kirigami.Units.gridUnit
-        anchors.topMargin: Kirigami.Units.gridUnit
-        clip: true
+    // The summary and the details at the width the window opens at, which
+    // its content has only once it shows: they set its default height.
+    Item {
+        width: root.openingWidth - 2 * root.contentPadding
+        visible: false
 
-        TextArea {
-            objectName: "tagEditorStatusDetailsText"
-            readOnly: true
+        Label {
+            id: summarySizer
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: summary.text
+            font: summary.font
+        }
+
+        TextEdit {
+            id: detailsSizer
+            width: parent.width - detailsText.leftPadding - detailsText.rightPadding
+            textFormat: TextEdit.RichText
             wrapMode: TextEdit.Wrap
-            text: root.tagEditorApi.statusDetails
-            selectByMouse: true
-            background: null
+            text: root.detailsHtml
+            font: detailsText.font
+        }
+    }
+
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.leftMargin: root.contentPadding
+        anchors.rightMargin: root.contentPadding
+        anchors.topMargin: root.contentPadding
+        anchors.bottomMargin: root.contentPadding
+        spacing: root.contentSpacing
+
+        // The editor's own status, such as "Saved 1 file; 1 failed.".
+        Label {
+            id: summary
+            objectName: "tagEditorStatusDetailsSummary"
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            text: root.tagEditorApi.statusText
+            visible: text.length > 0
+            font.weight: Font.DemiBold
+            color: root.uiPalette.text
+        }
+
+        ScrollView {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+
+            TextArea {
+                id: detailsText
+                objectName: "tagEditorStatusDetailsText"
+                readOnly: true
+                textFormat: TextEdit.RichText
+                wrapMode: TextEdit.Wrap
+                text: root.detailsHtml
+                selectByMouse: true
+                // On the summary's x, as plain text on the window.
+                leftPadding: 0
+                rightPadding: 0
+                topPadding: 0
+                bottomPadding: 0
+                background: null
+                Accessible.name: I18n.i18nc("@label", "Details")
+            }
         }
     }
 }

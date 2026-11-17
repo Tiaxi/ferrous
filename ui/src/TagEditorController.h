@@ -27,6 +27,10 @@ class TagEditorController final : public QObject {
     Q_PROPERTY(bool hasRowErrors READ hasRowErrors NOTIFY rowErrorsChanged)
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusChanged)
     Q_PROPERTY(QString statusDetails READ statusDetails NOTIFY statusChanged)
+    // statusDetails' sections, for the Details window to set out: each a
+    // map of its `heading`, such as "Failed:", and its `items`, one line
+    // for each file.
+    Q_PROPERTY(QVariantList statusDetailSections READ statusDetailSections NOTIFY statusChanged)
     // Whether the status reports something that failed.
     Q_PROPERTY(bool statusIsError READ statusIsError NOTIFY statusChanged)
     Q_PROPERTY(int selectedCount READ selectedCount NOTIFY selectionChanged)
@@ -45,6 +49,7 @@ public:
     bool hasRowErrors() const;
     QString statusText() const;
     QString statusDetails() const;
+    QVariantList statusDetailSections() const;
     bool statusIsError() const;
     int selectedCount() const;
     QStringList operationFiles() const;
@@ -176,7 +181,7 @@ private:
     bool anyFieldChanged(const QVector<int> &rows, const QString &field) const;
     void revertRows(const QVector<int> &rows, const QString &field);
     void reportFailures(const QString &status, const QStringList &failureLines);
-    void setStatusText(const QString &text, const QString &details = QString(),
+    void setStatusText(const QString &text, const QVariantList &detailSections = {},
                        bool isError = false);
     void setSelection(QSet<int> rows);
     void resetSelection();
@@ -188,6 +193,7 @@ private:
     QStringList m_loadedPaths;
     QString m_statusText;
     QString m_statusDetails;
+    QVariantList m_statusDetailSections;
     bool m_statusIsError{false};
     bool m_open{false};
     bool m_loading{false};

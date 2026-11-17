@@ -57,6 +57,7 @@
 #include "../src/BinaryBridgeCodec.h"
 #include <QtEndian>
 #include "../src/SpectrogramTraceLogging.h"
+#include "FlacFixture.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 #include "TestUserDirectories.h"
@@ -163,32 +164,7 @@ int unknownCommandErrors(const QSignalSpy &errors) {
         [&expected](const QList<QVariant> &error) { return error.at(0).toString() == expected; }));
 }
 
-QByteArray littleEndian32(qsizetype value) {
-    const quint32 encoded = qToLittleEndian(static_cast<quint32>(value));
-    return QByteArray(reinterpret_cast<const char *>(&encoded), sizeof(encoded));
-}
-
-// A FLAC stream with a STREAMINFO block, the given Vorbis comments, and no audio frames.
-QByteArray flacWithComments(const QStringList &comments) {
-    QByteArray bytes("fLaC");
-    bytes.append(QByteArray::fromHex("00000022"));
-    bytes.append(QByteArray::fromHex("10001000000000000000"));
-    // 44.1 kHz, two channels, 16 bits, one second of samples.
-    const quint64 packed = (quint64(44100) << 44) | (quint64(1) << 41) | (quint64(15) << 36) | 44100;
-    const quint64 encodedPacked = qToBigEndian(packed);
-    bytes.append(reinterpret_cast<const char *>(&encodedPacked), sizeof(encodedPacked));
-    bytes.append(QByteArray(16, '\0'));
-
-    const QByteArray vendor("ferrous-test");
-    QByteArray block = littleEndian32(vendor.size()) + vendor + littleEndian32(comments.size());
-    for (const QString &comment : comments) {
-        const QByteArray entry = comment.toUtf8();
-        block.append(littleEndian32(entry.size()) + entry);
-    }
-    const quint32 blockHeader = qToBigEndian(quint32(0x84000000) | quint32(block.size()));
-    bytes.append(reinterpret_cast<const char *>(&blockHeader), sizeof(blockHeader));
-    return bytes + block;
-}
+using flac_fixture::flacWithComments;
 
 // A snapshot of `path` playing at `seconds`, as the engine read it now.
 BinaryBridgeCodec::DecodedSnapshot playbackSnapshot(
@@ -1160,6 +1136,10 @@ void BridgeClientTest::tagEditorShowsRefusedEditsAndKeepsTheFile() {
     QVERIFY(editor.dirty());
     QCOMPARE(editor.statusText(), QStringLiteral("Saved 0 files; 1 failed."));
     QCOMPARE(editor.statusDetails(), QStringLiteral("Failed:\n  song.flac: ") + error);
+    // The same, in sections, for the Details window to set out.
+    QCOMPARE(editor.statusDetailSections(),
+             (QVariantList{QVariantMap{{QStringLiteral("heading"), QStringLiteral("Failed:")},
+                                       {QStringLiteral("items"), QStringList{QStringLiteral("song.flac: ") + error}}}}));
     QVERIFY(file.open(QIODevice::ReadOnly));
     QCOMPARE(file.readAll(), flac);
     file.close();

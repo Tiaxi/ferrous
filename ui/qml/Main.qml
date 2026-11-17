@@ -589,6 +589,7 @@ ApplicationWindow {
         property bool dirty: false
         property string statusText: ""
         property string statusDetails: ""
+        property var statusDetailSections: []
         property bool statusIsError: false
         property int selectedCount: 0
         property var operationFiles: []

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "FlacFixture.h"
 #include "QmlSmokeTest.h"
+
+#include <QQuickTextDocument>
+#include <QTextBlock>
+#include <QTextDocument>
+#include <QTextLayout>
 
 #include <functional>
 
@@ -46,6 +52,10 @@ private slots:
     void tagEditorLibrarySupportGateMatchesSupportedRows();
     void renameFilesShowsTheNewNamesAndCancelRenamesNothing();
     void renameRenamesThePreviewedFilesAfterTheSelectionChanged();
+    void saveDetailsReadAsAReport_data();
+    void saveDetailsReadAsAReport();
+    void renamePreviewOpensAsTallAsItsList_data();
+    void renamePreviewOpensAsTallAsItsList();
 };
 
 namespace {
@@ -722,6 +732,20 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     QObject *message = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitMessage"));
     QVERIFY(message != nullptr);
     QVERIFY(message->property("text").toString().contains(QStringLiteral("may be lost")));
+    // As a confirmation reads (#373 H40): what it waits for semibold, the
+    // files under its text rather than the spinner, the explanation in the
+    // secondary colour, and Keep Waiting with a glyph, as Quit Anyway.
+    QObject *palette = qvariant_cast<QObject *>(fixture.window->property("uiPalette"));
+    auto *status = fixture.window->findChild<QQuickItem *>(QStringLiteral("tagEditorQuitWaitStatus"));
+    QVERIFY(palette != nullptr && status != nullptr);
+    QCOMPARE(status->property("font").value<QFont>().weight(), QFont::DemiBold);
+    QCOMPARE(message->property("color").value<QColor>().rgba(), palette->property("textSecondary").value<QColor>().rgba());
+    QCOMPARE(files->property("color").value<QColor>().rgba(), palette->property("textSecondary").value<QColor>().rgba());
+    QTRY_COMPARE(sceneRectOf(qobject_cast<QQuickItem *>(files)).left(), sceneRectOf(status).left());
+    QVERIFY(sceneRectOf(qobject_cast<QQuickItem *>(message)).left() < sceneRectOf(status).left());
+    auto *keepWaiting = fixture.window->findChild<QQuickItem *>(QStringLiteral("tagEditorQuitWaitKeepWaitingButton"));
+    QVERIFY(keepWaiting != nullptr);
+    QCOMPARE(evaluateOn(keepWaiting, QStringLiteral("icon.name")).toString(), QStringLiteral("chronometer"));
 
     // Quit Anyway goes on to the usual shutdown: the settings and queue are
     // saved, and the window closes while the tag save still runs.
@@ -1591,6 +1615,208 @@ void TagEditorSmokeTest::renameRenamesThePreviewedFilesAfterTheSelectionChanged(
     QVERIFY(!renames().first().contains(second.toUtf8()));
     QTRY_VERIFY(!fixture.editor.saving());
     fixture.editor.m_bridge = nullptr;
+}
+
+void TagEditorSmokeTest::saveDetailsReadAsAReport_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The details of a save that failed for one file read as a report (#373
+// H40: a plain text dump in a window 522 px tall for six lines): the
+// editor's summary, semibold, then each section's heading, semibold, over
+// its files, each 16 px in, more with a larger font, the lines a long
+// error wraps to under its own start; the window as tall as all that.
+// The save is a real one, into a folder the user may not write to.
+void TagEditorSmokeTest::saveDetailsReadAsAReport() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont larger = applicationFont;
+        larger.setPointSizeF(pointSize);
+        QGuiApplication::setFont(larger);
+    }
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QDir root(dir.path());
+    QVERIFY(root.mkdir(QStringLiteral("writable")) && root.mkdir(QStringLiteral("read-only")));
+    const QString writable = root.filePath(QStringLiteral("writable/01 Brief Signal.flac"));
+    const QString readOnly = root.filePath(QStringLiteral("read-only/03 Long Exhale.flac"));
+    for (const QString &path : {writable, readOnly}) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray flac = flac_fixture::flacWithComments({QStringLiteral("TITLE=Old")});
+        QCOMPARE(file.write(flac), qint64(flac.size()));
+    }
+    const QString readOnlyFolder = root.filePath(QStringLiteral("read-only"));
+    QVERIFY(QFile::setPermissions(readOnlyFolder, QFile::ReadOwner | QFile::ExeOwner));
+    const auto restorePermissions = qScopeGuard([&] {
+        QFile::setPermissions(readOnlyFolder, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    });
+    if (QFileInfo(readOnlyFolder).isWritable()) {
+        QSKIP("The user may write to any folder, such as root.");
+    }
+
+    TagEditorController editor{nullptr};
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowWithTagEditor(engine, libraryModel, editor);
+    QVERIFY(window != nullptr);
+    QObject *tagsDialog = window->findChild<QObject *>(QStringLiteral("tagEditorDialog"));
+    QObject *details = window->findChild<QObject *>(QStringLiteral("tagEditorStatusDetailsDialog"));
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(tagsDialog != nullptr && details != nullptr && palette != nullptr);
+    QVERIFY(editor.openForPaths({writable, readOnly}));
+    QTRY_VERIFY(!editor.loading() && tagsDialog->property("opened").toBool());
+    QCOMPARE(editor.m_tableModel.rowCount(), 2);
+    editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+    editor.setCell(1, QStringLiteral("title"), QStringLiteral("New"));
+    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+    QVERIFY(editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QCOMPARE(editor.statusText(), QStringLiteral("Saved 1 file; 1 failed."));
+
+    QQuickWindow *tags = dialogWindowOf(tagsDialog);
+    QVERIFY(tags != nullptr);
+    QTRY_VERIFY(clickVisibleButton(tags, QStringLiteral("tagEditorDetailsButton")));
+    QTRY_VERIFY(details->property("opened").toBool());
+    QQuickWindow *detailsWindow = dialogWindowOf(details);
+    QVERIFY(QTest::qWaitForWindowExposed(detailsWindow));
+
+    // The summary first, semibold, in the text colour.
+    QQuickItem *summary = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsSummary"));
+    QVERIFY(summary != nullptr);
+    QCOMPARE(summary->property("text").toString(), QStringLiteral("Saved 1 file; 1 failed."));
+    QCOMPARE(summary->property("font").value<QFont>().weight(), QFont::DemiBold);
+    QCOMPARE(summary->property("color").value<QColor>(), palette->property("text").value<QColor>());
+
+    // Each heading semibold over its files, each file indented, trimmed.
+    QQuickItem *text = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsText"));
+    QVERIFY(text != nullptr);
+    QCOMPARE(text->property("textFormat").toInt(), int(Qt::RichText));
+    auto *quickDocument = qvariant_cast<QQuickTextDocument *>(text->property("textDocument"));
+    QVERIFY(quickDocument != nullptr);
+    QTextDocument *document = quickDocument->textDocument();
+    QVERIFY(document != nullptr);
+    QStringList blocks;
+    for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
+        blocks << block.text();
+    }
+    QCOMPARE(blocks.size(), 4);
+    QCOMPARE(blocks.mid(0, 3), (QStringList{QStringLiteral("Succeeded:"), QStringLiteral("01 Brief Signal.flac"),
+                                            QStringLiteral("Failed:")}));
+    QVERIFY2(blocks[3].startsWith(QStringLiteral("03 Long Exhale.flac: ")), qPrintable(blocks[3]));
+    QVERIFY2(blocks[3].contains(QStringLiteral("ermission denied")), qPrintable(blocks[3]));
+    const qreal indent = std::max(16.0, std::round(16.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
+    const auto blockAt = [&](int index) { return document->findBlockByNumber(index); };
+    for (int index : {0, 2}) {
+        QCOMPARE(blockAt(index).charFormat().fontWeight(), int(QFont::DemiBold));
+        QCOMPARE(blockAt(index).blockFormat().leftMargin(), 0.0);
+    }
+    for (int index : {1, 3}) {
+        QVERIFY(blockAt(index).charFormat().fontWeight() < int(QFont::DemiBold));
+        QCOMPARE(blockAt(index).blockFormat().leftMargin(), indent);
+    }
+    // The error wraps, and its lines start under the file's name, the
+    // indent right of the heading.
+    const QTextLayout *errorLayout = blockAt(3).layout();
+    QVERIFY2(errorLayout->lineCount() > 1, qPrintable(QString::number(errorLayout->lineCount())));
+    const auto lineLeft = [](const QTextBlock &block, int line) {
+        return block.layout()->position().x() + block.layout()->lineAt(line).x();
+    };
+    for (int line = 0; line < errorLayout->lineCount(); ++line) {
+        QCOMPARE(lineLeft(blockAt(3), line), lineLeft(blockAt(2), 0) + indent);
+    }
+    QCOMPARE(lineLeft(blockAt(1), 0), lineLeft(blockAt(0), 0) + indent);
+    // The text on the summary's x.
+    QCOMPARE(text->mapToScene(QPointF(text->property("leftPadding").toReal(), 0)).x(),
+             sceneRectOf(summary).left());
+
+    // As tall as all that, with a grid unit's room above the buttons, up to
+    // 29 grid units, past which the details scroll.
+    QQuickItem *close = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton"));
+    QVERIFY(close != nullptr);
+    const qreal gridUnit = details->property("contentPadding").toReal();
+    QTRY_VERIFY(text->height() > 0);
+    const qreal textBottom = sceneRectOf(text).top() + text->property("contentHeight").toReal();
+    const QString where = QStringLiteral("text to %1, Close from %2 in a window %3 px tall")
+        .arg(textBottom).arg(sceneRectOf(close).top()).arg(detailsWindow->height());
+    if (pointSize == 0 || detailsWindow->height() < gridUnit * 29) {
+        QVERIFY2(detailsWindow->height() < gridUnit * 29, qPrintable(where));
+        QVERIFY2(std::abs(sceneRectOf(close).top() - textBottom - gridUnit) <= 1.0, qPrintable(where));
+    } else {
+        QCOMPARE(detailsWindow->height(), int(gridUnit * 29));
+        QVERIFY2(textBottom > sceneRectOf(close).top() - gridUnit, qPrintable(where));
+    }
+    QCOMPARE(sceneRectOf(summary).top(), gridUnit);
+
+    QVERIFY(clickVisibleButton(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton")));
+    QTRY_VERIFY(!details->property("visible").toBool());
+}
+
+void TagEditorSmokeTest::renamePreviewOpensAsTallAsItsList_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Rename Files opens as tall as its summary and its list, a refused
+// file's error wrapped under its name, with a grid unit's room above the
+// buttons (#373 H40: four files opened it with 79 px of nothing under
+// them), each time it opens.
+void TagEditorSmokeTest::renamePreviewOpensAsTallAsItsList() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont larger = applicationFont;
+        larger.setPointSizeF(pointSize);
+        QGuiApplication::setFont(larger);
+    }
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(4, false));
+    const QByteArray loadResponse = tagEditorLoadResponse(4);
+    QByteArray preview(R"({"results":[)");
+    for (int i = 0; i < 4; ++i) {
+        const QString path = QStringLiteral("/fixture/Album 000/%1 Song.flac").arg(i + 1, 2, 10, QLatin1Char('0'));
+        const QString newPath = i == 1 ? QStringLiteral("/fixture/Album 000/02 Song (Live).flac") : path;
+        // The last can't be renamed, for a reason long enough to wrap.
+        const QString result = i == 3
+            ? QStringLiteral(R"("ok":false,"error":"%1")")
+                  .arg(QStringLiteral("the new name would replace a file that is not among the selected ones, "
+                                      "so it keeps its name; rename or move that file first, then try again"))
+            : QStringLiteral(R"("ok":true)");
+        preview += QStringLiteral(R"(%1{"path":"%2","newPath":"%3",%4})")
+                       .arg(i > 0 ? QStringLiteral(",") : QString(), path, newPath, result).toUtf8();
+    }
+    preview += R"(],"successfulPaths":[]})";
+    fixture.editor.m_executeOperation = [=](TagEditorController::Operation operation, const QByteArray &,
+                                            const TagEditorController::RenameGate &) {
+        return operation == TagEditorController::Operation::PreviewRename ? preview : loadResponse;
+    };
+    fixture.editor.selectAllRows();
+    QObject *previewDialog = fixture.window->findChild<QObject *>(QStringLiteral("renamePreviewDialog"));
+    QVERIFY(previewDialog != nullptr);
+    for (int opening = 0; opening < 2; ++opening) {
+        QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorRenameButton")));
+        QTRY_VERIFY(previewDialog->property("opened").toBool());
+        QQuickWindow *previewWindow = dialogWindowOf(previewDialog);
+        QVERIFY(QTest::qWaitForWindowExposed(previewWindow));
+        QQuickItem *list = visibleItemNamed(previewWindow, QStringLiteral("renamePreviewList"));
+        QQuickItem *cancel = visibleItemNamed(previewWindow, QStringLiteral("renamePreviewCancelButton"));
+        QVERIFY(list != nullptr && cancel != nullptr);
+        QTRY_COMPARE(list->property("count").toInt(), 4);
+        const qreal gridUnit = previewDialog->property("contentPadding").toReal();
+        const qreal listBottom = sceneRectOf(list).top() + list->property("contentHeight").toReal();
+        const QString where = QStringLiteral("opening %1: the list to %2, Cancel from %3 in a window %4 px tall")
+            .arg(opening).arg(listBottom).arg(sceneRectOf(cancel).top()).arg(previewWindow->height());
+        QVERIFY2(previewWindow->height() < gridUnit * 29, qPrintable(where));
+        QVERIFY2(std::abs(sceneRectOf(cancel).top() - listBottom - gridUnit) <= 1.0, qPrintable(where));
+        QVERIFY(clickVisibleButton(previewWindow, QStringLiteral("renamePreviewCancelButton")));
+        QTRY_VERIFY(!previewDialog->property("visible").toBool());
+    }
 }
 
 std::unique_ptr<QmlSmokeTest> makeTagEditorSmokeTest(const QString &userDirectoriesParent) {

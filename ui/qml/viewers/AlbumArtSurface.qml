@@ -43,12 +43,13 @@ Item {
     required property bool comparisonModeAvailable
     required property var uiPalette
     // Whether the viewer is over the whole screen: the details' text is
-    // then a step larger, 1.2 times the window's, the file's name 18 px,
-    // and their column as much wider, 336 px with its seam.
+    // then a step larger, 1.2 times the window's, as the title strip's
+    // over them, the file's name 16 px, and their column as much wider,
+    // 336 px with its seam.
     property bool fullscreen: false
     // The colours of the view, dark in both themes.
     readonly property var plot: root.uiPalette.mediaPlot
-    readonly property real infoScale: root.fullscreen ? 1.2 : 1
+    readonly property real infoScale: root.fullscreen ? root.uiPalette.fullscreenTextScale : 1
     // The details on the app's type scale (#373 H10: they were all at the
     // body size, crammed): the values at the body size and the labels at
     // the small size, 13 px and 12 px with the default 10 pt font; each
@@ -72,9 +73,11 @@ Item {
     readonly property int detailsIconSize: root.uiPalette.scaledSize(
         Math.round(Kirigami.Units.iconSizes.small * root.infoScale))
     // The file's name: the body size; during a preview, a step larger, 12 pt
-    // with the default 10 pt font; over the whole screen, 18 px with it.
+    // with the default 10 pt font; over the whole screen, the details' size,
+    // as the title strip's track title over it (#373 H40: at 1.35 times,
+    // 18 px, it outranked it).
     readonly property real infoTitlePointSize: root.uiPalette.basePointSize
-        * (root.fullscreen ? 1.35 : (root.previewActive ? 1.2 : 1))
+        * (root.fullscreen ? root.uiPalette.fullscreenTextScale : (root.previewActive ? 1.2 : 1))
     // The image's details, from BridgeClient.cachedImageFileDetails: path,
     // fileName, width, height, fileSizeText, format, embeddedCover.
     property var fileInfo: ({})
