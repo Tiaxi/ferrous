@@ -4254,9 +4254,9 @@ void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole_data() {
 
 // Track's field says that its files' numbers differ, whole: "Multiple
 // values" where it fits, as with the default font, and "Mixed" in the
-// narrower field of a larger font; the fields keep their width, which the
-// table needs (#373 H45: "Multiple values" elided in a 124 px field at
-// 24 pt).
+// narrower field of a larger font, as every field of the form then says;
+// the fields keep their width, which the table needs (#373 H45: "Multiple
+// values" elided in a 124 px field at 24 pt).
 void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -4293,9 +4293,23 @@ void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
     QTRY_VERIFY((number = visibleNamed(tags, QStringLiteral("tagEditorField_trackNo"))) != nullptr);
     const QString expected = pointSize <= 10 ? QStringLiteral("Multiple values") : QStringLiteral("Mixed");
     QTRY_COMPARE(number->property("placeholderText").toString(), expected);
-    // A field with the room says it whole.
-    QCOMPARE(visibleNamed(tags, QStringLiteral("tagEditorField_title"))->property("placeholderText").toString(),
-             QStringLiteral("Multiple values"));
+    // Every field whose files differ says it in the same word, the short
+    // one once a number field needs it, wide fields too (#373 H46:
+    // "Multiple values" and "Mixed" in one form at 24 pt).
+    int mixedFields = 0;
+    for (const char *key : {"title", "artist", "album", "albumArtist", "genre", "year", "trackNo",
+                            "totalTracks", "discNo", "totalDiscs", "comment"}) {
+        QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_") + QLatin1String(key));
+        QVERIFY2(field != nullptr, key);
+        if (!editor.bulkValueMixed(QLatin1String(key))) {
+            QCOMPARE(field->property("placeholderText").toString(), QString());
+            continue;
+        }
+        ++mixedFields;
+        QCOMPARE(field->property("placeholderText").toString(), expected);
+    }
+    QVERIFY(editor.bulkValueMixed(QStringLiteral("title")));
+    QVERIFY2(mixedFields >= 2, qPrintable(QString::number(mixedFields)));
     QQuickItem *title = visibleNamed(tags, QStringLiteral("tagEditorField_title"));
     QQuickItem *total = visibleNamed(tags, QStringLiteral("tagEditorField_totalTracks"));
     QVERIFY(title != nullptr && total != nullptr);

@@ -45,6 +45,10 @@ Components.DialogWindow {
     // with a large font (#373 H45: "Multiple values" elided in their 124 px
     // fields at 24 pt; widening them took the table's room).
     readonly property string keepShortText: I18n.i18nc("@info:placeholder short for Multiple values, in a narrow number field: the selected files keep their different values", "Mixed")
+    // Every field of the form says it in the same word: the short one in
+    // all of them once a number field needs it (#373 H46: "Multiple values"
+    // and "Mixed" in one form at 24 pt).
+    readonly property bool keepShortInForm: trackPair.needsKeepShort || discPair.needsKeepShort
     readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
     readonly property bool busy: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
     // Bumped whenever the selection or the edits change, for the bindings
@@ -837,6 +841,8 @@ Components.DialogWindow {
         property bool mixed: false
         readonly property bool keepTextFits: fieldMetrics.advanceWidth(root.keepText)
             <= fieldEditor.width - fieldEditor.leftPadding - fieldEditor.rightPadding
+        // Its files differ, and it is too narrow to say so whole.
+        readonly property bool needsKeepShort: fieldEditor.compact && fieldEditor.mixed && !fieldEditor.keepTextFits
         property bool touched: false
         // The text it shows for the tracks, before the user types.
         property string committedText: ""
@@ -880,9 +886,7 @@ Components.DialogWindow {
         Layout.fillWidth: true
         selectByMouse: true
         persistentSelection: true
-        placeholderText: fieldEditor.mixed
-            ? (fieldEditor.compact && !fieldEditor.keepTextFits ? root.keepShortText : root.keepText)
-            : ""
+        placeholderText: fieldEditor.mixed ? (root.keepShortInForm ? root.keepShortText : root.keepText) : ""
         placeholderTextColor: root.uiPalette.placeholderText
         rightPadding: fieldEditor.changed
             ? revertButton.width + Kirigami.Units.smallSpacing
@@ -1191,8 +1195,8 @@ Components.DialogWindow {
                 FieldRow { field: root.fieldAt("albumArtist") }
                 FieldRow { field: root.fieldAt("genre") }
                 FieldRow { field: root.fieldAt("year") }
-                NumberPair { first: root.fieldAt("trackNo"); second: root.fieldAt("totalTracks") }
-                NumberPair { first: root.fieldAt("discNo"); second: root.fieldAt("totalDiscs") }
+                NumberPair { id: trackPair; first: root.fieldAt("trackNo"); second: root.fieldAt("totalTracks") }
+                NumberPair { id: discPair; first: root.fieldAt("discNo"); second: root.fieldAt("totalDiscs") }
                 FieldRow { field: root.fieldAt("comment") }
             }
         }
@@ -1504,6 +1508,7 @@ Components.DialogWindow {
         id: pair
         required property var first
         required property var second
+        readonly property bool needsKeepShort: firstField.needsKeepShort || secondField.needsKeepShort
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
@@ -1513,6 +1518,7 @@ Components.DialogWindow {
         }
 
         TagField {
+            id: firstField
             field: pair.first
             compact: true
             Layout.fillWidth: true
@@ -1527,6 +1533,7 @@ Components.DialogWindow {
         }
 
         TagField {
+            id: secondField
             field: pair.second
             compact: true
             Layout.fillWidth: true
