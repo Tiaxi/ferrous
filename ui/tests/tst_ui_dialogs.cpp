@@ -3688,8 +3688,9 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     }
     QVERIFY2(tags->width() <= qCeil(held), qPrintable(QStringLiteral("holds %1: ").arg(held) + describeColumns()));
     QCOMPARE(qreal(tags->width()), dialog->property("fittedWidth").toReal());
-    // "of" is 4 px from the field on either side of it (#373 H11), and the
-    // number as far from its label as the other fields are from theirs.
+    // "of" is 4 px from the field on either side of it (#373 H11), the
+    // number as far from its label as the other fields are from theirs, and
+    // the total ends where they do.
     for (const auto &[number, total] : {std::pair{QStringLiteral("trackNo"), QStringLiteral("totalTracks")},
                                         std::pair{QStringLiteral("discNo"), QStringLiteral("totalDiscs")}}) {
         QQuickItem *of = visibleNamed(tags, QStringLiteral("tagEditorOf_") + number);
@@ -3700,6 +3701,11 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
         QCOMPARE(sceneRect(of).left() - sceneRect(numberField).right(), 4.0);
         QCOMPARE(sceneRect(totalField).left() - sceneRect(of).right(), 4.0);
         QCOMPARE(sceneRect(numberField).left(), sceneRect(titleField).left());
+        // The pair ends on the fields' edge, the two fields alike in width
+        // (#373 H41: it ended 35 px short).
+        QCOMPARE(sceneRect(totalField).right(), sceneRect(titleField).right());
+        QVERIFY2(std::abs(numberField->width() - totalField->width()) <= 1.0,
+                 qPrintable(QStringLiteral("%1: %2 and %3").arg(number).arg(numberField->width()).arg(totalField->width())));
     }
     // Status takes no room, and shows no header, while no row has a status.
     QQuickItem *status = named(tags, QStringLiteral("tagEditorColumn_status"));
@@ -4700,6 +4706,12 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
         QVERIFY2(!label->property("truncated").toBool(), qPrintable(describeItem(label)));
         QVERIFY2(sceneRect(label).right() <= sceneRect(field).left(), qPrintable(key));
         QVERIFY2(sceneRect(field).right() < sceneRect(table).left(), qPrintable(key));
+    }
+    // Track and Disc end where the other fields do, at a large font too.
+    for (const QString &total : {QStringLiteral("totalTracks"), QStringLiteral("totalDiscs")}) {
+        QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_") + total);
+        QVERIFY2(field != nullptr, qPrintable(total));
+        QCOMPARE(sceneRect(field).right(), sceneRect(title).right());
     }
 
     // The table's headers whole, with their Revert beside them once the

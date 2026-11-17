@@ -1467,7 +1467,9 @@ Components.DialogWindow {
 
     // Track and Disc: the number, "of", and the total. "of" is 4 px from
     // the field on either side of it, so the three read as one value
-    // (#373 H11: at the form's 12 px it stood apart from both).
+    // (#373 H11: at the form's 12 px it stood apart from both). The two
+    // fields share what is left of the row equally, so the pair ends where
+    // the other fields do (#373 H41: it ended 35 px short).
     component NumberPair: RowLayout {
         id: pair
         required property var first
@@ -1482,8 +1484,8 @@ Components.DialogWindow {
 
         TagField {
             field: pair.first
-            Layout.fillWidth: false
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 7
+            Layout.fillWidth: true
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 3
         }
 
         Label {
@@ -1495,10 +1497,8 @@ Components.DialogWindow {
 
         TagField {
             field: pair.second
-            Layout.fillWidth: false
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 3 + Kirigami.Units.largeSpacing
+            Layout.fillWidth: true
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 3
         }
-
-        Item { Layout.fillWidth: true }
     }
 }
