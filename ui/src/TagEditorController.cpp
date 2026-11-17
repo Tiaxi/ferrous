@@ -36,16 +36,19 @@ QString partialResultText(const QString &done, qsizetype failed) {
 }
 
 // The details of an action: a section of the files it did, and one of the
-// files it failed for, each a heading and a line for each file.
+// files it failed for, each a heading and a line for each file, and whether
+// it lists failures, which the Details window sets apart.
 QVariantList buildActionDetails(const QStringList &successLines, const QStringList &failureLines) {
     QVariantList sections;
     if (!successLines.isEmpty()) {
         sections.push_back(QVariantMap{{QStringLiteral("heading"), i18nc("@title list of files", "Succeeded:")},
-                                       {QStringLiteral("items"), successLines}});
+                                       {QStringLiteral("items"), successLines},
+                                       {QStringLiteral("failed"), false}});
     }
     if (!failureLines.isEmpty()) {
         sections.push_back(QVariantMap{{QStringLiteral("heading"), i18nc("@title list of files", "Failed:")},
-                                       {QStringLiteral("items"), failureLines}});
+                                       {QStringLiteral("items"), failureLines},
+                                       {QStringLiteral("failed"), true}});
     }
     return sections;
 }

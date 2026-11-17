@@ -1632,8 +1632,9 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport_data() {
 
 // The details of a save that failed for one file read as a report (#373
 // H40: a plain text dump in a window 522 px tall for six lines): the
-// editor's summary, semibold, then each section's heading, semibold, over
-// its files, each 16 px in, more with a larger font, the lines a long
+// editor's summary, semibold, then each section's heading over its files,
+// what failed semibold in the negative colour, what succeeded quieter,
+// each file 16 px in, more with a larger font, the lines a long
 // error wraps to under its own start; the window as tall as all that.
 // The save is a real one, into a folder the user may not write to.
 void TagEditorSmokeTest::saveDetailsReadAsAReport() {
@@ -1718,14 +1719,34 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     QVERIFY2(blocks[3].contains(QStringLiteral("ermission denied")), qPrintable(blocks[3]));
     const qreal indent = std::max(16.0, std::round(16.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
     const auto blockAt = [&](int index) { return document->findBlockByNumber(index); };
+    // The headings on the summary's edge: what succeeded regular, in the
+    // secondary colour; what failed semibold, in the negative colour (#373
+    // H40: both were semibold, as the summary, which no longer led).
+    const auto colourOf = [&](int index) {
+        const QTextBlock block = blockAt(index);
+        return block.begin().fragment().charFormat().foreground().color().rgb();
+    };
+    const auto weightOf = [&](int index) {
+        return blockAt(index).begin().fragment().charFormat().fontWeight();
+    };
     for (int index : {0, 2}) {
-        QCOMPARE(blockAt(index).charFormat().fontWeight(), int(QFont::DemiBold));
         QCOMPARE(blockAt(index).blockFormat().leftMargin(), 0.0);
     }
+    QVERIFY(weightOf(0) < int(QFont::DemiBold));
+    QCOMPARE(colourOf(0), palette->property("textSecondary").value<QColor>().rgb());
+    QCOMPARE(weightOf(2), int(QFont::DemiBold));
+    QCOMPARE(colourOf(2), palette->property("negative").value<QColor>().rgb());
+    // The files in the text's colour, indented.
     for (int index : {1, 3}) {
-        QVERIFY(blockAt(index).charFormat().fontWeight() < int(QFont::DemiBold));
+        QVERIFY(weightOf(index) < int(QFont::DemiBold));
+        QCOMPARE(colourOf(index), palette->property("text").value<QColor>().rgb());
         QCOMPARE(blockAt(index).blockFormat().leftMargin(), indent);
     }
+    // 12 px between the sections, more with a larger font (#373 H40: a
+    // grid unit, 18 px).
+    const qreal sectionGap = std::max(12.0, std::round(12.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
+    QCOMPARE(blockAt(0).blockFormat().topMargin(), 0.0);
+    QCOMPARE(blockAt(2).blockFormat().topMargin(), sectionGap);
     // The error wraps, and its lines start under the file's name, the
     // indent right of the heading.
     const QTextLayout *errorLayout = blockAt(3).layout();
