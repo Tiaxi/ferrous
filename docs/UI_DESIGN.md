@@ -78,7 +78,7 @@ The transport uses Breeze's Header colour set, as Breeze's toolbars and the menu
 
 ### Plot colours
 
-Anything drawn on a visualization takes its colours from the plot under it, never from the window: use `plotColors(mode)`, which returns `spectrogramPlot` or `waveformPlot`. The spectrogram's colour map is dark in both themes, so its set is fixed. The waveform is drawn on the view colour, so its set follows the theme. `mediaPlot` is the spectrogram set on black, for the album art viewer. Each set holds:
+Overlays drawn on a visualization take their colours from the plot under it, not from the window: use `plotColors(mode)`, which returns `spectrogramPlot` or `waveformPlot`. The spectrogram's colour map is dark in both themes, so its set is fixed. The waveform is drawn on the view colour, so its set follows the theme. `mediaPlot` is the spectrogram set on black, for the album art viewer. Exceptions in the current code: the level meter's clip lamp uses `negative`, and the waveform's centre line and neutral playhead use the text colour and theme-dependent colours. Each set holds:
 - `plotBg`, `plotPlate`, `plotPlateEdge`, `plotStrip`;
 - `plotText`, `plotTextSecondary`, `plotOutline`;
 - `plotLaneSeam`, `plotTick`, `plotLink`;
@@ -108,8 +108,8 @@ The `ui*` colours at the end of the file come from before these tokens. Don't us
 ## The one font rule
 
 Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs, viewers and the main window:
-- **A glyph beside text uses `labelIconSize`** (`Kirigami.Units.iconSizes.sizeForLabels`): 16 px at 10 pt, 32 px at 24 pt. This covers button glyphs, page-list icons, row glyphs and severity marks. A 16 px glyph beside 32 px text becomes the smallest thing in its row.
-- **A pixel measure tuned at 10 pt goes through `scaledSize()`.** This includes widths that bound text, thumbnails, gutters, insets and caps. `scaledSize()` leaves 10 pt unchanged and grows with a larger font. A fixed width at 24 pt cuts text beside empty room.
+- **A glyph beside text uses `labelIconSize`** (`Kirigami.Units.iconSizes.sizeForLabels`): 16 px at 10 pt, 32 px at 24 pt. This covers button glyphs, page-list icons, row glyphs and severity marks. A 16 px glyph beside 32 px text becomes the smallest thing in its row. Exception: the album art viewer's detail buttons scale their 16 px glyph with the viewer's own scale (larger in fullscreen) instead.
+- **A pixel measure tuned at 10 pt goes through `scaledSize()`.** This includes widths that bound text, thumbnails, gutters, insets and caps. Exception: the album art viewer's gutter around the art stays 16 or 24 px at any font, because it frames the image, not text. `scaledSize()` leaves 10 pt unchanged and grows with a larger font. A fixed width at 24 pt cuts text beside empty room.
 - **A text measure is counted in characters.** A compact dialog is about 46 average characters wide, help text at most about 63, and the art details about 40. A fixed width holds fewer words at a larger font.
 - **Check at 24 pt.** Nothing may elide or wrap a lead sentence while there is room beside it, and no window may run wider than the screen.
 
@@ -131,9 +131,9 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **Buttons follow KDE order** (`DialogButtons`, `DialogButtonBox.KdeLayout`): the affirmative button, Apply, a destructive one, then Cancel. Configure's Defaults sits on the left. The buttons sit one grid unit in from the window's sides and bottom, at the same inset as the content. The style's own 9 px footer inset pushed them into the corner.
 - **The safe choice is the default.** Enter presses the button marked `primary`. When the action destroys data (delete, remove, replace), Cancel is the default and has focus when the dialog opens, so neither Enter nor Space destroys anything until the user moves to the action. This follows the KDE HIG: a stray Enter once removed a library folder.
 - **Enter works as in KDE:** in a text field, it accepts the text; on a focused button, it presses that button; elsewhere, it presses the default button. Escape and the title bar's close button cancel.
-- **Dialog buttons carry a Breeze glyph** at `labelIconSize`, in footers and in action rows alike: `dialog-cancel`, `dialog-ok-apply`, `edit-delete`, `edit-rename` and so on. A glyphless caption in a row of glyphs reads as a label.
+- **Dialog buttons carry a Breeze glyph** at `labelIconSize`, in footers and in action rows alike: `dialog-cancel`, `dialog-ok-apply`, `edit-delete`, `edit-rename` and so on. A glyphless caption in a row of glyphs reads as a label. Current exceptions: Last.fm's Complete Connection, Reconnect… and Disconnect / Cancel Connection buttons (Connect… has its glyph).
 - **The colour of a destructive glyph comes from Breeze's own icon.** `edit-delete` and `edit-delete-remove` are red in Breeze, and Ferrous never tints them. Red belongs to removing and deleting only: Replace Album Art uses `document-swap`, because `document-replace` has a red × and read as Delete.
-- **Dialogs size to their content, with caps.** A compact dialog (`CompactDialogWindow`) is as tall as its content and follows it as it wraps. Its width is the measure, or the width its form and buttons need. Lists such as Rename Files open as wide as their widest line, up to a cap. Configure opens as tall as its tallest page, so no page scrolls. Everything stays within the screen. A fixed size left either a scrollbar or an empty band.
+- **Dialogs size to their content, with caps.** A compact dialog (`CompactDialogWindow`) is as tall as its content and follows it as it wraps. Its width is the measure, or the width its form and buttons need. Lists such as Rename Files open as wide as their widest line, up to a cap. Configure asks for the height of its tallest page, so no page scrolls when there is room. Everything stays within the screen, and a page scrolls when the screen, or a size the user chose, leaves too little room. A fixed size left either a scrollbar or an empty band.
 - **Configure has one grouping rule.** Only a page with three or more groups (Visualization) gives them DemiBold subheadings (`FormGroupGap.heading`). Two-group pages separate them with the form label and a `FormGroupGap`, 16 px. Help text (`FormHelpText`) sits under its control in `textSecondary`. Three grouping styles in one dialog read as assembled work.
 - **Lists that compare entries share columns.** In Configure, every library folder's path starts at one x, and Rename Files shows its rows as old | → | new. The things being compared need one left edge.
 - **Empty and failed states keep their place.** "Nothing found" is quiet, secondary text. A failure gets a warning glyph in the spinner's slot and the system's words under it, so a network failure doesn't read as a routine empty result.
@@ -143,7 +143,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 
 - **Rest:** no fill. Flat tool buttons show their glyph only.
 - **Hover:** the hover tint for the surface (`hover`, `rowHover`, or `hoverOn(bg)`) fades in and out over `shortDuration`. On a viewer's strip and corner plate, hover is a wash of the plot's text colour: 14 % on dark (about 1.4:1), 12 % on light. At 6.5 %, hover looked the same as rest.
-- **Pressed:** `pressed` or `pressedOn(bg)`, a clear step past the hover. It shows on the first frame of the press, never faded in. A press that matches the hover reads as nothing.
+- **Pressed:** `pressed` or `pressedOn(bg)`, a clear step past the hover. It shows on the first frame of the press, never faded in. A press that matches the hover reads as nothing. Known exception: the viewers' tool buttons fade their background in when pressed from the keyboard without a hover first.
 - **Focus:** a focus ring appears only while the keyboard is in use:
   - a focused list row gets a 1 px `focusRing`, drawn as one rectangle with the selection tint when the row is also selected;
   - Ferrous's own tool buttons and link actions get a 2 px ring;
@@ -172,7 +172,7 @@ Durations are Kirigami's (`shortDuration` 100 ms, `longDuration` 200 ms, `veryLo
 | What | Motion |
 |---|---|
 | hover on rows and buttons, plates revealing, the crosshair hiding over a plate | fade, `shortDuration`, OutCubic |
-| selection, focus ring, a press | none |
+| selection, focus ring, a press | none (except the viewers' tool buttons pressed from the keyboard, see States) |
 | Play ↔ Pause glyph | cross-fade from one progress value, `shortDuration`, so the button never goes blank |
 | amber on a track change | queue: the old row fades out as the new one fades in, so two rows are never both fully amber. Tree: the new row is amber at once and the old one fades. Both over `shortDuration` |
 | now playing, next track on the same album | the lines that change fade over `shortDuration`. Words and numbers that stay the same stay still |
@@ -188,7 +188,7 @@ Durations are Kirigami's (`shortDuration` 100 ms, `longDuration` 200 ms, `veryLo
 | meter or scale toggled | one step |
 
 Rules:
-- **No blink.** No layer may drop below half its ink while it changes. Cross-fades overlap rather than run in sequence, and no surface fades out before the one replacing it has arrived. The album art viewer keeps its image, and the visualization viewer its last frame, through the close fade. A popup draws one floor, never two layers at half opacity.
+- **No blink.** While content hands over, the outgoing and incoming layers together keep at least half a line's ink at every point. A layer that is leaving may fade to nothing, as long as its replacement is there. Cross-fades overlap rather than run in sequence, and no surface fades out before the one replacing it has arrived. The album art viewer keeps its image, and the visualization viewer its last frame, through the close fade. A popup draws one floor, never two layers at half opacity.
 - **No jump of the thing being looked at.** Geometry eases rather than switching in one frame: the art glides as the info column appears, and the library slides as now playing grows. Layouts that change per track keep one height. A track without a cover gets a stand-in in the cover's place, not a different layout.
 - **Details are already at rest when a viewer opens.** Only toggling the info column in an open viewer animates it. A viewer that opens with the column shown has it in place from the first frame. When the column slid in on open, Copy Path was briefly out of reach.
 - **Going back to "Nothing playing" plays the first play backwards,** as when playback stops because the queue was cleared or ran out. The track that showed stays while the panel shrinks into the compact row, and its lines fade out as they faded in.
