@@ -181,6 +181,8 @@ The waveform editor retains image tiles in the scene graph and moves their sourc
 
 For backend measurements (analysis throughput per file, seek latency, waveform detail windows, and the app's per-thread CPU and wakeups), see the harness in [`scripts/perf`](../scripts/perf/README.md).
 
+For screenshots of the whole interface, see the UI capture harness in [`tools/ui-capture`](../tools/ui-capture/README.md). It builds a source tree, shoots each UI state in both Breeze themes and records transitions frame by frame, in a nested headless KWin and a private D-Bus session. It then reports clipped text, contrast, and motion, and packs the images for review. `tools/ui-capture/shoot_round.sh <round> --focus-only dialogs` captures one area in a few minutes. The harness is optional and needs the [optional developer tools](INSTALL.md#optional-developer-tools); neither CI nor the tests run it.
+
 Other useful runtime controls:
 
 | Variable | Purpose / default |
