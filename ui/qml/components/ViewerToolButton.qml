@@ -8,7 +8,8 @@ import "../logic/KeyUtils.js" as KeyUtils
 
 // A flat 24 px tool button, larger with a larger font, on the window's
 // chrome or view colour, such as the viewers' info and close buttons: a
-// theme icon (`icon.name`), or its text with `display:
+// theme icon (`icon.name`), a symbolic mask of the app's own
+// (`icon.source`), or its text with `display:
 // AbstractButton.TextOnly`. Its `text` is the tooltip and the accessible
 // name; `toolTipText` replaces the tooltip. Checked is the selection tint
 // alone on the window's colours; the 2 px ring is for keyboard focus only.
@@ -69,7 +70,8 @@ ToolButton {
             width: root.icon.width
             height: root.icon.height
             visible: root.display !== AbstractButton.TextOnly
-            source: root.icon.name
+            // A theme icon by name, or the app's own glyph by its URL.
+            source: root.icon.name.length > 0 ? root.icon.name : root.icon.source
             color: root.glyphColor
             isMask: true
         }

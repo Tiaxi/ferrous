@@ -34,6 +34,11 @@ Item {
     // viewer's controls by a 1 px divider with the controls' 4 px either
     // side, as on the visualization viewer's (#373 H37).
     property bool dividers: false
+    // The viewer's own controls set off from Close by a 1 px divider, with
+    // the controls' 4 px either side: the visualization viewer's mode switch
+    // in its title strip, a choice of two, beside the button that closes it
+    // (#373 H40).
+    property bool closeDivided: false
 
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
@@ -123,10 +128,23 @@ Item {
         height: implicitHeight
     }
 
+    readonly property bool _closeDivided: root.closeDivided && root.viewerControlsShown
+
+    Rectangle {
+        objectName: "viewerControlsCloseDivider"
+        visible: root._closeDivided
+        x: viewerControlsRow.x + viewerControlsRow.implicitWidth + root.spacing
+        y: 4
+        width: 1
+        height: Math.max(0, root.height - 8)
+        color: root.plotColors ? root.plotColors.plotPlateEdge : root.uiPalette.seam
+    }
+
     Components.ViewerToolButton {
         id: closeButton
         objectName: root.closeButtonName
         x: viewerControlsRow.x + (root.viewerControlsShown ? viewerControlsRow.implicitWidth + root.spacing : 0)
+            + (root._closeDivided ? 1 + root.spacing : 0)
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         text: I18n.i18nc("@action:button", "Close")

@@ -4,7 +4,9 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
+import FerrousUi 1.0
 import "../components" as Components
+import "../logic/VisualizationModes.js" as VisualizationModes
 
 Item {
     id: root
@@ -36,6 +38,15 @@ Item {
     // Whether the title strip shows over the whole screen when the pointer
     // moves: the Preferences setting.
     property bool stripEnabled: true
+    // The plot's zoom, 1 at the default, and what resets it, for the strip.
+    property real zoomLevel: 1.0
+    property var resetZoom: null
+    // Whether the mode switch and the zoom are in the title strip rather
+    // than on the plot: over the whole screen while the strip is on, so the
+    // strip is the viewer's one place for its controls (#373 H40: the
+    // plot's plate under the strip's Close read as a second cluster). With
+    // the strip turned off, and in the main window, they stay on the plot.
+    readonly property bool controlsInStrip: root.wholeScreenOpen && root.stripEnabled
 
     property alias popupHost: spectrogramPopupHost
     // The visualization, whose last frame the viewer in the main window
@@ -471,6 +482,50 @@ Item {
                         pointerActivity: root.noteFullscreenPointerActivity
                         errorController: root.errorController
                         closeViewer: root.closeViewer
+                        // The plot's zoom, the mode switch and Close, each
+                        // set off by a 1 px divider, as on the windowed
+                        // viewer's corner plate.
+                        zoomLevel: root.zoomLevel
+                        resetView: root.resetZoom
+                        dividers: true
+                        closeDivided: true
+
+                        // The mode switch: the current mode checked, in the
+                        // strip's look for a choice that is on, as the album
+                        // art viewer's info toggle. The two are radio
+                        // buttons to assistive technology, as on the plot.
+                        Row {
+                            objectName: "spectrogramStripModeSwitch"
+                            spacing: 4
+                            Accessible.role: Accessible.Grouping
+                            Accessible.name: I18n.i18nc("@label", "Visualization")
+
+                            Repeater {
+                                model: VisualizationModes.modes(String(Qt.resolvedUrl("../assets/")))
+
+                                delegate: Components.ViewerToolButton {
+                                    required property int index
+                                    required property var modelData
+                                    objectName: "spectrogramStripModeButton" + index
+                                    uiPalette: root.uiPalette
+                                    plotColors: spectrogramStrip.plotColors
+                                    text: modelData.name
+                                    icon.name: modelData.iconName
+                                    icon.source: modelData.iconSource
+                                    // Its owner binds `checked` to the mode
+                                    // and chooses on a click; choosing the
+                                    // chosen one again leaves it chosen.
+                                    checkable: true
+                                    autoExclusive: true
+                                    checked: root.visualizationMode === index
+                                    Accessible.role: Accessible.RadioButton
+                                    Accessible.checkable: true
+                                    Accessible.checked: checked
+                                    Accessible.onPressAction: root.setVisualizationMode(index)
+                                    onClicked: root.setVisualizationMode(index)
+                                }
+                            }
+                        }
                     }
                 }
             }
