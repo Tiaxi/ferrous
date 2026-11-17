@@ -312,6 +312,8 @@ private slots:
     void smallControlsScaleWithALargeFont();
     void plotSegmentHoverStaysUnderTheChosenPlate_data();
     void plotSegmentHoverStaysUnderTheChosenPlate();
+    void viewerToolButtonHoverReadsOnThePlot_data();
+    void viewerToolButtonHoverReadsOnThePlot();
     void plotToolButtonDrawsCheckedAndFocusApart_data();
     void plotToolButtonDrawsCheckedAndFocusApart();
     void plotToolButtonIsAnAccessibleCheckableButton();
@@ -1766,6 +1768,103 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QTRY_VERIFY(other->property("down").toBool());
     QCOMPARE(letter->opacity(), 1.0);
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, other->mapToScene(QPointF(12, 12)).toPoint());
+}
+
+void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<int>("plotMode");
+    QTest::newRow("spectrogram, dark") << true << 0;
+    QTest::newRow("spectrogram, light") << false << 0;
+    QTest::newRow("waveform, dark") << true << 1;
+    QTest::newRow("waveform, light") << false << 1;
+}
+
+// A viewer's tool button on a plot's title strip, as the album art
+// viewer's info and close buttons: the pointer over it washes it in the
+// plot's text colour, 14 % on a dark plot and 12 % on a light one, which
+// read on the strip as drawn, some 1.4:1 and 1.25:1, as a plate's hovered
+// segment (#373 H42: 6.5 %, 1.15:1 on a 24 px target, hardly showed).
+// Pressed, 22 %, steps further.
+void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot() {
+    QFETCH(bool, dark);
+    QFETCH(int, plotMode);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root = createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight,
+                                                                               kPlotItems + QStringLiteral(R"QML(
+        Rectangle {
+            objectName: "strip"
+            x: 16
+            y: 150
+            width: 120
+            height: 40
+            color: plot.plotColors.plotStrip
+
+            Components.ViewerToolButton {
+                objectName: "viewerButton"
+                x: 8
+                y: 8
+                uiPalette: tokens
+                plotColors: plot.plotColors
+                text: "Close"
+                icon.name: "ferrous-fixture-square"
+            }
+        }
+)QML")),
+                                                       &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickItem *plot = itemNamed(root.get(), QStringLiteral("plot"));
+    QQuickItem *strip = itemNamed(root.get(), QStringLiteral("strip"));
+    QQuickItem *button = itemNamed(root.get(), QStringLiteral("viewerButton"));
+    QVERIFY(plot != nullptr && strip != nullptr && button != nullptr);
+    plot->setProperty("plotMode", plotMode);
+    QObject *plotColors = plot->property("plotColors").value<QObject *>();
+    QVERIFY(plotColors != nullptr);
+    QQuickItem *hover = childNamed(button, QStringLiteral("viewerToolButtonHover"));
+    QVERIFY(hover != nullptr);
+    const QColor text = colorOf(plotColors, "plotText");
+    const QColor surface = colorOf(strip, "color");
+    const bool darkPlot = relativeLuminance(colorOf(plotColors, "plotBg")) < 0.2;
+
+    // At rest, nothing.
+    QVERIFY(!hover->isVisible());
+
+    QTest::mouseMove(window, QPoint(2, 2));
+    const QPoint inside = button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint();
+    QTest::mouseMove(window, inside);
+    QTRY_VERIFY(button->property("hovered").toBool());
+    QTRY_COMPARE(hover->opacity(), 1.0);
+    const QColor wash = colorOf(hover, "color");
+    QCOMPARE(wash.rgb(), text.rgb());
+    QVERIFY2(std::abs(wash.alphaF() - (darkPlot ? 0.14 : 0.12)) < 0.005, qPrintable(QString::number(wash.alphaF())));
+
+    // As drawn, clear of the glyph.
+    QTest::qWait(50);
+    QImage image = window->grabWindow();
+    QVERIFY(!image.isNull());
+    const qreal scale = grabScale(image, window);
+    const QColor drawnHover = pixelAt(image, button->mapToScene(QPointF(2.5, 2.5)) * scale);
+    QVERIFY2(channelDistance(drawnHover, drawnOver(wash, surface)) <= 3,
+             qPrintable(describe(QStringLiteral("the hover wash"), drawnHover, surface)));
+    const qreal hoverStep = contrastRatio(drawnHover, surface);
+    QVERIFY2(hoverStep >= (darkPlot ? 1.35 : 1.25),
+             qPrintable(describe(QStringLiteral("the hover wash"), drawnHover, surface)));
+
+    // Pressed, further.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, inside);
+    QTRY_VERIFY(button->property("down").toBool());
+    const QColor pressed = colorOf(hover, "color");
+    QCOMPARE(pressed.rgb(), text.rgb());
+    QVERIFY2(std::abs(pressed.alphaF() - 0.22) < 0.005, qPrintable(QString::number(pressed.alphaF())));
+    QTest::qWait(50);
+    image = window->grabWindow();
+    const QColor drawnPressed = pixelAt(image, button->mapToScene(QPointF(2.5, 2.5)) * scale);
+    QVERIFY2(contrastRatio(drawnPressed, surface) > hoverStep,
+             qPrintable(describe(QStringLiteral("the pressed wash"), drawnPressed, surface)));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, inside);
 }
 
 void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart_data() {

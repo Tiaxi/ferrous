@@ -28,12 +28,18 @@ ToolButton {
     readonly property color baseTextColor: root.plotColors
         ? root.plotColors.plotText : root.uiPalette.text
     property color glyphColor: root.baseTextColor
-    // The window's hover tint, worked out the same way on the plot's floor.
+    // On a plot, hover is a wash of its text colour that reads on the
+    // strip and the plates: 14 % on a dark one, some 1.4:1, and 12 % on a
+    // light one, where the same tint steps more (#373 H42: 6.5 %, 1.15:1 on
+    // a 24 px target, hardly showed); pressed is 22 %. On the window's
+    // colours, its hover tint.
     readonly property bool _plotIsDark: root.plotColors !== null
         && ColorUtils.colorLuma(root.plotColors.plotBg) < 0.45
     readonly property color hoverColor: root.plotColors
-        ? ColorUtils.withAlpha(root.baseTextColor, root._plotIsDark ? 0.065 : 0.08)
+        ? ColorUtils.withAlpha(root.baseTextColor, root._plotIsDark ? 0.14 : 0.12)
         : root.uiPalette.hover
+    readonly property color pressedColor: ColorUtils.withAlpha(root.baseTextColor,
+        root.plotColors ? 0.22 : 0.10)
     readonly property color checkedColor: root.plotColors
         ? ColorUtils.withAlpha(root.plotColors.plotText, 0.18) : root.uiPalette.selection
     readonly property color focusRingColor: root.plotColors
@@ -94,9 +100,7 @@ ToolButton {
             objectName: "viewerToolButtonHover"
             anchors.fill: parent
             radius: 3
-            color: root.down
-                ? ColorUtils.withAlpha(root.baseTextColor, 0.10)
-                : root.hoverColor
+            color: root.down ? root.pressedColor : root.hoverColor
             opacity: (root.hovered || root.down) && !root.checked ? 1 : 0
             visible: opacity > 0
 
