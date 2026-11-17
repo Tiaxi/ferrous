@@ -342,7 +342,9 @@ bool rowsSettled(QQuickItem *view, int count) {
 
 // The time of every animation of the GUI thread, while it lives: it stands
 // still but for the steps the test takes, however busy the machine. For the
-// lists' transitions, whose animations cannot be paused or set to a point.
+// lists' transitions, whose animations cannot be paused or set to a point,
+// and for checks along a whole fade, which a slow frame would skip on real
+// time.
 // Qt takes it only while no other driver is installed: main() keeps Qt
 // Quick on the basic render loop, whose window installs none.
 class SteppedAnimationDriver : public QAnimationDriver {
@@ -731,12 +733,37 @@ QList<Drawn> drawnAt(const PanelLine &line, double x) {
     return drawn;
 }
 
-// The ink `line` draws with at `x`, as a share of one whole text's, and the
+// What draws on `line` as it is now, read once for the many points of it a
+// check looks at: where the playing track's text stays still, each piece of
+// the lines before with its opacity, and where the playing track's text
+// fades in, with the opacity it fades in at.
+struct LineInk {
+    double width = 0.0;
+    QList<Window> still;
+    QList<std::pair<Window, double>> parts;
+    QList<Window> incoming;
+    double incomingOpacity = 0.0;
+};
+
+LineInk lineInk(const PanelLine &line) {
+    LineInk ink;
+    ink.width = line.line()->width();
+    ink.still = line.stillWindows();
+    for (QQuickItem *part : line.parts()) {
+        ink.parts.push_back({{part->x(), part->x() + part->width()}, part->opacity()});
+    }
+    ink.incoming = line.incomingWindows();
+    ink.incomingOpacity = line.incoming()->opacity();
+    return ink;
+}
+
+// The ink a line draws with at `x`, as a share of one whole text's, and the
 // sum of the opacities there: whole where the line stays still; elsewhere
 // each piece of the lines before and the playing track's text fading in,
 // one over the other, as the eye blends them over the line (#373 H6).
-std::pair<double, double> inkAt(const PanelLine &line, double x) {
-    if (line.stillAt(x)) {
+std::pair<double, double> inkAt(const LineInk &line, double x) {
+    const auto in = [x](const Window &window) { return x >= window.first && x < window.second; };
+    if (std::any_of(line.still.begin(), line.still.end(), in)) {
         return {1.0, 1.0};
     }
     double clear = 1.0;
@@ -745,14 +772,14 @@ std::pair<double, double> inkAt(const PanelLine &line, double x) {
         clear *= 1.0 - opacity;
         sum += opacity;
     };
-    for (QQuickItem *part : line.parts()) {
-        if (x >= part->x() && x < part->x() + part->width()) {
-            add(part->opacity());
+    for (const auto &[window, opacity] : line.parts) {
+        if (in(window)) {
+            add(opacity);
         }
     }
-    for (const auto &[from, to] : line.incomingWindows()) {
-        if (x >= from && x < to) {
-            add(line.incoming()->opacity());
+    for (const Window &window : line.incoming) {
+        if (in(window)) {
+            add(line.incomingOpacity);
         }
     }
     return {1.0 - clear, sum};
@@ -5062,8 +5089,9 @@ void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink() {
             if (line.outgoingOpacity() > 0 && line.incomingOpacity() > 0 && line.incomingOpacity() < 1) {
                 ++crossFading;
             }
-            for (double x = 0.5; x < line.line()->width(); x += 1.0) {
-                const auto [ink, sum] = inkAt(line, x);
+            const LineInk layers = lineInk(line);
+            for (double x = 0.5; x < layers.width; x += 1.0) {
+                const auto [ink, sum] = inkAt(layers, x);
                 if (ink < leastInk || sum > 1.0 + 1e-9) {
                     return QStringLiteral("%1 at %2 px, handover %3: ink %4, opacities %5")
                         .arg(name).arg(x).arg(panel->property("handover").toDouble()).arg(ink).arg(sum);
@@ -5390,13 +5418,16 @@ void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText_data() {
 
 // No double-exposed text on a track change (#373 H15 H3: the outgoing and
 // the incoming title were both over 30 % for 50 ms, and read
-// superimposed): at the fades' real lengths, 100 and 200 ms, in every
-// frame of the change, the time a line shows its text before and the
-// playing track's both over 0.3 is at most 30 ms all told; and in no frame
-// does a line that changes keep under half of a text's ink (no blink), or
-// show neither text over 0.3. From an untagged file to a tagged track whose
-// tags and cover come after its path (H15 F11), to another album, and to
-// the next track of the album.
+// superimposed): at the fades' real lengths, 100 and 200 ms, looked at
+// every 5 ms of the change's animation time, as a frame drawn then shows
+// it, the time a line shows its text before and the playing track's both
+// over 0.3 is at most 30 ms all told; and at no point does a line that
+// changes keep under half of a text's ink (no blink), or show neither text
+// over 0.3. From an untagged file to a tagged track whose tags and cover
+// come after its path (H15 F11), to another album, and to the next track
+// of the album. The test steps the animations' time itself: the frame that
+// makes a change's lines before is slow in a Debug build, and on real time
+// the fade ran all but out within it, leaving a frame or two to look at.
 void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText() {
     QFETCH(int, change);
     Covers covers;
@@ -5423,14 +5454,21 @@ void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText() {
     QVERIFY(grown(panel));
     QTRY_VERIFY(!handover->property("running").toBool());
 
-    QElapsedTimer clock;
+    // The fade's time, in the test's steps.
+    SteppedAnimationDriver driver;
+    constexpr int kStep = 5;
     double lastAt = -1.0;
     QHash<QString, bool> wasBoth;
     QHash<QString, double> bothFor;
     QString failure;
-    int frames = 0;
+    // The points looked at strictly inside the fade.
+    int inside = 0;
     const auto look = [&]() {
-        const double now = double(clock.nsecsElapsed()) / 1e6;
+        const double now = double(driver.elapsed());
+        const double progress = panel->property("handover").toDouble();
+        if (progress > 0.0 && progress < 1.0) {
+            ++inside;
+        }
         for (const QString &name : kWideLines) {
             const PanelLine line = panelLine(panel, name);
             if (lastAt >= 0 && wasBoth.value(name)) {
@@ -5446,28 +5484,36 @@ void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText() {
             if (out <= 0.3 && in <= 0.3) {
                 failure = QStringLiteral("%1 shows neither text: out %2, in %3").arg(name).arg(out).arg(in);
             }
-            for (double x = 0.5; x < line.line()->width() && failure.isEmpty(); x += 2.0) {
-                if (inkAt(line, x).first < 0.5) {
+            const LineInk layers = lineInk(line);
+            for (double x = 0.5; x < layers.width && failure.isEmpty(); x += 2.0) {
+                if (inkAt(layers, x).first < 0.5) {
                     failure = QStringLiteral("%1 at %2 px keeps %3 of its ink")
-                                  .arg(name).arg(x).arg(inkAt(line, x).first);
+                                  .arg(name).arg(x).arg(inkAt(layers, x).first);
                 }
             }
         }
         lastAt = now;
     };
-    const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (handover->property("running").toBool()) {
-                ++frames;
-                look();
-            }
-        });
-    clock.start();
+    // What a frame drawn now shows: the panel laid out, then looked at.
+    const auto drawn = [&]() {
+        if (!QQuickTest::qWaitForPolish(window)) {
+            return false;
+        }
+        look();
+        return true;
+    };
+    // A step of the fade's time, then what a frame drawn at it shows.
+    const auto stepped = [&]() { return driver.step(kStep) && drawn(); };
     if (change == 0) {
         // The path first, as BridgeClient tells it, then the tags and the
         // cover a frame or two later.
         bridge->setProperty("currentTrackPath", kTrackB1);
-        QTest::qWait(25);
+        QVERIFY(handover->property("running").toBool());
+        QVERIFY(drawn());
+        while (driver.elapsed() < 25) {
+            QVERIFY(stepped());
+        }
+        QVERIFY(handover->property("running").toBool());
         bridge->setProperty("currentTrackArtist", QStringLiteral("Lantern Signal"));
         bridge->setProperty("currentTrackTitle", QStringLiteral("Hollow Arc"));
         bridge->setProperty("currentTrackAlbum", QStringLiteral("Album B"));
@@ -5479,9 +5525,14 @@ void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText() {
                   change == 1 ? QStringLiteral("Album B") : QStringLiteral("Album A"), 2005, 2,
                   covers.all.at(change == 1 ? 1 : 0));
     }
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
-    QObject::disconnect(connection);
-    QVERIFY(frames >= 3);
+    QVERIFY(handover->property("running").toBool());
+    QVERIFY(drawn());
+    while (handover->property("running").toBool()) {
+        QVERIFY(stepped());
+        // The fades are 200 ms at most, the tags' 25 ms before them.
+        QVERIFY2(driver.elapsed() <= 300, qPrintable(QString::number(driver.elapsed())));
+    }
+    QVERIFY2(inside >= 3, qPrintable(QString::number(inside)));
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     for (const QString &name : kWideLines) {
         QVERIFY2(bothFor.value(name) <= 30.0,
