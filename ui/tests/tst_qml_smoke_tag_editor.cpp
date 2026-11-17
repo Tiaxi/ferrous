@@ -1769,6 +1769,55 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
         QCOMPARE(lineLeft(blockAt(3), line), lineLeft(blockAt(2), 0) + indent);
     }
     QCOMPARE(lineLeft(blockAt(1), 0), lineLeft(blockAt(0), 0) + indent);
+    // As drawn too: each line of the long error, the first and those it
+    // wraps to, starts its ink at the file's indent, with nothing drawn
+    // between the headings' edge and it (#373 H42: a review read the
+    // wrapped line as fallen back past the indent).
+    QTRY_VERIFY(text->height() > 0);
+    const QImage shown = detailsWindow->grabWindow().convertToFormat(QImage::Format_RGB32);
+    QVERIFY(!shown.isNull());
+    const qreal scale = shown.devicePixelRatio();
+    const QPointF documentOrigin = text->mapToScene(
+        QPointF(text->property("leftPadding").toReal(), text->property("topPadding").toReal()));
+    // The leftmost drawn pixel of `line` of `block`, in scene pixels, from
+    // the headings' edge to the line's end; -1 with none.
+    const auto inkLeft = [&](const QTextBlock &block, int line) {
+        const QTextLine textLine = block.layout()->lineAt(line);
+        const QPointF position = block.layout()->position();
+        const int top = int(std::ceil((documentOrigin.y() + position.y() + textLine.y()) * scale));
+        const int bottom = int(std::floor((documentOrigin.y() + position.y() + textLine.y() + textLine.height()) * scale)) - 1;
+        const int from = int(std::floor((documentOrigin.x() + lineLeft(blockAt(2), 0)) * scale));
+        const int to = int(std::ceil((documentOrigin.x() + position.x() + textLine.x() + textLine.naturalTextWidth()) * scale));
+        const QColor background(shown.pixel(from, (top + bottom) / 2));
+        for (int x = from; x < std::min(to, shown.width()); ++x) {
+            for (int y = top; y <= std::min(bottom, shown.height() - 1); ++y) {
+                const QColor pixel(shown.pixel(x, y));
+                if (std::abs(pixel.red() - background.red()) + std::abs(pixel.green() - background.green())
+                        + std::abs(pixel.blue() - background.blue()) > 90) {
+                    return x / scale;
+                }
+            }
+        }
+        return -1.0;
+    };
+    const qreal expectedInk = documentOrigin.x() + lineLeft(blockAt(2), 0) + indent;
+    // The lines in view: at 24 pt the details may scroll.
+    QQuickItem *view = text->parentItem();
+    while (view != nullptr && !view->clip()) {
+        view = view->parentItem();
+    }
+    QVERIFY(view != nullptr);
+    for (int line = 0; line < errorLayout->lineCount(); ++line) {
+        const QTextLine textLine = errorLayout->lineAt(line);
+        if (documentOrigin.y() + errorLayout->position().y() + textLine.y() + textLine.height()
+            > sceneRectOf(view).bottom()) {
+            break;
+        }
+        const qreal ink = inkLeft(blockAt(3), line);
+        QVERIFY2(ink >= expectedInk - 0.5 && ink <= expectedInk + 3,
+                 qPrintable(QStringLiteral("line %1 of the error drawn from %2, the indent at %3")
+                                .arg(line).arg(ink).arg(expectedInk)));
+    }
     // The text on the summary's x.
     QCOMPARE(text->mapToScene(QPointF(text->property("leftPadding").toReal(), 0)).x(),
              sceneRectOf(summary).left());
