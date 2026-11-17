@@ -309,10 +309,10 @@ jobs:
       # Two at a time, half the runner's CPUs, as scripts/run-tests.sh
       # chooses; each test program has directories of its own.
       - name: Run UI smoke tests
-        # TEMPORARY, for measuring: every CPU, each test four times.
+        # TEMPORARY, for measuring: every CPU, each test five times.
         run: |
           echo "CPUs: $(nproc)"; grep -E 'MemTotal|MemAvailable' /proc/meminfo
-          ctest --test-dir ui/build --output-on-failure --parallel "$(nproc)" --repeat until-fail:4
+          ctest --test-dir ui/build --output-on-failure --parallel "$(nproc)" --repeat until-fail:5
 
       - name: Compare native waveform and spectrogram rendering and texture reuse
         run: |
