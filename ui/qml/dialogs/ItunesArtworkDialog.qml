@@ -702,7 +702,8 @@ Components.DialogWindow {
             // is in the secondary colour, what it found in the text's. A
             // search that failed says so in a semibold heading, with the
             // system's words under it in the secondary colour (#373 H38: it
-            // read as finding nothing). Built from its parts:
+            // read as finding nothing), and a warning glyph in the
+            // spinner's place (#373 H40: the state was text alone). Built from its parts:
             // Kirigami.PlaceholderMessage's selectable text brings Copy and
             // Select All actions that would take Ctrl+C and Ctrl+A from the
             // Edit menu's.
@@ -728,6 +729,19 @@ Components.DialogWindow {
                     Layout.preferredHeight: Kirigami.Units.iconSizes.medium
                     running: placeholder.searching
                     visible: running
+                }
+
+                // A failed search's glyph, in the spinner's place and size.
+                Kirigami.Icon {
+                    objectName: "itunesArtworkFailureIcon"
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.medium
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                    visible: placeholder.failed
+                    source: "dialog-warning-symbolic"
+                    isMask: true
+                    color: root.uiPalette.textSecondary
+                    Accessible.ignored: true
                 }
 
                 ColumnLayout {
