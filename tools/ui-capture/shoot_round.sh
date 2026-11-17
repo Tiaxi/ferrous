@@ -167,7 +167,9 @@ phase sync
 phase build
 
 # 2. Probe, fixtures, template DB.
-"$H/build_probes.sh" "$WORK/probe"
+# one probe folder for the build here and for driver.py (shotprobe.so) and states.py (iconprobe) in the runs
+export SHOT_PROBE_DIR=$(realpath -m "${SHOT_PROBE_DIR:-$WORK/probe}")
+"$H/build_probes.sh" "$SHOT_PROBE_DIR"
 LIB=$WORK/fixtures/library
 if [ ! -d "$LIB" ]; then  # made aside and renamed in, so an interrupted run never leaves half a library
     rm -rf "$LIB.partial"

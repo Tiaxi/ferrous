@@ -5,13 +5,14 @@
 #   shotprobe.so  the LD_PRELOAD probe the driver talks to (eval, find, click, key, grab, recordings);
 #   iconprobe     which hicolor folder Qt's and KDE's icon lookup take per size and device pixel ratio.
 #
-# OUT-DIR defaults to $SHOT_WORK/probe ($SHOT_WORK: $XDG_CACHE_HOME/ferrous-ui-capture). Both use public Qt API only.
+# OUT-DIR defaults to $SHOT_PROBE_DIR, else $SHOT_WORK/probe ($SHOT_WORK: $XDG_CACHE_HOME/ferrous-ui-capture), the
+# folder driver.py (PROBE_DIR) loads both from. Both use public Qt API only.
 # SHOT_BUILD_WRAPPER, when set, is a command the compiler runs under (e.g. a script that limits parallel builds).
 set -euo pipefail
 
 H=$(dirname "$(realpath "$0")")
 WORK=${SHOT_WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/ferrous-ui-capture}
-OUT=${1:-$WORK/probe}
+OUT=${1:-${SHOT_PROBE_DIR:-$WORK/probe}}
 WRAP=()
 if [ -n "${SHOT_BUILD_WRAPPER:-}" ]; then
     read -r -a WRAP <<< "$SHOT_BUILD_WRAPPER"

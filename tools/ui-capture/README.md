@@ -193,7 +193,7 @@ rect, and `pack.py` paints those out of every shot and frame and fails if any re
 | File | Role |
 | --- | --- |
 | `shoot_round.sh` | the entry point: mirror, build, probes, fixtures, template DB, shoot, analyse, pack |
-| `build_probes.sh` | builds `shotprobe.so` and `iconprobe` into `$SHOT_WORK/probe` |
+| `build_probes.sh` | builds `shotprobe.so` and `iconprobe` into `$SHOT_PROBE_DIR` (default `$SHOT_WORK/probe`), where `driver.py` loads both from |
 | `neutral_ns.sh` | runs a command with the work folder at `/mnt/ferrous` |
 | `driver.py` | starts one isolated app (KWin, D-Bus, XDG folders, settings, theme) and talks to the probe |
 | `shotlib.py` | a session: grabs, recordings, KWin window captures, the shot index |

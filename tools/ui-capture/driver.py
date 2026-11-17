@@ -11,7 +11,8 @@ Environment:
   SHOT_OUT   where grab() writes PNGs (default <work>/shots)
   SHOT_WORK  the work folder: fixtures/, run/, b/ (bus sockets) and probe/ (the built probes);
              default $XDG_CACHE_HOME/ferrous-ui-capture
-  SHOT_PROBE_DIR  where build_probes.sh put shotprobe.so (default <work>/probe)
+  SHOT_PROBE_DIR  where build_probes.sh put shotprobe.so and iconprobe (default <work>/probe); PROBE_DIR
+             below is the one place the harness's Python resolves it
 """
 import os
 import shutil
@@ -28,8 +29,11 @@ def default_work():
 
 # Resolved: no symlink in the app's paths (a path the app compares with another must not differ by one).
 WORK = os.path.realpath(os.environ.get("SHOT_WORK") or default_work())
-# The probes are built into the real work folder (build_probes.sh); LD_PRELOAD takes them from there.
-PROBE = os.path.join(os.environ.get("SHOT_PROBE_DIR") or os.path.join(WORK, "probe"), "shotprobe.so")
+# The probes are built into the real work folder (build_probes.sh, which shoot_round.sh gives SHOT_PROBE_DIR);
+# LD_PRELOAD and the icon lookup (states.py) take them from there.
+PROBE_DIR = os.path.realpath(os.environ.get("SHOT_PROBE_DIR") or os.path.join(WORK, "probe"))
+PROBE = os.path.join(PROBE_DIR, "shotprobe.so")
+ICONPROBE = os.path.join(PROBE_DIR, "iconprobe")
 # Under neutral_ns.sh the same folder at a neutral path (/mnt/ferrous): the app is given only those paths.
 WORK = os.environ.get("SHOT_NEUTRAL_WORK") or WORK
 APP = os.environ["SHOT_APP"]

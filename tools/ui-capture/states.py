@@ -14,6 +14,7 @@ import re
 import os
 import time
 
+from driver import ICONPROBE
 from shotlib import FIND, KEY, LIB, LIB2, album_paths
 
 KEY_TAB, KEY_ESC, KEY_SPACE = KEY["Tab"], KEY["Escape"], KEY["Space"]
@@ -3141,9 +3142,9 @@ def _kde_lookup(root, mode="kde", sizes=_KDE_SIZES, dprs=_KDE_DPRS):
     key = (root, mode, tuple(sizes), tuple(dprs))
     if key in _KDE_LOOKUP:
         return _KDE_LOOKUP[key]
-    probe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iconprobe")
+    probe = ICONPROBE
     if not os.access(probe, os.X_OK):
-        raise RuntimeError(f"_kde_lookup: no icon probe at {probe} (shoot_round.sh builds it)")
+        raise RuntimeError(f"_kde_lookup: no icon probe at {probe} (build_probes.sh builds it; SHOT_PROBE_DIR)")
     dirs = sorted(d for d in os.listdir(root) if os.path.isfile(os.path.join(root, d, "apps", "ferrous.svg")))
     if not dirs or len(dirs) > 31:
         raise RuntimeError(f"_kde_lookup: {len(dirs)} icon folders in {root}")
