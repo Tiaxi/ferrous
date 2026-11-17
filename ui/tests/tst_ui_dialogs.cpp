@@ -481,6 +481,8 @@ private slots:
     void configurePageIconsFollowTheFont();
     void configureListRowsAreAlike_data();
     void configureListRowsAreAlike();
+    void libraryFolderPathsShareOneColumn_data();
+    void libraryFolderPathsShareOneColumn();
     void configurePagesMoveByKeyboardAndTabReachesEveryControl();
     void configureAppliesOnOkOrApplyAndCancelDropsTheChanges();
     void configureDefaultsSetsThePagesBackToBeApplied();
@@ -903,6 +905,136 @@ void UiDialogsTest::configureListRowsAreAlike() {
     }
     for (qreal baseline : baselines) {
         QCOMPARE(baseline, baselines.constFirst());
+    }
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
+void UiDialogsTest::libraryFolderPathsShareOneColumn_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The library's folders have their paths in one column: the names' column
+// is as wide as the widest name, up to 8 grid units, so every path starts
+// at one x, a row without a name included (#373 H43: each path began where
+// its own name ended). A single folder's row is as it was, and a list
+// without names has no names' column.
+void UiDialogsTest::libraryFolderPathsShareOneColumn() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    const auto folder = [](const QString &path, const QString &name) {
+        QVariantMap entry{{QStringLiteral("path"), path}, {QStringLiteral("trackCount"), 3}};
+        if (!name.isEmpty()) {
+            entry.insert(QStringLiteral("name"), name);
+        }
+        return entry;
+    };
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        folder(QStringLiteral("/fixture/one"), QStringLiteral("Shelf")),
+        folder(QStringLiteral("/fixture/two"), QStringLiteral("Second Shelf Wide")),
+        folder(QStringLiteral("/fixture/three"), QString()),
+        folder(QStringLiteral("/fixture/four"), QStringLiteral("Mid Shelf")),
+    }));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    // The cap is in Kirigami's grid units, as the page sets it.
+    const qreal gridUnit = evaluate(dialog, QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+    QVERIFY(gridUnit > 0);
+    QQuickItem *list = nullptr;
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
+
+    struct Row {
+        QQuickItem *icon = nullptr;
+        QQuickItem *name = nullptr;
+        QQuickItem *path = nullptr;
+    };
+    // The rows in the list's order, once laid out.
+    const auto rowsOf = [&](int count) {
+        QList<Row> rows;
+        QList<QQuickItem *> items = itemsNamed(list, QStringLiteral("libraryRootRow"));
+        if (items.size() != count) {
+            return rows;
+        }
+        std::sort(items.begin(), items.end(), [](QQuickItem *a, QQuickItem *b) { return a->y() < b->y(); });
+        for (QQuickItem *item : items) {
+            if (layoutPending(item)) {
+                return QList<Row>();
+            }
+            Row row;
+            row.name = itemsNamed(item, QStringLiteral("libraryRootName")).value(0);
+            row.path = itemsNamed(item, QStringLiteral("libraryRootPath")).value(0);
+            row.icon = itemsNamed(item, QStringLiteral("libraryRootIcon")).value(0);
+            rows << row;
+        }
+        return rows;
+    };
+
+    // Four folders, one without a name: every path at one x, the widest
+    // name whole, its path the row spacing after it.
+    QList<Row> rows;
+    QTRY_VERIFY((rows = rowsOf(4)).size() == 4);
+    const qreal pathX = sceneRect(rows.at(0).path).left();
+    const qreal column = std::min(rows.at(1).name->implicitWidth(), 8 * gridUnit);
+    for (const Row &row : rows) {
+        QVERIFY2(qAbs(sceneRect(row.path).left() - pathX) < 0.5, qPrintable(describeItem(row.path)));
+        QVERIFY2(row.name->isVisible(), qPrintable(describeItem(row.name)));
+        QVERIFY2(qAbs(row.name->width() - column) < 0.5, qPrintable(describeItem(row.name)));
+        // A name elides only past 8 grid units, as the widest does at 24 pt.
+        QCOMPARE(row.name->property("truncated").toBool(), row.name->implicitWidth() > 8 * gridUnit + 0.5);
+    }
+    QCOMPARE(rows.at(1).name->property("text").toString(), QStringLiteral("Second Shelf Wide"));
+    QCOMPARE(rows.at(2).name->property("text").toString(), QString());
+    // The unnamed row's path is its only text: in the text's colour.
+    QCOMPARE(hex(rows.at(2).path->property("color").value<QColor>()), hex(tokenOf(window, "text")));
+
+    // A name wider than 8 grid units elides at that width, and the paths
+    // follow it.
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        folder(QStringLiteral("/fixture/one"), QStringLiteral("Shelf")),
+        folder(QStringLiteral("/fixture/two"),
+               QStringLiteral("A Folder Name Far Wider Than Any Column Should Ever Be")),
+    }));
+    QTRY_VERIFY((rows = rowsOf(2)).size() == 2);
+    QTRY_VERIFY(rows.at(1).name->property("truncated").toBool());
+    QVERIFY2(qAbs(rows.at(1).name->width() - 8 * gridUnit) < 0.5, qPrintable(describeItem(rows.at(1).name)));
+    QVERIFY2(qAbs(sceneRect(rows.at(0).path).left() - sceneRect(rows.at(1).path).left()) < 0.5,
+             qPrintable(describeItem(rows.at(0).path)));
+
+    // A single folder: its name as wide as it is, the path after it.
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        folder(QStringLiteral("/fixture/one"), QStringLiteral("Shelf")),
+    }));
+    QTRY_VERIFY((rows = rowsOf(1)).size() == 1);
+    QQuickItem *single = rows.at(0).name;
+    QTRY_VERIFY(qAbs(single->width() - single->implicitWidth()) <= 1);
+    QVERIFY(!single->property("truncated").toBool());
+    const qreal nameToPath = sceneRect(rows.at(0).path).left() - sceneRect(single).right();
+
+    // Without names, no names' column: the path where a name would start.
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        folder(QStringLiteral("/fixture/one"), QString()),
+        folder(QStringLiteral("/fixture/two"), QString()),
+    }));
+    QTRY_VERIFY((rows = rowsOf(2)).size() == 2);
+    for (const Row &row : rows) {
+        QVERIFY2(!row.name->isVisible(), qPrintable(describeItem(row.name)));
+        QVERIFY(row.icon != nullptr);
+        QVERIFY2(qAbs(sceneRect(row.path).left() - sceneRect(row.icon).right() - nameToPath) < 0.5,
+                 qPrintable(describeItem(row.path)));
     }
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());

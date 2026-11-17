@@ -28,6 +28,21 @@ Preferences.PreferencesPage {
         ? root.rootEntries[root.currentRootIndex]
         : null
 
+    // The rows' name column: as wide as the widest folder name, up to 8
+    // grid units, past which a name elides, so every path starts at one x
+    // (#373 H43: each began where its own name ended). A row without a
+    // name leaves the column empty; with no names, there is no column.
+    readonly property real rootNameColumnWidth: {
+        let widest = 0
+        for (let i = 0; i < rootNameMeasures.count; ++i) {
+            const measure = rootNameMeasures.itemAt(i)
+            if (measure) {
+                widest = Math.max(widest, measure.implicitWidth)
+            }
+        }
+        return Math.min(widest, Kirigami.Units.gridUnit * 8)
+    }
+
     function rootDisplayName(entry) {
         return entry ? (entry.displayName || entry.path || "") : ""
     }
@@ -114,6 +129,18 @@ Preferences.PreferencesPage {
             color: root.uiPalette.view
             border.width: frameWidth
             border.color: root.uiPalette.seam
+
+            // Measures the folder names as the rows draw them.
+            Repeater {
+                id: rootNameMeasures
+                model: root.rootEntries
+
+                Label {
+                    required property var modelData
+                    visible: false
+                    text: (modelData && modelData.name) || ""
+                }
+            }
 
             Label {
                 id: emptyRootsLabel
@@ -239,6 +266,7 @@ Preferences.PreferencesPage {
                             spacing: Kirigami.Units.largeSpacing + 2
 
                             Kirigami.Icon {
+                                objectName: "libraryRootIcon"
                                 implicitWidth: Kirigami.Units.iconSizes.small
                                 implicitHeight: Kirigami.Units.iconSizes.small
                                 source: "folder"
@@ -249,8 +277,8 @@ Preferences.PreferencesPage {
 
                             Label {
                                 objectName: "libraryRootName"
-                                visible: rootRow.rootName.length > 0
-                                Layout.preferredWidth: Math.min(implicitWidth, Kirigami.Units.gridUnit * 8)
+                                visible: root.rootNameColumnWidth > 0
+                                Layout.preferredWidth: root.rootNameColumnWidth
                                 text: rootRow.rootName
                                 color: root.uiPalette.text
                                 elide: Text.ElideRight
