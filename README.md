@@ -68,6 +68,7 @@ See the [backlog](docs/ROADMAP.md) for open ideas.
 - [Installation guide](docs/INSTALL.md) — dependencies, build options, data locations
 - [Keyboard and mouse](docs/SHORTCUTS.md) — shortcuts, scrolling, and zooming
 - [Development guide](docs/DEVELOPMENT.md) — building, testing, debugging, profiling
+- [UI design rules](docs/UI_DESIGN.md) — tokens, dialogs, states, motion, and what was rejected
 - [Backlog](docs/ROADMAP.md) — open feature and maintenance ideas
 - [Contributing](CONTRIBUTING.md) — proposing and submitting changes
 
