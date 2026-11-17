@@ -51,12 +51,42 @@ Components.DialogWindow {
     // The content, which has the keyboard as it opens.
     readonly property Item body: renamePreviewContent
     minimumWidth: Kirigami.Units.gridUnit * 24
-    minimumHeight: Kirigami.Units.gridUnit * 12
+    minimumHeight: Kirigami.Units.gridUnit * 9
     defaultWidth: Kirigami.Units.gridUnit * 42
-    // As tall as the list, up to a limit, each time it opens.
-    defaultHeight: Math.min(Kirigami.Units.gridUnit * 29,
-        renamePreviewContent.implicitHeight + 2 * root.contentPadding + dialogButtons.implicitHeight)
+    readonly property real contentSpacing: 10
+    // The room right of the rows for the list's scroll bar, and a refused
+    // file's error's indent under its name.
+    readonly property real listGutter: 12
+    readonly property real errorIndent: 16
+    readonly property real listSpacing: 4
+    readonly property real maximumHeight: Kirigami.Units.gridUnit * 29
+    // As tall as the summary and the list, or the message that nothing is
+    // renamed, up to a limit, each time it opens. They are measured at the
+    // width the window opens at, by the sizers below: the content's layout
+    // gets that width, and works out its own height, only once the window
+    // shows (#373 H40: its height, read as the window opened, was still
+    // that of what it last showed, which left 60 px of nothing under four
+    // files, and cut the list short at 24 pt).
+    defaultHeight: Math.min(root.maximumHeight,
+        2 * root.contentPadding + root.measuredContentHeight + dialogButtons.implicitHeight)
     sizesOnEachOpen: true
+    readonly property real measuredContentHeight: {
+        if (root.rows.length === 0 && root.errorText.length === 0) {
+            return 2 * Kirigami.Units.gridUnit + Kirigami.Units.iconSizes.huge
+                + 2 * Kirigami.Units.largeSpacing + emptyTitleSizer.implicitHeight + emptyTextSizer.implicitHeight
+        }
+        let height = Math.ceil(summarySizer.implicitHeight)
+        if (root.rows.length > 0) {
+            // Each row a line, and its error under it where it has one.
+            height += root.contentSpacing + root.rows.length * Math.ceil(nameLineSizer.implicitHeight)
+                + (root.rows.length - 1) * root.listSpacing
+            for (let i = 0; i < errorSizers.count; ++i) {
+                const sizer = errorSizers.itemAt(i)
+                height += sizer ? Math.ceil(sizer.implicitHeight) : 0
+            }
+        }
+        return height
+    }
 
     // The keyboard in the content, whose Enter presses the default button.
     onAboutToShow: renamePreviewContent.forceActiveFocus(Qt.PopupFocusReason)
@@ -87,6 +117,63 @@ Components.DialogWindow {
         }
     }
 
+    // The content's text at the width the window opens at, in the content's
+    // fonts and wrapping: they set its default height.
+    Item {
+        width: root.openingWidth - 2 * root.contentPadding
+        visible: false
+
+        Label {
+            id: summarySizer
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: root.summaryText()
+        }
+
+        // A file's line, elided to one.
+        Label {
+            id: nameLineSizer
+            text: " "
+        }
+
+        // The refused files' errors, as many as the tallest window shows.
+        Repeater {
+            id: errorSizers
+            model: {
+                const errors = []
+                const room = Math.ceil(root.maximumHeight / Math.max(1, nameLineSizer.implicitHeight))
+                for (let i = 0; i < root.rows.length && errors.length < room; ++i) {
+                    if (!root.rows[i].ok) {
+                        errors.push(root.rows[i].error || "")
+                    }
+                }
+                return errors
+            }
+            delegate: Label {
+                required property string modelData
+                width: parent.width - root.listGutter - root.errorIndent
+                wrapMode: Text.Wrap
+                text: modelData
+                font.pointSize: root.uiPalette.smallPointSize
+            }
+        }
+
+        Label {
+            id: emptyTitleSizer
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: emptyTitle.text
+            font: emptyTitle.font
+        }
+
+        Label {
+            id: emptyTextSizer
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: emptyText.text
+        }
+    }
+
     ColumnLayout {
         id: renamePreviewContent
         objectName: "renamePreviewContent"
@@ -98,7 +185,7 @@ Components.DialogWindow {
         // Enter presses the default button, as in KDE's dialogs.
         Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, root.visible) }
 
-        spacing: 10
+        spacing: root.contentSpacing
 
         Label {
             objectName: "renamePreviewSummary"
@@ -133,6 +220,7 @@ Components.DialogWindow {
             }
 
             Label {
+                id: emptyTitle
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
@@ -146,6 +234,7 @@ Components.DialogWindow {
             }
 
             Label {
+                id: emptyText
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
@@ -165,13 +254,13 @@ Components.DialogWindow {
             visible: root.rows.length > 0
             clip: true
             model: root.rows
-            spacing: 4
+            spacing: root.listSpacing
             boundsBehavior: Flickable.StopAtBounds
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
             delegate: ColumnLayout {
                 required property var modelData
-                width: ListView.view.width - 12
+                width: ListView.view.width - root.listGutter
                 spacing: 0
 
                 Label {
@@ -188,7 +277,7 @@ Components.DialogWindow {
 
                 Label {
                     Layout.fillWidth: true
-                    Layout.leftMargin: 16
+                    Layout.leftMargin: root.errorIndent
                     visible: !modelData.ok
                     wrapMode: Text.Wrap
                     text: modelData.error || ""

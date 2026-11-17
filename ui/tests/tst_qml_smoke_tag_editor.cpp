@@ -54,6 +54,8 @@ private slots:
     void renameRenamesThePreviewedFilesAfterTheSelectionChanged();
     void saveDetailsReadAsAReport_data();
     void saveDetailsReadAsAReport();
+    void renamePreviewOpensAsTallAsItsList_data();
+    void renamePreviewOpensAsTallAsItsList();
 };
 
 namespace {
@@ -1738,6 +1740,69 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
 
     QVERIFY(clickVisibleButton(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton")));
     QTRY_VERIFY(!details->property("visible").toBool());
+}
+
+void TagEditorSmokeTest::renamePreviewOpensAsTallAsItsList_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Rename Files opens as tall as its summary and its list, a refused
+// file's error wrapped under its name, with a grid unit's room above the
+// buttons (#373 H40: four files opened it with 79 px of nothing under
+// them), each time it opens.
+void TagEditorSmokeTest::renamePreviewOpensAsTallAsItsList() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont larger = applicationFont;
+        larger.setPointSizeF(pointSize);
+        QGuiApplication::setFont(larger);
+    }
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(4, false));
+    const QByteArray loadResponse = tagEditorLoadResponse(4);
+    QByteArray preview(R"({"results":[)");
+    for (int i = 0; i < 4; ++i) {
+        const QString path = QStringLiteral("/fixture/Album 000/%1 Song.flac").arg(i + 1, 2, 10, QLatin1Char('0'));
+        const QString newPath = i == 1 ? QStringLiteral("/fixture/Album 000/02 Song (Live).flac") : path;
+        // The last can't be renamed, for a reason long enough to wrap.
+        const QString result = i == 3
+            ? QStringLiteral(R"("ok":false,"error":"%1")")
+                  .arg(QStringLiteral("the new name would replace a file that is not among the selected ones, "
+                                      "so it keeps its name; rename or move that file first, then try again"))
+            : QStringLiteral(R"("ok":true)");
+        preview += QStringLiteral(R"(%1{"path":"%2","newPath":"%3",%4})")
+                       .arg(i > 0 ? QStringLiteral(",") : QString(), path, newPath, result).toUtf8();
+    }
+    preview += R"(],"successfulPaths":[]})";
+    fixture.editor.m_executeOperation = [=](TagEditorController::Operation operation, const QByteArray &,
+                                            const TagEditorController::RenameGate &) {
+        return operation == TagEditorController::Operation::PreviewRename ? preview : loadResponse;
+    };
+    fixture.editor.selectAllRows();
+    QObject *previewDialog = fixture.window->findChild<QObject *>(QStringLiteral("renamePreviewDialog"));
+    QVERIFY(previewDialog != nullptr);
+    for (int opening = 0; opening < 2; ++opening) {
+        QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorRenameButton")));
+        QTRY_VERIFY(previewDialog->property("opened").toBool());
+        QQuickWindow *previewWindow = dialogWindowOf(previewDialog);
+        QVERIFY(QTest::qWaitForWindowExposed(previewWindow));
+        QQuickItem *list = visibleItemNamed(previewWindow, QStringLiteral("renamePreviewList"));
+        QQuickItem *cancel = visibleItemNamed(previewWindow, QStringLiteral("renamePreviewCancelButton"));
+        QVERIFY(list != nullptr && cancel != nullptr);
+        QTRY_COMPARE(list->property("count").toInt(), 4);
+        const qreal gridUnit = previewDialog->property("contentPadding").toReal();
+        const qreal listBottom = sceneRectOf(list).top() + list->property("contentHeight").toReal();
+        const QString where = QStringLiteral("opening %1: the list to %2, Cancel from %3 in a window %4 px tall")
+            .arg(opening).arg(listBottom).arg(sceneRectOf(cancel).top()).arg(previewWindow->height());
+        QVERIFY2(previewWindow->height() < gridUnit * 29, qPrintable(where));
+        QVERIFY2(std::abs(sceneRectOf(cancel).top() - listBottom - gridUnit) <= 1.0, qPrintable(where));
+        QVERIFY(clickVisibleButton(previewWindow, QStringLiteral("renamePreviewCancelButton")));
+        QTRY_VERIFY(!previewDialog->property("visible").toBool());
+    }
 }
 
 std::unique_ptr<QmlSmokeTest> makeTagEditorSmokeTest(const QString &userDirectoriesParent) {
