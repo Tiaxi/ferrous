@@ -570,6 +570,7 @@ if(BUILD_TESTING)
     # The transport and the status bar of #373, from the QML sources.
     qt_add_executable(ferrous_transport_status_tests
         tests/tst_transport_status.cpp
+        src/InputModality.cpp
         src/Localization.cpp
         src/WaveformItem.cpp
     )

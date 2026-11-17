@@ -41,6 +41,7 @@
 #include <tuple>
 #include <utility>
 
+#include "InputModality.h"
 #include "Localization.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
@@ -3774,6 +3775,7 @@ int main(int argc, char **argv) {
     QAccessible::setActive(true);
     FerrousLocalization::registerQmlTypes();
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
+    InputModality::registerQmlTypes();
     TransportStatusTest test;
     return QTest::qExec(&test, argc, argv);
 }

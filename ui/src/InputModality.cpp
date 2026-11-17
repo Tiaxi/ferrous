@@ -5,6 +5,8 @@
 #include <QCoreApplication>
 #include <QFocusEvent>
 #include <QKeyEvent>
+#include <QPointingDevice>
+#include <QPointerEvent>
 #include <qqml.h>
 
 namespace {
@@ -29,6 +31,11 @@ bool isModifierKey(int key) {
     }
 }
 
+bool isFromTouchScreen(const QPointerEvent *event) {
+    const QPointingDevice *device = event->pointingDevice();
+    return device != nullptr && device->type() == QInputDevice::DeviceType::TouchScreen;
+}
+
 } // namespace
 
 InputModality::InputModality(QObject *parent) : QObject(parent) {
@@ -43,10 +50,11 @@ InputModality::~InputModality() {
     }
 }
 
-void InputModality::registerQmlType() {
+void InputModality::registerQmlTypes() {
     qmlRegisterSingletonType<InputModality>(
         "FerrousUi", 1, 0, "InputModality",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new InputModality(); });
+    qmlRegisterType<WindowPointer>("FerrousUi", 1, 0, "WindowPointer");
 }
 
 bool InputModality::eventFilter(QObject *watched, QEvent *event) {
@@ -86,5 +94,51 @@ void InputModality::setKeyboard(bool keyboard) {
     if (m_keyboard != keyboard) {
         m_keyboard = keyboard;
         emit keyboardChanged();
+    }
+}
+
+WindowPointer::WindowPointer(QObject *parent) : QObject(parent) {}
+
+void WindowPointer::setWindow(QWindow *window) {
+    if (m_window == window) {
+        return;
+    }
+    if (m_window) {
+        m_window->removeEventFilter(this);
+    }
+    m_window = window;
+    setTouch(false);
+    if (m_window) {
+        m_window->installEventFilter(this);
+    }
+    emit windowChanged();
+}
+
+// The window's own events, as it filters no other object's: the items
+// under a pointer get the events Qt makes for them from these.
+bool WindowPointer::eventFilter(QObject *watched, QEvent *event) {
+    switch (event->type()) {
+    case QEvent::TouchBegin:
+    case QEvent::TouchUpdate:
+        if (isFromTouchScreen(static_cast<const QPointerEvent *>(event))) {
+            setTouch(true);
+        }
+        break;
+    case QEvent::MouseMove:
+    case QEvent::Enter:
+        if (m_touch && !isFromTouchScreen(static_cast<const QPointerEvent *>(event))) {
+            setTouch(false);
+        }
+        break;
+    default:
+        break;
+    }
+    return QObject::eventFilter(watched, event);
+}
+
+void WindowPointer::setTouch(bool touch) {
+    if (m_touch != touch) {
+        m_touch = touch;
+        emit touchChanged();
     }
 }
