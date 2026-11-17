@@ -501,11 +501,14 @@ Popup {
                                     // Link-coloured small text on a flat button: the style
                                     // draws the text of its own background, so both are
                                     // drawn here.
-                                    // The tint under the text while hovered or pressed;
-                                    // the link is darker where the tint takes it under
+                                    // The tint under the text while hovered or pressed,
+                                    // the press a clear step past the hover, 1.65:1 on
+                                    // the popup's window colour, as the transport's
+                                    // (#373 H45: at 10% it read as the hover); the
+                                    // link is darker where the tint takes it under
                                     // 4.5:1 on the window colour.
                                     readonly property color tint: actionButton.down
-                                        ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
+                                        ? root.uiPalette.pressedOn(root.uiPalette.chrome)
                                         : (actionButton.hovered ? root.uiPalette.hover : "transparent")
                                     contentItem: Label {
                                         text: actionButton.text
@@ -522,8 +525,13 @@ Popup {
                                         border.width: actionButton.visualFocus ? 2 : 0
                                         border.color: root.uiPalette.focusRing
 
+                                        // The hover and the release fade; the press
+                                        // shows on its first frame. The button tells
+                                        // `pressed` before `down`, which the tint
+                                        // follows, so the fade is off by the time the
+                                        // tint turns.
                                         Behavior on color {
-                                            enabled: Kirigami.Units.shortDuration > 0
+                                            enabled: Kirigami.Units.shortDuration > 0 && !actionButton.pressed
                                             ColorAnimation {
                                                 duration: Kirigami.Units.shortDuration
                                                 easing.type: Easing.OutCubic

@@ -549,6 +549,7 @@ private slots:
     void compactDialogsKeepTheirMeasureWithALargeFont();
     void dialogGlyphsAndMeasuresFollowTheFont_data();
     void dialogGlyphsAndMeasuresFollowTheFont();
+    void recentIssuesLinkPressShowsAtOnce();
 };
 
 void UiDialogsTest::initTestCase() {
@@ -5350,6 +5351,60 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
     }
     QVERIFY(QMetaObject::invokeMethod(about, "close"));
     QTRY_VERIFY(!about->property("visible").toBool());
+}
+
+// A Recent Issues link's press reads as a press: its tint is a clear step
+// past the hover, 1.65:1 on the popup's window colour as the transport's
+// buttons' (#373 H45: at 10% it read as the hover), and it shows on its
+// first frame, with no fade while the button is down; the hover and the
+// release fade.
+void UiDialogsTest::recentIssuesLinkPressShowsAtOnce() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    report(window, 1, 0, kStaticPath, kEndsEarly);
+    QVERIFY(openIssues(window));
+    QQuickItem *action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"));
+    QVERIFY(action != nullptr);
+    auto *background = qvariant_cast<QQuickItem *>(action->property("background"));
+    QVERIFY(background != nullptr);
+    const auto colorOf = [&]() { return background->property("color").value<QColor>(); };
+    QObject *palette = paletteOf(window);
+    const QColor chrome = tokenOf(window, "chrome");
+    const QColor pressed = evaluate(palette, QStringLiteral("pressedOn(chrome)")).value<QColor>();
+    const QColor hover = tokenOf(window, "hover");
+    QVERIFY(pressed.isValid() && pressed.alpha() > 0);
+    // A step past the hover on the window colour.
+    const double pressedRatio = contrastRatio(drawnOver(pressed, chrome), chrome);
+    const double hoverRatio = contrastRatio(drawnOver(hover, chrome), chrome);
+    QVERIFY2(pressedRatio >= 1.65, qPrintable(QString::number(pressedRatio)));
+    QVERIFY2(pressedRatio >= hoverRatio + 0.25,
+             qPrintable(QStringLiteral("pressed %1:1, hover %2:1").arg(pressedRatio).arg(hoverRatio)));
+
+    const QPoint centre = action->mapToScene(QPointF(action->width() / 2, action->height() / 2)).toPoint();
+    QCOMPARE(colorOf().alpha(), 0);
+    // The press: the pressed tint at once, before any frame of a fade.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, centre);
+    QVERIFY(action->property("down").toBool());
+    QCOMPARE(hex(colorOf()), hex(pressed));
+    const QImage frame = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+    const QPointF inside = action->mapToScene(QPointF(2, action->height() / 2)) * frame.devicePixelRatio();
+    // Drawn in that first frame, give or take the blend's rounding.
+    const QColor drawn(frame.pixel(inside.toPoint()));
+    const QColor expected = drawnOver(pressed, chrome);
+    QVERIFY2(qAbs(drawn.red() - expected.red()) <= 3 && qAbs(drawn.green() - expected.green()) <= 3
+                 && qAbs(drawn.blue() - expected.blue()) <= 3,
+             qPrintable(QStringLiteral("%1, not %2").arg(hex(drawn), hex(expected))));
+    // The release, off the button so it does nothing: a fade back.
+    const QPoint away = action->mapToScene(QPointF(action->width() / 2, -action->height())).toPoint();
+    QTest::mouseMove(window, away);
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, away);
+    QTRY_VERIFY(!action->property("down").toBool());
+    if (evaluate(palette, QStringLiteral("Kirigami.Units.shortDuration")).toInt() > 0) {
+        QVERIFY2(colorOf() != pressed && colorOf().alpha() > 0, qPrintable(hex(colorOf())));
+    }
+    QTRY_COMPARE(colorOf().alpha(), 0);
 }
 
 int main(int argc, char **argv) {
