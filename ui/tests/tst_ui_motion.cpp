@@ -1058,6 +1058,8 @@ private slots:
     void albumArtViewerFadesWithItsArt_data();
     void albumArtViewerFadesWithItsArt();
     void albumArtGlidesAsideForItsDetails();
+    void albumArtDetailsRestAsTheViewerOpens_data();
+    void albumArtDetailsRestAsTheViewerOpens();
     void windowedViewerClosesOverItsLastFrame();
     void albumArtViewerControlsFadeOnOneLevel_data();
     void albumArtViewerControlsFadeOnOneLevel();
@@ -6945,6 +6947,97 @@ void UiMotionTest::albumArtGlidesAsideForItsDetails() {
 
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!popup->property("visible").toBool());
+}
+
+void UiMotionTest::albumArtDetailsRestAsTheViewerOpens_data() {
+    QTest::addColumn<bool>("wholeScreen");
+    QTest::newRow("window") << false;
+    QTest::newRow("whole screen") << true;
+}
+
+// A viewer that opens with the album art's details shown, or hidden, has
+// them at rest from the moment it opens: only showing or hiding them in the
+// open viewer slides them. (They slid in as the viewer opened, and until the
+// slide's first step they were hidden, Copy Path out of the Tab order of a
+// viewer that already had the keyboard.)
+void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
+    QFETCH(bool, wholeScreen);
+    Covers covers;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    // A slide would take 600 ms.
+    units->setShortDuration(500);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QQuickItem *surface = named(window, "albumArtSurface");
+    QVERIFY(bridge && viewer && surface);
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QQuickItem *copyPath = itemNamed(surface, QStringLiteral("albumArtCopyPathButton"));
+    QVERIFY(column && copyPath);
+    bridge->setProperty("viewerFullscreenMode", wholeScreen ? 1 : 0);
+    showTrack(bridge, QStringLiteral("/music/0.flac"), QStringLiteral("Track"), QStringLiteral("Album"),
+              covers.first);
+    // The image's details, as they come in for a folder's image.
+    const QString coverFile = QUrl(covers.first).toLocalFile();
+    const QVariantMap details{
+        {QStringLiteral("path"), coverFile},
+        {QStringLiteral("fileName"), QFileInfo(coverFile).fileName()},
+        {QStringLiteral("embeddedCover"), false},
+    };
+    const auto reveal = [surface]() { return surface->property("infoReveal").toDouble(); };
+    const int slide = surface->property("infoRevealDuration").toInt();
+    QCOMPARE(slide, 600);
+    QVERIFY(!viewer->property("albumArtInfoVisible").toBool());
+
+    // Opened on the current art from Replace from iTunes, with its details,
+    // which were hidden; then from the album art, without them, which were
+    // shown.
+    for (const auto &[open, shown] : {std::pair{"openAlbumArtViewerForCurrentArt", true},
+                                      std::pair{"openAlbumArtViewer", false}}) {
+        const QByteArray at(open);
+        QVERIFY2(viewer->property("albumArtInfoVisible").toBool() != shown, at.constData());
+        QVERIFY2(QMetaObject::invokeMethod(viewer, open), at.constData());
+        viewer->setProperty("albumArtViewerFileInfo", details);
+        QVERIFY2(viewer->property("albumArtViewerOpen").toBool(), at.constData());
+        QCOMPARE(viewer->property("albumArtInfoVisible").toBool(), shown);
+        // At once, before the viewer has drawn a frame or taken a key.
+        QCOMPARE(reveal(), shown ? 1.0 : 0.0);
+        QCOMPARE(column->isVisible(), shown);
+        QCOMPARE(copyPath->isVisible(), shown);
+        QVERIFY2(copyPath->activeFocusOnTab(), at.constData());
+        // And they stay there while the viewer shows: over the time a
+        // slide would take, they do not move.
+        QSignalSpy moved(surface, SIGNAL(infoRevealChanged()));
+        QTRY_VERIFY2(surface->window() != nullptr && surface->window()->isExposed(), at.constData());
+        QVERIFY2((surface->window() != window) == wholeScreen, at.constData());
+        QTest::qWait(slide + 100);
+        QVERIFY2(moved.isEmpty(), qPrintable(QStringLiteral("%1: %2 steps").arg(open).arg(moved.size())));
+        QCOMPARE(reveal(), shown ? 1.0 : 0.0);
+        QCOMPARE(column->isVisible(), shown);
+        if (shown) {
+            QCOMPARE(sceneRectOf(column).right(), sceneRectOf(surface).right());
+        }
+        if (!shown) {
+            break;
+        }
+        QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+        QTRY_VERIFY2(!surface->isVisible(), at.constData());
+    }
+
+    // In the open viewer, showing them still slides them in.
+    QSignalSpy moved(surface, SIGNAL(infoRevealChanged()));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant())));
+    QVERIFY(viewer->property("albumArtInfoVisible").toBool());
+    QCOMPARE(reveal(), 0.0);
+    QTRY_COMPARE(reveal(), 1.0);
+    QVERIFY2(moved.size() >= 3, qPrintable(QStringLiteral("%1 steps").arg(moved.size())));
+
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!surface->isVisible());
 }
 
 // The visualization viewer in the window fades out over its last frame as
