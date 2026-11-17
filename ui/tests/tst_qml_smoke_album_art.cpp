@@ -1831,6 +1831,9 @@ void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails() {
     QTest::mouseMove(shownIn, (artPoint + QPointF(80, 60)).toPoint());
     QTest::mouseRelease(shownIn, Qt::LeftButton, Qt::NoModifier, (artPoint + QPointF(80, 60)).toPoint());
     QVERIFY(surface->property("panX").toDouble() != 0.0 || surface->property("panY").toDouble() != 0.0);
+    // The details at rest before the view is taken: under load the
+    // reveal's last sub-pixel step (#373 H39 AF1) could land after it.
+    QTRY_COMPARE(surface->property("infoReveal").toDouble(), 1.0);
     const View before = view();
 
     // The wheel, a drag, a double-click and the context button on the
