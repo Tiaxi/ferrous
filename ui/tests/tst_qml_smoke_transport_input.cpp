@@ -1731,13 +1731,14 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
         QTRY_VERIFY(!title->property("truncated").toBool());
 
-        // A flat 24 px Close at the right, centred in the band, 4 px in, in
-        // the plot's colours; the view fills the window under the strip.
+        // A flat 24 px Close at the right, centred in the band, 8 px in
+        // (#373 H40: at 4 px its focus ring met the screen's corner), in the
+        // plot's colours; the view fills the window under the strip.
         QQuickItem *close = visibleItemNamed(fullscreen, shown.closeName);
         QVERIFY2(close != nullptr, name.constData());
         QVERIFY(strip->isAncestorOf(close));
         QCOMPARE(sceneRectOf(close).size(), QSizeF(24, 24));
-        QCOMPARE(sceneRectOf(close).right(), fullscreen->width() - 4.0);
+        QCOMPARE(sceneRectOf(close).right(), fullscreen->width() - 8.0);
         QCOMPARE(sceneRectOf(close).top(), 7.0);
         QQuickItem *closeIcon = itemNamed(close, QStringLiteral("viewerToolButtonIcon"));
         QVERIFY(closeIcon != nullptr);
@@ -1865,8 +1866,8 @@ void TransportInputSmokeTest::viewerStripHoldsItsTextAtALargeFont() {
                                     .arg(QString::fromUtf8(name), label->objectName())
                                     .arg(rect.top()).arg(rect.bottom()).arg(band)));
         }
-        // Close, centred in the band, 4 px in from the right.
-        QCOMPARE(sceneRectOf(close).right(), fullscreen->width() - 4.0);
+        // Close, centred in the band, 8 px in from the right.
+        QCOMPARE(sceneRectOf(close).right(), fullscreen->width() - 8.0);
         QVERIFY(std::abs(sceneRectOf(close).center().y() - band / 2) <= 0.5);
         // Over the view, which keeps the whole window.
         auto *surface = window->findChild<QQuickItem *>(shown.surfaceName);
@@ -2530,8 +2531,12 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
                         && sceneRectOf(zoomPlate).right() + (fullscreenMode == 1 ? 4 : 1)
                                == sceneRectOf(modeSwitch).left());
             if (fullscreenMode == 1) {
+                // Close above the switch, at the strip's 8 px inset (#373
+                // H40), the switch at the plot's 5 px.
                 QVERIFY(sceneRectOf(close).bottom() <= sceneRectOf(modeSwitch).top());
-                QVERIFY(sceneRectOf(close).right() >= sceneRectOf(modeSwitch).right());
+                QCOMPARE(sceneRectOf(close).right(), host->width() - 8.0);
+                QVERIFY(sceneRectOf(close).left() < sceneRectOf(modeSwitch).right()
+                        && sceneRectOf(close).right() > sceneRectOf(modeSwitch).center().x());
             } else {
                 QVERIFY2(sceneRectOf(modeSwitch).right() < sceneRectOf(close).left(),
                          qPrintable(QStringLiteral("switch ends at %1, Close starts at %2")

@@ -18,7 +18,7 @@ import "../logic/FormatUtils.js" as FormatUtils
 // "1:17 / 3:49", on the type scale of the viewer's text over the whole
 // screen (UiPalette.fullscreenTextScale), as the album art's details under
 // it are (#373 H40: at the window's size they were a second scale); on the
-// right flat 24 px tool buttons: a zoom readout and
+// right, 8 px in from the edge, flat 24 px tool buttons: a zoom readout and
 // Reset while the view is zoomed (the album art's; the visualization shows
 // its zoom on the plot, beside its mode switch), the new issues while there
 // are any, the viewer's own buttons (declared inside the strip, from the
@@ -182,7 +182,9 @@ Rectangle {
         id: controls
         objectName: "viewerStripControls"
         anchors.right: parent.right
-        anchors.rightMargin: 4
+        // 8 px in from the screen's edge (#373 H40: at 4 px, Close's focus
+        // ring met the screen's corner).
+        anchors.rightMargin: Kirigami.Units.largeSpacing
         y: Math.round((root.bandHeight - height) / 2)
         uiPalette: root.uiPalette
         plotColors: root.plotColors
