@@ -1648,25 +1648,20 @@ void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
     QVERIFY2(capHelp->property("lineCount").toInt() >= 2, qPrintable(describeItem(capHelp)));
     QVERIFY2(capHelp->width() <= 440.5 && capHelp->width() >= 420, qPrintable(describeItem(capHelp)));
 
-    // General: the viewers, then Plasma's media controls under a plain
-    // subheading where the fields start, 16 px below the group above it and
-    // 8 px above its row.
+    // General: the viewers, then Plasma's media controls, two groups apart
+    // by the room between them, with no subheading: only a page of three or
+    // more groups heads them, and "Plasma:" names the second (#373 H43: a
+    // heading over a single check box that its label already named).
     dialog->setProperty("pageIndex", 2);
     QQuickItem *media = nullptr;
     QTRY_VERIFY((media = named("systemMediaControlsCheckBox")) != nullptr);
     QTRY_VERIFY(!layoutPending(stack->childItems().at(2)));
-    QQuickItem *headingRow = named("desktopIntegrationHeading");
-    QVERIFY(headingRow != nullptr);
-    QQuickItem *heading = itemsNamed(headingRow, QStringLiteral("formSubheading")).value(0);
-    QVERIFY(heading != nullptr && heading->isVisible());
-    QCOMPARE(heading->property("text").toString(), QStringLiteral("Desktop Integration"));
-    const QFont headingFont = heading->property("font").value<QFont>();
-    QCOMPARE(headingFont.weight(), QFont::DemiBold);
-    QCOMPARE(headingFont.pointSizeF(), paletteOf(window)->property("basePointSize").toReal());
-    QCOMPARE(hex(heading->property("color").value<QColor>()), hex(tokenOf(window, "text")));
-    QVERIFY(gapIs(named("preventDisplaySleepInFullscreenCheckBox"), heading, 16));
-    QVERIFY(gapIs(heading, media, 8));
-    QCOMPARE(sceneRect(heading).left(), sceneRect(media).left());
+    QQuickItem *generalPage = stack->childItems().at(2);
+    QVERIFY(named("desktopIntegrationGap") != nullptr);
+    for (QQuickItem *subheading : itemsNamed(generalPage, QStringLiteral("formSubheading"))) {
+        QVERIFY2(!subheading->isVisible(), qPrintable(describeItem(subheading)));
+    }
+    QVERIFY(gapIs(named("preventDisplaySleepInFullscreenCheckBox"), media, 16));
     QQuickItem *mediaHelp = helpLabel("systemMediaControlsHelp");
     QVERIFY(mediaHelp != nullptr);
     QVERIFY(gapIs(media, mediaHelp, 4));
@@ -2200,14 +2195,12 @@ void UiDialogsTest::lastFmAccountIsAGroupApart() {
         return sceneRect(below).top() - sceneRect(above).bottom();
     };
     // General's room between its groups: from the viewers' last row to the
-    // desktop integration's subheading.
+    // media controls' check box.
     QTRY_VERIFY(!layoutPending(stack->childItems().at(2)));
     QQuickItem *sleep = visibleNamed(prefs, QStringLiteral("preventDisplaySleepInFullscreenCheckBox"));
-    QQuickItem *headingRow = visibleNamed(prefs, QStringLiteral("desktopIntegrationHeading"));
-    QVERIFY(sleep != nullptr && headingRow != nullptr);
-    QQuickItem *heading = itemsNamed(headingRow, QStringLiteral("formSubheading")).value(0);
-    QVERIFY(heading != nullptr);
-    const qreal generalGroupGap = gap(sleep, heading);
+    QQuickItem *media = visibleNamed(prefs, QStringLiteral("systemMediaControlsCheckBox"));
+    QVERIFY(sleep != nullptr && media != nullptr);
+    const qreal generalGroupGap = gap(sleep, media);
     QVERIFY2(qAbs(generalGroupGap - 16) < 1, qPrintable(QString::number(generalGroupGap)));
 
     dialog->setProperty("pageIndex", 3);
