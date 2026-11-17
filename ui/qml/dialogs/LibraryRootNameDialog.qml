@@ -70,6 +70,11 @@ Components.CompactDialogWindow {
         id: libraryRootNameForm
         objectName: "libraryRootNameForm"
         Layout.fillWidth: true
+        // It ends at its help text, the dialogs' inset above the buttons
+        // as in a confirmation: Kirigami's form ends in an empty 2 px row,
+        // for lining up twin forms, a row spacing under its last (#373 H42:
+        // 35 px from the help text to the buttons).
+        Layout.preferredHeight: implicitHeight - Kirigami.Units.smallSpacing - 2
 
         // The folder is chosen already: its path to read, not to edit.
         Components.PathLabel {
@@ -95,6 +100,8 @@ Components.CompactDialogWindow {
 
         Components.FormHelpText {
             uiPalette: root.uiPalette
+            // It ends the form: the dialog's inset is the room under it.
+            trailingSpace: 0
             text: I18n.i18nc("@info", "Optional. Without a name, the library shows the folder’s path.")
         }
     }

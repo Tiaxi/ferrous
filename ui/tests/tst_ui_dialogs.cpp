@@ -1844,6 +1844,15 @@ void UiDialogsTest::libraryFolderNameDialogShowsItsPath() {
             QCOMPARE(help->property("lineCount").toInt(), 1);
         }
         QVERIFY2(sceneRect(help).right() <= nameWindow->width() - inset + 0.5, qPrintable(where));
+        // The help text ends the form at the dialogs' inset above the
+        // buttons, as a confirmation's last line does (#373 H42: 35 px
+        // apart, with the help text's room to a next row and the form's
+        // empty last row under it).
+        QQuickItem *accept = visibleNamed(nameWindow, QStringLiteral("libraryRootNameAcceptButton"));
+        QVERIFY(accept != nullptr);
+        const qreal aboveButtons = sceneRect(accept).top() - sceneRect(help).bottom();
+        QVERIFY2(qAbs(aboveButtons - inset) < 1,
+                 qPrintable(QStringLiteral("%1: %2 px above the buttons, not %3").arg(mode).arg(aboveButtons).arg(inset)));
         QTest::keyClick(nameWindow, Qt::Key_Escape);
         QTRY_VERIFY(!dialog->property("visible").toBool());
     }
