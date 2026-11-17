@@ -2391,26 +2391,6 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
                 notes.append(f"{nm}: not made ({ex})")
             else:
                 fails.append(f"focus sheet {nm}: {ex}")
-    # blind review: no round numbers in the installed-only sheets (titles, tile labels, their shots'
-    # descriptions, what each shows); only the scope's `history` sheets may name the previous round
-    hist = set(sc_.get("history", []))
-    rx_round = re.compile(r"\b[Hh]\d{1,2}\b")
-    def tile_texts(cell, theme):
-        if isinstance(cell, list):
-            return [t for c in cell for t in tile_texts(c, theme)]
-        if isinstance(cell, dict):
-            return [cell.get("label", "")]
-        area, state, _, label = cell[:4]
-        th_ = (cell[4] if len(cell) > 4 and cell[4] else {}).get("theme", theme)
-        return [label] + [e.get("desc", "") for e in entries if e["area"] == area and e["state"] == state and e["theme"] == th_]
-    for nm, title, theme, rows in (sc_.get("sheets", []) if "history" in sc_ else []):  # (scopes that opt in)
-        if nm in hist:
-            continue
-        texts = [title] + [t for row in rows for c in row for t in tile_texts(c, theme)]
-        texts += [f"{sh} {lk}" for kind, n2, _, sh, lk, *_ in sc_["images"] if n2 == nm]
-        hits = sorted({m.group(0) + ": " + t[:80] for t in texts for m in [rx_round.search(t or "")] if m})
-        if hits:
-            fails.append(f"focus sheet {nm}: round numbers in an installed-only sheet: {hits[:3]}")
     by_sheet = {(x["group"], x["theme"]): x for x in sheets if x["page"] == 1}
     by_sheet.update(own)
     by_strip = {(x["name"], x["theme"]): x for x in strips}

@@ -475,7 +475,7 @@ SCOPES = {
     "app-icon": dict(
         title="The app icon",
         sessions=["icons", "firstplay-noart", "icon-noart24"],
-        # the installed icon per size first; the history (before, squint, variants) below in the facts
+        # the installed icon per size first; the squint row and the variants below in the facts
         lead_table=dict(
             prefix="appicon-table-", title="The installed icon per size",
             note="Each size at 1x with the file Plasma's icon lookup takes (real hicolor index; \"scaled\": drawn at another "
@@ -498,12 +498,12 @@ SCOPES = {
                          f"{', '.join(map(str, f['air_clear']))} / {', '.join(map(str, f['air_faint']))} (x {f.get('air_col')})"
                          if isinstance(f.get("air_clear"), list) else "-")), ("contrast to the tile", lambda f: ", ".join(f"{v}:1" for v in f["contrast"]))]),
         # the evidence rule: a blocking flaw must show at 1:1 in a real context; so the 1:1 real-context sheets
-        # lead, the magnified ones follow (supporting evidence), the history last. the variants (only with
+        # lead, the magnified ones follow (supporting evidence). the variants (only with
         # SHOT_ICON_VARIANTS=1) after the installed sheets; the vision sheet gives way to them (8 images at most)
         sheets=[
             ("focus-icon-small", "1:1 where Plasma shows the icon small: the title bar, 24 px on a 32 px strip, a 16 px "
-             "menu, a 22 px task-switcher list, the task manager at 32 px on a 44 px panel (not playing, playing, active), "
-             "36 px on a 52 px panel; apart, a 2x crop of the playing cell; Breeze Dark above Breeze Light",
+             "menu, a 22 px task switcher, the task manager at 32 px on a 44 px panel (idle, playing, active) and 36 px "
+             "on a 52 px panel; a 2x crop of the playing cell; Breeze Dark above Breeze Light",
              "dark", [[("appicon", "ctx-small", None, "Breeze Dark")], [("appicon", "ctx-small", None, "Breeze Light", dict(theme="light"))]]),
             ("focus-icon-large", "1:1 where Plasma shows the icon large: a 48 px launcher with LabPlot and KmPlot, Alt-Tab "
              "at 64 px, an About page at 128 px, among media players at 32 and 48 px; Breeze Dark above Breeze Light", "dark",
@@ -540,15 +540,6 @@ SCOPES = {
                ("appicon", "drift", None, "Breeze Light", dict(theme="light", lh=16, gap=6))],
               [("appicon", "squint", None, "Breeze Dark", dict(lh=16, gap=6))],
               [("appicon", "squint", None, "Breeze Light", dict(theme="light", lh=16, gap=6))]]),
-            ("focus-icon-history", "Magnified: the 4th harmonic at 128/256 px with the true 3rd and 4th drawn over it, and "
-             "its end at 4x without overlay (dark, light). Then the history: the previous round's icon vs installed at "
-             "16-128 px with the squint row", "dark",
-             [[("appicon", "h4true", None, "True harmonics, Breeze Dark", dict(lh=16, gap=6))],
-              [("appicon", "h4end", None, "The end, Breeze Dark", dict(lh=16, gap=6)),
-               ("appicon", "h4end", None, "Breeze Light", dict(theme="light", lh=16, gap=6))],
-              [("appicon", "compare20", None, "History, Breeze Dark", dict(lh=16, gap=6))],
-              [("details", "glyph-history", None, "Mode glyph, Breeze Dark", dict(optional=True))],
-              [("details", "glyph-history", None, "Mode glyph, Breeze Light", dict(theme="light", optional=True))]]),
         ],
         images=[
             ("sheet", "focus-icon-small", "dark", "1:1 real context, 16-36 px: title bar, 24 px strip, menu, task switcher, panel",
@@ -567,10 +558,7 @@ SCOPES = {
              "each file's pixels (supporting evidence only)"),
             ("sheet", "focus-icon-vision", "dark", "Colour vision, the 64 px drawing at 32 vs the 32 px file, the squint row",
              "the traces apart without red-green and in grey", dict(unless="focus-icon-variants")),
-            ("sheet", "focus-icon-history", "dark", "Magnified 4th harmonic (true harmonics; its end, clean); then the history",
-             "how far the drawn 4th sits from the true one and how its end meets the edge; what changed since the last round"),
         ],
-        history=["focus-icon-history"],  # the only sheet that may name the previous round
         facts=["appicon", "motif"],
         contrast={},
     ),
