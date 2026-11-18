@@ -331,18 +331,30 @@ void TagEditorSmokeTest::tagEditorOpensALargeSelectionWithoutBuildingEveryRow() 
     QObject *dialog = findObjectByStringProperty(window, "title", QStringLiteral("Edit Tags"));
     QVERIFY(dialog != nullptr);
 
-    QSignalSpy frames(window, &QQuickWindow::frameSwapped);
-    QElapsedTimer timer;
-    timer.start();
-    QVERIFY(openTagEditor(editor));
-    QTRY_VERIFY(!editor.loading());
-    const qint64 loadedMs = timer.elapsed();
-    frames.clear();
-    QTRY_VERIFY(frames.count() > 0);
-    const qint64 firstFrameMs = timer.elapsed();
-    // Edit Tags has a window of its own.
+    // Edit Tags has a window of its own: the time of its first frame once
+    // the rows have loaded, each noted as it happens, so that a frame drawn
+    // before a wait sees the load end still counts.
     QQuickWindow *tags = qobject_cast<QQuickWindow *>(dialog);
     QVERIFY(tags != nullptr);
+    QElapsedTimer timer;
+    qint64 loadedMs = -1;
+    qint64 firstFrameMs = -1;
+    const QMetaObject::Connection loadEnd = QObject::connect(
+        &editor, &TagEditorController::loadingChanged, &editor, [&]() {
+            if (!editor.loading() && loadedMs < 0) {
+                loadedMs = timer.elapsed();
+            }
+        });
+    const auto stopNoting = qScopeGuard([&] { QObject::disconnect(loadEnd); });
+    const FrameSampler frames(tags, [&]() {
+        if (loadedMs >= 0 && firstFrameMs < 0) {
+            firstFrameMs = timer.elapsed();
+        }
+    });
+    timer.start();
+    QVERIFY(openTagEditor(editor));
+    QTRY_VERIFY(loadedMs >= 0);
+    QTRY_VERIFY(firstFrameMs >= 0);
     const int rowItems = tagEditorRowItemCount(tags);
     qInfo("tag editor: %d rows loaded in %lld ms, first frame after %lld ms, %d row items",
           kRows, static_cast<long long>(loadedMs), static_cast<long long>(firstFrameMs), rowItems);
