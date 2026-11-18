@@ -90,6 +90,9 @@
 #include "../src/SpectrogramSeekTrace.h"
 #include "../src/WaveformSceneGraph.h"
 #include "../src/WindowActivation.h"
+#include "TestItems.h"
+#include "TestMessages.h"
+#include "TestMotion.h"
 #include "TestPlatform.h"
 #include "TestUserDirectories.h"
 #include "WaveformReaderLog.h"
@@ -271,14 +274,6 @@ QByteArray sampleArtistAlbumTreeBinary(quint64 albumCoverStamp = 0);
 
 QString formatQmlErrors(const QList<QQmlError> &errors);
 
-QMutex &capturedMessageMutex();
-
-QStringList &capturedMessages();
-
-void clearCapturedMessages();
-
-QString takeCapturedMessagesText();
-
 QObject *findObjectByStringProperty(QObject *root, const char *propertyName, const QString &expectedValue);
 
 QQuickItem *findQuickItemByObjectName(QQuickItem *root, const QString &objectName);
@@ -345,12 +340,6 @@ QStringList errorHistoryMessages(QObject *errors);
 
 // The shown text items under `root` whose text is `text`.
 QList<QQuickItem *> visibleTextItems(QQuickItem *root, const QString &text);
-
-// The items named `objectName` under `root`, in the order of the item tree.
-QList<QQuickItem *> itemsNamed(QQuickItem *root, const QString &objectName);
-
-// The first item named `objectName` under `root`.
-QQuickItem *itemNamed(QQuickItem *root, const QString &objectName);
 
 // The first item named `objectName` that is visible in `window`.
 QQuickItem *visibleItemNamed(QQuickWindow *window, const QString &objectName);

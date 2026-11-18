@@ -137,14 +137,6 @@ bool makeScrobbleHarness(ScrobbleHarness &harness, QString *error) {
     return harness.bridge != nullptr && harness.indicator != nullptr;
 }
 
-// What `expression` evaluates to on `item`, or nothing.
-QVariant evaluateOn(QQuickItem *item, const QString &expression) {
-    QQmlExpression evaluated(qmlContext(item), item, expression);
-    bool undefined = false;
-    const QVariant value = evaluated.evaluate(&undefined);
-    return evaluated.hasError() || undefined ? QVariant() : value;
-}
-
 } // namespace
 
 void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
@@ -408,7 +400,7 @@ void ScrobbleSmokeTest::scrobbleIndicatorBarMovesBySecondsWhileListening() {
     QCOMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(),
              QStringLiteral("Last.fm: 1:00 to scrobble"));
     int frames = 0;
-    connect(harness.window, &QQuickWindow::frameSwapped, harness.window, [&frames]() { ++frames; });
+    const FrameSampler counting(harness.window, [&frames]() { ++frames; });
     // Lets the window draw what it has to.
     const auto settle = [&frames]() {
         int seen = -1;

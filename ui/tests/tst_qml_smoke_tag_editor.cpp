@@ -210,13 +210,6 @@ QStringList tagEditorCellTexts(QQuickItem *row) {
     return texts;
 }
 
-QVariant evaluateOn(QQuickItem *item, const QString &expression) {
-    QQmlExpression evaluated(qmlContext(item), item, expression);
-    bool undefined = false;
-    const QVariant value = evaluated.evaluate(&undefined);
-    return evaluated.hasError() || undefined ? QVariant() : value;
-}
-
 bool isDefaultButton(QQuickItem *button) {
     return evaluateOn(button, QStringLiteral("Accessible.defaultButton")).toBool();
 }

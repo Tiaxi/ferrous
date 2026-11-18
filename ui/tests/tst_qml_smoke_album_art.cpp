@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "QmlSmokeTest.h"
+#include "TestColor.h"
 
 #include <QFontInfo>
 #include <QFontMetricsF>
@@ -1982,8 +1983,7 @@ bool openItunesArtworkDialog(QQuickWindow *window, QObject *dialog, QObject *fak
 // Drops what the offscreen platform says when a window's least size
 // changes, as a dialog's does with a larger font: it does not support it.
 void dropSizeHintMessages() {
-    QMutexLocker locker(&capturedMessageMutex());
-    capturedMessages().removeAll(QStringLiteral("This plugin does not support propagateSizeHints()"));
+    dropCapturedMessages(offscreenSizeHintsWarning());
 }
 
 // Whether `item` is `ancestor` or inside it.
@@ -2335,10 +2335,6 @@ QStringList visibleTextsIn(QQuickItem *root) {
     };
     visit(root);
     return texts;
-}
-
-QString describeRect(const QRectF &rect) {
-    return QStringLiteral("%1,%2 %3x%4").arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
 }
 
 } // namespace
@@ -4153,27 +4149,10 @@ void AlbumArtSmokeTest::itunesAppliedCoverGivesWayWhenTheSameTrackPlaysAgain() {
 
 namespace {
 
-// WCAG's relative luminance and contrast ratio of opaque colours.
-qreal relativeLuminance(QRgb rgb) {
-    const auto channel = [](int value) {
-        const qreal c = value / 255.0;
-        return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
-    };
-    return 0.2126 * channel(qRed(rgb)) + 0.7152 * channel(qGreen(rgb)) + 0.0722 * channel(qBlue(rgb));
-}
-
-// `color` drawn over the opaque `background`.
-QRgb drawnOver(QRgb color, QRgb background) {
-    const qreal alpha = qAlpha(color) / 255.0;
-    const auto mix = [alpha](int top, int bottom) { return int(std::lround(top * alpha + bottom * (1 - alpha))); };
-    return qRgb(mix(qRed(color), qRed(background)), mix(qGreen(color), qGreen(background)),
-                mix(qBlue(color), qBlue(background)));
-}
-
+// WCAG's contrast ratio of `color`, with its alpha, drawn over the opaque
+// `background`, against that background.
 qreal contrastOn(QRgb color, QRgb background) {
-    const qreal a = relativeLuminance(drawnOver(color, background));
-    const qreal b = relativeLuminance(background);
-    return (qMax(a, b) + 0.05) / (qMin(a, b) + 0.05);
+    return contrastRatio(drawnOver(QColor::fromRgba(color), QColor(background)), QColor(background));
 }
 
 QRgb borderColorOf(QQuickItem *rectangle) {
@@ -4356,7 +4335,7 @@ void AlbumArtSmokeTest::albumArtViewerIsBlackAroundTheArtInALightTheme() {
     // Their focus ring is 3:1 on what they sit on.
     const QRgb controlsBackground = viewerMode == 1
         ? colorOf(plot, "plotStrip")
-        : drawnOver(colorOf(plot, "plotPlate"), colorOf(plot, "plotBg"));
+        : drawnOver(QColor::fromRgba(colorOf(plot, "plotPlate")), QColor(colorOf(plot, "plotBg"))).rgb();
     QVERIFY(contrastOn(colorOf(plot, "plotFocusRing"), controlsBackground) >= 3.0);
     QVERIFY(contrastOn(colorOf(plot, "plotText"), controlsBackground) >= 4.5);
 

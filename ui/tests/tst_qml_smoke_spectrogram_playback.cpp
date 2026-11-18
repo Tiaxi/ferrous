@@ -3660,7 +3660,7 @@ void SpectrogramPlaybackSmokeTest::spectrogramIdleViewDrawsOnlyFramesThatDiffer(
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     int frames = 0;
-    connect(&window, &QQuickWindow::frameSwapped, &window, [&frames]() { ++frames; });
+    const FrameSampler counting(&window, [&frames]() { ++frames; });
     auto *idle = new SpectrogramItem(window.contentItem());
     prepareWholeTrackPlayback(*idle, 50.0);
     QTest::qWait(300);
@@ -3756,8 +3756,7 @@ void SpectrogramPlaybackSmokeTest::spectrogramPlaybackBenchmark() {
         setTestPosition(*item, scenario.position);
         QTest::qWait(500);
         int frames = 0;
-        const auto connection = connect(&window, &QQuickWindow::frameSwapped, &window,
-            [&frames]() { ++frames; });
+        FrameSampler connection(&window, [&frames]() { ++frames; });
         // The renderer's time for each frame, on the render thread.
         QMutex renderMutex;
         QElapsedTimer renderTimer;
@@ -3773,7 +3772,7 @@ void SpectrogramPlaybackSmokeTest::spectrogramPlaybackBenchmark() {
         elapsed.start();
         QTest::qWait(2000);
         const double framesPerSecond = frames / (static_cast<double>(elapsed.nsecsElapsed()) / 1e9);
-        disconnect(connection);
+        connection.stop();
         disconnect(renderStarted);
         disconnect(renderEnded);
         double renderMean = 0.0;

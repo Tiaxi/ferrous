@@ -43,43 +43,15 @@
 
 #include "InputModality.h"
 #include "Localization.h"
+#include "TestColor.h"
+#include "TestItems.h"
+#include "TestMessages.h"
+#include "TestMotion.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 #include "WaveformItem.h"
 
 namespace {
-
-QMutex &messageMutex() {
-    static QMutex mutex;
-    return mutex;
-}
-
-QStringList &warnings() {
-    static QStringList list;
-    return list;
-}
-
-QtMessageHandler &previousHandler() {
-    static QtMessageHandler handler = nullptr;
-    return handler;
-}
-
-void recordWarnings(QtMsgType type, const QMessageLogContext &context, const QString &message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg) {
-        QMutexLocker locker(&messageMutex());
-        warnings().push_back(message);
-    }
-    if (previousHandler()) {
-        previousHandler()(type, context, message);
-    }
-}
-
-QStringList takeWarnings() {
-    QMutexLocker locker(&messageMutex());
-    QStringList list = warnings();
-    warnings().clear();
-    return list;
-}
 
 // The colours of a Breeze scheme that UiPalette reads, from Breeze's
 // .colors files.
@@ -332,13 +304,6 @@ struct Harness {
     }
 };
 
-QVariant evaluateOn(QQuickItem *item, const QString &expression) {
-    QQmlExpression evaluated(qmlContext(item), item, expression);
-    bool undefined = false;
-    const QVariant value = evaluated.evaluate(&undefined);
-    return evaluated.hasError() || undefined ? QVariant() : value;
-}
-
 // The engine's Kirigami.Units, whose durations Plasma's animation speed
 // sets: with animations off, short is 0 and long is clamped to 1 ms.
 Kirigami::Platform::Units *unitsOf(QQuickItem *item) {
@@ -359,64 +324,10 @@ QString accessibleText(QQuickItem *item, QAccessible::Text text) {
     return accessible != nullptr ? accessible->text(text) : QString();
 }
 
-QRectF sceneRect(QQuickItem *item) {
-    return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
-}
-
-QPoint sceneCentre(QQuickItem *item) {
-    return sceneRect(item).center().toPoint();
-}
-
-// `top` drawn over the opaque `bottom`.
-QColor drawnOver(const QColor &top, const QColor &bottom) {
-    const double alpha = top.alphaF();
-    return QColor::fromRgbF(static_cast<float>(top.redF() * alpha + bottom.redF() * (1.0 - alpha)),
-                            static_cast<float>(top.greenF() * alpha + bottom.greenF() * (1.0 - alpha)),
-                            static_cast<float>(top.blueF() * alpha + bottom.blueF() * (1.0 - alpha)));
-}
-
-QColor mixed(const QColor &a, const QColor &b, double amount) {
-    return QColor::fromRgbF(static_cast<float>(a.redF() * (1.0 - amount) + b.redF() * amount),
-                            static_cast<float>(a.greenF() * (1.0 - amount) + b.greenF() * amount),
-                            static_cast<float>(a.blueF() * (1.0 - amount) + b.blueF() * amount));
-}
-
 QColor withAlpha(const QColor &color, double alpha) {
     QColor result = color;
     result.setAlphaF(static_cast<float>(alpha));
     return result;
-}
-
-// The largest difference of the colours' 8-bit channels.
-int channelDistance(const QColor &a, const QColor &b) {
-    const auto channel = [](double value) { return static_cast<int>(std::lround(value * 255.0)); };
-    return std::max({std::abs(channel(a.redF()) - channel(b.redF())),
-                     std::abs(channel(a.greenF()) - channel(b.greenF())),
-                     std::abs(channel(a.blueF()) - channel(b.blueF()))});
-}
-
-bool sameColor(const QColor &a, const QColor &b) {
-    return channelDistance(a, b) == 0 && std::lround(a.alphaF() * 255.0) == std::lround(b.alphaF() * 255.0);
-}
-
-// WCAG's relative luminance and contrast ratio of opaque colours.
-double relativeLuminance(const QColor &color) {
-    const auto linear = [](double channel) {
-        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
-    };
-    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
-}
-
-double contrastRatio(const QColor &a, const QColor &b) {
-    const double la = relativeLuminance(a);
-    const double lb = relativeLuminance(b);
-    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
-}
-
-QString describe(const QString &what, const QColor &a, const QColor &b) {
-    return QStringLiteral("%1: %2 on %3 is %4:1")
-        .arg(what, a.name(QColor::HexArgb), b.name(QColor::HexArgb))
-        .arg(contrastRatio(a, b), 0, 'f', 2);
 }
 
 QColor pixelAt(const QImage &image, const QPointF &scenePoint, qreal scale) {
@@ -443,16 +354,6 @@ QImage grabbed(QQuickWindow *window, qreal *scale) {
 qreal playheadLeftAt(QQuickItem *seek, double fraction) {
     const QRectF bar = sceneRect(seek);
     return bar.left() + std::round(fraction * (std::floor(bar.width() + 1e-6) - 2.0));
-}
-
-// Whether `inner` lies within `outer`, give or take half a pixel.
-bool within(const QRectF &inner, const QRectF &outer) {
-    return inner.left() >= outer.left() - 0.5 && inner.right() <= outer.right() + 0.5
-        && inner.top() >= outer.top() - 0.5 && inner.bottom() <= outer.bottom() + 0.5;
-}
-
-QString describeRect(const QRectF &rect) {
-    return QStringLiteral("%1,%2 %3x%4").arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
 }
 
 } // namespace
@@ -534,7 +435,7 @@ private slots:
 };
 
 void TransportStatusTest::initTestCase() {
-    previousHandler() = qInstallMessageHandler(recordWarnings);
+    startCapturingMessages();
     QVERIFY2(!QStandardPaths::locate(QStandardPaths::GenericDataLocation,
                                      QStringLiteral("icons/breeze/index.theme"))
                   .isEmpty(),
@@ -542,7 +443,7 @@ void TransportStatusTest::initTestCase() {
 }
 
 void TransportStatusTest::cleanup() {
-    const QStringList list = takeWarnings();
+    const QStringList list = takeCapturedMessages();
     QVERIFY2(list.isEmpty(), qPrintable(list.join(QLatin1Char('\n'))));
 }
 
@@ -735,17 +636,16 @@ void TransportStatusTest::playPauseGlyphsCrossFadeWithoutABlink() {
     QString failure;
     int frames = 0;
     int framesWithBoth = 0;
-    const QMetaObject::Connection connection =
-        QObject::connect(harness.window, &QQuickWindow::frameSwapped, harness.window, [&]() {
-            ++frames;
-            if (drawn(play) > 0.0 && drawn(pause) > 0.0) {
-                ++framesWithBoth;
-            }
-            if (failure.isEmpty() && combined() < 0.6) {
-                failure = QStringLiteral("combined ink %1 at frame %2: play %3, pause %4")
-                              .arg(combined()).arg(frames).arg(drawn(play)).arg(drawn(pause));
-            }
-        });
+    FrameSampler connection(harness.window, [&]() {
+        ++frames;
+        if (drawn(play) > 0.0 && drawn(pause) > 0.0) {
+            ++framesWithBoth;
+        }
+        if (failure.isEmpty() && combined() < 0.6) {
+            failure = QStringLiteral("combined ink %1 at frame %2: play %3, pause %4")
+                          .arg(combined()).arg(frames).arg(drawn(play)).arg(drawn(pause));
+        }
+    });
     const auto check = [&](const char *where) {
         QVERIFY2(combined() >= 0.6, where);
     };
@@ -783,7 +683,7 @@ void TransportStatusTest::playPauseGlyphsCrossFadeWithoutABlink() {
     QCOMPARE(pause->opacity(), 1.0);
     QCOMPARE(play->opacity(), 0.0);
     QVERIFY(!play->isVisible());
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
 
@@ -923,13 +823,13 @@ void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn() {
     // light on the Header colours), and the played part more, a clear step
     // apart, so the two tones stay two.
     const double unplayedContrast = contrastRatio(drawnUnplayed, drawnChrome);
-    QVERIFY2(unplayedContrast >= 3.15, qPrintable(describe(QStringLiteral("unplayed"), drawnUnplayed, drawnChrome)));
+    QVERIFY2(unplayedContrast >= 3.15, qPrintable(describeContrast(QStringLiteral("unplayed"), drawnUnplayed, drawnChrome)));
     QVERIFY2(measured <= 0 || contrastRatio(drawnPlayed, drawnUnplayed) >= 2.2,
-             qPrintable(describe(QStringLiteral("played on unplayed"), drawnPlayed, drawnUnplayed)));
+             qPrintable(describeContrast(QStringLiteral("played on unplayed"), drawnPlayed, drawnUnplayed)));
     QVERIFY2(measured <= 0 || std::abs(unplayedContrast - measured) < 0.1,
-             qPrintable(describe(QStringLiteral("unplayed"), drawnUnplayed, drawnChrome)));
+             qPrintable(describeContrast(QStringLiteral("unplayed"), drawnUnplayed, drawnChrome)));
     QVERIFY2(contrastRatio(drawnPlayed, drawnChrome) >= 4.5,
-             qPrintable(describe(QStringLiteral("played"), drawnPlayed, drawnChrome)));
+             qPrintable(describeContrast(QStringLiteral("played"), drawnPlayed, drawnChrome)));
     // The casing separates the line from the played part by luminance.
     for (const QColor &casingColor : {drawnCasingLeft, drawnCasingRight}) {
         QVERIFY2(channelDistance(casingColor, drawnOver(casing->property("color").value<QColor>(), expectedPlayed)) <= 2
@@ -937,12 +837,12 @@ void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn() {
                                         drawnOver(casing->property("color").value<QColor>(), expectedUnplayed)) <= 2,
                  qPrintable(casingColor.name()));
         QVERIFY2(contrastRatio(casingColor, drawnLine) >= 3.0,
-                 qPrintable(describe(QStringLiteral("line on its casing"), drawnLine, casingColor)));
+                 qPrintable(describeContrast(QStringLiteral("line on its casing"), drawnLine, casingColor)));
     }
     QVERIFY2(contrastRatio(drawnCasingLeft, drawnPlayed) >= 3.0,
-             qPrintable(describe(QStringLiteral("casing on the played part"), drawnCasingLeft, drawnPlayed)));
+             qPrintable(describeContrast(QStringLiteral("casing on the played part"), drawnCasingLeft, drawnPlayed)));
     QVERIFY2(contrastRatio(drawnLine, drawnChrome) >= 3.0,
-             qPrintable(describe(QStringLiteral("playhead"), drawnLine, drawnChrome)));
+             qPrintable(describeContrast(QStringLiteral("playhead"), drawnLine, drawnChrome)));
 }
 
 void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
@@ -1080,7 +980,7 @@ void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar() {
     const QColor ringColor = evaluateOn(ring, QStringLiteral("border.color")).value<QColor>();
     QVERIFY(sameColor(ringColor, harness.token("focusRing")));
     QVERIFY2(contrastRatio(ringColor, harness.transportChrome()) >= 3.0,
-             qPrintable(describe(QStringLiteral("focus ring"), ringColor, harness.transportChrome())));
+             qPrintable(describeContrast(QStringLiteral("focus ring"), ringColor, harness.transportChrome())));
     // Left and Right seek by 5 s.
     QTest::keyClick(harness.window, Qt::Key_Right);
     const QVariantList seeks = harness.root->property("seeks").value<QJSValue>().toVariant().toList();
@@ -1335,7 +1235,7 @@ void TransportStatusTest::transportButtonsDrawTheAppsFocusRing() {
         const QColor ringColor = evaluateOn(ring, QStringLiteral("border.color")).value<QColor>();
         QVERIFY(sameColor(ringColor, harness.token("focusRing")));
         QVERIFY2(contrastRatio(ringColor, chrome) >= 3.0,
-                 qPrintable(describe(name, ringColor, chrome)));
+                 qPrintable(describeContrast(name, ringColor, chrome)));
         harness.item(QStringLiteral("seekSlider"))->forceActiveFocus(Qt::TabFocusReason);
         QTRY_VERIFY2(!ring->isVisible(), qPrintable(name));
     }
@@ -1376,11 +1276,11 @@ void TransportStatusTest::transportPressedReadsApartFromHover() {
     const QColor hoverDrawn = drawnOver(hover, chrome);
     const QColor pressedDrawn = drawnOver(pressed, chrome);
     QVERIFY2(contrastRatio(hoverDrawn, chrome) >= 1.3,
-             qPrintable(describe(QStringLiteral("hover on the chrome"), hoverDrawn, chrome)));
+             qPrintable(describeContrast(QStringLiteral("hover on the chrome"), hoverDrawn, chrome)));
     QVERIFY2(contrastRatio(pressedDrawn, chrome) >= 1.65,
-             qPrintable(describe(QStringLiteral("pressed on the chrome"), pressedDrawn, chrome)));
+             qPrintable(describeContrast(QStringLiteral("pressed on the chrome"), pressedDrawn, chrome)));
     QVERIFY2(contrastRatio(pressedDrawn, hoverDrawn) >= 1.2,
-             qPrintable(describe(QStringLiteral("pressed on hover"), pressedDrawn, hoverDrawn)));
+             qPrintable(describeContrast(QStringLiteral("pressed on hover"), pressedDrawn, hoverDrawn)));
 
     QQuickItem *button = harness.item(QStringLiteral("transportButton_previous"));
     QVERIFY(button != nullptr);
@@ -1408,7 +1308,7 @@ void TransportStatusTest::transportPressedReadsApartFromHover() {
     QCOMPARE(std::lround(windowPressed.alphaF() * 100), dark ? 17L : 25L);
     QVERIFY(QMetaObject::invokeMethod(harness.errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 0),
                                       Q_ARG(QVariant, QString()), Q_ARG(QVariant, QStringLiteral("first"))));
-    takeWarnings(); // The controller logs each report as a warning.
+    takeCapturedMessages(); // The controller logs each report as a warning.
     harness.bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
     harness.bridge->setProperty("lastFmScrobbleState", 1);
     for (const auto &[name, backgroundName] :
@@ -1799,9 +1699,9 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QCOMPARE(evaluateOn(thumb, QStringLiteral("border.width")).toInt(), 0);
     // As drawn: the unfilled groove 3:1 on the chrome, as the unplayed
     // waveform is, and the thumb and the filled part more.
-    QVERIFY2(contrastRatio(unplayed, chrome) >= 3.0, qPrintable(describe(QStringLiteral("unfilled"), unplayed, chrome)));
+    QVERIFY2(contrastRatio(unplayed, chrome) >= 3.0, qPrintable(describeContrast(QStringLiteral("unfilled"), unplayed, chrome)));
     QVERIFY2(contrastRatio(played, chrome) > contrastRatio(unplayed, chrome),
-             qPrintable(describe(QStringLiteral("filled"), played, chrome)));
+             qPrintable(describeContrast(QStringLiteral("filled"), played, chrome)));
     qreal scale = 1;
     const QImage image = grabbed(harness.window, &scale);
     const QRectF thumbRect = sceneRect(thumb);
@@ -1830,7 +1730,7 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QCOMPARE(sceneRect(ring), sceneRect(thumb).adjusted(-3, -3, 3, 3));
     QVERIFY(sameColor(evaluateOn(ring, QStringLiteral("border.color")).value<QColor>(), harness.token("focusRing")));
     QVERIFY2(contrastRatio(harness.token("focusRing"), chrome) >= 3.0,
-             qPrintable(describe(QStringLiteral("volume focus"), harness.token("focusRing"), chrome)));
+             qPrintable(describeContrast(QStringLiteral("volume focus"), harness.token("focusRing"), chrome)));
     QTRY_VERIFY(tip->property("visible").toBool());
     // A key's step is the slider's tenth.
     QTest::keyClick(harness.window, Qt::Key_Left);
@@ -2506,13 +2406,12 @@ void TransportStatusTest::statusBarScanWithoutATotalIsStill() {
         // Once the window has drawn the row laid out for the count.
         QVERIFY(QTest::qWaitForWindowExposed(harness.window));
         int frames = 0;
-        const QMetaObject::Connection counting = QObject::connect(
-            harness.window, &QQuickWindow::frameSwapped, harness.window, [&frames]() { ++frames; });
+        FrameSampler counting(harness.window, [&frames]() { ++frames; });
         harness.window->update();
         QTRY_VERIFY(frames > 0);
         const QList<QRectF> before = geometry();
         QTest::qWait(300);
-        QObject::disconnect(counting);
+        counting.stop();
         QCOMPARE(geometry(), before);
 
         // The walk has ended: the files it found are the total, and the bar
@@ -2563,7 +2462,7 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     const QColor troughColor = trough->property("color").value<QColor>();
     QCOMPARE(troughColor.alphaF(), 1.0F);
     QVERIFY2(contrastRatio(troughColor, harness.token("chrome")) >= 3.0,
-             qPrintable(describe(QStringLiteral("trough"), troughColor, harness.token("chrome"))));
+             qPrintable(describeContrast(QStringLiteral("trough"), troughColor, harness.token("chrome"))));
     QVERIFY(bar->isVisible());
     QCOMPARE(bar->position(), QPointF(0, 0));
     QCOMPARE(bar->height(), 3.0);
@@ -2672,7 +2571,7 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("text")));
     QCOMPARE(label->property("font").value<QFont>().weight(), QFont::Normal);
     QVERIFY2(contrastRatio(negative, harness.token("chrome")) >= 3.0,
-             qPrintable(describe(QStringLiteral("failed glyph"), negative, harness.token("chrome"))));
+             qPrintable(describeContrast(QStringLiteral("failed glyph"), negative, harness.token("chrome"))));
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm didn't accept the scrobble: Invalid session key"));
 
     // Paused by the user: the glyph struck through, quieter, without the
@@ -2846,18 +2745,18 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
     const QColor fill = harness.token("textSecondary");
     const QColor trough = slot->property("troughColor").value<QColor>();
     QCOMPARE(trough.alphaF(), 1.0F);
-    QVERIFY2(contrastRatio(fill, chrome) >= 3.0, qPrintable(describe(QStringLiteral("bar"), fill, chrome)));
-    QVERIFY2(contrastRatio(trough, chrome) >= 3.0, qPrintable(describe(QStringLiteral("trough"), trough, chrome)));
+    QVERIFY2(contrastRatio(fill, chrome) >= 3.0, qPrintable(describeContrast(QStringLiteral("bar"), fill, chrome)));
+    QVERIFY2(contrastRatio(trough, chrome) >= 3.0, qPrintable(describeContrast(QStringLiteral("trough"), trough, chrome)));
     const QColor thirtyFive = mixed(chrome, harness.token("text"), 0.35);
     if (contrastRatio(thirtyFive, chrome) >= 3.1) {
         QVERIFY2(channelDistance(trough, thirtyFive) <= 1, qPrintable(trough.name() + QStringLiteral(" vs ") + thirtyFive.name()));
     } else {
         // Only as much nearer the text as 3:1 takes.
-        QVERIFY2(contrastRatio(trough, chrome) < 3.3, qPrintable(describe(QStringLiteral("trough"), trough, chrome)));
+        QVERIFY2(contrastRatio(trough, chrome) < 3.3, qPrintable(describeContrast(QStringLiteral("trough"), trough, chrome)));
     }
     // The bar stands out from the trough as clearly as the trough from the
     // chrome, and is further from the chrome.
-    QVERIFY2(contrastRatio(fill, trough) >= 1.9, qPrintable(describe(QStringLiteral("bar on trough"), fill, trough)));
+    QVERIFY2(contrastRatio(fill, trough) >= 1.9, qPrintable(describeContrast(QStringLiteral("bar on trough"), fill, trough)));
     QVERIFY(contrastRatio(fill, chrome) > contrastRatio(trough, chrome) * 1.9);
 
     // The 2 px gap under the glyph's ink, the trough's 3 px rows across the
@@ -3503,7 +3402,7 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QCOMPARE(stopped->property("text").toString(), QStringLiteral("Playback engine stopped"));
     QTRY_VERIFY(treatedAsAnError(stopped));
     QVERIFY2(contrastRatio(harness.token("negative"), harness.token("chrome")) >= 3.0,
-             qPrintable(describe(QStringLiteral("glyph"), harness.token("negative"), harness.token("chrome"))));
+             qPrintable(describeContrast(QStringLiteral("glyph"), harness.token("negative"), harness.token("chrome"))));
 }
 
 void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
@@ -3556,7 +3455,7 @@ void TransportStatusTest::issuesButtonShowsNewSeenAndOpen() {
                                       Q_ARG(QVariant, QString()), Q_ARG(QVariant, QStringLiteral("first"))));
     QVERIFY(QMetaObject::invokeMethod(harness.errors, "report", Q_ARG(QVariant, 2), Q_ARG(QVariant, 1),
                                       Q_ARG(QVariant, QString()), Q_ARG(QVariant, QStringLiteral("second"))));
-    takeWarnings(); // The controller logs each report as a warning.
+    takeCapturedMessages(); // The controller logs each report as a warning.
     QTRY_VERIFY(button->isVisible());
     QCOMPARE(label->property("text").toString(), QStringLiteral("2 new issues"));
     // The status bar's one treatment of an error (#373 H11): a 16 px glyph
@@ -3568,7 +3467,7 @@ void TransportStatusTest::issuesButtonShowsNewSeenAndOpen() {
     const QColor negative = harness.token("negative");
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), negative));
     QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("text")));
-    QVERIFY2(contrastRatio(negative, chrome) >= 3.0, qPrintable(describe(QStringLiteral("new glyph"), negative, chrome)));
+    QVERIFY2(contrastRatio(negative, chrome) >= 3.0, qPrintable(describeContrast(QStringLiteral("new glyph"), negative, chrome)));
     // 6 px from the status bar's end.
     QTRY_COMPARE(sceneRect(status).right() - sceneRect(button).right(), 6.0);
 
@@ -3587,9 +3486,9 @@ void TransportStatusTest::issuesButtonShowsNewSeenAndOpen() {
     QCOMPARE(label->property("text").toString(), QStringLiteral("2 new issues"));
     const QColor onTint = drawnOver(withAlpha(harness.token("text"), 0.10), chrome);
     QVERIFY2(contrastRatio(harness.token("text"), onTint) >= 4.5,
-             qPrintable(describe(QStringLiteral("issues on the tint"), harness.token("text"), onTint)));
+             qPrintable(describeContrast(QStringLiteral("issues on the tint"), harness.token("text"), onTint)));
     QVERIFY2(contrastRatio(negative, onTint) >= 3.0,
-             qPrintable(describe(QStringLiteral("glyph on the tint"), negative, onTint)));
+             qPrintable(describeContrast(QStringLiteral("glyph on the tint"), negative, onTint)));
 
     // Seen: "3 issues" in the secondary colour.
     QVERIFY(QMetaObject::invokeMethod(harness.errors, "markSeen"));
@@ -3599,12 +3498,12 @@ void TransportStatusTest::issuesButtonShowsNewSeenAndOpen() {
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY2(contrastRatio(harness.token("textSecondary"), chrome) >= 4.5,
-             qPrintable(describe(QStringLiteral("seen issues"), harness.token("textSecondary"), chrome)));
+             qPrintable(describeContrast(QStringLiteral("seen issues"), harness.token("textSecondary"), chrome)));
 
     // A repeat is new again.
     QVERIFY(QMetaObject::invokeMethod(harness.errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 0),
                                       Q_ARG(QVariant, QString()), Q_ARG(QVariant, QStringLiteral("old"))));
-    takeWarnings();
+    takeCapturedMessages();
     QTRY_COMPARE(label->property("text").toString(), QStringLiteral("1 new issue"));
 }
 
@@ -3619,7 +3518,7 @@ void TransportStatusTest::statusBarHasNoDividers() {
     harness.bridge->setProperty("lastFmScrobbleState", 1);
     QVERIFY(QMetaObject::invokeMethod(harness.errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 0),
                                       Q_ARG(QVariant, QString()), Q_ARG(QVariant, QStringLiteral("issue"))));
-    takeWarnings();
+    takeCapturedMessages();
     QQuickItem *status = harness.item(QStringLiteral("statusBar"));
     QVERIFY(status != nullptr);
     QTRY_VERIFY(harness.item(QStringLiteral("statusBarErrorsButton"))->isVisible());
@@ -3710,7 +3609,7 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
     harness.bridge->setProperty("lastFmScrobbleIneligibility", 3);
     QVERIFY(QMetaObject::invokeMethod(harness.errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 0),
                                       Q_ARG(QVariant, QString()), Q_ARG(QVariant, QStringLiteral("first"))));
-    takeWarnings(); // The controller logs each report as a warning.
+    takeCapturedMessages(); // The controller logs each report as a warning.
     QQuickItem *status = harness.item(QStringLiteral("statusBar"));
     QQuickItem *label = harness.item(QStringLiteral("statusBarPlaybackStateLabel"));
     QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));

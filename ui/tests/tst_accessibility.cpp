@@ -49,6 +49,10 @@
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
 #include "../src/WindowPresence.h"
+#include "TestColor.h"
+#include "TestItems.h"
+#include "TestMessages.h"
+#include "TestMotion.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
@@ -57,44 +61,6 @@ namespace {
 // The controls style that the test program's main() sets, rather than the
 // app's, for a child process that asks for another.
 constexpr char childControlsStyleVariable[] = "FERROUS_TEST_CHILD_CONTROLS_STYLE";
-
-QMutex &capturedMessageMutex() {
-    static QMutex mutex;
-    return mutex;
-}
-
-QStringList &capturedMessages() {
-    static QStringList messages;
-    return messages;
-}
-
-QtMessageHandler &previousMessageHandler() {
-    static QtMessageHandler handler = nullptr;
-    return handler;
-}
-
-void captureQtMessage(QtMsgType type, const QMessageLogContext &context, const QString &message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) {
-        QMutexLocker locker(&capturedMessageMutex());
-        capturedMessages().push_back(message);
-    }
-    if (previousMessageHandler()) {
-        previousMessageHandler()(type, context, message);
-    }
-}
-
-QString takeCapturedMessagesText() {
-    QMutexLocker locker(&capturedMessageMutex());
-    const QString text = capturedMessages().join('\n');
-    capturedMessages().clear();
-    return text;
-}
-
-// Drops the captured messages that are `message`.
-void dropCapturedMessages(const QString &message) {
-    QMutexLocker locker(&capturedMessageMutex());
-    capturedMessages().removeAll(message);
-}
 
 // A larger font widens the columns and raises the window's minimum size
 // with them; the offscreen platform warns that it ignores the new minimum.
@@ -141,20 +107,6 @@ QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &li
     }
     window->requestActivate();
     return QTest::qWaitForWindowActive(window) ? window : nullptr;
-}
-
-QList<QQuickItem *> itemsNamed(QQuickItem *root, const QString &objectName) {
-    QList<QQuickItem *> found;
-    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
-        if (item->objectName() == objectName) {
-            found.push_back(item);
-        }
-        for (QQuickItem *child : item->childItems()) {
-            visit(child);
-        }
-    };
-    visit(root);
-    return found;
 }
 
 // The first visible item named `objectName` in `window`.
@@ -208,15 +160,6 @@ QAccessibleInterface *inAccessibleTree(QQuickWindow *window, QObject *object) {
         return nullptr;
     };
     return visit(QAccessible::queryAccessibleInterface(window));
-}
-
-// Evaluates `expression` in `item`'s own QML scope, as for its attached
-// properties.
-QVariant evaluateOn(QQuickItem *item, const QString &expression) {
-    QQmlExpression evaluated(qmlContext(item), item, expression);
-    bool undefined = false;
-    const QVariant value = evaluated.evaluate(&undefined);
-    return evaluated.hasError() || undefined ? QVariant() : value;
 }
 
 qreal callReal(QObject *object, const char *function) {
@@ -373,7 +316,7 @@ private slots:
 };
 
 void AccessibilityTest::initTestCase() {
-    previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
+    startCapturingMessages();
     FerrousLocalization::setUpApplicationDomain();
     FerrousLocalization::registerQmlTypes();
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
@@ -394,8 +337,7 @@ void AccessibilityTest::cleanup() {
 }
 
 void AccessibilityTest::cleanupTestCase() {
-    qInstallMessageHandler(previousMessageHandler());
-    previousMessageHandler() = nullptr;
+    stopCapturingMessages();
 }
 
 void AccessibilityTest::everyPreferencesPageIsReachableByTab() {
@@ -1417,7 +1359,7 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekUnplayed"));
     QVERIFY(seek != nullptr && line != nullptr && progress != nullptr);
     int frames = 0;
-    connect(window, &QQuickWindow::frameSwapped, window, [&frames]() { ++frames; });
+    const FrameSampler counting(window, [&frames]() { ++frames; });
     QTRY_VERIFY(frames > 0);
     // Waits until the window draws no more frames, for up to five seconds.
     const auto settle = [&frames]() {
@@ -2614,29 +2556,6 @@ ApplicationWindow {
 )QML")
         .arg(window, base, alternateBase, text, highlight, header)
         .toUtf8();
-}
-
-// WCAG's relative luminance of an opaque colour.
-double relativeLuminance(const QColor &color) {
-    const auto linear = [](double channel) {
-        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
-    };
-    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
-}
-
-// WCAG's contrast ratio of two opaque colours.
-double contrastRatio(const QColor &a, const QColor &b) {
-    const double la = relativeLuminance(a);
-    const double lb = relativeLuminance(b);
-    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
-}
-
-// `top` drawn over the opaque `bottom`.
-QColor drawnOver(const QColor &top, const QColor &bottom) {
-    const double alpha = top.alphaF();
-    return QColor::fromRgbF(static_cast<float>(top.redF() * alpha + bottom.redF() * (1.0 - alpha)),
-                            static_cast<float>(top.greenF() * alpha + bottom.greenF() * (1.0 - alpha)),
-                            static_cast<float>(top.blueF() * alpha + bottom.blueF() * (1.0 - alpha)));
 }
 
 } // namespace

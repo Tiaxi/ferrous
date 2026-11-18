@@ -1729,30 +1729,29 @@ void WindowSmokeTest::nowPlayingHoldsTheTrackThatWentAsItShrinks() {
         QString problem;
         QList<std::pair<double, double>> shown;
         double rowAtEnd = 0;
-        const QMetaObject::Connection connection =
-            QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-                if (!panel->property("idle").toBool()) {
-                    return;
-                }
-                const double cover = area->isVisible() && tile->isVisible() ? tile->opacity() : 0.0;
-                const double rowShown = row->isVisible() ? row->opacity() : 0.0;
-                const double linesShown = lines->isVisible() && title->isVisible() ? lines->opacity() : 0.0;
-                shown.push_back({cover, rowShown});
-                rowAtEnd = rowShown;
-                if (!problem.isEmpty()) {
-                    return;
-                }
-                if (cover > 0 && (tile->property("idle").toBool() || !tile->property("hasCover").toBool()
-                                  || tile->property("coverPath").toString() != coverUrl)) {
-                    problem = QStringLiteral("the tile at %1 shows \"%2\"").arg(cover)
-                        .arg(tile->property("coverPath").toString());
-                } else if (linesShown > 0 && title->property("text").toString() != QStringLiteral("A Title")) {
-                    problem = QStringLiteral("the title \"%1\" at %2").arg(title->property("text").toString())
-                        .arg(linesShown);
-                } else if (std::max(cover, rowShown) < 0.49) {
-                    problem = QStringLiteral("the cover %1, the row %2").arg(cover).arg(rowShown);
-                }
-            });
+        FrameSampler connection(window, [&]() {
+            if (!panel->property("idle").toBool()) {
+                return;
+            }
+            const double cover = area->isVisible() && tile->isVisible() ? tile->opacity() : 0.0;
+            const double rowShown = row->isVisible() ? row->opacity() : 0.0;
+            const double linesShown = lines->isVisible() && title->isVisible() ? lines->opacity() : 0.0;
+            shown.push_back({cover, rowShown});
+            rowAtEnd = rowShown;
+            if (!problem.isEmpty()) {
+                return;
+            }
+            if (cover > 0 && (tile->property("idle").toBool() || !tile->property("hasCover").toBool()
+                              || tile->property("coverPath").toString() != coverUrl)) {
+                problem = QStringLiteral("the tile at %1 shows \"%2\"").arg(cover)
+                    .arg(tile->property("coverPath").toString());
+            } else if (linesShown > 0 && title->property("text").toString() != QStringLiteral("A Title")) {
+                problem = QStringLiteral("the title \"%1\" at %2").arg(title->property("text").toString())
+                    .arg(linesShown);
+            } else if (std::max(cover, rowShown) < 0.49) {
+                problem = QStringLiteral("the cover %1, the row %2").arg(cover).arg(rowShown);
+            }
+        });
         // No track: the queue cleared, or played out.
         snapshot.playback.state = 0;
         snapshot.playback.currentPath.clear();
@@ -1761,7 +1760,7 @@ void WindowSmokeTest::nowPlayingHoldsTheTrackThatWentAsItShrinks() {
         QTRY_VERIFY(panel->property("idle").toBool());
         QTRY_VERIFY(!growth->property("running").toBool() && panel->property("presence").toDouble() == 0.0);
         QTest::qWait(50);
-        QObject::disconnect(connection);
+        connection.stop();
         QVERIFY2(problem.isEmpty(), qPrintable(where + QStringLiteral(": ") + problem));
         QVERIFY2(shown.size() >= 3, qPrintable(where + QStringLiteral(": %1 frames").arg(shown.size())));
         // The cover whole at the start, the row whole at the end.

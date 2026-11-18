@@ -58,43 +58,13 @@
 #define private public
 #include "../src/TagEditorController.h"
 #undef private
+#include "TestColor.h"
+#include "TestItems.h"
+#include "TestMessages.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
 namespace {
-
-QMutex &messageMutex() {
-    static QMutex mutex;
-    return mutex;
-}
-
-QStringList &capturedMessages() {
-    static QStringList messages;
-    return messages;
-}
-
-QtMessageHandler &previousHandler() {
-    static QtMessageHandler handler = nullptr;
-    return handler;
-}
-
-void captureMessage(QtMsgType type, const QMessageLogContext &context, const QString &message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) {
-        QMutexLocker locker(&messageMutex());
-        capturedMessages().push_back(message);
-    }
-    if (previousHandler()) {
-        previousHandler()(type, context, message);
-    }
-}
-
-QString takeMessages() {
-    QMutexLocker locker(&messageMutex());
-    capturedMessages().removeAll(QStringLiteral("This plugin does not support propagateSizeHints()"));
-    const QString text = capturedMessages().join(QLatin1Char('\n'));
-    capturedMessages().clear();
-    return text;
-}
 
 // Main.qml with its fallback bridge, shown and active.
 QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel,
@@ -134,59 +104,6 @@ QColor tokenOf(QQuickWindow *window, const char *name) {
     return paletteOf(window)->property(name).value<QColor>();
 }
 
-QString hex(const QColor &color) {
-    return color.name(QColor::HexArgb);
-}
-
-// WCAG's contrast ratio of opaque colours, and a colour drawn over another.
-double relativeLuminance(const QColor &color) {
-    const auto linear = [](double channel) {
-        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
-    };
-    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
-}
-
-double contrastRatio(const QColor &a, const QColor &b) {
-    const double la = relativeLuminance(a);
-    const double lb = relativeLuminance(b);
-    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
-}
-
-QColor drawnOver(const QColor &top, const QColor &bottom) {
-    const double alpha = top.alphaF();
-    return QColor::fromRgbF(static_cast<float>(top.redF() * alpha + bottom.redF() * (1.0 - alpha)),
-                            static_cast<float>(top.greenF() * alpha + bottom.greenF() * (1.0 - alpha)),
-                            static_cast<float>(top.blueF() * alpha + bottom.blueF() * (1.0 - alpha)));
-}
-
-QString describeContrast(const QString &what, const QColor &text, const QColor &background) {
-    return QStringLiteral("%1: %2 on %3 is %4:1")
-        .arg(what, hex(text), hex(background))
-        .arg(contrastRatio(text, background), 0, 'f', 2);
-}
-
-QList<QQuickItem *> itemsNamed(QQuickItem *root, const QString &name) {
-    QList<QQuickItem *> found;
-    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
-        if (item->objectName() == name) {
-            found.push_back(item);
-        }
-        for (QQuickItem *child : item->childItems()) {
-            visit(child);
-        }
-    };
-    if (root != nullptr) {
-        visit(root);
-    }
-    return found;
-}
-
-// The items of the window, popups included, as the overlay holds them.
-QQuickItem *named(QQuickWindow *window, const QString &name) {
-    const QList<QQuickItem *> found = itemsNamed(window->contentItem(), name);
-    return found.isEmpty() ? nullptr : found.first();
-}
-
 QQuickItem *visibleNamed(QQuickWindow *window, const QString &name) {
     for (QQuickItem *item : itemsNamed(window->contentItem(), name)) {
         if (item->isVisible()) {
@@ -203,10 +120,6 @@ QObject *object(QQuickWindow *window, const QString &name) {
 QVariant evaluate(QObject *scope, const QString &expression) {
     QQmlExpression expr(qmlContext(scope), scope, expression);
     return expr.evaluate();
-}
-
-QRectF sceneRect(QQuickItem *item) {
-    return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
 }
 
 void click(QQuickWindow *window, QQuickItem *item) {
@@ -242,19 +155,6 @@ QString describe(QQuickItem *item) {
     }
     return QStringLiteral("%1 \"%2\"").arg(QString::fromLatin1(item->metaObject()->className()),
                                          item->objectName());
-}
-
-// Whether `item` or an item it sits in still waits for its polish, where
-// layouts and positioners place their children. A Row culls a child that is
-// hidden and takes it back only there: until then, a child shown again says
-// it is visible, but Qt neither draws it nor gives it presses.
-bool layoutPending(const QQuickItem *item) {
-    for (; item != nullptr; item = item->parentItem()) {
-        if (QQuickTest::qIsPolishScheduled(item)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 // Clicks `button` once it is enabled, laid out and nothing covers it, and
@@ -468,8 +368,6 @@ QStringList textsHolding(QObject *root, const QString &needle) {
     return found;
 }
 
-// Defined with the large-font checks below.
-bool within(const QRectF &inner, const QRectF &outer);
 QString describeItem(QQuickItem *item);
 void checkPreferencesPages(QObject *preferences, QQuickWindow *prefs, QQuickItem *stack, const QString &size);
 QList<bool> formModes(QObject *preferences, QQuickItem *stack);
@@ -575,7 +473,7 @@ private slots:
 };
 
 void UiDialogsTest::initTestCase() {
-    previousHandler() = qInstallMessageHandler(captureMessage);
+    startCapturingMessages();
     FerrousLocalization::setUpApplicationDomain();
     FerrousLocalization::registerQmlTypes();
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
@@ -587,17 +485,17 @@ void UiDialogsTest::initTestCase() {
 }
 
 void UiDialogsTest::init() {
-    takeMessages();
+    clearCapturedMessages();
 }
 
 void UiDialogsTest::cleanup() {
-    const QString messages = takeMessages();
+    dropCapturedMessages(offscreenSizeHintsWarning());
+    const QString messages = takeCapturedMessagesText();
     QVERIFY2(messages.isEmpty(), qPrintable(messages));
 }
 
 void UiDialogsTest::cleanupTestCase() {
-    qInstallMessageHandler(previousHandler());
-    previousHandler() = nullptr;
+    stopCapturingMessages();
 }
 
 void UiDialogsTest::drawsOffscreenUnlessAPlatformIsChosen() {
@@ -5360,12 +5258,6 @@ void UiDialogsTest::dialogsShareOneHeadingStyle() {
 }
 
 namespace {
-
-// Whether `inner` lies within `outer`, give or take half a pixel.
-bool within(const QRectF &inner, const QRectF &outer) {
-    return inner.left() >= outer.left() - 0.5 && inner.right() <= outer.right() + 0.5
-        && inner.top() >= outer.top() - 0.5 && inner.bottom() <= outer.bottom() + 0.5;
-}
 
 QString describeItem(QQuickItem *item) {
     const QRectF rect = sceneRect(item);
