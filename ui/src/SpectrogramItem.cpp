@@ -2406,6 +2406,48 @@ bool SpectrogramItem::reanchorRollingEpochForCurrentDataLocked(
     return true;
 }
 
+void SpectrogramItem::renumberRingForRollingHistoryLocked() {
+    if (!m_ringColumnBase
+        || m_ringCapacity <= 0
+        || m_precomputedTrackToken == 0
+        || (m_ringColumnToken != 0 && m_ringColumnToken != m_precomputedTrackToken)) {
+        // The ring's columns are in the order they came, or another
+        // track's, or of a track a gapless successor could not be told
+        // from: the columns that come from here on follow them.
+        m_ringColumnBase.reset();
+        return;
+    }
+    // The session's columns go on where their column puts them, and so do
+    // those the worker sends left of its first for the rolling view's
+    // history, which a ring numbered from that first column has no
+    // sequences for. Numbered a capacity on, every column the ring can hold
+    // has one; the columns stay in their slots.
+    m_ringColumnToken = m_precomputedTrackToken;
+    if (m_ringWriteSeq >= m_ringCapacity) {
+        return;
+    }
+    const qint64 shift = m_ringCapacity;
+    for (qint64 &seq : m_ringSequenceId) {
+        if (seq >= 0) {
+            seq += shift;
+        }
+    }
+    for (auto &columns : m_trackColumnToSeqByToken) {
+        for (auto it = columns.begin(); it != columns.end(); ++it) {
+            it.value() += shift;
+        }
+    }
+    m_ringWriteSeq += shift;
+    m_ringOldestSeq += shift;
+    *m_ringColumnBase -= shift;
+    m_precomputedLastDisplaySeq = -1;
+    // What was drawn of the ring's columns is of their old numbers.
+    ++m_ringGeneration;
+    cancelPendingRasterLocked();
+    m_timeGridDirty = true;
+    m_crosshairDirty = true;
+}
+
 void SpectrogramItem::setDisplayMode(int value) {
     const int clamped = std::clamp(value, 0, 1);
     if (m_displayMode == clamped) {
@@ -2417,6 +2459,7 @@ void SpectrogramItem::setDisplayMode(int value) {
         const int previousMode = m_displayMode;
         m_displayMode = clamped;
         if (previousMode == 1 && clamped == 0) {
+            renumberRingForRollingHistoryLocked();
             reanchorRollingEpochForCurrentDataLocked(m_now());
         }
         if (m_precomputedReady) {
@@ -3492,11 +3535,11 @@ void SpectrogramItem::feedPrecomputedChunk(
         applyPrecomputedResetLocked(
             startIndex, bins, trackToken, generation, true, hopSize);
         appliedImplicitReset = true;
-        if (m_centeredColumnBase >= 0) {
+        if (m_ringColumnBase) {
             // Where the session's columns start is unknown: the columns
             // left of these, which may come next, go where their column
             // puts them too.
-            m_centeredColumnBase = 0;
+            m_ringColumnBase = 0;
         }
     }
 
@@ -3531,7 +3574,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_ringSequenceId.clear();
         m_ringTrackToken.clear();
         m_trackColumnToSeqByToken.clear();
-        m_centeredColumnBase = -1;
+        m_ringColumnBase.reset();
         ++m_ringGeneration;
         cancelPendingRasterLocked();
         m_precomputedMaxColumnIndex = -1;
@@ -3972,10 +4015,11 @@ void SpectrogramItem::feedPrecomputedChunk(
         }
         activeTokenIt->reserve(activeTokenIt->size() + columns);
         // A centered session's columns may arrive out of order: the
-        // playhead's first, then those left of it.
-        const bool columnAddressed = m_displayMode == 1
-            && m_centeredColumnBase >= 0
-            && (m_centeredColumnToken == 0 || effectiveTrackToken == m_centeredColumnToken);
+        // playhead's first, then those left of it; and after a switch to
+        // rolling mode, those left of its first.
+        const bool columnAddressed = m_ringColumnBase
+            && (m_ringColumnToken == 0 || effectiveTrackToken == m_ringColumnToken);
+        const qint64 oldestBefore = m_ringOldestSeq;
 
         for (int col = 0; col < columns; ++col) {
             const int srcOff = col * stridePerColumn + channelOffset;
@@ -3987,13 +4031,19 @@ void SpectrogramItem::feedPrecomputedChunk(
                 continue;
             }
             qint64 seq = m_ringWriteSeq;
-            if (columnAddressed && trackCol >= m_centeredColumnBase) {
-                seq = static_cast<qint64>(trackCol) - m_centeredColumnBase;
+            if (columnAddressed && trackCol >= *m_ringColumnBase) {
+                seq = static_cast<qint64>(trackCol) - *m_ringColumnBase;
                 if (seq < m_ringWriteSeq - m_ringCapacity) {
                     // Further left than the ring reaches from its newest
                     // column: it would drop a column to the right of it.
                     continue;
                 }
+            } else if (m_displayMode == 0 && trackCol <= m_precomputedMaxColumnIndex) {
+                // A rolling ring in the order its columns came has no place
+                // for one of its track before its newest, such as the
+                // history a session sends a view it took for centered: it
+                // would show as the newest.
+                continue;
             }
             const int slot = static_cast<int>(seq % m_ringCapacity);
             if (!m_ringSequenceId.empty()) {
@@ -4036,7 +4086,26 @@ void SpectrogramItem::feedPrecomputedChunk(
             }
             m_ringWriteSeq = std::max(m_ringWriteSeq, seq + 1);
         }
-        m_ringOldestSeq = std::max<qint64>(0, m_ringWriteSeq - m_ringCapacity);
+        const qint64 reach = std::max<qint64>(0, m_ringWriteSeq - m_ringCapacity);
+        if (columnAddressed && m_displayMode == 0) {
+            // A rolling view shows the ring's columns from its oldest on,
+            // which run without gaps: the history left of them joins them
+            // once its columns reach them.
+            m_ringOldestSeq = std::max(m_ringOldestSeq, reach);
+            while (m_ringOldestSeq > reach) {
+                const qint64 previous = m_ringOldestSeq - 1;
+                const auto slot = static_cast<size_t>(previous % m_ringCapacity);
+                if (m_ringSequenceId[slot] != previous || m_ringColumnId[slot] < 0) {
+                    break;
+                }
+                m_ringOldestSeq = previous;
+            }
+            if (m_ringOldestSeq < oldestBefore) {
+                m_precomputedCanvasDirty = true;
+            }
+        } else {
+            m_ringOldestSeq = reach;
+        }
         FERROUS_SPECTROGRAM_LOGF(stderr,
             "[Qt-ring] tok=%llu writeSeq=%lld oldestSeq=%lld cap=%d valid=%lld maxCol=%d\n",
             static_cast<unsigned long long>(trackToken),
@@ -4253,7 +4322,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_ringSequenceId.clear();
     m_ringTrackToken.clear();
     m_trackColumnToSeqByToken.clear();
-    m_centeredColumnBase = -1;
+    m_ringColumnBase.reset();
     m_ringCapacity = 0;
     m_ringOldestSeq = 0;
     m_ringWriteSeq = 0;
@@ -4415,10 +4484,12 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         m_ringCapacity = 0;
         // A centered session's columns from here on go where their
         // column puts them, counted from its first.
-        m_centeredColumnBase = m_displayMode == 1 ? std::max(0, startIndex) : -1;
-        m_centeredColumnToken = trackToken;
+        m_ringColumnBase = m_displayMode == 1
+            ? std::optional<qint64>(std::max(0, startIndex))
+            : std::nullopt;
+        m_ringColumnToken = trackToken;
     } else {
-        m_centeredColumnBase = -1;
+        m_ringColumnBase.reset();
         // Preserve only the history that has actually been shown on screen.
         // Any speculative lookahead beyond the current playback head is stale
         // after a seek/non-gapless reset; keeping it and remapping to the
@@ -8033,8 +8104,8 @@ void SpectrogramItem::releaseStorageLocked() {
     m_ringOldestSeq = 0;
     m_trackEpochSeq = 0;
     m_rollingEpoch = 0;
-    m_centeredColumnBase = -1;
-    m_centeredColumnToken = 0;
+    m_ringColumnBase.reset();
+    m_ringColumnToken = 0;
     m_precomputedMaxColumnIndex = -1;
     m_precomputedResetPending = false;
     m_precomputedPendingResetStartIndex = 0;
