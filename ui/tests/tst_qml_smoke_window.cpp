@@ -1009,7 +1009,8 @@ void WindowSmokeTest::unmuteShowsTheVolumeAtOnce() {
     auto *muteAction = window->findChild<QObject *>(QStringLiteral("muteAction"));
     QVERIFY(slider && glyph && muteAction);
     const auto taken = [&bridge]() { return bridge.m_volumeRequestsTaken == bridge.m_volumeRequestsSent; };
-    const auto value = [slider]() { return slider->property("value").toDouble(); };
+    // The slider shows the volume in percent.
+    const auto value = [slider]() { return slider->property("value").toDouble() / 100; };
     // The volume the test sets, within the rounding of the backend's float.
     const auto atVolume = [](double shown) { return std::abs(shown - 0.6) < 1e-3; };
     const auto mutedGlyph = [glyph]() {

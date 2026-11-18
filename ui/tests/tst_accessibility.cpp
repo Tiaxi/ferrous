@@ -240,6 +240,7 @@ private slots:
     void cleanup();
     void cleanupTestCase();
     void controlsAreNamedForAssistiveTechnology();
+    void slidersAnnounceWholeSecondsAndPercents();
     void arrowKeysStepTheVolumeFromItsValue();
     void bridgeEchoesWaitForTheVolumeGesture();
     void arrowKeysSeekFromThePlaybackPosition();
@@ -630,7 +631,7 @@ void AccessibilityTest::checkSlidersAndIconButtonsHaveNamesAndTooltips(QQuickWin
     QTRY_COMPARE(accessibleText(volume, QAccessible::Description), QStringLiteral("50%"));
     QAccessibleValueInterface *volumeValue = QAccessible::queryAccessibleInterface(volume)->valueInterface();
     QVERIFY(volumeValue != nullptr);
-    QCOMPARE(volumeValue->currentValue().toDouble(), 0.5);
+    QCOMPARE(volumeValue->currentValue().toDouble(), 50.0);
 }
 
 void AccessibilityTest::checkKeyboardMovesOfTheSeekSliderSeek(QQuickWindow *window) {
@@ -938,6 +939,108 @@ struct TransportHarness {
 
 } // namespace
 
+void AccessibilityTest::slidersAnnounceWholeSecondsAndPercents() {
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
+    QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QQuickItem *volume = visibleItemNamed(window, QStringLiteral("volumeSlider"));
+    QVERIFY(bridge != nullptr && seek != nullptr && volume != nullptr);
+    // What a screen reader reads: the value interface's numbers, of which
+    // Orca speaks every decimal, and the description.
+    const auto announced = [](QQuickItem *slider) {
+        QAccessibleInterface *iface = QAccessible::queryAccessibleInterface(slider);
+        QAccessibleValueInterface *value = iface != nullptr ? iface->valueInterface() : nullptr;
+        if (value == nullptr) {
+            return QStringLiteral("no value");
+        }
+        return QStringLiteral("%1 (%2 to %3), %4")
+            .arg(value->currentValue().toString(), value->minimumValue().toString(),
+                 value->maximumValue().toString(), iface->text(QAccessible::Description));
+    };
+    const auto seeks = [&root]() { return recordedValues(root, "seeks"); };
+
+    // Playback between two seconds: the second the description gives,
+    // while the bar shows the exact position.
+    root->setProperty("positionSeconds", 30.353452042);
+    QCOMPARE(announced(seek), QStringLiteral("30 (0 to 200), 0:30 of 3:20"));
+    QVERIFY(fuzzyEqual(seek->property("shownSeconds").toDouble(), 30.353452042));
+    root->setProperty("positionSeconds", 30.6);
+    QCOMPARE(announced(seek), QStringLiteral("31 (0 to 200), 0:31 of 3:20"));
+
+    // A key's step, from the exact position, announces the second it
+    // reaches and seeks to the exact time.
+    QVERIFY(tabTo(window, seek));
+    QTest::keyPress(window, Qt::Key_Right);
+    QCOMPARE(announced(seek), QStringLiteral("35 (0 to 200), 0:35 of 3:20"));
+    QVERIFY(fuzzyEqual(seek->property("shownSeconds").toDouble(), 35.6));
+    QTest::keyRelease(window, Qt::Key_Right);
+    QVERIFY2(sameValues(seeks(), {35.6}), qPrintable(describeValues(seeks())));
+    root->setProperty("positionSeconds", 35.6);
+    QCOMPARE(announced(seek), QStringLiteral("36 (0 to 200), 0:36 of 3:20"));
+
+    // So does the wheel's, and playback then moves the bar on.
+    seek->setProperty("wheelEnabled", true);
+    QVERIFY(sendWheel(window, seek->mapToScene(QPointF(seek->width() / 2, seek->height() / 2)),
+                      QPoint(0, 120)));
+    QVERIFY2(sameValues(seeks(), {35.6, 40.6}), qPrintable(describeValues(seeks())));
+    root->setProperty("positionSeconds", 40.6);
+    QCOMPARE(announced(seek), QStringLiteral("41 (0 to 200), 0:41 of 3:20"));
+    root->setProperty("positionSeconds", 42.2);
+    QCOMPARE(announced(seek), QStringLiteral("42 (0 to 200), 0:42 of 3:20"));
+    QVERIFY(fuzzyEqual(seek->property("shownSeconds").toDouble(), 42.2));
+
+    // A key's step that the slider's whole second takes to the start is
+    // still a whole step from the exact time.
+    root->setProperty("positionSeconds", 5.3);
+    QTest::keyClick(window, Qt::Key_Left);
+    QVERIFY2(sameValues(seeks(), {35.6, 40.6, 0.3}), qPrintable(describeValues(seeks())));
+
+    // Within half a second of the start the value is already there, and a
+    // step back still seeks to it; likewise at the end.
+    root->setProperty("positionSeconds", 0.3);
+    QCOMPARE(announced(seek), QStringLiteral("0 (0 to 200), 0:00 of 3:20"));
+    QTest::keyClick(window, Qt::Key_Left);
+    QVERIFY2(sameValues(seeks(), {35.6, 40.6, 0.3, 0.0}), qPrintable(describeValues(seeks())));
+    root->setProperty("positionSeconds", 199.7);
+    QCOMPARE(announced(seek), QStringLiteral("200 (0 to 200), 3:20 of 3:20"));
+    QTest::keyClick(window, Qt::Key_Right);
+    QVERIFY2(sameValues(seeks(), {35.6, 40.6, 0.3, 0.0, 200.0}), qPrintable(describeValues(seeks())));
+    // At the end of a track whose length falls within a second, the value
+    // and the description stay within it.
+    bridge->setProperty("durationSeconds", 199.8);
+    root->setProperty("positionSeconds", 199.6);
+    QCOMPARE(announced(seek), QStringLiteral("199 (0 to 199.8), 3:19 of 3:19"));
+    bridge->setProperty("durationSeconds", 200.0);
+
+    // The volume in whole percents, from the bridge's, the keys' and a
+    // drag's.
+    bridge->setProperty("volume", 0.437);
+    QCOMPARE(announced(volume), QStringLiteral("44 (0 to 100), 44%"));
+    QVERIFY(tabTo(window, volume));
+    QTest::keyPress(window, Qt::Key_Right);
+    QCOMPARE(announced(volume), QStringLiteral("54 (0 to 100), 54%"));
+    QTest::keyRelease(window, Qt::Key_Right);
+    QVERIFY(fuzzyEqual(recordedValues(root, "volumes").constLast(), 0.54));
+    const qreal y = volume->height() / 2;
+    const auto scenePoint = [volume, y](qreal fraction) {
+        return volume->mapToScene(QPointF(volume->width() * fraction, y)).toPoint();
+    };
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.5));
+    double dragged = 0;
+    for (int step = 1; step <= 7; ++step) {
+        QTest::mouseMove(window, scenePoint(0.5 - 0.031 * step));
+        dragged = volume->property("value").toDouble();
+        QVERIFY2(dragged == std::round(dragged), qPrintable(announced(volume)));
+        QCOMPARE(announced(volume), QStringLiteral("%1 (0 to 100), %1%").arg(dragged));
+    }
+    QVERIFY2(dragged > 15.0 && dragged < 40.0, qPrintable(announced(volume)));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.5 - 0.031 * 7));
+    QVERIFY(fuzzyEqual(recordedValues(root, "volumes").constLast(), dragged / 100));
+}
+
 void AccessibilityTest::arrowKeysStepTheVolumeFromItsValue() {
     TransportHarness harness;
     QQuickWindow *window = harness.window;
@@ -946,7 +1049,7 @@ void AccessibilityTest::arrowKeysStepTheVolumeFromItsValue() {
     QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
     QQuickItem *volume = visibleItemNamed(window, QStringLiteral("volumeSlider"));
     QVERIFY(bridge != nullptr && volume != nullptr);
-    QCOMPARE(volume->property("value").toDouble(), 0.5);
+    QCOMPARE(volume->property("value").toDouble(), 50.0);
     QVERIFY(tabTo(window, volume));
     const auto volumesText = [&root]() {
         return describeValues(recordedValues(root, "volumes"));
@@ -956,14 +1059,14 @@ void AccessibilityTest::arrowKeysStepTheVolumeFromItsValue() {
     QTest::keyClick(window, Qt::Key_Right);
     QVERIFY2(onlyRecordedSince(root, "volumes", 0, 0.6), qPrintable(volumesText()));
     bridge->setProperty("volume", 0.6);
-    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.6));
+    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 60.0));
 
     // Left steps back down.
     const qsizetype sent = recordedValues(root, "volumes").size();
     QTest::keyClick(window, Qt::Key_Left);
     QVERIFY2(onlyRecordedSince(root, "volumes", sent, 0.5), qPrintable(volumesText()));
     bridge->setProperty("volume", 0.5);
-    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.5));
+    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 50.0));
 }
 
 void AccessibilityTest::bridgeEchoesWaitForTheVolumeGesture() {
@@ -981,9 +1084,9 @@ void AccessibilityTest::bridgeEchoesWaitForTheVolumeGesture() {
 
     // A held arrow key: a stale echo neither moves the slider nor is sent.
     QTest::keyPress(window, Qt::Key_Right);
-    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.6));
+    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 60.0));
     bridge->setProperty("volume", 0.3);
-    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.6));
+    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 60.0));
     QTest::keyRelease(window, Qt::Key_Right);
     QVERIFY2(onlyRecordedSince(root, "volumes", 0, 0.6), qPrintable(volumesText()));
     bridge->setProperty("volume", 0.6);
@@ -999,12 +1102,12 @@ void AccessibilityTest::bridgeEchoesWaitForTheVolumeGesture() {
         QTest::mouseMove(window, scenePoint(0.25 + 0.05 * step));
     }
     const double dragged = volume->property("value").toDouble();
-    QVERIFY2(dragged > 0.6 && dragged < 0.9, qPrintable(QString::number(dragged)));
+    QVERIFY2(dragged > 60.0 && dragged < 90.0, qPrintable(QString::number(dragged)));
     bridge->setProperty("volume", 0.05);
     QVERIFY(fuzzyEqual(volume->property("value").toDouble(), dragged));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.75));
     const QList<double> dragVolumes = recordedValues(root, "volumes").mid(sent);
-    QVERIFY2(!dragVolumes.isEmpty() && fuzzyEqual(dragVolumes.constLast(), dragged),
+    QVERIFY2(!dragVolumes.isEmpty() && fuzzyEqual(dragVolumes.constLast(), dragged / 100),
              qPrintable(volumesText()));
     QVERIFY2(std::none_of(dragVolumes.begin(), dragVolumes.end(),
                           [](double value) { return value < 0.15; }),
@@ -1063,10 +1166,10 @@ void AccessibilityTest::seekDragSeeksOnceOnRelease() {
     for (int step = 1; step <= 10; ++step) {
         QTest::mouseMove(window, scenePoint(0.25 + 0.05 * step));
     }
-    const double dragged = seek->property("value").toDouble();
+    const double dragged = seek->property("shownSeconds").toDouble();
     QVERIFY2(dragged > 130.0 && dragged < 170.0, qPrintable(QString::number(dragged)));
     root->setProperty("positionSeconds", 51.0);
-    QCOMPARE(seek->property("value").toDouble(), dragged);
+    QCOMPARE(seek->property("shownSeconds").toDouble(), dragged);
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.75));
     QCOMPARE(recordedValues(root, "seeks"), (QList<double>{dragged}));
 }
@@ -1088,7 +1191,7 @@ void AccessibilityTest::heldArrowKeysAccumulateVolumeSteps() {
     const QList<double> volumes = recordedValues(root, "volumes");
     QVERIFY2(sameValues(volumes, {0.3, 0.4, 0.5, 0.6, 0.7, 0.8}), qPrintable(describeValues(volumes)));
     bridge->setProperty("volume", 0.8);
-    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.8));
+    QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 80.0));
 
     holdKey(window, Qt::Key_Left, 3);
     const QList<double> after = recordedValues(root, "volumes").mid(6);
@@ -1171,7 +1274,7 @@ void AccessibilityTest::seekDragOutlastsAKeyRelease() {
         QTest::mouseMove(window, scenePoint(0.3 + 0.05 * step));
     }
     QVERIFY(seek->property("adjusting").toBool());
-    const double dragged = seek->property("value").toDouble();
+    const double dragged = seek->property("shownSeconds").toDouble();
     QVERIFY2(dragged > 80.0 && dragged < 120.0, qPrintable(QString::number(dragged)));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.5));
     const QList<double> seeks = recordedValues(root, "seeks");
@@ -1205,7 +1308,7 @@ void AccessibilityTest::seekDragOutlastsTheFocus() {
         QTest::mouseMove(window, scenePoint(0.45 + 0.05 * step));
     }
     QVERIFY(seek->property("adjusting").toBool());
-    const double dragged = seek->property("value").toDouble();
+    const double dragged = seek->property("shownSeconds").toDouble();
     QVERIFY2(dragged > 130.0 && dragged < 170.0, qPrintable(QString::number(dragged)));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.75));
     QVERIFY2(sameValues(recordedValues(root, "seeks"), {dragged}), qPrintable(seeksText()));
@@ -1352,7 +1455,7 @@ void AccessibilityTest::seekDragShowsAndSeeksTheTimeUnderThePointer() {
     QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() * 0.4, y)).toPoint());
     QTest::mouseMove(window, target->scene);
     QVERIFY(seek->property("adjusting").toBool());
-    const double dragged = seek->property("value").toDouble();
+    const double dragged = seek->property("shownSeconds").toDouble();
     QVERIFY2(fuzzyEqual(dragged, target->seconds),
              qPrintable(QStringLiteral("%1 vs %2").arg(dragged).arg(target->seconds)));
     QCOMPARE(dragTime.shown(), minutesAndSeconds(target->seconds));
@@ -1453,7 +1556,7 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     // the unplayed part starts at the playhead's line, which moves over the bar less
     // its own width.
     const double endSeconds = startSeconds + steps * secondsPerStep;
-    QVERIFY(fuzzyEqual(seek->property("value").toDouble(), endSeconds));
+    QVERIFY(fuzzyEqual(seek->property("shownSeconds").toDouble(), endSeconds));
     const qreal devicePixel = 1.0 / window->effectiveDevicePixelRatio();
     const qreal travel = progress->parentItem()->width() - line->width();
     const qreal exactWidth = travel * endSeconds / durationSeconds;
@@ -1464,7 +1567,7 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     QVERIFY(tabTo(window, seek));
     QTest::keyPress(window, Qt::Key_Right);
     QVERIFY(seek->property("adjusting").toBool());
-    QVERIFY(fuzzyEqual(seek->property("value").toDouble(), endSeconds + 5.0));
+    QVERIFY(fuzzyEqual(seek->property("shownSeconds").toDouble(), endSeconds + 5.0));
     QVERIFY2(std::abs(progress->x() - travel * (endSeconds + 5.0) / durationSeconds) <= devicePixel / 2,
              qPrintable(QString::number(progress->x())));
     QTest::keyRelease(window, Qt::Key_Right);
@@ -2217,7 +2320,7 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() * 0.4, y)).toPoint());
     QTest::mouseMove(window, dragEnd);
     QVERIFY(seek->property("adjusting").toBool());
-    error = expectShown(minutesAndSeconds(seek->property("value").toDouble()),
+    error = expectShown(minutesAndSeconds(seek->property("shownSeconds").toDouble()),
                         line->mapToItem(seek, QPointF(line->width() / 2, 0)).x());
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, dragEnd);
@@ -2794,6 +2897,7 @@ void AccessibilityTest::playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds
             descriptions.push_back(description);
         }
     });
+    QSignalSpy shownTimes(harness.seek, SIGNAL(shownSecondsChanged()));
     QSignalSpy values(harness.seek, SIGNAL(valueChanged()));
     QSignalSpy texts(&clock, &PlaybackClock::positionTextChanged);
     connect(&clock, &PlaybackClock::positionTextChanged, harness.window, [&]() {
@@ -2809,6 +2913,7 @@ void AccessibilityTest::playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds
     shown.clear();
     lineMoves = 0;
     descriptions = QStringList{harness.description()};
+    shownTimes.clear();
     values.clear();
     texts.clear();
     const qint64 end = now + 3 * kNsPerSecond;
@@ -2820,22 +2925,25 @@ void AccessibilityTest::playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds
     }
     now = end;
 
-    // The position, the slider's value and the playhead moved at every pixel
+    // The position, the bar's time and the playhead moved at every pixel
     // boundary, once, at most a millisecond after it, and only then.
     const double endSeconds = clock.currentPositionSeconds();
     const int pixels = static_cast<int>(pixelOf(endSeconds) - pixelOf(1.1));
-    const QString counts = QStringLiteral("%1 boundaries: %2 positions, %3 values, %4 playhead moves, %5 ticks")
-                               .arg(pixels).arg(shown.size()).arg(values.count()).arg(lineMoves).arg(ticks);
+    const QString counts = QStringLiteral("%1 boundaries: %2 positions, %3 bar times, %4 playhead moves, %5 ticks")
+                               .arg(pixels).arg(shown.size()).arg(shownTimes.count()).arg(lineMoves).arg(ticks);
     QVERIFY2(pixels > 80, qPrintable(counts));
-    QVERIFY2(shown.size() == pixels && values.count() == pixels && lineMoves == pixels, qPrintable(counts));
+    QVERIFY2(shown.size() == pixels && shownTimes.count() == pixels && lineMoves == pixels, qPrintable(counts));
     for (qsizetype i = 0; i < shown.size(); ++i) {
         const double pixel = pixelOf(1.1) + static_cast<double>(i) + 1.0;
         QCOMPARE(pixelOf(shown[i]), pixel);
         const double late = shown[i] - (pixel - 0.5) * step;
         QVERIFY2(late >= 0.0 && late <= 0.0011, qPrintable(QString::number(late)));
     }
-    // The texts changed at 1.5, 2.5 and 3.5 s, and only then.
+    // The texts and the slider's value, which assistive technology reads,
+    // changed at 1.5, 2.5 and 3.5 s, and only then.
     QCOMPARE(texts.count(), 3);
+    QCOMPARE(values.count(), 3);
+    QCOMPARE(harness.seek->property("value").toDouble(), 4.0);
     QCOMPARE(clock.positionText(), QStringLiteral("00:04"));
     QCOMPARE(descriptions,
              (QStringList{QStringLiteral("0:01 of 0:20"), QStringLiteral("0:02 of 0:20"),
@@ -2868,12 +2976,14 @@ void AccessibilityTest::seekBarDescriptionFollowsTheSecondsBetweenPixels() {
     };
     connect(&clock, &PlaybackClock::positionTextChanged, harness.window, record);
     connect(&clock, &PlaybackClock::positionChanged, harness.window, record);
+    QSignalSpy shownTimes(harness.seek, SIGNAL(shownSecondsChanged()));
     QSignalSpy values(harness.seek, SIGNAL(valueChanged()));
 
     // Ten seconds from 100.2 s: the description and the time label take
     // every second, though the bar moves only every few.
     clock.applySample(PlaybackSample{100.2, now, true, kDuration, 1}, true);
     descriptions = QStringList{harness.description()};
+    shownTimes.clear();
     values.clear();
     const qint64 end = now + 10 * kNsPerSecond;
     while (clock.nextTickNs().has_value() && *clock.nextTickNs() <= end) {
@@ -2887,7 +2997,11 @@ void AccessibilityTest::seekBarDescriptionFollowsTheSecondsBetweenPixels() {
     }
     QCOMPARE(descriptions, expected);
     QCOMPARE(clock.positionText(), PlaybackClock::formatSeconds(110));
-    QVERIFY2(values.count() <= static_cast<int>(10.0 / step) + 1, qPrintable(QString::number(values.count())));
+    QVERIFY2(shownTimes.count() <= static_cast<int>(10.0 / step) + 1, qPrintable(QString::number(shownTimes.count())));
+    // The slider's value, which assistive technology reads, takes every
+    // second with the description.
+    QCOMPARE(values.count(), 10);
+    QCOMPARE(harness.seek->property("value").toDouble(), 110.0);
 
     // A held key's gesture shows its own second, from where playback is.
     QVERIFY(tabTo(harness.window, harness.seek));
@@ -2929,7 +3043,7 @@ void AccessibilityTest::seekBarCatchesUpWithRealPlayback() {
     QTRY_VERIFY2(changes >= 3, qPrintable(QString::number(changes)));
     // The bar is never more than a pixel and a little behind playback, and
     // the time label shows the second playback is in.
-    QTRY_VERIFY(std::abs(harness.seek->property("value").toDouble() - clock.currentPositionSeconds())
+    QTRY_VERIFY(std::abs(harness.seek->property("shownSeconds").toDouble() - clock.currentPositionSeconds())
                 <= step + 0.005);
     QTRY_COMPARE(clock.positionText(), PlaybackClock::formatSeconds(clock.currentPositionSeconds()));
     QCOMPARE(withinAPixel, 0);
@@ -2937,7 +3051,7 @@ void AccessibilityTest::seekBarCatchesUpWithRealPlayback() {
     // Paused: nothing more changes.
     clock.applySample(PlaybackSample{clock.currentPositionSeconds(), 0, false, kDuration, 1}, false);
     QVERIFY(!clock.nextTickNs().has_value());
-    QCOMPARE(harness.seek->property("value").toDouble(), clock.positionSeconds());
+    QCOMPARE(harness.seek->property("shownSeconds").toDouble(), clock.positionSeconds());
     const int paused = changes;
     QTest::qWait(200);
     QCOMPARE(changes, paused);
@@ -2967,10 +3081,17 @@ void AccessibilityTest::seekBarStepsFromThePositionBetweenItsPixels() {
     // bar still shows the start.
     const double start = (std::floor(1000.0 / step) + 0.5) * step + 0.01;
     clock.applySample(PlaybackSample{start, now, true, kDuration, 1}, true);
-    QVERIFY(fuzzyEqual(seek->property("value").toDouble(), start));
+    QVERIFY(fuzzyEqual(seek->property("shownSeconds").toDouble(), start));
     now += 2'000'000'000LL;
     QVERIFY(fuzzyEqual(clock.currentPositionSeconds(), start + 2.0));
-    QVERIFY(fuzzyEqual(seek->property("value").toDouble(), start));
+    QVERIFY(fuzzyEqual(seek->property("shownSeconds").toDouble(), start));
+    // The slider's value, which assistive technology reads, moves on with
+    // the second the description gives, not with the bar.
+    while (clock.nextTickNs().has_value() && *clock.nextTickNs() <= now) {
+        clock.tick();
+    }
+    QVERIFY2(clock.positionSecond() > std::lround(start), qPrintable(QString::number(clock.positionSecond())));
+    QCOMPARE(seek->property("value").toDouble(), static_cast<double>(clock.positionSecond()));
 
     // An arrow key steps from where playback is.
     QVERIFY(tabTo(window, seek));
