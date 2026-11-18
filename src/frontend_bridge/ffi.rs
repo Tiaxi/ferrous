@@ -3164,6 +3164,9 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     {
         push_string(&mut out, key);
     }
+    // The path the library holds the track under, which a link can make
+    // differ from the track's own; empty when the library does not have it.
+    push_string(&mut out, &snapshot.now_playing_library_path);
     // The tracks on the album, or 0 when unknown; see
     // `TrackMetadata::shown_track_total`.
     push_u32(&mut out, snapshot.metadata.shown_track_total().unwrap_or(0));
@@ -3805,6 +3808,7 @@ mod tests {
                 "root|/music".to_string(),
                 "artist|/music|Sample Artist".to_string(),
             ],
+            now_playing_library_path: "/library/a.flac".to_string(),
             pre_built_tree_bytes: Some(Arc::new(vec![0, 0, 0, 0])),
             queue_len: 1,
             queue_revision: 1,
@@ -5523,6 +5527,8 @@ mod tests {
             read_string(&encoded, &mut offset),
             "artist|/music|Sample Artist"
         );
+        // Then the library's path for the track.
+        assert_eq!(read_string(&encoded, &mut offset), "/library/a.flac");
         // Then the tracks on the album.
         assert_eq!(read_u32(&encoded, &mut offset), 8);
         assert_eq!(offset, encoded.len());

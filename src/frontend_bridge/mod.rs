@@ -36,6 +36,7 @@ mod event_log;
 mod events;
 pub mod ffi;
 mod imports;
+mod library_alias;
 mod library_index;
 pub mod library_tree;
 mod persist;
@@ -543,6 +544,10 @@ pub struct BridgeSnapshot {
     /// it. They follow the tree's own grouping, so the UI can mark a
     /// collapsed row that holds the playing track.
     pub now_playing_tree_keys: Vec<String>,
+    /// The path the library holds the track `metadata` describes under,
+    /// which differs from the track's own path when one of them goes
+    /// through a link; empty when the library does not have the track.
+    pub now_playing_library_path: String,
     pub pre_built_tree_bytes: Option<Arc<Vec<u8>>>,
     pub queue_len: usize,
     pub queue_revision: u64,
@@ -772,6 +777,12 @@ pub(super) struct BridgeState {
     library_status: LibraryStatus,
     /// Finds `library`'s tracks by path.
     library_index: library_index::LibraryPathIndex,
+    /// The library's paths for paths it holds its files under another
+    /// spelling of; see [`library_alias`].
+    library_aliases: library_alias::LibraryAliases,
+    /// The path Show in Library was asked for, while the library's path for
+    /// it is being found.
+    pending_reveal: Option<PathBuf>,
     /// Paths whose tracks the bridge changed itself, from what other
     /// workers read. The library worker reads their rows again, so that a
     /// change applied after a newer one is corrected.
@@ -947,13 +958,19 @@ impl BridgeState {
         }
     }
 
+    /// The path the library holds the track `metadata` describes under, if
+    /// it has the track; see [`BridgeSnapshot::now_playing_library_path`].
+    fn now_playing_library_path(&self) -> Option<&Path> {
+        let path = Path::new(self.metadata.source_path.as_deref()?);
+        self.library_aliases
+            .library_path(&self.library_index, &self.library, path)
+    }
+
     /// See [`BridgeSnapshot::now_playing_tree_keys`]: a lookup in the
     /// library's path index and a few keys.
     fn now_playing_tree_keys(&self) -> Vec<String> {
-        self.metadata
-            .source_path
-            .as_deref()
-            .and_then(|path| self.library_index.position(&self.library, Path::new(path)))
+        self.now_playing_library_path()
+            .and_then(|path| self.library_index.position(&self.library, path))
             .map(|position| {
                 library_tree::track_ancestor_keys(
                     &self.library.roots,
@@ -961,6 +978,24 @@ impl BridgeState {
                 )
             })
             .unwrap_or_default()
+    }
+
+    /// The paths the library's own paths are still to be found for: the
+    /// playing track's and the one Show in Library was asked for, unless
+    /// the library holds them as spelled or the alias worker answered for
+    /// them in this library.
+    fn paths_to_find_in_library(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        let playing = self.metadata.source_path.as_deref().map(Path::new);
+        for path in playing.into_iter().chain(self.pending_reveal.as_deref()) {
+            if !self.library_index.contains(&self.library, path)
+                && !self.library_aliases.is_settled(&self.library, path)
+                && !paths.iter().any(|known: &PathBuf| known == path)
+            {
+                paths.push(path.to_path_buf());
+            }
+        }
+        paths
     }
 
     fn snapshot(&self, include_tree: bool) -> BridgeSnapshot {
@@ -992,6 +1027,10 @@ impl BridgeState {
             library_view_anchor_key: self.library_view_anchor_key.clone(),
             library_view_anchor_offset: self.library_view_anchor_offset,
             library_reveal_generation: self.library_reveal_generation,
+            now_playing_library_path: self
+                .now_playing_library_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             now_playing_tree_keys: self.now_playing_tree_keys(),
             pre_built_tree_bytes: if include_tree {
                 Some(self.pre_built_tree_bytes.clone())
@@ -1269,6 +1308,7 @@ pub(crate) const BRIDGE_SHUTDOWN_TIMEOUT: Duration = LASTFM_SHUTDOWN_TIMEOUT
 struct BridgeLoopRuntime {
     imports: imports::ImportWorker,
     tree_worker: tree_worker::TreeWorker,
+    alias_worker: library_alias::LibraryAliasWorker,
     queue_validator: queue_validation::QueueValidationWorker,
     edit_refreshes: edit_refresh::EditRefreshWorker,
     /// The [`crate::library::next_file_sequence`] number of the last rename
@@ -1378,6 +1418,7 @@ impl SnapshotUrgency {
 enum BridgeLoopWake {
     Import(imports::ImportMessage),
     Tree(tree_worker::TreeResult),
+    LibraryAlias(library_alias::AliasResult),
     QueueValidated(queue_validation::ValidationResult),
     EditsRefreshed(edit_refresh::RefreshResult),
     Command(BridgeCommand),
@@ -1400,6 +1441,7 @@ enum BridgeLoopWake {
 enum Worker {
     Imports,
     LibraryTree,
+    LibraryAlias,
     QueueValidation,
     EditRefresh,
     Playback,
@@ -1418,6 +1460,7 @@ impl Worker {
         match self {
             Self::Imports => "Adding files to the queue",
             Self::LibraryTree => "The library view",
+            Self::LibraryAlias => "Finding tracks in the library by another path",
             Self::QueueValidation => "Checking the queue's files",
             Self::EditRefresh => "Showing saved tag edits",
             Self::Playback => "Playback",
@@ -1436,6 +1479,7 @@ impl Worker {
         match self {
             Self::Imports | Self::QueueValidation | Self::Playback => ErrorCategory::Playback,
             Self::LibraryTree
+            | Self::LibraryAlias
             | Self::Metadata
             | Self::Library
             | Self::Search
@@ -1453,6 +1497,7 @@ impl Worker {
         matches!(
             self,
             Self::LibraryTree
+                | Self::LibraryAlias
                 | Self::QueueValidation
                 | Self::EditRefresh
                 | Self::Search
@@ -1522,6 +1567,7 @@ impl BridgeLoopRuntime {
         Self {
             imports,
             tree_worker: tree_worker::TreeWorker::new(),
+            alias_worker: library_alias::LibraryAliasWorker::new(),
             queue_validator: queue_validation::QueueValidationWorker::new(),
             edit_refreshes: edit_refresh::EditRefreshWorker::new(),
             applied_rename_sequence: 0,
@@ -1624,6 +1670,7 @@ impl BridgeLoopRuntime {
         select! {
             recv(&self.imports.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::Imports), BridgeLoopWake::Import),
             recv(&self.tree_worker.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::LibraryTree), BridgeLoopWake::Tree),
+            recv(&self.alias_worker.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::LibraryAlias), BridgeLoopWake::LibraryAlias),
             recv(&self.queue_validator.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::QueueValidation), BridgeLoopWake::QueueValidated),
             recv(&self.edit_refreshes.results) -> msg => msg.map_or(BridgeLoopWake::WorkerStopped(Worker::EditRefresh), BridgeLoopWake::EditsRefreshed),
             recv(cmd_rx) -> msg => {
@@ -1739,6 +1786,7 @@ impl BridgeLoopRuntime {
                 sequence,
             }) => self.apply_renamed_paths(number, renames, details, sequence, event_tx),
             BridgeLoopWake::Tree(result) => self.apply_tree_result(result),
+            BridgeLoopWake::LibraryAlias(result) => self.apply_library_alias(result),
             BridgeLoopWake::QueueValidated(result) => {
                 let (changed, problem) = self.queue_validator.apply(result, &mut self.state);
                 // The queue shows what it could read, or the file names,
@@ -1782,6 +1830,14 @@ impl BridgeLoopRuntime {
         };
         urgency = urgency.max(self.drain_pending_updates(event_tx));
         self.read_patched_library_rows();
+        if commands::finish_pending_reveal(&mut self.state, event_tx) {
+            // The rows it opened, which a tree asked for before would
+            // close again.
+            self.request_tree();
+            self.flags.session_dirty = true;
+            urgency = SnapshotUrgency::Immediate;
+        }
+        self.request_library_aliases();
         self.note_snapshot_urgency(urgency);
         self.maybe_emit_pending_snapshot(event_tx);
     }
@@ -1953,6 +2009,11 @@ impl BridgeLoopRuntime {
                 self.request_tree();
             }
             Worker::LibraryTree => self.tree_worker.results = never(),
+            // The new worker is asked again for what the old one lost.
+            Worker::LibraryAlias if restart => {
+                self.alias_worker = library_alias::LibraryAliasWorker::new();
+            }
+            Worker::LibraryAlias => self.alias_worker.results = never(),
             Worker::QueueValidation if restart => {
                 self.queue_validator = queue_validation::QueueValidationWorker::new();
                 self.state.queue_detail_validation_requested = true;
@@ -2022,6 +2083,30 @@ impl BridgeLoopRuntime {
             self.state.settings.library_sort_mode,
             self.state.expanded_keys.clone(),
         );
+    }
+
+    /// Ask the alias worker for the library's paths the bridge still
+    /// needs; see [`BridgeState::paths_to_find_in_library`].
+    fn request_library_aliases(&mut self) {
+        let paths = self.state.paths_to_find_in_library();
+        if !paths.is_empty() {
+            self.alias_worker.request(&self.state.library, paths);
+        }
+    }
+
+    /// Keep the library's paths the alias worker found. A Show in Library
+    /// that waited for them is finished after every wake.
+    fn apply_library_alias(&mut self, result: library_alias::AliasResult) -> SnapshotUrgency {
+        if !self.alias_worker.take_current(&result) {
+            return SnapshotUrgency::None;
+        }
+        let before = self.state.now_playing_library_path().map(Path::to_path_buf);
+        self.state.library_aliases.store(result);
+        if self.state.now_playing_library_path() == before.as_deref() {
+            SnapshotUrgency::None
+        } else {
+            SnapshotUrgency::Immediate
+        }
     }
 
     fn apply_tree_result(&mut self, result: tree_worker::TreeResult) -> SnapshotUrgency {
@@ -3125,10 +3210,9 @@ fn command_requires_tree_rebuild(cmd: &BridgeCommand, current_sort_mode: Library
             *mode != current_sort_mode
         }
         BridgeCommand::Settings(BridgeSettingsCommand::LoadFromDisk)
-        | BridgeCommand::Library(
-            BridgeLibraryCommand::SetNodeExpanded { .. }
-            | BridgeLibraryCommand::ShowTrackInLibrary(_),
-        ) => true,
+        // Show in Library rebuilds the tree once it found the track; see
+        // `commands::finish_pending_reveal`.
+        | BridgeCommand::Library(BridgeLibraryCommand::SetNodeExpanded { .. }) => true,
         _ => false,
     }
 }
@@ -8570,5 +8654,135 @@ mod tests {
             titles,
             HashMap::from([(a.as_path(), "B"), (b.as_path(), "A, changed again")])
         );
+    }
+
+    /// A runtime whose library holds the track of `album` through the
+    /// link, by the artist "Artist".
+    fn runtime_with_linked_album(
+        album: &library_alias::test_support::LinkedAlbum,
+    ) -> (
+        BridgeLoopRuntime,
+        Sender<BridgeEvent>,
+        Receiver<BridgeEvent>,
+    ) {
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = event_channel();
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        runtime.state.library = Arc::new(LibrarySnapshot {
+            roots: vec![library_root(&album.root)],
+            tracks: crate::library::shared_tracks(vec![library_track(
+                &album.linked.to_string_lossy(),
+                &album.root,
+                "Artist",
+                "Album",
+                None,
+                Some(1),
+            )]),
+            ..LibrarySnapshot::default()
+        });
+        (runtime, event_tx, event_rx)
+    }
+
+    /// Wait for the alias worker's answer, and hand it to the loop.
+    fn apply_alias_answer(runtime: &mut BridgeLoopRuntime, event_tx: &Sender<BridgeEvent>) {
+        let result = runtime
+            .alias_worker
+            .results
+            .recv_timeout(Duration::from_secs(5))
+            .expect("alias answer");
+        runtime.handle_wake(BridgeLoopWake::LibraryAlias(result), event_tx);
+    }
+
+    #[test]
+    fn the_playing_track_is_found_in_the_library_through_a_link() {
+        let _guard = test_guard();
+        let album = library_alias::test_support::linked_album();
+        let (mut runtime, event_tx, _event_rx) = runtime_with_linked_album(&album);
+        // Opened from outside the library, the file is queued by its
+        // canonical path.
+        runtime.state.metadata.source_path = Some(album.canonical.to_string_lossy().into_owned());
+        assert!(runtime
+            .state
+            .snapshot(false)
+            .now_playing_tree_keys
+            .is_empty());
+
+        runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
+        apply_alias_answer(&mut runtime, &event_tx);
+
+        let snapshot = runtime.state.snapshot(false);
+        assert_eq!(
+            snapshot.now_playing_library_path,
+            album.linked.to_string_lossy()
+        );
+        let root = album.root.to_string_lossy();
+        assert_eq!(
+            snapshot.now_playing_tree_keys,
+            [format!("root|{root}"), format!("artist|{root}|Album"),]
+        );
+
+        // The library as the track is spelled in it needs no worker.
+        runtime.state.metadata.source_path = Some(album.linked.to_string_lossy().into_owned());
+        assert!(runtime.state.paths_to_find_in_library().is_empty());
+        assert_eq!(
+            runtime.state.snapshot(false).now_playing_library_path,
+            album.linked.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn show_in_library_finds_a_track_through_a_link_and_says_when_it_cannot() {
+        let _guard = test_guard();
+        let album = library_alias::test_support::linked_album();
+        let (mut runtime, event_tx, event_rx) = runtime_with_linked_album(&album);
+        let show = |path: &Path| {
+            BridgeLoopWake::Command(BridgeCommand::Library(
+                BridgeLibraryCommand::ShowTrackInLibrary(path.to_path_buf()),
+            ))
+        };
+
+        runtime.handle_wake(show(&album.canonical), &event_tx);
+        assert_eq!(runtime.state.library_reveal_generation, 0);
+        apply_alias_answer(&mut runtime, &event_tx);
+        assert_eq!(runtime.state.library_reveal_generation, 1);
+        assert_eq!(
+            runtime.state.library_view_selection_key,
+            format!("track|{}", album.linked.to_string_lossy())
+        );
+        assert!(error_messages(&event_rx).is_empty());
+        // The tree it asks for keeps the rows it opened.
+        let artist = format!("artist|{}|Album", album.root.to_string_lossy());
+        assert!(runtime.state.expanded_keys.contains(&artist));
+        while let Ok(tree) = runtime
+            .tree_worker
+            .results
+            .recv_timeout(Duration::from_secs(5))
+        {
+            let current = runtime.tree_worker.is_current(&tree);
+            runtime.handle_wake(BridgeLoopWake::Tree(tree), &event_tx);
+            if current {
+                break;
+            }
+        }
+        assert!(
+            runtime.state.expanded_keys.contains(&artist),
+            "{:?}",
+            runtime.state.expanded_keys
+        );
+
+        // A track the library holds as asked is shown at once.
+        runtime.handle_wake(show(&album.linked), &event_tx);
+        assert_eq!(runtime.state.library_reveal_generation, 2);
+
+        // A file the library does not have is reported, not ignored.
+        let outside = album.base.join("elsewhere/Album/missing.flac");
+        runtime.handle_wake(show(&outside), &event_tx);
+        apply_alias_answer(&mut runtime, &event_tx);
+        assert_eq!(runtime.state.library_reveal_generation, 2);
+        assert_eq!(
+            error_messages(&event_rx),
+            ["This file is not in the library."]
+        );
+        assert!(runtime.state.pending_reveal.is_none());
     }
 }

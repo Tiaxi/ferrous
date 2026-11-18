@@ -560,6 +560,10 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
             out->treeKeys.append(key);
         }
     }
+    // The path the library holds the track under, which a link can make
+    // differ from the track's own.
+    out->libraryPath.clear();
+    if (!reader.atEnd() && !reader.readUtf8(&out->libraryPath)) return false;
     quint32 trackTotal = 0;
     if (!reader.atEnd() && !reader.readU32(&trackTotal)) return false;
     if (!reader.atEnd()) return false;

@@ -349,6 +349,7 @@ private slots:
     void metadataTreeKeysDecodeAfterTheChannelLabels();
     void currentTrackTreeKeysFollowTheMetadataOfTheCurrentTrack();
     void metadataTrackTotalDecodesAfterTheTreeKeys();
+    void currentTrackLibraryPathFollowsTheMetadataOfTheCurrentTrack();
     void currentTrackTotalBelongsToTheCurrentTracksNumber();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void trackOnlySnapshotSetsTrackFlagOnly();
@@ -8768,6 +8769,8 @@ void BridgeClientTest::metadataTrackTotalDecodesAfterTheTreeKeys()
     stream << quint16(0); // no channel labels
     stream << quint16(1);
     appendText("root|/music");
+    // The path the library holds the track under, through a link here.
+    appendText("/library/A/Album/02.flac");
     auto decode = [](const QByteArray &body, BinaryBridgeCodec::DecodedSnapshot *decoded) {
         QByteArray packet;
         QDataStream header(&packet, QIODevice::WriteOnly);
@@ -8787,8 +8790,41 @@ void BridgeClientTest::metadataTrackTotalDecodesAfterTheTreeKeys()
     QCOMPARE(decoded.metadata.trackNumber, 2);
     QCOMPARE(decoded.metadata.trackTotal, 8);
     QCOMPARE(decoded.metadata.treeKeys, QStringList{QStringLiteral("root|/music")});
+    QCOMPARE(decoded.metadata.libraryPath, QStringLiteral("/library/A/Album/02.flac"));
     QVERIFY(!decode(payload.first(payload.size() - 1), &decoded));
     QVERIFY(!decode(payload + QByteArray(1, '\0'), &decoded));
+}
+
+// The library's path for the playing track, which differs from the track's
+// own when a link is in one of them (#588), goes with the metadata of the
+// track as the tree keys do.
+void BridgeClientTest::currentTrackLibraryPathFollowsTheMetadataOfTheCurrentTrack()
+{
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/elsewhere/Album/01.flac");
+    snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.currentTrackLibraryPath().isEmpty());
+    // The backend found the track in the library, through the link, and
+    // the poll announces it.
+    client.m_pollTrackMetadataChanged = false;
+    snapshot.metadata.libraryPath = QStringLiteral("/music/Album/01.flac");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackLibraryPath(), snapshot.metadata.libraryPath);
+    QVERIFY(client.m_pollTrackMetadataChanged);
+    // Metadata still about the previous track names no path for the next.
+    snapshot.playback.currentPath = QStringLiteral("/elsewhere/Album/02.flac");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.currentTrackLibraryPath().isEmpty());
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    snapshot.metadata.libraryPath = QStringLiteral("/music/Album/02.flac");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackLibraryPath(), snapshot.metadata.libraryPath);
 }
 
 void BridgeClientTest::currentTrackTotalBelongsToTheCurrentTracksNumber()

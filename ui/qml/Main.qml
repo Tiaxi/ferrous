@@ -270,6 +270,7 @@ ApplicationWindow {
         property int currentTrackNumber: 0
         property int currentTrackTotal: 0
         property var currentTrackTreeKeys: []
+        property string currentTrackLibraryPath: ""
         property string currentTrackFormatLabel: ""
         property string currentTrackChannelLayoutText: ""
         property string currentTrackChannelLayoutIconKey: ""
