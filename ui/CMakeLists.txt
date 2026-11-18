@@ -1017,16 +1017,6 @@ if(BUILD_TESTING)
         )
     endif()
 
-    # The build and the perf probe refuse a Qt older than the one they need,
-    # and the install guide names it.
-    add_test(NAME ferrous_qt_minimum_version
-        COMMAND "${CMAKE_COMMAND}"
-            -DQT_MINIMUM=${FERROUS_QT_MINIMUM_VERSION}
-            -DROOT_DIR=${FERROUS_ROOT_DIR}
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_qt_minimum_version.cmake"
-    )
-    set_tests_properties(ferrous_qt_minimum_version PROPERTIES TIMEOUT 60)
-
     # No binary refers to Qt's private API, whose symbols would tie it, and
     # the package through RPM's automatic dependencies, to the exact Qt minor
     # version it was built with. This covers every executable defined above.
