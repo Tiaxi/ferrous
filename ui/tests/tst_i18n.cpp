@@ -32,44 +32,11 @@
 #include "../src/LibraryTreeModel.h"
 #include "../src/Localization.h"
 #include "../src/QmlTypes.h"
+#include "TestMessages.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
 namespace {
-
-QtMessageHandler &previousMessageHandler() {
-    static QtMessageHandler handler = nullptr;
-    return handler;
-}
-
-QMutex &capturedMessageMutex() {
-    static QMutex mutex;
-    return mutex;
-}
-
-QStringList &capturedMessages() {
-    static QStringList messages;
-    return messages;
-}
-
-void captureQtMessage(QtMsgType type, const QMessageLogContext &context, const QString &message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) {
-        QMutexLocker locker(&capturedMessageMutex());
-        capturedMessages().push_back(message);
-    }
-    if (previousMessageHandler()) {
-        previousMessageHandler()(type, context, message);
-    } else {
-        qt_message_output(type, context, message);
-    }
-}
-
-QString takeCapturedMessagesText() {
-    QMutexLocker locker(&capturedMessageMutex());
-    const QString text = capturedMessages().join(QLatin1Char('\n'));
-    capturedMessages().clear();
-    return text;
-}
 
 // `english` as the x-test catalog has it.
 QString pseudo(const QString &english) {
@@ -189,7 +156,7 @@ private slots:
 };
 
 void TranslationTest::initTestCase() {
-    previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
+    startCapturingMessages();
     // Gettext ignores the language KI18n asks for under the C locale.
     const char *messages = std::setlocale(LC_MESSAGES, nullptr);
     QVERIFY2(messages != nullptr && std::strcmp(messages, "C") != 0
@@ -214,8 +181,7 @@ void TranslationTest::cleanup() {
 }
 
 void TranslationTest::cleanupTestCase() {
-    qInstallMessageHandler(previousMessageHandler());
-    previousMessageHandler() = nullptr;
+    stopCapturingMessages();
 }
 
 void TranslationTest::cppMessagesComeFromTheCatalog() {

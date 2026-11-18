@@ -36,42 +36,13 @@
 
 #include "GlobalSearchResultsModel.h"
 #include "Localization.h"
+#include "TestColor.h"
+#include "TestItems.h"
+#include "TestMessages.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
 namespace {
-
-QMutex &messageMutex() {
-    static QMutex mutex;
-    return mutex;
-}
-
-QStringList &warnings() {
-    static QStringList list;
-    return list;
-}
-
-QtMessageHandler &previousHandler() {
-    static QtMessageHandler handler = nullptr;
-    return handler;
-}
-
-void recordWarnings(QtMsgType type, const QMessageLogContext &context, const QString &message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg) {
-        QMutexLocker locker(&messageMutex());
-        warnings().push_back(message);
-    }
-    if (previousHandler()) {
-        previousHandler()(type, context, message);
-    }
-}
-
-QStringList takeWarnings() {
-    QMutexLocker locker(&messageMutex());
-    QStringList list = warnings();
-    warnings().clear();
-    return list;
-}
 
 // The colours of a Breeze scheme that UiPalette reads, from Breeze's
 // .colors files.
@@ -244,14 +215,6 @@ QVector<Row> meridianRows(const QString &coverUrl) {
     return rows;
 }
 
-QRectF sceneRect(QQuickItem *item) {
-    return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
-}
-
-QPoint sceneCentre(QQuickItem *item) {
-    return sceneRect(item).center().toPoint();
-}
-
 void visit(QQuickItem *item, const std::function<void(QQuickItem *)> &function) {
     function(item);
     for (QQuickItem *child : item->childItems()) {
@@ -294,41 +257,8 @@ QString contextText(QQuickItem *row) {
     return text;
 }
 
-// `top` drawn over the opaque `bottom`.
-QColor drawnOver(const QColor &top, const QColor &bottom) {
-    const double alpha = top.alphaF();
-    return QColor::fromRgbF(static_cast<float>(top.redF() * alpha + bottom.redF() * (1.0 - alpha)),
-                            static_cast<float>(top.greenF() * alpha + bottom.greenF() * (1.0 - alpha)),
-                            static_cast<float>(top.blueF() * alpha + bottom.blueF() * (1.0 - alpha)));
-}
-
-// WCAG's relative luminance and contrast ratio of opaque colours.
-double relativeLuminance(const QColor &color) {
-    const auto linear = [](double channel) {
-        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
-    };
-    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
-}
-
-double contrastRatio(const QColor &a, const QColor &b) {
-    const double la = relativeLuminance(a);
-    const double lb = relativeLuminance(b);
-    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
-}
-
-QString describe(const QString &what, const QColor &a, const QColor &b) {
-    return QStringLiteral("%1: %2 on %3 is %4:1")
-        .arg(what, a.name(QColor::HexArgb), b.name(QColor::HexArgb))
-        .arg(contrastRatio(a, b), 0, 'f', 2);
-}
-
 QColor colorOf(QQuickItem *item) {
     return item->property("color").value<QColor>();
-}
-
-// A colour as #aarrggbb, to compare colours whatever their spec.
-QString hex(const QColor &color) {
-    return color.name(QColor::HexArgb);
 }
 
 // The harness window, shown and active, with a results model of the test's
@@ -508,7 +438,7 @@ private slots:
 };
 
 void SearchPaletteTest::initTestCase() {
-    previousHandler() = qInstallMessageHandler(recordWarnings);
+    startCapturingMessages();
     QVERIFY2(!QStandardPaths::locate(QStandardPaths::GenericDataLocation,
                                      QStringLiteral("icons/breeze/index.theme"))
                   .isEmpty(),
@@ -516,7 +446,7 @@ void SearchPaletteTest::initTestCase() {
 }
 
 void SearchPaletteTest::cleanup() {
-    const QStringList list = takeWarnings();
+    const QStringList list = takeCapturedMessages();
     QVERIFY2(list.isEmpty(), qPrintable(list.join(QLatin1Char('\n'))));
 }
 
@@ -601,12 +531,12 @@ void SearchPaletteTest::paletteSitsUnderTheTransportOverADim() {
         const QColor dimmed = drawnOver(colorOf(dim), window);
         if (dark) {
             QVERIFY2(contrastRatio(outline, dimmed) >= 1.5,
-                     qPrintable(describe(QStringLiteral("outline"), outline, dimmed)));
+                     qPrintable(describeContrast(QStringLiteral("outline"), outline, dimmed)));
             QVERIFY2(contrastRatio(outline, harness.token("view")) >= 1.5,
-                     qPrintable(describe(QStringLiteral("outline"), outline, harness.token("view"))));
+                     qPrintable(describeContrast(QStringLiteral("outline"), outline, harness.token("view"))));
         } else {
             QVERIFY2(contrastRatio(harness.token("view"), dimmed) >= 1.5,
-                     qPrintable(describe(QStringLiteral("palette"), harness.token("view"), dimmed)));
+                     qPrintable(describeContrast(QStringLiteral("palette"), harness.token("view"), dimmed)));
         }
     }
 }
@@ -870,11 +800,11 @@ void SearchPaletteTest::selectedHoveredAndPlayingRowsAreDrawn() {
     const QColor view = harness.token("view");
     const QColor hoverDrawn = drawnOver(colorOf(hover), view);
     const QColor selectionDrawn = harness.token("selection");
-    QVERIFY2(hoverDrawn != selectionDrawn, qPrintable(describe(QStringLiteral("hover vs selection"), hoverDrawn, selectionDrawn)));
+    QVERIFY2(hoverDrawn != selectionDrawn, qPrintable(describeContrast(QStringLiteral("hover vs selection"), hoverDrawn, selectionDrawn)));
     // Visibly different: neither reads as the other.
     QVERIFY2(std::abs(relativeLuminance(hoverDrawn) - relativeLuminance(selectionDrawn)) > 0.005
                  || std::abs(hoverDrawn.hueF() - selectionDrawn.hueF()) > 0.1,
-             qPrintable(describe(QStringLiteral("hover vs selection"), hoverDrawn, selectionDrawn)));
+             qPrintable(describeContrast(QStringLiteral("hover vs selection"), hoverDrawn, selectionDrawn)));
     QVERIFY(visibleChildNamed(other, QStringLiteral("rowBackgroundTint")) == nullptr);
     QTest::mouseMove(harness.window, QPoint(2, 2));
 
@@ -1534,7 +1464,7 @@ void SearchPaletteTest::textMeetsItsContrastAsDrawn() {
 
     QStringList failures;
     const auto check = [&](const QString &what, const QColor &foreground, const QColor &background, double minimum) {
-        if (contrastRatio(foreground, background) < minimum) failures << describe(what, foreground, background);
+        if (contrastRatio(foreground, background) < minimum) failures << describeContrast(what, foreground, background);
     };
     for (int i = 0; i < harness.model.rowCount(); ++i) {
         QQuickItem *row = harness.row(i);
@@ -1601,16 +1531,6 @@ void SearchPaletteTest::textMeetsItsContrastAsDrawn() {
 
     QVERIFY2(failures.isEmpty(), qPrintable(failures.join(QLatin1Char('\n'))));
 }
-
-namespace {
-
-// Whether `inner` lies within `outer`, give or take half a pixel.
-bool within(const QRectF &inner, const QRectF &outer) {
-    return inner.left() >= outer.left() - 0.5 && inner.right() <= outer.right() + 0.5
-        && inner.top() >= outer.top() - 0.5 && inner.bottom() <= outer.bottom() + 0.5;
-}
-
-} // namespace
 
 void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText_data() {
     QTest::addColumn<int>("windowWidth");

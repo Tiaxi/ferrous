@@ -275,12 +275,6 @@ QVector<QVariantMap> modelRows(const LibraryTreeModel &model) {
     return rows;
 }
 
-// Drop the captured messages that are `message`, which the test expects.
-void dropCapturedMessages(const QString &message) {
-    QMutexLocker locker(&capturedMessageMutex());
-    capturedMessages().removeAll(message);
-}
-
 } // namespace
 
 void LibraryQueueSmokeTest::libraryTreeRowsCarryTheirCoverStamp() {

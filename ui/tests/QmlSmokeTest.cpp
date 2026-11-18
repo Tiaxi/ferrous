@@ -2,29 +2,8 @@
 
 #include "QmlSmokeTest.h"
 
-namespace {
-
-QtMessageHandler &previousMessageHandler() {
-    static QtMessageHandler handler = nullptr;
-    return handler;
-}
-
-void captureQtMessage(QtMsgType type, const QMessageLogContext &context, const QString &message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) {
-        QMutexLocker locker(&capturedMessageMutex());
-        capturedMessages().push_back(message);
-    }
-    if (previousMessageHandler()) {
-        previousMessageHandler()(type, context, message);
-    } else {
-        qt_message_output(type, context, message);
-    }
-}
-
-} // namespace
-
 void QmlSmokeTest::initTestCase() {
-    previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
+    startCapturingMessages();
     // Every area runs alone, so none may rely on another's registrations.
     registerFerrousQmlTypes();
 }
@@ -45,8 +24,7 @@ void QmlSmokeTest::cleanup() {
 }
 
 void QmlSmokeTest::cleanupTestCase() {
-    qInstallMessageHandler(previousMessageHandler());
-    previousMessageHandler() = nullptr;
+    stopCapturingMessages();
 }
 
 void presentWithoutDrawing(QWindow &window) {
@@ -298,28 +276,6 @@ QString formatQmlErrors(const QList<QQmlError> &errors) {
     return lines.join('\n');
 }
 
-QMutex &capturedMessageMutex() {
-    static QMutex mutex;
-    return mutex;
-}
-
-QStringList &capturedMessages() {
-    static QStringList messages;
-    return messages;
-}
-
-void clearCapturedMessages() {
-    QMutexLocker locker(&capturedMessageMutex());
-    capturedMessages().clear();
-}
-
-QString takeCapturedMessagesText() {
-    QMutexLocker locker(&capturedMessageMutex());
-    const QString text = capturedMessages().join('\n');
-    capturedMessages().clear();
-    return text;
-}
-
 QObject *findObjectByStringProperty(QObject *root, const char *propertyName, const QString &expectedValue) {
     if (!root) {
         return nullptr;
@@ -414,25 +370,6 @@ QList<QQuickItem *> visibleTextItems(QQuickItem *root, const QString &text) {
     };
     visit(root);
     return found;
-}
-
-QList<QQuickItem *> itemsNamed(QQuickItem *root, const QString &objectName) {
-    QList<QQuickItem *> found;
-    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
-        if (item->objectName() == objectName) {
-            found.push_back(item);
-        }
-        for (QQuickItem *child : item->childItems()) {
-            visit(child);
-        }
-    };
-    visit(root);
-    return found;
-}
-
-QQuickItem *itemNamed(QQuickItem *root, const QString &objectName) {
-    const QList<QQuickItem *> found = itemsNamed(root, objectName);
-    return found.isEmpty() ? nullptr : found.first();
 }
 
 bool clearOfTheOtherButtons(QQuickItem *button) {

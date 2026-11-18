@@ -47,45 +47,14 @@
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
 #include "../src/WindowPresence.h"
+#include "TestColor.h"
+#include "TestItems.h"
+#include "TestMessages.h"
+#include "TestMotion.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
 namespace {
-
-QMutex &messageMutex() {
-    static QMutex mutex;
-    return mutex;
-}
-
-QStringList &capturedMessages() {
-    static QStringList messages;
-    return messages;
-}
-
-QtMessageHandler &previousHandler() {
-    static QtMessageHandler handler = nullptr;
-    return handler;
-}
-
-void captureMessage(QtMsgType type, const QMessageLogContext &context, const QString &message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) {
-        QMutexLocker locker(&messageMutex());
-        capturedMessages().push_back(message);
-    }
-    if (previousHandler()) {
-        previousHandler()(type, context, message);
-    }
-}
-
-QString takeMessages() {
-    QMutexLocker locker(&messageMutex());
-    // A larger font raises the window's minimum size; the offscreen
-    // platform warns that it does not pass size hints on.
-    capturedMessages().removeAll(QStringLiteral("This plugin does not support propagateSizeHints()"));
-    const QString text = capturedMessages().join(QLatin1Char('\n'));
-    capturedMessages().clear();
-    return text;
-}
 
 QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
     engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
@@ -109,10 +78,6 @@ QObject *bridgeOf(QQuickWindow *window) {
     return qvariant_cast<QObject *>(window->property("uiBridge"));
 }
 
-QString hex(const QColor &color) {
-    return color.name(QColor::HexArgb);
-}
-
 QString nowHex(QQuickWindow *window) {
     auto *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
     return hex(palette->property("now").value<QColor>());
@@ -120,31 +85,6 @@ QString nowHex(QQuickWindow *window) {
 
 QString colorOf(const QObject *object) {
     return hex(object->property("color").value<QColor>());
-}
-
-QList<QQuickItem *> itemsNamed(QQuickItem *root, const QString &name) {
-    QList<QQuickItem *> found;
-    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
-        if (item->objectName() == name) {
-            found.push_back(item);
-        }
-        for (QQuickItem *child : item->childItems()) {
-            visit(child);
-        }
-    };
-    if (root != nullptr) {
-        visit(root);
-    }
-    return found;
-}
-
-QQuickItem *itemNamed(QQuickItem *root, const QString &name) {
-    const QList<QQuickItem *> found = itemsNamed(root, name);
-    return found.isEmpty() ? nullptr : found.first();
-}
-
-QQuickItem *named(QQuickWindow *window, const char *name) {
-    return itemNamed(window->contentItem(), QString::fromLatin1(name));
 }
 
 QQuickItem *itemAtIndex(QQuickItem *view, int index) {
@@ -338,54 +278,6 @@ bool rowsSettled(QQuickItem *view, int count) {
         }
     }
     return true;
-}
-
-// The time of every animation of the GUI thread, while it lives: it stands
-// still but for the steps the test takes, however busy the machine. For the
-// lists' transitions, whose animations cannot be paused or set to a point,
-// and for checks along a whole fade, which a slow frame would skip on real
-// time.
-// Qt takes it only while no other driver is installed: main() keeps Qt
-// Quick on the basic render loop, whose window installs none.
-class SteppedAnimationDriver : public QAnimationDriver {
-public:
-    SteppedAnimationDriver() { install(); }
-    ~SteppedAnimationDriver() override { uninstall(); }
-    SteppedAnimationDriver(const SteppedAnimationDriver &) = delete;
-    SteppedAnimationDriver &operator=(const SteppedAnimationDriver &) = delete;
-
-    qint64 elapsed() const override { return m_elapsed; }
-
-    // Lets `ms` of animation time pass, a frame of 16 ms at a time, as the
-    // window would draw them. Whether this driver ran the animations: Qt
-    // starts the installed driver once one runs, so it is false when Qt
-    // left it out, and the animations ran on real time instead.
-    [[nodiscard]] bool step(int ms) {
-        bool drove = false;
-        for (int done = 0; done < ms; done += kFrame) {
-            // The animations that started since: they run from the next
-            // frame on.
-            QCoreApplication::processEvents();
-            drove = drove || isRunning();
-            m_elapsed += std::min(kFrame, ms - done);
-            advance();
-        }
-        return drove;
-    }
-
-private:
-    static constexpr int kFrame = 16;
-    qint64 m_elapsed = 0;
-};
-
-// The frames `window` draws over `ms` of wall time.
-int framesOver(QQuickWindow *window, int ms) {
-    int frames = 0;
-    const QMetaObject::Connection connection = QObject::connect(
-        window, &QQuickWindow::frameSwapped, window, [&frames]() { ++frames; });
-    QTest::qWait(ms);
-    QObject::disconnect(connection);
-    return frames;
 }
 
 // Covers, as image files of the test's own, each of one colour: `first`
@@ -915,17 +807,6 @@ QString lookChange(const PanelLook &before, const PanelLook &after, const QStrin
     return {};
 }
 
-// Whether `item` or an item it sits in still waits for its polish, where
-// layouts place their children.
-bool layoutPending(const QQuickItem *item) {
-    for (; item != nullptr; item = item->parentItem()) {
-        if (QQuickTest::qIsPolishScheduled(item)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Whether the panel shows the playing track's layout whole: the first
 // track grows it from the compact row of nothing playing (#373 H7), which
 // this waits out, and the sidebar has laid it out at its whole height,
@@ -1093,7 +974,7 @@ private slots:
 };
 
 void UiMotionTest::initTestCase() {
-    previousHandler() = qInstallMessageHandler(captureMessage);
+    startCapturingMessages();
     FerrousLocalization::setUpApplicationDomain();
     FerrousLocalization::registerQmlTypes();
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
@@ -1105,17 +986,19 @@ void UiMotionTest::initTestCase() {
 }
 
 void UiMotionTest::init() {
-    takeMessages();
+    clearCapturedMessages();
 }
 
 void UiMotionTest::cleanup() {
-    const QString messages = takeMessages();
+    // A larger font raises the window's minimum size: the offscreen
+    // platform warns that it does not pass size hints on.
+    dropCapturedMessages(offscreenSizeHintsWarning());
+    const QString messages = takeCapturedMessagesText();
     QVERIFY2(messages.isEmpty(), qPrintable(messages));
 }
 
 void UiMotionTest::cleanupTestCase() {
-    qInstallMessageHandler(previousHandler());
-    previousHandler() = nullptr;
+    stopCapturingMessages();
 }
 
 void UiMotionTest::drawsOffscreenUnlessAPlatformIsChosen() {
@@ -1526,13 +1409,12 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
             }
         }
     };
-    const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (handover->property("running").toBool()) {
-                ++frames;
-            }
-            checkFrame();
-        });
+    FrameSampler connection(window, [&]() {
+        if (handover->property("running").toBool()) {
+            ++frames;
+        }
+        checkFrame();
+    });
 
     // As BridgeClient tells it: the path, then the metadata.
     bridge->setProperty("currentTrackPath", kTrackA2);
@@ -1578,7 +1460,7 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
 
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
     QVERIFY(allLinesStill(panel));
@@ -2248,13 +2130,12 @@ void UiMotionTest::nowPlayingOnlyTheNumberThatChangesFades() {
     };
     QString failure;
     int frames = 0;
-    const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (failure.isEmpty() && handover->property("running").toBool()) {
-                ++frames;
-                failure = onlyTheWord(panel->property("handover").toDouble());
-            }
-        });
+    FrameSampler connection(window, [&]() {
+        if (failure.isEmpty() && handover->property("running").toBool()) {
+            ++frames;
+            failure = onlyTheWord(panel->property("handover").toDouble());
+        }
+    });
 
     tellDetails(bridge, yearAfter != yearBefore ? kTrackB1 : kTrackA2, QStringLiteral("Second"),
                 yearAfter != yearBefore ? QStringLiteral("Album B") : QStringLiteral("Album A"), yearAfter, genre,
@@ -2278,7 +2159,7 @@ void UiMotionTest::nowPlayingOnlyTheNumberThatChangesFades() {
     panel->setProperty("handover", 0.0);
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
     QVERIFY(panelIdle(panel, narrow ? kNarrowLines : kWideLines));
@@ -2887,28 +2768,27 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     QList<double> tops;
     QList<double> bands;
     QString unsquare;
-    const QMetaObject::Connection squareConnection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (!unsquare.isEmpty() || !area->isVisible()) {
-                return;
-            }
-            const QRectF band = sceneRectOf(area);
-            const QRectF tile = sceneRectOf(cover);
-            bands.push_back(band.height());
-            if (cover->width() != side || cover->height() != side || tile.topLeft() != band.topLeft()
-                || band.width() != side || (band.height() < side && !area->clip())) {
-                unsquare = QStringLiteral("%1x%2 at %3,%4 in a %5x%6 band at %7,%8").arg(tile.width())
-                               .arg(tile.height()).arg(tile.left()).arg(tile.top()).arg(band.width())
-                               .arg(band.height()).arg(band.left()).arg(band.top());
-            }
-        });
+    FrameSampler squareConnection(window, [&]() {
+        if (!unsquare.isEmpty() || !area->isVisible()) {
+            return;
+        }
+        const QRectF band = sceneRectOf(area);
+        const QRectF tile = sceneRectOf(cover);
+        bands.push_back(band.height());
+        if (cover->width() != side || cover->height() != side || tile.topLeft() != band.topLeft()
+            || band.width() != side || (band.height() < side && !area->clip())) {
+            unsquare = QStringLiteral("%1x%2 at %3,%4 in a %5x%6 band at %7,%8").arg(tile.width())
+                           .arg(tile.height()).arg(tile.left()).arg(tile.top()).arg(band.width())
+                           .arg(band.height()).arg(band.left()).arg(band.top());
+        }
+    });
     while (growth->property("running").toBool()) {
         QTest::qWait(5);
         if (libraryFollows(panel, header)) {
             tops.push_back(sceneRectOf(header).top());
         }
     }
-    QObject::disconnect(squareConnection);
+    squareConnection.stop();
     QVERIFY2(unsquare.isEmpty(), qPrintable(unsquare));
     // The band grew over several frames, from about the row's height.
     QVERIFY2(bands.size() >= 5 && bands.first() < side / 2, qPrintable(QString::number(bands.size())));
@@ -3066,23 +2946,22 @@ void UiMotionTest::nowPlayingFirstPlayBandIsNeverEmpty() {
     const double side = narrow ? panel->property("narrowLayoutCoverSize").toDouble() : panel->width();
     QList<double> shown;
     QString problem;
-    const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (!growth->property("running").toBool() && shown.isEmpty()) {
-                return;
-            }
-            const double rowOpacity = row->isVisible() ? row->opacity() : 0.0;
-            const double coverOpacity = cover->isVisible() ? cover->opacity() : 0.0;
-            shown.push_back(std::max(rowOpacity, coverOpacity));
-            if (problem.isEmpty() && (cover->width() != side || cover->height() != side)) {
-                problem = QStringLiteral("the cover %1x%2").arg(cover->width()).arg(cover->height());
-            }
-        });
+    FrameSampler connection(window, [&]() {
+        if (!growth->property("running").toBool() && shown.isEmpty()) {
+            return;
+        }
+        const double rowOpacity = row->isVisible() ? row->opacity() : 0.0;
+        const double coverOpacity = cover->isVisible() ? cover->opacity() : 0.0;
+        shown.push_back(std::max(rowOpacity, coverOpacity));
+        if (problem.isEmpty() && (cover->width() != side || cover->height() != side)) {
+            problem = QStringLiteral("the cover %1x%2").arg(cover->width()).arg(cover->height());
+        }
+    });
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
     QVERIFY(growth->property("running").toBool());
     QVERIFY(QTest::qWaitFor([&]() { return !growth->property("running").toBool(); }, 5000));
     QTest::qWait(50);
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY2(problem.isEmpty(), qPrintable(problem));
     QVERIFY2(shown.size() >= 5, qPrintable(QString::number(shown.size())));
     for (qsizetype index = 1; index < shown.size(); ++index) {
@@ -3381,13 +3260,12 @@ void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace() {
     // At Kirigami's speed, frame by frame: the library's header and the
     // panel never move.
     QString moved;
-    const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (moved.isEmpty() && geometry() != still) {
-                moved = QStringLiteral("header at %1, panel %2 high")
-                            .arg(sceneRectOf(header).top()).arg(panel->height());
-            }
-        });
+    FrameSampler connection(window, [&]() {
+        if (moved.isEmpty() && geometry() != still) {
+            moved = QStringLiteral("header at %1, panel %2 high")
+                        .arg(sceneRectOf(header).top()).arg(panel->height());
+        }
+    });
     for (const bool toCover : {false, true}) {
         change(toCover);
         QVERIFY(handover->property("running").toBool());
@@ -3395,7 +3273,7 @@ void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace() {
         QTRY_VERIFY(panelIdle(panel, lines));
         QVERIFY2(moved.isEmpty(), qPrintable(moved));
     }
-    QObject::disconnect(connection);
+    connection.stop();
 
     // A track without a cover of another album: the same stand-in, which
     // does not fade over itself, as every track without a cover has the
@@ -3613,35 +3491,34 @@ void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed() {
         QString problem;
     };
     QList<Frame> frames;
-    const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (!growth->property("running").toBool() && frames.isEmpty()) {
-                return;
+    FrameSampler connection(window, [&]() {
+        if (!growth->property("running").toBool() && frames.isEmpty()) {
+            return;
+        }
+        Frame frame;
+        frame.presence = panel->property("presence").toDouble();
+        frame.cover = area->isVisible() && tile->isVisible() ? tile->opacity() : 0.0;
+        frame.row = row->isVisible() ? row->opacity() : 0.0;
+        frame.lines = lines->isVisible() && title.line()->isVisible() ? lines->opacity() : 0.0;
+        // What the tile shows is the track that went: its cover, or the
+        // stand-in for one, never the tile at rest.
+        if (frame.cover > 0) {
+            const bool held = !tile->property("idle").toBool()
+                && (withCover ? tile->property("hasCover").toBool()
+                                    && tile->property("coverPath").toString() == cover
+                              : tile->property("standInShown").toBool());
+            if (!held) {
+                frame.problem = QStringLiteral("the tile at %1 shows %2").arg(frame.cover)
+                    .arg(tile->property("idle").toBool() ? QStringLiteral("nothing")
+                                                         : tile->property("coverPath").toString());
             }
-            Frame frame;
-            frame.presence = panel->property("presence").toDouble();
-            frame.cover = area->isVisible() && tile->isVisible() ? tile->opacity() : 0.0;
-            frame.row = row->isVisible() ? row->opacity() : 0.0;
-            frame.lines = lines->isVisible() && title.line()->isVisible() ? lines->opacity() : 0.0;
-            // What the tile shows is the track that went: its cover, or the
-            // stand-in for one, never the tile at rest.
-            if (frame.cover > 0) {
-                const bool held = !tile->property("idle").toBool()
-                    && (withCover ? tile->property("hasCover").toBool()
-                                        && tile->property("coverPath").toString() == cover
-                                  : tile->property("standInShown").toBool());
-                if (!held) {
-                    frame.problem = QStringLiteral("the tile at %1 shows %2").arg(frame.cover)
-                        .arg(tile->property("idle").toBool() ? QStringLiteral("nothing")
-                                                             : tile->property("coverPath").toString());
-                }
-            }
-            // The lines are the track's that went, whole.
-            if (frame.lines > 0 && title.text() != QStringLiteral("First")) {
-                frame.problem = QStringLiteral("the title \"%1\" at %2").arg(title.text()).arg(frame.lines);
-            }
-            frames.push_back(frame);
-        });
+        }
+        // The lines are the track's that went, whole.
+        if (frame.lines > 0 && title.text() != QStringLiteral("First")) {
+            frame.problem = QStringLiteral("the title \"%1\" at %2").arg(title.text()).arg(frame.lines);
+        }
+        frames.push_back(frame);
+    });
     if (runsOut) {
         // The last track ends: no track, then stopped.
         for (const char *property : {"currentTrackPath", "currentTrackTitle", "currentTrackArtist",
@@ -3657,7 +3534,7 @@ void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed() {
     QVERIFY(panel->property("holdsTrack").toBool());
     QVERIFY(QTest::qWaitFor([&]() { return !growth->property("running").toBool(); }, 5000));
     QTest::qWait(50);
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY2(frames.size() >= 10, qPrintable(QString::number(frames.size())));
     for (qsizetype index = 0; index < frames.size(); ++index) {
         const Frame &frame = frames.at(index);
@@ -5102,13 +4979,12 @@ void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink() {
     };
     QString failure;
     int frames = 0;
-    const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (failure.isEmpty() && handover->property("running").toBool()) {
-                ++frames;
-                failure = blink();
-            }
-        });
+    FrameSampler connection(window, [&]() {
+        if (failure.isEmpty() && handover->property("running").toBool()) {
+            ++frames;
+            failure = blink();
+        }
+    });
     // Along a fade at the points the test sets, at its very end, then to
     // its end in frames.
     const auto followTheFade = [&](const char *what) {
@@ -5172,7 +5048,7 @@ void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink() {
                   covers.all.at(2));
         followTheFade("a third track");
     }
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY(frames > 0);
 }
 
@@ -5317,13 +5193,12 @@ void UiMotionTest::nowPlayingAnotherAlbumLeavesNoWordAlone() {
     };
     QString failure;
     int frames = 0;
-    const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (failure.isEmpty() && handover->property("running").toBool()) {
-                ++frames;
-                failure = apart();
-            }
-        });
+    FrameSampler connection(window, [&]() {
+        if (failure.isEmpty() && handover->property("running").toBool()) {
+            ++frames;
+            failure = apart();
+        }
+    });
 
     // The path, then the metadata, the total after the number, then the
     // cover.
@@ -5352,7 +5227,7 @@ void UiMotionTest::nowPlayingAnotherAlbumLeavesNoWordAlone() {
     panel->setProperty("handover", 0.0);
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
     QVERIFY(panelIdle(panel, names));
@@ -5650,27 +5525,26 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     };
     QString failure;
     int frames = 0;
-    const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            ++frames;
-            if (failure.isEmpty() && !whole(spectrogram) && !whole(waveform)) {
-                failure = QStringLiteral("no plot whole at frame %1: spectrogram %2 at %3, waveform %4 at %5")
-                              .arg(frames)
-                              .arg(spectrogram->isVisible()).arg(spectrogram->opacity())
-                              .arg(waveform->isVisible()).arg(waveform->opacity());
-            }
-            if (failure.isEmpty() && playheads() != 1) {
-                failure = QStringLiteral("%1 playheads at frame %2").arg(playheads()).arg(frames);
-            }
-            // A spectrogram that comes in over the waveform shows its whole
-            // view, never its black floor or part of its columns.
-            if (failure.isEmpty() && waveform->isVisible() && spectrogram->isVisible()
-                && spectrogram->opacity() > 0.0 && spectrogram->z() > waveform->z()
-                && !spectrogram->property("viewFilled").toBool()) {
-                failure = QStringLiteral("the spectrogram came in at %1 before it filled its view, at frame %2")
-                              .arg(spectrogram->opacity()).arg(frames);
-            }
-        });
+    FrameSampler connection(window, [&]() {
+        ++frames;
+        if (failure.isEmpty() && !whole(spectrogram) && !whole(waveform)) {
+            failure = QStringLiteral("no plot whole at frame %1: spectrogram %2 at %3, waveform %4 at %5")
+                          .arg(frames)
+                          .arg(spectrogram->isVisible()).arg(spectrogram->opacity())
+                          .arg(waveform->isVisible()).arg(waveform->opacity());
+        }
+        if (failure.isEmpty() && playheads() != 1) {
+            failure = QStringLiteral("%1 playheads at frame %2").arg(playheads()).arg(frames);
+        }
+        // A spectrogram that comes in over the waveform shows its whole
+        // view, never its black floor or part of its columns.
+        if (failure.isEmpty() && waveform->isVisible() && spectrogram->isVisible()
+            && spectrogram->opacity() > 0.0 && spectrogram->z() > waveform->z()
+            && !spectrogram->property("viewFilled").toBool()) {
+            failure = QStringLiteral("the spectrogram came in at %1 before it filled its view, at frame %2")
+                          .arg(spectrogram->opacity()).arg(frames);
+        }
+    });
     const auto check = [&](const char *where) {
         QVERIFY2(whole(spectrogram) || whole(waveform), where);
         QCOMPARE(playheads(), 1);
@@ -5681,13 +5555,12 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     // spectrogram, in ms, or -1.
     QElapsedTimer sinceClick;
     qint64 firstShownMs = -1;
-    const QMetaObject::Connection shownConnection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (sinceClick.isValid() && firstShownMs < 0 && spectrogram->isVisible()
-                && spectrogram->opacity() > 0.0) {
-                firstShownMs = sinceClick.elapsed();
-            }
-        });
+    FrameSampler shownConnection(window, [&]() {
+        if (sinceClick.isValid() && firstShownMs < 0 && spectrogram->isVisible()
+            && spectrogram->opacity() > 0.0) {
+            firstShownMs = sinceClick.elapsed();
+        }
+    });
     // Waits for `count` more frames.
     const auto waitFrames = [&](int count) {
         const int before = frames;
@@ -5800,8 +5673,8 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
         QVERIFY(waveformItem->property("playheadVisible").toBool());
     }
 
-    QObject::disconnect(connection);
-    QObject::disconnect(shownConnection);
+    connection.stop();
+    shownConnection.stop();
     QVERIFY(frames > 0);
 
     // Cold, with no columns yet, as when the pane comes back with the
@@ -6154,7 +6027,7 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
         }
         return {};
     };
-    const QMetaObject::Connection connection = QObject::connect(host, &QQuickWindow::frameSwapped, host, [&]() {
+    FrameSampler connection(host, [&]() {
         ++frames;
         const double level = autoHide->property("level").toDouble();
         if (level > 0.0 && level < 1.0) {
@@ -6189,7 +6062,7 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
     QTRY_VERIFY(controls->opacity() > 0.0 && controls->opacity() < 1.0);
     QVERIFY2(apart().isEmpty(), qPrintable(apart()));
     QTRY_COMPARE(controls->opacity(), 1.0);
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
@@ -6330,7 +6203,7 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
     QTRY_COMPARE(autoHide->property("level").toDouble(), 0.0);
     autoHide->setProperty("hideDelay", 600000);
 
-    const QMetaObject::Connection connection = QObject::connect(host, &QQuickWindow::frameSwapped, host, [&]() {
+    FrameSampler connection(host, [&]() {
         const double level = autoHide->property("level").toDouble();
         if (level > 0.0 && level < 1.0) {
             ++fadingFrames;
@@ -6387,7 +6260,7 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
     QCOMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
     QCOMPARE(laneButtons->property("revealLevel").toDouble(), 1.0);
     QVERIFY2(failure.isEmpty(), qPrintable(QStringLiteral("the pointer arrived: ") + failure));
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
@@ -6456,7 +6329,7 @@ void UiMotionTest::windowedViewerOpensOverThePanesLastFrame() {
 
     QString failure;
     int frames = 0;
-    const QMetaObject::Connection connection = QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+    FrameSampler connection(window, [&]() {
         ++frames;
         if (failure.isEmpty() && !pane->isAncestorOf(surface)
             && !(lastFrame() != nullptr && lastFrame()->isVisible() && pane->property("lastFrameKept").toBool())) {
@@ -6469,7 +6342,7 @@ void UiMotionTest::windowedViewerOpensOverThePanesLastFrame() {
     QTRY_VERIFY(!pane->isAncestorOf(surface));
     QVERIFY(pane->property("lastFrameKept").toBool());
     QTRY_VERIFY(popup->property("opened").toBool());
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
 
@@ -6730,22 +6603,21 @@ void UiMotionTest::albumArtViewerFadesWithItsArt() {
     };
 
     const auto sampleFade = [&](bool details) {
-        const QMetaObject::Connection connection =
-            QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-                ++frames;
-                if (popupItem != nullptr && popupItem->isVisible()) {
-                    const double shown = drawnOpacity(popupItem);
-                    fadingFrames += shown > 0.0 && shown < 1.0;
-                }
-                if (failure.isEmpty()) {
-                    failure = apart(details);
-                }
-            });
-        return connection;
+        // `details` by value: the sampler outlives this call.
+        return FrameSampler(window, [&, details]() {
+            ++frames;
+            if (popupItem != nullptr && popupItem->isVisible()) {
+                const double shown = drawnOpacity(popupItem);
+                fadingFrames += shown > 0.0 && shown < 1.0;
+            }
+            if (failure.isEmpty()) {
+                failure = apart(details);
+            }
+        });
     };
 
     if (opening) {
-        const QMetaObject::Connection connection = sampleFade(false);
+        FrameSampler connection = sampleFade(false);
         QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
         QTRY_VERIFY(popupItem->isVisible());
         // Halfway, the art is there, at the viewer's opacity.
@@ -6753,7 +6625,7 @@ void UiMotionTest::albumArtViewerFadesWithItsArt() {
         QVERIFY2(apart(false).isEmpty(), qPrintable(apart(false)));
         QVERIFY(drawnOpacity(image) > 0.2);
         QTRY_VERIFY(popup->property("opened").toBool() && drawnOpacity(popupItem) == 1.0);
-        QObject::disconnect(connection);
+        connection.stop();
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
         QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
         units->setLongDuration(0);
@@ -6772,7 +6644,7 @@ void UiMotionTest::albumArtViewerFadesWithItsArt() {
     QCOMPARE(drawnOpacity(popupItem), 1.0);
     units->setLongDuration(400);
 
-    const QMetaObject::Connection connection = sampleFade(true);
+    FrameSampler connection = sampleFade(true);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QVERIFY(!viewer->property("albumArtViewerOpen").toBool());
     // At once, the art is still in the viewer, which goes on showing.
@@ -6783,7 +6655,7 @@ void UiMotionTest::albumArtViewerFadesWithItsArt() {
     QVERIFY(drawnOpacity(image) > 0.2 && drawnOpacity(column) > 0.2);
     // Faded out, the art leaves the viewer.
     QTRY_VERIFY(!popupItem->isVisible());
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
     QTRY_VERIFY(surface->parentItem() == mainHost);
@@ -6811,10 +6683,6 @@ QRectF paintedArtOf(QQuickItem *image) {
 bool nearly(const QRectF &a, const QRectF &b) {
     return std::abs(a.left() - b.left()) < 0.01 && std::abs(a.top() - b.top()) < 0.01
            && std::abs(a.right() - b.right()) < 0.01 && std::abs(a.bottom() - b.bottom()) < 0.01;
-}
-
-QString describeRect(const QRectF &rect) {
-    return QStringLiteral("%1,%2 %3x%4").arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
 }
 
 // Whether `frames`, drawn from the resting `from` to the resting `to`, move
@@ -6952,8 +6820,7 @@ void UiMotionTest::albumArtGlidesAsideForItsDetails() {
     // Eased, slowly enough for frames along the way.
     units->setShortDuration(500);
     QList<ArtFrame> frames;
-    QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() { frames.append(frameNow()); });
+    FrameSampler showing(window, [&]() { frames.append(frameNow()); });
     QVERIFY(toggle());
     // At once, nothing has moved.
     QVERIFY(nearly(paintedArtOf(image), hidden.art));
@@ -6961,7 +6828,7 @@ void UiMotionTest::albumArtGlidesAsideForItsDetails() {
     window->update();
     QSignalSpy swapped(window, &QQuickWindow::frameSwapped);
     QVERIFY(swapped.wait(2000));
-    QObject::disconnect(connection);
+    showing.stop();
     QString fault = glideFault(frames, hidden, shown, viewRect.right());
     QVERIFY2(fault.isEmpty(), qPrintable(QStringLiteral("showing: ") + fault));
 
@@ -6986,13 +6853,13 @@ void UiMotionTest::albumArtGlidesAsideForItsDetails() {
     QTRY_VERIFY(nearly(paintedArtOf(image), shown.art));
 
     frames.clear();
-    connection = QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() { frames.append(frameNow()); });
+    FrameSampler hiding(window, [&]() { frames.append(frameNow()); });
     QVERIFY(toggle());
     QVERIFY(nearly(paintedArtOf(image), shown.art));
     QTRY_VERIFY(nearly(paintedArtOf(image), hidden.art) && !column->isVisible());
     window->update();
     QVERIFY(swapped.wait(2000));
-    QObject::disconnect(connection);
+    hiding.stop();
     fault = glideFault(frames, shown, hidden, viewRect.right());
     QVERIFY2(fault.isEmpty(), qPrintable(QStringLiteral("hiding: ") + fault));
 
@@ -7187,7 +7054,7 @@ void UiMotionTest::windowedViewerClosesOverItsLastFrame() {
     units->setLongDuration(400);
     QString failure;
     int fadingFrames = 0;
-    QMetaObject::Connection connection = QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+    FrameSampler connection(window, [&]() {
         const double shown = drawnOpacity(popupItem);
         fadingFrames += shown > 0.0 && shown < 1.0;
         if (failure.isEmpty()) {
@@ -7207,7 +7074,7 @@ void UiMotionTest::windowedViewerClosesOverItsLastFrame() {
     QVERIFY(drawnOpacity(closingFrame()) > 0.2);
     // Faded out, the frame goes.
     QTRY_VERIFY(!popupItem->isVisible());
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
     QTRY_VERIFY(closingFrame() == nullptr);
@@ -7371,7 +7238,7 @@ void UiMotionTest::albumArtViewerControlsFadeOnOneLevel() {
 
     QString failure;
     int fadingFrames = 0;
-    const QMetaObject::Connection connection = QObject::connect(host, &QQuickWindow::frameSwapped, host, [&]() {
+    FrameSampler connection(host, [&]() {
         const double level = autoHide->property("level").toDouble();
         fadingFrames += level > 0.0 && level < 1.0;
         if (failure.isEmpty()) {
@@ -7397,7 +7264,7 @@ void UiMotionTest::albumArtViewerControlsFadeOnOneLevel() {
     QVERIFY(controls->isVisible());
     QVERIFY2(apart().isEmpty(), qPrintable(apart()));
     QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
-    QObject::disconnect(connection);
+    connection.stop();
     QVERIFY2(apart().isEmpty(), qPrintable(apart()));
     QVERIFY2(failure.isEmpty(), qPrintable(QStringLiteral("showing: ") + failure));
     QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));

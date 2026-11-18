@@ -4160,7 +4160,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorIdleViewDrawsOnlyFramesThatDiffe
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     int frames = 0;
-    connect(&window, &QQuickWindow::frameSwapped, &window, [&frames]() { ++frames; });
+    const FrameSampler counting(&window, [&frames]() { ++frames; });
     WaveformEditorItem item;
     item.setParentItem(window.contentItem());
     item.setWidth(1001);
@@ -4554,7 +4554,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorInteractionDrawsAtOnceWhileFollo
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     int frames = 0;
-    connect(&window, &QQuickWindow::frameSwapped, &window, [&frames]() { ++frames; });
+    const FrameSampler counting(&window, [&frames]() { ++frames; });
     auto *item = new WaveformEditorItem(window.contentItem());
     item->setWidth(400);
     item->setHeight(100);
@@ -4629,12 +4629,11 @@ void WaveformSceneGraphSmokeTest::waveformEditorPlaybackBenchmark() {
         setTestPosition(item, 100.0);
         QTest::qWait(500);
         int frames = 0;
-        const auto connection = connect(&window, &QQuickWindow::frameSwapped, &window,
-            [&frames]() { ++frames; });
+        FrameSampler connection(&window, [&frames]() { ++frames; });
         QElapsedTimer elapsed;
         elapsed.start();
         QTest::qWait(2000);
-        disconnect(connection);
+        connection.stop();
         qInfo("waveform playback zoom=%.0f scale=%g frames_per_s=%.1f", zoom,
             window.effectiveDevicePixelRatio(),
             frames / (static_cast<double>(elapsed.nsecsElapsed()) / 1e9));

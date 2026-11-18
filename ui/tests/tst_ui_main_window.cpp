@@ -51,45 +51,14 @@
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
 #include "../src/WindowPresence.h"
+#include "TestColor.h"
+#include "TestItems.h"
+#include "TestMessages.h"
+#include "TestMotion.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
 namespace {
-
-QMutex &messageMutex() {
-    static QMutex mutex;
-    return mutex;
-}
-
-QStringList &capturedMessages() {
-    static QStringList messages;
-    return messages;
-}
-
-QtMessageHandler &previousHandler() {
-    static QtMessageHandler handler = nullptr;
-    return handler;
-}
-
-void captureMessage(QtMsgType type, const QMessageLogContext &context, const QString &message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) {
-        QMutexLocker locker(&messageMutex());
-        capturedMessages().push_back(message);
-    }
-    if (previousHandler()) {
-        previousHandler()(type, context, message);
-    }
-}
-
-QString takeMessages() {
-    QMutexLocker locker(&messageMutex());
-    // A window resize below the minimum size; the offscreen platform warns
-    // that it does not pass size hints on.
-    capturedMessages().removeAll(QStringLiteral("This plugin does not support propagateSizeHints()"));
-    const QString text = capturedMessages().join(QLatin1Char('\n'));
-    capturedMessages().clear();
-    return text;
-}
 
 // Main.qml with its fallback bridge, `width` by `height`, shown and active.
 QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel,
@@ -125,10 +94,6 @@ QColor tokenOf(QQuickWindow *window, const char *name) {
     return paletteOf(window)->property(name).value<QColor>();
 }
 
-QString hex(const QColor &color) {
-    return color.name(QColor::HexArgb);
-}
-
 QString colorOf(const QObject *object) {
     return hex(object->property("color").value<QColor>());
 }
@@ -151,41 +116,9 @@ QString stateGlyphName(QQuickItem *glyph) {
     return source.endsWith(QStringLiteral("/assets/status-warning.svg")) ? QStringLiteral("status-warning") : source;
 }
 
-// The items named `name` under `root`, depth first.
-QList<QQuickItem *> itemsNamed(QQuickItem *root, const QString &name) {
-    QList<QQuickItem *> found;
-    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
-        if (item->objectName() == name) {
-            found.push_back(item);
-        }
-        for (QQuickItem *child : item->childItems()) {
-            visit(child);
-        }
-    };
-    if (root != nullptr) {
-        visit(root);
-    }
-    return found;
-}
-
-QQuickItem *itemNamed(QQuickItem *root, const QString &name) {
-    const QList<QQuickItem *> found = itemsNamed(root, name);
-    return found.isEmpty() ? nullptr : found.first();
-}
-
-// The first item named `name` in the window's item tree, which holds what
-// repeaters and views make too.
-QQuickItem *named(QQuickWindow *window, const char *name) {
-    return itemNamed(window->contentItem(), QString::fromLatin1(name));
-}
-
 // Whether `item` and every item above it are visible.
 bool shown(QQuickItem *item) {
     return item != nullptr && item->isVisible();
-}
-
-QRectF sceneRect(QQuickItem *item) {
-    return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
 }
 
 // The opacity `item` shows at within `top`: its own and its ancestors' up
@@ -347,27 +280,6 @@ QByteArray manyArtistsTree(int count) {
     return out;
 }
 
-double relativeLuminance(const QColor &color) {
-    const auto linear = [](double channel) {
-        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
-    };
-    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
-}
-
-double contrastRatio(const QColor &a, const QColor &b) {
-    const double la = relativeLuminance(a);
-    const double lb = relativeLuminance(b);
-    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
-}
-
-// `color`, with its alpha, drawn over the opaque `background`.
-QColor drawnOver(const QColor &color, const QColor &background) {
-    const double alpha = color.alphaF();
-    return QColor::fromRgbF(static_cast<float>(background.redF() * (1 - alpha) + color.redF() * alpha),
-                            static_cast<float>(background.greenF() * (1 - alpha) + color.greenF() * alpha),
-                            static_cast<float>(background.blueF() * (1 - alpha) + color.blueF() * alpha));
-}
-
 // How a collapsed row that holds the playing track shows it (#373 H5): its
 // name amber and semibold, quieter while paused, and no glyph anywhere on
 // the row, which read as a play button. Empty when it is so, else what is
@@ -468,17 +380,6 @@ void clearPlayback(QObject *bridge) {
                                  "currentTrackCoverPath"}) {
         bridge->setProperty(property, QString());
     }
-}
-
-// Whether `item` or an item it sits in still waits for its polish, where
-// layouts place their children.
-bool layoutPending(const QQuickItem *item) {
-    for (; item != nullptr; item = item->parentItem()) {
-        if (QQuickTest::qIsPolishScheduled(item)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 // Whether the now-playing panel shows the playing track's layout whole: the
@@ -997,7 +898,7 @@ private slots:
 };
 
 void UiMainWindowTest::initTestCase() {
-    previousHandler() = qInstallMessageHandler(captureMessage);
+    startCapturingMessages();
     FerrousLocalization::setUpApplicationDomain();
     FerrousLocalization::registerQmlTypes();
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
@@ -1009,17 +910,19 @@ void UiMainWindowTest::initTestCase() {
 }
 
 void UiMainWindowTest::init() {
-    takeMessages();
+    clearCapturedMessages();
 }
 
 void UiMainWindowTest::cleanup() {
-    const QString messages = takeMessages();
+    // A window resize below the minimum size: the offscreen platform warns
+    // that it does not pass size hints on.
+    dropCapturedMessages(offscreenSizeHintsWarning());
+    const QString messages = takeCapturedMessagesText();
     QVERIFY2(messages.isEmpty(), qPrintable(messages));
 }
 
 void UiMainWindowTest::cleanupTestCase() {
-    qInstallMessageHandler(previousHandler());
-    previousHandler() = nullptr;
+    stopCapturingMessages();
 }
 
 void UiMainWindowTest::drawsOffscreenUnlessAPlatformIsChosen() {
@@ -3081,7 +2984,7 @@ void UiMainWindowTest::nowPlayingHoldsItsHeightOnEveryFrameOfACoverChange() {
 
     int frames = 0;
     QStringList moved;
-    const QMetaObject::Connection sampler = QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+    const FrameSampler sampler(window, [&]() {
         ++frames;
         const QRectF now = sceneRect(panel);
         const qreal top = sceneRect(header).top();
@@ -3090,7 +2993,6 @@ void UiMainWindowTest::nowPlayingHoldsItsHeightOnEveryFrameOfACoverChange() {
                                 .arg(frames).arg(now.height()).arg(now.top()).arg(top));
         }
     });
-    const auto stopSampling = qScopeGuard([&] { QObject::disconnect(sampler); });
     // Each change cross-fades over frames of its own, every one sampled.
     const auto crossFaded = [&](int before) {
         return QTest::qWaitFor([&]() { return !handover->property("running").toBool() && frames > before + 2; },

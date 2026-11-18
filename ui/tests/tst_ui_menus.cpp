@@ -45,43 +45,13 @@
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
 #include "../src/WindowPresence.h"
+#include "TestColor.h"
+#include "TestItems.h"
+#include "TestMessages.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
 namespace {
-
-QMutex &messageMutex() {
-    static QMutex mutex;
-    return mutex;
-}
-
-QStringList &capturedMessages() {
-    static QStringList messages;
-    return messages;
-}
-
-QtMessageHandler &previousHandler() {
-    static QtMessageHandler handler = nullptr;
-    return handler;
-}
-
-void captureMessage(QtMsgType type, const QMessageLogContext &context, const QString &message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) {
-        QMutexLocker locker(&messageMutex());
-        capturedMessages().push_back(message);
-    }
-    if (previousHandler()) {
-        previousHandler()(type, context, message);
-    }
-}
-
-QString takeMessages() {
-    QMutexLocker locker(&messageMutex());
-    capturedMessages().removeAll(QStringLiteral("This plugin does not support propagateSizeHints()"));
-    const QString text = capturedMessages().join(QLatin1Char('\n'));
-    capturedMessages().clear();
-    return text;
-}
 
 // Main.qml with its fallback bridge, shown and active.
 QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
@@ -112,28 +82,6 @@ QObject *child(QQuickWindow *window, const char *name) {
     return window->findChild<QObject *>(QString::fromLatin1(name));
 }
 
-// The items named `name` under `root`, depth first.
-QList<QQuickItem *> itemsNamed(QQuickItem *root, const QString &name) {
-    QList<QQuickItem *> found;
-    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
-        if (item->objectName() == name) {
-            found.push_back(item);
-        }
-        for (QQuickItem *child : item->childItems()) {
-            visit(child);
-        }
-    };
-    if (root != nullptr) {
-        visit(root);
-    }
-    return found;
-}
-
-QQuickItem *named(QQuickWindow *window, const char *name) {
-    const QList<QQuickItem *> found = itemsNamed(window->contentItem(), QString::fromLatin1(name));
-    return found.isEmpty() ? nullptr : found.first();
-}
-
 // The first text item under `root` that shows `text`.
 QQuickItem *textItem(QQuickItem *root, const QString &text) {
     if (root == nullptr) {
@@ -148,10 +96,6 @@ QQuickItem *textItem(QQuickItem *root, const QString &text) {
         }
     }
     return nullptr;
-}
-
-QRectF sceneRect(QQuickItem *item) {
-    return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
 }
 
 QObject *menuBarOf(QQuickWindow *window) {
@@ -403,27 +347,6 @@ void rightClick(QQuickWindow *window, QQuickItem *item) {
     QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, at);
 }
 
-
-// WCAG's relative luminance and contrast ratio of opaque colours.
-double relativeLuminance(const QColor &color) {
-    const auto linear = [](double channel) {
-        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
-    };
-    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
-}
-
-double contrastRatio(const QColor &a, const QColor &b) {
-    const double la = relativeLuminance(a);
-    const double lb = relativeLuminance(b);
-    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
-}
-
-// The largest difference of the colours' 8-bit channels.
-int channelDistance(const QColor &a, const QColor &b) {
-    return std::max({std::abs(a.red() - b.red()), std::abs(a.green() - b.green()),
-                     std::abs(a.blue() - b.blue())});
-}
-
 // The menu bar's title at `index`, its delegate.
 QQuickItem *menuBarItemAt(QObject *menuBar, int index) {
     QQuickItem *item = nullptr;
@@ -550,7 +473,7 @@ private slots:
 };
 
 void UiMenusTest::initTestCase() {
-    previousHandler() = qInstallMessageHandler(captureMessage);
+    startCapturingMessages();
     FerrousLocalization::setUpApplicationDomain();
     FerrousLocalization::registerQmlTypes();
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
@@ -562,17 +485,17 @@ void UiMenusTest::initTestCase() {
 }
 
 void UiMenusTest::init() {
-    takeMessages();
+    clearCapturedMessages();
 }
 
 void UiMenusTest::cleanup() {
-    const QString messages = takeMessages();
+    dropCapturedMessages(offscreenSizeHintsWarning());
+    const QString messages = takeCapturedMessagesText();
     QVERIFY2(messages.isEmpty(), qPrintable(messages));
 }
 
 void UiMenusTest::cleanupTestCase() {
-    qInstallMessageHandler(previousHandler());
-    previousHandler() = nullptr;
+    stopCapturingMessages();
 }
 
 void UiMenusTest::drawsOffscreenUnlessAPlatformIsChosen() {

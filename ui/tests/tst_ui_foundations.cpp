@@ -27,42 +27,12 @@
 #include <memory>
 #include <utility>
 
+#include "TestColor.h"
+#include "TestMessages.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
 namespace {
-
-QMutex &messageMutex() {
-    static QMutex mutex;
-    return mutex;
-}
-
-QStringList &warnings() {
-    static QStringList list;
-    return list;
-}
-
-QtMessageHandler &previousHandler() {
-    static QtMessageHandler handler = nullptr;
-    return handler;
-}
-
-void recordWarnings(QtMsgType type, const QMessageLogContext &context, const QString &message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg) {
-        QMutexLocker locker(&messageMutex());
-        warnings().push_back(message);
-    }
-    if (previousHandler()) {
-        previousHandler()(type, context, message);
-    }
-}
-
-QStringList takeWarnings() {
-    QMutexLocker locker(&messageMutex());
-    QStringList list = warnings();
-    warnings().clear();
-    return list;
-}
 
 // The colours of a Breeze scheme that UiPalette reads, from Breeze's
 // .colors files: the window and view backgrounds, the text, the inactive
@@ -150,48 +120,6 @@ QColor fromHex(const QString &hex) {
     return QColor::fromString(hex);
 }
 
-// The largest difference of the colours' 8-bit channels.
-int channelDistance(const QColor &a, const QColor &b) {
-    const auto channel = [](double value) { return static_cast<int>(std::lround(value * 255.0)); };
-    return std::max({std::abs(channel(a.redF()) - channel(b.redF())),
-                     std::abs(channel(a.greenF()) - channel(b.greenF())),
-                     std::abs(channel(a.blueF()) - channel(b.blueF()))});
-}
-
-// Whether the colours are the same to 8 bits a channel, alpha included,
-// however each was made (QColor's == also compares how it stores them).
-bool sameColor(const QColor &a, const QColor &b) {
-    return channelDistance(a, b) == 0 && std::lround(a.alphaF() * 255.0) == std::lround(b.alphaF() * 255.0);
-}
-
-// `top` drawn over the opaque `bottom`.
-QColor drawnOver(const QColor &top, const QColor &bottom) {
-    const double alpha = top.alphaF();
-    return QColor::fromRgbF(static_cast<float>(top.redF() * alpha + bottom.redF() * (1.0 - alpha)),
-                            static_cast<float>(top.greenF() * alpha + bottom.greenF() * (1.0 - alpha)),
-                            static_cast<float>(top.blueF() * alpha + bottom.blueF() * (1.0 - alpha)));
-}
-
-QColor mixed(const QColor &a, const QColor &b, double amount) {
-    return QColor::fromRgbF(static_cast<float>(a.redF() * (1.0 - amount) + b.redF() * amount),
-                            static_cast<float>(a.greenF() * (1.0 - amount) + b.greenF() * amount),
-                            static_cast<float>(a.blueF() * (1.0 - amount) + b.blueF() * amount));
-}
-
-// WCAG's relative luminance and contrast ratio of opaque colours.
-double relativeLuminance(const QColor &color) {
-    const auto linear = [](double channel) {
-        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
-    };
-    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
-}
-
-double contrastRatio(const QColor &a, const QColor &b) {
-    const double la = relativeLuminance(a);
-    const double lb = relativeLuminance(b);
-    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
-}
-
 // An opaque colour in CIELAB, under D65.
 std::array<double, 3> labOf(const QColor &color) {
     const auto linear = [](double channel) {
@@ -220,12 +148,6 @@ double labDistance(const QColor &a, const QColor &b) {
 double labChroma(const QColor &color) {
     const std::array<double, 3> lab = labOf(color);
     return std::hypot(lab[1], lab[2]);
-}
-
-QString describe(const QString &what, const QColor &a, const QColor &b) {
-    return QStringLiteral("%1: %2 on %3 is %4:1")
-        .arg(what, a.name(QColor::HexArgb), b.name(QColor::HexArgb))
-        .arg(contrastRatio(a, b), 0, 'f', 2);
 }
 
 QQuickItem *itemNamed(QObject *root, const QString &name) {
@@ -320,7 +242,7 @@ private slots:
 };
 
 void UiFoundationsTest::initTestCase() {
-    previousHandler() = qInstallMessageHandler(recordWarnings);
+    startCapturingMessages();
     QVERIFY2(!QStandardPaths::locate(QStandardPaths::GenericDataLocation,
                                      QStringLiteral("icons/breeze/index.theme"))
                   .isEmpty(),
@@ -328,7 +250,7 @@ void UiFoundationsTest::initTestCase() {
 }
 
 void UiFoundationsTest::cleanup() {
-    const QStringList list = takeWarnings();
+    const QStringList list = takeCapturedMessages();
     QVERIFY2(list.isEmpty(), qPrintable(list.join(QLatin1Char('\n'))));
 }
 
@@ -485,9 +407,9 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
     // The ratios the design lists.
     const QColor secondaryBackground = secondaryOnChrome ? chrome : view;
     QVERIFY2(std::abs(contrastRatio(secondary, secondaryBackground) - secondaryRatio) <= 0.15,
-             qPrintable(describe(QStringLiteral("secondary"), secondary, secondaryBackground)));
+             qPrintable(describeContrast(QStringLiteral("secondary"), secondary, secondaryBackground)));
     QVERIFY2(std::abs(contrastRatio(tertiary, view) - tertiaryRatio) <= 0.15,
-             qPrintable(describe(QStringLiteral("tertiary"), tertiary, view)));
+             qPrintable(describeContrast(QStringLiteral("tertiary"), tertiary, view)));
 
     struct Pair {
         QString what;
@@ -530,7 +452,7 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
     };
     for (const Pair &pair : pairs) {
         QVERIFY2(contrastRatio(pair.foreground, pair.background) >= pair.minimum,
-                 qPrintable(describe(pair.what, pair.foreground, pair.background)));
+                 qPrintable(describeContrast(pair.what, pair.foreground, pair.background)));
     }
 
     // The paused amber name of a collapsed tree row that holds the playing
@@ -543,12 +465,12 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
         name.setAlphaF(static_cast<float>(pausedOpacity));
         const QColor drawn = drawnOver(name, background);
         QVERIFY2(contrastRatio(drawn, background) >= 4.5,
-                 qPrintable(describe(QStringLiteral("the tree's paused amber name"), drawn, background)));
+                 qPrintable(describeContrast(QStringLiteral("the tree's paused amber name"), drawn, background)));
     }
 
     // A hovered row stands out from the view at 1.3:1, yet is nearer to it
     // than a selected row is, in lightness and hue together.
-    QVERIFY2(contrastRatio(hovered, view) >= 1.3, qPrintable(describe(QStringLiteral("hover tint"), hovered, view)));
+    QVERIFY2(contrastRatio(hovered, view) >= 1.3, qPrintable(describeContrast(QStringLiteral("hover tint"), hovered, view)));
     QVERIFY2(labDistance(hovered, view) < 0.9 * labDistance(selection, view),
              qPrintable(QStringLiteral("hover %1 is %2 from the view, selection %3 is %4")
                             .arg(hovered.name())
@@ -701,7 +623,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         // Its rungs 3:1 on their trough, as drawn on the view.
         const QColor trough = drawnOver(colorOf(waveform, "meterTrough"), view);
         QVERIFY2(contrastRatio(colorOf(waveform, "meterFill"), trough) >= 3.0,
-                 qPrintable(describe(QStringLiteral("rungs on the trough"), colorOf(waveform, "meterFill"), trough)));
+                 qPrintable(describeContrast(QStringLiteral("rungs on the trough"), colorOf(waveform, "meterFill"), trough)));
         // The pane's waveform (#373 H15 H6): the seek bar's in light; in
         // dark a quieter tone of the same blue, #87bad4, some 8.6:1 on the
         // view rather than the seek bar's 13:1.
@@ -744,10 +666,10 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         text.setAlphaF(0.18);
         const QColor fill = drawnOver(text, plate);
         const QColor edge = colorOf(plot, "segmentEdge");
-        QVERIFY2(contrastRatio(edge, plate) >= 3.0, qPrintable(describe(QStringLiteral("edge on plate"), edge, plate)));
-        QVERIFY2(contrastRatio(edge, fill) >= 3.0, qPrintable(describe(QStringLiteral("edge on fill"), edge, fill)));
+        QVERIFY2(contrastRatio(edge, plate) >= 3.0, qPrintable(describeContrast(QStringLiteral("edge on plate"), edge, plate)));
+        QVERIFY2(contrastRatio(edge, fill) >= 3.0, qPrintable(describeContrast(QStringLiteral("edge on fill"), edge, fill)));
         QVERIFY2(contrastRatio(edge, colorOf(plot, "plotBg")) >= 3.0,
-                 qPrintable(describe(QStringLiteral("edge on the plot"), edge, colorOf(plot, "plotBg"))));
+                 qPrintable(describeContrast(QStringLiteral("edge on the plot"), edge, colorOf(plot, "plotBg"))));
         QVERIFY(!plot->property("checkedTint").isValid());
     }
     // A viewer's title strip is a plate over the plot: on the spectrogram,
@@ -756,7 +678,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         const QColor stripOverWhite = drawnOver(colorOf(spectrogram, "plotPlate"), QColor(Qt::white));
         const QColor secondary = drawnOver(colorOf(spectrogram, "plotTextSecondary"), stripOverWhite);
         QVERIFY2(contrastRatio(secondary, stripOverWhite) >= 4.5,
-                 qPrintable(describe(QStringLiteral("strip text over white"), secondary, stripOverWhite)));
+                 qPrintable(describeContrast(QStringLiteral("strip text over white"), secondary, stripOverWhite)));
     }
 
     for (QObject *plot : {spectrogram, waveform}) {
@@ -783,7 +705,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         };
         for (const auto &[what, foreground, background, minimum] : pairs) {
             QVERIFY2(contrastRatio(foreground, background) >= minimum,
-                     qPrintable(describe(name + QStringLiteral(", ") + what, foreground, background)));
+                     qPrintable(describeContrast(name + QStringLiteral(", ") + what, foreground, background)));
         }
     }
 }
@@ -845,7 +767,7 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
     QVERIFY(sameColor(hovered, drawnOver(rowHover, view)));
     const double target = dark ? 1.44 : 1.31;
     QVERIFY2(contrastRatio(hovered, view) >= target && contrastRatio(hovered, view) < target + 0.06,
-             qPrintable(describe(QStringLiteral("row hover"), hovered, view)));
+             qPrintable(describeContrast(QStringLiteral("row hover"), hovered, view)));
     QColor lighter = rowHover;
     lighter.setAlphaF(rowHover.alphaF() - 0.01f);
     QVERIFY(contrastRatio(drawnOver(lighter, view), view) < target);
@@ -882,7 +804,7 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
                                                        {"textTertiaryHovered", figureContrast}};
     for (const auto &[token, minimum] : texts) {
         QVERIFY2(contrastRatio(colorOf(tokens, token), hovered) >= minimum,
-                 qPrintable(describe(QLatin1String(token), colorOf(tokens, token), hovered)));
+                 qPrintable(describeContrast(QLatin1String(token), colorOf(tokens, token), hovered)));
     }
     // The tertiary colour keeps its step below the secondary elsewhere:
     // only a hovered row's is stronger, where the plain one falls short of
@@ -892,7 +814,7 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
     QVERIFY(!sameColor(tertiaryHovered, colorOf(tokens, "textTertiary")));
     QVERIFY(contrastRatio(tertiaryHovered, hovered) < contrastRatio(text, hovered) - 4);
     QVERIFY2(std::abs(contrastRatio(colorOf(tokens, "textTertiary"), view) - 6.2) <= 0.15,
-             qPrintable(describe(QStringLiteral("tertiary"), colorOf(tokens, "textTertiary"), view)));
+             qPrintable(describeContrast(QStringLiteral("tertiary"), colorOf(tokens, "textTertiary"), view)));
     const auto tertiaryOn = [tokens](bool selected, bool rowHovered) {
         QVariant color;
         QMetaObject::invokeMethod(tokens, "textTertiaryOn", Q_RETURN_ARG(QVariant, color),
@@ -935,8 +857,8 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
 
     // Weight: the selection is the stronger step off the view.
     QVERIFY2(contrastRatio(selection, view) >= contrastRatio(hovered, view) + 0.05,
-             qPrintable(describe(QStringLiteral("selection"), selection, view)
-                        + QStringLiteral(" vs ") + describe(QStringLiteral("hover"), hovered, view)));
+             qPrintable(describeContrast(QStringLiteral("selection"), selection, view)
+                        + QStringLiteral(" vs ") + describeContrast(QStringLiteral("hover"), hovered, view)));
     for (const QColor &selected : {selection, selectionInactive}) {
         QVERIFY2(labDistance(selected, view) >= 1.15 * labDistance(hovered, view),
                  qPrintable(QStringLiteral("%1 is %2 from the view, hover %3 is %4")
@@ -965,9 +887,9 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
     // step.
     QVERIFY2(contrastRatio(selectionInactive, view) >= contrastRatio(hovered, view) + 0.02
                  && contrastRatio(selection, view) >= contrastRatio(selectionInactive, view) + 0.02,
-             qPrintable(describe(QStringLiteral("hover"), hovered, view) + QStringLiteral(", ")
-                        + describe(QStringLiteral("inactive"), selectionInactive, view) + QStringLiteral(", ")
-                        + describe(QStringLiteral("active"), selection, view)));
+             qPrintable(describeContrast(QStringLiteral("hover"), hovered, view) + QStringLiteral(", ")
+                        + describeContrast(QStringLiteral("inactive"), selectionInactive, view) + QStringLiteral(", ")
+                        + describeContrast(QStringLiteral("active"), selection, view)));
 
     // The texts of a selected row: the title, the secondary and column
     // text, the playing amber, and the selected row's number, which is
@@ -984,13 +906,13 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
     };
     for (const QColor &selected : {selection, selectionInactive}) {
         for (const auto &[what, color] : texts) {
-            QVERIFY2(contrastRatio(color, selected) >= 4.5, qPrintable(describe(what, color, selected)));
+            QVERIFY2(contrastRatio(color, selected) >= 4.5, qPrintable(describeContrast(what, color, selected)));
         }
         // The number with the margin that small figures lose to subpixel
         // antialiasing, and under the text (#373 H45).
         const double figureContrast = tokens->property("rowFigureContrast").toDouble();
         QVERIFY2(contrastRatio(number.value<QColor>(), selected) >= figureContrast,
-                 qPrintable(describe(QStringLiteral("selected number"), number.value<QColor>(), selected)));
+                 qPrintable(describeContrast(QStringLiteral("selected number"), number.value<QColor>(), selected)));
         QVERIFY(contrastRatio(number.value<QColor>(), selected) < contrastRatio(colorOf(tokens, "text"), selected) - 4);
     }
 }
@@ -1095,12 +1017,12 @@ void UiFoundationsTest::selectedQueueRowAnswersHover() {
                                 .arg(labDistance(hovered, view))));
         QVERIFY(contrastRatio(selectedHovered, text) < contrastRatio(selected, text));
         for (const auto &[what, color] : texts) {
-            QVERIFY2(contrastRatio(color, selectedHovered) >= 4.5, qPrintable(describe(what, color, selectedHovered)));
+            QVERIFY2(contrastRatio(color, selectedHovered) >= 4.5, qPrintable(describeContrast(what, color, selectedHovered)));
         }
         const double figureContrast = tokens->property("rowFigureContrast").toDouble();
         for (const QColor &under : {selected, selectedHovered}) {
             QVERIFY2(contrastRatio(number.value<QColor>(), under) >= figureContrast,
-                     qPrintable(describe(QStringLiteral("selected number"), number.value<QColor>(), under)));
+                     qPrintable(describeContrast(QStringLiteral("selected number"), number.value<QColor>(), under)));
         }
     }
 
@@ -1170,7 +1092,7 @@ void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground() {
          {"view", "hoveredRow", "selection", "selectionInactive", "selectionHovered", "selectionInactiveHovered"}) {
         const QColor under = colorOf(tokens, background);
         QVERIFY2(contrastRatio(negative, under) >= 3.0,
-                 qPrintable(describe(QLatin1String(background), negative, under)));
+                 qPrintable(describeContrast(QLatin1String(background), negative, under)));
     }
 }
 
@@ -1759,9 +1681,9 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     const QColor drawnChosen = at(chosen, QPointF(2.5, 2.5));
     const QColor drawnHover = at(other, QPointF(2.5, 2.5));
     QVERIFY2(channelDistance(drawnChosen, drawnOver(plateFill, plate)) <= 3,
-             qPrintable(describe(QStringLiteral("the chosen plate"), drawnChosen, plate)));
+             qPrintable(describeContrast(QStringLiteral("the chosen plate"), drawnChosen, plate)));
     QVERIFY2(channelDistance(drawnHover, drawnOver(wash, plate)) <= 3,
-             qPrintable(describe(QStringLiteral("the hover wash"), drawnHover, plate)));
+             qPrintable(describeContrast(QStringLiteral("the hover wash"), drawnHover, plate)));
     // Toward the text colour, both: lighter on a dark plate, darker on a
     // light one; the hovered one shows, and less than the chosen one.
     const qreal chosenStep = contrastRatio(drawnChosen, plate);
@@ -1773,9 +1695,9 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     // on a light one some 2.5:1, where its dark glyph keeps 4.5:1 on it.
     const bool lightPlate = relativeLuminance(plate) > 0.5;
     QVERIFY2(chosenStep >= (lightPlate ? 2.4 : 2.97),
-             qPrintable(describe(QStringLiteral("the chosen plate on the plate"), drawnChosen, plate)));
+             qPrintable(describeContrast(QStringLiteral("the chosen plate on the plate"), drawnChosen, plate)));
     QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.98,
-             qPrintable(describe(QStringLiteral("the chosen plate on the hovered one"), drawnChosen, drawnHover)));
+             qPrintable(describeContrast(QStringLiteral("the chosen plate on the hovered one"), drawnChosen, drawnHover)));
     // The chosen one's edge, as drawn, 3:1 on the plate and on its fill.
     const QColor edge = at(chosen, QPointF(chosen->width() / 2, 0.5));
     QVERIFY2(contrastRatio(edge, plate) >= 3.0 && contrastRatio(edge, drawnChosen) >= 3.0,
@@ -1866,10 +1788,10 @@ void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot() {
     const qreal scale = grabScale(image, window);
     const QColor drawnHover = pixelAt(image, button->mapToScene(QPointF(2.5, 2.5)) * scale);
     QVERIFY2(channelDistance(drawnHover, drawnOver(wash, surface)) <= 3,
-             qPrintable(describe(QStringLiteral("the hover wash"), drawnHover, surface)));
+             qPrintable(describeContrast(QStringLiteral("the hover wash"), drawnHover, surface)));
     const qreal hoverStep = contrastRatio(drawnHover, surface);
     QVERIFY2(hoverStep >= (darkPlot ? 1.35 : 1.25),
-             qPrintable(describe(QStringLiteral("the hover wash"), drawnHover, surface)));
+             qPrintable(describeContrast(QStringLiteral("the hover wash"), drawnHover, surface)));
 
     // Pressed, further.
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, inside);
@@ -1881,7 +1803,7 @@ void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot() {
     image = window->grabWindow();
     const QColor drawnPressed = pixelAt(image, button->mapToScene(QPointF(2.5, 2.5)) * scale);
     QVERIFY2(contrastRatio(drawnPressed, surface) > hoverStep,
-             qPrintable(describe(QStringLiteral("the pressed wash"), drawnPressed, surface)));
+             qPrintable(describeContrast(QStringLiteral("the pressed wash"), drawnPressed, surface)));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, inside);
 }
 
@@ -2004,10 +1926,10 @@ void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart() {
         const QColor drawnGap = pixel(24.5);
         if (state.checked) {
             QVERIFY2(contrastRatio(drawnInside, drawnGap) >= 3.0,
-                     qPrintable(describe(name + QStringLiteral(": the fill on the plate"), drawnInside, drawnGap)));
+                     qPrintable(describeContrast(name + QStringLiteral(": the fill on the plate"), drawnInside, drawnGap)));
         }
         QVERIFY2(contrastRatio(letterColor, drawnInside) >= 4.5,
-                 qPrintable(describe(name + QStringLiteral(": the letter"), letterColor, drawnInside)));
+                 qPrintable(describeContrast(name + QStringLiteral(": the letter"), letterColor, drawnInside)));
 
         // The letter is drawn: its most contrasting pixel is the letter's
         // colour, within antialiasing, and stands out from the button.
@@ -2027,7 +1949,7 @@ void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart() {
                  qPrintable(QStringLiteral("%1: the letter's strongest pixel is %2, not %3")
                                 .arg(name, letterPixel.name(), letterColor.name())));
         QVERIFY2(contrastRatio(letterPixel, drawnInside) >= 4.5,
-                 qPrintable(describe(name + QStringLiteral(": the drawn letter"), letterPixel, drawnInside)));
+                 qPrintable(describeContrast(name + QStringLiteral(": the drawn letter"), letterPixel, drawnInside)));
 
         // The icon is drawn in the glyph colour: the middle of the fixture's
         // square, against the button around it.
@@ -2039,11 +1961,11 @@ void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart() {
         QVERIFY2(channelDistance(iconPixel, iconColor) <= 3,
                  qPrintable(QStringLiteral("%1: the icon is %2, not %3").arg(name, iconPixel.name(), iconColor.name())));
         QVERIFY2(contrastRatio(iconPixel, iconBehind) >= 4.5,
-                 qPrintable(describe(name + QStringLiteral(": the drawn icon"), iconPixel, iconBehind)));
+                 qPrintable(describeContrast(name + QStringLiteral(": the drawn icon"), iconPixel, iconBehind)));
         if (state.focused) {
             const QColor drawnRing = pixel(25.5);
             QVERIFY2(contrastRatio(drawnRing, drawnGap) >= 3.0,
-                     qPrintable(describe(name + QStringLiteral(": the ring on the plate"), drawnRing, drawnGap)));
+                     qPrintable(describeContrast(name + QStringLiteral(": the ring on the plate"), drawnRing, drawnGap)));
         }
     }
 

@@ -23,6 +23,7 @@
 
 #include "../src/LibraryTreeModel.h"
 #include "../src/QmlTypes.h"
+#include "TestMessages.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
@@ -30,40 +31,6 @@ namespace {
 
 // Where the module's files are in the resources, as in the app.
 const QString kModuleFiles = QStringLiteral(":/qt/qml/FerrousUi/qml");
-
-QMutex &capturedMessageMutex() {
-    static QMutex mutex;
-    return mutex;
-}
-
-QStringList &capturedMessages() {
-    static QStringList messages;
-    return messages;
-}
-
-QtMessageHandler &previousMessageHandler() {
-    static QtMessageHandler handler = nullptr;
-    return handler;
-}
-
-void captureQtMessage(QtMsgType type, const QMessageLogContext &context, const QString &message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg) {
-        QMutexLocker locker(&capturedMessageMutex());
-        capturedMessages().push_back(message);
-    }
-    if (previousMessageHandler()) {
-        previousMessageHandler()(type, context, message);
-    } else {
-        qt_message_output(type, context, message);
-    }
-}
-
-QString takeCapturedMessagesText() {
-    QMutexLocker locker(&capturedMessageMutex());
-    const QString text = capturedMessages().join('\n');
-    capturedMessages().clear();
-    return text;
-}
 
 // The paths of the files under `root`, relative to it.
 QStringList filesUnder(const QString &root, const QStringList &nameFilters = {}) {
@@ -95,7 +62,7 @@ private slots:
 };
 
 void QmlModuleTest::initTestCase() {
-    previousMessageHandler() = qInstallMessageHandler(captureQtMessage);
+    startCapturingMessages();
     registerFerrousQmlTypes();
 }
 
@@ -109,8 +76,7 @@ void QmlModuleTest::cleanup() {
 }
 
 void QmlModuleTest::cleanupTestCase() {
-    qInstallMessageHandler(previousMessageHandler());
-    previousMessageHandler() = nullptr;
+    stopCapturingMessages();
 }
 
 void QmlModuleTest::loadsMainFromTheModule() {

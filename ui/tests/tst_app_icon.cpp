@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "AppIcon.h"
+#include "TestColor.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
@@ -98,20 +99,6 @@ int distanceFromTile(QRgb pixel) {
 // apart by a row's faint antialiased edge are seen apart.
 bool traceInk(QRgb pixel) {
     return qAlpha(pixel) == 255 && distanceFromTile(pixel) >= 80;
-}
-
-// WCAG's contrast ratio between two opaque colours.
-double contrastRatio(QRgb a, QRgb b) {
-    const auto luminance = [](QRgb c) {
-        const auto channel = [](int v) {
-            const double s = v / 255.0;
-            return s <= 0.04045 ? s / 12.92 : std::pow((s + 0.055) / 1.055, 2.4);
-        };
-        return 0.2126 * channel(qRed(c)) + 0.7152 * channel(qGreen(c)) + 0.0722 * channel(qBlue(c));
-    };
-    const double la = luminance(a);
-    const double lb = luminance(b);
-    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
 }
 
 int colourDistance(QRgb a, QRgb b) {

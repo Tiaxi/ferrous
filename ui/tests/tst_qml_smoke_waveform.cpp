@@ -3457,21 +3457,20 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     // it has its picture, and until then the spectrogram is whole.
     QString failure;
     int frames = 0;
-    const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            ++frames;
-            if (!failure.isEmpty()) {
-                return;
-            }
-            if (waveformSurface->isVisible() && waveformSurface->opacity() > 0.0
-                && !waveform->pictureReady()) {
-                failure = QStringLiteral("the waveform showed at %1 without its picture, at frame %2")
-                              .arg(waveformSurface->opacity()).arg(frames);
-            } else if (!waveform->pictureReady() && spectrogramSurface->opacity() != 1.0) {
-                failure = QStringLiteral("the spectrogram at %1 before the waveform's picture, at frame %2")
-                              .arg(spectrogramSurface->opacity()).arg(frames);
-            }
-        });
+    FrameSampler connection(window, [&]() {
+        ++frames;
+        if (!failure.isEmpty()) {
+            return;
+        }
+        if (waveformSurface->isVisible() && waveformSurface->opacity() > 0.0
+            && !waveform->pictureReady()) {
+            failure = QStringLiteral("the waveform showed at %1 without its picture, at frame %2")
+                          .arg(waveformSurface->opacity()).arg(frames);
+        } else if (!waveform->pictureReady() && spectrogramSurface->opacity() != 1.0) {
+            failure = QStringLiteral("the spectrogram at %1 before the waveform's picture, at frame %2")
+                          .arg(spectrogramSurface->opacity()).arg(frames);
+        }
+    });
     const auto waitFrames = [&](int count) {
         const int before = frames;
         return QTest::qWaitFor([&]() {
@@ -3539,12 +3538,11 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     const int decodesBefore = started->load();
     int framesToShow = -1;
     const int clickFrame = frames;
-    const QMetaObject::Connection shownConnection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (framesToShow < 0 && waveformSurface->isVisible() && waveformSurface->opacity() > 0.0) {
-                framesToShow = frames - clickFrame;
-            }
-        });
+    FrameSampler shownConnection(window, [&]() {
+        if (framesToShow < 0 && waveformSurface->isVisible() && waveformSurface->opacity() > 0.0) {
+            framesToShow = frames - clickFrame;
+        }
+    });
     QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
     if (waitsForDetail && decodes) {
         // Its detail covers the view: the frame it draws next is the
@@ -3555,7 +3553,7 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QTRY_VERIFY(waveform->pictureReady());
     QTRY_VERIFY(!surface->property("modeSwitching").toBool());
     QVERIFY(waitFrames(1));
-    QObject::disconnect(shownConnection);
+    shownConnection.stop();
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     if (waitsForDetail && decodes) {
         QCOMPARE(started->load(), decodesBefore);
@@ -3589,7 +3587,7 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
         QTRY_VERIFY(!surface->property("modeSwitching").toBool());
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
     }
-    QObject::disconnect(connection);
+    connection.stop();
 }
 
 void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds_data() {
@@ -3670,8 +3668,7 @@ void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds() {
         return *decoded;
     };
     int frames = 0;
-    const QMetaObject::Connection counting =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() { ++frames; });
+    FrameSampler counting(window, [&]() { ++frames; });
     const auto waitFrames = [&](int count) {
         const int before = frames;
         return QTest::qWaitFor([&]() {
@@ -3722,7 +3719,7 @@ void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds() {
         QVERIFY(waitFrames(4));
         QTest::qWait(100);
         QVERIFY(decodes().isEmpty());
-        QObject::disconnect(counting);
+        counting.stop();
         return;
     }
     QTRY_COMPARE(decodes(), QStringList{QStringLiteral("/fixture/first.flac")});
@@ -3747,18 +3744,17 @@ void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds() {
     // and the waveform in within a few frames, without a decode.
     const int clickFrame = frames;
     int framesToShow = -1;
-    const QMetaObject::Connection shown =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
-            if (framesToShow < 0 && waveformSurface->isVisible() && waveformSurface->opacity() > 0.0) {
-                framesToShow = frames - clickFrame;
-            }
-        });
+    FrameSampler shown(window, [&]() {
+        if (framesToShow < 0 && waveformSurface->isVisible() && waveformSurface->opacity() > 0.0) {
+            framesToShow = frames - clickFrame;
+        }
+    });
     QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
     QVERIFY(waveform->pictureReady());
     QVERIFY(fade->property("running").toBool());
     QTRY_VERIFY(!surface->property("modeSwitching").toBool());
     QVERIFY(waitFrames(1));
-    QObject::disconnect(shown);
+    shown.stop();
     QVERIFY2(framesToShow >= 0 && framesToShow <= 4,
              qPrintable(QStringLiteral("the waveform came in %1 frames after the click").arg(framesToShow)));
     QCOMPARE(decodes().size(), 1);
@@ -3776,7 +3772,7 @@ void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds() {
     QVERIFY(fade->property("running").toBool());
     QTRY_VERIFY(!surface->property("modeSwitching").toBool());
     QCOMPARE(decodes().size(), 2);
-    QObject::disconnect(counting);
+    counting.stop();
 }
 
 void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
