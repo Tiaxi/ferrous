@@ -8753,11 +8753,12 @@ mod tests {
         // The tree it asks for keeps the rows it opened.
         let artist = format!("artist|{}|Album", album.root.to_string_lossy());
         assert!(runtime.state.expanded_keys.contains(&artist));
-        while let Ok(tree) = runtime
-            .tree_worker
-            .results
-            .recv_timeout(Duration::from_secs(5))
-        {
+        loop {
+            let tree = runtime
+                .tree_worker
+                .results
+                .recv_timeout(Duration::from_secs(5))
+                .expect("tree");
             let current = runtime.tree_worker.is_current(&tree);
             runtime.handle_wake(BridgeLoopWake::Tree(tree), &event_tx);
             if current {
@@ -8770,15 +8771,23 @@ mod tests {
             runtime.state.expanded_keys
         );
 
+        // In a changed library, an answer found before is not shown: the
+        // link may lead elsewhere now. The worker answers again first.
+        runtime.state.library = Arc::new((*runtime.state.library).clone());
+        runtime.handle_wake(show(&album.canonical), &event_tx);
+        assert_eq!(runtime.state.library_reveal_generation, 1);
+        apply_alias_answer(&mut runtime, &event_tx);
+        assert_eq!(runtime.state.library_reveal_generation, 2);
+
         // A track the library holds as asked is shown at once.
         runtime.handle_wake(show(&album.linked), &event_tx);
-        assert_eq!(runtime.state.library_reveal_generation, 2);
+        assert_eq!(runtime.state.library_reveal_generation, 3);
 
         // A file the library does not have is reported, not ignored.
         let outside = album.base.join("elsewhere/Album/missing.flac");
         runtime.handle_wake(show(&outside), &event_tx);
         apply_alias_answer(&mut runtime, &event_tx);
-        assert_eq!(runtime.state.library_reveal_generation, 2);
+        assert_eq!(runtime.state.library_reveal_generation, 3);
         assert_eq!(
             error_messages(&event_rx),
             ["This file is not in the library."]

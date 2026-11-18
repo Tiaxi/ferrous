@@ -617,10 +617,10 @@ fn handle_library_view_command(
 }
 
 /// Show the track Show in Library was asked for once the library's path
-/// for it is known: at once when the library holds it as asked, or when the
-/// alias worker found the path the library holds it under. Tells the user
-/// when the library does not have the track. Returns whether the view
-/// changed.
+/// for it is known: at once when the library holds it as asked, or once
+/// the alias worker answered for this library, as a link may lead elsewhere
+/// since it answered for an earlier one. Tells the user when the library
+/// does not have the track. Returns whether the view changed.
 pub(super) fn finish_pending_reveal(
     state: &mut BridgeState,
     event_tx: &Sender<BridgeEvent>,
@@ -628,13 +628,15 @@ pub(super) fn finish_pending_reveal(
     let Some(path) = state.pending_reveal.as_deref() else {
         return false;
     };
+    if !state.library_index.contains(&state.library, path)
+        && !state.library_aliases.is_settled(&state.library, path)
+    {
+        return false;
+    }
     let found = state
         .library_aliases
         .library_path(&state.library_index, &state.library, path)
         .map(Path::to_path_buf);
-    if found.is_none() && !state.library_aliases.is_settled(&state.library, path) {
-        return false;
-    }
     let Some(path) = state.pending_reveal.take() else {
         return false;
     };

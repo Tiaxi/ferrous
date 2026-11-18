@@ -237,8 +237,7 @@ pub(super) mod test_support {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("temp dir");
+        std::fs::create_dir(&base).expect("temp dir of the test's own");
         let base = base.canonicalize().expect("canonical temp dir");
         let album = base.join("elsewhere/Album");
         std::fs::create_dir_all(&album).expect("album folder");
