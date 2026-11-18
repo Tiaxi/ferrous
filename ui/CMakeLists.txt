@@ -794,7 +794,7 @@ if(BUILD_TESTING)
     # Its tests run in shards, each in a process of its own and in parallel
     # with the others: run alone, the binary takes minutes. FERROUS_TEST_SHARD
     # picks a shard's tests; see testShardFromEnvironment().
-    set(ferrous_ui_motion_shards 4)
+    set(ferrous_ui_motion_shards 3)
     foreach(shard RANGE 1 ${ferrous_ui_motion_shards})
         set(shard_test ferrous_ui_motion_tests_shard_${shard}_of_${ferrous_ui_motion_shards})
         add_test(NAME ${shard_test} COMMAND ferrous_ui_motion_tests)
@@ -803,7 +803,7 @@ if(BUILD_TESTING)
             TIMEOUT 180
             # For ctest -j, as the costs at the end of this file: about each
             # shard's seconds when run alone.
-            COST 42
+            COST 35
         )
     endforeach()
     add_test(NAME ferrous_ui_motion_tests_shards_run_every_test
