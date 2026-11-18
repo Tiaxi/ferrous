@@ -570,6 +570,7 @@ private:
     void checkLibraryFolderPathsShareOneColumn(QQuickWindow *window, qreal pointSize);
     void checkLibraryFoldersLabelSitsOnTheFirstFoldersBaseline(QQuickWindow *window, int folders);
     void checkLibraryFoldersActOnTheSelectedFolderAtOnce(QQuickWindow *window);
+    void checkLibraryFolderMenuOpensOnItsFolder(QQuickWindow *window);
     void checkReadOnlyPathsAreMiddleElidedLabelsWithATooltip(QQuickWindow *window);
     void checkQuitFailureBreaksItsPathOnlyBetweenFolders(QQuickWindow *window, qreal pointSize, const QString &message);
     void checkLibraryFolderNameDialogShowsItsPath(QQuickWindow *window, qreal pointSize);
@@ -2009,7 +2010,80 @@ void UiDialogsTest::libraryFolderListLaysOutItsFolders() {
                [&] { checkLibraryFoldersLabelSitsOnTheFirstFoldersBaseline(window, 1); },
                [&] { checkLibraryFoldersLabelSitsOnTheFirstFoldersBaseline(window, 3); },
                [&] { checkLibraryFoldersActOnTheSelectedFolderAtOnce(window); },
+               [&] { checkLibraryFolderMenuOpensOnItsFolder(window); },
                [&] { checkReadOnlyPathsAreMiddleElidedLabelsWithATooltip(window); }});
+}
+
+// A folder's menu opens on that folder: the Menu key scrolls the selected
+// folder back into view first, as the menu opens beside its row (on
+// Wayland, the compositor places it there), and a long press selects the
+// folder it is on, which the menu's items then act on.
+void UiDialogsTest::checkLibraryFolderMenuOpensOnItsFolder(QQuickWindow *window) {
+    QObject *bridge = bridgeOf(window);
+    QVariantList folders;
+    for (int i = 0; i < 40; ++i) {
+        const QString path = QStringLiteral("/music/folder%1").arg(i);
+        folders << QVariantMap{{QStringLiteral("path"), path}, {QStringLiteral("displayName"), path},
+                               {QStringLiteral("trackCount"), 10}};
+    }
+    QVERIFY(bridge->setProperty("libraryRootEntries", folders));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *list = nullptr;
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
+    QObject *menu = object(window, QStringLiteral("libraryRootContextMenu"));
+    QVERIFY(menu != nullptr);
+    const auto rowAt = [&](int index) -> QQuickItem * {
+        QQuickItem *row = nullptr;
+        QMetaObject::invokeMethod(list, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, index));
+        return row;
+    };
+    QTRY_VERIFY(rowAt(0) != nullptr);
+    click(prefs, rowAt(0));
+    QTRY_COMPARE(list->property("currentIndex").toInt(), 0);
+    QTRY_VERIFY(list->hasActiveFocus());
+
+    // Scrolled to the end, the first folder out of view: the Menu key.
+    QVERIFY(list->property("contentHeight").toReal() > list->height() + 4 * rowAt(0)->height());
+    list->setProperty("contentY", list->property("contentHeight").toReal() - list->height());
+    QTRY_VERIFY(rowAt(0) == nullptr || !sceneRect(list).intersects(sceneRect(rowAt(0))));
+    QTest::keyClick(prefs, Qt::Key_Menu);
+    QTRY_VERIFY(menu->property("opened").toBool());
+    auto *anchor = qvariant_cast<QQuickItem *>(menu->property("parent"));
+    QVERIFY(anchor != nullptr && rowAt(0) != nullptr && rowAt(0)->isAncestorOf(anchor));
+    const QPointF at = anchor->mapToScene(QPointF(0, 0));
+    QVERIFY2(sceneRect(list).adjusted(0, 0, 0, 1).contains(at),
+             qPrintable(QStringLiteral("menu at %1,%2, outside the list").arg(at.x()).arg(at.y())));
+    QTest::keyClick(qvariant_cast<QQuickItem *>(menu->property("contentItem"))->window(), Qt::Key_Escape);
+    QTRY_VERIFY(!menu->property("visible").toBool());
+
+    // A long press on another folder selects it.
+    QQuickItem *held = nullptr;
+    int heldIndex = -1;
+    for (int i = 39; i > 0 && held == nullptr; --i) {
+        QQuickItem *row = rowAt(i);
+        if (row != nullptr && sceneRect(list).contains(sceneRect(row))) {
+            held = row;
+            heldIndex = i;
+        }
+    }
+    QVERIFY(held != nullptr);
+    const QPoint holdAt = sceneRect(held).center().toPoint();
+    QTest::mousePress(prefs, Qt::LeftButton, Qt::NoModifier, holdAt);
+    // The button goes up whatever fails below, after the menu has closed:
+    // a release over the menu would pick an item.
+    auto release = qScopeGuard([&] {
+        QMetaObject::invokeMethod(menu, "close");
+        QTest::mouseRelease(prefs, Qt::LeftButton, Qt::NoModifier, holdAt);
+    });
+    QTRY_VERIFY(menu->property("opened").toBool());
+    QCOMPARE(list->property("currentIndex").toInt(), heldIndex);
+    QTest::keyClick(qvariant_cast<QQuickItem *>(menu->property("contentItem"))->window(), Qt::Key_Escape);
+    QTRY_VERIFY(!menu->property("visible").toBool());
+    release.dismiss();
+    QTest::mouseRelease(prefs, Qt::LeftButton, Qt::NoModifier, holdAt);
+    QVERIFY(reject(dialog));
 }
 
 // The library folders are a list, not a field: the view colour in a 1 px

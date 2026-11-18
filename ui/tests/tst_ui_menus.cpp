@@ -632,9 +632,9 @@ void UiMenusTest::queueAndPlaybackItemsActOnTheBackend() {
 // the window's corner reaches past its side, from the point it was opened
 // at. The field has the keyboard again once a menu closes.
 //
-// Run offscreen, Qt places the menus; run under KWin (QT_QPA_PLATFORM=wayland
-// in a nested kwin_wayland --virtual), the compositor does, from the item
-// each menu opens beside.
+// Offscreen, Qt places the menus. On Wayland the compositor does, from the
+// item each menu opens beside; it opens a menu window only for input it
+// sent, which QTest's is not, so that was checked by hand under KWin.
 void UiMenusTest::menusAreWindowsThatReachPastASmallWindow() {
     movePointerOffTheWindows();
     QQmlEngine engine;
