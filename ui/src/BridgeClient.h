@@ -831,6 +831,12 @@ private:
     static QString detectFileBrowserNameHeuristic();
     static QString detectFileBrowserName();
     static FileBrowserNameDetector s_fileBrowserNameDetector;
+    // Starts the backend, or returns null with why it could not in `reason`.
+    using BridgeCreator = FerrousFfiBridge *(*)(QString *reason);
+    static FerrousFfiBridge *createFfiBridge(QString *reason);
+    // How clients start their backend: createFfiBridge, unless a test that
+    // needs one that fails to start replaces it before making a client.
+    static BridgeCreator s_bridgeCreator;
     // What `program` prints, trimmed, or nothing when it fails or takes
     // longer than `timeoutMs`; then it is killed and waited for, up to a
     // second.

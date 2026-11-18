@@ -38,6 +38,7 @@
 #undef private
 
 #include "QmlSmokeTest.h"
+#include "TestBridgeStart.h"
 
 #include <QGuiApplication>
 #include <QImage>
@@ -66,6 +67,7 @@ private slots:
     void drawsOffscreenUnlessAPlatformIsChosen();
     void drawingWritesNoShaderCache();
     void nowPlayingFollowsBridgeClientsSnapshots();
+    void aBackendThatCannotStartShowsWhyInRecentErrorsAndTheStatusBar();
 };
 
 void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
@@ -1665,6 +1667,50 @@ void WindowSmokeTest::nowPlayingFollowsBridgeClientsSnapshots() {
     const NowPlayingWindow ui(bridge, QSize(1000, 720));
     QVERIFY2(ui.panel != nullptr, "Main.qml failed to show");
     checkTaglessFileFacts(ui, true);
+}
+
+// A backend that could not start fails before the window is made: the
+// window shows it as it shows one that stopped later.
+void WindowSmokeTest::aBackendThatCannotStartShowsWhyInRecentErrorsAndTheStatusBar() {
+    const QString reason = QStringLiteral("failed to start the bridge thread: no threads in this test");
+    const ScopedFailingBridgeStart failing(reason);
+    BridgeClient bridge;
+    const QString failure = bridge.backendFailure();
+    QVERIFY2(failure.contains(reason), qPrintable(failure));
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+
+    // In Recent Issues, as an error of the system's.
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(errors != nullptr);
+    auto *entries = qvariant_cast<QAbstractItemModel *>(errors->property("entries"));
+    QVERIFY(entries != nullptr);
+    const QStringList messages = errorHistoryMessages(errors);
+    const int row = static_cast<int>(messages.indexOf(failure));
+    QVERIFY2(row >= 0, qPrintable(messages.join(QStringLiteral("; "))));
+    const QHash<int, QByteArray> roles = entries->roleNames();
+    QCOMPARE(entries->index(row, 0).data(roles.key("category")).toInt(),
+             int(BinaryBridgeCodec::ErrorCategorySystem));
+    QCOMPARE(entries->index(row, 0).data(roles.key("severity")).toInt(),
+             int(BinaryBridgeCodec::ErrorSeverityError));
+    QCOMPARE(entries->index(row, 0).data(roles.key("count")).toInt(), 1);
+    QVERIFY(errors->property("unseenCount").toInt() >= 1);
+
+    // The status bar shows the engine stopped, not merely not running, with
+    // the reason in its tooltip.
+    auto *stopped = window->findChild<QQuickItem *>(QStringLiteral("statusBarBackendStoppedLabel"));
+    auto *notRunning = window->findChild<QQuickItem *>(QStringLiteral("statusBarDisconnectedLabel"));
+    QVERIFY(stopped != nullptr && notRunning != nullptr);
+    QTRY_VERIFY(stopped->isVisible());
+    QVERIFY(!notRunning->isVisible());
+    QCOMPARE(evaluateOn(stopped, QStringLiteral("ToolTip.text")).toString(), failure);
+    QCOMPARE(evaluateOn(stopped, QStringLiteral("Accessible.description")).toString(), failure);
+    auto *transportBar = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
+    QVERIFY(transportBar != nullptr);
+    QVERIFY(!transportBar->isEnabled());
 }
 
 #include "tst_qml_smoke_window.moc"

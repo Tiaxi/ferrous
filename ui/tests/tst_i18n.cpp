@@ -32,6 +32,7 @@
 #include "../src/LibraryTreeModel.h"
 #include "../src/Localization.h"
 #include "../src/QmlTypes.h"
+#include "TestBridgeStart.h"
 #include "TestMessages.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
@@ -150,6 +151,7 @@ private slots:
     void channelLayoutIconFollowsTheLayoutNotItsText();
     void albumArtRefusalsAreTranslated();
     void backendStopWithoutAReasonIsTranslated();
+    void backendStartFailureIsTranslated();
     void mainWindowShowsTranslatedText();
     void tagEditorTellsMixedValuesByAFlag();
     void drawsOffscreenUnlessAPlatformIsChosen();
@@ -302,6 +304,21 @@ void TranslationTest::backendStopWithoutAReasonIsTranslated() {
     QVERIFY(!client.processBinarySnapshot(decoded));
     QCOMPARE(client.backendFailure(),
              pseudo(QStringLiteral("The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.")));
+}
+
+void TranslationTest::backendStartFailureIsTranslated() {
+    {
+        // The backend's reason is English, and stays so.
+        const ScopedFailingBridgeStart failing(QStringLiteral("no threads in this test"));
+        BridgeClient client;
+        QCOMPARE(client.backendFailure(),
+                 pseudo(QStringLiteral("The playback engine could not start: no threads in this test. "
+                                       "Restart Ferrous to try again.")));
+    }
+    const ScopedFailingBridgeStart failing{QString()};
+    BridgeClient client;
+    QCOMPARE(client.backendFailure(),
+             pseudo(QStringLiteral("The playback engine could not start. Restart Ferrous to try again.")));
 }
 
 void TranslationTest::mainWindowShowsTranslatedText() {

@@ -215,6 +215,15 @@ ToolBar {
                 visible: root.backendStopped
                 text: I18n.i18nc("@info:status", "Playback engine stopped")
                 color: root.uiPalette.text
+
+                HoverHandler {
+                    id: stoppedHover
+                }
+                // Why it stopped or could not start, and what to do.
+                ToolTip.visible: stoppedHover.hovered
+                ToolTip.delay: Kirigami.Units.toolTipDelay
+                ToolTip.text: root.backendFailure
+                Accessible.description: ToolTip.text
             }
 
             StatusLabel {
