@@ -995,6 +995,7 @@ private slots:
     void steppedDriverTakesNoRealTimeFromBeforeIt();
     void steppedDriverTakesNoRealTimeFromBeforeIt_data();
     void steppedDriverGoesOnWhenQtStartsItAgain();
+    void steppedDriverStaysStoppedForTheRestOfAStep();
     void queueTrackChangeHandsTheAmberOver();
     void queueTrackChangeHandsTheAmberOver_data();
     void queueRepeatOneKeepsTheRowAmber();
@@ -1187,6 +1188,31 @@ void UiMotionTest::steppedDriverGoesOnWhenQtStartsItAgain() {
     first.start();
     QCOMPARE(steppedRunMs(driver, first, 400), 208);
     QVERIFY(QTest::qWaitFor([&]() { return !driver.isRunning(); }));
+
+    QVariantAnimation second;
+    second.setStartValue(0.0);
+    second.setEndValue(1.0);
+    second.setDuration(200);
+    second.start();
+    QCOMPARE(steppedRunMs(driver, second, 400), 208);
+}
+
+// Qt stops the driver once nothing runs, which can be part way through a
+// step: it stays stopped for the rest of the step, as a window draws no
+// frames for a stopped driver, and the next animation runs for its own
+// duration. A frame of the stopped driver started it again with Qt's clock
+// unset, and the next animation took every frame since in its first one
+// (#637: the crosshair's fade ended in one frame).
+void UiMotionTest::steppedDriverStaysStoppedForTheRestOfAStep() {
+    SteppedAnimationDriver driver;
+    QVariantAnimation first;
+    first.setStartValue(0.0);
+    first.setEndValue(1.0);
+    first.setDuration(100);
+    first.start();
+    QVERIFY(driver.step(1000));
+    QCOMPARE(first.state(), QAbstractAnimation::Stopped);
+    QVERIFY(!driver.isRunning());
 
     QVariantAnimation second;
     second.setStartValue(0.0);
