@@ -59,6 +59,7 @@
 #include <QtEndian>
 #include "../src/SpectrogramTraceLogging.h"
 #include "FlacFixture.h"
+#include "TestBridgeStart.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 #include "TestUserDirectories.h"
@@ -398,6 +399,7 @@ private slots:
     void backendFailurePacketShowsStoppedState();
     void requestedStopIsNotABackendFailure();
     void commandsToAStoppedBackendFailVisibly();
+    void aBackendThatCannotStartIsABackendFailure();
     void quittingSendsNothingToTheStoppedBackend();
     void eachTestStartsWithEmptyUserDirectories_data();
     void eachTestStartsWithEmptyUserDirectories();
@@ -8128,6 +8130,43 @@ void BridgeClientTest::commandsToAStoppedBackendFailVisibly() {
     QCOMPARE(
         errors.constLast().at(0).toString(),
         QStringLiteral("command not sent: the backend has stopped"));
+}
+
+void BridgeClientTest::aBackendThatCannotStartIsABackendFailure() {
+    // The reason comes from the backend, as ferrous_ffi_bridge_create gives it.
+    const QString reason = QStringLiteral("failed to start the bridge thread: no threads in this test");
+    {
+        const ScopedFailingBridgeStart failing(reason);
+        BridgeClient client;
+        QSignalSpy errors(&client, &BridgeClient::bridgeError);
+        QSignalSpy finished(&client, &BridgeClient::stateSaveFinished);
+        QCOMPARE(client.m_ffiBridge, nullptr);
+        QVERIFY(!client.connected());
+        // The state a backend that stops on its own leaves, with the reason.
+        QCOMPARE(client.backendFailure(),
+                 QStringLiteral("The playback engine could not start: %1. "
+                                "Restart Ferrous to try again.")
+                     .arg(reason));
+
+        // Commands fail as they do once the backend has stopped.
+        QVERIFY(!client.sendBinaryCommand(
+            BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRequestSnapshot)));
+        QCOMPARE(errors.count(), 1);
+        QCOMPARE(errors.constLast().at(0).toString(),
+                 QStringLiteral("command not sent: the backend has stopped"));
+        // Quitting does not wait for a save that cannot happen.
+        const quint32 save = client.saveStateBeforeQuit();
+        QTRY_COMPARE(finished.count(), 1);
+        QCOMPARE(finished.at(0).at(0).value<quint32>(), save);
+        QVERIFY(!finished.at(0).at(1).toBool());
+    }
+
+    // Without a reason, it still says what failed and what to do.
+    const ScopedFailingBridgeStart failing{QString()};
+    BridgeClient client;
+    QCOMPARE(client.m_ffiBridge, nullptr);
+    QCOMPARE(client.backendFailure(),
+             QStringLiteral("The playback engine could not start. Restart Ferrous to try again."));
 }
 
 void BridgeClientTest::quittingSendsNothingToTheStoppedBackend() {

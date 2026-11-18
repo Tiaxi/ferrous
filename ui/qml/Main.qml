@@ -2195,6 +2195,9 @@ ApplicationWindow {
         function onBridgeError(message, category, severity, subject) {
             errorController.report(category, severity, subject, message)
         }
+        function onBackendFailureChanged() {
+            root.reportBackendFailure()
+        }
     }
 
     Connections {
@@ -2236,8 +2239,18 @@ ApplicationWindow {
         onQuitMayProceed: root.close()
     }
 
+    // Recent Issues lists why the backend stopped, also when it stopped
+    // before the window was made, as when it could not start at all.
+    function reportBackendFailure() {
+        const failure = root.uiBridge.backendFailure || ""
+        if (failure.length > 0) {
+            errorController.report(ErrorUtils.CategorySystem, ErrorUtils.SeverityError, "", failure)
+        }
+    }
+
     Component.onCompleted: {
         windowLayoutController.showWindow()
+        root.reportBackendFailure()
         libraryController.requestTreeApply(uiBridge.libraryVersion, uiBridge.libraryTreeBinary || "")
         playbackController.initializeFromBridge()
         queueController.initializeFromBridge()

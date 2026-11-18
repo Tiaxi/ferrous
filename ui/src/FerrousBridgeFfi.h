@@ -45,7 +45,11 @@ float ferrous_ffi_spectrogram_fit_zoom(
 // current; current if it keeps its zoom.
 float ferrous_ffi_spectrogram_zoom_after_request(float current, float requested);
 
-FerrousFfiBridge *ferrous_ffi_bridge_create();
+// Null if the bridge cannot start; then up to errorCapacity bytes of the
+// reason, in UTF-8, are in errorBuf and their count in errorLenOut, which is
+// 0 when it starts. Either may be null.
+FerrousFfiBridge *ferrous_ffi_bridge_create(
+    std::uint8_t *errorBuf, std::size_t errorCapacity, std::size_t *errorLenOut);
 // Blocks until the backend has saved its state, for a few seconds at most.
 // Returns false if it had not finished by then, could not save it all, or
 // left a file open that it could not close.

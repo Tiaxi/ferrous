@@ -3336,6 +3336,12 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QTRY_VERIFY(stopped->isVisible());
     QCOMPARE(stopped->property("text").toString(), QStringLiteral("Playback engine stopped"));
     QTRY_VERIFY(treatedAsAnError(stopped));
+    // Its tooltip says why, in the backend's words.
+    QCOMPARE(toolTipText(stopped), QStringLiteral("stopped for testing"));
+    QCOMPARE(accessibleText(stopped, QAccessible::Description), QStringLiteral("stopped for testing"));
+    showToolTipsAtOnce(stopped);
+    QTest::mouseMove(harness.window, sceneCentre(stopped));
+    QTRY_VERIFY(toolTipShown(stopped));
     QVERIFY2(contrastRatio(harness.token("negative"), harness.token("chrome")) >= 3.0,
              qPrintable(describeContrast(QStringLiteral("glyph"), harness.token("negative"), harness.token("chrome"))));
 }

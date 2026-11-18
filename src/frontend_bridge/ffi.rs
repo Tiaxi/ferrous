@@ -1330,20 +1330,52 @@ pub extern "C" fn ferrous_ffi_spectrogram_zoom_after_request(current: f32, reque
     )
 }
 
-/// Start the bridge. Returns null if it cannot start.
+/// Start the bridge. Returns null if it cannot start, and writes why, in
+/// UTF-8, to `error_buf`: as much of the reason as fits in `error_capacity`
+/// bytes, cut at a character boundary, with its length in `error_len_out`
+/// (0 when the bridge starts). The UI shows and logs the reason.
+///
+/// # Safety
+///
+/// `error_buf` must be null or writable for `error_capacity` bytes, and
+/// `error_len_out` null or writable for one `usize`.
 #[no_mangle]
-pub extern "C" fn ferrous_ffi_bridge_create() -> *mut FerrousFfiBridge {
-    ffi_call(
-        "ferrous_ffi_bridge_create",
-        |_| std::ptr::null_mut(),
-        || match create_bridge() {
-            Ok(bridge) => Box::into_raw(Box::new(bridge)),
-            Err(message) => {
-                eprintln!("[ferrous] {message}");
-                std::ptr::null_mut()
-            }
-        },
-    )
+pub unsafe extern "C" fn ferrous_ffi_bridge_create(
+    error_buf: *mut c_uchar,
+    error_capacity: usize,
+    error_len_out: *mut usize,
+) -> *mut FerrousFfiBridge {
+    let started = ffi_call("ferrous_ffi_bridge_create", Err, create_bridge);
+    let reason = started.as_ref().err().map_or("", String::as_str);
+    // SAFETY: The caller guarantees that `error_buf` and `error_len_out`
+    // are null or writable for as much as they are given for.
+    unsafe { write_reason(reason, error_buf, error_capacity, error_len_out) };
+    started.map_or(std::ptr::null_mut(), |bridge| {
+        Box::into_raw(Box::new(bridge))
+    })
+}
+
+/// Write as much of `reason` as fits in `capacity` bytes to `buf`, cut at a
+/// character boundary, and the number of bytes written to `len_out`.
+///
+/// # Safety
+///
+/// `buf` must be null or writable for `capacity` bytes, and `len_out` null
+/// or writable for one `usize`.
+unsafe fn write_reason(reason: &str, buf: *mut c_uchar, capacity: usize, len_out: *mut usize) {
+    let capacity = if buf.is_null() { 0 } else { capacity };
+    let mut len = reason.len().min(capacity);
+    while !reason.is_char_boundary(len) {
+        len -= 1;
+    }
+    if len > 0 {
+        // SAFETY: `buf` is not null, so the caller guarantees it is writable
+        // for `capacity` bytes, which `len` does not exceed, and it cannot
+        // overlap `reason`, which Rust owns.
+        unsafe { std::ptr::copy_nonoverlapping(reason.as_ptr(), buf, len) };
+    }
+    // SAFETY: The caller guarantees that `len_out` is null or writable.
+    unsafe { write_out(len_out, len) };
 }
 
 #[no_mangle]
@@ -7014,7 +7046,7 @@ mod tests {
 
     #[test]
     fn ffi_bridge_emits_snapshot_event_end_to_end() {
-        let handle = ferrous_ffi_bridge_create();
+        let handle = ffi_bridge_create();
         assert!(!handle.is_null());
 
         let tree_evt = ffi_next_tree(handle, Duration::from_secs(4)).expect("tree frame");
@@ -7059,7 +7091,7 @@ mod tests {
             ));
         }
         assert_eq!((count, generation), (7, 7));
-        let handle = ferrous_ffi_bridge_create();
+        let handle = ffi_bridge_create();
         assert!(!handle.is_null());
         // SAFETY: `handle` is live; the null pointer is rejected.
         unsafe {
@@ -7099,7 +7131,7 @@ mod tests {
 
     #[test]
     fn ffi_bridge_reports_error_for_bad_command_end_to_end() {
-        let handle = ferrous_ffi_bridge_create();
+        let handle = ffi_bridge_create();
         assert!(!handle.is_null());
 
         // Each rejected seek is answered with an error, not a panic.
@@ -7305,6 +7337,68 @@ mod tests {
         // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
         unsafe { ferrous_ffi_bridge_destroy(handle) };
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Start a bridge as the UI does, failing the test if it cannot start.
+    fn ffi_bridge_create() -> *mut FerrousFfiBridge {
+        let mut reason = [0_u8; 256];
+        let mut len = usize::MAX;
+        // SAFETY: `reason` is writable for its length and `len` for a `usize`.
+        let handle =
+            unsafe { ferrous_ffi_bridge_create(reason.as_mut_ptr(), reason.len(), &raw mut len) };
+        assert!(
+            !handle.is_null(),
+            "the bridge did not start: {}",
+            String::from_utf8_lossy(&reason[..len.min(reason.len())])
+        );
+        assert_eq!(len, 0);
+        handle
+    }
+
+    #[test]
+    fn a_bridge_that_cannot_start_says_why() {
+        test_hooks::panic_at("ferrous_ffi_bridge_create");
+        let mut reason = [0xff_u8; 256];
+        let mut len = usize::MAX;
+        // SAFETY: `reason` is writable for its length and `len` for a `usize`.
+        let handle =
+            unsafe { ferrous_ffi_bridge_create(reason.as_mut_ptr(), reason.len(), &raw mut len) };
+        assert!(handle.is_null());
+        assert_eq!(
+            std::str::from_utf8(&reason[..len]),
+            Ok("internal error in ferrous_ffi_bridge_create: \
+                test panic at ferrous_ffi_bridge_create")
+        );
+
+        // Without a buffer, it still fails without writing one.
+        test_hooks::panic_at("ferrous_ffi_bridge_create");
+        let mut len = usize::MAX;
+        // SAFETY: A null buffer is allowed; `len` is writable.
+        let handle = unsafe { ferrous_ffi_bridge_create(std::ptr::null_mut(), 64, &raw mut len) };
+        assert!(handle.is_null());
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn a_start_failure_reason_is_cut_to_the_buffer_at_a_character_boundary() {
+        let reason = "could not start: \u{e9}t\u{e9}";
+        for (capacity, expected) in [
+            (0, ""),
+            (17, "could not start: "),
+            (18, "could not start: "),
+            (19, "could not start: \u{e9}"),
+            (64, reason),
+        ] {
+            let mut buf = [0_u8; 64];
+            let mut len = usize::MAX;
+            // SAFETY: `buf` is writable for 64 bytes, at least `capacity`,
+            // and `len` for a `usize`.
+            unsafe { write_reason(reason, buf.as_mut_ptr(), capacity, &raw mut len) };
+            assert_eq!(std::str::from_utf8(&buf[..len]), Ok(expected), "{capacity}");
+        }
+        // Nothing is written through null pointers.
+        // SAFETY: Null pointers are allowed.
+        unsafe { write_reason(reason, std::ptr::null_mut(), 64, std::ptr::null_mut()) };
     }
 
     /// Start a bridge with `options` behind the same handle the UI gets.
@@ -7870,7 +7964,7 @@ mod tests {
 
     #[test]
     fn a_panicking_ffi_call_returns_its_error_value_and_the_next_call_works() {
-        let handle = ferrous_ffi_bridge_create();
+        let handle = ffi_bridge_create();
         assert!(!handle.is_null());
         let snapshot = encode_command(33, &[]);
 

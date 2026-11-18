@@ -11,6 +11,7 @@
 #include "WindowPresence.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -831,6 +832,20 @@ BridgeClient::~BridgeClient() {
 BridgeClient::FileBrowserNameDetector BridgeClient::s_fileBrowserNameDetector =
     &BridgeClient::detectFileBrowserName;
 
+BridgeClient::BridgeCreator BridgeClient::s_bridgeCreator = &BridgeClient::createFfiBridge;
+
+FerrousFfiBridge *BridgeClient::createFfiBridge(QString *reason) {
+    // Room for the reasons the backend gives, which are a line long.
+    std::array<std::uint8_t, 1024> buffer{};
+    std::size_t length = 0;
+    FerrousFfiBridge *bridge = ferrous_ffi_bridge_create(buffer.data(), buffer.size(), &length);
+    if (bridge == nullptr && reason != nullptr) {
+        *reason = QString::fromUtf8(reinterpret_cast<const char *>(buffer.data()),
+                                    static_cast<qsizetype>(std::min(length, buffer.size())));
+    }
+    return bridge;
+}
+
 void BridgeClient::setFileBrowserNameDetector(FileBrowserNameDetector detector) {
     s_fileBrowserNameDetector = detector;
 }
@@ -876,10 +891,17 @@ bool BridgeClient::startInProcessBridge() {
     }
     m_bridgeWakeFd = -1;
 
-    m_ffiBridge = ferrous_ffi_bridge_create();
+    QString reason;
+    m_ffiBridge = s_bridgeCreator(&reason);
     if (m_ffiBridge == nullptr) {
-        reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    i18nc("@info", "failed to create in-process Rust bridge"));
+        // As when the backend stops on its own: the user can't play anything.
+        reason = reason.trimmed();
+        setBackendFailure(reason.isEmpty()
+                ? i18nc("@info", "The playback engine could not start. "
+                                 "Restart Ferrous to try again.")
+                : i18nc("@info %1 is why, in English", "The playback engine could not start: %1. "
+                                                       "Restart Ferrous to try again.",
+                        reason));
         return false;
     }
 
@@ -5450,7 +5472,9 @@ bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
     }
     if (m_ffiBridge == nullptr) {
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    i18nc("@info", "bridge is not initialized"));
+                    m_backendFailure.isEmpty()
+                        ? i18nc("@info", "bridge is not initialized")
+                        : i18nc("@info", "command not sent: the backend has stopped"));
         return false;
     }
     const auto *ptr = reinterpret_cast<const std::uint8_t *>(payload.constData());

@@ -1195,9 +1195,21 @@ fn wakeups_over(hold: Duration) -> String {
 }
 
 fn run_idle(options: &Options) -> Result<Fields, String> {
-    let handle = FfiHandle(bridge_ffi::ferrous_ffi_bridge_create());
+    let mut reason = [0_u8; 1024];
+    let mut reason_len = 0_usize;
+    // SAFETY: `reason` is writable for its length and `reason_len` for a `usize`.
+    let handle = FfiHandle(unsafe {
+        bridge_ffi::ferrous_ffi_bridge_create(
+            reason.as_mut_ptr(),
+            reason.len(),
+            &raw mut reason_len,
+        )
+    });
     if handle.0.is_null() {
-        return Err("the FFI bridge did not start".to_string());
+        return Err(format!(
+            "the FFI bridge did not start: {}",
+            String::from_utf8_lossy(&reason[..reason_len.min(reason.len())])
+        ));
     }
     // SAFETY: The handle is live.
     let wake_fd = unsafe { bridge_ffi::ferrous_ffi_bridge_wakeup_fd(handle.0) };
