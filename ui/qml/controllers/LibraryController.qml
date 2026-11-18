@@ -680,7 +680,8 @@ QtObject {
             return
         }
         let current = ""
-        const path = root.uiBridge.currentTrackPath || ""
+        // The track as the library's rows hold it.
+        const path = (root.uiBridge.currentTrackLibraryPath || "") || (root.uiBridge.currentTrackPath || "")
         const keys = root.uiBridge.currentTrackTreeKeys || []
         const playing = path.length > 0 && (root.uiBridge.playbackState || "Stopped") !== "Stopped"
         for (let i = range.first; i <= range.last; ++i) {

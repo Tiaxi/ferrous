@@ -93,6 +93,10 @@ Rectangle {
 
     // The playing track, and what the playback is doing with it.
     readonly property string currentTrackPath: root.uiBridge.currentTrackPath || ""
+    // The path of the playing track's row: the path the library holds the
+    // track under, which differs from the track's own when a link is in
+    // one of them.
+    readonly property string nowRowPath: (root.uiBridge.currentTrackLibraryPath || "") || root.currentTrackPath
     readonly property string playbackState: root.uiBridge.playbackState || ""
     // The keys of the rows that hold the playing track, as the backend
     // groups the tree: one artist row can gather tracks from more than one
@@ -113,23 +117,27 @@ Rectangle {
     }
 
     function followNowTrack() {
-        const path = root.uiBridge.currentTrackPath || ""
+        const track = root.currentTrackPath
         const state = root.uiBridge.playbackState || "Stopped"
         const keys = root.uiBridge.currentTrackTreeKeys || []
         const was = root.nowTrack
-        if (was !== null && path !== was.path) {
+        // Only another track fades the row out: the library's path for
+        // the same track, found a moment later, only moves its amber.
+        if (was !== null && track !== was.track) {
             root.nowFade.start(was)
         }
-        root.nowTrack = state !== "Stopped" && path.length > 0
+        root.nowTrack = state !== "Stopped" && track.length > 0
             ? {
-                path: path,
-                keys: keys.length > 0 || was === null || was.path !== path ? keys : was.keys,
+                track: track,
+                path: root.nowRowPath,
+                keys: keys.length > 0 || was === null || was.track !== track ? keys : was.keys,
                 glyph: state === "Paused" ? "media-playback-pause" : "media-playback-start"
             }
             : null
     }
 
     onCurrentTrackPathChanged: root.followNowTrack()
+    onNowRowPathChanged: root.followNowTrack()
     onPlaybackStateChanged: root.followNowTrack()
     onCurrentTrackTreeKeysChanged: root.followNowTrack()
     Component.onCompleted: root.followNowTrack()
@@ -410,8 +418,8 @@ Rectangle {
 
                     // The playing track's row: what the playback does with it.
                     readonly property bool isCurrentTrack: isTrackRow
-                        && root.currentTrackPath.length > 0
-                        && trackPathResolved === root.currentTrackPath
+                        && root.nowRowPath.length > 0
+                        && trackPathResolved === root.nowRowPath
                     readonly property bool isNow: isCurrentTrack && root.playbackState !== "Stopped"
                     readonly property string unreadableReason: isTrackRow && root.errorController
                         ? (root.errorController.unreadablePaths[trackPathResolved] || "")

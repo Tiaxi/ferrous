@@ -1896,6 +1896,10 @@ QStringList BridgeClient::currentTrackTreeKeys() const {
     return m_currentTrackTreeKeys;
 }
 
+QString BridgeClient::currentTrackLibraryPath() const {
+    return m_currentTrackLibraryPath;
+}
+
 int BridgeClient::currentTrackChannels() const {
     return m_currentTrackChannels;
 }
@@ -5940,6 +5944,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     // a library change can move the track, so they follow every section.
     QStringList nextTrackTreeKeys = currentPath.isEmpty() || currentPathChanged
         ? QStringList{} : m_currentTrackTreeKeys;
+    QString nextTrackLibraryPath = currentPath.isEmpty() || currentPathChanged
+        ? QString{} : m_currentTrackLibraryPath;
     int nextTrackSampleRateHz = currentPath.isEmpty() ? 0 : m_currentTrackSampleRateHz;
     int nextTrackBitDepth = currentPath.isEmpty() ? 0 : m_currentTrackBitDepth;
     int nextTrackCurrentBitrateKbps = currentPath.isEmpty() ? 0 : m_currentTrackCurrentBitrateKbps;
@@ -6023,6 +6029,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         nextTrackChannels = metadataChannels;
         nextChannelLabels = snapshot.metadata.channelLabels;
         nextTrackTreeKeys = snapshot.metadata.treeKeys;
+        nextTrackLibraryPath = snapshot.metadata.libraryPath;
         nextTrackTotal = metadataTrackNumber > 0 ? snapshot.metadata.trackTotal : 0;
         nextTrackSampleRateHz = metadataSampleRateHz;
         nextTrackBitDepth = metadataBitDepth;
@@ -6095,6 +6102,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (m_currentTrackTreeKeys != nextTrackTreeKeys) {
         m_currentTrackTreeKeys = nextTrackTreeKeys;
+        changed = true;
+        trackMetadataSignalChanged = true;
+    }
+    if (m_currentTrackLibraryPath != nextTrackLibraryPath) {
+        m_currentTrackLibraryPath = nextTrackLibraryPath;
         changed = true;
         trackMetadataSignalChanged = true;
     }

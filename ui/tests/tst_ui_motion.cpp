@@ -1000,6 +1000,7 @@ private slots:
     void queueRepeatOneKeepsTheRowAmber();
     void queueEditsMovingThePlayingRowFadeNothing();
     void treeTrackChangeHandsTheAmberOver();
+    void treeMarksATrackTheLibraryHoldsThroughALink();
     void reusedTreeRowsShowNoStaleFade();
     void nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges();
     void nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges_data();
@@ -1452,6 +1453,48 @@ void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
     QCOMPARE(weightMismatches, 0);
     QVERIFY(colorOf(album.title) != nowHex(window));
     QCOMPARE(titleWeight(album), QFont::Normal);
+}
+
+// A track opened by another path than the library holds it under, as when
+// a link in the library folder leads to its album, is the library's row
+// once the backend names that path (#588). Finding it later is no track
+// change: nothing fades. The next track fades the row out as usual.
+void UiMotionTest::treeMarksATrackTheLibraryHoldsThroughALink() {
+    LibraryTreeModel libraryModel;
+    showTree(libraryModel, {kArtistKey, kAlbumAKey});
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowSize());
+    QVERIFY(window != nullptr);
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(QTest::qWaitFor([&]() { return libraryRowWithPath(window, kTrackA1) != nullptr; }));
+    QObject *fade = qvariant_cast<QObject *>(named(window, "libraryPane")->property("nowFade"));
+    QVERIFY(fade != nullptr);
+    QQuickItem *rowItem = libraryRowWithPath(window, kTrackA1);
+    const RowLook row = libraryRowLook(rowItem);
+
+    const QString linkTarget = QStringLiteral("/elsewhere/Album A/01.flac");
+    bridge->setProperty("currentTrackPath", linkTarget);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QVERIFY(!rowItem->property("isNow").toBool());
+    QVERIFY(colorOf(row.title) != nowHex(window));
+
+    bridge->setProperty("currentTrackLibraryPath", kTrackA1);
+    bridge->setProperty("currentTrackTreeKeys", QStringList{kArtistKey, kAlbumAKey});
+    QVERIFY(rowItem->property("isNow").toBool());
+    QCOMPARE(colorOf(row.title), nowHex(window));
+    QVERIFY(row.glyph->isVisible());
+    QVERIFY(!animationOf(fade)->property("running").toBool());
+
+    // The next track, which the library does not hold yet as far as the
+    // backend has said.
+    bridge->setProperty("currentTrackPath", QStringLiteral("/elsewhere/Album A/02.flac"));
+    bridge->setProperty("currentTrackLibraryPath", QString());
+    bridge->setProperty("currentTrackTreeKeys", QStringList{});
+    QVERIFY(!rowItem->property("isNow").toBool());
+    QVERIFY(animationOf(fade)->property("running").toBool());
+    QVERIFY(row.fadingGlyph->isVisible());
+    QVERIFY(finish(animationOf(fade)));
+    QVERIFY(colorOf(row.title) != nowHex(window));
 }
 
 // The tree reuses its rows: a row that comes back for another track never

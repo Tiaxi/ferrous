@@ -562,7 +562,10 @@ fn handle_library_view_command(
             Some(false)
         }
         BridgeLibraryCommand::ShowTrackInLibrary(path) => {
-            Some(reveal_track_in_library(state, &path))
+            // Shown once the library's path for it is known; see
+            // `finish_pending_reveal`.
+            state.pending_reveal = Some(path);
+            Some(false)
         }
         BridgeLibraryCommand::SetNodeExpanded { key, expanded } => {
             let normalized = key.trim();
@@ -613,6 +616,42 @@ fn handle_library_view_command(
     }
 }
 
+/// Show the track Show in Library was asked for once the library's path
+/// for it is known: at once when the library holds it as asked, or once
+/// the alias worker answered for this library, as a link may lead elsewhere
+/// since it answered for an earlier one. Tells the user when the library
+/// does not have the track. Returns whether the view changed.
+pub(super) fn finish_pending_reveal(
+    state: &mut BridgeState,
+    event_tx: &Sender<BridgeEvent>,
+) -> bool {
+    let Some(path) = state.pending_reveal.as_deref() else {
+        return false;
+    };
+    if !state.library_index.contains(&state.library, path)
+        && !state.library_aliases.is_settled(&state.library, path)
+    {
+        return false;
+    }
+    let found = state
+        .library_aliases
+        .library_path(&state.library_index, &state.library, path)
+        .map(Path::to_path_buf);
+    let Some(path) = state.pending_reveal.take() else {
+        return false;
+    };
+    if found.is_some_and(|found| reveal_track_in_library(state, &found)) {
+        return true;
+    }
+    send_error(
+        event_tx,
+        BridgeError::error(ErrorCategory::Library, "This file is not in the library.")
+            .about(path.to_string_lossy()),
+    );
+    false
+}
+
+/// Expand and select the library's track at `path`, as the library holds it.
 fn reveal_track_in_library(state: &mut BridgeState, path: &Path) -> bool {
     let Some(track) = state
         .library_index
