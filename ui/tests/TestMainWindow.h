@@ -17,6 +17,7 @@
 #include <initializer_list>
 
 #include "../src/LibraryTreeModel.h"
+#include "TestPlatform.h"
 
 // Loading the main window from the QML sources, with its fallback bridge,
 // the application font a test sets for its run, and a test's checks of one
@@ -53,10 +54,11 @@ struct MainWindowOptions {
     QVariant appComponents;
 };
 
-// Main.qml, shown, at the options' size, and active unless they say not.
-// Null when it failed to load or to show.
+// Main.qml, shown, at the options' size, and active unless they say not,
+// with the pointer off it. Null when it failed to load or to show.
 inline QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel,
                                     const MainWindowOptions &options = {}) {
+    movePointerOffTheWindows();
     QQmlContext *context = engine.rootContext();
     context->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
     context->setContextProperty(QStringLiteral("appVersion"), options.appVersion);
