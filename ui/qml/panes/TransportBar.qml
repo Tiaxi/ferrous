@@ -514,7 +514,7 @@ ToolBar {
             // Where on the bar the shown time lies, from the left, as the
             // slider's visualPosition places its value.
             readonly property real shownVisualPosition: {
-                const fraction = to > from ? Math.max(0, Math.min(1, (shownSeconds - from) / (to - from))) : 0
+                const fraction = Math.max(0, Math.min(1, (shownSeconds - from) / (to - from)))
                 return mirrored ? 1 - fraction : fraction
             }
             // The handle is a grab target wider than the line and not drawn.
@@ -568,9 +568,11 @@ ToolBar {
             readonly property int valueSecond: adjusting ? Math.floor(shownSeconds) : root.positionSecond
 
             Accessible.name: I18n.i18nc("@label", "Seek")
+            // The value's second, which a track's last half second would
+            // otherwise give past its length.
             Accessible.description: seekAllowed
                 ? I18n.i18nc("@info position of duration", "%1 of %2",
-                    FormatUtils.formatClockTime(valueSecond),
+                    FormatUtils.formatClockTime(Math.floor(value)),
                     FormatUtils.formatClockTime(root.uiBridge.durationSeconds))
                 : I18n.i18nc("@info", "No track playing")
 
@@ -592,13 +594,20 @@ ToolBar {
             onMoved: {
                 const stepped = !pointerHeld && (heldKeys.length > 0 || !pressed)
                 let target = value
-                if (stepped && durationKnown && value > from && value < to) {
+                if (stepped && durationKnown) {
                     // A step of the keys or the wheel moves from the time a
                     // held step reached, or at first from the position now,
-                    // which the bar shows only to its last pixel. A step to
-                    // either end stays there.
+                    // which the bar shows only to its last pixel.
                     const start = isNaN(gestureValue) ? root.currentPositionSeconds() : gestureValue
-                    target = Math.max(from, Math.min(to, start + value - valueBeforeChange))
+                    const step = value - valueBeforeChange
+                    if (heldKeys.length > 0) {
+                        // A key's whole step, which the slider cuts short at
+                        // an end that its whole second can reach first.
+                        target = Math.max(from, Math.min(to, start + Math.sign(step) * stepSize))
+                    } else if (value > from && value < to) {
+                        // A step of the wheel to either end stays there.
+                        target = Math.max(from, Math.min(to, start + step))
+                    }
                 }
                 if (adjusting) {
                     gestureValue = target
@@ -928,8 +937,8 @@ ToolBar {
         Binding {
             target: seekSlider
             property: "value"
-            // positionSecond's, from the position the bar shows.
-            value: seekSlider.valueOfSecond(Math.round(seekSlider.playbackSeconds))
+            // The second the description gives.
+            value: seekSlider.durationKnown ? seekSlider.valueOfSecond(root.positionSecond) : 0
             when: !seekSlider.adjusting
             // A gesture keeps the position it starts from; restoring the
             // value from before the binding would make the arrow keys step

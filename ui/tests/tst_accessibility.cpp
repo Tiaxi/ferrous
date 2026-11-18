@@ -992,16 +992,28 @@ void AccessibilityTest::slidersAnnounceWholeSecondsAndPercents() {
     QCOMPARE(announced(seek), QStringLiteral("42 (0 to 200), 0:42 of 3:20"));
     QVERIFY(fuzzyEqual(seek->property("shownSeconds").toDouble(), 42.2));
 
+    // A key's step that the slider's whole second takes to the start is
+    // still a whole step from the exact time.
+    root->setProperty("positionSeconds", 5.3);
+    QTest::keyClick(window, Qt::Key_Left);
+    QVERIFY2(sameValues(seeks(), {35.6, 40.6, 0.3}), qPrintable(describeValues(seeks())));
+
     // Within half a second of the start the value is already there, and a
     // step back still seeks to it; likewise at the end.
     root->setProperty("positionSeconds", 0.3);
     QCOMPARE(announced(seek), QStringLiteral("0 (0 to 200), 0:00 of 3:20"));
     QTest::keyClick(window, Qt::Key_Left);
-    QVERIFY2(sameValues(seeks(), {35.6, 40.6, 0.0}), qPrintable(describeValues(seeks())));
+    QVERIFY2(sameValues(seeks(), {35.6, 40.6, 0.3, 0.0}), qPrintable(describeValues(seeks())));
     root->setProperty("positionSeconds", 199.7);
     QCOMPARE(announced(seek), QStringLiteral("200 (0 to 200), 3:20 of 3:20"));
     QTest::keyClick(window, Qt::Key_Right);
-    QVERIFY2(sameValues(seeks(), {35.6, 40.6, 0.0, 200.0}), qPrintable(describeValues(seeks())));
+    QVERIFY2(sameValues(seeks(), {35.6, 40.6, 0.3, 0.0, 200.0}), qPrintable(describeValues(seeks())));
+    // At the end of a track whose length falls within a second, the value
+    // and the description stay within it.
+    bridge->setProperty("durationSeconds", 199.8);
+    root->setProperty("positionSeconds", 199.6);
+    QCOMPARE(announced(seek), QStringLiteral("199 (0 to 199.8), 3:19 of 3:19"));
+    bridge->setProperty("durationSeconds", 200.0);
 
     // The volume in whole percents, from the bridge's, the keys' and a
     // drag's.
@@ -2964,12 +2976,14 @@ void AccessibilityTest::seekBarDescriptionFollowsTheSecondsBetweenPixels() {
     };
     connect(&clock, &PlaybackClock::positionTextChanged, harness.window, record);
     connect(&clock, &PlaybackClock::positionChanged, harness.window, record);
+    QSignalSpy shownTimes(harness.seek, SIGNAL(shownSecondsChanged()));
     QSignalSpy values(harness.seek, SIGNAL(valueChanged()));
 
     // Ten seconds from 100.2 s: the description and the time label take
     // every second, though the bar moves only every few.
     clock.applySample(PlaybackSample{100.2, now, true, kDuration, 1}, true);
     descriptions = QStringList{harness.description()};
+    shownTimes.clear();
     values.clear();
     const qint64 end = now + 10 * kNsPerSecond;
     while (clock.nextTickNs().has_value() && *clock.nextTickNs() <= end) {
@@ -2983,7 +2997,11 @@ void AccessibilityTest::seekBarDescriptionFollowsTheSecondsBetweenPixels() {
     }
     QCOMPARE(descriptions, expected);
     QCOMPARE(clock.positionText(), PlaybackClock::formatSeconds(110));
-    QVERIFY2(values.count() <= static_cast<int>(10.0 / step) + 1, qPrintable(QString::number(values.count())));
+    QVERIFY2(shownTimes.count() <= static_cast<int>(10.0 / step) + 1, qPrintable(QString::number(shownTimes.count())));
+    // The slider's value, which assistive technology reads, takes every
+    // second with the description.
+    QCOMPARE(values.count(), 10);
+    QCOMPARE(harness.seek->property("value").toDouble(), 110.0);
 
     // A held key's gesture shows its own second, from where playback is.
     QVERIFY(tabTo(harness.window, harness.seek));
@@ -3067,6 +3085,13 @@ void AccessibilityTest::seekBarStepsFromThePositionBetweenItsPixels() {
     now += 2'000'000'000LL;
     QVERIFY(fuzzyEqual(clock.currentPositionSeconds(), start + 2.0));
     QVERIFY(fuzzyEqual(seek->property("shownSeconds").toDouble(), start));
+    // The slider's value, which assistive technology reads, moves on with
+    // the second the description gives, not with the bar.
+    while (clock.nextTickNs().has_value() && *clock.nextTickNs() <= now) {
+        clock.tick();
+    }
+    QVERIFY2(clock.positionSecond() > std::lround(start), qPrintable(QString::number(clock.positionSecond())));
+    QCOMPARE(seek->property("value").toDouble(), static_cast<double>(clock.positionSecond()));
 
     // An arrow key steps from where playback is.
     QVERIFY(tabTo(window, seek));
