@@ -86,6 +86,9 @@ private slots:
     void spectrogramZoomFillClearsWhenDecoderReachesTail();
     void spectrogramSyntheticClearPreservesCanvasDuringSeek();
     void spectrogramSyntheticClearInvalidatesCanvasWhenNoOldContent();
+    void spectrogramFarSeekTellsTheSurfaceItAwaitsData_data();
+    void spectrogramFarSeekTellsTheSurfaceItAwaitsData();
+    void spectrogramReadinessLostToAResetIsSignalled();
     void spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll();
     void spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData();
     void spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData();
@@ -3323,6 +3326,160 @@ void SpectrogramCanvasSmokeTest::spectrogramSyntheticClearInvalidatesCanvasWhenN
     QCOMPARE(item.m_zoomFillActive, false);
     QCOMPARE(item.m_precomputedCanvasDisplayRight,
              item.m_precomputedCanvasDisplayLeft - 1);
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramFarSeekTellsTheSurfaceItAwaitsData_data() {
+    QTest::addColumn<int>("displayMode");
+    QTest::addColumn<bool>("canvasShown");
+    QTest::addColumn<bool>("keepsCanvas");
+    QTest::newRow("rolling") << 0 << true << false;
+    QTest::newRow("centered, nothing drawn yet") << 1 << false << false;
+    QTest::newRow("centered, canvas kept") << 1 << true << true;
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramFarSeekTellsTheSurfaceItAwaitsData() {
+    // A far seek's synthetic clear that drops the canvas drops the data it
+    // showed: the surface's awaitingData, which binds to the first pane's
+    // precomputedReady, knew only once a later change notified it (#584).
+    // One that keeps the canvas, as a centered view does, keeps its data.
+    QFETCH(int, displayMode);
+    QFETCH(bool, canvasShown);
+    QFETCH(bool, keepsCanvas);
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Window {
+    id: paletteRoot
+    width: 640
+    height: 320
+    visible: true
+
+    QtObject {
+        id: bridge
+        objectName: "farSeekBridge"
+        property string playbackState: "Paused"
+        property int spectrogramViewMode: 0
+        property int spectrogramDisplayMode: 0
+        property real dbRange: 90
+        property bool logScale: false
+        property bool spectrogramFrequencyCap: false
+        property bool showFps: false
+        property int sampleRateHz: 48000
+        property bool showSpectrogramCrosshair: false
+        property bool showSpectrogramScale: false
+        property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
+        property int channelButtonsVisibility: 0
+        property var soloedChannels: []
+        property string currentTrackPath: ""
+        property var currentTrackChannelLabels: []
+        signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
+        signal playbackChanged()
+        function isChannelSilent(channelIndex) { return false }
+        function setSpectrogramZoomLevel(level) {}
+        function registerSpectrogramItem(item, channelIndex) {}
+        function unregisterSpectrogramItem(item) {}
+        function setSpectrogramWidgetWidth(width) {}
+    }
+
+    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+
+    Viewers.SpectrogramSurface {
+        objectName: "farSeekSpectrogramSurface"
+        anchors.fill: parent
+        uiBridge: bridge
+        uiPalette: palette
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    auto *surface = qobject_cast<QQuickItem *>(
+        root->findChild<QObject *>(QStringLiteral("farSeekSpectrogramSurface")));
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("farSeekBridge"));
+    QVERIFY(surface != nullptr);
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("spectrogramDisplayMode", displayMode);
+    SpectrogramItem *pane = nullptr;
+    QTRY_VERIFY((pane = qobject_cast<SpectrogramItem *>(findQuickItemByObjectName(
+                     surface, QStringLiteral("spectrogramPaneItem")))) != nullptr);
+    QCOMPARE(pane->displayMode(), displayMode);
+    QVERIFY(surface->property("awaitingData").toBool());
+
+    constexpr int bins = 4;
+    constexpr int columns = 640;
+    pane->feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
+        0, 10'000, 48'000, 1'024, false, true, 1, true, 1);
+    QVERIFY(pane->precomputedReady());
+    QVERIFY(!surface->property("awaitingData").toBool());
+
+    // What the window has drawn so far, set here with no event processed
+    // until the seek: a centered view keeps its canvas only if it has one.
+    {
+        QMutexLocker lock(&pane->m_stateMutex);
+        if (canvasShown) {
+            pane->m_renderZoomLevel = 1.0;
+            pane->ensureMapping(320);
+            rebuildCanvasNow(*pane, columns, 320, 0, columns - 1, displayMode == 0);
+            QVERIFY(!pane->m_canvas.isNull());
+        } else {
+            pane->m_canvas = QImage();
+        }
+    }
+
+    QSignalSpy readyChanges(pane, &SpectrogramItem::precomputedReadyChanged);
+    // The far seek's synthetic clear: no columns, no bins, the history
+    // cleared, as seek_spectrogram_position sends it for the new session.
+    pane->feedPrecomputedChunk(QByteArray(), 0, 0, 0, 0, 0, 0, 0, false, true, 1, true, 2);
+    QCOMPARE(pane->m_canvas.isNull(), !keepsCanvas);
+    QCOMPARE(pane->precomputedReady(), keepsCanvas);
+    // At once, with no event processed in between.
+    QCOMPARE(surface->property("awaitingData").toBool(), !keepsCanvas);
+    QCOMPARE(readyChanges.size(), keepsCanvas ? 0 : 1);
+
+    // The new session's reset and its first columns: data again.
+    pane->feedPrecomputedChunk(QByteArray(), bins, 0, 0,
+        5'000, 10'000, 48'000, 1'024, false, true, 1, true, 2);
+    pane->feedPrecomputedChunk(QByteArray(bins * columns, '\x70'), bins, 0, columns,
+        5'000, 10'000, 48'000, 1'024, false, false, 1, false, 2);
+    QVERIFY(pane->precomputedReady());
+    QVERIFY(!surface->property("awaitingData").toBool());
+    QCOMPARE(readyChanges.size(), keepsCanvas ? 0 : 2);
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramReadinessLostToAResetIsSignalled() {
+    // A reset that leaves the pane without a track length takes its
+    // readiness: those who read precomputedReady hear of it, as they hear
+    // of it coming.
+    SpectrogramItem item;
+    item.setWidth(100);
+    item.setHeight(10);
+    constexpr int bins = 4;
+    item.feedPrecomputedChunk(QByteArray(100 * bins, '\x60'), bins, 0, 100,
+        0, 1000, 48000, 1024, false, true, 1, true, 1);
+    QVERIFY(item.precomputedReady());
+    QSignalSpy readyChanges(&item, &SpectrogramItem::precomputedReadyChanged);
+    {
+        // As after a track change whose zoom reset dropped the estimate.
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_precomputedTotalColumnsEstimate = 0;
+    }
+    // The next session's reset, before it knows the track's length.
+    item.feedPrecomputedChunk(QByteArray(100 * bins, '\x60'), bins, 0, 100,
+        0, 0, 48000, 1024, false, true, 1, true, 2);
+    QVERIFY(!item.precomputedReady());
+    QCOMPARE(readyChanges.size(), 1);
 }
 
 void SpectrogramCanvasSmokeTest::spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll() {

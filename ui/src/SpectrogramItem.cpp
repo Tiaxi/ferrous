@@ -3566,6 +3566,9 @@ void SpectrogramItem::feedPrecomputedChunk(
                 >= m_precomputedCanvasDisplayLeft
             && m_precomputedTotalColumnsEstimate > 0
             && m_precomputedBinsPerColumn > 0;
+        // Dropping the canvas drops the data it showed: the view awaits
+        // the new session's columns from now on.
+        const bool readyCleared = !preserveCanvasForSeek && m_precomputedReady;
 
         m_ringWriteSeq = 0;
         m_ringOldestSeq = 0;
@@ -3602,6 +3605,10 @@ void SpectrogramItem::feedPrecomputedChunk(
             "[Qt-synthetic-clear@%p] ring wiped, gate armed, preserved=%d\n",
             static_cast<const void *>(this),
             preserveCanvasForSeek ? 1 : 0);
+        lock.unlock();
+        if (readyCleared) {
+            emit precomputedReadyChanged();
+        }
         update();
         return;
     } else if (bufferReset
@@ -4239,7 +4246,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_timeGridDirty = true;
     }
 
-    const bool readyChanged = m_precomputedReady && !wasReady;
+    const bool readyChanged = m_precomputedReady != wasReady;
     // Columns the decoder sends ahead of the playhead show only once
     // playback reaches them, in frames the last one has already asked for.
     const bool leavesLastFrame = !bufferReset
