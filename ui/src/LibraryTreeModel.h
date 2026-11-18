@@ -190,6 +190,16 @@ private:
     // Drop selected keys that have no row now.
     void pruneSelection();
     bool revealAnswered(const QStringList &expandKeys) const;
+    // Whether a node of `keys` in `nodes` is expanded and waits for the
+    // backend to send its children.
+    bool awaitsChildren(const QVector<TreeNode> &nodes, const QSet<QString> &keys, bool autoExpand) const;
+    // The nodes above the node of `selectionKey` in `nodes`, outermost
+    // first, into `ancestors`; false when no node has the key.
+    static bool collectAncestors(
+        const QVector<TreeNode> &nodes, const QString &selectionKey, QVector<const TreeNode *> *ancestors);
+    // Expand every collapsed row above the row of `selectionKey`, so that
+    // the row is shown; whether any was collapsed.
+    bool expandAncestorsOf(const QString &selectionKey);
     void settleReveal();
 
     QVector<TreeNode> m_tree;

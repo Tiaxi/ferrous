@@ -5,6 +5,7 @@
 #include <QFontInfo>
 
 #include <optional>
+#include <utility>
 
 // The library tree, the queue and global search.
 class LibraryQueueSmokeTest : public QmlSmokeTest {
@@ -35,6 +36,7 @@ private slots:
     void playingALibrarySelectionSendsOneBatch();
     void revealKeyExpandsADeepKeyInOneCall();
     void revealKeyWaitsForRowsTheBackendHasNotSentWithoutTimers();
+    void revealKeyOpensTheCollapsedLibraryFolderOfTheRow();
     void queueMovesAndDropsActOnEveryHighlightedRow();
     void queueSelectionFollowsRowRangeMoves();
     void emptyLibraryAndFileMenuAddALibraryFolder();
@@ -2728,6 +2730,105 @@ void LibraryQueueSmokeTest::revealKeyWaitsForRowsTheBackendHasNotSentWithoutTime
     QVERIFY(!lazy.revealPending());
     lazy.setLibraryTreeFromBinary(encodeRows(rows));
     QCOMPARE(lazyFinished.count(), 0);
+}
+
+// Show in Library on a track in a library folder the user collapsed opens
+// that folder, and no other, so the track's row is shown (#629). The
+// backend asks for the reveal with every key it holds expanded, which has
+// no library folder in it: a folder's row is collapsed in the model alone.
+void LibraryQueueSmokeTest::revealKeyOpensTheCollapsedLibraryFolderOfTheRow() {
+    const QString rootA = QStringLiteral("root|/music-a");
+    const QString artistA = QStringLiteral("artist|/music-a|Artist A");
+    const QString albumA = QStringLiteral("album|/music-a|Artist A|Album");
+    const QString trackA = QStringLiteral("/music-a/Artist A/Album/01.flac");
+    const QString rootB = QStringLiteral("root|/music-b");
+    const QString artistB = QStringLiteral("artist|/music-b|Artist B");
+    const QString albumB = QStringLiteral("album|/music-b|Artist B|Album");
+    const QString trackB = QStringLiteral("/music-b/Artist B/Album/01.flac");
+    const QString trackKeyB = QStringLiteral("track|") + trackB;
+    // Artist B's rows come once the backend knows it is expanded.
+    const auto tree = [&](bool withArtistB) {
+        QVector<BinaryTreeRow> rows;
+        rows.push_back(BinaryTreeRow{0, 0, -1, 0, 1, QStringLiteral("/music-a"), rootA, {},
+            QStringLiteral("/music-a"), {}, {}, {}});
+        rows.push_back(BinaryTreeRow{1, 1, -1, 0, 1, QStringLiteral("Artist A"), artistA,
+            QStringLiteral("Artist A"), QStringLiteral("/music-a/Artist A"), {}, {}, {}});
+        rows.push_back(BinaryTreeRow{2, 2, -1, 0, 1, QStringLiteral("Album"), albumA,
+            QStringLiteral("Artist A"), QStringLiteral("/music-a/Artist A/Album"), {}, {},
+            QStringList{trackA}});
+        rows.push_back(BinaryTreeRow{4, 3, -1, 1, 0, QStringLiteral("01"),
+            QStringLiteral("track|") + trackA, QStringLiteral("Artist A"), trackA, {}, trackA,
+            QStringList{trackA}});
+        rows.push_back(BinaryTreeRow{0, 0, -1, 0, 1, QStringLiteral("/music-b"), rootB, {},
+            QStringLiteral("/music-b"), {}, {}, {}});
+        rows.push_back(BinaryTreeRow{1, 1, -1, 0, 1, QStringLiteral("Artist B"), artistB,
+            QStringLiteral("Artist B"), QStringLiteral("/music-b/Artist B"), {}, {}, {}});
+        if (withArtistB) {
+            rows.push_back(BinaryTreeRow{2, 2, -1, 0, 1, QStringLiteral("Album"), albumB,
+                QStringLiteral("Artist B"), QStringLiteral("/music-b/Artist B/Album"), {}, {},
+                QStringList{trackB}});
+            rows.push_back(BinaryTreeRow{4, 3, -1, 1, 0, QStringLiteral("01"), trackKeyB,
+                QStringLiteral("Artist B"), trackB, {}, trackB, QStringList{trackB}});
+        }
+        return encodeRows(rows);
+    };
+    const auto expanded = [](const LibraryTreeModel &model, const QString &key) {
+        const int row = model.indexForSelectionKey(key);
+        return row >= 0 && model.data(model.index(row, 0), LibraryTreeModel::ExpandedRole).toBool();
+    };
+
+    LibraryTreeModel model;
+    model.setExpandedKeys(QStringList{artistA, albumA});
+    QVERIFY(applyLibraryTree(model, tree(false)));
+    QCOMPARE(model.rowCount(), 6);
+    // The user collapses both library folders.
+    model.toggleKey(rootA);
+    model.toggleKey(rootB);
+    QCOMPARE(model.rowCount(), 2);
+
+    QSignalSpy expansions(&model, &LibraryTreeModel::nodeExpansionRequested);
+    QSignalSpy finished(&model, &LibraryTreeModel::revealFinished);
+    const QStringList bridgeExpandedKeys{artistA, albumA, artistB, albumB};
+    // Artist B's rows are not here yet: the reveal waits for them, though
+    // its row is hidden in a collapsed folder.
+    QCOMPARE(model.revealKey(bridgeExpandedKeys, trackKeyB), -1);
+    QVERIFY(model.revealPending());
+    QCOMPARE(finished.count(), 0);
+
+    // The tree with them opens folder B, and the reveal ends on the row.
+    model.setLibraryTreeFromBinary(tree(true));
+    QCOMPARE(finished.count(), 1);
+    QCOMPARE(finished.at(0).at(0).toString(), trackKeyB);
+    const int row = model.indexForSelectionKey(trackKeyB);
+    QCOMPARE(finished.at(0).at(1).toInt(), row);
+    QCOMPARE(row, 4);
+    QVERIFY(!model.revealPending());
+    QVERIFY(expanded(model, rootB));
+    // Folder A, where the reveal is not, stays collapsed.
+    QVERIFY(!expanded(model, rootA));
+    QCOMPARE(model.rowCount(), 5);
+    // Folders open in the model alone: the backend hears of none.
+    for (const QList<QVariant> &expansion : std::as_const(expansions)) {
+        QVERIFY2(!expansion.at(0).toString().startsWith(QStringLiteral("root|")),
+                 qPrintable(expansion.at(0).toString()));
+    }
+
+    // The user collapses folder B again, and it stays collapsed through
+    // the backend's next tree.
+    const qsizetype heard = expansions.count();
+    model.toggleKey(rootB);
+    QCOMPARE(model.rowCount(), 2);
+    model.setLibraryTreeFromBinary(tree(true));
+    QCOMPARE(model.rowCount(), 2);
+    QCOMPARE(expansions.count(), heard);
+
+    // With the rows already loaded, Show in Library opens the folder at once.
+    QCOMPARE(model.revealKey(bridgeExpandedKeys, trackKeyB), 4);
+    QVERIFY(!model.revealPending());
+    QVERIFY(expanded(model, rootB));
+    QVERIFY(!expanded(model, rootA));
+    QCOMPARE(expansions.count(), heard);
+    QCOMPARE(finished.count(), 1);
 }
 
 void LibraryQueueSmokeTest::queueMovesAndDropsActOnEveryHighlightedRow() {

@@ -1070,6 +1070,7 @@ private slots:
     void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort_data();
     void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort();
     void showInLibraryBringsThePlayingRowIntoView();
+    void showInLibraryOpensTheCollapsedLibraryFolderOfTheTrack();
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void nowPlayingCoverIsAKeyboardStop();
     void libraryFoldersAreFolderHeaders();
@@ -3452,6 +3453,74 @@ void UiMainWindowTest::showInLibraryBringsThePlayingRowIntoView() {
     QVERIFY(sceneRect(item).bottom() <= sceneRect(view).bottom() + 0.5);
     // And selected, as Show in Library leaves it.
     QVERIFY(item->property("rowSelected").toBool());
+}
+
+// Show in Library on a track in a library folder the user collapsed opens
+// that folder, and leaves the track's row selected in view (#629).
+void UiMainWindowTest::showInLibraryOpensTheCollapsedLibraryFolderOfTheTrack() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    LibraryTreeModel &libraryModel = fixture.libraryModel;
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *view = named(window, "libraryView");
+    QVERIFY(view != nullptr);
+
+    const QString rootA = QStringLiteral("root|/music-a");
+    const QString rootB = QStringLiteral("root|/music-b");
+    const QString artistB = QStringLiteral("artist|/music-b|Artist B");
+    const QString albumB = QStringLiteral("album|/music-b|Artist B|Album");
+    const QString trackPath = QStringLiteral("/music-b/Artist B/Album/01.flac");
+    const QString trackKey = QStringLiteral("track|") + trackPath;
+    // The backend sends artist B's rows once it is told to open it.
+    const auto frame = [&](int version, bool open) {
+        QList<TreeRow> rows{
+            {0, 0, 0, 1, 0, QStringLiteral("/music-a"), rootA, {}, QStringLiteral("/music-a"), {}},
+            {1, 1, 0, 1, 0, QStringLiteral("Artist A (1)"), QStringLiteral("artist|/music-a|Artist A"),
+             QStringLiteral("Artist A"), QStringLiteral("/music-a/Artist A"), {}},
+            {0, 0, 0, 1, 0, QStringLiteral("/music-b"), rootB, {}, QStringLiteral("/music-b"), {}},
+            {1, 1, 0, 1, 0, QStringLiteral("Artist B (1)"), artistB, QStringLiteral("Artist B"),
+             QStringLiteral("/music-b/Artist B"), {}},
+        };
+        if (open) {
+            rows.push_back({2, 2, 0, 1, 0, QStringLiteral("Album"), albumB, QStringLiteral("Artist B"),
+                            QStringLiteral("/music-b/Artist B/Album"), {}});
+            rows.push_back({4, 3, 1, 0, 0, QStringLiteral("First"), trackKey, QStringLiteral("Artist B"),
+                            trackPath, trackPath});
+        }
+        return QMetaObject::invokeMethod(bridge, "libraryTreeFrameReceived", Q_ARG(int, version),
+                                         Q_ARG(QVariant, QVariant(treeOf(rows))));
+    };
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music-a"), QStringLiteral("/music-b")});
+    QVERIFY(frame(1, false));
+    QTRY_COMPARE(view->property("count").toInt(), 4);
+    // The user collapses both library folders.
+    libraryModel.toggleKey(rootA);
+    libraryModel.toggleKey(rootB);
+    QTRY_COMPARE(view->property("count").toInt(), 2);
+
+    // Show in Library asks with the keys the backend holds expanded.
+    QVERIFY(QMetaObject::invokeMethod(bridge, "libraryRevealRequested",
+                                      Q_ARG(QVariant, QVariant(QStringList{artistB, albumB})),
+                                      Q_ARG(QString, trackKey)));
+    QVERIFY(libraryModel.property("revealPending").toBool());
+    QVERIFY(frame(2, true));
+    QTRY_VERIFY(libraryModel.indexForSelectionKey(trackKey) >= 0);
+    QTRY_VERIFY(!libraryModel.property("parsing").toBool());
+    const int row = libraryModel.indexForSelectionKey(trackKey);
+    // Folder B opened; folder A stayed collapsed above it.
+    QCOMPARE(row, 4);
+    QCOMPARE(libraryModel.indexForSelectionKey(QStringLiteral("artist|/music-a|Artist A")), -1);
+
+    QTRY_VERIFY(viewRowAt(view, row) != nullptr);
+    QQuickItem *item = viewRowAt(view, row);
+    QTRY_VERIFY(sceneRect(item).top() >= sceneRect(view).top() - 0.5
+                && sceneRect(item).bottom() <= sceneRect(view).bottom() + 0.5);
+    QTRY_VERIFY(item->property("rowSelected").toBool());
+
+    // Collapsing the folder again still works.
+    libraryModel.toggleKey(rootB);
+    QTRY_COMPARE(view->property("count").toInt(), 2);
 }
 
 // A track whose tag lacks its title and artist shows its file name as the
