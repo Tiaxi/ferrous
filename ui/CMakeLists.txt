@@ -723,8 +723,11 @@ if(BUILD_TESTING)
             TIMEOUT ${timeout}
         )
     endforeach()
-    # The Last.fm slot's ring moves by device pixels: its area again at 2x.
-    add_test(NAME ferrous_qml_smoke_scrobble_2x COMMAND ferrous_qml_smoke_tests -area scrobble)
+    # The Last.fm slot's glyph and ring move by device pixels: their tests
+    # again at 2x.
+    add_test(NAME ferrous_qml_smoke_scrobble_2x
+        COMMAND ferrous_qml_smoke_tests -area scrobble
+            scrobbleIndicatorGlyphIsCentredOnItsBlock scrobbleIndicatorBarMovesBySecondsWhileListening)
     set_tests_properties(ferrous_qml_smoke_scrobble_2x PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2"
         TIMEOUT 60
@@ -1064,7 +1067,7 @@ if(BUILD_TESTING)
             ferrous_accessibility_tests:14
             ferrous_bridge_client_tests:14
             ferrous_ui_menus_tests:7
-            ferrous_qml_smoke_library_queue:13
+            ferrous_qml_smoke_library_queue:6
             ferrous_qml_smoke_window:11)
         string(REPLACE ":" ";" test_and_cost "${test_and_cost}")
         list(GET test_and_cost 0 test)

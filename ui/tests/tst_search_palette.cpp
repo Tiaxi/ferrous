@@ -33,12 +33,14 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include "GlobalSearchResultsModel.h"
 #include "Localization.h"
 #include "TestColor.h"
 #include "TestItems.h"
 #include "TestMessages.h"
+#include "TestMotion.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
@@ -795,8 +797,13 @@ void SearchPaletteTest::selectedHoveredAndPlayingRowsAreDrawn() {
     });
     QVERIFY(hover != nullptr);
     QVERIFY(!hover->isVisible());
-    QTest::mouseMove(harness.window, sceneCentre(other));
-    QTRY_COMPARE(hover->opacity(), 1.0);
+    {
+        // The hover's fade in animation time, to its end.
+        SteppedAnimationDriver animations;
+        QTest::mouseMove(harness.window, sceneCentre(other));
+        (void)animations.step(1000);
+        QCOMPARE(hover->opacity(), 1.0);
+    }
     const QColor view = harness.token("view");
     const QColor hoverDrawn = drawnOver(colorOf(hover), view);
     const QColor selectionDrawn = harness.token("selection");
@@ -1290,7 +1297,11 @@ void SearchPaletteTest::mouseSelectsAndActs() {
     harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl));
     QTRY_VERIFY(harness.view()->isVisible());
     const int track = harness.model.indexOfResult(QStringLiteral("track"), 2);
+    // The menu's fades in animation time, each to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
     QTest::mouseClick(harness.window, Qt::RightButton, Qt::NoModifier, sceneCentre(harness.row(track)));
+    settle();
     QCOMPARE(harness.selection(), track);
     QCOMPARE(harness.dialog->property("contextRowData").toMap().value(QStringLiteral("label")).toString(),
              QStringLiteral("Lantern Signal"));
@@ -1311,6 +1322,7 @@ void SearchPaletteTest::mouseSelectsAndActs() {
                                      QStringLiteral("resultMenu.itemAt(2).text + '|' + resultMenu.itemAt(2).icon.name"));
     QCOMPARE(showInLibraryIcon.evaluate().toString(), QStringLiteral("Show in Library|go-jump"));
     QTest::keyClick(harness.window, Qt::Key_Escape);
+    settle();
     QTRY_VERIFY(!menuOpened.evaluate().toBool());
     // The palette stays open behind its menu.
     QVERIFY(harness.dialog->property("visible").toBool());
@@ -1378,17 +1390,22 @@ void SearchPaletteTest::paletteAndDimFadeTogether() {
         });
         return dim;
     };
+    // The fades in animation time: part of the way, and to their end.
+    std::optional<SteppedAnimationDriver> animations(std::in_place);
     harness.dialog->setProperty("fadeDuration", 400);
     QMetaObject::invokeMethod(harness.controller, "openDialog");
     QTRY_VERIFY(findDim() != nullptr);
     QQuickItem *dim = findDim();
-    QTest::qWait(60);
+    QVERIFY(animations->step(96));
     QVERIFY2(palette->opacity() > 0 && palette->opacity() < 1, qPrintable(QString::number(palette->opacity())));
     QVERIFY2(dim->opacity() > 0 && dim->opacity() < 1, qPrintable(QString::number(dim->opacity())));
-    QTRY_COMPARE(palette->opacity(), 1.0);
-    QTRY_COMPARE(dim->opacity(), 1.0);
+    (void)animations->step(400);
+    QCOMPARE(palette->opacity(), 1.0);
+    QCOMPARE(dim->opacity(), 1.0);
     QTest::keyClick(harness.window, Qt::Key_Escape);
+    (void)animations->step(400);
     QTRY_VERIFY(!harness.dialog->property("visible").toBool());
+    animations.reset();
 
     // Animations off: at once.
     harness.dialog->setProperty("fadeDuration", 0);
@@ -1871,6 +1888,10 @@ int main(int argc, char **argv) {
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
     // Accessible interfaces exist while assistive technology is active.
     qputenv("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1");
+    // The basic render loop, whatever the environment asks for: the threaded
+    // one installs an animation driver of its own for the GUI thread, and Qt
+    // then takes no SteppedAnimationDriver.
+    qputenv("QSG_RENDER_LOOP", "basic");
     // The app's controls style and Breeze icons, whatever the desktop the
     // tests run in; TestSessionIsolation.h.
     isolateFromDesktopSessionWithAppLook();

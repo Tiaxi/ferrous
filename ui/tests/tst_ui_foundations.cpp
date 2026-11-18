@@ -13,7 +13,6 @@
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
-#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QQuickWindow>
 #include <QDir>
@@ -28,7 +27,9 @@
 #include <utility>
 
 #include "TestColor.h"
+#include "TestMainWindow.h"
 #include "TestMessages.h"
+#include "TestMotion.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
@@ -1034,31 +1035,40 @@ void UiFoundationsTest::selectedQueueRowAnswersHover() {
         QVERIFY(costs);
     }
 
+    // The hover's fade in animation time, to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
+
     // The library's rows: a selected row keeps its tint under the pointer.
     background->setProperty("selected", true);
     background->setProperty("hovered", true);
-    QTRY_COMPARE(hoverTint->opacity(), 1.0);
+    settle();
+    QCOMPARE(hoverTint->opacity(), 1.0);
     QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selection")));
 
     // The queue's: it steps to the hovered selection with the hover's fade,
     // and back.
     background->setProperty("hovered", false);
-    QTRY_COMPARE(hoverTint->opacity(), 0.0);
+    settle();
+    QCOMPARE(hoverTint->opacity(), 0.0);
     background->setProperty("selectedHover", true);
     QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selection")));
     background->setProperty("hovered", true);
-    QTRY_COMPARE(hoverTint->opacity(), 1.0);
+    settle();
+    QCOMPARE(hoverTint->opacity(), 1.0);
     QCOMPARE(background->property("selectionHoverLevel").toReal(), 1.0);
     QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selectionHovered")));
     background->setProperty("active", false);
     QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selectionInactiveHovered")));
     background->setProperty("hovered", false);
-    QTRY_COMPARE(hoverTint->opacity(), 0.0);
+    settle();
+    QCOMPARE(hoverTint->opacity(), 0.0);
     QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selectionInactive")));
     // Selection still changes at once, hovered or not.
     background->setProperty("active", true);
     background->setProperty("hovered", true);
-    QTRY_COMPARE(hoverTint->opacity(), 1.0);
+    settle();
+    QCOMPARE(hoverTint->opacity(), 1.0);
     background->setProperty("selected", false);
     QCOMPARE(colorOf(tintRect, "color").alphaF(), 0.0f);
     background->setProperty("selected", true);
@@ -1094,33 +1104,13 @@ void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground() {
 
 void UiFoundationsTest::rowBackgroundShowsEachState_data() {
     QTest::addColumn<bool>("dark");
-    QTest::addColumn<bool>("hovered");
-    QTest::addColumn<bool>("selected");
-    QTest::addColumn<bool>("active");
-    QTest::addColumn<bool>("focused");
-    QTest::addColumn<QString>("tint");
-    for (const bool dark : {true, false}) {
-        const QString theme = dark ? QStringLiteral("dark, ") : QStringLiteral("light, ");
-        QTest::newRow(qPrintable(theme + QStringLiteral("rest"))) << dark << false << false << true << false << "";
-        QTest::newRow(qPrintable(theme + QStringLiteral("hovered"))) << dark << true << false << true << false << "";
-        QTest::newRow(qPrintable(theme + QStringLiteral("selected")))
-            << dark << false << true << true << false << "selection";
-        QTest::newRow(qPrintable(theme + QStringLiteral("selected without focus")))
-            << dark << false << true << false << false << "selectionInactive";
-        QTest::newRow(qPrintable(theme + QStringLiteral("selected and focused")))
-            << dark << true << true << true << true << "selection";
-        QTest::newRow(qPrintable(theme + QStringLiteral("focused, not selected")))
-            << dark << false << false << true << true << "";
-    }
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
 }
 
+// Each state of a row in turn: its hover, its tint and its focus ring.
 void UiFoundationsTest::rowBackgroundShowsEachState() {
     QFETCH(bool, dark);
-    QFETCH(bool, hovered);
-    QFETCH(bool, selected);
-    QFETCH(bool, active);
-    QFETCH(bool, focused);
-    QFETCH(QString, tint);
     QQmlEngine engine;
     QString errorText;
     const std::unique_ptr<QObject> root =
@@ -1133,6 +1123,8 @@ void UiFoundationsTest::rowBackgroundShowsEachState() {
     QQuickItem *hoverTint = childNamed(background, QStringLiteral("rowBackgroundHover"));
     QQuickItem *tintRect = childNamed(background, QStringLiteral("rowBackgroundTint"));
     QVERIFY(hoverTint != nullptr && tintRect != nullptr);
+    QObject *border = tintRect->property("border").value<QObject *>();
+    QVERIFY(border != nullptr);
 
     // The row's tints run to its right edge, under an overlay scrollbar; a
     // list whose scrollbar takes a lane leaves it free.
@@ -1143,26 +1135,49 @@ void UiFoundationsTest::rowBackgroundShowsEachState() {
     QCOMPARE(background->width(), row->width() - 8.0);
     background->setProperty("scrollbarLane", 0);
 
-    background->setProperty("hovered", hovered);
-    background->setProperty("selected", selected);
-    background->setProperty("active", active);
-    background->setProperty("focused", focused);
+    struct State {
+        const char *name;
+        bool hovered;
+        bool selected;
+        bool active;
+        bool focused;
+        // The tint's token, or none.
+        const char *tint;
+    };
+    const QList<State> states{
+        {"rest", false, false, true, false, nullptr},
+        {"hovered", true, false, true, false, nullptr},
+        {"selected", false, true, true, false, "selection"},
+        {"selected without focus", false, true, false, false, "selectionInactive"},
+        {"selected and focused", true, true, true, true, "selection"},
+        {"focused, not selected", false, false, true, true, nullptr},
+    };
+    // The hover's fade in animation time, to its end.
+    SteppedAnimationDriver animations;
+    for (const State &state : states) {
+        const QByteArray name(state.name);
+        background->setProperty("hovered", state.hovered);
+        background->setProperty("selected", state.selected);
+        background->setProperty("active", state.active);
+        background->setProperty("focused", state.focused);
+        (void)animations.step(1000);
 
-    QTRY_COMPARE(hoverTint->opacity(), hovered ? 1.0 : 0.0);
-    QCOMPARE(hoverTint->isVisible(), hovered);
-    QVERIFY2(sameColor(colorOf(hoverTint, "color"), colorOf(tokens, "hover")), qPrintable(colorOf(hoverTint, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "hover").name(QColor::HexArgb)));
-    QCOMPARE(tintRect->isVisible(), selected || focused);
-    if (tint.isEmpty()) {
-        QCOMPARE(colorOf(tintRect, "color").alphaF(), 0.0f);
-    } else {
-        QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, qPrintable(tint))));
+        QVERIFY2(hoverTint->opacity() == (state.hovered ? 1.0 : 0.0), name.constData());
+        QVERIFY2(hoverTint->isVisible() == state.hovered, name.constData());
+        QVERIFY2(sameColor(colorOf(hoverTint, "color"), colorOf(tokens, "hover")),
+                 qPrintable(colorOf(hoverTint, "color").name(QColor::HexArgb) + QStringLiteral(" vs ")
+                            + colorOf(tokens, "hover").name(QColor::HexArgb)));
+        QVERIFY2(tintRect->isVisible() == (state.selected || state.focused), name.constData());
+        if (state.tint == nullptr) {
+            QVERIFY2(colorOf(tintRect, "color").alphaF() == 0.0f, name.constData());
+        } else {
+            QVERIFY2(sameColor(colorOf(tintRect, "color"), colorOf(tokens, state.tint)), name.constData());
+        }
+        QVERIFY2(border->property("width").toReal() == (state.focused ? 1.0 : 0.0), name.constData());
+        QVERIFY2(channelDistance(colorOf(border, "color"), colorOf(tokens, "focusRing")) == 0, name.constData());
+        // The ring and the tint are one rectangle.
+        QVERIFY2(tintRect->size() == background->size(), name.constData());
     }
-    QObject *border = tintRect->property("border").value<QObject *>();
-    QVERIFY(border != nullptr);
-    QCOMPARE(border->property("width").toReal(), focused ? 1.0 : 0.0);
-    QCOMPARE(channelDistance(colorOf(border, "color"), colorOf(tokens, "focusRing")), 0);
-    // The ring and the tint are one rectangle.
-    QCOMPARE(tintRect->size(), background->size());
 }
 
 // The focused, selected row draws its 1 px ring on the edge of its tint,
@@ -1312,13 +1327,7 @@ void UiFoundationsTest::regionHeaderGivesUpTheTotalsBeforeTheName_data() {
 // then go. They never run into the name or the items at the right end.
 void UiFoundationsTest::regionHeaderGivesUpTheTotalsBeforeTheName() {
     QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont large = applicationFont;
-        large.setPointSizeF(pointSize);
-        QGuiApplication::setFont(large);
-    }
+    const ScopedApplicationFont font(pointSize);
     QQmlEngine engine;
     QString errorText;
     const std::unique_ptr<QObject> root = createWindow(engine, themedWindowQml(kBreezeDark, QStringLiteral(R"QML(
@@ -1506,27 +1515,20 @@ void UiFoundationsTest::plotPlateLabelHasAnEdgeOutside() {
 
 void UiFoundationsTest::smallControlsScaleWithALargeFont_data() {
     QTest::addColumn<qreal>("pointSize");
-    QTest::addColumn<int>("iconSize");
-    QTest::addColumn<int>("buttonSize");
-    QTest::newRow("10 pt") << 10.0 << 16 << 24;
-    // 2.4 times the default: 16 px is 38 px, and the button 4 px more
-    // around it.
-    QTest::newRow("24 pt") << 24.0 << 38 << 46;
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
 }
 
 // The plot's and the viewers' small tool buttons and their glyphs are 24
 // and 16 px at the default 10 pt font, and grow with a larger one as the
-// transport's do; a lane label's plate holds its text's line, 20 px tall
+// transport's do: the glyph by the font's share of 10 pt, the button 4 px
+// more around it. A lane label's plate holds its text's line, 20 px tall
 // at the default font, with 6 px either side of the text.
 void UiFoundationsTest::smallControlsScaleWithALargeFont() {
     QFETCH(qreal, pointSize);
-    QFETCH(int, iconSize);
-    QFETCH(int, buttonSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont font = applicationFont;
-    font.setPointSizeF(pointSize);
-    QGuiApplication::setFont(font);
+    const int iconSize = qRound(16 * pointSize / 10);
+    const int buttonSize = iconSize + 8;
+    const ScopedApplicationFont font(pointSize);
     QQmlEngine engine;
     QString errorText;
     const std::unique_ptr<QObject> root = createWindow(engine, themedWindowQml(kBreezeDark, kPlotItems + QStringLiteral(R"QML(
@@ -1640,12 +1642,15 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QQuickItem *letter = childNamed(other, QStringLiteral("plotToolButtonGlyph"));
     QVERIFY(hover != nullptr && fill != nullptr && letter != nullptr);
 
-    // The pointer over the other one, until its wash has faded in: from
-    // off the plate, as QTest leaves a move to where it already is out.
+    // The pointer over the other one, until its wash has faded in, in
+    // animation time: from off the plate, as QTest leaves a move to where it
+    // already is out.
+    SteppedAnimationDriver animations;
     QTest::mouseMove(window, QPoint(2, 2));
     QTest::mouseMove(window, other->mapToScene(QPointF(12, 12)).toPoint());
     QTRY_VERIFY(other->property("hovered").toBool());
-    QTRY_COMPARE(hover->opacity(), 1.0);
+    (void)animations.step(1000);
+    QCOMPARE(hover->opacity(), 1.0);
     const QColor text = colorOf(plotColors, "plotText");
     const QColor wash = colorOf(hover, "color");
     const QColor plateFill = colorOf(fill, "color");
@@ -1664,7 +1669,6 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
 
     // As drawn: the plate around the buttons, the chosen one's plate and
     // the hovered one's wash, clear of their glyphs.
-    QTest::qWait(50);
     const QImage image = window->grabWindow();
     QVERIFY(!image.isNull());
     const qreal scale = grabScale(image, window);
@@ -1766,17 +1770,20 @@ void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot() {
     // At rest, nothing.
     QVERIFY(!hover->isVisible());
 
+    // The wash's fade in animation time, to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
     QTest::mouseMove(window, QPoint(2, 2));
     const QPoint inside = button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint();
     QTest::mouseMove(window, inside);
     QTRY_VERIFY(button->property("hovered").toBool());
-    QTRY_COMPARE(hover->opacity(), 1.0);
+    settle();
+    QCOMPARE(hover->opacity(), 1.0);
     const QColor wash = colorOf(hover, "color");
     QCOMPARE(wash.rgb(), text.rgb());
     QVERIFY2(std::abs(wash.alphaF() - (darkPlot ? 0.14 : 0.12)) < 0.005, qPrintable(QString::number(wash.alphaF())));
 
     // As drawn, clear of the glyph.
-    QTest::qWait(50);
     QImage image = window->grabWindow();
     QVERIFY(!image.isNull());
     const qreal scale = grabScale(image, window);
@@ -1793,7 +1800,7 @@ void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot() {
     const QColor pressed = colorOf(hover, "color");
     QCOMPARE(pressed.rgb(), text.rgb());
     QVERIFY2(std::abs(pressed.alphaF() - 0.22) < 0.005, qPrintable(QString::number(pressed.alphaF())));
-    QTest::qWait(50);
+    settle();
     image = window->grabWindow();
     const QColor drawnPressed = pixelAt(image, button->mapToScene(QPointF(2.5, 2.5)) * scale);
     QVERIFY2(contrastRatio(drawnPressed, surface) > hoverStep,
@@ -2001,6 +2008,10 @@ int main(int argc, char **argv) {
     disableGpuShaderCaches();
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
+    // The basic render loop, whatever the environment asks for: the threaded
+    // one installs an animation driver of its own for the GUI thread, and Qt
+    // then takes no SteppedAnimationDriver.
+    qputenv("QSG_RENDER_LOOP", "basic");
     // The app's controls style and Breeze icons, whatever the desktop the
     // tests run in; TestSessionIsolation.h. With the style, Kirigami draws
     // theme icons in the colour asked for, as the plot tool buttons' glyphs

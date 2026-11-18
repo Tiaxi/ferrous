@@ -302,7 +302,6 @@ void ScrobbleSmokeTest::scrobbleIndicatorGlyphIsCentredOnItsBlock() {
     auto *statusBar = harness.root->findChild<QQuickItem *>(QStringLiteral("statusBar"));
     QQuickItem *glyph = findQuickItemByObjectName(indicator, QStringLiteral("scrobbleIndicatorGlyph"));
     QVERIFY(statusBar != nullptr && glyph != nullptr);
-    QTest::qWait(100);
     const QImage image = harness.window->grabWindow();
     const qreal scale = harness.window->effectiveDevicePixelRatio();
     QVERIFY(!image.isNull());
@@ -549,7 +548,11 @@ void ScrobbleSmokeTest::scrobbleIndicatorClickAndMenuPauseScrobbling() {
         QQuickItem *content = qvariant_cast<QQuickItem *>(menu->property("contentItem"));
         return content != nullptr ? findQuickItemByObjectName(content, name) : nullptr;
     };
+    // The menu's fades in animation time, each to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
     QTest::mouseClick(window, Qt::RightButton, {}, centerInWindow(indicator));
+    settle();
     QTRY_VERIFY(menu->property("opened").toBool());
     QQuickItem *pauseItem = menuItem(QStringLiteral("scrobbleIndicatorPauseItem"));
     QQuickItem *settingsItem = menuItem(QStringLiteral("scrobbleIndicatorSettingsItem"));
@@ -558,13 +561,16 @@ void ScrobbleSmokeTest::scrobbleIndicatorClickAndMenuPauseScrobbling() {
     QVERIFY(!pauseItem->property("checked").toBool());
     QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(pauseItem));
     QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
+    settle();
     QTRY_VERIFY(!menu->property("visible").toBool());
 
     QTest::mouseClick(window, Qt::RightButton, {}, centerInWindow(indicator));
+    settle();
     QTRY_VERIFY(menu->property("opened").toBool());
     QVERIFY(pauseItem->property("checked").toBool());
     QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(settingsItem));
     QTRY_COMPARE(harness.root->property("settingsRequests").toInt(), 1);
+    settle();
     QTRY_VERIFY(!menu->property("visible").toBool());
     QVERIFY(bridge->property("lastFmScrobblingPaused").toBool());
 
@@ -578,8 +584,10 @@ void ScrobbleSmokeTest::scrobbleIndicatorClickAndMenuPauseScrobbling() {
     QTest::keyClick(window, Qt::Key_Return);
     QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
     QTest::keyClick(window, Qt::Key_Menu);
+    settle();
     QTRY_VERIFY(menu->property("opened").toBool());
     QTest::keyClick(window, Qt::Key_Escape);
+    settle();
     QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
@@ -738,7 +746,10 @@ void ScrobbleSmokeTest::scrobbleIndicatorPausesScrobbling() {
     // Its menu's settings item opens the preferences on the Last.fm page.
     QObject *preferences = window->findChild<QObject *>(QStringLiteral("preferencesDialog"));
     QVERIFY(preferences != nullptr);
+    // Its fade in animation time, to its end.
+    SteppedAnimationDriver animations;
     QVERIFY(QMetaObject::invokeMethod(indicator, "settingsRequested"));
+    (void)animations.step(1000);
     QTRY_VERIFY(preferences->property("opened").toBool());
     QCOMPARE(preferences->property("pageIndex").toInt(),
              preferences->property("lastFmPageIndex").toInt());
