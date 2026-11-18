@@ -200,7 +200,8 @@ ToolBar {
         property point heldPointerPosition
         property bool heldByTouch: false
         // The holding pointer lifted, at heldPointerPosition; the slider
-        // takes the release after this.
+        // takes the release after this. Qt deactivates the hold before it
+        // says a grab was cancelled, so a cancelled hold lifts it too.
         signal pointerLifted()
 
         // The mouse's or a touch's hold. Its passive grab leaves the drag
