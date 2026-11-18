@@ -7,6 +7,7 @@
 #include <QFontMetricsF>
 #include <QQmlContext>
 #include <QQmlExpression>
+#include <QQmlIncubationController>
 #include <QTextLayout>
 #include <QTextOption>
 #include <algorithm>
@@ -40,6 +41,7 @@ private slots:
     void itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWithNothingFound();
     void itunesArtworkActionsFollowTheTextFont();
     void itunesArtworkCountLineHoldsAtLargeFonts();
+    void itunesArtworkDialogOpensWithItsRowsWhole();
     void itunesArtworkListIsAsTallAsItsRows();
     void itunesArtworkScalesAsAWholeWithTheFont_data();
     void itunesArtworkScalesAsAWholeWithTheFont();
@@ -2001,9 +2003,14 @@ bool openItunesArtworkDialog(QQuickWindow *window, QObject *dialog, QObject *fak
                              const QVariantList &rows, const QVariantMap &target) {
     fake->setProperty("itunesArtworkResults", rows);
     fake->setProperty("itunesArtworkTarget", target);
-    return QMetaObject::invokeMethod(window, "openItunesArtworkDialog")
+    QQmlEngine *engine = qmlEngine(dialog);
+    // With its rows whole: the list builds those the hidden dialog had no
+    // room for in the background (#627).
+    return engine != nullptr
+        && QMetaObject::invokeMethod(window, "openItunesArtworkDialog")
         && QTest::qWaitFor([dialog]() { return dialog->property("opened").toBool(); })
-        && QTest::qWaitForWindowExposed(qobject_cast<QQuickWindow *>(dialog));
+        && QTest::qWaitForWindowExposed(qobject_cast<QQuickWindow *>(dialog))
+        && finishIncubation(*engine);
 }
 
 // Drops what the offscreen platform says when a window's least size
@@ -2460,6 +2467,8 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
 
     QList<QQuickItem *> rowItems;
     QTRY_COMPARE((rowItems = visibleItemsNamed(content, QStringLiteral("itunesArtworkResultRow"))).size(), 3);
+    // A row is in the list before it is whole (#627).
+    QVERIFY(finishIncubation(engine));
     // Laid out in its window, three rows need no scroll bar.
     QTRY_COMPARE(itemNamed(content, QStringLiteral("itunesArtworkResultsView"))->property("scrollbarLane").toReal(),
                  0.0);
@@ -2816,16 +2825,46 @@ bool openItunesArtworkDialog(QQmlApplicationEngine &engine, const QTemporaryDir 
         return false;
     }
     out.content = itemNamed(out.dialogWindow->contentItem(), QStringLiteral("itunesArtworkContent"));
+    // A row is in the list before it is whole, and the list builds the rows
+    // the hidden dialog had no room for in the background.
     return out.content != nullptr
         && QTest::qWaitFor([&]() {
                return visibleItemsNamed(out.content, QStringLiteral("itunesArtworkResultRow")).size()
                    >= qMin(count, 5);
-           });
+           })
+        && finishIncubation(engine);
 }
 
 int fontPixelSize(QQuickItem *item) {
     return QFontInfo(qvariant_cast<QFont>(item->property("font"))).pixelSize();
 }
+
+// Builds what the engine builds in the background by its smallest step at
+// each turn of the event loop, as on a machine too busy to give it its
+// share of a frame: whatever a test waits for meanwhile is seen half made.
+class SlowIncubationController final : public QObject, public QQmlIncubationController {
+public:
+    SlowIncubationController() {
+        m_step.setInterval(0);
+        connect(&m_step, &QTimer::timeout, this, [this]() {
+            std::atomic<bool> more{false};
+            incubateWhile(&more);
+            if (incubatingObjectCount() == 0) {
+                m_step.stop();
+            }
+        });
+    }
+
+protected:
+    void incubatingObjectCountChanged(int count) override {
+        if (count > 0 && !m_step.isActive()) {
+            m_step.start();
+        }
+    }
+
+private:
+    QTimer m_step;
+};
 
 } // namespace
 
@@ -2856,6 +2895,24 @@ void AlbumArtSmokeTest::itunesArtworkCountLineHoldsAtLargeFonts() {
     QVERIFY(heading != nullptr);
     QTRY_VERIFY(heading->isVisible());
     QTRY_COMPARE(heading->property("lineCount").toInt(), 1);
+}
+
+// The dialog counts as open with its results only once its rows are whole,
+// however slowly the engine builds them. The hidden dialog's list builds
+// the rows it has no room for yet in the background, and a row is in the
+// list, with its name, before its bindings and buttons are done: a test
+// that ended then destroyed a row half made, and Qt still counted "2" items
+// in creation as the engine went (#627).
+void AlbumArtSmokeTest::itunesArtworkDialogOpensWithItsRowsWhole() {
+    const ScopedApplicationFont font(24);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QQmlApplicationEngine engine;
+    SlowIncubationController incubation;
+    engine.setIncubationController(&incubation);
+    OpenItunesArtworkDialog opened;
+    QVERIFY(openItunesArtworkDialog(engine, dir, 5, nullptr, opened));
+    QCOMPARE(incubation.incubatingObjectCount(), 0);
 }
 
 void AlbumArtSmokeTest::itunesArtworkActionsFollowTheTextFont() {
