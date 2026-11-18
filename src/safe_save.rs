@@ -168,16 +168,33 @@ fn create_file_with(path: &Path, bytes: &[u8], before_rename: impl FnOnce()) -> 
 /// flushed and renamed over `path`, so concurrent writers never share a
 /// temporary file: the last rename wins with a complete file. A symbolic
 /// link at `path` is followed, so the file it points to is replaced and
-/// the link survives. The replacement gets the permissions new files get,
-/// not the old file's, so this is meant for the app's own state, not the
-/// user's files; see [`replace_file`] for those.
+/// the link survives. A link that cannot be followed, because its target
+/// is missing or out of reach, fails the save instead: such a link often
+/// points into a dotfiles repository, and replacing it with a file would
+/// quietly keep later saves out of that repository. The replacement gets the
+/// permissions new files get, not the old file's, so this is meant for the
+/// app's own state, not the user's files; see [`replace_file`] for those.
 ///
 /// # Errors
 ///
 /// Returns the failed step and its error. `path` is unchanged then, and the
 /// temporary file is removed.
 pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> Result<(), WriteFileError> {
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = match fs::canonicalize(path) {
+        Ok(target) => target,
+        Err(error) if is_symlink(path) => {
+            return Err(WriteFileError {
+                path: path.to_path_buf(),
+                step: WriteStep::FollowLink {
+                    to: fs::read_link(path).ok(),
+                },
+                error,
+            });
+        }
+        // Not a link, so nothing can be lost by writing to `path`: a missing
+        // file is created there, and the steps below report other errors.
+        Err(_) => path.to_path_buf(),
+    };
     let failed = |step, error| WriteFileError {
         path: target.clone(),
         step,
@@ -198,9 +215,19 @@ pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> Result<(), WriteFileError
         .map_err(|(step, error)| failed(step, error))
 }
 
+/// Whether `path` itself, not what it points to, is a symbolic link.
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+}
+
 /// A step of [`write_file`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WriteStep {
+    /// Following the link at the saved path, which points `to` this path
+    /// when the link can be read.
+    FollowLink {
+        to: Option<PathBuf>,
+    },
     CreateTemporary,
     Write,
     Flush,
@@ -221,7 +248,15 @@ pub(crate) struct WriteFileError {
 impl std::fmt::Display for WriteFileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let path = self.path.display();
-        match self.step {
+        match &self.step {
+            WriteStep::FollowLink { to: Some(to) } => {
+                write!(
+                    f,
+                    "{path} links to {}, which cannot be reached",
+                    to.display()
+                )?;
+            }
+            WriteStep::FollowLink { to: None } => write!(f, "failed to follow the link {path}")?,
             WriteStep::CreateTemporary => {
                 write!(f, "failed to create a temporary file for {path}")?;
             }
@@ -1378,6 +1413,86 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(fs::read(&target).expect("read target"), b"new");
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_keeps_a_link_whose_target_is_missing() {
+        let dir = test_dir("write-dangling-link");
+        let target = dir.join("dotfiles").join("settings.txt");
+        let link = dir.join("settings.txt");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+
+        // Neither the target's directory nor, once it exists, the target.
+        let missing_dir = write_file(&link, b"new").expect_err("the link is kept");
+        fs::create_dir(dir.join("dotfiles")).expect("create the target's directory");
+        let missing_file = write_file(&link, b"new").expect_err("the link is kept");
+
+        for failure in [missing_dir, missing_file] {
+            assert_eq!(failure.path, link);
+            assert_eq!(
+                failure.step,
+                WriteStep::FollowLink {
+                    to: Some(target.clone())
+                }
+            );
+            assert_eq!(failure.error.kind(), io::ErrorKind::NotFound);
+            assert_eq!(
+                failure.to_string(),
+                format!(
+                    "{} links to {}, which cannot be reached: {}",
+                    link.display(),
+                    target.display(),
+                    failure.error
+                )
+            );
+        }
+        assert_eq!(fs::read_link(&link).expect("still a link"), target);
+        assert!(!target.exists());
+        assert_eq!(
+            dir_entries(&dir),
+            vec!["dotfiles".to_string(), "settings.txt".to_string()]
+        );
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_keeps_a_link_into_an_unreadable_directory() {
+        let dir = test_dir("write-unreachable-link");
+        let hidden = dir.join("dotfiles");
+        let target = hidden.join("settings.txt");
+        let link = dir.join("settings.txt");
+        fs::create_dir(&hidden).expect("create the target's directory");
+        fs::write(&target, b"old").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+        // As a sandbox that does not expose the directory would.
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).expect("lock");
+        // Root ignores directory permissions and still reaches the target.
+        if fs::metadata(&target).is_ok() {
+            fs::set_permissions(&hidden, fs::Permissions::from_mode(0o700)).expect("unlock");
+            fs::remove_dir_all(dir).expect("remove test dir");
+            return;
+        }
+
+        let failure = write_file(&link, b"new").expect_err("the link is kept");
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o700)).expect("unlock");
+
+        assert_eq!(failure.path, link);
+        assert_eq!(
+            failure.step,
+            WriteStep::FollowLink {
+                to: Some(target.clone())
+            }
+        );
+        assert_eq!(failure.error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read_link(&link).expect("still a link"), target);
+        assert_eq!(fs::read(&target).expect("read target"), b"old");
+        assert_eq!(
+            dir_entries(&dir),
+            vec!["dotfiles".to_string(), "settings.txt".to_string()]
+        );
         fs::remove_dir_all(dir).expect("remove test dir");
     }
 
