@@ -18,8 +18,6 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QMutex>
-#include <QMutexLocker>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -60,36 +58,65 @@
 #undef private
 #include "TestColor.h"
 #include "TestItems.h"
+#include "TestMainWindow.h"
 #include "TestMessages.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
 namespace {
 
-// Main.qml with its fallback bridge, shown and active.
-QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel,
-                             int width = 1600, int height = 1000) {
-    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
-    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("0.3.0"));
-    engine.rootContext()->setContextProperty(QStringLiteral("appComponents"), aboutComponents());
-    engine.load(QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
-    if (engine.rootObjects().isEmpty()) {
-        return nullptr;
+// Main.qml with its fallback bridge, About's version and components, and a
+// tag editor whose file operations the test answers, shown and active.
+// Each test loads its own: a test that checks several things loads it once.
+struct DialogsWindow {
+    explicit DialogsWindow(int width = 1600, int height = 1000) {
+        engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+        MainWindowOptions options;
+        options.width = width;
+        options.height = height;
+        options.appVersion = QStringLiteral("0.3.0");
+        options.appComponents = aboutComponents();
+        window = loadMainWindow(engine, libraryModel, options);
     }
-    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
-    if (window == nullptr || !QTest::qWaitForWindowExposed(window)) {
-        return nullptr;
+
+    TagEditorController editor{nullptr};
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = nullptr;
+};
+
+// KDE's default font, Noto Sans, at `pointSize` until the end of the scope.
+class ScopedNotoSans {
+public:
+    explicit ScopedNotoSans(qreal pointSize) {
+        QFont font(QStringLiteral("Noto Sans"));
+        font.setPointSizeF(pointSize);
+        QGuiApplication::setFont(font);
     }
-    window->resize(width, height);
-    window->requestActivate();
-    if (!QTest::qWaitForWindowActive(window)
-        || !QTest::qWaitFor([&]() { return window->width() == width && window->height() == height; })) {
-        return nullptr;
+
+private:
+    ScopedApplicationFont m_restore{0};
+};
+
+// Runs the checks in turn, up to the first that fails: for a test that
+// loads its window once for several checks.
+void runInTurn(std::initializer_list<std::function<void()>> checks) {
+    for (const auto &check : checks) {
+        check();
+        if (QTest::currentTestFailed()) {
+            return;
+        }
     }
-    // The window reads its new size at once, but tells its bindings with
-    // the window system's geometry event, which comes after.
-    QCoreApplication::processEvents();
-    return window;
+}
+
+// Whether an item under `root`, or `root` itself, waits for its polish:
+// layoutPending() for every item of a page.
+bool layoutPendingUnder(QQuickItem *root) {
+    if (QQuickTest::qIsPolishScheduled(root)) {
+        return true;
+    }
+    const QList<QQuickItem *> children = root->childItems();
+    return std::any_of(children.cbegin(), children.cend(), layoutPendingUnder);
 }
 
 QObject *bridgeOf(QQuickWindow *window) {
@@ -217,6 +244,12 @@ QObject *openPreferences(QQuickWindow *window, int page = 0) {
     return waitForDialogWindow(dialog) ? dialog : nullptr;
 }
 
+// Rejects `dialog`, as Cancel does, and waits until it hides.
+bool reject(QObject *dialog) {
+    return QMetaObject::invokeMethod(dialog, "reject")
+        && QTest::qWaitFor([&]() { return !dialog->property("visible").toBool(); });
+}
+
 QObject *settingsOf(QObject *dialog) {
     return qvariant_cast<QObject *>(dialog->property("settings"));
 }
@@ -312,12 +345,120 @@ QByteArray tagRowsWithLongPaths(int count) {
         .toJson(QJsonDocument::Compact);
 }
 
+// The tag editor answers its load, and every other file operation, with
+// `rows`.
+void answerWith(TagEditorController &editor, const QByteArray &rows) {
+    editor.m_executeOperation = [rows](TagEditorController::Operation, const QByteArray &,
+                                       const TagEditorController::RenameGate &) { return rows; };
+}
+
+// Edit Tags, opened on the files of `rows`, in its window, which has the
+// keyboard; null when it does not show.
+QQuickWindow *openTagEditor(DialogsWindow &main, const QByteArray &rows) {
+    answerWith(main.editor, rows);
+    QObject *dialog = object(main.window, QStringLiteral("tagEditorDialog"));
+    if (dialog == nullptr || !main.editor.openForPaths({QStringLiteral("/fixture/Album")})
+        || !QTest::qWaitFor([&]() { return !main.editor.loading(); }) || !waitForDialogWindow(dialog)) {
+        return nullptr;
+    }
+    return windowOf(dialog);
+}
+
+// Closes Edit Tags, edits and all, and waits until it hides.
+bool closeTagEditor(DialogsWindow &main) {
+    main.editor.close();
+    QObject *dialog = object(main.window, QStringLiteral("tagEditorDialog"));
+    return QTest::qWaitFor([&]() { return !dialog->property("visible").toBool(); });
+}
+
+// The windows the smaller dialogs open over, open: Edit Tags on two files
+// with an unsaved edit, Diagnostics, and Configure on its library page,
+// with a folder. Whether they show.
+bool openTheParentDialogs(DialogsWindow &main) {
+    QQuickWindow *window = main.window;
+    QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
+    if (!bridgeOf(window)->setProperty("libraryRootEntries", QVariantList{QVariantMap{
+            {QStringLiteral("path"), QStringLiteral("/fixture/one")}, {QStringLiteral("trackCount"), 3}}})
+        || openTagEditor(main, tagRows(2)) == nullptr) {
+        return false;
+    }
+    main.editor.selectAllRows();
+    main.editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
+    return QMetaObject::invokeMethod(diagnostics, "open") && waitForDialogWindow(diagnostics)
+        && openPreferences(window, 0) != nullptr && QTest::qWaitFor([&]() {
+               return object(window, QStringLiteral("removeLibraryRootConfirmDialog")) != nullptr;
+           });
+}
+
+void closeTheParentDialogs(DialogsWindow &main) {
+    QVERIFY(reject(object(main.window, QStringLiteral("preferencesDialog"))));
+    QVERIFY(reject(object(main.window, QStringLiteral("diagnosticsDialog"))));
+    QVERIFY(closeTagEditor(main));
+}
+
+// The shown buttons of a dialog's footer, left to right.
+QList<QQuickItem *> footerButtons(QObject *dialog) {
+    QList<QQuickItem *> buttons;
+    const std::function<void(QQuickItem *)> collect = [&](QQuickItem *item) {
+        for (QQuickItem *child : item->childItems()) {
+            if (!child->isVisible()) {
+                continue;
+            }
+            if (child->inherits("QQuickAbstractButton")) {
+                buttons.push_back(child);
+            } else {
+                collect(child);
+            }
+        }
+    };
+    if (auto *footer = qvariant_cast<QQuickItem *>(dialog->property("footer"))) {
+        collect(footer);
+    }
+    std::sort(buttons.begin(), buttons.end(),
+              [](QQuickItem *a, QQuickItem *b) { return sceneRect(a).left() < sceneRect(b).left(); });
+    return buttons;
+}
+
+// Calls `check` with each dialog that has buttons in a footer and its
+// buttons, laid out, with the windows the smaller dialogs open over open
+// (openTheParentDialogs()); it opens and closes the others.
+void forEachDialogWithButtons(QQuickWindow *window,
+                              const std::function<void(QObject *, const QList<QQuickItem *> &)> &check) {
+    for (const char *name : {"quitSaveFailedDialog", "libraryRootNameDialog", "removeLibraryRootConfirmDialog",
+                             "tagEditorCloseConfirmDialog", "autoNumberDialog", "renamePreviewDialog",
+                             "tagEditorStatusDetailsDialog", "clearDiagnosticsConfirmDialog", "itunesArtworkDialog",
+                             "aboutDialog", "diagnosticsDialog", "preferencesDialog", "tagEditorDialog"}) {
+        QObject *dialog = object(window, QString::fromLatin1(name));
+        QVERIFY2(dialog != nullptr, name);
+        const bool opened = dialog->property("opened").toBool();
+        if (!opened) {
+            QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        }
+        QVERIFY2(waitForDialogWindow(dialog), name);
+        QTRY_VERIFY2(!footerButtons(dialog).isEmpty(), name);
+        QTRY_VERIFY2(!layoutPending(qvariant_cast<QQuickItem *>(dialog->property("footer"))), name);
+        check(dialog, footerButtons(dialog));
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        if (!opened) {
+            QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+            QTRY_VERIFY2(!windowOf(dialog)->isVisible(), name);
+        }
+    }
+}
+
 // The window's issue history, with an entry reported.
 void report(QQuickWindow *window, int category, int severity, const QString &subject, const QString &message) {
     QObject *errors = object(window, QStringLiteral("errorController"));
     QVERIFY(errors != nullptr);
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, category), Q_ARG(QVariant, severity),
                                       Q_ARG(QVariant, subject), Q_ARG(QVariant, message)));
+}
+
+// The window's issue history, emptied.
+void clearIssues(QQuickWindow *window) {
+    QVERIFY(QMetaObject::invokeMethod(object(window, QStringLiteral("errorController")), "clear"));
 }
 
 // Opens Recent Issues and waits until its rows are laid out.
@@ -384,13 +525,8 @@ private slots:
     void cleanupTestCase();
     void drawsOffscreenUnlessAPlatformIsChosen();
     void configureAndAboutAreWindowsOfTheirOwn();
-    void configureIsAPageListWithKdesCaptionAndButtons();
-    void configurePageIconsFollowTheFont_data();
-    void configurePageIconsFollowTheFont();
-    void configureListRowsAreAlike_data();
-    void configureListRowsAreAlike();
-    void libraryFolderPathsShareOneColumn_data();
-    void libraryFolderPathsShareOneColumn();
+    void configureLaysOutItsPages();
+    void libraryFolderListLaysOutItsFolders();
     void configurePagesMoveByKeyboardAndTabReachesEveryControl();
     void configureAppliesOnOkOrApplyAndCancelDropsTheChanges();
     void configureDefaultsSetsThePagesBackToBeApplied();
@@ -398,38 +534,15 @@ private slots:
     void enterInATextFieldTakesTheTextNotTheDefaultButton();
     void everyConfigureSettingReachesTheBridge();
     void titleStripSettingIsOnlyForTheWholeScreen();
-    void configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange();
-    void configureFitsItsPagesAtAnyWidth();
-    void configureLabelsEndAtOnePlaceOnEveryPage();
-    void configureGroupsItsSettingsOnFourPages();
     void configureFitsTheVisualizationPageAtTheDefaultFont();
-    void readOnlyPathsAreMiddleElidedLabelsWithATooltip();
-    void libraryFolderNameDialogShowsItsPath_data();
-    void libraryFolderNameDialogShowsItsPath();
-    void libraryFoldersActOnTheSelectedFolderAtOnce();
-    void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
-    void libraryFolderListIsThreeRowsTallAtLeast_data();
-    void libraryFolderListIsThreeRowsTallAtLeast();
-    void libraryFoldersLabelSitsOnTheFirstFoldersBaseline_data();
-    void libraryFoldersLabelSitsOnTheFirstFoldersBaseline();
-    void quitFailureBreaksItsPathOnlyBetweenFolders_data();
-    void quitFailureBreaksItsPathOnlyBetweenFolders();
+    void compactDialogsHoldTheirText_data();
+    void compactDialogsHoldTheirText();
     void breakableTextKeepsNamesAndErrorCodesWhole();
-    void lastFmPageShowsOnlyTheButtonsThatApply();
-    void lastFmScrobblingNeedsABuildWithLastFm();
-    void lastFmAccountIsAGroupApart_data();
-    void lastFmAccountIsAGroupApart();
-    void aboutShowsTheIconVersionTabsAndCopiesTheVersion();
-    void aboutKdeHasAboutsHeadingAndPage_data();
-    void aboutKdeHasAboutsHeadingAndPage();
-    void aboutPagesSitOnAFrameJoinedToTheTabs_data();
-    void aboutPagesSitOnAFrameJoinedToTheTabs();
-    void aboutPagesNeverRunUnderTheButtons_data();
-    void aboutPagesNeverRunUnderTheButtons();
-    void recentIssuesIsAPopupAboveTheStatusBar();
-    void recentIssuesHeaderHoldsItsTitleAtLargeFonts();
-    void recentIssuesActionsAreInTheTextFont();
-    void recentIssuesRowsSplitTheMessageAndOfferOneAction();
+    void lastFmPageFollowsTheBuildAndTheAccount();
+    void aboutDialogsLayOutTheirPages_data();
+    void aboutDialogsLayOutTheirPages();
+    void recentIssuesLayOutTheirRows();
+    void recentIssuesHeaderFollowsALargeFont();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesOpenWithTheirFocusShown();
@@ -440,36 +553,65 @@ private slots:
     void recentIssuesFollowAQueueReplacedWithOneOfTheSameLength();
     void theQueuesPathIndexFollowsEveryEdit();
     void recentIssuesLookUpALargeQueueAtTheSameCost();
-    void editTagsMarksAChangedFieldAndColumnAndReverts();
-    void editTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut();
-    void editTagsTableHeaderUsesTheQueuesHeaderStyle();
-    void editTagsToolsMenuHoldsTheToolsAndCaseChanges();
+    void editTagsShowsItsFilesAndEdits();
     void editTagsIsAWindowOfItsOwnThatAsksBeforeClosing();
     void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
     void editTagsOpensNoWiderThanTheMainWindow();
-    void autoNumberIsOneFormInReadingOrder_data();
-    void autoNumberIsOneFormInReadingOrder();
-    void editTagsMultipleValuesPlaceholderReads();
-    void editTagsNumberPairsShowMultipleValuesWhole_data();
-    void editTagsNumberPairsShowMultipleValuesWhole();
     void editTagsFileColumnsGiveWayBeforeTheTags();
-    void editTagsStatusSaysWhatFailedWhole_data();
-    void editTagsStatusSaysWhatFailedWhole();
-    void dialogsPutTheirButtonsInKdesOrder();
-    void dialogsPutTheirButtonsOnTheContentInset();
-    void dialogButtonGlyphsFollowTheFont_data();
-    void dialogButtonGlyphsFollowTheFont();
-    void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
-    void dialogsShareOneHeadingStyle();
+    void dialogsShareOneLook();
     void dialogsHoldTheirContentsWithALargeFont();
-    void compactDialogsKeepTheirMeasureWithALargeFont_data();
-    void compactDialogsKeepTheirMeasureWithALargeFont();
-    void dialogGlyphsAndMeasuresFollowTheFont_data();
-    void dialogGlyphsAndMeasuresFollowTheFont();
-    void recentIssuesLinkPressShowsAtOnce();
+    void dialogsScaleWithKdesFont_data();
+    void dialogsScaleWithKdesFont();
     void autoNumberCheckBoxesStartOnTheFieldsEdge_data();
     void autoNumberCheckBoxesStartOnTheFieldsEdge();
     void dialogListNumbersReadAsDrawn();
+
+private:
+    // The checks that the tests above run in turn in one window; each says
+    // what it checks where it is defined.
+    void checkConfigurePageList(QQuickWindow *window);
+    void checkConfigurePageIcons(QQuickWindow *window, qreal pointSize);
+    void checkConfigureListRowsAreAlike(QQuickWindow *window);
+    void checkConfigureHelpTextAndSliderRange(QQuickWindow *window);
+    void checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *window);
+    void checkConfigureLabelsEndAtOnePlaceOnEveryPage(QQuickWindow *window);
+    void checkConfigureFitsItsPagesAtAnyWidth(QQuickWindow *window);
+    void checkLibraryFoldersAreAFramedListWithNoSelectionAtFirst(QQuickWindow *window);
+    void checkLibraryFolderListIsThreeRowsTallAtLeast(QQuickWindow *window, int folders);
+    void checkLibraryFolderPathsShareOneColumn(QQuickWindow *window, qreal pointSize);
+    void checkLibraryFoldersLabelSitsOnTheFirstFoldersBaseline(QQuickWindow *window, int folders);
+    void checkLibraryFoldersActOnTheSelectedFolderAtOnce(QQuickWindow *window);
+    void checkReadOnlyPathsAreMiddleElidedLabelsWithATooltip(QQuickWindow *window);
+    void checkQuitFailureBreaksItsPathOnlyBetweenFolders(QQuickWindow *window, qreal pointSize, const QString &message);
+    void checkLibraryFolderNameDialogShowsItsPath(QQuickWindow *window, qreal pointSize);
+    void checkCompactDialogsKeepTheirMeasure(QQuickWindow *window, qreal pointSize);
+    void checkAutoNumberIsOneFormInReadingOrder(DialogsWindow &main);
+    void checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *window);
+    void checkLastFmPageShowsOnlyTheButtonsThatApply(QQuickWindow *window);
+    void checkLastFmAccountIsAGroupApart(QQuickWindow *window, bool connected);
+    void checkAboutShowsTheIconVersionTabsAndCopiesTheVersion(QQuickWindow *window);
+    void checkAboutKdeHasAboutsHeadingAndPage(QQuickWindow *window, qreal pointSize);
+    void checkAboutPagesSitOnAFrameJoinedToTheTabs(QQuickWindow *window);
+    void checkAboutPagesNeverRunUnderTheButtons(QQuickWindow *window);
+    void checkRecentIssuesIsAPopupAboveTheStatusBar(QQuickWindow *window);
+    void checkRecentIssuesLinkPressShowsAtOnce(QQuickWindow *window);
+    void checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(QQuickWindow *window);
+    void checkRecentIssuesHeaderHoldsItsTitle(QQuickWindow *window);
+    void checkRecentIssuesActionsAreInTheTextFont(QQuickWindow *window);
+    void checkEditTagsTableHeaderUsesTheQueuesHeaderStyle(DialogsWindow &main);
+    void checkEditTagsToolsMenuHoldsTheToolsAndCaseChanges(DialogsWindow &main);
+    void checkEditTagsMultipleValuesPlaceholderReads(DialogsWindow &main);
+    void checkEditTagsMarksAChangedFieldAndColumnAndReverts(DialogsWindow &main);
+    void checkEditTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut(DialogsWindow &main);
+    void checkEditTagsNumberPairsShowMultipleValuesWhole(DialogsWindow &main, qreal pointSize);
+    void checkEditTagsStatusSaysWhatFailedWhole(DialogsWindow &main, qreal pointSize);
+    void checkDialogsUseOneCharacterEllipsesAndNoTextGlyphs(QQuickWindow *window);
+    void checkDialogsPutTheirButtonsInKdesOrder(QQuickWindow *window);
+    void checkDialogsPutTheirButtonsOnTheContentInset(QQuickWindow *window);
+    void checkDialogButtonGlyphsFollowTheFont(QQuickWindow *window, qreal pointSize);
+    void checkDialogsShareOneHeadingStyle(QQuickWindow *window);
+    void checkDialogsHoldTheirContents(DialogsWindow &main);
+    void checkDialogGlyphsAndMeasuresFollowTheFont(DialogsWindow &main, qreal pointSize);
 };
 
 void UiDialogsTest::initTestCase() {
@@ -509,9 +651,8 @@ void UiDialogsTest::drawsOffscreenUnlessAPlatformIsChosen() {
 // block, resizable, and keeping the user's size. Escape and the title bar's
 // close button reject them, and the main window gets the keyboard back.
 void UiDialogsTest::configureAndAboutAreWindowsOfTheirOwn() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     auto *overlay = qvariant_cast<QQuickItem *>(window->property("overlayHost"));
     QVERIFY(overlay != nullptr);
@@ -586,8 +727,7 @@ void UiDialogsTest::configureAndAboutAreWindowsOfTheirOwn() {
         QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
         QVERIFY2(waitForDialogWindow(dialog), at.constData());
         QCOMPARE(dialogWindow->size(), resized);
-        QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-        QTRY_VERIFY2(!dialogWindow->isVisible(), at.constData());
+        QVERIFY(reject(dialog));
         QVERIFY(QTest::qWaitForWindowActive(window));
     }
 
@@ -608,18 +748,28 @@ void UiDialogsTest::configureAndAboutAreWindowsOfTheirOwn() {
     QVERIFY(openPreferences(window, 0) != nullptr);
     QVERIFY(!dialog->property("modified").toBool());
     QTRY_VERIFY(watch->property("checked").toBool());
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
+    QVERIFY(reject(dialog));
 }
 
-void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+// Configure Ferrous lays its pages out as KDE's settings dialogs do, at the
+// default font: each check opens it, and it opens at its default size
+// until the last, which makes it as narrow as it goes.
+void UiDialogsTest::configureLaysOutItsPages() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkConfigurePageList(window); }, [&] { checkConfigurePageIcons(window, 0); },
+               [&] { checkConfigureListRowsAreAlike(window); }, [&] { checkConfigureHelpTextAndSliderRange(window); },
+               [&] { checkConfigureGroupsItsSettingsOnFourPages(window); },
+               [&] { checkConfigureLabelsEndAtOnePlaceOnEveryPage(window); },
+               [&] { checkConfigureFitsItsPagesAtAnyWidth(window); }});
+}
+
+// A list of the four pages with KConfigDialog's caption, and its buttons in
+// KDE's order.
+void UiDialogsTest::checkConfigurePageList(QQuickWindow *window) {
     QObject *dialog = openPreferences(window);
     QVERIFY(dialog != nullptr);
-    // Configure Ferrous has a window of its own.
     QQuickWindow *prefs = windowOf(dialog);
     // KConfigDialog's caption.
     QCOMPARE(dialog->property("title").toString(), QStringLiteral("Configure \u2014 Ferrous"));
@@ -638,7 +788,7 @@ void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
         QQuickItem *row = visibleNamed(prefs, QStringLiteral("preferencesPage_%1").arg(i));
         QVERIFY(row != nullptr);
         QCOMPARE(row->property("text").toString(), pages[i]);
-        QCOMPARE(row->width(), 176.0);
+        QCOMPARE(row->width(), list->width());
         click(prefs, row);
         QTRY_COMPARE(stack->property("currentIndex").toInt(), i);
         // The page's title, 15 px semibold, on the content edge.
@@ -650,7 +800,7 @@ void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
         QCOMPARE(font.weight(), QFont::DemiBold);
         // 15 px with the default 10 pt font.
         QCOMPARE(font.pointSizeF(), paletteOf(window)->property("basePointSize").toReal() * 1.125);
-        QCOMPARE(sceneRect(title).left(), sceneRect(page).left() + 24.0);
+        QCOMPARE(sceneRect(title).left(), sceneRect(page).left() + page->property("pageSideInset").toReal());
         QQuickItem *tint = itemsNamed(row, QStringLiteral("rowBackgroundTint")).value(0);
         QVERIFY(tint != nullptr && tint->isVisible());
         QCOMPARE(tint->width(), row->width());
@@ -680,30 +830,12 @@ void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
     QTRY_VERIFY(!dialog->property("visible").toBool());
 }
 
-void UiDialogsTest::configurePageIconsFollowTheFont_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("default font") << 0.0;
-    QTest::newRow("24 pt") << 24.0;
-}
-
 // The page list's icons are as large as their titles' font calls for,
 // Kirigami's size for labels: 16 px with the default font, larger at 24 pt
 // (at a fixed 16 px they were small beside 24 pt titles), and drawn in the
 // text's colour at either size. The list is as wide
 // as a row with its icon and its longest title needs, centred on the row.
-void UiDialogsTest::configurePageIconsFollowTheFont() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont large = applicationFont;
-        large.setPointSizeF(pointSize);
-        QGuiApplication::setFont(large);
-    }
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkConfigurePageIcons(QQuickWindow *window, qreal pointSize) {
     QObject *dialog = openPreferences(window);
     QVERIFY(dialog != nullptr);
     QQuickWindow *prefs = windowOf(dialog);
@@ -749,33 +881,14 @@ void UiDialogsTest::configurePageIconsFollowTheFont() {
         QVERIFY2(saturated == 0, qPrintable(QStringLiteral("%1: %2 coloured pixels")
                                                 .arg(row->property("text").toString()).arg(saturated)));
     }
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
-}
-
-void UiDialogsTest::configureListRowsAreAlike_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("default font") << 0.0;
-    QTest::newRow("24 pt") << 24.0;
+    QVERIFY(reject(dialog));
 }
 
 // Every row of Configure's lists has its text on the same line within it,
 // the last as the others, and centred on it (the style gives every row
 // but a list's last a bottom padding, which the rows' `padding: 0` left,
 // so the others' text sat 2 px above Last.fm's and the last folder's).
-void UiDialogsTest::configureListRowsAreAlike() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont large = applicationFont;
-        large.setPointSizeF(pointSize);
-        QGuiApplication::setFont(large);
-    }
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkConfigureListRowsAreAlike(QQuickWindow *window) {
     QVERIFY(bridgeOf(window)->setProperty("libraryRootEntries", QVariantList{
         QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/one")}, {QStringLiteral("name"), QStringLiteral("One")},
                     {QStringLiteral("trackCount"), 3}},
@@ -830,14 +943,7 @@ void UiDialogsTest::configureListRowsAreAlike() {
     for (qreal baseline : baselines) {
         QCOMPARE(baseline, baselines.constFirst());
     }
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
-}
-
-void UiDialogsTest::libraryFolderPathsShareOneColumn_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("default font") << 0.0;
-    QTest::newRow("24 pt") << 24.0;
+    QVERIFY(reject(dialog));
 }
 
 // The library's folders have their paths in one column: the names' column is
@@ -845,19 +951,7 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn_data() {
 // (UiPalette.scaledSize), so every path starts at one x, a row without a
 // name included, rather than where its own name ends. A single folder's row
 // is as it was, and a list without names has no names' column.
-void UiDialogsTest::libraryFolderPathsShareOneColumn() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont large = applicationFont;
-        large.setPointSizeF(pointSize);
-        QGuiApplication::setFont(large);
-    }
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkLibraryFolderPathsShareOneColumn(QQuickWindow *window, qreal pointSize) {
     QObject *bridge = bridgeOf(window);
     const auto folder = [](const QString &path, const QString &name) {
         QVariantMap entry{{QStringLiteral("path"), path}, {QStringLiteral("trackCount"), 3}};
@@ -964,14 +1058,12 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn() {
         QVERIFY2(qAbs(sceneRect(row.path).left() - sceneRect(row.icon).right() - iconToName) < 0.5,
                  qPrintable(describeItem(row.path)));
     }
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
+    QVERIFY(reject(dialog));
 }
 
 void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     // Last.fm's controls are there to reach in a build with it.
     QVERIFY(bridgeOf(window)->setProperty("lastFmBuildConfigured", true));
@@ -1037,9 +1129,8 @@ void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
 }
 
 void UiDialogsTest::configureAppliesOnOkOrApplyAndCancelDropsTheChanges() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("libraryWatchEnabled", true));
@@ -1096,9 +1187,8 @@ void UiDialogsTest::configureAppliesOnOkOrApplyAndCancelDropsTheChanges() {
 }
 
 void UiDialogsTest::configureDefaultsSetsThePagesBackToBeApplied() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     const QVariantMap defaults = evaluate(window, QStringLiteral("uiBridge.settingDefaults()")).toMap();
@@ -1153,9 +1243,8 @@ void UiDialogsTest::configureDefaultsSetsThePagesBackToBeApplied() {
 }
 
 void UiDialogsTest::enterPressesConfiguresOkButtonUnlessAControlTakesIt() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("libraryWatchEnabled", true));
@@ -1239,29 +1328,25 @@ void UiDialogsTest::enterPressesConfiguresOkButtonUnlessAControlTakesIt() {
 }
 
 void UiDialogsTest::enterInATextFieldTakesTheTextNotTheDefaultButton() {
-    TagEditorController editor(nullptr);
     int saves = 0;
-    editor.m_executeOperation = [&saves](TagEditorController::Operation operation, const QByteArray &,
-                                         const TagEditorController::RenameGate &) {
-        if (operation == TagEditorController::Operation::Save) {
-            ++saves;
-        }
-        return tagRows(2);
-    };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    TagEditorController &editor = main.editor;
 
     // In a tag field, Enter commits the text; Save, the default button,
     // stays unpressed.
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
-    // Edit Tags has a window of its own.
-    QQuickWindow *tags = windowOf(dialog);
-    QVERIFY(QTest::qWaitForWindowActive(tags));
+    QQuickWindow *tags = openTagEditor(main, tagRows(2));
+    QVERIFY(tags != nullptr);
+    const QByteArray rows = tagRows(2);
+    editor.m_executeOperation = [&saves, rows](TagEditorController::Operation operation, const QByteArray &,
+                                               const TagEditorController::RenameGate &) {
+        if (operation == TagEditorController::Operation::Save) {
+            ++saves;
+        }
+        return rows;
+    };
     editor.selectAllRows();
     QQuickItem *field = nullptr;
     QTRY_VERIFY((field = visibleNamed(tags, QStringLiteral("tagEditorField_genre"))) != nullptr);
@@ -1283,8 +1368,7 @@ void UiDialogsTest::enterInATextFieldTakesTheTextNotTheDefaultButton() {
     QTest::keyClick(tags, Qt::Key_Return);
     QTRY_COMPARE(saves, 1);
     QTRY_VERIFY(!editor.saving());
-    editor.close();
-    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QVERIFY(closeTagEditor(main));
 
     // The library folder's name: Enter in the field adds the folder once.
     QObject *nameDialog = object(window, QStringLiteral("libraryRootNameDialog"));
@@ -1307,9 +1391,8 @@ void UiDialogsTest::enterInATextFieldTakesTheTextNotTheDefaultButton() {
 }
 
 void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
@@ -1392,9 +1475,8 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
 }
 
 void UiDialogsTest::titleStripSettingIsOnlyForTheWholeScreen() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("viewerFullscreenMode", 0));
@@ -1434,11 +1516,9 @@ void UiDialogsTest::titleStripSettingIsOnlyForTheWholeScreen() {
     QCOMPARE(bridge->property("viewerFullscreenMode").toInt(), 1);
 }
 
-void UiDialogsTest::configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+// Help text in the secondary colour under its check box's text, and the
+// dynamic range's slider over the range the backend keeps.
+void UiDialogsTest::checkConfigureHelpTextAndSliderRange(QQuickWindow *window) {
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
     // Configure Ferrous has a window of its own.
@@ -1463,17 +1543,15 @@ void UiDialogsTest::configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange(
     // The backend keeps 50 to 150 dB; the slider offers the same.
     QCOMPARE(slider->property("from").toDouble(), 50.0);
     QCOMPARE(slider->property("to").toDouble(), 150.0);
+    QVERIFY(reject(dialog));
 }
 
 // Configure Ferrous lays its pages out for the room its window has: the
 // labels beside the fields at its default size, above them in a page too
 // narrow for both, and nothing runs past a page's edge either way. Its
 // window is never narrower than its widest field needs.
-void UiDialogsTest::configureFitsItsPagesAtAnyWidth() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkConfigureFitsItsPagesAtAnyWidth(QQuickWindow *window) {
+    QVERIFY(bridgeOf(window)->setProperty("libraryRootEntries", QVariantList()));
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
     QQuickWindow *prefs = windowOf(dialog);
@@ -1488,8 +1566,7 @@ void UiDialogsTest::configureFitsItsPagesAtAnyWidth() {
     QTRY_VERIFY(formModes(dialog, stack).contains(false));
     checkPreferencesPages(dialog, prefs, stack, QStringLiteral("narrowest"));
     QVERIFY(!QTest::currentTestFailed());
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
+    QVERIFY(reject(dialog));
 }
 
 // Configure has four pages: Library, Visualization, General and Last.fm.
@@ -1506,15 +1583,10 @@ void UiDialogsTest::configureFitsItsPagesAtAnyWidth() {
 // as measured with Noto Sans, 38 grid units, and a margin of 8 px (with Noto
 // Sans it scrolled by 8 px in 41 grid units for the whole window).
 void UiDialogsTest::configureFitsTheVisualizationPageAtTheDefaultFont() {
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont standard = applicationFont;
-    standard.setPointSizeF(10);
-    QGuiApplication::setFont(standard);
+    const ScopedApplicationFont font(10);
     for (const int openOn : {0, 1}) {
-        LibraryTreeModel libraryModel;
-        QQmlApplicationEngine engine;
-        QQuickWindow *window = loadMainWindow(engine, libraryModel);
+        DialogsWindow main;
+        QQuickWindow *window = main.window;
         QVERIFY2(window != nullptr, "Main.qml failed to show");
         QCOMPARE(paletteOf(window)->property("basePointSize").toReal(), 10.0);
         QObject *dialog = openPreferences(window, openOn);
@@ -1534,8 +1606,9 @@ void UiDialogsTest::configureFitsTheVisualizationPageAtTheDefaultFont() {
             QQuickItem *page = stack->childItems().at(index);
             QTRY_VERIFY(page->isVisible() && !layoutPending(page));
             QVERIFY2(page->property("contentHeight").toReal() <= page->height() + 0.5,
-                     qPrintable(QStringLiteral("page %1: %2 of %3 px").arg(index)
-                                    .arg(page->property("contentHeight").toReal()).arg(page->height())));
+                     qPrintable(QStringLiteral("opened on %1, page %2: %3 of %4 px, window %5").arg(openOn).arg(index)
+                                    .arg(page->property("contentHeight").toReal()).arg(page->height())
+                                    .arg(prefs->height())));
             for (QQuickItem *child : page->childItems()) {
                 if (QString::fromLatin1(child->metaObject()->className()).contains(QStringLiteral("ScrollBar"))
                     && child->property("orientation").toInt() == Qt::Vertical) {
@@ -1544,23 +1617,11 @@ void UiDialogsTest::configureFitsTheVisualizationPageAtTheDefaultFont() {
                 }
             }
         }
+        // Visualization's subheadings in view, its last row above the
+        // buttons.
         dialog->setProperty("pageIndex", 1);
         QQuickItem *page = stack->childItems().at(1);
         QTRY_VERIFY(page->isVisible() && !layoutPending(page));
-        QTRY_VERIFY(visibleNamed(prefs, QStringLiteral("stretchShortTracksCheckBox")) != nullptr);
-        QVERIFY2(page->property("contentHeight").toReal() <= page->height() + 0.5,
-                 qPrintable(QStringLiteral("opened on %1: %2 of %3 px, window %4")
-                                .arg(openOn).arg(page->property("contentHeight").toReal()).arg(page->height())
-                                .arg(prefs->height())));
-        // No vertical scroll bar shows.
-        for (QQuickItem *child : page->childItems()) {
-            if (QString::fromLatin1(child->metaObject()->className()).contains(QStringLiteral("ScrollBar"))
-                && child->property("orientation").toInt() == Qt::Vertical) {
-                QVERIFY2(child->property("size").toReal() >= 1.0 - 1e-6 || !child->isVisible(),
-                         qPrintable(describeItem(child)));
-            }
-        }
-        // Each subheading in view, the last row above the buttons.
         for (const QString &name : {QStringLiteral("visualizationAnalysisHeading"),
                                     QStringLiteral("visualizationDisplayHeading"),
                                     QStringLiteral("visualizationInteractionHeading"),
@@ -1569,16 +1630,11 @@ void UiDialogsTest::configureFitsTheVisualizationPageAtTheDefaultFont() {
             QVERIFY2(item != nullptr, qPrintable(name));
             QVERIFY2(within(sceneRect(item), sceneRect(page)), qPrintable(describeItem(item)));
         }
-        QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-        QTRY_VERIFY(!prefs->isVisible());
+        QVERIFY(reject(dialog));
     }
 }
 
-void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *window) {
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
     QQuickWindow *prefs = windowOf(dialog);
@@ -1725,18 +1781,13 @@ void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
     QVERIFY(mediaHelp != nullptr);
     QVERIFY(gapIs(media, mediaHelp, 4));
     QVERIFY2(mediaHelp->width() <= 440.5, qPrintable(describeItem(mediaHelp)));
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
+    QVERIFY(reject(dialog));
 }
 
 // The labels' column is as wide on every page of Configure: the fields of
 // the labelled rows start at one x as the pages change, rather than where
 // each page's own widest label ends.
-void UiDialogsTest::configureLabelsEndAtOnePlaceOnEveryPage() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkConfigureLabelsEndAtOnePlaceOnEveryPage(QQuickWindow *window) {
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
     QQuickWindow *prefs = windowOf(dialog);
@@ -1773,18 +1824,13 @@ void UiDialogsTest::configureLabelsEndAtOnePlaceOnEveryPage() {
     }
     const auto [lowest, highest] = std::minmax_element(all.begin(), all.end());
     QVERIFY2(*highest - *lowest <= 1, qPrintable(described.join(QLatin1Char('\n'))));
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
+    QVERIFY(reject(dialog));
 }
 
 // A path the dialogs show but do not edit is a label: one line, elided in
 // the middle, so its start and its name stay, with the whole path in a
 // tooltip; not a read-only text field, which looks editable.
-void UiDialogsTest::readOnlyPathsAreMiddleElidedLabelsWithATooltip() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkReadOnlyPathsAreMiddleElidedLabelsWithATooltip(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     const QString longPath = QStringLiteral("/fixture/a folder with a long enough name to run past the dialog/"
                                             "and another level that is long as well/of music");
@@ -1810,6 +1856,7 @@ void UiDialogsTest::readOnlyPathsAreMiddleElidedLabelsWithATooltip() {
     QTRY_VERIFY((rowPath = visibleNamed(prefs, QStringLiteral("libraryRootPath"))) != nullptr);
     checkPath(rowPath, QStringLiteral("folder list"));
     // Its tooltip shows on hover.
+    QTest::mouseMove(prefs, QPoint(1, 1));
     QTest::mouseMove(prefs, sceneRect(rowPath).center().toPoint());
     QTRY_VERIFY(evaluate(rowPath, QStringLiteral("ToolTip.visible")).toBool());
     QCOMPARE(evaluate(rowPath, QStringLiteral("ToolTip.text")).toString(), longPath);
@@ -1838,14 +1885,7 @@ void UiDialogsTest::readOnlyPathsAreMiddleElidedLabelsWithATooltip() {
     checkPath(visibleNamed(windowOf(nameDialog), QStringLiteral("libraryRootPathField")), QStringLiteral("rename"));
     QTest::keyClick(windowOf(nameDialog), Qt::Key_Escape);
     QTRY_VERIFY(!nameDialog->property("visible").toBool());
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
-}
-
-void UiDialogsTest::libraryFolderNameDialogShowsItsPath_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("10 pt") << 10.0;
-    QTest::newRow("24 pt") << 24.0;
+    QVERIFY(reject(dialog));
 }
 
 // Add and Rename Library Folder show a typical folder's path whole, in a
@@ -1853,17 +1893,7 @@ void UiDialogsTest::libraryFolderNameDialogShowsItsPath_data() {
 // 16-unit path elided a short one beside wide gutters). The name has no
 // placeholder, which read as a prompt to type a path; the help says what an
 // empty name does, which the library does (LibraryRoot::display_name).
-void UiDialogsTest::libraryFolderNameDialogShowsItsPath() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont font = applicationFont;
-    font.setPointSizeF(pointSize);
-    QGuiApplication::setFont(font);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkLibraryFolderNameDialogShowsItsPath(QQuickWindow *window, qreal pointSize) {
     const QString path = QStringLiteral("/home/listener/Music/Collection/Library");
     QObject *dialog = object(window, QStringLiteral("libraryRootNameDialog"));
     for (const QString &mode : {QStringLiteral("add"), QStringLiteral("rename")}) {
@@ -1911,11 +1941,8 @@ void UiDialogsTest::libraryFolderNameDialogShowsItsPath() {
     }
 }
 
-void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+// The folders change at once, and the buttons act on the selected one.
+void UiDialogsTest::checkLibraryFoldersActOnTheSelectedFolderAtOnce(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
         QVariantMap{{QStringLiteral("path"), QStringLiteral("/music")}, {QStringLiteral("name"), QStringLiteral("Music")},
@@ -1974,6 +2001,26 @@ void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
     QVERIFY(dialog->property("opened").toBool());
     // Nothing waits for Apply.
     QVERIFY(!dialog->property("modified").toBool());
+    QVERIFY(reject(dialog));
+}
+
+// Configure's library folders, at the default font: a framed list of
+// rows, one, three or nine of them, with their paths in one column and the
+// form's label on the first; the buttons act on the selected folder, and a
+// path too long for its row elides in the middle.
+void UiDialogsTest::libraryFolderListLaysOutItsFolders() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkLibraryFoldersAreAFramedListWithNoSelectionAtFirst(window); },
+               [&] { checkLibraryFolderListIsThreeRowsTallAtLeast(window, 1); },
+               [&] { checkLibraryFolderListIsThreeRowsTallAtLeast(window, 3); },
+               [&] { checkLibraryFolderListIsThreeRowsTallAtLeast(window, 9); },
+               [&] { checkLibraryFolderPathsShareOneColumn(window, 0); },
+               [&] { checkLibraryFoldersLabelSitsOnTheFirstFoldersBaseline(window, 1); },
+               [&] { checkLibraryFoldersLabelSitsOnTheFirstFoldersBaseline(window, 3); },
+               [&] { checkLibraryFoldersActOnTheSelectedFolderAtOnce(window); },
+               [&] { checkReadOnlyPathsAreMiddleElidedLabelsWithATooltip(window); }});
 }
 
 // The library folders are a list, not a field: the view colour in a 1 px
@@ -1982,11 +2029,7 @@ void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
 // field. The buttons that act on a folder wait for one. A click selects with
 // the tint alone; the ring shows only from the keyboard, which selects the
 // first folder as it arrives.
-void UiDialogsTest::libraryFoldersAreAFramedListWithNoSelectionAtFirst() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkLibraryFoldersAreAFramedListWithNoSelectionAtFirst(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
         QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/one")},
@@ -2083,27 +2126,14 @@ void UiDialogsTest::libraryFoldersAreAFramedListWithNoSelectionAtFirst() {
     QTRY_VERIFY(tintOf(rows.at(0))->isVisible());
     QCOMPARE(ringWidth(rows.at(0)), 1.0);
 
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
-}
-
-void UiDialogsTest::libraryFolderListIsThreeRowsTallAtLeast_data() {
-    QTest::addColumn<int>("folders");
-    QTest::newRow("one folder") << 1;
-    QTest::newRow("three folders") << 3;
-    QTest::newRow("nine folders") << 9;
+    QVERIFY(reject(dialog));
 }
 
 // The library folder list is three rows tall at least, so that one folder
 // sits in a visible list, the view colour under it inside the frame, rather
 // than reading as a text field. It grows with its folders up to eight rows,
 // and then scrolls.
-void UiDialogsTest::libraryFolderListIsThreeRowsTallAtLeast() {
-    QFETCH(int, folders);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkLibraryFolderListIsThreeRowsTallAtLeast(QQuickWindow *window, int folders) {
     QObject *bridge = bridgeOf(window);
     QVariantList entries;
     for (int index = 0; index < folders; ++index) {
@@ -2146,34 +2176,13 @@ void UiDialogsTest::libraryFolderListIsThreeRowsTallAtLeast() {
         const QColor seam(shown.pixel(int(frameRect.left() * dpr), int((frameRect.bottom() - 3) * dpr)));
         QCOMPARE(hex(seam), hex(tokenOf(window, "seam")));
     }
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
-}
-
-void UiDialogsTest::libraryFoldersLabelSitsOnTheFirstFoldersBaseline_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::addColumn<int>("folders");
-    QTest::newRow("10 pt, one folder") << 10.0 << 1;
-    QTest::newRow("10 pt, three folders") << 10.0 << 3;
-    QTest::newRow("24 pt, one folder") << 24.0 << 1;
-    QTest::newRow("24 pt, three folders") << 24.0 << 3;
+    QVERIFY(reject(dialog));
 }
 
 // The form's "Library folders:" sits on the first folder's line, its
 // baseline on the folder's name's (at the list's top it sat 5 px above the
 // name, at 10 and at 24 pt).
-void UiDialogsTest::libraryFoldersLabelSitsOnTheFirstFoldersBaseline() {
-    QFETCH(qreal, pointSize);
-    QFETCH(int, folders);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont font = applicationFont;
-    font.setPointSizeF(pointSize);
-    QGuiApplication::setFont(font);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkLibraryFoldersLabelSitsOnTheFirstFoldersBaseline(QQuickWindow *window, int folders) {
     QVariantList entries;
     for (int index = 0; index < folders; ++index) {
         entries.push_back(QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/folder%1").arg(index)},
@@ -2231,39 +2240,41 @@ void UiDialogsTest::libraryFoldersLabelSitsOnTheFirstFoldersBaseline() {
     QTRY_VERIFY2(std::abs(baselineOf(label) - baselineOf(firstName)) <= 1.0,
                  qPrintable(QStringLiteral("the label's baseline at %1, the first folder's at %2")
                                 .arg(baselineOf(label)).arg(baselineOf(firstName))));
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
+    QVERIFY(reject(dialog));
 }
 
-void UiDialogsTest::quitFailureBreaksItsPathOnlyBetweenFolders_data() {
+void UiDialogsTest::compactDialogsHoldTheirText_data() {
     QTest::addColumn<qreal>("pointSize");
-    QTest::addColumn<QString>("message");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The compact dialogs at KDE's default 10 pt and at 24 pt: Quit's failure,
+// Add and Rename Library Folder, a confirmation and Auto Number, each in a
+// window wide enough for its text.
+void UiDialogsTest::compactDialogsHoldTheirText() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
     const QString error = QStringLiteral("Settings could not be saved: Permission denied (os error 13)");
     const QString path = QStringLiteral(
         "Settings could not be saved: failed to create temporary file in /fixture/configuration/ferrous-settings/"
         "2005 - Small Hours (Deluxe Edition)/read-only: Permission denied (os error 13)");
-    QTest::newRow("10 pt, an error") << 10.0 << error;
-    QTest::newRow("10 pt, a path") << 10.0 << path;
-    QTest::newRow("24 pt, an error") << 24.0 << error;
-    QTest::newRow("24 pt, a path") << 24.0 << path;
+    runInTurn({[&] { checkQuitFailureBreaksItsPathOnlyBetweenFolders(window, pointSize, error); },
+               [&] { checkQuitFailureBreaksItsPathOnlyBetweenFolders(window, pointSize, path); },
+               [&] { checkLibraryFolderNameDialogShowsItsPath(window, pointSize); },
+               [&] { checkCompactDialogsKeepTheirMeasure(window, pointSize); },
+               [&] { checkAutoNumberIsOneFormInReadingOrder(main); }});
 }
 
 // The quit failure's message wraps as its words allow, but a path in it
 // breaks only after a slash, never inside a folder's name, and the system's
 // "(os error 13)" stays whole (not "(os error" ending a line and "13)" alone
 // on the next). Its accessible name is the message as it is.
-void UiDialogsTest::quitFailureBreaksItsPathOnlyBetweenFolders() {
-    QFETCH(qreal, pointSize);
-    QFETCH(QString, message);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont font = applicationFont;
-    font.setPointSizeF(pointSize);
-    QGuiApplication::setFont(font);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkQuitFailureBreaksItsPathOnlyBetweenFolders(QQuickWindow *window, qreal pointSize,
+                                                                     const QString &message) {
     QObject *dialog = object(window, QStringLiteral("quitSaveFailedDialog"));
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, message)));
@@ -2383,11 +2394,23 @@ void UiDialogsTest::breakableTextKeepsNamesAndErrorCodesWhole() {
     }
 }
 
-void UiDialogsTest::lastFmPageShowsOnlyTheButtonsThatApply() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+// The Last.fm page as the build and the account have it: without Last.fm
+// in the build, then not connected, waiting for the user's approval, and
+// connected.
+void UiDialogsTest::lastFmPageFollowsTheBuildAndTheAccount() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkLastFmScrobblingNeedsABuildWithLastFm(window); },
+               [&] { checkLastFmAccountIsAGroupApart(window, false); },
+               [&] { checkLastFmPageShowsOnlyTheButtonsThatApply(window); },
+               [&] { checkLastFmAccountIsAGroupApart(window, true); }});
+}
+
+// Connect while not connected; Complete and Disconnect while waiting for
+// the user's approval; Reconnect and Disconnect once connected, with the
+// account's name and the scrobble progress setting.
+void UiDialogsTest::checkLastFmPageShowsOnlyTheButtonsThatApply(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
     QObject *dialog = openPreferences(window, 3);
@@ -2418,16 +2441,13 @@ void UiDialogsTest::lastFmPageShowsOnlyTheButtonsThatApply() {
     QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmShowScrobbleProgressCheckBox")));
     QCOMPARE(visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))->property("text").toString(),
              QStringLiteral("Connected as listener"));
+    QVERIFY(reject(dialog));
 }
 
 // In a build without Last.fm, scrobbling can't be turned on: the build
 // can't send a scrobble, and the account's line says why, rather than
 // offering a check box to tick. No button to connect either.
-void UiDialogsTest::lastFmScrobblingNeedsABuildWithLastFm() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", false));
     QObject *dialog = openPreferences(window, 3);
@@ -2450,14 +2470,7 @@ void UiDialogsTest::lastFmScrobblingNeedsABuildWithLastFm() {
     // A build with Last.fm lets it be turned on.
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
     QTRY_VERIFY(box->isEnabled());
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
-}
-
-void UiDialogsTest::lastFmAccountIsAGroupApart_data() {
-    QTest::addColumn<bool>("connected");
-    QTest::newRow("connected") << true;
-    QTest::newRow("not connected") << false;
+    QVERIFY(reject(dialog));
 }
 
 // The Last.fm page's account stands apart from the scrobbling group above
@@ -2465,18 +2478,11 @@ void UiDialogsTest::lastFmAccountIsAGroupApart_data() {
 // check box when connected or the help text without it, where the rows
 // within the group are 4 px apart (at 4 px under the status check box,
 // Account stood closer to it than the help text above it).
-void UiDialogsTest::lastFmAccountIsAGroupApart() {
-    QFETCH(bool, connected);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkLastFmAccountIsAGroupApart(QQuickWindow *window, bool connected) {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
-    if (connected) {
-        QVERIFY(bridge->setProperty("lastFmAuthState", 2));
-        QVERIFY(bridge->setProperty("lastFmUsername", QStringLiteral("listener")));
-    }
+    QVERIFY(bridge->setProperty("lastFmAuthState", connected ? 2 : 0));
+    QVERIFY(bridge->setProperty("lastFmUsername", connected ? QStringLiteral("listener") : QString()));
     QObject *dialog = openPreferences(window, 2);
     QVERIFY(dialog != nullptr);
     QQuickWindow *prefs = windowOf(dialog);
@@ -2516,15 +2522,37 @@ void UiDialogsTest::lastFmAccountIsAGroupApart() {
     QVERIFY2(qAbs(accountGap - generalGroupGap) < 1,
              qPrintable(QStringLiteral("%1 px, General's %2 px: %3, %4")
                             .arg(accountGap).arg(generalGroupGap).arg(describeItem(groupEnd), describeItem(account))));
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
+    QVERIFY(reject(dialog));
 }
 
-void UiDialogsTest::aboutShowsTheIconVersionTabsAndCopiesTheVersion() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+void UiDialogsTest::aboutDialogsLayOutTheirPages_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// About and About KDE, at the default font and at 24 pt: About's heading,
+// tabs and pages, and About KDE's as About's. The last check makes About
+// as short as it goes.
+void UiDialogsTest::aboutDialogsLayOutTheirPages() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] {
+                   if (pointSize <= 0) {
+                       checkAboutShowsTheIconVersionTabsAndCopiesTheVersion(window);
+                   }
+               },
+               [&] { checkAboutKdeHasAboutsHeadingAndPage(window, pointSize); },
+               [&] { checkAboutPagesSitOnAFrameJoinedToTheTabs(window); },
+               [&] { checkAboutPagesNeverRunUnderTheButtons(window); }});
+}
+
+// About shows the app's icon, name and version, its links, and its pages
+// in tabs, which have the keyboard; Copy puts the version on the clipboard.
+void UiDialogsTest::checkAboutShowsTheIconVersionTabsAndCopiesTheVersion(QQuickWindow *window) {
     QObject *dialog = object(window, QStringLiteral("aboutDialog"));
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
@@ -2570,37 +2598,20 @@ void UiDialogsTest::aboutShowsTheIconVersionTabsAndCopiesTheVersion() {
     QTRY_VERIFY(!dialog->property("visible").toBool());
 }
 
-void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("default font") << 0.0;
-    QTest::newRow("24 pt") << 24.0;
-}
-
 // About KDE is laid out as About Ferrous: the 48 px icon, the name and the
 // line under it at the same places and in the same fonts and colours, the
 // page at the inset of About's pages, starting where About's tabs do, as it
 // has one page and so no tabs, and Close at the right of the button row, the
 // default button with the keyboard. It opens tall enough for its page, whose
 // last line ends 12 px over the buttons, and scrolls it when made shorter.
-void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont large = applicationFont;
-        large.setPointSizeF(pointSize);
-        QGuiApplication::setFont(large);
-    }
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkAboutKdeHasAboutsHeadingAndPage(QQuickWindow *window, qreal pointSize) {
     QObject *aboutDialog = object(window, QStringLiteral("aboutDialog"));
     QObject *kdeDialog = object(window, QStringLiteral("aboutKdeDialog"));
     QVERIFY(aboutDialog != nullptr && kdeDialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(aboutDialog, "open"));
     QVERIFY(waitForDialogWindow(aboutDialog));
     QQuickWindow *about = windowOf(aboutDialog);
+    QVERIFY(aboutDialog->setProperty("tabIndex", 0));
     // Where an item is in its window.
     const auto place = [](QQuickWindow *in, const QString &name) {
         QQuickItem *item = visibleNamed(in, name);
@@ -2615,8 +2626,7 @@ void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage() {
     const QFont nameFont = visibleNamed(about, QStringLiteral("aboutName"))->property("font").value<QFont>();
     const qreal aboutRightGap = about->width() - aboutClose.right();
     const qreal aboutBottomGap = about->height() - aboutClose.bottom();
-    QVERIFY(QMetaObject::invokeMethod(aboutDialog, "reject"));
-    QTRY_VERIFY(!about->isVisible());
+    QVERIFY(reject(aboutDialog));
 
     QVERIFY(QMetaObject::invokeMethod(kdeDialog, "open"));
     QVERIFY(waitForDialogWindow(kdeDialog));
@@ -2680,14 +2690,7 @@ void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage() {
     QTRY_COMPARE(kde->height(), kde->minimumHeight());
     QTRY_VERIFY(view->property("interactive").toBool());
     QVERIFY(sceneRect(view).bottom() <= sceneRect(close).top() - 12 + 0.5);
-    QVERIFY(QMetaObject::invokeMethod(kdeDialog, "reject"));
-    QTRY_VERIFY(!kde->isVisible());
-}
-
-void UiDialogsTest::aboutPagesSitOnAFrameJoinedToTheTabs_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("default font") << 0.0;
-    QTest::newRow("24 pt") << 24.0;
+    QVERIFY(reject(kdeDialog));
 }
 
 // About's pages sit on a frame joined to the tabs, as KDE's About dialog
@@ -2695,19 +2698,7 @@ void UiDialogsTest::aboutPagesSitOnAFrameJoinedToTheTabs_data() {
 // page under it: the frame is as wide as the content, its top edge on the
 // tabs' last row of pixels, open under the selected tab and drawn on
 // either side of it, and every page is inside it.
-void UiDialogsTest::aboutPagesSitOnAFrameJoinedToTheTabs() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont large = applicationFont;
-        large.setPointSizeF(pointSize);
-        QGuiApplication::setFont(large);
-    }
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkAboutPagesSitOnAFrameJoinedToTheTabs(QQuickWindow *window) {
     QObject *dialog = object(window, QStringLiteral("aboutDialog"));
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
@@ -2773,33 +2764,14 @@ void UiDialogsTest::aboutPagesSitOnAFrameJoinedToTheTabs() {
             }
         }
     }
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!about->isVisible());
-}
-
-void UiDialogsTest::aboutPagesNeverRunUnderTheButtons_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("default font") << 0.0;
-    QTest::newRow("24 pt") << 24.0;
+    QVERIFY(reject(dialog));
 }
 
 // About opens tall enough for its tallest page at its width, so every tab
 // shows whole, its last line at least 12 px above the buttons. Made shorter
 // than its pages, it scrolls them, still clear of the buttons: at 24 pt
 // the links once sat under them.
-void UiDialogsTest::aboutPagesNeverRunUnderTheButtons() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont large = applicationFont;
-        large.setPointSizeF(pointSize);
-        QGuiApplication::setFont(large);
-    }
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkAboutPagesNeverRunUnderTheButtons(QQuickWindow *window) {
     QObject *dialog = object(window, QStringLiteral("aboutDialog"));
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
@@ -2820,7 +2792,9 @@ void UiDialogsTest::aboutPagesNeverRunUnderTheButtons() {
         dialog->setProperty("tabIndex", tab);
         QQuickItem *page = visibleNamed(about, pageNames.at(tab));
         QVERIFY2(page != nullptr, qPrintable(at));
-        QTRY_VERIFY2(!layoutPending(page) && !layoutPending(view), qPrintable(at));
+        // Laid out, its own layouts too: a tab shown again lays out its
+        // rows of links on the next polish.
+        QTRY_VERIFY2(!layoutPending(view) && !layoutPendingUnder(page), qPrintable(at));
         QVERIFY2(sceneRect(view).bottom() <= buttonsTop() - 12 + 0.5,
                  qPrintable(QStringLiteral("%1: the pages end at %2, the buttons start at %3")
                                 .arg(at).arg(sceneRect(view).bottom()).arg(buttonsTop())));
@@ -2867,22 +2841,31 @@ void UiDialogsTest::aboutPagesNeverRunUnderTheButtons() {
         checkTab(tab, false, QStringLiteral("least height, tab %1").arg(tab));
         QVERIFY(!QTest::currentTestFailed());
     }
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!about->isVisible());
+    QVERIFY(reject(dialog));
 }
 
-void UiDialogsTest::recentIssuesIsAPopupAboveTheStatusBar() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+// Recent Issues, a popup of rows over the main window: each check starts
+// with an empty history.
+void UiDialogsTest::recentIssuesLayOutTheirRows() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkRecentIssuesIsAPopupAboveTheStatusBar(window); },
+               [&] { checkRecentIssuesLinkPressShowsAtOnce(window); },
+               [&] { checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(window); }});
+}
+
+void UiDialogsTest::checkRecentIssuesIsAPopupAboveTheStatusBar(QQuickWindow *window) {
+    clearIssues(window);
     report(window, 1, 0, kStaticPath, kEndsEarly);
     QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
     QVERIFY(popup != nullptr);
     QVERIFY(openIssues(window));
-    // 460 px, 6 px from the window's right edge and just above the status bar.
+    // 460 px, at its margin from the window's right edge and just above
+    // the status bar.
     QCOMPARE(popup->property("width").toReal(), 460.0);
-    QCOMPARE(popup->property("x").toReal() + popup->property("width").toReal(), window->width() - 6.0);
+    QCOMPARE(popup->property("x").toReal() + popup->property("width").toReal(),
+             window->width() - popup->property("edgeMargin").toReal());
     QQuickItem *statusBar = named(window, QStringLiteral("statusBar"));
     QVERIFY(statusBar != nullptr);
     const qreal bottom = popup->property("y").toReal() + popup->property("height").toReal();
@@ -2908,20 +2891,31 @@ void UiDialogsTest::recentIssuesIsAPopupAboveTheStatusBar() {
     QTRY_VERIFY(!popup->property("visible").toBool());
 }
 
-// The header is as tall as its title needs: at 24 pt, its fixed 32 px left
-// the title over the first issue's category line.
-void UiDialogsTest::recentIssuesHeaderHoldsItsTitleAtLargeFonts() {
+// Recent Issues' header at 24 pt, with KDE's toolbar font at 10 pt.
+void UiDialogsTest::recentIssuesHeaderFollowsALargeFont() {
     const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    // QApplication's setFont() without a class drops the class fonts.
+    const auto restoreFont = qScopeGuard([&] { QApplication::setFont(applicationFont); });
     QFont large = applicationFont;
     large.setPointSizeF(24);
     QGuiApplication::setFont(large);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QFont toolbar = applicationFont;
+    toolbar.setPointSizeF(10);
+    QApplication::setFont(toolbar, "QToolButton");
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     report(window, 1, 0, kStaticPath, kEndsEarly);
     QVERIFY(openIssues(window));
+    runInTurn({[&] { checkRecentIssuesHeaderHoldsItsTitle(window); },
+               [&] { checkRecentIssuesActionsAreInTheTextFont(window); }});
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());
+}
+
+// The header is as tall as its title needs: at 24 pt, its fixed 32 px left
+// the title over the first issue's category line.
+void UiDialogsTest::checkRecentIssuesHeaderHoldsItsTitle(QQuickWindow *window) {
     QQuickItem *header = visibleNamed(window, QStringLiteral("errorHistoryHeader"));
     QQuickItem *title = visibleNamed(window, QStringLiteral("errorHistoryTitle"));
     QQuickItem *clear = visibleNamed(window, QStringLiteral("errorHistoryClearButton"));
@@ -2945,8 +2939,6 @@ void UiDialogsTest::recentIssuesHeaderHoldsItsTitleAtLargeFonts() {
              qPrintable(where));
     QVERIFY2(sceneRect(title).bottom() <= sceneRect(category).top() + 0.5, qPrintable(where));
     QVERIFY2(!sceneRect(title).intersects(sceneRect(category)), qPrintable(where));
-    QTest::keyClick(window, Qt::Key_Escape);
-    QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());
 }
 
 // Clear All and Open Diagnostics… are drawn in the font of the text
@@ -2957,22 +2949,7 @@ void UiDialogsTest::recentIssuesHeaderHoldsItsTitleAtLargeFonts() {
 // their own labels, in the text's font, and each button is as wide as its
 // icon and caption in that font need. The header stays 32 px with the
 // default font (recentIssuesIsAPopupAboveTheStatusBar).
-void UiDialogsTest::recentIssuesActionsAreInTheTextFont() {
-    const QFont applicationFont = QGuiApplication::font();
-    // QApplication's setFont() without a class drops the class fonts.
-    const auto restoreFont = qScopeGuard([&] { QApplication::setFont(applicationFont); });
-    QFont large = applicationFont;
-    large.setPointSizeF(24);
-    QGuiApplication::setFont(large);
-    QFont toolbar = applicationFont;
-    toolbar.setPointSizeF(10);
-    QApplication::setFont(toolbar, "QToolButton");
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    report(window, 1, 0, kStaticPath, kEndsEarly);
-    QVERIFY(openIssues(window));
+void UiDialogsTest::checkRecentIssuesActionsAreInTheTextFont(QQuickWindow *window) {
     QQuickItem *title = visibleNamed(window, QStringLiteral("errorHistoryTitle"));
     QVERIFY(title != nullptr);
     const int textPixels = QFontInfo(title->property("font").value<QFont>()).pixelSize();
@@ -3034,15 +3011,10 @@ void UiDialogsTest::recentIssuesActionsAreInTheTextFont() {
     }
     QCOMPARE(sceneRect(itemsNamed(diagnostics, QStringLiteral("textToolButtonIcon")).first()).left(),
              sceneRect(visibleNamed(window, QStringLiteral("errorHistoryTitle"))).left());
-    QTest::keyClick(window, Qt::Key_Escape);
-    QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());
 }
 
-void UiDialogsTest::recentIssuesRowsSplitTheMessageAndOfferOneAction() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(QQuickWindow *window) {
+    clearIssues(window);
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("queueRows", queueRowsOf({QStringLiteral("/music/a.flac"), kStaticPath})));
     QVERIFY(bridge->setProperty("queueLength", 2));
@@ -3080,8 +3052,9 @@ void UiDialogsTest::recentIssuesRowsSplitTheMessageAndOfferOneAction() {
     QVERIFY(sceneRect(time).right() > sceneRect(category).right() - 0.5);
     // The file is named in the title, so its path does not repeat.
     QVERIFY(!itemsNamed(first, QStringLiteral("errorHistorySubject")).at(0)->isVisible());
+    // The severity glyph as large as a line of text holds.
     QQuickItem *glyph = itemsNamed(first, QStringLiteral("errorHistoryGlyph")).at(0);
-    QCOMPARE(glyph->width(), 16.0);
+    QCOMPARE(glyph->width(), paletteOf(window)->property("labelIconSize").toReal());
     QCOMPARE(hex(glyph->property("color").value<QColor>()), hex(tokenOf(window, "negative")));
     QQuickItem *action = itemsNamed(first, QStringLiteral("errorHistoryActionButton")).at(0);
     QVERIFY(action->isVisible());
@@ -3123,9 +3096,8 @@ void UiDialogsTest::recentIssuesRowsSplitTheMessageAndOfferOneAction() {
 }
 
 void UiDialogsTest::recentIssuesActionsShowTheFileOrOpenTheSettings() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     QVariantList queueRows;
@@ -3196,9 +3168,8 @@ void UiDialogsTest::recentIssuesActionsShowTheFileOrOpenTheSettings() {
 }
 
 void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     report(window, 2, 0, QString(), QStringLiteral("Archive isn\u2019t watched. It is rescanned every 30 minutes instead."));
     report(window, 1, 0, kStaticPath, kEndsEarly);
@@ -3269,16 +3240,9 @@ void UiDialogsTest::diagnosticsActionsShareOneRow_data() {
 // and its text clear of the frame.
 void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont large = applicationFont;
-        large.setPointSizeF(pointSize);
-        QGuiApplication::setFont(large);
-    }
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    const ScopedApplicationFont font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     QStringList lines;
@@ -3398,8 +3362,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QVERIFY(QMetaObject::invokeMethod(bridge, "diagnosticsChanged"));
     QTRY_VERIFY(!buttons.at(1)->isEnabled());
     QCOMPARE(diagnostics->minimumWidth(), minimumWidth);
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!diagnostics->isVisible());
+    QVERIFY(reject(dialog));
 }
 
 // Recent Issues has the keyboard where it shows it: opened with the pointer,
@@ -3410,9 +3373,8 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
 // button with the keyboard, the first action has it, with its ring, and
 // Space presses it.
 void UiDialogsTest::recentIssuesOpenWithTheirFocusShown() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     report(window, 2, 0, QStringLiteral("Fixtures"), QStringLiteral("Could not read 2 files during the scan"));
     QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
@@ -3460,14 +3422,12 @@ void UiDialogsTest::recentIssuesOpenWithTheirFocusShown() {
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_VERIFY(preferences->property("opened").toBool());
     QCOMPARE(preferences->property("pageIndex").toInt(), 0);
-    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
-    QTRY_VERIFY(!preferences->property("visible").toBool());
+    QVERIFY(reject(preferences));
 }
 
 void UiDialogsTest::recentIssuesAreSeenWhenThePopupCloses() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *errors = object(window, QStringLiteral("errorController"));
     report(window, 1, 0, kStaticPath, kEndsEarly);
@@ -3498,9 +3458,8 @@ void UiDialogsTest::recentIssuesAreSeenWhenThePopupCloses() {
 }
 
 void UiDialogsTest::thePanesEndsEarlyLinkOpensItsIssue() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("queueRows", queueRowsOf({QStringLiteral("/music/a.flac"), kStaticPath})));
@@ -3557,9 +3516,8 @@ void UiDialogsTest::recentIssuesFollowAQueueReplacedWithOneOfTheSameLength() {
         return row;
     };
     QVERIFY(model.setRows({rowOf(kStaticPath)}));
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("queueRows", QVariant::fromValue<QObject *>(&model)));
@@ -3644,9 +3602,8 @@ void UiDialogsTest::recentIssuesLookUpALargeQueueAtTheSameCost() {
     };
     QueueRowsModel model;
     QVERIFY(model.setRows(rowsOf(0, 100)));
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("queueRows", QVariant::fromValue<QObject *>(&model)));
@@ -3701,21 +3658,27 @@ void UiDialogsTest::recentIssuesLookUpALargeQueueAtTheSameCost() {
     QTRY_COMPARE(evaluate(popup, QStringLiteral("Object.keys(queuedSubjects).length")).toInt(), limit - limit / 2);
 }
 
-void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(8); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
-    // Edit Tags has a window of its own.
-    QQuickWindow *tags = windowOf(dialog);
-    QVERIFY(QTest::qWaitForWindowActive(tags));
+// Edit Tags at the default font, opened again for each check: its table's
+// header, its tools, a field whose files differ, and an edit's marks and
+// reverts.
+void UiDialogsTest::editTagsShowsItsFilesAndEdits() {
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkEditTagsTableHeaderUsesTheQueuesHeaderStyle(main); },
+               [&] { checkEditTagsToolsMenuHoldsTheToolsAndCaseChanges(main); },
+               [&] { checkEditTagsMultipleValuesPlaceholderReads(main); },
+               [&] { checkEditTagsMarksAChangedFieldAndColumnAndReverts(main); },
+               [&] { checkEditTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut(main); }});
+}
+
+// A changed field's label turns semibold with a Revert, and so does its
+// column's header; the field's Revert reverts the selected rows, the
+// column's every row.
+void UiDialogsTest::checkEditTagsMarksAChangedFieldAndColumnAndReverts(DialogsWindow &main) {
+    QQuickWindow *window = main.window;
+    TagEditorController &editor = main.editor;
+    QQuickWindow *tags = openTagEditor(main, tagRows(8));
+    QVERIFY(tags != nullptr);
     editor.selectAllRows();
     QQuickItem *label = nullptr;
     QTRY_VERIFY((label = visibleNamed(tags, QStringLiteral("tagEditorLabel_genre"))) != nullptr);
@@ -3775,28 +3738,16 @@ void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {
     QTRY_VERIFY(!columnRevert->isVisible());
     QCOMPARE(columnLabel->property("font").value<QFont>().weight(), QFont::Normal);
     QVERIFY(!editor.dirty());
-    editor.close();
-    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QVERIFY(closeTagEditor(main));
 }
 
 // The column's Revert shows as soon as an edit changes the column, but its
 // header row takes it back only when it is next laid out: a click before
 // that went to the column's label (#516).
-void UiDialogsTest::editTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut() {
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(8); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
-    // Edit Tags has a window of its own.
-    QQuickWindow *tags = windowOf(dialog);
-    QVERIFY(QTest::qWaitForWindowActive(tags));
+void UiDialogsTest::checkEditTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut(DialogsWindow &main) {
+    TagEditorController &editor = main.editor;
+    QQuickWindow *tags = openTagEditor(main, tagRows(8));
+    QVERIFY(tags != nullptr);
     QQuickItem *columnRevert = named(tags, QStringLiteral("tagEditorColumnRevert_genre"));
     QVERIFY(columnRevert != nullptr);
     QTRY_VERIFY(!layoutPending(columnRevert));
@@ -3813,24 +3764,13 @@ void UiDialogsTest::editTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut() {
     }
     QTRY_VERIFY(!columnRevert->isVisible());
     QVERIFY(!editor.dirty());
-    editor.close();
-    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QVERIFY(closeTagEditor(main));
 }
 
-void UiDialogsTest::editTagsTableHeaderUsesTheQueuesHeaderStyle() {
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(3); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
-    // Edit Tags has a window of its own.
-    QQuickWindow *tags = windowOf(dialog);
+void UiDialogsTest::checkEditTagsTableHeaderUsesTheQueuesHeaderStyle(DialogsWindow &main) {
+    QQuickWindow *window = main.window;
+    QQuickWindow *tags = openTagEditor(main, tagRows(3));
+    QVERIFY(tags != nullptr);
     QQuickItem *queueLabel = named(window, QStringLiteral("queueHeader_artist"));
     QVERIFY(queueLabel != nullptr);
     QQuickItem *header = nullptr;
@@ -3853,25 +3793,14 @@ void UiDialogsTest::editTagsTableHeaderUsesTheQueuesHeaderStyle() {
     QQuickItem *last = named(tags, QStringLiteral("tagEditorColumn_directory"));
     QVERIFY(sceneRect(last).right() >= sceneRect(table).right() - 8.5 - 0.5
             || table->property("contentWidth").toReal() > table->width());
-    editor.close();
-    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QVERIFY(closeTagEditor(main));
 }
 
-void UiDialogsTest::editTagsToolsMenuHoldsTheToolsAndCaseChanges() {
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(2); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
-    // Edit Tags has a window of its own.
-    QQuickWindow *tags = windowOf(dialog);
-    QVERIFY(QTest::qWaitForWindowActive(tags));
+void UiDialogsTest::checkEditTagsToolsMenuHoldsTheToolsAndCaseChanges(DialogsWindow &main) {
+    QQuickWindow *window = main.window;
+    TagEditorController &editor = main.editor;
+    QQuickWindow *tags = openTagEditor(main, tagRows(2));
+    QVERIFY(tags != nullptr);
     editor.selectAllRows();
     editor.applyBulkField(QStringLiteral("title"), QStringLiteral("the long way home"));
     QQuickItem *tools = visibleNamed(tags, QStringLiteral("tagEditorToolsButton"));
@@ -3892,8 +3821,7 @@ void UiDialogsTest::editTagsToolsMenuHoldsTheToolsAndCaseChanges() {
     QTRY_VERIFY(visibleNamed(tags, QStringLiteral("tagEditorField_title"))->property("text").toString()
                 == QStringLiteral("The Long Way Home"));
     menu->setProperty("visible", false);
-    editor.close();
-    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QVERIFY(closeTagEditor(main));
 }
 
 // Edit Tags is a window of its own, as Configure and About (#480): KWin's
@@ -3904,14 +3832,10 @@ void UiDialogsTest::editTagsToolsMenuHoldsTheToolsAndCaseChanges() {
 // unsaved edits first, as Cancel does (#559), and the question opens over
 // it.
 void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(4); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    TagEditorController &editor = main.editor;
     auto *overlay = qvariant_cast<QQuickItem *>(window->property("overlayHost"));
     QVERIFY(overlay != nullptr);
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
@@ -3920,9 +3844,7 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
     QQuickWindow *tags = windowOf(dialog);
     QVERIFY(tags != nullptr);
     QVERIFY(!tags->isVisible());
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading());
-    QVERIFY(waitForDialogWindow(dialog));
+    QVERIFY(openTagEditor(main, tagRows(4)) != nullptr);
 
     QVERIFY(tags->isTopLevel());
     QCOMPARE(tags->transientParent(), window);
@@ -3961,9 +3883,7 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
     QVERIFY(QTest::qWaitForWindowActive(window));
 
     // The size the user gives it stays when it opens again.
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading());
-    QVERIFY(waitForDialogWindow(dialog));
+    QVERIFY(openTagEditor(main, tagRows(4)) != nullptr);
     const QSize resized(tags->width() + 120, tags->height() + 60);
     tags->resize(resized);
     QTRY_COMPARE(tags->size(), resized);
@@ -3992,12 +3912,9 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
     QTRY_VERIFY(!tags->isVisible());
     QVERIFY(!editor.isOpen());
 
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading());
-    QVERIFY(waitForDialogWindow(dialog));
+    QVERIFY(openTagEditor(main, tagRows(4)) != nullptr);
     QCOMPARE(tags->size(), resized);
-    editor.close();
-    QTRY_VERIFY(!tags->isVisible());
+    QVERIFY(closeTagEditor(main));
 }
 
 // The table's columns at the default font, or a smaller one: the window opens
@@ -4008,26 +3925,13 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
 // or more. Status takes no room while no row has a status.
 void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     // The default 10 pt font, which the reviews see.
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont standard = applicationFont;
-    standard.setPointSizeF(10);
-    QGuiApplication::setFont(standard);
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRowsOfAnAlbum(4); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    // The editor opens no wider than the main window, which is as wide as a
-    // large screen here.
-    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1920, 1200);
+    const ScopedApplicationFont font(10);
+    DialogsWindow main(1920, 1200);
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QCOMPARE(paletteOf(window)->property("basePointSize").toReal(), 10.0);
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading());
-    QVERIFY(waitForDialogWindow(dialog));
+    QVERIFY(openTagEditor(main, tagRowsOfAnAlbum(4)) != nullptr);
     QQuickWindow *tags = windowOf(dialog);
     QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
     QVERIFY(table != nullptr);
@@ -4087,9 +3991,10 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     }
     QVERIFY2(tags->width() <= qCeil(held), qPrintable(QStringLiteral("holds %1: ").arg(held) + describeColumns()));
     QCOMPARE(qreal(tags->width()), dialog->property("fittedWidth").toReal());
-    // "of" is 4 px from the field on either side of it, the number as far
-    // from its label as the other fields are from theirs, and the total ends
-    // where they do.
+    // "of" is the form's small spacing, 4 px, from the field on either side
+    // of it, the number as far from its label as the other fields are from
+    // theirs, and the total ends where they do.
+    const qreal smallSpacing = evaluate(dialog, QStringLiteral("Kirigami.Units.smallSpacing")).toReal();
     for (const auto &[number, total] : {std::pair{QStringLiteral("trackNo"), QStringLiteral("totalTracks")},
                                         std::pair{QStringLiteral("discNo"), QStringLiteral("totalDiscs")}}) {
         QQuickItem *of = visibleNamed(tags, QStringLiteral("tagEditorOf_") + number);
@@ -4097,8 +4002,8 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
         QQuickItem *totalField = visibleNamed(tags, QStringLiteral("tagEditorField_") + total);
         QQuickItem *titleField = visibleNamed(tags, QStringLiteral("tagEditorField_title"));
         QVERIFY2(of && numberField && totalField && titleField, qPrintable(number));
-        QCOMPARE(sceneRect(of).left() - sceneRect(numberField).right(), 4.0);
-        QCOMPARE(sceneRect(totalField).left() - sceneRect(of).right(), 4.0);
+        QCOMPARE(sceneRect(of).left() - sceneRect(numberField).right(), smallSpacing);
+        QCOMPARE(sceneRect(totalField).left() - sceneRect(of).right(), smallSpacing);
         QCOMPARE(sceneRect(numberField).left(), sceneRect(titleField).left());
         // The pair ends on the fields' edge, the two fields alike in width
         // (it ended 35 px short of the other fields).
@@ -4145,76 +4050,30 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
             }
         }
     }
-    editor.close();
-    QTRY_VERIFY(!tags->isVisible());
+    QVERIFY(closeTagEditor(main));
 }
 
 // The editor opens no wider than the main window it opens from, frames
-// and all (it opened 1624 px wide from a 1600 px one). From a 1600 by
-// 1000 px window, File Name and Folder give way first, Title, Artist and
-// Album keep 160 px or more, and the table does not scroll sideways; from
-// a 1000 by 720 px one, it is as wide as the main window.
+// and all (it opened 1624 px wide from a 1600 px one), and as wide as it
+// when it needs more. How its columns give way at about that width,
+// editTagsColumnsFitTheDefaultWindowAndFollowTheFont checks.
 void UiDialogsTest::editTagsOpensNoWiderThanTheMainWindow() {
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont standard = applicationFont;
-    standard.setPointSizeF(10);
-    QGuiApplication::setFont(standard);
+    const ScopedApplicationFont font(10);
     for (const QSize mainSize : {QSize(1600, 1000), QSize(1000, 720)}) {
-        const QString at = QStringLiteral("%1x%2").arg(mainSize.width()).arg(mainSize.height());
-        TagEditorController editor(nullptr);
-        editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                       const TagEditorController::RenameGate &) { return tagRowsOfAnAlbum(4); };
-        LibraryTreeModel libraryModel;
-        QQmlApplicationEngine engine;
-        engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-        QQuickWindow *window = loadMainWindow(engine, libraryModel, mainSize.width(), mainSize.height());
+        DialogsWindow main(mainSize.width(), mainSize.height());
+        QQuickWindow *window = main.window;
         QVERIFY2(window != nullptr, "Main.qml failed to show");
         QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
-        QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-        QTRY_VERIFY(!editor.loading());
-        QVERIFY(waitForDialogWindow(dialog));
-        QQuickWindow *tags = windowOf(dialog);
-        QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
-        QVERIFY(table != nullptr);
-        QTRY_VERIFY(!layoutPending(table));
-        const QString where = QStringLiteral("%1: editor %2 (frame %3), main window %4 (frame %5)")
-            .arg(at).arg(tags->width()).arg(tags->frameGeometry().width()).arg(window->width())
+        QQuickWindow *tags = openTagEditor(main, tagRowsOfAnAlbum(4));
+        QVERIFY(tags != nullptr);
+        const QString where = QStringLiteral("editor %1 (frame %2), main window %3 (frame %4)")
+            .arg(tags->width()).arg(tags->frameGeometry().width()).arg(window->width())
             .arg(window->frameGeometry().width());
         // It needs more than either main window gives it.
-        QVERIFY2(dialog->property("defaultWidth").toReal() <= mainSize.width(), qPrintable(where));
-        QVERIFY2(tags->width() <= window->width(), qPrintable(where));
+        QVERIFY2(dialog->property("fittedWidth").toReal() >= mainSize.width(), qPrintable(where));
         QVERIFY2(tags->frameGeometry().width() <= window->frameGeometry().width(), qPrintable(where));
-        if (mainSize.width() == 1000) {
-            QCOMPARE(tags->width(), window->width());
-            continue;
-        }
         QCOMPARE(tags->width(), window->width());
-        const auto columnWidth = [tags](const QString &key) {
-            QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_") + key);
-            return column != nullptr ? column->width() : -1.0;
-        };
-        const QString columns = QStringLiteral("%1; title %2, artist %3, album %4, file name %5, folder %6, "
-                                               "content %7 in %8")
-            .arg(where).arg(columnWidth(QStringLiteral("title"))).arg(columnWidth(QStringLiteral("artist")))
-            .arg(columnWidth(QStringLiteral("album"))).arg(columnWidth(QStringLiteral("fileName")))
-            .arg(columnWidth(QStringLiteral("directory"))).arg(table->property("contentWidth").toReal())
-            .arg(table->width());
-        QVERIFY2(columnWidth(QStringLiteral("fileName")) < 220 || columnWidth(QStringLiteral("directory")) < 156,
-                 qPrintable(columns));
-        for (const QString &key : {QStringLiteral("title"), QStringLiteral("artist"), QStringLiteral("album")}) {
-            QVERIFY2(columnWidth(key) >= 160, qPrintable(key + QStringLiteral(": ") + columns));
-        }
-        QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(columns));
-        editor.close();
-        QTRY_VERIFY(!tags->isVisible());
     }
-}
-
-void UiDialogsTest::autoNumberIsOneFormInReadingOrder_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("10 pt") << 10.0;
-    QTest::newRow("24 pt") << 24.0;
 }
 
 // Auto Number is one form in reading order: the tracks' start and Write
@@ -4229,24 +4088,9 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder_data() {
 // start fields hold four digits, 5 grid units, and their errors wrap at 14.
 // The window is as wide as the form, in the font it is in: at 24 pt, a fixed
 // 26 grid units left the check boxes running up to 435 px past it.
-void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont font = applicationFont;
-    font.setPointSizeF(pointSize);
-    QGuiApplication::setFont(font);
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(4); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading());
-    QVERIFY(waitForDialogWindow(object(window, QStringLiteral("tagEditorDialog"))));
+void UiDialogsTest::checkAutoNumberIsOneFormInReadingOrder(DialogsWindow &main) {
+    QQuickWindow *window = main.window;
+    QVERIFY(openTagEditor(main, tagRows(4)) != nullptr);
     QObject *dialog = object(window, QStringLiteral("autoNumberDialog"));
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
@@ -4348,7 +4192,7 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
     QVERIFY(numbers->width() <= qCeil(form->implicitWidth() + 2 * padding) || numbers->width() == numbers->minimumWidth());
     QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
     QTRY_VERIFY(!dialog->property("visible").toBool());
-    editor.close();
+    main.editor.close();
 }
 
 // A field whose files hold different values says so with its placeholder,
@@ -4356,21 +4200,13 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
 // placeholder colour, at least 4.5:1 on the field, where Breeze Light's own
 // was 4.2:1. The colour's contrast in both themes is tested with
 // the palette's tokens.
-void UiDialogsTest::editTagsMultipleValuesPlaceholderReads() {
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(3); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
+void UiDialogsTest::checkEditTagsMultipleValuesPlaceholderReads(DialogsWindow &main) {
+    QQuickWindow *window = main.window;
+    TagEditorController &editor = main.editor;
+    QQuickWindow *tags = openTagEditor(main, tagRows(3));
+    QVERIFY(tags != nullptr);
     editor.selectAllRows();
     QVERIFY(editor.bulkValueMixed(QStringLiteral("title")));
-    QQuickWindow *tags = windowOf(dialog);
     QQuickItem *title = nullptr;
     QTRY_VERIFY((title = visibleNamed(tags, QStringLiteral("tagEditorField_title"))) != nullptr);
     QTRY_COMPARE(title->property("placeholderText").toString(), QStringLiteral("Multiple values"));
@@ -4381,23 +4217,7 @@ void UiDialogsTest::editTagsMultipleValuesPlaceholderReads() {
     // A field whose files agree has no placeholder.
     QCOMPARE(visibleNamed(tags, QStringLiteral("tagEditorField_artist"))->property("placeholderText").toString(),
              QString());
-    editor.close();
-    QTRY_VERIFY(!tags->isVisible());
-}
-
-void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::addColumn<QSize>("windowSize");
-    QTest::addColumn<bool>("edited");
-    for (const qreal pointSize : {10.0, 24.0}) {
-        for (const QSize size : {QSize(1600, 1000), QSize(1000, 720)}) {
-            for (const bool edited : {false, true}) {
-                QTest::addRow("%g pt, %dx%d%s", pointSize, size.width(), size.height(),
-                              edited ? ", edited" : "")
-                    << pointSize << size << edited;
-            }
-        }
-    }
+    QVERIFY(closeTagEditor(main));
 }
 
 // Track's field says that its files' numbers differ, whole: "Multiple
@@ -4408,52 +4228,25 @@ void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole_data() {
 // the fields still hold the word and their value whole, and Edit Tags is
 // no wider than its window ("Mixed" elided to "Mix…" once the Revert
 // followed the font).
-void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
-    QFETCH(qreal, pointSize);
-    QFETCH(QSize, windowSize);
-    QFETCH(bool, edited);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont font(QStringLiteral("Noto Sans"));
-    font.setPointSizeF(pointSize);
-    QGuiApplication::setFont(font);
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRowsOfAnAlbum(4); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowSize.width(), windowSize.height());
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkEditTagsNumberPairsShowMultipleValuesWhole(DialogsWindow &main, qreal pointSize) {
+    QQuickWindow *window = main.window;
+    TagEditorController &editor = main.editor;
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading());
-    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfAnAlbum(4));
+    QVERIFY(tags != nullptr);
     editor.selectAllRows();
-    // Edited in one file: Track and Disc stay mixed, and a total all of
-    // them take has its value, each with its Revert.
-    if (edited) {
-        editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("09"));
-        editor.setCell(0, QStringLiteral("discNo"), QStringLiteral("2"));
-        editor.setCell(0, QStringLiteral("title"), QStringLiteral("Paper Harbour, Revised"));
-        editor.applyBulkField(QStringLiteral("totalTracks"), QStringLiteral("12"));
-        QVERIFY(editor.bulkValueMixed(QStringLiteral("discNo")));
-        QVERIFY(!editor.bulkValueMixed(QStringLiteral("totalTracks")));
-    }
-    QVERIFY(editor.bulkValueMixed(QStringLiteral("trackNo")));
-    QQuickWindow *tags = windowOf(dialog);
     const qreal gridUnit = evaluate(paletteOf(window), QStringLiteral("Kirigami.Units.gridUnit")).toReal();
     // The fields' width as it was with the default font: 19 grid units.
     if (pointSize <= 10) {
         QCOMPARE(dialog->property("fieldsWidth").toReal(), 19 * gridUnit);
     }
     QVERIFY(dialog->property("fieldsWidth").toReal() >= 19 * gridUnit);
+    // Edit Tags is no wider than the window it opens from.
+    QVERIFY2(tags->width() <= window->width(),
+             qPrintable(QStringLiteral("Edit Tags %1 wide, its window %2").arg(tags->width()).arg(window->width())));
+    const int openedWidth = tags->width();
     QQuickItem *number = nullptr;
     QTRY_VERIFY((number = visibleNamed(tags, QStringLiteral("tagEditorField_trackNo"))) != nullptr);
-    // The whole word with the default font, but for the Revert's room.
-    const QString expected = pointSize <= 10 && !edited ? QStringLiteral("Multiple values") : QStringLiteral("Mixed");
-    QTRY_COMPARE(number->property("placeholderText").toString(), expected);
-    QTRY_VERIFY(!layoutPending(number));
     const QStringList keys{QStringLiteral("title"), QStringLiteral("artist"), QStringLiteral("album"),
                            QStringLiteral("albumArtist"), QStringLiteral("genre"), QStringLiteral("year"),
                            QStringLiteral("trackNo"), QStringLiteral("totalTracks"), QStringLiteral("discNo"),
@@ -4474,66 +4267,87 @@ void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
     };
     const QStringList numberKeys{QStringLiteral("trackNo"), QStringLiteral("totalTracks"),
                                  QStringLiteral("discNo"), QStringLiteral("totalDiscs")};
-    // Every field whose files differ says it in the same word, the short
-    // one once a number field needs it, wide fields too (not "Multiple
-    // values" and "Mixed" in one form at 24 pt), whole between
-    // its paddings, as is a number field's value beside its Revert; a
-    // longer text scrolls in its field.
-    int mixedFields = 0;
-    int reverts = 0;
-    for (const QString &key : keys) {
-        QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_") + key);
-        QVERIFY2(field != nullptr, qPrintable(key));
-        QQuickItem *revert = named(tags, QStringLiteral("tagEditorRevert_") + key);
-        QVERIFY2(revert != nullptr, qPrintable(key));
-        QTRY_COMPARE(revert->isVisible(), editor.bulkFieldChanged(key));
-        reverts += revert->isVisible() ? 1 : 0;
-        const qreal textArea = field->width() - field->property("leftPadding").toReal()
-            - field->property("rightPadding").toReal();
-        const QString value = field->property("text").toString();
-        if (!value.isEmpty()) {
-            QCOMPARE(field->property("placeholderText").toString(), QString());
-            if (!numberKeys.contains(key)) {
+    // The fields with Edit Tags `width` wide, as it opens from a main window
+    // that wide: every field whose files differ says it in the same word,
+    // the short one once a number field needs it, wide fields too (not
+    // "Multiple values" and "Mixed" in one form at 24 pt), whole between its
+    // paddings, as is a number field's value beside its Revert; a longer
+    // text scrolls in its field.
+    const auto checkFields = [&](int width, bool edited) {
+        tags->resize(qMax(width, tags->minimumWidth()), tags->height());
+        QTRY_COMPARE(tags->contentItem()->width(), qreal(qMax(width, tags->minimumWidth())));
+        QTRY_VERIFY(!layoutPending(number));
+        const QString where = QStringLiteral("%1 px%2").arg(tags->width()).arg(edited ? QStringLiteral(", edited") : QString());
+        QVERIFY(editor.bulkValueMixed(QStringLiteral("trackNo")));
+        // The whole word with the default font, but for the Revert's room.
+        const QString expected = pointSize <= 10 && !edited ? QStringLiteral("Multiple values") : QStringLiteral("Mixed");
+        QTRY_COMPARE(number->property("placeholderText").toString(), expected);
+        int mixedFields = 0;
+        int reverts = 0;
+        for (const QString &key : keys) {
+            const QString at = where + QStringLiteral(", ") + key;
+            QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_") + key);
+            QVERIFY2(field != nullptr, qPrintable(at));
+            QQuickItem *revert = named(tags, QStringLiteral("tagEditorRevert_") + key);
+            QVERIFY2(revert != nullptr, qPrintable(at));
+            QTRY_COMPARE(revert->isVisible(), editor.bulkFieldChanged(key));
+            reverts += revert->isVisible() ? 1 : 0;
+            const qreal textArea = field->width() - field->property("leftPadding").toReal()
+                - field->property("rightPadding").toReal();
+            const QString value = field->property("text").toString();
+            if (!value.isEmpty()) {
+                QCOMPARE(field->property("placeholderText").toString(), QString());
+                if (!numberKeys.contains(key)) {
+                    continue;
+                }
+                const qreal advance = QFontMetricsF(field->property("font").value<QFont>()).horizontalAdvance(value);
+                QVERIFY2(advance <= textArea + 0.5,
+                         qPrintable(QStringLiteral("%1: \"%2\" %3 in %4 of %5").arg(at, value).arg(advance)
+                                        .arg(textArea).arg(describeItem(field))));
                 continue;
             }
-            const qreal advance = QFontMetricsF(field->property("font").value<QFont>()).horizontalAdvance(value);
-            QVERIFY2(advance <= textArea + 0.5,
-                     qPrintable(QStringLiteral("%1: \"%2\" %3 in %4 of %5").arg(key, value).arg(advance)
-                                    .arg(textArea).arg(describeItem(field))));
-            continue;
+            if (!editor.bulkValueMixed(key)) {
+                QCOMPARE(field->property("placeholderText").toString(), QString());
+                continue;
+            }
+            ++mixedFields;
+            QCOMPARE(field->property("placeholderText").toString(), expected);
+            QQuickItem *placeholder = drawn(field, expected);
+            QVERIFY2(placeholder != nullptr && placeholder->isVisible(), qPrintable(at));
+            const QString drawnAt = QStringLiteral("%1: %2 in %3, text area %4")
+                .arg(at, describeItem(placeholder), describeItem(field)).arg(textArea);
+            QTRY_VERIFY2(!placeholder->property("truncated").toBool(), qPrintable(drawnAt));
+            QVERIFY2(placeholder->implicitWidth() <= textArea + 0.5, qPrintable(drawnAt));
         }
-        if (!editor.bulkValueMixed(key)) {
-            QCOMPARE(field->property("placeholderText").toString(), QString());
-            continue;
-        }
-        ++mixedFields;
-        QCOMPARE(field->property("placeholderText").toString(), expected);
-        QQuickItem *placeholder = drawn(field, expected);
-        QVERIFY2(placeholder != nullptr && placeholder->isVisible(), qPrintable(key));
-        const QString at = QStringLiteral("%1: %2 in %3, text area %4")
-            .arg(key, describeItem(placeholder), describeItem(field)).arg(textArea);
-        QTRY_VERIFY2(!placeholder->property("truncated").toBool(), qPrintable(at));
-        QVERIFY2(placeholder->implicitWidth() <= textArea + 0.5, qPrintable(at));
-    }
-    QVERIFY(editor.bulkValueMixed(QStringLiteral("title")));
-    QVERIFY2(mixedFields >= (edited ? 3 : 2), qPrintable(QString::number(mixedFields)));
-    QCOMPARE(reverts, edited ? 4 : 0);
-    QQuickItem *title = visibleNamed(tags, QStringLiteral("tagEditorField_title"));
-    QQuickItem *total = visibleNamed(tags, QStringLiteral("tagEditorField_totalTracks"));
-    QVERIFY(title != nullptr && total != nullptr);
-    // A total that differs would show it whole too: the two alike. The
-    // pair ends where the other fields end.
-    const QString at = QStringLiteral("track %1, total %2, title %3")
-        .arg(describeItem(number), describeItem(total), describeItem(title));
-    QVERIFY2(std::abs(number->width() - total->width()) <= 1.0, qPrintable(at));
-    QCOMPARE(sceneRect(total).right(), sceneRect(title).right());
-    QCOMPARE(sceneRect(visibleNamed(tags, QStringLiteral("tagEditorField_totalDiscs"))).right(),
-             sceneRect(title).right());
-    // Edit Tags is no wider than the window it opens from.
-    QVERIFY2(tags->width() <= window->width(),
-             qPrintable(QStringLiteral("Edit Tags %1 wide, its window %2").arg(tags->width()).arg(window->width())));
-    editor.close();
-    QTRY_VERIFY(!tags->isVisible());
+        QVERIFY(editor.bulkValueMixed(QStringLiteral("title")));
+        QVERIFY2(mixedFields >= (edited ? 3 : 2), qPrintable(QStringLiteral("%1: %2").arg(where).arg(mixedFields)));
+        QCOMPARE(reverts, edited ? 4 : 0);
+        QQuickItem *title = visibleNamed(tags, QStringLiteral("tagEditorField_title"));
+        QQuickItem *total = visibleNamed(tags, QStringLiteral("tagEditorField_totalTracks"));
+        QVERIFY(title != nullptr && total != nullptr);
+        // A total that differs would show it whole too: the two alike. The
+        // pair ends where the other fields end.
+        const QString pair = QStringLiteral("%1: track %2, total %3, title %4")
+            .arg(where, describeItem(number), describeItem(total), describeItem(title));
+        QVERIFY2(std::abs(number->width() - total->width()) <= 1.0, qPrintable(pair));
+        QCOMPARE(sceneRect(total).right(), sceneRect(title).right());
+        QCOMPARE(sceneRect(visibleNamed(tags, QStringLiteral("tagEditorField_totalDiscs"))).right(),
+                 sceneRect(title).right());
+    };
+    // As it opens from this 1600 px main window, and from a 1000 px one;
+    // then edited in one file: Track and Disc stay mixed, and a total all of
+    // them take has its value, each with its Revert.
+    const auto edit = [&] {
+        editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("09"));
+        editor.setCell(0, QStringLiteral("discNo"), QStringLiteral("2"));
+        editor.setCell(0, QStringLiteral("title"), QStringLiteral("Paper Harbour, Revised"));
+        editor.applyBulkField(QStringLiteral("totalTracks"), QStringLiteral("12"));
+        QVERIFY(editor.bulkValueMixed(QStringLiteral("discNo")));
+        QVERIFY(!editor.bulkValueMixed(QStringLiteral("totalTracks")));
+    };
+    runInTurn({[&] { checkFields(openedWidth, false); }, [&] { checkFields(1000, false); }, edit,
+               [&] { checkFields(1000, true); }, [&] { checkFields(openedWidth, true); }});
+    QVERIFY(closeTagEditor(main));
 }
 
 // At 1364 px and wider, the table has no sideways scroll bar: File Name,
@@ -4545,19 +4359,13 @@ void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
 // track number and title, with the whole in a tooltip. In a wide window
 // the tags have their widths and File Name and Folder stretch.
 void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRowsWithLongPaths(4); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    TagEditorController &editor = main.editor;
     QVERIFY(paletteOf(window)->property("basePointSize").toReal() <= 10.0);
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading());
-    QVERIFY(waitForDialogWindow(dialog));
+    QVERIFY(openTagEditor(main, tagRowsWithLongPaths(4)) != nullptr);
     QQuickWindow *tags = windowOf(dialog);
     QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
     QVERIFY(table != nullptr);
@@ -4778,14 +4586,7 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
                                          {});
     QTRY_COMPARE(columnWidth(QStringLiteral("status")), 120.0);
     QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(describeColumns()));
-    editor.close();
-    QTRY_VERIFY(!tags->isVisible());
-}
-
-void UiDialogsTest::editTagsStatusSaysWhatFailedWhole_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("10 pt") << 10.0;
-    QTest::newRow("24 pt") << 24.0;
+    QVERIFY(closeTagEditor(main));
 }
 
 // A row whose save failed says "Not saved" in its Status cell, and one
@@ -4793,26 +4594,11 @@ void UiDialogsTest::editTagsStatusSaysWhatFailedWhole_data() {
 // the system's words in its tooltip and for screen readers (they are in
 // Details… too); the column holds them whole at either font and width
 // (the system's text was elided to "failed to …").
-void UiDialogsTest::editTagsStatusSaysWhatFailedWhole() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont font(QStringLiteral("Noto Sans"));
-    font.setPointSizeF(pointSize);
-    QGuiApplication::setFont(font);
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(4); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading());
-    QVERIFY(waitForDialogWindow(dialog));
-    QQuickWindow *tags = windowOf(dialog);
+void UiDialogsTest::checkEditTagsStatusSaysWhatFailedWhole(DialogsWindow &main, qreal pointSize) {
+    QQuickWindow *window = main.window;
+    TagEditorController &editor = main.editor;
+    QQuickWindow *tags = openTagEditor(main, tagRows(4));
+    QVERIFY(tags != nullptr);
     const QStringList paths = editor.loadedPaths();
     QVERIFY(paths.size() >= 2);
     const QString saveError = QStringLiteral("failed to create temporary file in /fixture/a/rather/long/folder/"
@@ -4860,26 +4646,30 @@ void UiDialogsTest::editTagsStatusSaysWhatFailedWhole() {
         tags->resize(2000, tags->height());
         QTRY_COMPARE(statusCell(0)->width(), 120.0);
     }
-    editor.close();
-    QTRY_VERIFY(!tags->isVisible());
+    QVERIFY(closeTagEditor(main));
 }
 
-void UiDialogsTest::dialogsPutTheirButtonsInKdesOrder() {
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(2); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+// The dialogs share one look, at the default font: each footer has its
+// buttons in KDE's order, on the content's inset and with glyphs that
+// follow the font; their texts use one-character ellipses; and every modal
+// dialog is a window of its own, with its title in KWin's title bar only.
+void UiDialogsTest::dialogsShareOneLook() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
-    // The tag editor's dialogs open over it.
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
-    editor.selectAllRows();
-    editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
-    // The affirmative button first, then the destructive one, then Cancel,
-    // on the right, as KDE orders them.
+    checkDialogsUseOneCharacterEllipsesAndNoTextGlyphs(window);
+    QVERIFY(!QTest::currentTestFailed());
+    QVERIFY(openTheParentDialogs(main));
+    runInTurn({[&] { checkDialogsPutTheirButtonsInKdesOrder(window); },
+               [&] { checkDialogsPutTheirButtonsOnTheContentInset(window); },
+               [&] { checkDialogButtonGlyphsFollowTheFont(window, 0); },
+               [&] { checkDialogsShareOneHeadingStyle(window); }});
+    closeTheParentDialogs(main);
+}
+
+// The affirmative button first, then the destructive one, then Cancel, on
+// the right, as KDE orders them.
+void UiDialogsTest::checkDialogsPutTheirButtonsInKdesOrder(QQuickWindow *window) {
     struct Order { const char *dialog; QStringList buttons; };
     const QList<Order> orders{
         {"quitSaveFailedDialog", {QStringLiteral("quitSaveFailedRetryButton"), QStringLiteral("quitSaveFailedQuitButton")}},
@@ -4891,9 +4681,6 @@ void UiDialogsTest::dialogsPutTheirButtonsInKdesOrder() {
         {"removeLibraryRootConfirmDialog", {QStringLiteral("confirmDialogConfirmButton"),
                                             QStringLiteral("confirmDialogCancelButton")}},
     };
-    // The confirmation of the library page opens over Configure Ferrous.
-    QVERIFY(openPreferences(window, 0) != nullptr);
-    QTRY_VERIFY(object(window, QStringLiteral("removeLibraryRootConfirmDialog")) != nullptr);
     for (const Order &order : orders) {
         QObject *dialog = object(window, QString::fromLatin1(order.dialog));
         QVERIFY2(dialog != nullptr, order.dialog);
@@ -4919,75 +4706,16 @@ void UiDialogsTest::dialogsPutTheirButtonsInKdesOrder() {
 // compact dialogs' buttons were 9 px from the edges, their content 19 px).
 // Buttons that share the row, such as Configure's Defaults, start on the
 // inset too, on the same line.
-void UiDialogsTest::dialogsPutTheirButtonsOnTheContentInset() {
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(2); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
-    editor.selectAllRows();
-    editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
-    QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
-    QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
-    QVERIFY(waitForDialogWindow(diagnostics));
-    QObject *preferences = openPreferences(window, 0);
-    QVERIFY(preferences != nullptr);
-    QTRY_VERIFY(object(window, QStringLiteral("removeLibraryRootConfirmDialog")) != nullptr);
+void UiDialogsTest::checkDialogsPutTheirButtonsOnTheContentInset(QQuickWindow *window) {
     // A grid unit: the compact dialogs' content inset.
     const qreal inset = object(window, QStringLiteral("quitSaveFailedDialog"))->property("contentPadding").toReal();
     QVERIFY(inset > 0);
-
-    // The footer's buttons that show, left to right.
-    const auto buttonsOf = [](QObject *dialog) {
-        QList<QQuickItem *> buttons;
-        auto *footer = qvariant_cast<QQuickItem *>(dialog->property("footer"));
-        if (footer == nullptr) {
-            return buttons;
-        }
-        std::function<void(QQuickItem *)> collect = [&](QQuickItem *item) {
-            for (QQuickItem *child : item->childItems()) {
-                if (!child->isVisible()) {
-                    continue;
-                }
-                if (child->inherits("QQuickAbstractButton")) {
-                    buttons.push_back(child);
-                } else {
-                    collect(child);
-                }
-            }
-        };
-        collect(footer);
-        std::sort(buttons.begin(), buttons.end(), [](QQuickItem *a, QQuickItem *b) {
-            return sceneRect(a).left() < sceneRect(b).left();
-        });
-        return buttons;
-    };
-    struct Case { const char *name; bool opened; bool leftButton; };
-    for (const Case &test : {Case{"quitSaveFailedDialog", false, false}, Case{"libraryRootNameDialog", false, false},
-                             Case{"removeLibraryRootConfirmDialog", false, false},
-                             Case{"tagEditorCloseConfirmDialog", false, false},
-                             Case{"autoNumberDialog", false, false}, Case{"renamePreviewDialog", false, false},
-                             Case{"tagEditorStatusDetailsDialog", false, false},
-                             Case{"clearDiagnosticsConfirmDialog", false, false},
-                             Case{"itunesArtworkDialog", false, false}, Case{"aboutDialog", false, true},
-                             Case{"diagnosticsDialog", true, false}, Case{"preferencesDialog", true, true},
-                             Case{"tagEditorDialog", true, true}}) {
-        const QString name = QString::fromLatin1(test.name);
-        QObject *dialog = object(window, name);
-        QVERIFY2(dialog != nullptr, test.name);
-        if (!test.opened) {
-            QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
-        }
-        QVERIFY2(waitForDialogWindow(dialog), test.name);
+    // The dialogs with buttons on the left of the row too.
+    const QStringList leftButtons{QStringLiteral("aboutDialog"), QStringLiteral("preferencesDialog"),
+                                  QStringLiteral("tagEditorDialog")};
+    forEachDialogWithButtons(window, [&](QObject *dialog, const QList<QQuickItem *> &buttons) {
+        const QString name = dialog->objectName();
         QQuickWindow *dialogWindow = windowOf(dialog);
-        QTRY_VERIFY2(!buttonsOf(dialog).isEmpty(), test.name);
-        QTRY_VERIFY(!layoutPending(qvariant_cast<QQuickItem *>(dialog->property("footer"))));
-        const QList<QQuickItem *> buttons = buttonsOf(dialog);
         const QRectF last = sceneRect(buttons.constLast());
         const QString where = QStringLiteral("%1: %2 buttons, the last at %3,%4 %5x%6 in a window %7x%8")
             .arg(name).arg(buttons.size()).arg(last.x()).arg(last.y()).arg(last.width()).arg(last.height())
@@ -4997,7 +4725,7 @@ void UiDialogsTest::dialogsPutTheirButtonsOnTheContentInset() {
         for (QQuickItem *button : buttons) {
             QVERIFY2(qAbs(sceneRect(button).top() - last.top()) <= 1.0, qPrintable(where));
         }
-        if (test.leftButton) {
+        if (leftButtons.contains(name)) {
             QVERIFY2(qAbs(sceneRect(buttons.constFirst()).left() - inset) <= 1.0,
                      qPrintable(where + QStringLiteral(", the first at %1").arg(sceneRect(buttons.constFirst()).left())));
         }
@@ -5008,20 +4736,7 @@ void UiDialogsTest::dialogsPutTheirButtonsOnTheContentInset() {
             QVERIFY2(qAbs(last.top() - sceneRect(body).bottom() - inset) <= 1.0,
                      qPrintable(where + QStringLiteral(", the content ends at %1").arg(sceneRect(body).bottom())));
         }
-        if (!test.opened) {
-            QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
-            QTRY_VERIFY2(!dialogWindow->isVisible(), test.name);
-        }
-    }
-    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
-    QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
-    editor.close();
-}
-
-void UiDialogsTest::dialogButtonGlyphsFollowTheFont_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("default font") << 0.0;
-    QTest::newRow("24 pt") << 24.0;
+    });
 }
 
 // The dialogs' buttons have glyphs as large as their captions' font calls
@@ -5029,97 +4744,31 @@ void UiDialogsTest::dialogButtonGlyphsFollowTheFont_data() {
 // 24 pt, as the iTunes rows' (the footers kept 16 px glyphs beside 24 pt
 // captions). So do Configure's Defaults, the library folders' buttons and
 // the Diagnostics actions.
-void UiDialogsTest::dialogButtonGlyphsFollowTheFont() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont large = applicationFont;
-        large.setPointSizeF(pointSize);
-        QGuiApplication::setFont(large);
-    }
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(2); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QVERIFY(bridgeOf(window)->setProperty("libraryRootEntries", QVariantList{
-        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/one")}, {QStringLiteral("trackCount"), 3}},
-    }));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
-    QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
-    QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
-    QVERIFY(waitForDialogWindow(diagnostics));
-    QObject *preferences = openPreferences(window, 0);
-    QVERIFY(preferences != nullptr);
-    QTRY_VERIFY(object(window, QStringLiteral("removeLibraryRootConfirmDialog")) != nullptr);
+void UiDialogsTest::checkDialogButtonGlyphsFollowTheFont(QQuickWindow *window, qreal pointSize) {
+    QObject *preferences = object(window, QStringLiteral("preferencesDialog"));
     const qreal forLabels = evaluate(preferences, QStringLiteral("Kirigami.Units.iconSizes.sizeForLabels")).toReal();
     if (pointSize > 0) {
         QVERIFY2(forLabels > 16, qPrintable(QString::number(forLabels)));
     } else {
         QCOMPARE(forLabels, 16.0);
     }
-    const auto glyphIs = [&](QQuickItem *button, const QString &where) {
+    QStringList wrong;
+    const auto checkGlyph = [&](QQuickItem *button, const QString &where) {
         const QString name = evaluate(button, QStringLiteral("icon.name")).toString();
         const qreal width = evaluate(button, QStringLiteral("icon.width")).toReal();
         const qreal height = evaluate(button, QStringLiteral("icon.height")).toReal();
-        if (name.isEmpty() || (width == forLabels && height == forLabels)) {
-            return true;
+        if (!name.isEmpty() && (width != forLabels || height != forLabels)) {
+            wrong << QStringLiteral("%1: %2 has a %3x%4 glyph, not %5")
+                         .arg(where, describeItem(button)).arg(width).arg(height).arg(forLabels);
         }
-        qWarning().noquote() << QStringLiteral("%1: %2 has a %3x%4 glyph, not %5")
-                                    .arg(where, describeItem(button)).arg(width).arg(height).arg(forLabels);
-        return false;
     };
-    // The visible buttons under an item.
-    const auto buttonsIn = [](QQuickItem *root) {
-        QList<QQuickItem *> buttons;
-        std::function<void(QQuickItem *)> collect = [&](QQuickItem *item) {
-            for (QQuickItem *child : item->childItems()) {
-                if (!child->isVisible()) {
-                    continue;
-                }
-                if (child->inherits("QQuickAbstractButton")) {
-                    buttons.push_back(child);
-                } else {
-                    collect(child);
-                }
-            }
-        };
-        if (root != nullptr) {
-            collect(root);
-        }
-        return buttons;
-    };
-
     int glyphs = 0;
-    for (const char *dialogName : {"quitSaveFailedDialog", "libraryRootNameDialog", "removeLibraryRootConfirmDialog",
-                                   "tagEditorCloseConfirmDialog", "autoNumberDialog", "renamePreviewDialog",
-                                   "tagEditorStatusDetailsDialog", "clearDiagnosticsConfirmDialog",
-                                   "itunesArtworkDialog", "aboutDialog", "diagnosticsDialog", "preferencesDialog",
-                                   "tagEditorDialog"}) {
-        const QString name = QString::fromLatin1(dialogName);
-        QObject *dialog = object(window, name);
-        QVERIFY2(dialog != nullptr, dialogName);
-        const bool opened = dialog->property("opened").toBool();
-        if (!opened) {
-            QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
-        }
-        QVERIFY2(waitForDialogWindow(dialog), dialogName);
-        auto *footer = qvariant_cast<QQuickItem *>(dialog->property("footer"));
-        QTRY_VERIFY2(!buttonsIn(footer).isEmpty(), dialogName);
-        for (QQuickItem *button : buttonsIn(footer)) {
-            QVERIFY(glyphIs(button, name));
+    forEachDialogWithButtons(window, [&](QObject *dialog, const QList<QQuickItem *> &buttons) {
+        for (QQuickItem *button : buttons) {
+            checkGlyph(button, dialog->objectName());
             ++glyphs;
         }
-        if (!opened) {
-            QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
-            QTRY_VERIFY2(!windowOf(dialog)->isVisible(), dialogName);
-        }
-    }
+    });
     QVERIFY(glyphs >= 20);
 
     // Beside the footers: the library folders' buttons and the Diagnostics
@@ -5129,27 +4778,19 @@ void UiDialogsTest::dialogButtonGlyphsFollowTheFont() {
                                    "libraryRootRemoveButton"}) {
         QQuickItem *button = nullptr;
         QTRY_VERIFY2((button = visibleNamed(prefs, QString::fromLatin1(buttonName))) != nullptr, buttonName);
-        QVERIFY(glyphIs(button, QStringLiteral("Library")));
+        checkGlyph(button, QStringLiteral("Library"));
     }
-    QQuickWindow *diagnosticsWindow = windowOf(diagnostics);
+    QQuickWindow *diagnosticsWindow = windowOf(object(window, QStringLiteral("diagnosticsDialog")));
     for (const char *buttonName : {"diagnosticsReloadButton", "diagnosticsClearButton", "diagnosticsOpenFolderButton",
                                    "diagnosticsCopyAllButton", "diagnosticsCopyWithoutPathsButton"}) {
         QQuickItem *button = visibleNamed(diagnosticsWindow, QString::fromLatin1(buttonName));
         QVERIFY2(button != nullptr, buttonName);
-        QVERIFY(glyphIs(button, QStringLiteral("Diagnostics")));
+        checkGlyph(button, QStringLiteral("Diagnostics"));
     }
-    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
-    QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
-    editor.close();
+    QVERIFY2(wrong.isEmpty(), qPrintable(wrong.join(QLatin1Char('\n'))));
 }
 
-void UiDialogsTest::dialogsUseOneCharacterEllipsesAndNoTextGlyphs() {
-    TagEditorController editor(nullptr);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkDialogsUseOneCharacterEllipsesAndNoTextGlyphs(QQuickWindow *window) {
     for (const char *name : {"preferencesDialog", "aboutDialog", "tagEditorDialog", "recentErrorsDialog",
                              "quitSaveFailedDialog", "autoNumberDialog", "renamePreviewDialog",
                              "tagEditorCloseConfirmDialog", "tagEditorQuitWaitDialog", "libraryRootNameDialog"}) {
@@ -5161,7 +4802,7 @@ void UiDialogsTest::dialogsUseOneCharacterEllipsesAndNoTextGlyphs() {
         }
         const QStringList dots = textsHolding(dialog, QStringLiteral("..."));
         QVERIFY2(dots.isEmpty(), qPrintable(dots.join(QLatin1Char('\n'))));
-        for (const QString &glyph : {QStringLiteral("\u00d7"), QStringLiteral("\u2715")}) {
+        for (const QString &glyph : {QStringLiteral("×"), QStringLiteral("✕")}) {
             const QStringList glyphs = textsHolding(dialog, glyph);
             QVERIFY2(glyphs.isEmpty(), qPrintable(glyphs.join(QLatin1Char('\n'))));
         }
@@ -5171,29 +4812,14 @@ void UiDialogsTest::dialogsUseOneCharacterEllipsesAndNoTextGlyphs() {
 
 // The dialogs have one heading style: every modal dialog is a window of its
 // own, with its title in KWin's title bar only, whose close button Cancels.
-void UiDialogsTest::dialogsShareOneHeadingStyle() {
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(2); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-
+void UiDialogsTest::checkDialogsShareOneHeadingStyle(QQuickWindow *window) {
     // Configure's page title: the style.
-    QObject *preferences = openPreferences(window, 0);
-    QVERIFY(preferences != nullptr);
+    QObject *preferences = object(window, QStringLiteral("preferencesDialog"));
     QQuickItem *pageTitle = nullptr;
     QTRY_VERIFY((pageTitle = visibleNamed(windowOf(preferences), QStringLiteral("preferencesPageTitle"))) != nullptr);
-    const QFont titleFont = pageTitle->property("font").value<QFont>();
-    QCOMPARE(titleFont.weight(), QFont::DemiBold);
-    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
-    QTRY_VERIFY(!preferences->property("visible").toBool());
+    QCOMPARE(pageTitle->property("font").value<QFont>().weight(), QFont::DemiBold);
 
     // The windows: no heading of their own.
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
     for (const char *name : {"preferencesDialog", "aboutDialog", "aboutKdeDialog", "tagEditorDialog",
                              "itunesArtworkDialog"}) {
         QQuickWindow *dialogWindow = windowOf(object(window, QString::fromLatin1(name)));
@@ -5206,22 +4832,15 @@ void UiDialogsTest::dialogsShareOneHeadingStyle() {
     // that opens it: the main window, Configure, Edit Tags, or Diagnostics.
     // No heading of its own: KWin's title bar has the title, and its close
     // button Cancels. Configure's library page asks over it.
-    QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
-    QVERIFY(diagnostics != nullptr);
-    QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
-    QVERIFY(waitForDialogWindow(diagnostics));
-    QVERIFY(openPreferences(window, 0) != nullptr);
-    QTRY_VERIFY(object(window, QStringLiteral("removeLibraryRootConfirmDialog")) != nullptr);
-    editor.selectAllRows();
-    editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
+    QQuickWindow *prefs = windowOf(preferences);
+    QQuickWindow *diagnostics = windowOf(object(window, QStringLiteral("diagnosticsDialog")));
     QQuickWindow *tags = windowOf(object(window, QStringLiteral("tagEditorDialog")));
     struct Case { const char *name; QWindow *over; };
-    for (const Case &test : {Case{"quitSaveFailedDialog", window}, Case{"libraryRootNameDialog", windowOf(preferences)},
-                             Case{"removeLibraryRootConfirmDialog", windowOf(preferences)},
-                             Case{"tagEditorCloseConfirmDialog", tags}, Case{"tagEditorQuitWaitDialog", tags},
-                             Case{"autoNumberDialog", tags}, Case{"renamePreviewDialog", tags},
-                             Case{"tagEditorStatusDetailsDialog", tags},
-                             Case{"clearDiagnosticsConfirmDialog", windowOf(diagnostics)}}) {
+    for (const Case &test : {Case{"quitSaveFailedDialog", window}, Case{"libraryRootNameDialog", prefs},
+                             Case{"removeLibraryRootConfirmDialog", prefs}, Case{"tagEditorCloseConfirmDialog", tags},
+                             Case{"tagEditorQuitWaitDialog", tags}, Case{"autoNumberDialog", tags},
+                             Case{"renamePreviewDialog", tags}, Case{"tagEditorStatusDetailsDialog", tags},
+                             Case{"clearDiagnosticsConfirmDialog", diagnostics}}) {
         const char *name = test.name;
         QObject *dialog = object(window, QString::fromLatin1(name));
         QVERIFY2(dialog != nullptr, name);
@@ -5242,19 +4861,17 @@ void UiDialogsTest::dialogsShareOneHeadingStyle() {
         QTRY_VERIFY2(!dialogWindow->isVisible(), name);
         QVERIFY2(rejected.count() == 1, name);
     }
-    QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
-    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
-    editor.close();
 }
 
 namespace {
 
 QString describeItem(QQuickItem *item) {
     const QRectF rect = sceneRect(item);
-    return QStringLiteral("%1 \"%2\" %3 at %4,%5 %6x%7")
+    return QStringLiteral("%1 \"%2\" %3 at %4,%5 %6x%7 (implicit %8x%9)")
         .arg(QString::fromLatin1(item->metaObject()->className()), item->objectName(),
              item->property("text").toString())
-        .arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
+        .arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height())
+        .arg(item->implicitWidth()).arg(item->implicitHeight());
 }
 
 // The visible items of `window` that lie outside it, across or also down,
@@ -5299,9 +4916,10 @@ void checkPreferencesPages(QObject *preferences, QQuickWindow *prefs, QQuickItem
         preferences->setProperty("pageIndex", page);
         QTRY_COMPARE(stack->property("currentIndex").toInt(), page);
         QQuickItem *pageItem = stack->childItems().at(page);
-        // Laid out for the window's width.
-        QTRY_VERIFY2(!layoutPending(pageItem), qPrintable(at));
-        QTest::qWait(50);
+        // Laid out for the window's width: the form places its rows on a
+        // timer of no delay, then its layouts on their polish.
+        QCoreApplication::processEvents();
+        QTRY_VERIFY2(!layoutPendingUnder(pageItem), qPrintable(at));
         for (QQuickItem *row : itemsNamed(list, QStringLiteral("preferencesPage_%1").arg(page))) {
             for (QQuickItem *label : itemsNamed(row, QString())) {
                 QVERIFY2(!label->property("truncated").toBool(), qPrintable(describeItem(label)));
@@ -5362,26 +4980,34 @@ QList<bool> formModes(QObject *preferences, QQuickItem *stack) {
 
 } // namespace
 
+// The dialogs at 24 pt: Configure's lists, the buttons' glyphs, and About,
+// Configure and Edit Tags whole. The last check widens Configure.
+void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
+    const ScopedApplicationFont font(24);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QCOMPARE(paletteOf(window)->property("basePointSize").toReal(), 24.0);
+    runInTurn({[&] { checkConfigurePageIcons(window, 24); }, [&] { checkConfigureListRowsAreAlike(window); },
+               [&] { checkLibraryFolderPathsShareOneColumn(window, 24); },
+               [&] { checkLibraryFoldersLabelSitsOnTheFirstFoldersBaseline(window, 1); },
+               [&] { checkLibraryFoldersLabelSitsOnTheFirstFoldersBaseline(window, 3); },
+               [&] {
+                   QVERIFY(openTheParentDialogs(main));
+                   checkDialogButtonGlyphsFollowTheFont(window, 24);
+                   closeTheParentDialogs(main);
+               },
+               [&] { checkDialogsHoldTheirContents(main); }});
+}
+
 // At 24 pt, About, Configure and Edit Tags hold their contents: no tab,
 // text or button crosses a dialog's edge or is cut short, Configure's page
 // list and combo boxes fit their words, its pages fit across at any width
 // of its window, and Edit Tags' fields show about 16 characters, with the
 // table taking the rest.
-void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont large = applicationFont;
-    large.setPointSizeF(24);
-    QGuiApplication::setFont(large);
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(12); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QCOMPARE(paletteOf(window)->property("basePointSize").toReal(), 24.0);
+void UiDialogsTest::checkDialogsHoldTheirContents(DialogsWindow &main) {
+    QQuickWindow *window = main.window;
+    TagEditorController &editor = main.editor;
 
     // About, on each of its tabs: nothing crosses its window's edges.
     QObject *about = object(window, QStringLiteral("aboutDialog"));
@@ -5391,9 +5017,11 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     QQuickWindow *aboutWindow = windowOf(about);
     QQuickItem *aboutTabs = visibleNamed(aboutWindow, QStringLiteral("aboutTabs"));
     QVERIFY(aboutTabs != nullptr);
+    QQuickItem *aboutPages = visibleNamed(aboutWindow, QStringLiteral("aboutPagesView"));
+    QVERIFY(aboutPages != nullptr);
     for (int tab = 0; tab < 4; ++tab) {
         about->setProperty("tabIndex", tab);
-        QTest::qWait(50);
+        QTRY_VERIFY(!layoutPending(aboutPages));
         const QStringList crossing = itemsCrossingWindow(aboutWindow, false);
         QVERIFY2(crossing.isEmpty(), qPrintable(QStringLiteral("tab %1:\n").arg(tab) + crossing.join(QLatin1Char('\n'))));
     }
@@ -5431,15 +5059,12 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     QCOMPARE(formModes(preferences, stack), QList<bool>(4, true));
     checkPreferencesPages(preferences, prefs, stack, QStringLiteral("24 pt, wide"));
     QVERIFY(!QTest::currentTestFailed());
-    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
-    QTRY_VERIFY(!preferences->property("visible").toBool());
+    QVERIFY(reject(preferences));
 
     // Edit Tags: the fields' column holds its labels and a field of about
     // 16 characters, and the table starts after it.
-    QObject *tagEditor = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && tagEditor->property("opened").toBool());
-    QQuickWindow *tags = windowOf(tagEditor);
+    QQuickWindow *tags = openTagEditor(main, tagRows(12));
+    QVERIFY(tags != nullptr);
     QQuickItem *title = nullptr;
     QTRY_VERIFY((title = visibleNamed(tags, QStringLiteral("tagEditorField_title"))) != nullptr);
     const qreal sixteen = 16 * QFontMetricsF(title->property("font").value<QFont>()).averageCharWidth();
@@ -5533,33 +5158,14 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
             }
         }
     }
-    editor.close();
-    QTRY_VERIFY(!tagEditor->property("visible").toBool());
-}
-
-void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("default font") << 0.0;
-    QTest::newRow("24 pt") << 24.0;
+    QVERIFY(closeTagEditor(main));
 }
 
 // A compact dialog's measure is about 46 characters of the body font: at
 // 24 pt, a confirmation's question is on one line, rather than broken after
-// 28 characters in the 450 px it had. With the default font, it opens at
-// 450 px, as before.
-void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont large = applicationFont;
-        large.setPointSizeF(pointSize);
-        QGuiApplication::setFont(large);
-    }
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+// 28 characters in the 450 px it had. With KDE's default 10 pt font, it
+// opens at 450 px, as before.
+void UiDialogsTest::checkCompactDialogsKeepTheirMeasure(QQuickWindow *window, qreal pointSize) {
     QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
     QVERIFY(diagnostics != nullptr);
     QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
@@ -5576,7 +5182,7 @@ void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont() {
     const qreal padding = confirm->property("contentPadding").toReal();
     const qreal measure = confirm->property("measureWidth").toReal();
     QCOMPARE(measure, std::ceil(46 * body.averageCharWidth() + 2 * padding));
-    if (pointSize > 0) {
+    if (pointSize > 10) {
         // The measure, wider than 450 px, within the screen's room.
         QVERIFY2(measure > 450, qPrintable(QString::number(measure)));
         QCOMPARE(confirmWindow->width(), int(measure));
@@ -5588,15 +5194,27 @@ void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont() {
     QTRY_COMPARE(message->property("lineCount").toInt(), 1);
     const QStringList crossing = itemsCrossingWindow(confirmWindow, false);
     QVERIFY2(crossing.isEmpty(), qPrintable(crossing.join(QLatin1Char('\n'))));
-    QVERIFY(QMetaObject::invokeMethod(confirm, "reject"));
-    QTRY_VERIFY(!confirmWindow->isVisible());
+    QVERIFY(reject(confirm));
     QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
 }
 
-void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont_data() {
+void UiDialogsTest::dialogsScaleWithKdesFont_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::newRow("10 pt") << 10.0;
     QTest::newRow("24 pt") << 24.0;
+}
+
+// The dialogs in KDE's default font, Noto Sans, at its default 10 pt and at
+// 24 pt: their glyphs and measures, and Edit Tags' text whole in its fields
+// and its Status column.
+void UiDialogsTest::dialogsScaleWithKdesFont() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkDialogGlyphsAndMeasuresFollowTheFont(main, pointSize); },
+               [&] { checkEditTagsNumberPairsShowMultipleValuesWhole(main, pointSize); },
+               [&] { checkEditTagsStatusSaysWhatFailedWhole(main, pointSize); }});
 }
 
 // The dialogs' glyphs beside text are as large as a line of the font holds
@@ -5606,23 +5224,10 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont_data() {
 // stopped at its buttons and cut the path beside free room, with a 16 px
 // folder glyph; Recent Issues kept 460 px and a 16 px severity glyph;
 // About's icon stayed 48 px).
-void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    // KDE's default font, at the size of the row.
-    QFont font(QStringLiteral("Noto Sans"));
-    font.setPointSizeF(pointSize);
-    QGuiApplication::setFont(font);
+void UiDialogsTest::checkDialogGlyphsAndMeasuresFollowTheFont(DialogsWindow &main, qreal pointSize) {
+    QQuickWindow *window = main.window;
+    TagEditorController &editor = main.editor;
     const bool large = pointSize > 10;
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(8); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *palette = paletteOf(window);
     const qreal labelIcon = palette->property("labelIconSize").toReal();
     const qreal fontScale = palette->property("fontScale").toReal();
@@ -5702,8 +5307,7 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
     // With the room, the path is whole.
     QTRY_VERIFY2(!path->property("truncated").toBool(),
                  qPrintable(describeItem(path)));
-    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
+    QVERIFY(reject(preferences));
 
     // Recent Issues: 460 px scaled with the font, within the window, and
     // its severity glyph as large as a line holds, centred on the
@@ -5733,10 +5337,6 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
         - QFontMetricsF(category->property("font").value<QFont>()).xHeight() / 2;
     QVERIFY2(qAbs(sceneRect(glyph).center().y() - xMiddle) <= 0.5,
              qPrintable(describeItem(glyph) + QStringLiteral(", the category's x-height centred at %1").arg(xMiddle)));
-    if (!large && QFontInfo(category->property("font").value<QFont>()).family() == QStringLiteral("Noto Sans")) {
-        // Where it was with the default font: 2 px under the line's top.
-        QCOMPARE(sceneRect(glyph).top() - sceneRect(category).top(), 2.0);
-    }
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!issues->property("visible").toBool());
 
@@ -5758,12 +5358,8 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
     // Edit Tags: a changed field's Revert, in the field, has a glyph as
     // large as a line holds, as the column's Revert has, and 16 px with the
     // default font (not 16 px beside 32 px text at 24 pt).
-    QObject *tagDialog = object(window, QStringLiteral("tagEditorDialog"));
-    QVERIFY(tagDialog != nullptr);
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && tagDialog->property("opened").toBool());
-    QQuickWindow *tags = windowOf(tagDialog);
-    QVERIFY(QTest::qWaitForWindowActive(tags));
+    QQuickWindow *tags = openTagEditor(main, tagRows(8));
+    QVERIFY(tags != nullptr);
     editor.selectAllRows();
     QQuickItem *field = nullptr;
     QTRY_VERIFY((field = visibleNamed(tags, QStringLiteral("tagEditorField_genre"))) != nullptr);
@@ -5781,14 +5377,11 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
     QCOMPARE(revert->height(), revert->width());
     QCOMPARE(evaluate(revert, QStringLiteral("icon.width")).toReal(), labelIcon);
     QCOMPARE(evaluate(revert, QStringLiteral("icon.height")).toReal(), labelIcon);
-    if (!large) {
-        // As it was with the default font.
-        QCOMPARE(revert->width(), 24.0);
-    }
     // Within the field, clear of its text.
     QVERIFY2(sceneRect(field).contains(sceneRect(revert)),
              qPrintable(describeItem(revert) + QStringLiteral(" / ") + describeItem(field)));
     QCOMPARE(field->property("rightPadding").toReal(), revert->width() + smallSpacing);
+    QVERIFY(closeTagEditor(main));
 }
 
 // A Recent Issues link's press reads as a press: its tint is a clear step
@@ -5796,11 +5389,8 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
 // buttons' (at 10% it read as the hover), and it shows on its
 // first frame, with no fade while the button is down; the hover and the
 // release fade.
-void UiDialogsTest::recentIssuesLinkPressShowsAtOnce() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiDialogsTest::checkRecentIssuesLinkPressShowsAtOnce(QQuickWindow *window) {
+    clearIssues(window);
     report(window, 1, 0, kStaticPath, kEndsEarly);
     QVERIFY(openIssues(window));
     QQuickItem *action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"));
@@ -5843,6 +5433,8 @@ void UiDialogsTest::recentIssuesLinkPressShowsAtOnce() {
         QVERIFY2(colorOf() != pressed && colorOf().alpha() > 0, qPrintable(hex(colorOf())));
     }
     QTRY_COMPARE(colorOf().alpha(), 0);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());
 }
 
 void UiDialogsTest::autoNumberCheckBoxesStartOnTheFieldsEdge_data() {
@@ -5864,16 +5456,10 @@ void UiDialogsTest::autoNumberCheckBoxesStartOnTheFieldsEdge() {
         }
         QApplication::setStyle(widgetStyle);
     }
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(4); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading());
+    QVERIFY(openTagEditor(main, tagRows(4)) != nullptr);
     QObject *dialog = object(window, QStringLiteral("autoNumberDialog"));
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
@@ -5916,9 +5502,8 @@ void UiDialogsTest::autoNumberCheckBoxesStartOnTheFieldsEdge() {
         QVERIFY2(boxInk == fieldInk, qPrintable(QStringLiteral("%1: its box from x %2, the field's frame from %3 (%4)")
                                                     .arg(name).arg(boxInk).arg(fieldInk).arg(describeItem(indicator))));
     }
-    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
-    QTRY_VERIFY(!numbers->isVisible());
-    editor.close();
+    QVERIFY(reject(dialog));
+    main.editor.close();
 }
 
 namespace {
@@ -5960,13 +5545,8 @@ QColor drawnAt(const QImage &shown, const QPointF &scenePoint) {
 // antialiasing). Their colours are rowFigureContrast on the row as drawn,
 // which keeps that margin, and quieter than the text.
 void UiDialogsTest::dialogListNumbersReadAsDrawn() {
-    TagEditorController editor(nullptr);
-    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(3); };
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     const QColor text = tokenOf(window, "text");
     const double figureContrast = paletteOf(window)->property("rowFigureContrast").toDouble();
@@ -6047,14 +5627,11 @@ void UiDialogsTest::dialogListNumbersReadAsDrawn() {
     visibleNamed(prefs, QStringLiteral("libraryWatchCheckBox"))->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(!list->hasActiveFocus());
     folderCheck(QStringLiteral("selected, the list unfocused"));
-    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
-    QTRY_VERIFY(!prefs->isVisible());
+    QVERIFY(reject(preferences));
 
     // Edit Tags' track numbers.
-    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
-    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
-    QVERIFY(waitForDialogWindow(object(window, QStringLiteral("tagEditorDialog"))));
-    QQuickWindow *tags = windowOf(object(window, QStringLiteral("tagEditorDialog")));
+    QQuickWindow *tags = openTagEditor(main, tagRows(3));
+    QVERIFY(tags != nullptr);
     QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
     QVERIFY(table != nullptr);
     QList<QQuickItem *> rows;
@@ -6090,7 +5667,7 @@ void UiDialogsTest::dialogListNumbersReadAsDrawn() {
     QTRY_VERIFY(!table->hasActiveFocus());
     rowCheck(QStringLiteral("selected, the table unfocused"));
     QVERIFY2(failures.isEmpty(), qPrintable(failures.join(QLatin1Char('\n'))));
-    editor.close();
+    main.editor.close();
 }
 
 int main(int argc, char **argv) {
