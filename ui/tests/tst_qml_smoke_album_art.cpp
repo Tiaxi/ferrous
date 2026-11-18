@@ -569,12 +569,21 @@ struct AlbumArtWindow {
         palette = qvariant_cast<QObject *>(window->property("uiPalette"));
         viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
         surface = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+        controlsAutoHide = window->findChild<QObject *>(QStringLiteral("albumArtFullscreenControlsAutoHide"));
         if (bridge != nullptr) {
             setPlayingTrack(bridge);
         }
+        // The viewer's controls stay shown while the checks look at them.
+        // Its auto-hide's timer runs on the animations' time, a frame at
+        // each pass of the event loop here, so its 5 s ran out while a
+        // viewer opened, and the pointer, off the window, wakes none.
+        if (controlsAutoHide != nullptr) {
+            controlsAutoHide->setProperty("hideDelay", 600000);
+        }
     }
     bool loaded() const {
-        return window != nullptr && bridge != nullptr && palette != nullptr && viewer != nullptr && surface != nullptr;
+        return window != nullptr && bridge != nullptr && palette != nullptr && viewer != nullptr && surface != nullptr
+            && controlsAutoHide != nullptr;
     }
     QObject *plot() const { return qvariant_cast<QObject *>(palette->property("mediaPlot")); }
     // Opens the viewer on `coverUrl`, the playing track's art, in the main
@@ -618,6 +627,7 @@ struct AlbumArtWindow {
     QObject *palette = nullptr;
     QObject *viewer = nullptr;
     QQuickItem *surface = nullptr;
+    QObject *controlsAutoHide = nullptr;
 };
 
 // The hidden preload decodes the current cover as the album art viewer

@@ -10,6 +10,7 @@
 #include <QAccessible>
 #include <QApplication>
 #include <QColor>
+#include <QCursor>
 #include <QDesktopServices>
 #include <QFile>
 #include <QFont>
@@ -571,6 +572,8 @@ void UiMenusTest::checkMenuBarTitlesAreLitWithTheSelectionTint(QQuickWindow *win
     const QColor text = palette->property("text").value<QColor>();
     const QColor selection = palette->property("selection").value<QColor>();
 
+    // Fresh, with the pointer off the window, no title is lit.
+    QVERIFY(!window->geometry().contains(QCursor::pos()));
     const QList<QObject *> menus = menusOf(window);
     QCOMPARE(menuBar->property("count").toInt(), menus.size());
     for (int i = 0; i < menus.size(); ++i) {
@@ -617,6 +620,7 @@ void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered_data() {
 void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered() {
     QFETCH(bool, dark);
     const Scheme &scheme = dark ? kBreezeDark : kBreezeLight;
+    movePointerOffTheWindows();
     QQmlEngine engine;
     QQmlComponent component(&engine);
     component.setData(menuBarHarnessQml(scheme),
@@ -658,7 +662,9 @@ void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered() {
                                          + file->property("leftPadding").toReal()
                                          + file->property("rightPadding").toReal()));
 
-    // Plain: the bar shows through, and the text is the text colour.
+    // Plain, with the pointer off the window: the bar shows through, and
+    // the text is the text colour.
+    QVERIFY(!window->geometry().contains(QCursor::pos()));
     QVERIFY(!background->isVisible());
     QCOMPARE(label->property("color").value<QColor>(), text);
 

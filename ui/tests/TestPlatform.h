@@ -3,7 +3,9 @@
 #pragma once
 
 #include <QByteArrayView>
+#include <QCursor>
 #include <QGuiApplication>
+#include <QPoint>
 #include <QString>
 #include <QtTest/QtTest>
 
@@ -39,6 +41,25 @@ inline void useOffscreenPlatformByDefault(int argc, char **argv) {
 inline void disableGpuShaderCaches() {
     qputenv("MESA_SHADER_CACHE_DISABLE", "true");
     qputenv("AMD_COMGR_CACHE", "0");
+}
+
+// Puts the offscreen platform's pointer where no window is, so that a
+// window a test shows next starts with nothing hovered. Call it once the
+// application exists, before showing the window.
+//
+// The platform keeps a pointer of its own, at (10, 10) on its screen until
+// something sets it; QTest's mouse events leave it there. It shows each
+// window at (2, 2), inside the screen by the window frame's width, and
+// sends the window an Enter at that pointer: (8, 8) in the window, on the
+// first title of a menu bar. Qt Quick then hovers the item there, and on
+// each frame after, one that has moved there, so a fresh window's first
+// title was lit or not by when its first frames were drawn.
+inline void movePointerOffTheWindows() {
+    if (QGuiApplication::platformName() != QLatin1String("offscreen")) {
+        return;
+    }
+    // Above and left of the screen, where the platform places no window.
+    QCursor::setPos(QPoint(-1, -1));
 }
 
 // The test of the default, for a test slot of each binary that shows windows.
