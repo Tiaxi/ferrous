@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <climits>
 #include <functional>
+#include <utility>
 #include <vector>
 
 #include <QFileInfo>
@@ -834,10 +835,15 @@ int LibraryTreeModel::revealKey(const QStringList &expandKeys, const QString &se
             emit nodeExpansionRequested(key, true);
         }
     }
+    const QString target = selectionKey.trimmed();
+    // The keys need not name every row above the target's: a library folder
+    // the user collapsed is collapsed in this model alone.
+    if (expandAncestorsOf(target)) {
+        expanded = true;
+    }
     if (expanded && m_hasTree) {
         rebuildRows();
     }
-    const QString target = selectionKey.trimmed();
     const int row = indexForSelectionKey(target);
     if (target.isEmpty() || row >= 0 || revealAnswered(keys)) {
         if (wasPending) {
@@ -862,24 +868,71 @@ void LibraryTreeModel::cancelReveal() {
     emit revealPendingChanged();
 }
 
-// Whether the tree shows all it will of `expandKeys`: every row of them
+// Whether the tree has all it will of `expandKeys`: every node of them
 // that has children has them loaded. Until then, the backend still sends
-// rows that a reveal may be waiting for.
+// rows that a reveal may be waiting for. Nodes in a collapsed library
+// folder count too: the reveal opens the folder once its row has come.
 bool LibraryTreeModel::revealAnswered(const QStringList &expandKeys) const {
     if (!m_hasTree || m_parseInFlight || m_hasQueuedTree) {
         return false;
     }
-    for (const QString &key : expandKeys) {
-        const int row = indexForSelectionKey(key);
-        if (row < 0) {
-            continue;
-        }
-        const FlatRow &item = rowAt(row);
-        if (item.hasChildren && item.expanded && !item.childrenLoaded) {
-            return false;
+    const QSet<QString> keys(expandKeys.cbegin(), expandKeys.cend());
+    return !awaitsChildren(m_tree, keys, !m_searchLower.isEmpty());
+}
+
+bool LibraryTreeModel::awaitsChildren(
+    const QVector<TreeNode> &nodes, const QSet<QString> &keys, bool autoExpand) const {
+    for (const TreeNode &node : nodes) {
+        if (!node.children.isEmpty()) {
+            if (awaitsChildren(node.children, keys, autoExpand)) {
+                return true;
+            }
+        } else if (keys.contains(node.key) && isExpanded(node, autoExpand)) {
+            return true;
         }
     }
-    return true;
+    return false;
+}
+
+bool LibraryTreeModel::collectAncestors(
+    const QVector<TreeNode> &nodes, const QString &selectionKey, QVector<const TreeNode *> *ancestors) {
+    for (const TreeNode &node : nodes) {
+        if (node.selectionKey == selectionKey) {
+            return true;
+        }
+        ancestors->push_back(&node);
+        if (collectAncestors(node.children, selectionKey, ancestors)) {
+            return true;
+        }
+        ancestors->pop_back();
+    }
+    return false;
+}
+
+bool LibraryTreeModel::expandAncestorsOf(const QString &selectionKey) {
+    QVector<const TreeNode *> ancestors;
+    if (selectionKey.isEmpty() || !collectAncestors(m_tree, selectionKey, &ancestors)) {
+        return false;
+    }
+    const bool autoExpand = !m_searchLower.isEmpty();
+    QStringList requested;
+    bool expanded = false;
+    for (const TreeNode *node : std::as_const(ancestors)) {
+        if (isExpanded(*node, autoExpand)) {
+            continue;
+        }
+        m_expandedByKey.insert(node->key, true);
+        expanded = true;
+        // As in revealKey: the backend sends a library folder's rows whole.
+        if (node->rowType != QStringLiteral("root")) {
+            requested.push_back(node->key);
+        }
+    }
+    // Told once the nodes are no longer needed: a listener may change the tree.
+    for (const QString &key : std::as_const(requested)) {
+        emit nodeExpansionRequested(key, true);
+    }
+    return expanded;
 }
 
 void LibraryTreeModel::settleReveal() {
@@ -1258,6 +1311,11 @@ void LibraryTreeModel::applyRows(QVector<FlatRow> nextRows) {
 }
 
 void LibraryTreeModel::rebuildRows() {
+    // A reveal waiting for rows the backend had not sent: they may come in
+    // a library folder the user collapsed, which then opens to show them.
+    if (revealPending()) {
+        expandAncestorsOf(m_revealKey);
+    }
     const int oldCount = count();
     applyRows(buildFlatRows());
     pruneSelection();
