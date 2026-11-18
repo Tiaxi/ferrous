@@ -1058,9 +1058,9 @@ if(BUILD_TESTING)
             ferrous_ui_main_window_tests:60
             ferrous_qml_smoke_tag_editor:36
             ferrous_ui_dialogs_tests:40
-            ferrous_qml_smoke_waveform:32
+            ferrous_qml_smoke_waveform:27
             ferrous_qml_smoke_errors:32
-            ferrous_qml_smoke_spectrogram:32
+            ferrous_qml_smoke_spectrogram:14
             ferrous_accessibility_tests:14
             ferrous_bridge_client_tests:14
             ferrous_ui_menus_tests:7

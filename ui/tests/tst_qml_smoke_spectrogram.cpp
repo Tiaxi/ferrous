@@ -84,6 +84,21 @@ private slots:
     void spectrogramCrosshairFadesAsAWhole();
 };
 
+namespace {
+
+// Waits for `done` with animation time passing 100 ms between looks, so
+// that fades end at once, and real time for timers, which Qt runs on it
+// while only they run.
+template <typename Done>
+bool settlesTo(SteppedAnimationDriver &animations, Done done) {
+    return QTest::qWaitFor([&]() {
+        (void)animations.step(100);
+        return done();
+    }, 5000);
+}
+
+} // namespace
+
 void SpectrogramSmokeTest::spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -428,11 +443,16 @@ Window {
     // Hidden, the buttons stay in the scene, for the keyboard.
     QVERIFY(buttons->isVisible());
     QCOMPARE(buttons->opacity(), 0.0);
+    // Their fades in animation time, each to its end.
+    SteppedAnimationDriver animations;
+    const auto buttonsAt = [&](double opacity) {
+        return settlesTo(animations, [&]() { return buttons->opacity() == opacity; });
+    };
 
     // Hover the pane to reveal the controls, then move onto each control.
     // The plate's own hover keeps it shown until the click is released.
     QTest::mouseMove(window, QPoint(320, 160));
-    QTRY_COMPARE(buttons->opacity(), 1.0);
+    QVERIFY(buttonsAt(1.0));
     const QPoint muteCenter = muteButton->mapToScene(QPointF(
         muteButton->width() * 0.5, muteButton->height() * 0.5)).toPoint();
     QTest::mouseMove(window, muteCenter);
@@ -453,9 +473,9 @@ Window {
     // and they stay while it is inside.
     QTest::mouseMove(window, QPoint(320, 310));
     QTest::mouseMove(window, QPoint(-10, -10));
-    QTRY_COMPARE(buttons->opacity(), 0.0);
+    QVERIFY(buttonsAt(0.0));
     muteButton->forceActiveFocus(Qt::TabFocusReason);
-    QTRY_COMPARE(buttons->opacity(), 1.0);
+    QVERIFY(buttonsAt(1.0));
     QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(soloButton->hasActiveFocus());
     QCOMPARE(buttons->opacity(), 1.0);
@@ -463,7 +483,7 @@ Window {
     QTRY_COMPARE(bridge->property("soloCalls").toInt(), 2);
     soloButton->setFocus(false);
     layer->forceActiveFocus();
-    QTRY_COMPARE(buttons->opacity(), 0.0);
+    QVERIFY(buttonsAt(0.0));
 
     // A muted or soloed lane keeps its buttons shown with the pointer away,
     // compact too, so the checked one stays in sight to undo it (they
@@ -473,17 +493,17 @@ Window {
     for (const bool compact : {false, true}) {
         head->setProperty("compact", compact);
         bridge->setProperty("mutedChannels", QVariantList{true});
-        QTRY_COMPARE(buttons->opacity(), 1.0);
+        QVERIFY(buttonsAt(1.0));
         QVERIFY(muteButton->property("checked").toBool());
-        QTest::qWait(250);
+        (void)animations.step(250);
         QCOMPARE(buttons->opacity(), 1.0);
         bridge->setProperty("mutedChannels", QVariantList{});
-        QTRY_COMPARE(buttons->opacity(), 0.0);
+        QVERIFY(buttonsAt(0.0));
         bridge->setProperty("soloedChannels", QVariantList{true});
-        QTRY_COMPARE(buttons->opacity(), 1.0);
+        QVERIFY(buttonsAt(1.0));
         QVERIFY(soloButton->property("checked").toBool());
         bridge->setProperty("soloedChannels", QVariantList{});
-        QTRY_COMPARE(buttons->opacity(), 0.0);
+        QVERIFY(buttonsAt(0.0));
     }
 }
 
@@ -2386,7 +2406,9 @@ void SpectrogramSmokeTest::shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch
         QRectF(-1, -1, modeSwitch->width() + 2, modeSwitch->height() + 2));
     const QPointF origin = top->mapToScene(QPointF());
     int checked = 0;
-    for (double x = top->width() - 2; x > top->width() - 400; x -= 37) {
+    // The value's plate, the one in this lane, keeps to the right edge and
+    // follows the pointer's height alone: a few columns of the sweep.
+    for (double x = top->width() - 2; x > top->width() - 400; x -= 131) {
         for (double y = 1; y < top->height() - 1; y += 4) {
             const QPointF at = origin + QPointF(x, y);
             // Not on the switch, which takes the pointer from the plot.

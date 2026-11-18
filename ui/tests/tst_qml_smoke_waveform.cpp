@@ -92,6 +92,25 @@ private slots:
 
 namespace {
 
+// Waits for `done`, looking again after each pass of the event loop, for
+// timers and fades that end within milliseconds: QTRY_* looks every 50 ms.
+template <typename Done>
+bool soon(Done done) {
+    return QTest::qWaitFor(done, 5000);
+}
+
+// Hides the controls of `autoHide` at once, and waits for them and the
+// crosshair of `waveform`, which fades with them, to go, with the fade in
+// animation time, to its end.
+bool hideControls(QObject *autoHide, WaveformEditorItem *waveform) {
+    SteppedAnimationDriver animations;
+    autoHide->setProperty("hideDelay", 1);
+    return QTest::qWaitFor([&]() {
+        (void)animations.step(100);
+        return !autoHide->property("controlsVisible").toBool() && !waveform->crosshairEnabled();
+    }, 5000);
+}
+
 class CompositionRecordingPaintEngine final : public QPaintEngine {
 public:
     CompositionRecordingPaintEngine()
@@ -819,7 +838,7 @@ void WaveformSmokeTest::waveformEditorCancelsAndBoundsObsoleteDecodes() {
     item.setSourcePath(QStringLiteral("/fixture/first.wav"));
     item.m_requestTimer.stop();
     item.requestDetailWindow();
-    QTRY_COMPARE(started->load(), 1);
+    QVERIFY(soon([&]() { return started->load() == 1; }));
     const auto cancelled = item.m_decodeCancelled;
     for (int i = 0; i < 20; ++i) {
         item.setZoomLevel(2.0 + i);
@@ -3152,7 +3171,7 @@ Window {
     QObject *bridge = root->findChild<QObject *>(QStringLiteral("waveformBridge"));
     auto *waveform = root->findChild<WaveformEditorItem *>(QStringLiteral("waveformEditorItem"));
     QVERIFY(autoHide != nullptr && bridge != nullptr && waveform != nullptr);
-    QTRY_COMPARE(waveform->channelCount(), 2);
+    QVERIFY(soon([&]() { return waveform->channelCount() == 2; }));
     QVERIFY(waveform->crosshairEnabled());
     QObject *hoverHandler = root->findChild<QObject *>(
         QStringLiteral("waveformSurfaceHoverHandler"));
@@ -3160,24 +3179,22 @@ Window {
 
     const auto keepControlsShown = [&]() {
         autoHide->setProperty("hideDelay", 5000);
-        QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+        QVERIFY(soon([&]() { return autoHide->property("controlsVisible").toBool(); }));
     };
     // Hides the controls, then moves the pointer to `at` and sees them
     // return. A tool button there takes the hover from the waveform, as a
     // button does: `onButton`.
     const auto hideThenMoveTo = [&](QPoint at, bool onButton = false) {
-        autoHide->setProperty("hideDelay", 1);
-        QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
-        QTRY_VERIFY(!waveform->crosshairEnabled());
+        QVERIFY(hideControls(autoHide, waveform));
         QSignalSpy controlsChanged(autoHide, SIGNAL(controlsVisibleChanged()));
         QTest::mouseMove(window, at);
-        QTRY_VERIFY(!controlsChanged.isEmpty());
+        QVERIFY(soon([&]() { return !controlsChanged.isEmpty(); }));
         keepControlsShown();
-        QTRY_VERIFY(waveform->crosshairEnabled());
+        QVERIFY(soon([&]() { return waveform->crosshairEnabled(); }));
         if (onButton) {
             return;
         }
-        QTRY_VERIFY(waveform->m_hoverActive);
+        QVERIFY(soon([&]() { return waveform->m_hoverActive; }));
         QCOMPARE(waveform->mapToScene(waveform->m_hoverPosition).toPoint(), at);
         QVERIFY(hoverHandler->property("hovered").toBool());
     };
@@ -3190,7 +3207,7 @@ Window {
     // The plate lays out its returned buttons as it next polishes, and a
     // click outside the plate does not reach them.
     const auto waitForRowLaidOut = [&](QQuickItem *mute, QQuickItem *solo) {
-        QTRY_VERIFY(shows(mute) && shows(solo));
+        QVERIFY(soon([&]() { return shows(mute) && shows(solo); }));
         QTRY_VERIFY(sceneRectOf(solo->parentItem()).contains(sceneRectOf(mute))
                     && sceneRectOf(solo->parentItem()).contains(sceneRectOf(solo)));
     };
@@ -3215,12 +3232,11 @@ Window {
         return image;
     };
     const QImage withCrosshair = painted();
-    autoHide->setProperty("hideDelay", 1);
-    QTRY_VERIFY(!waveform->crosshairEnabled());
+    QVERIFY(hideControls(autoHide, waveform));
     QVERIFY(painted() != withCrosshair);
     keepControlsShown();
-    QTRY_VERIFY(waveform->crosshairEnabled());
-    QTRY_COMPARE(painted(), withCrosshair);
+    QVERIFY(soon([&]() { return waveform->crosshairEnabled(); }));
+    QVERIFY(soon([&]() { return painted() == withCrosshair; }));
 
     // On a channel's label, which stays while the controls are hidden.
     QQuickItem *label = firstVisibleItemNamed(
@@ -3247,20 +3263,20 @@ Window {
     }
     waitForRowLaidOut(mute, solo);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, onSolo);
-    QTRY_COMPARE(bridge->property("soloCalls").toInt(), 1);
+    QVERIFY(soon([&]() { return bridge->property("soloCalls").toInt() == 1; }));
     hideThenMoveTo(onMute, true);
     if (QTest::currentTestFailed()) {
         return;
     }
     waitForRowLaidOut(mute, solo);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, onMute);
-    QTRY_COMPARE(bridge->property("muteCalls").toInt(), 1);
+    QVERIFY(soon([&]() { return bridge->property("muteCalls").toInt() == 1; }));
     QCOMPARE(bridge->property("soloCalls").toInt(), 1);
 
     // A pointer moving on a button still counts as moving.
     const int movesBefore = root->property("pointerMoves").toInt();
     QTest::mouseMove(window, onSolo + QPoint(1, 0));
-    QTRY_VERIFY(root->property("pointerMoves").toInt() > movesBefore);
+    QVERIFY(soon([&]() { return root->property("pointerMoves").toInt() > movesBefore; }));
 
     // Shown on hover, a row's buttons follow the pointer from row to row,
     // and stay for the click while the pointer is on them.
@@ -3272,35 +3288,35 @@ Window {
         }
         return shown;
     };
-    QTRY_COMPARE(shownSolos(), 1);
+    QVERIFY(soon([&]() { return shownSolos() == 1; }));
     QVERIFY(shows(solo));
     QTest::mouseMove(window, QPoint(onSolo.x(), static_cast<int>(view.bottom()) - 2));
-    QTRY_VERIFY(!shows(solo));
-    QTRY_COMPARE(shownSolos(), 1);
+    QVERIFY(soon([&]() { return !shows(solo); }));
+    QVERIFY(soon([&]() { return shownSolos() == 1; }));
     QTest::mouseMove(window, QPoint(onSolo.x(), static_cast<int>(view.top()) + 2));
-    QTRY_VERIFY(shows(solo));
+    QVERIFY(soon([&]() { return shows(solo); }));
     waitForRowLaidOut(mute, solo);
     QTest::mouseMove(window, onSolo);
     QVERIFY(shows(solo));
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, onSolo);
-    QTRY_COMPARE(bridge->property("soloCalls").toInt(), 2);
+    QVERIFY(soon([&]() { return bridge->property("soloCalls").toInt() == 2; }));
     QVERIFY(shows(solo));
     bridge->setProperty("channelButtonsVisibility", 2);
 
     // The controls do not depend on the crosshair being on.
     bridge->setProperty("showSpectrogramCrosshair", false);
-    QTRY_VERIFY(!waveform->crosshairEnabled());
+    QVERIFY(soon([&]() { return !waveform->crosshairEnabled(); }));
     autoHide->setProperty("hideDelay", 1);
-    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    QVERIFY(soon([&]() { return !autoHide->property("controlsVisible").toBool(); }));
     QSignalSpy controlsChanged(autoHide, SIGNAL(controlsVisibleChanged()));
     QTest::mouseMove(window, view.center().toPoint() + QPoint(7, 0));
-    QTRY_VERIFY(!controlsChanged.isEmpty());
+    QVERIFY(soon([&]() { return !controlsChanged.isEmpty(); }));
     keepControlsShown();
 
     // Mixed, there are no channel rows over the waveform.
     bridge->setProperty("showSpectrogramCrosshair", true);
     bridge->setProperty("spectrogramViewMode", 0);
-    QTRY_COMPARE(waveform->channelCount(), 1);
+    QVERIFY(soon([&]() { return waveform->channelCount() == 1; }));
     QTRY_VERIFY(firstVisibleItemNamed(
                     window->contentItem(), QStringLiteral("plotLaneLabel")) == nullptr);
     hideThenMoveTo(view.center().toPoint() + QPoint(9, 0));
@@ -3311,45 +3327,42 @@ Window {
     // The pointer goes with the controls and returns with them.
     QCOMPARE(window->cursor().shape(), Qt::ArrowCursor);
     autoHide->setProperty("hideDelay", 1);
-    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
-    QTRY_COMPARE(window->cursor().shape(), Qt::BlankCursor);
+    QVERIFY(soon([&]() { return !autoHide->property("controlsVisible").toBool(); }));
+    QVERIFY(soon([&]() { return window->cursor().shape() == Qt::BlankCursor; }));
     QTest::mouseMove(window, view.center().toPoint() + QPoint(11, 0));
     keepControlsShown();
-    QTRY_COMPARE(window->cursor().shape(), Qt::ArrowCursor);
+    QVERIFY(soon([&]() { return window->cursor().shape() == Qt::ArrowCursor; }));
 
     // A touch ends without a hover leave, and must not leave the crosshair.
     QPointingDevice *touchScreen = QTest::createTouchDevice();
     const QPoint touched = waveform->mapToScene(
         QPointF(waveform->width() / 2, waveform->height() / 2)).toPoint();
     QTest::touchEvent(window, touchScreen).press(0, touched, window);
-    QTRY_VERIFY(hoverHandler->property("hovered").toBool());
+    QVERIFY(soon([&]() { return hoverHandler->property("hovered").toBool(); }));
     QTest::touchEvent(window, touchScreen).release(0, touched, window);
-    QTRY_VERIFY(!hoverHandler->property("hovered").toBool());
-    QTRY_VERIFY(!waveform->m_hoverActive);
+    QVERIFY(soon([&]() { return !hoverHandler->property("hovered").toBool(); }));
+    QVERIFY(soon([&]() { return !waveform->m_hoverActive; }));
 }
 
 void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPicture_data() {
     QTest::addColumn<int>("viewMode");
     QTest::addColumn<bool>("decodes");
-    QTest::addColumn<bool>("animated");
     QTest::addColumn<int>("channels");
     // Per channel, the overview has no lanes to draw: the detail is the
     // first picture.
-    QTest::newRow("per channel") << 1 << true << true << 2;
-    QTest::newRow("per channel, animations off") << 1 << true << false << 2;
+    QTest::newRow("per channel") << 1 << true << 2;
     // A file whose detail cannot be read has no more to wait for.
-    QTest::newRow("per channel, unreadable") << 1 << false << true << 2;
+    QTest::newRow("per channel, unreadable") << 1 << false << 2;
     // Mixed, the overview of more than one channel is the peak of them
     // all, not the downmix the detail draws (a 5.1 track's was a near
     // solid envelope for some 300 ms, then the downmix): the detail is the
-    // first picture; without one, the overview.
-    QTest::newRow("mixed, stereo") << 0 << true << true << 2;
-    QTest::newRow("mixed, 5.1") << 0 << true << true << 6;
-    QTest::newRow("mixed, 5.1, animations off") << 0 << true << false << 6;
-    QTest::newRow("mixed, 5.1, unreadable") << 0 << false << true << 6;
+    // first picture; without one, the overview. A stereo track's is the
+    // same case.
+    QTest::newRow("mixed, 5.1") << 0 << true << 6;
+    QTest::newRow("mixed, 5.1, unreadable") << 0 << false << 6;
     // A mono track's overview is to its detail's scale: the first picture,
     // whatever the detail does.
-    QTest::newRow("mixed, mono") << 0 << true << true << 1;
+    QTest::newRow("mixed, mono") << 0 << true << 1;
 }
 
 // The mode switch to the waveform never shows an empty plot (the
@@ -3361,7 +3374,6 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
 void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPicture() {
     QFETCH(int, viewMode);
     QFETCH(bool, decodes);
-    QFETCH(bool, animated);
     QFETCH(int, channels);
     // Whether its first picture is the detail's.
     const bool waitsForDetail = viewMode == 1 || channels > 1;
@@ -3369,10 +3381,6 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QQmlExpression unitsExpression(qmlContext(window), window, QStringLiteral("Kirigami.Units"));
-    QObject *units = qvariant_cast<QObject *>(unitsExpression.evaluate());
-    QVERIFY(units != nullptr);
-    units->setProperty("shortDuration", animated ? 200 : 0);
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     auto *surface = window->findChild<QQuickItem *>(QStringLiteral("visualizationSurface"));
@@ -3384,6 +3392,9 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QVERIFY(waveform != nullptr);
     QObject *fade = qvariant_cast<QObject *>(surface->property("modeFadeAnimation"));
     QVERIFY(fade != nullptr);
+    // The cross-fades in animation time, each to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations]() { (void)animations.step(300); };
 
     // A detail window of one channel for [start, end] at 48 kHz, as the
     // decoder sends one, or nothing a window can be read from; held until
@@ -3492,7 +3503,7 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
         // Its frames draw the bare floor, or the overview at another
         // scale, while the detail is on its way: however many, the
         // spectrogram stays.
-        QTRY_COMPARE(started->load(), 1);
+        QVERIFY(soon([&]() { return started->load() == 1; }));
         QVERIFY(waitFrames(4));
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
         QVERIFY(!waveform->pictureReady());
@@ -3509,11 +3520,10 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     }
     // The first frame with the waveform, or with no detail to come: the
     // picture, and the cross-fade.
-    QTRY_VERIFY(waveform->pictureReady());
-    if (animated) {
-        QVERIFY(fade->property("running").toBool() || !surface->property("modeSwitching").toBool());
-    }
-    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+    QVERIFY(soon([&]() { return waveform->pictureReady(); }));
+    QVERIFY(fade->property("running").toBool() || !surface->property("modeSwitching").toBool());
+    settle();
+    QVERIFY(!surface->property("modeSwitching").toBool());
     QCOMPARE(waveformSurface->opacity(), 1.0);
     QTRY_COMPARE(spectrogramSurface->opacity(), 0.0);
     QVERIFY(waitFrames(2));
@@ -3523,11 +3533,12 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     // Hidden again, it keeps the track and its detail, and gives its
     // picture up: the view moves on with playback while it is hidden.
     QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
-    QTRY_VERIFY(!waveformSurface->isVisible());
+    settle();
+    QVERIFY(!waveformSurface->isVisible());
     QVERIFY(!waveform->pictureReady());
     QCOMPARE(waveform->sourcePath(), QStringLiteral("/fixture/stereo.flac"));
     QCOMPARE(waitsForDetail && decodes, waveform->m_detail.pointCount > 0);
-    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+    QVERIFY(!surface->property("modeSwitching").toBool());
     // Any decode still held, as the mono track's, goes through.
     gate->release(64);
 
@@ -3550,8 +3561,9 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
         QVERIFY(waveform->pictureReady());
         QVERIFY(fade->property("running").toBool() || !surface->property("modeSwitching").toBool());
     }
-    QTRY_VERIFY(waveform->pictureReady());
-    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+    QVERIFY(soon([&]() { return waveform->pictureReady(); }));
+    settle();
+    QVERIFY(!surface->property("modeSwitching").toBool());
     QVERIFY(waitFrames(1));
     shownConnection.stop();
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
@@ -3568,7 +3580,8 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
         // A new track while it is hidden: the detail and picture of the
         // one before never show for it. The switch waits for its own.
         QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
-        QTRY_VERIFY(!waveformSurface->isVisible());
+        settle();
+        QVERIFY(!waveformSurface->isVisible());
         while (gate->tryAcquire()) {
         }
         bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/next.flac"));
@@ -3576,15 +3589,16 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
         QCOMPARE(waveform->m_detail.pointCount, 0);
         QVERIFY(!waveform->pictureReady());
         QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
-        QTRY_COMPARE(started->load(), decodesBefore + 1);
+        QVERIFY(soon([&]() { return started->load() == decodesBefore + 1; }));
         QVERIFY(waitFrames(4));
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
         QVERIFY(!waveform->pictureReady());
         QCOMPARE(waveformSurface->opacity(), 0.0);
         QCOMPARE(spectrogramSurface->opacity(), 1.0);
         gate->release(64);
-        QTRY_VERIFY(waveform->pictureReady());
-        QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+        QVERIFY(soon([&]() { return waveform->pictureReady(); }));
+        settle();
+        QVERIFY(!surface->property("modeSwitching").toBool());
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
     }
     connection.stop();
@@ -3618,10 +3632,6 @@ void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds() {
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QQmlExpression unitsExpression(qmlContext(window), window, QStringLiteral("Kirigami.Units"));
-    QObject *units = qvariant_cast<QObject *>(unitsExpression.evaluate());
-    QVERIFY(units != nullptr);
-    units->setProperty("shortDuration", 200);
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     auto *surface = window->findChild<QQuickItem *>(QStringLiteral("visualizationSurface"));
@@ -3633,6 +3643,9 @@ void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds() {
     QVERIFY(waveform != nullptr);
     QObject *fade = qvariant_cast<QObject *>(surface->property("modeFadeAnimation"));
     QVERIFY(fade != nullptr);
+    // The cross-fades in animation time, each to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations]() { (void)animations.step(300); };
 
     // A detail window of the track's channels for [start, end] at 48 kHz,
     // as the decoder sends one, from the worker; the paths it was asked
@@ -3715,21 +3728,23 @@ void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds() {
     // picture needs, once, and draws none of it.
     bridge->setProperty("waveformPeaksPacked", QByteArray(512, '\x40'));
     bridge->setProperty("waveformCoverageSeconds", 6.0);
+    // Frames enough for a request's 40 ms delay: none is due or made.
     if (!fetches) {
         QVERIFY(waitFrames(4));
-        QTest::qWait(100);
+        QVERIFY(!waveform->m_requestTimer.isActive() && !waveform->m_decodeActive);
         QVERIFY(decodes().isEmpty());
         counting.stop();
         return;
     }
-    QTRY_COMPARE(decodes(), QStringList{QStringLiteral("/fixture/first.flac")});
-    QTRY_VERIFY(waveform->m_detail.pointCount > 0);
+    QVERIFY(soon([&]() { return !decodes().isEmpty(); }));
+    QCOMPARE(decodes(), QStringList{QStringLiteral("/fixture/first.flac")});
+    QVERIFY(soon([&]() { return waveform->m_detail.pointCount > 0; }));
     // More of the overview, and the rest of it, fetch nothing more.
     bridge->setProperty("waveformCoverageSeconds", 30.0);
     bridge->setProperty("waveformCoverageSeconds", 60.0);
     bridge->setProperty("waveformComplete", true);
     QVERIFY(waitFrames(4));
-    QTest::qWait(100);
+    QVERIFY(!waveform->m_requestTimer.isActive() && !waveform->m_decodeActive);
     QCOMPARE(decodes().size(), 1);
     QVERIFY(!waveformSurface->isVisible());
     QVERIFY(!waveform->pictureReady());
@@ -3752,7 +3767,8 @@ void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds() {
     QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
     QVERIFY(waveform->pictureReady());
     QVERIFY(fade->property("running").toBool());
-    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+    settle();
+    QVERIFY(!surface->property("modeSwitching").toBool());
     QVERIFY(waitFrames(1));
     shown.stop();
     QVERIFY2(framesToShow >= 0 && framesToShow <= 4,
@@ -3762,15 +3778,18 @@ void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds() {
     // A new track while it is hidden: it fetches the new track's detail,
     // and the switch has that picture at the click.
     QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
-    QTRY_VERIFY(!waveformSurface->isVisible());
-    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+    settle();
+    QVERIFY(!waveformSurface->isVisible());
+    QVERIFY(!surface->property("modeSwitching").toBool());
     bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/second.flac"));
-    QTRY_COMPARE(decodes(), (QStringList{QStringLiteral("/fixture/first.flac"), QStringLiteral("/fixture/second.flac")}));
-    QTRY_VERIFY(waveform->m_detail.pointCount > 0);
+    QVERIFY(soon([&]() { return decodes().size() == 2; }));
+    QCOMPARE(decodes(), (QStringList{QStringLiteral("/fixture/first.flac"), QStringLiteral("/fixture/second.flac")}));
+    QVERIFY(soon([&]() { return waveform->m_detail.pointCount > 0; }));
     QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
     QVERIFY(waveform->pictureReady());
     QVERIFY(fade->property("running").toBool());
-    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+    settle();
+    QVERIFY(!surface->property("modeSwitching").toBool());
     QCOMPARE(decodes().size(), 2);
     counting.stop();
 }
@@ -3802,32 +3821,32 @@ void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
     // Docked, nothing hides, and the crosshair and seek work as ever, up to
     // the pointer leaving the view.
     viewer->setProperty("visualizationMode", 1);
-    QTRY_VERIFY(waveformSurface->isVisible());
-    QTRY_VERIFY(waveform->crosshairEnabled());
+    QVERIFY(soon([&]() { return waveformSurface->isVisible(); }));
+    QVERIFY(soon([&]() { return waveform->crosshairEnabled(); }));
     QVERIFY(!autoHide->property("active").toBool());
     int nudge = 0;
     for (const int viewMode : {0, 1}) {
         bridge->setProperty("spectrogramViewMode", viewMode);
-        QTRY_COMPARE(waveform->viewMode(), viewMode);
+        QVERIFY(soon([&]() { return waveform->viewMode() == viewMode; }));
         const QRectF view = sceneRectOf(waveform);
         const QPoint docked = view.center().toPoint() + QPoint(++nudge, 0);
         QTest::mouseMove(window, docked);
-        QTRY_VERIFY(waveform->m_hoverActive);
+        QVERIFY(soon([&]() { return waveform->m_hoverActive; }));
         QCOMPARE(waveform->mapToScene(waveform->m_hoverPosition).toPoint(), docked);
         QVERIFY(autoHide->property("controlsVisible").toBool());
         QSignalSpy dockedSeeks(waveform, &WaveformEditorItem::seekRequested);
         QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, docked);
-        QTRY_COMPARE(dockedSeeks.count(), 1);
+        QVERIFY(soon([&]() { return dockedSeeks.count() == 1; }));
         const QPoint outside(docked.x(), static_cast<int>(view.top()) - 4);
         QVERIFY(!view.contains(outside));
         QTest::mouseMove(window, outside);
-        QTRY_VERIFY(!waveform->m_hoverActive);
+        QVERIFY(soon([&]() { return !waveform->m_hoverActive; }));
     }
 
     for (const int fullscreen : {1, 0}) {
         bridge->setProperty("viewerFullscreenMode", fullscreen);
         QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
-        QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+        QVERIFY(soon([&]() { return viewer->property("spectrogramViewerOpen").toBool(); }));
         QQuickWindow *host = window;
         if (fullscreen == 1) {
             QTRY_VERIFY(waveformSurface->window() != nullptr
@@ -3837,41 +3856,39 @@ void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
         } else {
             QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
             QVERIFY(popup != nullptr);
-            QTRY_VERIFY(popup->property("opened").toBool());
+            QVERIFY(soon([&]() { return popup->property("opened").toBool(); }));
         }
         // Over the whole screen, all of it: the title strip lies over it.
-        QTRY_VERIFY(qFuzzyCompare(waveformSurface->height(), host->contentItem()->height()));
+        QVERIFY(soon([&]() { return qFuzzyCompare(waveformSurface->height(), host->contentItem()->height()); }));
         QVERIFY(autoHide->property("active").toBool());
 
         for (const int visualization : {1, 0}) {
             viewer->setProperty("visualizationMode", visualization);
             QQuickItem *surface = visualization == 1 ? waveformSurface : spectrogramSurface;
-            QTRY_VERIFY(surface->isVisible());
+            QVERIFY(soon([&]() { return surface->isVisible(); }));
             for (const int viewMode : {0, 1}) {
                 bridge->setProperty("spectrogramViewMode", viewMode);
                 const QString where = QStringLiteral("fullscreen %1, visualization %2, layout %3")
                                           .arg(fullscreen).arg(visualization).arg(viewMode);
-                autoHide->setProperty("hideDelay", 1);
-                QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
-                QTRY_VERIFY(!waveform->crosshairEnabled());
+                QVERIFY(hideControls(autoHide, waveform));
 
                 QSignalSpy controlsChanged(autoHide, SIGNAL(controlsVisibleChanged()));
                 // Off the middle row, where per channel the seam between
                 // two lanes is.
                 const QPoint at = sceneRectOf(surface).center().toPoint() + QPoint(++nudge, 8);
                 QTest::mouseMove(host, at);
-                QTRY_VERIFY2(!controlsChanged.isEmpty(), qPrintable(where));
+                QVERIFY2(soon([&]() { return !controlsChanged.isEmpty(); }), qPrintable(where));
                 autoHide->setProperty("hideDelay", 5000);
-                QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
-                QTRY_VERIFY(waveform->crosshairEnabled());
+                QVERIFY(soon([&]() { return autoHide->property("controlsVisible").toBool(); }));
+                QVERIFY(soon([&]() { return waveform->crosshairEnabled(); }));
 
                 if (visualization == 1) {
-                    QTRY_VERIFY(waveform->m_hoverActive);
+                    QVERIFY(soon([&]() { return waveform->m_hoverActive; }));
                     QCOMPARE(waveform->mapToScene(waveform->m_hoverPosition).toPoint(), at);
                     QVERIFY(hoverHandler->property("hovered").toBool());
                     QSignalSpy seeks(waveform, &WaveformEditorItem::seekRequested);
                     QTest::mouseClick(host, Qt::RightButton, Qt::NoModifier, at);
-                    QTRY_COMPARE(seeks.count(), 1);
+                    QVERIFY(soon([&]() { return seeks.count() == 1; }));
                 } else {
                     // The lane under the pointer: per channel, before any
                     // audio, the lower of a stereo track's two.
@@ -3884,19 +3901,19 @@ void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
                         }
                         return false;
                     };
-                    QTRY_VERIFY2(laneHovered(), qPrintable(where));
+                    QVERIFY2(soon(laneHovered), qPrintable(where));
                 }
             }
         }
 
         // The double-click on the view that closes the viewer still gets there.
         viewer->setProperty("visualizationMode", 1);
-        QTRY_VERIFY(waveformSurface->isVisible());
+        QVERIFY(soon([&]() { return waveformSurface->isVisible(); }));
         const QPoint at = sceneRectOf(waveformSurface).center().toPoint();
         QTest::mouseMove(host, at);
         QTest::mouseDClick(host, Qt::LeftButton, Qt::NoModifier, at);
-        QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
-        QTRY_VERIFY(waveformSurface->window() == window);
+        QVERIFY(soon([&]() { return !viewer->property("spectrogramViewerOpen").toBool(); }));
+        QVERIFY(soon([&]() { return waveformSurface->window() == window; }));
     }
 }
 

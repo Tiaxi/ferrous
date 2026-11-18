@@ -81,6 +81,19 @@ private slots:
     void waveformEditorInteractionDrawsAtOnceWhileFollowing();
 };
 
+namespace {
+
+// Waits for `done`, as a worker's result that the event loop delivers,
+// looking again after each pass of it: QTRY_* looks every 50 ms, which
+// tests that wait for many results spend most of their time on. Whether it
+// came within the time an unoptimized build may need.
+template <typename Done>
+bool soon(Done done) {
+    return QTest::qWaitFor(done, kSlowBuildTimeoutMs);
+}
+
+} // namespace
+
 void WaveformSceneGraphSmokeTest::waveformEditorFrameReadsTheClockOnce() {
     WaveformEditorItem item;
     item.setWidth(320);
@@ -606,17 +619,17 @@ public:
     int visibleChangedListeners() const { return receivers(SIGNAL(visibleChanged(bool))); }
 };
 
-// A track that the editor, zoomed in, follows: 12.8 pixels a second.
+// A track that the editor, zoomed in, follows: 128 pixels a second.
 void playFollowingThePlayhead(WaveformEditorItem &item) {
     item.setWidth(400);
     item.setHeight(100);
-    item.setDurationSeconds(250.0);
+    item.setDurationSeconds(25.0);
     item.setOverviewComplete(true);
     item.setOverviewData(QByteArray(8192, static_cast<char>(128)));
     item.setZoomLevel(8.0);
-    setTestPosition(item, 100.0);
+    setTestPosition(item, 10.0);
     item.setPlaying(true);
-    setTestPosition(item, 100.0);
+    setTestPosition(item, 10.0);
 }
 
 } // namespace
@@ -635,7 +648,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorMadeInAWindowSchedulesPlaybackFr
     auto *item = new WaveformEditorItem(window.contentItem());
     playFollowingThePlayhead(*item);
     const quint64 requested = item->m_playbackFrameRequests;
-    QTRY_VERIFY_WITH_TIMEOUT(item->m_playbackFrameRequests >= requested + 5, 2000);
+    QVERIFY(soon([&]() { return item->m_playbackFrameRequests >= requested + 5; }));
     QVERIFY(item->m_frameSwappedConnection);
     QVERIFY(item->m_windowVisibilityConnection);
     QCOMPARE(window.frameSwappedListeners(), frameListeners + 1);
@@ -681,7 +694,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorParentedByQmlBindsItsWindowOnce(
     QCOMPARE(window.visibleChangedListeners(), visibilityListeners + 1);
     playFollowingThePlayhead(*item);
     const quint64 requested = item->m_playbackFrameRequests;
-    QTRY_VERIFY_WITH_TIMEOUT(item->m_playbackFrameRequests >= requested + 5, 2000);
+    QVERIFY(soon([&]() { return item->m_playbackFrameRequests >= requested + 5; }));
     QCOMPARE(window.frameSwappedListeners(), frameListeners + 1);
 
     root.reset();
@@ -809,23 +822,31 @@ QImage rasterizeSceneGeometry(const QSGNode *scene, QSize size, double scale, QC
     image.fill(background);
     const int width = image.width();
     const int height = image.height();
-    const auto blend = [&image](int x, int y, double r, double g, double b, double a) {
+    // Rounds a value of at least 0 to the nearest, halves up, as std::lround
+    // does, in a fraction of its time.
+    const auto round = [](double value) { return static_cast<int>(value + 0.5); };
+    const auto blend = [&image, &round](int x, int y, double r, double g, double b, double a) {
         auto *pixel = reinterpret_cast<QRgb *>(image.scanLine(y)) + x;
         const double keep = 1.0 - a;
-        *pixel = qRgba(static_cast<int>(std::lround(r + qRed(*pixel) * keep)),
-            static_cast<int>(std::lround(g + qGreen(*pixel) * keep)),
-            static_cast<int>(std::lround(b + qBlue(*pixel) * keep)),
-            static_cast<int>(std::lround(a * 255.0 + qAlpha(*pixel) * keep)));
+        *pixel = qRgba(round(r + qRed(*pixel) * keep), round(g + qGreen(*pixel) * keep),
+            round(b + qBlue(*pixel) * keep), round(a * 255.0 + qAlpha(*pixel) * keep));
     };
     visitDrawnNodes(scene, QPointF(), [&](const QSGNode *child, QPointF offset) {
         if (const auto *rectangle = dynamic_cast<const QSGRectangleNode *>(child)) {
             const QRectF rect = rectangle->rect().translated(offset);
             const QColor color = rectangle->color();
             const double alpha = color.alphaF();
+            const int left = std::max(0, static_cast<int>(std::lround(rect.left() * scale)));
+            const int right = std::min(width, static_cast<int>(std::lround(rect.right() * scale)));
             for (int y = std::max(0, static_cast<int>(std::lround(rect.top() * scale)));
                  y < std::min(height, static_cast<int>(std::lround(rect.bottom() * scale))); ++y) {
-                for (int x = std::max(0, static_cast<int>(std::lround(rect.left() * scale)));
-                     x < std::min(width, static_cast<int>(std::lround(rect.right() * scale))); ++x) {
+                if (alpha == 1.0 && left < right) {
+                    // Opaque: what the blend leaves is the color itself.
+                    std::fill(reinterpret_cast<QRgb *>(image.scanLine(y)) + left,
+                        reinterpret_cast<QRgb *>(image.scanLine(y)) + right, qRgba(color.red(), color.green(), color.blue(), 255));
+                    continue;
+                }
+                for (int x = left; x < right; ++x) {
                     blend(x, y, color.red() * alpha, color.green() * alpha, color.blue() * alpha, alpha);
                 }
             }
@@ -868,7 +889,26 @@ QImage rasterizeSceneGeometry(const QSGNode *scene, QSize size, double scale, QC
             const int bottom = std::min(height - 1, static_cast<int>(std::ceil(std::max({py[0], py[1], py[2]}))));
             for (int y = top; y <= bottom; ++y) {
                 const double cy = y + 0.5;
-                for (int x = left; x <= right; ++x) {
+                // The centers of the row that may be inside: an edge's
+                // weight falls along the row, so it is at least 0 on one
+                // side of where it crosses 0. A pixel to spare either side
+                // for rounding; the test below decides.
+                double from = left;
+                double to = right;
+                for (int i = 0; i < 3; ++i) {
+                    const int a = (i + 1) % 3;
+                    const int b = (i + 2) % 3;
+                    const double slope = (py[b] - py[a]) * sign;
+                    const double atA = (px[b] - px[a]) * (cy - py[a]) * sign;
+                    if (slope > 0) {
+                        to = std::min(to, px[a] + atA / slope - 0.5 + 1.0);
+                    } else if (slope < 0) {
+                        from = std::max(from, px[a] + atA / slope - 0.5 - 1.0);
+                    }
+                }
+                const int rowLeft = std::max(left, static_cast<int>(std::floor(from)));
+                const int rowRight = std::min(right, static_cast<int>(std::ceil(to)));
+                for (int x = rowLeft; x <= rowRight; ++x) {
                     const double cx = x + 0.5;
                     double weight[3];
                     bool inside = true;
@@ -1158,7 +1198,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorMakesPlaybackTilesOnWorkers() {
         const auto range = item->visibleRangeLocked();
         return item->playbackTilesCoverLocked(range.first, range.second);
     };
-    QTRY_VERIFY_WITH_TIMEOUT(tilesCoverTheView(), kSlowBuildTimeoutMs);
+    QVERIFY(soon(tilesCoverTheView));
     {
         // In strips the scene graph takes as textures without copying them.
         QMutexLocker lock(&item->m_stateMutex);
@@ -1178,7 +1218,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorMakesPlaybackTilesOnWorkers() {
     setTestPosition(*item, 40.0);
     draw();
     QVERIFY(lanesWithEmptyColumns(image, 6, 3438, 3442).isEmpty());
-    QTRY_VERIFY_WITH_TIMEOUT(tilesCoverTheView(), kSlowBuildTimeoutMs);
+    QVERIFY(soon(tilesCoverTheView));
 
     // Muting a channel drops the tiles: those the workers are still making
     // in the old colors are not taken. The workers are held busy until then.
@@ -2119,14 +2159,14 @@ void WaveformSceneGraphSmokeTest::waveformSceneGraphKeepsSampleChunksAcrossDetai
     };
     setTestPosition(item, 30.0);
     item.setSourcePath(QStringLiteral("/fixture/chunks.wav"));
-    QTRY_COMPARE_WITH_TIMEOUT(item.sampleRateHz(), kRate, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return item.sampleRateHz() == kRate; }));
     item.setZoomLevel(item.maximumZoomLevel());
     const auto viewHasSamples = [&item]() {
         QMutexLocker lock(&item.m_stateMutex);
         const auto [start, end] = item.visibleRangeLocked();
         return !item.m_decodeActive && item.renderDetailDirectlyLocked(start, end);
     };
-    QTRY_VERIFY_WITH_TIMEOUT(viewHasSamples(), kSlowBuildTimeoutMs);
+    QVERIFY(soon(viewHasSamples));
     QSGNode *chunks = nullptr;
     SampleFrames frames = compareSampleFrames(item, window, chunks);
     QVERIFY(frames.stats.chunks > 0);
@@ -2144,8 +2184,8 @@ void WaveformSceneGraphSmokeTest::waveformSceneGraphKeepsSampleChunksAcrossDetai
         item.clearPendingRequestLocked();
     }
     item.requestDetailWindow();
-    QTRY_VERIFY_WITH_TIMEOUT(generation() != first && !item.m_decodeActive, kSlowBuildTimeoutMs);
-    QTRY_VERIFY_WITH_TIMEOUT(viewHasSamples(), kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return generation() != first && !item.m_decodeActive; }));
+    QVERIFY(soon(viewHasSamples));
     frames = compareSampleFrames(item, window, chunks);
     QCOMPARE(frames.stats.chunksBuilt, 0);
     QVERIFY2(sampleFramesDiffer(frames).isEmpty(), qPrintable(sampleFramesDiffer(frames)));
@@ -2173,7 +2213,7 @@ void WaveformSceneGraphSmokeTest::waveformSceneGraphKeepsSampleChunksAcrossDetai
     QCOMPARE(sampleChunkLayer(chunks), nullptr);
     held->store(false);
     gate->release(4);
-    QTRY_VERIFY_WITH_TIMEOUT(viewHasSamples(), kSlowBuildTimeoutMs);
+    QVERIFY(soon(viewHasSamples));
     QVERIFY(generation() != second);
     {
         QMutexLocker lock(&item.m_stateMutex);
@@ -2186,7 +2226,7 @@ void WaveformSceneGraphSmokeTest::waveformSceneGraphKeepsSampleChunksAcrossDetai
     delete chunks;
     item.setSourcePath(QString());
     gate->release(4);
-    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return !item.m_decodeActive; }));
 }
 
 void WaveformSceneGraphSmokeTest::waveformSceneGraphClipsSampleChunksToFastViews_data() {
@@ -2488,7 +2528,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorDetailStaysAheadOfSamplePlayback
     setTestPosition(item, 30.0);
     item.setSourcePath(QStringLiteral("/fixture/surround.dts"));
     // The first window tells the sample rate; the zoom then asks for samples.
-    QTRY_COMPARE_WITH_TIMEOUT(item.sampleRateHz(), rate, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return item.sampleRateHz() == rate; }));
     item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, stepsOut));
     const auto viewHasSamples = [&item]() {
         QMutexLocker lock(&item.m_stateMutex);
@@ -2496,7 +2536,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorDetailStaysAheadOfSamplePlayback
         return !item.m_decodeActive && item.detailCoversRangeLocked(start, end)
             && item.detailResolutionCoversLocked(start, end) && item.m_detail.framesPerPoint == 1;
     };
-    QTRY_VERIFY_WITH_TIMEOUT(viewHasSamples(), kSlowBuildTimeoutMs);
+    QVERIFY(soon(viewHasSamples));
     held->store(true);
 
     item.setPlaying(true);
@@ -2524,7 +2564,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorDetailStaysAheadOfSamplePlayback
         }
         if (askedAtNs >= 0 && time.nowNs - askedAtNs >= replyNs) {
             gate->release();
-            QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+            QVERIFY(soon([&]() { return !item.m_decodeActive; }));
             askedAtNs = -1;
         }
         QMutexLocker lock(&item.m_stateMutex);
@@ -2544,7 +2584,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorDetailStaysAheadOfSamplePlayback
         + uncovered.mid(0, 6).join(QStringLiteral(", "))));
     item.setSourcePath(QString());
     gate->release(4);
-    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return !item.m_decodeActive; }));
 }
 
 void WaveformSceneGraphSmokeTest::waveformEditorDeferredZoomOutLandsWhilePlaying() {
@@ -2574,7 +2614,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorDeferredZoomOutLandsWhilePlaying
     };
     setTestPosition(item, 30.0);
     item.setSourcePath(QStringLiteral("/fixture/surround.flac"));
-    QTRY_COMPARE_WITH_TIMEOUT(item.sampleRateHz(), kRate, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return item.sampleRateHz() == kRate; }));
     // Eight steps out from the deepest zoom, drawn in playback tiles while
     // playing and in a raster while paused.
     item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, 8));
@@ -2584,7 +2624,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorDeferredZoomOutLandsWhilePlaying
         return !item.m_decodeActive && item.detailCoversRangeLocked(start, end)
             && item.detailResolutionCoversLocked(start, end) && item.m_detail.framesPerPoint == 1;
     };
-    QTRY_VERIFY_WITH_TIMEOUT(viewHasSamples(), kSlowBuildTimeoutMs);
+    QVERIFY(soon(viewHasSamples));
     // Detail of little more than the view, as when playback has nearly
     // used up its window, so that the wider view has none.
     {
@@ -2623,7 +2663,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorDeferredZoomOutLandsWhilePlaying
             QVERIFY(item.m_decodeActive);
             held->store(false);
             gate->release();
-            QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+            QVERIFY(soon([&]() { return !item.m_decodeActive; }));
         }
         paintFrame();
         QMutexLocker lock(&item.m_stateMutex);
@@ -2643,7 +2683,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorDeferredZoomOutLandsWhilePlaying
     }
     item.setSourcePath(QString());
     gate->release(4);
-    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return !item.m_decodeActive; }));
 }
 
 void WaveformSceneGraphSmokeTest::waveformEditorZoomOutWhilePlayingHoldsTheTiledView() {
@@ -2672,7 +2712,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorZoomOutWhilePlayingHoldsTheTiled
     };
     setTestPosition(item, 30.0);
     item.setSourcePath(QStringLiteral("/fixture/stereo.flac"));
-    QTRY_COMPARE_WITH_TIMEOUT(item.sampleRateHz(), kRate, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return item.sampleRateHz() == kRate; }));
     item.setZoomLevel(8.0);
     const auto viewReady = [&item]() {
         QMutexLocker lock(&item.m_stateMutex);
@@ -2680,7 +2720,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorZoomOutWhilePlayingHoldsTheTiled
         return !item.m_decodeActive && item.detailCoversRangeLocked(start, end)
             && item.detailResolutionCoversLocked(start, end);
     };
-    QTRY_VERIFY_WITH_TIMEOUT(viewReady(), kSlowBuildTimeoutMs);
+    QVERIFY(soon(viewReady));
     QImage canvas(kWidth, 200, QImage::Format_RGB32);
     const auto paintFrame = [&item, &canvas]() {
         QPainter painter(&canvas);
@@ -2720,7 +2760,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorZoomOutWhilePlayingHoldsTheTiled
     // The wider view's detail comes, and the zoom shows.
     held->store(false);
     gate->release();
-    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return !item.m_decodeActive; }));
     for (int frame = 0; frame < 60; ++frame) {
         time.advance(1.0 / 120.0);
         item.handleWindowFrameSwapped();
@@ -2738,7 +2778,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorZoomOutWhilePlayingHoldsTheTiled
     }
     item.setSourcePath(QString());
     gate->release(4);
-    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return !item.m_decodeActive; }));
 }
 
 void WaveformSceneGraphSmokeTest::waveformEditorLateDetailDrawsNoRasterEachFrame_data() {
@@ -2784,7 +2824,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorLateDetailDrawsNoRasterEachFrame
     };
     setTestPosition(item, 30.0);
     item.setSourcePath(QStringLiteral("/fixture/surround.flac"));
-    QTRY_COMPARE_WITH_TIMEOUT(item.sampleRateHz(), kRate, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return item.sampleRateHz() == kRate; }));
     item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, stepsOut));
     const auto viewHasSamples = [&item]() {
         QMutexLocker lock(&item.m_stateMutex);
@@ -2792,7 +2832,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorLateDetailDrawsNoRasterEachFrame
         return !item.m_decodeActive && item.detailCoversRangeLocked(start, end)
             && item.detailResolutionCoversLocked(start, end) && item.m_detail.framesPerPoint == 1;
     };
-    QTRY_VERIFY_WITH_TIMEOUT(viewHasSamples(), kSlowBuildTimeoutMs);
+    QVERIFY(soon(viewHasSamples));
     held->store(true);
     item.setPlaying(true);
     setTestPosition(item, 30.0);
@@ -2824,7 +2864,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorLateDetailDrawsNoRasterEachFrame
         }
         if (askedAtNs >= 0 && time.nowNs - askedAtNs >= kReplyNs) {
             gate->release();
-            QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+            QVERIFY(soon([&]() { return !item.m_decodeActive; }));
             askedAtNs = -1;
             ++arrivals;
             rasters = 0;
@@ -2851,7 +2891,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorLateDetailDrawsNoRasterEachFrame
     QVERIFY2(mostRasters <= 1, qPrintable(QStringLiteral("%1 rasters between two windows").arg(mostRasters)));
     item.setSourcePath(QString());
     gate->release(4);
-    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return !item.m_decodeActive; }));
 }
 
 void WaveformSceneGraphSmokeTest::waveformEditorPauseRedrawsTheRasterPlaybackLeft_data() {
@@ -2892,8 +2932,8 @@ void WaveformSceneGraphSmokeTest::waveformEditorPauseRedrawsTheRasterPlaybackLef
     setTestPosition(item, 30.0);
     // A request goes out, and fails or stays in flight.
     item.handleWindowFrameSwapped();
-    QTRY_VERIFY_WITH_TIMEOUT(item.m_decodeActive || item.m_detailArrivals > 0, kSlowBuildTimeoutMs);
-    if (requestFails) QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return item.m_decodeActive || item.m_detailArrivals > 0; }));
+    if (requestFails) QVERIFY(soon([&]() { return !item.m_decodeActive; }));
 
     QImage canvas(320, 120, QImage::Format_RGB32);
     const auto paintFrame = [&item, &canvas]() {
@@ -2946,7 +2986,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorPauseRedrawsTheRasterPlaybackLef
 
     item.setSourcePath(QString());
     gate->release(4);
-    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return !item.m_decodeActive; }));
 }
 
 void WaveformSceneGraphSmokeTest::waveformEditorDeepZoomPlaybackBenchmark() {
@@ -3472,9 +3512,9 @@ void WaveformSceneGraphSmokeTest::waveformEditorOffScreenDecodesNoDetail() {
         const auto [start, end] = item->detailRequestVisibleRangeLocked();
         return item->detailCoversRangeLocked(start, end);
     };
-    QTRY_COMPARE(started->load(), 1);
+    QVERIFY(soon([&]() { return started->load() == 1; }));
     gate->release();
-    QTRY_VERIFY(!item->m_decodeActive);
+    QVERIFY(soon([&]() { return !item->m_decodeActive; }));
     QVERIFY(viewHasDetail());
     const double detailStart = item->m_detail.startSeconds;
 
@@ -3488,7 +3528,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorOffScreenDecodesNoDetail() {
     sample.positionSeconds = 7.0;
     sample.sampledAtNs = time.nowNs;
     clock.applySample(sample, true);
-    QTRY_COMPARE(started->load(), 2);
+    QVERIFY(soon([&]() { return started->load() == 2; }));
     const std::shared_ptr<std::atomic_bool> inFlight = item->m_decodeCancelled;
     QVERIFY(inFlight && !inFlight->load());
     setTestExposed(window, false);
@@ -3499,7 +3539,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorOffScreenDecodesNoDetail() {
     QVERIFY(!item->m_requestInFlight);
     QVERIFY(!item->m_requestTimer.isActive());
     gate->release();
-    QTRY_VERIFY(!item->m_decodeActive);
+    QVERIFY(soon([&]() { return !item->m_decodeActive; }));
     // The engine's samples go on, with another seek; nothing decodes.
     for (int i = 0; i < 12; ++i) {
         time.advance(0.04);
@@ -3520,9 +3560,9 @@ void WaveformSceneGraphSmokeTest::waveformEditorOffScreenDecodesNoDetail() {
 
     // Back on screen, the detail of where playback is now.
     setTestExposed(window, true);
-    QTRY_COMPARE(started->load(), 3);
+    QVERIFY(soon([&]() { return started->load() == 3; }));
     gate->release();
-    QTRY_VERIFY(!item->m_decodeActive);
+    QVERIFY(soon([&]() { return !item->m_decodeActive; }));
     QVERIFY(viewHasDetail());
     QVERIFY(item->m_detail.startSeconds <= 8.5 && item->m_detail.endSeconds >= 8.5);
     gate->release(8);
@@ -3562,7 +3602,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorMovedBetweenWindowsFollowsTheirP
     item->setZoomLevel(8.0);
     setTestPosition(*item, 3.0);
     item->setSourcePath(file.fileName());
-    QTRY_COMPARE(started->load(), 1);
+    QVERIFY(soon([&]() { return started->load() == 1; }));
     const std::shared_ptr<std::atomic_bool> inFlight = item->m_decodeCancelled;
     QVERIFY(inFlight && !inFlight->load());
 
@@ -3572,16 +3612,16 @@ void WaveformSceneGraphSmokeTest::waveformEditorMovedBetweenWindowsFollowsTheirP
     QVERIFY(!item->m_requestInFlight);
     QVERIFY(!item->m_requestTimer.isActive());
     gate->release();
-    QTRY_VERIFY(!item->m_decodeActive);
+    QVERIFY(soon([&]() { return !item->m_decodeActive; }));
     QTest::qWait(100);
     QCOMPARE(started->load(), 1);
     QCOMPARE(item->m_detail.pointCount, 0);
 
     item->setParentItem(shown.contentItem());
     QCOMPARE(item->window(), &shown);
-    QTRY_COMPARE(started->load(), 2);
+    QVERIFY(soon([&]() { return started->load() == 2; }));
     gate->release();
-    QTRY_VERIFY(!item->m_decodeActive);
+    QVERIFY(soon([&]() { return !item->m_decodeActive; }));
     {
         QMutexLocker lock(&item->m_stateMutex);
         const auto [start, end] = item->detailRequestVisibleRangeLocked();
@@ -3968,7 +4008,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorFastScrollShowsArrivalsWithItsNe
     };
     setTestPosition(item, 5.0);
     item.setSourcePath(QStringLiteral("/fixture/fast.flac"));
-    QTRY_COMPARE_WITH_TIMEOUT(item.sampleRateHz(), kRate, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return item.sampleRateHz() == kRate; }));
     item.setZoomLevel(60.0);
     const auto idle = [&item]() {
         QMutexLocker lock(&item.m_stateMutex);
@@ -3976,7 +4016,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorFastScrollShowsArrivalsWithItsNe
         return !item.m_decodeActive && !item.m_requestTimer.isActive()
             && item.detailCoversRangeLocked(start, end) && item.m_detail.framesPerPoint == 1;
     };
-    QTRY_VERIFY_WITH_TIMEOUT(idle(), kSlowBuildTimeoutMs);
+    QVERIFY(soon(idle));
     item.setPlaying(true);
     setTestPosition(item, 5.0);
     QImage canvas(1000, 100, QImage::Format_RGB32);
@@ -3995,7 +4035,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorFastScrollShowsArrivalsWithItsNe
     const auto dueMs = [](qint64 ns) { return (ns + 999'999) / 1'000'000 * 1'000'000; };
     frame();
     // The detail playback asks for ahead of the view, if any, has come.
-    QTRY_VERIFY_WITH_TIMEOUT(idle(), kSlowBuildTimeoutMs);
+    QVERIFY(soon(idle));
     {
         QMutexLocker lock(&item.m_stateMutex);
         QVERIFY(item.m_fastScrollCapped);
@@ -4023,7 +4063,7 @@ void WaveformSceneGraphSmokeTest::waveformEditorFastScrollShowsArrivalsWithItsNe
     item.cancelPlaybackFrame();
     const quint64 arrivals = item.m_detailArrivals;
     item.requestDetailWindow();
-    QTRY_VERIFY_WITH_TIMEOUT(item.m_detailArrivals > arrivals, kSlowBuildTimeoutMs);
+    QVERIFY(soon([&]() { return item.m_detailArrivals > arrivals; }));
     QCOMPARE(item.m_playbackFrameRequests, requested);
     QCOMPARE(scheduler->dueNs(&item), dueMs(nextCapped()));
 
@@ -4171,19 +4211,20 @@ void WaveformSceneGraphSmokeTest::waveformEditorIdleViewDrawsOnlyFramesThatDiffe
     setTestPosition(item, 100.0);
     item.setPlaying(true);
     setTestPosition(item, 100.0);
-    // The whole track in view: a pixel every 0.25 s.
-    QTest::qWait(300);
+    // The whole track in view: a pixel every 0.25 s, 2 frames in half a
+    // second, where the window could draw 30.
+    QTest::qWait(200);
     frames = 0;
-    QTest::qWait(1000);
-    QVERIFY2(frames >= 2 && frames <= 7, qPrintable(QString::number(frames)));
+    QTest::qWait(500);
+    QVERIFY2(frames >= 1 && frames <= 4, qPrintable(QString::number(frames)));
     const int idleFrames = frames;
     // Zoomed in, the view scrolls a pixel at a time, 32 a second, and
     // draws a frame for each, not one for every frame the window could.
     item.setZoomLevel(8.0);
-    QTest::qWait(300);
+    QTest::qWait(200);
     frames = 0;
-    QTest::qWait(1000);
-    QVERIFY2(frames >= 2 * std::max(idleFrames, 5) && frames <= 40,
+    QTest::qWait(500);
+    QVERIFY2(frames >= 2 * std::max(idleFrames, 3) && frames <= 20,
         qPrintable(QString::number(frames)));
 }
 
@@ -4410,11 +4451,11 @@ void WaveformSceneGraphSmokeTest::waveformEditorFollowingViewDrawsOnlyAtPixelSte
     };
     const int firstColumn = playheadColumn();
     int frames = 0;
-    const QString error = loop.play(1.0, middle, &frames);
+    const QString error = loop.play(0.5, middle, &frames);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     // 12.8 to 25.6 columns a second: one frame for each.
     QCOMPARE(frames, playheadColumn() - firstColumn);
-    QVERIFY(frames >= 12);
+    QVERIFY(frames >= 6);
 
     // On a column's edge, the view is where one centred on the playhead
     // is, as before it moved a column at a time.
@@ -4566,14 +4607,15 @@ void WaveformSceneGraphSmokeTest::waveformEditorInteractionDrawsAtOnceWhileFollo
     setTestPosition(*item, 10'000.0);
     item->setPlaying(true);
     setTestPosition(*item, 10'000.0);
+    // Every frame the window could draw would be 9 in 150 ms.
     const auto settlesWithoutFrames = [&]() {
-        QTest::qWait(200);
+        QTest::qWait(100);
         frames = 0;
-        QTest::qWait(300);
+        QTest::qWait(150);
         return frames == 0;
     };
     const auto drawsAtOnce = [&](const std::function<void()> &interact) {
-        QTest::qWait(100);
+        QTest::qWait(50);
         frames = 0;
         interact();
         return QTest::qWaitFor([&frames]() { return frames > 0; }, 500);

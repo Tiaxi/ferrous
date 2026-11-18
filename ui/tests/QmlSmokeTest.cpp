@@ -135,8 +135,12 @@ OverlayOnScreen overlayOnScreen(QSGNode *node, int layer) {
 }
 
 bool sendPendingBackendZoom(SpectrogramItem &item) {
-    return QTest::qWaitFor(
-        [&item]() { return !item.m_zoomDebounceTimer->isActive(); }, 1000);
+    // At once, as the debounce's end would: its 150 ms are real time.
+    if (item.m_zoomDebounceTimer->isActive()) {
+        item.m_zoomDebounceTimer->stop();
+        QMetaObject::invokeMethod(item.m_zoomDebounceTimer, "timeout");
+    }
+    return !item.m_zoomDebounceTimer->isActive();
 }
 
 void rebuildCanvasNow(

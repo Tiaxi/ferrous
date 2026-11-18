@@ -225,7 +225,7 @@ constexpr int kPlayheadChild = 4;
 
 OverlayOnScreen overlayOnScreen(QSGNode *node, int layer);
 
-// Lets the item's zoom debounce send its request to the backend.
+// Ends the item's zoom debounce, which sends its request to the backend.
 bool sendPendingBackendZoom(SpectrogramItem &item);
 
 // Rasterizes an item's canvas at once, as its worker would.
