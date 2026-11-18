@@ -426,6 +426,7 @@ private slots:
     void resultsListEndsOnAWholeRow();
     void keyboardSelectsAndActs();
     void mouseSelectsAndActs();
+    void menuKeyOpensTheSelectedResultsMenu();
     void staleAndBusyResultsDoNotAct();
     void paletteAndDimFadeTogether();
     void clearUsesTheBreezeIconAndNoTextGlyphs();
@@ -1325,6 +1326,74 @@ void SearchPaletteTest::mouseSelectsAndActs() {
     settle();
     QTRY_VERIFY(!menuOpened.evaluate().toBool());
     // The palette stays open behind its menu.
+    QVERIFY(harness.dialog->property("visible").toBool());
+}
+
+// The Menu key and Shift+F10 open the selected result's menu under its row,
+// from the field and from the list, as the queue's and the library's do
+// (#583), and the field's own text menu stays closed; with a more row
+// selected they open nothing.
+void SearchPaletteTest::menuKeyOpensTheSelectedResultsMenu() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 26});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QVERIFY(harness.field()->hasActiveFocus());
+    // The menu's fades in animation time, each to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
+    QQmlExpression menuOpened(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.opened"));
+    QQmlExpression menuItem(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.contentItem"));
+
+    const int track = harness.model.indexOfResult(QStringLiteral("track"), 2);
+    QVERIFY(QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, track)));
+    QTest::keyClick(harness.window, Qt::Key_Menu);
+    settle();
+    QTRY_VERIFY(menuOpened.evaluate().toBool());
+    QCOMPARE(harness.dialog->property("contextRowData").toMap().value(QStringLiteral("label")).toString(),
+             QStringLiteral("Lantern Signal"));
+    // Under the selected row, at its start.
+    auto *menuContent = qvariant_cast<QQuickItem *>(menuItem.evaluate());
+    QVERIFY(menuContent != nullptr);
+    const QRectF row = sceneRect(harness.row(track));
+    const QPointF rowCorner = harness.window->mapToGlobal(QPointF(row.left(), row.bottom()));
+    const QPointF menuAt = menuContent->mapToGlobal(QPointF(0, 0));
+    QVERIFY2(std::abs(menuAt.x() - rowCorner.x()) <= 16 && std::abs(menuAt.y() - rowCorner.y()) <= 16,
+             qPrintable(QStringLiteral("menu at %1,%2, row's corner at %3,%4")
+                            .arg(menuAt.x()).arg(menuAt.y()).arg(rowCorner.x()).arg(rowCorner.y())));
+    // Escape closes the menu only, and the field keeps the keys.
+    QTest::keyClick(harness.window, Qt::Key_Escape);
+    settle();
+    QTRY_VERIFY(!menuOpened.evaluate().toBool());
+    QVERIFY(harness.dialog->property("visible").toBool());
+    QTRY_VERIFY(harness.field()->hasActiveFocus());
+
+    // Shift+F10 from the list; its actions act on that result.
+    harness.view()->forceActiveFocus();
+    QTest::keyClick(harness.window, Qt::Key_F10, Qt::ShiftModifier);
+    settle();
+    QTRY_VERIFY(menuOpened.evaluate().toBool());
+    QTest::keyClick(harness.window, Qt::Key_Down);
+    QTest::keyClick(harness.window, Qt::Key_Down); // Add to Queue.
+    QTest::keyClick(harness.window, Qt::Key_Return);
+    settle();
+    QCOMPARE(harness.strings("queued"), QStringList{QStringLiteral("track:/fixture/lantern.flac")});
+    QTRY_VERIFY(!menuOpened.evaluate().toBool());
+
+    // A more row has no menu (in the field, the key would be the field's).
+    harness.view()->forceActiveFocus();
+    int moreIndex = -1;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        if (harness.model.rowDataAt(i).value(QStringLiteral("kind")) == QStringLiteral("more")) moreIndex = i;
+    }
+    QVERIFY(moreIndex > 0);
+    QVERIFY(QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, moreIndex)));
+    QCOMPARE(harness.selection(), moreIndex);
+    QTest::keyClick(harness.window, Qt::Key_Menu);
+    settle();
+    QVERIFY(!menuOpened.evaluate().toBool());
     QVERIFY(harness.dialog->property("visible").toBool());
 }
 
