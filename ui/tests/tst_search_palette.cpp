@@ -1357,7 +1357,9 @@ void SearchPaletteTest::menuKeyOpensTheSelectedResultsMenu() {
     // Under the selected row, at its start.
     auto *menuContent = qvariant_cast<QQuickItem *>(menuItem.evaluate());
     QVERIFY(menuContent != nullptr);
-    const QRectF row = sceneRect(harness.row(track));
+    QQuickItem *trackRow = harness.row(track);
+    QVERIFY(trackRow != nullptr);
+    const QRectF row = sceneRect(trackRow);
     const QPointF rowCorner = harness.window->mapToGlobal(QPointF(row.left(), row.bottom()));
     const QPointF menuAt = menuContent->mapToGlobal(QPointF(0, 0));
     QVERIFY2(std::abs(menuAt.x() - rowCorner.x()) <= 16 && std::abs(menuAt.y() - rowCorner.y()) <= 16,
