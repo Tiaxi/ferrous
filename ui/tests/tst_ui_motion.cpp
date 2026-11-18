@@ -25,6 +25,7 @@
 #include <QQuickWindow>
 #include <QScopeGuard>
 #include <QTemporaryDir>
+#include <QVariantAnimation>
 #include <QtEndian>
 #include <QtQuickTest/quicktest.h>
 #include <QtTest/QtTest>
@@ -877,6 +878,9 @@ private slots:
     void cleanup();
     void cleanupTestCase();
     void drawsOffscreenUnlessAPlatformIsChosen();
+    void steppedDriverTakesNoRealTimeFromBeforeIt();
+    void steppedDriverTakesNoRealTimeFromBeforeIt_data();
+    void steppedDriverGoesOnWhenQtStartsItAgain();
     void queueTrackChangeHandsTheAmberOver();
     void queueTrackChangeHandsTheAmberOver_data();
     void queueRepeatOneKeepsTheRowAmber();
@@ -1003,6 +1007,78 @@ void UiMotionTest::cleanupTestCase() {
 
 void UiMotionTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
+}
+
+// The time `animation` runs for under `driver`, in the driver's frames.
+// -1 where Qt left the driver out, or the animation ran on past `limitMs`.
+int steppedRunMs(SteppedAnimationDriver &driver, const QAbstractAnimation &animation, int limitMs) {
+    int ms = 0;
+    while (animation.state() == QAbstractAnimation::Running) {
+        if (!driver.step(16) || ms >= limitMs) {
+            return -1;
+        }
+        ms += 16;
+    }
+    return ms;
+}
+
+void UiMotionTest::steppedDriverTakesNoRealTimeFromBeforeIt_data() {
+    QTest::addColumn<int>("busyMs");
+    QTest::newRow("at once") << 0;
+    // Up to 50 ms Qt hands the time on; past that it brings its clock up to
+    // date itself before an animation starts.
+    QTest::newRow("after 30 ms") << 30;
+    QTest::newRow("after 45 ms") << 45;
+    QTest::newRow("after 80 ms") << 80;
+}
+
+// A driver made while animations run on real time, as a window's own do
+// from its start, gives the animations that start under it the test's steps
+// only: none of the real time that passed since Qt's last frame, which Qt
+// hands on when it is 50 ms or less (#611: in CI, where the test's thread
+// waits for a CPU, a 200 ms transition ended within 176 ms of steps).
+void UiMotionTest::steppedDriverTakesNoRealTimeFromBeforeIt() {
+    QFETCH(int, busyMs);
+    QVariantAnimation before;
+    before.setStartValue(0.0);
+    before.setEndValue(1.0);
+    before.setDuration(60'000);
+    before.start();
+    // On real time, with a frame behind it.
+    QVERIFY(QTest::qWaitFor([&]() { return before.currentTime() > 0; }));
+    // The thread is busy, or waits for a CPU: no frame meanwhile.
+    QTest::qSleep(busyMs);
+
+    SteppedAnimationDriver driver;
+    QVariantAnimation stepped;
+    stepped.setStartValue(0.0);
+    stepped.setEndValue(1.0);
+    stepped.setDuration(200);
+    stepped.start();
+    // 200 ms in frames of 16 ms.
+    QCOMPARE(steppedRunMs(driver, stepped, 400), 208);
+    QCOMPARE(before.state(), QAbstractAnimation::Running);
+}
+
+// Qt stops the driver once nothing runs, and starts it again for the next
+// animation, counting the driver's time from that start: the next animation
+// runs for its own duration, not past all the time stepped before.
+void UiMotionTest::steppedDriverGoesOnWhenQtStartsItAgain() {
+    SteppedAnimationDriver driver;
+    QVariantAnimation first;
+    first.setStartValue(0.0);
+    first.setEndValue(1.0);
+    first.setDuration(200);
+    first.start();
+    QCOMPARE(steppedRunMs(driver, first, 400), 208);
+    QVERIFY(QTest::qWaitFor([&]() { return !driver.isRunning(); }));
+
+    QVariantAnimation second;
+    second.setStartValue(0.0);
+    second.setEndValue(1.0);
+    second.setDuration(200);
+    second.start();
+    QCOMPARE(steppedRunMs(driver, second, 400), 208);
 }
 
 void UiMotionTest::queueTrackChangeHandsTheAmberOver_data() {
@@ -4428,7 +4504,7 @@ void UiMotionTest::treeToggleOpensChildrenThatArriveLater() {
         halfShown = halfShown || (shown(firstChild) > 0 && shown(secondChild) < rowHeight);
     }
     QVERIFY(halfShown);
-    QVERIFY(expandMs >= units->longDuration() - 16);
+    QVERIFY2(expandMs >= units->longDuration() - 16, qPrintable(QStringLiteral("%1 ms").arg(expandMs)));
     QCOMPARE(albumB->y(), 4 * rowHeight);
     QCOMPARE(shown(secondChild), rowHeight);
 
