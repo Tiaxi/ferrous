@@ -1068,6 +1068,24 @@ Dialog {
                 wrapMode: Text.Wrap
             }
         }
+        // The Menu key and Shift+F10 open the selected result's menu under
+        // its row, as the queue's and the library's do. A shortcut, so the
+        // query field's own text menu doesn't open too; with no result
+        // selected, the keys stay the field's.
+        Shortcut {
+            sequences: ["Menu", "Shift+F10"]
+            context: Qt.WindowShortcut
+            enabled: root.opened && root.resultsShown && !root.searching && !resultMenu.visible
+                && !!resultsView.selectedRow && resultsView.selectedRow.kind === "item"
+            onActivated: {
+                const index = root.controller.selectedDisplayIndex
+                root.contextRowData = resultsView.selectedRow
+                resultsView.positionViewAtIndex(index, ListView.Contain)
+                const row = resultsView.itemAtIndex(index)
+                if (row) resultMenu.popup(row, 0, row.height)
+                else resultMenu.popup(resultsView, 0, 0)
+            }
+        }
         Menu {
             id: resultMenu
             MenuItem { text: I18n.i18nc("@action:inmenu", "Play"); icon.name: "media-playback-start"; onTriggered: root.controller.activateRow(root.contextRowData) }
