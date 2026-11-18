@@ -1573,11 +1573,12 @@ void AccessibilityTest::seekPointerReachesEitherEndOnItsWholeSecond() {
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, pastEnd);
     QVERIFY2(sameValues(seeks(), {0.0, 0.0, 200.0, 200.0}), qPrintable(describeValues(seeks())));
 
-    // A touch's tap at the start, which the slider takes as it lifts, as
-    // it takes a touch's drag only once it moves.
+    // A touch, which the slider takes where it lifts, as it takes a
+    // touch's drag only once it moves: here, at the start, with no update
+    // between, so only the release has its place.
     root->setProperty("positionSeconds", 0.3);
     QPointingDevice *touchScreen = QTest::createTouchDevice();
-    QTest::touchEvent(window, touchScreen).press(0, start.scene, window);
+    QTest::touchEvent(window, touchScreen).press(0, nearStart->scene, window);
     QVERIFY(seek->property("adjusting").toBool());
     QCOMPARE(held(), heldAt(0.3));
     QTest::touchEvent(window, touchScreen).release(0, start.scene, window);
