@@ -6563,15 +6563,34 @@ mod engine_tests {
         )
     }
 
+    /// The thread that `echo_stream_changes` notifies on.
+    const STREAM_ECHO_THREAD: &str = "ferrous-test-stream-echo";
+
     /// Have each sink of the output of `playbin` notify its volume and mute
     /// again on another thread after every change, as pulsesink does once
     /// the sound server has told it that its stream changed, which the
     /// server does for the engine's own writes too.
     fn echo_stream_changes(playbin: &gst::Element) {
-        const ECHO_THREAD: &str = "ferrous-test-stream-echo";
+        let output = playbin
+            .property::<gst::Element>("audio-sink")
+            .downcast::<gst::Bin>()
+            .unwrap();
+        echo_stream_changes_of(&output);
+    }
+
+    /// Have each fakeaudiosink that `output` gets from now on echo the
+    /// changes of its stream; see `echo_stream_changes`. A change of a sink
+    /// below Paused is not echoed: playsink sets a new sink up there,
+    /// before it has a stream the server could tell of, giving it the
+    /// volume and after that the mute. It takes a `notify::mute` in
+    /// between for a mute set on the sink, which it then writes back in
+    /// place of its own: the next stream lost a mute set elsewhere to such
+    /// an echo (#610). What pulsesink tells of a stream as it starts is
+    /// left out with it; the writes to a stream that plays are echoed.
+    fn echo_stream_changes_of(output: &gst::Bin) {
         let (echo_tx, echo_rx) = unbounded::<gst::glib::WeakRef<gst::Element>>();
         std::thread::Builder::new()
-            .name(ECHO_THREAD.to_string())
+            .name(STREAM_ECHO_THREAD.to_string())
             .spawn(move || {
                 while let Ok(sink) = echo_rx.recv() {
                     if let Some(sink) = sink.upgrade() {
@@ -6580,10 +6599,6 @@ mod engine_tests {
                     }
                 }
             })
-            .unwrap();
-        let output = playbin
-            .property::<gst::Element>("audio-sink")
-            .downcast::<gst::Bin>()
             .unwrap();
         output.connect_deep_element_added(move |_, _, element| {
             if element
@@ -6595,9 +6610,11 @@ mod engine_tests {
             for property in ["notify::volume", "notify::mute"] {
                 let echo_tx = echo_tx.clone();
                 element.connect(property, false, move |values| {
-                    if std::thread::current().name() != Some(ECHO_THREAD) {
+                    if std::thread::current().name() != Some(STREAM_ECHO_THREAD) {
                         let sink = values.first()?.get::<gst::Element>().ok()?;
-                        let _ = echo_tx.send(sink.downgrade());
+                        if sink.current_state() >= gst::State::Paused {
+                            let _ = echo_tx.send(sink.downgrade());
+                        }
                     }
                     None
                 });
@@ -12682,6 +12699,55 @@ mod engine_tests {
         assert!(engine.runtime.restarting());
         engine.wait_until("the cue did not land", |runtime| runtime.restart.is_none());
         engine.assert_plays_at_once_at(1.0);
+    }
+
+    /// The echo of `echo_stream_changes` tells of a sink only once it has
+    /// opened its stream, as pulsesink does (#610).
+    #[test]
+    fn the_stream_echo_leaves_a_sink_that_has_not_opened_its_stream_alone() {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        echo_stream_changes_of(pipeline.upcast_ref());
+        let source = gst::ElementFactory::make("audiotestsrc").build().unwrap();
+        let sink = || {
+            gst::ElementFactory::make("fakeaudiosink")
+                .build()
+                .expect("fakeaudiosink, from gst-plugins-bad")
+        };
+        let (opened, unopened) = (sink(), sink());
+        pipeline.add_many([&source, &opened, &unopened]).unwrap();
+        source.link(&opened).unwrap();
+        // Set up, as playsink has a new sink while it gives it the volume
+        // and the mute, but with no stream yet.
+        unopened.set_locked_state(true);
+        unopened.set_state(gst::State::Ready).unwrap();
+        let (echoed_tx, echoed) = unbounded();
+        for sink in [&opened, &unopened] {
+            let echoed_tx = echoed_tx.clone();
+            sink.connect("notify::mute", false, move |values| {
+                if std::thread::current().name() == Some(STREAM_ECHO_THREAD) {
+                    let sink = values.first()?.get::<gst::Element>().ok()?;
+                    let _ = echoed_tx.send(sink);
+                }
+                None
+            });
+        }
+        pipeline.set_state(gst::State::Paused).unwrap();
+        let (changed, _, _) = pipeline.state(gst::ClockTime::from_seconds(10));
+        changed.unwrap();
+        assert_eq!(opened.current_state(), gst::State::Paused);
+        assert_eq!(unopened.current_state(), gst::State::Ready);
+
+        unopened.set_property("volume", 0.5_f64);
+        opened.set_property("volume", 0.5_f64);
+        // The echo takes the changes in their order: one of the sink
+        // without a stream would come first.
+        let first = echoed
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the change of the sink with a stream was not echoed");
+        assert_eq!(first, opened);
+        pipeline.set_state(gst::State::Null).unwrap();
+        unopened.set_state(gst::State::Null).unwrap();
     }
 
     #[test]
