@@ -206,11 +206,17 @@ ToolBar {
             return pressed || heldKeys.length > 0
         }
 
+        // An arrow key's press, each autorepeat's too, before the slider
+        // steps by it.
+        signal arrowPressed(int key)
+
         // The slider handles the keys after these, unless they accept them.
         Keys.onPressed: function(event) {
-            if ((event.key === Qt.Key_Left || event.key === Qt.Key_Right)
-                    && !heldKeys.includes(event.key)) {
-                heldKeys = heldKeys.concat([event.key])
+            if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
+                if (!heldKeys.includes(event.key)) {
+                    heldKeys = heldKeys.concat([event.key])
+                }
+                arrowPressed(event.key)
             }
         }
         Keys.onReleased: function(event) {
@@ -504,7 +510,13 @@ ToolBar {
             // every track begins; the decoded part of the waveform measures
             // the analysis, not playback.
             readonly property real playheadX: !seekAllowed ? 0.0
-                : Math.round(visualPosition * travelDevicePixels) / windowDevicePixelRatio
+                : Math.round(shownVisualPosition * travelDevicePixels) / windowDevicePixelRatio
+            // Where on the bar the shown time lies, from the left, as the
+            // slider's visualPosition places its value.
+            readonly property real shownVisualPosition: {
+                const fraction = to > from ? Math.max(0, Math.min(1, (shownSeconds - from) / (to - from))) : 0
+                return mirrored ? 1 - fraction : fraction
+            }
             // The handle is a grab target wider than the line and not drawn.
             // Padding of half their difference outside the bar puts the
             // handle's centre, which a press or drag moves under the
@@ -536,10 +548,24 @@ ToolBar {
                 return from + Math.max(0, Math.min(1, offset / extent)) * (to - from)
             }
 
+            // The time the bar shows and a gesture seeks to, exactly: the
+            // gesture's, under the pointer or keys, or otherwise playback's,
+            // which moves by the bar's device pixels and stays where it was
+            // while a gesture is held.
+            property real playbackSeconds: 0
+            readonly property real shownSeconds: isNaN(gestureValue) ? playbackSeconds : gestureValue
+            // The slider's value is the second its description gives, as
+            // assistive technology reads the value as a number with all its
+            // decimals ("30.353452042"); within the slider's range, whose
+            // end may fall within a second.
+            function valueOfSecond(second) {
+                return Math.max(from, Math.min(Math.floor(to), second))
+            }
+
             // The second the texts show: a gesture's under the pointer or
             // keys, otherwise playback's, which changes every second while
-            // the value moves by pixels, which can be seconds apart.
-            readonly property int valueSecond: adjusting ? Math.floor(value) : root.positionSecond
+            // the bar moves by pixels, which can be seconds apart.
+            readonly property int valueSecond: adjusting ? Math.floor(shownSeconds) : root.positionSecond
 
             Accessible.name: I18n.i18nc("@label", "Seek")
             Accessible.description: seekAllowed
@@ -548,7 +574,7 @@ ToolBar {
                     FormatUtils.formatClockTime(root.uiBridge.durationSeconds))
                 : I18n.i18nc("@info", "No track playing")
 
-            // Where the current gesture moved the slider, or NaN. The
+            // The time the current gesture moved to, exactly, or NaN. The
             // position's Binding may write the value first when it ends.
             property real gestureValue: NaN
             // The value before its latest change, which a step of the keys
@@ -565,17 +591,36 @@ ToolBar {
             // seek at once.
             onMoved: {
                 const stepped = !pointerHeld && (heldKeys.length > 0 || !pressed)
-                if (stepped && isNaN(gestureValue) && durationKnown && value > from && value < to) {
-                    // The first step of the keys or a step of the wheel
-                    // moves from the position now, which the value shows
-                    // only to its last pixel. A step to either end stays.
-                    const target = value - valueBeforeChange + root.currentPositionSeconds()
-                    value = Math.max(from, Math.min(to, target))
+                let target = value
+                if (stepped && durationKnown && value > from && value < to) {
+                    // A step of the keys or the wheel moves from the time a
+                    // held step reached, or at first from the position now,
+                    // which the bar shows only to its last pixel. A step to
+                    // either end stays there.
+                    const start = isNaN(gestureValue) ? root.currentPositionSeconds() : gestureValue
+                    target = Math.max(from, Math.min(to, start + value - valueBeforeChange))
                 }
                 if (adjusting) {
-                    gestureValue = value
-                } else if (seekAllowed) {
-                    root.seekCommitted(value)
+                    gestureValue = target
+                } else {
+                    playbackSeconds = target
+                    if (seekAllowed) {
+                        root.seekCommitted(target)
+                    }
+                }
+                // A gesture's second, as valueSecond's, or the one playback
+                // shows once it is there.
+                value = valueOfSecond(adjusting ? Math.floor(target) : Math.round(target))
+            }
+            // The value, a whole second, can be at an end of the range while
+            // the time is not, and then a step towards that end leaves it
+            // where it is, so the slider does not move: the time steps to the
+            // end itself.
+            onArrowPressed: function(key) {
+                const forward = (key === Qt.Key_Right) !== mirrored
+                const end = forward ? to : from
+                if (durationKnown && value === end && shownSeconds !== end) {
+                    gestureValue = end
                 }
             }
             onAdjustingChanged: {
@@ -874,8 +919,17 @@ ToolBar {
 
         Binding {
             target: seekSlider
-            property: "value"
+            property: "playbackSeconds"
             value: seekSlider.durationKnown ? root.displayedPositionSeconds : 0
+            when: !seekSlider.adjusting
+            // A gesture keeps the position it starts from.
+            restoreMode: Binding.RestoreNone
+        }
+        Binding {
+            target: seekSlider
+            property: "value"
+            // positionSecond's, from the position the bar shows.
+            value: seekSlider.valueOfSecond(Math.round(seekSlider.playbackSeconds))
             when: !seekSlider.adjusting
             // A gesture keeps the position it starts from; restoring the
             // value from before the binding would make the arrow keys step
@@ -1016,12 +1070,16 @@ ToolBar {
             Layout.preferredWidth: volumeSlider.grooveWidth(root.narrow)
             Layout.preferredHeight: volumeSlider.boxHeight
             padding: 0
+            // In whole percents, which assistive technology reads as the
+            // value: "50" rather than "0.5".
             from: 0
-            to: 1
-            stepSize: 0
+            to: 100
+            // The arrow keys' step; a drag moves by whole percents, as the
+            // slider rounds a pointer's value to its step.
+            stepSize: pressed && heldKeys.length === 0 ? 1 : 10
             hoverEnabled: true
             readonly property string percentText: I18n.i18nc("@info volume in percent", "%1%",
-                Math.round(value * 100))
+                Math.round(value))
             readonly property string toolTipText: root.volumeMuted
                 ? I18n.i18nc("@info:tooltip volume in percent, while muted", "Volume %1, muted",
                     volumeSlider.percentText)
@@ -1041,7 +1099,7 @@ ToolBar {
             Accessible.description: volumeSlider.percentText
             // Every move, including a release's, sends its value, so the
             // volume follows a drag or a held key.
-            onMoved: root.setAppVolume(value)
+            onMoved: root.setAppVolume(value / 100)
 
             // Its own tooltip, rather than the shared one, whose text a
             // drag or a key that moves the slider before the hover's delay
@@ -1135,7 +1193,7 @@ ToolBar {
         Binding {
             target: volumeSlider
             property: "value"
-            value: root.volumeMuted ? root.mutedVolume : root.uiBridge.volume
+            value: Math.round((root.volumeMuted ? root.mutedVolume : root.uiBridge.volume) * 100)
             when: !volumeSlider.adjusting
             // As for the seek slider.
             restoreMode: Binding.RestoreNone

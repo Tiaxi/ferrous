@@ -1888,7 +1888,7 @@ void TransportStatusTest::volumeMuteKeepsTheThumb() {
     QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
     QVERIFY(transport && mute && muteGlyph && volume && groove && fill && thumb && tip);
     const QColor played = transport->property("seekPlayedColor").value<QColor>();
-    QCOMPARE(volume->property("value").toDouble(), 0.8);
+    QCOMPARE(volume->property("value").toDouble(), 80.0);
     const qreal thumbX = thumb->x();
     const qreal fillWidth = fill->width();
     QVERIFY(muteGlyph->property("source").toString().endsWith(QStringLiteral("/volume.svg")));
@@ -1925,7 +1925,7 @@ void TransportStatusTest::volumeMuteKeepsTheThumb() {
     QCOMPARE(harness.bridge->property("volume").toDouble(), 0.0);
     QVERIFY(muteGlyph->property("source").toString().endsWith(QStringLiteral("/volume-muted.svg")));
     // The thumb and the fill stay; both dim to the groove's colour.
-    QCOMPARE(volume->property("value").toDouble(), 0.8);
+    QCOMPARE(volume->property("value").toDouble(), 80.0);
     QCOMPARE(thumb->x(), thumbX);
     QCOMPARE(fill->width(), fillWidth);
     fadeTogether(unfilled);
@@ -1963,7 +1963,7 @@ void TransportStatusTest::volumeToolTipFollowsTheDrag() {
     // A delay long enough that the drag starts and ends within it.
     units->setToolTipDelay(400);
     harness.bridge->setProperty("volume", 1.0);
-    QTRY_COMPARE(volume->property("value").toDouble(), 1.0);
+    QTRY_COMPARE(volume->property("value").toDouble(), 100.0);
 
     // Onto the thumb, which starts the hover's delay; then a drag to 40%.
     const QRectF rect = sceneRect(volume);
@@ -1977,9 +1977,9 @@ void TransportStatusTest::volumeToolTipFollowsTheDrag() {
     for (int step = 1; step <= 8; ++step) {
         QTest::mouseMove(harness.window, start + (end - start) * step / 8);
     }
-    QTRY_VERIFY(std::abs(volume->property("value").toDouble() - 0.4) < 0.02);
+    QTRY_VERIFY(std::abs(volume->property("value").toDouble() - 40.0) < 2.0);
     QTRY_VERIFY(tip->property("opened").toBool());
-    const QString expected = QStringLiteral("Volume %1%").arg(std::lround(volume->property("value").toDouble() * 100));
+    const QString expected = QStringLiteral("Volume %1%").arg(std::lround(volume->property("value").toDouble()));
     QCOMPARE(tip->property("text").toString(), expected);
     // As drawn: the tooltip's label.
     auto *label = tip->property("contentItem").value<QQuickItem *>();
