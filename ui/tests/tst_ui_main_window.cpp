@@ -56,6 +56,7 @@
 #include "TestMotion.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
+#include "TestShard.h"
 
 namespace {
 
@@ -5455,7 +5456,7 @@ int main(int argc, char **argv) {
     qputenv("XDG_CACHE_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("cache"))));
     QApplication app(argc, argv);
     UiMainWindowTest test;
-    return QTest::qExec(&test, argc, argv);
+    return qExecShard(&test, argc, argv);
 }
 
 #include "tst_ui_main_window.moc"

@@ -433,6 +433,31 @@ if(BUILD_TESTING)
         set_target_properties(${target} PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
     endfunction()
 
+    # The tests of `target` in `shards` shards, each in a process of its own
+    # and in parallel with the others, offscreen, as `<target>_shard_<n>_of_
+    # <shards>`; FERROUS_TEST_SHARD picks a shard's tests (tests/TestShard.h).
+    # `cost` is about each shard's seconds when run alone, for ctest -j, as
+    # the costs at the end of this file. A test of its own checks that the
+    # shards together run every test once.
+    function(ferrous_add_sharded_test target shards cost)
+        foreach(shard RANGE 1 ${shards})
+            set(shard_test ${target}_shard_${shard}_of_${shards})
+            add_test(NAME ${shard_test} COMMAND ${target})
+            set_tests_properties(${shard_test} PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen;FERROUS_TEST_SHARD=${shard}/${shards}"
+                TIMEOUT 180
+                COST ${cost}
+            )
+        endforeach()
+        add_test(NAME ${target}_shards_run_every_test
+            COMMAND "${CMAKE_COMMAND}"
+                -DBINARY=$<TARGET_FILE:${target}>
+                -DSHARDS=${shards}
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_test_shards.cmake"
+        )
+        set_tests_properties(${target}_shards_run_every_test PROPERTIES TIMEOUT 60)
+    endfunction()
+
     # Test class names may have digits and underscores.
     ferrous_skip_line_regex(skip_line drawsOffscreenUnlessAPlatformIsChosen)
     add_test(NAME ferrous_skip_line_regex_class_names
@@ -702,7 +727,8 @@ if(BUILD_TESTING)
         waveform 120
         waveform_coverage 120
         library_queue 120
-        transport_input 180
+        transport_input 120
+        album_art 120
         window 120
         preferences 60
         errors 120
@@ -762,11 +788,8 @@ if(BUILD_TESTING)
         ferrous_app_icon
         Qt6::QuickTest
     )
-    add_test(NAME ferrous_ui_main_window_tests COMMAND ferrous_ui_main_window_tests)
-    set_tests_properties(ferrous_ui_main_window_tests PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-        TIMEOUT 180
-    )
+    # Run alone, the binary takes about a minute.
+    ferrous_add_sharded_test(ferrous_ui_main_window_tests 2 35)
     ferrous_add_default_platform_test(ferrous_ui_main_window_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The dialogs of #373, from the QML sources.
@@ -794,28 +817,8 @@ if(BUILD_TESTING)
         Qt6::QuickTest
         KF6::KirigamiPlatform
     )
-    # Its tests run in shards, each in a process of its own and in parallel
-    # with the others: run alone, the binary takes minutes. FERROUS_TEST_SHARD
-    # picks a shard's tests; see testShardFromEnvironment().
-    set(ferrous_ui_motion_shards 3)
-    foreach(shard RANGE 1 ${ferrous_ui_motion_shards})
-        set(shard_test ferrous_ui_motion_tests_shard_${shard}_of_${ferrous_ui_motion_shards})
-        add_test(NAME ${shard_test} COMMAND ferrous_ui_motion_tests)
-        set_tests_properties(${shard_test} PROPERTIES
-            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;FERROUS_TEST_SHARD=${shard}/${ferrous_ui_motion_shards}"
-            TIMEOUT 180
-            # For ctest -j, as the costs at the end of this file: about each
-            # shard's seconds when run alone.
-            COST 35
-        )
-    endforeach()
-    add_test(NAME ferrous_ui_motion_tests_shards_run_every_test
-        COMMAND "${CMAKE_COMMAND}"
-            -DBINARY=$<TARGET_FILE:ferrous_ui_motion_tests>
-            -DSHARDS=${ferrous_ui_motion_shards}
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_test_shards.cmake"
-    )
-    set_tests_properties(ferrous_ui_motion_tests_shards_run_every_test PROPERTIES TIMEOUT 60)
+    # Run alone, the binary takes over a minute.
+    ferrous_add_sharded_test(ferrous_ui_motion_tests 3 35)
     ferrous_add_default_platform_test(ferrous_ui_motion_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The menus of #373, in a session of its own: no desktop's platform
@@ -1051,18 +1054,36 @@ if(BUILD_TESTING)
         TIMEOUT 60
     )
 
+    # The tests' own sources build as for debugging, with line tables only,
+    # whatever the build type: optimised, with full debug info, the largest
+    # took over a minute each, and their run time is the QML's they load, not
+    # their own. The app's sources the tests build keep the build type's
+    # flags, so the tests check the code as it ships.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        get_property(ferrous_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+        foreach(target IN LISTS ferrous_test_targets)
+            get_target_property(target_sources ${target} SOURCES)
+            foreach(source IN LISTS target_sources)
+                if(source MATCHES "^tests/.*\\.cpp$")
+                    set_property(SOURCE ${source} APPEND PROPERTY COMPILE_OPTIONS
+                        "$<$<NOT:$<CONFIG:Debug>>:-Og;-g1>")
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+
     # ctest -j starts the tests of most COST first, so that a run does not
     # end waiting on a long test that started last. CTest takes the times of
     # the build directory's last run instead where it has them; these, about
     # each test's seconds when run alone, are for a first run, as in CI.
     # The shards of ferrous_ui_motion_tests have theirs where they are added.
     foreach(test_and_cost IN ITEMS
-            ferrous_qml_smoke_transport_input:80
-            ferrous_ui_main_window_tests:60
+            ferrous_qml_smoke_transport_input:44
+            ferrous_qml_smoke_album_art:18
             ferrous_qml_smoke_tag_editor:36
             ferrous_ui_dialogs_tests:40
             ferrous_qml_smoke_waveform:27
-            ferrous_qml_smoke_errors:32
+            ferrous_qml_smoke_errors:18
             ferrous_qml_smoke_spectrogram:14
             ferrous_accessibility_tests:14
             ferrous_bridge_client_tests:14
