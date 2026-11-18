@@ -828,9 +828,12 @@ void AppIconTest::tracesRunFromOneStartOutToTheTilesEdge() {
                               && (y < inside.top() + corner || y > inside.bottom() - corner);
         return inCorner || near(image.pixel(x, y), composited(x, y), 4);
     });
-    QVERIFY2(!onlyTraces, qPrintable(QStringLiteral("%1 %2, not %3")
-                                         .arg(hex(image.pixel(*onlyTraces)), at(onlyTraces),
-                                              hex(composited(onlyTraces->x(), onlyTraces->y())))));
+    // QVERIFY2 builds its message even when the check holds.
+    if (onlyTraces) {
+        QFAIL(qPrintable(QStringLiteral("%1 %2, not %3")
+                             .arg(hex(image.pixel(*onlyTraces)), at(onlyTraces),
+                                  hex(composited(onlyTraces->x(), onlyTraces->y())))));
+    }
 
     const int capSlack = drawing.onPixelGrid() ? 0 : 1 + size / 64;
     const int start = columnsOf(traces.front()).first;
@@ -1089,8 +1092,10 @@ void AppIconTest::strokesTaperFromTheFundamental() {
             QVERIFY2(x == body || std::abs(bend) <= 0.3, qPrintable(QStringLiteral("trace %1, column %2: bends %3").arg(n).arg(x).arg(bend)));
         }
     }
-    QVERIFY2(across.size() < 3 || (across[0] >= 1.5 * across[1] && across[0] >= 1.75 * across[2]),
-             qPrintable(QStringLiteral("%1, %2 and %3 px across").arg(across[0]).arg(across[1]).arg(across[2])));
+    if (across.size() >= 3) {
+        QVERIFY2(across[0] >= 1.5 * across[1] && across[0] >= 1.75 * across[2],
+                 qPrintable(QStringLiteral("%1, %2 and %3 px across").arg(across[0]).arg(across[1]).arg(across[2])));
+    }
 }
 
 // The ink thins smoothly as the icon grows: the fundamental's width across,
