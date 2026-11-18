@@ -8,6 +8,7 @@ import FerrousUi 1.0
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/ErrorUtils.js" as ErrorUtils
 import "../logic/FormatUtils.js" as FormatUtils
+import "../logic/KeyUtils.js" as KeyUtils
 import "../components" as Components
 
 // The status bar (#373): 24 px of chrome with 12 px text, taller with a
@@ -539,6 +540,11 @@ ToolBar {
             ToolTip.delay: Kirigami.Units.toolTipDelay
             ToolTip.text: I18n.i18nc("@info:tooltip", "Show Recent Issues")
             onClicked: root.errorController.historyRequested()
+            // Plain Space presses the focused button, not the window's
+            // Play/Pause shortcut.
+            Keys.onShortcutOverride: function(event) {
+                event.accepted = KeyUtils.isPlainSpace(event)
+            }
 
             background: Rectangle {
                 objectName: "statusBarErrorsBackground"

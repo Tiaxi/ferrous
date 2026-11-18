@@ -110,6 +110,8 @@ ApplicationWindow {
     property alias errors: errors
     property alias startButton: startButton
     property alias statusBar: statusBar
+    // How often Space reached the Play/Pause shortcut.
+    property int playPauseCount: 0
     property real positionSeconds: 77
     property string positionText: "01:17"
     property var seeks: []
@@ -157,9 +159,14 @@ ApplicationWindow {
     Action { id: previousAction; text: "P&revious"; icon.name: "media-skip-backward"; shortcut: "Ctrl+Left" }
     Action { id: playAction; text: "Play"; icon.name: "media-playback-start" }
     Action { id: pauseAction; text: "Pause"; icon.name: "media-playback-pause" }
-    // The transport reads only its shortcut's text, for the Play/Pause
-    // tooltip; disabled, so that Space stays with the focused control.
-    Action { id: playPauseAction; text: "&Pause"; shortcut: "Space"; enabled: false }
+    // Space plays and pauses, as in the main window: a focused control
+    // that takes Space must keep it from this shortcut.
+    Action {
+        id: playPauseAction
+        text: "&Pause"
+        shortcut: "Space"
+        onTriggered: window.playPauseCount += 1
+    }
     Action { id: stopAction; text: "&Stop"; icon.name: "media-playback-stop"; shortcut: "Ctrl+Shift+Space" }
     Action { id: nextAction; text: "&Next"; icon.name: "media-skip-forward"; shortcut: "Ctrl+Right" }
 
@@ -3366,6 +3373,7 @@ void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
     // Space pauses scrobbling, not playback.
     QTest::keyClick(harness.window, Qt::Key_Space);
     QTRY_VERIFY(harness.bridge->property("lastFmScrobblingPaused").toBool());
+    QCOMPARE(harness.root->property("playPauseCount").toInt(), 0);
 }
 
 void TransportStatusTest::issuesButtonShowsNewSeenAndOpen_data() {
@@ -3413,9 +3421,11 @@ void TransportStatusTest::issuesButtonShowsNewSeenAndOpen() {
     QCOMPARE(evaluateOn(background, QStringLiteral("border.width")).toInt(), 2);
 
     // Open: the same on a text-10% tint, on which the text keeps 4.5:1.
+    // Space presses the focused button; it does not play or pause (#587).
     QSignalSpy requested(harness.errors, SIGNAL(historyRequested()));
     QTest::keyClick(harness.window, Qt::Key_Space);
     QTRY_COMPARE(requested.count(), 1);
+    QCOMPARE(harness.root->property("playPauseCount").toInt(), 0);
     harness.root->property("statusBar").value<QObject *>()->setProperty("issuesOpen", true);
     SteppedAnimationDriver animations;
     QVERIFY(stepUntil(animations, [&] {
