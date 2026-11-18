@@ -91,6 +91,7 @@
 #include "../src/WaveformSceneGraph.h"
 #include "../src/WindowActivation.h"
 #include "TestItems.h"
+#include "TestMainWindow.h"
 #include "TestMessages.h"
 #include "TestMotion.h"
 #include "TestPlatform.h"

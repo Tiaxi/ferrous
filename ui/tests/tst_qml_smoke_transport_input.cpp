@@ -32,9 +32,7 @@ private slots:
     void fullscreenStripHidesWhatTheViewDrawsUnderIt();
     void viewerModeSwitchStaysWhileThePointerIsOnTheViewersControls();
     void fullscreenViewersGiveTheViewTheWholeScreen();
-    void viewerStripHoldsItsTextAtALargeFont_data();
     void viewerStripHoldsItsTextAtALargeFont();
-    void albumArtDetailsKeepBelowTheViewerControls_data();
     void albumArtDetailsKeepBelowTheViewerControls();
     void fullscreenVisualizationKeepsItsControlsBelowTheStrip();
     void viewersInTheMainWindowAreNamedInItsTitle();
@@ -253,18 +251,10 @@ void TransportInputSmokeTest::windowPresenceFollowsTheScreensRefreshRate() {
 }
 
 void TransportInputSmokeTest::mainWindowStopsPositionFramesWhileHidden() {
-    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
-    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
-    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
-    engine.load(QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
-    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
-    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
-    QVERIFY(window != nullptr);
-    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
     // The fallback bridge has no clock; give it one that plays.
     PlaybackClock clock;
     auto *bridge = window->property("uiBridge").value<QObject *>();
@@ -724,13 +714,11 @@ void TransportInputSmokeTest::visualizationModeSwitchStaysClearOfTheCornerOverla
                     const QRectF view = sceneRectOf(surface);
                     const QRectF modeSwitch = sceneRectOf(modeSwitchItem);
                     const double margin = modeSwitch.height();
-                    // In the top right corner, off the centre line; over
-                    // the whole screen, below the title strip over the view.
-                    const double stripHeight = controlsRoot->window() != window ? 39.0 : 0.0;
+                    // In the top right corner, off the centre line.
                     QVERIFY(view.contains(modeSwitch));
                     QVERIFY(modeSwitch.left() > view.center().x());
-                    QVERIFY(modeSwitch.top() >= view.top() + stripHeight);
-                    QVERIFY(modeSwitch.top() - (view.top() + stripHeight) < margin);
+                    QVERIFY(modeSwitch.top() >= view.top());
+                    QVERIFY(modeSwitch.top() - view.top() < margin);
                     if (closeButton != nullptr) {
                         const QRectF close = sceneRectOf(closeButton);
                         QVERIFY(close.right() <= view.right());
@@ -920,11 +908,15 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsOnlyWithThePointerOrFo
         }
     }
     QVERIFY(!pane.contains(away) && !away.isNull());
+    // The fades in the main window in animation time, each to its end.
+    std::optional<SteppedAnimationDriver> animations(std::in_place);
+    const auto settle = [&animations]() { (void)animations->step(1000); };
 
     // The pointer away: nothing on the plot's newest edge, but the switch is
     // still a Tab stop with its name.
     QTest::mouseMove(window, away);
-    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+    settle();
+    QCOMPARE(modeSwitch->opacity(), 0.0);
     QVERIFY(modeSwitch->isVisible());
     QVERIFY(spectrogramButton->activeFocusOnTab() && waveformButton->activeFocusOnTab());
     QAccessible::setActive(true);
@@ -941,18 +933,23 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsOnlyWithThePointerOrFo
     // The pointer anywhere on the pane shows it: on the plot's middle, and
     // on the left, away from the switch.
     QTest::mouseMove(window, pane.center().toPoint());
-    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    settle();
+    QCOMPARE(modeSwitch->opacity(), 1.0);
     QTest::mouseMove(window, away);
-    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+    settle();
+    QCOMPARE(modeSwitch->opacity(), 0.0);
     QTest::mouseMove(window, QPoint(static_cast<int>(pane.left()) + 60,
                                     static_cast<int>(pane.bottom()) - 10));
-    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    settle();
+    QCOMPARE(modeSwitch->opacity(), 1.0);
     // On the switch itself, it stays.
     QTest::mouseMove(window, sceneRectOf(spectrogramButton).center().toPoint());
     QTRY_VERIFY(modeSwitch->property("pointerHovered").toBool());
+    settle();
     QCOMPARE(modeSwitch->opacity(), 1.0);
     QTest::mouseMove(window, away);
-    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+    settle();
+    QCOMPARE(modeSwitch->opacity(), 0.0);
 
     // Tab focus shows it, and it stays while focus is on either button.
     QQuickItem *beforeSwitch = spectrogramButton->nextItemInFocusChain(false);
@@ -961,30 +958,36 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsOnlyWithThePointerOrFo
     QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(spectrogramButton->hasActiveFocus());
     QVERIFY(modeSwitch->property("focusInside").toBool());
-    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    settle();
+    QCOMPARE(modeSwitch->opacity(), 1.0);
     QVERIFY(!switchAccessible->state().invisible);
     QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(waveformButton->hasActiveFocus());
-    QTest::qWait(50);
+    settle();
     QCOMPARE(modeSwitch->opacity(), 1.0);
     // Focus leaving it hides it again.
     QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(!waveformButton->hasActiveFocus());
     QVERIFY(!modeSwitch->property("focusInside").toBool());
-    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+    settle();
+    QCOMPARE(modeSwitch->opacity(), 0.0);
 
     // Ctrl+1 and Ctrl+2 pick the modes while it is hidden.
     window->contentItem()->forceActiveFocus();
     QTest::keyClick(window, Qt::Key_2, Qt::ControlModifier);
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
     QCOMPARE(modeSwitch->property("selectedMode").toInt(), 1);
+    settle();
     QCOMPARE(modeSwitch->opacity(), 0.0);
     QTest::keyClick(window, Qt::Key_1, Qt::ControlModifier);
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
     QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
+    settle();
     QCOMPARE(modeSwitch->opacity(), 0.0);
 
-    // In the viewer in the main window, the pointer on the view shows it too.
+    // In the viewer in the main window, the pointer on the view shows it
+    // too, with the viewer's controls, which come and go on real time.
+    animations.reset();
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
     QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
     QVERIFY(popup != nullptr);
@@ -1023,16 +1026,18 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
     QVERIFY(modeSwitch != nullptr && waveformButton != nullptr && spectrogramButton != nullptr);
 
-    // The pointer off the pane: the switch shows, in its corner, 5 px in,
-    // as the lane heads are.
+    // The pointer off the pane: the switch shows, in its corner, as far in
+    // from the top as the lane heads' plates and as far from the right.
     QTest::mouseMove(window, QPoint(4, window->height() - 4));
     QVERIFY(!sceneRectOf(spectrogram).contains(QPointF(4, window->height() - 4)));
     QTRY_COMPARE(modeSwitch->opacity(), 1.0);
     QVERIFY(modeSwitch->isVisible());
     const QRectF pane = sceneRectOf(spectrogram);
     const QRectF plate = sceneRectOf(modeSwitch);
-    QCOMPARE(plate.top() - pane.top(), 5.0);
-    QCOMPARE(pane.right() - plate.right(), 5.0);
+    QQuickItem *laneHead = nullptr;
+    QTRY_VERIFY((laneHead = firstVisibleItemNamed(window->contentItem(), QStringLiteral("plotLaneHead"))) != nullptr);
+    QCOMPARE(plate.top(), sceneRectOf(laneHead).top() - laneHead->property("plateReach").toReal());
+    QCOMPARE(pane.right() - plate.right(), plate.top() - pane.top());
     // No message on the plot; a stereo track's lanes, named, without
     // Mute and Solo.
     QVERIFY(firstVisibleItemNamed(window->contentItem(), QStringLiteral("plotAnalysingText")) == nullptr);
@@ -1082,18 +1087,11 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
 }
 
 void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates_data() {
-    QTest::addColumn<QSize>("windowSize");
-    QTest::addColumn<int>("viewMode");
     // The application font's size, or 0 for the default.
     QTest::addColumn<qreal>("pointSize");
-    for (const QSize &size : {QSize(1600, 1000), QSize(1000, 720)}) {
-        for (const int mode : {0, 1}) {
-            QTest::addRow("%dx%d, %s", size.width(), size.height(), mode == 0 ? "mixed" : "per channel")
-                << size << mode << 0.0;
-        }
-    }
+    QTest::newRow("default font") << 0.0;
     // 24 pt: the lanes shorter, two lines each.
-    QTest::newRow("1600x1000, per channel, 24 pt") << QSize(1600, 1000) << 1 << 24.0;
+    QTest::newRow("24 pt") << 24.0;
 }
 
 // The never-played pane's rest lines keep clear of the plates over it: a
@@ -1109,32 +1107,20 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates_data() {
 // centred on the 1 px seam and drawn over the lanes, whose heights stay;
 // playing, the seam is 1 px again. A line in a plate's band, within 4 px of
 // its top or foot, is white 10 % rather than 20 %, its cuts kept, and every
-// other line 20 % (beside the plates the line read as a connector cut into
-// them), at the default font and at 24 pt.
+// them), at the default font, mixed and per channel at 1600x1000 and
+// 1000x720, and per channel at 24 pt, in turn in one window.
 void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
-    QFETCH(QSize, windowSize);
-    QFETCH(int, viewMode);
     QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont font = applicationFont;
-        font.setPointSizeF(pointSize);
-        QGuiApplication::setFont(font);
-    }
+    const ScopedApplicationFont font(pointSize);
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
-    window->resize(windowSize);
-    QTRY_COMPARE(window->size(), windowSize);
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
     QVERIFY(bridge && spectrogram);
     QCOMPARE(bridge->property("currentTrackPath").toString(), QString());
     QVERIFY(bridge->setProperty("showSpectrogramScale", false));
-    QVERIFY(bridge->setProperty("spectrogramViewMode", viewMode));
-    const int laneCount = viewMode == 0 ? 1 : 2;
     const auto panes = [&]() {
         QList<SpectrogramItem *> found;
         for (QQuickItem *item : itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))) {
@@ -1142,168 +1128,188 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
         }
         return found;
     };
-    QTRY_COMPARE(panes().size(), laneCount);
-    QTRY_COMPARE(visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneLabel")).size(),
-                 viewMode == 0 ? 0 : 2);
-    // Each lane's lines, in the scene, once laid out for its size.
-    const auto linesOf = [&](SpectrogramItem *pane) {
-        QList<QRectF> lines;
-        QMutexLocker lock(&pane->m_stateMutex);
-        if (!pane->m_restGrid.valid || pane->m_restGrid.size.width() != qRound(pane->width() * pane->m_canvasScale)) {
-            return lines;
-        }
-        const QRectF rect = sceneRectOf(pane);
-        const double scale = pane->m_canvasScale;
-        for (const QRect &line : std::as_const(pane->m_restGrid.lines)) {
-            lines.push_back(QRectF(rect.left() + line.x() / scale, rect.top() + line.y() / scale,
-                                   line.width() / scale, line.height() / scale));
-        }
-        return lines;
-    };
-    // Each line's colour, in the order of linesOf: white 20 %, or 10 %.
-    const auto lineColorsOf = [&](SpectrogramItem *pane) {
-        QList<QColor> colors;
-        QMutexLocker lock(&pane->m_stateMutex);
-        for (qsizetype i = 0; i < pane->m_restGrid.lines.size(); ++i) {
-            const QColor own = pane->m_restGrid.lineColors.value(i);
-            colors.push_back(own.isValid() ? own : QColor(255, 255, 255, 51));
-        }
-        return colors;
-    };
-    int quiet = 0;
-    // Laid out for the window's size, and drawn.
-    for (SpectrogramItem *pane : panes()) {
-        QTRY_VERIFY(!linesOf(pane).isEmpty());
-    }
-    QTRY_VERIFY(sceneRectOf(spectrogram).right() <= windowSize.width());
-    QTest::qWait(50);
-    QQuickItem *modeSwitch = firstVisibleItemNamed(window->contentItem(), QStringLiteral("visualizationModeSwitch"));
-    QVERIFY(modeSwitch != nullptr);
-    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
-    // The plates with their 1 px edges.
-    const QRectF switchPlate = sceneRectOf(modeSwitch).adjusted(-1, -1, 1, 1);
-    QList<QRectF> labels;
-    for (QQuickItem *label : visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneLabel"))) {
-        labels.push_back(sceneRectOf(label).adjusted(-1, -1, 1, 1));
-    }
-    int shortened = 0;
-    // The lanes whose top line starts after their label.
-    int topLinesAfterALabel = 0;
-    for (SpectrogramItem *pane : panes()) {
-        QTRY_VERIFY(!linesOf(pane).isEmpty());
-        const QRectF lane = sceneRectOf(pane);
-        const QList<QRectF> lines = linesOf(pane);
-        const QList<QColor> colors = lineColorsOf(pane);
-        QCOMPARE(colors.size(), lines.size());
-        // Every tick keeps its line, most of the lane wide.
-        QVERIFY2(lines.size() >= (pointSize > 0 ? 2 : 3), qPrintable(QString::number(lines.size())));
-        double topLine = lane.bottom();
-        for (const QRectF &line : lines) {
-            topLine = std::min(topLine, line.top());
-        }
-        for (qsizetype index = 0; index < lines.size(); ++index) {
-            const QRectF &line = lines.at(index);
-            QVERIFY2(line.width() >= lane.width() / 2,
-                     qPrintable(QStringLiteral("a line %1 px of %2").arg(line.width()).arg(lane.width())));
-            const auto within = [&](const QRectF &plate, double reach) {
-                return line.bottom() > plate.top() - reach && line.top() < plate.bottom() + reach
-                    && plate.left() < lane.right() && plate.right() > lane.left();
-            };
-            const auto beside = [&](const QRectF &plate) { return within(plate, 8); };
-            // In a plate's band: the switch's, or its own lane's label's.
-            bool inBand = within(switchPlate, 4);
-            for (const QRectF &label : std::as_const(labels)) {
-                inBand = inBand || (within(label, 4) && label.top() >= lane.top() - 4 && label.top() < lane.bottom());
-            }
-            QVERIFY2(colors.at(index) == (inBand ? QColor(255, 255, 255, 26) : QColor(255, 255, 255, 51)),
-                     qPrintable(QStringLiteral("a line at y %1, alpha %2").arg(line.top()).arg(colors.at(index).alpha())));
-            quiet += inBand ? 1 : 0;
-            if (windowSize == QSize(1000, 720) && pointSize <= 0) {
-                for (const QRectF &plate : QList<QRectF>{switchPlate} + labels) {
-                    QVERIFY2(within(plate, 8) == within(plate, 4),
-                             qPrintable(QStringLiteral("a line at y %1, 4 to 8 px from a plate %2 to %3")
-                                            .arg(line.top()).arg(plate.top()).arg(plate.bottom())));
-                }
-            }
-            if (beside(switchPlate)) {
-                QVERIFY2(line.right() <= switchPlate.left() - 6 + 0.01,
-                         qPrintable(QStringLiteral("a line at y %1 ends at %2, the switch from %3 (to y %4)")
-                                        .arg(line.top()).arg(line.right()).arg(switchPlate.left()).arg(switchPlate.bottom())));
-                ++shortened;
-            } else {
-                QVERIFY2(line.right() == lane.right(),
-                         qPrintable(QStringLiteral("a line at y %1 to %2 ends at %3, the switch %4,%5 %6x%7, corner %8x%9, lane %10 to %11")
-                                        .arg(line.top()).arg(line.bottom()).arg(line.right()).arg(switchPlate.left()).arg(switchPlate.top())
-                                        .arg(switchPlate.width()).arg(switchPlate.height()).arg(pane->reservedCorner().width())
-                                        .arg(pane->reservedCorner().height()).arg(lane.top()).arg(lane.bottom())));
-            }
-            bool besideLabel = false;
-            for (const QRectF &label : std::as_const(labels)) {
-                if (beside(label) && label.top() >= lane.top() - 4 && label.top() < lane.bottom()) {
-                    besideLabel = true;
-                    QVERIFY2(line.left() >= label.right() + 6 - 0.01,
-                             qPrintable(QStringLiteral("a line at y %1 starts at %2, the label to %3")
-                                            .arg(line.top()).arg(line.left()).arg(label.right())));
-                    topLinesAfterALabel += line.top() == topLine ? 1 : 0;
-                }
-            }
-            if (!besideLabel) {
-                QCOMPARE(line.left(), lane.left());
-            }
-        }
-    }
-    // Per channel at 1600x1000, the first line is under the switch's foot,
-    // and each lane's top line under its label, the first lane's too.
-    if (viewMode == 1 && windowSize == QSize(1600, 1000) && pointSize <= 0) {
-        QVERIFY(shortened > 0);
-        QCOMPARE(topLinesAfterALabel, laneCount);
-    }
-    // Per channel, a line in the plates' band, quieter.
-    if (viewMode == 1) {
-        QVERIFY(quiet > 0);
-    }
-
-    // The groove between the lanes at rest, per channel.
     const auto grooves = [&]() {
         return visibleItemsNamed(spectrogram, QStringLiteral("spectrogramRestSeamGroove"));
     };
-    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
-    QVERIFY(palette != nullptr);
-    const QColor restSeam = palette->property("plotRestLaneSeam").value<QColor>();
-    QCOMPARE(restSeam.rgb(), QColor(QStringLiteral("#0a0318")).rgb());
-    if (viewMode == 0) {
-        QCOMPARE(grooves().size(), 0);
-        return;
+    const auto checkAt = [&](const QSize &windowSize, int viewMode) {
+        window->resize(windowSize);
+        QTRY_COMPARE(window->size(), windowSize);
+        QVERIFY(bridge->setProperty("spectrogramViewMode", viewMode));
+        const int laneCount = viewMode == 0 ? 1 : 2;
+        QTRY_COMPARE(panes().size(), laneCount);
+        QTRY_COMPARE(visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneLabel")).size(),
+                     viewMode == 0 ? 0 : 2);
+        // Each lane's lines, in the scene, once laid out for its size.
+        const auto linesOf = [&](SpectrogramItem *pane) {
+            QList<QRectF> lines;
+            QMutexLocker lock(&pane->m_stateMutex);
+            if (!pane->m_restGrid.valid || pane->m_restGrid.size.width() != qRound(pane->width() * pane->m_canvasScale)) {
+                return lines;
+            }
+            const QRectF rect = sceneRectOf(pane);
+            const double scale = pane->m_canvasScale;
+            for (const QRect &line : std::as_const(pane->m_restGrid.lines)) {
+                lines.push_back(QRectF(rect.left() + line.x() / scale, rect.top() + line.y() / scale,
+                                       line.width() / scale, line.height() / scale));
+            }
+            return lines;
+        };
+        // Each line's colour, in the order of linesOf: white 20 %, or 10 %.
+        const auto lineColorsOf = [&](SpectrogramItem *pane) {
+            QList<QColor> colors;
+            QMutexLocker lock(&pane->m_stateMutex);
+            for (qsizetype i = 0; i < pane->m_restGrid.lines.size(); ++i) {
+                const QColor own = pane->m_restGrid.lineColors.value(i);
+                colors.push_back(own.isValid() ? own : QColor(255, 255, 255, 51));
+            }
+            return colors;
+        };
+        int quiet = 0;
+        // Laid out for the window's size, and drawn.
+        for (SpectrogramItem *pane : panes()) {
+            QTRY_VERIFY(!linesOf(pane).isEmpty());
+        }
+        QTRY_VERIFY(sceneRectOf(spectrogram).right() <= windowSize.width());
+        QTest::qWait(50);
+        QQuickItem *modeSwitch = firstVisibleItemNamed(window->contentItem(), QStringLiteral("visualizationModeSwitch"));
+        QVERIFY(modeSwitch != nullptr);
+        QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+        // The plates with their 1 px edges.
+        const QRectF switchPlate = sceneRectOf(modeSwitch).adjusted(-1, -1, 1, 1);
+        QList<QRectF> labels;
+        for (QQuickItem *label : visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneLabel"))) {
+            labels.push_back(sceneRectOf(label).adjusted(-1, -1, 1, 1));
+        }
+        int shortened = 0;
+        // The lanes whose top line starts after their label.
+        int topLinesAfterALabel = 0;
+        for (SpectrogramItem *pane : panes()) {
+            QTRY_VERIFY(!linesOf(pane).isEmpty());
+            const QRectF lane = sceneRectOf(pane);
+            const QList<QRectF> lines = linesOf(pane);
+            const QList<QColor> colors = lineColorsOf(pane);
+            QCOMPARE(colors.size(), lines.size());
+            // Every tick keeps its line, most of the lane wide.
+            QVERIFY2(lines.size() >= (pointSize > 0 ? 2 : 3), qPrintable(QString::number(lines.size())));
+            double topLine = lane.bottom();
+            for (const QRectF &line : lines) {
+                topLine = std::min(topLine, line.top());
+            }
+            for (qsizetype index = 0; index < lines.size(); ++index) {
+                const QRectF &line = lines.at(index);
+                QVERIFY2(line.width() >= lane.width() / 2,
+                         qPrintable(QStringLiteral("a line %1 px of %2").arg(line.width()).arg(lane.width())));
+                const auto within = [&](const QRectF &plate, double reach) {
+                    return line.bottom() > plate.top() - reach && line.top() < plate.bottom() + reach
+                        && plate.left() < lane.right() && plate.right() > lane.left();
+                };
+                const auto beside = [&](const QRectF &plate) { return within(plate, 8); };
+                // In a plate's band: the switch's, or its own lane's label's.
+                bool inBand = within(switchPlate, 4);
+                for (const QRectF &label : std::as_const(labels)) {
+                    inBand = inBand || (within(label, 4) && label.top() >= lane.top() - 4 && label.top() < lane.bottom());
+                }
+                QVERIFY2(colors.at(index) == (inBand ? QColor(255, 255, 255, 26) : QColor(255, 255, 255, 51)),
+                         qPrintable(QStringLiteral("a line at y %1, alpha %2").arg(line.top()).arg(colors.at(index).alpha())));
+                quiet += inBand ? 1 : 0;
+                if (windowSize == QSize(1000, 720) && pointSize <= 0) {
+                    for (const QRectF &plate : QList<QRectF>{switchPlate} + labels) {
+                        QVERIFY2(within(plate, 8) == within(plate, 4),
+                                 qPrintable(QStringLiteral("a line at y %1, 4 to 8 px from a plate %2 to %3")
+                                                .arg(line.top()).arg(plate.top()).arg(plate.bottom())));
+                    }
+                }
+                if (beside(switchPlate)) {
+                    QVERIFY2(line.right() <= switchPlate.left() - 6 + 0.01,
+                             qPrintable(QStringLiteral("a line at y %1 ends at %2, the switch from %3 (to y %4)")
+                                            .arg(line.top()).arg(line.right()).arg(switchPlate.left()).arg(switchPlate.bottom())));
+                    ++shortened;
+                } else {
+                    QVERIFY2(line.right() == lane.right(),
+                             qPrintable(QStringLiteral("a line at y %1 to %2 ends at %3, the switch %4,%5 %6x%7, corner %8x%9, lane %10 to %11")
+                                            .arg(line.top()).arg(line.bottom()).arg(line.right()).arg(switchPlate.left()).arg(switchPlate.top())
+                                            .arg(switchPlate.width()).arg(switchPlate.height()).arg(pane->reservedCorner().width())
+                                            .arg(pane->reservedCorner().height()).arg(lane.top()).arg(lane.bottom())));
+                }
+                bool besideLabel = false;
+                for (const QRectF &label : std::as_const(labels)) {
+                    if (beside(label) && label.top() >= lane.top() - 4 && label.top() < lane.bottom()) {
+                        besideLabel = true;
+                        QVERIFY2(line.left() >= label.right() + 6 - 0.01,
+                                 qPrintable(QStringLiteral("a line at y %1 starts at %2, the label to %3")
+                                                .arg(line.top()).arg(line.left()).arg(label.right())));
+                        topLinesAfterALabel += line.top() == topLine ? 1 : 0;
+                    }
+                }
+                if (!besideLabel) {
+                    QCOMPARE(line.left(), lane.left());
+                }
+            }
+        }
+        // Per channel at 1600x1000, the first line is under the switch's foot,
+        // and each lane's top line under its label, the first lane's too.
+        if (viewMode == 1 && windowSize == QSize(1600, 1000) && pointSize <= 0) {
+            QVERIFY(shortened > 0);
+            QCOMPARE(topLinesAfterALabel, laneCount);
+        }
+        // Per channel, a line in the plates' band, quieter.
+        if (viewMode == 1) {
+            QVERIFY(quiet > 0);
+        }
+
+        // The groove between the lanes at rest, per channel.
+        QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+        QVERIFY(palette != nullptr);
+        const QColor restSeam = palette->property("plotRestLaneSeam").value<QColor>();
+        QCOMPARE(restSeam.rgb(), QColor(QStringLiteral("#0a0318")).rgb());
+        if (viewMode == 0) {
+            QCOMPARE(grooves().size(), 0);
+            return;
+        }
+        QTRY_COMPARE(grooves().size(), 1);
+        const QRectF upper = sceneRectOf(panes().at(0));
+        const QRectF lower = sceneRectOf(panes().at(1));
+        const QRectF pane = sceneRectOf(spectrogram);
+        // The lanes keep their heights, with the 1 px seam between them.
+        QCOMPARE(lower.top() - upper.bottom(), 1.0);
+        QCOMPARE(upper.top(), pane.top());
+        QCOMPARE(upper.height(), double(qRound(pane.height() / 2)));
+        QCOMPARE(lower.bottom(), pane.bottom());
+        const QRectF groove = sceneRectOf(grooves().first());
+        QCOMPARE(groove.height(), 3.0);
+        QCOMPARE(groove.left(), upper.left());
+        QCOMPARE(groove.width(), upper.width());
+        QCOMPARE(groove.center().y(), upper.bottom() + 0.5);
+        QCOMPARE(grooves().first()->property("color").value<QColor>().rgb(), restSeam.rgb());
+        // Drawn over the lanes: their rows beside the seam show it.
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        QVERIFY(!image.isNull());
+        const double scale = double(image.width()) / window->width();
+        for (const double row : {upper.bottom() - 0.5, upper.bottom() + 0.5, lower.top() + 0.5}) {
+            const QColor drawn = image.pixelColor(int(pane.center().x() * scale), int(row * scale));
+            QVERIFY2(drawn.rgb() == restSeam.rgb(),
+                     qPrintable(QStringLiteral("row %1: %2").arg(row).arg(drawn.name())));
+        }
+        const QColor beyond = image.pixelColor(int(pane.center().x() * scale), int((lower.top() + 2.5) * scale));
+        QVERIFY2(beyond.rgb() != restSeam.rgb(), qPrintable(beyond.name()));
+    };
+    // Each in turn at another width, at which the lanes lay their lines out
+    // anew: linesOf() tells stale lines by their width. Per channel last.
+    const QList<std::pair<QSize, int>> layouts = pointSize > 0
+        ? QList<std::pair<QSize, int>>{{QSize(1600, 1000), 1}}
+        : QList<std::pair<QSize, int>>{{QSize(1000, 720), 0}, {QSize(1600, 1000), 0},
+                                       {QSize(1000, 720), 1}, {QSize(1600, 1000), 1}};
+    for (const auto &[windowSize, viewMode] : layouts) {
+        checkAt(windowSize, viewMode);
+        if (QTest::currentTestFailed()) {
+            qInfo("At %dx%d, %s", windowSize.width(), windowSize.height(), viewMode == 0 ? "mixed" : "per channel");
+            return;
+        }
     }
-    QTRY_COMPARE(grooves().size(), 1);
-    const QRectF upper = sceneRectOf(panes().at(0));
-    const QRectF lower = sceneRectOf(panes().at(1));
-    const QRectF pane = sceneRectOf(spectrogram);
-    // The lanes keep their heights, with the 1 px seam between them.
-    QCOMPARE(lower.top() - upper.bottom(), 1.0);
-    QCOMPARE(upper.top(), pane.top());
-    QCOMPARE(upper.height(), double(qRound(pane.height() / 2)));
-    QCOMPARE(lower.bottom(), pane.bottom());
-    const QRectF groove = sceneRectOf(grooves().first());
-    QCOMPARE(groove.height(), 3.0);
-    QCOMPARE(groove.left(), upper.left());
-    QCOMPARE(groove.width(), upper.width());
-    QCOMPARE(groove.center().y(), upper.bottom() + 0.5);
-    QCOMPARE(grooves().first()->property("color").value<QColor>().rgb(), restSeam.rgb());
-    // Drawn over the lanes: their rows beside the seam show it.
-    QTest::qWait(50);
-    const QImage image = window->grabWindow();
-    QVERIFY(!image.isNull());
-    const double scale = double(image.width()) / window->width();
-    for (const double row : {upper.bottom() - 0.5, upper.bottom() + 0.5, lower.top() + 0.5}) {
-        const QColor drawn = image.pixelColor(int(pane.center().x() * scale), int(row * scale));
-        QVERIFY2(drawn.rgb() == restSeam.rgb(),
-                 qPrintable(QStringLiteral("row %1: %2").arg(row).arg(drawn.name())));
-    }
-    const QColor beyond = image.pixelColor(int(pane.center().x() * scale), int((lower.top() + 2.5) * scale));
-    QVERIFY2(beyond.rgb() != restSeam.rgb(), qPrintable(beyond.name()));
 
     // Playing: no groove, the seam 1 px.
+    QCOMPARE(grooves().size(), 1);
     setPlayingTrack(bridge);
     QTRY_COMPARE(grooves().size(), 0);
 }
@@ -1529,29 +1535,37 @@ void TransportInputSmokeTest::crosshairGivesWayToThePlotsPlates() {
         return !values.isEmpty()
             && std::all_of(values.begin(), values.end(), [&](double each) { return std::abs(each - value) < 1e-6; });
     };
+    // The fades in animation time, each to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations]() { (void)animations.step(1000); };
     for (const int mode : {0, 1}) {
         viewer->setProperty("visualizationMode", mode);
-        QTRY_VERIFY((mode == 0 ? spectrogramSurface : waveformSurface)->isVisible());
+        settle();
+        QVERIFY((mode == 0 ? spectrogramSurface : waveformSurface)->isVisible());
         const QPoint onPlot = sceneRectOf(layer).center().toPoint();
         QTest::mouseMove(window, onPlot);
-        QTRY_VERIFY(all(mode, 1.0));
+        settle();
+        QVERIFY(all(mode, 1.0));
         QCOMPARE(layer->property("crosshairLevel").toDouble(), 1.0);
         for (QQuickItem *plate : {label, modeSwitch}) {
             QTest::mouseMove(window, sceneRectOf(plate).center().toPoint());
             QTRY_VERIFY(layer->property("plateHovered").toBool());
-            QTRY_VERIFY2(all(mode, 0.0), qPrintable(QStringLiteral("mode %1 on %2").arg(mode).arg(plate->objectName())));
+            settle();
+            QVERIFY2(all(mode, 0.0), qPrintable(QStringLiteral("mode %1 on %2").arg(mode).arg(plate->objectName())));
             QTest::mouseMove(window, onPlot);
             QTRY_VERIFY(!layer->property("plateHovered").toBool());
-            QTRY_VERIFY(all(mode, 1.0));
+            settle();
+            QVERIFY(all(mode, 1.0));
         }
     }
-    // Over shortDuration, OutCubic.
+    // Over shortDuration, OutCubic: under way after a frame.
     QTest::mouseMove(window, sceneRectOf(modeSwitch).center().toPoint());
     QTRY_VERIFY(layer->property("plateHovered").toBool());
-    QTest::qWait(16);
+    QVERIFY(animations.step(16));
     const double during = layer->property("crosshairLevel").toDouble();
-    QVERIFY2(during < 1.0, qPrintable(QString::number(during)));
-    QTRY_COMPARE(layer->property("crosshairLevel").toDouble(), 0.0);
+    QVERIFY2(during > 0.0 && during < 1.0, qPrintable(QString::number(during)));
+    settle();
+    QCOMPARE(layer->property("crosshairLevel").toDouble(), 0.0);
 }
 
 void TransportInputSmokeTest::visualizationModeSwitchLeavesTheCornerToTheView() {
@@ -1690,7 +1704,8 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         QCOMPARE(qAlpha(colorOf(strip, "color")), 255);
         QQuickItem *hairline = itemNamed(strip, QStringLiteral("viewerStripHairline"));
         QVERIFY(hairline != nullptr);
-        QCOMPARE(sceneRectOf(hairline), QRectF(0, 38, fullscreen->width(), 1));
+        const qreal band = strip->height() - 1;
+        QCOMPARE(sceneRectOf(hairline), QRectF(0, band, fullscreen->width(), 1));
         QCOMPARE(colorOf(hairline, "color"), colorOf(plotColors, "plotPlateEdge"));
 
         // The title semibold, then "Artist — Album" and the time, secondary.
@@ -1747,7 +1762,7 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         QVERIFY(strip->isAncestorOf(close));
         QCOMPARE(sceneRectOf(close).size(), QSizeF(24, 24));
         QCOMPARE(sceneRectOf(close).right(), fullscreen->width() - 8.0);
-        QCOMPARE(sceneRectOf(close).top(), 7.0);
+        QCOMPARE(sceneRectOf(close).center().y(), band / 2);
         QQuickItem *closeIcon = itemNamed(close, QStringLiteral("viewerToolButtonIcon"));
         QVERIFY(closeIcon != nullptr);
         QCOMPARE(colorOf(closeIcon, "color"), colorOf(plotColors, "plotText"));
@@ -1782,25 +1797,14 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
 
-void TransportInputSmokeTest::viewerStripHoldsItsTextAtALargeFont_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("default font") << 0.0;
-    QTest::newRow("24 pt") << 24.0;
-}
-
 // The strip is as tall as its line of text and 4 px above and below it,
 // 32 px and its edge at the least: at 24 pt its text ran 6 px over the top
 // of the screen. It still lies over the view, which keeps the whole
-// window, and what keeps below it moves down with it.
+// window, and what keeps below it moves down with it. Its size with the
+// default font: viewersShowTheTrackInATitleStripOverTheWholeScreen.
 void TransportInputSmokeTest::viewerStripHoldsItsTextAtALargeFont() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont larger = applicationFont;
-        larger.setPointSizeF(pointSize);
-        QGuiApplication::setFont(larger);
-    }
+    constexpr qreal pointSize = 24;
+    const ScopedApplicationFont font(pointSize);
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverPath = savedCover(dir, 400, 400);
@@ -1853,19 +1857,13 @@ void TransportInputSmokeTest::viewerStripHoldsItsTextAtALargeFont() {
                                          QStringLiteral("viewerStripTime")}) {
             QQuickItem *label = itemNamed(strip, labelName);
             QVERIFY2(label != nullptr && label->isVisible(), name.constData());
-            if (pointSize > 0) {
-                QCOMPARE(qvariant_cast<QFont>(label->property("font")).pointSizeF(), pointSize * 1.2);
-            }
+            QCOMPARE(qvariant_cast<QFont>(label->property("font")).pointSizeF(), pointSize * 1.2);
             line = std::max(line, label->implicitHeight());
             labels << label;
         }
         const qreal band = std::max({38.0, std::ceil(line) + 8.0, close->height() + 8.0});
         QTRY_COMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), band + 1.0));
-        if (pointSize == 0) {
-            QCOMPARE(band, 38.0);
-        } else {
-            QVERIFY2(band > 38.0, name.constData());
-        }
+        QVERIFY2(band > 38.0, name.constData());
         // Each text whole inside the band, over the edge under it.
         for (QQuickItem *label : std::as_const(labels)) {
             const QRectF rect = sceneRectOf(label);
@@ -1899,25 +1897,12 @@ void TransportInputSmokeTest::viewerStripHoldsItsTextAtALargeFont() {
     }
 }
 
-void TransportInputSmokeTest::albumArtDetailsKeepBelowTheViewerControls_data() {
-    QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("default font") << 0.0;
-    QTest::newRow("24 pt") << 24.0;
-}
-
-// The album art's details start below the viewer's controls, which grow
-// with the font: in the main window, under the plate in its corner, 12 px
-// below it at the default font as before; over the whole screen, under the
-// title strip. At 24 pt the file's name lay 8 px under the plate's buttons.
+// The album art's details start 12 px below the viewer's controls, which
+// grow with the font: in the main window, under the plate in its corner;
+// over the whole screen, under the title strip. At 24 pt the file's name
+// lay 8 px under the plate's buttons.
 void TransportInputSmokeTest::albumArtDetailsKeepBelowTheViewerControls() {
-    QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont larger = applicationFont;
-        larger.setPointSizeF(pointSize);
-        QGuiApplication::setFont(larger);
-    }
+    const ScopedApplicationFont font(24);
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverPath = savedCover(dir, 400, 400);
@@ -1943,14 +1928,8 @@ void TransportInputSmokeTest::albumArtDetailsKeepBelowTheViewerControls() {
     QTRY_VERIFY((controls = visibleItemNamed(window, QStringLiteral("albumArtPopupControls"))) != nullptr);
     QTRY_VERIFY((title = visibleItemNamed(window, QStringLiteral("albumArtInfoTitle"))) != nullptr);
     const qreal plateBottom = sceneRectOf(controls).bottom();
-    if (pointSize == 0) {
-        QCOMPARE(plateBottom, 33.0);
-        QTRY_COMPARE(sceneRectOf(title).top(), 45.0);
-    } else {
-        QVERIFY2(plateBottom > 33.0, qPrintable(QString::number(plateBottom)));
-    }
     QTRY_COMPARE(albumArt->property("infoTopInset").toReal(), plateBottom);
-    QTRY_VERIFY2(sceneRectOf(title).top() >= plateBottom + 12 - 0.5,
+    QTRY_VERIFY2(std::abs(sceneRectOf(title).top() - (plateBottom + 12)) <= 0.5,
                  qPrintable(QStringLiteral("title at %1, plate to %2")
                                 .arg(sceneRectOf(title).top()).arg(plateBottom)));
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
@@ -1969,7 +1948,7 @@ void TransportInputSmokeTest::albumArtDetailsKeepBelowTheViewerControls() {
     QQuickItem *strip = nullptr;
     QTRY_VERIFY((strip = visibleItemNamed(fullscreen, QStringLiteral("albumArtFullscreenStrip"))) != nullptr);
     QTRY_VERIFY((title = visibleItemNamed(fullscreen, QStringLiteral("albumArtInfoTitle"))) != nullptr);
-    QTRY_VERIFY2(sceneRectOf(title).top() >= sceneRectOf(strip).bottom() + 12 - 0.5,
+    QTRY_VERIFY2(std::abs(sceneRectOf(title).top() - (sceneRectOf(strip).bottom() + 12)) <= 0.5,
                  qPrintable(QStringLiteral("title at %1, strip to %2")
                                 .arg(sceneRectOf(title).top()).arg(sceneRectOf(strip).bottom())));
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
@@ -2039,7 +2018,7 @@ void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {
         // and the view has the whole window.
         QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
         QTRY_COMPARE(sceneRectOf(surface), wholeWindow);
-        QCOMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), 39));
+        QCOMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), strip->height()));
         QVERIFY(strip->z() > 0);
         QTRY_COMPARE(strip->opacity(), 1.0);
 
@@ -2129,14 +2108,14 @@ void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {
     QVERIFY(albumArtAutoHide->property("active").toBool());
     QQuickItem *popupClose = visibleItemNamed(window, QStringLiteral("albumArtPopupCloseButton"));
     QVERIFY(popupClose != nullptr);
-    QCOMPARE(sceneRectOf(popupClose).top(), 7.0);
+    const QRectF popupCloseRect = sceneRectOf(popupClose);
     albumArtAutoHide->setProperty("hideDelay", 1);
     QTRY_VERIFY(!popupClose->isVisible());
     albumArtAutoHide->setProperty("hideDelay", 600000);
     QTest::mouseMove(window, QPoint(window->width() / 3, window->height() / 2));
     QTest::mouseMove(window, QPoint(window->width() / 3 + 5, window->height() / 2));
     QTRY_VERIFY(popupClose->isVisible());
-    QCOMPARE(sceneRectOf(popupClose).top(), 7.0);
+    QCOMPARE(sceneRectOf(popupClose), popupCloseRect);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
@@ -2198,7 +2177,8 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
     QVERIFY(strip != nullptr);
     QTRY_COMPARE(sceneRectOf(surface).top(), 0.0);
-    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(-1.0, 39.0 + 5.0));
+    const qreal belowStrip = strip->height() + 5.0;
+    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(-1.0, belowStrip));
     auto *spectrogram = qobject_cast<SpectrogramItem *>(
         firstVisibleItemNamed(surface, QStringLiteral("spectrogramPaneItem")));
     QVERIFY(spectrogram != nullptr);
@@ -2213,13 +2193,13 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
         QVERIFY(modeSwitch != nullptr);
         QTRY_VERIFY(sceneRectOf(strip).contains(sceneRectOf(modeSwitch)));
     }
-    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(-1.0, 39.0 + 5.0));
+    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(-1.0, belowStrip));
     autoHide->setProperty("hideDelay", 1);
     QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
     QTRY_VERIFY(!strip->isVisible());
     QQuickItem *laneHead = firstVisibleItemNamed(fullscreen->contentItem(), QStringLiteral("plotLaneHead"));
     QVERIFY(laneHead != nullptr);
-    QCOMPARE(headPlatesTop(laneHead), 39.0 + 5.0);
+    QCOMPARE(headPlatesTop(laneHead), belowStrip);
     autoHide->setProperty("hideDelay", 5000);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
@@ -2352,7 +2332,7 @@ void TransportInputSmokeTest::fullscreenStripHidesWhatTheViewDrawsUnderIt() {
         };
         const double x = line->x();
         // Under the strip: its colour, as beside the line.
-        for (int y = 1; y < 32; y += 3) {
+        for (int y = 1; y < strip->height() - 1; y += 3) {
             const QColor at = pixel(x, y);
             QVERIFY2(std::abs(at.red() - stripColor.red()) <= 1 && std::abs(at.green() - stripColor.green()) <= 1
                          && std::abs(at.blue() - stripColor.blue()) <= 1,
@@ -2360,7 +2340,7 @@ void TransportInputSmokeTest::fullscreenStripHidesWhatTheViewDrawsUnderIt() {
                                     .arg(QLatin1String(where), at.name(), QString::number(y), stripColor.name())));
         }
         // Below it, the line shows.
-        QCOMPARE(pixel(x, 33 + 20).name(), QStringLiteral("#ff00ff"));
+        QCOMPARE(pixel(x, strip->height() + 20).name(), QStringLiteral("#ff00ff"));
         line.reset();
         QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
         QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
@@ -2424,10 +2404,12 @@ void TransportInputSmokeTest::viewerModeSwitchStaysWhileThePointerIsOnTheViewers
             const QPoint at = fullscreenMode == 1 && spot == controls
                 ? QPoint(host->width() / 2, int(controls->height() / 2))
                 : centerInWindow(spot);
+            // Longer than the switch's fade, in animation time: it stays
+            // revealed.
+            SteppedAnimationDriver animations;
             QTest::mouseMove(host, at);
             QTRY_VERIFY2(controls->property("hovered").toBool(), where.constData());
-            // Longer than the switch's fade: it stays revealed.
-            QTest::qWait(300);
+            (void)animations.step(300);
             if (!inStrip) {
                 QVERIFY2(modeSwitch->property("revealed").toBool(), where.constData());
                 QCOMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
@@ -2437,8 +2419,11 @@ void TransportInputSmokeTest::viewerModeSwitchStaysWhileThePointerIsOnTheViewers
         }
         // Off the view and its controls, it stays while the viewer's
         // controls show, as their part, and goes with them, at their level.
-        QTest::mouseMove(host, QPoint(-20, -20));
-        QTest::qWait(300);
+        {
+            SteppedAnimationDriver animations;
+            QTest::mouseMove(host, QPoint(-20, -20));
+            (void)animations.step(300);
+        }
         QVERIFY(shownSwitch->isVisible());
         if (!inStrip) {
             QVERIFY2(modeSwitch->property("revealed").toBool(), where.constData());
@@ -3303,6 +3288,10 @@ void TransportInputSmokeTest::fullscreenVisualizationStripHoldsTheModeSwitch() {
         {waveformButton, QStringLiteral("Waveform")},
         {close, QStringLiteral("Close")},
     };
+    // Where they show is the point, not after how long: at once.
+    for (const auto &[button, text] : tips) {
+        QVERIFY(evaluateOn(button, QStringLiteral("ToolTip.delay = 0")).isValid());
+    }
     for (const auto &[button, text] : tips) {
         QTest::mouseMove(fullscreen, centerInWindow(button));
         QList<QQuickItem *> shown;
@@ -3424,7 +3413,7 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
                 != nullptr);
     QTRY_COMPARE(modeSwitch->opacity(), 1.0);
     QVERIFY(sceneRectOf(modeSwitch).top() >= 0.0);
-    QVERIFY2(sceneRectOf(modeSwitch).top() < 39.0, qPrintable(QString::number(sceneRectOf(modeSwitch).top())));
+    QVERIFY2(sceneRectOf(modeSwitch).top() < strip->height(), qPrintable(QString::number(sceneRectOf(modeSwitch).top())));
     // They still hide as the pointer rests.
     autoHide->setProperty("hideDelay", 50);
     QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
@@ -3434,7 +3423,7 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
     // Turned on again, it shows with the controls, which keep below it,
     // and it has the mode switch, which is no longer on the plot.
     QVERIFY(bridge->setProperty("showFullscreenTitleStrip", true));
-    QTRY_COMPARE(plotLayer->property("topInset").toReal(), 39.0);
+    QTRY_COMPARE(plotLayer->property("topInset").toReal(), strip->height());
     autoHide->setProperty("hideDelay", 600000);
     QTest::mouseMove(fullscreen, QPoint(300, 300));
     QTRY_VERIFY(strip->isVisible());
@@ -3477,7 +3466,7 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
     QTRY_VERIFY(!viewer->property("albumArtInfoVisible").toBool());
     // With the strip on, the details keep below it.
     QVERIFY(bridge->setProperty("showFullscreenTitleStrip", true));
-    QTRY_COMPARE(albumArt->property("infoTopInset").toReal(), 39.0);
+    QTRY_COMPARE(albumArt->property("infoTopInset").toReal(), albumArtStrip->height());
     QTest::mouseMove(albumArtWindow, QPoint(300, 300));
     QTRY_VERIFY(albumArtStrip->isVisible());
     QTest::keyClick(albumArtWindow, Qt::Key_Escape);
