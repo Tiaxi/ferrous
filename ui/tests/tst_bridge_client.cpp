@@ -13,6 +13,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocale>
+#include <QMetaProperty>
 #include <QNetworkProxy>
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -379,6 +380,7 @@ private slots:
     void albumArtistFollowsMatchingMetadataAcrossTracks();
     void mprisPositionReadsThePlaybackClock();
     void mprisRateWritePausesOnlyForZero();
+    void spectrogramDisplayModeReachesTheViewsBeforeTheBackend();
     void mprisOpenUriOpensOnlyLocalFiles();
     void eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths();
     void loggingDoesNotWaitForAStalledDisk();
@@ -7235,6 +7237,49 @@ void BridgeClientTest::mprisOpenUriOpensOnlyLocalFiles() {
     QCOMPARE(sentCommands.count(), 0);
     QVERIFY(controller.openUri(QStringLiteral("file:///music/track.flac")));
     QCOMPARE(sentCommands.count(), 1);
+}
+
+void BridgeClientTest::spectrogramDisplayModeReachesTheViewsBeforeTheBackend() {
+    // The backend's worker answers a display-mode request with columns for
+    // the new mode, which go to the views straight from the bridge: the
+    // views have the mode before the request leaves (#586).
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QMetaObject *meta = client.metaObject();
+    const QMetaProperty property =
+        meta->property(meta->indexOfProperty("spectrogramDisplayMode"));
+    QVERIFY(property.hasNotifySignal());
+    QSignalSpy announced(&client, property.notifySignal());
+    QList<int> announcedAtSend;
+    client.m_sendCommandOverride = [&announced, &announcedAtSend](const QByteArray &) {
+        announcedAtSend.push_back(static_cast<int>(announced.count()));
+        return true;
+    };
+    client.setSpectrogramDisplayMode(1);
+    client.setSpectrogramDisplayMode(0);
+    QCOMPARE(announcedAtSend, (QList<int>{1, 2}));
+    QCOMPARE(property.read(&client).toInt(), 0);
+
+    // The backend's changes come with the snapshot notification, so a
+    // snapshot from before the request, which the next one corrects,
+    // announces nothing.
+    QSignalSpy snapshots(&client, &BridgeClient::snapshotChanged);
+    const auto applySnapshot = [&client](int displayMode) {
+        BinaryBridgeCodec::DecodedSnapshot snapshot;
+        snapshot.settings.present = true;
+        snapshot.settings.spectrogramDisplayMode = displayMode;
+        client.resetPollChanges();
+        QVERIFY(client.processBinarySnapshot(snapshot));
+        client.schedulePollChanges();
+    };
+    applySnapshot(1);
+    applySnapshot(0);
+    QTRY_VERIFY(snapshots.count() > 0);
+    QCOMPARE(announced.count(), 2);
+    applySnapshot(1);
+    QCOMPARE(announced.count(), 2);
+    QTRY_COMPARE(announced.count(), 3);
+    QCOMPARE(property.read(&client).toInt(), 1);
 }
 
 void BridgeClientTest::eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths() {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::VecDeque;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -1117,11 +1118,53 @@ struct SpectrogramSessionState {
     /// them before the channel's, so they apply in the order sent.
     queued_commands: VecDeque<SpectrogramWorkerCommand>,
     /// The left of a centered view, while the session decodes it after the
-    /// columns at the playhead.
+    /// columns at the playhead; or the history of a rolling view.
     backfill: Option<Backfill>,
+    /// Whether the UI's ring has the session's columns where their column
+    /// puts them, as it has a session's that started, or last sought, in
+    /// centered mode: a rolling view then takes columns left of them too.
+    ring_by_column: bool,
+    /// The columns a rolling view shows left of those the session decoded
+    /// for a centered view, from its first to the session's first: decoded
+    /// once the session has no backfill left (see [`plan_rolling_history`]).
+    rolling_history: Option<(u64, u64)>,
     /// The column after the file's last, once the session has decoded to
     /// its end: the extent every later chunk carries as its estimate.
     end_column: Option<u64>,
+    /// The stream at the end of the file, while the session decodes the
+    /// left of its view, or a rolling view's history, after it: what it
+    /// parks with again, and what a continuation goes on from.
+    stream_at_end: Option<StreamAtEnd>,
+}
+
+/// Where a session that decoded its file to the end has its stream: the
+/// file's end on the timeline, and the audio its STFTs and resamplers hold
+/// past its last column, which the next file's first columns take in.
+struct StreamAtEnd {
+    timeline: AudioTimeline,
+    stfts: Vec<StftComputer>,
+    resamplers: Vec<PeakHoldResampler>,
+    total_covered_samples: u64,
+}
+
+impl StreamAtEnd {
+    /// The stream `session` has at the end of its file, before a pass after
+    /// it rewinds the decoder.
+    fn take(session: &mut SpectrogramSessionState) -> Self {
+        Self {
+            timeline: std::mem::replace(&mut session.timeline, AudioTimeline::new(0)),
+            stfts: session.stfts.clone(),
+            resamplers: session.resamplers.clone(),
+            total_covered_samples: session.total_covered_samples,
+        }
+    }
+
+    fn restore(self, session: &mut SpectrogramSessionState) {
+        session.timeline = self.timeline;
+        session.stfts = self.stfts;
+        session.resamplers = self.resamplers;
+        session.total_covered_samples = self.total_covered_samples;
+    }
 }
 
 /// Whose timeline a session's columns are on.
@@ -1403,7 +1446,10 @@ fn run_spectrogram_session(
         failure: None,
         queued_commands,
         backfill,
+        ring_by_column: display_mode == SpectrogramDisplayMode::Centered,
+        rolling_history: None,
         end_column: None,
+        stream_at_end: None,
     };
     enqueue_leading_silence(&mut session.stfts, leading_silence);
 
@@ -1555,6 +1601,10 @@ fn run_spectrogram_session(
 
                 session.target_chunk_columns = 1;
                 session.throttle_origin = None;
+                // The UI's ring takes the file's columns in the order they
+                // come, after the outgoing file's.
+                session.ring_by_column = false;
+                session.rolling_history = None;
                 session.session_start_column = session.columns_produced;
                 session.post_reset_unthrottled_columns =
                     post_reset_unthrottled_columns(session.display_mode);
@@ -1798,9 +1848,13 @@ fn session_decode_loop(
             return None;
         }
         // A session parked at its end after rejecting a continuation has
-        // published its end already.
-        if session.source_reached_eof {
-            break;
+        // published its end already. One whose view became rolling decodes
+        // the history left of its columns first.
+        if session.source_reached_eof && session.rolling_history.is_none() {
+            match park_at_end(session, cmd_rx, event_tx, generation, columns_produced_out) {
+                ControlFlow::Break(result) => return result,
+                ControlFlow::Continue(()) => continue,
+            }
         }
 
         // 1. Check for commands via try_recv (drain pending, take latest position).
@@ -1827,8 +1881,9 @@ fn session_decode_loop(
             return None;
         }
         if session.source_reached_eof {
-            // A backfill after the end of the file: the session parks there.
-            break;
+            // A backfill after the end of the file: the session parks there,
+            // once it has decoded a rolling view's history.
+            continue;
         }
 
         // 2. Check lead — park if sufficiently ahead (unless gapless pending).
@@ -1951,6 +2006,7 @@ fn session_decode_loop(
                     // ends where the left did, not where the right started,
                     // and every column of the session is sent.
                     session.backfill = None;
+                    session.stream_at_end = None;
                 }
                 // Real source EOF.  Publish the decoded extent while this
                 // track is still current. Waiting until the parked worker
@@ -1959,7 +2015,7 @@ fn session_decode_loop(
                 session_flush_chunk(session, event_tx, columns_produced_out);
                 record_end_column(session);
                 session_emit_finalize_chunk(session, event_tx);
-                break;
+                continue;
             }
         };
         session.packet_counter += 1;
@@ -1986,39 +2042,57 @@ fn session_decode_loop(
         //    early columns get evicted, causing the spectrogram to go black.
         maybe_update_columns_estimate(session, source, generation, track_length_out);
     }
+}
 
+/// Park a session that has decoded its file to the end, handling commands so
+/// that backward seeks still work. Breaks with what the session returns, or
+/// goes on to decode the history its view needs once it became rolling.
+fn park_at_end(
+    session: &mut SpectrogramSessionState,
+    cmd_rx: &Receiver<SpectrogramWorkerCommand>,
+    event_tx: &dyn AnalysisEventOutput,
+    generation: &AtomicU64,
+    columns_produced_out: &AtomicU64,
+) -> ControlFlow<Option<SpectrogramWorkerCommand>> {
     if let Some((path, track_token)) = session.pending_continue.take() {
-        return Some(SpectrogramWorkerCommand::ContinueWithFile { path, track_token });
+        return ControlFlow::Break(Some(SpectrogramWorkerCommand::ContinueWithFile {
+            path,
+            track_token,
+        }));
     }
-    // Otherwise park and keep handling commands so backward seeks
-    // still work after the decoder has consumed the entire file.
     loop {
-        let session_gen = session.gen;
-        if generation.load(Ordering::Relaxed) != session_gen {
-            return None;
+        if generation.load(Ordering::Relaxed) != session.gen {
+            return ControlFlow::Break(None);
         }
-        match next_session_command(session, || cmd_rx.recv()) {
+        let result = match next_session_command(session, || cmd_rx.recv()) {
             Ok(cmd) => match handle_single_command(session, cmd) {
                 SessionAction::Continue => {
+                    if session.rolling_history.is_some() {
+                        return ControlFlow::Continue(());
+                    }
                     if let Some((path, token)) = session.pending_continue.take() {
-                        return Some(SpectrogramWorkerCommand::ContinueWithFile {
+                        Some(SpectrogramWorkerCommand::ContinueWithFile {
                             path,
                             track_token: token,
-                        });
+                        })
+                    } else {
+                        continue;
                     }
                 }
                 SessionAction::FlushToken => {
                     session_flush_token(session, event_tx, columns_produced_out);
+                    continue;
                 }
-                SessionAction::Stop => return Some(SpectrogramWorkerCommand::StopSession),
-                SessionAction::End => return None,
-                SessionAction::NewSession(cmd) => return Some(cmd),
+                SessionAction::Stop => Some(SpectrogramWorkerCommand::StopSession),
+                SessionAction::End => None,
+                SessionAction::NewSession(cmd) => Some(cmd),
                 SessionAction::SeekRequired { position_seconds } => {
-                    return Some(SpectrogramWorkerCommand::Seek { position_seconds });
+                    Some(SpectrogramWorkerCommand::Seek { position_seconds })
                 }
             },
-            Err(_) => return None,
-        }
+            Err(_) => None,
+        };
+        return ControlFlow::Break(result);
     }
 }
 
@@ -2399,6 +2473,11 @@ fn handle_session_seek(
         backfill.map_or(new_column, |backfill| backfill.end),
     )?;
     session.backfill = backfill;
+    session.stream_at_end = None;
+    // The seek's reset starts the UI's ring over, in order of arrival in a
+    // rolling view.
+    session.ring_by_column = session.display_mode == SpectrogramDisplayMode::Centered;
+    session.rolling_history = None;
     session.session_start_column = new_column;
     session.target_chunk_columns = 1; // Fast first-pixel after seek
     session.throttle_origin = None;
@@ -2486,6 +2565,23 @@ fn plan_backfill(
     })
 }
 
+/// The history a rolling view shows that a centered session has not
+/// decoded: the columns from a view's width left of the playhead up to the
+/// session's first. A centered session decodes from the left edge of its
+/// view, half a view left of the playhead, and a rolling view shows a whole
+/// view left of it (#586). `None` when the session decoded them, or when the
+/// UI's ring has no place for them: one in the order its columns came.
+fn plan_rolling_history(session: &SpectrogramSessionState) -> Option<(u64, u64)> {
+    if !session.ring_by_column || session.timeline_of != ColumnTimeline::PlayingFile {
+        return None;
+    }
+    let view = session_view(session);
+    let first = view
+        .column_at(session.target_position_seconds)
+        .saturating_sub(view.window_columns());
+    (first < session.session_start_column).then_some((first, session.session_start_column))
+}
+
 /// The column after the last the session decoded on the right, where the
 /// UI's ring ends; while it decodes the left, that is not where it reads.
 fn decoded_frontier(session: &SpectrogramSessionState) -> u64 {
@@ -2502,11 +2598,23 @@ fn view_right_column(session: &SpectrogramSessionState) -> u64 {
     view.left_column(session.target_position_seconds) + view.window_columns()
 }
 
+/// The column the right of a session's view reaches: the right edge of a
+/// centered view, or the playhead of a rolling one, which shows the
+/// columns up to it.
+fn backfill_view_right(session: &SpectrogramSessionState) -> u64 {
+    match session.display_mode {
+        SpectrogramDisplayMode::Centered => view_right_column(session),
+        SpectrogramDisplayMode::Rolling => {
+            session_view(session).column_at(session.target_position_seconds)
+        }
+    }
+}
+
 /// Where a session decoding the right of its view leaves it for the left:
 /// a margin past the view's right edge, or its lookahead if that is nearer.
 fn backfill_right_end(session: &SpectrogramSessionState) -> u64 {
     let margin = f64_to_u64_saturating(BACKFILL_RIGHT_MARGIN_SECONDS * session.cols_per_second);
-    let view_end = view_right_column(session).saturating_add(margin);
+    let view_end = backfill_view_right(session).saturating_add(margin);
     if session.lookahead_columns == 0 {
         return view_end;
     }
@@ -2557,18 +2665,35 @@ fn reposition_decoder(
 /// right of its view and the left: to the left once the right reaches
 /// [`backfill_right_end`] or the end of the file, back to the right when
 /// playback gets near the right edge of what it decoded there, and on with
-/// the right once the left is done. A view that stops being centered gets
-/// the right only, as a rolling view shows columns in the order they come.
+/// the right once the left is done. A view that stops being centered goes
+/// on so while the UI's ring has the columns where their column puts them,
+/// and then decodes the history a rolling view shows left of the session's
+/// first column; otherwise it gets the right only, as a rolling view shows
+/// columns in the order they come.
 fn step_backfill(
     session: &mut SpectrogramSessionState,
     source: &mut AudioFrameSource,
     event_tx: &dyn AnalysisEventOutput,
     columns_produced_out: &AtomicU64,
 ) -> anyhow::Result<()> {
+    if session.backfill.is_none() {
+        if let Some((next, end)) = session.rolling_history.take() {
+            // A session parked at the end of its file decodes it, and parks
+            // there again.
+            let right_ended = session.source_reached_eof;
+            session.source_reached_eof = false;
+            session.backfill = Some(Backfill {
+                next,
+                end,
+                resume: None,
+                right_ended,
+            });
+        }
+    }
     let Some(backfill) = session.backfill else {
         return Ok(());
     };
-    if session.display_mode != SpectrogramDisplayMode::Centered {
+    if session.display_mode != SpectrogramDisplayMode::Centered && !session.ring_by_column {
         return end_backfill(session, source, event_tx, columns_produced_out);
     }
     match backfill.resume {
@@ -2580,6 +2705,9 @@ fn step_backfill(
                 backfill.next,
                 backfill.end,
             );
+            if backfill.right_ended {
+                session.stream_at_end = Some(StreamAtEnd::take(session));
+            }
             reposition_decoder(session, source, backfill.next)?;
             session.backfill = Some(Backfill {
                 resume: Some(resume),
@@ -2589,7 +2717,7 @@ fn step_backfill(
         Some(_) if session.columns_produced >= backfill.end => {
             end_backfill(session, source, event_tx, columns_produced_out)?;
         }
-        Some(resume) if !backfill.right_ended && resume < view_right_column(session) => {
+        Some(resume) if !backfill.right_ended && resume < backfill_view_right(session) => {
             // Playback caught up with the right: decode it ahead again.
             session_emit_pending_chunk(session, event_tx, columns_produced_out);
             let next = session.columns_produced;
@@ -2629,9 +2757,23 @@ fn end_backfill(
         return Ok(());
     };
     session_emit_pending_chunk(session, event_tx, columns_produced_out);
+    if let Some((next, end)) = session.rolling_history.take() {
+        // A rolling view's history left of these comes before the right.
+        reposition_decoder(session, source, next)?;
+        session.backfill = Some(Backfill {
+            next,
+            end,
+            ..backfill
+        });
+        return Ok(());
+    }
     session.backfill = None;
     if backfill.right_ended {
-        // Every column is sent: publish the end, and park there.
+        // Every column is sent: publish the end, and park there, with the
+        // stream as the end of the file left it.
+        if let Some(stream) = session.stream_at_end.take() {
+            stream.restore(session);
+        }
         session.columns_produced = resume;
         session.chunk_start_index = resume;
         session.source_reached_eof = true;
@@ -2676,7 +2818,15 @@ fn next_target_chunk_columns_for_payload(
 /// Apply a display-mode change to a live session: update rate limit
 /// and lookahead for the new mode.
 fn apply_display_mode(session: &mut SpectrogramSessionState, mode: SpectrogramDisplayMode) {
+    let previous = session.display_mode;
     session.display_mode = mode;
+    session.rolling_history = match mode {
+        SpectrogramDisplayMode::Rolling if previous == SpectrogramDisplayMode::Centered => {
+            plan_rolling_history(session)
+        }
+        SpectrogramDisplayMode::Rolling => session.rolling_history,
+        SpectrogramDisplayMode::Centered => None,
+    };
     // Columns decoded at the centered mode's unlimited rate do not count
     // against the rolling limit.
     session.throttle_origin = None;
@@ -2755,7 +2905,14 @@ fn throttle_wait(
     session: &mut SpectrogramSessionState,
     now: std::time::Instant,
 ) -> Option<Duration> {
-    if post_reset_window_active(session) || !session.decode_rate_limit.is_finite() {
+    // The left of a view, or a rolling view's history, is what the view
+    // shows, not lookahead: it decodes at once.
+    if post_reset_window_active(session)
+        || !session.decode_rate_limit.is_finite()
+        || session
+            .backfill
+            .is_some_and(|backfill| backfill.resume.is_some())
+    {
         return None;
     }
     let max_cols_per_wall_sec = session.decode_rate_limit * session.cols_per_second;
@@ -3452,6 +3609,35 @@ mod tests {
     }
 
     #[test]
+    fn a_rolling_session_decodes_the_left_of_its_view_unthrottled() {
+        // The history a rolling view shows after a switch from centered
+        // mode decodes at once; the right goes on at the rolling rate.
+        let mut session = make_test_session();
+        session.display_mode = SpectrogramDisplayMode::Rolling;
+        session.post_reset_unthrottled_columns = 0;
+        session.session_start_column = 1_000;
+        session.columns_produced = 500;
+        session.decode_rate_limit = 1e-30;
+        session.backfill = Some(Backfill {
+            next: 400,
+            end: 1_000,
+            resume: Some(2_000),
+            right_ended: false,
+        });
+        let start = std::time::Instant::now();
+        for _ in 0..3 {
+            assert_eq!(throttle_wait(&mut session, start), None);
+            session.columns_produced += 100;
+        }
+        assert_eq!(session.throttle_origin, None);
+        session.backfill = None;
+        session.columns_produced = 2_000;
+        assert_eq!(throttle_wait(&mut session, start), None);
+        session.columns_produced += 1;
+        assert_eq!(throttle_wait(&mut session, start), Some(Duration::MAX));
+    }
+
+    #[test]
     fn a_session_that_ends_without_a_successor_is_reported_and_one_parked_at_its_end_is_not() {
         let fixture = include_bytes!("fixtures/seek-tone.mp3");
         let folder = crate::paths::test_root().join(format!("session-ends-{}", std::process::id()));
@@ -4061,7 +4247,10 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            ring_by_column: false,
+            rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         };
 
         match handle_single_command(
@@ -4178,7 +4367,10 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            ring_by_column: false,
+            rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         };
 
         assert!(post_reset_window_active(&session));
@@ -4234,7 +4426,10 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            ring_by_column: false,
+            rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -4300,7 +4495,10 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            ring_by_column: false,
+            rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -4358,7 +4556,10 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            ring_by_column: false,
+            rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -4447,7 +4648,10 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            ring_by_column: false,
+            rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         }
     }
 
@@ -8228,11 +8432,26 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// The column a rolling view of the backfill sessions shows first,
+    /// with its playhead at `target`: a view's width left of it.
+    fn rolling_history_start(target: f64) -> u64 {
+        let view = CenteredView::new(BACKFILL_WIDTH, BACKFILL_ZOOM, BACKFILL_RATE, None);
+        view.column_at(target) - view.window_columns()
+    }
+
     #[test]
-    fn a_view_that_stops_being_centered_gets_the_right_of_its_view_only() {
+    fn a_view_that_becomes_rolling_gets_the_left_of_its_view_then_the_history_before_it() {
+        // Regression for #586: a centered session decodes half a view left of
+        // its playhead, a rolling view shows a whole view. After the switch,
+        // the session goes on with the left of its view, which the UI's ring
+        // still takes where its column puts it, then decodes the columns
+        // before its first, then goes on with the right.
         let path = write_noise_fixture("rolling", 2);
         let reference = continuous_reference(&path, 2, 1);
         let playhead = backfill_column(BACKFILL_PLAYHEAD);
+        let start = backfill_column(backfill_start_seconds(BACKFILL_PLAYHEAD));
+        let history = rolling_history_start(BACKFILL_PLAYHEAD);
+        assert!(history < start, "{history} {start}");
         let (commands, command_rx) = unbounded();
         let switch = commands.clone();
         let sent = AtomicBool::new(false);
@@ -8261,21 +8480,182 @@ mod tests {
                         .unwrap();
                 }
             },
-            |chunks| spans_of(chunks).len() >= 3,
+            |chunks| spans_of(chunks).len() >= 4,
         );
         let spans = spans_of(&chunks);
-        assert_eq!(spans.len(), 3, "{spans:?}");
-        // The left stopped where the switch found it, and the right went on
-        // from where it was.
-        assert_eq!(
-            spans[1].0,
-            backfill_column(backfill_start_seconds(BACKFILL_PLAYHEAD))
-        );
-        assert!(spans[1].1 < playhead, "{spans:?}");
-        assert_eq!(spans[2].0, spans[0].1);
+        assert_eq!(spans.len(), 4, "{spans:?}");
+        // The right, the whole left of the view, the history before it, and
+        // the right on from where it was.
+        assert_eq!(spans[0].0, playhead);
+        assert_eq!(spans[1], (start, playhead));
+        assert_eq!(spans[2], (history, start));
+        assert_eq!(spans[3].0, spans[0].1);
         for (index, bytes) in columns_of(&chunks) {
             assert_eq!(Some(&bytes), reference.get(&index), "column {index}");
         }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_view_that_becomes_rolling_at_the_end_of_its_file_gets_the_history_and_parks_again() {
+        // A centered session near the end of its file has decoded it and
+        // parked there when the view becomes rolling: it decodes the
+        // history, then parks at the end again, publishing it.
+        let path = write_noise_fixture("rolling-end", 2);
+        let reference = continuous_reference(&path, 2, 1);
+        let target = 110.0;
+        let start = backfill_column(backfill_start_seconds(target));
+        let history = rolling_history_start(target);
+        assert!(history < start, "{history} {start}");
+        let (commands, command_rx) = unbounded();
+        let switch = commands.clone();
+        let sent = AtomicBool::new(false);
+        let chunks = run_watched_session(
+            backfill_session_on(&path, 2, target),
+            1,
+            (commands, command_rx),
+            &Arc::new(AtomicU64::new(1)),
+            move |chunk| {
+                if chunk.complete && !sent.swap(true, Ordering::Relaxed) {
+                    switch
+                        .send(SpectrogramWorkerCommand::SetDisplayMode(
+                            SpectrogramDisplayMode::Rolling,
+                        ))
+                        .unwrap();
+                }
+            },
+            |chunks| chunks.iter().filter(|chunk| chunk.complete).count() >= 2,
+        );
+        let parked = chunks
+            .iter()
+            .position(|chunk| chunk.complete)
+            .expect("the end");
+        let end = chunks[parked].total_columns_estimate;
+        let after = &chunks[parked + 1..];
+        assert_eq!(spans_of(after), vec![(history, start)]);
+        let last = after.last().unwrap();
+        assert!(last.complete);
+        assert_eq!(last.total_columns_estimate, end);
+        for (index, bytes) in columns_of(&chunks) {
+            assert_eq!(Some(&bytes), reference.get(&index), "column {index}");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_continuation_after_the_history_at_the_end_of_a_file_goes_on_from_its_end() {
+        // Repeat-One after a view became rolling at the end of its file: the
+        // history rewinds the decoder, and the continuation still starts
+        // where the file ends, its first columns those of a session that
+        // stayed there.
+        let path = write_noise_fixture("history-continued", 2);
+        let target = 110.0;
+        let continue_after = |history: bool| {
+            let worker = QueuedWorker::start(vec![backfill_session_on(&path, 2, target)]);
+            let parked = worker.chunks_until(|chunk| chunk.complete);
+            let end = u64::from(parked.last().unwrap().total_columns_estimate);
+            if history {
+                worker
+                    .commands
+                    .send(SpectrogramWorkerCommand::SetDisplayMode(
+                        SpectrogramDisplayMode::Rolling,
+                    ))
+                    .unwrap();
+                let decoded = worker.chunks_until(|chunk| chunk.complete);
+                assert!(
+                    decoded.iter().any(|chunk| chunk.column_count > 0),
+                    "no history"
+                );
+            }
+            worker
+                .commands
+                .send(SpectrogramWorkerCommand::ContinueWithFile {
+                    path: path.clone(),
+                    track_token: 31,
+                })
+                .unwrap();
+            let start = loop {
+                match worker.reports.recv_timeout(Duration::from_secs(10)) {
+                    Ok(SessionReport::Opened {
+                        continued_at: Some(start),
+                        ..
+                    }) => break start,
+                    Ok(_) => {}
+                    Err(error) => panic!("no continuation: {error}"),
+                }
+            };
+            let continued = worker.chunks_until(|chunk| {
+                u64::from(chunk.start_column_index) + u64::from(chunk.column_count) >= end + 16
+            });
+            let _ = worker.commands.send(SpectrogramWorkerCommand::StopSession);
+            worker.finish();
+            let columns = columns_of(&continued);
+            assert_eq!(columns.keys().next(), Some(&end));
+            (start, columns)
+        };
+        let (start, columns) = continue_after(true);
+        assert!(
+            (start - f64::from(BACKFILL_SECONDS)).abs() < 1e-9,
+            "{start}"
+        );
+        let (_, reference) = continue_after(false);
+        for ((index, bytes), (reference_index, reference_bytes)) in
+            columns.iter().zip(&reference).take(16)
+        {
+            assert_eq!(index, reference_index);
+            assert!(bytes == reference_bytes, "column {index}");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_session_that_started_rolling_sends_no_history_after_a_centered_spell() {
+        // A rolling session's columns are in the UI's ring in the order they
+        // came: after a switch to centered and back, it has no place for
+        // columns before them.
+        let path = write_noise_fixture("rolling-only", 2);
+        let mut command = backfill_session_on(&path, 2, BACKFILL_PLAYHEAD);
+        if let SpectrogramWorkerCommand::NewTrack {
+            display_mode,
+            start_seconds,
+            ..
+        } = &mut command
+        {
+            *display_mode = SpectrogramDisplayMode::Rolling;
+            *start_seconds = BACKFILL_PLAYHEAD;
+        }
+        let start = backfill_column(BACKFILL_PLAYHEAD);
+        let (commands, command_rx) = unbounded();
+        let switch = commands.clone();
+        let sent = AtomicBool::new(false);
+        let chunks = run_watched_session(
+            command,
+            1,
+            (commands, command_rx),
+            &Arc::new(AtomicU64::new(1)),
+            move |chunk| {
+                if chunk.column_count > 0 && !sent.swap(true, Ordering::Relaxed) {
+                    for mode in [
+                        SpectrogramDisplayMode::Centered,
+                        SpectrogramDisplayMode::Rolling,
+                    ] {
+                        switch
+                            .send(SpectrogramWorkerCommand::SetDisplayMode(mode))
+                            .unwrap();
+                    }
+                }
+            },
+            |chunks| {
+                columns_of(chunks).len()
+                    >= usize::try_from(post_reset_unthrottled_columns(
+                        SpectrogramDisplayMode::Rolling,
+                    ))
+                    .unwrap()
+            },
+        );
+        let spans = spans_of(&chunks);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!(spans[0].0, start);
         std::fs::remove_file(path).unwrap();
     }
 

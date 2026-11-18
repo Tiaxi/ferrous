@@ -7,6 +7,7 @@ use symphonia::core::audio::{SampleBuffer, SignalSpec};
 
 use super::{seconds_from_frames, small_usize_to_f32, usize_to_u64};
 
+#[derive(Clone)]
 pub(super) struct StftComputer {
     r2c: std::sync::Arc<dyn RealToComplex<f32>>,
     fft_in: Vec<f32>,
@@ -150,6 +151,7 @@ impl StftComputer {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct PeakHoldResampler {
     output_interval: f64,
     accumulator: f64,

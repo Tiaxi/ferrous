@@ -689,6 +689,7 @@ BridgeClient::BridgeClient(QObject *parent)
         }
         if (m_snapshotChangedPending) {
             m_snapshotChangedPending = false;
+            notifySpectrogramDisplayMode();
             emit snapshotChanged();
         }
     });
@@ -2420,6 +2421,10 @@ void BridgeClient::setSpectrogramDisplayMode(int value) {
         m_spectrogramDisplayMode = clamped;
         scheduleSnapshotChanged();
     }
+    // The views take the mode before the backend does: the columns its
+    // worker sends for the mode come to them straight from the bridge, and
+    // a view that took them for the other mode's would misplace them.
+    notifySpectrogramDisplayMode();
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSpectrogramDisplayMode,
         static_cast<quint8>(clamped)));
@@ -5192,6 +5197,16 @@ void BridgeClient::scheduleSnapshotChanged() {
     m_snapshotChangedPending = true;
     if (!m_snapshotNotifyTimer.isActive()) {
         m_snapshotNotifyTimer.start();
+    }
+}
+
+void BridgeClient::notifySpectrogramDisplayMode() {
+    // A change of the backend's is announced with the snapshot
+    // notification: a snapshot from before a request of the UI's, which the
+    // backend's next one corrects, does not reach the views.
+    if (m_notifiedSpectrogramDisplayMode != m_spectrogramDisplayMode) {
+        m_notifiedSpectrogramDisplayMode = m_spectrogramDisplayMode;
+        emit spectrogramDisplayModeChanged();
     }
 }
 
