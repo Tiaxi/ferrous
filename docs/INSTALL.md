@@ -34,7 +34,7 @@ Install these tools and development libraries:
 
 To run Ferrous, also install the KDE `qqc2-desktop-style` QML module (`kf6-qqc2-desktop-style` on Fedora). Ferrous uses its `org.kde.desktop` controls style and does not start without it, and the UI tests use it too, with the Breeze icon theme (`breeze-icon-theme`). Plasma desktops include both.
 
-Although CMake declares a Qt 6.6 minimum, it unconditionally enables [QTP0004, introduced in Qt 6.8](https://doc.qt.io/qt-6/qt-cmake-policy-qtp0004.html), so source builds need Qt 6.8 or newer. See [UI CI](../.github/workflows/ci.yml) for the reference distribution and Rust toolchain.
+CMake refuses a Qt older than 6.8. See [UI CI](../.github/workflows/ci.yml) for the reference distribution and Rust toolchain.
 
 For Fedora, the build package set used by CI is:
 

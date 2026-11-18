@@ -1279,10 +1279,8 @@ void UiFoundationsTest::regionHeaderLaysOutNameTotalsAndHairline() {
     QCOMPARE(titleFont.weight(), QFont::DemiBold);
     QCOMPARE(totalsFont.pointSizeF(), smallPointSize);
     QCOMPARE(totalsFont.weight(), QFont::Normal);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
     QVERIFY(totalsFont.featureTags().contains(QFont::Tag("tnum")));
     QCOMPARE(totalsFont.featureValue(QFont::Tag("tnum")), 1u);
-#endif
     QVERIFY2(sameColor(colorOf(title, "color"), colorOf(tokens, "text")), qPrintable(colorOf(title, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "text").name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(totals, "color"), colorOf(tokens, "textTertiary")), qPrintable(colorOf(totals, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "textTertiary").name(QColor::HexArgb)));
     // Both centred in the row above the hairline.

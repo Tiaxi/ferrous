@@ -9993,9 +9993,8 @@ void BridgeClientTest::searchRetainAndReuseIntegration() {
         row.label = QStringLiteral("Artist %1").arg(i);
         newRows.push_back(row);
     }
-    // Model is non-empty → replaceRowsBatched falls through to replaceRows.
-    // rowType changes (track→artist), so replaceRows does a full rebuild
-    // (remove+insert) to force DelegateChooser to re-evaluate delegate types.
+    // Model is non-empty → replaceRowsBatched falls through to replaceRows,
+    // which updates the 20 rows both lists have and removes the other 10.
     model.replaceRowsBatched(newRows, 10);
 
     QCOMPARE(model.rowCount(), 20); // Immediate update, no batching
