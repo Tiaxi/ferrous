@@ -6579,13 +6579,14 @@ mod engine_tests {
     }
 
     /// Have each fakeaudiosink that `output` gets from now on echo the
-    /// changes of its stream; see `echo_stream_changes`. A sink below
-    /// Paused has not opened its stream, so the server has nothing to tell
-    /// of: a change of it is not echoed. Playsink sets up a new sink then,
-    /// giving it the volume and after that the mute, and takes a
-    /// `notify::mute` in between for a mute set on the sink, which it then
-    /// writes back in place of its own: the next stream lost a mute set
-    /// elsewhere to such an echo (#610).
+    /// changes of its stream; see `echo_stream_changes`. A change of a sink
+    /// below Paused is not echoed: playsink sets a new sink up there,
+    /// before it has a stream the server could tell of, giving it the
+    /// volume and after that the mute. It takes a `notify::mute` in
+    /// between for a mute set on the sink, which it then writes back in
+    /// place of its own: the next stream lost a mute set elsewhere to such
+    /// an echo (#610). What pulsesink tells of a stream as it starts is
+    /// left out with it; the writes to a stream that plays are echoed.
     fn echo_stream_changes_of(output: &gst::Bin) {
         let (echo_tx, echo_rx) = unbounded::<gst::glib::WeakRef<gst::Element>>();
         std::thread::Builder::new()
@@ -12734,6 +12735,7 @@ mod engine_tests {
         pipeline.set_state(gst::State::Paused).unwrap();
         let (changed, _, _) = pipeline.state(gst::ClockTime::from_seconds(10));
         changed.unwrap();
+        assert_eq!(opened.current_state(), gst::State::Paused);
         assert_eq!(unopened.current_state(), gst::State::Ready);
 
         unopened.set_property("volume", 0.5_f64);
