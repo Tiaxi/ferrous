@@ -1055,6 +1055,7 @@ if(BUILD_TESTING)
     # The shards of ferrous_ui_motion_tests have theirs where they are added.
     foreach(test_and_cost IN ITEMS
             ferrous_qml_smoke_transport_input:80
+            ferrous_ui_main_window_tests:60
             ferrous_qml_smoke_tag_editor:50
             ferrous_ui_dialogs_tests:40
             ferrous_qml_smoke_waveform:32
