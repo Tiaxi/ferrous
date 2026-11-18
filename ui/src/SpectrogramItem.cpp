@@ -2439,6 +2439,7 @@ void SpectrogramItem::renumberRingForRollingHistoryLocked() {
     }
     m_ringWriteSeq += shift;
     m_ringOldestSeq += shift;
+    m_rollingEpoch += shift;
     *m_ringColumnBase -= shift;
     m_precomputedLastDisplaySeq = -1;
     // What was drawn of the ring's columns is of their old numbers.
@@ -3533,7 +3534,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     bool appliedImplicitReset = false;
     if (!bufferReset && columns > 0 && m_ringCapacity == 0 && !m_precomputedResetPending) {
         applyPrecomputedResetLocked(
-            startIndex, bins, trackToken, generation, true, hopSize);
+            startIndex, bins, trackToken, generation, true, hopSize, m_displayMode == 1);
         appliedImplicitReset = true;
         if (m_ringColumnBase) {
             // Where the session's columns start is unknown: the columns
@@ -3575,6 +3576,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_ringTrackToken.clear();
         m_trackColumnToSeqByToken.clear();
         m_ringColumnBase.reset();
+        m_renumberRingForHistory = false;
         ++m_ringGeneration;
         cancelPendingRasterLocked();
         m_precomputedMaxColumnIndex = -1;
@@ -3620,8 +3622,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         const double renderZoomBefore = m_renderZoomLevel;
 
         m_zoomFillActive = false;
-        applyPrecomputedResetLocked(
-            startIndex, bins, trackToken, generation, clearHistoryOnReset, hopSize);
+        applyPrecomputedResetLocked(startIndex, bins, trackToken, generation,
+            clearHistoryOnReset, hopSize, m_displayMode == 1);
         invalidateCanvas();
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
@@ -3629,6 +3631,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedPendingResetTrackToken = 0;
         m_precomputedPendingResetGeneration = 0;
         m_precomputedPendingResetClearHistory = false;
+        m_precomputedPendingResetByColumn = false;
         m_precomputedReady = false;
         publishViewFilledLocked(false);
         m_precomputedBinsPerColumn = bins;
@@ -3698,15 +3701,17 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedPendingResetTrackToken = trackToken;
         m_precomputedPendingResetGeneration = generation;
         m_precomputedPendingResetClearHistory = clearHistoryOnReset;
+        m_precomputedPendingResetByColumn = m_displayMode == 1;
     } else if (bufferReset) {
-        applyPrecomputedResetLocked(
-            startIndex, bins, trackToken, generation, clearHistoryOnReset, hopSize);
+        applyPrecomputedResetLocked(startIndex, bins, trackToken, generation,
+            clearHistoryOnReset, hopSize, m_displayMode == 1);
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
         m_precomputedPendingResetBins = 0;
         m_precomputedPendingResetTrackToken = 0;
         m_precomputedPendingResetGeneration = 0;
         m_precomputedPendingResetClearHistory = false;
+        m_precomputedPendingResetByColumn = false;
         appliedReset = true;
     } else if (m_precomputedResetPending
         && columns > 0
@@ -3732,13 +3737,15 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_precomputedPendingResetGeneration != 0
                 ? m_precomputedPendingResetGeneration
                 : generation,
-            m_precomputedPendingResetClearHistory, hopSize);
+            m_precomputedPendingResetClearHistory, hopSize,
+            m_precomputedPendingResetByColumn);
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
         m_precomputedPendingResetBins = 0;
         m_precomputedPendingResetTrackToken = 0;
         m_precomputedPendingResetGeneration = 0;
         m_precomputedPendingResetClearHistory = false;
+        m_precomputedPendingResetByColumn = false;
         appliedReset = true;
     }
 
@@ -3996,6 +4003,12 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_ringTrackToken = std::move(newTrackToken);
             m_trackColumnToSeqByToken = std::move(newTrackColumnToSeqByToken);
             m_ringCapacity = neededCapacity;
+        }
+        if (m_renumberRingForHistory && m_ringCapacity > 0) {
+            m_renumberRingForHistory = false;
+            if (m_displayMode == 0) {
+                renumberRingForRollingHistoryLocked();
+            }
         }
     }
 
@@ -4323,6 +4336,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_ringTrackToken.clear();
     m_trackColumnToSeqByToken.clear();
     m_ringColumnBase.reset();
+    m_renumberRingForHistory = false;
     m_ringCapacity = 0;
     m_ringOldestSeq = 0;
     m_ringWriteSeq = 0;
@@ -4344,6 +4358,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedPendingResetTrackToken = 0;
     m_precomputedPendingResetGeneration = 0;
     m_precomputedPendingResetClearHistory = false;
+    m_precomputedPendingResetByColumn = false;
     m_precomputedSessionGeneration = 0;
     m_precomputedCommittedGeneration = 0;
     m_precomputedLastRightCol = -1;
@@ -4404,7 +4419,8 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     quint64 trackToken,
     quint64 generation,
     bool clearHistoryOnReset,
-    int hopSize) {
+    int hopSize,
+    bool byColumn) {
     // Decided before anything of the reset changes what it looks at.
     const bool restartsForZoom = resetRestartsForZoomLocked(trackToken, hopSize);
     // A zoom's restart of a gapless successor whose data has come, while
@@ -4425,10 +4441,13 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         // being drawn of it.
         invalidateBackdropLocked();
     }
-    // Only columns of the ring's own bin count can go on after its history.
+    // Only columns of the ring's own bin count can go on after its history,
+    // in the order they come: a session whose columns go where their column
+    // puts them starts the ring over.
     const bool preserveRollingHistory =
         !clearHistoryOnReset &&
-        m_displayMode == 0
+        !byColumn
+        && m_displayMode == 0
         && m_ringCapacity > 0
         && m_ring.bins() > 0
         && bins == m_ring.bins();
@@ -4483,13 +4502,17 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         m_trackColumnToSeqByToken.clear();
         m_ringCapacity = 0;
         // A centered session's columns from here on go where their
-        // column puts them, counted from its first.
-        m_ringColumnBase = m_displayMode == 1
+        // column puts them, counted from its first; in a view that became
+        // rolling since its reset came, so do those of the history left of
+        // them, once the ring is allocated and numbered for them.
+        m_ringColumnBase = byColumn
             ? std::optional<qint64>(std::max(0, startIndex))
             : std::nullopt;
         m_ringColumnToken = trackToken;
+        m_renumberRingForHistory = byColumn && m_displayMode == 0;
     } else {
         m_ringColumnBase.reset();
+        m_renumberRingForHistory = false;
         // Preserve only the history that has actually been shown on screen.
         // Any speculative lookahead beyond the current playback head is stale
         // after a seek/non-gapless reset; keeping it and remapping to the
@@ -8105,6 +8128,7 @@ void SpectrogramItem::releaseStorageLocked() {
     m_trackEpochSeq = 0;
     m_rollingEpoch = 0;
     m_ringColumnBase.reset();
+    m_renumberRingForHistory = false;
     m_ringColumnToken = 0;
     m_precomputedMaxColumnIndex = -1;
     m_precomputedResetPending = false;
@@ -8113,6 +8137,7 @@ void SpectrogramItem::releaseStorageLocked() {
     m_precomputedPendingResetTrackToken = 0;
     m_precomputedPendingResetGeneration = 0;
     m_precomputedPendingResetClearHistory = false;
+    m_precomputedPendingResetByColumn = false;
     m_precomputedLastRightCol = -1;
     m_precomputedLastDisplaySeq = -1;
     m_zoomFillActive = false;

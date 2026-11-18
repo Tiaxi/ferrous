@@ -102,7 +102,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
     Q_PROPERTY(int fftSize READ fftSize NOTIFY snapshotChanged)
     Q_PROPERTY(int spectrogramViewMode READ spectrogramViewMode NOTIFY snapshotChanged)
-    Q_PROPERTY(int spectrogramDisplayMode READ spectrogramDisplayMode NOTIFY snapshotChanged)
+    Q_PROPERTY(int spectrogramDisplayMode READ spectrogramDisplayMode NOTIFY spectrogramDisplayModeChanged)
     Q_PROPERTY(int viewerFullscreenMode READ viewerFullscreenMode NOTIFY snapshotChanged)
     Q_PROPERTY(bool preventDisplaySleepInFullscreen READ preventDisplaySleepInFullscreen NOTIFY snapshotChanged)
     Q_PROPERTY(bool showFullscreenTitleStrip READ showFullscreenTitleStrip NOTIFY snapshotChanged)
@@ -556,6 +556,10 @@ signals:
     // snapshot for one of the backend's, such as a change made outside the
     // app.
     void volumeChanged();
+    // The spectrogram's display mode changed: at once for a request of the
+    // UI's, before the backend hears of it, and with the snapshot for one of
+    // the backend's.
+    void spectrogramDisplayModeChanged();
     // The library's rows, roots, counts, view state and sort mode changed.
     void libraryChanged();
     // A scan's progress changed; it changes many times a second.
@@ -817,6 +821,7 @@ private:
     void scheduleTrackIdentityChanged();
     void scheduleTrackMetadataChanged();
     void scheduleSnapshotChanged();
+    void notifySpectrogramDisplayMode();
     void scheduleLibraryChanged();
     void scheduleLibraryScanChanged();
     void scheduleLastFmScrobbleChanged();
@@ -941,6 +946,8 @@ private:
     int m_fftSize{8192};
     int m_spectrogramViewMode{0};
     int m_spectrogramDisplayMode{0};
+    // The display mode spectrogramDisplayModeChanged last announced.
+    int m_notifiedSpectrogramDisplayMode{0};
     int m_viewerFullscreenMode{0};
     bool m_preventDisplaySleepInFullscreen{true};
     bool m_showFullscreenTitleStrip{true};

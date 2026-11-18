@@ -15,6 +15,7 @@ private slots:
     void spectrogramRollingSeekKeepsHistoryContinuous();
     void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
     void spectrogramCenteredToRollingFillsTheHistoryLeftOfTheSession();
+    void spectrogramSwitchBeforeACenteredSeeksDataPlacesItsColumns();
     void spectrogramRollingRingInArrivalOrderIgnoresEarlierColumns();
     void spectrogramGaplessSuccessorAfterARollingSwitchFollowsTheHistory();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
@@ -437,6 +438,75 @@ void SpectrogramPlaybackSmokeTest::spectrogramCenteredToRollingFillsTheHistoryLe
     {
         QMutexLocker lock(&item.m_stateMutex);
         QVERIFY(item.ringHoldsColumnsLocked(historyStart, decodedEnd + 63));
+    }
+    delete node;
+}
+
+void SpectrogramPlaybackSmokeTest::spectrogramSwitchBeforeACenteredSeeksDataPlacesItsColumns() {
+    // A centered seek's reset comes before its data. The view becomes
+    // rolling in between: the worker made the reset for a centered view, and
+    // sends the playhead's columns, the left of the view and then the
+    // history before it. The view places them by their column, as the
+    // reset said when it came, not in the order they come.
+    QQuickWindow window;
+    window.resize(400, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(400);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+
+    constexpr int bins = 16;
+    constexpr int sampleRate = 48'000;
+    constexpr int hop = 1'024;
+    constexpr int sessionStart = 3'000;
+    constexpr int playhead = 3'200;
+    constexpr int decodedEnd = 3'700;
+    constexpr int totalEstimate = 10'000;
+    constexpr quint64 token = 7;
+    const auto feed = [&item](int first, int count, char value, quint64 generation) {
+        item.feedPrecomputedChunk(QByteArray(count * bins, value), bins, 0, count, first,
+            totalEstimate, sampleRate, hop, false, false, token, false, generation);
+    };
+    // The session before the seek, whose columns the ring holds.
+    item.feedPrecomputedChunk(QByteArray(), bins, 0, 0, 500, totalEstimate,
+        sampleRate, hop, false, true, token, true, 1);
+    feed(500, 1'000, '\x30', 1);
+    const double columnsPerSecond = static_cast<double>(sampleRate) / hop;
+    setTestPosition(item, 1'000.5 / columnsPerSecond, token);
+    QSGNode *node = paintSettled(item, nullptr);
+
+    // The seek's reset, which keeps what the view shows until its data.
+    item.feedPrecomputedChunk(QByteArray(), bins, 0, 0, sessionStart, totalEstimate,
+        sampleRate, hop, false, true, token, false, 2);
+    setTestPosition(item, (playhead + 0.5) / columnsPerSecond, token);
+    item.setDisplayMode(0);
+
+    feed(playhead, decodedEnd - playhead, '\x50', 2);
+    feed(sessionStart, playhead - sessionStart, '\x50', 2);
+    int viewColumns = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        viewColumns = static_cast<int>(std::ceil(400.0 / item.canvasZoomLocked()));
+    }
+    const int historyStart = playhead + 1 - viewColumns;
+    QVERIFY2(historyStart < sessionStart, qPrintable(QString::number(viewColumns)));
+    for (int first = historyStart; first < sessionStart; first += 64) {
+        feed(first, std::min(64, sessionStart - first), '\x70', 2);
+    }
+    node = paintSettled(item, node);
+    QCOMPARE(rollingFloorPixels(item, 400), 0);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const qint64 displayRight = item.m_rollingEpoch + playhead;
+        for (qint64 seq = displayRight - viewColumns + 1; seq <= displayRight; ++seq) {
+            const int slot = item.ringSlotForDisplayIndexLocked(seq, true);
+            QVERIFY2(slot >= 0, qPrintable(QString::number(seq)));
+            QCOMPARE(static_cast<qint64>(item.m_ringColumnId[static_cast<size_t>(slot)]),
+                seq - item.m_rollingEpoch);
+        }
     }
     delete node;
 }

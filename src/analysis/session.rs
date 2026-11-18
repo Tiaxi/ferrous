@@ -1131,6 +1131,40 @@ struct SpectrogramSessionState {
     /// The column after the file's last, once the session has decoded to
     /// its end: the extent every later chunk carries as its estimate.
     end_column: Option<u64>,
+    /// The stream at the end of the file, while the session decodes the
+    /// left of its view, or a rolling view's history, after it: what it
+    /// parks with again, and what a continuation goes on from.
+    stream_at_end: Option<StreamAtEnd>,
+}
+
+/// Where a session that decoded its file to the end has its stream: the
+/// file's end on the timeline, and the audio its STFTs and resamplers hold
+/// past its last column, which the next file's first columns take in.
+struct StreamAtEnd {
+    timeline: AudioTimeline,
+    stfts: Vec<StftComputer>,
+    resamplers: Vec<PeakHoldResampler>,
+    total_covered_samples: u64,
+}
+
+impl StreamAtEnd {
+    /// The stream `session` has at the end of its file, before a pass after
+    /// it rewinds the decoder.
+    fn take(session: &mut SpectrogramSessionState) -> Self {
+        Self {
+            timeline: std::mem::replace(&mut session.timeline, AudioTimeline::new(0)),
+            stfts: session.stfts.clone(),
+            resamplers: session.resamplers.clone(),
+            total_covered_samples: session.total_covered_samples,
+        }
+    }
+
+    fn restore(self, session: &mut SpectrogramSessionState) {
+        session.timeline = self.timeline;
+        session.stfts = self.stfts;
+        session.resamplers = self.resamplers;
+        session.total_covered_samples = self.total_covered_samples;
+    }
 }
 
 /// Whose timeline a session's columns are on.
@@ -1415,6 +1449,7 @@ fn run_spectrogram_session(
         ring_by_column: display_mode == SpectrogramDisplayMode::Centered,
         rolling_history: None,
         end_column: None,
+        stream_at_end: None,
     };
     enqueue_leading_silence(&mut session.stfts, leading_silence);
 
@@ -1971,6 +2006,7 @@ fn session_decode_loop(
                     // ends where the left did, not where the right started,
                     // and every column of the session is sent.
                     session.backfill = None;
+                    session.stream_at_end = None;
                 }
                 // Real source EOF.  Publish the decoded extent while this
                 // track is still current. Waiting until the parked worker
@@ -2437,6 +2473,7 @@ fn handle_session_seek(
         backfill.map_or(new_column, |backfill| backfill.end),
     )?;
     session.backfill = backfill;
+    session.stream_at_end = None;
     // The seek's reset starts the UI's ring over, in order of arrival in a
     // rolling view.
     session.ring_by_column = session.display_mode == SpectrogramDisplayMode::Centered;
@@ -2668,6 +2705,9 @@ fn step_backfill(
                 backfill.next,
                 backfill.end,
             );
+            if backfill.right_ended {
+                session.stream_at_end = Some(StreamAtEnd::take(session));
+            }
             reposition_decoder(session, source, backfill.next)?;
             session.backfill = Some(Backfill {
                 resume: Some(resume),
@@ -2729,7 +2769,11 @@ fn end_backfill(
     }
     session.backfill = None;
     if backfill.right_ended {
-        // Every column is sent: publish the end, and park there.
+        // Every column is sent: publish the end, and park there, with the
+        // stream as the end of the file left it.
+        if let Some(stream) = session.stream_at_end.take() {
+            stream.restore(session);
+        }
         session.columns_produced = resume;
         session.chunk_start_index = resume;
         session.source_reached_eof = true;
@@ -4206,6 +4250,7 @@ mod tests {
             ring_by_column: false,
             rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         };
 
         match handle_single_command(
@@ -4325,6 +4370,7 @@ mod tests {
             ring_by_column: false,
             rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         };
 
         assert!(post_reset_window_active(&session));
@@ -4383,6 +4429,7 @@ mod tests {
             ring_by_column: false,
             rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -4451,6 +4498,7 @@ mod tests {
             ring_by_column: false,
             rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -4511,6 +4559,7 @@ mod tests {
             ring_by_column: false,
             rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -4602,6 +4651,7 @@ mod tests {
             ring_by_column: false,
             rolling_history: None,
             end_column: None,
+            stream_at_end: None,
         }
     }
 
@@ -8488,6 +8538,72 @@ mod tests {
         assert_eq!(last.total_columns_estimate, end);
         for (index, bytes) in columns_of(&chunks) {
             assert_eq!(Some(&bytes), reference.get(&index), "column {index}");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_continuation_after_the_history_at_the_end_of_a_file_goes_on_from_its_end() {
+        // Repeat-One after a view became rolling at the end of its file: the
+        // history rewinds the decoder, and the continuation still starts
+        // where the file ends, its first columns those of a session that
+        // stayed there.
+        let path = write_noise_fixture("history-continued", 2);
+        let target = 110.0;
+        let continue_after = |history: bool| {
+            let worker = QueuedWorker::start(vec![backfill_session_on(&path, 2, target)]);
+            let parked = worker.chunks_until(|chunk| chunk.complete);
+            let end = u64::from(parked.last().unwrap().total_columns_estimate);
+            if history {
+                worker
+                    .commands
+                    .send(SpectrogramWorkerCommand::SetDisplayMode(
+                        SpectrogramDisplayMode::Rolling,
+                    ))
+                    .unwrap();
+                let decoded = worker.chunks_until(|chunk| chunk.complete);
+                assert!(
+                    decoded.iter().any(|chunk| chunk.column_count > 0),
+                    "no history"
+                );
+            }
+            worker
+                .commands
+                .send(SpectrogramWorkerCommand::ContinueWithFile {
+                    path: path.clone(),
+                    track_token: 31,
+                })
+                .unwrap();
+            let start = loop {
+                match worker.reports.recv_timeout(Duration::from_secs(10)) {
+                    Ok(SessionReport::Opened {
+                        continued_at: Some(start),
+                        ..
+                    }) => break start,
+                    Ok(_) => {}
+                    Err(error) => panic!("no continuation: {error}"),
+                }
+            };
+            let continued = worker.chunks_until(|chunk| {
+                u64::from(chunk.start_column_index) + u64::from(chunk.column_count) >= end + 16
+            });
+            let _ = worker.commands.send(SpectrogramWorkerCommand::StopSession);
+            worker.finish();
+            let columns = columns_of(&continued);
+            assert_eq!(columns.keys().next(), Some(&end));
+            (start, columns)
+        };
+        let (start, columns) = continue_after(true);
+        assert!(
+            (start - f64::from(BACKFILL_SECONDS)).abs() < 1e-9,
+            "{start}"
+        );
+        let (_, reference) = continue_after(false);
+        for ((index, bytes), (reference_index, reference_bytes)) in
+            columns.iter().zip(&reference).take(16)
+        {
+            assert_eq!(index, reference_index);
+            assert!(bytes == reference_bytes, "column {index}");
         }
         std::fs::remove_file(path).unwrap();
     }

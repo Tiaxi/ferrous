@@ -611,7 +611,8 @@ private:
         quint64 trackToken,
         quint64 generation,
         bool clearHistoryOnReset,
-        int hopSize);
+        int hopSize,
+        bool byColumn);
     // Whether a session reset of trackToken, hopSize frames a column, is
     // the backend's restart for the zoom being waited for: at the hop of
     // the zoom asked for or of one sent to the backend since, of the track
@@ -1075,6 +1076,9 @@ private:
     // in order of arrival; the track of those columns, or 0 for any.
     std::optional<qint64> m_ringColumnBase;
     quint64 m_ringColumnToken{0};
+    // A column-addressed ring of a rolling view that is not allocated yet:
+    // renumberRingForRollingHistoryLocked numbers it once it is.
+    bool m_renumberRingForHistory{false};
     int m_ringCapacity{0};            // number of column slots
     qint64 m_ringWriteSeq{0};         // next write-order sequence number
     qint64 m_ringOldestSeq{0};        // oldest write-order sequence still retained
@@ -1141,6 +1145,11 @@ private:
     quint64 m_precomputedPendingResetTrackToken{0};
     quint64 m_precomputedPendingResetGeneration{0};
     bool m_precomputedPendingResetClearHistory{false};
+    // Whether the session of the reset waiting for its data has its
+    // columns go where their column puts them: whether the view was
+    // centered when the reset came, as the worker's view was when it made
+    // it, whatever the view is when the data comes.
+    bool m_precomputedPendingResetByColumn{false};
     qint64 m_precomputedLastDisplaySeq{-1};
     int m_precomputedLastRightCol{-1};
     qint64 m_precomputedCanvasDisplayLeft{0};
