@@ -418,6 +418,7 @@ private slots:
     void paletteSitsUnderTheTransportOverADim();
     void sectionsFollowTheirBestMatch();
     void rowsThatChangeKindRedrawInPlace();
+    void tooltipFollowsARowThatChangesKindUnderAStillPointer();
     void rowsShareTheirColumnsAndThumbnails();
     void matchesAreEmphasisedInTheTitleOnly();
     void selectedHoveredAndPlayingRowsAreDrawn();
@@ -693,6 +694,48 @@ void SearchPaletteTest::rowsThatChangeKindRedrawInPlace() {
     QVERIFY(accessible != nullptr);
     QVERIFY2(accessible->text(QAccessible::Name).contains(QStringLiteral("The Quiet Meridian")),
              qPrintable(accessible->text(QAccessible::Name)));
+}
+
+// New results that turn the result under a still pointer into a "Show
+// all" link take the result's tooltip away, and give it back when the row
+// is a result again.
+void SearchPaletteTest::tooltipFollowsARowThatChangesKindUnderAStillPointer() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    QVector<Row> tracks;
+    for (const QString &title : {QStringLiteral("Tide Line"), QStringLiteral("Tide Drift"), QStringLiteral("Tide Field")}) {
+        Row row = result(QStringLiteral("track"), title, 1.0f);
+        row.artist = QStringLiteral("The Quiet Meridian");
+        row.trackPath = QStringLiteral("/fixture/") + title + QStringLiteral(".flac");
+        tracks << row;
+    }
+    harness.search(QStringLiteral("tide"), tracks, {0, 0, 3});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QCOMPARE(harness.model.rowCount(), 4);
+    QQuickItem *row = harness.row(3);
+    QVERIFY(row != nullptr);
+    QTest::mouseMove(harness.window, sceneCentre(row));
+    QTRY_COMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), row);
+
+    // Two of five tracks: the row under the pointer is the "Show all" link.
+    harness.search(QStringLiteral("tide"), tracks.mid(0, 2), {0, 0, 5});
+    QCOMPARE(harness.model.rowCount(), 4);
+    QCOMPARE(harness.model.rowDataAt(3).value(QStringLiteral("kind")).toString(), QStringLiteral("more"));
+    QCOMPARE(harness.row(3), row);
+    QVERIFY(row->property("hovered").toBool());
+    QCOMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), nullptr);
+    QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("globalSearchResultToolTip"));
+    QVERIFY(toolTip != nullptr);
+    QVERIFY(!toolTip->property("visible").toBool());
+
+    // A result again.
+    harness.search(QStringLiteral("tide"), tracks, {0, 0, 3});
+    QCOMPARE(harness.row(3), row);
+    QCOMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), row);
+    QTest::mouseMove(harness.window, QPoint(2, 2));
+    QTRY_COMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), nullptr);
 }
 
 // The lead at 16 px (a 24 px thumbnail with a 2 px radius, the artist
