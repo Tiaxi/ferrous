@@ -3282,6 +3282,56 @@ mod tests {
     }
 
     #[test]
+    fn a_settings_link_that_cannot_be_followed_is_kept_and_the_failed_save_is_shown() {
+        let _config = crate::paths::TestConfigDir::new();
+        let settings_path = config::settings_path().expect("settings path");
+        let config_dir = settings_path.parent().expect("config dir");
+        let target = config_dir.join("dotfiles").join("settings.txt");
+        std::fs::create_dir_all(config_dir).expect("create the config dir");
+        std::os::unix::fs::symlink(&target, &settings_path).expect("link the settings");
+        let settings = BridgeSettings::default();
+        let (event_tx, event_rx) = unbounded();
+        let mut reported = None;
+
+        assert!(!report_save(
+            save_settings(&settings),
+            &mut reported,
+            &event_tx
+        ));
+        let messages = error_messages(&event_rx);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].starts_with(&format!(
+                "Settings could not be saved: {} links to {}, which cannot be reached: ",
+                settings_path.display(),
+                target.display(),
+            )),
+            "{messages:?}"
+        );
+        assert_eq!(
+            std::fs::read_link(&settings_path).expect("the link is kept"),
+            target
+        );
+
+        // Once the target is back, saves reach it through the link again.
+        std::fs::create_dir(target.parent().expect("dotfiles")).expect("restore the dotfiles");
+        std::fs::write(&target, "").expect("restore the target");
+        assert!(report_save(
+            save_settings(&settings),
+            &mut reported,
+            &event_tx
+        ));
+        assert_eq!(
+            std::fs::read_link(&settings_path).expect("the link is kept"),
+            target
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read the target"),
+            config::format_settings_text(&settings)
+        );
+    }
+
+    #[test]
     fn library_view_state_keeps_offsets_into_rows_taller_than_the_default() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
