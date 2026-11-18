@@ -1026,7 +1026,9 @@ void UiMotionTest::steppedDriverTakesNoRealTimeFromBeforeIt_data() {
     QTest::addColumn<int>("busyMs");
     QTest::newRow("at once") << 0;
     // Up to 50 ms Qt hands the time on; past that it brings its clock up to
-    // date itself before an animation starts.
+    // date itself before an animation starts. So the rows under 50 ms
+    // catch a driver that lets the time in only when their sleep ends
+    // within 50 ms, which a busy machine can overrun.
     QTest::newRow("after 30 ms") << 30;
     QTest::newRow("after 45 ms") << 45;
     QTest::newRow("after 80 ms") << 80;

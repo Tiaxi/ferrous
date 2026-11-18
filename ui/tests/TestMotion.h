@@ -47,6 +47,9 @@ inline int framesOver(QQuickWindow *window, int ms) {
 // time.
 // Qt takes it only while no other driver is installed: the test's main()
 // must keep Qt Quick on the basic render loop, whose window installs none.
+// Qt also leaves it out while only pauses run, such as a PauseAnimation
+// with no other animation beside it: it times those on real time, and
+// step() returns false.
 class SteppedAnimationDriver : public QAnimationDriver {
 public:
     SteppedAnimationDriver() {
