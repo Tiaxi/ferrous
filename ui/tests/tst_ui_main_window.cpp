@@ -3654,9 +3654,12 @@ void UiMainWindowTest::nowPlayingCoverIsAKeyboardStop() {
     QTRY_VERIFY(stop->hasActiveFocus());
     QTRY_VERIFY(shown(ring));
     QTest::keyClick(window, Qt::Key_Menu);
-    QTRY_VERIFY(openMenu() != nullptr);
+    QObject *keyboardMenu = nullptr;
+    QTRY_VERIFY((keyboardMenu = openMenu()) != nullptr);
     QTest::keyClick(window, Qt::Key_Escape);
-    QTRY_VERIFY(openMenu() == nullptr);
+    // Gone, not only closing: a menu gives the focus back to where it was
+    // when its window goes, after the focus moves on below.
+    QTRY_VERIFY(!keyboardMenu->property("visible").toBool());
     QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
     bridge->setProperty("currentTrackCoverPath", testCoverUrl());
     QTRY_VERIFY(cover->property("hasCover").toBool());
@@ -5524,6 +5527,7 @@ int main(int argc, char **argv) {
     qputenv("XDG_DATA_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("data"))));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("cache"))));
     QApplication app(argc, argv);
+    returnFocusFromClosedPopups();
     UiMainWindowTest test;
     return qExecShard(&test, argc, argv);
 }

@@ -658,9 +658,9 @@ Rectangle {
                     const row = playlistView.itemAtIndex(index)
                     playlistContextMenu.rowIndex = index
                     if (row) {
-                        playlistContextMenu.popup(row, 0, row.height)
+                        playlistContextMenu.popupAt(row, 0, row.height)
                     } else {
-                        playlistContextMenu.popup(playlistView, 0, 0)
+                        playlistContextMenu.popupAt(playlistView, 0, 0)
                     }
                 }
 
@@ -997,7 +997,7 @@ Rectangle {
                         onClicked: function(mouse) {
                             if (mouse.button === Qt.RightButton) {
                                 playlistContextMenu.rowIndex = index
-                                playlistContextMenu.popup()
+                                playlistContextMenu.popupAt(playlistRowMouseArea, mouse.x, mouse.y)
                             }
                         }
 

@@ -4,6 +4,7 @@
 
 #include <QMutex>
 #include <QMutexLocker>
+#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 #include <QtLogging>
@@ -75,6 +76,12 @@ inline void clearCapturedMessages() {
 inline void dropCapturedMessages(const QString &message) {
     QMutexLocker locker(&capturedMessageMutex());
     capturedMessages().removeAll(message);
+}
+
+// Drops the captured messages `pattern` matches.
+inline void dropCapturedMessagesMatching(const QRegularExpression &pattern) {
+    QMutexLocker locker(&capturedMessageMutex());
+    capturedMessages().removeIf([&pattern](const QString &message) { return pattern.match(message).hasMatch(); });
 }
 
 // What the offscreen platform logs when a window's size hints change, as

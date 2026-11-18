@@ -4716,6 +4716,7 @@ int main(int argc, char **argv) {
     qputenv("XDG_DATA_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("data"))));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("cache"))));
     QApplication app(argc, argv);
+    returnFocusFromClosedPopups();
     UiMotionTest test;
     return qExecShard(&test, argc, argv);
 }

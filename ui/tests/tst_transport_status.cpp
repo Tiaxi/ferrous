@@ -3614,6 +3614,7 @@ int main(int argc, char **argv) {
     qputenv("LANGUAGE", "en_US");
     QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
     QApplication app(argc, argv);
+    returnFocusFromClosedPopups();
     QAccessible::setActive(true);
     FerrousLocalization::registerQmlTypes();
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");

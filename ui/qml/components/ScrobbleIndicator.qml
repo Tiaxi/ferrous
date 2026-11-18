@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
+import "." as Components
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../logic/KeyUtils.js" as KeyUtils
@@ -252,7 +253,7 @@ AbstractButton {
     }
 
     function openMenu() {
-        menu.popup(root, 0, root.height)
+        menu.popupAt(root, 0, root.height)
     }
 
     objectName: "scrobbleIndicator"
@@ -299,10 +300,10 @@ AbstractButton {
 
     TapHandler {
         acceptedButtons: Qt.RightButton
-        onTapped: menu.popup()
+        onTapped: function(eventPoint) { menu.popupAt(root, eventPoint.position.x, eventPoint.position.y) }
     }
 
-    Menu {
+    Components.AppMenu {
         id: menu
         objectName: "scrobbleIndicatorMenu"
 

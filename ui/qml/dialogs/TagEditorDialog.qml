@@ -1036,7 +1036,7 @@ Components.DialogWindow {
             Accessible.role: Accessible.ButtonMenu
             onClicked: toolsMenu.open()
 
-            Menu {
+            Components.AppMenu {
                 id: toolsMenu
                 objectName: "tagEditorToolsMenu"
                 y: toolsButton.height
@@ -1059,7 +1059,7 @@ Components.DialogWindow {
                     onClicked: root.triggerRename()
                 }
                 MenuSeparator {}
-                Menu {
+                Components.AppMenu {
                     title: I18n.i18nc("@title:menu", "Title Case")
 
                     CaseItem { fieldKey: "title"; titleCase: true }
@@ -1067,7 +1067,7 @@ Components.DialogWindow {
                     CaseItem { fieldKey: "album"; titleCase: true }
                     CaseItem { fieldKey: "albumArtist"; titleCase: true }
                 }
-                Menu {
+                Components.AppMenu {
                     title: I18n.i18nc("@title:menu", "Capital Case")
 
                     CaseItem { fieldKey: "title"; titleCase: false }

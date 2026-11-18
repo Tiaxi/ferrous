@@ -198,8 +198,15 @@ Preferences.PreferencesPage {
                 Keys.onEnterPressed: root.openCurrentRoot()
                 Keys.onDeletePressed: root.removeCurrentRoot()
                 Keys.onMenuPressed: {
-                    if (rootList.currentItem) {
-                        rootContextMenu.popup(rootList.currentItem)
+                    if (rootList.currentIndex < 0) {
+                        return
+                    }
+                    // Under the selected folder, scrolled into view: the
+                    // menu opens beside the row (see AppMenu.popupAt).
+                    rootList.positionViewAtIndex(rootList.currentIndex, ListView.Contain)
+                    const row = rootList.currentItem
+                    if (row) {
+                        rootContextMenu.popupAt(row, 0, row.height)
                     }
                 }
 
@@ -246,13 +253,16 @@ Preferences.PreferencesPage {
                         rootList.currentIndex = rootRow.index
                         root.openCurrentRoot()
                     }
-                    onPressAndHold: rootContextMenu.popup()
+                    onPressAndHold: {
+                        rootList.currentIndex = rootRow.index
+                        rootContextMenu.popupAt(rootRow, rootRow.pressX, rootRow.pressY)
+                    }
 
                     TapHandler {
                         acceptedButtons: Qt.RightButton
-                        onTapped: {
+                        onTapped: function(eventPoint) {
                             rootList.currentIndex = rootRow.index
-                            rootContextMenu.popup()
+                            rootContextMenu.popupAt(rootRow, eventPoint.position.x, eventPoint.position.y)
                         }
                     }
 
@@ -439,8 +449,9 @@ Preferences.PreferencesPage {
         onActivated: function(index) { root.settings.setValue("librarySortMode", index) }
     }
 
-    Menu {
+    Components.AppMenu {
         id: rootContextMenu
+        objectName: "libraryRootContextMenu"
         MenuItem {
             text: I18n.i18nc("@action:inmenu %1 is the file manager", "Open in %1", root.uiBridge.fileBrowserName || "")
             icon.name: "system-file-manager"

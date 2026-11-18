@@ -10325,6 +10325,7 @@ int main(int argc, char **argv) {
     // tests run in; TestSessionIsolation.h.
     isolateFromDesktopSessionWithAppLook();
     QApplication app(argc, argv);
+    returnFocusFromClosedPopups();
     BridgeClientTest test(testStorage.path());
     return QTest::qExec(&test, argc, argv);
 }

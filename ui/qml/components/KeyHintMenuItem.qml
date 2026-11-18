@@ -14,7 +14,14 @@ MenuItem {
     // The key, as the menu shows a shortcut, such as "Enter" or "Del".
     property string keyHint: ""
 
-    readonly property real hintSpace: hint.visible
+    // Whether the hint shows, from the key alone and not from the hint's
+    // own visibility, which is false while the menu is closed: the item is
+    // as wide closed as open. A menu window takes its first size from the
+    // closed menu, and on Wayland the compositor kept that size when the
+    // menu changed it as it opened: the queue's menu first showed as an
+    // empty strip.
+    readonly property bool hintShown: root.keyHint.length > 0
+    readonly property real hintSpace: root.hintShown
         ? hint.implicitWidth + Kirigami.Units.largeSpacing
         : 0
 
@@ -27,7 +34,7 @@ MenuItem {
     Label {
         id: hint
         objectName: "menuKeyHint"
-        visible: root.keyHint.length > 0
+        visible: root.hintShown
         // Where Breeze puts a shortcut: a small spacing in from the padding.
         x: root.mirrored
             ? root.padding + Kirigami.Units.smallSpacing

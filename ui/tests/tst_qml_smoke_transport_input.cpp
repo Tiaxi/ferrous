@@ -3030,8 +3030,16 @@ void TransportInputSmokeTest::viewerKeysWorkFromEveryControl() {
         {QStringLiteral("fileName"), QStringLiteral("cover.png")},
         {QStringLiteral("embeddedCover"), false},
     };
+    // Shown on the screen: open, with its items in a window that shows.
     const auto contextMenuShown = [window]() {
-        return anyMenuVisible(window, QStringLiteral("albumArtViewerContextMenu"));
+        for (QObject *menu : window->findChildren<QObject *>(QStringLiteral("albumArtViewerContextMenu"))) {
+            auto *content = qvariant_cast<QQuickItem *>(menu->property("contentItem"));
+            if (menu->property("visible").toBool() && content != nullptr && content->window() != nullptr
+                && content->window()->isExposed()) {
+                return true;
+            }
+        }
+        return false;
     };
 
     // The ways the viewers open: the visualization, the album art with its

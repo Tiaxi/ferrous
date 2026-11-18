@@ -1433,7 +1433,12 @@ void SearchPaletteTest::mouseSelectsAndActs() {
     // The menu's fades in animation time, each to its end.
     SteppedAnimationDriver animations;
     const auto settle = [&animations] { (void)animations.step(1000); };
-    QTest::mouseClick(harness.window, Qt::RightButton, Qt::NoModifier, sceneCentre(harness.row(track)));
+    // Near the row's start: the menu is a window of its own, kept on the
+    // screen, and the offscreen screen is 800 px wide, so a click further
+    // right opened it to the click's left.
+    const QRectF trackRect = sceneRect(harness.row(track));
+    const QPoint clickAt = QPointF(trackRect.left() + 40, trackRect.center().y()).toPoint();
+    QTest::mouseClick(harness.window, Qt::RightButton, Qt::NoModifier, clickAt);
     settle();
     QCOMPARE(harness.selection(), track);
     QCOMPARE(harness.dialog->property("contextRowData").toMap().value(QStringLiteral("label")).toString(),
@@ -1445,7 +1450,7 @@ void SearchPaletteTest::mouseSelectsAndActs() {
     QQmlExpression menuItem(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.contentItem"));
     auto *menuContent = qvariant_cast<QQuickItem *>(menuItem.evaluate());
     QVERIFY(menuContent != nullptr);
-    const QPointF clicked = harness.window->mapToGlobal(sceneCentre(harness.row(track)));
+    const QPointF clicked = harness.window->mapToGlobal(QPointF(clickAt));
     const QPointF menuAt = menuContent->mapToGlobal(QPointF(0, 0));
     QVERIFY2(std::abs(menuAt.x() - clicked.x()) <= 16 && std::abs(menuAt.y() - clicked.y()) <= 16,
              qPrintable(QStringLiteral("menu at %1,%2, clicked at %3,%4")
@@ -2111,6 +2116,7 @@ int main(int argc, char **argv) {
     qputenv("LANGUAGE", "en_US");
     QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
     QApplication app(argc, argv);
+    returnFocusFromClosedPopups();
     QAccessible::setActive(true);
     FerrousLocalization::registerQmlTypes();
     SearchPaletteTest test;
