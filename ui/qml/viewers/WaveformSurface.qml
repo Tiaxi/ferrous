@@ -40,7 +40,7 @@ Item {
     // The lanes: one per channel in the per-channel view, one otherwise.
     readonly property int laneCount: waveform.viewMode === 1 ? Math.max(1, waveform.channelCount) : 1
     // Before any audio, with neither a track nor its channels, the pane is
-    // at rest, as the spectrogram's (#373 H14 F3): per channel, the lanes of
+    // at rest, as the spectrogram's: per channel, the lanes of
     // a stereo track, named, each with its centre line; the plot layer
     // gives them no Mute and Solo then. A track change keeps the lanes
     // while the new track's channels are not known yet.
@@ -93,7 +93,7 @@ Item {
         height: root.height
         // Hidden too: the item decodes nothing while it is not shown, and
         // keeps the detail it has, so that the mode switch back draws it at
-        // once (#373 H14). A new track while hidden clears it.
+        // once. A new track while hidden clears it.
         sourcePath: root.uiBridge.currentTrackPath
         overviewData: root.uiBridge.waveformPeaksPacked
         overviewCoverageSeconds: root.uiBridge.waveformCoverageSeconds
@@ -125,7 +125,7 @@ Item {
         centerLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.08)
         laneSeamColor: root.plotColors.plotLaneSeam
         // The crosshair's readout on the plot's plates, as the
-        // spectrogram's, and its dashes in the plot's text (#373 H18 C5).
+        // spectrogram's, and its dashes in the plot's text.
         readoutPlateColor: root.plotColors.plotPlate
         readoutPlateEdgeColor: root.plotColors.plotPlateEdge
         readoutTextColor: root.plotColors.plotText
@@ -143,8 +143,7 @@ Item {
         // Before any audio, each lane's rest lines at half of full scale
         // over and under its centre line, which the item draws, so the
         // pane waits as an instrument, as the spectrogram's does with its
-        // rest lines (#373 H16 I8). Gone with the first track, whose lanes
-        // they are in.
+        // rest lines. Gone with the first track, whose lanes they are in.
         Repeater {
             model: root.atRest ? root.laneCount * 2 : 0
 

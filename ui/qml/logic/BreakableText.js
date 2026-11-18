@@ -18,7 +18,7 @@ function unbreakable(name) {
 
 // A path whose lines break only between folders: a zero-width space after
 // each slash is a break point, and each name that `fits` on a line (called
-// with the name and its slash) is kept whole (#373 H40: "…/2005 - Small"
+// with the name and its slash) is kept whole ("…/2005 - Small"
 // broke before "Hours"). A name wider than the line breaks between its
 // words.
 function breakablePath(path, fits) {
@@ -37,7 +37,7 @@ const osError = /\(os error (\d+)\)/g
 
 // A message whose lines break inside a path only between its folders (see
 // breakablePath), and never inside an error code such as "(os error 13)"
-// (#373 H47: "13)" alone on a line). A path is not broken right after its
+// ("13)" was alone on a line). A path is not broken right after its
 // first slash: the space before it is the break.
 function breakableMessage(text, fits) {
     return String(text || "")

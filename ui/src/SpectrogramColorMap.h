@@ -8,8 +8,8 @@
 #include <numbers>
 
 // The spectrogram's colour map and how it places a level on it, shared with
-// the level meter, whose fill takes the map's colour of its level (#373 H7
-// P11), so that the meter reads as part of the plot.
+// the level meter, whose fill takes the map's colour of its level, so that
+// the meter reads as part of the plot.
 namespace SpectrogramColorMap {
 
 // The colour at `x`, from 0 (silence, black) to 1 (full scale, white).

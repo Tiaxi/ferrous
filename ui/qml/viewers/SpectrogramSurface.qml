@@ -188,8 +188,8 @@ Item {
         return result
     }
 
-    // Before any track the pane is at rest, as an instrument waiting
-    // (#373 H14 F3, P23): its lanes are those of a stereo track, so that
+    // Before any track the pane is at rest, as an instrument waiting:
+    // its lanes are those of a stereo track, so that
     // the first one's columns come in where it already is, each with its
     // rest lines; per channel, two named lanes with the seam between them,
     // and mixed, one. A track's own lanes replace them as its columns come.
@@ -498,8 +498,8 @@ Item {
 
     // At rest, never played, each seam between the lanes is a groove: 3 px
     // of plotRestLaneSeam centred on it, over the lanes' rows beside it,
-    // so it reads as a cut between them (#373 H29 W4: 1 px of it was hard
-    // to find). The lanes keep their heights; playing, the seam is 1 px.
+    // so it reads as a cut between them (1 px of it was hard to find). The
+    // lanes keep their heights; playing, the seam is 1 px.
     Repeater {
         model: root.atRest ? Math.max(0, spectrogramRepeater.count - 1) : 0
 

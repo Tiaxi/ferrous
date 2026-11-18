@@ -75,7 +75,7 @@ Components.DialogWindow {
         spacing: Kirigami.Units.largeSpacing
 
         // The log's path on a line of its own, and under it every action in
-        // one row (#373 H38: they were over two rows, with two ragged right
+        // one row (they were over two rows, with two ragged right
         // edges): the log's own on the left, reading it out on the right.
         RowLayout {
             objectName: "diagnosticsLogPathRow"
@@ -112,7 +112,7 @@ Components.DialogWindow {
                     + diagnosticsReadActions.implicitHeight
 
             // The log's own actions. The actions' glyphs are as large as the
-            // footer's, which their captions' font calls for (#373 H43).
+            // footer's, which their captions' font calls for.
             RowLayout {
                 id: diagnosticsLogActions
                 width: implicitWidth
@@ -131,9 +131,9 @@ Components.DialogWindow {
                 }
 
                 // One verb for one act: it deletes the log, as its question
-                // and its confirming button say (#373 H38: it was Clear…).
+                // and its confirming button say (it was Clear…).
                 // No ellipsis: its confirmation asks for nothing more, as
-                // KDE's guidelines have it (#373 H45).
+                // KDE's guidelines have it.
                 Button {
                     objectName: "diagnosticsClearButton"
                     icon.width: dialogButtons.glyphSize
@@ -195,7 +195,7 @@ Components.DialogWindow {
         }
 
         // The log on the view colour in a frame, its scroll bars inside the
-        // frame, as the tag editor's table (#373 H38: the horizontal one ran
+        // frame, as the tag editor's table (the horizontal one ran
         // under the frame, outside it). The frame takes the focus colour
         // while the log has the focus, as a text area's.
         Rectangle {
@@ -233,7 +233,7 @@ Components.DialogWindow {
                     persistentSelection: true
                     // The frame round the view is the log's; the text
                     // stands 8 px clear of its sides and 6 px of its top
-                    // and bottom (#373 H42: 5 px, nearly on the frame).
+                    // and bottom (at 5 px it was nearly on the frame).
                     background: null
                     leftPadding: Kirigami.Units.largeSpacing
                     rightPadding: Kirigami.Units.largeSpacing

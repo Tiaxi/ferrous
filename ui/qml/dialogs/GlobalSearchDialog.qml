@@ -66,7 +66,7 @@ Dialog {
     // The footer's gaps: between a key and its action, half again a word
     // space, so "Ctrl+Enter Add to Queue" reads as a key and an action, not
     // as one phrase; between pairs three times that, so the pairs read
-    // apart (#373 H37: 4 px, a word space, and 22 px). 6 and 18 px at
+    // apart (they were 4 px, a word space, and 22 px). 6 and 18 px at
     // 10 pt; they grow with the font.
     readonly property real hintKeyGap: Math.max(Kirigami.Units.mediumSpacing,
                                                 Math.round(1.5 * smallMetrics.advanceWidth(" ")))
@@ -124,7 +124,7 @@ Dialog {
     leftPadding: 0
     rightPadding: 0
     // 800 px with the default font, wider with a larger one so its columns
-    // keep their measure (#373 H41), and 16 px clear of the window's sides.
+    // keep their measure, and 16 px clear of the window's sides.
     readonly property int designWidth: root.uiPalette.scaledSize(800)
     width: Math.min(root.designWidth, (root.parent ? root.parent.width : root.designWidth) - 2 * root.sideInset)
     height: Math.min(contentColumn.implicitHeight, root.maximumHeight)
@@ -255,7 +255,7 @@ Dialog {
             : root.controller.globalSearchModelApi.highlightSegments(text, queryField.text)
         return root.layOutRuns(segments, root.maxTitleRuns, root.titleWidth, regularMetrics, semiboldMetrics)
     }
-    // A result emphasises its match in its title only (#373 H10, H12): its
+    // A result emphasises its match in its title only: its
     // context, such as the artist an album was found by, stays whole and
     // regular, so it never outweighs the title.
     // `segments` as at most `maxRuns` runs side by side in `room`: matches
@@ -479,7 +479,7 @@ Dialog {
             clip: true
             // The results' height: all of them, and 6 px under the last,
             // where the palette has the room; otherwise as many rows, from
-            // the first, as fit it whole, and the rest scroll (#373 H11: the
+            // the first, as fit it whole, and the rest scroll (the
             // list ended in half a row). From the rows' kinds, not from the
             // view's content height, which is an estimate while only some
             // of its rows have items.
@@ -532,7 +532,7 @@ Dialog {
                 opacity: root.searching ? 0.5 : 1
                 enabled: !root.searching
                 // The app's lane scrollbar, as the library's and the
-                // queue's (#373 H12: Breeze's own was another hand here):
+                // queue's (Breeze's own was another hand here):
                 // over the lane the rows' text keeps clear of, its thumb
                 // over their tints, which run to the edge.
                 ScrollBar.vertical: Components.LaneScrollBar {

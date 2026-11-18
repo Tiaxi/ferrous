@@ -11,9 +11,9 @@ import "../logic/VisualizationModes.js" as VisualizationModes
 // `focusInside`: hidden, the buttons stay Tab stops. The buttons are 4 px
 // apart with 4 px around them, so a button's focus ring, 3 px out from it,
 // stays inside the plate with 1 px of the plate outside it, and 1 px clear
-// of the other button, whose checked edge it never touches (#373 H14 G4:
-// 2 px apart and in, the ring ran over the plate's edge and onto the
-// chosen one's; H16 I5: at 3 px around them it met the plate's edge).
+// of the other button, whose checked edge it never touches (2 px apart
+// and in, the ring ran over the plate's edge and onto the checked one's;
+// at 3 px around them it met the plate's edge).
 Components.PlotPlate {
     id: root
     objectName: "visualizationModeSwitch"

@@ -32,12 +32,11 @@ Item {
     default property alias viewerControls: viewerControlsRow.data
     // On the windowed viewer's corner plate, the zoom is set off from the
     // viewer's controls by a 1 px divider with the controls' 4 px either
-    // side, as on the visualization viewer's (#373 H37).
+    // side, as on the visualization viewer's.
     property bool dividers: false
     // The viewer's own controls set off from Close by a 1 px divider, with
     // the controls' 4 px either side: the visualization viewer's mode switch
-    // in its title strip, a choice of two, beside the button that closes it
-    // (#373 H40).
+    // in its title strip, a choice of two, beside the button that closes it.
     property bool closeDivided: false
 
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001

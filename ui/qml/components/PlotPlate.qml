@@ -32,7 +32,7 @@ Item {
     // buttons too, stay on it rather than reach the view under it.
     property bool takesPointer: false
     // Without a fill and an edge of its own, on a plate it shares with
-    // other controls, such as the windowed viewer's corner (#373 H37).
+    // other controls, such as the windowed viewer's corner.
     property bool bare: false
     property bool revealed: true
     // A level the plate fades with besides its own reveal, such as a
@@ -51,7 +51,7 @@ Item {
     // plate fades with `fadeLevel`, such as a viewer's controls coming back
     // with the pointer on the view, its own reveal follows at once: the
     // plate, its fill and its glyphs, come in on that one level rather than
-    // on two curves, one after the other (#373 H5).
+    // on two curves, one after the other.
     Behavior on revealLevel {
         enabled: Kirigami.Units.shortDuration > 0 && root.fadeLevel >= 1
         NumberAnimation {
@@ -103,9 +103,9 @@ Item {
 
         // Text, not a Label: the desktop style's Label has a hover handler,
         // which would take the hover from the view under the plate. Its
-        // letters are drawn as curves, with grey antialiasing (#373 H14
-        // G8: the platform's subpixel antialiasing fringed them in colour
-        // on the plate, which is not the window's).
+        // letters are drawn as curves, with grey antialiasing (the
+        // platform's subpixel antialiasing fringed them in colour on the
+        // plate, which is not the window's).
         Text {
             objectName: "plotPlateLabel"
             visible: root.isLabel

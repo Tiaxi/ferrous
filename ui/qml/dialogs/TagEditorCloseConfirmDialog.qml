@@ -87,7 +87,7 @@ Components.CompactDialogWindow {
         objectName: "tagEditorCloseConfirmMessage"
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
-        // The lead, semibold, as every dialog's first sentence is (#373 H40).
+        // The lead, semibold, as every dialog's first sentence is.
         font.weight: Font.DemiBold
         text: root.forQuit
             ? I18n.i18nc("@info", "Save tag changes before quitting Ferrous?")
@@ -101,7 +101,7 @@ Components.CompactDialogWindow {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
-        // What Discard closes: the tag editor, not this question (#373 H45).
+        // What Discard closes: the tag editor, not this question.
         text: root.forQuit
             ? I18n.i18nc("@info", "Save writes the current edits and quits. "
                 + "Discard drops every unsaved change and quits. Cancel keeps Ferrous open.")

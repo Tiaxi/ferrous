@@ -1370,7 +1370,7 @@ void BridgeClientTest::tagEditorKeepsExtraValuesUntilTheirFieldIsSaved() {
 
 // The table's Status column takes room only while a row has a status, so
 // the editor tells whether a row holds an error of a failed save or rename,
-// and when that changes (#373 H7).
+// and when that changes.
 void BridgeClientTest::tagEditorTellsWhetherARowHasAnError() {
     TagEditorController editor(nullptr);
     QVERIFY(loadTagEditorRows(editor, tagEditorRows(3, 3)));
@@ -1406,7 +1406,7 @@ void BridgeClientTest::tagEditorTellsWhetherARowHasAnError() {
 }
 
 // A row's error says whether a rename or a save failed, for its Status
-// cell: "Not renamed" or "Not saved" (#373 H46).
+// cell: "Not renamed" or "Not saved".
 void BridgeClientTest::tagEditorTellsWhetherARowsRenameFailed() {
     TagEditorController editor(nullptr);
     QVERIFY(loadTagEditorRows(editor, tagEditorRows(3, 3)));
@@ -1921,8 +1921,8 @@ void BridgeClientTest::queueColumnWidthsAreSentAsTheBackendReadsThem() {
 // backend's again once a snapshot says the backend has taken every request:
 // a snapshot it built before then still has the volume from before, which
 // showed the volume slider at 0 and the muted glyph for some 50 ms after an
-// unmute (#373 H34 AA4). A change the backend makes, as one made outside the
-// app, shows once it has.
+// unmute. A change the backend makes, as one made outside the app, shows
+// once it has.
 void BridgeClientTest::volumeShowsTheRequestUntilTheBackendHasTakenIt() {
     // The settings section ends with the count, after the stretch setting;
     // older backends end it before, and their volume is taken as it is.
@@ -3042,7 +3042,7 @@ void BridgeClientTest::queueSnapshotKeepsRawCoverPathsInRows() {
 
 // The queue's total is written as the transport and the rows write a
 // time, with no leading zero on the minutes, and as a floor in words while
-// a queued track's length is unknown (#373 H35: "01:49+?").
+// a queued track's length is unknown, not "01:49+?".
 void BridgeClientTest::queueTotalReadsAsAClockTime() {
     BridgeClient client;
     isolateBridgeClient(client);
@@ -3632,8 +3632,7 @@ void BridgeClientTest::anUndoOfAClearWhileStoppedKeepsTheStoppedRowOfARepeatedTr
     QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 0
                                  && bridge.queueUndoKind() == BinaryBridgeCodec::QueueUndoCleared,
                              10000);
-    // Cleared while stopped, the engine has no track, nor has the client
-    // (#373 H18 C3).
+    // Cleared while stopped, the engine has no track, nor has the client.
     QTRY_VERIFY_WITH_TIMEOUT(bridge.currentTrackPath().isEmpty() && bridge.currentTrackTitle().isEmpty(), 10000);
     bridge.undoQueueChange();
     QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 4, 10000);
@@ -3720,9 +3719,9 @@ void BridgeClientTest::movedRowsGoBackThroughTheBackendAndAreSelected() {
 }
 
 // A search whose every request failed says so apart from finding nothing
-// (#373 H38: the dialog showed both alike): itunesArtworkFailed, with the
-// system's words in itunesArtworkErrorText and the sentence in the status
-// text. A new search, one that cannot start, and closing clear it.
+// (the dialog showed both alike): itunesArtworkFailed, with the system's
+// words in itunesArtworkErrorText and the sentence in the status text. A
+// new search, one that cannot start, and closing clear it.
 void BridgeClientTest::aFailedArtworkSearchSaysSoApartFromFindingNothing() {
     BridgeClient client;
     isolateBridgeClient(client);
@@ -5957,19 +5956,19 @@ void BridgeClientTest::itunesArtworkUrlRequestsLargestRendition() {
 }
 
 // The line over the iTunes suggestions says in plain words when the
-// full-size images come, not "loads on preview/apply" (#373 H6).
+// full-size images come, not "loads on preview/apply".
 void BridgeClientTest::itunesArtworkFoundTextIsPlainWords() {
     QCOMPARE(BridgeClient::itunesArtworkFoundText(1),
              QStringLiteral("Found 1 suggestion. Its full-size image downloads when you preview or apply it."));
     QCOMPARE(BridgeClient::itunesArtworkFoundText(5),
              QStringLiteral("Found 5 suggestions. Full-size images download when you preview or apply one."));
     QVERIFY(!BridgeClient::itunesArtworkFoundText(5).contains(QLatin1Char('/')));
-    // So does each suggestion's line before its image has come (#373 H7),
-    // with a one-character ellipsis while it downloads.
+    // So does each suggestion's line before its image has come, with a
+    // one-character ellipsis while it downloads.
     QCOMPARE(BridgeClient::itunesArtworkPendingDetailsText(),
              QStringLiteral("Its size and format show once you preview or apply it."));
     // In the count line's term for the image, one term for it in the
-    // dialog (#373 H46: "high-resolution artwork" beside "Full-size images").
+    // dialog, not "high-resolution artwork" beside "Full-size images".
     QCOMPARE(BridgeClient::itunesArtworkLoadingDetailsText(), QStringLiteral("Loading full-size image\u2026"));
     QVERIFY(BridgeClient::itunesArtworkFoundText(1).contains(QStringLiteral("full-size image")));
 }
@@ -7046,9 +7045,8 @@ void BridgeClientTest::stoppingEndsTheWaitForTheTracksText() {
 
 // Stop, then Clear: the engine keeps the stopped track current, then, its
 // queue empty, reports none. The client then has no track, its path and
-// text gone with it, so the now-playing card says "Nothing playing" (#373
-// H18 C3: the stopped track's path outlived the queue, and the card kept
-// the track).
+// text gone with it, so the now-playing card says "Nothing playing" (the
+// stopped track's path outlived the queue, and the card kept the track).
 void BridgeClientTest::clearingTheQueueWhileStoppedLeavesNoTrack() {
     BridgeClient client;
     isolateBridgeClient(client);
@@ -9470,7 +9468,7 @@ void BridgeClientTest::searchExtendedMatchDetailsDecodeAndHighlight() {
     // Row 0 is the Tracks heading.
     QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(0), GlobalSearchResultsModel::KindRole).toString(), QStringLiteral("section"));
     // Its length as the queue and the transport write one not known: en
-    // dashes, not hyphens (#373 H37).
+    // dashes, not hyphens.
     QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(1), GlobalSearchResultsModel::LengthTextRole).toString(), QStringLiteral("\u2013:\u2013\u2013"));
     QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(1), GlobalSearchResultsModel::MatchDetailRole).toString(), QStringLiteral("Comment: remaster"));
     QCOMPARE(client.m_globalSearchModel.highlightText("Comment: anniversary remaster", "comment:\"anniversary remaster\""), QStringLiteral("Comment: <b>anniversary remaster</b>"));

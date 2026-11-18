@@ -1242,9 +1242,9 @@ struct SeekTimeBox {
 
 // Why `box` is not over `anchorX`, in the slider's coordinates, as drawn:
 // above the bar, its bottom edge on the bar's top, so it covers none of the
-// waveform (#373 H33 AA2) and nothing under the bar (#373 H5); centred on
-// the line, to within the device pixel it is rounded to, or against the
-// bar's end where centring would take it past it; or an empty text.
+// waveform and nothing under the bar; centred on the line, to within the
+// device pixel it is rounded to, or against the bar's end where centring
+// would take it past it; or an empty text.
 QString timeBoxPlacementError(QQuickItem *seek, const SeekTimeBox &box, qreal anchorX, qreal dpr) {
     auto *content = box.box->property("contentItem").value<QQuickItem *>();
     QQuickItem *popup = content != nullptr ? content->parentItem() : nullptr;
@@ -2011,8 +2011,8 @@ struct SeekTimeFade {
 // Hides the seek bar's time, shown in full, by `hide`, and follows its fade
 // out to its end: it fades where it was, with the time it showed. The hover
 // line, when given, fades with it, at its opacity in every frame and where
-// it was, if `lineFades`; otherwise it shows in none (#373 H3: it went at
-// once while the time faded).
+// it was, if `lineFades`; otherwise it shows in none (it went at once while
+// the time faded).
 SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, const std::function<void()> &hide,
                                 QQuickItem *hoverLine = nullptr, bool lineFades = false) {
     SeekTimeFade fade;
@@ -2617,7 +2617,7 @@ void AccessibilityTest::seekBarPlayheadContrastsWithTheBar() {
     QCOMPARE(casing.rgb() & 0xffffff, dark ? 0x000000u : 0xffffffu);
     QVERIFY(casing.alphaF() > 0.5f && casing.alphaF() < 1.0f);
 
-    // The bar is the transport's chrome, its Header colour (#373 H13 P24);
+    // The bar is the transport's chrome, its Header colour;
     // the waveform is drawn on it, and the unplayed part is the chrome over
     // it.
     const QColor chrome = background->property("color").value<QColor>();
@@ -3646,8 +3646,7 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
         return a.red() == b.red() && a.green() == b.green() && a.blue() == b.blue();
     };
 
-    // The seek bar, on the transport's chrome: the theme's Header colour
-    // (#373 H13 P24).
+    // The seek bar, on the transport's chrome: the theme's Header colour.
     const QColor header(QStringLiteral("#e6dccb"));
     QQuickItem *background = visibleItemNamed(window, QStringLiteral("seekBackground"));
     QVERIFY(background != nullptr);
@@ -3723,10 +3722,10 @@ QColor drawnAt(const QImage &image, const QQuickWindow *window, QQuickItem *item
 } // namespace
 
 // The mode switch's segments tell assistive technology what they are:
-// radio buttons, checkable, the chosen one checked (#373 H12: they told of
-// their checked state changing but never that they could be checked, and
-// read as plain buttons). A click, Space and the press action choose a
-// mode; choosing the chosen one again leaves it chosen.
+// radio buttons, checkable, the chosen one checked (they told of their
+// checked state changing but never that they could be checked, and read as
+// plain buttons). A click, Space and the press action choose a mode;
+// choosing the chosen one again leaves it chosen.
 void AccessibilityTest::modeSwitchSegmentsAreCheckableRadioButtons() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -3795,8 +3794,7 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     QVERIFY(viewer != nullptr && spectrogramButton != nullptr && waveformButton != nullptr);
     // Real tool buttons with glyphs, tooltips and accessible names: the
     // spectrogram's the app icon's glide and harmonic as a 16 px symbolic
-    // mask (#373 H14 G7: Breeze's bar chart said statistics), the
-    // waveform's Breeze's.
+    // mask (Breeze's bar chart said statistics), the waveform's Breeze's.
     for (const auto &[button, name, icon] : {
              std::tuple{spectrogramButton, QStringLiteral("Spectrogram"), QStringLiteral("spectrogram-symbolic.svg")},
              std::tuple{waveformButton, QStringLiteral("Waveform"), QStringLiteral("waveform")}}) {
@@ -3822,19 +3820,18 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     {
         // The glyph's 16 px source: the app icon's small-size pair in its
         // weight order, a 2 px lowest stroke from x 2 to 14, the icon's
-        // fundamental (#373 H16 I7: without it the other read as "/"), under
-        // a 1.5 px one, its 3rd harmonic (#373 H24: a 1.5 px glide under a
-        // 1.75 px harmonic, the reverse of the icon's taper, read as "/" over
-        // "_"), with round caps; no middle trace (#373 H22: at 16 px it
-        // crowded the two). Each starts on its own, in the same column, as the
-        // icon's traces do, with 1.5 px or more of clear space between them
-        // everywhere (#373 H23: from one vertex the two read as an angle
-        // sign). The lowest rises 2.5 px along its length, most of it in its
-        // first half, a glide (#373 H24: rising 1 px it read as a baseline;
-        // H20: level, as a chart's). The upper one's end is 1.5 px or more
-        // clear of the lowest stroke's end, and half way across 3 px or more
-        // clear of it; both inside the 16 px square with their caps. It is the
-        // app icon's top harmonic, a glide (#373 H19: it rose at 81 degrees and
+        // fundamental (without it the other read as "/"), under a 1.5 px
+        // one, its 3rd harmonic (the other way round, a 1.5 px glide under a
+        // 1.75 px harmonic, read as "/" over "_"), with round caps; no
+        // middle trace (at 16 px it crowded the two). Each starts on its
+        // own, in the same column, as the icon's traces do, with 1.5 px or
+        // more of clear space between them everywhere (from one vertex the
+        // two read as an angle sign). The lowest rises 2.5 px along its
+        // length, most of it in its first half, a glide (level, or rising
+        // 1 px, it read as a baseline). The upper one's end is 1.5 px or
+        // more clear of the lowest stroke's end, and half way across 3 px or
+        // more clear of it; both inside the 16 px square with their caps. It
+        // is the app icon's top harmonic, a glide (rising at 81 degrees it
         // read as a hook): it starts at 40 to 55 degrees and bends over to
         // under 35, steeper than the lowest everywhere, so that the two fan
         // apart.
@@ -3937,12 +3934,12 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         }
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
-    // over the switch's plate, 3:1 on it (#373 H28 V3; PlotToolButton's
-    // segmentFillOpacity), with its glyph in the text colour
-    // whole; the other's glyph is at 72 % but while pressed (#373 H11: the
-    // accent's solid fill read as keyboard focus; H12 Z4: whole under the
-    // pointer, it rivalled the chosen one). Nothing of the switch is in the
-    // accent, or in the plot's checked fill, without the keyboard's focus.
+    // over the switch's plate, 3:1 on it (PlotToolButton's
+    // segmentFillOpacity), with its glyph in the text colour whole; the
+    // other's glyph is at 72 % but while pressed (the accent's solid fill
+    // read as keyboard focus; whole under the pointer, the other rivalled
+    // the chosen one). Nothing of the switch is in the accent, or in the
+    // plot's checked fill, without the keyboard's focus.
     const auto checkedFill = [](QQuickItem *button) {
         return button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonChecked"));
     };
@@ -3981,7 +3978,7 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
             return QStringLiteral("the chosen glyph at %1").arg(glyph(chosen)->opacity());
         }
         // Quiet with the keyboard's focus too, less so under the pointer:
-        // whole only while pressed (#373 H14 G4).
+        // whole only while pressed.
         const double quiet = other->property("hovered").toBool() ? 0.85 : 0.72;
         if (!other->property("down").toBool() && std::abs(glyph(other)->opacity() - quiet) > 0.005) {
             return QStringLiteral("the other glyph at %1").arg(glyph(other)->opacity());
@@ -4012,8 +4009,8 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
                  qPrintable(QStringLiteral("%1 on %2").arg(drawn.name(), plate.name())));
     }
     // The chosen one's 1 px edge, inside it, at 3:1 or more on the plate
-    // and on its fill, as drawn (#373 H14 F4: the fill alone was 1.4 to
-    // 1.7:1), in both modes' plot colours.
+    // and on its fill, as drawn (the fill alone was 1.4 to 1.7:1), in both
+    // modes' plot colours.
     const auto edgeProblem = [&](QQuickItem *chosen, QQuickItem *other) -> QString {
         QQuickItem *edge = chosen->findChild<QQuickItem *>(QStringLiteral("plotToolButtonCheckedEdge"));
         QQuickItem *otherEdge = other->findChild<QQuickItem *>(QStringLiteral("plotToolButtonCheckedEdge"));
@@ -4057,14 +4054,14 @@ void AccessibilityTest::modeSwitchStatesStayApart_data() {
     QTest::newRow("waveform") << 1;
 }
 
-// The mode switch's states stay apart (#373 H14 G4): its buttons are 4 px
-// apart with 3 px of plate around them, so the keyboard's 2 px focus ring,
-// with its 1 px gap in the plate's colour, stays inside the plate and
-// clear of the chosen button's edge; the chosen glyph is whole, the other
-// at 72 %, and under the pointer at 85 % on a 14 % wash, which shows on
-// the plate and stays under the chosen one's plate. On both plots; in both
-// Breeze themes, UiFoundationsTest's plotSegmentHoverStaysUnderTheChosenPlate
-// and plotToolButtonDrawsCheckedAndFocusApart draw the hover and the ring.
+// The mode switch's states stay apart: its buttons are 4 px apart with 3 px
+// of plate around them, so the keyboard's 2 px focus ring, with its 1 px gap
+// in the plate's colour, stays inside the plate and clear of the chosen
+// button's edge; the chosen glyph is whole, the other at 72 %, and under the
+// pointer at 85 % on a 14 % wash, which shows on the plate and stays under
+// the chosen one's plate. On both plots; in both Breeze themes,
+// UiFoundationsTest's plotSegmentHoverStaysUnderTheChosenPlate and
+// plotToolButtonDrawsCheckedAndFocusApart draw the hover and the ring.
 void AccessibilityTest::modeSwitchStatesStayApart() {
     QFETCH(int, mode);
     LibraryTreeModel libraryModel;
@@ -4089,7 +4086,7 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
         return button->findChild<QQuickItem *>(QString::fromLatin1(name));
     };
 
-    // 4 px of plate around the buttons, 4 px between them (#373 H16 I5).
+    // 4 px of plate around the buttons, 4 px between them.
     QQuickItem *first = mode == 0 ? chosen : other;
     QQuickItem *second = mode == 0 ? other : chosen;
     const QRectF plateRect = rectOf(plate);
@@ -4109,7 +4106,7 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
     QVERIFY(ring != nullptr && gap != nullptr && edge != nullptr);
     QTRY_VERIFY(ring->isVisible() && gap->isVisible() && edge->isVisible());
     const QRectF ringRect = rectOf(ring);
-    // With 1 px of the plate outside it (#373 H16 I5).
+    // With 1 px of the plate outside it.
     QVERIFY2(plateRect.adjusted(1, 1, -1, -1).contains(ringRect),
              qPrintable(QStringLiteral("ring %1,%2 %3x%4 in plate %5,%6 %7x%8")
                             .arg(ringRect.left()).arg(ringRect.top()).arg(ringRect.width()).arg(ringRect.height())
@@ -4137,8 +4134,8 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
     QVERIFY2(std::abs(otherGlyph->opacity() - 0.72) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
 
     // Under the pointer: a wash of 10 % or so, its glyph at 85 %; as drawn,
-    // it shows on the plate, under the chosen one's plate, which is 1.4:1
-    // or more on it (#373 H15 H4).
+    // it shows on the plate, under the chosen one's plate, which is 1.4:1 or
+    // more on it.
     QTest::mouseMove(window, rectOf(other).center().toPoint() + QPoint(0, 1));
     QTest::mouseMove(window, rectOf(other).center().toPoint());
     QTRY_VERIFY(other->property("hovered").toBool());
@@ -4281,9 +4278,9 @@ void AccessibilityTest::laneButtonsAreTabStopsThatRevealThemselves() {
 }
 
 // A lane's Mute and Solo tell assistive technology that they are toggles
-// and whether each is on (#373 H14 F6: only "focused, focusable" reached
-// it). What they show is the lane's state: a click asks for the change
-// and leaves the button as the lane is until the lane changes.
+// and whether each is on (only "focused, focusable" reached it). What they
+// show is the lane's state: a click asks for the change and leaves the
+// button as the lane is until the lane changes.
 void AccessibilityTest::laneButtonsAreCheckableToggles() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -4337,10 +4334,10 @@ void AccessibilityTest::laneButtonsAreCheckableToggles() {
 
     // The buttons' plate: 4 px around them and between them, its top on
     // one line with the mode switch's, 5 px into the lane, and a button's
-    // focus ring inside it with 1 px of the plate outside it (#373 H16 I5:
-    // at 2 px, the ring ran past the plate's edge). The label is centred on
-    // it, so that L and M stand on one centre line (H18 C4: the plates'
-    // tops were on one line, their letters 6 px apart).
+    // focus ring inside it with 1 px of the plate outside it (at 2 px, the
+    // ring ran past the plate's edge). The label is centred on it, so that L
+    // and M stand on one centre line (with only the plates' tops on one
+    // line, their letters were 6 px apart).
     const auto rectOf = [](QQuickItem *item) {
         return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
     };
@@ -4518,8 +4515,7 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         QQuickItem *switchPlate = visibleItemNamed(window, QStringLiteral("visualizationModeSwitch"));
         QVERIFY(label != nullptr && labelText != nullptr && switchPlate != nullptr);
         // The switch's plate beside the chosen mode, clear of the focused
-        // one's ring, which reaches the plate's edge on its side (#373 H14
-        // G4).
+        // one's ring, which reaches the plate's edge on its side.
         const QPointF plateSpot(mode == 0 ? 1.0 : switchPlate->width() - 1.0, switchPlate->height() / 2);
         // The switch whole before sampling it. Tabbing to the other segment
         // takes keyboard focus out of the switch and round the window, and
@@ -4544,12 +4540,11 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         QVERIFY2(contrastRatio(text, plate) >= 4.5,
                  qPrintable(QStringLiteral("%1 label: %2").arg(what).arg(contrastRatio(text, plate))));
         // The chosen mode's plate on the switch's, a neutral step from it
-        // (#373 H11: the plot's text colour at 20 %, not the accent's solid
-        // fill), its glyph whole on it and the other's on the switch's
-        // plate; and the focus ring.
+        // (the plot's text colour at 20 %, not the accent's solid fill), its
+        // glyph whole on it and the other's on the switch's plate; and the
+        // focus ring.
         const QColor switchFill = drawnAt(image, window, switchPlate, plateSpot);
-        // Between its 1 px edge (#373 H14 F4), rounded at the corners, and
-        // its glyph.
+        // Between its 1 px edge, rounded at the corners, and its glyph.
         const QColor fill = drawnAt(image, window, checked, QPointF(checked->width() / 2, 2.5));
         QVERIFY2(contrastRatio(fill, switchFill) >= 1.4,
                  qPrintable(QStringLiteral("%1 checked: %2").arg(what).arg(contrastRatio(fill, switchFill))));
@@ -4557,10 +4552,10 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         QQuickItem *uncheckedGlyph = unchecked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
         QVERIFY(checkedGlyph != nullptr && uncheckedGlyph != nullptr);
         // A glyph's ink as drawn on `background`. A mask of the app's own,
-        // from a file, as the spectrogram's (#373 H14 G7), is coloured by
-        // the platform's icon loader, which offscreen leaves it black, as
-        // the transport's own glyphs are (TransportStatusTest): its colour
-        // at its opacity over the background stands for it.
+        // from a file, as the spectrogram's, is coloured by the platform's
+        // icon loader, which offscreen leaves it black, as the transport's
+        // own glyphs are (TransportStatusTest): its colour at its opacity
+        // over the background stands for it.
         const auto inkOf = [&](QQuickItem *glyph, const QColor &background) {
             if (glyph->property("source").metaType() != QMetaType::fromType<QUrl>()) {
                 return mostContrasting(image, window, glyph, QRectF(0, 0, glyph->width(), glyph->height()),
@@ -4600,9 +4595,9 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         const auto [top, bottom] = LevelMeterItem::laneRows(0, 2, meter->height());
         // The fill just under its top, where it meets the trough and shows
         // the level: on the spectrogram, a ramp of the colour map, whose
-        // floor is darker (#373 H10 V2). A few dB under the level, as the
-        // level decays while the test runs; a rung of its ladder there,
-        // the trough showing between them (#373 H14 G3).
+        // floor is darker. A few dB under the level, as the level decays
+        // while the test runs; a rung of its ladder there, the trough
+        // showing between them.
         const double meterBottom = bottom - LevelMeterItem::kInset;
         const double scaleHeight = bottom - top - 2 * LevelMeterItem::kInset - LevelMeterItem::kLampHeight - 1.0;
         const QColor trough = meterPixel(5.5, top + 9);
@@ -4616,10 +4611,10 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         }
         // On the waveform, 3:1 on the trough. On the spectrogram the fill
         // stops at the map's magenta, as its orange and yellow were
-        // louder than the plot (#373 H14 G3): 3:1 on the plot's floor
-        // around the column and 2:1 on the trough, the track, which is
-        // 1.3:1 on the floor to show; the peak tick marks the level at
-        // full contrast (meterPeak, near white).
+        // louder than the plot: 3:1 on the plot's floor around the column
+        // and 2:1 on the trough, the track, which is 1.3:1 on the floor to
+        // show; the peak tick marks the level at full contrast (meterPeak,
+        // near white).
         const double onTrough = contrastRatio(meterFill, trough);
         const QColor floor = layer->property("plotColors").value<QObject *>()->property("plotBg").value<QColor>();
         const double onFloor = contrastRatio(meterFill, floor);
@@ -4644,7 +4639,7 @@ void AccessibilityTest::plotLayerShowsThePaneStates() {
     QVERIFY(analysing != nullptr && endsEarly != nullptr);
     // Before any audio: no message; the switch shows. The bare pane is the
     // spectrogram's floor, the plot's indigo, in the light theme the tests
-    // run in too (#373 H4, H11 P19).
+    // run in too.
     QVERIFY(!analysing->isVisible());
     QVERIFY(!endsEarly->isVisible());
     QVERIFY(visibleItemNamed(window, QStringLiteral("visualizationModeSwitch")) != nullptr);

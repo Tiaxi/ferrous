@@ -490,8 +490,8 @@ void SearchPaletteTest::paletteSitsUnderTheTransportOverADim() {
     QCOMPARE(background->property("radius").toReal(), 6.0);
     QCOMPARE(background->property("border").value<QObject *>()->property("width").toReal(), 1.0);
     // Its 1 px outline is the seam, which stands out from both the palette
-    // and the dimmed window around it (#373 H10: on dark, the palette all
-    // but merged into the window).
+    // and the dimmed window around it (without it, on dark, the palette
+    // all but merged into the window).
     const QColor outline = background->property("border").value<QObject *>()->property("color").value<QColor>();
     QCOMPARE(hex(outline), hex(harness.token("seam")));
 
@@ -676,8 +676,8 @@ void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
 
 // "Meridian Line" for "meridian": "Meridian" semibold, " Line" regular; the
 // context has no emphasis. A row emphasises its matches in its title only
-// (#373 H10, H12: the spec's rule; the context of an album found by its
-// artist had its match semibold, and outweighed the title).
+// (the context of an album found by its artist had its match semibold,
+// and outweighed the title).
 void SearchPaletteTest::matchesAreEmphasisedInTheTitleOnly() {
     Harness harness;
     QString errorText;
@@ -843,8 +843,8 @@ void SearchPaletteTest::selectedHoveredAndPlayingRowsAreDrawn() {
 // actions, "Show All" for a more row, "Search" for a recent search,
 // "Search Instead" for a suggestion, and only Esc otherwise. The key in the
 // text colour, the action in the secondary one; 6 px from a key to its
-// action, more than a word space, and 18 px between pairs (#373 H37: 4 px,
-// a word space, ran each pair together into one phrase).
+// action, more than a word space, and 18 px between pairs (at 4 px, a word
+// space, each pair ran together into one phrase).
 void SearchPaletteTest::footerNamesTheKeysForEachState() {
     Harness harness;
     QString errorText;
@@ -1076,8 +1076,8 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow_data() {
 }
 
 // With more results than the palette has room for, the list is as tall as
-// the rows that fit it whole, from the first, and the rest scroll (#373
-// H11: it was as tall as its room, and ended in half a row). The rows are
+// the rows that fit it whole, from the first, and the rest scroll (as tall
+// as its room, it ended in half a row). The rows are
 // of two heights, results and headings, so the height is no multiple of
 // either. With room for them all, they all show, with 6 px under the last.
 void SearchPaletteTest::resultsListEndsOnAWholeRow() {
@@ -1123,7 +1123,7 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     QVERIFY2(shown > 2 && shown < heights.size(), qPrintable(QStringLiteral("%1 rows in %2 px").arg(shown).arg(room)));
     QTRY_COMPARE(view->height(), whole);
     // The rest scroll under the app's lane scrollbar, as the library's and
-    // the queue's (#373 H12: Breeze's own was another hand): 8 px at the
+    // the queue's (Breeze's own was another hand): 8 px at the
     // view's right edge, its thumb over the rows' tints, which run to the
     // edge, while the rows' text keeps clear of its lane.
     QQuickItem *scrollBar = harness.item(QStringLiteral("globalSearchScrollBar"));
@@ -1297,7 +1297,7 @@ void SearchPaletteTest::mouseSelectsAndActs() {
     QQmlExpression menuOpened(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.opened"));
     QTRY_VERIFY2(menuOpened.evaluate().toBool(), qPrintable(menuOpened.error().toString() + QStringLiteral(" visible=")
         + QQmlExpression(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.visible")).evaluate().toString()));
-    // It opens where the click was, not at the window's corner (#373 H6).
+    // It opens where the click was, not at the window's corner.
     QQmlExpression menuItem(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.contentItem"));
     auto *menuContent = qvariant_cast<QQuickItem *>(menuItem.evaluate());
     QVERIFY(menuContent != nullptr);
@@ -1541,7 +1541,7 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText_data() {
 
 // At 24 pt, the field, the rows and the headings are as tall as their text
 // needs, and the palette, its title column and its help are as much wider
-// as the font is larger (#373 H41: at 800 px, titles were elided beside
+// as the font is larger (otherwise, at 800 px, titles were elided beside
 // empty room and the footer wrapped). The footer's key hints stay on one
 // line where the window has the room, and wrap inside the palette, which
 // grows to hold their lines, where it has not. With the default font, the
@@ -1628,7 +1628,7 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
     // The footer's four pairs on one line, or wrapped to more than one in
     // a narrow window, every pair whole and inside the palette, and the
     // footer is as tall as its lines.
-    // Each line starts where the results' titles do (#373 H12).
+    // Each line starts where the results' titles do.
     QTRY_COMPARE(harness.hints().size(), 4);
     QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
     const QRectF footerRect = sceneRect(footer);
@@ -1649,7 +1649,7 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
         }
         QVERIFY(rect.left() >= titleLeft);
         // A key stays further from its action than the action's words
-        // from each other, at a large font too (#373 H37).
+        // from each other, at a large font too.
         {
             const auto keys = visibleNamed(hint, QStringLiteral("globalSearchKeyHintKey"));
             const auto actions = visibleNamed(hint, QStringLiteral("globalSearchKeyHintAction"));
@@ -1678,7 +1678,7 @@ void SearchPaletteTest::glyphsTargetsAndThumbnailsFollowTheFont_data() {
 
 // The field's search glyph, its clear and help buttons and their glyphs,
 // and the results' covers and glyphs are sized for the default font and
-// grow with a larger one, as the transport's do (#373 H10: at 24 pt they
+// grow with a larger one, as the transport's do (at 24 pt they
 // stayed at their 1× sizes beside 32 px text). The covers keep 4 px clear
 // of their row's edges and the buttons 8 px of the field's; the query and
 // the titles start 12 px after the lead.

@@ -470,14 +470,14 @@ namespace {
 
 // How much wider than at its 280 px the album art viewer's details column
 // is in a view `viewWidth` wide: over the whole screen a seventh; in the
-// window a quarter of the view, between 280 and 320 px (#373 H37).
+// window a quarter of the view, between 280 and 320 px.
 qreal infoColumnWidthScale(bool fullscreen, qreal viewWidth) {
     return fullscreen ? 1.2 : qBound(280.0, std::floor(viewWidth / 4), 320.0) / 280.0;
 }
 
 // The details' column's 40 characters, less its seam: of the body font in
 // a window, as much wider as the column in a wide one; over the whole
-// screen, of the details' text, 1.2 times the body font (#373 H38).
+// screen, of the details' text, 1.2 times the body font.
 qreal infoColumnFortyCharacters(const QFont &bodyFont, bool fullscreen, qreal viewWidth) {
     if (fullscreen) {
         QFont details = bodyFont;
@@ -693,8 +693,8 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QCOMPARE(qAlpha(colorOf(backing, "color")), 255);
     QCOMPARE(sceneRectOf(viewport), QRectF(0, 0, 1000, 600));
     // The square art fits the view's height, centred in what the details
-    // leave of the view, left of their seam (#373 H8: it was centred in the
-    // whole view), however the decode request is shaped.
+    // leave of the view, left of their seam (it was centred in the whole
+    // view), however the decode request is shaped.
     QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
     QVERIFY(image != nullptr);
     const auto paintedArt = [image]() {
@@ -744,9 +744,9 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
 
     // The folder: its label on a line of its own, and under it the path on
     // one line across the column's whole width, elided in the middle, with
-    // Copy Path at the line's end (#373 H12: in the grid the path had the
-    // values' part of the row and broke onto a second line). The whole path
-    // is in its tooltip.
+    // Copy Path at the line's end (in the grid the path had the values' part
+    // of the row and broke onto a second line). The whole path is in its
+    // tooltip.
     QQuickItem *folderLabel = itemNamed(column, QStringLiteral("albumArtFolderLabel"));
     QQuickItem *path = itemNamed(column, QStringLiteral("albumArtFolderPath"));
     QQuickItem *copy = itemNamed(column, QStringLiteral("albumArtCopyPathButton"));
@@ -773,7 +773,7 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     // Copy Path, which reaches up beside it, is clear of its text.
     QVERIFY(boxOf(folderLabel).left() + folderLabel->property("contentWidth").toReal() < boxOf(copy).left());
     QCOMPARE(folderLabel->property("lineCount").toInt(), 1);
-    // The labels' column: 80 px at the default font (#373 H11: 76, the
+    // The labels' column: 80 px at the default font (it was 76 px, the
     // width of "Dimensions").
     QCOMPARE(surface->property("infoLabelColumnMinimum").toReal(), 80.0);
     QVERIFY2(sourceLabel->width() >= 80.0, qPrintable(QString::number(sourceLabel->width())));
@@ -783,8 +783,8 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     // The path from the column's start, not the values', to Copy Path at the
     // row's end, on the path's first line; a long one wraps after its slashes, on
     // the lines it needs up to eight, three during a preview, and what does
-    // not fit is elided (#373 H38: on one line, elided in its middle, a
-    // typical one lost its folders; H41: on three, a large font cut it short).
+    // not fit is elided (on one line, elided in its middle, a typical one lost
+    // its folders; on three, a large font cut it short).
     QCOMPARE(boxOf(path).left(), boxOf(folderRow).left());
     QVERIFY(boxOf(path).left() < boxOf(sourceValue).left());
     QCOMPARE(boxOf(copy).right(), boxOf(folderRow).right());
@@ -813,10 +813,9 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QTRY_COMPARE(path->property("lineCount").toInt(), 3);
     QVERIFY(!path->property("elided").toBool());
     // Copy Path's glyph is centred on the path's first line, not on its
-    // three lines' middle (#373 H38), the button clear of the folder's
-    // label's text; over the whole screen, the button and its glyph are a
-    // step larger, as the details' text is: 24 and 16 px in a window, 29
-    // and 19 px there.
+    // three lines' middle, the button clear of the folder's label's text;
+    // over the whole screen, the button and its glyph are a step larger, as
+    // the details' text is: 24 and 16 px in a window, 29 and 19 px there.
     QQuickItem *copyGlyph = itemNamed(copy, QStringLiteral("viewerToolButtonIcon"));
     QVERIFY(copyGlyph != nullptr);
     const auto checkCopyOnTheFirstLine = [&](qreal buttonSize, qreal glyphSize, const QString &where) {
@@ -873,9 +872,9 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QVERIFY(pathMetrics.horizontalAdvance(QStringLiteral("05 - Small Hours")) <= path->width());
 
     // Over the whole screen, a path of three lines breaks between its
-    // folders, not inside one's name (#373 H40: "…/2005 - Small" broke
-    // before "Hours"). The lines are laid out as Qt's text lays out the
-    // label's, from a text and the label's font and width.
+    // folders, not inside one's name ("…/2005 - Small" broke before
+    // "Hours"). The lines are laid out as Qt's text lays out the label's,
+    // from a text and the label's font and width.
     const auto linesOf = [path](const QString &text) {
         QTextLayout layout(text, qvariant_cast<QFont>(path->property("font")));
         QTextOption option;
@@ -1062,7 +1061,7 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
         // The column of the labels: the widest label, up to two fifths of
         // the row inside the column's margins, and never narrower than the
         // widest word.
-        // 80 px or more at the default font (#373 H11), more with a larger.
+        // 80 px or more at the default font, more with a larger.
         const qreal least = surface->property("infoLabelColumnMinimum").toReal();
         QCOMPARE(least, pointSize > 10 ? std::round(80 * pointSize / 10) : 80.0);
         const qreal cap = std::floor((column->width() - 2 * padding) * 0.4);
@@ -1140,9 +1139,9 @@ void AlbumArtSmokeTest::albumArtKeepsAGutterBesideTheDetails_data() {
 }
 
 // While the details show, the art keeps 16 px clear of their seam and of
-// the view's left edge, centred in what is left (#373 H41: in a window as
-// wide as it was tall, the art met the seam); the gutter eases with the
-// details' reveal. Without them, the art fits the whole view.
+// the view's left edge, centred in what is left (in a window as wide as it
+// was tall, the art met the seam); the gutter eases with the details'
+// reveal. Without them, the art fits the whole view.
 void AlbumArtSmokeTest::albumArtKeepsAGutterBesideTheDetails() {
     QFETCH(QSize, size);
     QTemporaryDir dir;
@@ -1212,7 +1211,7 @@ void AlbumArtSmokeTest::albumArtKeepsAGutterBesideTheDetails() {
 
 // At 24 pt in a window, a typical folder path is whole on the lines it
 // needs, broken after its slashes, rather than cut short on three over an
-// empty column (#373 H41: "…/2005 - Smal…").
+// empty column ("…/2005 - Smal…").
 void AlbumArtSmokeTest::albumArtFolderPathTakesTheLinesItNeedsAtLargeFonts() {
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
@@ -1279,13 +1278,12 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnTheTypeScale_data() {
     QTest::newRow("24 pt") << 24.0 << false;
 }
 
-// The details are on the app's type scale (#373 H10: everything at the body
-// size, crammed): with the default 10 pt font, 13 px values and 12 px
-// labels, the rows 26 px apart, a list row's height, and 16 px in from the
-// column's edges; all from the font, so a larger font scales them, and a
-// step larger over the whole screen. During a preview, Back to Results and
-// Apply sit in a footer at the column's bottom, Apply the style's default
-// button.
+// The details are on the app's type scale (everything was at the body size,
+// crammed): with the default 10 pt font, 13 px values and 12 px labels, the
+// rows 26 px apart, a list row's height, and 16 px in from the column's
+// edges; all from the font, so a larger font scales them, and a step larger
+// over the whole screen. During a preview, Back to Results and Apply sit in
+// a footer at the column's bottom, Apply the style's default button.
 void AlbumArtSmokeTest::albumArtDetailsAreOnTheTypeScale() {
     QFETCH(qreal, pointSize);
     QFETCH(bool, fullscreen);
@@ -1530,8 +1528,8 @@ void AlbumArtSmokeTest::albumArtInfoButtonIsTintedOnlyWhileChecked() {
     QVERIFY(tint->isVisible());
     QObject *plot = qvariant_cast<QObject *>(palette->property("mediaPlot"));
     QVERIFY(plot != nullptr);
-    // The mode switch's chosen segment (#373 H14 F4): the plot's text at
-    // 18 %, inside a 1 px edge of segmentEdge, rather than an accent tint.
+    // The mode switch's chosen segment: the plot's text at 18 %, inside a
+    // 1 px edge of segmentEdge, rather than an accent tint.
     QColor neutral = QColor::fromRgba(colorOf(plot, "plotText"));
     neutral.setAlphaF(0.18);
     QVERIFY(std::abs(qAlpha(colorOf(tint, "color")) - neutral.alpha()) <= 1);
@@ -1590,8 +1588,8 @@ void AlbumArtSmokeTest::albumArtInfoButtonIsTintedOnlyWhileChecked() {
 // popup fades its children one by one, not as one layer: with a second
 // floor of its own, at half opacity the window showed through only a
 // quarter, so the window went dark before the art came in, a blink of
-// 33 ms as it opened (#373 H37). At half the popup's opacity, the window
-// beside the art shows at half.
+// 33 ms as it opened. At half the popup's opacity, the window beside the art
+// shows at half.
 void AlbumArtSmokeTest::windowedViewerFadesInOverOneFloor() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -1640,7 +1638,7 @@ void AlbumArtSmokeTest::windowedViewerFadesInOverOneFloor() {
 // The windowed viewer's corner plate: zoomed, the readout and Reset are set
 // off from the viewer's buttons by a 1 px divider in the plot plate's edge
 // colour, with the buttons' 4 px either side and 6 px of plate above and
-// below it, as on the visualization viewer's (#373 H37). Not zoomed, none.
+// below it, as on the visualization viewer's. Not zoomed, none.
 void AlbumArtSmokeTest::windowedViewerCornerSetsTheZoomOffWithADivider() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -1697,10 +1695,10 @@ void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails_data() {
 
 void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails() {
     // While the details show, the art fits what they leave of the view and
-    // is centred there, left of their seam (#373 H8: it kept its place
-    // under them, centred in the whole view), windowed and over the whole
-    // screen; it keeps its zoom. The pointer on the details works them
-    // rather than the art beneath.
+    // is centred there, left of their seam (it kept its place under them,
+    // centred in the whole view), windowed and over the whole screen; it
+    // keeps its zoom. The pointer on the details works them rather than the
+    // art beneath.
     QFETCH(int, viewerMode);
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -1785,8 +1783,8 @@ void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails() {
     QCOMPARE(columnRect.bottom(), viewRect.bottom());
     QCOMPARE(seamRect.right(), columnRect.left());
     // 280 px with its seam, 320 px in a window 1280 px wide or more, a
-    // quarter of one between (#373 H37), and 336 px over the whole screen,
-    // for its text 1.2 times larger (#373 H38).
+    // quarter of one between, and 336 px over the whole screen, for its
+    // text 1.2 times larger.
     QCOMPARE(columnRect.width(), std::round(280 * infoColumnWidthScale(viewerMode == 1, viewRect.width())) - 1);
     if (viewerMode == 1) {
         QCOMPARE(columnRect.width(), 335.0);
@@ -1800,8 +1798,7 @@ void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails() {
                  qPrintable(describe(view()) + QStringLiteral(" / %1").arg(left.center().x())));
     QVERIFY2(qAbs(paintedArt().center().y() - left.center().y()) < 0.5, qPrintable(describe(view())));
     // The wide art fits the space's width less a 16 px gutter on each side
-    // (#373 H41: it met the seam), and runs under neither the seam nor the
-    // details.
+    // (it met the seam), and runs under neither the seam nor the details.
     QVERIFY2(qAbs(paintedArt().width() - (left.width() - 32)) < 0.5, qPrintable(describe(view())));
     QVERIFY(paintedArt().left() >= left.left() + 16 - 0.5);
     QVERIFY(paintedArt().right() <= seamRect.left() - 16 + 0.5);
@@ -1833,8 +1830,8 @@ void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails() {
     QTest::mouseMove(shownIn, (artPoint + QPointF(80, 60)).toPoint());
     QTest::mouseRelease(shownIn, Qt::LeftButton, Qt::NoModifier, (artPoint + QPointF(80, 60)).toPoint());
     QVERIFY(surface->property("panX").toDouble() != 0.0 || surface->property("panY").toDouble() != 0.0);
-    // The details at rest before the view is taken: under load the
-    // reveal's last sub-pixel step (#373 H39 AF1) could land after it.
+    // The details at rest before the view is taken: under load the reveal's
+    // last sub-pixel step could land after it.
     QTRY_COMPARE(surface->property("infoReveal").toDouble(), 1.0);
     const View before = view();
 
@@ -2051,10 +2048,9 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
         QVERIFY2(columnRect.contains(rectOf(item)), at.constData());
     }
     // The label first, over the file's name; the buttons in a footer at
-    // the column's bottom (#373 H10: they followed the details, crammed
-    // under them), under a seam the column's width, the padding clear of
-    // the column's edges, Back to Results then Apply. The details end above
-    // the footer.
+    // the column's bottom (they followed the details, crammed under them),
+    // under a seam the column's width, the padding clear of the column's
+    // edges, Back to Results then Apply. The details end above the footer.
     QQuickItem *title = visibleItemNamed(host, QStringLiteral("albumArtInfoTitle"));
     QVERIFY2(title != nullptr, at.constData());
     QVERIFY2(rectOf(label).bottom() <= rectOf(title).top(), at.constData());
@@ -2096,17 +2092,17 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     QCOMPARE(columnRect.right() - rectOf(apply).right(), padding);
     // The file's name a step larger than the body size: 12 pt to its 10;
     // over the whole screen, the details' 16 px, as the title strip's
-    // track title over it (#373 H40: at 18 px it outranked it).
+    // track title over it (at 18 px it outranked the title).
     QQuickItem *value = visibleItemsNamed(column, QStringLiteral("albumArtInfoValue")).value(0);
     QVERIFY2(value != nullptr, at.constData());
     const qreal bodyPointSize = value->property("font").value<QFont>().pointSizeF() / infoScale;
     QVERIFY2(qAbs(title->property("font").value<QFont>().pointSizeF() - bodyPointSize * 1.2)
                  < 0.001,
              at.constData());
-    // Apply is the style's default button, as a dialog's (#373 H10: it was
-    // a solid accent fill, unlike any other default button); Back to
-    // Results is a plain one. Both are the style's own, drawn in Breeze's
-    // complementary colours, dark in either theme as the details are.
+    // Apply is the style's default button, as a dialog's (it was a solid
+    // accent fill, unlike any other default button); Back to Results is a
+    // plain one. Both are the style's own, drawn in Breeze's complementary
+    // colours, dark in either theme as the details are.
     const auto evaluate = [](QQuickItem *button, const QString &expression) {
         return QQmlExpression(qmlContext(button), button, expression).evaluate();
     };
@@ -2145,8 +2141,8 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     }
 }
 
-// The Replace Album Art question: a window of its own (#373 H5), above the
-// window that asks it.
+// The Replace Album Art question: a window of its own, above the window
+// that asks it.
 QQuickWindow *replaceQuestion(QQuickWindow *window) {
     return qobject_cast<QQuickWindow *>(window->findChild<QObject *>(QStringLiteral("replaceCoverConfirmDialog")));
 }
@@ -2172,8 +2168,8 @@ void applyItunesCandidateFromPreview(QQuickWindow *window, QObject *dialog, QObj
     QTRY_VERIFY2(replaceQuestionButton(window, window, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                  at.constData());
     // Asked from the preview, the question has its heading: it names the
-    // album, above the details, never a blank line (#373 H37: opened alone,
-    // with no message, it showed one).
+    // album, above the details, never a blank line (opened alone, with no
+    // message, it showed one).
     {
         QQuickItem *message = visibleItemNamed(replaceQuestion(window), QStringLiteral("confirmDialogMessage"));
         QQuickItem *details = visibleItemNamed(replaceQuestion(window), QStringLiteral("confirmDialogDetails"));
@@ -2182,7 +2178,7 @@ void applyItunesCandidateFromPreview(QQuickWindow *window, QObject *dialog, QObj
         QVERIFY2(text.startsWith(QStringLiteral("Replace the ")) && text.contains(QStringLiteral("album art")) && message->height() > 0,
                  qPrintable(text));
         QVERIFY(sceneRectOf(message).bottom() <= sceneRectOf(details).top());
-        // The question leads, semibold, the details regular (#373 H40).
+        // The question leads, semibold, the details regular.
         QCOMPARE(message->property("font").value<QFont>().weight(), QFont::DemiBold);
         QCOMPARE(details->property("font").value<QFont>().weight(), QFont::Normal);
     }
@@ -2413,8 +2409,8 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
         for (QQuickItem *rect : rectanglesIn(row)) {
             QCOMPARE(rect->objectName(), QStringLiteral("itunesArtworkResultHairline"));
             QCOMPARE(rect->height(), 1.0);
-            // From the text's left edge to the row's end (#373 H11: from
-            // the frame's edge, under the thumbnail).
+            // From the text's left edge to the row's end (not from the
+            // frame's edge, under the thumbnail).
             QQuickItem *rowTitle = itemNamed(row, QStringLiteral("itunesArtworkResultTitle"));
             QQuickItem *rowThumbnail = itemNamed(row, QStringLiteral("itunesArtworkResultThumbnail"));
             QVERIFY(rowTitle != nullptr && rowThumbnail != nullptr);
@@ -2430,7 +2426,7 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     // Each row: a 64 px thumbnail, the title, and exactly one line of
     // details, rows as tall as the thumbnail with 8 px above and below. The
     // size as the art viewer gives it, "1,200 × 1,200 px", with the locale's
-    // thousands separator (#373 H12: "1200 × 1200").
+    // thousands separator (not "1200 × 1200").
     const QString itunesSize = QLocale().toString(1200.0, 'f', 0);
     const QStringList expectedDetails{
         QStringLiteral("The Quiet Meridian · %1 × %1 px · JPEG · 412 KiB").arg(itunesSize),
@@ -2513,12 +2509,11 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
 void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWithNothingFound() {
     // While it searches, when it found nothing, and when the search failed,
     // a placeholder message where the results would be, a little above
-    // their middle (#373 H38), with no frame or well around it (#373 H8),
-    // and a running busy indicator above it while searching, under the
-    // current art, which stays the dialog's first line. A failed search
-    // says so in a semibold heading, with the system's words under it, so
-    // it does not read as finding nothing (#373 H38), and a warning glyph
-    // in the spinner's place (#373 H40).
+    // their middle, with no frame or well around it, and a running busy
+    // indicator above it while searching, under the current art, which stays
+    // the dialog's first line. A failed search says so in a semibold
+    // heading, with the system's words under it, so it does not read as
+    // finding nothing, and a warning glyph in the spinner's place.
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
@@ -2578,10 +2573,10 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
                          && rect->property("border").value<QObject *>()->property("width").toReal() == 0.0,
                      qPrintable(rect->objectName()));
         }
-        // A quiet placeholder, as the queue's empty state (#373 H7, H8): a
-        // centred line in the base font, regular, with no glyph; searching
-        // and the system's words in the secondary colour, what the search
-        // found in the text's (#373 H38).
+        // A quiet placeholder, as the queue's empty state: a centred line
+        // in the base font, regular, with no glyph; searching and the
+        // system's words in the secondary colour, what the search found in
+        // the text's.
         QCOMPARE(message->property("color").value<QColor>().rgba(),
                  palette->property(searching || failed ? "textSecondary" : "text").value<QColor>().rgba());
         QCOMPARE(heading->isVisible(), failed);
@@ -2596,13 +2591,13 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         }
         // A failed search has a warning glyph where the spinner is while
         // searching: 32 px, a mask in the secondary colour, above the
-        // heading (#373 H40); nothing found has none.
+        // heading; nothing found has none.
         QQuickItem *warning = itemNamed(content, QStringLiteral("itunesArtworkFailureIcon"));
         QVERIFY2(warning != nullptr, at.constData());
         QCOMPARE(warning->isVisible(), failed);
         if (failed) {
             // The app's own warning mark, whose "!" survives the mask
-            // (#373 H41: dialog-warning drew a plain triangle).
+            // (dialog-warning drew a plain triangle).
             QVERIFY2(warning->property("source").toString().endsWith(QStringLiteral("assets/status-warning.svg")),
                      qPrintable(warning->property("source").toString()));
             QVERIFY(warning->property("isMask").toBool());
@@ -2659,8 +2654,8 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     };
     // The current art's Preview: in the results' column while it searches,
     // so nothing moves as the rows arrive; with no rows to line up with, on
-    // the content's right inset, as Close under it (#373 H43: it hung on
-    // the absent column, 117 px short of Close).
+    // the content's right inset, as Close under it (it hung on the absent
+    // column, 117 px short of Close).
     QQuickItem *currentPreview = itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentPreviewButton"));
     QQuickItem *close = itemNamed(qobject_cast<QQuickWindow *>(dialog)->contentItem(),
                                   QStringLiteral("itunesArtworkCloseButton"));
@@ -2758,8 +2753,8 @@ int fontPixelSize(QQuickItem *item) {
 } // namespace
 
 // The line over the results that says how many there are is one line in
-// the dialog at 24 pt, as wide as it opens on a 1600 px screen (#373 H45:
-// "it." wrapped alone onto a second line).
+// the dialog at 24 pt, as wide as it opens on a 1600 px screen ("it."
+// wrapped alone onto a second line).
 void AlbumArtSmokeTest::itunesArtworkCountLineHoldsAtLargeFonts() {
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
@@ -2791,13 +2786,12 @@ void AlbumArtSmokeTest::itunesArtworkActionsFollowTheTextFont() {
     // are drawn in the font of the titles beside them. They were
     // ToolButtons, whose caption the style draws in the application's
     // QToolButton font, the toolbar font that KDE sets apart, whatever the
-    // control's own font: at 24 pt they stayed at 10 pt beside 24 pt titles
-    // (#373 H9). A 10 pt QToolButton font stands in for KDE's toolbar font
-    // here. As drawn captions cannot be read back, each action must be as
-    // wide as its icon and caption in the labels' font need, which the
-    // style measures in the font it draws with. Their column is built from
-    // the buttons' own sizes: 8 px between them, and the text at least
-    // 16 px clear of them.
+    // control's own font: at 24 pt they stayed at 10 pt beside 24 pt titles.
+    // A 10 pt QToolButton font stands in for KDE's toolbar font here. As
+    // drawn captions cannot be read back, each action must be as wide as its
+    // icon and caption in the labels' font need, which the style measures in
+    // the font it draws with. Their column is built from the buttons' own
+    // sizes: 8 px between them, and the text at least 16 px clear of them.
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
     QFont large = applicationFont;
@@ -2869,8 +2863,8 @@ void AlbumArtSmokeTest::itunesArtworkActionsFollowTheTextFont() {
 
 void AlbumArtSmokeTest::itunesArtworkListIsAsTallAsItsRows() {
     // The results' frame ends at the last row, with no empty framed band
-    // under a few results (#373 H9: about 110 px), and the dialog opens
-    // tall enough for the current art and five results whole; more scroll.
+    // under a few results (it left about 110 px), and the dialog opens tall
+    // enough for the current art and five results whole; more scroll.
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
     QFont standard = applicationFont;
@@ -2924,7 +2918,7 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont_data() {
 // Kirigami's size for labels, 16 px at 10 pt; and the dialog opens
 // 920 px wide at 10 pt and no wider than 1280 px with a larger font.
 // At 24 pt, 64 px thumbnails stood under 92 px of text, 16 px glyphs
-// beside 32 px captions, in a 1964 px window (#373 H42).
+// beside 32 px captions, in a 1964 px window.
 void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -3017,7 +3011,7 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
 
     // A result whose full-size image loads says so beside the
     // artist, whole: at 24 pt on two lines, inside the row, and on one
-    // with the default font (#373 H45: elided at 24 pt).
+    // with the default font (it was elided at 24 pt).
     QObject *bridge = qvariant_cast<QObject *>(opened.root->property("bridge"));
     QVERIFY(bridge != nullptr);
     QVariantList loading = itunesArtworkFixture(dir, 2);
@@ -3056,7 +3050,7 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
 
     // The search's glyph, the spinner or a failure's warning mark, is
     // 32 px with the default font and scaled with a larger one, as the
-    // text under it (#373 H45: 32 px over 24 pt text).
+    // text under it (it was 32 px over 24 pt text).
     const qreal fontScale = qvariant_cast<QObject *>(opened.dialog->property("uiPalette"))
         ->property("fontScale").toReal();
     const qreal stateGlyph = std::max(32.0, qreal(std::round(32 * fontScale)));
@@ -4251,11 +4245,11 @@ void AlbumArtSmokeTest::albumArtViewerIsBlackAroundTheArtInALightTheme_data() {
 }
 
 void AlbumArtSmokeTest::albumArtViewerIsBlackAroundTheArtInALightTheme() {
-    // A media surface is dark in both themes (#373 H7, P10): in a light
-    // theme, a dark cover sat between white bars. The art is on black, in
-    // the main window and over the whole screen, and the viewer's controls,
-    // the corner plate or the title strip, and the details are the
-    // spectrogram's: the same set in both viewers.
+    // A media surface is dark in both themes: in a light theme, a dark
+    // cover sat between white bars. The art is on black, in the main window
+    // and over the whole screen, and the viewer's controls, the corner
+    // plate or the title strip, and the details are the spectrogram's: the
+    // same set in both viewers.
     QFETCH(int, viewerMode);
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -4296,7 +4290,7 @@ void AlbumArtSmokeTest::albumArtViewerIsBlackAroundTheArtInALightTheme() {
         QCOMPARE(shownIn->color().rgba(), qRgb(0, 0, 0));
     } else {
         // The black is the art surface's floor, the popup's only one: it
-        // draws no background of its own (#373 H37).
+        // draws no background of its own.
         QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
         QVERIFY(popup != nullptr);
         auto *background = qvariant_cast<QQuickItem *>(popup->property("background"));
@@ -4460,8 +4454,8 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
 
     // At the body size in the window; over the whole screen, 1.2 times it,
     // 16 px at the default font, the file's name too, no larger than the
-    // title strip's track title over it (#373 H40: it was 18 px): from
-    // the font, so a larger one scales them as well.
+    // title strip's track title over it (at 18 px it outranked the title):
+    // from the font, so a larger one scales them as well.
     const qreal body = palette->property("basePointSize").toReal();
     QQuickItem *value = visibleItemsNamed(column, QStringLiteral("albumArtInfoValue")).value(0);
     QVERIFY(value != nullptr);

@@ -154,10 +154,9 @@ Popup {
     // Above the viewer popups.
     z: 100
     // 460 px with the default font, as much wider as a larger font makes
-    // the text (#373 H45: at 24 pt it kept 460 px, and its heading wrapped
-    // after four words), or as wide as the header needs, which puts its
-    // title, how many are new and Clear All on one line (#373 H10); within
-    // the window.
+    // the text (at 24 pt it kept 460 px, and its heading wrapped after four
+    // words), or as wide as the header needs, which puts its title, how
+    // many are new and Clear All on one line; within the window.
     width: Math.min(Math.max(root.uiPalette.scaledSize(460), Math.ceil(errorHistoryHeader.implicitWidth
             + errorHistoryHeader.Layout.leftMargin + errorHistoryHeader.Layout.rightMargin)),
         root.hostWidth - 2 * root.edgeMargin)
@@ -183,7 +182,7 @@ Popup {
     // Opened from the keyboard, the first action has it, with its focus
     // ring, as Tab would give it. Opened with the pointer, no control
     // shows a ring, so none has the keyboard, and Enter presses no button
-    // the user cannot see marked (#373 H38: a popup's focus reason drew no
+    // the user cannot see marked (a popup's focus reason drew no
     // ring on the action Enter pressed); the content does, whose keys
     // scroll the list, and Tab goes on to the controls. The control is
     // the list's focus within it all the same, which Tab into the list
@@ -282,7 +281,7 @@ Popup {
             Layout.fillWidth: true
             // 32 px with the default font, and at a larger one as tall as
             // the title with 4 px above and below, and Clear All: at 24 pt,
-            // the title ran into the first issue (#373 H10).
+            // the title ran into the first issue.
             Layout.preferredHeight: Math.max(Kirigami.Units.gridUnit + 2 * Kirigami.Units.smallSpacing + 6,
                 Math.ceil(errorHistoryTitle.implicitHeight) + 2 * Kirigami.Units.smallSpacing,
                 Math.ceil(errorHistoryClearButton.implicitHeight))
@@ -315,7 +314,7 @@ Popup {
                 objectName: "errorHistoryClearButton"
                 text: I18n.i18nc("@action:button", "Clear All")
                 // A glyph, as every dialog action has: without one it read
-                // as a label of the header (#373 H46).
+                // as a label of the header.
                 icon.name: "edit-clear-history"
                 flat: true
                 enabled: !closingState.closing
@@ -394,8 +393,7 @@ Popup {
                             // large as a line of text holds, and centred on the
                             // category's lowercase, the middle of its x-height,
                             // 2 px under the line's top with the default font
-                            // (#373 H45: it stayed 16 px at the top of a 24 pt
-                            // line).
+                            // (it stayed 16 px at the top of a 24 pt line).
                             Kirigami.Icon {
                                 objectName: "errorHistoryGlyph"
                                 Layout.alignment: Qt.AlignTop
@@ -504,7 +502,7 @@ Popup {
                                     // The tint under the text while hovered or pressed,
                                     // the press a clear step past the hover, 1.65:1 on
                                     // the popup's window colour, as the transport's
-                                    // (#373 H45: at 10% it read as the hover); the
+                                    // (at 10% it read as the hover); the
                                     // link is darker where the tint takes it under
                                     // 4.5:1 on the window colour.
                                     readonly property color tint: actionButton.down
@@ -562,8 +560,8 @@ Popup {
         }
 
         // On the header's x, with the glyph of Help's Diagnostics…, as Clear
-        // All has its own (#373 H46: they were the only dialog actions with
-        // none). Not ⓘ, which marks a notice in the list (#373 H40).
+        // All has its own (they were the only dialog actions with none).
+        // Not ⓘ, which marks a notice in the list.
         Components.TextToolButton {
             id: diagnosticsButton
             objectName: "errorHistoryDiagnosticsButton"

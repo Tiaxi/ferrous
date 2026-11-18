@@ -78,7 +78,7 @@ Components.DialogWindow {
     // keeps its name, a sentence of the summary, the message that nothing
     // is renamed, or the buttons; no narrower than its minimum, and no
     // wider than 42 grid units, which grow with a larger font, within the
-    // screen, where a longer name elides in its middle (#373 H45: a fixed
+    // screen, where a longer name elides in its middle (a fixed
     // 756 px held 390 px of lines, and 1814 px at 24 pt, wider than Edit
     // Tags under it). Only the first rows are measured: more scroll, and a
     // list that long opens at its limit anyway.
@@ -146,7 +146,7 @@ Components.DialogWindow {
     // The old names' column: as wide as the widest, where the window holds
     // it; where it does not, it gives way to the new names, which are what
     // is checked before renaming, down to 40 % of the list, and then the
-    // new names elide too (#373 H46: the arrows stood at seven places, and
+    // new names elide too (the arrows stood at seven places, and
     // the new names had no column).
     readonly property real oldNameColumnWidth: {
         const line = previewList.width - root.listGutter
@@ -164,7 +164,7 @@ Components.DialogWindow {
     // renamed, up to a limit, each time it opens. They are measured at the
     // width the window opens at, by the sizers below: the content's layout
     // gets that width, and works out its own height, only once the window
-    // shows (#373 H40: its height, read as the window opened, was still
+    // shows (its height, read as the window opened, was still
     // that of what it last showed, which left 60 px of nothing under four
     // files, and cut the list short at 24 pt).
     defaultHeight: Math.min(root.maximumHeight,
@@ -308,7 +308,7 @@ Components.DialogWindow {
 
         spacing: root.contentSpacing
 
-        // The lead, semibold, as every dialog's first sentence is (#373 H40).
+        // The lead, semibold, as every dialog's first sentence is.
         Label {
             id: summary
             objectName: "renamePreviewSummary"

@@ -80,7 +80,7 @@ Item {
 
     // The viewer's controls hide while the pointer rests, as the
     // visualization viewer's do: over the whole screen the title strip, in
-    // the main window the corner plate (#373 H8: it stayed while the
+    // the main window the corner plate (it stayed while the
     // visualization viewer's hid). They stay while one of them has keyboard
     // focus.
     Components.FullscreenControlsAutoHide {
@@ -272,8 +272,8 @@ Item {
         // floor, in both themes. A second floor here doubled it as the popup
         // faded: its children fade one by one, not as one layer, so two
         // floors at half opacity left a quarter of the window, and as the
-        // viewer opened the window went dark before the art came in (#373
-        // H37: a blink of 33 ms).
+        // viewer opened the window went dark before the art came in, a
+        // blink of 33 ms.
         background: Item {
             objectName: "albumArtPopupBackground"
         }

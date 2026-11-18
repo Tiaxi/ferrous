@@ -37,10 +37,10 @@ namespace {
 
 constexpr QRgb kTile = 0x3a1490;
 // The tile's rim, lighter than the tile, so that the tile holds its edge on a
-// dark panel (#373 hill climb, H9), the same rim at every size (H11), and a
-// quiet mid-violet since H18: H13's #6a4ad0 was the icon's loudest edge, and
-// a near-tile #24096b vanished on Breeze Dark. Within a trace's distance of
-// the tile: no trace is that close to it.
+// dark panel, the same rim at every size, and a quiet mid-violet: a lighter
+// #6a4ad0 (kLoudRim) is the icon's loudest edge, and a near-tile #24096b
+// vanishes on Breeze Dark. Within a trace's distance of the tile: no trace is
+// that close to it.
 constexpr QRgb kRim = 0x5a3fb0;
 constexpr QRgb kLoudRim = 0x6a4ad0;
 // Breeze's panels: Dark's window and view, Light's window and view.
@@ -50,27 +50,27 @@ constexpr QRgb kBreezeLightWindow = 0xeff0f1;
 constexpr QRgb kBreezeLightView = 0xffffff;
 // The chirp: the fundamental in amber, its 2nd harmonic in rose and its 3rd
 // in magenta, lower on the colour map and each 3:1 or more on the tile, a
-// step darker each (H20: the rose was as dark as the magenta). At 16 and
-// 22 px the fundamental and the 3rd harmonic only. One magenta at every size
-// (#373 hill climb, H23: H22's deeper one at 32 to 48 px made the top trace
-// the dimmest there, and its colour changed with the size); the rose a step
-// lighter instead, its hue kept, so that the three hold apart in greyscale.
+// step darker each, so that the rose is not as dark as the magenta. At 16
+// and 22 px the fundamental and the 3rd harmonic only. One magenta at every
+// size (a deeper one at 32 to 48 px makes the top trace the dimmest there,
+// and its colour changes with the size); the rose a step lighter instead, its
+// hue kept, so that the three hold apart in greyscale.
 constexpr QRgb kGlide = 0xf2b035;
 constexpr QRgb kHarmonic = 0xff7a92;
 constexpr QRgb kThirdHarmonic = 0xe055b4;
 // The magenta of the drawings on the pixel grid, 16 to 24 px at 1x, a step
 // lighter: their 45 degree climbs cover a row and two half rows a column, so
-// that they render as bright as the magenta of the other drawings (#373 hill
-// climb, H27: in kThirdHarmonic they rendered some 2.9:1 on the tile, the
-// 2x drawings' climbs 3.5:1; pixelGridMagentaRendersAsBrightAsAt2x).
+// that they render as bright as the magenta of the other drawings (in
+// kThirdHarmonic they render some 2.9:1 on the tile, the 2x drawings' climbs
+// 3.5:1; pixelGridMagentaRendersAsBrightAsAt2x).
 constexpr QRgb kPixelGridThirdHarmonic = 0xea6cc2;
-// H22's deeper magenta at 32 to 48 px, and its rose: no file has them now.
+// A deeper magenta for 32 to 48 px, and a darker rose: no file has them.
 constexpr QRgb kDeepThirdHarmonic = 0xd442ab;
 constexpr QRgb kDarkerHarmonic = 0xf87089;
 // The faint 4th harmonic of the 128 and 256 px drawings, a violet a step
-// darker again (#373 hill climb, H21); H21's, darker still, whose cut on the
-// tile's top inner edge fused with the rim (H24); and H24's, 2.9:1 on the
-// tile, with little reserve over the tile (H25).
+// darker again; a darker one, whose cut on the tile's top inner edge fuses
+// with the rim; and one between the two, 2.9:1 on the tile, with little
+// reserve over the tile.
 constexpr QRgb kFourthHarmonic = 0xab55df;
 constexpr QRgb kDarkerFourthHarmonic = 0x9a4bd0;
 constexpr QRgb kH24FourthHarmonic = 0xa456d6;
@@ -129,16 +129,15 @@ QRect tileOf(const QImage &image) {
 }
 
 // The sizes drawn as a smaller size's drawing in a larger canvas, as Breeze
-// draws its 24 px icons: 24 px the 22 px drawing moved a pixel in (#373 hill
-// climb, H22). (36 px was the 32 px one moved two until H24, a tile 72 % of
-// the slot; it has its own drawing now, taskManagerSize.) The size whose
-// drawing a size has: its own, or that one.
+// draws its 24 px icons: 24 px the 22 px drawing moved a pixel in. (36 px has
+// its own drawing, taskManagerSize: the 32 px one moved two in leaves a tile
+// 72 % of the slot.) The size whose drawing a size has: its own, or that one.
 int drawnAs(int size) {
     return size == 24 ? 22 : size;
 }
 
 // The task manager's sizes, 32 and 36 px: one drawing on each grid, with
-// the same strokes, taper and starts' spacing (#373 hill climb, H24).
+// the same strokes, taper and starts' spacing.
 bool taskManagerSize(int size) {
     return size == 32 || size == 36;
 }
@@ -146,8 +145,8 @@ bool taskManagerSize(int size) {
 // Breeze's app-icon margin around the tile at each size: 1 px at 16, 2 px at
 // 22 and 32, 4 px at 48 and 6 px at 64, as Breeze's own app icons sit, and in
 // proportion above; 3 px at 24, the 22 px drawing's 2 and the pixel it moves
-// in, and 3 at 36, a 30 px rim (#373 hill climb, H24: H22's 32 px drawing
-// moved two pixels in left a 28 px rim).
+// in, and 3 at 36, a 30 px rim (the 32 px drawing moved two pixels in leaves
+// a 28 px rim).
 int breezeMargin(int size) {
     switch (size) {
     case 16:
@@ -167,18 +166,18 @@ int breezeMargin(int size) {
 
 // The sizes drawn on the pixel grid, 16, 22 and 24 px: each trace a closed shape
 // with every vertex on a whole pixel, so that its flats are crisp and only
-// its climbs, a row a column at most, are antialiased (#373 hill climb,
-// H18). From 32 px, where the third trace comes in, the traces are smooth
-// curves (H20: H19's whole-pixel stairs at 32 and 48 px read as aliased
-// beside Breeze's icons, and changed idiom between 48 and 64 px).
+// its climbs, a row a column at most, are antialiased. From 32 px, where the
+// third trace comes in, the traces are smooth curves (whole-pixel stairs at
+// 32 and 48 px read as aliased beside Breeze's icons, and change idiom
+// between 48 and 64 px).
 bool onPixelGrid(int size) {
     return size <= 24;
 }
 
 // The traces' colours, lowest first: the fundamental and two harmonics from
 // 32 px up, the fundamental and the magenta 3rd harmonic at 16 and 22 px,
-// where a middle trace fused with its neighbours (#373 hill climb, H10, H18),
-// its magenta there the pixel grid's (kPixelGridThirdHarmonic).
+// where a middle trace fuses with its neighbours, its magenta there the pixel
+// grid's (kPixelGridThirdHarmonic).
 std::vector<QRgb> traceColours(int size) {
     if (size >= 32) {
         return {kGlide, kHarmonic, kThirdHarmonic};
@@ -187,9 +186,9 @@ std::vector<QRgb> traceColours(int size) {
 }
 
 // The sizes with a detail tier: at 128 and 256 px a faint 4th harmonic over
-// the three traces (#373 hill climb, H21: the 64 px drawing enlarged left the
-// tile's upper left half empty beside Breeze's large icons). 64 px and the
-// scalable drawing, which serves 40 to 60 device px, keep three.
+// the three traces (the 64 px drawing enlarged leaves the tile's upper left
+// half empty beside Breeze's large icons). 64 px and the scalable drawing,
+// which serves 40 to 60 device px, keep three.
 bool hasDetailTier(int size) {
     return size == 128 || size == 256;
 }
@@ -215,11 +214,11 @@ QStringList traceIds(int size) {
 }
 
 // How tall each trace is on the pixel grid, lowest first: two 2 px strokes
-// at 16 and 22 px (H18: a 1 px harmonic broke into dots), the fundamental
-// 3 px at 22 px, so that the amber outweighs the magenta harmonic that rises
-// across more of the tile (#373 hill climb, H21), and so at 24 px, the 22 px
-// drawing, and at 16 px from its 4th column (H23: at 2 px the amber read
-// lighter than the magenta over it; hintedSizesAreClosedShapesOnThePixelGrid).
+// at 16 and 22 px (a 1 px harmonic breaks into dots), the fundamental 3 px at
+// 22 px, so that the amber outweighs the magenta harmonic that rises across
+// more of the tile, and so at 24 px, the 22 px drawing, and at 16 px from its
+// 4th column (at 2 px the amber reads lighter than the magenta over it;
+// hintedSizesAreClosedShapesOnThePixelGrid).
 std::vector<int> strokeHeights() {
     return {3, 2};
 }
@@ -232,7 +231,7 @@ int strokeHeightAt(int size, size_t trace, int offset) {
 }
 
 // The width the 64-unit drawing's harmonics taper from, in its units: 3.8 at
-// 64 px and 3.4 from 128 px (H19's 3.0 read thin beside 128 px icons), the
+// 64 px and 3.4 from 128 px (3.0 reads thin beside 128 px icons), the
 // rose 0.8 of it and the magenta 0.65, as a harmonic's energy falls with its
 // number. The fundamental is heavier (fundamentalWidth).
 double taperReference(int size) {
@@ -241,9 +240,9 @@ double taperReference(int size) {
 
 // The fundamental's width in the 64-unit drawing's units: the focal stroke,
 // clearly heavier than the harmonics over it, 5 units at 64 px and 4.5 from
-// 128 (#373 hill climb, H25: at 3.8 and 3.4, 1 : 0.8 : 0.65 read as three
-// near-equal stripes). Its added weight is on its underside: its top edge is
-// where the series puts it (fundamentalUnderside).
+// 128 (at 3.8 and 3.4, 1 : 0.8 : 0.65 reads as three near-equal stripes).
+// Its added weight is on its underside: its top edge is where the series puts
+// it (fundamentalUnderside).
 double fundamentalWidth(int size) {
     return size == 64 ? 5.0 : 4.5;
 }
@@ -256,11 +255,10 @@ double fundamentalUnderside(int size) {
 
 // The smooth strokes' widths across, in device pixels, lowest first: the
 // fundamental the heaviest, the harmonics tapering above it, and never under
-// 2 px (H20). At 32 and 36 px 4 / 2.5 / 2.25 (#373 hill climb, H25: H24's
-// 3 / 2.5 / 2 read as three near-equal stripes in the task manager), the rose
-// and the magenta eased to 2 px into their ends (easedWidth); at 48 px
-// 4 / 2.5 / 2.25 (H25: the fundamental 3 px read as one of three equal
-// stripes), the top trace 2.25 px
+// 2 px. At 32 and 36 px 4 / 2.5 / 2.25 (3 / 2.5 / 2 reads as three
+// near-equal stripes in the task manager), the rose and the magenta eased to
+// 2 px into their ends (easedWidth); at 48 px 4 / 2.5 / 2.25 (a 3 px
+// fundamental reads as one of three equal stripes), the top trace 2.25 px
 // over most of its run, eased to 2 px into its end (topTraceWidths); from
 // 64 px the fundamental's fundamentalWidth and the harmonics 0.8 and 0.65 of
 // taperReference.
@@ -279,17 +277,15 @@ std::vector<double> strokeWidths(int size) {
 }
 
 // The 4th harmonic's width across at 128 and 256 px, in device pixels: half
-// the 3.4 unit stroke the harmonics taper from (H21), faint beside the
-// fundamental.
+// the 3.4 unit stroke the harmonics taper from, faint beside the fundamental.
 double fourthWidth(int size) {
     return taperReference(size) / 2 * size / 64.0;
 }
 
-// The top trace's width across at 48 px, at its start and at its end (#373
-// hill climb, H23: a 2 px stroke read as the thinnest and dimmest trace, and
-// beaded over its steep start): 2.25 px to x 38, eased to 2 over its last
-// 5 px only, into its end's whole rows (H24: eased by x 20, it thinned to
-// 2 px over most of its run).
+// The top trace's width across at 48 px, at its start and at its end (a 2 px
+// stroke reads as the thinnest and dimmest trace, and beads over its steep
+// start): 2.25 px to x 38, eased to 2 over its last 5 px only, into its end's
+// whole rows (eased from x 20, it thins to 2 px over most of its run).
 std::pair<double, double> topTraceWidths() {
     return {2.25, 2.0};
 }
@@ -300,10 +296,9 @@ constexpr int kTopTraceHeldTo = 38;
 // A trace's width across as drawn at `x`, lowest first, `edge` the tile's
 // inner edge: its width (strokeWidths), but at 32 and 36 px the rose's
 // 2.5 px and the magenta's 2.25 eased to 2 px over their last 4 px, so that
-// they run out on two whole rows each (#373 hill climb, H24, H25), and at
-// 32 px the fundamental's 4 px eased to 3 over its last 4 px, its top edge
-// a row lower at its end, so that it opens apart from the rose, whose exit
-// is a row lower too (H26).
+// they run out on two whole rows each, and at 32 px the fundamental's 4 px
+// eased to 3 over its last 4 px, its top edge a row lower at its end, so that
+// it opens apart from the rose, whose exit is a row lower too.
 double easedWidth(int size, size_t trace, double x, double edge) {
     const double width = strokeWidths(size)[trace];
     if (!taskManagerSize(size) || (trace == 0 && size != 32)) {
@@ -326,11 +321,10 @@ int capColumns(int size) {
 }
 
 // The tile's rim, lighter than itself, so that it holds the tile's edge on
-// Breeze Dark (#373 hill climb, H9, H11: at H10 only 16 to 32 px had it): a
-// hairline, 1 device px at every size (H18: H13's 32nd of the icon, 4 and 8
-// px at 128 and 256, framed the large sizes in a thick band; H21: H18's 2 px
-// at 128 and 256 read as a halo on Breeze Light). The scalable drawing's is
-// 1.5 units of its 64 (scalableDrawingKeepsADevicePixelRim).
+// Breeze Dark: a hairline, 1 device px at every size (a 32nd of the icon, 4
+// and 8 px at 128 and 256, frames the large sizes in a thick band, and 2 px
+// there reads as a halo on Breeze Light). The scalable drawing's is 1.5 units
+// of its 64 (scalableDrawingKeepsADevicePixelRim).
 constexpr int kRimWidth = 1;
 
 // The tile inside its rim.
@@ -595,13 +589,12 @@ double widthAcross(const QImage &trace, int start, int end) {
 
 
 // The sizes with a drawing of their own for their slot at 2x scaling: 16, 22,
-// 32 and 36 px doubled (#373 hill climb, H26: 32 and 36 px had the 64 px
-// composition, lighter than their 1x drawings), 48 px with the 64 px
-// composition (H21: Qt's theme took the scalable drawing there, with a 1
-// device px rim where the 16 and 22 px slots had 2), and 64 px its drawing
-// doubled (H22). None for 24 px, whose slot at 2x
-// takes the 22 px slot's (hicolorsOwnIndexPicksTheSlotsDrawings; H23: H22's
-// 24x24@2 was never chosen).
+// 32, 36 and 48 px doubled (the 64 px composition is lighter than their 1x
+// drawings, and the scalable drawing, which Qt's theme takes otherwise, has
+// a 1 device px rim where the 16 and 22 px slots have 2), and 64 px its
+// drawing doubled. None for 24 px, whose slot at 2x takes the 22 px slot's
+// (hicolorsOwnIndexPicksTheSlotsDrawings; a 24x24@2 drawing is never
+// chosen).
 constexpr std::array<int, 6> kDoubledSizes{16, 22, 32, 36, 48, 64};
 
 // The drawing for a size's slot at 2x scaling.
@@ -611,8 +604,8 @@ QString doubledPath(int size) {
 
 // The fundamental's width in the 64 px slot's 2x drawing, in the 64-unit
 // drawing's units, and how far its centre sits under the series' centre line,
-// half its added weight: the focal stroke, as at 1x (#373 hill climb, H25), 5
-// units over the 3.8 the harmonics taper from.
+// half its added weight: the focal stroke, as at 1x, 5 units over the 3.8 the
+// harmonics taper from.
 std::pair<double, double> doubledFundamental() {
     return {5.0, (5.0 - 3.8) / 2};
 }
@@ -709,10 +702,9 @@ void AppIconTest::everySizeIsBuiltIn() {
 }
 
 // The tile has a rim lighter than itself just inside its edge, so that it
-// holds its edge on a dark panel (#373 hill climb, H9: on Breeze Dark the
-// indigo tile was 1.3:1 on the window); the tile's own colour is inside it.
-// It is the same rim at every size (H11: from 48 px the tile was plain at
-// H10, and the sizes differed), a quiet hairline (H18).
+// holds its edge on a dark panel (on Breeze Dark the indigo tile alone is
+// 1.3:1 on the window); the tile's own colour is inside it. It is the same
+// rim at every size, so that the sizes match, a quiet hairline.
 void AppIconTest::tileHasTheSameLighterRimAtEverySize() {
     QFETCH(int, size);
     const QImage image = render(FerrousAppIcon::resourcePath(size), size);
@@ -761,8 +753,8 @@ void AppIconTest::tileHasTheSameLighterRimAtEverySize() {
         QVERIFY2(contrastRatio(kRim, panel) >= 4.5,
                  qPrintable(QStringLiteral("#%1: %2:1").arg(panel, 6, 16, QLatin1Char('0')).arg(contrastRatio(kRim, panel))));
     }
-    // Quiet: nearer the tile than H13's light rim, the loudest edge of the
-    // icon then, and quieter on the tile than any trace.
+    // Quiet: nearer the tile than a light rim (kLoudRim), the icon's loudest
+    // edge, and quieter on the tile than any trace.
     QVERIFY2(contrastRatio(kRim, kTile) <= 1.75, qPrintable(QString::number(contrastRatio(kRim, kTile))));
     QVERIFY(contrastRatio(kRim, kTile) < contrastRatio(kLoudRim, kTile));
     for (const QRgb trace : {kGlide, kHarmonic, kThirdHarmonic}) {
@@ -773,9 +765,9 @@ void AppIconTest::tileHasTheSameLighterRimAtEverySize() {
 
 // The scalable drawing serves the slots no drawing of the theme's matches,
 // 40 to 60 device px or so: there its rim is 1.5 units of its 64, about a
-// device pixel, where a 64th of the icon, H21's, was 0.6 to 0.9 px, a
-// grey-violet smudge rather than an edge (#373 hill climb, H22). The tile
-// inside the rim, 1.5 units in from it all round.
+// device pixel, where a 64th of the icon is 0.6 to 0.9 px, a grey-violet
+// smudge rather than an edge. The tile inside the rim, 1.5 units in from it
+// all round.
 void AppIconTest::scalableDrawingKeepsADevicePixelRim() {
     const QString path = FerrousAppIcon::resourcePath(96);
     QCOMPARE(path, QStringLiteral(":/icons/hicolor/scalable/apps/ferrous.svg"));
@@ -820,9 +812,9 @@ void AppIconTest::scalableDrawingKeepsADevicePixelRim() {
     }
 }
 
-// The traces stand on the plain tile: H1 to H5 drew the spectrogram's floor
-// under them as a magenta band, which read as an unrelated underline or a
-// progress bar, so it is gone at every size (#373 hill climb, H5).
+// The traces stand on the plain tile: the spectrogram's floor drawn under
+// them as a magenta band reads as an unrelated underline or a progress bar,
+// so there is none at any size.
 void AppIconTest::tracesStandOnThePlainTile() {
     QFETCH(int, size);
     const QImage image = renderSeries(FerrousAppIcon::resourcePath(size), size);
@@ -833,8 +825,7 @@ void AppIconTest::tracesStandOnThePlainTile() {
     // Nothing but the tile under the lowest trace, down to the tile's rim:
     // no band, no line. From 64 px up the fundamental's antialiased edge
     // reaches a row below its ink; on the pixel grid it has none; a row of
-    // the tile or more is left above the rim (H19: at 16 px the fundamental
-    // sat on it).
+    // the tile or more is left above the rim, at 16 px too.
     int lowest = 0;
     for (const Trace &trace : traces) {
         lowest = std::max(lowest, trace.bounds.bottom());
@@ -842,8 +833,8 @@ void AppIconTest::tracesStandOnThePlainTile() {
     const int top = lowest + (onPixelGrid(size) ? 1 : 2);
     const int corner = std::max(2, size / 8);
     const QRect below(tile.left() + corner, top, tile.width() - 2 * corner, insideRim(tile).bottom() - top + 1);
-    // At 32 and 36 px a row, under the fundamental's round start (#373 hill
-    // climb, H25: its added weight on its underside).
+    // At 32 and 36 px a row, under the fundamental's round start (its added
+    // weight is on its underside).
     QVERIFY2(below.height() >= (onPixelGrid(size) || taskManagerSize(size) ? 1 : 2), qPrintable(QString::number(lowest)));
     QCOMPARE(countWhere(image, below, [](QRgb p) { return near(p, kTile, 4); }), below.width() * below.height());
 
@@ -874,15 +865,14 @@ void AppIconTest::tracesStandOnThePlainTile() {
     QVERIFY2(std::abs(dy) <= slack, qPrintable(QStringLiteral("off centre by %1").arg(dy)));
 }
 
-// Icon B (#373 hill climb, H7 vote P9, drawn in H8; a fan since H13): a
-// glide and its harmonics on a linear frequency axis. Each harmonic is the
-// glide's frequency times its number, so from a common start at the lower
-// left the three rise 1 : 2 : 3 and fan out across the tile's diagonal (H12
-// drew the same curve shifted up a log axis: three parallel strokes that
-// read as swooshes or a trend line). They are measured traces: they start
-// on one time line and run out to the tile's edge (H19), each at least 3:1
-// on the tile, in strokes tapering from the fundamental up (H10), bending
-// over as a glide does, and fill the plate.
+// The icon: a glide and its harmonics on a linear frequency axis. Each
+// harmonic is the glide's frequency times its number, so from a common start
+// at the lower left the three rise 1 : 2 : 3 and fan out across the tile's
+// diagonal (the same curve shifted up a log axis is three parallel strokes
+// that read as swooshes or a trend line). They are measured traces: they
+// start on one time line and run out to the tile's edge, each at least 3:1
+// on the tile, in strokes tapering from the fundamental up, bending over as a
+// glide does, and fill the plate.
 void AppIconTest::harmonicsFanOutFromOneStart() {
     QFETCH(int, size);
     const QImage image = renderSeries(FerrousAppIcon::resourcePath(size), size);
@@ -910,9 +900,8 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
         QVERIFY2(contrastRatio(colour, kTile) >= 3.0, qPrintable(QString::number(colour, 16)));
     }
     // A step of value from each trace to the one above it, so that the
-    // three hold apart in greyscale (#373 hill climb, H20: the rose was
-    // 3.9:1 on the tile, the magenta 3.6:1): the amber some 6.6:1, the rose
-    // 5:1 (H23: 4.6:1 before, a step lighter), the magenta 3.6:1
+    // three hold apart in greyscale (a rose 3.9:1 on the tile is too near the
+    // magenta's 3.6:1): the amber some 6.6:1, the rose 5:1, the magenta 3.6:1
     // (oneMagentaAtEverySize).
     QVERIFY2(contrastRatio(kHarmonic, kTile) >= 4.9 && contrastRatio(kHarmonic, kTile) <= 5.1,
              qPrintable(QString::number(contrastRatio(kHarmonic, kTile))));
@@ -950,11 +939,11 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     // A harmonic series of one glide: each trace rises its harmonic number
     // times as far as the fundamental, to within the pixel grid's rounding.
     // (At 16 px the fundamental's centre rises 1.5 px: its top edge climbs
-    // two rows and its bottom one, as it grows from 2 to 3 px; H23.)
+    // two rows and its bottom one, as it grows from 2 to 3 px.)
     // At 32 px the ends sit up to 1.5 px higher than the series from the
-    // starts would put them, by the fundamental's (#373 hill climb, H24: the
-    // fan opened wider to ends 2 px under the top inner edge, from the same
-    // starts), so the harmonics rise up to 1.25 px less than their share there.
+    // starts would put them, by the fundamental's (the fan opens wider, to
+    // ends 2 px under the top inner edge, from the same starts), so the
+    // harmonics rise up to 1.25 px less than their share there.
     const double fundamentalRise = centre(0, start) - centre(0, end);
     QVERIFY2(fundamentalRise >= (size == 16 ? 1.5 : 2.0), qPrintable(QString::number(fundamentalRise)));
     for (size_t n = 1; n < traces.size(); ++n) {
@@ -966,10 +955,9 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
 
     // They fan out: the height between neighbours' centres grows from the
     // start to the end, by half or more, and never shrinks along the way by
-    // more than a row of the grid's rounding (H12's traces kept one height
-    // apart), at 32 px too, measured past the caps, where the traces have
-    // opened already (#373 hill climb, H24: by a third, then two fifths,
-    // which read as nearly parallel traces).
+    // more than a row of the grid's rounding, at 32 px too, measured past the
+    // caps, where the traces have opened already (by a third or two fifths,
+    // they read as nearly parallel traces).
     const double fan = 1.5;
     for (size_t n = 1; n < traces.size(); ++n) {
         const auto apart = [&](int x) { return centre(n - 1, x) - centre(n, x); };
@@ -995,8 +983,7 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     // furthest, rises twice as far or more in its first third as in its last
     // (at 32 px 1.75 times: its round cap's two columns, left out, take the
     // steepest of its rise), and a third of the tile inside its rim or more
-    // (at 32 px 0.3, where its cap's columns are left out; H24: a quarter
-    // before); none falls.
+    // (at 32 px 0.3, where its cap's columns are left out); none falls.
     const size_t top = traces.size() - 1;
     const int third = (end - start) / 3;
     const double first = centre(top, start) - centre(top, start + third);
@@ -1012,10 +999,9 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
 
     // The strokes taper from the fundamental up, as a harmonic's energy
     // falls with its number: none heavier than the one below it, and from
-    // 32 px the fundamental heavier than the top harmonic (H10; H8 and H9
-    // drew three equal strokes). At 16 and 22 px two 2 px strokes since H18,
-    // as wide across where they climb as on a flat since H19, so the steeper
-    // harmonic, the longer one, comes within a twentieth of the
+    // 32 px the fundamental heavier than the top harmonic. At 16 and 22 px
+    // two 2 px strokes, as wide across where they climb as on a flat, so the
+    // steeper harmonic, the longer one, comes within a twentieth of the
     // fundamental's weight. The ratios at the smooth sizes are checked in
     // largeSizesTaperFromARoundStart.
     std::vector<double> weights;
@@ -1032,10 +1018,9 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     }
 
     // They fill the plate along its diagonal: across 70 % of the tile or more
-    // each way (H24: at 32 px two thirds of its height before, with 4 px of
-    // air over the top trace), from its
-    // bottom-left quarter, with ink in its top-left quarter (A left that
-    // empty) and its top-right one.
+    // each way (at 32 px two thirds of its height leaves 4 px of air over the
+    // top trace), from its bottom-left quarter, with ink in its top-left
+    // quarter and its top-right one.
     const QRect ink = boundsWhere(image, traceInk);
     QVERIFY2(ink.width() >= tile.width() * 0.7 && ink.height() >= tile.height() * 0.7,
              qPrintable(QStringLiteral("%1x%2 of %3").arg(ink.width()).arg(ink.height()).arg(tile.width())));
@@ -1060,11 +1045,11 @@ void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid_data() {
     }
 }
 
-// At 16 and 22 px two hinted strokes (#373 hill climb, H18, H19): each trace
-// is a closed shape with every vertex on a whole pixel and every edge level,
-// upright or at 45 degrees: crisp flats, and climbs of a row a column at
-// most, antialiased only there. Each covers its full height in every column
-// (strokeHeights), at most a row more where it climbs, as a broad nib does.
+// At 16 and 22 px two hinted strokes: each trace is a closed shape with every
+// vertex on a whole pixel and every edge level, upright or at 45 degrees:
+// crisp flats, and climbs of a row a column at most, antialiased only there.
+// Each covers its full height in every column (strokeHeights), at most a row
+// more where it climbs, as a broad nib does.
 void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -1180,12 +1165,11 @@ void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid() {
                  qPrintable(QStringLiteral("trace %1: %2 crisp columns").arg(n).arg(crisp)));
     }
     // The harmonic's start no heavier than its first climb, which it starts
-    // on (#373 hill climb, H21: a 3 px shoulder where it turned from its
-    // first climb weighed on the start). At 22 and 24 px that climb is three
-    // rows tall, its start's columns included, as wide across its 45 degree
-    // slope, some 2.1 px, as its flats' 2 rows (H26: at two rows, 1.4 px
-    // across, the climb read thin and faint beside the amber); at 16 px two,
-    // its height.
+    // on (a 3 px shoulder where it turns from its first climb weighs on the
+    // start). At 22 and 24 px that climb is three rows tall, its start's
+    // columns included, as wide across its 45 degree slope, some 2.1 px, as
+    // its flats' 2 rows (at two rows, 1.4 px across, the climb reads thin and
+    // faint beside the amber); at 16 px two, its height.
     const int climb = size == 16 ? heights.back() : heights.back() + 1;
     for (int x = start; x < start + (size == 16 ? 3 : 5); ++x) {
         const double tall = columnOf(traces.back(), x).sum;
@@ -1194,9 +1178,9 @@ void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid() {
     // At 16 px the fundamental starts at 2 px, a clear row under the
     // harmonic's start, for two columns, and from its 4th column on it is
     // 3 px, its height, or a half row more where an edge climbs, to the
-    // tile's edge, with a row of the tile under it (#373 hill climb, H23: at
-    // 2 px all along the amber read lighter than the magenta over it; H22: a
-    // block three rows tall at its start).
+    // tile's edge, with a row of the tile under it (at 2 px all along the
+    // amber reads lighter than the magenta over it; at 3 px from its start
+    // it is a block three rows tall there).
     if (size == 16) {
         for (int x = start; x < start + 2; ++x) {
             const double tall = columnOf(traces.front(), x).sum;
@@ -1217,9 +1201,9 @@ void AppIconTest::hintedTracesKeepClearOfEachOtherAndTheRim_data() {
 // On the pixel grid a clear device pixel or more between the traces
 // everywhere, more towards the end as they fan out, and the tile around
 // them: a clear row of it above the top trace and below the lowest, and a
-// clear column before their start (#373 hill climb, H19: at 16 px the amber
-// start sat on the rim). The fundamental's start lifted off the rim at 16 px
-// left a row between the two strokes there.
+// clear column before their start (at 16 px the amber start would sit on the
+// rim). The fundamental's start lifted off the rim at 16 px leaves a row
+// between the two strokes there.
 void AppIconTest::hintedTracesKeepClearOfEachOtherAndTheRim() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -1295,11 +1279,11 @@ void AppIconTest::tracesRunOutFlushToTheTilesInnerEdge_data() {
 
 // The traces run out to the tile's inner edge on the right, cut flush on it
 // with the rim intact, so that the tile reads as a crop of an endless
-// spectrogram (#373 hill climb, H19: three series ending at a common x in
-// round caps inside the tile read as a line chart). Each trace's last column
-// is the one inside the rim, with no cap there: on the pixel grid whole
-// pixels of the stroke's height, and from 64 px as covered as the column
-// before it. Nothing of a trace is under the rim.
+// spectrogram (three series ending at a common x in round caps inside the tile
+// read as a line chart). Each trace's last column is the one inside the rim,
+// with no cap there: on the pixel grid whole pixels of the stroke's height,
+// and from 64 px as covered as the column before it. Nothing of a trace is
+// under the rim.
 void AppIconTest::tracesRunOutFlushToTheTilesInnerEdge() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -1346,11 +1330,10 @@ void AppIconTest::largeSizesTaperFromARoundStart_data() {
     }
 }
 
-// From 32 px the traces are smooth (#373 hill climb, H10 from 64 px, H20
-// from 32 px): strokes tapering from the fundamental up (strokeWidths), as a
-// harmonic's energy falls with its number, drawn as filled outlines with a
-// round cap at the start, where H9's flat cut read as clipped, and none at
-// the end, where they run out to the tile's edge (H19).
+// From 32 px the traces are smooth: strokes tapering from the fundamental up
+// (strokeWidths), as a harmonic's energy falls with its number, drawn as
+// filled outlines with a round cap at the start, where a flat cut reads as
+// clipped, and none at the end, where they run out to the tile's edge.
 void AppIconTest::largeSizesTaperFromARoundStart() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -1386,8 +1369,8 @@ void AppIconTest::largeSizesTaperFromARoundStart() {
     // A round start, at 256 px, where a cap is pixels enough across to
     // tell: a trace's first column holds the tip of its cap and the column
     // after it less than the stroke's height, both short of a column of the
-    // stroke's body just past the cap. A cut, as in H9, has the stroke's
-    // whole height in the column after its end.
+    // stroke's body just past the cap. A flat cut has the stroke's whole
+    // height in the column after its end.
     if (size == 256) {
         for (size_t n = 0; n < traces.size(); ++n) {
             const int tip = columnsOf(traces[n]).first;
@@ -1420,25 +1403,21 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows_data() {
 }
 
 // At 32 and 48 px the traces are antialiased curves, the 64-unit drawing on
-// their grid (#373 hill climb, H20: H19 drew them as whole-pixel stairs,
-// which read as aliased and beaded beside Breeze's smooth icons): no stair
-// runs, an even weight along each stroke, never under 2 px across, apart
-// from each other everywhere, and the ends cut flush on the tile's inner
-// edge on whole rows. H21: on the 64 px composition, the magenta's end 5 px
-// under the top inner edge at 48 px and 4 at 32 (H20: 3 and 2, with the
-// 32 px end under the corner, where Plasma's badge cuts it), the ends
-// 1 : 2 : 3 above the baseline, from starts as far apart. H25: at 32 and
-// 36 px the fundamental the focal stroke, 4 px, its weight on its underside,
-// and the fan opened, the caps' tips in one column (H24: 3 / 2.5 / 2, exits
-// 1.6 and 1.8 times as far apart as the starts, read as three near-parallel
-// stripes). H26: the magenta's exit 3 rows under the top inner edge and the
-// rose's a row lower, so that the top trace keeps 2 px of the tile over it
-// up to the rounded corner, where Plasma's playing badge sits (H25's, a row
-// under the edge, ran into the corner); the exits some 1.75 times as far
-// apart as the starts, from starts a little closer, the traces as far apart
-// as in H25. 36 px a drawing of its own, the same strokes on its grid
-// (H24); and 1.5 px or more of the tile between neighbours everywhere,
-// 2.25 px at 30 % of the way across.
+// their grid (whole-pixel stairs read as aliased and beaded beside Breeze's
+// smooth icons): no stair runs, an even weight along each stroke, never
+// under 2 px across, apart from each other everywhere, and the ends cut
+// flush on the tile's inner edge on whole rows. At 48 px the 64 px
+// composition: the magenta's end 5 px under the top inner edge, the ends
+// 1 : 2 : 3 above the baseline, from starts as far apart. At 32 and 36 px
+// the fundamental the focal stroke, 4 px, its weight on its underside, and
+// the fan opened, the caps' tips in one column (3 / 2.5 / 2 px, with exits
+// 1.6 and 1.8 times as far apart as the starts, reads as three
+// near-parallel stripes); the magenta's exit 3 rows under the top inner edge
+// and the rose's a row lower, so that the top trace keeps 2 px of the tile
+// over it up to the rounded corner, where Plasma's playing badge sits; the
+// exits some 1.75 times as far apart as the starts. 36 px a drawing of its
+// own, the same strokes on its grid; and 1.5 px or more of the tile between
+// neighbours everywhere, 2.25 px at 30 % of the way across.
 void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -1449,8 +1428,8 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
     using Ends = std::vector<std::pair<double, double>>;
     const Ends ends = size == 48 ? Ends{{30, 34}, {20, 22.5}, {10, 12}}
                                  : (size == 36 ? Ends{{22, 26}, {15, 17}, {7, 9}} : Ends{{21, 24}, {13, 15}, {6, 8}});
-    // The start caps' centres, lowest first: at 48 px a pixel above H20's,
-    // the fundamental's half a pixel lower, its added weight on its underside.
+    // The start caps' centres, lowest first, the fundamental's half a pixel
+    // lower: its added weight is on its underside.
     const std::vector<double> starts = size == 48 ? std::vector<double>{37.25, 31.75, 26.75}
                                                   : (size == 36 ? std::vector<double>{27.75, 23.0, 18.8}
                                                                 : std::vector<double>{25.1, 20.45, 16.3});
@@ -1551,9 +1530,8 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
     const double fan = exits / (startCentres.front() - startCentres.back());
     QVERIFY2(fan >= (size == 48 ? 2.0 : 1.7), qPrintable(QString::number(fan)));
     // The tile clear above the top trace: 5 rows at 48 px, 3 at 32 and 36
-    // (#373 hill climb, H26: 1 before, and in its last column, under the
-    // tile's rounded corner, none: the trace ran into the corner where
-    // Plasma's playing badge sits).
+    // (with 1, the trace runs into the tile's rounded corner, where Plasma's
+    // playing badge sits).
     for (int y = inside.top(); y < inside.top() + (size == 48 ? 5 : 3); ++y) {
         for (int x = inside.left(); x <= inside.right(); ++x) {
             QVERIFY2(alphaAt(traces.back(), x, y) <= 0.01, qPrintable(QStringLiteral("%1, %2").arg(x).arg(y)));
@@ -1573,8 +1551,7 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
     }
     // Apart by the tile: in every column both cross past their caps' first
     // columns, 1.5 px or more of it between their centres, from what each
-    // leaves of a row, and 2.25 px at 30 % of the way across (H20: at 32 px
-    // the rose came within a row of the amber there).
+    // leaves of a row, and 2.25 px at 30 % of the way across.
     const int thirty = inside.left() + inside.width() * 3 / 10;
     for (size_t n = 1; n < traces.size(); ++n) {
         const int from = std::max(columnsOf(traces[n - 1]).first, columnsOf(traces[n]).first) + 1;
@@ -1592,11 +1569,11 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
 }
 
 // The ink thins smoothly as the icon grows: the fundamental's width across,
-// a share of the tile inside the rim, falls from each size to the next
-// (#373 hill climb, H19: at 48 px it dipped below 64 px's, and 32 px read
-// bolder than 48). From 22 px: at 16 px the grid's 2 px is the least a
-// stroke can be, and 22 px's 3 px is a larger share (H21). A size drawn as a
-// smaller size's drawing, moved in, has that one's (sizesDrawnAsASmallerSize).
+// a share of the tile inside the rim, falls from each size to the next, so
+// that no size reads bolder than a smaller one. From 22 px: at 16 px the
+// grid's 2 px is the least a stroke can be, and 22 px's 3 px is a larger
+// share. A size drawn as a smaller size's drawing, moved in, has that one's
+// (sizesDrawnAsASmallerSize).
 void AppIconTest::fundamentalThinsSmoothlyWithSize() {
     double before = -1;
     for (const int size : FerrousAppIcon::kSizes) {
@@ -1631,8 +1608,8 @@ void AppIconTest::fundamentalLeadsTheHarmonics_data() {
 // The fundamental is the focal stroke, as it is at 16 and 22 px: half as
 // heavy again as the rose over it, or more, and three quarters again as the
 // magenta, across their strokes over the columns all three cross at their
-// full widths (#373 hill climb, H25: from 32 px they tapered 1 : 0.83 : 0.67
-// or 1 : 0.8 : 0.65 and read as three near-equal stripes).
+// full widths (tapering 1 : 0.83 : 0.67 or 1 : 0.8 : 0.65, they read as three
+// near-equal stripes).
 void AppIconTest::fundamentalLeadsTheHarmonics() {
     QFETCH(QString, path);
     QFETCH(int, size);
@@ -1662,13 +1639,13 @@ void AppIconTest::oneMagentaAtEverySize_data() {
 }
 
 // The 3rd harmonic is one magenta in every file, but on the pixel grid at 1x
-// a step lighter (kPixelGridThirdHarmonic) (#373 hill climb, H23: H22
-// deepened it at 32 to 48 px and in their 2x drawings, so that it held apart
-// from the rose in greyscale, and there the top trace was the thinnest and
-// dimmest trace, 2.6:1 as drawn, its hue changing from 48 to 64 px). The
-// rose is a step lighter instead, its hue kept: in Rec. 709 luma at their
-// full colours some 30 levels over the magenta and as many under the amber
-// (H22: 21 over the magenta), and nothing of H22's colours in any file.
+// a step lighter (kPixelGridThirdHarmonic) (deepened at 32 to 48 px and in
+// their 2x drawings to hold apart from the rose in greyscale, it makes the
+// top trace the thinnest and dimmest there, 2.6:1 as drawn, its hue changing
+// from 48 to 64 px). The rose is a step lighter instead, its hue kept: in
+// Rec. 709 luma at their full colours some 30 levels over the magenta and as
+// many under the amber, and neither the deeper magenta nor its darker rose
+// (kDeepThirdHarmonic, kDarkerHarmonic) in any file.
 // Rendered, down the middle column, each trace's core, its brightest pixel
 // there, is that far apart in grey, to within what a 2 px stroke's centre row
 // loses to the tile at 32 px, and the magenta's 3:1 or more on the tile there.
@@ -1778,10 +1755,10 @@ std::pair<double, double> magentaBrightness(const QString &path, int size) {
 // On the pixel grid the magenta's 45 degree climbs cover, column by column,
 // a row and two half rows, so that drawn in the other drawings' magenta they
 // rendered dimmer than the 2x drawing's smooth curves, 2.8 to 2.9:1 on the
-// tile against 3.5:1 (#373 hill climb, H27): in its lighter magenta its
-// climbs render within a quarter of a step of its 2x drawing's, some 3.3 to
-// 3.5:1, and its flats, which take the colour whole, still well under the
-// amber, so that the glide leads.
+// tile against 3.5:1: in its lighter magenta its climbs render within a
+// quarter of a step of its 2x drawing's, some 3.3 to 3.5:1, and its flats,
+// which take the colour whole, still well under the amber, so that the glide
+// leads.
 void AppIconTest::pixelGridMagentaRendersAsBrightAsAt2x() {
     QFETCH(int, size);
     QFETCH(int, doubled);
@@ -1804,20 +1781,19 @@ void AppIconTest::topTraceClearsTheCornerFrom64px_data() {
 }
 
 // From 64 px the traces' ends sit 0.94 as high above the 64-unit drawing's
-// baseline, y 55.5, as in H19, their starts where they were, so that the top
-// trace runs out to the tile's edge some 3 units below its rounded corner
-// rather than into it (#373 hill climb, H20): at the edge their centres are
+// baseline, y 55.5, as the full series from the same starts would put them,
+// so that the top trace runs out to the tile's edge some 3 units below its
+// rounded corner rather than into it: at the edge their centres are
 // at 55.5 - 0.94 k 14.17 units, 1 : 2 : 3 above the baseline, and the top
 // trace's ink starts 2.5 units or more below the corner's arc, which ends 4
 // units below the tile's inner edge. The fundamental's centre sits its
-// fundamentalUnderside lower (H25: its added weight on its underside). With
+// fundamentalUnderside lower (its added weight on its underside). With
 // the 4th harmonic, whose spacing shows the series, the series is the
 // fundamental's own: each harmonic that much higher per number over the 2nd,
 // so that in every column past the caps each is as far above the one under
-// it as the 2nd is above the fundamental, to within a quarter unit (#373
-// hill climb, H27: the 3rd sat that much, and the 4th twice that, under the
-// series). At 64 px, three traces, the 3rd stays on the 2nd's series, where
-// it keeps the corner's air.
+// it as the 2nd is above the fundamental, to within a quarter unit. At 64 px,
+// three traces, the 3rd stays on the 2nd's series, where it keeps the
+// corner's air.
 void AppIconTest::topTraceClearsTheCornerFrom64px() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -1866,26 +1842,23 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic_data() {
     QTest::addRow("scalable") << 96;
 }
 
-// At 128 and 256 px a detail tier (#373 hill climb, H21, P29 amended: the 64
-// px drawing enlarged left the upper left of the tile empty beside Breeze's
-// large icons): the faint 4th harmonic of the same glide, in violet, half
-// the width the harmonics taper from (fourthWidth), from the common start, a
-// true 4th harmonic: as far above the 3rd as the 3rd is above the 2nd in
-// every column, rising 4/3 as far as the 3rd, flattening as the others do
-// (#373 hill climb, H26: H25 bent its last stretch up to leave at 40
-// degrees, the only reversed curvature, and spaced it wider than the series),
-// and cropped by the tile's top inner edge as the others are by its right
-// one, where the series puts it: the stroke run on along its own curve past
-// the tile and intersected with it, so that both its edges cross that edge
-// at the series' slope there, some 25 degrees, its upper edge from x 42 of
-// the 64-unit drawing and its lower edge by 47.5, and the edge runs between
-// them only for the stroke's width across that slant: no stretch of the
-// trace lies along it (#373 hill climb, H27: 2 fundamentalUnderside under the
-// series, it left at 23 degrees from x 44.6; H23: H22 cut it square across
-// the stroke, a corner on the rim with a wedge of the tile under the cut),
-// so that nothing of it is in the tile's rounded corner, whose arc starts at
-// x 53, where Plasma draws a task's badge (x over 51, y under 20). Below 128
-// px, and in the scalable drawing, three traces.
+// At 128 and 256 px a detail tier (the 64 px drawing enlarged leaves the
+// upper left of the tile empty beside Breeze's large icons): the faint 4th
+// harmonic of the same glide, in violet, half the width the harmonics taper
+// from (fourthWidth), from the common start, a true 4th harmonic: as far
+// above the 3rd as the 3rd is above the 2nd in every column, rising 4/3 as
+// far as the 3rd, flattening as the others do (bent up at its end, it would
+// be the only reversed curvature), and cropped by the tile's top inner edge
+// as the others are by its right one, where the series puts it: the stroke
+// run on along its own curve past the tile and intersected with it, so that
+// both its edges cross that edge at the series' slope there, some
+// 25 degrees, its upper edge from x 42 of the 64-unit drawing and its lower
+// edge by 47.5, and the edge runs between them only for the stroke's width
+// across that slant: no stretch of the trace lies along it (a cut square
+// across the stroke leaves a corner on the rim with a wedge of the tile
+// under the cut), so that nothing of it is in the tile's rounded corner,
+// whose arc starts at x 53, where Plasma draws a task's badge (x over 51, y
+// under 20). Below 128 px, and in the scalable drawing, three traces.
 void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -1897,11 +1870,10 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     QVERIFY(source.contains(QLatin1String("<path id=\"h4\" fill=\"#ab55df\"")));
     // Faint: a step of value below the 3rd harmonic, as each trace is below
     // the one under it, and fainter than any of the three, 3:1 on the tile
-    // (#373 hill climb, H25: H24's 2.9:1 had little reserve), 8 grey levels or
-    // more under the magenta in Rec. 709 luma. Yet light enough that its cut
-    // on the top inner edge reads against the rim, 1.7:1 or more on it (H24:
-    // H21's #9a4bd0, 2.55:1 on the tile, was 1.55:1 on the rim, and the cut
-    // fused with it); the hue kept.
+    // (2.9:1 has little reserve), 8 grey levels or more under the magenta in
+    // Rec. 709 luma. Yet light enough that its cut on the top inner edge
+    // reads against the rim, 1.7:1 or more on it (#9a4bd0, 2.55:1 on the
+    // tile, is 1.55:1 on the rim, and the cut fuses with it); the hue kept.
     const double ratio = contrastRatio(kFourthHarmonic, kTile);
     QVERIFY2(ratio >= 3.0 && ratio <= 3.1, qPrintable(QString::number(ratio)));
     QVERIFY(contrastRatio(kH24FourthHarmonic, kTile) < 3.0);
@@ -1963,7 +1935,7 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     const double slant = std::abs(along.y()) / std::hypot(along.x(), along.y());
     // Both edges at the series' slope there, some 25 degrees to the edge,
     // the lower a little flatter, as the curve flattens across the stroke:
-    // not bent up (H25's met it at 40), and neither edge run flat along it.
+    // not bent up to meet it at 40, and neither edge run flat along it.
     const double angle = qRadiansToDegrees(std::asin(slant));
     QVERIFY2(angle >= 24 && angle <= 27.5, qPrintable(QStringLiteral("%1 degrees").arg(angle)));
     const QPointF back = lowerControl - lower;
@@ -2050,11 +2022,10 @@ void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice_data() {
 }
 
 // A 16 or 22 px slot at 2x scaling shows the drawing it shows at 1x, doubled
-// (#373 hill climb, H20: there the theme fell back to the 32 px drawing, with
-// three traces, or the scalable one, so a task manager's icon changed with the
-// scale): the same two traces, from the same start to the same end, as smooth
-// strokes twice the 1x heights with a round start, in a 2 px rim and twice
-// the margin.
+// (otherwise the theme falls back to the 32 px drawing, with three traces, or
+// the scalable one, so a task manager's icon changes with the scale): the same
+// two traces, from the same start to the same end, as smooth strokes twice the
+// 1x heights with a round start, in a 2 px rim and twice the margin.
 void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice() {
     QFETCH(int, size);
     const QString path = doubledPath(size);
@@ -2194,15 +2165,13 @@ QList<std::pair<QString, std::vector<PathNumber>>> shapesOf(const QString &path)
 
 // A 32, 36 or 48 px slot at 2x scaling, the task manager's and the
 // launcher's at 2x, shows its 1x drawing doubled, as the 16 and 22 px slots
-// do (#373 hill climb, H26: the 32 and 36 px slots had the 64 px
-// composition, some 35 % lighter than the 1x drawing, so a slot's weight
-// changed with the scale; H27: the 48 px slot's too, its strokes 7.1, 4.4
-// and 3.6 px against the 1x drawing's 4, 2.5 and 2.25 doubled, 8, 5 and
-// 4.5): every coordinate and width of the
-// file twice the 1x file's, to within the files' rounding, the arcs' flags
-// kept, its rim 2 px; rendered, each trace from twice its 1x start to the
-// tile's inner edge, ending on twice its 1x end's rows, and twice as wide
-// across.
+// do (the 64 px composition is some 35 % lighter than the 1x drawing at 32
+// and 36 px, and at 48 px its strokes are 7.1, 4.4 and 3.6 px against the 1x
+// drawing's 4, 2.5 and 2.25 doubled, 8, 5 and 4.5, so a slot's weight would
+// change with the scale): every coordinate and width of the file twice the 1x
+// file's, to within the files' rounding, the arcs' flags kept, its rim 2 px;
+// rendered, each trace from twice its 1x start to the tile's inner edge,
+// ending on twice its 1x end's rows, and twice as wide across.
 void AppIconTest::doubledSlotsTo48pxDoubleTheir1xDrawings() {
     QFETCH(int, size);
     const QString path = doubledPath(size);
@@ -2264,15 +2233,14 @@ void AppIconTest::doubledSlotsTo48pxDoubleTheir1xDrawings() {
     }
 }
 
-// The 64 px slot at 2x scaling has a drawing of its own (#373 hill climb,
-// H22: the theme gave it the 128 or 256 px drawing, with the 4th harmonic,
-// or the scalable one): the 64 px drawing doubled, three smooth traces
+// The 64 px slot at 2x scaling has a drawing of its own (otherwise the theme
+// gives it the 128 or 256 px drawing, with the 4th harmonic, or the scalable
+// one): the 64 px drawing doubled, three smooth traces
 // rising 1 : 2 : 3 to the tile's inner edge, in twice the 1x tile and a 2 px
 // rim, its traces where the 64 px drawing has them, in proportion to the
 // tile inside the rim, and tapering as it does, from 3.8 units at 128 device
 // px, without the 4th harmonic. (The 32 to 48 px slots' double their 1x
-// drawings: doubledSlotsTo48pxDoubleTheir1xDrawings; H21 to H26 the 48 px
-// slot's had the 64 px composition.)
+// drawings: doubledSlotsTo48pxDoubleTheir1xDrawings.)
 void AppIconTest::doubled64pxSlotDrawsThe64pxDrawingDoubled() {
     const int size = 64;
     const QString path = doubledPath(size);
@@ -2351,11 +2319,10 @@ void AppIconTest::sizesDrawnAsASmallerSize_data() {
 }
 
 // The 24 px drawing is the 22 px one moved a pixel in on a 24 px canvas, as
-// Breeze draws its 24 px icons, for the window icon's 24 px slot (#373 hill
-// climb, H22: the slot took the 32 px drawing scaled down, three thin
-// traces, or the 22 px one scaled up): pixel for pixel the same, moved, with
-// nothing else on the canvas. (H22 drew 36 px and its 2x so too, from the
-// 32 px slot's, until H24 gave 36 px a drawing of its own.)
+// Breeze draws its 24 px icons, for the window icon's 24 px slot (otherwise
+// the slot takes the 32 px drawing scaled down, three thin traces, or the
+// 22 px one scaled up): pixel for pixel the same, moved, with nothing else on
+// the canvas.
 void AppIconTest::sizesDrawnAsASmallerSize() {
     QFETCH(QString, path);
     QFETCH(QString, from);
@@ -2428,13 +2395,12 @@ void AppIconTest::everySizeInstalls() {
     QVERIFY(countWhere(image, image.rect(), [](QRgb p) { return near(p, kGlide, 24); }) >= drawn / 2);
 }
 
-// No 24x24@2 drawing, built in or installed (#373 hill climb, H23): the
-// hicolor theme's 22 px directories serve 20 to 24 px and come first, so a
-// 24 px slot at 2x takes 22x22@2 (hicolorsOwnIndexPicksTheSlotsDrawings), and
-// the window icon has 1x pixmaps only. The 24 px drawing stays, for the
-// window icon's 24 px slot (windowIconHasEachSizesDrawing), and says so, so
-// that no one takes it for what the icon theme shows at 24 px (#373 hill
-// climb, H24).
+// No 24x24@2 drawing, built in or installed: the hicolor theme's 22 px
+// directories serve 20 to 24 px and come first, so a 24 px slot at 2x takes
+// 22x22@2 (hicolorsOwnIndexPicksTheSlotsDrawings), and the window icon has
+// 1x pixmaps only. The 24 px drawing stays, for the window icon's 24 px slot
+// (windowIconHasEachSizesDrawing), and says so, so that no one takes it for
+// what the icon theme shows at 24 px.
 void AppIconTest::noDrawingForA24pxSlotAt2x() {
     QVERIFY(!QFile::exists(doubledPath(24)));
     QVERIFY(QFile::exists(FerrousAppIcon::resourcePath(24)));
@@ -2539,9 +2505,9 @@ void AppIconTest::hicolorsOwnIndexPicksTheSlotsDrawings_data() {
 // 64 px. Qt's theme lookup, and KDE's, which a Plasma session uses (the
 // same slots, checked by hand), take the first directory that serves a
 // size, at the scale rounded up: so a slot at 1.25x or 1.5x takes the 2x
-// drawing. A 24 px slot takes the 22 px drawing (#373 hill climb, H22: the
-// 24 px directories come after it), as Breeze's own application icons,
-// which have no 24 px drawing, show theirs.
+// drawing. A 24 px slot takes the 22 px drawing (the 24 px directories come
+// after it), as Breeze's own application icons, which have no 24 px drawing,
+// show theirs.
 void AppIconTest::hicolorsOwnIndexPicksTheSlotsDrawings() {
     if (installPrefix().isEmpty()) {
         QSKIP("FERROUS_APP_ICON_INSTALL_PREFIX names no install; CTest installs one");

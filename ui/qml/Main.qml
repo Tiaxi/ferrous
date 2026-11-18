@@ -1586,10 +1586,10 @@ ApplicationWindow {
         // The viewer in the main window takes them once the pane has kept
         // their last frame, which it shows under the viewer as that fades
         // in. The whole-screen window takes them only once that frame no
-        // longer refers to them, as it would keep them in this window
-        // (#373 H6); the pane lets them go as soon as it keeps no frame.
+        // longer refers to them, as it would keep them in this window; the
+        // pane lets them go as soon as it keeps no frame.
         // Closed, the viewer in the main window keeps their last frame as it
-        // fades out, and gives them back to the pane once it has (#373 H8);
+        // fades out, and gives them back to the pane once it has;
         // it too keeps them out of the whole-screen window while its frame
         // refers to them.
         parent: viewerController.spectrogramViewerOpen
@@ -1624,17 +1624,17 @@ ApplicationWindow {
         // meter stay put. The plot before goes once the chosen one shows
         // whole. With animations off the chosen one shows at once.
         // The spectrogram stays live under the waveform, at 0 and taking no
-        // input (#373 H7): hidden, it gave its analysis and columns up, so
+        // input: hidden, it gave its analysis and columns up, so
         // that shown again it waited about 250 ms for a fresh session's
         // columns to fill its view. Kept live, its view is drawn when it is
         // chosen, and it comes in at the click. The waveform comes in once
         // it has drawn its first frame of the track's detail
-        // (`pictureReady`), at 0 over the spectrogram until then (#373 H11:
-        // it faded in from the click, and its per-channel lanes, which wait
+        // (`pictureReady`), at 0 over the spectrogram until then (it
+        // faded in from the click, and its per-channel lanes, which wait
         // for their detail, were an empty floor for 80 to 170 ms). Hidden,
-        // it keeps the detail it has (#373 H14), and fetches the detail of a
-        // new track's lanes once its overview comes (H18), so that frame is
-        // the first one after the click, from a track's first switch on.
+        // it keeps the detail it has, and fetches the detail of a new track's
+        // lanes once its overview comes, so that frame is the first one after
+        // the click, from a track's first switch on.
         readonly property int chosenMode: viewerController.visualizationMode
         // The plot that shows whole, under the chosen one while it comes in.
         property int settledMode: -1
@@ -1725,7 +1725,7 @@ ApplicationWindow {
             return visualizationSurface.settledMode === mode || !visualizationSurface.modeSwitching
                 ? 1 : visualizationSurface.modeFade
         }
-        // One playhead through the switch (H2: both showed): the settled
+        // One playhead through the switch (both showed at once): the settled
         // plot's goes once the chosen one, with its own, has come in at all.
         // Until then, the chosen plot is at 0, and the settled one keeps it.
         function playheadShown(mode) {
@@ -1934,7 +1934,7 @@ ApplicationWindow {
     }
 
     // The viewer in the main window shows the art until it has faded out,
-    // not only while it is open (#373 H8: the art went the moment the viewer
+    // not only while it is open (the art went the moment the viewer
     // closed, and its black floor faded out alone).
     Viewers.AlbumArtSurface {
         id: albumArtSurface

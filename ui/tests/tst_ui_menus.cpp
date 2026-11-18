@@ -570,8 +570,8 @@ void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered_data() {
 }
 
 // The open or hovered title is the text colour on the selection tint, as
-// in the lists, and well over 4.5:1 in both themes (#373 H4: the style's
-// white on a translucent accent was 2.08:1 in light). It keeps the style's
+// in the lists, and well over 4.5:1 in both themes (the style's white on
+// a translucent accent was 2.08:1 in light). It keeps the style's
 // size, padding and Alt mnemonics, and Alt+letter opens its menu.
 void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered() {
     QFETCH(bool, dark);
@@ -1041,15 +1041,15 @@ void UiMenusTest::scaleItemIsOffInWaveformMode() {
     QTRY_VERIFY(!meter->property("checked").toBool());
 }
 
-// The level meter as part of the plot (#373 H7 P11, H8): its column runs
-// out to the pane's edge, which is the window's and the right edge of the
-// queue's scrollbar above the pane, with no strip of the plot's floor
-// beside it; its bar is far wider than the scrollbar's thumb, and nothing
-// of either overlaps the other. Its fill is the plot set's meterFill, the
-// app icon's magenta on the spectrogram (#373 H15 H2). It is one meter
-// for both visualization modes, of the same input, scale and marks, so
-// one signal reads the same in either: only its colours change, and on
-// the waveform its bar is framed by the trough (#373 H16 I3).
+// The level meter as part of the plot: its column runs out to the pane's
+// edge, which is the window's and the right edge of the queue's scrollbar
+// above the pane, with no strip of the plot's floor beside it; its bar is
+// far wider than the scrollbar's thumb, and nothing of either overlaps the
+// other. Its fill is the plot set's meterFill, the app icon's magenta on
+// the spectrogram. It is one meter for both visualization modes, of the
+// same input, scale and marks, so one signal reads the same in either:
+// only its colours change, and on the waveform its bar is framed by the
+// trough.
 void UiMenusTest::levelMeterIsPartOfThePlot() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1087,7 +1087,7 @@ void UiMenusTest::levelMeterIsPartOfThePlot() {
     QCOMPARE(meter->implicitWidth(), LevelMeterItem::kColumnWidth);
     // The bar out to that edge, 10 px: a ladder of 3 px rungs on a 4 px
     // pitch rather than a solid bar, which tells it from the scrollbar's
-    // solid thumb (#373 H14 G3; H16 I3: 2 px on 3 read as a hatch).
+    // solid thumb (2 px rungs on a 3 px pitch read as a hatch).
     QCOMPARE(LevelMeterItem::kBarLeft + LevelMeterItem::kBarWidth, meter->width());
     QCOMPARE(LevelMeterItem::kBarWidth, 10.0);
     QCOMPARE(LevelMeterItem::kRungHeight, 3.0);
@@ -1342,7 +1342,7 @@ void UiMenusTest::queueContextMenuShowsKeysItDoesNotTake() {
 
 // The cover's menus, on the now playing cover and in the album art viewer,
 // give Replace from iTunes an icon, as the other menus give their items, so
-// its text starts where theirs does (#373 H7).
+// its text starts where theirs does.
 void UiMenusTest::coverMenusGiveReplaceFromItunesAnIcon() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;

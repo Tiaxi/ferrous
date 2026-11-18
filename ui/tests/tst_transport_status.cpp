@@ -453,10 +453,10 @@ void TransportStatusTest::drawsOffscreenUnlessAPlatformIsChosen() {
 
 // The sizes of the design at 1×: a 48 px band; 32 px buttons 4 px apart
 // from 12 px, the content's inset; the seek bar 16 px after Next; then on
-// one rhythm (#373 H8), between what is drawn: the time 16 px after the
-// seek bar, as wide as "0:00 / 0:00", the volume glyph 24 px after it, and
-// the 96 px slider's groove 8 px after the glyph, 12 px from the end. The
-// volume glyph is the size of Previous and Next.
+// one rhythm, between what is drawn: the time 16 px after the seek bar, as
+// wide as "0:00 / 0:00", the volume glyph 24 px after it, and the 96 px
+// slider's groove 8 px after the glyph, 12 px from the end. The volume glyph
+// is the size of Previous and Next.
 void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     Harness harness;
     QString errorText;
@@ -469,7 +469,7 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     const QStringList names{QStringLiteral("previous"), QStringLiteral("playPause"), QStringLiteral("stop"),
                             QStringLiteral("next")};
     // Play/Pause a step above its neighbours, in the same 32 px button, and
-    // the others one size (#373 H9: 22, 16 and 14 read as three weights).
+    // the others one size (22, 16 and 14 read as three weights).
     const QList<int> glyphs{16, 20, 16, 16};
     for (int i = 0; i < names.size(); ++i) {
         QQuickItem *button = harness.item(QStringLiteral("transportButton_") + names[i]);
@@ -477,7 +477,7 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
         const QRectF rect = sceneRect(button);
         QCOMPARE(rect.size(), QSizeF(32, 32));
         // Previous's 16 px glyph, 8 px into its button, on the 12 px
-        // content edge (#373 H34 AB6).
+        // content edge.
         QCOMPARE(rect.left(), 4.0 + i * 36.0);
         QCOMPARE(rect.top() - top, 8.0);
         QVERIFY(button->property("flat").toBool());
@@ -541,8 +541,8 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QCOMPARE(volumeRect.width(), 96.0);
     // Stopped, "–:–– / –:––" leaves the box as wide, and the volume where
     // it is; it fills the box as a time does, in the secondary colour and
-    // tabular figures, rather than leaving a hole before the volume (#373
-    // H33 AA3: "–:––" alone ended some 45 px short of the box's end).
+    // tabular figures, rather than leaving a hole before the volume ("–:––"
+    // alone ended some 45 px short of the box's end).
     harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QTRY_COMPARE(time->property("text").toString(), QStringLiteral("–:–– / –:––"));
     QVERIFY(position->isVisible() && length->isVisible());
@@ -606,9 +606,9 @@ void TransportStatusTest::playPauseIsOneButtonThatShowsTheState() {
 
 // The Play/Pause glyphs cross-fade: the one shown goes out as the other
 // comes in, over shortDuration, so the button never drops below 0.6 of its
-// ink (#373 H4: a fade out, then in, left it below half for 50 ms). At rest
-// one glyph is whole and the other gone; a change back mid-fade reverses
-// from where it is; with animations off the swap is instant.
+// ink (a fade out, then in, left it below half for 50 ms). At rest one glyph
+// is whole and the other gone; a change back mid-fade reverses from where it
+// is; with animations off the swap is instant.
 void TransportStatusTest::playPauseGlyphsCrossFadeWithoutABlink() {
     Harness harness;
     QString errorText;
@@ -710,7 +710,7 @@ void TransportStatusTest::transportToolTipsNameTheShortcut() {
     QCOMPARE(toolTipText(next), QStringLiteral("Next · Ctrl+Right"));
     QCOMPARE(toolTipText(stop), QStringLiteral("Stop · Ctrl+Shift+Space"));
     // Play and Pause have no shortcut of their own: Space toggles them
-    // (#373 H9: Previous named its shortcut and Pause none).
+    // (Previous named its shortcut and Pause none).
     QCOMPARE(toolTipText(playPause), QStringLiteral("Pause · Space"));
     harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
     QTRY_COMPARE(toolTipText(playPause), QStringLiteral("Play · Space"));
@@ -724,8 +724,8 @@ void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {
     QTest::addColumn<int>("scheme");
     QTest::addColumn<double>("opacity");
     QTest::addColumn<double>("measured");
-    // On the Header colours (#373 H13 P24: the tones before were 2.99:1
-    // and 2.72:1 on them).
+    // On the Header colours (the tones before were 2.99:1 and 2.72:1 on
+    // them).
     QTest::newRow("breeze dark") << 0 << 0.5 << 3.21;
     QTest::newRow("breeze light") << 1 << 0.65 << 3.26;
     // Not measured by the design: the opacity rises to keep 3.2:1.
@@ -881,8 +881,8 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
     QCOMPARE(tip->property("text").toString(), expected);
     QVERIFY2(!expected.startsWith(QLatin1Char('0')), qPrintable(expected));
     // Above the bar, its bottom edge on the bar's top, centred on the line:
-    // it covers none of the waveform it reads (#373 H33 AA2), and nothing
-    // under the bar such as the queue's header (#373 H5).
+    // it covers none of the waveform it reads, and nothing under the bar
+    // such as the queue's header.
     auto *tipBox = tip->property("background").value<QQuickItem *>();
     QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
     QVERIFY(tipBox != nullptr && waveform != nullptr);
@@ -924,8 +924,8 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
     expectAbove(tipRect);
     QCOMPARE(tipRect.right(), bar.right());
     // Nothing else moves it: a little way in from the start, it is centred
-    // on its line again (#373 H34 AB4: a menu bar's titles kept it right of
-    // them, up to 350 px from its line).
+    // on its line again (a menu bar's titles kept it right of them, up to
+    // 350 px from its line).
     const QPointF nearStart(bar.left() + tipRect.width() / 2 + 20, bar.center().y());
     QTest::mouseMove(harness.window, nearStart.toPoint());
     QTRY_COMPARE(sceneRect(hoverLine).left(), std::floor(nearStart.x()));
@@ -994,10 +994,10 @@ void TransportStatusTest::volumeGlyphHasTheTransportsWeight_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// The volume glyph is drawn at the weight of Next beside it (#373 H8:
-// Breeze's speaker, with 1 px waves, read lighter than Play and Next), in
-// both of its looks: at least 80 % of Next's ink, where Breeze's speaker
-// had 63 %, and in Next's box.
+// The volume glyph is drawn at the weight of Next beside it (Breeze's
+// speaker, with 1 px waves, read lighter than Play and Next), in both of
+// its looks: at least 80 % of Next's ink, where Breeze's speaker had 63 %,
+// and in Next's box.
 void TransportStatusTest::volumeGlyphHasTheTransportsWeight() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1058,13 +1058,13 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale_data() {
     QTest::newRow("24 pt") << 24.0 << 38 << 48;
 }
 
-// The transport's glyphs on one scale (#373 H9: Play/Pause 22, Previous and
-// Next 16 and Stop 14 read as three weights): Previous, Stop, Next and the
-// volume 16 px, their ink 12 px tall, and Play/Pause a step above at 20 px,
-// its ink 14 px tall; Stop's and Pause's ink at most 1.4 times Next's. They
-// grow with the font on whole pixels, to at least 0.9 of its pixel size at
-// 24 pt, and are drawn at that size (H9: Kirigami rounded a 24 pt font's
-// 38 px glyphs down to 32 px theme icons, and would draw a 20 px one at 16).
+// The transport's glyphs on one scale (Play/Pause 22, Previous and Next 16
+// and Stop 14 read as three weights): Previous, Stop, Next and the volume
+// 16 px, their ink 12 px tall, and Play/Pause a step above at 20 px, its ink
+// 14 px tall; Stop's and Pause's ink at most 1.4 times Next's. They grow
+// with the font on whole pixels, to at least 0.9 of its pixel size at 24 pt,
+// and are drawn at that size (Kirigami rounded a 24 pt font's 38 px glyphs
+// down to 32 px theme icons, and would draw a 20 px one at 16).
 void TransportStatusTest::transportGlyphsDrawOnOneScale() {
     QFETCH(qreal, pointSize);
     QFETCH(int, small);
@@ -1252,13 +1252,12 @@ void TransportStatusTest::transportPressedReadsApartFromHover_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// A pressed transport button reads apart from a hovered one (#373 H5: the
-// press, text 10%, was the hover's tint in the dark and lighter than it in
-// the light): the pressed tint a clear step past the hover's, as drawn on
-// the transport's Header chrome, each as strong on it as the window's on
-// the view (#373 H13 P24): 1.3:1 and 1.65:1, 9% / 15% and 16% / 26% text
-// in Breeze. The status bar's buttons, on the window colour, take the
-// window's tints.
+// A pressed transport button reads apart from a hovered one (the press,
+// text 10%, was the hover's tint in the dark and lighter than it in the
+// light): the pressed tint a clear step past the hover's, as drawn on the
+// transport's Header chrome, each as strong on it as the window's on the
+// view: 1.3:1 and 1.65:1, 9% / 15% and 16% / 26% text in Breeze. The status
+// bar's buttons, on the window colour, take the window's tints.
 void TransportStatusTest::transportPressedReadsApartFromHover() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1327,7 +1326,7 @@ void TransportStatusTest::transportPressedReadsApartFromHover() {
 }
 
 // The seek bar's tooltip comes in over the window's short duration, as its
-// other hovers do, not the style's long one (#373 H5: 200 ms against 100 ms
+// other hovers do, not the style's long one (200 ms against 100 ms
 // elsewhere); it goes as the style's tooltips do.
 void TransportStatusTest::seekToolTipFadesInAtTheShortDuration() {
     Harness harness;
@@ -1390,8 +1389,8 @@ void TransportStatusTest::seekEmptyLineRunsPastAnEarlyEndingWaveform_data() {
 // A waveform that ends before the track does, as a file that ends early or
 // one not yet analysed to the end, leaves the rest of the bar its empty
 // line, 1 px through the middle as without a track, to the bar's last
-// pixel (#373 H10: nothing was drawn past the waveform's end). So does a
-// track playing before its first peaks.
+// pixel (nothing was drawn past the waveform's end). So does a track playing
+// before its first peaks.
 void TransportStatusTest::seekEmptyLineRunsPastAnEarlyEndingWaveform() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1661,11 +1660,11 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// The volume slider in the seek bar's language (#373 H5): a 3 px groove,
-// filled up to the thumb in the seek bar's played colour and the rest in
-// its unplayed one, opaque, and a solid 12 px thumb in the played colour,
-// centred on the groove. Hover brightens the thumb to the text colour and
-// shows "Volume 80%"; keyboard focus draws a 2 px ring around the thumb.
+// The volume slider in the seek bar's language: a 3 px groove, filled up to
+// the thumb in the seek bar's played colour and the rest in its unplayed
+// one, opaque, and a solid 12 px thumb in the played colour, centred on the
+// groove. Hover brightens the thumb to the text colour and shows
+// "Volume 80%"; keyboard focus draws a 2 px ring around the thumb.
 void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1751,10 +1750,10 @@ void TransportStatusTest::volumeGrooveGrowsWithTheThumb_data() {
 }
 
 // A larger font widens the volume's groove with its thumb and the glyphs,
-// up to half again: at 24 pt, 144 px and 108 px in a narrow window (#373
-// H34 AB5: the 29 px thumb crowded a 96 px groove). The default font keeps
-// 96 px and 72 px. The groove ends on the content edge, and its background
-// is as wide as the slider.
+// up to half again: at 24 pt, 144 px and 108 px in a narrow window (the
+// 29 px thumb crowded a 96 px groove). The default font keeps 96 px and
+// 72 px. The groove ends on the content edge, and its background is as wide
+// as the slider.
 void TransportStatusTest::volumeGrooveGrowsWithTheThumb() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
@@ -1795,11 +1794,10 @@ void TransportStatusTest::previousGlyphStartsOnTheContentEdge_data() {
 
 // Previous's glyph starts on the 12 px content edge, where the library's
 // rows and the status bar's text do, as the transport's right end is
-// measured to the volume's groove (#373 H34 AB6: its ink was at 20 px,
-// with the button's clear space added to the inset). Its hover tint and
-// focus ring stay inside the window: at a large font, whose clear space
-// would put the ring past the window's edge, the glyph starts a pixel or
-// two further in.
+// measured to the volume's groove (its ink was at 20 px, with the button's
+// clear space added to the inset). Its hover tint and focus ring stay inside
+// the window: at a large font, whose clear space would put the ring past the
+// window's edge, the glyph starts a pixel or two further in.
 void TransportStatusTest::previousGlyphStartsOnTheContentEdge() {
     QFETCH(qreal, pointSize);
     QFETCH(bool, dark);
@@ -1891,11 +1889,11 @@ void TransportStatusTest::volumeMuteKeepsTheThumb_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// A mute leaves the thumb at the volume it put aside (#373 H5: it threw the
-// thumb to 0), dims the filled groove and the thumb at rest to the unfilled
-// colour together, over the same fade (#373 H34 AB3: the thumb stayed
-// bright), and shows the muted glyph; the tooltip says so. A hover still
-// shows the thumb in the text colour. Unmuting brings both back.
+// A mute leaves the thumb at the volume it put aside (it threw the thumb
+// to 0), dims the filled groove and the thumb at rest to the unfilled
+// colour together, over the same fade (the thumb stayed bright), and shows
+// the muted glyph; the tooltip says so. A hover still shows the thumb in
+// the text colour. Unmuting brings both back.
 void TransportStatusTest::volumeMuteKeepsTheThumb() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1968,9 +1966,8 @@ void TransportStatusTest::volumeMuteKeepsTheThumb() {
 }
 
 // The volume's tooltip shows the value it is dragged to, even when the drag
-// starts before the hover's delay has shown it (#373 H5: "Volume 100%"
-// with the thumb at 40%: the shared tooltip kept the text it had when the
-// delay began).
+// starts before the hover's delay has shown it ("Volume 100%" with the thumb
+// at 40%: the shared tooltip kept the text it had when the delay began).
 void TransportStatusTest::volumeToolTipFollowsTheDrag() {
     Harness harness;
     QString errorText;
@@ -2073,9 +2070,9 @@ void TransportStatusTest::statusBarShowsRepeatAndShuffleInWords() {
     QTRY_COMPARE(sceneRect(group).left(), sceneRect(state).right() + 16.0);
     harness.bridge->setProperty("repeatMode", 2);
     QCOMPARE(repeat->property("text").toString(), QStringLiteral("Repeat Whole Queue"));
-    // Shuffle as repeat is (#373 H6: a glyph alone, named only in its
-    // tooltip): its glyph and the words of its menu item, "Shuffle", in
-    // the secondary colour, 16 px after repeat.
+    // Shuffle as repeat is (it was a glyph alone, named only in its
+    // tooltip): its glyph and the words of its menu item, "Shuffle", in the
+    // secondary colour, 16 px after repeat.
     harness.bridge->setProperty("shuffleEnabled", true);
     QTRY_VERIFY(shuffle->isVisible() && shuffleLabel->isVisible() && shuffleGlyph->isVisible());
     QCOMPARE(shuffleLabel->property("text").toString(), QStringLiteral("Shuffle"));
@@ -2126,9 +2123,9 @@ void TransportStatusTest::statusBarShowsTheFormatGroupWithoutThePosition() {
 }
 
 // The format group shows what fits whole, not what the window's width
-// allows (#373 H6: at 1000 px it showed "FLAC" alone, with most of the bar
-// empty). With the room, all of it; with less, it drops parts from the end,
-// each only once it no longer fits, and never cuts one.
+// allows (at 1000 px it showed "FLAC" alone, with most of the bar empty).
+// With the room, all of it; with less, it drops parts from the end, each
+// only once it no longer fits, and never cuts one.
 void TransportStatusTest::statusBarFormatShowsWhatFitsWhole() {
     Harness harness;
     QString errorText;
@@ -2146,8 +2143,8 @@ void TransportStatusTest::statusBarFormatShowsWhatFitsWhole() {
 
     // The width of each part as a label of the status bar draws it, and of
     // the separator between two: the headers' middle dot between two
-    // spaces, as wide as that text and no wider (#373 H11: a dot with 6 px
-    // either side of it stood wider than the headers').
+    // spaces, as wide as that text and no wider (a dot with 6 px either side
+    // of it stood wider than the headers').
     const QFontMetricsF metrics(stateLabel->property("font").value<QFont>());
     const qreal dot = metrics.horizontalAdvance(separator);
     QList<QQuickItem *> separators;
@@ -2229,8 +2226,8 @@ void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
         harness.bridge->setProperty("libraryScanInProgress", true);
         QTRY_VERIFY(scan->isVisible());
         // Words that say what the progress is, and its percent of the files
-        // to scan, not of those found so far (#373 H13: the bar alone read
-        // as a twin of the Last.fm slot's); the files in the tooltip.
+        // to scan, not of those found so far (the bar alone read as a twin
+        // of the Last.fm slot's); the files in the tooltip.
         QCOMPARE(count->property("text").toString(), QStringLiteral("34%"));
         QCOMPARE(accessibleText(scan, QAccessible::Name), QStringLiteral("Scanning “Music”: 412 of 1,204 files"));
         if (width == 1000) {
@@ -2298,10 +2295,10 @@ void TransportStatusTest::statusBarScanBarFillsOnlyOnceTheRescanEnds() {
     QCOMPARE(count->property("text").toString(), QStringLiteral("100%"));
 }
 
-// The scan's words and its bar keep their places while it counts (#373
-// H13): the percent keeps the room of "100%", in tabular figures, so the
-// status bar's groups do not move as it goes from 0% to 9% to 10% to
-// 100%, at 10 and at 24 pt, wide and narrow.
+// The scan's words and its bar keep their places while it counts: the
+// percent keeps the room of "100%", in tabular figures, so the status bar's
+// groups do not move as it goes from 0% to 9% to 10% to 100%, at 10 and at
+// 24 pt, wide and narrow.
 void TransportStatusTest::statusBarScanKeepsItsPlaceWhileItCounts_data() {
     QTest::addColumn<int>("width");
     QTest::addColumn<int>("pointSize");
@@ -2441,18 +2438,17 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
 
     // Listening: the glyph in the secondary colour, and under it the bar in
     // the same colour, the listening done of its trough, which is opaque and
-    // 3:1 on the status bar (#373 H12: the text at 20% was 1.9:1); the time
-    // left in the tooltip.
+    // 3:1 on the status bar (the text at 20% was 1.9:1); the time left in
+    // the tooltip.
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
     bridge->setProperty("lastFmScrobbleListenedMs", 77000);
     bridge->setProperty("lastFmScrobbleState", 1);
     QTRY_VERIFY(slot->isVisible());
     QVERIFY(!label->isVisible());
-    // A 16 px glyph (#373 H6: 10 px inside a ring was a smudge at 1x), and
-    // a 16 by 3 px trough 2 px under its ink (#373 H10: the bar under the
-    // glyph's cell pushed the glyph 2.5 px above the middle; H13: at 2 px
-    // its proportions did not read at 1x), which the bar fills from the
-    // left by whole pixels.
+    // A 16 px glyph (10 px inside a ring was a smudge at 1x), and a 16 by
+    // 3 px trough 2 px under its ink (the bar under the glyph's cell pushed
+    // the glyph 2.5 px above the middle; at 2 px its proportions did not
+    // read at 1x), which the bar fills from the left by whole pixels.
     QCOMPARE(box->size(), QSizeF(16, 16));
     QCOMPARE(glyph->size(), QSizeF(16, 16));
     QCOMPARE(glyph->position(), QPointF(0, 0));
@@ -2477,7 +2473,7 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QCOMPARE(accessibleText(slot, QAccessible::Name), QStringLiteral("Last.fm: 0:38 to scrobble"));
     QCOMPARE(accessibleText(slot, QAccessible::Description), QStringLiteral("Press to pause scrobbling."));
     // Until the track's length is known, there is no scrobble point: the
-    // trough and the 3 px mark that listening always has (#373 H9, H12).
+    // trough and the 3 px mark that listening always has.
     bridge->setProperty("lastFmScrobbleThresholdMs", 0);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: listening"));
     QCOMPARE(progress(), 0.0);
@@ -2511,9 +2507,9 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
         QTRY_VERIFY2(!slot->isVisible(), qPrintable(QString::number(state)));
     }
 
-    // Being sent and scrobbled differ by shape (#373 H8): while it is sent,
-    // the bar fills its trough; once accepted, neither, and the glyph in
-    // the secondary colour. The glyph is the same in both, at full strength.
+    // Being sent and scrobbled differ by shape: while it is sent, the bar
+    // fills its trough; once accepted, neither, and the glyph in the
+    // secondary colour. The glyph is the same in both, at full strength.
     bridge->setProperty("lastFmScrobbleState", 2);
     QTRY_VERIFY(slot->isVisible());
     QVERIFY(bar->isVisible());
@@ -2540,7 +2536,7 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: sending the scrobble"));
 
     // Queued: the words and the offline glyph, of the Last.fm glyph's
-    // family and size, where it is (#373 H11: a 14 px one), without the bar.
+    // family and size, where it is (it was a 14 px one), without the bar.
     bridge->setProperty("lastFmScrobbleState", 5);
     bridge->setProperty("lastFmPendingScrobbleCount", 3);
     QTRY_VERIFY(slot->isVisible());
@@ -2555,9 +2551,9 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     bridge->setProperty("lastFmPendingScrobbleCount", 1);
     QCOMPARE(label->property("text").toString(), QStringLiteral("1 scrobble waiting"));
 
-    // Failed: the status bar's one treatment of an error (#373 H11): the
-    // words in the text colour and the 16 px glyph in the negative colour,
-    // the slot's only colour, at least 3:1 on the chrome; no bar.
+    // Failed: the status bar's one treatment of an error: the words in the
+    // text colour and the 16 px glyph in the negative colour, the slot's
+    // only colour, at least 3:1 on the chrome; no bar.
     bridge->setProperty("lastFmPendingScrobbleCount", 0);
     bridge->setProperty("lastFmScrobbleState", 4);
     bridge->setProperty("lastFmScrobbleMessage", QStringLiteral("Invalid session key"));
@@ -2714,17 +2710,16 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// The bar under the glyph, as drawn at 1x (#373 H11): a trough 16 by 3 px
-// (#373 H13), the glyph's width, 2 px under its ink, the text at 35% in
-// the chrome, or nearer the text where that is under 3:1 on the chrome
-// (#373 H12: the text at 20% was 1.9:1 dark and 1.5:1 light), and in
-// it from the left the listening done, in the secondary text colour: 3:1
-// or more on the chrome and well apart from its trough, so that it reads as
-// a share of a whole (H10's bar had no trough, started 6 px long and was
-// brighter than its glyph: it did not read as progress). Nothing between
-// the glyph and the trough. At 0% a 3 px mark in the trough, so that
-// listening that has just started never looks like scrobbled (#373 H9:
-// both were the bare glyph; H12: the trough alone did). Being sent fills
+// The bar under the glyph, as drawn at 1x: a trough 16 by 3 px, the glyph's
+// width, 2 px under its ink, the text at 35% in the chrome, or nearer the
+// text where that is under 3:1 on the chrome (the text at 20% was 1.9:1
+// dark and 1.5:1 light), and in it from the left the listening done, in the
+// secondary text colour: 3:1 or more on the chrome and well apart from its
+// trough, so that it reads as a share of a whole (a bar with no trough,
+// that started 6 px long and was brighter than its glyph, did not read as
+// progress). Nothing between the glyph and the trough. At 0% a 3 px mark in
+// the trough, so that listening that has just started never looks like
+// scrobbled (the bare glyph, or the trough alone, did). Being sent fills
 // it; scrobbled and failed have neither bar nor trough.
 void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
     QFETCH(bool, dark);
@@ -2827,12 +2822,11 @@ void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// Listening, being sent and scrobbled look apart as drawn, by shape and
-// not by shade (#373 H5, H6: they drew alike; H8: they still differed
-// mainly in shade). Listening: the bar short of its trough's end (a play
-// at its scrobble point is being sent). Being sent: the bar over the whole
-// trough. Scrobbled: neither, the glyph in the secondary colour. The glyph
-// is drawn alike in all three.
+// Listening, being sent and scrobbled look apart as drawn, by shape and not
+// by shade (they drew alike, and then differed mainly in shade). Listening:
+// the bar short of its trough's end (a play at its scrobble point is being
+// sent). Being sent: the bar over the whole trough. Scrobbled: neither, the
+// glyph in the secondary colour. The glyph is drawn alike in all three.
 void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
     QFETCH(bool, dark);
     Harness harness;
@@ -2926,9 +2920,9 @@ void TransportStatusTest::lastFmGlyphIsCentredOnItsBlock_data() {
 
 // The Last.fm glyph's ink, as drawn, is centred on its block, the slot,
 // both ways and on whole pixels, and the slot on the status bar under its
-// seam (#373 H10: the glyph sat 2.5 px above the middle, over the bar's
-// place). The trough under it is 3 px thick at the default font, a little
-// more at a larger one, and as wide as the glyph (#373 H11).
+// seam (the glyph sat 2.5 px above the middle, over the bar's place). The
+// trough under it is 3 px thick at the default font, a little more at a
+// larger one, and as wide as the glyph.
 void TransportStatusTest::lastFmGlyphIsCentredOnItsBlock() {
     QFETCH(bool, dark);
     QFETCH(qreal, pointSize);
@@ -3032,14 +3026,14 @@ void TransportStatusTest::lastFmSlotGlyphReadsAtOneX_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// The Last.fm glyph is drawn for 1x at 16 px on whole pixels (#373 H6: a
-// 10 px glyph in a ring was a smudge; H8: H6's bold one read "QS"): its ink
-// within rows 3 to 12 and columns 1 to 14, its straight strokes whole
-// pixels and only its corners antialiased (#373 H11: every pixel ink or
-// clear was a staircase, of another hand than the offline glyph), in
-// Breeze's stroke weight (2 px verticals, 1 px horizontals, about 1.5 px),
-// and a two-storey a that reads as one: its bowl's counter open, the bowl
-// open to the left under the arch, the stem whole, and apart from the s.
+// The Last.fm glyph is drawn for 1x at 16 px on whole pixels (a 10 px glyph
+// in a ring was a smudge, and a bold one read "QS"): its ink within rows 3
+// to 12 and columns 1 to 14, its straight strokes whole pixels and only its
+// corners antialiased (with every pixel ink or clear it was a staircase, of
+// another hand than the offline glyph), in Breeze's stroke weight (2 px
+// verticals, 1 px horizontals, about 1.5 px), and a two-storey a that reads
+// as one: its bowl's counter open, the bowl open to the left under the
+// arch, the stem whole, and apart from the s.
 void TransportStatusTest::lastFmSlotGlyphReadsAtOneX() {
     QFETCH(bool, dark);
     Harness harness;
@@ -3111,7 +3105,7 @@ void TransportStatusTest::lastFmSlotGlyphReadsAtOneX() {
     // The stroke weight: how thick the stroke is at each pixel of ink, its
     // shortest run of ink across, down or along either diagonal. Never more
     // than 2 px, and about 1.5 on average, the weight of the status bar's
-    // other glyphs: H6's 2 px strokes everywhere, 1.8 on this measure, read
+    // other glyphs: 2 px strokes everywhere, 1.8 on this measure, read
     // blocky beside Breeze's line icons.
     const auto isInk = [&](int x, int y) { return x >= 0 && x < 16 && y >= 0 && y < 16 && ink(x, y) >= 0.9; };
     double weight = 0;
@@ -3179,11 +3173,11 @@ void TransportStatusTest::lastFmBarReadsApartFromTheScanBar_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// The Last.fm bar is the glyph's, not a second scan or a download (#373
-// H6), with a scan running beside it: as wide as the glyph and under it,
-// less than a quarter of the scan bar's length and half its height, with
-// square ends where the scan bar's are round. It has a trough, as the scan
-// bar has (#373 H11: without one it did not read as progress).
+// The Last.fm bar is the glyph's, not a second scan or a download, with a
+// scan running beside it: as wide as the glyph and under it, less than a
+// quarter of the scan bar's length and half its height, with square ends
+// where the scan bar's are round. It has a trough, as the scan bar has
+// (without one it did not read as progress).
 void TransportStatusTest::lastFmBarReadsApartFromTheScanBar() {
     QFETCH(bool, dark);
     Harness harness;
@@ -3219,9 +3213,9 @@ void TransportStatusTest::lastFmBarReadsApartFromTheScanBar() {
     QCOMPARE(slot->property("barWidth").toReal(), glyphRect.width());
     QCOMPARE(barRect.width(), glyphRect.width() / 2);
     QVERIFY2(glyphRect.width() * 4 < scanBar->width(), qPrintable(QString::number(scanBar->width())));
-    // 3 px to the scan bar's 4 (#373 H13: at 2 px its proportions did not
-    // read at 1x), with square ends to the scan bar's round ones, and the
-    // scan bar has its percent beside it.
+    // 3 px to the scan bar's 4 (at 2 px its proportions did not read at
+    // 1x), with square ends to the scan bar's round ones, and the scan bar
+    // has its percent beside it.
     QCOMPARE(bar->height(), 3.0);
     QCOMPARE(trough->height(), 3.0);
     QQuickItem *scanCount = harness.item(QStringLiteral("statusBarScanCount"));
@@ -3253,9 +3247,9 @@ void TransportStatusTest::lastFmBarReadsApartFromTheScanBar() {
     }
 }
 
-// The Last.fm slot's three glyphs are one family (#373 H11: the "as" was a
-// grid of squares, its strike a staircase of them, and the offline glyph
-// thin antialiased strokes at 14 px: three hands in one slot). Each is an
+// The Last.fm slot's three glyphs are one family (the "as" was a grid of
+// squares, its strike a staircase of them, and the offline glyph thin
+// antialiased strokes at 14 px: three hands in one slot). Each is an
 // outline drawn for 16 px: its straight strokes whole pixels there, its
 // curves and its strike antialiased, and sharp at 2x. Paused and offline
 // are struck through with the same stroke, from corner to corner, with
@@ -3350,12 +3344,12 @@ void TransportStatusTest::lastFmGlyphsAreOneFamily() {
     }
 }
 
-// "Bridge disconnected" was the developer's word for it (#373 H5): the
-// status bar says the playback engine isn't running, and its tooltip what
-// to do. It is an error, in the status bar's one treatment of them (#373
-// H11: a stopped engine was red semibold words, one not running plain
-// words with no glyph): the words in the text colour, at the status bar's
-// weight, after a 16 px warning glyph in the negative colour.
+// "Bridge disconnected" was the developer's word for it: the status bar
+// says the playback engine isn't running, and its tooltip what to do. It is
+// an error, in the status bar's one treatment of them (a stopped engine was
+// red semibold words, one not running plain words with no glyph): the words
+// in the text colour, at the status bar's weight, after a 16 px warning
+// glyph in the negative colour.
 void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     Harness harness;
     QString errorText;
@@ -3392,7 +3386,7 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QTest::mouseMove(harness.window, sceneCentre(label));
     QTRY_VERIFY(toolTipShown(label));
     // A failure the backend reported says so instead, in the same words
-    // (#373 H6: "Backend stopped").
+    // (it said "Backend stopped").
     QQuickItem *stopped = harness.item(QStringLiteral("statusBarBackendStoppedLabel"));
     QVERIFY(stopped != nullptr);
     QVERIFY(!stopped->isVisible());
@@ -3458,8 +3452,8 @@ void TransportStatusTest::issuesButtonShowsNewSeenAndOpen() {
     takeCapturedMessages(); // The controller logs each report as a warning.
     QTRY_VERIFY(button->isVisible());
     QCOMPARE(label->property("text").toString(), QStringLiteral("2 new issues"));
-    // The status bar's one treatment of an error (#373 H11): a 16 px glyph
-    // in the negative colour and the words in the text colour.
+    // The status bar's one treatment of an error: a 16 px glyph in the
+    // negative colour and the words in the text colour.
     QCOMPARE(glyph->size(), QSizeF(16, 16));
     // An outlined triangle: Breeze's filled one loses its "!" as a mask.
     QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("status-warning.svg")));
@@ -3580,8 +3574,8 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
         QVERIFY2(item != nullptr, qPrintable(name));
         QVERIFY2(within(sceneRect(item), band), qPrintable(name + QLatin1Char(' ') + describeRect(sceneRect(item))));
     }
-    // The seek waveform and the volume's thumb grow as the glyphs do (#373
-    // H12: 24 and 12 px beside 48 px glyphs): 24 px and 12 px 2.4 times,
+    // The seek waveform and the volume's thumb grow as the glyphs do (they
+    // stayed 24 and 12 px beside 48 px glyphs): 24 px and 12 px 2.4 times,
     // the seek bar 2 px past the waveform on either side, and both inside
     // the band.
     QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));

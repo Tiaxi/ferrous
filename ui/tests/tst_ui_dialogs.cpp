@@ -503,8 +503,8 @@ void UiDialogsTest::drawsOffscreenUnlessAPlatformIsChosen() {
 }
 
 // Configure Ferrous, About and About KDE are windows of their own, as
-// KConfigDialog and KAboutApplicationDialog (About KDE since #373 H4, so
-// the two About dialogs are one model): KWin's title bar, no title or close button
+// KConfigDialog and KAboutApplicationDialog (About KDE too, so the two
+// About dialogs are one model): KWin's title bar, no title or close button
 // of their own and no dimmed main window; above the main window, which they
 // block, resizable, and keeping the user's size. Escape and the title bar's
 // close button reject them, and the main window gets the keyboard back.
@@ -688,7 +688,7 @@ void UiDialogsTest::configurePageIconsFollowTheFont_data() {
 
 // The page list's icons are as large as their titles' font calls for,
 // Kirigami's size for labels: 16 px with the default font, larger at 24 pt
-// (#373 H38: they stayed 16 px beside 24 pt titles), and drawn in the
+// (at a fixed 16 px they were small beside 24 pt titles), and drawn in the
 // text's colour at either size. The list is as wide
 // as a row with its icon and its longest title needs, centred on the row.
 void UiDialogsTest::configurePageIconsFollowTheFont() {
@@ -760,10 +760,9 @@ void UiDialogsTest::configureListRowsAreAlike_data() {
 }
 
 // Every row of Configure's lists has its text on the same line within it,
-// the last as the others, and centred on it (#373 H40: the style gives
-// every row but a list's last a bottom padding, which the rows' `padding:
-// 0` left, so the others' text sat 2 px above Last.fm's and the last
-// folder's).
+// the last as the others, and centred on it (the style gives every row
+// but a list's last a bottom padding, which the rows' `padding: 0` left,
+// so the others' text sat 2 px above Last.fm's and the last folder's).
 void UiDialogsTest::configureListRowsAreAlike() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -841,12 +840,11 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// The library's folders have their paths in one column: the names' column
-// is as wide as the widest name, up to 8 grid units scaled with the font
-// (UiPalette.scaledSize), so every path starts
-// at one x, a row without a name included (#373 H43: each path began where
-// its own name ended). A single folder's row is as it was, and a list
-// without names has no names' column.
+// The library's folders have their paths in one column: the names' column is
+// as wide as the widest name, up to 8 grid units scaled with the font
+// (UiPalette.scaledSize), so every path starts at one x, a row without a
+// name included, rather than where its own name ends. A single folder's row
+// is as it was, and a list without names has no names' column.
 void UiDialogsTest::libraryFolderPathsShareOneColumn() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -1297,8 +1295,8 @@ void UiDialogsTest::enterInATextFieldTakesTheTextNotTheDefaultButton() {
     QCOMPARE(nameWindow->transientParent(), window);
     QQuickItem *name = visibleNamed(nameWindow, QStringLiteral("libraryRootNameField"));
     QTRY_VERIFY(name->hasActiveFocus());
-    // No placeholder, which read as a prompt to type a path (#373 H38):
-    // the help under it says what an empty name does.
+    // No placeholder, which read as a prompt to type a path: the help under
+    // it says what an empty name does.
     QCOMPARE(name->property("placeholderText").toString(), QString());
     QSignalSpy accepted(nameDialog, SIGNAL(accepted()));
     QTest::keyClick(nameWindow, Qt::Key_J);
@@ -1494,20 +1492,19 @@ void UiDialogsTest::configureFitsItsPagesAtAnyWidth() {
     QTRY_VERIFY(!prefs->isVisible());
 }
 
-// Configure has four pages (#373 H7, P12): Library, Visualization,
-// General and Last.fm. Visualization holds every plot setting, in three
-// groups under subheadings (#373 H8): Analysis, Display and Interaction,
-// with the "Show:" check boxes together. General holds the fullscreen viewers and, under a plain
-// subheading, Plasma's media controls. A help text is 4 px under its
-// control, 12 px above the next row, and at most about 440 px wide.
-// At the default 10 pt font, Configure opens tall enough for the
-// Visualization page, its tallest, with its three subheadings: it shows
-// whole, with no vertical scroll bar, whichever page Configure opens on
-// (#373 H8: its last row was under the buttons), and so does every other
-// page. The pages are laid out only once they show, so its height cannot
-// follow them (#585): it is Visualization's as measured with Noto Sans,
-// 38 grid units, and a margin of 8 px (#373 H37: with Noto Sans it
-// scrolled by 8 px in 41 grid units for the whole window).
+// Configure has four pages: Library, Visualization, General and Last.fm.
+// Visualization holds every plot setting, in three groups under subheadings:
+// Analysis, Display and Interaction, with the "Show:" check boxes together.
+// General holds the fullscreen viewers and, under a plain subheading,
+// Plasma's media controls. A help text is 4 px under its control, 12 px
+// above the next row, and at most about 440 px wide. At the default 10 pt
+// font, Configure opens tall enough for the Visualization page, its tallest,
+// with its three subheadings: it shows whole, with no vertical scroll bar,
+// whichever page Configure opens on (its last row once sat under the
+// buttons), and so does every other page. The pages are laid out only once
+// they show, so its height cannot follow them (#585): it is Visualization's
+// as measured with Noto Sans, 38 grid units, and a margin of 8 px (with Noto
+// Sans it scrolled by 8 px in 41 grid units for the whole window).
 void UiDialogsTest::configureFitsTheVisualizationPageAtTheDefaultFont() {
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
@@ -1698,7 +1695,7 @@ void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
     // Within a group, the rows are 4 px apart; a help text is 4 px under
     // its control and 12 px above the next row.
     // The Show group's three check boxes are together, the crosshair's help
-    // after them (#373 H38: Frame rate stood apart under it).
+    // after them (Frame rate once stood apart under the help).
     QVERIFY(gapIs(named("spectrogramScaleCheckBox"), named("spectrogramCrosshairCheckBox"), 4));
     QVERIFY(gapIs(named("spectrogramCrosshairCheckBox"), named("spectrogramFpsCheckBox"), 4));
     QVERIFY(gapIs(named("spectrogramFpsCheckBox"), crosshairHelp, 4));
@@ -1712,8 +1709,8 @@ void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
 
     // General: the viewers, then Plasma's media controls, two groups apart
     // by the room between them, with no subheading: only a page of three or
-    // more groups heads them, and "Plasma:" names the second (#373 H43: a
-    // heading over a single check box that its label already named).
+    // more groups heads them, and "Plasma:" names the second (a heading
+    // over a single check box would repeat what its label names).
     dialog->setProperty("pageIndex", 2);
     QQuickItem *media = nullptr;
     QTRY_VERIFY((media = named("systemMediaControlsCheckBox")) != nullptr);
@@ -1732,9 +1729,9 @@ void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
     QTRY_VERIFY(!prefs->isVisible());
 }
 
-// The labels' column is as wide on every page of Configure (#373 H5): the
-// fields of the labelled rows start at one x as the pages change, rather
-// than where each page's own widest label ends.
+// The labels' column is as wide on every page of Configure: the fields of
+// the labelled rows start at one x as the pages change, rather than where
+// each page's own widest label ends.
 void UiDialogsTest::configureLabelsEndAtOnePlaceOnEveryPage() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1780,9 +1777,9 @@ void UiDialogsTest::configureLabelsEndAtOnePlaceOnEveryPage() {
     QTRY_VERIFY(!prefs->isVisible());
 }
 
-// A path the dialogs show but do not edit is a label (#373 H5): one line,
-// elided in the middle, so its start and its name stay, with the whole
-// path in a tooltip; not a read-only text field, which looks editable.
+// A path the dialogs show but do not edit is a label: one line, elided in
+// the middle, so its start and its name stay, with the whole path in a
+// tooltip; not a read-only text field, which looks editable.
 void UiDialogsTest::readOnlyPathsAreMiddleElidedLabelsWithATooltip() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1852,11 +1849,10 @@ void UiDialogsTest::libraryFolderNameDialogShowsItsPath_data() {
 }
 
 // Add and Rename Library Folder show a typical folder's path whole, in a
-// path 24 grid units wide, with the help under the name on one line
-// (#373 H38: a 16-unit path elided a short one beside wide gutters). The
-// name has no placeholder, which read as a prompt to type a path; the
-// help says what an empty name does, which the library does
-// (LibraryRoot::display_name).
+// path 24 grid units wide, with the help under the name on one line (a
+// 16-unit path elided a short one beside wide gutters). The name has no
+// placeholder, which read as a prompt to type a path; the help says what an
+// empty name does, which the library does (LibraryRoot::display_name).
 void UiDialogsTest::libraryFolderNameDialogShowsItsPath() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -1902,7 +1898,7 @@ void UiDialogsTest::libraryFolderNameDialogShowsItsPath() {
         }
         QVERIFY2(sceneRect(help).right() <= nameWindow->width() - inset + 0.5, qPrintable(where));
         // The help text ends the form at the dialogs' inset above the
-        // buttons, as a confirmation's last line does (#373 H42: 35 px
+        // buttons, as a confirmation's last line does (they were 35 px
         // apart, with the help text's room to a next row and the form's
         // empty last row under it).
         QQuickItem *accept = visibleNamed(nameWindow, QStringLiteral("libraryRootNameAcceptButton"));
@@ -1961,7 +1957,7 @@ void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
     click(prefs, visibleNamed(prefs, QStringLiteral("libraryRootRemoveButton")));
     QObject *confirm = object(window, QStringLiteral("removeLibraryRootConfirmDialog"));
     QVERIFY(confirm != nullptr);
-    // A window of its own above Configure's (#373 H5), not a popup in it.
+    // A window of its own above Configure's, not a popup in it.
     QVERIFY(waitForDialogWindow(confirm));
     QQuickWindow *confirmWindow = windowOf(confirm);
     QCOMPARE(confirmWindow->transientParent(), prefs);
@@ -1980,12 +1976,12 @@ void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
     QVERIFY(!dialog->property("modified").toBool());
 }
 
-// The library folders are a list, not a field (#373 H4): the view colour
-// in a 1 px seam, 26 px rows edge to edge inside it, and no selection until
-// the user selects a folder, so a single folder does not read as a focused
-// text field. The buttons that act on a folder wait for one. A click
-// selects with the tint alone; the ring shows only from the keyboard,
-// which selects the first folder as it arrives.
+// The library folders are a list, not a field: the view colour in a 1 px
+// seam, 26 px rows edge to edge inside it, and no selection until the user
+// selects a folder, so a single folder does not read as a focused text
+// field. The buttons that act on a folder wait for one. A click selects with
+// the tint alone; the ring shows only from the keyboard, which selects the
+// first folder as it arrives.
 void UiDialogsTest::libraryFoldersAreAFramedListWithNoSelectionAtFirst() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2026,7 +2022,7 @@ void UiDialogsTest::libraryFoldersAreAFramedListWithNoSelectionAtFirst() {
         QCOMPARE(sceneRect(row).left(), sceneRect(list).left());
         QCOMPARE(sceneRect(row).right(), sceneRect(list).right());
     }
-    // Three rows tall, the third empty (#373 H38).
+    // Three rows tall, the third empty.
     QCOMPARE(frame->height(), 3 * rowHeight + 2);
 
     // The look of a row: whether it has the tint, and its ring.
@@ -2099,9 +2095,9 @@ void UiDialogsTest::libraryFolderListIsThreeRowsTallAtLeast_data() {
 }
 
 // The library folder list is three rows tall at least, so that one folder
-// sits in a visible list, the view colour under it inside the frame,
-// rather than reading as a text field (#373 H38). It grows with its
-// folders up to eight rows, and then scrolls.
+// sits in a visible list, the view colour under it inside the frame, rather
+// than reading as a text field. It grows with its folders up to eight rows,
+// and then scrolls.
 void UiDialogsTest::libraryFolderListIsThreeRowsTallAtLeast() {
     QFETCH(int, folders);
     LibraryTreeModel libraryModel;
@@ -2164,8 +2160,8 @@ void UiDialogsTest::libraryFoldersLabelSitsOnTheFirstFoldersBaseline_data() {
 }
 
 // The form's "Library folders:" sits on the first folder's line, its
-// baseline on the folder's name's (#373 H47: at the list's top, 5 px above
-// the name, at 10 and at 24 pt).
+// baseline on the folder's name's (at the list's top it sat 5 px above the
+// name, at 10 and at 24 pt).
 void UiDialogsTest::libraryFoldersLabelSitsOnTheFirstFoldersBaseline() {
     QFETCH(qreal, pointSize);
     QFETCH(int, folders);
@@ -2253,10 +2249,9 @@ void UiDialogsTest::quitFailureBreaksItsPathOnlyBetweenFolders_data() {
 }
 
 // The quit failure's message wraps as its words allow, but a path in it
-// breaks only after a slash, never inside a folder's name, and the
-// system's "(os error 13)" stays whole (#373 H47: "(os error" ended a line
-// and "13)" was alone on the next). Its accessible name is the message as
-// it is.
+// breaks only after a slash, never inside a folder's name, and the system's
+// "(os error 13)" stays whole (not "(os error" ending a line and "13)" alone
+// on the next). Its accessible name is the message as it is.
 void UiDialogsTest::quitFailureBreaksItsPathOnlyBetweenFolders() {
     QFETCH(qreal, pointSize);
     QFETCH(QString, message);
@@ -2426,8 +2421,8 @@ void UiDialogsTest::lastFmPageShowsOnlyTheButtonsThatApply() {
 }
 
 // In a build without Last.fm, scrobbling can't be turned on: the build
-// can't send a scrobble, and the account's line says why (#373 H40: the
-// check box was there to tick). No button to connect either.
+// can't send a scrobble, and the account's line says why, rather than
+// offering a check box to tick. No button to connect either.
 void UiDialogsTest::lastFmScrobblingNeedsABuildWithLastFm() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2468,8 +2463,8 @@ void UiDialogsTest::lastFmAccountIsAGroupApart_data() {
 // The Last.fm page's account stands apart from the scrobbling group above
 // it, as General's groups are: 16 px from the group's last row, the status
 // check box when connected or the help text without it, where the rows
-// within the group are 4 px apart (#373 H42: Account stood 4 px under the
-// status check box, closer than the help text above it).
+// within the group are 4 px apart (at 4 px under the status check box,
+// Account stood closer to it than the help text above it).
 void UiDialogsTest::lastFmAccountIsAGroupApart() {
     QFETCH(bool, connected);
     LibraryTreeModel libraryModel;
@@ -2581,13 +2576,12 @@ void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// About KDE is laid out as About Ferrous (#373 H4): the 48 px icon, the
-// name and the line under it at the same places and in the same fonts and
-// colours, the page at the inset of About's pages, starting where About's
-// tabs do, as it has one page and so no tabs,
-// and Close at the right of the button row, the default button with the
-// keyboard. It opens tall enough for its page, whose last line ends 12 px
-// over the buttons, and scrolls it when made shorter.
+// About KDE is laid out as About Ferrous: the 48 px icon, the name and the
+// line under it at the same places and in the same fonts and colours, the
+// page at the inset of About's pages, starting where About's tabs do, as it
+// has one page and so no tabs, and Close at the right of the button row, the
+// default button with the keyboard. It opens tall enough for its page, whose
+// last line ends 12 px over the buttons, and scrolls it when made shorter.
 void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -2697,8 +2691,8 @@ void UiDialogsTest::aboutPagesSitOnAFrameJoinedToTheTabs_data() {
 }
 
 // About's pages sit on a frame joined to the tabs, as KDE's About dialog
-// draws them (#373 H38: the tabs' band stopped mid-window, with no page
-// under it): the frame is as wide as the content, its top edge on the
+// draws them, rather than a band of tabs that stops mid-window with no
+// page under it: the frame is as wide as the content, its top edge on the
 // tabs' last row of pixels, open under the selected tab and drawn on
 // either side of it, and every page is inside it.
 void UiDialogsTest::aboutPagesSitOnAFrameJoinedToTheTabs() {
@@ -2792,7 +2786,7 @@ void UiDialogsTest::aboutPagesNeverRunUnderTheButtons_data() {
 // About opens tall enough for its tallest page at its width, so every tab
 // shows whole, its last line at least 12 px above the buttons. Made shorter
 // than its pages, it scrolls them, still clear of the buttons: at 24 pt
-// the links once sat under them (#373 H3).
+// the links once sat under them.
 void UiDialogsTest::aboutPagesNeverRunUnderTheButtons() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -2915,7 +2909,7 @@ void UiDialogsTest::recentIssuesIsAPopupAboveTheStatusBar() {
 }
 
 // The header is as tall as its title needs: at 24 pt, its fixed 32 px left
-// the title over the first issue's category line (#373 H10).
+// the title over the first issue's category line.
 void UiDialogsTest::recentIssuesHeaderHoldsItsTitleAtLargeFonts() {
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
@@ -2958,7 +2952,7 @@ void UiDialogsTest::recentIssuesHeaderHoldsItsTitleAtLargeFonts() {
 // Clear All and Open Diagnostics… are drawn in the font of the text
 // around them. The style draws a ToolButton's caption in the application's
 // QToolButton font, KDE's toolbar font, whatever the button's own font:
-// at 24 pt they stayed at 10 pt beside the 24 pt title (#373 H10). A 10 pt
+// at 24 pt they stayed at 10 pt beside the 24 pt title. A 10 pt
 // QToolButton font stands in for the toolbar font here. Their captions are
 // their own labels, in the text's font, and each button is as wide as its
 // icon and caption in that font need. The header stays 32 px with the
@@ -3016,10 +3010,10 @@ void UiDialogsTest::recentIssuesActionsAreInTheTextFont() {
     QVERIFY2(sceneRect(visibleNamed(window, QStringLiteral("errorHistoryNewCount"))).right()
                  <= sceneRect(clearAll).left() + 0.5,
              "the new count runs into Clear All");
-    // Each carries a glyph, as every dialog action does (#373 H46: without
-    // one, Clear All read as a label of the header), as large as a line of
-    // their text holds: Clear All its own, Open Diagnostics… that of Help's
-    // Diagnostics…, not ⓘ, which marks a notice in the list (#373 H40).
+    // Each carries a glyph, as every dialog action does (without one, Clear
+    // All read as a label of the header), as large as a line of their text
+    // holds: Clear All its own, Open Diagnostics… that of Help's
+    // Diagnostics…, not ⓘ, which marks a notice in the list.
     // Open Diagnostics… starts on the header's text's x.
     QQuickItem *diagnostics = visibleNamed(window, QStringLiteral("errorHistoryDiagnosticsButton"));
     QQuickItem *clear = visibleNamed(window, QStringLiteral("errorHistoryClearButton"));
@@ -3072,7 +3066,7 @@ void UiDialogsTest::recentIssuesRowsSplitTheMessageAndOfferOneAction() {
     QVERIFY(QRegularExpression(QStringLiteral("^\\d\\d:\\d\\d$")).match(time->property("text").toString()).hasMatch());
     QCOMPARE(hex(time->property("color").value<QColor>()), hex(tokenOf(window, "textTertiary")));
     // The title names the problem, in the body size; the category is the
-    // quietest line, small and tertiary, above it with the time (#373 H5).
+    // quietest line, small and tertiary, above it with the time.
     QCOMPARE(heading->property("font").value<QFont>().pointSizeF(),
              paletteOf(window)->property("basePointSize").toReal());
     QCOMPARE(hex(heading->property("color").value<QColor>()), hex(tokenOf(window, "text")));
@@ -3242,7 +3236,7 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
     QVERIFY(diagnosticsDialog != nullptr);
     QVERIFY(waitForDialogWindow(diagnosticsDialog));
     QQuickWindow *diagnosticsWindow = windowOf(diagnosticsDialog);
-    // "Loading the log…" reads at AA, like every placeholder (#373 H7).
+    // "Loading the log…" reads at AA, like every placeholder.
     QCOMPARE(hex(named(diagnosticsWindow, QStringLiteral("diagnosticsTextArea"))
                      ->property("placeholderTextColor")
                      .value<QColor>()),
@@ -3267,12 +3261,12 @@ void UiDialogsTest::diagnosticsActionsShareOneRow_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// Diagnostics has one verb for deleting its log and one row of actions
-// under the log's path (#373 H38: Clear… asked to delete the log, and the
-// actions were over two rows with two ragged right edges): Reload and
-// Delete Log on the left, Open Folder, Copy All and Copy Log Without
-// Paths on the right, ending where the log's frame does. The log's scroll
-// bars are inside its frame, and its text clear of the frame.
+// Diagnostics has one verb for deleting its log and one row of actions under
+// the log's path (Clear… asked to delete the log, and the actions were over
+// two rows with two ragged right edges): Reload and Delete Log on the left,
+// Open Folder, Copy All and Copy Log Without Paths on the right, ending
+// where the log's frame does. The log's scroll bars are inside its frame,
+// and its text clear of the frame.
 void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -3315,7 +3309,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QTRY_VERIFY(!layoutPending(frame) && !layoutPending(buttons.constFirst()));
 
     // One verb: Delete Log, which asks Delete Diagnostics Log, with no
-    // ellipsis: the confirmation asks for nothing more (#373 H45).
+    // ellipsis: the confirmation asks for nothing more.
     QCOMPARE(buttons.at(1)->property("text").toString(), QStringLiteral("Delete Log"));
     QCOMPARE(evaluate(buttons.at(1), QStringLiteral("icon.name")).toString(), QStringLiteral("edit-delete"));
     QObject *confirm = object(window, QStringLiteral("clearDiagnosticsConfirmDialog"));
@@ -3359,7 +3353,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
                  qPrintable(QString::fromLatin1(bar) + QStringLiteral(" ") + describeItem(scrollBar)));
     }
     // The log's text stands 8 px clear of the frame's sides and 6 px of
-    // its top and bottom, inside its 1 px edge (#373 H42: 5 px, nearly on
+    // its top and bottom, inside its 1 px edge (at 5 px it sat nearly on
     // the frame).
     QQuickItem *textArea = visibleNamed(diagnostics, QStringLiteral("diagnosticsTextArea"));
     QVERIFY(textArea != nullptr);
@@ -3408,13 +3402,13 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QTRY_VERIFY(!diagnostics->isVisible());
 }
 
-// Recent Issues has the keyboard where it shows it (#373 H38): opened
-// with the pointer, it gave the newest action the keyboard for a popup's
-// reason, which draws no focus ring, and Enter pressed that unmarked
-// action. Opened from the status bar's button with the pointer, no control
-// has the keyboard, Enter and Space press nothing, and Tab marks the first
-// action. Opened from the button with the keyboard, the first action has
-// it, with its ring, and Space presses it.
+// Recent Issues has the keyboard where it shows it: opened with the pointer,
+// it gave the newest action the keyboard for a popup's reason, which draws
+// no focus ring, and Enter pressed that unmarked action. Opened from the
+// status bar's button with the pointer, no control has the keyboard, Enter
+// and Space press nothing, and Tab marks the first action. Opened from the
+// button with the keyboard, the first action has it, with its ring, and
+// Space presses it.
 void UiDialogsTest::recentIssuesOpenWithTheirFocusShown() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -3988,7 +3982,7 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
     QVERIFY(tags->isVisible());
     QVERIFY(editor.dirty());
     // Escape asks too; Discard closes, the tag editor, as the question
-    // says (#373 H45: "Discard closes the dialog" read as the question).
+    // says ("Discard closes the dialog" read as the question).
     QVERIFY(QTest::qWaitForWindowActive(tags));
     QTest::keyClick(tags, Qt::Key_Escape);
     QVERIFY(waitForDialogWindow(confirm));
@@ -4006,13 +4000,12 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
     QTRY_VERIFY(!tags->isVisible());
 }
 
-// The table's columns at the default font, or a smaller one (#373 H8): the
-// window opens wide enough for every column at its width beside the
-// fields, the numbers and Format as narrow as their headers and values
-// allow: # about 36 px, Year 52, Disc 40 and Format 56, from a main
-// window wide enough. In a 1600 px screen, File Name and Folder give way
-// first, and Title, Artist and Album keep 160 px or more. Status takes no
-// room while no row has a status.
+// The table's columns at the default font, or a smaller one: the window opens
+// wide enough for every column at its width beside the fields, the numbers and
+// Format as narrow as their headers and values allow: # about 36 px, Year 52,
+// Disc 40 and Format 56, from a main window wide enough. In a 1600 px screen,
+// File Name and Folder give way first, and Title, Artist and Album keep 160 px
+// or more. Status takes no room while no row has a status.
 void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     // The default 10 pt font, which the reviews see.
     const QFont applicationFont = QGuiApplication::font();
@@ -4026,8 +4019,8 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    // The editor opens no wider than the main window (#373 H9), which is
-    // as wide as a large screen here.
+    // The editor opens no wider than the main window, which is as wide as a
+    // large screen here.
     QQuickWindow *window = loadMainWindow(engine, libraryModel, 1920, 1200);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QCOMPARE(paletteOf(window)->property("basePointSize").toReal(), 10.0);
@@ -4079,9 +4072,9 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
         QVERIFY2(columnWidth(key) >= width, qPrintable(key + QStringLiteral(": ") + describeColumns()));
     }
     QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(describeColumns()));
-    // The window is as wide as what it holds and no wider (#373 H11): its
-    // padding, the fields, the gap, the table's frame and insets, its
-    // columns at their widths and the scroll bar's lane.
+    // The window is as wide as what it holds and no wider: its padding, the
+    // fields, the gap, the table's frame and insets, its columns at their
+    // widths and the scroll bar's lane.
     QQuickItem *fields = visibleNamed(tags, QStringLiteral("tagEditorFields"));
     QVERIFY(fields != nullptr);
     qreal held = 2 * dialog->property("contentPadding").toReal() + fields->width()
@@ -4094,9 +4087,9 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     }
     QVERIFY2(tags->width() <= qCeil(held), qPrintable(QStringLiteral("holds %1: ").arg(held) + describeColumns()));
     QCOMPARE(qreal(tags->width()), dialog->property("fittedWidth").toReal());
-    // "of" is 4 px from the field on either side of it (#373 H11), the
-    // number as far from its label as the other fields are from theirs, and
-    // the total ends where they do.
+    // "of" is 4 px from the field on either side of it, the number as far
+    // from its label as the other fields are from theirs, and the total ends
+    // where they do.
     for (const auto &[number, total] : {std::pair{QStringLiteral("trackNo"), QStringLiteral("totalTracks")},
                                         std::pair{QStringLiteral("discNo"), QStringLiteral("totalDiscs")}}) {
         QQuickItem *of = visibleNamed(tags, QStringLiteral("tagEditorOf_") + number);
@@ -4108,7 +4101,7 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
         QCOMPARE(sceneRect(totalField).left() - sceneRect(of).right(), 4.0);
         QCOMPARE(sceneRect(numberField).left(), sceneRect(titleField).left());
         // The pair ends on the fields' edge, the two fields alike in width
-        // (#373 H41: it ended 35 px short).
+        // (it ended 35 px short of the other fields).
         QCOMPARE(sceneRect(totalField).right(), sceneRect(titleField).right());
         QVERIFY2(std::abs(numberField->width() - totalField->width()) <= 1.0,
                  qPrintable(QStringLiteral("%1: %2 and %3").arg(number).arg(numberField->width()).arg(totalField->width())));
@@ -4157,7 +4150,7 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
 }
 
 // The editor opens no wider than the main window it opens from, frames
-// and all (#373 H9: 1624 px from a 1600 px main window). From a 1600 by
+// and all (it opened 1624 px wide from a 1600 px one). From a 1600 by
 // 1000 px window, File Name and Folder give way first, Title, Artist and
 // Album keep 160 px or more, and the table does not scroll sideways; from
 // a 1000 by 720 px one, it is as wide as the main window.
@@ -4224,19 +4217,18 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// Auto Number is one form in reading order (#373 H38): the tracks' start
-// and Write totals, which writes the tracks' totals with or without the
-// discs' (under the disc's start, it read as a disc option); Write disc
-// numbers, then the disc's start and the reset at each disc, which it
-// enables (#373 H41: the reset was in the last group, apart from it); then
-// the reset at each folder. The groups are a FormGroupGap apart, 16 px with the default font,
-// and their rows the form's row spacing, 4 px. The check boxes have no labels and start
-// where the fields do, the description too, so the dialog has one left
-// edge; it had two, with Write disc numbers under the field it enables.
-// The start fields hold four digits, 5 grid units, and their errors wrap
-// at 14. The window is as wide as the form, in the font it is in: at
-// 24 pt, a fixed 26 grid units left the check boxes running up to 435 px
-// past it (#373 H10).
+// Auto Number is one form in reading order: the tracks' start and Write
+// totals, which writes the tracks' totals with or without the discs' (under
+// the disc's start, it read as a disc option); Write disc numbers, then the
+// disc's start and the reset at each disc, which it enables (in the last
+// group, the reset stood apart from it); then the reset at each folder. The
+// groups are a FormGroupGap apart, 16 px with the default font, and their
+// rows the form's row spacing, 4 px. The check boxes have no labels and
+// start where the fields do, the description too, so the dialog has one left
+// edge; it had two, with Write disc numbers under the field it enables. The
+// start fields hold four digits, 5 grid units, and their errors wrap at 14.
+// The window is as wide as the form, in the font it is in: at 24 pt, a fixed
+// 26 grid units left the check boxes running up to 435 px past it.
 void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -4362,7 +4354,7 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
 // A field whose files hold different values says so with its placeholder,
 // "Multiple values", which tells what saving does: in the palette's
 // placeholder colour, at least 4.5:1 on the field, where Breeze Light's own
-// was 4.2:1 (#373 H6). The colour's contrast in both themes is tested with
+// was 4.2:1. The colour's contrast in both themes is tested with
 // the palette's tokens.
 void UiDialogsTest::editTagsMultipleValuesPlaceholderReads() {
     TagEditorController editor(nullptr);
@@ -4411,10 +4403,10 @@ void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole_data() {
 // Track's field says that its files' numbers differ, whole: "Multiple
 // values" where it fits, as with the default font, and "Mixed" in the
 // narrower field of a larger font, as every field of the form then says;
-// the fields keep their width, which the table needs (#373 H45: "Multiple
-// values" elided in a 124 px field at 24 pt). Edited, with their Revert
-// showing, the fields still hold the word and their value whole, and Edit
-// Tags is no wider than its window (#373 H47: "Mix…" once the Revert
+// the fields keep their width, which the table needs ("Multiple values"
+// elided in a 124 px field at 24 pt). Edited, with their Revert showing,
+// the fields still hold the word and their value whole, and Edit Tags is
+// no wider than its window ("Mixed" elided to "Mix…" once the Revert
 // followed the font).
 void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
     QFETCH(qreal, pointSize);
@@ -4483,8 +4475,8 @@ void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
     const QStringList numberKeys{QStringLiteral("trackNo"), QStringLiteral("totalTracks"),
                                  QStringLiteral("discNo"), QStringLiteral("totalDiscs")};
     // Every field whose files differ says it in the same word, the short
-    // one once a number field needs it, wide fields too (#373 H46:
-    // "Multiple values" and "Mixed" in one form at 24 pt), whole between
+    // one once a number field needs it, wide fields too (not "Multiple
+    // values" and "Mixed" in one form at 24 pt), whole between
     // its paddings, as is a number field's value beside its Revert; a
     // longer text scrolls in its field.
     int mixedFields = 0;
@@ -4544,15 +4536,14 @@ void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
     QTRY_VERIFY(!tags->isVisible());
 }
 
-// At 1364 px and wider, the table has no sideways scroll bar (#373 H6):
-// File Name, Folder and Status give way first, File Name to no less than
-// 140 px and Folder 100 px, and the tags only once they are at their least,
-// Title, Artist and Album to no less than 160 px (#373 H8: H7's order cut
-// the artist short in every row). Status takes no room until a row has a
-// status. Long file names
-// and folders elide at the end, keeping the track number and title, with
-// the whole in a tooltip. In a wide window the tags have their widths and
-// File Name and Folder stretch.
+// At 1364 px and wider, the table has no sideways scroll bar: File Name,
+// Folder and Status give way first, File Name to no less than 140 px and
+// Folder 100 px, and the tags only once they are at their least, Title,
+// Artist and Album to no less than 160 px (with the tags giving way first,
+// the artist was cut short in every row). Status takes no room until a row
+// has a status. Long file names and folders elide at the end, keeping the
+// track number and title, with the whole in a tooltip. In a wide window
+// the tags have their widths and File Name and Folder stretch.
 void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
     TagEditorController editor(nullptr);
     editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
@@ -4697,8 +4688,8 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
         }
     }
     QCOMPARE(fields->width(), fieldsWidth);
-    // An edit moves no column (#373 H11: Status came with the first edit,
-    // and took its room from File Name and Folder): the row has a mark in
+    // An edit moves no column (Status came with the first edit, and took
+    // its room from File Name and Folder): the row has a mark in
     // the # column's padding instead, there in every row, and Status stays
     // away.
     checkColumns(1600, false, false);
@@ -4801,7 +4792,7 @@ void UiDialogsTest::editTagsStatusSaysWhatFailedWhole_data() {
 // whose rename failed "Not renamed", whole, in the negative colour, with
 // the system's words in its tooltip and for screen readers (they are in
 // Details… too); the column holds them whole at either font and width
-// (#373 H46: the system's text was elided to "failed to …").
+// (the system's text was elided to "failed to …").
 void UiDialogsTest::editTagsStatusSaysWhatFailedWhole() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -4924,10 +4915,10 @@ void UiDialogsTest::dialogsPutTheirButtonsInKdesOrder() {
 }
 
 // A dialog's buttons sit on its content's inset, a grid unit from the
-// window's sides and bottom, as the content is from its sides and top
-// (#373 H38: the compact dialogs' buttons were 9 px from the edges, their
-// content 19 px). Buttons that share the row, such as Configure's
-// Defaults, start on the inset too, on the same line.
+// window's sides and bottom, as the content is from its sides and top (the
+// compact dialogs' buttons were 9 px from the edges, their content 19 px).
+// Buttons that share the row, such as Configure's Defaults, start on the
+// inset too, on the same line.
 void UiDialogsTest::dialogsPutTheirButtonsOnTheContentInset() {
     TagEditorController editor(nullptr);
     editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
@@ -5035,9 +5026,9 @@ void UiDialogsTest::dialogButtonGlyphsFollowTheFont_data() {
 
 // The dialogs' buttons have glyphs as large as their captions' font calls
 // for, Kirigami's size for labels: 16 px with the default font, larger at
-// 24 pt, as the iTunes rows' (#373 H43: the footers kept 16 px glyphs
-// beside 24 pt captions). So do Configure's Defaults, the library
-// folders' buttons and the Diagnostics actions.
+// 24 pt, as the iTunes rows' (the footers kept 16 px glyphs beside 24 pt
+// captions). So do Configure's Defaults, the library folders' buttons and
+// the Diagnostics actions.
 void UiDialogsTest::dialogButtonGlyphsFollowTheFont() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -5178,9 +5169,8 @@ void UiDialogsTest::dialogsUseOneCharacterEllipsesAndNoTextGlyphs() {
     }
 }
 
-// The dialogs have one heading style (#373 H3): every modal dialog is a
-// window of its own (#373 H5), with its title in KWin's title bar only,
-// whose close button Cancels.
+// The dialogs have one heading style: every modal dialog is a window of its
+// own, with its title in KWin's title bar only, whose close button Cancels.
 void UiDialogsTest::dialogsShareOneHeadingStyle() {
     TagEditorController editor(nullptr);
     editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
@@ -5212,10 +5202,10 @@ void UiDialogsTest::dialogsShareOneHeadingStyle() {
         QVERIFY2(textsHolding(dialogWindow->contentItem(), dialogWindow->title()).isEmpty(), name);
     }
 
-    // Every other modal dialog is a window of its own too (#373 H5), above
-    // the window that opens it: the main window, Configure, Edit Tags, or
-    // Diagnostics. No heading of its own: KWin's title bar has the title,
-    // and its close button Cancels. Configure's library page asks over it.
+    // Every other modal dialog is a window of its own too, above the window
+    // that opens it: the main window, Configure, Edit Tags, or Diagnostics.
+    // No heading of its own: KWin's title bar has the title, and its close
+    // button Cancels. Configure's library page asks over it.
     QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
     QVERIFY(diagnostics != nullptr);
     QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
@@ -5494,7 +5484,7 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
         QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_") + key);
         QVERIFY2(column != nullptr, qPrintable(key));
         if (key == QStringLiteral("status")) {
-            // The edits bring no Status column (#373 H11).
+            // The edits bring no Status column.
             QCOMPARE(column->width(), 0.0);
             QVERIFY(!column->isVisible());
             continue;
@@ -5554,9 +5544,9 @@ void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont_data() {
 }
 
 // A compact dialog's measure is about 46 characters of the body font: at
-// 24 pt, a confirmation's question is on one line, rather than broken
-// after 28 characters in the 450 px it had (#373 H41). With the default
-// font, it opens at 450 px, as before.
+// 24 pt, a confirmation's question is on one line, rather than broken after
+// 28 characters in the 450 px it had. With the default font, it opens at
+// 450 px, as before.
 void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -5612,7 +5602,7 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont_data() {
 // The dialogs' glyphs beside text are as large as a line of the font holds
 // (UiPalette.labelIconSize, Kirigami's size for labels), and their measures
 // tuned at 10 pt grow with the font (UiPalette.scaledSize); the default
-// 10 pt font draws them as they were (#373 H45: at 24 pt Configure's folder list
+// 10 pt font draws them as they were (at 24 pt Configure's folder list
 // stopped at its buttons and cut the path beside free room, with a 16 px
 // folder glyph; Recent Issues kept 460 px and a 16 px severity glyph;
 // About's icon stayed 48 px).
@@ -5699,7 +5689,7 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
     QVERIFY(note->isVisible());
     QVERIFY2(qAbs(sceneRect(note).left() - sceneRect(name).left()) < 0.5,
              qPrintable(describeItem(note) + QStringLiteral(" / ") + describeItem(name)));
-    // The name and the path 10 px apart, scaled with the font (#373 H45:
+    // The name and the path 10 px apart, scaled with the font (a fixed
     // 10 px between them at 24 pt).
     {
         const qreal rowSpacing = evaluate(palette, QStringLiteral("Kirigami.Units.largeSpacing")).toReal() + 2;
@@ -5767,7 +5757,7 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
 
     // Edit Tags: a changed field's Revert, in the field, has a glyph as
     // large as a line holds, as the column's Revert has, and 16 px with the
-    // default font (#373 H46: 16 px beside 32 px text at 24 pt).
+    // default font (not 16 px beside 32 px text at 24 pt).
     QObject *tagDialog = object(window, QStringLiteral("tagEditorDialog"));
     QVERIFY(tagDialog != nullptr);
     QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
@@ -5803,7 +5793,7 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
 
 // A Recent Issues link's press reads as a press: its tint is a clear step
 // past the hover, 1.65:1 on the popup's window colour as the transport's
-// buttons' (#373 H45: at 10% it read as the hover), and it shows on its
+// buttons' (at 10% it read as the hover), and it shows on its
 // first frame, with no fade while the button is down; the hover and the
 // release fade.
 void UiDialogsTest::recentIssuesLinkPressShowsAtOnce() {
@@ -5863,7 +5853,7 @@ void UiDialogsTest::autoNumberCheckBoxesStartOnTheFieldsEdge_data() {
 
 // Auto Number's check boxes are drawn from the fields' left edge: their
 // boxes start in the column the fields' frames do. Breeze draws a 16 px box
-// in the middle of a 20 px indicator, which left them 2 px in (#373 H45).
+// in the middle of a 20 px indicator, which left them 2 px in.
 void UiDialogsTest::autoNumberCheckBoxesStartOnTheFieldsEdge() {
     QFETCH(QString, widgetStyle);
     const QString previousStyle = QApplication::style()->name();
@@ -5964,7 +5954,7 @@ QColor drawnAt(const QImage &shown, const QPointF &scenePoint) {
 // The quiet numbers of the dialogs' lists read at 4.5:1 or more as drawn,
 // on their row at rest, under the pointer and selected, with the list
 // focused or not: Configure's library folders' track counts and Edit
-// Tags' track numbers (#373 H45: in Breeze Light, "3 tracks" on a hovered
+// Tags' track numbers (in Breeze Light, "3 tracks" on a hovered
 // folder drew at 4.48:1 and a selected row's "1" at 4.39:1, their
 // colours at 4.64:1 and 5.08:1, which small figures lose to subpixel
 // antialiasing). Their colours are rowFigureContrast on the row as drawn,

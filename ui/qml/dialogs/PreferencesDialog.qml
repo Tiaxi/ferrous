@@ -162,7 +162,7 @@ Components.DialogWindow {
     readonly property real pageRowLeftPadding: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
     readonly property real pageRowSpacing: Kirigami.Units.largeSpacing + 2
     // The rows' icons are as large as their titles' font calls for: 16 px
-    // with the default font, larger with a larger one (#373 H38: they
+    // with the default font, larger with a larger one (they
     // stayed 16 px beside 24 pt titles).
     readonly property real pageIconSize: root.uiPalette.labelIconSize
     // The page list: 176 px, or as wide as its longest title needs.
@@ -195,7 +195,7 @@ Components.DialogWindow {
         + Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 39),
             pagesLoader.item ? pagesLoader.item.wideWidth : 0))
     // Visualization's height at 10 pt: 684 px with Noto Sans, 38 grid
-    // units of the window's font, which it grows with (#373 H37: in 41 of
+    // units of the window's font, which it grows with (in 41 of
     // Kirigami's, which do not, for the whole window, it scrolled by 8 px,
     // and at 24 pt by half its height).
     readonly property real tallestPageHeight: root.uiPalette.gridUnit * 38
@@ -358,7 +358,7 @@ Components.DialogWindow {
                     // The style gives every row but a list's last a bottom
                     // padding of its own, which `padding` does not reset:
                     // each row's icon and title were 2 px above the last
-                    // one's (#373 H40), off the row's middle.
+                    // one's, off the row's middle.
                     topPadding: 0
                     bottomPadding: 0
                     leftPadding: root.pageRowLeftPadding

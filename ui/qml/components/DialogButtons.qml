@@ -14,14 +14,14 @@ import "../logic/KeyUtils.js" as KeyUtils
 //
 // The buttons sit on the dialogs' content inset, a grid unit from the
 // window's sides and bottom, as the content is from its sides and top;
-// the content's own inset under it is the room above them (#373 H38).
+// the content's own inset under it is the room above them.
 // Buttons that share the row with the box, such as Defaults, take its
 // `inset` as their side margin and its bottomPadding under them, and its
 // `glyphSize` as their glyphs' size.
 //
 // The buttons' glyphs are as large as their captions' font calls for,
 // Kirigami's size for labels: 16 px with the default font, larger with a
-// larger one, as the iTunes rows' (#373 H43: 16 px beside 24 pt captions).
+// larger one, as the iTunes rows' (not 16 px beside 24 pt captions).
 DialogButtonBox {
     id: root
 

@@ -1008,9 +1008,9 @@ QtObject {
         // when the backend sends the rows it waited for, as for Show in
         // Library on a collapsed artist: the view's place from before that
         // tree, which the apply restores, now and once more after the view
-        // has laid the tree out, is not put back over it (#373 H11: the
-        // tree opened, and the view went back to where it was, with the
-        // playing row out of sight).
+        // has laid the tree out, is not put back over it (the tree opened,
+        // and the view went back to where it was, with the playing row out
+        // of sight).
         root.pendingAnchorValid = false
         ++root.viewPlacements
         if (purpose === "center") {

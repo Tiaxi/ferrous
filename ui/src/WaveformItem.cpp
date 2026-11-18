@@ -416,7 +416,7 @@ void WaveformItem::updateWaveformCacheLocked() {
     // The empty line, a logical pixel thick through the middle, from the
     // waveform's end to the item's, so that a waveform that ends early, or
     // isn't analysed to the end yet, doesn't leave the rest of the bar
-    // blank (#373 H10).
+    // blank.
     const int lineLeft = std::max(dirty.x(), drawWidth);
     const int lineRight = dirty.right() + 1;
     if (m_emptyLineColor.alpha() > 0 && lineLeft < lineRight) {

@@ -166,7 +166,7 @@ Components.DialogWindow {
             Kirigami.Icon {
                 objectName: "aboutIcon"
                 // 48 px with the default font, and larger with a larger
-                // one, beside the name and version it heads (#373 H45).
+                // one, beside the name and version it heads.
                 implicitWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
                 implicitHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
                 // The built-in drawing, which shows whether the icon is
@@ -212,7 +212,7 @@ Components.DialogWindow {
         }
 
         // The pages on a frame joined to the tabs, as KDE's About dialog,
-        // a tab widget, draws them (#373 H38: the tabs' band stopped
+        // a tab widget, draws them (the tabs' band stopped
         // mid-window, with no page under it): the frame's top edge runs
         // along the tabs' foot and opens under the selected tab, which
         // stands on it; under the first tab, its corner is square.

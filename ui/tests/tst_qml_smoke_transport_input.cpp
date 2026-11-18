@@ -838,9 +838,9 @@ void TransportInputSmokeTest::visualizationModeSwitchStaysClearOfTheCornerOverla
     QVERIFY(QTest::qWaitForWindowExposed(fullscreen));
     QTRY_VERIFY(qFuzzyCompare(spectrogramSurface->width(), fullscreen->contentItem()->width()));
     // Over the whole screen, the viewer's controls, the mode switch among
-    // them, are in the title strip over the view's top edge (#373 H40), so
-    // the plot's corner has none: the lanes' heads and the counter keep
-    // clear of nothing there.
+    // them, are in the title strip over the view's top edge, so the plot's
+    // corner has none: the lanes' heads and the counter keep clear of
+    // nothing there.
     QQuickItem *strip =
         firstVisibleItemNamed(fullscreen->contentItem(), QStringLiteral("spectrogramFullscreenStrip"));
     QVERIFY(strip != nullptr);
@@ -1001,7 +1001,7 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsOnlyWithThePointerOrFo
 // Before any audio the pane is at rest, with no message, and the mode
 // switch shows in its corner without the pointer, so a mode can be picked
 // first. Per channel, its lanes are a stereo track's, named L and R, with
-// no Mute and Solo, as there is nothing to mute (#373 H14 F3).
+// no Mute and Solo, as there is nothing to mute.
 void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1024,7 +1024,7 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     QVERIFY(modeSwitch != nullptr && waveformButton != nullptr && spectrogramButton != nullptr);
 
     // The pointer off the pane: the switch shows, in its corner, 5 px in,
-    // as the lane heads are (#373 H16 I5).
+    // as the lane heads are.
     QTest::mouseMove(window, QPoint(4, window->height() - 4));
     QVERIFY(!sceneRectOf(spectrogram).contains(QPointF(4, window->height() - 4)));
     QTRY_COMPARE(modeSwitch->opacity(), 1.0);
@@ -1099,19 +1099,18 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates_data() {
 // The never-played pane's rest lines keep clear of the plates over it: a
 // line on a row beside the mode switch, or within 8 px under or over it,
 // ends 6 px before the switch, and one beside a lane's label starts 6 px
-// after it, rather than run along a plate's edge (#373 H29 W4: per channel
-// the first line ran along the switch's foot, 1 px under it). One rule for
-// both lanes (#373 H30: at 1600x1000 the first lane's top line, 4 px under
-// its label, ran on, while the second's, 3 px under its, was cut): per
-// channel at 1600x1000 each lane's top line starts after its label; at
-// 1000x720 no line is within 4 to 8 px of a plate, so nothing there
-// changed. Every tick keeps its line. The seam between the lanes at rest is a 3 px groove in
-// the plot's deep violet, centred on the 1 px seam and drawn over the
-// lanes, whose heights stay; playing, the seam is 1 px again. A line in a
-// plate's band, within 4 px of its top or foot, is white 10 % rather than
-// 20 %, its cuts kept, and every other line 20 % (#373 H31 Y4: beside the
-// plates the line read as a connector cut into them), at the default font
-// and at 24 pt.
+// after it, rather than run along a plate's edge (per channel the first line
+// ran along the switch's foot, 1 px under it). One rule for both lanes (at
+// 1600x1000 the first lane's top line, 4 px under its label, ran on, while
+// the second's, 3 px under its, was cut): per channel at 1600x1000 each
+// lane's top line starts after its label; at 1000x720 no line is within 4 to
+// 8 px of a plate, so nothing there changed. Every tick keeps its line. The
+// seam between the lanes at rest is a 3 px groove in the plot's deep violet,
+// centred on the 1 px seam and drawn over the lanes, whose heights stay;
+// playing, the seam is 1 px again. A line in a plate's band, within 4 px of
+// its top or foot, is white 10 % rather than 20 %, its cuts kept, and every
+// other line 20 % (beside the plates the line read as a connector cut into
+// them), at the default font and at 24 pt.
 void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
     QFETCH(QSize, windowSize);
     QFETCH(int, viewMode);
@@ -1309,13 +1308,13 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
     QTRY_COMPARE(grooves().size(), 0);
 }
 
-// The pane at rest, before any audio, is an instrument waiting (#373 H14
-// F3, P23): each lane draws its frequency scale's lines faintly, the
-// scale's labels only while the scale shows; per channel it has a stereo
-// track's lanes, with the 1 px seam between them at mid-height, and mixed
-// one lane, unnamed, as a stereo track's would be. The first track's
-// columns come into those lanes: a stereo track keeps them, with nothing
-// laid out again. The waveform at rest has the same lanes.
+// The pane at rest, before any audio, is an instrument waiting: each lane
+// draws its frequency scale's lines faintly, the scale's labels only while
+// the scale shows; per channel it has a stereo track's lanes, with the 1 px
+// seam between them at mid-height, and mixed one lane, unnamed, as a stereo
+// track's would be. The first track's columns come into those lanes: a
+// stereo track keeps them, with nothing laid out again. The waveform at
+// rest has the same lanes.
 void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1372,17 +1371,17 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QVERIFY(std::abs((upper.bottom() + lower.top()) / 2 - pane.center().y()) <= 1.0);
     QQuickItem *seams = itemsNamed(spectrogram, QStringLiteral("spectrogramLaneSeams")).value(0);
     QVERIFY(seams != nullptr && seams->isVisible());
-    // The seam at rest in the floor's violet, over the rest lines (#373
-    // H15 H7); playing, the neutral one.
+    // The seam at rest in the floor's violet, over the rest lines; playing,
+    // the neutral one.
     QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
     QVERIFY(palette != nullptr);
     QObject *spectrogramPlot = qvariant_cast<QObject *>(palette->property("spectrogramPlot"));
     QCOMPARE(seams->property("color").value<QColor>(), palette->property("plotRestLaneSeam").value<QColor>());
     QTRY_VERIFY2(restProblem(false).isEmpty(), qPrintable(restProblem(false)));
-    // As drawn (#373 H28 V4: the lines at 1.3:1 left the never-played pane
-    // an empty slab, and the seam, at 1.45:1, read as one more line): the
-    // rest lines white 20 % over the floor, some 1.78:1 on it, and the seam
-    // between the lanes a cut, darker than the floor, well apart from them.
+    // As drawn (the lines at 1.3:1 left the never-played pane an empty
+    // slab, and the seam, at 1.45:1, read as one more line): the rest lines
+    // white 20 % over the floor, some 1.78:1 on it, and the seam between
+    // the lanes a cut, darker than the floor, well apart from them.
     {
         const auto luminance = [](const QColor &color) {
             const auto channel = [](double value) {
@@ -1395,7 +1394,7 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
         };
         const QColor floor = palette->property("plotFloor").value<QColor>();
         // A line of the lane's own colour, and one in a plate's band, which
-        // is quieter (#373 H31 Y4).
+        // is quieter.
         QRect line;
         QRect quietLine;
         {
@@ -1443,7 +1442,7 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QCOMPARE(waveformSurface->property("laneLabels").toStringList(),
              (QStringList{QStringLiteral("L"), QStringLiteral("R")}));
     // Each lane with its rest lines at half of full scale over and under
-    // its centre, 1 px, faint, about 1.3:1 on the view (#373 H16 I8).
+    // its centre, 1 px, faint, about 1.3:1 on the view.
     const auto restLines = [&]() { return visibleItemsNamed(waveformSurface, QStringLiteral("waveformRestLine")); };
     QTRY_COMPARE(restLines().size(), 4);
     {
@@ -1495,8 +1494,8 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
 
 // The crosshair and its readout give way to the plot's plates: on a lane's
 // label or its buttons, or on the mode switch, they fade out over
-// shortDuration, and come back off them (#373 H16 I9: its line ran under
-// the plates and through them), in both modes.
+// shortDuration, and come back off them (its line ran under the plates and
+// through them), in both modes.
 void TransportInputSmokeTest::crosshairGivesWayToThePlotsPlates() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1681,7 +1680,7 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
 
         // A 38 px band on the plot's strip colour, opaque, with its edge
         // under it, over the top of the view: 32 px grown with its text, a
-        // step larger (#373 H40).
+        // step larger.
         QObject *plotColors = qvariant_cast<QObject *>(palette->property(shown.plotColors));
         QVERIFY(plotColors != nullptr);
         QQuickItem *strip = visibleItemNamed(fullscreen, shown.stripName);
@@ -1703,13 +1702,13 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         QCOMPARE(qvariant_cast<QFont>(title->property("font")).weight(), QFont::DemiBold);
         // Its text on the type scale of the viewer's text over the whole
         // screen, 1.2 times the window's, as the album art's details are
-        // (#373 H40: the strip was at the window's size over them).
+        // (the strip was at the window's size over them).
         const qreal basePointSize = palette->property("basePointSize").toReal();
         for (QQuickItem *label : {title, context, time}) {
             QCOMPARE(qvariant_cast<QFont>(label->property("font")).pointSizeF(), basePointSize * 1.2);
         }
-        // 16 px in from the view's edge (#373 H11: 12 px), and 14 px, 12 px
-        // a step larger, to "Artist — Album".
+        // 16 px in from the view's edge, and 14 px, 12 px a step larger, to
+        // "Artist — Album".
         QTRY_COMPARE(title->mapToScene(QPointF(0, 0)).x(), 16.0);
         QCOMPARE(context->mapToScene(QPointF(0, 0)).x() - title->mapToScene(QPointF(title->width(), 0)).x(), 14.0);
         QCOMPARE(colorOf(title, "color"), colorOf(plotColors, "plotText"));
@@ -1740,9 +1739,9 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
         QTRY_VERIFY(!title->property("truncated").toBool());
 
-        // A flat 24 px Close at the right, centred in the band, 8 px in
-        // (#373 H40: at 4 px its focus ring met the screen's corner), in the
-        // plot's colours; the view fills the window under the strip.
+        // A flat 24 px Close at the right, centred in the band, 8 px in (at
+        // 4 px its focus ring met the screen's corner), in the plot's
+        // colours; the view fills the window under the strip.
         QQuickItem *close = visibleItemNamed(fullscreen, shown.closeName);
         QVERIFY2(close != nullptr, name.constData());
         QVERIFY(strip->isAncestorOf(close));
@@ -2118,7 +2117,7 @@ void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {
 
     // In the main window, the album art viewer's corner plate hides while
     // the pointer rests and comes back as it moves, as the visualization
-    // viewer's does (#373 H8: it never hid).
+    // viewer's does (it never hid).
     QObject *albumArtAutoHide =
         window->findChild<QObject *>(QStringLiteral("albumArtFullscreenControlsAutoHide"));
     QVERIFY(albumArtAutoHide != nullptr);
@@ -2162,8 +2161,8 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QTRY_COMPARE(surface->property("laneCount").toInt(), 2);
 
     // The pane's: the mode switch and the first lane's head's plates 5 px
-    // from the top (#373 H16 I5), the label centred on its buttons' plate,
-    // which reaches above it (H18 C4).
+    // from the top, the label centred on its buttons' plate, which reaches
+    // above it.
     const auto headPlatesTop = [](QQuickItem *laneHead) {
         return sceneRectOf(laneHead).top() - laneHead->property("plateReach").toReal();
     };
@@ -2190,7 +2189,7 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     // below it, whether it shows or not, so they never move and are never
     // under it; the time scale stays on the view's top edge, which the
     // strip leaves clear while it is hidden. The mode switch is in the
-    // strip (#373 H40), so the plot's corner has nothing to keep clear of.
+    // strip, so the plot's corner has nothing to keep clear of.
     bridge->setProperty("viewerFullscreenMode", 1);
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
     QQuickWindow *fullscreen = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
@@ -2295,10 +2294,10 @@ void TransportInputSmokeTest::viewersInTheMainWindowAreNamedInItsTitle() {
     }
 }
 
-// The title strip over the whole screen is opaque (#373 H5: the playhead
-// and the spectrogram showed through it): a line the view draws the whole
-// height, as the playhead and the crosshair are, ends at the strip's lower
-// edge. The strip still draws over the view, which keeps its size.
+// The title strip over the whole screen is opaque (the playhead and the
+// spectrogram showed through it): a line the view draws the whole height,
+// as the playhead and the crosshair are, ends at the strip's lower edge.
+// The strip still draws over the view, which keeps its size.
 void TransportInputSmokeTest::fullscreenStripHidesWhatTheViewDrawsUnderIt() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2370,11 +2369,11 @@ void TransportInputSmokeTest::fullscreenStripHidesWhatTheViewDrawsUnderIt() {
     }
 }
 
-// The pointer on the viewer's own controls is on the view (#373 H5: in the
-// viewer in the window, the mode switch went as the pointer reached the
-// corner plate beside it): the switch stays, in the window on the corner
-// plate and its Close, and over the whole screen on the title strip. It
-// shows with the viewer's controls, which it hides with.
+// The pointer on the viewer's own controls is on the view (in the viewer in
+// the window, the mode switch went as the pointer reached the corner plate
+// beside it): the switch stays, in the window on the corner plate and its
+// Close, and over the whole screen on the title strip. It shows with the
+// viewer's controls, which it hides with.
 void TransportInputSmokeTest::viewerModeSwitchStaysWhileThePointerIsOnTheViewersControls() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2410,8 +2409,8 @@ void TransportInputSmokeTest::viewerModeSwitchStaysWhileThePointerIsOnTheViewers
             spots = {itemNamed(controls, QStringLiteral("spectrogramPopupCloseButton"))};
         }
         QTRY_COMPARE(layer->window(), host);
-        // Over the whole screen, the switch is in the strip (#373 H40), and
-        // not on the plot.
+        // Over the whole screen, the switch is in the strip, and not on the
+        // plot.
         const bool inStrip = fullscreenMode == 1;
         QQuickItem *shownSwitch = inStrip ? itemNamed(controls, QStringLiteral("spectrogramStripModeSwitch")) : modeSwitch;
         QVERIFY(shownSwitch != nullptr);
@@ -2437,8 +2436,7 @@ void TransportInputSmokeTest::viewerModeSwitchStaysWhileThePointerIsOnTheViewers
             QCOMPARE(modeSwitch->isVisible(), !inStrip);
         }
         // Off the view and its controls, it stays while the viewer's
-        // controls show, as their part (#373 H6), and goes with them, at
-        // their level.
+        // controls show, as their part, and goes with them, at their level.
         QTest::mouseMove(host, QPoint(-20, -20));
         QTest::qWait(300);
         QVERIFY(shownSwitch->isVisible());
@@ -2486,11 +2484,11 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
     QVERIFY(QMetaObject::invokeMethod(resetAction, "trigger"));
     QTRY_COMPARE(spectrogramZoom(), 1.0);
 
-    // One order everywhere (#373 H5): [Zoom ↺] [mode] [✕], in both viewers
-    // as in the main pane. In the window, the zoom is the plot's own plate,
-    // left of the mode switch, and the viewer's controls have Close and no
-    // zoom; over the whole screen, the zoom and the mode switch are in the
-    // title strip, before Close (#373 H40), and not on the plot.
+    // One order everywhere: [Zoom ↺] [mode] [✕], in both viewers as in the
+    // main pane. In the window, the zoom is the plot's own plate, left of
+    // the mode switch, and the viewer's controls have Close and no zoom;
+    // over the whole screen, the zoom and the mode switch are in the title
+    // strip, before Close, and not on the plot.
     auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
     QVERIFY(layer != nullptr);
     QQuickItem *readout = itemNamed(layer, QStringLiteral("plotZoomReadout"));
@@ -2550,7 +2548,7 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
                 // On the strip: the readout, Reset, the mode switch and
                 // Close, each group 4 px either side of a 1 px divider, as
                 // on the windowed viewer's corner plate, Close at the
-                // strip's 8 px inset (#373 H40).
+                // strip's 8 px inset.
                 QTRY_VERIFY(sceneRectOf(shownReadout).right() <= sceneRectOf(shownReset).left());
                 QCOMPARE(sceneRectOf(shownSwitch).left() - sceneRectOf(shownReset).right(), 9.0);
                 QCOMPARE(sceneRectOf(close).left() - sceneRectOf(shownSwitch).right(), 9.0);
@@ -2569,7 +2567,7 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
             }
             // Laid out in the window: the readout, Reset, the mode switch
             // right of them and Close right of that on the corner's one
-            // plate, the divider's 1 px apart (#373 H37).
+            // plate, the divider's 1 px apart.
             if (!inStrip) {
                 QTRY_VERIFY(sceneRectOf(readout).right() <= sceneRectOf(reset).left()
                             && sceneRectOf(zoomPlate).right() + 1 == sceneRectOf(modeSwitch).left());
@@ -2601,11 +2599,11 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
     }
 }
 
-// The main pane shows its zoom while it is zoomed (#373 H4: nothing did,
-// with the scale off): the viewers' readout and Reset, on a plate 4 px left
+// The main pane shows its zoom while it is zoomed (with the scale off,
+// nothing showed it): the viewers' readout and Reset, on a plate 4 px left
 // of the mode switch, there also while the switch hides. The plot keeps its
 // place and size; its overlays keep clear of the plate. A viewer shows the
-// same plate (#373 H5: one plate order everywhere).
+// same plate, in the same order.
 void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2695,10 +2693,10 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
     QTRY_VERIFY(plate->isVisible());
     QVERIFY(itemsNamed(controls, QStringLiteral("viewerZoomReadout")).isEmpty());
 
-    // One plate in the windowed viewer's corner (#373 H37: a row of three
-    // plates read as unlike controls): the zoom, the mode switch and the
-    // viewer's Close on the plot layer's one plate, each group 1 px apart
-    // with a divider there, the groups' own plates bare.
+    // One plate in the windowed viewer's corner (a row of three plates read
+    // as unlike controls): the zoom, the mode switch and the viewer's Close
+    // on the plot layer's one plate, each group 1 px apart with a divider
+    // there, the groups' own plates bare.
     QQuickItem *cornerPlate = itemNamed(controls, QStringLiteral("viewerCornerPlate"));
     QQuickItem *joined = itemNamed(layer, QStringLiteral("plotCornerPlate"));
     QVERIFY(cornerPlate != nullptr && joined != nullptr);
@@ -2887,8 +2885,8 @@ void TransportInputSmokeTest::resetZoomResetsOnlyTheShownPlotsZoom() {
     QVERIFY(QTest::qWaitForWindowActive(fullscreen));
     check(fullscreen, "viewer over the screen");
 
-    // The viewer's Reset, beside the mode switch in its title strip (#373
-    // H40), does the same zoom-only reset.
+    // The viewer's Reset, beside the mode switch in its title strip, does
+    // the same zoom-only reset.
     QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
     QVERIFY(strip != nullptr);
     QQuickItem *reset = itemNamed(strip, QStringLiteral("viewerResetButton"));
@@ -3206,7 +3204,7 @@ void TransportInputSmokeTest::viewerControlsStayWhileOneHasFocus() {
         QQuickItem *close = visibleItemNamed(host, fullscreenMode == 1
             ? QStringLiteral("spectrogramFullscreenCloseButton")
             : QStringLiteral("spectrogramPopupCloseButton"));
-        // Over the whole screen, the mode switch is in the strip (#373 H40).
+        // Over the whole screen, the mode switch is in the strip.
         QQuickItem *modeButton = visibleItemNamed(host, fullscreenMode == 1
             ? QStringLiteral("spectrogramStripModeButton1")
             : QStringLiteral("visualizationModeButton1"));
@@ -3243,13 +3241,13 @@ void TransportInputSmokeTest::viewerControlsStayWhileOneHasFocus() {
 }
 
 // Over the whole screen, with its title strip on, the visualization viewer's
-// controls are all in the strip, as the album art viewer's are (#373 H40:
-// Close in the strip and the mode switch on a plate 5 px under it read as
-// two clusters, and Close's tooltip covered the plate): Spectrogram and
-// Waveform, the current one in the strip's look for a choice that is on,
-// then a 1 px divider with 4 px either side, then Close. The plot's corner
-// has no plate. They are radio buttons to assistive technology, Tab takes
-// them in order, and each one's tooltip is clear of the others.
+// controls are all in the strip, as the album art viewer's are (Close in the
+// strip and the mode switch on a plate 5 px under it read as two clusters,
+// and Close's tooltip covered the plate): Spectrogram and Waveform, the
+// current one in the strip's look for a choice that is on, then a 1 px
+// divider with 4 px either side, then Close. The plot's corner has no plate.
+// They are radio buttons to assistive technology, Tab takes them in order,
+// and each one's tooltip is clear of the others.
 void TransportInputSmokeTest::fullscreenVisualizationStripHoldsTheModeSwitch() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -3434,7 +3432,7 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
     QVERIFY(!strip->isVisible());
 
     // Turned on again, it shows with the controls, which keep below it,
-    // and it has the mode switch, which is no longer on the plot (#373 H40).
+    // and it has the mode switch, which is no longer on the plot.
     QVERIFY(bridge->setProperty("showFullscreenTitleStrip", true));
     QTRY_COMPARE(plotLayer->property("topInset").toReal(), 39.0);
     autoHide->setProperty("hideDelay", 600000);

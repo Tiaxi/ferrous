@@ -7,8 +7,8 @@ import "../logic/BreakableText.js" as BreakableText
 // A message that wraps and may hold a path or a system error, such as
 // "failed to create temporary file in /…/read-only: Permission denied (os
 // error 13)": its lines break inside the path only between folders, and
-// never inside the error's code (#373 H47). Set `message`, not `text`. Its
-// accessible name keeps the message as it is.
+// never inside the error's code. Set `message`, not `text`. Its accessible
+// name keeps the message as it is.
 Label {
     id: root
 

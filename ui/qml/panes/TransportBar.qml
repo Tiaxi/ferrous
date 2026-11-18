@@ -13,9 +13,9 @@ import "../logic/KeyUtils.js" as KeyUtils
 // The transport (#373): Previous, Play/Pause, Stop and Next as flat 32 px
 // tool buttons, the seek waveform, the time and the volume, on the chrome.
 // The chrome is the theme's Header colour set, as Breeze's toolbars and
-// the menu bar above it are, so the two read as one band of window chrome
-// (#373 H13 P24): #292c30 / #dee0e2 in Breeze, and the window colour while
-// the window is inactive, as Breeze's Header set has it.
+// the menu bar above it are, so the two read as one band of window chrome:
+// #292c30 / #dee0e2 in Breeze, and the window colour while the window is
+// inactive, as Breeze's Header set has it.
 // The glyphs and buttons grow with a font larger than the default, and are
 // drawn at the size they are given, not rounded down to a theme icon size.
 ToolBar {
@@ -76,8 +76,8 @@ ToolBar {
     // the chrome (dark) or a little darker (light); the unplayed part is the
     // same at 50% (dark) or 62% (light), raised where that is under 3.2:1
     // on the chrome, a margin over 3:1 that rendering cannot round away
-    // (#373 H13 P24: today's tones were 2.99:1 / 2.72:1 on the Header
-    // colours). In Breeze, played is 8.2:1 / 7.4:1 and unplayed 3.2:1 /
+    // (unraised, the tones were 2.99:1 / 2.72:1 on the Header colours). In
+    // Breeze, played is 8.2:1 / 7.4:1 and unplayed 3.2:1 /
     // 3.3:1 on the active Header colours, about 2.5:1 / 2.3:1 apart.
     readonly property bool themeIsDark: root.uiPalette.themeIsDark
     readonly property color seekPlayedColor: root.themeIsDark
@@ -98,12 +98,11 @@ ToolBar {
         : Qt.rgba(1, 1, 1, 0.85)
     readonly property color seekHoverLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.7)
     readonly property color seekEmptyLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.18)
-    // The volume slider, in the seek bar's language (#373 H5): its groove
-    // filled up to the thumb in the played colour and the rest in the
-    // unplayed one, opaque, and a solid thumb in the played colour. While
-    // muted, the filled part and the thumb at rest dim to the unplayed
-    // colour together (#373 H34 AB3), and the thumb stays at the volume a
-    // mute put aside.
+    // The volume slider, in the seek bar's language: its groove filled up
+    // to the thumb in the played colour and the rest in the unplayed one,
+    // opaque, and a solid thumb in the played colour. While muted, the
+    // filled part and the thumb at rest dim to the unplayed
+    // colour together, and the thumb stays at the volume a mute put aside.
     readonly property color volumeFilledColor: root.seekPlayedColor
     readonly property color volumeUnfilledColor: ColorUtils.mixColor(
         root.chromeColor, root.seekPlayedColor, root.seekUnplayedOpacity)
@@ -140,8 +139,8 @@ ToolBar {
     function scaled(size) {
         return Math.max(size, Math.round(size * root.fontScale))
     }
-    // The transport's two glyph sizes (#373 H9: Play/Pause 22, Previous and
-    // Next 16 and Stop 14 read as three weights): 20 px for Play/Pause, a
+    // The transport's two glyph sizes (Play/Pause 22, Previous and Next 16
+    // and Stop 14 read as three weights): 20 px for Play/Pause, a
     // step above the 16 px of the others, the volume's included.
     readonly property int playPauseGlyphSize: root.scaled(20)
     readonly property int smallGlyphSize: root.scaled(Kirigami.Units.iconSizes.small)
@@ -149,9 +148,9 @@ ToolBar {
     readonly property real buttonSize: Math.max(32, root.playPauseGlyphSize + 12)
     // The clear space around a 16 px glyph in its button.
     readonly property real smallGlyphInset: (root.buttonSize - root.smallGlyphSize) / 2
-    // The right of the transport on one rhythm (#373 H8): the seek bar,
-    // 16 px, the time, 24 px, the volume glyph, 8 px, the volume slider,
-    // measured between what is drawn, not between the buttons' frames.
+    // The right of the transport on one rhythm: the seek bar, 16 px, the
+    // time, 24 px, the volume glyph, 8 px, the volume slider, measured
+    // between what is drawn, not between the buttons' frames.
     readonly property real seekToTimeGap: 2 * Kirigami.Units.largeSpacing
     readonly property real timeToVolumeGap: 3 * Kirigami.Units.largeSpacing
     readonly property real volumeGlyphToSliderGap: Kirigami.Units.largeSpacing
@@ -167,10 +166,10 @@ ToolBar {
     // 48 px, or the buttons and 8 px above and below them.
     implicitHeight: Math.max(48, root.buttonSize + 16)
     // The content's inset, on both sides, measured to what is drawn, as
-    // the transport's other gaps are (#373 H8): Previous's glyph starts
-    // where the library's rows and the status bar's text do, with its
-    // button's clear space in the inset (#373 H34 AB6: its ink was at 20
-    // px), and the volume groove ends at it. The button's focus ring, 3 px
+    // the transport's other gaps are: Previous's glyph starts where the
+    // library's rows and the status bar's text do, with its button's clear
+    // space in the inset (with the button's frame there, its ink was at
+    // 20 px), and the volume groove ends at it. The button's focus ring, 3 px
     // outside it, stays in the window: at a large font, whose wider clear
     // space leaves less than that, the glyph starts a pixel or two further
     // in. On whole pixels, as the clear space can be a half.
@@ -360,8 +359,8 @@ ToolBar {
             // One button that shows the state: Pause while playing,
             // otherwise Play. Its two glyphs cross-fade over shortDuration,
             // the one shown going out as the other comes in, so the button
-            // never goes blank (#373 H4: a sequential swap left it below
-            // half its ink for 50 ms). Both opacities come from one
+            // never goes blank (a sequential swap left it below half its
+            // ink for 50 ms). Both opacities come from one
             // progress, so a change back mid-fade reverses from where it
             // is, and at rest one glyph is whole and the other gone.
             TransportButton {
@@ -478,7 +477,7 @@ ToolBar {
             // The bar: 28 px, with the ±12 px waveform in its middle and
             // the playhead across its height, 2 px past the waveform's
             // peaks on either side. A larger font scales the waveform as it
-            // does the glyphs (#373 H12: at 24 pt it stayed 24 px beside
+            // does the glyphs (unscaled, at 24 pt it stayed 24 px beside
             // 48 px glyphs).
             readonly property real waveformHeight: root.scaled(24)
             readonly property real boxHeight: waveformHeight + 4
@@ -766,9 +765,9 @@ ToolBar {
             // names: the playhead while a gesture moves it, otherwise the
             // hovering pointer's line. Its bottom edge is on the bar's top,
             // in the band the volume's tooltip takes, so it hides none of
-            // the waveform it reads (#373 H33 AA2: beside the line it
-            // covered some 40 px of it where the pointer was; #373 H5:
-            // under the bar it hung over the queue's header).
+            // the waveform it reads (beside the line it covered some 40 px
+            // of it where the pointer was; under the bar it hung over the
+            // queue's header).
             ToolTip {
                 id: seekTimeBox
                 objectName: "seekTimeBox"
@@ -827,8 +826,8 @@ ToolBar {
                 // Centred on the line, within the bar at either end. Near
                 // the bar's start it may cover a menu bar's titles above
                 // it for a moment, which costs less than a time away from
-                // its line (#373 H34 AB4: kept right of them, it was up to
-                // 350 px from it).
+                // its line (kept right of them, it was up to 350 px from
+                // it).
                 readonly property real centredX: anchorX - width / 2
                 readonly property real placedX: root.snapped(Math.max(0,
                     Math.min(seekSlider.width - width, centredX)))
@@ -887,8 +886,8 @@ ToolBar {
         // "1:17 / 3:49": the position in the text colour, the length in the
         // secondary one; "–:–– / –:––" in the secondary colour with nothing
         // playing, which fills the box as a time does, so the volume keeps
-        // its distance from what is drawn (#373 H33 AA3: "–:––" alone left
-        // a hole of some 45 px before it).
+        // its distance from what is drawn ("–:––" alone left a hole of some
+        // 45 px before it).
         Item {
             id: transportTime
             objectName: "transportTime"
@@ -966,8 +965,8 @@ ToolBar {
                 ? I18n.i18nc("@action:button", "Unmute")
                 : I18n.i18nc("@action:button", "Mute")
             // Ferrous's own glyphs, at the weight of the transport's beside
-            // them (#373 H8: Breeze's speaker, with 1 px waves, read lighter
-            // than Next), and at their size.
+            // them (Breeze's speaker, with 1 px waves, read lighter than
+            // Next), and at their size.
             icon.source: root.volumeSilent
                 ? Qt.resolvedUrl("../assets/volume-muted.svg")
                 : Qt.resolvedUrl("../assets/volume.svg")
@@ -1013,7 +1012,7 @@ ToolBar {
             Layout.alignment: Qt.AlignVCenter
             // 96 px, 72 px in a narrow window; a larger font widens the
             // groove with the thumb and the glyphs, up to half again
-            // (#373 H34 AB5: at 24 pt a 29 px thumb crowded a 96 px groove).
+            // (at 24 pt a 29 px thumb crowded a fixed 96 px groove).
             Layout.preferredWidth: volumeSlider.grooveWidth(root.narrow)
             Layout.preferredHeight: volumeSlider.boxHeight
             padding: 0
@@ -1029,7 +1028,7 @@ ToolBar {
                 : I18n.i18nc("@info:tooltip volume in percent", "Volume %1", volumeSlider.percentText)
             // A 3 px groove and a 12 px thumb in a 20 px box, both centred
             // on the groove's middle, which lies on whole device pixels; a
-            // larger font scales them as it does the glyphs (#373 H12: at
+            // larger font scales them as it does the glyphs (unscaled, at
             // 24 pt the thumb stayed 12 px beside 38 px glyphs).
             readonly property real boxHeight: root.scaled(20)
             readonly property real grooveHeight: root.scaled(3)
@@ -1046,8 +1045,8 @@ ToolBar {
 
             // Its own tooltip, rather than the shared one, whose text a
             // drag or a key that moves the slider before the hover's delay
-            // ends left at the volume it had (#373 H5: "Volume 100%" with
-            // the thumb at 40%). A press shows it at once.
+            // ends left at the volume it had ("Volume 100%" with the thumb
+            // at 40%). A press shows it at once.
             ToolTip {
                 id: volumeToolTip
                 objectName: "volumeToolTip"

@@ -273,7 +273,7 @@ void ErrorsSmokeTest::aLongErrorIsShownWhole() {
     QVERIFY(QMetaObject::invokeMethod(errors, "historyRequested"));
     QTRY_VERIFY(dialog->property("opened").toBool());
     // The message's label, which shows it with its path broken between
-    // folders and its "(os error 28)" whole (#373 H47).
+    // folders and its "(os error 28)" whole.
     const auto messageLabels = [&] {
         QList<QQuickItem *> labels;
         for (const QString &name : {QStringLiteral("errorHistoryHeading"), QStringLiteral("errorHistoryMessage")}) {
@@ -477,7 +477,7 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
 
     QTRY_VERIFY(dialog->property("visible").toBool());
     // The error as it is; shown with its path broken between folders and
-    // its "(os error 28)" whole (#373 H47).
+    // its "(os error 28)" whole.
     QCOMPARE(message->property("message").toString(), error);
     QCOMPARE(message->property("text").toString().remove(QChar(0x200b)).remove(QChar(0x2060))
                  .replace(QChar(0x00a0), QLatin1Char(' ')),
@@ -485,7 +485,7 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     QVERIFY(message->property("text").toString().contains(QStringLiteral("(os\u00a0error\u00a028)")));
     QVERIFY(window->isVisible());
     // The heading says what happened in words; the system's error is the
-    // line below it, in the secondary colour, not the heading (#373 H37).
+    // line below it, in the secondary colour, not the heading.
     {
         auto *heading = window->findChild<QQuickItem *>(QStringLiteral("quitSaveFailedHeading"));
         auto *messageItem = qobject_cast<QQuickItem *>(message);
@@ -493,13 +493,12 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
         QTRY_VERIFY(heading->isVisible() && messageItem->isVisible());
         const QString headingText = heading->property("text").toString();
         // It says so once, on one line, and not in the title's words
-        // again; what the changes can be is in the text below (#373 H38,
-        // H41).
+        // again; what the changes can be is in the text below.
         QCOMPARE(headingText, QStringLiteral("Some recent changes were not saved."));
         QVERIFY(!headingText.contains(QStringLiteral("could not be saved")));
         QCOMPARE(heading->property("lineCount").toInt(), 1);
-        // The lead, semibold, as every dialog's first sentence is (#373
-        // H40); the error and what follows regular, secondary.
+        // The lead, semibold, as every dialog's first sentence is; the
+        // error and what follows regular, secondary.
         QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
         QCOMPARE(messageItem->property("font").value<QFont>().weight(), QFont::Normal);
         auto *details = window->findChild<QQuickItem *>(QStringLiteral("quitSaveFailedDetails"));
@@ -587,7 +586,7 @@ void ErrorsSmokeTest::retryTakesNoSecondAnswerAsTheDialogFades() {
     const int first = bridge->property("lastStateSaveRequestId").toInt();
     QVERIFY(answerStateSave(bridge, first, false, QStringLiteral("Settings could not be saved")));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    // A window of its own above the main window (#373 H5).
+    // A window of its own above the main window.
     auto *dialogWindow = qobject_cast<QQuickWindow *>(dialog);
     QVERIFY(dialogWindow != nullptr);
     QCOMPARE(dialogWindow->transientParent(), window);
@@ -951,8 +950,8 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
 
     // The popup fits the window; the list scrolls. Opened with the
     // pointer, its content has the keyboard, not a control, which would
-    // show no ring (#373 H38), so no focus frame wraps the whole list; the
-    // list's keys scroll it from there.
+    // show no ring, so no focus frame wraps the whole list; the list's keys
+    // scroll it from there.
     QVERIFY(shownInsideItsWindow(content));
     QVERIFY(shownInsideItsWindow(diagnostics));
     QVERIFY(shownInsideItsWindow(clearAll));

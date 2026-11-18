@@ -72,7 +72,7 @@ Components.CompactDialogWindow {
         Layout.fillWidth: true
         // It ends at its help text, the dialogs' inset above the buttons
         // as in a confirmation: Kirigami's form ends in an empty 2 px row,
-        // for lining up twin forms, a row spacing under its last (#373 H42:
+        // for lining up twin forms, a row spacing under its last (it left
         // 35 px from the help text to the buttons).
         Layout.preferredHeight: implicitHeight - Kirigami.Units.smallSpacing - 2
 
@@ -83,7 +83,7 @@ Components.CompactDialogWindow {
             Layout.fillWidth: true
             // Wide enough for a typical folder's path whole, and for the
             // help under the name on one line; a longer path is elided in
-            // the middle (#373 H38). In grid units of the font it is in.
+            // the middle. In grid units of the font it is in.
             Layout.preferredWidth: root.uiPalette.gridUnit * 24
             path: root.pathValue || ""
         }

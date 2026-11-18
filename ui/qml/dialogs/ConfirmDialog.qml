@@ -13,9 +13,9 @@ import "../components" as Components
 // answered. The confirm button is the default one, which Enter presses,
 // unless the action destroys data: then Cancel is, as KDE's guidelines ask,
 // and it has the keyboard as the dialog opens, so neither Enter nor Space
-// destroys anything until the user moves to the action (#373 H37). The
-// question is the dialog's lead, semibold, as every dialog's first sentence
-// is (#373 H40); what it acts on and what follows are secondary.
+// destroys anything until the user moves to the action. The question is
+// the dialog's lead, semibold, as every dialog's first sentence is; what
+// it acts on and what follows are secondary.
 Components.CompactDialogWindow {
     id: root
 

@@ -10,9 +10,9 @@ import "../components" as Components
 
 // Help › About KDE: the KDE community that makes the frameworks Ferrous is
 // built on, in the words of KDE's own About KDE dialog. A window of its
-// own, as About Ferrous is, with the same heading, page and button row
-// (#373 H4): the icon, the name and its motto, then the text and its
-// links where About Ferrous has its pages.
+// own, as About Ferrous is, with the same heading, page and button row:
+// the icon, the name and its motto, then the text and its links where
+// About Ferrous has its pages.
 Components.DialogWindow {
     id: root
 

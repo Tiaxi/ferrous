@@ -27,7 +27,7 @@ DialogWindow {
     property Item initialFocusItem: body
     // The width the content needs whole, leaving out text that wraps:
     // a form's or a check box's, which do not wrap and would run past a
-    // narrower window, as they did at large fonts (#373 H10).
+    // narrower window, as they did at large fonts.
     property real contentWidth: 0
 
     readonly property real _footerHeight: root.footer && root.footer.visible ? root.footer.implicitHeight : 0
@@ -38,9 +38,8 @@ DialogWindow {
 
     // The measure of its text: about 46 characters of the body font, so
     // that a larger font keeps a lead on a line and a body of a few lines,
-    // rather than a few words to the line (#373 H41: at 24 pt, 450 px held
-    // 28 characters). With the default font, 25 grid units, 450 px, hold
-    // more.
+    // rather than a few words to the line (at 24 pt, 450 px held 28
+    // characters). With the default font, 25 grid units, 450 px, hold more.
     readonly property int measureWidth: Math.ceil(46 * bodyMetrics.averageCharacterWidth + 2 * root.contentPadding)
 
     // Its minimum stays put: the window system takes a new one as a new

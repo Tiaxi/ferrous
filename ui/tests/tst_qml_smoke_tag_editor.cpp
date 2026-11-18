@@ -376,8 +376,7 @@ void TagEditorSmokeTest::tagEditorCancelAsksBeforeDroppingEdits() {
     // Cancel asks, as the close button and Escape do.
     QTRY_VERIFY(fixture.confirmShown());
     QCOMPARE(fixture.confirmMessage(), QStringLiteral("Save changes before closing the tag editor?"));
-    // The question leads, semibold, as every dialog's first sentence is
-    // (#373 H40).
+    // The question leads, semibold, as every dialog's first sentence is.
     QCOMPARE(fixture.window->findChild<QObject *>(QStringLiteral("tagEditorCloseConfirmMessage"))
                  ->property("font").value<QFont>().weight(),
              QFont::DemiBold);
@@ -408,8 +407,8 @@ void TagEditorSmokeTest::tagEditorCancelAsksBeforeDroppingEdits() {
 
 // Text typed in a field and not yet applied is an unsaved change: Save
 // and Ctrl+S are enabled while it differs from what the field held, and
-// save it (#373 H37: they stayed disabled until the field lost focus, and
-// Ctrl+S did nothing). Typed back to what it held, there is nothing to save.
+// save it (they stayed disabled until the field lost focus, and Ctrl+S did
+// nothing). Typed back to what it held, there is nothing to save.
 void TagEditorSmokeTest::typedTextCanBeSavedBeforeTheFieldIsLeft() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(2, false));
@@ -436,8 +435,8 @@ void TagEditorSmokeTest::typedTextCanBeSavedBeforeTheFieldIsLeft() {
     QTRY_VERIFY(!fixture.editor.saving());
 }
 
-// Typed text marks its change at once, as it does once applied (#373 H38:
-// Save was enabled, but nothing else showed the change until the field
+// Typed text marks its change at once, as it does once applied (Save was
+// enabled, but nothing else showed the change until the field
 // lost focus): the field's label turns semibold and its Revert shows, the
 // column's header turns semibold with its Revert, and the rows the text
 // goes to get the modified dot. Typed back to what the field held, the
@@ -739,7 +738,7 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     QObject *message = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitMessage"));
     QVERIFY(message != nullptr);
     QVERIFY(message->property("text").toString().contains(QStringLiteral("may be lost")));
-    // As a confirmation reads (#373 H40): what it waits for semibold, the
+    // As a confirmation reads: what it waits for semibold, the
     // files under its text rather than the spinner, the explanation in the
     // secondary colour, and Keep Waiting with a glyph, as Quit Anyway.
     QObject *palette = qvariant_cast<QObject *>(fixture.window->property("uiPalette"));
@@ -750,8 +749,8 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     QCOMPARE(files->property("color").value<QColor>().rgba(), palette->property("textSecondary").value<QColor>().rgba());
     QTRY_COMPARE(sceneRectOf(qobject_cast<QQuickItem *>(files)).left(), sceneRectOf(status).left());
     // The explanation on the same left edge, as wide as the status's text
-    // (#373 H40: it started under the spinner); the window wider by that
-    // indent, so it keeps the lines it had.
+    // (it started under the spinner); the window wider by that indent, so
+    // it keeps the lines it had.
     auto *messageItem = qobject_cast<QQuickItem *>(message);
     QTRY_COMPARE(sceneRectOf(messageItem).left(), sceneRectOf(status).left());
     QCOMPARE(messageItem->width(), status->width());
@@ -1354,7 +1353,7 @@ void TagEditorSmokeTest::tagEditorRowsFollowTheKeyboard() {
 
 // The current row, with the focus ring, follows the selection however it
 // changes, so the ring and the selection's tint are on one row and the
-// keyboard goes on from the selected row (#373 H12: with the selection set
+// keyboard goes on from the selected row (with the selection set
 // elsewhere, the ring stayed on row 1 while row 2 was selected).
 void TagEditorSmokeTest::tagEditorCurrentRowFollowsTheSelection() {
     TagEditorWindow fixture;
@@ -1505,7 +1504,7 @@ void TagEditorSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {
     QVERIFY(summary != nullptr);
     QCOMPARE(summary->property("text").toString(),
              QStringLiteral("1 file will be renamed.\n1 file can\u2019t be renamed and keeps its name."));
-    // The lead, semibold, as every dialog's first sentence is (#373 H40).
+    // The lead, semibold, as every dialog's first sentence is.
     QCOMPARE(summary->property("font").value<QFont>().weight(), QFont::DemiBold);
     const QVariantList rows = previewDialog->property("rows").toList();
     QCOMPARE(rows.size(), 2);
@@ -1643,8 +1642,8 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// The details of a save that failed for one file read as a report (#373
-// H40: a plain text dump in a window 522 px tall for six lines): the
+// The details of a save that failed for one file read as a report (not a
+// plain text dump in a window 522 px tall for six lines): the
 // editor's summary, semibold, then each section's heading over its files,
 // what failed semibold in the negative colour, what succeeded quieter,
 // each file 16 px in, more with a larger font, the lines a long
@@ -1735,8 +1734,8 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     const qreal indent = std::max(16.0, std::round(16.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
     const auto blockAt = [&](int index) { return document->findBlockByNumber(index); };
     // The headings on the summary's edge: what succeeded regular, in the
-    // secondary colour; what failed semibold, in the negative colour (#373
-    // H40: both were semibold, as the summary, which no longer led).
+    // secondary colour; what failed semibold, in the negative colour (when
+    // both were semibold, as the summary, it no longer led).
     const auto colourOf = [&](int index) {
         const QTextBlock block = blockAt(index);
         return block.begin().fragment().charFormat().foreground().color().rgb();
@@ -1757,8 +1756,8 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
         QCOMPARE(colourOf(index), palette->property("text").value<QColor>().rgb());
         QCOMPARE(blockAt(index).blockFormat().leftMargin(), indent);
     }
-    // 12 px between the sections, more with a larger font (#373 H40: a
-    // grid unit, 18 px).
+    // 12 px between the sections, more with a larger font, not a grid
+    // unit, 18 px.
     const qreal sectionGap = std::max(12.0, std::round(12.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
     QCOMPARE(blockAt(0).blockFormat().topMargin(), 0.0);
     QCOMPARE(blockAt(2).blockFormat().topMargin(), sectionGap);
@@ -1775,8 +1774,8 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     QCOMPARE(lineLeft(blockAt(1), 0), lineLeft(blockAt(0), 0) + indent);
     // As drawn too: each line of the long error, the first and those it
     // wraps to, starts its ink at the file's indent, with nothing drawn
-    // between the headings' edge and it (#373 H42: a review read the
-    // wrapped line as fallen back past the indent).
+    // between the headings' edge and it (a review read the wrapped line as
+    // fallen back past the indent).
     QTRY_VERIFY(text->height() > 0);
     const QImage shown = detailsWindow->grabWindow().convertToFormat(QImage::Format_RGB32);
     QVERIFY(!shown.isNull());
@@ -1845,7 +1844,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
         QVERIFY2(std::abs(sceneRectOf(close).top() - textBottom - gridUnit) <= 1.0, qPrintable(where));
         // With no scroll bar: the window was laid out hidden and small,
         // the bar shown, and the lines beside it took one more than the
-        // window had room for, so it stayed (#373 H47).
+        // window had room for, so it stayed.
         QQmlExpression barShown(qmlContext(text), text, QStringLiteral("detailsView.ScrollBar.vertical.visible"));
         QTRY_VERIFY2(!barShown.evaluate().toBool(), qPrintable(where));
     } else {
@@ -1880,7 +1879,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     // The failed file's line breaks inside the folder's path only after a
     // slash, never inside a folder's name such as "2005 - Small Hours
     // (Deluxe Edition)" or "read-only", and never inside "(os error 13)"
-    // (#373 H47: it broke in "ferrous-tagsave" at 24 pt). The narrowest
+    // (it broke in "ferrous-tagsave" at 24 pt). The narrowest
     // window spreads the path over lines; the selection goes as the text
     // is laid out anew, with no warning.
     const QString failedItem = editor.statusDetailSections().last().toMap().value(QStringLiteral("items"))
@@ -1953,8 +1952,8 @@ void TagEditorSmokeTest::renamePreviewOpensAsTallAsItsList_data() {
 
 // Rename Files opens as tall as its summary and its list, a refused
 // file's error wrapped under its name, with a grid unit's room above the
-// buttons (#373 H40: four files opened it with 79 px of nothing under
-// them), each time it opens.
+// buttons (four files opened it with 79 px of nothing under them), each
+// time it opens.
 void TagEditorSmokeTest::renamePreviewOpensAsTallAsItsList() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -2019,8 +2018,8 @@ void TagEditorSmokeTest::renamePreviewOpensAsWideAsItsLines_data() {
 // columns, a sentence of the summary, or the buttons, within its
 // minimum and 42 grid units scaled with the font, where longer lines elide
 // in their middle; each time it opens, so long names widen it and short
-// ones bring it back (#373 H45: a fixed 756 px held 390 px of lines at
-// 10 pt, and 1814 px at 24 pt held 950).
+// ones bring it back (a fixed 756 px held 390 px of lines at 10 pt, and
+// 1814 px at 24 pt held 950).
 void TagEditorSmokeTest::renamePreviewOpensAsWideAsItsLines() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -2086,7 +2085,7 @@ void TagEditorSmokeTest::renamePreviewOpensAsWideAsItsLines() {
         QTRY_VERIFY(!visibleItemsNamed(list, QStringLiteral("renamePreviewNewName")).isEmpty());
         // Its widest line, measured as the labels draw them: a renamed
         // file's widest old name, the arrow's column and its widest new
-        // name, which start at one x in every row (#373 H46), or the line
+        // name, which start at one x in every row, or the line
         // of the file that can't be renamed.
         const QFontMetricsF rowMetrics(qvariant_cast<QFont>(
             visibleItemsNamed(list, QStringLiteral("renamePreviewNewName")).first()->property("font")));
@@ -2169,8 +2168,8 @@ void TagEditorSmokeTest::renamePreviewShowsTheNewNamesInAColumn_data() {
 // keeps its name, or can't be renamed, is one line across the list. Screen
 // readers still read a renamed file's row as one line. Where the window
 // can't hold the names, the old names give way first, down to 40 % of the
-// list, and the new names keep their one x (#373 H46: the arrows stood at
-// seven places over 105 px, and the new names had no column).
+// list, and the new names keep their one x (the arrows stood at seven
+// places over 105 px, and the new names had no column).
 void TagEditorSmokeTest::renamePreviewShowsTheNewNamesInAColumn() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();

@@ -125,8 +125,7 @@ void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
     QVERIFY2(modeSwitch != nullptr, "Visualization mode switch was not created");
     QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
     // Two 24 px tool buttons on one plate, 4 px apart with 4 px around,
-    // which keeps a focus ring inside it with 1 px of plate outside it
-    // (#373 H14 G4, H16 I5).
+    // which keeps a focus ring inside it with 1 px of plate outside it.
     QCOMPARE(modeSwitch->property("width").toDouble(), 60.0);
     QCOMPARE(modeSwitch->property("height").toDouble(), 32.0);
     QCOMPARE(modeSwitch->property("pointerHovered").toBool(), false);
@@ -1076,10 +1075,10 @@ void WindowSmokeTest::queueColumnWidthsSurviveARestart() {
 }
 
 // Unmuting showed the volume slider at 0, and the muted glyph, until a
-// snapshot of the backend's brought the restored volume some 50 ms later
-// (#373 H34 AA4). With the real bridge and backend: from the mute to the
-// backend's snapshot after the unmute, the slider shows the volume in every
-// frame, and the glyph the state, at once.
+// snapshot of the backend's brought the restored volume some 50 ms later.
+// With the real bridge and backend: from the mute to the backend's snapshot
+// after the unmute, the slider shows the volume in every frame, and the
+// glyph the state, at once.
 void WindowSmokeTest::unmuteShowsTheVolumeAtOnce() {
     QFile::remove(savedSettingsPath());
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -1483,7 +1482,7 @@ void WindowSmokeTest::nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown() {
     snapshot.metadata.sourcePath = untaggedPath;
     QVERIFY(deliver(snapshot));
     // Its file name for a title and, in the artist's row, its folder, not
-    // a tag (#373 H29 W2, H30: as the bridge gives the title, never empty).
+    // a tag (as the bridge gives the title, never empty).
     QTRY_COMPARE(title->property("text").toString(), QStringLiteral("untitled take.flac"));
     QTRY_COMPARE(artistAlbum->property("text").toString(), QStringLiteral("fixture"));
     QCOMPARE(panel->property("artistAlbumText").toString(), QString());
@@ -1499,9 +1498,9 @@ void WindowSmokeTest::nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown() {
 // cover and in the large-font header, where the album's row, which the
 // file has nothing for, is not kept, so the details follow the folder
 // 4 px under it; the panel's height and the library's place are a tagged
-// track's (#373 H31 Y2: at 24 pt the card stood some 100 px empty under
-// "Unsorted"). The bridge's format label is from the file's extension, and
-// its length from the playback.
+// track's (at 24 pt the card stood some 100 px empty under "Unsorted").
+// The bridge's format label is from the file's extension, and its length
+// from the playback.
 void WindowSmokeTest::nowPlayingShowsWhatATaglessFileIs() {
     BridgeClient bridge;
     // Only the snapshots below reach it, not the real bridge's.
@@ -1644,9 +1643,9 @@ void WindowSmokeTest::nowPlayingShowsWhatATaglessFileIs() {
 // idle from the first. While the panel shrinks into the compact row it
 // holds the track that showed, its cover and its lines, whichever of them
 // it hears of first; every frame shows that track, it and the row handing
-// over, or the row, and the tile is never at rest while it shows (#373
-// H30: the cover and the lines went in one frame, and the tile's own disc
-// mark stood alone in the band). Stop alone keeps the track.
+// over, or the row, and the tile is never at rest while it shows (the
+// cover and the lines went in one frame, and the tile's own disc mark stood
+// alone in the band). Stop alone keeps the track.
 void WindowSmokeTest::nowPlayingHoldsTheTrackThatWentAsItShrinks() {
     BridgeClient bridge;
     // Only the snapshots below reach it, not the real bridge's.

@@ -9,13 +9,13 @@ import "." as Components
 // while keyboard focus is on either of them, and in a viewer with its
 // controls; hidden, they stay Tab stops, so the keyboard reveals them.
 // A `compact` head, in a short lane, such as each of 5.1's in the main
-// window (#373 H8), has a 16 px label with 11 px text and 20 px buttons,
+// window, has a 16 px label with 11 px text and 20 px buttons,
 // larger with a larger font, and its buttons show only on the pointer or
 // keyboard focus, not with a viewer's controls: there, every lane's would
 // show at once and crowd the lanes. A lane that is muted or soloed keeps
 // its buttons shown, compact or not, so the checked one says why the lane
-// is silent, or why the others are, and is there to undo it (#373 H16 I4:
-// a muted lane and one silenced by another's Solo looked the same).
+// is silent, or why the others are, and is there to undo it (a muted
+// lane and one silenced by another's Solo looked the same).
 Item {
     id: root
 
@@ -69,11 +69,11 @@ Item {
         : root.uiPalette.smallPointSize
 
     // The label's box; the buttons' plate, taller, is centred on it, so
-    // that the label's letters and M and S stand on one centre line (#373
-    // H18 C4: with the plates' tops on one line, H16 I5, they stood 6 px
-    // apart). It reaches `plateReach` above the label, which the plot layer
-    // insets the head by, so that the plate's top is on one line with the
-    // mode switch's, and its centre line with the label's is the switch's.
+    // that the label's letters and M and S stand on one centre line (with
+    // the plates' tops on one line, they stood 6 px apart). It reaches
+    // `plateReach` above the label, which the plot layer insets the head
+    // by, so that the plate's top is on one line with the mode switch's,
+    // and its centre line with the label's is the switch's.
     readonly property real plateReach: Math.max(0, -buttons.y)
     implicitWidth: buttons.visible ? buttons.x + buttons.width : labelPlate.width
     implicitHeight: labelPlate.height
@@ -107,7 +107,7 @@ Item {
         y: Math.round((labelPlate.height - buttons.height) / 2)
         // 4 px around the buttons and between them, as on the mode switch,
         // so a button's focus ring, 3 px out from it, keeps 1 px of the
-        // plate outside it (#373 H16 I5).
+        // plate outside it.
         padding: 4
         contentSpacing: 4
         plotColors: root.plotColors
@@ -137,8 +137,8 @@ Item {
             glyphText: I18n.i18nc("@action:button one-letter abbreviation of mute", "M")
             text: I18n.i18nc("@action:button %1 is a channel", "Mute %1", root.label)
             // Checkable, so that assistive technology hears it is a toggle
-            // and whether it is on (#373 H14 F6: the accessible state's
-            // checkable alone, set over a button that is not, was lost).
+            // and whether it is on (the accessible state's checkable alone,
+            // set over a button that is not, was lost).
             // The lane's state is what it shows: a click's own toggle goes
             // back to it, which the click then changes.
             checkable: true
@@ -159,8 +159,8 @@ Item {
             glyphText: I18n.i18nc("@action:button one-letter abbreviation of solo", "S")
             text: I18n.i18nc("@action:button %1 is a channel", "Solo %1", root.label)
             // Checkable, so that assistive technology hears it is a toggle
-            // and whether it is on (#373 H14 F6: the accessible state's
-            // checkable alone, set over a button that is not, was lost).
+            // and whether it is on (the accessible state's checkable alone,
+            // set over a button that is not, was lost).
             // The lane's state is what it shows: a click's own toggle goes
             // back to it, which the click then changes.
             checkable: true

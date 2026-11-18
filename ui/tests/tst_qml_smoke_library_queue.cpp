@@ -2200,7 +2200,7 @@ ApplicationWindow {
     QVERIFY(confirm != nullptr);
 
     // Remove acts on the selected folder: none at first, then the one
-    // clicked (#373 H4).
+    // clicked.
     QQuickItem *removeButton = visibleItemNamed(window, QStringLiteral("libraryRootRemoveButton"));
     QVERIFY(removeButton != nullptr);
     QVERIFY(!removeButton->isEnabled());
@@ -2210,7 +2210,7 @@ ApplicationWindow {
     QTRY_VERIFY(removeButton->isEnabled());
     QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
-    // A window of its own above the page's (#373 H5).
+    // A window of its own above the page's.
     auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
     QVERIFY(confirmWindow != nullptr);
     QCOMPARE(confirmWindow->transientParent(), window);
@@ -2237,8 +2237,8 @@ ApplicationWindow {
     QCOMPARE(root->property("removed").toStringList(), QStringList{});
 
     // Removing takes the folder's tracks out of the library, so Cancel is
-    // the default button, as KDE's guidelines ask, and has the keyboard
-    // (#373 H37): Enter as the question shows keeps the folder.
+    // the default button, as KDE's guidelines ask, and has the keyboard:
+    // Enter as the question shows keeps the folder.
     QVERIFY(confirm->property("destructive").toBool());
     QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
@@ -3051,8 +3051,8 @@ QList<int> queueSelection(QObject *controller) {
 } // namespace
 
 void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
-    // A length that is not known, as the transport writes it: en dashes
-    // (#373 H35 AC2), from the bridge and in the row's own fallback.
+    // A length that is not known, as the transport writes it: en dashes,
+    // from the bridge and in the row's own fallback.
     QCOMPARE(formatQueueDuration(-1.0), QStringLiteral("\u2013:\u2013\u2013"));
     QCOMPARE(formatQueueDuration(std::numeric_limits<double>::infinity()), QStringLiteral("\u2013:\u2013\u2013"));
     BinaryBridgeCodec::DecodedQueueTrack unknownTrack;
@@ -3183,8 +3183,8 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
 
     // An unreadable file: the status bar's warning sign, at its size and
-    // in its negative colour, and a quieter title (#373 H35 AC1: Breeze's
-    // dialog-warning as a mask was a solid grey triangle).
+    // in its negative colour, and a quieter title (Breeze's dialog-warning
+    // as a mask was a solid grey triangle).
     QVERIFY(errors->setProperty("unreadablePaths",
                                 QVariantMap{{QStringLiteral("/music/3.flac"),
                                              QStringLiteral("Cannot read the file")}}));
@@ -3233,8 +3233,7 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QVERIFY(ring(4));
     QVERIFY(!ring(2));
     // The pointer over a selected row steps its tint toward the text, with
-    // the hover's fade, and back; the other selected row keeps its own
-    // (#373 H35 AC3).
+    // the hover's fade, and back; the other selected row keeps its own.
     QTest::mouseMove(window, queueRowPoint(view, 4, 0.5));
     QTRY_COMPARE(tint(4), paletteColor("selectionHovered"));
     QCOMPARE(tint(2), paletteColor("selection"));
@@ -3276,9 +3275,9 @@ void LibraryQueueSmokeTest::queueStateGlyphGrowsWithTheFont_data() {
 }
 
 // The playing row's glyph grows with the font, from its 12 px at the
-// default 10 pt, on whole pixels, and is drawn at that size (#373 H9: at
-// 24 pt Kirigami rounded the 29 px glyph down to a 22 px theme icon, a
-// 16 px triangle beside 33 px text).
+// default 10 pt, on whole pixels, and is drawn at that size (at 24 pt
+// Kirigami rounded the 29 px glyph down to a 22 px theme icon, a 16 px
+// triangle beside 33 px text).
 void LibraryQueueSmokeTest::queueStateGlyphGrowsWithTheFont() {
     QFETCH(qreal, pointSize);
     QFETCH(int, side);
@@ -3454,7 +3453,7 @@ void LibraryQueueSmokeTest::queueDropsFollowTheRowsAfterRowsAboveAreRemoved() {
     // A drop in the top row's upper half goes before it, one in the lower
     // half of the row three down after that row, and the line is there:
     // its 2 px straddle the boundary, one above it, inside the view at
-    // its top (#373 H35 AC4: it lay in the lower row).
+    // its top (it lay in the lower row).
     const auto dropAt = [&](double y) {
         QVERIFY(QMetaObject::invokeMethod(dropArea, "updateQueueDropIndicator", Q_ARG(QVariant, y)));
     };
@@ -3469,8 +3468,8 @@ void LibraryQueueSmokeTest::queueDropsFollowTheRowsAfterRowsAboveAreRemoved() {
 }
 
 // The drop line runs to the scrollbar's lane while the scrollbar shows,
-// and to the queue's edge when it does not, as the focus ring does (#373
-// H35 AC4: it stopped 8 px short with no scrollbar).
+// and to the queue's edge when it does not, as the focus ring does (it
+// stopped 8 px short with no scrollbar).
 void LibraryQueueSmokeTest::queueDropLineKeepsTheScrollbarLaneOnlyWhileItShows() {
     QueueRowsModel rows;
     loadQueueRows(rows, 4);

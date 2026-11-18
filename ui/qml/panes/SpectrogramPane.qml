@@ -9,7 +9,7 @@ import QtQuick.Window 2.15
 //
 // The viewer in the main window takes the visualization from here, and
 // fades in over the pane as it opens: the pane keeps the visualization's
-// last frame under it (#373 H5: it was empty for a few frames, so the
+// last frame under it (it was empty for a few frames, so the
 // opening viewer faded in over a blank pane). With `keepsLastFrame`, the
 // pane grabs that frame once, while the visualization is still here, and
 // `lastFrameKept` tells Main.qml it may take the visualization away.
@@ -18,7 +18,7 @@ import QtQuick.Window 2.15
 // in the effect's window for as long as the effect refers to it, whatever
 // window its parent is in: taken into the whole-screen window then, it
 // stayed in this window's scene, and the two windows' render threads drew
-// its nodes at once (#373 H6: a crash). So the effect is made only while
+// its nodes at once, and the app crashed. So the effect is made only while
 // the pane keeps a frame, and only once the visualization is here; it lets
 // the visualization go and is destroyed as soon as the pane keeps none,
 // and `holdsVisualization` tells Main.qml not to take the visualization

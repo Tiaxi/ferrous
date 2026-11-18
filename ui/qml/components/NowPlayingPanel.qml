@@ -16,71 +16,66 @@ import "../logic/PathUtils.js" as PathUtils
 //   "Year · Genre · Track n" under it, inset 12 px, a line each, in a
 //   block that with the cover is a whole number of the list's rows high
 //   (see wideTextTop), then the seam. The block is one height for every
-//   track (#373 H14 G1: an untagged track's, a tagged one's and one with a
-//   long album's were 56, 82 and 108 px, so a track change moved the
+//   track (otherwise an untagged track's, a tagged one's and one with a
+//   long album's were 56, 82 and 108 px, and a track change moved the
 //   library by up to 26 px): each line is elided where it does not fit,
 //   with the whole text in the tooltip, and a line the track has no text
 //   for keeps its row, empty.
 // - Narrow (a sidebar under narrowWidth): the cover at the panel's top
-//   left corner, as the wide one is, at every font size (#373 H14 G9: in
-//   a wide sidebar it was in 12 px, at the top of the title's capitals),
-//   with four short lines beside it, 12 px after it and 10 px down, the
-//   cover as high as the block, flush with the seam, where the lines keep
-//   a dozen characters beside it, and 96 px otherwise (besideCoverSize);
-//   or a 96 px cover with the lines under it when there is no room beside
-//   it, then 12 px before the seam. Under it, the
-//   title wraps onto a second line rather than be cut off, and under a
-//   title on one line the artist, or else the album, and the lines are
-//   4 px apart. Beside the cover in a wide sidebar (the
-//   compact layout) the block keeps six lines' room. With a font too
-//   large for four lines beside the 96 px cover, as 24 pt, in either
-//   sidebar, it is a header row instead: the cover as high as two lines of
-//   the title, the title beside it, and the artist, the album and the
-//   details under it on the whole width (see largeHeader). A sidebar too
-//   short for the wide layout
-//   to leave the library about six rows, as with a large font or a short
-//   window, takes it too (#373 H6), with the lines beside the cover
-//   however far past it they run, as its room beside it is wide (#373 H10).
+//   left corner, as the wide one is, at every font size (not inset 12 px,
+//   at the top of the title's capitals), with four short lines beside it,
+//   12 px after it and 10 px down, the cover as high as the block, flush
+//   with the seam, where the lines keep a dozen characters beside it, and
+//   96 px otherwise (besideCoverSize); or a 96 px cover with the lines
+//   under it when there is no room beside it, then 12 px before the seam.
+//   Under it, the title wraps onto a second line rather than be cut off,
+//   and under a title on one line the artist, or else the album, and the
+//   lines are 4 px apart. Beside the cover in a wide sidebar (the compact
+//   layout) the block keeps six lines' room. With a font too large for
+//   four lines beside the 96 px cover, as 24 pt, in either sidebar, it is
+//   a header row instead: the cover as high as two lines of the title,
+//   the title beside it, and the artist, the album and the details under
+//   it on the whole width (see largeHeader). A sidebar too short for the
+//   wide layout to leave the library about six rows, as with a large font
+//   or a short window, takes it too, with the lines beside the cover
+//   however far past it they run, as its room beside it is wide.
 // - Nothing loaded, wide or narrow: one compact row of the list's row
 //   height, Ferrous's 16 px mark at the 12 px inset and "Nothing playing"
 //   where a library row has its text, both in the secondary colour; the
-//   library gets the height (#373 H7: the empty square took 360 px). The
-//   first track grows the cover's place from the row to its full size
-//   over moveDuration, InOutQuad, uncovering the cover, which lies at its
-//   full size in place all along (#373 H14 G5: a cover scaled up from a
-//   square in the middle of the band read as a zoom, with empty flanks),
-//   fading in as the row goes, by the move's time (see idleOut), the
-//   lines and the library moving down
-//   with its foot, so nothing jumps (#373 H5); the lines fade in over the
-//   move's last part, once it is past its fastest, so no text slides over
-//   the moving rows (#373 H12 Z7) nor pops in at its end (#373 H28 V6).
-//   Going back to nothing
-//   loaded, as when the queue is cleared or runs out, is the same backwards
-//   (#373 H30: the cover and lines went in one frame, the tile's own disc
-//   mark alone in the band as it shrank): the track that showed stays, its
-//   cover or stand-in and its lines (heldTrack), while it shrinks, the lines
-//   fading out as they faded in and the row back over the move's end. With
-//   animations off, both are at once.
+//   library gets the height (an empty square took 360 px). The first
+//   track grows the cover's place from the row to its full size over
+//   moveDuration, InOutQuad, uncovering the cover, which lies at its full
+//   size in place all along (a cover scaled up from a square in the middle
+//   of the band read as a zoom, with empty flanks), fading in as the row
+//   goes, by the move's time (see idleOut), the lines and the library
+//   moving down with its foot, so nothing jumps; the lines fade in over
+//   the move's last part, once it is past its fastest, so no text slides
+//   over the moving rows nor pops in at its end. Going back to nothing
+//   loaded, as when the queue is cleared or runs out, is the same
+//   backwards (rather than the cover and lines going in one frame, leaving
+//   a mark alone in the band as it shrank): the track that showed stays,
+//   its cover or stand-in and its lines (heldTrack), while it shrinks, the
+//   lines fading out as they faded in and the row back over the move's
+//   end. With animations off, both are at once.
 // - A track without a cover keeps the cover's place, wide or narrow, with
-//   a stand-in in it (#373 H11; AlbumArtTile): the plot's floor colour
-//   with the app icon's harmonic traces (StandInMark), the same for every
-//   track and never text (#373 H14 F2: an album title in it said again
-//   what the lines under it say, and left the slot blank without one).
-//   So the panel
-//   changes its geometry only between nothing loaded and a track (#373
-//   H9 to H11: a track without a cover had a layout of its own, a mark
-//   beside the title and no cover's place, and a track change between one
-//   and the other moved the library some 360 to 400 px). Between a track
-//   with a cover and one without, the cover and the stand-in cross-fade
-//   in place, as two covers do; the lines and the library stay put.
+//   a stand-in in it (AlbumArtTile): the plot's floor colour with the app
+//   icon's harmonic traces (StandInMark), the same for every track and
+//   never text (an album title in it said again what the lines under it
+//   say, and left the slot blank without one). So the panel changes its
+//   geometry only between nothing loaded and a track (a layout of its own
+//   for a track without a cover, a mark beside the title and no cover's
+//   place, moved the library some 360 to 400 px on a change between the
+//   two). Between a track with a cover and one without, the cover and the
+//   stand-in cross-fade in place, as two covers do; the lines and the
+//   library stay put.
 // - Narrow, a line a track has no text for, as for a file without tags,
-//   takes no room (#373 H6): the lines under it move up, within the block.
+//   takes no room: the lines under it move up, within the block.
 // - Narrow, the block is one height for every track, too, beside the cover
-//   and under it (#373 H28: at 24 pt under the cover a title on two lines
-//   moved the library 28 px): it keeps room for two lines of the title and
-//   one each of the artist, the album and the details (see
-//   narrowReservedHeight). Under the cover, a title on one line leaves a
-//   line of that room to the artist, or else to the album, to wrap into.
+//   and under it (at 24 pt under the cover a title on two lines moved the
+//   library 28 px): it keeps room for two lines of the title and one each
+//   of the artist, the album and the details (see narrowReservedHeight).
+//   Under the cover, a title on one line leaves a line of that room to the
+//   artist, or else to the album, to wrap into.
 //
 // The title is over the rest: DemiBold, and a Kirigami heading's size,
 // level 1 under the wide cover and level 2 beside the narrow one, but the
@@ -110,8 +105,8 @@ Item {
     // The sidebar's height, and what of it the library under the panel
     // needs: its header and about six rows (SidebarPane). Where the wide
     // layout would leave it less, as with a large font or in a short
-    // window, the panel takes the narrow one (#373 H6: at 24 pt in a
-    // 1000 px high window the library showed three rows). The wide
+    // window, the panel takes the narrow one (at 24 pt in a 1000 px high
+    // window the library showed three rows). The wide
     // layout's height is from the font and the width alone, all its lines
     // counted, so the switch does not change what it is decided by, and
     // a track does not switch it.
@@ -124,8 +119,8 @@ Item {
     readonly property int narrowCoverSize: 96
     // The large-font header's cover (see largeHeader): as high as two lines
     // of the title beside it, from the fonts alone, so that it spans them,
-    // and never under the narrow 96 px (#373 H28 V1: 108 px at 24 pt; 96 px
-    // where its title is at the base size, headerTitleSmall).
+    // and never under the narrow 96 px (108 px at 24 pt; 96 px where its
+    // title is at the base size, headerTitleSmall).
     readonly property real headerCoverSize: root.headerTitleSmall
         ? Math.max(root.narrowCoverSize, Math.round(headerSmallTitleProbe.implicitHeight))
         : root.headingHeaderCoverSize
@@ -138,9 +133,9 @@ Item {
     // heading-size title, the panel's own narrowLineMinimum in the title's
     // font, as at 24 pt in the 360 px sidebar of a 1000 px window, but not
     // in the 408 px one of a 1600 px window. From the fonts and the width
-    // alone, so every title of a layout is one size (#373 H31 Y1: a long
-    // title stepped down a size on its own, and ranked over the artist by
-    // weight alone on that track).
+    // alone, so every title of a layout is one size (a long title that
+    // stepped down a size on its own ranked over the artist by weight alone
+    // on that track).
     readonly property bool headerTitleSmall: root._roomBeside(root.headingHeaderCoverSize)
         < 12 * narrowTitleMetrics.averageCharacterWidth
     // The size of the narrow layout's title: the base size in a large-font
@@ -149,7 +144,7 @@ Item {
         ? root.uiPalette.basePointSize : root.titlePointSize
     // The cover beside the narrow lines (narrowBeside): the block's whole
     // height, flush with its top and with the seam, rather than 96 px with
-    // a band of the view under it (#373 H28 V2: 25 px at 10 pt); 96 px
+    // a band of the view under it (25 px at 10 pt); 96 px
     // where the lines would have under narrowLineMinimum beside it, as at
     // 12 and 14 pt in a 260 px sidebar. The block keeps its height.
     readonly property real besideBlockSize: Math.max(root.narrowCoverSize,
@@ -186,23 +181,22 @@ Item {
     // InOutQuad, which eases in rather than leaping off. Under the wide
     // cover the library moves 350 to 420 px: over longDuration, OutCubic,
     // its first frames jumped some 100 px, four of its rows, and read as a
-    // cross-fade rather than a slide (#373 H10); over veryLongDuration,
-    // OutCubic, it still started at some 3,100 px/s (#373 H12 Z7); over
-    // wideMoveDuration, InOutQuad, it peaks at some 1,850 px/s, mid-way.
+    // cross-fade rather than a slide; over veryLongDuration, OutCubic, it
+    // still started at some 3,100 px/s; over wideMoveDuration, InOutQuad,
+    // it peaks at some 1,850 px/s, mid-way.
     // The narrow cover's 100 px or so take longDuration. None with
     // animations off.
     readonly property int wideMoveDuration: Math.round(Kirigami.Units.veryLongDuration * 9 / 8)
     readonly property int moveDuration: Kirigami.Units.longDuration <= 0 ? 0
         : (root.wideRoom ? root.wideMoveDuration : Kirigami.Units.longDuration)
     readonly property int moveEasing: Easing.InOutQuad
-    // The lines come in late in the move, not with it (#373 H12 Z7: they
-    // slid over the moving rows for some 190 ms): at 0 until the move is
+    // The lines come in late in the move, not with it (with it, they slid
+    // over the moving rows for some 190 ms): at 0 until the move is
     // linesFromPresence of the way, past its fastest part, then fading in
     // over longDuration, OutCubic, or what is left of the move where that
     // is shorter, so they are whole when it ends: under the wide cover from
-    // some 250 ms of its 450 (#373 H28 V6: from 90 %, at some 390 ms, they
-    // popped in over its last 60 ms; H14 G5: from 80 % with shortDuration
-    // they arrived with it). Read from the move's progress, so a move that
+    // some 250 ms of its 450 (from 90 %, at some 390 ms, they popped in
+    // over its last 60 ms). Read from the move's progress, so a move that
     // turns back, or none, as with animations off, takes them with it.
     readonly property real linesFromPresence: 0.6
     readonly property real linesOpacity: {
@@ -219,11 +213,10 @@ Item {
     // milliseconds over any move: the row goes over idleOut, linear, the
     // cover comes in over coverIn, OutCubic, whole for the rest; they
     // overlap only where each is near half, so the band never shows
-    // neither, nor "Nothing playing" across the art for long (#373 H15 H5:
-    // the row's text, at 0.8 to 0.2, was drawn across the incoming art;
-    // H16 I2: on InOutQuad's slow start the row was gone by 12 % of the
-    // way and the cover still faint, so the band was empty for some 60 to
-    // 140 ms). As fractions of shortDuration, [start, end]: the row from
+    // neither, nor "Nothing playing" across the art for long (by the
+    // move's progress, on InOutQuad's slow start the row was gone by 12 %
+    // of the way and the cover still faint, so the band was empty for some
+    // 60 to 140 ms). As fractions of shortDuration, [start, end]: the row from
     // 20 to 50 ms, the cover from 12 to 112 ms, with Kirigami's own. Going
     // back to nothing loaded runs the same backwards.
     readonly property var idleOut: [0.2, 0.5]
@@ -272,7 +265,7 @@ Item {
     // The track as it last showed, {coverPath, lines} (see followTrack):
     // what the panel shows while it shrinks into the compact row, as the
     // bridge tells nothing of the track any more, before or after the
-    // panel is idle (#373 H30). Kept while a track plays, so that it is the
+    // panel is idle. Kept while a track plays, so that it is the
     // one that showed whichever the bridge clears first; gone once the
     // panel has shrunk.
     property var heldTrack: null
@@ -367,8 +360,8 @@ Item {
     // "Album (Year)" as the album and its year, [album, " (Year)"], or
     // [text, ""] for a text without both: the album line draws the year
     // whole after the album, which is cut off before it where the two do
-    // not fit, "A Remarkabl… (2024)" (#373 H14 G2: at 24 pt the year was
-    // lost to the ellipsis). The parts are read from the line's own
+    // not fit, "A Remarkabl… (2024)" (at 24 pt the year was lost to the
+    // ellipsis). The parts are read from the line's own
     // format, so a translation that puts the year first has none.
     readonly property var albumYearFormat: {
         const format = I18n.i18nc("@info album and its year", "%1 (%2)", "\u0001", "\u0002")
@@ -390,12 +383,12 @@ Item {
     // A file without tags, with its file name for a title and no artist,
     // album or details, says where it is instead: the name of its folder,
     // in the artist's row, in textSecondary, as a fact of the file rather
-    // than a tag (#373 H29 W2: at 24 pt "track07" stood alone beside the
-    // cover over some 140 px of empty rows). Never for a track with any
+    // than a tag (at 24 pt "track07" stood alone beside the cover over
+    // some 140 px of empty rows). Never for a track with any
     // tag the lines show, as an album or a track number alone.
     // Its title is the file's own name when it has no title tag: the
-    // queue row's title or the bridge's fallback (#373 H30: the real app
-    // never left it empty, so the folder never showed).
+    // queue row's title or the bridge's fallback, as the app never leaves
+    // it empty.
     readonly property bool untagged: (root._trimmed(root.uiBridge.currentTrackTitle).length === 0
             || PathUtils.isFileNameTitle(root.uiBridge.currentTrackTitle, root.uiBridge.currentTrackPath))
         && root.artistText.length === 0 && root.albumText.length === 0 && root.detailsText.length === 0
@@ -403,8 +396,8 @@ Item {
         ? PathUtils.containingFolderName(root._trimmed(root.uiBridge.currentTrackPath)) : ""
     // What a file without tags is, for its details line: its container
     // and its length, "FLAC · 0:40", or the one of them the bridge knows,
-    // in the details' style (#373 H31 Y2: at 24 pt the tag-less card stood
-    // some 100 px empty under the folder). Only for such a file.
+    // in the details' style (at 24 pt the tag-less card stood some 100 px
+    // empty under the folder). Only for such a file.
     readonly property string fileFactsText: root.untagged
         ? root._joined([root._trimmed(root.uiBridge.currentTrackFormatLabel),
                         root.uiBridge.durationSeconds > 0
@@ -423,7 +416,7 @@ Item {
     }
     // The details as the lines show them: all of them where the line has
     // room, and otherwise without what matters least, rather than cut off
-    // (#373 H11: at 24 pt, "Classical · Track 2 o…"): first the album's
+    // (at 24 pt, "Classical · Track 2 o…"): first the album's
     // track total, then the genre, then the year. The whole of them is in
     // the tooltip.
     function _fittingDetails(year, separator, width) {
@@ -475,16 +468,16 @@ Item {
         narrowDetails: root.untagged ? root.fileFactsText : root.shownNarrowDetailsText
     })
 
-    // A track change fades (#373 Motion), line by line: a line that differs
-    // for the next track cross-fades, in place, the one before going out
-    // over the first 40 % of the fade as the next track's comes in over all
-    // of it (see _linesOutLevel), so the line never drops below half of its
-    // ink (#373 H6: out, then in, left each line under half for up to 50
-    // ms) and the two texts hardly show together (#373 H15 H3); where
-    // only a word or a number of it changes, its fields, and the words of a
-    // field in which only a number changes, that are the same for both and
-    // do not move stay still (#537), and otherwise it fades whole (see
-    // `_fadesWhole`, #373 H2); a line that is the same stays still. The next
+    // A track change fades, line by line: a line that differs for the next
+    // track cross-fades, in place, the one before going out over the first
+    // 40 % of the fade as the next track's comes in over all of it (see
+    // _linesOutLevel), so the line never drops below half of its ink (out,
+    // then in, left each line under half for up to 50 ms) and the two texts
+    // hardly show together; where only a word or a number of it changes,
+    // its fields, and the words of a field in which only a number changes,
+    // that are the same for both and do not move stay still (#537), and
+    // otherwise it fades whole (see `_fadesWhole`); a line that is the same
+    // stays still. The next
     // track of the same album fades over shortDuration; a track of another
     // album, or with another cover, fades the cover and the lines together
     // over longDuration, the cover cross-fading over all of it. A line
@@ -548,9 +541,9 @@ Item {
     // lines before go out over the first linesOutSpan of it, OutCubic, 80
     // ms of a 200 ms fade, as the playing track's come in over all of it,
     // OutCubic, so the two texts are both over 0.3 for some 4 ms of it
-    // rather than 50 (#373 H15 H3: two titles read superimposed), and
-    // between them a line keeps over half of a text's ink in every frame,
-    // so it does not blink (#373 H6). The incoming lines start with the
+    // rather than 50 (at 50 two titles read superimposed), and between
+    // them a line keeps over half of a text's ink in every frame, so it
+    // does not blink. The incoming lines start with the
     // fade: held back any longer, as to 60 ms, the line would drop under
     // half its ink for up to 70 ms, a blink.
     readonly property real linesOutSpan: 0.4
@@ -733,15 +726,15 @@ Item {
     }
 
     // The lines that wrap onto a second line rather than be cut off, and
-    // so fade whole: in the narrow layout the title (#373 H11: beside the
-    // cover at 24 pt a long title was cut off), under the narrow cover the
+    // so fade whole: in the narrow layout the title (beside the cover at
+    // 24 pt a long title was cut off), under the narrow cover the
     // artist too, under a title on one line, and under it, in the room the
     // title and the artist leave, and beside it in the compact layout the
-    // album with its year (#373 H14 F7, G2: at 24 pt a long album kept a
-    // fifth of its text), but under the large-font header (largeHeader),
+    // album with its year (at 24 pt a long album kept a fifth of its
+    // text), but under the large-font header (largeHeader),
     // where it has the whole width, one line, its year whole after it.
     // Beside the compact cover, and under the header, the artist takes one
-    // line, elided, with the whole of it in the tooltip (#373 H15 H1). The
+    // line, elided, with the whole of it in the tooltip. The
     // album line fades whole wherever it shows, as its year stands apart
     // from it (_albumAndYear).
     readonly property var wrappingLines: root.wideRoom ? ({})
@@ -1068,14 +1061,14 @@ Item {
     }
 
     // The title, over the text under it: under the wide cover a level 1
-    // Kirigami.Heading's size, 13.5 pt with the default 10 pt font (#373
-    // H11: a step up from level 2, to stand to the 360 px cover), and in
-    // the narrow layout a level 2's, 12 pt. It follows the font.
+    // Kirigami.Heading's size, 13.5 pt with the default 10 pt font (a step
+    // up from level 2, to stand to the 360 px cover), and in the narrow
+    // layout a level 2's, 12 pt. It follows the font.
     readonly property real wideTitlePointSize: root.uiPalette.headingPointSize(1)
     readonly property real titlePointSize: root.uiPalette.headingPointSize(2)
 
-    // The wide text block, under the cover, is on the queue's row grid
-    // (#373 H11): with the cover it is a whole number of the list's rows
+    // The wide text block, under the cover, is on the queue's row grid:
+    // with the cover it is a whole number of the list's rows
     // high, UiPalette's rowHeight, which the queue's rows are too, so that
     // the seam at its foot and the hairline under the library's header
     // fall on the lines of the queue's rows; with the default font and the
@@ -1084,7 +1077,7 @@ Item {
     // lines start `wideTextTop` under the cover, whatever the track, and
     // what the grid leaves over is under them, at least `wideLeastGap`
     // before the seam, which sets the panel and the library apart as
-    // regions of one sheet (#373 H4: 28 px there left a dead band).
+    // regions of one sheet (28 px there left a dead band).
     readonly property int wideTextTop: 2 * Kirigami.Units.smallSpacing
     readonly property int wideLeastGap: 2 * Kirigami.Units.smallSpacing
     function _wideBlockHeight(linesHeight) {
@@ -1112,7 +1105,7 @@ Item {
         + root.narrowTitleGap + 3 * narrowLineMetrics.height
     // Beside the narrow cover, the gap between the title and the artist
     // under it, which sets the title apart from the three small lines that
-    // are one group (#373 H12: 2 px, the same as between those, ran them
+    // are one group (2 px, the same as between those, ran them
     // together). The block stays the cover's height and the grid's.
     readonly property int narrowTitleGap: 4
     // A font too large for the four lines beside the 96 px cover, as 24 pt:
@@ -1124,19 +1117,19 @@ Item {
     readonly property bool narrowLinesTall: root.narrowLinesHeight > 1.25 * root.narrowCoverSize
     // The large-font header, in a narrow sidebar and in one wide enough for
     // the wide layout that takes this one for its height alone alike
-    // (#373 H28 V1: at 24 pt the narrow sidebar stood a 96 px cover alone
-    // on a row, some 264 px of it empty beside it, and the compact one cut
-    // the artist off beside a 152 px cover): the cover at the top left, as
-    // high as two lines of the title (headerCoverSize), and beside it,
-    // 12 px after it, the title, on up to two lines, which end on the
-    // cover's foot, a title on one line too (#373 H29 W1); then,
-    // footGap under the cover, at the panel's inset and on its whole width,
-    // the artist, "Album (Year)", the album cut off before its year, in
-    // textSecondary, and the details, a line each, elided, stackedLineGap
-    // apart. The block is one height for every track (largeHeaderHeight):
-    // a line a track has no text for keeps its row, so a track change does
-    // not move the library; but a file without tags shows no album, and
-    // its details, the file's facts, follow its folder (fileFactsText). Where the title would have under
+    // (at 24 pt the narrow sidebar stood a 96 px cover alone on a row,
+    // some 264 px of it empty beside it, and the compact one cut the artist
+    // off beside a 152 px cover): the cover at the top left, as high as
+    // two lines of the title (headerCoverSize), and beside it, 12 px after
+    // it, the title, on up to two lines, which end on the cover's foot, a
+    // title on one line too; then, footGap under the cover, at the panel's
+    // inset and on its whole width, the artist, "Album (Year)", the album
+    // cut off before its year, in textSecondary, and the details, a line
+    // each, elided, stackedLineGap apart. The block is one height for
+    // every track (largeHeaderHeight): a line a track has no text for
+    // keeps its row, so a track change does not move the library; but a
+    // file without tags shows no album, and its details, the file's facts,
+    // follow its folder (fileFactsText). Where the title would have under
     // narrowLineMinimum beside the cover, the lines go under it instead
     // (narrowStacked).
     readonly property bool largeHeader: !root.wideRoom && root.largeFont
@@ -1151,12 +1144,12 @@ Item {
     // they would run well past the cover and the large-font header has no
     // room: there the room beside it would still show only a dozen
     // characters of each, under the cover they show more, and the title
-    // and the artist wrap rather than be cut off (#373 H5). A sidebar wide
-    // enough for the wide layout that takes this one for its height alone,
-    // as with a large font in a 1000 px high window, keeps the lines beside
-    // the cover, or the header: the room beside it is wide enough there,
-    // and under it the cover stood alone on a row, with its width empty
-    // beside it (#373 H10).
+    // and the artist wrap rather than be cut off. A sidebar wide enough for
+    // the wide layout that takes this one for its height alone, as with a
+    // large font in a 1000 px high window, keeps the lines beside the
+    // cover, or the header: the room beside it is wide enough there, and
+    // under it the cover stood alone on a row, with its width empty beside
+    // it.
     readonly property bool narrowStacked: !root.wideRoom && !root.largeHeader
         && (root._roomBeside(root.largeFont && !root.narrow ? root.headerCoverSize : root.narrowCoverSize)
                 < root.narrowLineMinimum
@@ -1165,12 +1158,12 @@ Item {
     // wide layout, which takes this one for its height alone; with a large
     // font, the large-font header. Otherwise the lines are beside the
     // 96 px cover, where the album with its year takes two lines where it
-    // needs them, as the title does (#373 H14 G2: at 24 pt a long album was
-    // cut off on one line, its year lost), the artist one, elided, and the
-    // block keeps the room of them all, six lines: two each for the title
-    // and the album, one each for the artist and the details, whatever the
-    // track, so a track change does not move the library (#373 H15 H1: two
-    // for the artist too left some 145 px blank under a common track).
+    // needs them, as the title does (at 24 pt a long album was cut off on
+    // one line, its year lost), the artist one, elided, and the block keeps
+    // the room of them all, six lines: two each for the title and the
+    // album, one each for the artist and the details, whatever the track,
+    // so a track change does not move the library (two for the artist too
+    // left some 145 px blank under a common track).
     readonly property bool compactLayout: !root.wideRoom && !root.narrow && !root.narrowStacked
     readonly property real compactLinesHeight: root.narrowTextTop + narrowTitleProbe.implicitHeight
         + root.narrowTitleGap + narrowTwoLinesProbe.implicitHeight + 2 * narrowLineProbe.implicitHeight
@@ -1246,14 +1239,14 @@ Item {
     }
 
     // The tile with nothing in it, at rest under the compact row: the
-    // sidebar's view colour, as one surface with it (#373 H6: a lighter
-    // tile read as a broken image).
+    // sidebar's view colour, as one surface with it (a lighter tile read
+    // as a broken image).
     readonly property color placeholderColor: root.uiPalette.view
 
     // The room the narrow lines keep, beside the cover or under it,
-    // whatever the track has text for, from the fonts alone (#373 H28: it
-    // followed the track's text, so a title on two lines, or an album on
-    // two under the cover, moved the library): two lines of the title and
+    // whatever the track has text for, from the fonts alone (following
+    // the track's text, a title on two lines, or an album on two under the
+    // cover, moved the library): two lines of the title and
     // one each of the artist, the album and the details, with the gaps
     // between them. Under the cover, a title on one line leaves the artist,
     // or else the album, a second line in the title's line it does not
@@ -1274,7 +1267,7 @@ Item {
         : root.compactLayout ? Math.max(root.narrowCoverSize, root.compactLinesHeight) + root.textInset + root.seamHeight
         : root.besideBlockSize + root.seamHeight
     // The wide block's height: its three lines', whatever the track has
-    // text for (#373 H14 G1), from the font alone.
+    // text for, from the font alone.
     readonly property real wideLinesHeight: wideTitleProbe.implicitHeight + wideColumn.spacing
         + wideLineProbe.implicitHeight + wideColumn.spacing + wideDetailsProbe.implicitHeight
     readonly property real wideBlockHeight: root._wideBlockHeight(root.wideLinesHeight)
@@ -1310,13 +1303,13 @@ Item {
     // wider than the line, where the line `breaksLongWords`, breaks with a
     // hyphen where its first part fills the line, at least hyphenatedHead
     // characters of it before the hyphen and hyphenatedTail after it, the
-    // line ending there ("\n"), rather than anywhere (#373 H30: "A Remarka
-    // / bly Long …" split the word with no mark); the lines before the last
-    // as Text wraps them. A word only the ellipsis cuts is cut as any
-    // line's last word is (#373 H31 Y1). Where Text would elide the last
-    // line after a space, "Title That …", the panel elides it instead,
-    // without the space, the lines before it ending in "\n", and `elided`
-    // is set (#373 H31 Y6); otherwise Text elides it. `text` as it is where
+    // line ending there ("\n"), rather than anywhere ("A Remarka / bly
+    // Long …" split the word with no mark); the lines before the last as
+    // Text wraps them. A word only the ellipsis cuts is cut as any line's
+    // last word is. Where Text would elide the last line after a space,
+    // "Title That …", the panel elides it instead, without the space, the
+    // lines before it ending in "\n", and `elided` is set; otherwise Text
+    // elides it. `text` as it is where
     // nothing of this applies, and where a word wider than the line has no
     // such break, which Text then breaks anywhere.
     function _laidOut(text, width, lines, lastWidth, breaksLongWords, metrics) {
@@ -1535,7 +1528,7 @@ Item {
         property bool breaksLongWords: false
         // The height of the box at whose foot each text of the line sits,
         // or 0 for its top: the large-font header's title seats a single
-        // line on the cover's foot (#373 H29 W1).
+        // line on the cover's foot.
         property real seatHeight: 0
         readonly property bool wraps: line.maximumLineCount > 1
         readonly property bool truncated: stillText.elided
@@ -1658,8 +1651,8 @@ Item {
 
         Layout.fillWidth: true
         // A line of the font's height; a track's empty line takes none,
-        // rather than leave a blank line in the block (#373 H6), unless it
-        // keeps its row.
+        // rather than leave a blank line in the block, unless it keeps its
+        // row.
         implicitHeight: line.collapsed ? (line.keepsRow ? rowProbe.implicitHeight : 0)
                                        : stillText.implicitHeight + stillText.tailLineHeight
         visible: !line.collapsed || line.keepsRow
@@ -1800,8 +1793,8 @@ Item {
     // from the compact row or shrinks back into it, a band of it from the
     // row's height up, which uncovers the cover from its top: the cover
     // lies whole, at its full size, at the place's top left all along, so
-    // the move reveals it rather than scale it (#373 H14 G5: H14 F5's
-    // square in the middle of the band, growing, read as a zoom).
+    // the move reveals it rather than scale it (a square in the middle of
+    // the band, growing, read as a zoom).
     Item {
         id: coverArea
         objectName: "nowPlayingCoverArea"
@@ -1870,8 +1863,7 @@ Item {
             width: root.idleGlyphSize
             height: width
             // Ferrous's mark, the stand-in's traces drawn for 16 px, rather
-            // than a stock disc, which read as noise at this size (#373 H31
-            // Y3).
+            // than a stock disc, which read as noise at this size.
             source: Qt.resolvedUrl("../assets/ferrous-mark-symbolic.svg")
             roundToIconSize: false
             isMask: true
@@ -1993,9 +1985,9 @@ Item {
                 breaksLongWords: true
                 // In the large-font header, a title on one line on the
                 // cover's foot, where a title on two ends, so the header
-                // reads as one stack down to the lines under it (#373 H29
-                // W1: at the cover's top it left some 54 px empty beside
-                // the cover's lower half).
+                // reads as one stack down to the lines under it (at the
+                // cover's top it left some 54 px empty beside the cover's
+                // lower half).
                 seatHeight: root.largeHeader ? root.headerCoverSize : 0
                 width: narrowColumn.width
                 // In the large-font header, the cover's height and footGap
@@ -2024,9 +2016,8 @@ Item {
                 pointSize: root.uiPalette.smallPointSize
                 // One line, elided, with the whole of it in the tooltip.
                 // Under the cover the title and the artist share their room:
-                // under a title on one line, the artist may take two (#373
-                // H18 C2: a long artist was cut off with a line free; H28:
-                // under the cover the block grew for it).
+                // under a title on one line, the artist may take two (on
+                // one line, a long artist was cut off with a line free).
                 maximumLineCount: root.narrowStacked && narrowTitle.textLineCount < 2 ? 2 : 1
                 // Under the large-font header, at the panel's inset.
                 x: root.largeHeader ? root.textInset - narrowColumn.x : 0
@@ -2041,18 +2032,18 @@ Item {
                 keepsTail: true
                 pointSize: root.uiPalette.smallPointSize
                 // Under the large-font header, a step below the artist and
-                // above the details, as the wide layout's lines are ranked
-                // (#373 H18 C2).
+                // above the details, as the wide layout's lines are
+                // ranked.
                 color: root.largeHeader ? root.uiPalette.textSecondary : root.uiPalette.text
                 // Beside the cover in the compact layout, the year goes
                 // onto a second line with the album's end where it needs
                 // to; under the cover too, in the line a title on one line
-                // leaves when the artist takes one (#373 H28); elsewhere one
-                // line, the album cut off before its year.
+                // leaves when the artist takes one; elsewhere one line, the
+                // album cut off before its year.
                 maximumLineCount: root.narrowLinesWrap ? 2 : 1
                 // Under the large-font header, at the panel's inset. Its row
                 // is kept, but for a file without tags, whose details,
-                // the file's facts, follow its folder (#373 H31 Y2).
+                // the file's facts, follow its folder.
                 x: root.largeHeader ? root.textInset - narrowColumn.x : 0
                 width: root.largeHeader ? root.footLineWidth : narrowColumn.width
                 keepsRow: root.largeHeader && !root._isFolderLine(root.shownLines.artist)

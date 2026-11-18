@@ -403,7 +403,7 @@ Item {
     QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
     QCOMPARE(waveform->playheadColor().alpha(), 255);
     // The crosshair's readout on the plot's plates, as the spectrogram's
-    // (#373 H18 C5: a translucent grey of its own, #5f5f65 on Breeze Light).
+    // (not a translucent grey of its own, #5f5f65 on Breeze Light).
     QCOMPARE(waveform->readoutPlateColor(), plotColors->property("plotPlate").value<QColor>());
     QCOMPARE(waveform->readoutPlateEdgeColor(), plotColors->property("plotPlateEdge").value<QColor>());
     QCOMPARE(waveform->readoutTextColor(), plotColors->property("plotText").value<QColor>());
@@ -595,8 +595,8 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     QVERIFY(!bridge->property("showLevelMeter").toBool());
     QTRY_VERIFY(surface->height() > 20);
     // The queue at its default height: the visualization has 47% of the
-    // right column (#373 H8), and what the queue's whole rows leave over
-    // (H9). The meter changes neither.
+    // right column, and what the queue's whole rows leave over. The meter
+    // changes neither.
     auto *rightSplit = root->findChild<QQuickItem *>(QStringLiteral("rightSplit"));
     QVERIFY(rightSplit != nullptr);
     QTRY_VERIFY(rightSplit->height() > 800);
@@ -613,8 +613,8 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     bridge->setProperty("showLevelMeter", true);
     QTRY_VERIFY(meter->isVisible());
     // A column at the right end of the lanes, as tall as the pane, out to
-    // its edge, which is the window's (#373 H8: no strip of the plot's
-    // floor beside it).
+    // its edge, which is the window's, with no strip of the plot's floor
+    // beside it.
     const double column = LevelMeterItem::kColumnWidth;
     QCOMPARE(meter->width(), column);
     QCOMPARE(meter->height(), surface->height());
@@ -1011,7 +1011,7 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
         const auto drawn = record();
         // The crosshair is on the device column under the pointer, at its
         // left edge, dashed as the spectrogram's: 4 px on, 3 off, in the
-        // plot's text at 45 % (#373 H18 C5).
+        // plot's text at 45 %.
         const QVector<double> crosshair = verticalLinesIn(drawn->engine, Qt::CustomDashLine);
         QCOMPARE(crosshair.size(), 1);
         const double columnX = std::floor(pointerX * scale + 1e-6) / scale;
@@ -2637,7 +2637,7 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsStayReadableInNarrowPlots()
 }
 
 // The waveform's level readout has the spectrogram's minus sign, U+2212,
-// not a hyphen (#373 H12: "-12.5 dB" beside the spectrogram's "−75 dB").
+// not a hyphen ("-12.5 dB" stood beside the spectrogram's "−75 dB").
 void WaveformSmokeTest::waveformEditorLevelReadoutUsesTheMinusSign() {
     QCOMPARE(CrosshairReadout::signedNumber(-12.46, 1), QStringLiteral("\u221212.5"));
     QCOMPARE(CrosshairReadout::signedNumber(-0.04, 1), QStringLiteral("0.0"));
@@ -2721,7 +2721,7 @@ void WaveformSmokeTest::waveformOverlaysKeepClearOfTheReservedCorner() {
     const QRect corner(width - 120, 0, 120, 40);
 
     // The readout leaves the corner, only while it would be under it, and
-    // keeps a group's gap from its plates (#373 H5, H8).
+    // keeps a group's gap from its plates.
     const auto [topValue, topTime] = WaveformEditorItem::crosshairLabelRects(
         width, height, 100, 5, 42, 48, 12, reserved);
     QVERIFY(!topValue.intersects(corner));
@@ -3340,9 +3340,9 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     // A file whose detail cannot be read has no more to wait for.
     QTest::newRow("per channel, unreadable") << 1 << false << true << 2;
     // Mixed, the overview of more than one channel is the peak of them
-    // all, not the downmix the detail draws (#373 H12 Z6: a 5.1 track's
-    // was a near solid envelope for some 300 ms, then the downmix): the
-    // detail is the first picture; without one, the overview.
+    // all, not the downmix the detail draws (a 5.1 track's was a near
+    // solid envelope for some 300 ms, then the downmix): the detail is the
+    // first picture; without one, the overview.
     QTest::newRow("mixed, stereo") << 0 << true << true << 2;
     QTest::newRow("mixed, 5.1") << 0 << true << true << 6;
     QTest::newRow("mixed, 5.1, animations off") << 0 << true << false << 6;
@@ -3352,7 +3352,7 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QTest::newRow("mixed, mono") << 0 << true << true << 1;
 }
 
-// The mode switch to the waveform never shows an empty plot (#373 H11: the
+// The mode switch to the waveform never shows an empty plot (the
 // waveform faded in from the click, before it had drawn the track, which
 // it is given only while it shows; per channel, its lanes wait for their
 // detail, and the plot was a bare floor for 80 to 170 ms). The spectrogram
@@ -3531,8 +3531,8 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     // Any decode still held, as the mono track's, goes through.
     gate->release(64);
 
-    // Back to the waveform (#373 H14: it waited about 200 ms for a fresh
-    // decode, and mixed, showed the overview's slab for another 116 ms):
+    // Back to the waveform (it waited about 200 ms for a fresh decode, and
+    // mixed, showed the overview's slab for another 116 ms):
     // with its detail kept, its first frame is the picture, and it comes
     // in a frame or two after the click, without decoding again.
     const int decodesBefore = started->load();
@@ -3605,7 +3605,7 @@ void WaveformSmokeTest::hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds_data()
 // The first mode switch of a track to the per-channel waveform held the
 // spectrogram some 200 ms after the switch's segment flipped, while the
 // waveform decoded the detail of its lanes, which it asked for only once
-// shown; later switches, with that detail kept, a frame (#373 H18 C1).
+// shown; later switches, with that detail kept, a frame.
 // Hidden, it fetches that detail once the track's overview has begun to
 // come, on its worker path, and draws nothing; the first switch then has
 // its picture at the click, as later ones, without decoding again. A track

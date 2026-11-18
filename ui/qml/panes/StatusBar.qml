@@ -15,7 +15,7 @@ import "../components" as Components
 // track's format; on the right the library scan, the Last.fm slot and the
 // issues. Groups are 16 px apart, with middle dots only inside a group and
 // no dividers.
-// An error has one treatment here (#373 H11: red semibold words for a
+// An error has one treatment here (it had three: red semibold words for a
 // stopped engine, plain words for one not running, and a glyph with words
 // for the issues and a failed scrobble): its words in the text colour
 // beside a 16 px glyph in the negative colour.
@@ -309,7 +309,7 @@ ToolBar {
 
         // The format group: "FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps".
         // It fills the room left, and shows as many of its parts as fit
-        // there whole, dropping them from the end (#373 H6: it went by the
+        // there whole, dropping them from the end (it went by the
         // window's width, and showed "FLAC" alone with most of the bar
         // empty). Its width is the layout's, never its text's, so what it
         // shows cannot move the layout.
@@ -362,7 +362,7 @@ ToolBar {
                         required property string modelData
 
                         // The headers' separator, a middle dot between
-                        // two spaces, at their spacing (#373 H11: a dot
+                        // two spaces, at their spacing (a dot
                         // with 6 px either side stood wider than theirs).
                         StatusLabel {
                             objectName: "statusBarFormatSeparator"
@@ -382,7 +382,7 @@ ToolBar {
 
         // The library scan: "Scanning “Music”… 34%" and a bar that moves
         // with the scan's batches; narrow: "Scanning… 34%". Its words say
-        // what the bar is (#373 H13: a bare bar read as a twin of the
+        // what the bar is (a bare bar read as a twin of the
         // Last.fm slot's). Without a total: "Scanning “Music”… 412 files",
         // the count being the progress; the bar shows once there is a total
         // to fill it against. The percent keeps the width of "100%", in
