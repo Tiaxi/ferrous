@@ -3252,11 +3252,19 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
                 QVERIFY2(apply != nullptr, at.constData());
                 QTRY_VERIFY2(apply->isEnabled(), at.constData());
                 checkPreviewControlsInTheDetails(host, prefix, at);
+                // I, the Image Details shortcut, keeps the details and with
+                // them Back to Results and Apply, the preview's only buttons
+                // (#578): it hid them, though its button was hidden.
                 QTest::keyClick(host, Qt::Key_I);
                 QCoreApplication::processEvents();
                 QVERIFY2(viewer->property("albumArtInfoVisible").toBool(), at.constData());
                 QVERIFY2(visibleItemNamed(host, QStringLiteral("albumArtInfoColumn")) != nullptr,
                          at.constData());
+                checkPreviewControlsInTheDetails(host, prefix, at);
+                QQuickItem *backAfterI = visibleItemNamed(host, QStringLiteral("albumArtPreviewBackButton"));
+                QQuickItem *applyAfterI = visibleItemNamed(host, QStringLiteral("albumArtPreviewApplyButton"));
+                QVERIFY2(backAfterI != nullptr && backAfterI->isEnabled(), at.constData());
+                QVERIFY2(applyAfterI != nullptr && applyAfterI->isEnabled(), at.constData());
                 // The results stay as they were, hidden.
                 QCOMPARE(resultsView()->property("count").toInt(), 12);
             };
