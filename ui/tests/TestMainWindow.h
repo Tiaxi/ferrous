@@ -13,10 +13,14 @@
 #include <QVariant>
 #include <QtTest/QtTest>
 
+#include <functional>
+#include <initializer_list>
+
 #include "../src/LibraryTreeModel.h"
 
 // Loading the main window from the QML sources, with its fallback bridge,
-// and the application font a test sets for its run.
+// the application font a test sets for its run, and a test's checks of one
+// window run in turn.
 
 // The application font at `pointSize` until the end of the scope, then the
 // font it was; 0 or less keeps the font as it is.
@@ -99,3 +103,14 @@ struct MainWindowFixture {
     QQmlApplicationEngine engine;
     QQuickWindow *window = nullptr;
 };
+
+// Runs the checks in turn, up to the first that fails: for a test that
+// loads its window once for several checks.
+inline void runInTurn(std::initializer_list<std::function<void()>> checks) {
+    for (const auto &check : checks) {
+        check();
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+    }
+}

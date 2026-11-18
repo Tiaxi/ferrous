@@ -47,31 +47,19 @@
 #include "../src/WindowPresence.h"
 #include "TestColor.h"
 #include "TestItems.h"
+#include "TestMainWindow.h"
 #include "TestMessages.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
 namespace {
 
-// Main.qml with its fallback bridge, shown and active.
-QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
-    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
-    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
-    engine.load(QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
-    if (engine.rootObjects().isEmpty()) {
-        return nullptr;
-    }
-    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
-    if (window == nullptr || !QTest::qWaitForWindowExposed(window)) {
-        return nullptr;
-    }
-    window->resize(1600, 1000);
-    window->requestActivate();
-    if (!QTest::qWaitForWindowActive(window)
-        || !QTest::qWaitFor([&]() { return window->width() == 1600 && window->height() == 1000; })) {
-        return nullptr;
-    }
-    return window;
+// The window the tests load, at a size that shows every pane.
+MainWindowOptions wideWindow() {
+    MainWindowOptions options;
+    options.width = 1600;
+    options.height = 1000;
+    return options;
 }
 
 QObject *bridgeOf(QQuickWindow *window) {
@@ -447,29 +435,37 @@ private slots:
     void cleanup();
     void cleanupTestCase();
     void drawsOffscreenUnlessAPlatformIsChosen();
-    void menuBarHasTheSixKdeMenusInOrder();
-    void menuBarTitlesAreLitWithTheSelectionTint();
     void menuBarTitleReadsWhenOpenOrHovered_data();
     void menuBarTitleReadsWhenOpenOrHovered();
-    void menusListTheirItemsInOrder();
-    void wordingIsTitleCaseWithOneCharacterEllipsis();
-    void playPauseItemNamesWhatItDoes();
-    void headingsAreTextThatIsNotPicked();
-    void headingsAreSkippedByThePointerAndTheKeyboard();
-    void repeatRadiosFollowTheBackendAndSetIt();
-    void visualizationRadiosFollowThePlotSwitch();
-    void scaleItemIsOffInWaveformMode();
-    void levelMeterIsPartOfThePlot();
-    void editMenuNamesItsUndoAndClearsTheQueue();
-    void findOpensSearchOnCtrlF();
-    void shortcutsAreTakenOnceEach();
-    void shortcutsTriggerTheirActions();
-    void queueContextMenuShowsKeysItDoesNotTake();
-    void libraryContextMenuNamesWhatItActsOn();
-    void coverMenusGiveReplaceFromItunesAnIcon();
-    void menusHaveNoTransitionsOfTheirOwn();
-    void settingsAndHelpOpenTheirPages();
-    void aboutKdeLinksTakeTheKeyboard();
+    void menusReadInKdesWordsAndOrder();
+    void menusAnswerThePointerAndTheKeyboard();
+    void viewMenuFollowsThePlot();
+    void queueAndPlaybackItemsActOnTheBackend();
+
+private:
+    // The checks that the tests above run in turn in one window; each says
+    // what it checks where it is defined.
+    void checkMenuBarHasTheSixKdeMenusInOrder(QQuickWindow *window);
+    void checkMenusListTheirItemsInOrder(QQuickWindow *window);
+    void checkWordingIsTitleCaseWithOneCharacterEllipsis(MainWindowFixture &main);
+    void checkShortcutsAreTakenOnceEach(QQuickWindow *window);
+    void checkCoverMenusGiveReplaceFromItunesAnIcon(QQuickWindow *window);
+    void checkMenusHaveNoTransitionsOfTheirOwn(QQuickWindow *window);
+    void checkHeadingsAreTextThatIsNotPicked(QQuickWindow *window);
+    void checkMenuBarTitlesAreLitWithTheSelectionTint(QQuickWindow *window);
+    void checkHeadingsAreSkippedByThePointerAndTheKeyboard(QQuickWindow *window);
+    void checkPlayPauseItemNamesWhatItDoes(QQuickWindow *window);
+    void checkFindOpensSearchOnCtrlF(QQuickWindow *window);
+    void checkSettingsAndHelpOpenTheirPages(QQuickWindow *window);
+    void checkAboutKdeLinksTakeTheKeyboard(QQuickWindow *window);
+    void checkVisualizationRadiosFollowThePlotSwitch(QQuickWindow *window);
+    void checkScaleItemIsOffInWaveformMode(QQuickWindow *window);
+    void checkLevelMeterIsPartOfThePlot(QQuickWindow *window);
+    void checkRepeatRadiosFollowTheBackendAndSetIt(QQuickWindow *window);
+    void checkEditMenuNamesItsUndoAndClearsTheQueue(QQuickWindow *window);
+    void checkQueueContextMenuShowsKeysItDoesNotTake(QQuickWindow *window);
+    void checkLibraryContextMenuNamesWhatItActsOn(MainWindowFixture &main);
+    void checkShortcutsTriggerTheirActions(QQuickWindow *window);
 };
 
 void UiMenusTest::initTestCase() {
@@ -502,11 +498,60 @@ void UiMenusTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
 }
 
-void UiMenusTest::menuBarHasTheSixKdeMenusInOrder() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+// What the menus say and hold, as declared: the window's menus are those
+// KDE's apps have, in KDE's words, and take each shortcut once.
+void UiMenusTest::menusReadInKdesWordsAndOrder() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkMenuBarHasTheSixKdeMenusInOrder(window); },
+               [&] { checkMenusListTheirItemsInOrder(window); },
+               [&] { checkWordingIsTitleCaseWithOneCharacterEllipsis(main); },
+               [&] { checkShortcutsAreTakenOnceEach(window); },
+               [&] { checkCoverMenusGiveReplaceFromItunesAnIcon(window); },
+               [&] { checkMenusHaveNoTransitionsOfTheirOwn(window); },
+               [&] { checkHeadingsAreTextThatIsNotPicked(window); }});
+}
+
+// The menus under the pointer and the keyboard, and the pages and dialogs
+// their items open. Each check leaves the menus closed.
+void UiMenusTest::menusAnswerThePointerAndTheKeyboard() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkMenuBarTitlesAreLitWithTheSelectionTint(window); },
+               [&] { checkHeadingsAreSkippedByThePointerAndTheKeyboard(window); },
+               [&] { checkPlayPauseItemNamesWhatItDoes(window); },
+               [&] { checkFindOpensSearchOnCtrlF(window); },
+               [&] { checkSettingsAndHelpOpenTheirPages(window); },
+               [&] { checkAboutKdeLinksTakeTheKeyboard(window); }});
+}
+
+// The View menu's items and the plot they show. Each check leaves the
+// spectrogram shown, without its scale or the level meter.
+void UiMenusTest::viewMenuFollowsThePlot() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkVisualizationRadiosFollowThePlotSwitch(window); },
+               [&] { checkScaleItemIsOffInWaveformMode(window); },
+               [&] { checkLevelMeterIsPartOfThePlot(window); }});
+}
+
+// The items that act on the queue and on playback, and the backend's state
+// they follow. Each check sets the queue it needs.
+void UiMenusTest::queueAndPlaybackItemsActOnTheBackend() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkRepeatRadiosFollowTheBackendAndSetIt(window); },
+               [&] { checkEditMenuNamesItsUndoAndClearsTheQueue(window); },
+               [&] { checkQueueContextMenuShowsKeysItDoesNotTake(window); },
+               [&] { checkLibraryContextMenuNamesWhatItActsOn(main); },
+               [&] { checkShortcutsTriggerTheirActions(window); }});
+}
+
+void UiMenusTest::checkMenuBarHasTheSixKdeMenusInOrder(QQuickWindow *window) {
 
     QStringList titles;
     for (QObject *menu : menusOf(window)) {
@@ -519,11 +564,7 @@ void UiMenusTest::menuBarHasTheSixKdeMenusInOrder() {
 
 // Main.qml's titles are the app's: plain, they show the bar; lit, the
 // selection tint of the lists, with the text colour on both.
-void UiMenusTest::menuBarTitlesAreLitWithTheSelectionTint() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkMenuBarTitlesAreLitWithTheSelectionTint(QQuickWindow *window) {
     auto *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
     QObject *menuBar = menuBarOf(window);
     QVERIFY(palette != nullptr && menuBar != nullptr);
@@ -634,7 +675,6 @@ void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered() {
     QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 10));
     QTRY_COMPARE(background->opacity(), 1.0);
     QCOMPARE(label->property("color").value<QColor>(), text);
-    QTest::qWait(50);
     const QImage image = window->grabWindow();
     const qreal scale = static_cast<qreal>(image.width()) / window->width();
     const QPointF corner = sceneRect(file).topLeft() + QPointF(2, 2);
@@ -658,11 +698,7 @@ void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered() {
     QTRY_VERIFY(!fileMenu->property("visible").toBool());
 }
 
-void UiMenusTest::menusListTheirItemsInOrder() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
 
     QCOMPARE(rowsOf(menuNamed(window, "fileMenu")),
              (QStringList{
@@ -736,11 +772,9 @@ void UiMenusTest::menusListTheirItemsInOrder() {
     QVERIFY(QFile::exists(QStringLiteral(":/icons/hicolor/16x16/apps/ferrous.svg")));
 }
 
-void UiMenusTest::wordingIsTitleCaseWithOneCharacterEllipsis() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkWordingIsTitleCaseWithOneCharacterEllipsis(MainWindowFixture &main) {
+    QQuickWindow *window = main.window;
+    LibraryTreeModel &libraryModel = main.libraryModel;
     libraryModel.setExpandedKeys({kArtistKey, kAlbumKey});
     libraryModel.setLibraryTreeFromBinary(artistAlbumTrackTree());
 
@@ -776,11 +810,7 @@ void UiMenusTest::wordingIsTitleCaseWithOneCharacterEllipsis() {
     }
 }
 
-void UiMenusTest::playPauseItemNamesWhatItDoes() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkPlayPauseItemNamesWhatItDoes(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QQuickItem *item = menuItems(menuNamed(window, "playbackMenu")).value(0);
     QVERIFY(item != nullptr);
@@ -794,11 +824,7 @@ void UiMenusTest::playPauseItemNamesWhatItDoes() {
     QTRY_COMPARE(withoutMnemonic(item->property("text").toString()), QStringLiteral("Play"));
 }
 
-void UiMenusTest::headingsAreTextThatIsNotPicked() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkHeadingsAreTextThatIsNotPicked(QQuickWindow *window) {
     QObject *playback = menuNamed(window, "playbackMenu");
     QObject *view = menuNamed(window, "viewMenu");
     QMetaObject::invokeMethod(playback, "open");
@@ -846,11 +872,7 @@ void UiMenusTest::headingsAreTextThatIsNotPicked() {
     QMetaObject::invokeMethod(playback, "close");
 }
 
-void UiMenusTest::headingsAreSkippedByThePointerAndTheKeyboard() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkHeadingsAreSkippedByThePointerAndTheKeyboard(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QObject *menu = menuNamed(window, "playbackMenu");
     auto *heading = menu->findChild<QQuickItem *>(QStringLiteral("repeatHeading"));
@@ -904,11 +926,7 @@ void UiMenusTest::headingsAreSkippedByThePointerAndTheKeyboard() {
     QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
-void UiMenusTest::repeatRadiosFollowTheBackendAndSetIt() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkRepeatRadiosFollowTheBackendAndSetIt(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     const QList<QObject *> radios{child(window, "repeatOffAction"), child(window, "repeatOneAction"),
                                   child(window, "repeatAllAction")};
@@ -955,11 +973,7 @@ void UiMenusTest::repeatRadiosFollowTheBackendAndSetIt() {
     QCOMPARE(checkedIndex(), 0);
 }
 
-void UiMenusTest::visualizationRadiosFollowThePlotSwitch() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkVisualizationRadiosFollowThePlotSwitch(QQuickWindow *window) {
     QObject *viewer = child(window, "viewerController");
     QObject *spectrogram = child(window, "spectrogramModeAction");
     QObject *waveform = child(window, "waveformModeAction");
@@ -1003,11 +1017,7 @@ void UiMenusTest::visualizationRadiosFollowThePlotSwitch() {
     QVERIFY(viewerActions.contains(QVariant::fromValue(waveform)));
 }
 
-void UiMenusTest::scaleItemIsOffInWaveformMode() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkScaleItemIsOffInWaveformMode(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QObject *viewer = child(window, "viewerController");
     QObject *scale = child(window, "showScaleAction");
@@ -1050,11 +1060,7 @@ void UiMenusTest::scaleItemIsOffInWaveformMode() {
 // same input, scale and marks, so one signal reads the same in either:
 // only its colours change, and on the waveform its bar is framed by the
 // trough.
-void UiMenusTest::levelMeterIsPartOfThePlot() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkLevelMeterIsPartOfThePlot(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QObject *viewer = child(window, "viewerController");
     bridge->setProperty("showLevelMeter", true);
@@ -1143,11 +1149,7 @@ void UiMenusTest::levelMeterIsPartOfThePlot() {
     QCOMPARE(LevelMeterItem::meterPosition(-6.0, scaleHeight), 0.8 * scaleHeight);
 }
 
-void UiMenusTest::editMenuNamesItsUndoAndClearsTheQueue() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkEditMenuNamesItsUndoAndClearsTheQueue(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QObject *editMenu = menuNamed(window, "editMenu");
     QQuickItem *undo = menuItems(editMenu).value(0);
@@ -1174,11 +1176,7 @@ void UiMenusTest::editMenuNamesItsUndoAndClearsTheQueue() {
     QTRY_VERIFY(bridge->property("queueCommands").toStringList().contains(QStringLiteral("clear")));
 }
 
-void UiMenusTest::findOpensSearchOnCtrlF() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkFindOpensSearchOnCtrlF(QQuickWindow *window) {
     QObject *search = child(window, "globalSearchController");
     QVERIFY(search != nullptr);
     QVERIFY(!search->property("dialogVisible").toBool());
@@ -1198,11 +1196,7 @@ void UiMenusTest::findOpensSearchOnCtrlF() {
     QTRY_VERIFY(!search->property("dialogVisible").toBool());
 }
 
-void UiMenusTest::shortcutsAreTakenOnceEach() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkShortcutsAreTakenOnceEach(QQuickWindow *window) {
 
     QHash<QString, QString> owners;
     for (QObject *action : actionsOf(window)) {
@@ -1235,11 +1229,7 @@ void UiMenusTest::shortcutsAreTakenOnceEach() {
     }
 }
 
-void UiMenusTest::shortcutsTriggerTheirActions() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkShortcutsTriggerTheirActions(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     bridge->setProperty("queueRows", sampleQueueRows(3));
     bridge->setProperty("queueLength", 3);
@@ -1280,11 +1270,7 @@ void UiMenusTest::shortcutsTriggerTheirActions() {
     }
 }
 
-void UiMenusTest::queueContextMenuShowsKeysItDoesNotTake() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkQueueContextMenuShowsKeysItDoesNotTake(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     bridge->setProperty("queueRows", sampleQueueRows(3));
     bridge->setProperty("queueLength", 3);
@@ -1343,11 +1329,7 @@ void UiMenusTest::queueContextMenuShowsKeysItDoesNotTake() {
 // The cover's menus, on the now playing cover and in the album art viewer,
 // give Replace from iTunes an icon, as the other menus give their items, so
 // its text starts where theirs does.
-void UiMenusTest::coverMenusGiveReplaceFromItunesAnIcon() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkCoverMenusGiveReplaceFromItunesAnIcon(QQuickWindow *window) {
     QStringList found;
     for (const QString &name : {QStringLiteral("albumArtMenu"), QStringLiteral("albumArtViewerContextMenu")}) {
         const QList<QObject *> menus = window->findChildren<QObject *>(name);
@@ -1363,11 +1345,9 @@ void UiMenusTest::coverMenusGiveReplaceFromItunesAnIcon() {
     QVERIFY2(found.contains(QStringLiteral("albumArtMenu")), qPrintable(found.join(QLatin1Char(' '))));
 }
 
-void UiMenusTest::libraryContextMenuNamesWhatItActsOn() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkLibraryContextMenuNamesWhatItActsOn(MainWindowFixture &main) {
+    QQuickWindow *window = main.window;
+    LibraryTreeModel &libraryModel = main.libraryModel;
     QObject *bridge = bridgeOf(window);
     bridge->setProperty("libraryRootCount", 1);
     libraryModel.setExpandedKeys({kArtistKey, kAlbumKey});
@@ -1439,11 +1419,7 @@ void UiMenusTest::libraryContextMenuNamesWhatItActsOn() {
     QVERIFY(close(menu));
 }
 
-void UiMenusTest::menusHaveNoTransitionsOfTheirOwn() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkMenusHaveNoTransitionsOfTheirOwn(QQuickWindow *window) {
 
     // The style's: Breeze fades a menu in over Kirigami's short duration,
     // which Plasma's animation speed sets.
@@ -1459,11 +1435,7 @@ void UiMenusTest::menusHaveNoTransitionsOfTheirOwn() {
     }
 }
 
-void UiMenusTest::settingsAndHelpOpenTheirPages() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkSettingsAndHelpOpenTheirPages(QQuickWindow *window) {
 
     QObject *preferences = child(window, "preferencesDialog");
     QVERIFY(preferences != nullptr);
@@ -1493,11 +1465,7 @@ void UiMenusTest::settingsAndHelpOpenTheirPages() {
              QStringLiteral("https://github.com/Tiaxi/ferrous/issues/new"));
 }
 
-void UiMenusTest::aboutKdeLinksTakeTheKeyboard() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void UiMenusTest::checkAboutKdeLinksTakeTheKeyboard(QQuickWindow *window) {
     UrlRecorder opened;
     QDesktopServices::setUrlHandler(QStringLiteral("https"), &opened, "open");
     const auto unsetHandler = qScopeGuard([] { QDesktopServices::unsetUrlHandler(QStringLiteral("https")); });

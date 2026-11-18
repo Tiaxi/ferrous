@@ -98,17 +98,6 @@ private:
     ScopedApplicationFont m_restore{0};
 };
 
-// Runs the checks in turn, up to the first that fails: for a test that
-// loads its window once for several checks.
-void runInTurn(std::initializer_list<std::function<void()>> checks) {
-    for (const auto &check : checks) {
-        check();
-        if (QTest::currentTestFailed()) {
-            return;
-        }
-    }
-}
-
 // Whether an item under `root`, or `root` itself, waits for its polish:
 // layoutPending() for every item of a page.
 bool layoutPendingUnder(QQuickItem *root) {

@@ -28,6 +28,8 @@
 #include <QtTest/QtTest>
 #include <qqml.h>
 
+#include <Kirigami/Platform/Units>
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -51,6 +53,7 @@
 #include "../src/WindowPresence.h"
 #include "TestColor.h"
 #include "TestItems.h"
+#include "TestMainWindow.h"
 #include "TestMessages.h"
 #include "TestMotion.h"
 #include "TestPlatform.h"
@@ -90,23 +93,6 @@ QObject *createQml(QQmlEngine &engine, const QByteArray &source, QString *errorT
         *errorText = formatQmlErrors(component.errors());
     }
     return object;
-}
-
-// Loads Main.qml with its fallback bridge and makes it the active window.
-QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
-    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
-    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
-    engine.load(QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
-    if (engine.rootObjects().isEmpty()) {
-        return nullptr;
-    }
-    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
-    if (window == nullptr || !QTest::qWaitForWindowExposed(window)) {
-        return nullptr;
-    }
-    window->requestActivate();
-    return QTest::qWaitForWindowActive(window) ? window : nullptr;
 }
 
 // The first visible item named `objectName` in `window`.
@@ -253,11 +239,7 @@ private slots:
     void init();
     void cleanup();
     void cleanupTestCase();
-    void everyPreferencesPageIsReachableByTab();
-    void libraryAndQueueRowsHaveAccessibleNames();
-    void slidersAndIconButtonsHaveNamesAndTooltips();
-    void scrobbleIndicatorIsNamedAndWorksByKeyboard();
-    void keyboardMovesOfTheSeekSliderSeek();
+    void controlsAreNamedForAssistiveTechnology();
     void arrowKeysStepTheVolumeFromItsValue();
     void bridgeEchoesWaitForTheVolumeGesture();
     void arrowKeysSeekFromThePlaybackPosition();
@@ -294,25 +276,38 @@ private slots:
     void seekBarStepsFromThePositionBetweenItsPixels();
     void transportBarHasNoWarnings();
     void transportBarHasNoWarningsUnderTheBasicStyle();
-    void clicksLeaveSpaceToPlayOrPause();
-    void modifiedKeysReachTheShortcutsFromFocusedButtons();
     void rowHeightsAndScrollingFollowTheFont();
     void queueHeaderAndRowsShareTheColumnWidths();
-    void queueColumnsResizeByTheirHandles();
-    void aCompressedQueueColumnResizesFromItsPreferredWidth();
-    void queueColumnTextStaysInsideItsColumnAtTheMinimum();
     void lightPaletteLeavesNoFixedColours();
-    void modeSwitchIconFollowsTheMode();
-    void modeSwitchSegmentsAreCheckableRadioButtons();
-    void modeSwitchStatesStayApart_data();
-    void modeSwitchStatesStayApart();
-    void visualizationsHaveAccessibleRoles();
-    void laneButtonsAreTabStopsThatRevealThemselves();
-    void laneButtonsAreCheckableToggles();
-    void levelMeterReservesItsColumnAndReadsOut();
+    void transportLeavesTheKeyboardWhereItWas();
+    void queueColumnsResizeWithinTheirLimits();
+    void modeSwitchIsTwoRadioButtons();
+    void plotLayerShowsThePaneStatesAndTheMeter();
+    void laneButtonsAreTogglesTheKeyboardReaches();
     void plotLayerDrawsWithContrast();
-    void plotLayerShowsThePaneStates();
     void drawsOffscreenUnlessAPlatformIsChosen();
+
+private:
+    // The checks that the tests above run in turn in one window; each says
+    // what it checks where it is defined.
+    void checkVisualizationsHaveAccessibleRoles(QQuickWindow *window);
+    void checkLibraryAndQueueRowsHaveAccessibleNames(MainWindowFixture &main, QueueRowsModel &model);
+    void checkSlidersAndIconButtonsHaveNamesAndTooltips(QQuickWindow *window);
+    void checkKeyboardMovesOfTheSeekSliderSeek(QQuickWindow *window);
+    void checkScrobbleIndicatorIsNamedAndWorksByKeyboard(QQuickWindow *window);
+    void checkEveryPreferencesPageIsReachableByTab(QQuickWindow *window);
+    void checkClicksLeaveSpaceToPlayOrPause(QQuickWindow *window);
+    void checkModifiedKeysReachTheShortcutsFromFocusedButtons(QQuickWindow *window);
+    void checkQueueColumnsResizeByTheirHandles(QQuickWindow *window);
+    void checkACompressedQueueColumnResizesFromItsPreferredWidth(QQuickWindow *window);
+    void checkQueueColumnTextStaysInsideItsColumnAtTheMinimum(QQuickWindow *window);
+    void checkModeSwitchSegmentsAreCheckableRadioButtons(QQuickWindow *window);
+    void checkModeSwitchIconFollowsTheMode(QQuickWindow *window);
+    void checkModeSwitchStatesStayApart(QQuickWindow *window, int mode);
+    void checkPlotLayerShowsThePaneStates(QQuickWindow *window);
+    void checkLevelMeterReservesItsColumnAndReadsOut(QQuickWindow *window);
+    void checkLaneButtonsAreTabStopsThatRevealThemselves(QQuickWindow *window);
+    void checkLaneButtonsAreCheckableToggles(QQuickWindow *window);
 };
 
 void AccessibilityTest::initTestCase() {
@@ -340,11 +335,71 @@ void AccessibilityTest::cleanupTestCase() {
     stopCapturingMessages();
 }
 
-void AccessibilityTest::everyPreferencesPageIsReachableByTab() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+// The main window's controls, lists and plots tell assistive technology
+// what they are, and the keyboard reaches them.
+void AccessibilityTest::controlsAreNamedForAssistiveTechnology() {
+    // Outlives the window that shows it.
+    QueueRowsModel model;
+    MainWindowFixture main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkVisualizationsHaveAccessibleRoles(window); },
+               [&] { checkLibraryAndQueueRowsHaveAccessibleNames(main, model); },
+               [&] { checkSlidersAndIconButtonsHaveNamesAndTooltips(window); },
+               [&] { checkKeyboardMovesOfTheSeekSliderSeek(window); },
+               [&] { checkScrobbleIndicatorIsNamedAndWorksByKeyboard(window); },
+               [&] { checkEveryPreferencesPageIsReachableByTab(window); }});
+}
+
+// What the transport's clicks and keys leave the keyboard on.
+void AccessibilityTest::transportLeavesTheKeyboardWhereItWas() {
+    MainWindowFixture main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkClicksLeaveSpaceToPlayOrPause(main.window); },
+               [&] { checkModifiedKeysReachTheShortcutsFromFocusedButtons(main.window); }});
+}
+
+// The queue's columns, resized by their handles and their saved widths.
+// Each check sets the widths it starts from.
+void AccessibilityTest::queueColumnsResizeWithinTheirLimits() {
+    MainWindowFixture main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkQueueColumnsResizeByTheirHandles(main.window); },
+               [&] { checkACompressedQueueColumnResizesFromItsPreferredWidth(main.window); },
+               [&] { checkQueueColumnTextStaysInsideItsColumnAtTheMinimum(main.window); }});
+}
+
+// The plot's mode switch, read and used as a pair of radio buttons, on
+// either plot.
+void AccessibilityTest::modeSwitchIsTwoRadioButtons() {
+    MainWindowFixture main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkModeSwitchSegmentsAreCheckableRadioButtons(main.window); },
+               [&] { checkModeSwitchIconFollowsTheMode(main.window); },
+               [&] { checkModeSwitchStatesStayApart(main.window, 0); },
+               [&] { checkModeSwitchStatesStayApart(main.window, 1); }});
+}
+
+// The plot layer's messages before and during a track, and its level
+// meter's column. The pane's states come first, before any track.
+void AccessibilityTest::plotLayerShowsThePaneStatesAndTheMeter() {
+    MainWindowFixture main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkPlotLayerShowsThePaneStates(main.window); },
+               [&] { checkLevelMeterReservesItsColumnAndReadsOut(main.window); }});
+}
+
+// The lanes' Mute and Solo, from the keyboard and to assistive technology.
+// Before playback, as the Tab order reaches them from the mode switch,
+// which hides once playback has run a while.
+void AccessibilityTest::laneButtonsAreTogglesTheKeyboardReaches() {
+    MainWindowFixture main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkLaneButtonsAreTabStopsThatRevealThemselves(main.window); },
+               [&] { checkLaneButtonsAreCheckableToggles(main.window); }});
+}
+
+void AccessibilityTest::checkEveryPreferencesPageIsReachableByTab(QQuickWindow *window) {
     QObject *dialog = window->findChild<QObject *>(QStringLiteral("preferencesDialog"));
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
@@ -409,13 +464,10 @@ void AccessibilityTest::everyPreferencesPageIsReachableByTab() {
     QVERIFY(bridge->property("showLevelMeter").toBool());
 }
 
-void AccessibilityTest::libraryAndQueueRowsHaveAccessibleNames() {
-    // Outlives the window that shows it.
-    QueueRowsModel model;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+// `model` outlives the window that shows it.
+void AccessibilityTest::checkLibraryAndQueueRowsHaveAccessibleNames(MainWindowFixture &main, QueueRowsModel &model) {
+    QQuickWindow *window = main.window;
+    LibraryTreeModel &libraryModel = main.libraryModel;
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     bridge->setProperty("queueRows", sampleQueueRows(3));
     bridge->setProperty("queueLength", 3);
@@ -470,11 +522,7 @@ void AccessibilityTest::libraryAndQueueRowsHaveAccessibleNames() {
     QVERIFY(QAccessible::queryAccessibleInterface(libraryRows[0])->state().selectable);
 }
 
-void AccessibilityTest::scrobbleIndicatorIsNamedAndWorksByKeyboard() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkScrobbleIndicatorIsNamedAndWorksByKeyboard(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     bridge->setProperty("lastFmScrobblingEnabled", true);
     bridge->setProperty("lastFmAuthState", 2);
@@ -490,7 +538,12 @@ void AccessibilityTest::scrobbleIndicatorIsNamedAndWorksByKeyboard() {
     QCOMPARE(accessibleText(indicator, QAccessible::Description),
              QStringLiteral("Press to pause scrobbling."));
     // Tab reaches it, its tooltip tells the listening left, and
-    // Space pauses scrobbling rather than playback.
+    // Space pauses scrobbling rather than playback. The tooltip without
+    // Kirigami's delay: the check is whether it shows, not how soon.
+    auto *units = qobject_cast<Kirigami::Platform::Units *>(
+        evaluateOn(indicator, QStringLiteral("Kirigami.Units")).value<QObject *>());
+    QVERIFY(units != nullptr);
+    units->setToolTipDelay(0);
     QVERIFY(indicator->activeFocusOnTab());
     QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
     QVERIFY(playPause != nullptr);
@@ -508,11 +561,7 @@ void AccessibilityTest::scrobbleIndicatorIsNamedAndWorksByKeyboard() {
              QStringLiteral("Press to resume scrobbling."));
 }
 
-void AccessibilityTest::slidersAndIconButtonsHaveNamesAndTooltips() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkSlidersAndIconButtonsHaveNamesAndTooltips(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     bridge->setProperty("durationSeconds", 200.0);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
@@ -584,11 +633,7 @@ void AccessibilityTest::slidersAndIconButtonsHaveNamesAndTooltips() {
     QCOMPARE(volumeValue->currentValue().toDouble(), 0.5);
 }
 
-void AccessibilityTest::keyboardMovesOfTheSeekSliderSeek() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkKeyboardMovesOfTheSeekSliderSeek(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     bridge->setProperty("durationSeconds", 200.0);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
@@ -867,49 +912,71 @@ QQuickWindow *loadTransportHarness(QQmlEngine &engine, QScopedPointer<QObject> &
     return start->hasActiveFocus() ? window : nullptr;
 }
 
+// The transport harness of one test. Its window is null, and `error` says
+// why, when it did not show.
+struct TransportHarness {
+    // What has the focus: the start button, or the seek slider, with the
+    // bridge's echo one value behind.
+    enum Focus { StartButton, SeekWithLaggingEcho };
+
+    explicit TransportHarness(Focus focus = StartButton)
+        : window(loadTransportHarness(engine, root, &error)) {
+        if (window != nullptr && focus == SeekWithLaggingEcho) {
+            root->setProperty("echoLags", true);
+            if (!tabTo(window, visibleItemNamed(window, QStringLiteral("seekSlider")))) {
+                window = nullptr;
+                error = QStringLiteral("the seek slider took no focus");
+            }
+        }
+    }
+
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString error;
+    QQuickWindow *window = nullptr;
+};
+
 } // namespace
 
 void AccessibilityTest::arrowKeysStepTheVolumeFromItsValue() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
     QQuickItem *volume = visibleItemNamed(window, QStringLiteral("volumeSlider"));
     QVERIFY(bridge != nullptr && volume != nullptr);
     QCOMPARE(volume->property("value").toDouble(), 0.5);
     QVERIFY(tabTo(window, volume));
     const auto volumesText = [&root]() {
-        return describeValues(recordedValues(root.data(), "volumes"));
+        return describeValues(recordedValues(root, "volumes"));
     };
 
     // Right steps up from the bridge's volume, and the bridge gets it.
     QTest::keyClick(window, Qt::Key_Right);
-    QVERIFY2(onlyRecordedSince(root.data(), "volumes", 0, 0.6), qPrintable(volumesText()));
+    QVERIFY2(onlyRecordedSince(root, "volumes", 0, 0.6), qPrintable(volumesText()));
     bridge->setProperty("volume", 0.6);
     QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.6));
 
     // Left steps back down.
-    const qsizetype sent = recordedValues(root.data(), "volumes").size();
+    const qsizetype sent = recordedValues(root, "volumes").size();
     QTest::keyClick(window, Qt::Key_Left);
-    QVERIFY2(onlyRecordedSince(root.data(), "volumes", sent, 0.5), qPrintable(volumesText()));
+    QVERIFY2(onlyRecordedSince(root, "volumes", sent, 0.5), qPrintable(volumesText()));
     bridge->setProperty("volume", 0.5);
     QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.5));
 }
 
 void AccessibilityTest::bridgeEchoesWaitForTheVolumeGesture() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
     QQuickItem *volume = visibleItemNamed(window, QStringLiteral("volumeSlider"));
     QVERIFY(bridge != nullptr && volume != nullptr);
     QVERIFY(tabTo(window, volume));
     const auto volumesText = [&root]() {
-        return describeValues(recordedValues(root.data(), "volumes"));
+        return describeValues(recordedValues(root, "volumes"));
     };
 
     // A held arrow key: a stale echo neither moves the slider nor is sent.
@@ -918,11 +985,11 @@ void AccessibilityTest::bridgeEchoesWaitForTheVolumeGesture() {
     bridge->setProperty("volume", 0.3);
     QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.6));
     QTest::keyRelease(window, Qt::Key_Right);
-    QVERIFY2(onlyRecordedSince(root.data(), "volumes", 0, 0.6), qPrintable(volumesText()));
+    QVERIFY2(onlyRecordedSince(root, "volumes", 0, 0.6), qPrintable(volumesText()));
     bridge->setProperty("volume", 0.6);
 
     // A drag from a quarter to three quarters of the slider, likewise.
-    const qsizetype sent = recordedValues(root.data(), "volumes").size();
+    const qsizetype sent = recordedValues(root, "volumes").size();
     const qreal y = volume->height() / 2;
     const auto scenePoint = [volume, y](qreal fraction) {
         return volume->mapToScene(QPointF(volume->width() * fraction, y)).toPoint();
@@ -936,7 +1003,7 @@ void AccessibilityTest::bridgeEchoesWaitForTheVolumeGesture() {
     bridge->setProperty("volume", 0.05);
     QVERIFY(fuzzyEqual(volume->property("value").toDouble(), dragged));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.75));
-    const QList<double> dragVolumes = recordedValues(root.data(), "volumes").mid(sent);
+    const QList<double> dragVolumes = recordedValues(root, "volumes").mid(sent);
     QVERIFY2(!dragVolumes.isEmpty() && fuzzyEqual(dragVolumes.constLast(), dragged),
              qPrintable(volumesText()));
     QVERIFY2(std::none_of(dragVolumes.begin(), dragVolumes.end(),
@@ -945,16 +1012,15 @@ void AccessibilityTest::bridgeEchoesWaitForTheVolumeGesture() {
 }
 
 void AccessibilityTest::arrowKeysSeekFromThePlaybackPosition() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QVERIFY(seek != nullptr);
     QCOMPARE(seek->property("value").toDouble(), 50.0);
     QVERIFY(tabTo(window, seek));
-    const auto seeks = [&root]() { return recordedValues(root.data(), "seeks"); };
+    const auto seeks = [&root]() { return recordedValues(root, "seeks"); };
 
     // One seek per press, by the step from the playback position.
     QTest::keyClick(window, Qt::Key_Right);
@@ -981,11 +1047,10 @@ void AccessibilityTest::arrowKeysSeekFromThePlaybackPosition() {
 }
 
 void AccessibilityTest::seekDragSeeksOnceOnRelease() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QVERIFY(seek != nullptr);
     const qreal y = seek->height() / 2;
@@ -1003,15 +1068,14 @@ void AccessibilityTest::seekDragSeeksOnceOnRelease() {
     root->setProperty("positionSeconds", 51.0);
     QCOMPARE(seek->property("value").toDouble(), dragged);
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.75));
-    QCOMPARE(recordedValues(root.data(), "seeks"), (QList<double>{dragged}));
+    QCOMPARE(recordedValues(root, "seeks"), (QList<double>{dragged}));
 }
 
 void AccessibilityTest::heldArrowKeysAccumulateVolumeSteps() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
     QQuickItem *volume = visibleItemNamed(window, QStringLiteral("volumeSlider"));
     QVERIFY(bridge != nullptr && volume != nullptr);
@@ -1021,27 +1085,26 @@ void AccessibilityTest::heldArrowKeysAccumulateVolumeSteps() {
 
     // Each step is sent once, from the one before, though the echo lags.
     holdKey(window, Qt::Key_Right, 6);
-    const QList<double> volumes = recordedValues(root.data(), "volumes");
+    const QList<double> volumes = recordedValues(root, "volumes");
     QVERIFY2(sameValues(volumes, {0.3, 0.4, 0.5, 0.6, 0.7, 0.8}), qPrintable(describeValues(volumes)));
     bridge->setProperty("volume", 0.8);
     QVERIFY(fuzzyEqual(volume->property("value").toDouble(), 0.8));
 
     holdKey(window, Qt::Key_Left, 3);
-    const QList<double> after = recordedValues(root.data(), "volumes").mid(6);
+    const QList<double> after = recordedValues(root, "volumes").mid(6);
     QVERIFY2(sameValues(after, {0.7, 0.6, 0.5}), qPrintable(describeValues(after)));
 }
 
 void AccessibilityTest::heldArrowKeysSeekOnceWhenReleased() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QVERIFY(seek != nullptr);
     root->setProperty("echoLags", true);
     QVERIFY(tabTo(window, seek));
-    const auto seeks = [&root]() { return recordedValues(root.data(), "seeks"); };
+    const auto seeks = [&root]() { return recordedValues(root, "seeks"); };
 
     // The steps add up, and the hold seeks once, when it ends.
     holdKey(window, Qt::Key_Right, 6);
@@ -1064,11 +1127,10 @@ void AccessibilityTest::heldArrowKeysSeekOnceWhenReleased() {
 }
 
 void AccessibilityTest::overlappingArrowKeysAreOneGesture() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *volume = visibleItemNamed(window, QStringLiteral("volumeSlider"));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QVERIFY(volume != nullptr && seek != nullptr);
@@ -1078,34 +1140,22 @@ void AccessibilityTest::overlappingArrowKeysAreOneGesture() {
     // the next step.
     QVERIFY(tabTo(window, volume));
     overlapArrowKeys(window);
-    const QList<double> volumes = recordedValues(root.data(), "volumes");
+    const QList<double> volumes = recordedValues(root, "volumes");
     QVERIFY2(sameValues(volumes, {0.4, 0.3, 0.2, 0.3, 0.2}), qPrintable(describeValues(volumes)));
     QVERIFY(!volume->property("adjusting").toBool());
 
     // The seek slider seeks once, when the last key is released.
     QVERIFY(tabTo(window, seek));
     overlapArrowKeys(window);
-    QCOMPARE(recordedValues(root.data(), "seeks"), (QList<double>{35.0}));
+    QCOMPARE(recordedValues(root, "seeks"), (QList<double>{35.0}));
     QVERIFY(!seek->property("adjusting").toBool());
 }
 
-// Loads the transport harness with a lagging echo and the focus on the seek
-// slider.
-QQuickWindow *loadSeekHarness(QQmlEngine &engine, QScopedPointer<QObject> &root, QString *errorText) {
-    QQuickWindow *window = loadTransportHarness(engine, root, errorText);
-    if (window == nullptr) {
-        return nullptr;
-    }
-    root->setProperty("echoLags", true);
-    return tabTo(window, visibleItemNamed(window, QStringLiteral("seekSlider"))) ? window : nullptr;
-}
-
 void AccessibilityTest::seekDragOutlastsAKeyRelease() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadSeekHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness(TransportHarness::SeekWithLaggingEcho);
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     const qreal y = seek->height() / 2;
     const auto scenePoint = [seek, y](qreal fraction) {
@@ -1124,17 +1174,16 @@ void AccessibilityTest::seekDragOutlastsAKeyRelease() {
     const double dragged = seek->property("value").toDouble();
     QVERIFY2(dragged > 80.0 && dragged < 120.0, qPrintable(QString::number(dragged)));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.5));
-    const QList<double> seeks = recordedValues(root.data(), "seeks");
+    const QList<double> seeks = recordedValues(root, "seeks");
     QVERIFY2(sameValues(seeks, {dragged}), qPrintable(describeValues(seeks)));
     QVERIFY(!seek->property("adjusting").toBool());
 }
 
 void AccessibilityTest::seekDragOutlastsTheFocus() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadSeekHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness(TransportHarness::SeekWithLaggingEcho);
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     auto *start = qvariant_cast<QQuickItem *>(root->property("startButton"));
     const qreal y = seek->height() / 2;
@@ -1142,7 +1191,7 @@ void AccessibilityTest::seekDragOutlastsTheFocus() {
         return seek->mapToScene(QPointF(seek->width() * fraction, y)).toPoint();
     };
     const auto seeksText = [&root]() {
-        return describeValues(recordedValues(root.data(), "seeks"));
+        return describeValues(recordedValues(root, "seeks"));
     };
 
     // The focus leaves while a key is held: the drag still seeks once, to
@@ -1159,25 +1208,24 @@ void AccessibilityTest::seekDragOutlastsTheFocus() {
     const double dragged = seek->property("value").toDouble();
     QVERIFY2(dragged > 130.0 && dragged < 170.0, qPrintable(QString::number(dragged)));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, scenePoint(0.75));
-    QVERIFY2(sameValues(recordedValues(root.data(), "seeks"), {dragged}), qPrintable(seeksText()));
+    QVERIFY2(sameValues(recordedValues(root, "seeks"), {dragged}), qPrintable(seeksText()));
     QVERIFY(!seek->property("adjusting").toBool());
 
     // The key's release, which reaches the button, seeks nothing more.
     QTest::keyRelease(window, Qt::Key_Right);
-    QVERIFY2(sameValues(recordedValues(root.data(), "seeks"), {dragged}), qPrintable(seeksText()));
+    QVERIFY2(sameValues(recordedValues(root, "seeks"), {dragged}), qPrintable(seeksText()));
 }
 
 void AccessibilityTest::seekClickSeeksOnce() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QVERIFY(seek != nullptr);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
                       seek->mapToScene(QPointF(seek->width() * 0.75, seek->height() / 2)).toPoint());
-    const QList<double> seeks = recordedValues(root.data(), "seeks");
+    const QList<double> seeks = recordedValues(root, "seeks");
     QVERIFY2(seeks.size() == 1 && seeks.constFirst() > 130.0 && seeks.constFirst() < 170.0,
              qPrintable(describeValues(seeks)));
 }
@@ -1286,11 +1334,10 @@ QString minutesAndSeconds(double seconds) {
 } // namespace
 
 void AccessibilityTest::seekDragShowsAndSeeksTheTimeUnderThePointer() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     SeekTimeBox dragTime;
     QVERIFY(seek != nullptr && dragTime.find(window));
@@ -1314,16 +1361,15 @@ void AccessibilityTest::seekDragShowsAndSeeksTheTimeUnderThePointer() {
 
     // The release seeks there.
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, target->scene);
-    const QList<double> seeks = recordedValues(root.data(), "seeks");
+    const QList<double> seeks = recordedValues(root, "seeks");
     QVERIFY2(sameValues(seeks, {target->seconds}), qPrintable(describeValues(seeks)));
 }
 
 void AccessibilityTest::seekClickSeeksToTheTimeUnderThePointer() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QVERIFY(seek != nullptr);
     const std::optional<SeekPoint> target = pointBetweenSteps(seek, 0.3);
@@ -1334,7 +1380,7 @@ void AccessibilityTest::seekClickSeeksToTheTimeUnderThePointer() {
 
     // A click between the keyboard's steps seeks to the time under it.
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, target->scene);
-    QList<double> seeks = recordedValues(root.data(), "seeks");
+    QList<double> seeks = recordedValues(root, "seeks");
     QVERIFY2(sameValues(seeks, {target->seconds}), qPrintable(describeValues(seeks)));
 
     // The arrow keys still step by the keyboard's step, from the playback
@@ -1344,16 +1390,15 @@ void AccessibilityTest::seekClickSeeksToTheTimeUnderThePointer() {
     QTest::keyClick(window, Qt::Key_Right);
     root->setProperty("positionSeconds", 55.0);
     QTest::keyClick(window, Qt::Key_Right);
-    seeks = recordedValues(root.data(), "seeks");
+    seeks = recordedValues(root, "seeks");
     QVERIFY2(sameValues(seeks, {target->seconds, 55.0, 60.0}), qPrintable(describeValues(seeks)));
 }
 
 void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QQuickItem *line = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
     QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekUnplayed"));
@@ -1372,11 +1417,13 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     };
     QVERIFY(settle());
 
-    // Three seconds of playback in 60 position updates a second. At 1x, the
-    // bar moves about 3 device pixels a second, and the time label once.
+    // Three seconds of playback in 90 position updates, a frame apart: twice
+    // as fast as playback, which moves the bar about 3 device pixels a
+    // second at 1x, and the time label once.
     const double startSeconds = 50.0;
     const double durationSeconds = 200.0;
-    const int steps = 180;
+    const int steps = 90;
+    const double secondsPerStep = 2.0 / 60.0;
     struct Drawn {
         qreal lineX;
         qreal progressWidth;
@@ -1391,7 +1438,7 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     int changes = 0;
     frames = 0;
     for (int step = 1; step <= steps; ++step) {
-        root->setProperty("positionSeconds", startSeconds + step / 60.0);
+        root->setProperty("positionSeconds", startSeconds + step * secondsPerStep);
         const Drawn now = drawn();
         changes += now == previous ? 0 : 1;
         previous = now;
@@ -1405,7 +1452,7 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     // The value stays exact, and the bar is within a device pixel of it:
     // the unplayed part starts at the playhead's line, which moves over the bar less
     // its own width.
-    const double endSeconds = startSeconds + steps / 60.0;
+    const double endSeconds = startSeconds + steps * secondsPerStep;
     QVERIFY(fuzzyEqual(seek->property("value").toDouble(), endSeconds));
     const qreal devicePixel = 1.0 / window->effectiveDevicePixelRatio();
     const qreal travel = progress->parentItem()->width() - line->width();
@@ -1421,7 +1468,7 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     QVERIFY2(std::abs(progress->x() - travel * (endSeconds + 5.0) / durationSeconds) <= devicePixel / 2,
              qPrintable(QString::number(progress->x())));
     QTest::keyRelease(window, Qt::Key_Right);
-    QVERIFY(sameValues(recordedValues(root.data(), "seeks"), {endSeconds + 5.0}));
+    QVERIFY(sameValues(recordedValues(root, "seeks"), {endSeconds + 5.0}));
 
     // A wheel step seeks at once, as the desktop style's wheel does, and the
     // bar draws the seek's position.
@@ -1429,7 +1476,7 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     seek->setProperty("wheelEnabled", true);
     QVERIFY(sendWheel(window, seek->mapToScene(QPointF(seek->width() / 2, seek->height() / 2)),
                       QPoint(0, 120)));
-    const QList<double> seeks = recordedValues(root.data(), "seeks");
+    const QList<double> seeks = recordedValues(root, "seeks");
     QVERIFY2(sameValues(seeks, {endSeconds + 5.0, endSeconds + 10.0}), qPrintable(describeValues(seeks)));
     root->setProperty("positionSeconds", endSeconds + 10.0);
     QVERIFY(std::abs(progress->x() - travel * (endSeconds + 10.0) / durationSeconds) <= devicePixel);
@@ -1558,11 +1605,10 @@ void AccessibilityTest::seekBarStepsByTheWindowsDevicePixels() {
 }
 
 void AccessibilityTest::seekBarPlayheadIsOneOutlinedLine() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     const qreal dpr = window->effectiveDevicePixelRatio();
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekUnplayed"));
@@ -1705,11 +1751,10 @@ void sendMouse(QQuickWindow *window, QEvent::Type type, QPointF scene, Qt::Mouse
 } // namespace
 
 void AccessibilityTest::seekHoverShowsTheTimeUnderThePointer() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     const qreal dpr = window->effectiveDevicePixelRatio();
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekUnplayed"));
@@ -1749,8 +1794,8 @@ void AccessibilityTest::seekHoverShowsTheTimeUnderThePointer() {
     QCOMPARE(seek->property("value").toDouble(), 50.0);
     QCOMPARE(progress->x(), playedWidth);
     QVERIFY(!seek->property("adjusting").toBool());
-    QVERIFY2(recordedValues(root.data(), "seeks").isEmpty(),
-             qPrintable(describeValues(recordedValues(root.data(), "seeks"))));
+    QVERIFY2(recordedValues(root, "seeks").isEmpty(),
+             qPrintable(describeValues(recordedValues(root, "seeks"))));
 
     // Leaving the bar hides the box; coming back shows it again.
     QTest::mouseMove(window, centerOf(qvariant_cast<QQuickItem *>(root->property("startButton"))));
@@ -1760,15 +1805,14 @@ void AccessibilityTest::seekHoverShowsTheTimeUnderThePointer() {
     QCOMPARE(timeBox.shown(), minutesAndSeconds(between->seconds));
     QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() + 4, y)).toPoint());
     QCOMPARE(timeBox.shown(), QString());
-    QVERIFY(recordedValues(root.data(), "seeks").isEmpty());
+    QVERIFY(recordedValues(root, "seeks").isEmpty());
 }
 
 void AccessibilityTest::seekHoverShowsTheTimeAClickSeeksTo() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     SeekTimeBox timeBox;
     QVERIFY(seek != nullptr && timeBox.find(window));
@@ -1781,13 +1825,13 @@ void AccessibilityTest::seekHoverShowsTheTimeAClickSeeksTo() {
         QTest::mouseMove(window, scene);
         const QString hovered = timeBox.shown();
         QVERIFY2(!hovered.isEmpty(), qPrintable(QStringLiteral("at %1").arg(x)));
-        QCOMPARE(recordedValues(root.data(), "seeks").size(), clicks);
+        QCOMPARE(recordedValues(root, "seeks").size(), clicks);
 
         // A click there seeks to the time the box showed, and the box,
         // under the pointer still, shows it again.
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, scene);
         ++clicks;
-        const QList<double> seeks = recordedValues(root.data(), "seeks");
+        const QList<double> seeks = recordedValues(root, "seeks");
         QCOMPARE(seeks.size(), clicks);
         QVERIFY2(minutesAndSeconds(seeks.constLast()) == hovered,
                  qPrintable(QStringLiteral("at %1: seeks to %2, shows %3")
@@ -1892,11 +1936,10 @@ void AccessibilityTest::seekHoverFollowsTheWindowsDevicePixels() {
 }
 
 void AccessibilityTest::seekGesturesShowTheTimeOverThePlayhead() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     const qreal dpr = window->effectiveDevicePixelRatio();
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QQuickItem *line = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
@@ -1917,8 +1960,8 @@ void AccessibilityTest::seekGesturesShowTheTimeOverThePlayhead() {
     QVERIFY2(placementError.isEmpty(), qPrintable(placementError));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier,
                         seek->mapToScene(QPointF(seek->width() + 30, y)).toPoint());
-    QVERIFY2(sameValues(recordedValues(root.data(), "seeks"), {200.0}),
-             qPrintable(describeValues(recordedValues(root.data(), "seeks"))));
+    QVERIFY2(sameValues(recordedValues(root, "seeks"), {200.0}),
+             qPrintable(describeValues(recordedValues(root, "seeks"))));
     // Qt delivers no hover during the drag, and brings it up to date at the
     // next frame, before drawing it.
     QTRY_COMPARE(timeBox.shown(), QString());
@@ -1932,9 +1975,9 @@ void AccessibilityTest::seekGesturesShowTheTimeOverThePlayhead() {
     QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() * 0.5, y)).toPoint());
     QTest::mouseMove(window, dragEnd);
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, dragEnd);
-    QCOMPARE(recordedValues(root.data(), "seeks").size(), 2);
+    QCOMPARE(recordedValues(root, "seeks").size(), 2);
     const QString dragEndTime = minutesAndSeconds(secondsAtX(seek, dragEndX));
-    QCOMPARE(minutesAndSeconds(recordedValues(root.data(), "seeks").constLast()), dragEndTime);
+    QCOMPARE(minutesAndSeconds(recordedValues(root, "seeks").constLast()), dragEndTime);
     QTRY_COMPARE(timeBox.shown(), dragEndTime);
     placementError = timeBoxPlacementError(seek, timeBox, dragEndX, dpr);
     QVERIFY2(placementError.isEmpty(), qPrintable(placementError));
@@ -1953,17 +1996,16 @@ void AccessibilityTest::seekGesturesShowTheTimeOverThePlayhead() {
     QVERIFY2(placementError.isEmpty(), qPrintable(placementError));
     sendKey(window, QEvent::KeyRelease, Qt::Key_Right, false);
     QVERIFY(!seek->property("adjusting").toBool());
-    QVERIFY2(sameValues(recordedValues(root.data(), "seeks").mid(2), {55.0}),
-             qPrintable(describeValues(recordedValues(root.data(), "seeks"))));
+    QVERIFY2(sameValues(recordedValues(root, "seeks").mid(2), {55.0}),
+             qPrintable(describeValues(recordedValues(root, "seeks"))));
     QCOMPARE(timeBox.shown(), hoverTime);
 }
 
 void AccessibilityTest::seekHoverShowsNothingWithoutATrack() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     auto *bridge = qvariant_cast<QObject *>(root->property("bridge"));
     SeekTimeBox timeBox;
@@ -1995,12 +2037,26 @@ void AccessibilityTest::seekHoverShowsNothingWithoutATrack() {
     QCOMPARE(timeBox.shown(), QString());
     QTest::mouseMove(window, later);
     QVERIFY(!timeBox.shown().isEmpty());
-    QVERIFY(recordedValues(root.data(), "seeks").isEmpty());
+    QVERIFY(recordedValues(root, "seeks").isEmpty());
 }
 
 namespace {
 
-// The seek bar's time as each frame draws it while it fades out.
+// Steps `animations` a frame at a time until `done`, for up to five seconds
+// of them. A millisecond of real time passes with each step, for what runs
+// on it: a hover's delay, and the frames that hand Qt Quick the pointer.
+bool stepUntil(SteppedAnimationDriver &animations, const std::function<bool()> &done) {
+    for (int elapsed = 0; !done(); elapsed += 16) {
+        if (elapsed >= 5000) {
+            return false;
+        }
+        (void)animations.step(16);
+        QTest::qWait(1);
+    }
+    return true;
+}
+
+// The seek bar's time in each frame of its fade out.
 struct SeekTimeFade {
     // The frames the box was drawn in, part faded.
     int fadingFrames = 0;
@@ -2009,17 +2065,19 @@ struct SeekTimeFade {
 };
 
 // Hides the seek bar's time, shown in full, by `hide`, and follows its fade
-// out to its end: it fades where it was, with the time it showed. The hover
-// line, when given, fades with it, at its opacity in every frame and where
-// it was, if `lineFades`; otherwise it shows in none (it went at once while
-// the time faded).
-SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, const std::function<void()> &hide,
-                                QQuickItem *hoverLine = nullptr, bool lineFades = false) {
+// out to its end, a frame of `animations` at a time: it fades where it was,
+// with the time it showed. The hover line, when given, fades with it, at its
+// opacity in every frame and where it was, if `lineFades`; otherwise it
+// shows in none (it went at once while the time faded).
+SeekTimeFade followSeekTimeFade(SteppedAnimationDriver &animations, const SeekTimeBox &box,
+                                const std::function<void()> &hide, QQuickItem *hoverLine = nullptr,
+                                bool lineFades = false) {
     SeekTimeFade fade;
     auto *content = box.box->property("contentItem").value<QQuickItem *>();
     QQuickItem *popup = content != nullptr ? content->parentItem() : nullptr;
     // A hover's time shows after a moment.
-    if (popup == nullptr || !QTest::qWaitFor([&]() { return popup->isVisible() && popup->opacity() >= 1.0; })) {
+    if (popup == nullptr
+        || !stepUntil(animations, [&]() { return popup->isVisible() && popup->opacity() >= 1.0; })) {
         fade.error = QStringLiteral("not shown in full");
         return fade;
     }
@@ -2060,11 +2118,12 @@ SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, co
                                  .arg(popup->opacity()));
         }
     };
-    const QMetaObject::Connection frames = QObject::connect(window, &QQuickWindow::afterAnimating, window, check);
     hide();
     check();
-    const bool ended = QTest::qWaitFor([&]() { return !popup->isVisible(); }, 5000);
-    QObject::disconnect(frames);
+    const bool ended = stepUntil(animations, [&]() {
+        check();
+        return !popup->isVisible();
+    });
     if (!ended) {
         errors.push_back(QStringLiteral("did not end"));
     }
@@ -2091,11 +2150,10 @@ SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, co
 } // namespace
 
 void AccessibilityTest::seekTimeFadesOutWhereItWas() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     const qreal dpr = window->effectiveDevicePixelRatio();
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QQuickItem *line = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
@@ -2107,6 +2165,8 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
             && timeBox.find(window));
     // The app's style fades a tooltip out.
     QVERIFY(timeBox.box->property("exit").value<QObject *>() != nullptr);
+    // The fades, a frame at a time.
+    SteppedAnimationDriver animations;
     const qreal y = seek->height() / 2;
     const QPoint away = centerOf(qvariant_cast<QQuickItem *>(root->property("startButton")));
     const std::optional<SeekPoint> middle = pointBetweenSteps(seek, 0.5);
@@ -2124,7 +2184,7 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     };
     // The hover's time fades with its line; a gesture's has none.
     const auto expectFade = [&](const std::function<void()> &hide, bool lineFades) {
-        const SeekTimeFade fade = followSeekTimeFade(window, timeBox, hide, hoverLine, lineFades);
+        const SeekTimeFade fade = followSeekTimeFade(animations, timeBox, hide, hoverLine, lineFades);
         if (!fade.error.isEmpty()) {
             return fade.error;
         }
@@ -2165,7 +2225,7 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     QTRY_COMPARE(timeBox.shown(), minutesAndSeconds(secondsAtX(seek, dragEndX)));
     error = expectShown(minutesAndSeconds(secondsAtX(seek, dragEndX)), dragEndX);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    QCOMPARE(recordedValues(root.data(), "seeks").size(), 1);
+    QCOMPARE(recordedValues(root, "seeks").size(), 1);
 
     // A touch's drag, which has no hover, fades its time out over the
     // playhead.
@@ -2174,10 +2234,16 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     const QPoint touched = seek->mapToScene(QPointF(seek->width() * 0.2, y)).toPoint();
     QTest::touchEvent(window, touchScreen).press(0, touched, window);
     QTest::touchEvent(window, touchScreen).move(0, touched + QPoint(20, 0), window);
+    {
+        // Qt Quick hands a touch move on with the next frame it draws.
+        int frames = 0;
+        const FrameSampler counting(window, [&frames]() { ++frames; });
+        QTRY_VERIFY(frames > 0);
+    }
     error = expectFade([&]() { QTest::touchEvent(window, touchScreen).release(0, touched + QPoint(20, 0), window); },
                        false);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    QCOMPARE(recordedValues(root.data(), "seeks").size(), 2);
+    QCOMPARE(recordedValues(root, "seeks").size(), 2);
 
     // Stopping fades the time out where it was; playing again shows it.
     QTest::mouseMove(window, later->scene);
@@ -2198,7 +2264,7 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     bridge->setProperty("durationSeconds", 200.0);
     error = expectShown(laterTime, laterX);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    QCOMPARE(recordedValues(root.data(), "seeks").size(), 2);
+    QCOMPARE(recordedValues(root, "seeks").size(), 2);
 }
 
 namespace {
@@ -2922,11 +2988,9 @@ void AccessibilityTest::seekBarStepsFromThePositionBetweenItsPixels() {
 }
 
 void AccessibilityTest::transportBarHasNoWarnings() {
-    QQmlEngine engine;
-    QScopedPointer<QObject> root;
-    QString errorText;
-    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
-    QVERIFY2(window != nullptr, qPrintable(errorText));
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
     qInfo("Qt Quick Controls style: %s", qPrintable(QQuickStyle::name()));
     // Lay the bar out again at other sizes.
     window->resize(640, 160);
@@ -2957,11 +3021,7 @@ void AccessibilityTest::transportBarHasNoWarningsUnderTheBasicStyle() {
     QVERIFY2(child.exitStatus() == QProcess::NormalExit && child.exitCode() == 0, qPrintable(output));
 }
 
-void AccessibilityTest::clicksLeaveSpaceToPlayOrPause() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkClicksLeaveSpaceToPlayOrPause(QQuickWindow *window) {
     TransportFixture f;
     QVERIFY(f.load(window));
     QTRY_VERIFY(f.seek->isEnabled());
@@ -3001,11 +3061,7 @@ void AccessibilityTest::clicksLeaveSpaceToPlayOrPause() {
     QCOMPARE(f.playPauseTriggered->count(), 3);
 }
 
-void AccessibilityTest::modifiedKeysReachTheShortcutsFromFocusedButtons() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkModifiedKeysReachTheShortcutsFromFocusedButtons(QQuickWindow *window) {
     TransportFixture f;
     QVERIFY(f.load(window));
 
@@ -3027,9 +3083,9 @@ void AccessibilityTest::modifiedKeysReachTheShortcutsFromFocusedButtons() {
 }
 
 void AccessibilityTest::rowHeightsAndScrollingFollowTheFont() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    MainWindowFixture main;
+    QQuickWindow *window = main.window;
+    LibraryTreeModel &libraryModel = main.libraryModel;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     bridge->setProperty("queueRows", sampleQueueRows(300));
@@ -3108,9 +3164,8 @@ void AccessibilityTest::rowHeightsAndScrollingFollowTheFont() {
 }
 
 void AccessibilityTest::queueHeaderAndRowsShareTheColumnWidths() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    MainWindowFixture main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     bridge->setProperty("queueRows", sampleQueueRows(3));
@@ -3195,11 +3250,7 @@ void AccessibilityTest::queueHeaderAndRowsShareTheColumnWidths() {
     dropMinimumSizeWarnings();
 }
 
-void AccessibilityTest::queueColumnsResizeByTheirHandles() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkQueueColumnsResizeByTheirHandles(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     bridge->setProperty("queueRows", sampleQueueRows(3));
     bridge->setProperty("queueLength", 3);
@@ -3293,11 +3344,7 @@ void AccessibilityTest::queueColumnsResizeByTheirHandles() {
     QVERIFY(bridge->property("queueColumnWidths").toMap().isEmpty());
 }
 
-void AccessibilityTest::aCompressedQueueColumnResizesFromItsPreferredWidth() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkACompressedQueueColumnResizesFromItsPreferredWidth(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     auto *pane = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
     QVERIFY(pane != nullptr);
@@ -3425,11 +3472,7 @@ void AccessibilityTest::aCompressedQueueColumnResizesFromItsPreferredWidth() {
     QVERIFY(titleAtItsMinimum());
 }
 
-void AccessibilityTest::queueColumnTextStaysInsideItsColumnAtTheMinimum() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkQueueColumnTextStaysInsideItsColumnAtTheMinimum(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QVariantList rows;
     for (int i = 0; i < 3; ++i) {
@@ -3726,11 +3769,7 @@ QColor drawnAt(const QImage &image, const QQuickWindow *window, QQuickItem *item
 // checked state changing but never that they could be checked, and read as
 // plain buttons). A click, Space and the press action choose a mode;
 // choosing the chosen one again leaves it chosen.
-void AccessibilityTest::modeSwitchSegmentsAreCheckableRadioButtons() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkModeSwitchSegmentsAreCheckableRadioButtons(QQuickWindow *window) {
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
     QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
@@ -3783,11 +3822,7 @@ void AccessibilityTest::modeSwitchSegmentsAreCheckableRadioButtons() {
     QTRY_VERIFY2(problem(0).isEmpty(), qPrintable(problem(0)));
 }
 
-void AccessibilityTest::modeSwitchIconFollowsTheMode() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) {
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
     QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
@@ -4048,26 +4083,15 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     QVERIFY(spectrogramButton->property("checked").toBool());
 }
 
-void AccessibilityTest::modeSwitchStatesStayApart_data() {
-    QTest::addColumn<int>("mode");
-    QTest::newRow("spectrogram") << 0;
-    QTest::newRow("waveform") << 1;
-}
-
-// The mode switch's states stay apart: its buttons are 4 px apart with 3 px
-// of plate around them, so the keyboard's 2 px focus ring, with its 1 px gap
-// in the plate's colour, stays inside the plate and clear of the chosen
-// button's edge; the chosen glyph is whole, the other at 72 %, and under the
+// The mode switch's states stay apart: its buttons have as much plate
+// between them as around them, so the keyboard's 2 px focus ring, with its
+// 1 px gap in the plate's colour, stays inside the plate and clear of the
+// chosen button's edge; the chosen glyph is whole, the other at 72 %, and under the
 // pointer at 85 % on a 14 % wash, which shows on the plate and stays under
 // the chosen one's plate. On both plots; in both Breeze themes,
 // UiFoundationsTest's plotSegmentHoverStaysUnderTheChosenPlate and
 // plotToolButtonDrawsCheckedAndFocusApart draw the hover and the ring.
-void AccessibilityTest::modeSwitchStatesStayApart() {
-    QFETCH(int, mode);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int mode) {
     QObject *tokens = qvariant_cast<QObject *>(window->property("uiPalette"));
     QVERIFY(tokens != nullptr);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
@@ -4086,15 +4110,16 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
         return button->findChild<QQuickItem *>(QString::fromLatin1(name));
     };
 
-    // 4 px of plate around the buttons, 4 px between them.
+    // An even plate: as much of it around the buttons as between them.
     QQuickItem *first = mode == 0 ? chosen : other;
     QQuickItem *second = mode == 0 ? other : chosen;
     const QRectF plateRect = rectOf(plate);
-    QCOMPARE(rectOf(first).left() - plateRect.left(), 4.0);
-    QCOMPARE(rectOf(first).top() - plateRect.top(), 4.0);
-    QCOMPARE(plateRect.right() - rectOf(second).right(), 4.0);
-    QCOMPARE(plateRect.bottom() - rectOf(second).bottom(), 4.0);
-    QCOMPARE(rectOf(second).left() - rectOf(first).right(), 4.0);
+    const qreal inset = rectOf(first).left() - plateRect.left();
+    QVERIFY(inset > 0);
+    QCOMPARE(rectOf(first).top() - plateRect.top(), inset);
+    QCOMPARE(plateRect.right() - rectOf(second).right(), inset);
+    QCOMPARE(plateRect.bottom() - rectOf(second).bottom(), inset);
+    QCOMPARE(rectOf(second).left() - rectOf(first).right(), inset);
 
     // The other one focused from the keyboard: its ring inside the plate,
     // 1 px or more clear of the chosen one's edge, with its gap.
@@ -4115,10 +4140,13 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
     const QRectF edgeRect = rectOf(edge);
     const double clearance = mode == 0 ? ringRect.left() - edgeRect.right() : edgeRect.left() - ringRect.right();
     QVERIFY2(clearance >= 1.0, qPrintable(QString::number(clearance)));
-    QCOMPARE(QQmlProperty(ring, QStringLiteral("border.width")).read().toReal(), 2.0);
-    QCOMPARE(QQmlProperty(gap, QStringLiteral("border.width")).read().toReal(), 1.0);
-    QCOMPARE(rectOf(gap).left(), rectOf(other).left() - 1);
-    QCOMPARE(ringRect.left(), rectOf(other).left() - 3);
+    // The 2 px ring round its 1 px gap, round the button.
+    const qreal ringWidth = QQmlProperty(ring, QStringLiteral("border.width")).read().toReal();
+    const qreal gapWidth = QQmlProperty(gap, QStringLiteral("border.width")).read().toReal();
+    QCOMPARE(ringWidth, 2.0);
+    QCOMPARE(gapWidth, 1.0);
+    QCOMPARE(rectOf(other).left() - rectOf(gap).left(), gapWidth);
+    QCOMPARE(rectOf(other).left() - ringRect.left(), gapWidth + ringWidth);
 
     // The glyphs: the chosen one whole, the other quiet.
     QQuickItem *chosenGlyph = part(chosen, "plotToolButtonIcon");
@@ -4173,11 +4201,7 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
              qPrintable(QStringLiteral("chosen %1 on hovered %2").arg(drawnFill.name(), drawnWash.name())));
 }
 
-void AccessibilityTest::visualizationsHaveAccessibleRoles() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkVisualizationsHaveAccessibleRoles(QQuickWindow *window) {
     const QList<QPair<QString, QString>> items{
         {QStringLiteral("mainSpectrogramSurface"), QStringLiteral("Spectrogram")},
         {QStringLiteral("mainWaveformSurface"), QStringLiteral("Waveform")},
@@ -4226,11 +4250,7 @@ bool showStereoLanes(QQuickItem *layer) {
 }
 }
 
-void AccessibilityTest::laneButtonsAreTabStopsThatRevealThemselves() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkLaneButtonsAreTabStopsThatRevealThemselves(QQuickWindow *window) {
     QQuickItem *layer = plotLayerOf(window);
     QVERIFY(layer != nullptr);
     QVERIFY(showStereoLanes(layer));
@@ -4275,17 +4295,15 @@ void AccessibilityTest::laneButtonsAreTabStopsThatRevealThemselves() {
     QVERIFY(bridge->setProperty("channelButtonsVisibility", 0));
     QTRY_VERIFY(!plates[0]->isVisible());
     QVERIFY(!mutes[0]->isVisible());
+    // Shown when wanted again, as by default.
+    QVERIFY(bridge->setProperty("channelButtonsVisibility", 1));
 }
 
 // A lane's Mute and Solo tell assistive technology that they are toggles
 // and whether each is on (only "focused, focusable" reached it). What they
 // show is the lane's state: a click asks for the change and leaves the
 // button as the lane is until the lane changes.
-void AccessibilityTest::laneButtonsAreCheckableToggles() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkLaneButtonsAreCheckableToggles(QQuickWindow *window) {
     QQuickItem *layer = plotLayerOf(window);
     QVERIFY(layer != nullptr);
     QVERIFY(showStereoLanes(layer));
@@ -4332,8 +4350,9 @@ void AccessibilityTest::laneButtonsAreCheckableToggles() {
     QVERIFY(heads[0]->setProperty("muted", false));
     QTRY_VERIFY2(problem(mute, false).isEmpty(), qPrintable(problem(mute, false)));
 
-    // The buttons' plate: 4 px around them and between them, its top on
-    // one line with the mode switch's, 5 px into the lane, and a button's
+    // The buttons' plate: as even as the mode switch's, as much of it
+    // around them as between them, its top on one line with the switch's,
+    // as far into the lane as the switch is into the plot, and a button's
     // focus ring inside it with 1 px of the plate outside it (at 2 px, the
     // ring ran past the plate's edge). The label is centred on it, so that L
     // and M stand on one centre line (with only the plates' tops on one
@@ -4346,20 +4365,23 @@ void AccessibilityTest::laneButtonsAreCheckableToggles() {
     QQuickItem *modeSwitch = itemsNamed(layer, QStringLiteral("visualizationModeSwitch")).value(0);
     QVERIFY(label != nullptr && firstSolo != nullptr && modeSwitch != nullptr);
     const QRectF plateRect = rectOf(plate);
-    QCOMPARE(rectOf(mute).left() - plateRect.left(), 4.0);
-    QCOMPARE(rectOf(mute).top() - plateRect.top(), 4.0);
-    QCOMPARE(rectOf(firstSolo).left() - rectOf(mute).right(), 4.0);
-    QCOMPARE(plateRect.right() - rectOf(firstSolo).right(), 4.0);
-    QCOMPARE(plateRect.bottom() - rectOf(mute).bottom(), 4.0);
+    const qreal inset = rectOf(mute).left() - plateRect.left();
+    QCOMPARE(inset, modeSwitch->property("padding").toReal());
+    QCOMPARE(rectOf(mute).top() - plateRect.top(), inset);
+    QCOMPARE(rectOf(firstSolo).left() - rectOf(mute).right(), inset);
+    QCOMPARE(plateRect.right() - rectOf(firstSolo).right(), inset);
+    QCOMPARE(plateRect.bottom() - rectOf(mute).bottom(), inset);
     QCOMPARE(plateRect.top(), rectOf(modeSwitch).top());
-    QCOMPARE(plateRect.top() - rectOf(layer).top(), 5.0);
+    const qreal plateInset = layer->property("plateInset").toReal();
+    QVERIFY(plateInset > 0);
+    QCOMPARE(plateRect.top() - rectOf(layer).top(), plateInset);
     QVERIFY2(std::abs(rectOf(label).center().y() - plateRect.center().y()) <= 0.5,
              qPrintable(QStringLiteral("label centre %1, plate centre %2")
                             .arg(rectOf(label).center().y()).arg(plateRect.center().y())));
     QVERIFY2(std::abs(rectOf(modeSwitch).center().y() - plateRect.center().y()) <= 0.5,
              qPrintable(QStringLiteral("switch centre %1, plate centre %2")
                             .arg(rectOf(modeSwitch).center().y()).arg(plateRect.center().y())));
-    QCOMPARE(rectOf(label).left() - rectOf(layer).left(), 5.0);
+    QCOMPARE(rectOf(label).left() - rectOf(layer).left(), plateInset);
     mute->forceActiveFocus(Qt::TabFocusReason);
     QQuickItem *ring = mute->findChild<QQuickItem *>(QStringLiteral("plotToolButtonFocusRing"));
     QVERIFY(ring != nullptr);
@@ -4370,11 +4392,7 @@ void AccessibilityTest::laneButtonsAreCheckableToggles() {
                             .arg(plateRect.left()).arg(plateRect.top())));
 }
 
-void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkLevelMeterReservesItsColumnAndReadsOut(QQuickWindow *window) {
     QQuickItem *layer = plotLayerOf(window);
     QQuickItem *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
@@ -4470,9 +4488,8 @@ void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
 }
 
 void AccessibilityTest::plotLayerDrawsWithContrast() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    MainWindowFixture main;
+    QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QQuickItem *layer = plotLayerOf(window);
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
@@ -4625,11 +4642,7 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
     }
 }
 
-void AccessibilityTest::plotLayerShowsThePaneStates() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void AccessibilityTest::checkPlotLayerShowsThePaneStates(QQuickWindow *window) {
     QQuickItem *layer = plotLayerOf(window);
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
@@ -4714,6 +4727,10 @@ int main(int argc, char **argv) {
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
     // Accessible interfaces exist while assistive technology is active.
     qputenv("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1");
+    // The basic render loop, whatever the environment asks for: the threaded
+    // one installs an animation driver of its own for the GUI thread, and Qt
+    // then takes no SteppedAnimationDriver.
+    qputenv("QSG_RENDER_LOOP", "basic");
 
     // The app's controls style and Breeze icons, whatever the desktop the
     // tests run in; TestSessionIsolation.h. A child process that

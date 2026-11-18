@@ -1061,9 +1061,9 @@ if(BUILD_TESTING)
             ferrous_qml_smoke_waveform:32
             ferrous_qml_smoke_errors:32
             ferrous_qml_smoke_spectrogram:32
-            ferrous_accessibility_tests:20
+            ferrous_accessibility_tests:14
             ferrous_bridge_client_tests:14
-            ferrous_ui_menus_tests:13
+            ferrous_ui_menus_tests:7
             ferrous_qml_smoke_library_queue:13
             ferrous_qml_smoke_window:11)
         string(REPLACE ":" ";" test_and_cost "${test_and_cost}")
