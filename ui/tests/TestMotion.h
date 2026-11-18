@@ -87,9 +87,16 @@ public:
             if (!isRunning()) {
                 QCoreApplication::processEvents();
             }
-            drove = drove || isRunning();
             m_elapsed += std::min(kFrame, ms - done);
-            advance();
+            // Frames only while Qt runs the driver, as a window draws them:
+            // Qt stops it once nothing runs, which can be part way through
+            // the step. A frame of the stopped driver starts it again with
+            // Qt's clock unset, and the next animation takes every frame
+            // since in its first one (#637).
+            if (isRunning()) {
+                drove = true;
+                advance();
+            }
         }
         return drove;
     }
