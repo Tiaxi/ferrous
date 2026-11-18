@@ -253,6 +253,7 @@ private slots:
     void seekClickSeeksOnce();
     void seekDragShowsAndSeeksTheTimeUnderThePointer();
     void seekClickSeeksToTheTimeUnderThePointer();
+    void seekPointerReachesEitherEndOnItsWholeSecond();
     void playbackMovesTheSeekBarByWholePixels();
     void seekBarStepsByTheWindowsDevicePixels();
     void seekBarPlayheadIsOneOutlinedLine();
@@ -1495,6 +1496,92 @@ void AccessibilityTest::seekClickSeeksToTheTimeUnderThePointer() {
     QTest::keyClick(window, Qt::Key_Right);
     seeks = recordedValues(root, "seeks");
     QVERIFY2(sameValues(seeks, {target->seconds, 55.0, 60.0}), qPrintable(describeValues(seeks)));
+}
+
+void AccessibilityTest::seekPointerReachesEitherEndOnItsWholeSecond() {
+    TransportHarness harness;
+    QQuickWindow *window = harness.window;
+    QObject *root = harness.root.data();
+    QVERIFY2(window != nullptr, qPrintable(harness.error));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QVERIFY(seek != nullptr);
+    QAccessibleValueInterface *value = QAccessible::queryAccessibleInterface(seek)->valueInterface();
+    QVERIFY(value != nullptr);
+    const qreal y = seek->height() / 2;
+    // The point at `x` on the slider, in the whole pixels a mouse gives.
+    const auto pointAt = [seek, y](qreal x) {
+        const QPoint scene = seek->mapToScene(QPointF(x, y)).toPoint();
+        return SeekPoint{scene, secondsAtX(seek, seek->mapFromScene(QPointF(scene)).x())};
+    };
+    const auto pointWithin = [&](double from, double to) -> std::optional<SeekPoint> {
+        for (int x = 0; x < seek->width(); ++x) {
+            const SeekPoint point = pointAt(x);
+            if (point.seconds > from && point.seconds < to) {
+                return point;
+            }
+        }
+        return std::nullopt;
+    };
+    const SeekPoint start = pointAt(0);
+    const SeekPoint end = pointAt(seek->width() - 1);
+    const std::optional<SeekPoint> nearStart = pointWithin(0.0, 0.5);
+    const std::optional<SeekPoint> nearEnd = pointWithin(199.5, 200.0);
+    QCOMPARE(start.seconds, 0.0);
+    QCOMPARE(end.seconds, 200.0);
+    QVERIFY(nearStart.has_value() && nearEnd.has_value());
+    // While the pointer holds the slider: the time it shows, and the
+    // value assistive technology reads, a whole second.
+    const auto held = [seek, value]() {
+        return QStringLiteral("%1, value %2")
+            .arg(seek->property("shownSeconds").toDouble())
+            .arg(value->currentValue().toDouble());
+    };
+    const auto heldAt = [](double seconds) {
+        return QStringLiteral("%1, value %2").arg(seconds).arg(std::floor(seconds));
+    };
+    const auto seeks = [&root]() { return recordedValues(root, "seeks"); };
+
+    // Within half a second of the start, the slider's value is already
+    // there, and a click at the start seeks to it.
+    root->setProperty("positionSeconds", 0.3);
+    QCOMPARE(value->currentValue().toDouble(), 0.0);
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start.scene);
+    QVERIFY(seek->property("adjusting").toBool());
+    QCOMPARE(held(), heldAt(0.0));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, start.scene);
+    QVERIFY2(sameValues(seeks(), {0.0}), qPrintable(describeValues(seeks())));
+
+    // So does a drag from within that half second to the start.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, nearStart->scene);
+    QCOMPARE(held(), heldAt(nearStart->seconds));
+    QTest::mouseMove(window, start.scene);
+    QCOMPARE(held(), heldAt(0.0));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, start.scene);
+    QVERIFY2(sameValues(seeks(), {0.0, 0.0}), qPrintable(describeValues(seeks())));
+
+    // Within half a second of the end, a click at the end, or a drag past
+    // it, seeks to the length.
+    root->setProperty("positionSeconds", 199.7);
+    QCOMPARE(value->currentValue().toDouble(), 200.0);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, end.scene);
+    QVERIFY2(sameValues(seeks(), {0.0, 0.0, 200.0}), qPrintable(describeValues(seeks())));
+    const QPoint pastEnd = end.scene + QPoint(20, 0);
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, nearEnd->scene);
+    QCOMPARE(held(), heldAt(nearEnd->seconds));
+    QTest::mouseMove(window, pastEnd);
+    QCOMPARE(held(), heldAt(200.0));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, pastEnd);
+    QVERIFY2(sameValues(seeks(), {0.0, 0.0, 200.0, 200.0}), qPrintable(describeValues(seeks())));
+
+    // A touch's tap at the start, which the slider takes as it lifts, as
+    // it takes a touch's drag only once it moves.
+    root->setProperty("positionSeconds", 0.3);
+    QPointingDevice *touchScreen = QTest::createTouchDevice();
+    QTest::touchEvent(window, touchScreen).press(0, start.scene, window);
+    QVERIFY(seek->property("adjusting").toBool());
+    QCOMPARE(held(), heldAt(0.3));
+    QTest::touchEvent(window, touchScreen).release(0, start.scene, window);
+    QVERIFY2(sameValues(seeks(), {0.0, 0.0, 200.0, 200.0, 0.0}), qPrintable(describeValues(seeks())));
 }
 
 void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {

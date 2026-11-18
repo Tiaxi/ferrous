@@ -188,15 +188,41 @@ ToolBar {
     // A slider whose held arrow keys are one gesture, as a drag is. Qt's
     // autorepeat clears `pressed` at each repeat, but not `adjusting`.
     component GestureSlider: Slider {
+        id: gestureSlider
         // The arrow keys held down.
         property var heldKeys: []
         readonly property bool adjusting: gestureHeld()
         readonly property bool pointerHeld: pointerHold.active
+        // Where the holding pointer is, in the slider's coordinates, and
+        // whether it is a touch. The hold clears its point as the release
+        // arrives, before the slider takes the release there, so the
+        // position is kept from the hold, the release's included.
+        property point heldPointerPosition
+        property bool heldByTouch: false
+        // The holding pointer lifted, at heldPointerPosition; the slider
+        // takes the release after this.
+        signal pointerLifted()
 
         // The mouse's or a touch's hold. Its passive grab leaves the drag
         // to the slider.
         PointHandler {
             id: pointerHold
+            onPointChanged: {
+                if (active) {
+                    gestureSlider.heldPointerPosition = point.position
+                }
+            }
+            // The point is still the event's here: the press's, or the
+            // release's.
+            onActiveChanged: {
+                gestureSlider.heldPointerPosition = point.position
+                if (active) {
+                    gestureSlider.heldByTouch = point.device !== null
+                        && point.device.type === PointerDevice.TouchScreen
+                } else {
+                    gestureSlider.pointerLifted()
+                }
+            }
         }
 
         // Whether a drag or held keys move the slider, from their own state.
@@ -593,6 +619,8 @@ ToolBar {
             // seek at once.
             onMoved: {
                 const stepped = !pointerHeld && (heldKeys.length > 0 || !pressed)
+                // A touch moves the slider once it drags.
+                pointerMoving = pointerMoving || (!stepped && pressed)
                 let target = value
                 if (stepped && durationKnown) {
                     // A step of the keys or the wheel moves from the time a
@@ -630,6 +658,33 @@ ToolBar {
                 const end = forward ? to : from
                 if (durationKnown && value === end && shownSeconds !== end) {
                     gestureValue = end
+                }
+            }
+            // A pointer's time is the one under it, which the slider gives
+            // only by moving its value, a whole second, to another: one on
+            // that second, as at an end the value is already at, moves
+            // nothing. So the time comes from the pointer's position,
+            // wherever the slider takes it: a mouse's press and drag, a
+            // touch's drag once it moves the slider, and any release.
+            property bool pointerMoving: false
+            function takePointer() {
+                gestureValue = secondsAtX(heldPointerPosition.x)
+                value = valueOfSecond(Math.floor(gestureValue))
+            }
+            onPressedChanged: {
+                pointerMoving = pressed && pointerHeld && !heldByTouch
+                if (pointerMoving) {
+                    takePointer()
+                }
+            }
+            onHeldPointerPositionChanged: {
+                if (pointerMoving && pressed) {
+                    takePointer()
+                }
+            }
+            onPointerLifted: {
+                if (pressed) {
+                    takePointer()
                 }
             }
             onAdjustingChanged: {
