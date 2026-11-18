@@ -363,9 +363,6 @@ QPoint centerInWindow(QQuickItem *item);
 // destroying the engine leaves none half made.
 bool finishIncubation(QQmlEngine &engine);
 
-// Loads and shows Main.qml without a backend, so it uses its fallback bridge.
-QQuickWindow *loadMainWindowForQuit(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel);
-
 inline auto keepRunningWhenTheWindowCloses() {
     const bool quitOnLastWindowClosed = QGuiApplication::quitOnLastWindowClosed();
     QGuiApplication::setQuitOnLastWindowClosed(false);

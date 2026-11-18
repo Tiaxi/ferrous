@@ -160,7 +160,7 @@ void useTagBackend(TagEditorController &editor, const QByteArray &loadResponse,
 QQuickWindow *loadMainWindowWithTagEditor(
     QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel, TagEditorController &editor) {
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    return loadMainWindowForQuit(engine, libraryModel);
+    return loadMainWindowShown(engine, libraryModel);
 }
 
 bool openTagEditor(TagEditorController &editor) {

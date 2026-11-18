@@ -412,10 +412,6 @@ bool finishIncubation(QQmlEngine &engine) {
     return QTest::qWaitFor([controller]() { return controller->incubatingObjectCount() == 0; });
 }
 
-QQuickWindow *loadMainWindowForQuit(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
-    return loadMainWindowShown(engine, libraryModel);
-}
-
 bool clickButton(QObject *window, const QString &objectName) {
     QObject *button = window->findChild<QObject *>(objectName);
     return button != nullptr && QMetaObject::invokeMethod(button, "clicked");
