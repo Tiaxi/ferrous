@@ -43,7 +43,7 @@ CTEST_PARALLEL_LEVEL=1 ./scripts/run-tests.sh --ui-only    # one test at a time
 ./scripts/run-tests.sh --ui-only --no-configure --no-build --verbose
 ```
 
-Running `ctest --test-dir ui/build` directly also gives each test program directories of its own, in `$TMPDIR` or `/tmp`, and leaves them there; `-j` runs tests in parallel. CI runs the UI tests two at a time, half its runner's CPUs.
+Running `ctest --test-dir ui/build` directly also gives each test program directories of its own, in `$TMPDIR` or `/tmp`, and leaves them there; `-j` runs tests in parallel. CI runs as many UI tests at a time as its runner has CPUs, since nothing else runs there. Its UI jobs compile through ccache, whose objects each push to `main` saves for later runs; a pull request's run restores them and saves none.
 
 The app's C++ classes build once, as the static library `ferrous_ui_core`, which the app and the test programs that use those classes link (`ferrous_add_app_test` in `ui/CMakeLists.txt`). Add a new class's source to the library, not to each program: configuring fails for a program that links the library and also compiles one of its sources. The small unit tests, such as `ferrous_playback_clock_tests`, compile the few sources they test themselves and don't link the library.
 

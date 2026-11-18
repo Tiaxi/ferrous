@@ -12,6 +12,13 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels the runs of its earlier commits. Every
+# other run, such as each push to main or a release, is in a group of its own
+# and always finishes.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 jobs:
   rust-backend:
     name: "Rust Backend Checks${{ matrix.toolchain == 'fedora' && ' (Fedora Rust)' || '' }}${{ matrix.fedora != '44' && format(' (Fedora {0}{1})', matrix.fedora, matrix.experimental && ', non-blocking' || '') || '' }}"
@@ -215,6 +222,7 @@ jobs:
             cmake \
             ninja-build \
             gcc-c++ \
+            ccache \
             rust \
             cargo \
             pkgconf-pkg-config \
@@ -249,14 +257,45 @@ jobs:
           key: profile-logs-${{ matrix.profile_logs }}
           workspaces: ". -> ui/build/cargo"
 
-      - name: Configure UI
-        run: >-
-          cmake -S ui -B ui/build -G Ninja
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
-          -DFERROUS_ENABLE_PROFILE_LOGS=${{ matrix.profile_logs }}
+      # ccache keeps the C++ objects of earlier runs, so a run compiles only
+      # what its change affects. A run restores the newest cache that main
+      # has saved, when there is one. Only a push to main saves one, under a
+      # key of its own, since a cache cannot be overwritten: a repository has
+      # 10 GB for all its caches, and GitHub removes the least recently used
+      # ones beyond that. ccache is for CI only; the app's build does not
+      # need it.
+      - name: Restore C++ objects
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ccache
+          key: v0-ccache-ui-fedora-44-${{ matrix.build_type }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: v0-ccache-ui-fedora-44-${{ matrix.build_type }}-
 
+      - name: Configure UI
+        run: |
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CCACHE_MAXSIZE=1G"
+          } >> "$GITHUB_ENV"
+          cmake -S ui -B ui/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DFERROUS_ENABLE_PROFILE_LOGS=${{ matrix.profile_logs }} \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      # With every CPU of the runner; Cargo does the same.
       - name: Build UI
-        run: cmake --build ui/build -j2
+        run: |
+          ccache --zero-stats
+          cmake --build ui/build --parallel "$(nproc)"
+          ccache --show-stats
+
+      # After the build, whatever the tests then say: the objects are as good.
+      - name: Save C++ objects
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/ccache
+          key: v0-ccache-ui-fedora-44-${{ matrix.build_type }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Isolate test user directories
         run: |
@@ -267,10 +306,11 @@ jobs:
             echo "XDG_CACHE_HOME=$RUNNER_TEMP/xdg/cache"
           } >> "$GITHUB_ENV"
 
-      # Two at a time, half the runner's CPUs, as scripts/run-tests.sh
-      # chooses; each test program has directories of its own.
+      # As many at a time as the runner has CPUs; each test program has
+      # directories of its own. scripts/run-tests.sh takes half the CPUs, to
+      # leave room for other work on a desktop; a runner has none.
       - name: Run UI smoke tests
-        run: ctest --test-dir ui/build --output-on-failure --parallel 2
+        run: ctest --test-dir ui/build --output-on-failure --parallel "$(nproc)"
 
       - name: Compare native waveform and spectrogram rendering and texture reuse
         run: |
