@@ -47,14 +47,30 @@ inline int framesOver(QQuickWindow *window, int ms) {
 // time.
 // Qt takes it only while no other driver is installed: the test's main()
 // must keep Qt Quick on the basic render loop, whose window installs none.
+// Qt also leaves it out while only pauses run, such as a PauseAnimation
+// with no other animation beside it: it times those on real time, and
+// step() returns false.
 class SteppedAnimationDriver : public QAnimationDriver {
 public:
-    SteppedAnimationDriver() { install(); }
+    SteppedAnimationDriver() {
+        install();
+        // Qt starts the driver at once where animations already run, such
+        // as a window's own from its start. They ran on real time, and take
+        // what has passed of it since their last frame here: Qt otherwise
+        // gives up to 50 ms of it to the animations that start next, which
+        // then end that much before the steps of their duration.
+        if (isRunning()) {
+            advance();
+        }
+    }
     ~SteppedAnimationDriver() override { uninstall(); }
     SteppedAnimationDriver(const SteppedAnimationDriver &) = delete;
     SteppedAnimationDriver &operator=(const SteppedAnimationDriver &) = delete;
 
-    qint64 elapsed() const override { return m_elapsed; }
+    // Since Qt last started the driver, which is what Qt adds to its own
+    // time at that start: it stops the driver while nothing runs, and while
+    // only pauses do.
+    qint64 elapsed() const override { return m_elapsed - m_startedAt; }
 
     // Lets `ms` of animation time pass, a frame of 16 ms at a time, as the
     // window would draw them. Whether this driver ran the animations: Qt
@@ -64,8 +80,13 @@ public:
         bool drove = false;
         for (int done = 0; done < ms; done += kFrame) {
             // The animations that started since: they run from the next
-            // frame on.
+            // frame on. Qt starts them, and this driver for the first of
+            // them, over two queued calls, the second posted by the first,
+            // and a pass of the event loop delivers one.
             QCoreApplication::processEvents();
+            if (!isRunning()) {
+                QCoreApplication::processEvents();
+            }
             drove = drove || isRunning();
             m_elapsed += std::min(kFrame, ms - done);
             advance();
@@ -73,7 +94,16 @@ public:
         return drove;
     }
 
+protected:
+    void start() override {
+        if (!isRunning()) {
+            m_startedAt = m_elapsed;
+        }
+        QAnimationDriver::start();
+    }
+
 private:
     static constexpr int kFrame = 16;
     qint64 m_elapsed = 0;
+    qint64 m_startedAt = 0;
 };
