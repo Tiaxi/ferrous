@@ -17,4 +17,5 @@
 - For documentation-only changes, verify commands and claims against their implementation, check local links, and run `git diff --check`.
 - Introduce no warnings. Prefer refactoring over lint suppressions; justify unavoidable suppressions with a nearby comment. Justify every `unsafe` block with a `// SAFETY:` comment.
 - Work on one issue per PR. Autonomous commits are allowed at coherent, validated checkpoints. Use lowercase conventional subjects (`fix: correct seek handling`) and branches of the form `<type>/<branch_name>`; do not use agent-specific branch types. Merge with `gh pr merge`.
+- Label every issue you open: one type (`bug`, `enhancement`, `documentation` or `performance`), at least one `area:*`, and one `priority:*`. Add `needs-repro` when the cause hasn't been confirmed by a run.
 - Keep this file limited to actionable instructions. Put user and development documentation in the linked guides; keep implementation details with the code.
