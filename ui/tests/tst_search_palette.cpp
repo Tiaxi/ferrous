@@ -17,6 +17,7 @@
 #include <QLocale>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QPointer>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -24,6 +25,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QScopeGuard>
+#include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QUrl>
@@ -415,6 +417,8 @@ private slots:
     void paletteSitsUnderTheTransportOverADim_data();
     void paletteSitsUnderTheTransportOverADim();
     void sectionsFollowTheirBestMatch();
+    void rowsThatChangeKindRedrawInPlace();
+    void tooltipFollowsARowThatChangesKindUnderAStillPointer();
     void rowsShareTheirColumnsAndThumbnails();
     void matchesAreEmphasisedInTheTitleOnly();
     void selectedHoveredAndPlayingRowsAreDrawn();
@@ -604,6 +608,134 @@ void SearchPaletteTest::sectionsFollowTheirBestMatch() {
         }
     }
     QCOMPARE(order, (QStringList{QStringLiteral("album"), QStringLiteral("track"), QStringLiteral("artist")}));
+}
+
+// A query whose rows change kind or type where the old ones were (a track
+// result becoming an album, a heading or an artist) updates them in place,
+// and each recycled row draws as its new kind. The model used to remove and
+// insert such rows for a DelegateChooser, which the palette no longer has.
+void SearchPaletteTest::rowsThatChangeKindRedrawInPlace() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    const auto track = [](const QString &title, const QString &path) {
+        Row row = result(QStringLiteral("track"), title, 1.0f);
+        row.artist = QStringLiteral("The Quiet Meridian");
+        row.album = QStringLiteral("Small Hours");
+        row.trackPath = path;
+        row.lengthText = QStringLiteral("3:49");
+        return row;
+    };
+    harness.search(QStringLiteral("tide"),
+                   {track(QStringLiteral("Tide Line"), QStringLiteral("/fixture/line.flac")),
+                    track(QStringLiteral("Tide Drift"), QStringLiteral("/fixture/drift.flac")),
+                    track(QStringLiteral("Tide Field"), QStringLiteral("/fixture/field.flac"))},
+                   {0, 0, 3});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QCOMPARE(harness.model.rowCount(), 4);
+    QList<QPointer<QQuickItem>> before;
+    for (int i = 0; i < 4; ++i) {
+        before << harness.row(i);
+        QVERIFY(before.last() != nullptr);
+    }
+    QVERIFY(visibleChildNamed(before[1], QStringLiteral("globalSearchCoverPlaceholder")) != nullptr);
+
+    // An album, then an artist: a heading, a result, a heading, a result.
+    Row album = result(QStringLiteral("album"), QStringLiteral("Small Hours"), 0.0f);
+    album.artist = QStringLiteral("The Quiet Meridian");
+    album.year = 2005;
+    album.coverUrl = harness.coverUrl;
+    Row artist = result(QStringLiteral("artist"), QStringLiteral("The Quiet Meridian"), 1.0f);
+    artist.count = 4;
+    QSignalSpy removed(&harness.model, &QAbstractItemModel::rowsRemoved);
+    QSignalSpy inserted(&harness.model, &QAbstractItemModel::rowsInserted);
+    QSignalSpy changed(&harness.model, &QAbstractItemModel::dataChanged);
+    harness.search(QStringLiteral("small"), {album, artist}, {1, 1, 0});
+    QCOMPARE(harness.model.rowCount(), 4);
+    QCOMPARE(removed.count(), 0);
+    QCOMPARE(inserted.count(), 0);
+    QCOMPARE(changed.count(), 1);
+
+    // The same items, each drawn as its new row.
+    for (int i = 0; i < 4; ++i) {
+        QCOMPARE(harness.row(i), before[i].data());
+    }
+    QQuickItem *albumHeading = visibleChildNamed(harness.row(0), QStringLiteral("globalSearchSectionHeading"));
+    QVERIFY(albumHeading != nullptr);
+    QCOMPARE(albumHeading->property("text").toString(), QStringLiteral("Albums"));
+
+    QQuickItem *albumRow = harness.row(1);
+    QCOMPARE(albumRow->height(), 32.0);
+    QCOMPARE(harness.title(albumRow), QStringLiteral("Small Hours"));
+    QVERIFY(contextText(albumRow).startsWith(QStringLiteral("The Quiet Meridian · ")));
+    QVERIFY(visibleChildNamed(albumRow, QStringLiteral("globalSearchThumbnail")) != nullptr);
+    QVERIFY(visibleChildNamed(albumRow, QStringLiteral("globalSearchCoverPlaceholder")) == nullptr);
+    QVERIFY(visibleChildNamed(albumRow, QStringLiteral("globalSearchResultLength")) == nullptr);
+
+    QQuickItem *artistHeadingRow = harness.row(2);
+    QCOMPARE(artistHeadingRow->height(), 28.0);
+    QQuickItem *artistHeading = visibleChildNamed(artistHeadingRow, QStringLiteral("globalSearchSectionHeading"));
+    QVERIFY(artistHeading != nullptr);
+    QCOMPARE(artistHeading->property("text").toString(), QStringLiteral("Artists"));
+    QVERIFY(visibleNamed(artistHeadingRow, QStringLiteral("globalSearchResultTitle")).isEmpty());
+    QVERIFY(visibleChildNamed(artistHeadingRow, QStringLiteral("globalSearchCoverPlaceholder")) == nullptr);
+    QVERIFY(!harness.model.isSelectableIndex(2));
+
+    QQuickItem *artistRow = harness.row(3);
+    QCOMPARE(artistRow->height(), 32.0);
+    QCOMPARE(harness.title(artistRow), QStringLiteral("The Quiet Meridian"));
+    QCOMPARE(contextText(artistRow), QStringLiteral("4 albums"));
+    QVERIFY(visibleChildNamed(artistRow, QStringLiteral("globalSearchArtistGlyph")) != nullptr);
+    QVERIFY(visibleChildNamed(artistRow, QStringLiteral("globalSearchCoverPlaceholder")) == nullptr);
+    QVERIFY(visibleChildNamed(artistRow, QStringLiteral("globalSearchThumbnail")) == nullptr);
+    QVERIFY(visibleChildNamed(artistRow, QStringLiteral("globalSearchResultLength")) == nullptr);
+    QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(artistRow);
+    QVERIFY(accessible != nullptr);
+    QVERIFY2(accessible->text(QAccessible::Name).contains(QStringLiteral("The Quiet Meridian")),
+             qPrintable(accessible->text(QAccessible::Name)));
+}
+
+// New results that turn the result under a still pointer into a "Show
+// all" link take the result's tooltip away, and give it back when the row
+// is a result again.
+void SearchPaletteTest::tooltipFollowsARowThatChangesKindUnderAStillPointer() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    QVector<Row> tracks;
+    for (const QString &title : {QStringLiteral("Tide Line"), QStringLiteral("Tide Drift"), QStringLiteral("Tide Field")}) {
+        Row row = result(QStringLiteral("track"), title, 1.0f);
+        row.artist = QStringLiteral("The Quiet Meridian");
+        row.trackPath = QStringLiteral("/fixture/") + title + QStringLiteral(".flac");
+        tracks << row;
+    }
+    harness.search(QStringLiteral("tide"), tracks, {0, 0, 3});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QCOMPARE(harness.model.rowCount(), 4);
+    QQuickItem *row = harness.row(3);
+    QVERIFY(row != nullptr);
+    QTest::mouseMove(harness.window, sceneCentre(row));
+    QTRY_COMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), row);
+
+    // Two of five tracks: the row under the pointer is the "Show all" link.
+    harness.search(QStringLiteral("tide"), tracks.mid(0, 2), {0, 0, 5});
+    QCOMPARE(harness.model.rowCount(), 4);
+    QCOMPARE(harness.model.rowDataAt(3).value(QStringLiteral("kind")).toString(), QStringLiteral("more"));
+    QCOMPARE(harness.row(3), row);
+    QVERIFY(row->property("hovered").toBool());
+    QCOMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), nullptr);
+    QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("globalSearchResultToolTip"));
+    QVERIFY(toolTip != nullptr);
+    QVERIFY(!toolTip->property("visible").toBool());
+
+    // A result again.
+    harness.search(QStringLiteral("tide"), tracks, {0, 0, 3});
+    QCOMPARE(harness.row(3), row);
+    QCOMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), row);
+    QTest::mouseMove(harness.window, QPoint(2, 2));
+    QTRY_COMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), nullptr);
 }
 
 // The lead at 16 px (a 24 px thumbnail with a 2 px radius, the artist

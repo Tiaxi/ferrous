@@ -594,6 +594,14 @@ Dialog {
                                               : root.moreText(kind, rowType, model.shownCount || 0, model.count || 0))
                     Accessible.selectable: selectable
                     Accessible.selected: selected
+                    // The result under the pointer has the tooltip, also
+                    // when new results turn the row under a still pointer
+                    // into a result or out of one.
+                    readonly property bool ownsToolTip: isResult && rowMouse.containsMouse
+                    onOwnsToolTipChanged: {
+                        if (ownsToolTip) root.hoveredResultRow = resultRow
+                        else if (root.hoveredResultRow === resultRow) root.hoveredResultRow = null
+                    }
                     ListView.onPooled: {
                         if (root.hoveredResultRow === resultRow) root.hoveredResultRow = null
                     }
@@ -830,10 +838,6 @@ Dialog {
                         hoverEnabled: true
                         cursorShape: resultRow.isMore ? Qt.PointingHandCursor : Qt.ArrowCursor
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
-                        onContainsMouseChanged: {
-                            if (containsMouse && resultRow.isResult) root.hoveredResultRow = resultRow
-                            else if (root.hoveredResultRow === resultRow) root.hoveredResultRow = null
-                        }
                         onClicked: function(mouse) {
                             root.controller.selectDisplayIndex(resultRow.index)
                             if (resultRow.isMore && mouse.button === Qt.LeftButton) {

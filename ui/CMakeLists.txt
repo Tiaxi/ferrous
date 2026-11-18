@@ -13,7 +13,10 @@ option(FERROUS_ENABLE_PROFILE_LOGS "Compile UI instrumentation and profiling log
 option(FERROUS_WARNINGS_AS_ERRORS "Fail UI builds on compiler warnings" ON)
 set(FERROUS_CARGO_ARGS "" CACHE STRING "Extra arguments for the Cargo build of the Rust library, such as --frozen")
 
-find_package(Qt6 6.6 REQUIRED COMPONENTS Core DBus Gui Qml Quick QuickControls2 Network Widgets Concurrent)
+# The oldest Qt that Ferrous builds with: QTP0004 below is new in 6.8, and
+# current KDE distributions ship 6.8 or newer.
+set(FERROUS_QT_MINIMUM_VERSION 6.8)
+find_package(Qt6 ${FERROUS_QT_MINIMUM_VERSION} REQUIRED COMPONENTS Core DBus Gui Qml Quick QuickControls2 Network Widgets Concurrent)
 find_package(KF6Kirigami 6.0 REQUIRED)
 # KLocalizedQmlContext is new in 6.8.
 find_package(KF6I18n 6.8 REQUIRED)
@@ -29,7 +32,7 @@ pkg_check_modules(FERROUS_GSTREAMER REQUIRED IMPORTED_TARGET
     dbus-1
 )
 
-qt_standard_project_setup(REQUIRES 6.6)
+qt_standard_project_setup(REQUIRES ${FERROUS_QT_MINIMUM_VERSION})
 # The gettext domain of every i18n() call; see src/Localization.h.
 add_compile_definitions(TRANSLATION_DOMAIN="ferrous")
 qt_policy(SET QTP0004 NEW)
@@ -379,7 +382,7 @@ endforeach()
 install(FILES io.github.tiaxi.ferrous.metainfo.xml DESTINATION share/metainfo COMPONENT desktop_integration)
 
 if(BUILD_TESTING)
-    find_package(Qt6 6.6 REQUIRED COMPONENTS Test QuickTest)
+    find_package(Qt6 ${FERROUS_QT_MINIMUM_VERSION} REQUIRED COMPONENTS Test QuickTest)
     find_program(FERROUS_BASH bash REQUIRED)
 
     # Each test program runs with a temporary directory and XDG config, data
