@@ -165,7 +165,7 @@ Preferences.PreferencesPage {
     }
 
     // After the Show group's three check boxes, which stay together
-    // (#373 H38: Frame rate stood apart under this help text).
+    // (Frame rate stood apart under this help text).
     Components.FormHelpText {
         objectName: "crosshairHelp"
         uiPalette: root.uiPalette

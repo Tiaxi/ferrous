@@ -95,8 +95,7 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     Q_PROPERTY(QColor playheadCasingColor READ playheadCasingColor WRITE setPlayheadCasingColor NOTIFY colorsChanged)
     // The crosshair's readout plates, in the plot's colours (UiPalette's
     // PlotColors), as the spectrogram's, and its dashed lines in the text's
-    // colour (#373 H18 C5: translucent grey plates and a dotted line of
-    // their own).
+    // colour, not translucent grey plates and a dotted line of their own.
     Q_PROPERTY(QColor readoutPlateColor READ readoutPlateColor WRITE setReadoutPlateColor NOTIFY readoutColorsChanged)
     Q_PROPERTY(QColor readoutPlateEdgeColor READ readoutPlateEdgeColor WRITE setReadoutPlateEdgeColor NOTIFY readoutColorsChanged)
     Q_PROPERTY(QColor readoutTextColor READ readoutTextColor WRITE setReadoutTextColor NOTIFY readoutColorsChanged)
@@ -109,15 +108,15 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // False from a change of source, and from when the item stops being
     // shown, until then: what shows the item over
     // something else, such as the visualization's mode switch over the
-    // spectrogram, waits for it rather than show the bare floor (#373 H11:
+    // spectrogram, waits for it rather than show the bare floor (otherwise
     // the per-channel view, which the overview has no lanes for, was empty
     // for 80 to 170 ms, until its detail was decoded). A frame of the
     // overview where it is not to the detail's scale, as in the mixed view
     // of a source of more than one channel, is not the picture while the
     // detail is on its way (see overviewProvisionalLocked), nor is detail
     // that covers only part of the view. Hidden, the item keeps the detail
-    // it has (#373 H14): shown again, it has the picture at once when that
-    // detail covers the view at its resolution, as its next frame draws.
+    // it has: shown again, it has the picture at once when that detail
+    // covers the view at its resolution, as its next frame draws.
     Q_PROPERTY(bool pictureReady READ pictureReady NOTIFY pictureReadyChanged)
 
 public:
@@ -427,8 +426,8 @@ private:
     // detail gives: in the mixed view of a source of more than one
     // channel, the overview is the peak of every channel and the detail
     // their average, the downmix, far lower for channels that differ, as a
-    // 5.1 track's (#373 H12 Z6: a switch to the waveform showed a near
-    // solid envelope for some 300 ms, then the downmix).
+    // 5.1 track's (a switch to the waveform showed a near solid envelope
+    // for some 300 ms, then the downmix).
     bool overviewProvisionalLocked() const;
     // Follows pictureReady, on the GUI thread: after a frame is painted,
     // and when a detail request ends without one.
@@ -548,7 +547,7 @@ private:
     // Hidden in a window on screen, the item fetches the detail of its
     // picture once, on the worker path, when its overview cannot be that
     // picture: so that the mode switch to it has its picture at the click
-    // (#373 H18 C1: the first switch of a track to the per-channel view held
+    // (otherwise the first switch of a track to the per-channel view held
     // the spectrogram some 200 ms for that decode, later ones a frame). It
     // does so once the track's overview has begun to come, and only for a
     // view of the whole track, which playback does not move: it never

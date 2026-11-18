@@ -21,8 +21,8 @@ import "../logic/WheelUtils.js" as WheelUtils
 // floor, the details on its strip colour, in the plot's text colours.
 // Over the whole screen, the details are a step larger, read from further
 // away. While they show, the art fits the space left of their seam, centred
-// there (#373 H8: it stayed centred in the whole view, off-centre in what
-// the details leave of it), and keeps its zoom and pan; it glides there as
+// there (centred in the whole view, it was off-centre in what the
+// details leave of it), and keeps its zoom and pan; it glides there as
 // they slide in, and back as they slide out.
 // During a preview from Replace from iTunes, the details go on with what the
 // preview shows, and a footer at their bottom holds its buttons, as a
@@ -51,8 +51,8 @@ Item {
     // The colours of the view, dark in both themes.
     readonly property var plot: root.uiPalette.mediaPlot
     readonly property real infoScale: root.fullscreen ? root.uiPalette.fullscreenTextScale : 1
-    // The details on the app's type scale (#373 H10: they were all at the
-    // body size, crammed): the values at the body size and the labels at
+    // The details on the app's type scale (all at the body size, they read
+    // crammed): the values at the body size and the labels at
     // the small size, 13 px and 12 px with the default 10 pt font; each
     // row a list row's height, 26 px with it (UiPalette.rowHeight): a line
     // of the values' text and a small spacing above and below it; and
@@ -75,8 +75,8 @@ Item {
         Math.round(Kirigami.Units.iconSizes.small * root.infoScale))
     // The file's name: the body size; during a preview, a step larger, 12 pt
     // with the default 10 pt font; over the whole screen, the details' size,
-    // as the title strip's track title over it (#373 H40: at 1.35 times,
-    // 18 px, it outranked it).
+    // as the title strip's track title over it (at 1.35 times, 18 px, it
+    // outranked that title).
     readonly property real infoTitlePointSize: root.uiPalette.basePointSize
         * (root.fullscreen ? root.uiPalette.fullscreenTextScale : (root.previewActive ? 1.2 : 1))
     // The image's details, from BridgeClient.cachedImageFileDetails: path,
@@ -98,8 +98,8 @@ Item {
     readonly property alias imageStatus: albumArtImageFull.status
     readonly property bool zoomed: root.zoom > 1.0
     // How far the details are shown: 0 hidden, 1 shown. Showing or hiding
-    // them eases it over 120 ms, OutCubic, and at once with Plasma's
-    // animations off (#373 H38: the art jumped aside in one frame). The
+    // them eases it over 120 ms, OutCubic (unless eased, the art jumped
+    // aside in one frame), and at once with Plasma's animations off. The
     // space they take, their reserve, follows it: the column slides in
     // over the view's right edge, whole, as wide as it rests, and the art
     // glides with it. Only showing or hiding them in the open viewer is
@@ -122,9 +122,9 @@ Item {
     readonly property real infoReserve: Math.round(root.infoReveal * (infoColumn.width + 1))
     // The space the art fits in, across: the whole view, or while the
     // details show the space left of their seam less 16 px on each side,
-    // during a preview 24 px, so the art never touches their seam (#373
-    // H41: a wide window's art met it). The gutter eases with the details'
-    // reveal, as their reserve does.
+    // during a preview 24 px, so the art never touches their seam (with no
+    // gutter, a wide window's art met it). The gutter eases with the
+    // details' reveal, as their reserve does.
     readonly property real artMargin: (root.previewActive ? 24 : 16) * root.infoReveal
     readonly property real fitLeft: root.artMargin
     readonly property real fitWidth: Math.max(1, albumArtViewport.width - root.infoReserve - 2 * root.artMargin)
@@ -251,8 +251,8 @@ Item {
 
     // A button of the preview's footer: the style's own, as a dialog's
     // button row has, so Apply, the default, is Breeze's default button
-    // (#373 H10: it was a solid accent fill, unlike any other default
-    // button). The details are dark in both themes, so the buttons take
+    // (a solid accent fill was unlike any other default button). The
+    // details are dark in both themes, so the buttons take
     // the complementary colours, Breeze's dark set in either. Space and
     // the tooltip as the details' other buttons.
     component FooterButton: Button {
@@ -577,10 +577,10 @@ Item {
     // The column is about 40 characters wide, 280 px with its seam at the
     // default font, up to two fifths of the view, and never under 280 px;
     // in a wide view, a quarter of it, up to 320 px, a seventh wider, so the
-    // details are not crammed beside a wide art (#373 H37: 280 px in a
-    // 1600 px window). Over the whole screen it follows its text, 1.2 times
-    // larger: 336 px, or 40 characters of that text (#373 H38: at 320 px a
-    // folder's path was cut beside the screen's room to spare).
+    // details are not crammed beside a wide art (as at 280 px in a 1600 px
+    // window). Over the whole screen it follows its text, 1.2 times larger:
+    // 336 px, or 40 characters of that text (at 320 px a folder's path was
+    // cut beside the screen's room to spare).
     // During a preview, it is wider for its buttons if they need it, up to
     // half the view: in a narrower view, the buttons stack, so neither is
     // cut short.
@@ -672,8 +672,8 @@ Item {
                 }
 
                 // The labels' column: as wide as the widest label, and 80 px
-                // or more at the default font (#373 H11: 76,
-                // the width of "Dimensions"); never so wide that it leaves
+                // or more at the default font (76 px, the width of
+                // "Dimensions", was too tight); never so wide that it leaves
                 // the values under 60% of the row, or narrower than a
                 // label's widest word.
                 readonly property real labelColumnWidth: Math.max(
@@ -801,14 +801,13 @@ Item {
 
                 // The folder: its label on a line of its own, and under it
                 // the path across the column's whole width, with Copy Path
-                // at its end (#373 H12: in the grid, the path had the
-                // values' part of the row and broke onto a second line). A
-                // long path wraps after a slash, on the lines it needs up to
-                // eight, and what does not fit is elided (#373 H38: on one
-                // line, it was cut to its start and its last folder's end;
-                // H41: on three, a large font cut a typical path short over
-                // an empty column). During a preview, under the candidate's
-                // label and Apply, it takes up to three.
+                // at its end (in the grid, the path had the values' part of
+                // the row and broke onto a second line). A long path wraps
+                // after a slash, on the lines it needs up to eight, and what
+                // does not fit is elided (on three lines, a large font cut a
+                // typical path short over an empty column). During a
+                // preview, under the candidate's label and Apply, it takes
+                // up to three.
                 ColumnLayout {
                     id: folderRow
                     objectName: "albumArtFolderRow"
@@ -829,8 +828,8 @@ Item {
                     }
 
                     // The path, and Copy Path at its end, centred on the
-                    // path's first line (#373 H38: on the middle of its
-                    // three lines); taller than the line, it reaches up
+                    // path's first line (not on the middle of its three
+                    // lines); taller than the line, it reaches up
                     // beside the folder's label, whose one word is far to
                     // its left. The button and its glyph are a step larger
                     // over the whole screen, as the details' text is.
@@ -856,9 +855,9 @@ Item {
                             anchors.right: copyPathButton.left
                             anchors.rightMargin: folderPathRow.spacing
                             // The lines break only between folders, never
-                            // inside a folder's name that fits on a line
-                            // (#373 H40). The tooltip, Copy Path and the
-                            // accessible name keep the path as it is.
+                            // inside a folder's name that fits on a line.
+                            // The tooltip, Copy Path and the accessible name
+                            // keep the path as it is.
                             text: BreakableText.breakablePath(folderPathLabel.path, function(name) {
                                 return folderPathMetrics.advanceWidth(name) <= folderPathLabel.width
                             })
@@ -921,8 +920,8 @@ Item {
         }
 
         // The preview's footer, as a dialog's button row, at the bottom of
-        // the details under a seam (#373 H10: the buttons followed the
-        // details, crammed under them): at the end of a row, the default
+        // the details under a seam (following the details, the buttons
+        // were crammed under them): at the end of a row, the default
         // one, Apply, last. When they do not fit side by side, with a larger
         // font or a longer translation, they stack, each the column's width,
         // Back to Results first.

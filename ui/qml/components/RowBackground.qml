@@ -7,8 +7,8 @@ import "../logic/ColorUtils.js" as ColorUtils
 // The background of a list row, shared by the library tree and the queue.
 // Put it first in a row delegate, which it fills to the list's right edge,
 // so a tint ends where the pane does, with a scrollbar or without; the
-// list's overlay scrollbar draws its thumb over it (#373 H6). A list whose
-// scrollbar is not an overlay leaves its lane with scrollbarLane.
+// list's overlay scrollbar draws its thumb over it. A list whose scrollbar
+// is not an overlay leaves its lane with scrollbarLane.
 //
 // - hovered: the hover tint, which fades in and out: the main window's
 //   library and queue set the stronger rowHover;
@@ -19,7 +19,7 @@ import "../logic/ColorUtils.js" as ColorUtils
 //   on a selected row, the tint and the ring are one rectangle; on an
 //   unselected row, the ring alone, as in Breeze. A list whose scrollbar
 //   lies over the rows' right end sets focusRingLane, and the ring stops
-//   short of it, so the thumb never runs over the ring (#373 H12 Z12);
+//   short of it, so the thumb never runs over the ring;
 //   the tint goes on under the lane.
 // Selection and focus change at once.
 //

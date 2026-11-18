@@ -761,7 +761,7 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         if (!m_active || scaleHeight <= 0.0) {
             // At rest the marks alone, where they are while playing, with
             // no lamp, fill or peak: a meter waiting rather than a blank
-            // trough (#373 H30: at the first run it read as a scrollbar's).
+            // trough (an empty one read as a scrollbar's).
             next(QRectF(), m_backgroundColor);
             next(QRectF(), m_backgroundColor);
             nextRamp(QRectF(), scaleHeight * dpr, 0);
@@ -774,7 +774,7 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         next(track(meterTop + kLampHeight, 1.0), m_gapColor);
         // The fill and the tick end on device pixels; frames are drawn only
         // when these change. The fill is a ladder of rungs from the scale's
-        // foot (#373 H14 G3), of one colour.
+        // foot, of one colour.
         const double fill = shown.fill / dpr;
         nextRamp(bar(meterBottom - fill, fill), scaleHeight * dpr, shown.fill);
         nextMarks();

@@ -377,7 +377,7 @@ ApplicationWindow {
     QObject *dialog = qvariant_cast<QObject *>(root->property("dialog"));
     QObject *confirm = root->findChild<QObject *>(QStringLiteral("replaceCoverConfirmDialog"));
     QVERIFY(dialog != nullptr && confirm != nullptr);
-    // Typographic apostrophes, as everywhere else (#373 H45).
+    // Typographic apostrophes, as everywhere else.
     const QString details = confirm->property("details").toString();
     QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("album\u2019s cover image")),
              qPrintable(details));
@@ -413,20 +413,20 @@ ApplicationWindow {
     QCOMPARE(confirm->property("message").toString(),
              QStringLiteral("Replace the album art of “Album A” by Artist A?"));
     QVERIFY(applied().isEmpty());
-    // What Replace does, in two short sentences (#373 H45: one sentence of
-    // 31 words): the folder's cover image, or the tracks' embedded art.
+    // What Replace does, in two short sentences (one sentence of 31 words
+    // was too long): the folder's cover image, or the tracks' embedded art.
     QCOMPARE(confirm->property("details").toString(),
              QStringLiteral("The new artwork replaces the album\u2019s cover image file or, if it has none, the artwork "
                             "embedded in its tracks. Ferrous keeps no copy of the current album art."));
-    // A window of its own above Replace from iTunes' (#373 H5), with
-    // Replace's icon beside Cancel's.
+    // A window of its own above Replace from iTunes', with Replace's icon
+    // beside Cancel's.
     auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
     QVERIFY(confirmWindow != nullptr);
     QCOMPARE(confirmWindow->transientParent(), dialogWindow);
     QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
     // Replace's glyph is Breeze's swap, one image for the other, in the
-    // text's colour: "document-replace", a page with a red ×, read as Delete
-    // (#373 H47).
+    // text's colour: "document-replace", a page with a red ×, read as
+    // Delete.
     QCOMPARE(confirm->property("confirmIcon").toString(), QStringLiteral("document-swap"));
     QQuickItem *replaceButton = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogConfirmButton"));
     QVERIFY(replaceButton != nullptr);
@@ -525,8 +525,8 @@ void PreferencesSmokeTest::clearingDiagnosticsAsksFirst() {
     QVERIFY(dialog != nullptr && confirm != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    // Diagnostics and its question are windows of their own (#373 H5),
-    // the question above Diagnostics.
+    // Diagnostics and its question are windows of their own, the question
+    // above Diagnostics.
     auto *logWindow = qobject_cast<QQuickWindow *>(dialog);
     auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
     QVERIFY(logWindow != nullptr && confirmWindow != nullptr);
@@ -569,8 +569,8 @@ void PreferencesSmokeTest::enterConfirmsAsSoonAsTheConfirmationShows() {
     QVERIFY(dialog != nullptr && confirm != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    // Diagnostics and its question are windows of their own (#373 H5),
-    // the question above Diagnostics.
+    // Diagnostics and its question are windows of their own, the question
+    // above Diagnostics.
     auto *logWindow = qobject_cast<QQuickWindow *>(dialog);
     auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
     QVERIFY(logWindow != nullptr && confirmWindow != nullptr);
@@ -578,7 +578,7 @@ void PreferencesSmokeTest::enterConfirmsAsSoonAsTheConfirmationShows() {
     QCOMPARE(confirmWindow->transientParent(), logWindow);
     QVERIFY(QTest::qWaitForWindowExposed(logWindow));
 
-    // The keyboard on Cancel, the safe answer, as it opens (#373 H37).
+    // The keyboard on Cancel, the safe answer, as it opens.
     const auto keyboardOnCancel = [&]() {
         QQuickItem *cancel = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogCancelButton"));
         return cancel != nullptr && QTest::qWaitFor([&]() {

@@ -91,6 +91,7 @@
 #include "../src/WaveformSceneGraph.h"
 #include "../src/WindowActivation.h"
 #include "TestItems.h"
+#include "TestMainWindow.h"
 #include "TestMessages.h"
 #include "TestMotion.h"
 #include "TestPlatform.h"
@@ -224,7 +225,7 @@ constexpr int kPlayheadChild = 4;
 
 OverlayOnScreen overlayOnScreen(QSGNode *node, int layer);
 
-// Lets the item's zoom debounce send its request to the backend.
+// Ends the item's zoom debounce, which sends its request to the backend.
 bool sendPendingBackendZoom(SpectrogramItem &item);
 
 // Rasterizes an item's canvas at once, as its worker would.
@@ -361,9 +362,6 @@ QPoint centerInWindow(QQuickItem *item);
 // such as the overflow menus of Kirigami's inline messages, so that
 // destroying the engine leaves none half made.
 bool finishIncubation(QQmlEngine &engine);
-
-// Loads and shows Main.qml without a backend, so it uses its fallback bridge.
-QQuickWindow *loadMainWindowForQuit(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel);
 
 inline auto keepRunningWhenTheWindowCloses() {
     const bool quitOnLastWindowClosed = QGuiApplication::quitOnLastWindowClosed();

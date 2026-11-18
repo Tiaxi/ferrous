@@ -27,24 +27,24 @@
 // 2 px in from either edge of the column, the track framing it: the fill
 // from the bottom and a 3 px clip lamp at the top. The fill is a ladder,
 // 3 px rungs on a 4 px pitch from the scale's foot, the track showing
-// between them, so it reads as an instrument rather than a solid bar (#373
-// H14 G3: a 15 px solid bar was louder than the data, and in the view's
-// colours read as the thumb of the queue's scrollbar above the pane, whose
-// right edge it shares; H8, H7; H16 I3: 2 px rungs on a 3 px pitch read as
-// a hatch). The meter's marks, at -6, -12 and -24 dB (only -6 and -24 in a
-// lane under 64 px), are 2 px gaps in the ladder, its rungs starting again
-// over each, and a 1 px tick across the track in each gap, which shows
-// above the fill too (#373 H16 I3: without them the ladder had no
-// reference). The same marks, scale and input in either visualization
-// mode; only the colours, and the frame, differ. The rungs are of one
-// colour, fillColor: on the spectrogram the app icon's harmonic magenta,
-// at 3:1 on the trough (#373 H15 H2). A 2 px peak tick, at full
+// between them, so it reads as an instrument rather than a solid bar (a
+// solid bar was louder than the data, and in the view's colours read as the
+// thumb of the queue's scrollbar above the pane, whose right edge it
+// shares; 2 px rungs on a 3 px pitch read as a hatch). The meter's marks,
+// at -6, -12 and -24 dB (only -6 and -24 in a lane under 64 px), are 2 px
+// gaps in the ladder, its rungs starting again over each, and a 1 px tick
+// across the track in each gap, which shows above the fill too (without
+// them the ladder had no reference). The same marks, scale and input in
+// either visualization mode; only the colours, and the frame, differ. The
+// rungs are of one colour, fillColor: on the spectrogram the app icon's
+// harmonic magenta, at 3:1 on the trough. A 2 px peak tick, at full
 // brightness, with a 1 px gap under it where it is on the fill. At rest,
 // without a track or stopped, it is the track with its marks' ticks alone
-// (#373 H30: an empty track read as a scrollbar's). A `topSeamColor` that is not transparent draws a 1 px
-// line across the column's top, which sets it apart from what is above
-// it, as the queue's scrollbar lane over the waveform's meter (#373 H12
-// Z5: in the view's greys the bar read as a piece of that scrollbar).
+// (an empty track read as a scrollbar's). A `topSeamColor` that is not
+// transparent draws a 1 px line across the column's top, which sets it
+// apart from what is above it, as the queue's scrollbar lane over the
+// waveform's meter (in the view's greys the bar read as a piece of that
+// scrollbar).
 class LevelMeterItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(QString sourcePath READ sourcePath WRITE setSourcePath NOTIFY sourcePathChanged)
@@ -70,7 +70,7 @@ class LevelMeterItem : public QQuickItem {
     Q_PROPERTY(QColor topSeamColor MEMBER m_topSeamColor WRITE setTopSeamColor NOTIFY colorsChanged)
     // Whether the bar is framed by the track, kFramedInset in from either
     // edge of the column, as on the waveform, where the bar in the plot's
-    // own colour otherwise read as the waveform's tail (#373 H16 I3).
+    // own colour otherwise read as the waveform's tail.
     Q_PROPERTY(bool framed READ framed WRITE setFramed NOTIFY framedChanged)
     // Whether something reads the levels, such as a tooltip: then
     // readoutChanged() tells it of new ones, a few times a second. It also

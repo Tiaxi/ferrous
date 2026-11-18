@@ -73,7 +73,7 @@ const std::array<SmokeTestArea, 14> kSmokeTestAreas{{
     {"waveform_coverage", &makeWaveformCoverageSmokeTest},
     {"library_queue", &makeLibraryQueueSmokeTest},
     {"transport_input", &makeTransportInputSmokeTest},
-    {"transport_input", &makeAlbumArtSmokeTest},
+    {"album_art", &makeAlbumArtSmokeTest},
     {"window", &makeWindowSmokeTest},
     {"preferences", &makePreferencesSmokeTest},
     {"errors", &makeErrorsSmokeTest},

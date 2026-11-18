@@ -33,12 +33,14 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include "GlobalSearchResultsModel.h"
 #include "Localization.h"
 #include "TestColor.h"
 #include "TestItems.h"
 #include "TestMessages.h"
+#include "TestMotion.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
@@ -490,8 +492,8 @@ void SearchPaletteTest::paletteSitsUnderTheTransportOverADim() {
     QCOMPARE(background->property("radius").toReal(), 6.0);
     QCOMPARE(background->property("border").value<QObject *>()->property("width").toReal(), 1.0);
     // Its 1 px outline is the seam, which stands out from both the palette
-    // and the dimmed window around it (#373 H10: on dark, the palette all
-    // but merged into the window).
+    // and the dimmed window around it (without it, on dark, the palette
+    // all but merged into the window).
     const QColor outline = background->property("border").value<QObject *>()->property("color").value<QColor>();
     QCOMPARE(hex(outline), hex(harness.token("seam")));
 
@@ -676,8 +678,8 @@ void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
 
 // "Meridian Line" for "meridian": "Meridian" semibold, " Line" regular; the
 // context has no emphasis. A row emphasises its matches in its title only
-// (#373 H10, H12: the spec's rule; the context of an album found by its
-// artist had its match semibold, and outweighed the title).
+// (the context of an album found by its artist had its match semibold,
+// and outweighed the title).
 void SearchPaletteTest::matchesAreEmphasisedInTheTitleOnly() {
     Harness harness;
     QString errorText;
@@ -795,8 +797,13 @@ void SearchPaletteTest::selectedHoveredAndPlayingRowsAreDrawn() {
     });
     QVERIFY(hover != nullptr);
     QVERIFY(!hover->isVisible());
-    QTest::mouseMove(harness.window, sceneCentre(other));
-    QTRY_COMPARE(hover->opacity(), 1.0);
+    {
+        // The hover's fade in animation time, to its end.
+        SteppedAnimationDriver animations;
+        QTest::mouseMove(harness.window, sceneCentre(other));
+        (void)animations.step(1000);
+        QCOMPARE(hover->opacity(), 1.0);
+    }
     const QColor view = harness.token("view");
     const QColor hoverDrawn = drawnOver(colorOf(hover), view);
     const QColor selectionDrawn = harness.token("selection");
@@ -843,8 +850,8 @@ void SearchPaletteTest::selectedHoveredAndPlayingRowsAreDrawn() {
 // actions, "Show All" for a more row, "Search" for a recent search,
 // "Search Instead" for a suggestion, and only Esc otherwise. The key in the
 // text colour, the action in the secondary one; 6 px from a key to its
-// action, more than a word space, and 18 px between pairs (#373 H37: 4 px,
-// a word space, ran each pair together into one phrase).
+// action, more than a word space, and 18 px between pairs (at 4 px, a word
+// space, each pair ran together into one phrase).
 void SearchPaletteTest::footerNamesTheKeysForEachState() {
     Harness harness;
     QString errorText;
@@ -1076,8 +1083,8 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow_data() {
 }
 
 // With more results than the palette has room for, the list is as tall as
-// the rows that fit it whole, from the first, and the rest scroll (#373
-// H11: it was as tall as its room, and ended in half a row). The rows are
+// the rows that fit it whole, from the first, and the rest scroll (as tall
+// as its room, it ended in half a row). The rows are
 // of two heights, results and headings, so the height is no multiple of
 // either. With room for them all, they all show, with 6 px under the last.
 void SearchPaletteTest::resultsListEndsOnAWholeRow() {
@@ -1123,7 +1130,7 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     QVERIFY2(shown > 2 && shown < heights.size(), qPrintable(QStringLiteral("%1 rows in %2 px").arg(shown).arg(room)));
     QTRY_COMPARE(view->height(), whole);
     // The rest scroll under the app's lane scrollbar, as the library's and
-    // the queue's (#373 H12: Breeze's own was another hand): 8 px at the
+    // the queue's (Breeze's own was another hand): 8 px at the
     // view's right edge, its thumb over the rows' tints, which run to the
     // edge, while the rows' text keeps clear of its lane.
     QQuickItem *scrollBar = harness.item(QStringLiteral("globalSearchScrollBar"));
@@ -1290,14 +1297,18 @@ void SearchPaletteTest::mouseSelectsAndActs() {
     harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl));
     QTRY_VERIFY(harness.view()->isVisible());
     const int track = harness.model.indexOfResult(QStringLiteral("track"), 2);
+    // The menu's fades in animation time, each to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
     QTest::mouseClick(harness.window, Qt::RightButton, Qt::NoModifier, sceneCentre(harness.row(track)));
+    settle();
     QCOMPARE(harness.selection(), track);
     QCOMPARE(harness.dialog->property("contextRowData").toMap().value(QStringLiteral("label")).toString(),
              QStringLiteral("Lantern Signal"));
     QQmlExpression menuOpened(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.opened"));
     QTRY_VERIFY2(menuOpened.evaluate().toBool(), qPrintable(menuOpened.error().toString() + QStringLiteral(" visible=")
         + QQmlExpression(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.visible")).evaluate().toString()));
-    // It opens where the click was, not at the window's corner (#373 H6).
+    // It opens where the click was, not at the window's corner.
     QQmlExpression menuItem(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.contentItem"));
     auto *menuContent = qvariant_cast<QQuickItem *>(menuItem.evaluate());
     QVERIFY(menuContent != nullptr);
@@ -1311,6 +1322,7 @@ void SearchPaletteTest::mouseSelectsAndActs() {
                                      QStringLiteral("resultMenu.itemAt(2).text + '|' + resultMenu.itemAt(2).icon.name"));
     QCOMPARE(showInLibraryIcon.evaluate().toString(), QStringLiteral("Show in Library|go-jump"));
     QTest::keyClick(harness.window, Qt::Key_Escape);
+    settle();
     QTRY_VERIFY(!menuOpened.evaluate().toBool());
     // The palette stays open behind its menu.
     QVERIFY(harness.dialog->property("visible").toBool());
@@ -1378,17 +1390,22 @@ void SearchPaletteTest::paletteAndDimFadeTogether() {
         });
         return dim;
     };
+    // The fades in animation time: part of the way, and to their end.
+    std::optional<SteppedAnimationDriver> animations(std::in_place);
     harness.dialog->setProperty("fadeDuration", 400);
     QMetaObject::invokeMethod(harness.controller, "openDialog");
     QTRY_VERIFY(findDim() != nullptr);
     QQuickItem *dim = findDim();
-    QTest::qWait(60);
+    QVERIFY(animations->step(96));
     QVERIFY2(palette->opacity() > 0 && palette->opacity() < 1, qPrintable(QString::number(palette->opacity())));
     QVERIFY2(dim->opacity() > 0 && dim->opacity() < 1, qPrintable(QString::number(dim->opacity())));
-    QTRY_COMPARE(palette->opacity(), 1.0);
-    QTRY_COMPARE(dim->opacity(), 1.0);
+    (void)animations->step(400);
+    QCOMPARE(palette->opacity(), 1.0);
+    QCOMPARE(dim->opacity(), 1.0);
     QTest::keyClick(harness.window, Qt::Key_Escape);
+    (void)animations->step(400);
     QTRY_VERIFY(!harness.dialog->property("visible").toBool());
+    animations.reset();
 
     // Animations off: at once.
     harness.dialog->setProperty("fadeDuration", 0);
@@ -1541,7 +1558,7 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText_data() {
 
 // At 24 pt, the field, the rows and the headings are as tall as their text
 // needs, and the palette, its title column and its help are as much wider
-// as the font is larger (#373 H41: at 800 px, titles were elided beside
+// as the font is larger (otherwise, at 800 px, titles were elided beside
 // empty room and the footer wrapped). The footer's key hints stay on one
 // line where the window has the room, and wrap inside the palette, which
 // grows to hold their lines, where it has not. With the default font, the
@@ -1628,7 +1645,7 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
     // The footer's four pairs on one line, or wrapped to more than one in
     // a narrow window, every pair whole and inside the palette, and the
     // footer is as tall as its lines.
-    // Each line starts where the results' titles do (#373 H12).
+    // Each line starts where the results' titles do.
     QTRY_COMPARE(harness.hints().size(), 4);
     QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
     const QRectF footerRect = sceneRect(footer);
@@ -1649,7 +1666,7 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
         }
         QVERIFY(rect.left() >= titleLeft);
         // A key stays further from its action than the action's words
-        // from each other, at a large font too (#373 H37).
+        // from each other, at a large font too.
         {
             const auto keys = visibleNamed(hint, QStringLiteral("globalSearchKeyHintKey"));
             const auto actions = visibleNamed(hint, QStringLiteral("globalSearchKeyHintAction"));
@@ -1678,7 +1695,7 @@ void SearchPaletteTest::glyphsTargetsAndThumbnailsFollowTheFont_data() {
 
 // The field's search glyph, its clear and help buttons and their glyphs,
 // and the results' covers and glyphs are sized for the default font and
-// grow with a larger one, as the transport's do (#373 H10: at 24 pt they
+// grow with a larger one, as the transport's do (at 24 pt they
 // stayed at their 1× sizes beside 32 px text). The covers keep 4 px clear
 // of their row's edges and the buttons 8 px of the field's; the query and
 // the titles start 12 px after the lead.
@@ -1871,6 +1888,10 @@ int main(int argc, char **argv) {
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
     // Accessible interfaces exist while assistive technology is active.
     qputenv("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1");
+    // The basic render loop, whatever the environment asks for: the threaded
+    // one installs an animation driver of its own for the GUI thread, and Qt
+    // then takes no SteppedAnimationDriver.
+    qputenv("QSG_RENDER_LOOP", "basic");
     // The app's controls style and Breeze icons, whatever the desktop the
     // tests run in; TestSessionIsolation.h.
     isolateFromDesktopSessionWithAppLook();

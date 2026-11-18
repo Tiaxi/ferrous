@@ -43,14 +43,14 @@ Item {
     property var resetZoom: null
     // Whether the mode switch and the zoom are in the title strip rather
     // than on the plot: over the whole screen while the strip is on, so the
-    // strip is the viewer's one place for its controls (#373 H40: the
+    // strip is the viewer's one place for its controls (the
     // plot's plate under the strip's Close read as a second cluster). With
     // the strip turned off, and in the main window, they stay on the plot.
     readonly property bool controlsInStrip: root.wholeScreenOpen && root.stripEnabled
 
     property alias popupHost: spectrogramPopupHost
     // The visualization, whose last frame the viewer in the main window
-    // keeps as it fades out after it closes (#373 H8: the visualization went
+    // keeps as it fades out after it closes (the visualization went
     // back to the pane the moment the viewer closed, and the viewer's black
     // floor faded out alone over the pane). The pane shows the visualization
     // live under it meanwhile, as the pane's own last frame shows under the
@@ -116,8 +116,8 @@ Item {
                   popupControls.anchors.topMargin + popupControls.height + 1)
     // Between the plot's mode switch and the viewer's controls: the 1 px
     // divider of the corner's one plate, which the plot layer draws under
-    // both (#373 H37: as a row of plates, 8 px apart since H11, the corner
-    // read as four controls rather than one).
+    // both (as a row of plates, 8 px apart, the corner read as four
+    // controls rather than one).
     readonly property int cornerGap: 1
     // How far the visualization's controls, such as its mode switch and the
     // first lane's Mute and Solo, keep below its top edge: over the whole

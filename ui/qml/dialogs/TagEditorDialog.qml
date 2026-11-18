@@ -40,19 +40,19 @@ Components.DialogWindow {
     // description, and its Status cell while that column shows.
     readonly property string modifiedText: I18n.i18nc("@item tag editor row status", "Modified")
     // The Status cell of a row whose save or rename failed: why is in its
-    // tooltip and in Details… (#373 H46: the system's own words, elided to
-    // "failed to …").
+    // tooltip and in Details… (the system's own words, in the cell, were
+    // elided to "failed to …").
     readonly property string notSavedText: I18n.i18nc("@item tag editor row status: saving the file's tags failed", "Not saved")
     readonly property string notRenamedText: I18n.i18nc("@item tag editor row status: renaming the file failed", "Not renamed")
     // Shown in a field whose rows hold different values, which saving keeps.
     readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "Multiple values")
     // The same, in a number field too narrow for it, as Track and Disc's
-    // with a large font (#373 H45: "Multiple values" elided in their 124 px
-    // fields at 24 pt; widening them took the table's room).
+    // with a large font ("Multiple values" elided in their 124 px fields at
+    // 24 pt; widening them took the table's room).
     readonly property string keepShortText: I18n.i18nc("@info:placeholder short for Multiple values, in a narrow number field: the selected files keep their different values", "Mixed")
     // Every field of the form says it in the same word: the short one in
-    // all of them once a number field needs it (#373 H46: "Multiple values"
-    // and "Mixed" in one form at 24 pt).
+    // all of them once a number field needs it, not "Multiple values" and
+    // "Mixed" in one form.
     readonly property bool keepShortInForm: trackPair.needsKeepShort || discPair.needsKeepShort
     readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
     readonly property bool busy: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
@@ -85,11 +85,11 @@ Components.DialogWindow {
     // Folder, which `stretch`, take the rest. Status takes no room until a
     // save or a rename failed for a row; a row with unsaved edits has a
     // mark in the # column instead, whose room is always there, so that an
-    // edit moves no column (#373 H11: Status came with the first edit and
+    // edit moves no column (a Status column that came with the first edit
     // took its width from File Name and Folder). The window opens wide
-    // enough for every column, so none gives way on a large screen (#373
-    // H8: with too little room for them all, either the tags or the paths
-    // were cut short).
+    // enough for every column, so none gives way on a large screen (with
+    // too little room for them all, either the tags or the paths were cut
+    // short).
     readonly property var tableColumns: [
         { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
         { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 160 },
@@ -308,8 +308,8 @@ Components.DialogWindow {
     readonly property real fieldsLeastWidth: Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
     // The fields' width as shown: narrower, down to their least, where
     // that spares the table its sideways scroll bar with every column at
-    // its least width or wider, as on a 1400 px screen (#373 H8);
-    // otherwise their width.
+    // its least width or wider, as on a 1400 px screen; otherwise their
+    // width.
     readonly property real fieldsShownWidth: {
         const tableLeast = 2 + 2 * root.tableInset
             + root.tableColumnLeastWidths.reduce(function(sum, width) { return sum + width }, 0)
@@ -320,10 +320,10 @@ Components.DialogWindow {
     // table at its width, clear of its scroll bar.
     readonly property real fittedWidth: Math.ceil(2 * root.contentPadding + root.fieldsWidth
         + root.contentSpacing + root.tableWidthThrough("directory") + Kirigami.Units.gridUnit)
-    // As wide as what it holds and no wider (#373 H11), within the screen
-    // and no wider than the window it opens from, frame and all, as the two
-    // have the same frame (#373 H9: 1624 px from a 1600 px main window):
-    // with less room, File Name and Folder give way first, then the tags.
+    // As wide as what it holds and no wider, within the screen and no wider
+    // than the window it opens from, frame and all, as the two have the
+    // same frame (not 1624 px from a 1600 px main window): with less room,
+    // File Name and Folder give way first, then the tags.
     defaultWidth: Math.min(root.fittedWidth,
         root.windowRoot && root.windowRoot.width > 0 ? root.windowRoot.width : Number.POSITIVE_INFINITY)
     // As tall as the fields, or a table of 12 rows, whichever is taller,
@@ -356,12 +356,12 @@ Components.DialogWindow {
     // The field whose typed text differs from what it holds and is not
     // yet applied to the tracks, or null. A field applies its text as it
     // loses focus or on Enter; until then the text is an unsaved change
-    // too, which Save and Ctrl+S apply and save (#373 H37: they stayed
-    // disabled while the user typed, and Ctrl+S did nothing).
+    // too, which Save and Ctrl+S apply and save (rather than Save staying
+    // disabled while the user types, and Ctrl+S doing nothing).
     property Item pendingEditField: null
     readonly property bool hasUnsavedChanges: root.tagEditorApi.dirty || root.pendingEditField !== null
     // The typed text marks its change at once, as it will once applied
-    // (#373 H38: nothing showed it until the field lost focus): its
+    // (rather than nothing showing it until the field loses focus): its
     // field's label and Revert, its column's header, and the rows it
     // goes to.
     readonly property string pendingEditKey: root.pendingEditField ? root.pendingEditField.field.key : ""
@@ -611,8 +611,8 @@ Components.DialogWindow {
     // The current row follows the selection, however it changes: when the
     // current row is not selected, the first selected row becomes current
     // and the anchor, so the ring and the tint are on one row and the
-    // keyboard goes on from the selection (#373 H12: after the selection was
-    // set elsewhere, the ring stayed on row 1 while row 2 was selected). A
+    // keyboard goes on from the selection (otherwise, after the selection
+    // was set elsewhere, the ring stayed on row 1 while row 2 was selected). A
     // row that Ctrl or Space has just deselected stays current: it is set
     // after the selection changes.
     function followSelection() {
@@ -1369,7 +1369,7 @@ Components.DialogWindow {
                     // The row is under the pointer wherever the pointer is
                     // on it: the cells above the click area take the hover
                     // from a sibling under them, so the row's tint showed
-                    // only in its insets (#373 H45).
+                    // only in its insets.
                     HoverHandler {
                         id: rowHover
                     }
@@ -1466,8 +1466,8 @@ Components.DialogWindow {
     }
 
     // A field's Revert: its glyph as large as a line of the field's text
-    // holds, as the column's Revert: 16 px with the default font (#373 H46:
-    // 16 px beside 32 px text at 24 pt).
+    // holds, as the column's Revert: 16 px with the default font (a fixed
+    // 16 px stood beside 32 px text at 24 pt).
     readonly property real fieldRevertWidth: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
 
     // The least the fields' column takes: the labels and a field that shows
@@ -1521,16 +1521,16 @@ Components.DialogWindow {
 
     // Track and Disc: the number, "of", and the total. "of" is 4 px from
     // the field on either side of it, so the three read as one value
-    // (#373 H11: at the form's 12 px it stood apart from both). The two
-    // fields share what is left of the row equally, so the pair ends where
-    // the other fields do (#373 H41: it ended 35 px short).
+    // (at the form's 12 px it stood apart from both). The two fields share
+    // what is left of the row equally, so the pair ends where the other
+    // fields do (otherwise it ended 35 px short of them).
     component NumberPair: RowLayout {
         id: pair
         required property var first
         required property var second
         readonly property bool needsKeepShort: firstField.needsKeepShort || secondField.needsKeepShort
         // Its fields at their narrowest: "Mixed" whole beside the Revert
-        // (#373 H47: "Mix…" at 24 pt once the Revert followed the font).
+        // (at 24 pt it elided to "Mix…" once the Revert followed the font).
         readonly property real fieldLeastWidth: Math.ceil(firstField.leftPadding
             + fieldMetrics.advanceWidth(root.keepShortText)
             + root.fieldRevertWidth + Kirigami.Units.smallSpacing)

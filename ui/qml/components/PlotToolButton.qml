@@ -14,23 +14,21 @@ import "../logic/KeyUtils.js" as KeyUtils
 //
 // A `segment`, one of a plate's choices of which one is always checked,
 // as the visualization's mode switch, shows the chosen one as a neutral
-// plate instead (#373 H11: the accent's solid blue read as keyboard focus,
-// and as the loudest thing on the plot): the plot's text colour over the
-// plate, 3:1 on a dark one (#373 H28 V3), inside a 1 px edge of the plot's
-// segmentEdge, at least 3:1 on the plate and on the fill (#373 H14 F4), with its glyph in
-// the text colour whole; the others' glyphs are at 72 %, whole only while
-// pressed. Under the pointer one of the others has a wash of the text
-// colour at 10 % or more, 1.25:1 on the plate, and its glyph at 85 %,
-// which show (#373 H14 G4: 8 % and 60 % were 1.2:1, nearly invisible),
-// fading in and out over shortDuration, OutCubic; the chosen one's plate
-// is 2:1 or more on that wash, so a hovered choice never reads as the
-// chosen one (#373 H12 Z4: the 12 % hover with a whole glyph came to the
-// plate's brightness; H15 H4: 18 % on 14 % was 1.14:1). The accent is
-// left to the focus ring. A segment is a
+// plate instead (the accent's solid blue read as keyboard focus, and as
+// the loudest thing on the plot): the plot's text colour over the plate,
+// 3:1 on a dark one, inside a 1 px edge of the plot's segmentEdge, at
+// least 3:1 on the plate and on the fill, with its glyph in the text
+// colour whole; the others' glyphs are at 72 %, whole only while pressed.
+// Under the pointer one of the others has a wash of the text colour at
+// 10 % or more, 1.25:1 on the plate, and its glyph at 85 %, which show
+// (8 % and 60 % were 1.2:1, nearly invisible), fading in and out over
+// shortDuration, OutCubic; the chosen one's plate is 2:1 or more on that
+// wash, so a hovered choice never reads as the chosen one (18 % on 14 %
+// was 1.14:1). The accent is left to the focus ring. A segment is a
 // checkable, auto-exclusive button, so it is a radio button to assistive
-// technology, checkable and checked as chosen (#373 H12: as a plain button
-// it told of its checked state changing but not that it could be checked),
-// and choosing the chosen one again leaves it chosen.
+// technology, checkable and checked as chosen (as a plain button it told
+// of its checked state changing but not that it could be checked), and
+// choosing the chosen one again leaves it chosen.
 //
 // Keyboard focus is a separate 2 px ring 1 px outside the button, with a
 // 1 px gap in the plate's colour, so it reads on the plate and around a
@@ -63,7 +61,7 @@ ToolButton {
     readonly property real segmentHoverOpacity: root._tintFor(0.10, root.plateColor, 1.25)
     // The chosen one's fill: 2:1 on the hover wash, and on a dark plate 3:1
     // on the plate, so the choice reads by its fill and not by its edge
-    // alone (#373 H28 V3: at 2:1 on the plate it was carried by the edge,
+    // alone (at 2:1 on the plate it was carried by the edge,
     // beside the lanes' solid M and S). On a light plate it stops at the
     // wash's 2:1, some 2.5:1 on the plate: at 3:1 the thin strokes of its
     // dark glyph drew under 4.5:1 on it.
@@ -188,8 +186,8 @@ ToolButton {
         }
 
         // A chosen segment's 1 px edge, inside it, over its neutral fill:
-        // the state at 3:1 or more, which the fill alone is not (#373 H14
-        // F4). The focus ring stays outside, 2 px and in the accent.
+        // the state at 3:1 or more, which the fill alone is not. The focus
+        // ring stays outside, 2 px and in the accent.
         Rectangle {
             objectName: "plotToolButtonCheckedEdge"
             anchors.fill: parent

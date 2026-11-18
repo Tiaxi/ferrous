@@ -38,7 +38,7 @@ Item {
     // In a viewer, whose controls show on the pointer's activity and hide
     // after it as one layer: the mode switch and the lanes' Mute and Solo
     // show whenever they do, on their level alone, rather than each on the
-    // pointer over the pane or its lane, a moment apart (#373 H6).
+    // pointer over the pane or its lane, a moment apart.
     property bool controlsAutoHide: false
     property var pointerActivity: null
     // What the viewer keeps clear on the right of the mode switch.
@@ -59,12 +59,12 @@ Item {
     property var resetZoom: null
     // Whether the viewer shows the mode switch and the zoom in its own
     // controls, the fullscreen viewer's title strip: then they are not on
-    // the plot, and its corner is the view's (#373 H40).
+    // the plot, and its corner is the view's.
     property bool controlsInViewer: false
     // In the windowed viewer, whose Close is right of the mode switch, the
     // corner is one plate: the zoom, the mode switch and the viewer's own
     // controls on it, each group set off by a 1 px divider, rather than a
-    // row of plates (#373 H37). The viewer keeps its controls bare on it.
+    // row of plates. The viewer keeps its controls bare on it.
     readonly property bool cornerJoined: root.trailingInset > 0
     // The divider's inset from the plate's top and bottom: the buttons'
     // 4 px of plate and 2 px more, so it is shorter than the glyphs' boxes.
@@ -72,7 +72,7 @@ Item {
 
     // The mode's plot colours, also while the plot is bare, before any
     // audio and while it waits for its data: the floor is the mode's own
-    // then too (#373 H4 P5), so the first data never changes it.
+    // then too, so the first data never changes it.
     readonly property var plotColors: root.uiPalette.plotColors(root.visualizationMode)
     readonly property bool meterShown: root.uiBridge.showLevelMeter
     // The meter takes its column of the plot's width while it is shown,
@@ -100,7 +100,7 @@ Item {
                                                     zoomPlate.visible ? zoomPlate.height : 0) + 1)
 
     // Lanes shorter than this, such as each of 5.1's in the main window,
-    // have compact heads (#373 H8): 72 px with the default font, where a
+    // have compact heads: 72 px with the default font, where a
     // 20 px label and its 28 px buttons would take most of the lane.
     readonly property real compactLaneHeight: 4 * Kirigami.Units.gridUnit
     // The plates' inset from the plot's corners: the lane heads' and the
@@ -124,9 +124,8 @@ Item {
         return false
     }
     // How much of the plot's crosshair and its readout show: none while the
-    // pointer is on a plate, where they ran under it and through it (#373
-    // H16 I9), fading over shortDuration, OutCubic; at once with
-    // animations off.
+    // pointer is on a plate, where they ran under it and through it,
+    // fading over shortDuration, OutCubic; at once with animations off.
     property real crosshairLevel: root.plateHovered ? 0 : 1
     Behavior on crosshairLevel {
         enabled: Kirigami.Units.shortDuration > 0
@@ -221,7 +220,7 @@ Item {
         anchors.top: parent.top
         anchors.right: parent.right
         // 5 px in, as the lane heads are, their plates' tops on one line
-        // with its own (#373 H16 I5).
+        // with its own.
         anchors.topMargin: root.topInset + root.plateInset
         anchors.rightMargin: (root.meterShown ? root.meterWidth : 0) + root.plateInset + root.trailingInset
         // In a viewer, it hides and shows with the viewer's controls, at
@@ -240,7 +239,7 @@ Item {
     }
 
     // The zoom, left of the mode switch as far as a viewer's controls are
-    // right of it, so that the corner's plates read as one row (#373 H6):
+    // right of it, so that the corner's plates read as one row:
     // shown whenever the plot is zoomed, not only with the switch, as
     // nothing else shows it. It keeps its place while the switch hides. In
     // a viewer, it hides and shows with the viewer's controls, at their
@@ -483,8 +482,7 @@ Item {
         topSeamColor: root.plotColors.meterTopSeam
         // On the waveform, whose colour the bar has, the bar is framed by
         // its trough, so it reads as an instrument rather than as the
-        // waveform's tail (#373 H16 I3). Its marks and scale are the same
-        // in both modes.
+        // waveform's tail. Its marks and scale are the same in both modes.
         framed: root.visualizationMode === 1
         // Out to the pane's edge, in the main window and in the viewers
         // alike: its bar is far wider than the queue's scrollbar above it.

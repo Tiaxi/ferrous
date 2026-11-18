@@ -8,12 +8,12 @@ import "." as Components
 // The controls of the visualization viewer in the main window, which has
 // no title strip: in the top right corner, in the plot's colours, right of
 // the plot's mode switch, on the one plate the plot layer draws under both
-// with `bare` (#373 H37), or on a plate of their own. The new issues while there are any, and
-// Close: 24 px tool buttons, 4 px apart with 3 px around, as the mode
-// switch's beside it, so a focus ring stays inside the plate and clear of
-// the other button (#373 H14 G4). The zoom is on the
-// plot, left of the mode switch, as in the main pane and over the whole
-// screen: [Zoom ↺] [mode] [✕] everywhere.
+// with `bare`, or on a plate of their own. The new issues while there are
+// any, and Close: 24 px tool buttons, 4 px apart with 3 px around, as the
+// mode switch's beside it, so a focus ring stays inside the plate and
+// clear of the other button. The zoom is on the plot, left of the mode
+// switch, as in the main pane and over the whole screen: [Zoom ↺] [mode]
+// [✕] everywhere.
 //
 // The items are placed by bindings rather than the plate's Row: a
 // positioner places an item that has just appeared only when the window
@@ -33,7 +33,7 @@ Item {
     property var errorController: null
     property string closeButtonName: "viewerCloseButton"
     // Without a plate of its own, on one the plot layer draws under it and
-    // the mode switch (#373 H37).
+    // the mode switch.
     property bool bare: false
 
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0

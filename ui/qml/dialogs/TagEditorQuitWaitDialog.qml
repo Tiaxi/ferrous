@@ -10,9 +10,9 @@ import "../components" as Components
 // Shown while quitting waits for a tag save or rename to finish: what it
 // waits for, semibold, beside the spinner, the files under its text, and,
 // once it offers to quit anyway, why, in the secondary colour, as the
-// explanation of a confirmation is (#373 H40), on the files' left edge, so
-// all but the spinner start on one line (#373 H40: the explanation was on
-// the window's edge, under the spinner).
+// explanation of a confirmation is, on the files' left edge, so all but
+// the spinner start on one line (the explanation was on the window's
+// edge, under the spinner).
 Components.CompactDialogWindow {
     id: root
 

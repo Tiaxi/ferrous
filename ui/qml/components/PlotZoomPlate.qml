@@ -39,7 +39,7 @@ Components.PlotPlate {
 
     // The readout 6 px in from the plate's edge, as a lane's label is on
     // its plate, and 6 px from the box of Reset's glyph, which leaves about
-    // 8 px between their ink (#373 H6: 8 px and 10 px).
+    // 8 px between their ink.
     Components.ZoomReadout {
         objectName: "plotZoomReadout"
         uiPalette: root.uiPalette

@@ -3,11 +3,11 @@
 <!-- The status bar's Last.fm glyph, the first of a family of three with
      lastfm-paused.svg and status-offline.svg: outlines drawn for 16 px, with every straight edge on
      a whole pixel there and the corners as arcs, so that it is sharp at 1x and smooth at 2x and at
-     a larger font (H8's was a grid of squares, which stayed a staircase at any size). A lowercase
-     "as", 2 px verticals and 1 px horizontals, 10 px tall (rows 3 to 12, columns 1 to 14). The a is
+     a larger font (a grid of squares stays a staircase at any size). A lowercase "as", 2 px
+     verticals and 1 px horizontals, 10 px tall (rows 3 to 12, columns 1 to 14). The a is
      two-storey: an arch over an open bowl, its 2 px stem on the right from the arch to the
      baseline, and the bowl open to the left under the arch, so that it never reads as an o, a 0 or
-     a Q (H6's bold one read "QS"). One clear column between the a and the s. A one-colour mask,
+     a Q (a bold round a read "QS"). One clear column between the a and the s. A one-colour mask,
      drawn in the text colours. -->
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
 <path fill="#000" d="M2 3 H6.5 A1.5 1.5 0 0 1 8 4.5 V13 H6 V4.5 A.5 .5 0 0 0 5.5 4 H2 Z"/>

@@ -226,11 +226,10 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
         QCOMPARE(QAccessible::queryAccessibleInterface(indicator)->text(QAccessible::Name), c.tooltip);
     }
 
-    // Listening, being sent and scrobbled look apart by shape (#373 H8): a
-    // 3 px bar (#373 H13) filling its trough, the trough full, and neither under the
-    // glyph. The bar is the secondary colour, the glyph's, over an opaque
-    // trough 3:1 on the status bar (#373 H11, H12). The glyph is the same in
-    // all three.
+    // Listening, being sent and scrobbled look apart by shape: a 3 px bar
+    // filling its trough, the trough full, and neither under the glyph. The
+    // bar is the secondary colour, the glyph's, over an opaque trough 3:1 on
+    // the status bar. The glyph is the same in all three.
     QQuickItem *bar = findQuickItemByObjectName(indicator, QStringLiteral("scrobbleIndicatorBar"));
     QQuickItem *trough = findQuickItemByObjectName(indicator, QStringLiteral("scrobbleIndicatorTrough"));
     QVERIFY(bar != nullptr && trough != nullptr);
@@ -269,9 +268,9 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
     QVERIFY(!bar->isVisible() && !trough->isVisible());
 
     // Listening has its trough from the start, so that it never looks like
-    // scrobbled, the glyph alone (#373 H9: at 0 % both were the bare
-    // glyph), and the bar in it is the listening done, from a 3 px mark
-    // (#373 H12: at 0 % the trough alone).
+    // scrobbled, the glyph alone (at 0 % both were the bare glyph), and the
+    // bar in it is the listening done, from a 3 px mark (at 0 % the trough
+    // alone).
     for (const auto &[listenedMs, width] : {std::pair{0, 3.0}, std::pair{15000, 3.0}, std::pair{30000, 4.0}}) {
         bridge->setProperty("lastFmScrobbleListenedMs", listenedMs);
         bridge->setProperty("lastFmScrobbleState", 1);
@@ -288,8 +287,8 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
 }
 
 // The glyph's ink, as drawn in device pixels, is centred on its block, the
-// slot, both ways, and the slot on the status bar under its seam (#373
-// H10: the glyph sat 2.5 px above the middle, over the bar's place). The
+// slot, both ways, and the slot on the status bar under its seam (the
+// glyph sat 2.5 px above the middle, over the bar's place). The
 // bar under it is 3 px thick and, a second into a 2 min scrobble point, a
 // 6 px dash from the ink's left edge, not a speck. The ctest runs this at
 // 1x and at 2x.
@@ -303,7 +302,6 @@ void ScrobbleSmokeTest::scrobbleIndicatorGlyphIsCentredOnItsBlock() {
     auto *statusBar = harness.root->findChild<QQuickItem *>(QStringLiteral("statusBar"));
     QQuickItem *glyph = findQuickItemByObjectName(indicator, QStringLiteral("scrobbleIndicatorGlyph"));
     QVERIFY(statusBar != nullptr && glyph != nullptr);
-    QTest::qWait(100);
     const QImage image = harness.window->grabWindow();
     const qreal scale = harness.window->effectiveDevicePixelRatio();
     QVERIFY(!image.isNull());
@@ -739,7 +737,10 @@ void ScrobbleSmokeTest::scrobbleIndicatorPausesScrobbling() {
     // Its menu's settings item opens the preferences on the Last.fm page.
     QObject *preferences = window->findChild<QObject *>(QStringLiteral("preferencesDialog"));
     QVERIFY(preferences != nullptr);
+    // Its fade in animation time, to its end.
+    SteppedAnimationDriver animations;
     QVERIFY(QMetaObject::invokeMethod(indicator, "settingsRequested"));
+    (void)animations.step(1000);
     QTRY_VERIFY(preferences->property("opened").toBool());
     QCOMPARE(preferences->property("pageIndex").toInt(),
              preferences->property("lastFmPageIndex").toInt());

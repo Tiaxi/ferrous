@@ -17,7 +17,6 @@
 #include <QImage>
 #include <QMutex>
 #include <QMutexLocker>
-#include <QProcess>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlExpression>
@@ -37,6 +36,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <tuple>
 #include <utility>
 
 #include "../src/InputModality.h"
@@ -50,29 +50,23 @@
 #include "../src/WindowPresence.h"
 #include "TestColor.h"
 #include "TestItems.h"
+#include "TestMainWindow.h"
 #include "TestMessages.h"
 #include "TestMotion.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
+#include "TestShard.h"
 
 namespace {
 
-QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
-    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
-    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
-    engine.load(QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
-    if (engine.rootObjects().isEmpty()) {
-        return nullptr;
-    }
-    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
-    if (window == nullptr || !QTest::qWaitForWindowExposed(window)) {
-        return nullptr;
-    }
-    window->resize(1600, 1000);
-    if (!QTest::qWaitFor([&]() { return window->width() == 1600 && window->height() == 1000; })) {
-        return nullptr;
-    }
-    return window;
+// The tests' window: 1600 by 1000, with the now-playing panel's wide
+// layout, or 1000 by 720, with its narrow one.
+MainWindowOptions windowSize(bool narrow = false) {
+    MainWindowOptions options;
+    options.width = narrow ? 1000 : 1600;
+    options.height = narrow ? 720 : 1000;
+    options.activate = false;
+    return options;
 }
 
 QObject *bridgeOf(QQuickWindow *window) {
@@ -101,6 +95,32 @@ Kirigami::Platform::Units *unitsOf(QQuickWindow *window) {
     const QVariant value = expression.evaluate();
     return qobject_cast<Kirigami::Platform::Units *>(qvariant_cast<QObject *>(value));
 }
+
+// The main window of a test, and what the tests drive and read in it: the
+// bridge, the now-playing panel and its fade, and Kirigami's durations.
+struct Motion : MainWindowFixture {
+    explicit Motion(bool narrow = false)
+        : MainWindowFixture(windowSize(narrow)) {
+        if (window != nullptr) {
+            bridge = bridgeOf(window);
+            panel = named(window, "nowPlayingPanel");
+            handover = panel != nullptr ? qvariant_cast<QObject *>(panel->property("handoverAnimation")) : nullptr;
+            units = unitsOf(window);
+        }
+    }
+
+    bool loaded() const {
+        return window != nullptr && bridge != nullptr && panel != nullptr && handover != nullptr && units != nullptr;
+    }
+    std::tuple<QQuickWindow *, QObject *, QQuickItem *, QObject *, Kirigami::Platform::Units *> parts() const {
+        return {window, bridge, panel, handover, units};
+    }
+
+    QObject *bridge = nullptr;
+    QQuickItem *panel = nullptr;
+    QObject *handover = nullptr;
+    Kirigami::Platform::Units *units = nullptr;
+};
 
 QEasingCurve::Type easingOf(const QObject *animation) {
     return animation->property("easing").value<QEasingCurve>().type();
@@ -311,8 +331,8 @@ struct Covers {
 };
 
 // One cover every track shows unless a test gives it another: the panel
-// takes its wide layout only for a track with a cover (#373 H8), and a
-// cover that stays the same changes nothing of a track change's fade.
+// takes its wide layout only for a track with a cover, and a cover that stays
+// the same changes nothing of a track change's fade.
 QString steadyCover() {
     static QTemporaryDir dir;
     static const QString url = [] {
@@ -653,7 +673,7 @@ LineInk lineInk(const PanelLine &line) {
 // The ink a line draws with at `x`, as a share of one whole text's, and the
 // sum of the opacities there: whole where the line stays still; elsewhere
 // each piece of the lines before and the playing track's text fading in,
-// one over the other, as the eye blends them over the line (#373 H6).
+// one over the other, as the eye blends them over the line.
 std::pair<double, double> inkAt(const LineInk &line, double x) {
     const auto in = [x](const Window &window) { return x >= window.first && x < window.second; };
     if (std::any_of(line.still.begin(), line.still.end(), in)) {
@@ -729,9 +749,9 @@ PanelLook panelLook(QQuickItem *panel, const QStringList &names) {
 // The now-playing fade's curves, as NowPlayingPanel has them: its handover
 // runs over the fade's time, linearly; the lines before go out over its
 // first 40 %, OutCubic, as the playing track's come in over all of it,
-// OutCubic, so a line that changes never drops below half of its ink
-// (#373 H6) and the two texts are hardly both readable at once (#373 H15
-// H3); the covers before go out over all of it, OutCubic.
+// OutCubic, so a line that changes never drops below half of its ink and the
+// two texts are hardly both readable at once; the covers before go out over
+// all of it, OutCubic.
 double eased(double progress) {
     const double rest = 1.0 - std::clamp(progress, 0.0, 1.0);
     return 1.0 - rest * rest * rest;
@@ -808,13 +828,41 @@ QString lookChange(const PanelLook &before, const PanelLook &after, const QStrin
     return {};
 }
 
+// Ends `animation` as its last frame would, on its end value, and lets the
+// event loop delete what the end leaves, as it would after that frame:
+// whether it stopped. For a test whose point is the end state, not the way
+// there.
+bool finish(QObject *animation) {
+    if (animation->property("running").toBool() && !QMetaObject::invokeMethod(animation, "complete")) {
+        return false;
+    }
+    QCoreApplication::processEvents();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    return !animation->property("running").toBool();
+}
+
+// Runs `animation` to its end on the test's time under `driver`, a frame of
+// 16 ms at a time, and calls `look` at each frame, with the window laid out
+// as the frame drawn then shows it: whether it ended within `limitMs`, every
+// frame on the driver's time.
+bool framesToEnd(SteppedAnimationDriver &driver, QQuickWindow *window, const QObject *animation,
+                 const std::function<void()> &look, int limitMs = 5000) {
+    for (int ms = 0; animation->property("running").toBool(); ms += 16) {
+        if (ms >= limitMs || !driver.step(16) || !QQuickTest::qWaitForPolish(window)) {
+            return false;
+        }
+        look();
+    }
+    return true;
+}
+
 // Whether the panel shows the playing track's layout whole: the first
-// track grows it from the compact row of nothing playing (#373 H7), which
-// this waits out, and the sidebar has laid it out at its whole height,
-// which the growth's last step reaches only at the frame after it (#373
-// H24, see tst_ui_main_window's grown()).
+// track grows it from the compact row of nothing playing, which this ends,
+// and the sidebar has laid it out at its whole height, which the growth's
+// last step reaches only at the frame after it (see tst_ui_main_window's
+// grown()).
 bool grown(QQuickItem *panel) {
-    return QTest::qWaitFor([&]() {
+    return finish(qvariant_cast<QObject *>(panel->property("presenceAnimation"))) && QTest::qWaitFor([&]() {
         return panel->property("presence").toDouble() == 1.0 && !layoutPending(panel);
     }, 5000);
 }
@@ -867,6 +915,72 @@ void tellDetails(QObject *bridge, const QString &path, const QString &title, con
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
 }
 
+// Where the runs a line keeps still, as [start, end) ranges of `before` and
+// `after`, are not `still`, or are not the same in both lines; or "".
+QString stillRunsApart(const QString &before, const QString &after, const QVariant &runs, const QStringList &still) {
+    QStringList kept;
+    for (const QVariant &run : runs.toList()) {
+        const QVariantList range = run.toList();
+        if (range.size() != 2) {
+            return QStringLiteral("a run of %1 ends").arg(range.size());
+        }
+        const int start = range.at(0).toInt();
+        const int end = range.at(1).toInt();
+        if (before.mid(start, end - start) != after.mid(start, end - start)) {
+            return QStringLiteral("\"%1\" kept still for \"%2\"")
+                .arg(after.mid(start, end - start), before.mid(start, end - start));
+        }
+        kept.push_back(after.mid(start, end - start));
+    }
+    return kept == still ? QString()
+                         : QStringLiteral("%1 still, not %2").arg(kept.join(QLatin1Char('|')), still.join(QLatin1Char('|')));
+}
+
+// Feeds each of the spectrogram's `lanes` its first 200 columns of a track
+// of 2,000, of `level`, as a session's first chunk.
+void feedFirstColumns(const QList<QQuickItem *> &lanes, char level) {
+    constexpr int bins = 4'097;
+    constexpr int columns = 200;
+    for (qsizetype index = 0; index < lanes.size(); ++index) {
+        qobject_cast<SpectrogramItem *>(lanes.at(index))
+            ->feedPrecomputedChunk(QByteArray(bins * columns, level), bins, static_cast<int>(index), columns, 0,
+                                   2'000, 48'000, 1'024, false, true, 1, false);
+    }
+}
+
+// Five rows of the queue's model, as the bridge gives them.
+QVector<QueueRowData> fiveQueueRows() {
+    QVector<QueueRowData> rows;
+    for (int i = 0; i < 5; ++i) {
+        QueueRowData data;
+        data.title = QStringLiteral("Track %1").arg(i);
+        data.path = queuePath(i);
+        data.lengthText = QStringLiteral("1:00");
+        rows.push_back(data);
+    }
+    return rows;
+}
+
+// How much of a library row shows through its clip, 0 while it is hidden.
+double libraryRowShown(QQuickItem *row) {
+    auto *clip = row->findChild<QQuickItem *>(QStringLiteral("libraryRowClip"));
+    return clip != nullptr && clip->isVisible() ? clip->height() : 0.0;
+}
+
+// The advance of what of `text` shows before the ellipsis, elided to `width`.
+double advanceBeforeEllipsis(const QFontMetricsF &metrics, const QString &text, double width) {
+    QString shown = metrics.elidedText(text, Qt::ElideRight, width);
+    if (shown != text) {
+        shown.chop(1);
+    }
+    return metrics.horizontalAdvance(shown);
+}
+
+// The weight of a queue or tree row's title.
+QFont::Weight titleWeight(const RowLook &row) {
+    return row.title->property("font").value<QFont>().weight();
+}
+
 } // namespace
 
 class UiMotionTest : public QObject {
@@ -898,7 +1012,6 @@ private slots:
     void nowPlayingElidedLineKeepsEdgesOffTheEllipsis();
     void nowPlayingAlbumCutOffKeepsItsYearThroughATrackChange();
     void nowPlayingStillRunsAreFieldsAndWordsInPlace();
-    void nowPlayingStillRunsAreFieldsAndWordsInPlace_data();
     void nowPlayingOnlyTheNumberThatChangesFades();
     void nowPlayingOnlyTheNumberThatChangesFades_data();
     void nowPlayingFieldThatMovesFades();
@@ -950,7 +1063,6 @@ private slots:
     void nowPlayingChangedLinesCrossFadeWithoutABlink();
     void nowPlayingChangedLinesCrossFadeWithoutABlink_data();
     void nowPlayingLineFadesWholeUnlessOnlyAWordChanges();
-    void nowPlayingLineFadesWholeUnlessOnlyAWordChanges_data();
     void nowPlayingAnotherAlbumLeavesNoWordAlone();
     void nowPlayingAnotherAlbumLeavesNoWordAlone_data();
     void nowPlayingLinesCrossFadeOnOneProgress();
@@ -1097,11 +1209,9 @@ void UiMotionTest::queueTrackChangeHandsTheAmberOver_data() {
 // amber rows.
 void UiMotionTest::queueTrackChangeHandsTheAmberOver() {
     QFETCH(bool, gapless);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     bridge->setProperty("queueRows", queueRows());
     bridge->setProperty("queueLength", 5);
     playQueueRow(bridge, 1);
@@ -1110,8 +1220,6 @@ void UiMotionTest::queueTrackChangeHandsTheAmberOver() {
     QQuickItem *pane = named(window, "mainQueuePane");
     QObject *fade = qvariant_cast<QObject *>(pane->property("nowFade"));
     QVERIFY(fade != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
     QVERIFY(units->shortDuration() > 0);
     QCOMPARE(animationOf(fade)->property("duration").toInt(), units->shortDuration());
     QCOMPARE(easingOf(animationOf(fade)), QEasingCurve::OutCubic);
@@ -1142,11 +1250,8 @@ void UiMotionTest::queueTrackChangeHandsTheAmberOver() {
     QVERIFY(!newRow.fadingGlyph->isVisible());
     // The weights go with the amber, not the state: the new row is not
     // semibold in the text colour, nor the old one regular in amber.
-    const auto weightOf = [](const RowLook &row) {
-        return row.title->property("font").value<QFont>().weight();
-    };
-    QCOMPARE(weightOf(newRow), QFont::Normal);
-    QCOMPARE(weightOf(oldRow), QFont::DemiBold);
+    QCOMPARE(titleWeight(newRow), QFont::Normal);
+    QCOMPARE(titleWeight(oldRow), QFont::DemiBold);
     QVERIFY(!oldRow.glyph->isVisible());
 
     // Every frame of the hand-over: the glyphs' opacities add up to one,
@@ -1176,7 +1281,7 @@ void UiMotionTest::queueTrackChangeHandsTheAmberOver() {
     // text colour, so the two change in the same frame.
     const auto weightFollowsAmber = [&](const RowLook &row) {
         const qreal share = amberShare(row.title);
-        return weightOf(row) == QFont::DemiBold ? share >= 0.48 : share <= 0.52;
+        return titleWeight(row) == QFont::DemiBold ? share >= 0.48 : share <= 0.52;
     };
     QVERIFY(weightFollowsAmber(oldRow) && weightFollowsAmber(newRow));
     int frames = 0;
@@ -1205,17 +1310,15 @@ void UiMotionTest::queueTrackChangeHandsTheAmberOver() {
     QVERIFY(fade->property("target").isNull() || !fade->property("target").value<QJSValue>().isObject());
     QCOMPARE(colorOf(newRow.title), nowHex(window));
     QCOMPARE(newRow.glyph->opacity(), 1.0);
-    QCOMPARE(weightOf(newRow), QFont::DemiBold);
-    QCOMPARE(weightOf(oldRow), QFont::Normal);
+    QCOMPARE(titleWeight(newRow), QFont::DemiBold);
+    QCOMPARE(titleWeight(oldRow), QFont::Normal);
 }
 
 // Repeat-One plays the same row again: it stays amber, nothing fades.
 void UiMotionTest::queueRepeatOneKeepsTheRowAmber() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     bridge->setProperty("queueRows", queueRows());
     bridge->setProperty("queueLength", 5);
     bridge->setProperty("repeatMode", 1);
@@ -1236,11 +1339,9 @@ void UiMotionTest::queueRepeatOneKeepsTheRowAmber() {
 // A queue edit that moves the playing row changes its index but not the
 // track: no other row takes its amber, not even for a moment.
 void UiMotionTest::queueEditsMovingThePlayingRowFadeNothing() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     bridge->setProperty("queueRows", queueRows());
     bridge->setProperty("queueLength", 5);
     playQueueRow(bridge, 3);
@@ -1269,7 +1370,7 @@ void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey, kAlbumAKey});
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowSize());
     QVERIFY(window != nullptr);
     QObject *bridge = bridgeOf(window);
     playTreeTrack(bridge, kTrackA1, kAlbumAKey);
@@ -1298,11 +1399,8 @@ void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
     QCOMPARE(colorOf(first.title), nowHex(window));
     // The weights go with the amber: the new row semibold at once, as it is
     // amber at once, and the old one semibold while it is mostly amber.
-    const auto weightOf = [](const RowLook &row) {
-        return row.title->property("font").value<QFont>().weight();
-    };
-    QCOMPARE(weightOf(second), QFont::DemiBold);
-    QCOMPARE(weightOf(first), QFont::DemiBold);
+    QCOMPARE(titleWeight(second), QFont::DemiBold);
+    QCOMPARE(titleWeight(first), QFont::DemiBold);
     QQuickItem *firstTitle = first.title;
     int weightMismatches = 0;
     bridge->setProperty("currentTrackTreeKeys", QStringList{kArtistKey, kAlbumAKey});
@@ -1311,28 +1409,27 @@ void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
             return true;
         }
         const qreal amber = firstTitle->property("amber").toReal();
-        const bool semibold = weightOf(first) == QFont::DemiBold;
+        const bool semibold = titleWeight(first) == QFont::DemiBold;
         weightMismatches += semibold == (amber >= 0.5) ? 0 : 1;
         return false;
     }));
     QCOMPARE(weightMismatches, 0);
     QVERIFY(!first.fadingGlyph->isVisible());
     QVERIFY(colorOf(first.title) != nowHex(window));
-    QCOMPARE(weightOf(first), QFont::Normal);
+    QCOMPARE(titleWeight(first), QFont::Normal);
 
     // Album B is collapsed and holds the next track: its name is amber,
-    // with no glyph on the row (#373 H5). Then Album A plays again, and
-    // Album B's name fades back, its weight with its colour, as a track
-    // row's does.
+    // with no glyph on the row. Then Album A plays again, and Album B's name
+    // fades back, its weight with its colour, as a track row's does.
     QQuickItem *albumB = libraryRowWithKey(window, kAlbumBKey);
     QVERIFY(albumB != nullptr);
     playTreeTrack(bridge, kTrackB1, kAlbumBKey);
     const RowLook album = libraryRowLook(albumB);
     QVERIFY(itemNamed(albumB, QStringLiteral("libraryRowNowMark")) == nullptr);
     QCOMPARE(colorOf(album.title), nowHex(window));
-    QCOMPARE(weightOf(album), QFont::DemiBold);
+    QCOMPARE(titleWeight(album), QFont::DemiBold);
     QVERIFY(!album.glyph->isVisible());
-    QVERIFY(QTest::qWaitFor([&]() { return !animationOf(fade)->property("running").toBool(); }));
+    QVERIFY(finish(animationOf(fade)));
     playTreeTrack(bridge, kTrackA1, kAlbumAKey);
     QVERIFY(animationOf(fade)->property("running").toBool());
     QCOMPARE(colorOf(album.title), nowHex(window));
@@ -1348,13 +1445,13 @@ void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
         }
         const qreal amber = albumTitle->property("amber").toReal();
         faded = faded || (amber > 0 && amber < 1);
-        weightMismatches += (weightOf(album) == QFont::DemiBold) == (amber >= 0.5) ? 0 : 1;
+        weightMismatches += (titleWeight(album) == QFont::DemiBold) == (amber >= 0.5) ? 0 : 1;
         return false;
     }));
     QVERIFY(faded);
     QCOMPARE(weightMismatches, 0);
     QVERIFY(colorOf(album.title) != nowHex(window));
-    QCOMPARE(weightOf(album), QFont::Normal);
+    QCOMPARE(titleWeight(album), QFont::Normal);
 }
 
 // The tree reuses its rows: a row that comes back for another track never
@@ -1363,7 +1460,7 @@ void UiMotionTest::reusedTreeRowsShowNoStaleFade() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey, kAlbumAKey});
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowSize());
     QVERIFY(window != nullptr);
     QObject *bridge = bridgeOf(window);
     playTreeTrack(bridge, kTrackA1, kAlbumAKey);
@@ -1402,20 +1499,13 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges_data() {
 // what changes fades, in place, over shortDuration: the title, and the
 // track number in the details, between "Track" and "of 2", which stay still
 // with the year and the genre. What changes cross-fades, the text before
-// going out as the playing track's comes in, on one progress (#373 H6).
-// The artist and the album stay at full opacity in every frame, and no
-// edge cuts a glyph.
+// going out as the playing track's comes in, on one progress. The artist and
+// the album stay at full opacity in every frame, and no edge cuts a glyph.
 void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
     QFETCH(bool, narrow);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    if (narrow) {
-        window->resize(1000, 720);
-    }
-    QObject *bridge = bridgeOf(window);
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     bridge->setProperty("currentTrackPath", kTrackA1);
     bridge->setProperty("currentTrackTitle", QStringLiteral("First"));
     bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
@@ -1428,15 +1518,9 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     QTRY_COMPARE(panel->property("layoutMode").toString(),
                  narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    QVERIFY(handover != nullptr);
     QVERIFY(!handover->property("running").toBool());
     QVERIFY(allLinesStill(panel));
     QTRY_VERIFY(panelLine(panel, narrow ? QStringLiteral("NarrowDetails") : QStringLiteral("Details")).line()->width() > 0);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
-    // Long enough for some frames.
-    units->setShortDuration(600);
 
     const QString title = narrow ? QStringLiteral("NarrowTitle") : QStringLiteral("Title");
     const QString details = narrow ? QStringLiteral("NarrowDetails") : QStringLiteral("Details");
@@ -1463,8 +1547,8 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
         }
         for (const QString &name : {title, details}) {
             const PanelLine line = panelLine(panel, name);
-            // In sequence (#373 H15 H3): out over the fade's first 40 %,
-            // in over all of it, each from whole.
+            // In sequence: out over the fade's first 40 %, in over all of it,
+            // each from whole.
             const double at = panel->property("handover").toDouble();
             if (std::abs(line.incomingOpacity() - linesIn(at)) > 1e-9
                 || std::abs(line.outgoingOpacity() - linesOut(at)) > 1e-9) {
@@ -1500,7 +1584,7 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
     bridge->setProperty("currentTrackNumber", 2);
 
     QVERIFY(handover->property("running").toBool());
-    QCOMPARE(handover->property("duration").toInt(), 600);
+    QCOMPARE(handover->property("duration").toInt(), units->shortDuration());
     QCOMPARE(easingOf(handover), QEasingCurve::Linear);
     // The playing track's lines, coming in; the track before's going out
     // where they differ.
@@ -1535,12 +1619,13 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
         QCOMPARE(detailsLine.incomingOpacity(), linesIn(at));
     }
     panel->setProperty("handover", 0.0);
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
     connection.stop();
-    QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
+    // Then every frame of it, on the test's time.
+    SteppedAnimationDriver driver;
+    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
+    QVERIFY(framesToEnd(driver, window, handover, checkFrame));
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(allLinesStill(panel));
 
     // Metadata that comes later changes the lines in place.
@@ -1565,11 +1650,9 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
 // stays still, and the details, whose year and number change, fade whole.
 void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     bridge->setProperty("currentTrackPath", kTrackA2);
     bridge->setProperty("currentTrackTitle", QStringLiteral("Second"));
     bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
@@ -1578,8 +1661,6 @@ void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
     bridge->setProperty("currentTrackNumber", 2);
     bridge->setProperty("currentTrackCoverPath", covers.first);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     QTRY_VERIFY(panelLine(panel, QStringLiteral("ArtistAlbum")).line()->width() > 0);
     QVERIFY(grown(panel));
 
@@ -1590,8 +1671,6 @@ void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
     bridge->setProperty("currentTrackNumber", 1);
     bridge->setProperty("currentTrackCoverPath", covers.second);
 
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
     QVERIFY(handover->property("running").toBool());
     QCOMPARE(handover->property("duration").toInt(), units->longDuration());
     QCOMPARE(easingOf(handover), QEasingCurve::Linear);
@@ -1620,15 +1699,14 @@ void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
     QCOMPARE(textOf(panel, "nowPlayingOutgoingDetails"), QStringLiteral("2005 · Track 2"));
     QCOMPARE(panelLine(panel, QStringLiteral("Title")).stillTexts(), QStringList());
     // The year and the number change, in two places: the line fades whole,
-    // with nothing between them left alone (#373 H2).
+    // with nothing between them left alone.
     QCOMPARE(panelLine(panel, QStringLiteral("Details")).stillTexts(), QStringList());
     QCOMPARE(panelLine(panel, QStringLiteral("Details")).incomingWindows(),
              (QList<Window>{{0.0, panelLine(panel, QStringLiteral("Details")).line()->width()}}));
     // Only the album changes, and most of the line stays: the artist stays
     // still.
     QCOMPARE(panelLine(panel, QStringLiteral("ArtistAlbum")).stillTexts(), QStringList{QStringLiteral("Artist A —")});
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
+    QVERIFY(finish(handover));
     QVERIFY(!outgoingCover->isVisible());
     QVERIFY(allLinesStill(panel));
 }
@@ -1638,15 +1716,9 @@ void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
 // fades out from full opacity, the lines fading go on from where they are,
 // and nothing jumps.
 void UiMotionTest::nowPlayingLineThatComesToDifferJoinsTheFade() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"));
     // Laid out: a line draws what fades in pieces of its width.
@@ -1694,8 +1766,7 @@ void UiMotionTest::nowPlayingLineThatComesToDifferJoinsTheFade() {
         titleOut = nextTitle;
         lineOut = nextLine;
     }
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     QVERIFY(allLinesStill(panel));
 }
 
@@ -1708,22 +1779,16 @@ void UiMotionTest::nowPlayingStillFieldThatChangesLateFadesFromWhole_data() {
 // A field that stayed still while the rest of its line fades, and that the
 // playing track's metadata changes later, fades out from full opacity, as
 // it showed, and so does all else that stayed still: the line now changes
-// in two places, so it fades whole (#373 H2), with no word left alone. What
-// stayed still does not take on the rest's progress, and nothing jumps. The
+// in two places, so it fades whole, with no word left alone. What stayed
+// still does not take on the rest's progress, and nothing jumps. The
 // playing track's text fades in as one, from nothing, as all that goes out
 // goes, so none of its glyphs is cut where the line before's pieces are,
 // however long its new field.
 void UiMotionTest::nowPlayingStillFieldThatChangesLateFadesFromWhole() {
     QFETCH(QString, genre);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setShortDuration(1500);
     bridge->setProperty("currentTrackYear", 2005);
     bridge->setProperty("currentTrackGenre", QStringLiteral("Rock"));
@@ -1795,23 +1860,16 @@ void UiMotionTest::nowPlayingStillFieldThatChangesLateFadesFromWhole() {
         QCOMPARE(details.opacitiesAt(inTrack), std::make_pair(linesOut(at), linesIn(at)));
         QCOMPARE(details.opacitiesAt(inNumber), std::make_pair(numberLeft * linesOut(at), linesIn(at)));
     }
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     QVERIFY(allLinesStill(panel));
 }
 
 // A line with right-to-left text is not laid out from the left: none of it
 // stays still, and the whole of it fades out, then in, as one.
 void UiMotionTest::nowPlayingRightToLeftLineFadesWhole() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setLongDuration(1500);
     // An artist named in Hebrew, with two albums of different lengths.
     bridge->setProperty("currentTrackArtist", QStringLiteral("להקת הים"));
@@ -1835,8 +1893,7 @@ void UiMotionTest::nowPlayingRightToLeftLineFadesWhole() {
         QCOMPARE(artistAlbum.incomingWindows(), (QList<Window>{{0.0, artistAlbum.line()->width()}}));
         QCOMPARE(artistAlbum.incomingOpacity(), linesIn(at));
     }
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     QVERIFY(allLinesStill(panel));
 }
 
@@ -1845,13 +1902,9 @@ void UiMotionTest::nowPlayingRightToLeftLineFadesWhole() {
 // out, from the opacity it had, the start that showed whole from there, and
 // the playing track's text comes in as one, from nothing, as it goes.
 void UiMotionTest::nowPlayingLineThatTurnsRightToLeftFadesInWhole() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"));
     const PanelLine artistAlbum = panelLine(panel, QStringLiteral("ArtistAlbum"));
@@ -1905,8 +1958,7 @@ void UiMotionTest::nowPlayingLineThatTurnsRightToLeftFadesInWhole() {
         QCOMPARE(opacities(artistAlbum, inAlbum),
                  (QList<double>{albumLeft * linesOut(at), cameIn * linesOut(at), linesIn(at)}));
     }
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     QVERIFY(allLinesStill(panel));
 }
 
@@ -1914,13 +1966,9 @@ void UiMotionTest::nowPlayingLineThatTurnsRightToLeftFadesInWhole() {
 // the still windows or between the pieces, falls where the ellipsis is, or
 // past the gap it stands for.
 void UiMotionTest::nowPlayingElidedLineKeepsEdgesOffTheEllipsis() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     const QString genre = QStringLiteral("Contemporary Classical Chamber Music");
     bridge->setProperty("currentTrackYear", 2005);
     bridge->setProperty("currentTrackGenre", genre);
@@ -1944,13 +1992,8 @@ void UiMotionTest::nowPlayingElidedLineKeepsEdgesOffTheEllipsis() {
     const QString split = QStringLiteral("2005 · ") + genre + QStringLiteral(" · Track");
     const QFontMetricsF metrics(details.font());
     const double splitEdge = (metrics.horizontalAdvance(split) + metrics.horizontalAdvance(split + QLatin1Char(' '))) / 2;
-    // What of `text` shows before the ellipsis at `width`.
     const auto shownUpTo = [&](const QString &text, double width) {
-        QString shown = metrics.elidedText(text, Qt::ElideRight, width);
-        if (shown != text) {
-            shown.chop(1);
-        }
-        return metrics.horizontalAdvance(shown);
+        return advanceBeforeEllipsis(metrics, text, width);
     };
 
     int moved = 0;
@@ -1983,25 +2026,18 @@ void UiMotionTest::nowPlayingElidedLineKeepsEdgesOffTheEllipsis() {
     // gap the ellipsis took, at the end.
     QVERIFY(kept > 0);
     QVERIFY(moved > 0);
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
 }
 
 // The album's line beside the narrow cover keeps its year whole after an
-// album cut off (#373 H14 G2: the year was cut off with it, so a track
-// with another year looked the same): a track of the same album with
-// another year fades the line whole, as any line that changes, from the
-// year before to the new one, and then it is still.
+// album cut off (cut off with it, a track with another year would look the
+// same): a track of the same album with another year fades the line whole, as
+// any line that changes, from the year before to the new one, and then it is
+// still.
 void UiMotionTest::nowPlayingAlbumCutOffKeepsItsYearThroughATrackChange() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    window->resize(1000, 720);
-    QTRY_COMPARE(window->width(), 1000);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui(true);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     const QString album = QStringLiteral(
         "An Album Named At Such Length That No Sidebar Will Ever Show All Of It, Not Even The Widest One");
     bridge->setProperty("currentTrackYear", 2005);
@@ -2024,51 +2060,9 @@ void UiMotionTest::nowPlayingAlbumCutOffKeepsItsYearThroughATrackChange() {
     QCOMPARE(line.outgoingText(), album + QStringLiteral(" (2005)"));
     QVERIFY(line.fades());
     QCOMPARE(tail->property("text").toString(), QStringLiteral(" (2006)"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
+    QVERIFY(finish(handover));
     QVERIFY(allLinesStill(panel));
     QVERIFY(tail->isVisible());
-}
-
-void UiMotionTest::nowPlayingStillRunsAreFieldsAndWordsInPlace_data() {
-    QTest::addColumn<QString>("before");
-    QTest::addColumn<QString>("after");
-    QTest::addColumn<QString>("separator");
-    QTest::addColumn<bool>("tabular");
-    QTest::addColumn<QStringList>("still");
-    const QString dot = QStringLiteral(" · ");
-    QTest::newRow("the number") << "2005 · Rock · Track 1" << "2005 · Rock · Track 2" << dot << true
-                                << QStringList{"2005 · Rock · Track"};
-    QTest::newRow("the number of a total") << "Track 4 of 8" << "Track 5 of 8" << dot << true
-                                           << QStringList{"Track", "of 8"};
-    QTest::newRow("the year") << "2019 · Synth-pop" << "2020 · Synth-pop" << dot << true
-                              << QStringList{"· Synth-pop"};
-    QTest::newRow("the year and the number") << "2019 · Synth-pop · Track 3 of 10"
-                                             << "2020 · Synth-pop · Track 1 of 12" << dot << true
-                                             << QStringList{"· Synth-pop · Track", "of"};
-    QTest::newRow("the year, not in tabular figures") << "2019 · Synth-pop" << "2020 · Synth-pop" << dot << false
-                                                      << QStringList{};
-    QTest::newRow("a number that gets wider") << "Track 9 of 12" << "Track 10 of 12" << dot << true
-                                              << QStringList{"Track"};
-    QTest::newRow("a field that gets wider") << "2005 · Rock · Track 2" << "2005 · Electronic · Track 2" << dot
-                                             << true << QStringList{"2005 ·"};
-    QTest::newRow("a field more") << "2005 · Rock" << "2005 · Rock · Track 2" << dot << true
-                                  << QStringList{"2005 · Rock"};
-    QTest::newRow("a field fewer") << "2005 · Rock · Track 1" << "2005 · Rock" << dot << true
-                                   << QStringList{"2005 · Rock"};
-    QTest::newRow("a word that is not a number") << "Album A (2005)" << "Album B (2005)" << "" << true
-                                                 << QStringList{};
-    QTest::newRow("the year with the album") << "Album A (2005)" << "Album A (2007)" << "" << true
-                                             << QStringList{"Album A"};
-    QTest::newRow("the artist") << "Artist — Album A" << "Artist — Album B" << " — " << false
-                                << QStringList{"Artist —"};
-    QTest::newRow("the same") << "2005 · Rock" << "2005 · Rock" << dot << true << QStringList{"2005 · Rock"};
-    QTest::newRow("one field, the same") << "First" << "First" << "" << false << QStringList{"First"};
-    QTest::newRow("one field, another") << "First" << "Firsts" << "" << false << QStringList{};
-    QTest::newRow("right to left") << "להקה — שירים" << "להקה — שירים נוספים" << " — " << false << QStringList{};
-    QTest::newRow("right to left later") << "Artist — שירים" << "Artist — Album" << " — " << false
-                                         << QStringList{};
-    QTest::newRow("right to left, the year") << "2019 · רוק" << "2020 · רוק" << dot << true << QStringList{};
-    QTest::newRow("right to left, the same") << "להקה" << "להקה" << "" << false << QStringList{};
 }
 
 // What stays still of a line that changes: its fields that are the same and
@@ -2077,31 +2071,51 @@ void UiMotionTest::nowPlayingStillRunsAreFieldsAndWordsInPlace_data() {
 // when it keeps its number of digits. Nothing stays still in right-to-left
 // text.
 void UiMotionTest::nowPlayingStillRunsAreFieldsAndWordsInPlace() {
-    QFETCH(QString, before);
-    QFETCH(QString, after);
-    QFETCH(QString, separator);
-    QFETCH(bool, tabular);
-    QFETCH(QStringList, still);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QVariant result;
-    QVERIFY(QMetaObject::invokeMethod(named(window, "nowPlayingPanel"), "_stillRuns",
-                                      Q_RETURN_ARG(QVariant, result), Q_ARG(QVariant, before),
-                                      Q_ARG(QVariant, after), Q_ARG(QVariant, separator),
-                                      Q_ARG(QVariant, tabular)));
-    QStringList runs;
-    for (const QVariant &run : result.toList()) {
-        const QVariantList range = run.toList();
-        QCOMPARE(range.size(), 2);
-        const int start = range.at(0).toInt();
-        const int end = range.at(1).toInt();
-        // The same, in the same place, in both.
-        QCOMPARE(before.mid(start, end - start), after.mid(start, end - start));
-        runs.push_back(after.mid(start, end - start));
+    struct Case {
+        const char *name;
+        QString before;
+        QString after;
+        QString separator;
+        bool tabular;
+        QStringList still;
+    };
+    const QString dot = QStringLiteral(" · ");
+    const QList<Case> cases{
+        {"the number", "2005 · Rock · Track 1", "2005 · Rock · Track 2", dot, true, {"2005 · Rock · Track"}},
+        {"the number of a total", "Track 4 of 8", "Track 5 of 8", dot, true, {"Track", "of 8"}},
+        {"the year", "2019 · Synth-pop", "2020 · Synth-pop", dot, true, {"· Synth-pop"}},
+        {"the year and the number", "2019 · Synth-pop · Track 3 of 10", "2020 · Synth-pop · Track 1 of 12", dot, true,
+         {"· Synth-pop · Track", "of"}},
+        {"the year, not in tabular figures", "2019 · Synth-pop", "2020 · Synth-pop", dot, false, {}},
+        {"a number that gets wider", "Track 9 of 12", "Track 10 of 12", dot, true, {"Track"}},
+        {"a field that gets wider", "2005 · Rock · Track 2", "2005 · Electronic · Track 2", dot, true, {"2005 ·"}},
+        {"a field more", "2005 · Rock", "2005 · Rock · Track 2", dot, true, {"2005 · Rock"}},
+        {"a field fewer", "2005 · Rock · Track 1", "2005 · Rock", dot, true, {"2005 · Rock"}},
+        {"a word that is not a number", "Album A (2005)", "Album B (2005)", "", true, {}},
+        {"the year with the album", "Album A (2005)", "Album A (2007)", "", true, {"Album A"}},
+        {"the artist", "Artist — Album A", "Artist — Album B", " — ", false, {"Artist —"}},
+        {"the same", "2005 · Rock", "2005 · Rock", dot, true, {"2005 · Rock"}},
+        {"one field, the same", "First", "First", "", false, {"First"}},
+        {"one field, another", "First", "Firsts", "", false, {}},
+        {"right to left", "להקה — שירים", "להקה — שירים נוספים", " — ", false, {}},
+        {"right to left later", "Artist — שירים", "Artist — Album", " — ", false, {}},
+        {"right to left, the year", "2019 · רוק", "2020 · רוק", dot, true, {}},
+        {"right to left, the same", "להקה", "להקה", "", false, {}},
+    };
+    Motion ui;
+    QVERIFY(ui.loaded());
+    QStringList failures;
+    for (const Case &each : cases) {
+        QVariant result;
+        QVERIFY(QMetaObject::invokeMethod(ui.panel, "_stillRuns", Q_RETURN_ARG(QVariant, result),
+                                          Q_ARG(QVariant, each.before), Q_ARG(QVariant, each.after),
+                                          Q_ARG(QVariant, each.separator), Q_ARG(QVariant, each.tabular)));
+        const QString wrong = stillRunsApart(each.before, each.after, result, each.still);
+        if (!wrong.isEmpty()) {
+            failures.push_back(QStringLiteral("%1: %2").arg(QLatin1String(each.name), wrong));
+        }
     }
-    QCOMPARE(runs, still);
+    QVERIFY2(failures.isEmpty(), qPrintable(failures.join(QLatin1Char('\n'))));
 }
 
 void UiMotionTest::nowPlayingOnlyTheNumberThatChangesFades_data() {
@@ -2138,21 +2152,9 @@ void UiMotionTest::nowPlayingOnlyTheNumberThatChangesFades() {
     QFETCH(QString, prefix);
     QFETCH(QString, was);
     QFETCH(QString, is);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    if (narrow) {
-        window->resize(1000, 720);
-    }
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
-    // Long enough for some frames.
-    units->setShortDuration(600);
-    units->setLongDuration(600);
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     const QString name = narrow ? QStringLiteral("NarrowDetails") : QStringLiteral("Details");
     bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
     tellDetails(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), yearBefore, genre,
@@ -2208,12 +2210,13 @@ void UiMotionTest::nowPlayingOnlyTheNumberThatChangesFades() {
     };
     QString failure;
     int frames = 0;
-    FrameSampler connection(window, [&]() {
+    const auto checkFrame = [&]() {
         if (failure.isEmpty() && handover->property("running").toBool()) {
             ++frames;
             failure = onlyTheWord(panel->property("handover").toDouble());
         }
-    });
+    };
+    FrameSampler connection(window, checkFrame);
 
     tellDetails(bridge, yearAfter != yearBefore ? kTrackB1 : kTrackA2, QStringLiteral("Second"),
                 yearAfter != yearBefore ? QStringLiteral("Album B") : QStringLiteral("Album A"), yearAfter, genre,
@@ -2235,11 +2238,13 @@ void UiMotionTest::nowPlayingOnlyTheNumberThatChangesFades() {
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
     }
     panel->setProperty("handover", 0.0);
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
     connection.stop();
-    QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
+    // Then every frame of it, on the test's time.
+    SteppedAnimationDriver driver;
+    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
+    QVERIFY(framesToEnd(driver, window, handover, checkFrame));
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(panelIdle(panel, narrow ? kNarrowLines : kWideLines));
 }
 
@@ -2257,7 +2262,7 @@ void UiMotionTest::nowPlayingFieldThatMovesFades_data() {
     QTest::newRow("a number with a digit more") << "Classical" << "Classical" << 2005 << 9 << 10 << 12
                                                 << QStringList{QStringLiteral("2005 · Classical · Track")}
                                                 << "2005 · Classical · Track 9 o" << "2005 · Classical · Track 10 o";
-    // Less than half of it would stay: it fades whole (#373 H2).
+    // Less than half of it would stay: it fades whole.
     QTest::newRow("a wider genre") << "Rock" << "Electronic" << 2005 << 2 << 3 << 8 << QStringList{}
                                    << "2005 · Rock · Tr" << "2005 · Electronic · Tr";
 }
@@ -2275,13 +2280,9 @@ void UiMotionTest::nowPlayingFieldThatMovesFades() {
     QFETCH(QStringList, still);
     QFETCH(QString, movedBefore);
     QFETCH(QString, movedAfter);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     tellDetails(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), year, genreBefore,
                 numberBefore, total);
     const PanelLine details = panelLine(panel, QStringLiteral("Details"));
@@ -2303,8 +2304,7 @@ void UiMotionTest::nowPlayingFieldThatMovesFades() {
         QCOMPARE(details.opacitiesAt(inAfter), std::make_pair(linesOut(at), linesIn(at)));
         QVERIFY2(cutGlyph(details).isEmpty(), qPrintable(cutGlyph(details)));
     }
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     // The first track's growth, if the change came during it, ends on its
     // own time.
     QVERIFY(grown(panel));
@@ -2318,13 +2318,9 @@ void UiMotionTest::nowPlayingFieldThatMovesFades() {
 // when every text is cut off within it alike; the number, where it shows,
 // always fades.
 void UiMotionTest::nowPlayingElidedLineKeepsWhatStaysStillAfterAChange() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     const QString genre = QStringLiteral("Contemporary Classical Chamber Music");
     tellDetails(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), 2019, genre, 4, 8);
     const PanelLine details = panelLine(panel, QStringLiteral("Details"));
@@ -2338,13 +2334,8 @@ void UiMotionTest::nowPlayingElidedLineKeepsWhatStaysStillAfterAChange() {
     const QString upToNumber = QStringLiteral("2019 · ") + genre + QStringLiteral(" · Track ");
     const double inNumber = metrics.horizontalAdvance(upToNumber) + 1.0;
     const double pastNumber = metrics.horizontalAdvance(upToNumber + QLatin1Char('5'));
-    // What of `text` shows before the ellipsis at `width`.
     const auto shownUpTo = [&](const QString &text, double width) {
-        QString shown = metrics.elidedText(text, Qt::ElideRight, width);
-        if (shown != text) {
-            shown.chop(1);
-        }
-        return metrics.horizontalAdvance(shown);
+        return advanceBeforeEllipsis(metrics, text, width);
     };
 
     int toAGap = 0;
@@ -2377,21 +2368,16 @@ void UiMotionTest::nowPlayingElidedLineKeepsWhatStaysStillAfterAChange() {
     }
     QVERIFY(toAGap > 0);
     QVERIFY(toTheEnd > 0);
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
 }
 
 // A details line with a genre in Hebrew is laid out from the right: when
 // only its year changes, none of it stays still, and the whole of it
 // cross-fades, as one.
 void UiMotionTest::nowPlayingRightToLeftDetailsFadeWhole() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     tellDetails(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), 2019, QStringLiteral("רוק"), 0, 0);
     const PanelLine details = panelLine(panel, QStringLiteral("Details"));
     QTRY_VERIFY(details.line()->width() > 0);
@@ -2411,8 +2397,7 @@ void UiMotionTest::nowPlayingRightToLeftDetailsFadeWhole() {
         QCOMPARE(details.incomingWindows(), (QList<Window>{{0.0, details.line()->width()}}));
         QCOMPARE(details.incomingOpacity(), linesIn(at));
     }
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     // The first track's growth, if the change came during it, ends on its
     // own time.
     QVERIFY(grown(panel));
@@ -2425,7 +2410,7 @@ void UiMotionTest::nowPlayingInterruptionKeepsWhatStaysStill_data() {
     QTest::addColumn<QList<int>>("numbers");
     QTest::addColumn<int>("total");
     // What stays still from B's arrival, and from C's: C's genre changes
-    // too, so its line fades whole, with no lone "·" left (#373 H2).
+    // too, so its line fades whole, with no lone "·" left.
     QTest::addColumn<QStringList>("stillForB");
     QTest::addColumn<QStringList>("stillForC");
     // Where a word that stayed still and changes for C is.
@@ -2456,15 +2441,9 @@ void UiMotionTest::nowPlayingInterruptionKeepsWhatStaysStill() {
     // while B still comes in.
     for (const double interruptAt : {0.15, 0.75}) {
         const QString where = QStringLiteral(" (C at %1)").arg(interruptAt);
-        LibraryTreeModel libraryModel;
-        QQmlApplicationEngine engine;
-        QQuickWindow *window = loadMainWindow(engine, libraryModel);
-        QVERIFY(window != nullptr);
-        QObject *bridge = bridgeOf(window);
-        QQuickItem *panel = named(window, "nowPlayingPanel");
-        QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-        Kirigami::Platform::Units *units = unitsOf(window);
-        QVERIFY(units != nullptr);
+        Motion ui;
+        QVERIFY(ui.loaded());
+        const auto [window, bridge, panel, handover, units] = ui.parts();
         units->setShortDuration(1000);
         units->setLongDuration(1000);
         const QStringList paths{kTrackA1, kTrackA2, QStringLiteral("/music/Artist A/Album A/03.flac")};
@@ -2487,7 +2466,7 @@ void UiMotionTest::nowPlayingInterruptionKeepsWhatStaysStill() {
         QCOMPARE(details.stillTexts(), stillForB);
         panel->setProperty("handover", interruptAt);
         // A as far as it has gone out, B as far as it has come in, in
-        // sequence (#373 H15 H3).
+        // sequence.
         const double leftOfA = linesOut(interruptAt);
         const double inOfB = linesIn(interruptAt);
         QVERIFY2((interruptAt < kLinesOutSpan ? leftOfA > 0.0 : leftOfA == 0.0) && inOfB > 0.0, qPrintable(where));
@@ -2535,8 +2514,9 @@ void UiMotionTest::nowPlayingInterruptionKeepsWhatStaysStill() {
             QCOMPARE(details.stillTexts(), stillForC);
             QVERIFY2(cutGlyph(details).isEmpty(), qPrintable(cutGlyph(details) + where));
         }
-        QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-        QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+        QVERIFY(finish(handover));
+        // The first track's growth, which the changes came during.
+        QVERIFY(grown(panel));
         QVERIFY(panelIdle(panel, kWideLines));
     }
 }
@@ -2545,13 +2525,9 @@ void UiMotionTest::nowPlayingInterruptionKeepsWhatStaysStill() {
 // tracks before comes back over the new one.
 void UiMotionTest::nowPlayingClearedAndReloadedMidFadeShowsNoStaleTrack() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
     showTrack(bridge, kTrackB1, QStringLiteral("Second"), QStringLiteral("Album B"), covers.second);
     QVERIFY(handover->property("running").toBool());
@@ -2581,15 +2557,9 @@ void UiMotionTest::nowPlayingClearedAndReloadedMidFadeShowsNoStaleTrack() {
 // over all of it, the lines on theirs.
 void UiMotionTest::nowPlayingLateCoverJoinsTheFadeOfTheLines() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
     // Laid out: a line draws what fades in pieces of its width.
     QTRY_VERIFY(panelLine(panel, QStringLiteral("Title")).line()->width() > 0);
@@ -2618,8 +2588,7 @@ void UiMotionTest::nowPlayingLateCoverJoinsTheFadeOfTheLines() {
     }
     // The album line is the same: it stays still all along.
     QVERIFY(lineStill(panel, QStringLiteral("ArtistAlbum")));
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
+    QVERIFY(finish(handover));
     QVERIFY(!outgoingCover->isVisible());
     QVERIFY(allLinesStill(panel));
 }
@@ -2639,13 +2608,9 @@ void UiMotionTest::nowPlayingRapidChangesFadeFromWhatShows_data() {
 void UiMotionTest::nowPlayingRapidChangesFadeFromWhatShows() {
     QFETCH(double, at);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
     const PanelLine title = panelLine(panel, QStringLiteral("Title"));
     QTRY_VERIFY(title.line()->width() > 0);
@@ -2683,8 +2648,7 @@ void UiMotionTest::nowPlayingRapidChangesFadeFromWhatShows() {
     QCOMPARE(cover.at(1).first, covers.first);
     QCOMPARE(cover.at(1).second, coversOut(at));
 
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     QVERIFY(!anyLineFades(panel));
     QVERIFY(panelIdle(panel, kWideLines));
 }
@@ -2693,18 +2657,13 @@ void UiMotionTest::nowPlayingRapidChangesFadeFromWhatShows() {
 // over longDuration; the lines stay as they are.
 void UiMotionTest::nowPlayingCoverAfterTheFadeFadesAlone() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
     showTrack(bridge, kTrackA2, QStringLiteral("Second"), QStringLiteral("Album A"), covers.first);
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
+    QVERIFY(finish(handover));
+    QVERIFY(grown(panel));
 
     bridge->setProperty("currentTrackCoverPath", covers.second);
     QVERIFY(handover->property("running").toBool());
@@ -2716,7 +2675,7 @@ void UiMotionTest::nowPlayingCoverAfterTheFadeFadesAlone() {
     // The lines did not change: they neither fade nor dim.
     QVERIFY(!anyLineFades(panel));
     QVERIFY(allLinesStill(panel));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
+    QVERIFY(finish(handover));
     QVERIFY(!outgoingCover->isVisible());
 }
 
@@ -2748,9 +2707,8 @@ double grownHeight(QQuickItem *panel, double presence, double full) {
 }
 
 // The compact row's and the cover's opacity `elapsed` ms into the move
-// from the compact row, by its time (#373 H16 I2): the row out from 20 % to
-// 50 % of shortDuration, linear; the cover in from 12 % to 112 % of it,
-// OutCubic.
+// from the compact row, by its time: the row out from 20 % to 50 % of
+// shortDuration, linear; the cover in from 12 % to 112 % of it, OutCubic.
 double idleRowOpacityAt(double elapsed, double shortDuration) {
     return 1.0 - std::clamp((elapsed - 0.2 * shortDuration) / (0.3 * shortDuration), 0.0, 1.0);
 }
@@ -2776,42 +2734,28 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay_data() {
 }
 
 // The first track after nothing loaded grows the cover's place from the
-// compact row to its full size, InOutQuad (#373 H7; H12 Z7: OutCubic left
-// at some 3,100 px/s): the panel's height and the cover's band follow one
+// compact row to its full size, InOutQuad (OutCubic would start off at
+// some 3,100 px/s): the panel's height and the cover's band follow one
 // progress, the lines and the library's header move down with it, and the
 // compact row and the cover hand over by the move's time: the row out from
 // 20 to 50 ms, the cover in from 12 to 112 ms, OutCubic, with Kirigami's
-// shortDuration, so the band always shows one of them at least half (#373
-// H16 I2: by presence the row was gone by 12 % and the cover faint until
-// past it, an empty band for some 60 to 140 ms) and the row's text is not
-// drawn across the art for long (#373 H15 H5). The band uncovers the
-// cover, which lies at its full size at the band's top left in every
-// frame: a reveal, not a zoom (#373 H14 G5: a
+// shortDuration, so the band always shows one of them at least half (by
+// presence the row would be gone by 12 % and the cover faint until past
+// it, an empty band for some 60 to 140 ms) and the row's text is not drawn
+// across the art for long. The band uncovers the cover, which lies at its
+// full size at the band's top left in every frame: a reveal, not a zoom (a
 // square growing in the middle of the band, with empty flanks). The lines
-// come in late in the move rather than with it (#373 H12 Z7, H14 G5), and
-// not as a pop at its end (#373 H28 V6): at 0 until it is 60 % of the way,
-// then fading in over longDuration, OutCubic, or what is left of the move,
-// whole as it ends. Nothing jumps:
+// come in late in the move rather than with it, and not as a pop at its
+// end: at 0 until it is 60 % of the way, then fading in over longDuration,
+// OutCubic, or what is left of the move, whole as it ends. Nothing jumps:
 // the header goes down frame by frame, one way, to where the full layout
 // puts it.
 void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     QFETCH(bool, narrow);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    if (narrow) {
-        window->resize(1000, 720);
-        QTRY_COMPARE(window->width(), 1000);
-    }
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
-    // Long enough for many frames.
-    units->setLongDuration(1000);
-    units->setVeryLongDuration(2000);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QQuickItem *header = named(window, "libraryHeader");
     QQuickItem *area = named(window, "nowPlayingCoverArea");
     QQuickItem *cover = named(window, "nowPlayingCover");
@@ -2834,39 +2778,40 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     QVERIFY(growth->property("running").toBool());
     // Under the wide cover, over 9/8 of veryLongDuration, 450 ms with
     // Kirigami's own (see nowPlayingLibrarySlidesWithTheCoversPlace).
-    QCOMPARE(growth->property("duration").toInt(), narrow ? 1000 : 2250);
+    QCOMPARE(growth->property("duration").toInt(),
+             narrow ? units->longDuration() : qRound(units->veryLongDuration() * 9.0 / 8.0));
     QCOMPARE(easingOf(growth), QEasingCurve::InOutQuad);
     QCOMPARE(growth->property("from").toDouble(), 0.0);
     QCOMPARE(growth->property("to").toDouble(), 1.0);
 
-    // Frame by frame: down, one way, from near where it was, to the end;
-    // the cover at its full size at the band's top left in every frame,
-    // only the band's height changing (#373 H14 G5).
+    // Frame by frame, at Kirigami's durations, on the test's time: down,
+    // one way, from near where it was, to the end; the cover at its full
+    // size at the band's top left in every frame, only the band's height
+    // changing.
     const double side = narrow ? panel->property("narrowLayoutCoverSize").toDouble() : panel->width();
     QList<double> tops;
     QList<double> bands;
     QString unsquare;
-    FrameSampler squareConnection(window, [&]() {
-        if (!unsquare.isEmpty() || !area->isVisible()) {
-            return;
-        }
-        const QRectF band = sceneRectOf(area);
-        const QRectF tile = sceneRectOf(cover);
-        bands.push_back(band.height());
-        if (cover->width() != side || cover->height() != side || tile.topLeft() != band.topLeft()
-            || band.width() != side || (band.height() < side && !area->clip())) {
-            unsquare = QStringLiteral("%1x%2 at %3,%4 in a %5x%6 band at %7,%8").arg(tile.width())
-                           .arg(tile.height()).arg(tile.left()).arg(tile.top()).arg(band.width())
-                           .arg(band.height()).arg(band.left()).arg(band.top());
-        }
-    });
-    while (growth->property("running").toBool()) {
-        QTest::qWait(5);
-        if (libraryFollows(panel, header)) {
-            tops.push_back(sceneRectOf(header).top());
-        }
+    {
+        SteppedAnimationDriver driver;
+        QVERIFY(framesToEnd(driver, window, growth, [&]() {
+            if (libraryFollows(panel, header)) {
+                tops.push_back(sceneRectOf(header).top());
+            }
+            if (!unsquare.isEmpty() || !area->isVisible()) {
+                return;
+            }
+            const QRectF band = sceneRectOf(area);
+            const QRectF tile = sceneRectOf(cover);
+            bands.push_back(band.height());
+            if (cover->width() != side || cover->height() != side || tile.topLeft() != band.topLeft()
+                || band.width() != side || (band.height() < side && !area->clip())) {
+                unsquare = QStringLiteral("%1x%2 at %3,%4 in a %5x%6 band at %7,%8").arg(tile.width())
+                               .arg(tile.height()).arg(tile.left()).arg(tile.top()).arg(band.width())
+                               .arg(band.height()).arg(band.left()).arg(band.top());
+            }
+        }));
     }
-    squareConnection.stop();
     QVERIFY2(unsquare.isEmpty(), qPrintable(unsquare));
     // The band grew over several frames, from about the row's height.
     QVERIFY2(bands.size() >= 5 && bands.first() < side / 2, qPrintable(QString::number(bands.size())));
@@ -2874,7 +2819,8 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     QTRY_VERIFY(libraryFollows(panel, header));
     const double full = panel->property("layoutHeight").toDouble();
     const double fullTop = idleTop + full - rest;
-    QVERIFY(full > rest + 60);
+    // At least the band's growth, from the row's height to the cover's.
+    QVERIFY2(full - rest >= side - rowHeight - 0.5, qPrintable(QStringLiteral("%1 to %2").arg(rest).arg(full)));
     QCOMPARE(panel->height(), full);
     QCOMPARE(sceneRectOf(header).top(), fullTop);
     QVERIFY2(tops.size() >= 5, qPrintable(QString::number(tops.size())));
@@ -2901,7 +2847,7 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     QVERIFY(linesItem != nullptr);
     // The lines' opacity at `at` of the move: from where InOutQuad is 60 %
     // of the way, over longDuration or the rest of the move, OutCubic
-    // (#373 H28 V6: from 90 % they popped in over the move's last 60 ms).
+    // (from 90 % they would pop in over the move's last 60 ms).
     const double duration = growth->property("duration").toDouble();
     const auto timeAt = [](double presence) {
         return presence < 0.5 ? std::sqrt(presence / 2) : 1 - std::sqrt((1 - presence) / 2);
@@ -2924,7 +2870,7 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
                             0.9, 0.93, 0.97}) {
         panel->setProperty("presence", at);
         const QString where = QString::number(at);
-        QTRY_VERIFY2(libraryFollows(panel, header), qPrintable(where));
+        QVERIFY2(QTest::qWaitFor([&]() { return libraryFollows(panel, header); }), qPrintable(where));
         // On whole pixels.
         QVERIFY2(std::abs(panel->height() - grownHeight(panel, at, full)) <= 0.5, qPrintable(where));
         QCOMPARE(panel->height(), std::round(panel->height()));
@@ -2980,7 +2926,8 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
                          || sceneRectOf(title.line()).top() >= sceneRectOf(row).bottom(),
                      qPrintable(where));
         } else {
-            QCOMPARE(sceneRectOf(title.line()).top(), sceneRectOf(area).bottom() + 8);
+            QCOMPARE(sceneRectOf(title.line()).top(),
+                     sceneRectOf(area).bottom() + panel->property("wideTextTop").toDouble());
         }
     }
     // Whole as the move ends.
@@ -2999,21 +2946,14 @@ void UiMotionTest::nowPlayingFirstPlayBandIsNeverEmpty_data() {
 
 // On the first Play, at Kirigami's own durations, every frame drawn shows
 // the compact row or the cover at least at half, from the first frame of
-// the move on: no blink of an empty band (#373 H16 I2: 60 to 80 ms of it),
-// and the cover at its full size all along.
+// the move on: no blink of an empty band, not even for 60 ms, and the cover
+// at its full size all along.
 void UiMotionTest::nowPlayingFirstPlayBandIsNeverEmpty() {
     QFETCH(bool, narrow);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    if (narrow) {
-        window->resize(1000, 720);
-        QTRY_COMPARE(window->width(), 1000);
-    }
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QQuickItem *cover = named(window, "nowPlayingCover");
     QQuickItem *row = named(window, "nowPlayingIdleRow");
     QVERIFY(panel && cover && row);
@@ -3024,22 +2964,18 @@ void UiMotionTest::nowPlayingFirstPlayBandIsNeverEmpty() {
     const double side = narrow ? panel->property("narrowLayoutCoverSize").toDouble() : panel->width();
     QList<double> shown;
     QString problem;
-    FrameSampler connection(window, [&]() {
-        if (!growth->property("running").toBool() && shown.isEmpty()) {
-            return;
-        }
+    // Every frame of the move, on the test's time.
+    SteppedAnimationDriver driver;
+    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
+    QVERIFY(growth->property("running").toBool());
+    QVERIFY(framesToEnd(driver, window, growth, [&]() {
         const double rowOpacity = row->isVisible() ? row->opacity() : 0.0;
         const double coverOpacity = cover->isVisible() ? cover->opacity() : 0.0;
         shown.push_back(std::max(rowOpacity, coverOpacity));
         if (problem.isEmpty() && (cover->width() != side || cover->height() != side)) {
             problem = QStringLiteral("the cover %1x%2").arg(cover->width()).arg(cover->height());
         }
-    });
-    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
-    QVERIFY(growth->property("running").toBool());
-    QVERIFY(QTest::qWaitFor([&]() { return !growth->property("running").toBool(); }, 5000));
-    QTest::qWait(50);
-    connection.stop();
+    }));
     QVERIFY2(problem.isEmpty(), qPrintable(problem));
     QVERIFY2(shown.size() >= 5, qPrintable(QString::number(shown.size())));
     for (qsizetype index = 1; index < shown.size(); ++index) {
@@ -3054,7 +2990,7 @@ void UiMotionTest::nowPlayingLibrarySlidesWithTheCoversPlace_data() {
     QTest::addColumn<bool>("narrow");
     QTest::addColumn<QString>("move");
     // A track without a cover grows its stand-in's place the same way. A
-    // cover that comes or goes moves nothing (#373 H11; see
+    // cover that comes or goes moves nothing (see
     // nowPlayingCoverAndStandInCrossFadeInPlace).
     for (const bool narrow : {false, true}) {
         for (const char *move : {"first play", "first play, no cover"}) {
@@ -3065,27 +3001,18 @@ void UiMotionTest::nowPlayingLibrarySlidesWithTheCoversPlace_data() {
 
 // The library slides with the cover's place, at Kirigami's own speed, frame
 // by frame at 60 Hz, on the curve and over the time the panel gives its
-// move (#373 H10: on the first Play its first frames jumped some 100 px,
-// four rows, and the library read as cross-fading between two places): at
-// whole opacity, one way, never more than two of its rows in a frame, and,
+// move (a jump of some 100 px, four rows, in the first frames of the first
+// Play reads as the library cross-fading between two places): at whole
+// opacity, one way, never more than two of its rows in a frame, and,
 // under the wide cover, over many frames.
 void UiMotionTest::nowPlayingLibrarySlidesWithTheCoversPlace() {
     QFETCH(bool, narrow);
     QFETCH(QString, move);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    if (narrow) {
-        window->resize(1000, 720);
-        QTRY_COMPARE(window->width(), 1000);
-    }
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QVERIFY(units->longDuration() > 0);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
     QQuickItem *header = named(window, "libraryHeader");
     QQuickItem *library = named(window, "libraryView");
     QVERIFY(panel && header && library);
@@ -3104,7 +3031,6 @@ void UiMotionTest::nowPlayingLibrarySlidesWithTheCoversPlace() {
     QCOMPARE(duration, panel->property("moveDuration").toInt());
     QCOMPARE(duration, narrow ? units->longDuration() : qRound(units->veryLongDuration() * 9.0 / 8.0));
     QVERIFY(QMetaObject::invokeMethod(animation, "pause"));
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     if (handover->property("running").toBool()) {
         // The lines' fade runs with the move.
         QCOMPARE(handover->property("duration").toInt(), duration);
@@ -3129,7 +3055,11 @@ void UiMotionTest::nowPlayingLibrarySlidesWithTheCoversPlace() {
             break;
         }
     }
+    // The library follows the panel's whole growth.
     const double travel = tops.last() - tops.first();
+    QVERIFY2(std::abs(travel - (panel->property("layoutHeight").toDouble() - panel->property("restHeight").toDouble()))
+                 < 0.5,
+             qPrintable(QString::number(travel)));
     QVERIFY2(std::abs(travel) > rowHeight, qPrintable(QString::number(travel)));
     double largest = 0;
     for (qsizetype index = 1; index < tops.size(); ++index) {
@@ -3139,34 +3069,29 @@ void UiMotionTest::nowPlayingLibrarySlidesWithTheCoversPlace() {
     }
     // Two rows, or the curve's own first frame where that is a hair more:
     // an eighth of the way, which is under two rows up to sixteen rows of
-    // travel, as the default font's wide layout has on the row grid (#373
-    // H11); a smaller font's rows are a few more to the same cover.
+    // travel, as the default font's wide layout has on the row grid; a
+    // smaller font's rows are a few more to the same cover.
     QVERIFY2(largest <= std::max(2 * rowHeight, 0.125 * std::abs(travel)),
              qPrintable(QStringLiteral("%1 px in a frame of %2 px over %3 ms").arg(largest).arg(travel).arg(duration)));
     if (!narrow) {
-        QVERIFY2(std::abs(travel) > 300, qPrintable(QString::number(travel)));
+        // At least the band's growth from the row to the wide cover, as
+        // wide as the sidebar.
+        QVERIFY2(std::abs(travel) >= panel->width() - panel->property("idleRowHeight").toDouble() - 0.5,
+                 qPrintable(QString::number(travel)));
         QVERIFY2(tops.size() >= 20, qPrintable(QString::number(tops.size())));
     }
-    QVERIFY(QMetaObject::invokeMethod(animation, "resume"));
-    if (handover->property("running").toBool()) {
-        QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    }
-    QTRY_VERIFY(!animation->property("running").toBool());
+    QVERIFY(finish(animation));
+    QVERIFY(finish(handover));
 }
 
 // With animations off, the first track shows the full layout at once, and
 // nothing loaded the compact row.
 void UiMotionTest::nowPlayingGrowsAtOnceWithAnimationsOff() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setShortDuration(0);
     units->setLongDuration(0);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
     QQuickItem *header = named(window, "libraryHeader");
     auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
     QVERIFY(growth != nullptr);
@@ -3201,31 +3126,22 @@ void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace_data() {
 }
 
 // Between a track with a cover and one without, wide or narrow, nothing of
-// the panel moves (#373 H11; H9 to H11 a track without a cover had no
-// cover's place, so the change moved the library some 360 to 400 px and
-// slid the lines sideways): the track without one has a stand-in in the
-// cover's place, and the two cross-fade there as two covers do, over
-// longDuration, the one before fading out over the playing track's, which
-// shows whole under it. In every frame of the change the panel's height,
-// the library's place, the cover's place and where the lines are stay as
-// they were; the stand-in going out keeps its own title.
+// the panel moves (without a cover's place for a track without a cover, the
+// change would move the library some 360 to 400 px and slide the lines
+// sideways): the track without one has a stand-in in the cover's place, and
+// the two cross-fade there as two covers do, over longDuration, the one
+// before fading out over the playing track's, which shows whole under it. In
+// every frame of the change the panel's height, the library's place, the
+// cover's place and where the lines are stay as they were; the stand-in going
+// out keeps its own title.
 void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace() {
     QFETCH(bool, narrow);
     QFETCH(bool, nextTrack);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    if (narrow) {
-        window->resize(1000, 720);
-        QTRY_COMPARE(window->width(), 1000);
-    }
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QVERIFY(units->longDuration() > 0);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
     QQuickItem *header = named(window, "libraryHeader");
     QQuickItem *area = named(window, "nowPlayingCoverArea");
     QQuickItem *cover = named(window, "nowPlayingCover");
@@ -3237,9 +3153,8 @@ void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace() {
     QQuickItem *standIn = itemNamed(cover, QStringLiteral("albumArtStandIn"));
     QQuickItem *standInMark = itemNamed(cover, QStringLiteral("albumArtStandInMark"));
     QVERIFY(standIn && standInMark);
-    // No text in it (#373 H14 F2).
+    // No text in it.
     QVERIFY(itemNamed(cover, QStringLiteral("albumArtStandInTitle")) == nullptr);
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     QObject *presence = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
     QVERIFY(handover && presence);
     const QStringList lines = narrow ? kNarrowLines : kWideLines;
@@ -3313,7 +3228,7 @@ void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace() {
             QVERIFY2(before.first()->opacity() <= lastOut && before.first()->opacity() > 0.0, qPrintable(where));
             lastOut = before.first()->opacity();
             // What goes out is what showed: the cover, or the stand-in
-            // with its mark, and no text (#373 H14 F2).
+            // with its mark, and no text.
             QQuickItem *outgoingStandIn = itemNamed(before.first(), QStringLiteral("albumArtOutgoingStandIn"));
             QVERIFY(outgoingStandIn != nullptr);
             QCOMPARE(outgoingStandIn->isVisible(), toCover);
@@ -3324,8 +3239,7 @@ void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace() {
             QVERIFY(!shownStandIn->property("subtitle").isValid());
         }
         QVERIFY2(lastOut < 0.05, qPrintable(QString::number(lastOut)));
-        QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-        QTRY_VERIFY(!handover->property("running").toBool());
+        QVERIFY(finish(handover));
         QTRY_VERIFY(panelIdle(panel, lines));
         QVERIFY(outgoing().isEmpty());
         QCOMPARE(geometry(), still);
@@ -3335,27 +3249,26 @@ void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace() {
     sampled(true);
     if (QTest::currentTestFailed()) return;
 
-    // At Kirigami's speed, frame by frame: the library's header and the
-    // panel never move.
+    // At Kirigami's speed, frame by frame, on the test's time: the
+    // library's header and the panel never move.
     QString moved;
-    FrameSampler connection(window, [&]() {
-        if (moved.isEmpty() && geometry() != still) {
-            moved = QStringLiteral("header at %1, panel %2 high")
-                        .arg(sceneRectOf(header).top()).arg(panel->height());
-        }
-    });
     for (const bool toCover : {false, true}) {
+        SteppedAnimationDriver driver;
         change(toCover);
         QVERIFY(handover->property("running").toBool());
-        QTRY_VERIFY(!handover->property("running").toBool());
+        QVERIFY(framesToEnd(driver, window, handover, [&]() {
+            if (moved.isEmpty() && geometry() != still) {
+                moved = QStringLiteral("header at %1, panel %2 high")
+                            .arg(sceneRectOf(header).top()).arg(panel->height());
+            }
+        }));
         QTRY_VERIFY(panelIdle(panel, lines));
         QVERIFY2(moved.isEmpty(), qPrintable(moved));
     }
-    connection.stop();
 
     // A track without a cover of another album: the same stand-in, which
     // does not fade over itself, as every track without a cover has the
-    // same mark (#373 H14 F2).
+    // same mark.
     bridge->setProperty("currentTrackCoverPath", QString());
     QTRY_VERIFY(panelIdle(panel, lines));
     showTrack(bridge, kTrackB1, QStringLiteral("Third"), QStringLiteral("Album B"), QString());
@@ -3377,21 +3290,15 @@ void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace() {
 // place.
 void UiMotionTest::nowPlayingCoverAndStandInChangeAtOnceWithAnimationsOff() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setShortDuration(0);
     units->setLongDuration(0);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
     QQuickItem *cover = named(window, "nowPlayingCover");
     QQuickItem *header = named(window, "libraryHeader");
     QVERIFY(panel && cover && header);
     QQuickItem *standIn = itemNamed(cover, QStringLiteral("albumArtStandIn"));
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     QVERIFY(standIn && handover);
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
     QCOMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
@@ -3429,15 +3336,10 @@ void UiMotionTest::nowPlayingCoverAndStandInChangeAtOnceWithAnimationsOff() {
 // so the library does not jump; and so does a growth cut short.
 void UiMotionTest::nowPlayingShrinksBackIntoTheCompactRow() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setLongDuration(1000);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
     QQuickItem *header = named(window, "libraryHeader");
     QQuickItem *row = named(window, "nowPlayingIdleRow");
     auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
@@ -3465,15 +3367,13 @@ void UiMotionTest::nowPlayingShrinksBackIntoTheCompactRow() {
     for (const double at : {0.75, 0.5, 0.25, 0.1, 0.05}) {
         panel->setProperty("presence", at);
         const QString where = QString::number(at);
-        QTRY_VERIFY2(libraryFollows(panel, header), qPrintable(where));
+        QVERIFY2(QTest::qWaitFor([&]() { return libraryFollows(panel, header); }), qPrintable(where));
         QVERIFY2(std::abs(panel->height() - grownHeight(panel, at, full)) <= 0.5, qPrintable(where));
-        // The row back only as the cover goes, by the move's time (#373
-        // H16 I2).
+        // The row back only as the cover goes, by the move's time.
         const double elapsed = moveTimeAt(at) * growth->property("duration").toDouble();
         QCOMPARE(row->isVisible(), elapsed < 0.5 * units->shortDuration());
     }
-    QVERIFY(QMetaObject::invokeMethod(growth, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !growth->property("running").toBool(); }, 5000));
+    QVERIFY(finish(growth));
     QTRY_VERIFY(libraryFollows(panel, header));
     QCOMPARE(panel->height(), rest);
     QCOMPARE(sceneRectOf(header).top(), idleTop);
@@ -3500,52 +3400,36 @@ void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed_data() {
     QTest::addColumn<bool>("narrow");
     QTest::addColumn<bool>("withCover");
     QTest::addColumn<bool>("runsOut");
-    for (const bool narrow : {false, true}) {
-        for (const bool withCover : {true, false}) {
-            for (const bool runsOut : {false, true}) {
-                QTest::addRow("%s, %s, %s", narrow ? "narrow" : "wide", withCover ? "cover" : "no cover",
-                              runsOut ? "queue runs out" : "stop and clear")
-                    << narrow << withCover << runsOut;
-            }
-        }
-    }
+    // Each pair of the three: the layout, a cover or its stand-in, and the
+    // order the backend empties the track in.
+    QTest::newRow("wide, cover, stop and clear") << false << true << false;
+    QTest::newRow("wide, no cover, queue runs out") << false << false << true;
+    QTest::newRow("narrow, cover, queue runs out") << true << true << true;
+    QTest::newRow("narrow, no cover, stop and clear") << true << false << false;
 }
 
 // Back to nothing loaded, as when Stop and Clear empty the queue or it runs
-// out, is the first Play backwards (#373 H30: the cover and the lines went
-// in one frame, the tile's own disc mark stood alone in the band as it
-// shrank, and "Nothing playing" came only at its end): the track that
-// showed, its cover or its stand-in and its lines, stays while the panel
-// shrinks, the lines fading out as they faded in, before the row comes
-// back, and the row and the cover handing over by the move's time. Every
-// frame shows that track, the two handing over, or the row: never
-// neither, never a tile with nothing of the track in it, and never the
-// disc mark, which is gone. Once shrunk, the panel holds nothing more.
+// out, is the first Play backwards (not the cover and the lines gone in one
+// frame, the tile's own disc mark alone in the band as it shrinks, and
+// "Nothing playing" only at its end): the track that showed, its cover or its
+// stand-in and its lines, stays while the panel shrinks, the lines fading out
+// as they faded in, before the row comes back, and the row and the cover
+// handing over by the move's time. Every frame shows that track, the two
+// handing over, or the row: never neither, never a tile with nothing of the
+// track in it, and never the disc mark, which is gone. Once shrunk, the panel
+// holds nothing more.
 void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed() {
     QFETCH(bool, narrow);
     QFETCH(bool, withCover);
     QFETCH(bool, runsOut);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    if (narrow) {
-        window->resize(1000, 720);
-        QTRY_COMPARE(window->width(), 1000);
-    }
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
-    // Long enough for many frames.
-    units->setLongDuration(1000);
-    units->setVeryLongDuration(2000);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QQuickItem *area = named(window, "nowPlayingCoverArea");
     QQuickItem *tile = named(window, "nowPlayingCover");
     QQuickItem *row = named(window, "nowPlayingIdleRow");
     QQuickItem *lines = named(window, "nowPlayingLines");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
     QVERIFY(panel && area && tile && row && lines && handover && growth);
     QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
@@ -3555,7 +3439,7 @@ void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed() {
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), cover);
     bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
     QVERIFY(grown(panel));
-    QTRY_VERIFY(!handover->property("running").toBool());
+    QVERIFY(finish(handover));
     const PanelLine title = panelLine(panel, narrow ? QStringLiteral("NarrowTitle") : QStringLiteral("Title"));
     QCOMPARE(title.text(), QStringLiteral("First"));
     QCOMPARE(tile->property("hasCover").toBool(), withCover);
@@ -3569,10 +3453,7 @@ void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed() {
         QString problem;
     };
     QList<Frame> frames;
-    FrameSampler connection(window, [&]() {
-        if (!growth->property("running").toBool() && frames.isEmpty()) {
-            return;
-        }
+    const auto look = [&]() {
         Frame frame;
         frame.presence = panel->property("presence").toDouble();
         frame.cover = area->isVisible() && tile->isVisible() ? tile->opacity() : 0.0;
@@ -3596,7 +3477,9 @@ void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed() {
             frame.problem = QStringLiteral("the title \"%1\" at %2").arg(title.text()).arg(frame.lines);
         }
         frames.push_back(frame);
-    });
+    };
+    // Every frame of the move, at Kirigami's durations, on the test's time.
+    SteppedAnimationDriver driver;
     if (runsOut) {
         // The last track ends: no track, then stopped.
         for (const char *property : {"currentTrackPath", "currentTrackTitle", "currentTrackArtist",
@@ -3610,9 +3493,9 @@ void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed() {
     QVERIFY(panel->property("idle").toBool());
     QVERIFY(growth->property("running").toBool());
     QVERIFY(panel->property("holdsTrack").toBool());
-    QVERIFY(QTest::qWaitFor([&]() { return !growth->property("running").toBool(); }, 5000));
-    QTest::qWait(50);
-    connection.stop();
+    QVERIFY(QQuickTest::qWaitForPolish(window));
+    look();
+    QVERIFY(framesToEnd(driver, window, growth, look));
     QVERIFY2(frames.size() >= 10, qPrintable(QString::number(frames.size())));
     for (qsizetype index = 0; index < frames.size(); ++index) {
         const Frame &frame = frames.at(index);
@@ -3656,16 +3539,11 @@ void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed() {
 // ones of the track that went, and the tile never at rest.
 void UiMotionTest::nowPlayingPlayDuringTheShrinkReversesIntoTheNextTrack() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setLongDuration(1000);
     units->setVeryLongDuration(2000);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
     QQuickItem *tile = named(window, "nowPlayingCover");
     auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
     QVERIFY(panel && tile && growth);
@@ -3702,13 +3580,9 @@ void UiMotionTest::nowPlayingPlayDuringTheShrinkReversesIntoTheNextTrack() {
 void UiMotionTest::nowPlayingLeavesNothingPlayingWithoutAFade() {
     QFETCH(bool, coverFirst);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QVERIFY(panel->property("idle").toBool());
 
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first,
@@ -3738,15 +3612,9 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous_data() {
 void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
     QFETCH(double, at);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QVERIFY(units->longDuration() != units->shortDuration());
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
     // Laid out: a line draws what fades in pieces of its width.
@@ -3799,15 +3667,14 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
         QCOMPARE(nextLines, outgoingBefore * linesOut(next));
         QCOMPARE(nextLive, 1.0 - (1.0 - liveBefore) * (1.0 - linesIn(next)));
         QCOMPARE(nextCover, coversOut(next));
-        // In sequence (#373 H15 H3), never under half a text's ink.
+        // In sequence, never under half a text's ink.
         QVERIFY(1.0 - (1.0 - nextLines) * (1.0 - nextLive) >= 0.5);
         QVERIFY(lineStill(panel, QStringLiteral("ArtistAlbum")));
         lines = nextLines;
         live = nextLive;
         cover = nextCover;
     }
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     QVERIFY(!outgoingCover->isVisible());
     QVERIFY(allLinesStill(panel));
 }
@@ -3830,15 +3697,9 @@ void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer_data() {
 void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer() {
     QFETCH(double, at);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setShortDuration(1000);
     units->setLongDuration(1500);
     bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
@@ -3863,7 +3724,7 @@ void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer() {
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     panel->setProperty("handover", at);
     // A's lines, from where they were when the cover came, going out as
-    // B's come in, on their curves (#373 H15 H3).
+    // B's come in, on their curves.
     const double a = linesOut(0.25) * linesOut(at);
     const double b = 1.0 - (1.0 - linesIn(0.25)) * (1.0 - linesIn(at));
     QVERIFY(a > 0.0 && b > 0.0);
@@ -3895,10 +3756,10 @@ void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer() {
     QCOMPARE(partsOf(title, titleLayers.last()).first()->opacity(), b);
     QCOMPARE(title.incomingOpacity(), 0.0);
     // C's details have another year and another number: they change in two
-    // places, so the line fades whole (#373 H2), with nothing of it left
-    // still. What A's and B's kept still goes out whole, in B's layer, as it
-    // showed, and B's number as far as it came in; A's draws nothing there,
-    // which B's covers, and A's number goes on where it was.
+    // places, so the line fades whole, with nothing of it left still. What
+    // A's and B's kept still goes out whole, in B's layer, as it showed, and
+    // B's number as far as it came in; A's draws nothing there, which B's
+    // covers, and A's number goes on where it was.
     QCOMPARE(details.stillTexts(), QStringList());
     const QList<QQuickItem *> detailsLayers = layersOf(details);
     QCOMPARE(detailsLayers.size(), 2);
@@ -3954,9 +3815,7 @@ void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer() {
         QCOMPARE(cover.at(1).second, coversOut(next));
         QCOMPARE(cover.at(2).second, coversOut(at) * coversOut(next));
     }
-    panel->setProperty("handover", 0.0);
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     // C alone: one layer of each line, and one cover, at full opacity.
     QVERIFY(panelIdle(panel, kWideLines));
     QCOMPARE(title.text(), QStringLiteral("Third"));
@@ -3973,15 +3832,9 @@ void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer() {
 // it has. The fade ends on the last track alone.
 void UiMotionTest::nowPlayingSkippingThroughTracksKeepsEveryLayer() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setLongDuration(1500);
     QCOMPARE(panel->property("maxOutgoingLayers").toInt(), 2);
     bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
@@ -4047,8 +3900,7 @@ void UiMotionTest::nowPlayingSkippingThroughTracksKeepsEveryLayer() {
             : QStringList{QStringLiteral("First"), QStringLiteral("Third")};
         QCOMPARE(outgoing, expected);
     }
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     QVERIFY(panelIdle(panel, kWideLines));
     QCOMPARE(title.text(), QStringLiteral("Fifth"));
     const QList<std::pair<QString, double>> cover = coverLook(panel);
@@ -4061,13 +3913,9 @@ void UiMotionTest::nowPlayingSkippingThroughTracksKeepsEveryLayer() {
 // the fade again.
 void UiMotionTest::nowPlayingRepeatOneDuringAJoinedFadeChangesNothing() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     tellTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), 2005, 1, covers.all.at(0));
     QTRY_VERIFY(panelLine(panel, QStringLiteral("Title")).line()->width() > 0);
     tellTrack(bridge, kTrackA2, QStringLiteral("Second"), QStringLiteral("Album A"), 2005, 2, covers.all.at(0));
@@ -4083,8 +3931,7 @@ void UiMotionTest::nowPlayingRepeatOneDuringAJoinedFadeChangesNothing() {
     QVERIFY(handover->property("paused").toBool());
     const QString change = lookChange(before, panelLook(panel, kWideLines), kWideLines, true, true);
     QVERIFY2(change.isEmpty(), qPrintable(change));
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     // The first track's growth, if the change came during it, ends on its
     // own time.
     QVERIFY(grown(panel));
@@ -4095,17 +3942,11 @@ void UiMotionTest::nowPlayingRepeatOneDuringAJoinedFadeChangesNothing() {
 // instant: nothing fades, and C alone shows.
 void UiMotionTest::nowPlayingThirdTrackWithAnimationsOffIsInstant() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setShortDuration(0);
     units->setLongDuration(0);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     const PanelLine title = panelLine(panel, QStringLiteral("Title"));
     tellTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), 2005, 1, covers.all.at(0));
     QTRY_VERIFY(title.line()->width() > 0);
@@ -4126,26 +3967,20 @@ void UiMotionTest::nowPlayingThirdTrackWithAnimationsOffIsInstant() {
 
 // A, with a cover, changes to B, without one, and C, of another album and
 // without a cover either, comes during that change: A's cover goes on out
-// from the opacity it has over the stand-in, which B and C share (#373 H14
-// F2: one mark for every track without a cover), so it stays; the tile's
-// mark, of nothing playing, never shows, and the lines go on from what
-// they show. Nothing of the panel moves. In the narrow window too.
+// from the opacity it has over the stand-in, which B and C share (one mark
+// for every track without a cover), so it stays; the tile's mark, of nothing
+// playing, never shows, and the lines go on from what they show. Nothing of
+// the panel moves. In the narrow window too.
 void UiMotionTest::nowPlayingInterruptedFadeAddsNoPlaceholderOverItself() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    window->resize(1000, 720);
-    QTRY_COMPARE(window->width(), 1000);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
+    Motion ui(true);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QQuickItem *header = named(window, "libraryHeader");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     QQuickItem *tile = itemNamed(panel, QStringLiteral("nowPlayingCover"));
     QQuickItem *standIn = itemNamed(tile, QStringLiteral("albumArtStandIn"));
     QVERIFY(handover && tile && standIn && header);
-    // The tile has no mark of its own for nothing playing (#373 H30).
+    // The tile has no mark of its own for nothing playing.
     QVERIFY(itemNamed(tile, QStringLiteral("albumArtPlaceholderGlyph")) == nullptr);
     tellTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), 2005, 1, covers.first);
     QTRY_VERIFY(panelLine(panel, QStringLiteral("NarrowTitle")).line()->width() > 0);
@@ -4205,19 +4040,11 @@ void UiMotionTest::nowPlayingInterruptedFadeAddsNoPlaceholderOverItself() {
 }
 
 // Another album, neither with a cover: the stand-in stays, the same for
-// both (#373 H14 F2), and the lines fade over longDuration.
+// both, and the lines fade over longDuration.
 void UiMotionTest::nowPlayingAnotherAlbumWithoutCoversFadesItsLinesLong() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    window->resize(1000, 720);
-    QTRY_COMPARE(window->width(), 1000);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui(true);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     tellTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), 2005, 1, QString());
     QTRY_VERIFY(panelLine(panel, QStringLiteral("NarrowTitle")).line()->width() > 0);
     QVERIFY(grown(panel));
@@ -4240,13 +4067,9 @@ void UiMotionTest::nowPlayingAnotherAlbumWithoutCoversFadesItsLinesLong() {
 // sides; idle, the space around a landscape cover is the sidebar's colour.
 void UiMotionTest::nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QQuickItem *tile = itemNamed(panel, QStringLiteral("nowPlayingCover"));
     const QColor view =
         qvariant_cast<QObject *>(panel->property("uiPalette"))->property("view").value<QColor>();
@@ -4294,7 +4117,7 @@ void UiMotionTest::nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt() {
     QTRY_VERIFY(near(drawn().first, view) && near(drawn().second, wideColor));
 
     tellTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), 2005, 1, covers.first);
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     QVERIFY(panelIdle(panel, kWideLines));
     tellTrack(bridge, kTrackB1, QStringLiteral("Second"), QStringLiteral("Album B"), 2007, 1, covers.landscape);
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
@@ -4322,8 +4145,7 @@ void UiMotionTest::nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt() {
     panel->setProperty("handover", 0.5);
     const QColor overA = mixed(squareColor, leftOfA * coversOut(0.5), mixed(view, coversOut(0.5), squareColor));
     QTRY_VERIFY(near(drawn().first, overA));
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     QVERIFY(panelIdle(panel, kWideLines));
     QTRY_VERIFY(near(drawn().first, squareColor) && near(drawn().second, squareColor));
 }
@@ -4331,15 +4153,15 @@ void UiMotionTest::nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt() {
 // Expanding a row opens its children downward: the toggled row stays put,
 // the rows below slide down from where they were over longDuration with
 // OutCubic, uncovering the children. Collapsing is the same played back, on
-// the same duration and curve (#373 H7: the expand was instant beside the
-// collapse's fade). The children show only above the fold, the top of the
+// the same duration and curve (an instant expand looks broken beside the
+// collapse's slide). The children show only above the fold, the top of the
 // rows sliding, at full opacity: no child's text is ever under a sliding
-// row's, as it was while they faded under them (#373 H9 T5).
+// row's, as it would be if they faded under them.
 void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey});
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowSize());
     QVERIFY(window != nullptr);
     QQuickItem *view = named(window, "libraryView");
     QVERIFY(QTest::qWaitFor([&]() { return view->property("count").toInt() == 3; }));
@@ -4360,17 +4182,13 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     const double rowHeight = view->property("rowHeight").toDouble();
     const double albumAY = albumA->y();
     QCOMPARE(albumB->y(), 2 * rowHeight);
-    const auto shown = [](QQuickItem *row) {
-        auto *clip = row->findChild<QQuickItem *>(QStringLiteral("libraryRowClip"));
-        return clip != nullptr && clip->isVisible() ? clip->height() : 0.0;
-    };
     // The children's drawn part ends at the top of the row sliding, or
     // above it, and they never fade.
     const auto checkFold = [&](const QList<QQuickItem *> &children, const QString &where) {
         for (QQuickItem *child : children) {
-            QVERIFY2(shown(child) == 0.0 || child->y() + shown(child) <= albumB->y() + 0.01,
+            QVERIFY2(libraryRowShown(child) == 0.0 || child->y() + libraryRowShown(child) <= albumB->y() + 0.01,
                      qPrintable(QStringLiteral("%1: a child to %2 under Album B at %3")
-                                    .arg(where).arg(child->y() + shown(child)).arg(albumB->y())));
+                                    .arg(where).arg(child->y() + libraryRowShown(child)).arg(albumB->y())));
             QCOMPARE(child->opacity(), 1.0);
         }
         QCOMPARE(albumB->opacity(), 1.0);
@@ -4390,8 +4208,8 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     QCOMPARE(firstChild->y(), 2 * rowHeight);
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QVERIFY(albumB->z() > firstChild->z());
-    QCOMPARE(shown(firstChild), 0.0);
-    QCOMPARE(shown(secondChild), 0.0);
+    QCOMPARE(libraryRowShown(firstChild), 0.0);
+    QCOMPARE(libraryRowShown(secondChild), 0.0);
     // Frame by frame, Album B on its way down uncovers the children.
     int expandMs = 0;
     bool halfShown = false;
@@ -4401,13 +4219,13 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
         QVERIFY2(expandMs <= duration + 48, qPrintable(QString::number(albumB->y())));
         checkFold({firstChild, secondChild}, QStringLiteral("expand at %1 ms").arg(expandMs));
         QCOMPARE(albumA->y(), albumAY);
-        halfShown = halfShown || (shown(firstChild) > 0 && shown(secondChild) < rowHeight);
+        halfShown = halfShown || (libraryRowShown(firstChild) > 0 && libraryRowShown(secondChild) < rowHeight);
     }
     QVERIFY(halfShown);
     QCOMPARE(albumB->y(), 4 * rowHeight);
     QCOMPARE(albumB->z(), 1.0);
-    QCOMPARE(shown(firstChild), rowHeight);
-    QCOMPARE(shown(secondChild), rowHeight);
+    QCOMPARE(libraryRowShown(firstChild), rowHeight);
+    QCOMPARE(libraryRowShown(secondChild), rowHeight);
 
     // Collapsing: Album B slides back up over the children, the expand
     // played back, over the same time.
@@ -4415,7 +4233,7 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     QCOMPARE(view->property("count").toInt(), 3);
     QCOMPARE(albumA->y(), albumAY);
     QCOMPARE(albumB->y(), 4 * rowHeight);
-    QCOMPARE(shown(firstChild), rowHeight);
+    QCOMPARE(libraryRowShown(firstChild), rowHeight);
     int collapseMs = 0;
     halfShown = false;
     while (albumB->y() > 2 * rowHeight || view->property("folding").toBool()) {
@@ -4424,7 +4242,7 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
         QVERIFY2(collapseMs <= duration + 48, qPrintable(QString::number(albumB->y())));
         if (firstChild->isVisible() && secondChild->isVisible()) {
             checkFold({firstChild, secondChild}, QStringLiteral("collapse at %1 ms").arg(collapseMs));
-            halfShown = halfShown || (shown(firstChild) > 0 && shown(secondChild) < rowHeight);
+            halfShown = halfShown || (libraryRowShown(firstChild) > 0 && libraryRowShown(secondChild) < rowHeight);
         }
     }
     QVERIFY(halfShown);
@@ -4437,15 +4255,14 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
 
 // The backend sends a collapsed row's children only once the row is
 // expanded, with a later tree: they open then as a toggle's, Album B
-// sliding down from where it was and uncovering them, not at once (#373
-// H10: in the app, expanding was instant while collapsing slid). A tree
+// sliding down from where it was and uncovering them, not at once. A tree
 // without them, sent before the backend was asked, moves nothing.
 void UiMotionTest::treeToggleOpensChildrenThatArriveLater() {
     LibraryTreeModel libraryModel;
     libraryModel.setExpandedKeys({kArtistKey});
     libraryModel.setLibraryTreeFromBinary(libraryTree(false));
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowSize());
     QVERIFY(window != nullptr);
     QQuickItem *view = named(window, "libraryView");
     QVERIFY(QTest::qWaitFor([&]() { return view->property("count").toInt() == 3; }));
@@ -4457,10 +4274,6 @@ void UiMotionTest::treeToggleOpensChildrenThatArriveLater() {
     const double rowHeight = view->property("rowHeight").toDouble();
     const double albumAY = albumA->y();
     QCOMPARE(albumB->y(), 2 * rowHeight);
-    const auto shown = [](QQuickItem *row) {
-        auto *clip = row->findChild<QQuickItem *>(QStringLiteral("libraryRowClip"));
-        return clip != nullptr && clip->isVisible() ? clip->height() : 0.0;
-    };
     // A tree as the bridge delivers it.
     const auto applyTree = [&](int version, bool albumATracks) {
         return QMetaObject::invokeMethod(controller, "requestTreeApply", Q_ARG(QVariant, version),
@@ -4490,8 +4303,8 @@ void UiMotionTest::treeToggleOpensChildrenThatArriveLater() {
     QCOMPARE(firstChild->y(), 2 * rowHeight);
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QVERIFY(view->property("folding").toBool());
-    QCOMPARE(shown(firstChild), 0.0);
-    QCOMPARE(shown(secondChild), 0.0);
+    QCOMPARE(libraryRowShown(firstChild), 0.0);
+    QCOMPARE(libraryRowShown(secondChild), 0.0);
     // Then as a toggle with its children loaded: over longDuration, the
     // children never under Album B.
     int expandMs = 0;
@@ -4501,14 +4314,14 @@ void UiMotionTest::treeToggleOpensChildrenThatArriveLater() {
         expandMs += 16;
         QVERIFY2(expandMs <= units->longDuration() + 48, qPrintable(QString::number(albumB->y())));
         for (QQuickItem *child : {firstChild, secondChild}) {
-            QVERIFY(shown(child) == 0.0 || child->y() + shown(child) <= albumB->y() + 0.01);
+            QVERIFY(libraryRowShown(child) == 0.0 || child->y() + libraryRowShown(child) <= albumB->y() + 0.01);
         }
-        halfShown = halfShown || (shown(firstChild) > 0 && shown(secondChild) < rowHeight);
+        halfShown = halfShown || (libraryRowShown(firstChild) > 0 && libraryRowShown(secondChild) < rowHeight);
     }
     QVERIFY(halfShown);
     QVERIFY2(expandMs >= units->longDuration() - 16, qPrintable(QStringLiteral("%1 ms").arg(expandMs)));
     QCOMPARE(albumB->y(), 4 * rowHeight);
-    QCOMPARE(shown(secondChild), rowHeight);
+    QCOMPARE(libraryRowShown(secondChild), rowHeight);
 
     // The next tree, the same rows again, moves nothing.
     QVERIFY(applyTree(4, true));
@@ -4517,12 +4330,12 @@ void UiMotionTest::treeToggleOpensChildrenThatArriveLater() {
 }
 
 // With animations off, a toggle moves the rows at once, both ways, and the
-// children show whole (#373 H9 T5).
+// children show whole.
 void UiMotionTest::treeToggleIsInstantWithAnimationsOff() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey});
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowSize());
     QVERIFY(window != nullptr);
     Kirigami::Platform::Units *units = unitsOf(window);
     QVERIFY(units != nullptr);
@@ -4557,7 +4370,7 @@ void UiMotionTest::treeChangesOtherThanAToggleAreInstant() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey});
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowSize());
     QVERIFY(window != nullptr);
     QQuickItem *view = named(window, "libraryView");
     QVERIFY(QTest::qWaitFor([&]() { return view->property("count").toInt() == 3; }));
@@ -4574,27 +4387,15 @@ void UiMotionTest::treeChangesOtherThanAToggleAreInstant() {
 // over shortDuration with OutCubic, under the dropped row.
 void UiMotionTest::queueRowsADragDisplacesSlide() {
     QueueRowsModel rows;
-    QVector<QueueRowData> initial;
-    for (int i = 0; i < 5; ++i) {
-        QueueRowData data;
-        data.title = QStringLiteral("Track %1").arg(i);
-        data.path = queuePath(i);
-        data.lengthText = QStringLiteral("1:00");
-        initial.push_back(data);
-    }
-    rows.setRows(initial);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
+    rows.setRows(fiveQueueRows());
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     bridge->setProperty("queueRows", QVariant::fromValue<QObject *>(&rows));
     bridge->setProperty("queueLength", 5);
     QQuickItem *view = named(window, "playlistView");
     QVERIFY(QTest::qWaitFor([&]() { return itemAtIndex(view, 4) != nullptr; }));
     QObject *controller = qvariant_cast<QObject *>(named(window, "mainQueuePane")->property("controller"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
     auto *slide = qvariant_cast<QObject *>(view->property("slideAnimation"));
     QVERIFY(slide != nullptr);
     QCOMPARE(slide->property("duration").toInt(), units->shortDuration());
@@ -4626,20 +4427,10 @@ void UiMotionTest::queueRowsADragDisplacesSlide() {
 // after a drag.
 void UiMotionTest::queueRowsTheKeyboardMovesMoveAtOnce() {
     QueueRowsModel rows;
-    QVector<QueueRowData> initial;
-    for (int i = 0; i < 5; ++i) {
-        QueueRowData data;
-        data.title = QStringLiteral("Track %1").arg(i);
-        data.path = queuePath(i);
-        data.lengthText = QStringLiteral("1:00");
-        initial.push_back(data);
-    }
-    rows.setRows(initial);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
+    rows.setRows(fiveQueueRows());
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     bridge->setProperty("queueRows", QVariant::fromValue<QObject *>(&rows));
     bridge->setProperty("queueLength", 5);
     QQuickItem *view = named(window, "playlistView");
@@ -4665,7 +4456,7 @@ void UiMotionTest::animationsOffMakeEveryChangeInstant() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey, kAlbumAKey});
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowSize());
     QVERIFY(window != nullptr);
     Kirigami::Platform::Units *units = unitsOf(window);
     QVERIFY(units != nullptr);
@@ -4728,7 +4519,7 @@ void UiMotionTest::nothingAnimatesOnceTheMotionIsDone() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey, kAlbumAKey});
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowSize());
     QVERIFY(window != nullptr);
     QObject *bridge = bridgeOf(window);
     bridge->setProperty("queueRows", queueRows());
@@ -4765,22 +4556,16 @@ void UiMotionTest::nothingAnimatesOnceTheMotionIsDone() {
 // with the cover before kept while the new track's is not known, then its
 // cover. The cover before shows until the new one fades in over the long
 // curve; the stand-in for a cover shows only for a track known to have
-// none, fading in under the cover before as that goes (#373 H11), and the
-// tile's mark, of nothing playing, never shows.
+// none, fading in under the cover before as that goes, and the tile's mark,
+// of nothing playing, never shows.
 void UiMotionTest::nowPlayingKeepsTheCoverUntilTheNextTracksIsKnown() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QQuickItem *standIn = itemNamed(panel, QStringLiteral("albumArtStandIn"));
     // The tile at rest, as for nothing playing, never shows; it has no
-    // mark of its own any more (#373 H30).
+    // mark of its own.
     QQuickItem *tile = itemNamed(panel, QStringLiteral("nowPlayingCover"));
     QVERIFY(tile != nullptr);
     QVERIFY(itemNamed(panel, QStringLiteral("albumArtPlaceholderGlyph")) == nullptr);
@@ -4838,76 +4623,6 @@ void UiMotionTest::nowPlayingKeepsTheCoverUntilTheNextTracksIsKnown() {
 
 namespace {
 
-// The tests of one shard, with FERROUS_TEST_SHARD=<shard>/<shards>. CTest
-// runs each shard in a process of its own, all in parallel
-// (ui/CMakeLists.txt). A test is a row of a data-driven function, or a
-// function without data: a few functions have many rows that take seconds
-// each, and shards of whole functions came out unevenly. In the order of
-// `-datatags`, the declaration order, a shard has every shards-th test from
-// the shard-th. The rule needs no list kept up to date, and the rows of a
-// function, alike in cost, go to every shard. Without the variable,
-// `sharded` is false and every test runs.
-struct TestShard {
-    bool sharded = false;
-    // The lines of `-datatags` for the shard's tests: "<class> <function>"
-    // or "<class> <function> <tag>".
-    QStringList listing;
-    // The tests as QTest takes them on its command line: "<function>" or
-    // "<function>:<tag>".
-    QStringList tests;
-    QString error;
-};
-
-TestShard testShardFromEnvironment() {
-    TestShard shard;
-    const QString value = qEnvironmentVariable("FERROUS_TEST_SHARD");
-    if (value.isEmpty()) {
-        return shard;
-    }
-    shard.sharded = true;
-    const QStringList parts = value.split(QLatin1Char('/'));
-    bool indexValid = false;
-    bool countValid = false;
-    const int index = parts.size() == 2 ? parts.at(0).toInt(&indexValid) : 0;
-    const int count = parts.size() == 2 ? parts.at(1).toInt(&countValid) : 0;
-    if (!indexValid || !countValid || index < 1 || index > count) {
-        shard.error = QStringLiteral("FERROUS_TEST_SHARD is \"%1\", not <shard>/<shards> with 1 <= shard <= shards")
-                          .arg(value);
-        return shard;
-    }
-    // QTest lists the tests, rows and all, only on its standard output and
-    // only to exit after: ask this binary, unsharded, in a process of its own.
-    QProcess listing;
-    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-    environment.remove(QStringLiteral("FERROUS_TEST_SHARD"));
-    listing.setProcessEnvironment(environment);
-    listing.start(QCoreApplication::applicationFilePath(), {QStringLiteral("-datatags")});
-    if (!listing.waitForFinished(30000) || listing.exitStatus() != QProcess::NormalExit
-        || listing.exitCode() != 0) {
-        shard.error = QStringLiteral("Could not list the tests with -datatags: %1 %2")
-                          .arg(listing.errorString(), QString::fromLocal8Bit(listing.readAllStandardError()));
-        return shard;
-    }
-    const QStringList lines = QString::fromLocal8Bit(listing.readAllStandardOutput()).split(QLatin1Char('\n'));
-    int position = 0;
-    for (const QString &line : lines) {
-        const QStringList fields = line.split(QLatin1Char(' '));
-        if (fields.size() < 2) {
-            continue;
-        }
-        if (position++ % count != index - 1) {
-            continue;
-        }
-        shard.listing << line;
-        const QString tag = line.section(QLatin1Char(' '), 2);
-        shard.tests << (tag.isEmpty() ? fields.at(1) : fields.at(1) + QLatin1Char(':') + tag);
-    }
-    if (shard.tests.isEmpty()) {
-        shard.error = QStringLiteral("Shard %1 has no tests").arg(value);
-    }
-    return shard;
-}
-
 } // namespace
 
 int main(int argc, char **argv) {
@@ -4933,29 +4648,7 @@ int main(int argc, char **argv) {
     qputenv("XDG_CACHE_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("cache"))));
     QApplication app(argc, argv);
     UiMotionTest test;
-    const TestShard shard = testShardFromEnvironment();
-    if (!shard.error.isEmpty()) {
-        // To standard error, not with qCritical(): before qExec(), Qt logs to
-        // the journal where standard error is not a terminal, as under CTest.
-        std::fprintf(stderr, "%s\n", qPrintable(shard.error));
-        return 1;
-    }
-    if (!shard.sharded) {
-        return QTest::qExec(&test, argc, argv);
-    }
-    QStringList arguments;
-    for (int i = 0; i < argc; ++i) {
-        arguments << QString::fromLocal8Bit(argv[i]);
-    }
-    // QTest's -datatags lists every test: list the shard's, which
-    // check_test_shards.cmake checks against it.
-    if (arguments.contains(QStringLiteral("-datatags"))) {
-        for (const QString &line : shard.listing) {
-            std::printf("%s\n", qPrintable(line));
-        }
-        return 0;
-    }
-    return QTest::qExec(&test, arguments + shard.tests);
+    return qExecShard(&test, argc, argv);
 }
 
 void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink_data() {
@@ -4967,12 +4660,12 @@ void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink_data() {
     // the artist wrapping.
     QTest::newRow("narrow, stacked") << true << 18.0;
     // 24 pt in a 360 px one: the large-font header, the title beside the
-    // cover and the rest under it (#373 H28 V1).
+    // cover and the rest under it.
     QTest::newRow("narrow, header") << true << 24.0;
 }
 
-// A line that changes cross-fades (#373 H6: out, then in, left each line
-// under half its ink for up to 50 ms): the line before goes out as the
+// A line that changes cross-fades (out, then in, would leave each line under
+// half its ink for up to 50 ms): the line before goes out as the
 // playing track's comes in, at the same time, so at every point of every
 // line, in every frame and at every point of the fade the test sets, the
 // two draw with at least half of a whole text's ink between them, and never
@@ -4985,10 +4678,10 @@ void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink() {
     QFETCH(bool, narrow);
     QFETCH(qreal, pointSize);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
+    // The font, then the narrow size: the narrow layout follows both.
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     if (pointSize > 0) {
         QFont font = window->property("font").value<QFont>();
         font.setPointSizeF(pointSize);
@@ -5000,14 +4693,6 @@ void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink() {
     if (narrow) {
         window->resize(1000, 720);
     }
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
-    // Long enough for many frames of the fade.
-    units->setShortDuration(400);
-    units->setLongDuration(600);
     const QStringList names = narrow ? kNarrowLines : kWideLines;
     bridge->setProperty("currentTrackArtist", QStringLiteral("Lantern Signal"));
     bridge->setProperty("currentTrackGenre", QStringLiteral("Ambient"));
@@ -5057,14 +4742,8 @@ void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink() {
     };
     QString failure;
     int frames = 0;
-    FrameSampler connection(window, [&]() {
-        if (failure.isEmpty() && handover->property("running").toBool()) {
-            ++frames;
-            failure = blink();
-        }
-    });
     // Along a fade at the points the test sets, at its very end, then to
-    // its end in frames.
+    // its end in frames, at Kirigami's durations, on the test's time.
     const auto followTheFade = [&](const char *what) {
         QVERIFY2(handover->property("running").toBool(), what);
         QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
@@ -5085,8 +4764,14 @@ void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink() {
             QVERIFY2(line.incomingOpacity() == 1.0, qPrintable(QString::fromLatin1(what) + QLatin1Char(' ') + name));
         }
         panel->setProperty("handover", 0.0);
+        SteppedAnimationDriver driver;
         QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-        QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+        QVERIFY(framesToEnd(driver, window, handover, [&]() {
+            if (failure.isEmpty() && handover->property("running").toBool()) {
+                ++frames;
+                failure = blink();
+            }
+        }));
         QVERIFY2(failure.isEmpty(), qPrintable(QString::fromLatin1(what) + QStringLiteral(": ") + failure));
         QVERIFY(panelIdle(panel, names));
         stillNames.clear();
@@ -5126,74 +4811,59 @@ void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink() {
                   covers.all.at(2));
         followTheFade("a third track");
     }
-    connection.stop();
     QVERIFY(frames > 0);
 }
 
-void UiMotionTest::nowPlayingLineFadesWholeUnlessOnlyAWordChanges_data() {
-    QTest::addColumn<QString>("key");
-    QTest::addColumn<QString>("before");
-    QTest::addColumn<QString>("after");
-    QTest::addColumn<QStringList>("still");
-    QTest::newRow("the number") << "details" << "2005 · Classical · Track 1 of 2" << "2005 · Classical · Track 2 of 2"
-                                << QStringList{"2005 · Classical · Track", "of 2"};
-    QTest::newRow("the number of a total") << "narrowDetails" << "Track 1 of 8" << "Track 2 of 8"
-                                           << QStringList{"Track", "of 8"};
-    QTest::newRow("the year") << "details" << "2019 · Synth-pop" << "2020 · Synth-pop"
-                              << QStringList{"· Synth-pop"};
-    QTest::newRow("the album") << "artistAlbum" << "Artist A — Album A" << "Artist A — Album B"
-                               << QStringList{"Artist A —"};
-    // Another album: the year, the number and the total change, and
-    // "· Classical · Track" and "of" would be left alone.
-    QTest::newRow("in three places") << "details" << "2006 · Classical · Track 1 of 4"
-                                     << "2005 · Classical · Track 8 of 8" << QStringList{};
-    QTest::newRow("in two places") << "details" << "2005 · Track 2" << "2007 · Track 1" << QStringList{};
-    QTest::newRow("most of it") << "artistAlbum" << "Lumen Drift — Afterimage"
-                                << "Lumen Drift — The Quiet Meridian Hours" << QStringList{};
-    QTest::newRow("a number that gets wider") << "narrowDetails" << "Track 9 of 12" << "Track 10 of 12"
-                                              << QStringList{};
-    QTest::newRow("a field more") << "details" << "2005 · Rock" << "2005 · Rock · Track 2" << QStringList{};
-    QTest::newRow("a field fewer") << "details" << "2005 · Rock · Track 1" << "2005 · Rock" << QStringList{};
-    // The number comes before the total: "Classical ·" would be left alone.
-    QTest::newRow("the total goes") << "narrowDetails" << "Classical · Track 1 of 4" << "Classical · Track 8"
-                                    << QStringList{};
-    QTest::newRow("the total comes") << "narrowDetails" << "Classical · Track 8" << "Classical · Track 8 of 8"
-                                     << QStringList{};
-    QTest::newRow("the year with the album") << "narrowAlbum" << "Album A (2005)" << "Album A (2007)"
-                                             << QStringList{"Album A"};
-    QTest::newRow("the same") << "details" << "2005 · Rock" << "2005 · Rock" << QStringList{"2005 · Rock"};
-}
-
-// What stays still of a line that changes (#373 H2): where only a word or
-// a number of it changes, the rest of it, as #537 has it; otherwise
-// nothing, and the line fades whole: when it changes in more than one
-// place, when less than half of it would stay, or when it has more or
-// fewer fields. No word or separator is left alone in a line that is
-// otherwise gone.
+// What stays still of a line that changes: where only a word or a number of
+// it changes, the rest of it, as #537 has it; otherwise nothing, and the line
+// fades whole: when it changes in more than one place, when less than half of
+// it would stay, or when it has more or fewer fields. No word or separator is
+// left alone in a line that is otherwise gone.
 void UiMotionTest::nowPlayingLineFadesWholeUnlessOnlyAWordChanges() {
-    QFETCH(QString, key);
-    QFETCH(QString, before);
-    QFETCH(QString, after);
-    QFETCH(QStringList, still);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    const QVariantList whole{QVariant(QVariantList{0, static_cast<int>(std::max(before.size(), after.size()))})};
-    QVariant result;
-    QVERIFY(QMetaObject::invokeMethod(named(window, "nowPlayingPanel"), "_keptStill", Q_RETURN_ARG(QVariant, result),
-                                      Q_ARG(QVariant, key), Q_ARG(QVariant, whole), Q_ARG(QVariant, before),
-                                      Q_ARG(QVariant, after)));
-    QStringList runs;
-    for (const QVariant &run : result.toList()) {
-        const QVariantList range = run.toList();
-        QCOMPARE(range.size(), 2);
-        const int start = range.at(0).toInt();
-        const int end = range.at(1).toInt();
-        QCOMPARE(before.mid(start, end - start), after.mid(start, end - start));
-        runs.push_back(after.mid(start, end - start));
+    struct Case {
+        const char *name;
+        QString key;
+        QString before;
+        QString after;
+        QStringList still;
+    };
+    const QList<Case> cases{
+        {"the number", "details", "2005 · Classical · Track 1 of 2", "2005 · Classical · Track 2 of 2",
+         {"2005 · Classical · Track", "of 2"}},
+        {"the number of a total", "narrowDetails", "Track 1 of 8", "Track 2 of 8", {"Track", "of 8"}},
+        {"the year", "details", "2019 · Synth-pop", "2020 · Synth-pop", {"· Synth-pop"}},
+        {"the album", "artistAlbum", "Artist A — Album A", "Artist A — Album B", {"Artist A —"}},
+        // Another album: the year, the number and the total change, and
+        // "· Classical · Track" and "of" would be left alone.
+        {"in three places", "details", "2006 · Classical · Track 1 of 4", "2005 · Classical · Track 8 of 8", {}},
+        {"in two places", "details", "2005 · Track 2", "2007 · Track 1", {}},
+        {"most of it", "artistAlbum", "Lumen Drift — Afterimage", "Lumen Drift — The Quiet Meridian Hours", {}},
+        {"a number that gets wider", "narrowDetails", "Track 9 of 12", "Track 10 of 12", {}},
+        {"a field more", "details", "2005 · Rock", "2005 · Rock · Track 2", {}},
+        {"a field fewer", "details", "2005 · Rock · Track 1", "2005 · Rock", {}},
+        // The number comes before the total: "Classical ·" would be left
+        // alone.
+        {"the total goes", "narrowDetails", "Classical · Track 1 of 4", "Classical · Track 8", {}},
+        {"the total comes", "narrowDetails", "Classical · Track 8", "Classical · Track 8 of 8", {}},
+        {"the year with the album", "narrowAlbum", "Album A (2005)", "Album A (2007)", {"Album A"}},
+        {"the same", "details", "2005 · Rock", "2005 · Rock", {"2005 · Rock"}},
+    };
+    Motion ui;
+    QVERIFY(ui.loaded());
+    QStringList failures;
+    for (const Case &each : cases) {
+        const QVariantList whole{
+            QVariant(QVariantList{0, static_cast<int>(std::max(each.before.size(), each.after.size()))})};
+        QVariant result;
+        QVERIFY(QMetaObject::invokeMethod(ui.panel, "_keptStill", Q_RETURN_ARG(QVariant, result),
+                                          Q_ARG(QVariant, each.key), Q_ARG(QVariant, whole),
+                                          Q_ARG(QVariant, each.before), Q_ARG(QVariant, each.after)));
+        const QString wrong = stillRunsApart(each.before, each.after, result, each.still);
+        if (!wrong.isEmpty()) {
+            failures.push_back(QStringLiteral("%1: %2").arg(QLatin1String(each.name), wrong));
+        }
     }
-    QCOMPARE(runs, still);
+    QVERIFY2(failures.isEmpty(), qPrintable(failures.join(QLatin1Char('\n'))));
 }
 
 void UiMotionTest::nowPlayingAnotherAlbumLeavesNoWordAlone_data() {
@@ -5202,29 +4872,18 @@ void UiMotionTest::nowPlayingAnotherAlbumLeavesNoWordAlone_data() {
     QTest::newRow("narrow") << true;
 }
 
-// Another album, told as BridgeClient tells it (#373 H2, the strip's "·
-// Classical ·" left alone): the details, whose year, number and total
-// change, and the artist and album, fade whole: in every frame and at each
-// point the test sets, nothing of them stays still, every piece of the line
-// before goes out at one opacity, the playing track's comes in as one, and
-// the two cross-fade on one progress, in sequence (#373 H6, H15 H3). The
-// title fades whole too.
+// Another album, told as BridgeClient tells it (with no "· Classical ·" left
+// alone in the strip): the details, whose year, number and total change, and
+// the artist and album, fade whole: in every frame and at each point the test
+// sets, nothing of them stays still, every piece of the line before goes out
+// at one opacity, the playing track's comes in as one, and the two cross-fade
+// on one progress, in sequence. The title fades whole too.
 void UiMotionTest::nowPlayingAnotherAlbumLeavesNoWordAlone() {
     QFETCH(bool, narrow);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    if (narrow) {
-        window->resize(1000, 720);
-    }
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
-    units->setLongDuration(600);
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     bridge->setProperty("currentTrackArtist", QStringLiteral("Lumen Drift"));
     tellDetails(bridge, kTrackA1, QStringLiteral("Moth Copper"), QStringLiteral("Afterimage"), 2006,
                 QStringLiteral("Classical"), 1, 4);
@@ -5260,7 +4919,7 @@ void UiMotionTest::nowPlayingAnotherAlbumLeavesNoWordAlone() {
             if (levels.size() > 1) {
                 return QStringLiteral("%1 goes out at %2 opacities").arg(name).arg(levels.size());
             }
-            // On one progress, in sequence (#373 H15 H3).
+            // On one progress, in sequence.
             const double at = panel->property("handover").toDouble();
             if (std::abs(line.outgoingOpacity() - linesOut(at)) > 1e-9
                 || std::abs(line.incomingOpacity() - linesIn(at)) > 1e-9) {
@@ -5271,12 +4930,6 @@ void UiMotionTest::nowPlayingAnotherAlbumLeavesNoWordAlone() {
     };
     QString failure;
     int frames = 0;
-    FrameSampler connection(window, [&]() {
-        if (failure.isEmpty() && handover->property("running").toBool()) {
-            ++frames;
-            failure = apart();
-        }
-    });
 
     // The path, then the metadata, the total after the number, then the
     // cover.
@@ -5289,7 +4942,7 @@ void UiMotionTest::nowPlayingAnotherAlbumLeavesNoWordAlone() {
     bridge->setProperty("currentTrackTotal", 8);
     bridge->setProperty("currentTrackCoverPath", covers.all.at(1));
     QVERIFY(handover->property("running").toBool());
-    QCOMPARE(handover->property("duration").toInt(), 600);
+    QCOMPARE(handover->property("duration").toInt(), units->longDuration());
     for (const QString &name : names) {
         QVERIFY2(panelLine(panel, name).fades(), qPrintable(name));
     }
@@ -5303,30 +4956,31 @@ void UiMotionTest::nowPlayingAnotherAlbumLeavesNoWordAlone() {
         QVERIFY2(each.isEmpty(), qPrintable(QStringLiteral("at %1: %2").arg(at).arg(each)));
     }
     panel->setProperty("handover", 0.0);
+    // Then every frame of it, on the test's time.
+    SteppedAnimationDriver driver;
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
-    connection.stop();
+    QVERIFY(framesToEnd(driver, window, handover, [&]() {
+        if (failure.isEmpty() && handover->property("running").toBool()) {
+            ++frames;
+            failure = apart();
+        }
+    }));
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
     QVERIFY(panelIdle(panel, names));
 }
 
-// A line that changes cross-fades in sequence (#373 H6, H15 H3): over the
-// fade, at points 1 % apart, the line before goes out over its first 40 %,
-// OutCubic, as the playing track's comes in over all of it, OutCubic, so
-// the two are both over 0.3 for no more than 5 % of the fade (some 10 ms
-// of the long fade's 200; it was 50 ms, two titles superimposed), neither
-// is under 0.3 with the other, and the line keeps at least half of its
-// ink at every point, which is no blink; at its ends one text is whole and
-// the other gone, exactly.
+// A line that changes cross-fades in sequence: over the fade, at points 1 %
+// apart, the line before goes out over its first 40 %, OutCubic, as the
+// playing track's comes in over all of it, OutCubic, so the two are both over
+// 0.3 for no more than 5 % of the fade (some 10 ms of the long fade's 200; at
+// 50 ms two titles read superimposed), neither is under 0.3 with the other,
+// and the line keeps at least half of its ink at every point, which is no
+// blink; at its ends one text is whole and the other gone, exactly.
 void UiMotionTest::nowPlayingLinesCrossFadeOnOneProgress() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"));
     QTRY_VERIFY(panelLine(panel, QStringLiteral("Title")).line()->width() > 0);
     showTrack(bridge, kTrackB1, QStringLiteral("Second"), QStringLiteral("Album B"));
@@ -5357,8 +5011,7 @@ void UiMotionTest::nowPlayingLinesCrossFadeOnOneProgress() {
         }
         QVERIFY2(both <= 5, qPrintable(QStringLiteral("%1: both over 0.3 for %2 % of the fade").arg(name).arg(both)));
     }
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(finish(handover));
     QVERIFY(allLinesStill(panel));
 }
 
@@ -5369,32 +5022,25 @@ void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText_data() {
     QTest::newRow("the next track of the album") << 2;
 }
 
-// No double-exposed text on a track change (#373 H15 H3: the outgoing and
-// the incoming title were both over 30 % for 50 ms, and read
-// superimposed): at the fades' real lengths, 100 and 200 ms, looked at
-// every 5 ms of the change's animation time, as a frame drawn then shows
-// it, the time a line shows its text before and the playing track's both
-// over 0.3 is at most 30 ms all told; and at no point does a line that
-// changes keep under half of a text's ink (no blink), or show neither text
-// over 0.3. From an untagged file to a tagged track whose tags and cover
-// come after its path (H15 F11), to another album, and to the next track
+// No double-exposed text on a track change (an outgoing and an incoming title
+// both over 30 % for 50 ms read superimposed): at the fades' real lengths,
+// 100 and 200 ms, looked at every 5 ms of the change's animation time, as a
+// frame drawn then shows it, the time a line shows its text before and the
+// playing track's both over 0.3 is at most 30 ms all told; and at no point
+// does a line that changes keep under half of a text's ink (no blink), or
+// show neither text over 0.3. From an untagged file to a tagged track whose
+// tags and cover come after its path, to another album, and to the next track
 // of the album. The test steps the animations' time itself: the frame that
 // makes a change's lines before is slow in a Debug build, and on real time
 // the fade ran all but out within it, leaving a frame or two to look at.
 void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText() {
     QFETCH(int, change);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setShortDuration(100);
     units->setLongDuration(200);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     QVERIFY(handover != nullptr);
     bridge->setProperty("currentTrackArtist", change == 0 ? QString() : QStringLiteral("Lantern Signal"));
     if (change == 0) {
@@ -5405,7 +5051,7 @@ void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText() {
     }
     QTRY_VERIFY(panelLine(panel, QStringLiteral("Title")).line()->width() > 0);
     QVERIFY(grown(panel));
-    QTRY_VERIFY(!handover->property("running").toBool());
+    QVERIFY(finish(handover));
 
     // The fade's time, in the test's steps.
     SteppedAnimationDriver driver;
@@ -5505,29 +5151,24 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen_data() {
     QTest::newRow("animations off") << 1 << 2 << false;
 }
 
-// The visualization mode switch (#373 Motion; H1: a black frame on the way
-// back to the spectrogram): in every frame, a plot that has its data shows
-// whole. The chosen plot fades in over the one before, which stays whole
-// under it, over shortDuration on OutCubic, as one picture, and the plot
-// before goes. The spectrogram stays live under the waveform, at 0 and
-// taking no input, so that switching back while playing comes in at the
-// click with its whole view drawn (#373 H7: it waited about 250 ms for a
-// fresh session's columns): the first frame after the click shows it, and
-// no frame is darker than both plots. With animations off the chosen plot
-// shows at once, with no blank frame.
+// The visualization mode switch (with no black frame on the way back to the
+// spectrogram): in every frame, a plot that has its data shows whole. The
+// chosen plot fades in over the one before, which stays whole under it, over
+// shortDuration on OutCubic, as one picture, and the plot before goes. The
+// spectrogram stays live under the waveform, at 0 and taking no input, so
+// that switching back while playing comes in at the click with its whole view
+// drawn (not some 250 ms later, with a fresh session's columns): the first
+// frame after the click shows it, and no frame is darker than both plots.
+// With animations off the chosen plot shows at once, with no blank frame.
 void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     QFETCH(int, displayMode);
     QFETCH(int, channels);
     QFETCH(bool, animated);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     // Long enough for frames along the fade.
     units->setShortDuration(animated ? 400 : 0);
-    QObject *bridge = bridgeOf(window);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QQuickItem *surface = named(window, "visualizationSurface");
     QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
@@ -5581,9 +5222,8 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     const auto whole = [](QQuickItem *plot) {
         return plot->isVisible() && plot->opacity() == 1.0 && !plot->property("awaitingData").toBool();
     };
-    // The playheads drawn (H2: two through the fade): those of the plots
-    // that show, at any opacity, and draw theirs. Every spectrogram lane
-    // draws the same one.
+    // The playheads drawn: those of the plots that show, at any opacity, and
+    // draw theirs. Every spectrogram lane draws the same one.
     QQuickItem *waveformItem = itemNamed(waveform, QStringLiteral("waveformEditorItem"));
     QVERIFY(waveformItem != nullptr);
     const auto playheads = [&]() {
@@ -5663,7 +5303,7 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     for (int round = 0; round < 2; ++round) {
         // To the waveform, which has its data: it comes in over the
         // spectrogram once it has drawn its first frame of the track, at 0
-        // until then (#373 H11), or with animations off replaces it then.
+        // until then, or with animations off replaces it then.
         QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
         QVERIFY(waveform->isVisible());
         QVERIFY(spectrogram->isVisible());
@@ -5724,7 +5364,7 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
         }
         window->update();
         QVERIFY(QTest::qWaitFor([&]() { return firstShownMs >= 0; }, 2000));
-        // Frames, not a session's columns, away (H7: 251 ms): the bound
+        // Frames, not a session's columns (some 250 ms), away: the bound
         // leaves room for a loaded test machine's software rendering.
         QVERIFY2(firstShownMs < 125, qPrintable(QStringLiteral("shown %1 ms after the click").arg(firstShownMs)));
         sinceClick.invalidate();
@@ -5760,7 +5400,7 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     // in at the click, with what it has, and its columns come in as they
     // would were it shown.
     QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
-    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+    QTRY_VERIFY(finish(fade) && !surface->property("modeSwitching").toBool());
     for (SpectrogramItem *pane : panes()) {
         pane->releaseStorage();
     }
@@ -5769,6 +5409,7 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     if (animated) {
         QVERIFY(fade->property("running").toBool());
     }
+    QVERIFY(finish(fade));
     QTRY_VERIFY(!waveform->isVisible());
     QCOMPARE(spectrogram->opacity(), 1.0);
     for (SpectrogramItem *pane : panes()) {
@@ -5785,6 +5426,7 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     if (animated) {
         QVERIFY(fade->property("running").toBool());
     }
+    QVERIFY(finish(fade));
     QTRY_COMPARE(waveform->opacity(), 1.0);
     QTRY_VERIFY(spectrogram->property("standby").toBool());
     QCOMPARE(spectrogram->opacity(), 0.0);
@@ -5799,13 +5441,12 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode_data() {
     QTest::newRow("dark, animations off") << true << false;
 }
 
-// The empty pane's floor follows the mode (#373 H4, P5; H2's P1 made the
-// light theme's bare pane the view colour): before any audio and while the
-// first track is analysed, the spectrogram's pane is the plot's floor,
-// its indigo (#373 H11 P19: not black, which silence within a track still
-// is), also where a rolling view is not yet filled, and the waveform's the
-// view colour, in both themes. Switching modes on the empty pane switches the floor with
-// the mode's cross-fade, and the first data never changes it. What is drawn
+// The empty pane's floor follows the mode: before any audio and while the
+// first track is analysed, the spectrogram's pane is the plot's floor, its
+// indigo (not black, which silence within a track still is), also where a
+// rolling view is not yet filled, and the waveform's the view colour, in both
+// themes. Switching modes on the empty pane switches the floor with the
+// mode's cross-fade, and the first data never changes it. What is drawn
 // on it, the mode switch, takes the mode's plot colours.
 void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
     QFETCH(bool, dark);
@@ -5821,32 +5462,28 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
         QGuiApplication::setPalette(palette);
     }
     const auto restorePalette = qScopeGuard([&]() { QGuiApplication::setPalette(before); });
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setShortDuration(animated ? 150 : 0);
     units->setLongDuration(animated ? 400 : 1);
     auto *tokens = qvariant_cast<QObject *>(window->property("uiPalette"));
     QVERIFY(tokens != nullptr);
     QCOMPARE(tokens->property("themeIsDark").toBool(), dark);
     const QColor view = tokens->property("view").value<QColor>();
-    QObject *bridge = bridgeOf(window);
     QQuickItem *pane = named(window, "spectrogramPane");
     QQuickItem *layer = named(window, "plotLayer");
     QQuickItem *surface = named(window, "visualizationSurface");
     QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
     QQuickItem *waveform = named(window, "mainWaveformSurface");
     QVERIFY(pane && layer && surface && spectrogram && waveform);
-    // H2's view-colour layer is gone.
+    // No layer of the view colour under the plots.
     QVERIFY(itemNamed(window->contentItem(), QStringLiteral("plotViewFloor")) == nullptr);
     QObject *fade = qvariant_cast<QObject *>(surface->property("modeFadeAnimation"));
     QVERIFY(fade != nullptr);
     auto *spectrogramSet = qvariant_cast<QObject *>(tokens->property("spectrogramPlot"));
     auto *waveformSet = qvariant_cast<QObject *>(tokens->property("waveformPlot"));
-    // The plot's floor (#373 H11 P19), the same in both themes.
+    // The plot's floor, the same in both themes.
     const QColor floor(QStringLiteral("#14062e"));
     QCOMPARE(tokens->property("plotFloor").value<QColor>(), floor);
     QCOMPARE(spectrogramSet->property("plotBg").value<QColor>(), floor);
@@ -5904,7 +5541,7 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
             QVERIFY2(between(drawn.green(), from.green(), to.green())
                          && between(drawn.blue(), from.blue(), to.blue()),
                      qPrintable(drawn.name()));
-            QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
+            QVERIFY(finish(fade));
         } else {
             QVERIFY(!fade->property("running").toBool());
         }
@@ -5942,24 +5579,19 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
     // floor is the same, at once and after.
     QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, 2),
                                       Q_ARG(bool, true)));
-    QList<SpectrogramItem *> lanes;
-    QTRY_VERIFY([&]() {
-        lanes.clear();
-        for (QQuickItem *item : itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))) {
-            lanes.push_back(qobject_cast<SpectrogramItem *>(item));
-        }
-        return lanes.size() == 2;
-    }());
-    constexpr int bins = 4'097;
-    constexpr int columns = 200;
-    for (qsizetype index = 0; index < lanes.size(); ++index) {
-        lanes.at(index)->feedPrecomputedChunk(QByteArray(bins * columns, '\0'), bins, static_cast<int>(index),
-                                              columns, 0, 2'000, 48'000, 1'024, false, true, 1, false);
-    }
+    QList<QQuickItem *> lanes;
+    QTRY_COMPARE((lanes = itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))).size(), 2);
+    feedFirstColumns(lanes, '\0');
     QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
     QCOMPARE(pane->property("color").value<QColor>(), floor);
     QCOMPARE(layer->property("plotColors").value<QObject *>(), spectrogramSet);
-    QTest::qWait(animated ? 450 : 50);
+    {
+        // Past the longest fade, on the test's time, then a few frames.
+        SteppedAnimationDriver driver;
+        // False where nothing runs, as it should.
+        static_cast<void>(driver.step(450));
+    }
+    QTest::qWait(50);
     QCOMPARE(pane->property("color").value<QColor>(), floor);
     // The rolling view at the track's start has its newest columns at its
     // right edge: the part not yet filled is the floor, not black.
@@ -5970,8 +5602,8 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
     // mode.
     bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     bridge->setProperty("currentTrackPath", QString());
-    for (SpectrogramItem *lane : lanes) {
-        lane->releaseStorage();
+    for (QQuickItem *lane : lanes) {
+        qobject_cast<SpectrogramItem *>(lane)->releaseStorage();
     }
     QTRY_VERIFY(spectrogram->property("awaitingData").toBool());
     QTRY_VERIFY(expectFloor(0, "stopped"));
@@ -5985,25 +5617,21 @@ void UiMotionTest::viewerControlsFadeWithTheStrip_data() {
     QTest::newRow("in the window") << false;
 }
 
-// The viewer's controls hide and show together (#373 H1: the strip faded,
-// the corner controls cut): the title strip over the whole screen, the
-// corner plate in the window, the mode switch and the lanes' Mute and Solo
-// all fade on one curve, at the same opacity in every frame, shown at once
-// for the key that wakes them and hidden only once faded out. The plots'
-// crosshair and its readouts fade with them too (#373 H3: it went at once).
-// All of them take the auto-hide's one level as their opacity, and the
-// pointer hides once it is 0, not as the fade starts (#373 H4).
+// The viewer's controls hide and show together (not the strip fading as the
+// corner controls cut): the title strip over the whole screen, the corner
+// plate in the window, the mode switch and the lanes' Mute and Solo all fade
+// on one curve, at the same opacity in every frame, shown at once for the key
+// that wakes them and hidden only once faded out. The plots' crosshair and
+// its readouts fade with them too, not going at once. All of them take the
+// auto-hide's one level as their opacity, and the pointer hides once it is 0,
+// not as the fade starts.
 void UiMotionTest::viewerControlsFadeWithTheStrip() {
     QFETCH(bool, wholeScreen);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     // Long enough for frames along the fade.
     units->setShortDuration(400);
-    QObject *bridge = bridgeOf(window);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
     QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
@@ -6033,8 +5661,8 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
                                                                        : QStringLiteral("spectrogramPopupControls"));
     QQuickItem *modeSwitch = itemNamed(host->contentItem(), QStringLiteral("visualizationModeSwitch"));
     QVERIFY(controls && modeSwitch);
-    // Over the whole screen, the mode switch is in the strip (#373 H40),
-    // which it fades with as its part; in the window, it is the plot's.
+    // Over the whole screen, the mode switch is in the strip, which it fades
+    // with as its part; in the window, it is the plot's.
     QList<QQuickItem *> followers;
     if (wholeScreen) {
         QVERIFY(controls->isAncestorOf(itemNamed(controls, QStringLiteral("spectrogramStripModeSwitch"))));
@@ -6170,23 +5798,19 @@ double drawnOpacity(const QQuickItem *item) {
 
 } // namespace
 
-// The viewer's controls come back as one (#373 H5: the plates' fill came in
-// about 130 ms before the lanes' M and S): with the pointer moving on a
-// lane, the title strip or the corner plate, the mode switch and the lane's
-// Mute and Solo, each plate's fill and each button's glyph, are at the
-// auto-hide's one level in every frame, from hidden to shown. The lanes'
-// buttons show on the pointer (the default), not always.
+// The viewer's controls come back as one (no plate's fill some 130 ms before
+// the lanes' M and S): with the pointer moving on a lane, the title strip or
+// the corner plate, the mode switch and the lane's Mute and Solo, each
+// plate's fill and each button's glyph, are at the auto-hide's one level in
+// every frame, from hidden to shown. The lanes' buttons show on the pointer
+// (the default), not always.
 void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
     QFETCH(bool, wholeScreen);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     // Long enough for frames along the fade.
     units->setShortDuration(400);
-    QObject *bridge = bridgeOf(window);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
     QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
@@ -6221,9 +5845,9 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
     QQuickItem *laneButtons = itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).first();
     // Each plate's fill and a glyph on it. In the window, the mode switch
     // and the viewer's controls are on the corner's one plate, which the
-    // plot layer draws (#373 H37).
-    // Over the whole screen, the mode switch is on the strip (#373 H40),
-    // with no plate of its own.
+    // plot layer draws.
+    // Over the whole screen, the mode switch is on the strip, with no plate
+    // of its own.
     QQuickItem *cornerPlate = wholeScreen ? nullptr : itemNamed(host->contentItem(), QStringLiteral("plotCornerPlate"));
     QList<QPair<QString, QQuickItem *>> drawn{
         {QStringLiteral("the mode switch's icon"),
@@ -6292,10 +5916,9 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
     });
     // The pointer moving on the lane wakes them; then, hidden again, the
     // pointer comes back onto the lane from outside the view. In a viewer
-    // the plates that show on the pointer show with its controls (#373 H6:
-    // the mode switch, then the lane's buttons, came in on their own curves
-    // after the strip), so the pointer leaving the view leaves them as they
-    // are.
+    // the plates that show on the pointer show with its controls (not the
+    // mode switch, then the lane's buttons, on their own curves after the
+    // strip), so the pointer leaving the view leaves them as they are.
     for (const bool fromOutside : {false, true}) {
         if (fromOutside) {
             autoHide->setProperty("hideDelay", 1);
@@ -6323,17 +5946,22 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
 
     // The controls shown, the pointer comes onto the lane from outside the
     // view, as when it reaches a viewer that has just opened: nothing comes
-    // in on a curve of its own after them (#373 H6, 73 ms after the strip).
+    // in on a curve of its own after them.
     QTest::mouseMove(host, QPoint(-20, -20));
     QVERIFY(QMetaObject::invokeMethod(autoHide, "wake"));
     QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
     QVERIFY2(apart().isEmpty(), qPrintable(QStringLiteral("shown, the pointer outside: ") + apart()));
-    // Sampled along what would be a fade, as no frame need be drawn.
-    QTest::mouseMove(host, onLane);
-    for (int sample = 0; sample < 20; ++sample) {
-        QTest::qWait(units->shortDuration() / 10);
-        QVERIFY2(apart().isEmpty(), qPrintable(QStringLiteral("the pointer arrived, sample %1: %2")
-                                                   .arg(sample).arg(apart())));
+    // Sampled along what would be a fade, and as long again, on the test's
+    // time, as no frame need be drawn.
+    {
+        SteppedAnimationDriver driver;
+        QTest::mouseMove(host, onLane);
+        for (int sample = 0; sample < 20; ++sample) {
+            // False where nothing runs, as it should.
+            static_cast<void>(driver.step(units->shortDuration() / 10));
+            QVERIFY2(apart().isEmpty(), qPrintable(QStringLiteral("the pointer arrived, sample %1: %2")
+                                                       .arg(sample).arg(apart())));
+        }
     }
     QCOMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
     QCOMPARE(laneButtons->property("revealLevel").toDouble(), 1.0);
@@ -6343,19 +5971,17 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
 
-// The viewer in the window opens over the pane's last frame (#373 H5: the
-// pane went blank for about 46 ms, as the visualization left it at once and
-// the viewer faded in over the empty pane). In every frame from the open,
-// the visualization is either still in the pane or the pane has kept its
-// last frame; under the open viewer, the pane shows what it showed before.
-// Closed, the visualization is back and the kept frame goes. The pane makes
+// The viewer in the window opens over the pane's last frame (not a blank pane
+// for some 46 ms, as the visualization leaves it at once and the viewer fades
+// in over the empty pane). In every frame from the open, the visualization is
+// either still in the pane or the pane has kept its last frame; under the
+// open viewer, the pane shows what it showed before. Closed, the
+// visualization is back and the kept frame goes. The pane makes
 // the frame only while it keeps one.
 void UiMotionTest::windowedViewerOpensOverThePanesLastFrame() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QQuickItem *pane = named(window, "spectrogramPane");
     QQuickItem *surface = named(window, "visualizationSurface");
@@ -6461,14 +6087,13 @@ void UiMotionTest::windowedViewerOpensOverThePanesLastFrame() {
 
 // The viewer takes the visualization whole into its window, whichever
 // window it opened in before and when the setting changes while it is open
-// (#373 H6: the pane's kept frame, a ShaderEffectSource of the
-// visualization, kept it in the main window's scene when the whole-screen
-// window took it; the two windows' render threads drew its nodes at once,
-// and the app crashed. The setting comes from the backend after it is
-// set, so a viewer opened just after it is set opens in the window first).
-// Wherever the viewer shows the visualization, every item of it is in that
-// window; the pane keeps no frame of it, and has no frame, unless it is in
-// the main window.
+// (a frame the pane kept, a ShaderEffectSource of the visualization, would
+// keep it in the main window's scene when the whole-screen window takes it,
+// and the two windows' render threads, drawing its nodes at once, crash the
+// app. The setting comes from the backend after it is set, so a viewer opened
+// just after it is set opens in the window first). Wherever the viewer shows
+// the visualization, every item of it is in that window; the pane keeps no
+// frame of it, and has no frame, unless it is in the main window.
 void UiMotionTest::viewerTakesTheVisualizationWholeIntoEitherWindow_data() {
     QTest::addColumn<bool>("wholeScreenFirst");
     QTest::addColumn<bool>("whileOpen");
@@ -6481,11 +6106,9 @@ void UiMotionTest::viewerTakesTheVisualizationWholeIntoEitherWindow_data() {
 void UiMotionTest::viewerTakesTheVisualizationWholeIntoEitherWindow() {
     QFETCH(bool, wholeScreenFirst);
     QFETCH(bool, whileOpen);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QQuickItem *pane = named(window, "spectrogramPane");
     QQuickItem *surface = named(window, "visualizationSurface");
@@ -6502,13 +6125,7 @@ void UiMotionTest::viewerTakesTheVisualizationWholeIntoEitherWindow() {
                                       Q_ARG(bool, true)));
     QList<QQuickItem *> lanes;
     QTRY_COMPARE((lanes = itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))).size(), 2);
-    for (qsizetype index = 0; index < lanes.size(); ++index) {
-        constexpr int bins = 4'097;
-        constexpr int columns = 200;
-        qobject_cast<SpectrogramItem *>(lanes.at(index))
-            ->feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins, static_cast<int>(index), columns, 0,
-                                   2'000, 48'000, 1'024, false, true, 1, false);
-    }
+    feedFirstColumns(lanes, '\x80');
     QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
 
     // Whether the visualization is whole in `host`: every item of it there,
@@ -6615,23 +6232,18 @@ void UiMotionTest::albumArtViewerFadesWithItsArt_data() {
 }
 
 // The album art viewer in the window fades in and out with its art and its
-// details (#373 H8: as it closed, the art went at once and the viewer's
-// black floor faded out alone, a blink of about 100 ms). In every frame the
-// viewer draws, the art and the details are drawn at the viewer's own
-// opacity, the art loaded: none of them shows before the viewer or goes
-// before it.
+// details (were the art to go at once as it closes, the viewer's black floor
+// would fade out alone, a blink of some 100 ms). In every frame the viewer
+// draws, the art and the details are drawn at the viewer's own opacity, the
+// art loaded: none of them shows before the viewer or goes before it.
 void UiMotionTest::albumArtViewerFadesWithItsArt() {
     QFETCH(bool, opening);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     // Long enough for frames along the fade.
     units->setLongDuration(400);
-    QObject *bridge = bridgeOf(window);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
     QQuickItem *surface = named(window, "albumArtSurface");
@@ -6834,8 +6446,8 @@ bool sendWheelAt(QQuickWindow *window, QPointF scenePosition, QPoint angleDelta)
 } // namespace
 
 // Showing the album art's details eases the art aside, and hiding them eases
-// it back (#373 H38: it jumped some 170 px in one frame as they toggled).
-// Over the details' 120 ms the space they take grows from nothing to their
+// it back, rather than jumping some 170 px in one frame as they toggle. Over
+// the details' 120 ms the space they take grows from nothing to their
 // width with their seam: they slide in over the view's edge whole, as wide
 // as they rest, and the art fits and centres in what they leave, frame by
 // frame. The art moves one way only, never most of the way at once, and
@@ -6843,13 +6455,9 @@ bool sendWheelAt(QQuickWindow *window, QPointF scenePosition, QPoint angleDelta)
 // zooming are not eased.
 void UiMotionTest::albumArtGlidesAsideForItsDetails() {
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
-    QObject *bridge = bridgeOf(window);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
     QQuickItem *surface = named(window, "albumArtSurface");
@@ -6959,15 +6567,11 @@ void UiMotionTest::albumArtDetailsRestAsTheViewerOpens_data() {
 void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
     QFETCH(bool, wholeScreen);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     // A slide would take 600 ms.
     units->setShortDuration(500);
-    QObject *bridge = bridgeOf(window);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QQuickItem *surface = named(window, "albumArtSurface");
     QVERIFY(bridge && viewer && surface);
@@ -7006,11 +6610,15 @@ void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
         QCOMPARE(copyPath->isVisible(), shown);
         QVERIFY2(copyPath->activeFocusOnTab(), at.constData());
         // And they stay there while the viewer shows: over the time a
-        // slide would take, they do not move.
+        // slide would take, on the test's time, they do not move.
         QSignalSpy moved(surface, SIGNAL(infoRevealChanged()));
         QTRY_VERIFY2(surface->window() != nullptr && surface->window()->isExposed(), at.constData());
         QVERIFY2((surface->window() != window) == wholeScreen, at.constData());
-        QTest::qWait(slide + 100);
+        {
+            SteppedAnimationDriver driver;
+            // False where nothing runs, as it should.
+            static_cast<void>(driver.step(slide + 100));
+        }
         QVERIFY2(moved.isEmpty(), qPrintable(QStringLiteral("%1: %2 steps").arg(open).arg(moved.size())));
         QCOMPARE(reveal(), shown ? 1.0 : 0.0);
         QCOMPARE(column->isVisible(), shown);
@@ -7024,12 +6632,19 @@ void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
         QTRY_VERIFY2(!surface->isVisible(), at.constData());
     }
 
-    // In the open viewer, showing them still slides them in.
+    // In the open viewer, showing them still slides them in, over the
+    // slide's time.
     QSignalSpy moved(surface, SIGNAL(infoRevealChanged()));
-    QVERIFY(QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant())));
-    QVERIFY(viewer->property("albumArtInfoVisible").toBool());
-    QCOMPARE(reveal(), 0.0);
-    QTRY_COMPARE(reveal(), 1.0);
+    {
+        SteppedAnimationDriver driver;
+        QVERIFY(QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant())));
+        QVERIFY(viewer->property("albumArtInfoVisible").toBool());
+        QCOMPARE(reveal(), 0.0);
+        for (int ms = 0; reveal() < 1.0; ms += 16) {
+            QVERIFY2(ms <= slide + 32, qPrintable(QString::number(reveal())));
+            QVERIFY(driver.step(16));
+        }
+    }
     QVERIFY2(moved.size() >= 3, qPrintable(QStringLiteral("%1 steps").arg(moved.size())));
 
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
@@ -7038,20 +6653,16 @@ void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
 
 // The visualization viewer in the window fades out over its last frame as
 // it closes, while the pane under it shows the visualization live again
-// (#373 H8: the visualization went back to the pane at once, and the
-// viewer's black floor faded out alone over it). In every frame the viewer
+// (rather than the visualization going back to the pane at once and the
+// viewer's black floor fading out alone over it). In every frame the viewer
 // draws, it shows the visualization, live or as its kept frame, at its own
 // opacity; once the frame is kept, the pane has the visualization. Faded
 // out, the frame goes. Opened over the whole screen while it fades, the
 // viewer gives the visualization up whole to that window.
 void UiMotionTest::windowedViewerClosesOverItsLastFrame() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
-    QObject *bridge = bridgeOf(window);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
     QQuickItem *pane = named(window, "spectrogramPane");
@@ -7070,13 +6681,7 @@ void UiMotionTest::windowedViewerClosesOverItsLastFrame() {
                                       Q_ARG(bool, true)));
     QList<QQuickItem *> lanes;
     QTRY_COMPARE((lanes = itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))).size(), 2);
-    for (qsizetype index = 0; index < lanes.size(); ++index) {
-        constexpr int bins = 4'097;
-        constexpr int columns = 200;
-        qobject_cast<SpectrogramItem *>(lanes.at(index))
-            ->feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins, static_cast<int>(index), columns, 0,
-                                   2'000, 48'000, 1'024, false, true, 1, false);
-    }
+    feedFirstColumns(lanes, '\x80');
     QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
 
     QQuickItem *popupItem = nullptr;
@@ -7164,8 +6769,8 @@ void UiMotionTest::windowedViewerClosesOverItsLastFrame() {
     // viewer's controls stay while it is open, however slowly the test runs.
     QVERIFY(shell->setProperty("fullscreenControlsHideDelay", 600000));
     // With its scale, lanes at rest draw their lines and labels too, so the
-    // frame has enough to compare (#373 H10 P18: without the scale, the
-    // floor at rest is plain).
+    // frame has enough to compare (without the scale, the floor at rest is
+    // plain).
     bridge->setProperty("showSpectrogramScale", true);
     openInWindow();
     if (QTest::currentTestFailed()) {
@@ -7243,21 +6848,17 @@ void UiMotionTest::albumArtViewerControlsFadeOnOneLevel_data() {
 // The album art viewer's controls hide while the pointer rests and come
 // back as it moves, on the auto-hide's one level, as the visualization
 // viewer's do: over the whole screen the title strip with its buttons, in
-// the window the corner plate with its buttons (#373 H8: the corner plate
-// never hid). Each is drawn at the level in every frame of the fade.
+// the window the corner plate with its buttons. Each is drawn at the level in
+// every frame of the fade.
 void UiMotionTest::albumArtViewerControlsFadeOnOneLevel() {
     QFETCH(bool, wholeScreen);
     Covers covers;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
     units->setLongDuration(0);
     // Long enough for frames along the fade.
     units->setShortDuration(400);
-    QObject *bridge = bridgeOf(window);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QObject *autoHide = window->findChild<QObject *>(QStringLiteral("albumArtFullscreenControlsAutoHide"));
     QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));

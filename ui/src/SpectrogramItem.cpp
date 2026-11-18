@@ -140,16 +140,16 @@ const QColor kScaleOutlineColor(0, 0, 0);
 // plotTick.
 const QColor kScaleTickColor(236, 236, 236, 191);
 // The lane at rest, before it has columns: a line across it at each of the
-// scale's ticks in white 20%, #433858 and 1.78:1 on the floor (#373 H15 H7:
-// 8% was 1.19:1 and faint; H28 V4: at 11%, 1.3:1, the never-played pane
-// read as an empty slab, and the seam between its lanes as one more of its
-// lines), over the lane seam at rest, which is darker than the floor, and
-// while the scale shows, the scale's text in plotTextSecondary.
+// scale's ticks in white 20%, #433858 and 1.78:1 on the floor (at 11%,
+// 1.3:1, the never-played pane read as an empty slab, and the seam between
+// its lanes as one more of its lines), over the lane seam at rest, which is
+// darker than the floor, and while the scale shows, the scale's text in
+// plotTextSecondary.
 const QColor kRestGridLineColor(255, 255, 255, 51);
 // A rest line in the band of a plate over the lane, its label or the mode
 // switch, within kRestQuietReach of its top or foot: white 10 %, some
 // 1.3:1, so that beside the plate it reads as the grid going on behind it
-// rather than a connector cut into it (#373 H31 Y4).
+// rather than a connector cut into it.
 const QColor kRestGridQuietLineColor(255, 255, 255, 26);
 const QColor kRestScaleTextColor(236, 236, 236, 184);
 // The playhead: a 1 px light core cased in 1 px of black 60% on each side.
@@ -764,8 +764,8 @@ struct SpectrogramSceneNode final : public QSGNode {
     QSGSimpleTextureNode *latest{nullptr};
     // Over the canvas, from where the file is cut off (markerSeconds) to
     // the view's end: the floor, as the time after a track's end is not
-    // the track's (#373 H12 Z10: the analysis's columns there, silence to
-    // the length the file claims, drew black).
+    // the track's (the analysis's columns there, silence to the length the
+    // file claims, drew black).
     QSGSimpleRectNode *pastEnd{nullptr};
     QSGSimpleRectNode *playheadCasing{nullptr};
     QSGSimpleRectNode *playhead{nullptr};
@@ -5493,8 +5493,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
         // At rest, without columns to show (before any audio, with nothing
         // playing, or waiting for a session's first columns), the lane keeps
-        // its floor and, while the scale shows, shows it faintly
-        // (#373 H6 P6, H10 P18).
+        // its floor and, while the scale shows, shows it faintly.
         if (!usePrecomputed && !hasCanvas) {
             updateRestGridOverlayLocked(cw, ch);
             placeOverlay(m_restGrid, 0, restGridFrame);
@@ -6318,7 +6317,7 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     }
     m_restGrid.valid = true;
     // The bins and rows a session at the analysis's settings will have at
-    // the lane's rate, for the ticks the scale will then show (#373 H6 P6).
+    // the lane's rate, for the ticks the scale will then show.
     const int bins = shownFrequencyBins(m_analysisFftSize, m_sampleRateHz, m_frequencyCap);
     const double binHz = static_cast<double>(m_sampleRateHz) / static_cast<double>(m_analysisFftSize);
     const std::vector<int> rowBins = frequencyRowBins(height, bins, binHz, m_logScale, nullptr);
@@ -6326,17 +6325,17 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     const int lineWidth = deviceLineWidth(scale);
     // With the scale hidden there are no labels to keep clear of the lane's
     // head and the mode switch: every tick has its line, so the lines are
-    // evenly spaced (#373 H15 H7: the top one left out, the lane's top band
-    // was some 80 px to the others' 45).
+    // evenly spaced (with the top one left out, the lane's top band was some
+    // 80 px to the others' 45).
     const int topClearance = m_gridEnabled ? frequencyScaleTopClearanceLocked() : 0;
     // A line on a row beside a plate, the mode switch's in the corner or the
     // lane's label, or within kPlateReach under or over it, ends, or
-    // starts, kPlateGap clear of it, rather than run along its edge (#373
-    // H29 W4: the first line ran along the switch's foot, 1 px under it).
-    // One rule for every lane: within 8 px rather than 4 (#373 H30: at
-    // 1600x1000 the first lane's top line, 4 px under its label, ran on
-    // while the second's, 3 px under its, was cut). Every tick keeps its
-    // line. The plates' rects are logical, with their 1 px edges.
+    // starts, kPlateGap clear of it, rather than run along its edge, as the
+    // first line did along the switch's foot, 1 px under it. One rule for
+    // every lane: within 8 px rather than 4 (at 4 px, at 1600x1000, the
+    // first lane's top line, 4 px under its label, ran on while the
+    // second's, 3 px under its, was cut). Every tick keeps its line. The
+    // plates' rects are logical, with their 1 px edges.
     constexpr double kPlateGap = 6.0;
     constexpr double kPlateReach = 8.0;
     // A line within kRestQuietReach of a plate's top or foot, in its band,
@@ -6352,9 +6351,8 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
              rowBins, bins, binHz, width, height, scale, topClearance)) {
         // Across the lane, where the scale's tick is, with the scale hidden
-        // too: the pane at rest is an instrument waiting, not a hole
-        // (#373 H14 F3, P23; H10 P18 left the floor plain). The label over
-        // it, where the scale's goes, only with the scale shown.
+        // too: the pane at rest is an instrument waiting, not a hole. The
+        // label over it, where the scale's goes, only with the scale shown.
         const double row = static_cast<double>(tick.pixelY) / scale;
         const double rowHeight = static_cast<double>(lineWidth) / scale;
         const int left = besidePlate(m_laneLabelBounds, row, rowHeight)

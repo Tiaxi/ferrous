@@ -12,10 +12,10 @@ import "../logic/BreakableText.js" as BreakableText
 // could not write, in a window of its own over the editor: the editor's
 // summary, semibold, the lead, then each section of the details, its
 // heading over its files, each file 16 px in, in the text's colour, the
-// lines it wraps to under its own start (#373 H40: it was the plain text,
+// lines it wraps to under its own start (it was the plain text,
 // every line at the heading's x past the first). The heading of what
 // failed is semibold, in the negative colour; that of what succeeded is
-// regular, secondary, so the summary leads (#373 H40: all three were
+// regular, secondary, so the summary leads (all three were
 // semibold). It opens as tall as they are, up to a limit.
 Components.DialogWindow {
     id: root
@@ -28,7 +28,7 @@ Components.DialogWindow {
     // The details' scroll bar shows only while they are taller than the
     // window, and their lines leave it room whether it shows or not: lines
     // that wrapped anew, narrower beside it, could need it then, and it
-    // stayed (#373 H47: at 24 pt Details opened with the bar, its last line
+    // stayed (at 24 pt Details opened with the bar, its last line
     // out of view, where the window had been laid out hidden and small).
     readonly property real scrollBarRoom: detailsView.ScrollBar.vertical.width
     readonly property real lineWidth: Math.max(0, detailsView.width - root.scrollBarRoom)
@@ -45,10 +45,10 @@ Components.DialogWindow {
 
     // TagEditorController.statusDetailSections as rich text: each heading
     // a paragraph, each item one of its own, indented, with 12 px before
-    // each section after the first (#373 H40: a grid unit, 18 px). A path
+    // each section after the first (not a grid unit, 18 px). A path
     // in an item breaks between its folders, those that fit on a line
-    // `width` wide whole, and an error's code stays whole (#373 H47: the
-    // line broke in "ferrous-tagsave").
+    // `width` wide whole, and an error's code stays whole (a line broke
+    // in "ferrous-tagsave").
     function detailsHtmlAt(width) {
         const sections = root.tagEditorApi.statusDetailSections || []
         const indent = root.itemIndent
@@ -106,7 +106,7 @@ Components.DialogWindow {
     // larger one, within the screen.
     defaultWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 36)
     // As tall as the summary and the details at the width it opens at,
-    // each time it opens, up to a limit (#373 H40: it opened 522 px tall
+    // each time it opens, up to a limit (it opened 522 px tall
     // for six lines).
     defaultHeight: Math.min(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 29),
         root.contentPadding

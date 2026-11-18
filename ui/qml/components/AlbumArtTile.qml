@@ -8,20 +8,20 @@ import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 
 // The playing track's cover, edge to edge: no inset, radius or frame. A
-// track without a cover has a stand-in in its place (#373 H11: the panel
-// showed no tile for it, so a track change between one with a cover and
-// one without moved the whole sidebar by the cover's height): the plot's
-// floor colour with one static mark at its centre, the same for every
-// track without a cover (#373 H14 F2: a stand-in of text repeated the
-// lines under it, and without an album it was blank): the app icon's glide
-// and its harmonics, at the icon's own aspect, at a cover mark's strength
-// rather than data's. A small tile, as the narrow layout's 96 px one, has
-// the mark of three curves, without the 4th harmonic. In a light theme a 1 px edge
-// (`standInEdgeColor`) keeps the dark tile from reading as a hole in the
-// sidebar. With nothing playing (`idle`) it shows only the placeholder
-// colour: the now-playing panel shows its compact row then, and while it
-// shrinks into it the tile keeps the track that went (#373 H30: the disc
-// mark it showed then stood alone in an empty band).
+// track without a cover has a stand-in in its place (with no tile for it,
+// a track change between one with a cover and one without moved the whole
+// sidebar by the cover's height): the plot's floor colour with one static
+// mark at its centre, the same for every track without a cover (a stand-in
+// of text repeated the lines under it, and without an album it was blank):
+// the app icon's glide and its harmonics, at the icon's own aspect, at a
+// cover mark's strength rather than data's. A small tile, as the narrow
+// layout's 96 px one, has the mark of three curves, without the 4th
+// harmonic. In a light theme a 1 px edge (`standInEdgeColor`) keeps the
+// dark tile from reading as a hole in the sidebar. With nothing playing
+// (`idle`) it shows only the placeholder colour: the now-playing panel
+// shows its compact row then, and while it shrinks into it the tile keeps
+// the track that went (a mark of its own there stood alone in an empty
+// band).
 //
 // The tile is a keyboard stop while a track plays: a 1 px ring shows its
 // focus while the keyboard is in use, and the Menu key or Shift+F10 opens
@@ -45,30 +45,28 @@ Rectangle {
     property color standInColor: "transparent"
     property color standInEdgeColor: "transparent"
     // The mark's colours, as drawn on the floor: a cover's mark, not the
-    // plot's data. The glide in the icon's amber at the value it had at 68 %,
-    // 5.1:1, its hue and chroma kept (#373 H27: mixed toward the floor it
-    // read as ochre);
-    // the harmonics in its rose and magenta, a little brighter than at
-    // 68 %, the 3rd harmonic some 3.8:1 on the floor rather than 3.2 (#373
-    // H16 I6), and the 2nd a step lighter between them, 4.4:1, as the
-    // icon's rose is (H20: the two harmonics were one value).
+    // plot's data. The glide in the icon's amber at the value it had at
+    // 68 %, 5.1:1, its hue and chroma kept (mixed toward the floor it read
+    // as ochre); the harmonics in its rose and magenta, a little brighter
+    // than at 68 %, the 3rd harmonic some 3.8:1 on the floor rather than
+    // 3.2, and the 2nd a step lighter between them, 4.4:1, as the icon's
+    // rose is, so the two harmonics are not one value.
     property color standInGlideColor: "#b07a1a"
     property color standInHarmonicColor: "#bd5872"
     property color standInHighHarmonicColor: "#b04698"
     // The wide mark's 4th harmonic, as the app icon draws it from 128 px: a
-    // faint violet, some 3.2:1 on the floor, the dimmest trace, below the 3rd
-    // harmonic's value (#373 H21 N1; H24: lifted from 2.6:1 as the icon's
-    // was, where its cut on the top edge fused with the rim; H27: from 2.9:1,
-    // where at 360 px it read as faint as the floor's grain).
+    // faint violet, some 3.2:1 on the floor, the dimmest trace, below the
+    // 3rd harmonic's value (at 2.9:1, at 360 px it read as faint as the
+    // floor's grain).
     property color standInFourthHarmonicColor: "#8049ac"
     // The mark's strokes, by the tile's size, so they weigh alike at every
-    // size (#373 H16 I6: drawn from one file they were 1.6 to 3.2 px): on
-    // the wide mark a stroke of 3.5 px at a 180 px tile, rising to 6.5 px at
-    // 360 (H21: H20's 2 and 4 px read faint), the harmonics 0.8, 0.65 and 0.5
-    // of it, as the app icon tapers them; on the small mark 4, 3.5 and 3 px
-    // (H22: its 3 and 2.5 px read as hairlines at 152 px). The glide 1.3
-    // times that stroke, the focal one, as in the app icon (H25: at the
-    // harmonics' taper the curves read as near-equal stripes).
+    // size (drawn from one file they were 1.6 to 3.2 px): on the wide mark
+    // a stroke of 3.5 px at a 180 px tile, rising to 6.5 px at 360, the
+    // harmonics 0.8, 0.65 and 0.5 of it, as the app icon tapers them; on
+    // the small mark 4, 3.5 and 3 px (3 and 2.5 px read as hairlines at
+    // 152 px). The glide 1.3 times that stroke, the focal one, as in the
+    // app icon (at the harmonics' taper the curves read as near-equal
+    // stripes).
     readonly property real standInStroke: Math.min(6.5, 3 + Math.max(0, root.layoutSize - 152) * 3.5 / 208)
     readonly property bool standInShown: !root.idle && root.coverPath.length === 0
     // The tile's size once in place: the now-playing panel keeps it while
@@ -92,7 +90,7 @@ Rectangle {
     readonly property bool hasCover: !root.idle && root.coverPath.length > 0
     // Hovered by the pointer.
     readonly property bool hovered: tileMouseArea.containsMouse
-    // The ring shows keyboard focus only, as in the lists (#373 H2).
+    // The ring shows keyboard focus only, as in the lists.
     readonly property bool focusRingShown: focusTarget.activeFocus && InputModality.keyboard
     // What takes the keyboard's focus, the pointer and the keys.
     readonly property Item focusItem: focusTarget
@@ -136,17 +134,17 @@ Rectangle {
     }
 
     // The stand-in's mark and its edge: the app icon's glide and its 2nd,
-    // 3rd and faint 4th harmonics (ferrous.svg's own curves, #373 H19: H14
-    // to H18 stretched them to 2:1; H21: the 4th, as the icon's 128 and 256
-    // px drawings have it), rising 1 : 2 : 3 : 4 from a common start at the
-    // lower left, or in a small tile the glide and its 2nd and 3rd
-    // harmonics, as the icon's 32 to 64 px drawings have them (#373 H22:
-    // H14 F2's glide and 3rd harmonic alone read as two hairlines). They start a quarter of
-    // the way in and, as in the icon, run out to the tile's right edge, cut
-    // flush there: a crop of a spectrogram, not a chart's series ending in
-    // round caps (H19), nor ending in the tile's free air (H20: they ended
-    // at three quarters of its width); the 4th leaves through the top edge,
-    // as in the icon (H23: it ran out on the right, under the corner).
+    // 3rd and faint 4th harmonics (ferrous.svg's own curves, not stretched
+    // to 2:1, and the 4th as the icon's 128 and 256 px drawings have it),
+    // rising 1 : 2 : 3 : 4 from a common start at the lower left, or in a
+    // small tile the glide and its 2nd and 3rd harmonics, as the icon's 32
+    // to 64 px drawings have them (the glide and 3rd harmonic alone read as
+    // two hairlines). They start a quarter of the way in and, as in the
+    // icon, run out to the tile's right edge, cut flush there: a crop of a
+    // spectrogram, not a chart's series ending in round caps, nor ending in
+    // the tile's free air, as at three quarters of its width; the 4th
+    // leaves through the top edge, as in the icon, not on the right, under
+    // the corner.
     // Drawn as shapes, so their strokes keep the width set for the tile's
     // size (standInStroke) as the curves scale to it. Assistive technology
     // hears "No album art" from the keyboard stop over it.
@@ -159,12 +157,12 @@ Rectangle {
             // icon's 64-unit drawing at 18.4 units to the icon's one, from a
             // start 240 units in, the ink of its lower three traces 20 units
             // over the tile's middle, the small mark's three too, the 4th
-            // harmonic above them (#373 H23: at 12.3 units it ran out under
+            // harmonic above them (at 12.3 units it ran out under
             // the top right corner, where the icon's leaves through the top
             // edge). The 4th is a true one, as in the icon: as far above the
             // 3rd as the 3rd is above the 2nd at every point, flattening as
             // they do, so that it leaves through the top edge some 82 % across
-            // at about 24 degrees, where the icon's does (H25: at 16 units it
+            // at about 24 degrees, where the icon's does (at 16 units it
             // rose 1.25 times its share and bent up at its end to leave 70 %
             // across). The paths run on past the tile's right side, the 4th's
             // past its top, and the clip cuts them there.

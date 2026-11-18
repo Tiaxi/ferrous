@@ -45,8 +45,8 @@ QtObject {
     // The contrast of a row's tertiary figures on a hovered or selected
     // row's tint. Small figures drawn with subpixel antialiasing reach a
     // strongest pixel lighter than their colour, by up to 14% in contrast
-    // (#373 H45: in Breeze Light a selected row's 5.08:1 "1" drew at
-    // 4.39:1, a hovered row's 4.64:1 "3 tracks" at 4.48:1): at 5.4:1 they
+    // (in Breeze Light a selected row's 5.08:1 "1" drew at 4.39:1, a
+    // hovered row's 4.64:1 "3 tracks" at 4.48:1): at 5.4:1 they
     // draw at 4.5:1 or more. They stay well under the text's contrast.
     readonly property real rowFigureContrast: 5.4
     // Tertiary text on a hovered list row: lightened or darkened to be
@@ -68,7 +68,7 @@ QtObject {
     readonly property color placeholderText: root.readableOn(root._inactiveText, [root.view], 4.6)
     // The artist and album cells of the queue: darkened or lightened where
     // they fall short of 4.5:1 on a selected row under the pointer, as on
-    // light (#373 H35 AC3). #c2c2c3 / #555759 (#5a5c5e as mixed).
+    // light. #c2c2c3 / #555759 (#5a5c5e as mixed).
     readonly property color textColumn: root.readableOn(ColorUtils.mixColor(root.text, root.view, 0.25),
         [root.view, root.selection, root.selectionInactive, root.selectionHovered, root.selectionInactiveHovered], 4.5)
     // The 1 px line where two regions meet. #383b40 / #d6d9dc.
@@ -86,47 +86,45 @@ QtObject {
     // than the selection, which is further from it in hue as well.
     readonly property color hover: root._tintOf(root.text, root.view, 1.3)
     // A pressed button: text over it, a clear step past the hover tint, so
-    // a press reads apart from a hover (#373 H5: 10% read as the hover).
+    // a press reads apart from a hover (at 10% it read as the hover).
     // The least, in whole percent, that is 1.65:1 on the view: 17% / 25%.
     readonly property color pressed: root._tintOf(root.text, root.view, 1.65)
     // The hover tint of the main window's lists, the library's and the
     // queue's: text over the row, the least of it in whole percent that is
     // 1.44:1 on a dark view, a step stronger than a button's, so the row
-    // under the pointer reads across a wide list (#373 H13: at 1.3:1 it was
-    // faint), and 1.31:1 on a light one, where 1.44:1 outweighed the pale
-    // selection and the row under the pointer looked the more selected
-    // (#373 H33 AA1): 13% (#323436) / 14% (#e0e1e1). It stays under the
-    // selection in contrast and apart from it in hue: it is neutral, the
-    // selection blue.
+    // under the pointer reads across a wide list (at 1.3:1 it was faint),
+    // and 1.31:1 on a light one, where 1.44:1 outweighed the pale selection
+    // and the row under the pointer looked the more selected: 13%
+    // (#323436) / 14% (#e0e1e1). It stays under the selection in contrast
+    // and apart from it in hue: it is neutral, the selection blue.
     readonly property color rowHover: root._tintOf(root.text, root.view, root.themeIsDark ? 1.44 : 1.31)
     // A hovered row of the library or the queue: rowHover on the view.
     readonly property color hoveredRow: ColorUtils.drawnOver(root.rowHover, root.view)
     // The view mixed with the accent: 1.6:1 / 1.4:1 on the view, a clear
-    // step past a hovered row in weight as well as in hue (#373 H33 AA1: at
-    // 22 %, #d4edfa, the light one was 1.2:1, under the hover).
+    // step past a hovered row in weight as well as in hue (at 22 %,
+    // #d4edfa, the light one was 1.2:1, under the hover).
     // #1f3e4e / #b5e0f7.
     readonly property color selection: ColorUtils.mixColor(
         root.view, root.accent, root.themeIsDark ? 0.26 : 0.38)
     // The selection of a list without keyboard focus: quieter than the
     // selection, yet further from the view than a hovered row: 1.52:1 /
     // 1.34:1 on the view, between rowHover's 1.45:1 / 1.31:1 and the
-    // selection's 1.6:1 / 1.4:1 (#373 H34 AB2: at 20 % and 27 %, #1c3442
-    // and #cbe9f9, it was 1.40:1 / 1.27:1, under the hover). It differs
+    // selection's 1.6:1 / 1.4:1 (at 20 % and 27 %, #1c3442 and #cbe9f9,
+    // it was 1.40:1 / 1.27:1, under the hover). It differs
     // from the selection by its colour more than by its weight: the view
     // mixed with 24 % / 33 % of the accent, then at 60 % of that mix's
     // saturation and the same luminance, so it keeps its step over the
     // hover and reads as a selection at rest rather than a second active
-    // one (#373 H36: at full saturation, #1e3a4a / #bfe4f8, it was some
-    // 1.5 / 2.8 ΔE from the selection). The playing amber is 6.2:1 /
+    // one (at full saturation, #1e3a4a / #bfe4f8, it was some 1.5 / 2.8 ΔE
+    // from the selection). The playing amber is 6.2:1 /
     // 5.4:1 on it. #283a43 / #cde2ed.
     readonly property color selectionInactive: root._desaturated(
         ColorUtils.mixColor(root.view, root.accent, root.themeIsDark ? 0.24 : 0.33), 0.6)
     // A selected queue row under the pointer: the text colour over the
     // selection, active or inactive, so a selected row answers the pointer
-    // as the others do (#373 H35 AC3: hover changed nothing on it). See
-    // _selectionHoverShare: 4 % / 6 % in Breeze, #284555 / #acd5eb; 6 % on
-    // dark took the warning mark under 3:1. The column text and the amber
-    // are made readable on it.
+    // as the others do. See _selectionHoverShare: 4 % / 6 % in Breeze,
+    // #284555 / #acd5eb; 6 % on dark took the warning mark under 3:1. The
+    // column text and the amber are made readable on it.
     readonly property color selectionHovered: ColorUtils.mixColor(
         root.selection, root.text, root._selectionHoverShare)
     readonly property color selectionInactiveHovered: ColorUtils.mixColor(
@@ -151,9 +149,9 @@ QtObject {
     readonly property color wave: ColorUtils.mixColor(root.text, root.accent, 0.35)
     // The visualization pane's waveform: in a light theme the seek bar's;
     // in a dark one quieter, the accent's hue at 60 % of its saturation and
-    // 68 % lightness, #87bad4, some 8.6:1 on the view (#373 H15 H6: the seek
-    // bar's #b9e1f5, 13:1 over some 29 % of the pane, was the brightest
-    // mass of the dark window). One tone: no played part apart.
+    // 68 % lightness, #87bad4, some 8.6:1 on the view (the seek bar's
+    // #b9e1f5, 13:1 over some 29 % of the pane, was the brightest mass of
+    // the dark window). One tone: no played part apart.
     readonly property color paneWave: root.themeIsDark ? root._withHslLightness(root.accent, 0.6, 0.68) : root.wave
     // Fixed: the spectrogram colour map's amber. It marks only what is
     // playing: the playing row's glyph and title, the playing tree row, the
@@ -179,7 +177,7 @@ QtObject {
         return opacity
     }
     // The scrim behind the search palette: black, 65% on dark, where less
-    // left the window behind it nearly as bright as the palette (#373 H10),
+    // left the window behind it nearly as bright as the palette,
     // and 25% on light, where black reads much sooner.
     readonly property color dim: Qt.rgba(0, 0, 0, root.themeIsDark ? 0.65 : 0.25)
 
@@ -330,8 +328,8 @@ QtObject {
         required property color meterTopSeam
         // The meter before any audio, while the pane is at rest: its track
         // in the plot's floor and its marks in the rest lines' colour, so
-        // it is of one piece with the pane waiting (#373 H31 Y5: the lit
-        // trough stood out as the one instrument switched on).
+        // it is of one piece with the pane waiting (a lit trough stood out
+        // as the one instrument switched on).
         required property color meterRestTrough
         required property color meterRestTick
         // A checked tool button on a plate: a solid fill, at least 3:1 on
@@ -340,8 +338,8 @@ QtObject {
         required property color checkedGlyph
         // The 1 px edge inside a chosen choice on a plate, as the mode
         // switch's chosen segment and a viewer's info toggle while on, over
-        // their neutral fill (#373 H14 F4: the fill alone was 1.4 to
-        // 1.7:1): at least 3:1 on the plate and on the fill.
+        // their neutral fill (the fill alone was 1.4 to 1.7:1): at least
+        // 3:1 on the plate and on the fill.
         required property color segmentEdge
         // A tool button's keyboard focus ring, at least 3:1 on the plate.
         required property color plotFocusRing
@@ -350,30 +348,29 @@ QtObject {
     // The plot's floor: the deep indigo of the spectrogram colour map's
     // quiet end, fixed, the same in both themes. It is what the spectrogram
     // shows where it has no column to draw: never played, while a track is
-    // analysed, and the part of a rolling view not yet filled (#373 H11
-    // P19: black there read as a hole in the window, most of all in a light
-    // theme, and unlike the pane once it plays). The now-playing panel's
+    // analysed, and the part of a rolling view not yet filled (black there
+    // read as a hole in the window, most of all in a light theme, and
+    // unlike the pane once it plays). The now-playing panel's
     // stand-in for a track without a cover is of the same colour, as the
     // plot's own.
     readonly property color plotFloor: "#14062e"
     // A 1 px edge around a tile of the floor that stands for a cover, as
     // the now-playing stand-in's in a light theme and the library's no-art
-    // thumbnail's (#373 H14 F2): lighter than the floor, towards the app
-    // icon's rim, as the icon's tile has one, so it reads as a cover rather
-    // than a hole.
+    // thumbnail's: lighter than the floor, towards the app icon's rim, as
+    // the icon's tile has one, so it reads as a cover rather than a hole.
     readonly property color plotFloorEdge: ColorUtils.mixColor(root.plotFloor, Qt.color("#6a4ad0"), 0.45)
     // The seam between the lanes at rest, never played: a cut, the plot's
-    // deep violet under the floor, as the level meter's seams are (#373 H28
-    // V4: a lighter seam, #372b4d at 1.45:1, read as one more of the rest
-    // lines, white 20 % at 1.78:1, which it is now 1.87:1 from), in the
-    // plot's own hue (#373 H15 H7: the playing seam's neutral grey stood
-    // apart from the violet floor and its lines). Playing, the seam is
+    // deep violet under the floor, as the level meter's seams are (a
+    // lighter seam, #372b4d at 1.45:1, read as one more of the rest lines,
+    // white 20 % at 1.78:1, which it is now 1.87:1 from), in the plot's own
+    // hue (the playing seam's neutral grey stood apart from the violet
+    // floor and its lines). Playing, the seam is
     // plotLaneSeam's neutral one, which shows between lanes of silence.
     readonly property color plotRestLaneSeam: root.spectrogramPlot.meterSeam
     // The never-played waveform's rest lines, at half of full scale over
     // and under each lane's centre line: the text over the view, the
     // least in whole percent that is 1.3:1 on it, as the spectrogram's rest
-    // lines are faint on its floor (#373 H16 I8).
+    // lines are faint on its floor.
     readonly property color waveformRestLine: ColorUtils.drawnOver(
         root._tintOf(root.text, root.view, 1.3), root.view)
 
@@ -393,16 +390,16 @@ QtObject {
         plotTextSecondary: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.72)
         plotOutline: "#000000"
         // Neutral, as all that is drawn on the plot, and lighter than the
-        // floor: 1.41:1 on it, so the seam between lanes reads (#373 H14 G6:
-        // at 1.18:1 it did not), and it shows between lanes of black
+        // floor: 1.41:1 on it, so the seam between lanes reads (at 1.18:1
+        // it did not), and it shows between lanes of black
         // silence too.
         plotLaneSeam: "#2e2e2e"
         plotTick: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.75)
         plotLink: "#7cc8f0"
         // In the colour map's violet, not neutral grey, so the meter reads
         // as part of the plot. The trough is 1.3:1 on the floor; the rungs
-        // are the app icon's harmonic magenta, 3.2:1 on it (#373 H15 H2:
-        // the colour map's capped #c20055 was 2.3:1) and clearly not the
+        // are the app icon's harmonic magenta, 3.2:1 on it (the colour
+        // map's capped #c20055 was 2.3:1) and clearly not the
         // clip lamp's red.
         meterTrough: "#30244a"
         meterFill: "#c149a0"
@@ -438,13 +435,13 @@ QtObject {
         plotLink: root.link
         // The meter in the waveform's colour, so it reads as the plot's own
         // instrument rather than as a piece of the queue's scrollbar above
-        // it, whose greys it had (#373 H12 Z5): the waveform's colour mixed
-        // about 35 % toward the view, less where that would be under 3:1 on
-        // the trough, and a seam across its top. From the pane's waveform
-        // colour, so it stays the plot's own (#373 H15 H6). The trough
-        // frames the bar (LevelMeterItem's `framed`), a step off the view,
-        // so the column reads as an instrument and not as the waveform's
-        // tail (#373 H16 I3: at 1.2:1 it did not show).
+        // it, whose greys it had: the waveform's colour mixed about 35 %
+        // toward the view, less where that would be under 3:1 on the
+        // trough, and a seam across its top. From the pane's waveform
+        // colour, so it stays the plot's own. The trough frames the bar
+        // (LevelMeterItem's `framed`), a step off the view, so the column
+        // reads as an instrument and not as the waveform's tail (at 1.2:1
+        // it did not show).
         meterTrough: root.themeIsDark ? "#2b2d2f" : "#e8e9ea"
         meterFill: root._waveformMeterFill(ColorUtils.drawnOver(waveformColors.meterTrough, root.view))
         meterTopSeam: root.seam
@@ -483,7 +480,7 @@ QtObject {
 
     // A media surface, such as the album art viewer: dark in both themes,
     // as a cover reads best on black and a light theme's white around it
-    // would outshine it (#373 H7, P10). It is the spectrogram's set on a
+    // would outshine it. It is the spectrogram's set on a
     // black floor, so both viewers are of one family: the art on black,
     // the title strip and the details on the set's strip colour.
     readonly property PlotColors mediaPlot: PlotColors {
@@ -598,7 +595,7 @@ QtObject {
     }
     // The text of a viewer over the whole screen, its title strip and the
     // album art's details alike: a step larger, 1.2 times the window's
-    // (#373 H7, and H40: the strip and the details on one type scale).
+    // (so the strip and the details are on one type scale).
     readonly property real fullscreenTextScale: 1.2
     // Old-style figures line up in columns with tabular figures.
     readonly property var tabularFigures: ({ "tnum": 1 })
@@ -618,7 +615,7 @@ QtObject {
     // the largest icon size a line of the font holds, 16 px with the
     // default 10 pt font and 32 px at 24 pt. The dialogs' measures that
     // bound text, tuned at 10 pt, follow the font through scaledSize(), so
-    // the default font draws every dialog as it was (#373 H45: glyphs and
+    // the default font draws every dialog as it was (unscaled, glyphs and
     // widths stayed at their 10 pt sizes at 24 pt).
     readonly property int labelIconSize: Kirigami.Units.iconSizes.sizeForLabels
 

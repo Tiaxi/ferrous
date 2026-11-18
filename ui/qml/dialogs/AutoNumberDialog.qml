@@ -23,7 +23,7 @@ Components.CompactDialogWindow {
     // Breeze draws a check box's 16 px box in the middle of its 20 px
     // indicator, which leaves room for the focus frame: the check boxes,
     // box and text, move left by that room, so their boxes start where the
-    // fields' frames do (#373 H45: they were 2 px in). A style whose box
+    // fields' frames do (they were 2 px in). A style whose box
     // fills its indicator needs none.
     readonly property real checkBoxInset: Math.max(0, (writeTotalsCheck.indicator.width - 16) / 2)
 
@@ -50,7 +50,7 @@ Components.CompactDialogWindow {
     objectName: "autoNumberDialog"
     title: I18n.i18nc("@title:window", "Auto Number")
     // As wide as its form, whose check boxes do not wrap, in the font
-    // they are in; the description above it wraps (#373 H10, H38).
+    // they are in; the description above it wraps.
     contentWidth: autoNumberForm.implicitWidth
     defaultWidth: Math.max(root.minimumWidth, root._neededWidth)
 
@@ -91,7 +91,7 @@ Components.CompactDialogWindow {
     // One form in reading order, in three groups a FormGroupGap apart, the
     // form's own row spacing within them: the tracks' start and totals;
     // the discs' option, and the start and the reset at each disc that it
-    // enables (#373 H41: the reset was in the last group, apart from the
+    // enables (the reset was in the last group, apart from the
     // option that enables it); then the reset at each folder. The check
     // boxes have no labels, so they start where the fields do.
     Kirigami.FormLayout {
@@ -115,14 +115,14 @@ Components.CompactDialogWindow {
             objectName: "autoNumberStartingTrackError"
             // It wraps under its field: its whole sentence, which the form
             // counts even while it is hidden, would widen the fields'
-            // column past the window at large fonts (#373 H10).
+            // column past the window at large fonts.
             Layout.maximumWidth: root.errorWidth
             visible: !root.startingTrackValid
             wrapMode: Text.WordWrap
             color: root.uiPalette.negative
             text: I18n.i18nc("@info", "Enter a starting track from 1 to %1.", root.maximumNumber)
         }
-        // With the tracks (#373 H38: under the disc's start, it read as a
+        // With the tracks (under the disc's start, it read as a
         // disc option): it writes each track's total, and the discs' too
         // when it writes disc numbers.
         CheckBox {

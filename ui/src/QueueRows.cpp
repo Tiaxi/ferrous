@@ -13,7 +13,7 @@
 namespace {
 
 // A length that is not known, as the transport writes a time it does not
-// know: en dashes, not hyphens (#373 H35 AC2).
+// know: en dashes, not hyphens.
 QString unknownLength() {
     return i18nc("@info:status no time", "–:––");
 }

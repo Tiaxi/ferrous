@@ -135,8 +135,12 @@ OverlayOnScreen overlayOnScreen(QSGNode *node, int layer) {
 }
 
 bool sendPendingBackendZoom(SpectrogramItem &item) {
-    return QTest::qWaitFor(
-        [&item]() { return !item.m_zoomDebounceTimer->isActive(); }, 1000);
+    // At once, as the debounce's end would: its 150 ms are real time.
+    if (item.m_zoomDebounceTimer->isActive()) {
+        item.m_zoomDebounceTimer->stop();
+        QMetaObject::invokeMethod(item.m_zoomDebounceTimer, "timeout");
+    }
+    return !item.m_zoomDebounceTimer->isActive();
 }
 
 void rebuildCanvasNow(
@@ -326,20 +330,9 @@ QObject *createQmlObjectFromSource(
 }
 
 QQuickWindow *loadMainWindowShown(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
-    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
-    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
-    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
-    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
-    engine.load(QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
-    if (engine.rootObjects().isEmpty()) {
-        return nullptr;
-    }
-    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
-    if (window == nullptr || !QTest::qWaitForWindowExposed(window)) {
-        return nullptr;
-    }
-    return window;
+    MainWindowOptions options;
+    options.activate = false;
+    return loadMainWindow(engine, libraryModel, options);
 }
 
 QStringList errorHistoryMessages(QObject *errors) {
@@ -417,23 +410,6 @@ bool finishIncubation(QQmlEngine &engine) {
         return true;
     }
     return QTest::qWaitFor([controller]() { return controller->incubatingObjectCount() == 0; });
-}
-
-QQuickWindow *loadMainWindowForQuit(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
-    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
-    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
-    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
-    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
-    engine.load(QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml")));
-    if (engine.rootObjects().isEmpty()) {
-        return nullptr;
-    }
-    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
-    if (window == nullptr || !QTest::qWaitForWindowExposed(window)) {
-        return nullptr;
-    }
-    return window;
 }
 
 bool clickButton(QObject *window, const QString &objectName) {
@@ -588,12 +564,7 @@ void addScrollingRows() {
 }
 
 QQuickWindow *loadActiveMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
-    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
-    if (window == nullptr) {
-        return nullptr;
-    }
-    window->requestActivate();
-    return QTest::qWaitForWindowActive(window) ? window : nullptr;
+    return loadMainWindow(engine, libraryModel);
 }
 
 QQuickWindow *viewerWindowNamed(QQmlApplicationEngine &engine, const QString &name) {

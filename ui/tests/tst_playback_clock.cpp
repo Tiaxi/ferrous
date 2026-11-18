@@ -96,7 +96,7 @@ private slots:
 };
 
 // A time that is not known, as the transport and the queue write it: en
-// dashes, not hyphens (#373 H37).
+// dashes, not hyphens.
 void PlaybackClockTest::unknownTimeIsWrittenWithEnDashes() {
     const QString unknown = QStringLiteral("\u2013:\u2013\u2013");
     QCOMPARE(PlaybackClock::formatSeconds(-1.0), unknown);

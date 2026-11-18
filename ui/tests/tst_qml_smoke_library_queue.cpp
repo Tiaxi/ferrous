@@ -4,6 +4,8 @@
 
 #include <QFontInfo>
 
+#include <optional>
+
 // The library tree, the queue and global search.
 class LibraryQueueSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -53,17 +55,30 @@ private slots:
     void queueContainIndexSkipsScrollWhenVisible();
     void queueContainIndexScrollsUpWhenAboveViewport();
     void queueContainIndexClampsAtListEnd();
-    void wheelScrollsListsByTheWheelDelta();
-    void queueKeysReachBothEndsAndOpenTheContextMenu();
-    void deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus();
-    void queueChangesShowNoNoticeAndEditUndoRestoresThem();
+    void mainWindowQueueAnswersTheWheelTheKeysAndUndo();
+    void mainWindowLibraryLaysOutItsRowsAndAnswersTheKeys();
     void removingALibraryRootAsksFirstAndNamesIt();
-    void libraryKeysReachBothEndsAndOpenTheContextMenu();
-    void libraryRowsLayOutTheirYearsWithoutWarnings();
-    void editMenuNamesTheUndoOfAMoveAndItSelectsTheMovedRows();
+
+private:
+    // The checks that the main window tests above run in turn in one
+    // window; each says what it checks where it is defined.
+    void checkWheelScrollsListsByTheWheelDelta(QQuickWindow *window);
+    void checkQueueKeysReachBothEndsAndOpenTheContextMenu(QQuickWindow *window);
+    void checkDeleteRemovesQueueTracksOnlyWhileTheQueueHasFocus(QQuickWindow *window);
+    void checkQueueChangesShowNoNoticeAndEditUndoRestoresThem(QQuickWindow *window);
+    void checkLibraryRowsLayOutTheirYearsWithoutWarnings(QQuickWindow *window, LibraryTreeModel &libraryModel);
+    void checkLibraryKeysReachBothEndsAndOpenTheContextMenu(QQuickWindow *window, LibraryTreeModel &libraryModel);
 };
 
 namespace {
+
+// `source`, with its imports resolved from the QML sources.
+QObject *createHarness(QQmlEngine &engine, const QByteArray &source, QString *errorText) {
+    return createQmlObjectFromSource(
+        engine, source,
+        QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml")),
+        errorText);
+}
 
 QByteArray artistWithManyAlbumsBinary(int albumCount) {
     QVector<BinaryTreeRow> rows;
@@ -423,10 +438,8 @@ void LibraryQueueSmokeTest::libraryTreeAppliesALargeUpdateWithoutAReset() {
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> window(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> window(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import QtQuick.Window 2.15
 
@@ -453,7 +466,7 @@ Window {
         }
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(window != nullptr, qPrintable(errorText));
     auto *view = qvariant_cast<QQuickItem *>(window->property("view"));
     QVERIFY(view != nullptr);
@@ -576,10 +589,8 @@ void LibraryQueueSmokeTest::libraryControllerExtendsSelectionWithShiftArrows() {
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
 
@@ -617,7 +628,7 @@ Item {
 
     Component.onCompleted: controller.selectIndex(0)
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
 
     QObject *controller = qvariant_cast<QObject *>(root->property("controllerRef"));
@@ -655,10 +666,8 @@ void LibraryQueueSmokeTest::libraryControllerRestoresExpandedSelectionAndViewpor
     engine.rootContext()->setContextProperty(
         QStringLiteral("treeBytes"),
         sampleArtistAlbumTreeBinary());
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
 
@@ -725,7 +734,7 @@ Item {
         publishTimer.start()
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
 
     QObject *controller = qvariant_cast<QObject *>(root->property("controllerRef"));
@@ -743,10 +752,8 @@ Item {
 
 void LibraryQueueSmokeTest::libraryControllerUsesDelegateCoordinatesForViewportAnchor() {
     QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
 
@@ -799,7 +806,7 @@ Item {
         capturedAnchor = controller.captureViewAnchor()
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
 
     const QVariantMap anchor = root->property("capturedAnchor").toMap();
@@ -811,10 +818,8 @@ Item {
 
 void LibraryQueueSmokeTest::libraryControllerForwardsShowTrackRequest() {
     QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
 
@@ -843,7 +848,7 @@ Item {
         openTagEditorDialog: function() {}
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
 
     QObject *controller = qvariant_cast<QObject *>(root->property("controllerRef"));
@@ -862,10 +867,8 @@ void LibraryQueueSmokeTest::libraryControllerCentersBridgeRevealAfterExpansion()
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
 
@@ -908,7 +911,7 @@ Item {
             "track|/music/artist/album20/track.flac")
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
 
     QObject *controller = qvariant_cast<QObject *>(root->property("controllerRef"));
@@ -926,10 +929,8 @@ Item {
 
 void LibraryQueueSmokeTest::trackIdentityChangedSignalTriggersQmlHandler() {
     QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 
 Item {
@@ -957,7 +958,7 @@ Item {
         bridge.trackIdentityChanged()
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
 
     QCOMPARE(root->property("trackIdentityChangedCount").toInt(), 0);
@@ -968,10 +969,8 @@ Item {
 
 void LibraryQueueSmokeTest::queueRemovalSendsOneBatch() {
     QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
 Item {
@@ -995,34 +994,18 @@ Item {
         controller.removeSelectedTrack()
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
     QVERIFY(QMetaObject::invokeMethod(root.data(), "removeSelection"));
     QCOMPARE(root->property("batches").toInt(), 1);
     QCOMPARE(root->property("removed").toString(), QStringLiteral("9999,200,1"));
 }
 
-void LibraryQueueSmokeTest::queueEditsKeepSelectionAndViewport() {
-    QueueRowsModel rows;
-    const auto row = [](int number) {
-        QueueRowData data;
-        data.title = QStringLiteral("Track %1").arg(number);
-        data.path = QStringLiteral("/music/%1.flac").arg(number);
-        data.lengthText = QStringLiteral("1:00");
-        return data;
-    };
-    QVector<QueueRowData> initial;
-    for (int number = 0; number < 200; ++number) {
-        initial.push_back(row(number));
-    }
-    rows.setRows(initial);
+namespace {
 
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+// The queue pane with its controller, over `queueRowsModel`, and a bridge
+// that records the queue commands.
+const QByteArray kQueuePaneHarness = QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
@@ -1036,23 +1019,35 @@ Window {
     height: 400
     visible: true
     property alias controller: queueController
+    property var commands: []
+
+    function takeCommands() {
+        const taken = harness.commands.join("; ")
+        harness.commands = []
+        return taken
+    }
 
     QtObject {
         id: bridge
+        objectName: "bridge"
         property var queueRows: queueRowsModel
-        property int queueLength: 1000
-        property int selectedQueueIndex: 50
+        property int queueLength: queueRowsModel.rowCount()
+        property int selectedQueueIndex: -1
         property int playingQueueIndex: -1
         property string playbackState: "Stopped"
         property string currentTrackPath: ""
         property bool profileLogsEnabled: false
         signal snapshotChanged()
         signal trackIdentityChanged()
+        function record(command) { harness.commands = harness.commands.concat([command]) }
         function selectQueueIndex(index) { selectedQueueIndex = index }
         function queuePathAt(index) { return "" }
+        function playAt(index) { record("play " + index) }
+        function moveQueueRows(rows, before) { record("move " + rows.join(",") + " before " + before) }
+        function shiftQueueRows(rows, direction) {}
+        function insertPaths(paths, row) {}
         function removeAt(index) {}
         function removeIndices(indices) {}
-        function moveQueue(from, to) {}
         function clearQueue() {}
         function openContainingFolder(path) {}
     }
@@ -1077,11 +1072,20 @@ Window {
         function showTrackInLibrary(path) {}
     }
 
+    // The tracks the playback could not read, as the error history has them.
+    QtObject {
+        id: errorControllerStub
+        objectName: "errorController"
+        property var unreadablePaths: ({})
+    }
+
     Panes.QueuePane {
+        objectName: "queuePane"
         anchors.fill: parent
         controller: queueController
         uiBridge: bridge
         uiPalette: palette
+        errorController: errorControllerStub
         preferredHeight: height
         playlistIndicatorColumnWidth: 22
         playlistOrderColumnWidth: 34
@@ -1093,22 +1097,119 @@ Window {
         droppedExternalPaths: function(drop) { return [] }
     }
 }
-)QML"), baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-    QObject *controller = root->findChild<QObject *>(QStringLiteral("queueController"));
-    QVERIFY(controller != nullptr);
-    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
-    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
-    QVERIFY(view != nullptr);
-    QTRY_VERIFY(view->height() > 0);
+)QML");
 
-    const auto selection = [controller]() {
-        QList<int> indices;
-        for (const QVariant &value : controller->property("selectedIndices").toList()) {
-            indices.push_back(value.toInt());
+// The harness as an application window, whose palette and font the
+// palette follows.
+QByteArray asApplicationWindow(QByteArray source) {
+    return source.replace("Window {\n    id: harness", "ApplicationWindow {\n    id: harness");
+}
+
+QueueRowData queueRow(int number) {
+    QueueRowData data;
+    data.title = QStringLiteral("Track %1").arg(number);
+    data.path = QStringLiteral("/music/%1.flac").arg(number);
+    data.lengthText = QStringLiteral("1:00");
+    return data;
+}
+
+// Rows `first` up to `end`.
+QVector<QueueRowData> queueRows(int first, int end) {
+    QVector<QueueRowData> rows;
+    for (int number = first; number < end; ++number) {
+        rows.push_back(queueRow(number));
+    }
+    return rows;
+}
+
+void loadQueueRows(QueueRowsModel &rows, int count) {
+    rows.setRows(queueRows(0, count));
+}
+
+// The scene position `fraction` of the way down row `row` of `view`.
+QPoint queueRowPoint(QQuickItem *view, int row, double fraction) {
+    QQuickItem *item = nullptr;
+    QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, row));
+    if (item == nullptr) {
+        return {};
+    }
+    return item->mapToScene(QPointF(item->width() / 2, item->height() * fraction)).toPoint();
+}
+
+// Presses at `from`, moves in small steps to `to`, and releases there, as a
+// drag with the mouse does.
+// QTest dates each release past the double-click interval, so the next press
+// does not make a double click.
+void dragWithMouse(QQuickWindow *window, QPoint from, QPoint to) {
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, from);
+    const int steps = std::max(4, std::abs(to.y() - from.y()) / 4);
+    for (int step = 1; step <= steps; ++step) {
+        QTest::mouseMove(window, from + (to - from) * step / steps);
+    }
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, to);
+}
+
+QList<int> queueSelection(QObject *controller) {
+    QList<int> indices;
+    for (const QVariant &value : controller->property("selectedIndices").toList()) {
+        indices.push_back(value.toInt());
+    }
+    return indices;
+}
+
+// A queue pane harness over a rows model that outlives it, shown, with its
+// controller, bridge and list view.
+struct QueuePane {
+    QQmlApplicationEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window = nullptr;
+    QObject *controller = nullptr;
+    QObject *bridge = nullptr;
+    QQuickItem *view = nullptr;
+
+    // `source` is kQueuePaneHarness or a variant of it.
+    bool load(QueueRowsModel &rows, const QByteArray &source, QString *errorText) {
+        engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
+        root.reset(createHarness(engine, source, errorText));
+        if (root == nullptr) {
+            return false;
         }
-        return indices;
-    };
+        window = qobject_cast<QQuickWindow *>(root.get());
+        controller = root->property("controller").value<QObject *>();
+        bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+        if (window == nullptr || controller == nullptr || bridge == nullptr || !QTest::qWaitForWindowExposed(window)
+            || !QTest::qWaitFor([this] { return controller->property("view").value<QObject *>() != nullptr; })) {
+            *errorText = QStringLiteral("the queue pane did not show");
+            return false;
+        }
+        view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
+        return view != nullptr;
+    }
+
+    // The commands the bridge recorded since the last call.
+    QString takeCommands() {
+        QVariant taken;
+        QMetaObject::invokeMethod(root.get(), "takeCommands", Q_RETURN_ARG(QVariant, taken));
+        return taken.toString();
+    }
+};
+
+} // namespace
+
+void LibraryQueueSmokeTest::queueEditsKeepSelectionAndViewport() {
+    QueueRowsModel rows;
+    const QVector<QueueRowData> initial = queueRows(0, 200);
+    rows.setRows(initial);
+    // The backend's selection is row 50.
+    QByteArray source = kQueuePaneHarness;
+    source.replace("property int selectedQueueIndex: -1", "property int selectedQueueIndex: 50");
+    QueuePane pane;
+    QString errorText;
+    QVERIFY2(pane.load(rows, source, &errorText), qPrintable(errorText));
+    QObject *controller = pane.controller;
+    QQuickItem *view = pane.view;
+    QTRY_VERIFY(view->height() > 0);
+    const auto selection = [controller]() { return queueSelection(controller); };
     // The title of the row at the top of the viewport.
     const auto topRowTitle = [view, &rows]() {
         int index = -1;
@@ -1129,13 +1230,13 @@ Window {
     // Edits elsewhere in the queue keep both where the user left them.
     QVERIFY(rows.removeRowsAt(10, 1));
     QCOMPARE(selection(), (QList<int>{39, 59, 119}));
-    QVERIFY(rows.insertRowsAt(5, {row(1000), row(1001)}));
+    QVERIFY(rows.insertRowsAt(5, {queueRow(1000), queueRow(1001)}));
     QCOMPARE(selection(), (QList<int>{41, 61, 121}));
     QVERIFY(rows.moveRow(150, 0));
     QCOMPARE(selection(), (QList<int>{42, 62, 122}));
     QVERIFY(rows.moveRow(62, 190));
     QCOMPARE(selection(), (QList<int>{42, 122 - 1, 190}));
-    QVERIFY(rows.updateRow(42, row(2000)));
+    QVERIFY(rows.updateRow(42, queueRow(2000)));
     QCOMPARE(selection(), (QList<int>{42, 121, 190}));
     QCOMPARE(controller->property("selectionAnchorIndex").toInt(), 190);
     QCoreApplication::processEvents();
@@ -1178,10 +1279,8 @@ void LibraryQueueSmokeTest::queueRemovalsKeepActionsOnHighlightedRows() {
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
 Item {
@@ -1234,7 +1333,7 @@ Item {
         return taken
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
     QObject *bridge = root->property("bridge").value<QObject *>();
     QObject *controller = root->property("controller").value<QObject *>();
@@ -1395,11 +1494,8 @@ Item {
 
 void LibraryQueueSmokeTest::queueAutoCenterIsDeferredOffHandlerStack() {
     QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR)
-        + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
 
@@ -1443,7 +1539,7 @@ Item {
         controller.handleSnapshotChanged(stubView)
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
 
     // Initialize controller so it has a lastAutoCenterTrackPath to compare against.
@@ -1474,7 +1570,6 @@ Item {
 // Returns the resulting contentY.
 static double invokeContainIndex(
     QQmlApplicationEngine &engine,
-    const QUrl &baseUrl,
     double initialContentY,
     double viewHeight,
     double contentHeight,
@@ -1522,7 +1617,7 @@ Item {
     }
 }
 )QML");
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, qml, baseUrl, &errorText));
+    QScopedPointer<QObject> root(createHarness(engine, qml, &errorText));
     if (!root) {
         qWarning("invokeContainIndex: %s", qPrintable(errorText));
         return -1.0;
@@ -1538,14 +1633,11 @@ Item {
 
 void LibraryQueueSmokeTest::queueContainIndexSkipsScrollWhenVisible() {
     QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR)
-        + QStringLiteral("/qml/QmlSmokeHarness.qml"));
 
     // Index 5 → rowTop = 120, rowBottom = 144.
     // Viewport: contentY=100, height=400 → visible range [100, 500].
     // Row is fully inside viewport → contentY must not change.
-    const double result = invokeContainIndex(engine, baseUrl,
+    const double result = invokeContainIndex(engine,
         /*initialContentY=*/100.0, /*viewHeight=*/400.0,
         /*contentHeight=*/24000.0, /*targetIndex=*/5);
     QCOMPARE(result, 100.0);
@@ -1553,14 +1645,11 @@ void LibraryQueueSmokeTest::queueContainIndexSkipsScrollWhenVisible() {
 
 void LibraryQueueSmokeTest::queueContainIndexScrollsUpWhenAboveViewport() {
     QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR)
-        + QStringLiteral("/qml/QmlSmokeHarness.qml"));
 
     // Index 2 → rowTop = 48.
     // Viewport: contentY=200, height=400 → visible range [200, 600].
     // Row is above viewport → contentY should snap to rowTop = 48.
-    const double result = invokeContainIndex(engine, baseUrl,
+    const double result = invokeContainIndex(engine,
         /*initialContentY=*/200.0, /*viewHeight=*/400.0,
         /*contentHeight=*/24000.0, /*targetIndex=*/2);
     QCOMPARE(result, 48.0);
@@ -1568,16 +1657,13 @@ void LibraryQueueSmokeTest::queueContainIndexScrollsUpWhenAboveViewport() {
 
 void LibraryQueueSmokeTest::queueContainIndexClampsAtListEnd() {
     QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR)
-        + QStringLiteral("/qml/QmlSmokeHarness.qml"));
 
     // Index 999 → rowTop = 23976, rowBottom = 24000.
     // contentHeight = 24000, viewHeight = 400.
     // maxY = 24000 - 400 = 23600.
     // Target would be rowBottom - viewHeight = 24000 - 400 = 23600.
     // Clamped to maxY = 23600.
-    const double result = invokeContainIndex(engine, baseUrl,
+    const double result = invokeContainIndex(engine,
         /*initialContentY=*/0.0, /*viewHeight=*/400.0,
         /*contentHeight=*/24000.0, /*targetIndex=*/999);
     QCOMPARE(result, 23600.0);
@@ -1608,11 +1694,31 @@ int callIntFunction(QObject *object, const char *function) {
 
 } // namespace
 
-void LibraryQueueSmokeTest::wheelScrollsListsByTheWheelDelta() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+// The queue's rows, the library's and their keys in the main window, each
+// group in a window of its own. Each check sets the rows it needs.
+void LibraryQueueSmokeTest::mainWindowQueueAnswersTheWheelTheKeysAndUndo() {
+    MainWindowFixture main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkWheelScrollsListsByTheWheelDelta(main.window); },
+               [&] { checkQueueKeysReachBothEndsAndOpenTheContextMenu(main.window); },
+               [&] { checkDeleteRemovesQueueTracksOnlyWhileTheQueueHasFocus(main.window); },
+               [&] { checkQueueChangesShowNoNoticeAndEditUndoRestoresThem(main.window); }});
+}
+
+// The rows first, from an empty library, as the app starts.
+void LibraryQueueSmokeTest::mainWindowLibraryLaysOutItsRowsAndAnswersTheKeys() {
+    MainWindowFixture main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    runInTurn({[&] { checkLibraryRowsLayOutTheirYearsWithoutWarnings(main.window, main.libraryModel); },
+               [&] {
+                   // The view done with the rows it was making: Qt warns
+                   // when it cancels one the tree no longer has.
+                   QVERIFY(finishIncubation(main.engine));
+                   checkLibraryKeysReachBothEndsAndOpenTheContextMenu(main.window, main.libraryModel);
+               }});
+}
+
+void LibraryQueueSmokeTest::checkWheelScrollsListsByTheWheelDelta(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QVERIFY(bridge != nullptr);
     bridge->setProperty("queueRows", sampleQueueRows(300));
@@ -1657,11 +1763,7 @@ void LibraryQueueSmokeTest::wheelScrollsListsByTheWheelDelta() {
     QCOMPARE(contentY(), before);
 }
 
-void LibraryQueueSmokeTest::queueKeysReachBothEndsAndOpenTheContextMenu() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void LibraryQueueSmokeTest::checkQueueKeysReachBothEndsAndOpenTheContextMenu(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     bridge->setProperty("queueRows", sampleQueueRows(300));
     bridge->setProperty("queueLength", 300);
@@ -1678,23 +1780,28 @@ void LibraryQueueSmokeTest::queueKeysReachBothEndsAndOpenTheContextMenu() {
     QTest::keyClick(window, Qt::Key_Home);
     QTRY_COMPARE(callIntFunction(controller, "primarySelectedIndex"), 0);
 
-    QVERIFY(!anyMenuVisible(window, QStringLiteral("playlistContextMenu")));
+    // The menu's fades in animation time, each to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
+    const auto menuVisible = [window] { return anyMenuVisible(window, QStringLiteral("playlistContextMenu")); };
+    QVERIFY(!menuVisible());
     QTest::keyClick(window, Qt::Key_Menu);
-    QTRY_VERIFY(anyMenuVisible(window, QStringLiteral("playlistContextMenu")));
+    settle();
+    QTRY_VERIFY(menuVisible());
     QTest::keyClick(window, Qt::Key_Escape);
-    QTRY_VERIFY(!anyMenuVisible(window, QStringLiteral("playlistContextMenu")));
+    settle();
+    QTRY_VERIFY(!menuVisible());
     QTRY_VERIFY(view->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_F10, Qt::ShiftModifier);
-    QTRY_VERIFY(anyMenuVisible(window, QStringLiteral("playlistContextMenu")));
+    settle();
+    QTRY_VERIFY(menuVisible());
     QTest::keyClick(window, Qt::Key_Escape);
-    QTRY_VERIFY(!anyMenuVisible(window, QStringLiteral("playlistContextMenu")));
+    settle();
+    QTRY_VERIFY(!menuVisible());
 }
 
-void LibraryQueueSmokeTest::libraryKeysReachBothEndsAndOpenTheContextMenu() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void LibraryQueueSmokeTest::checkLibraryKeysReachBothEndsAndOpenTheContextMenu(QQuickWindow *window,
+                                                                                LibraryTreeModel &libraryModel) {
     libraryModel.setExpandedKeys(QStringList{
         QStringLiteral("artist|Artist A"),
         QStringLiteral("album|Artist A|Album A"),
@@ -1732,15 +1839,22 @@ void LibraryQueueSmokeTest::libraryKeysReachBothEndsAndOpenTheContextMenu() {
     QTest::keyClick(window, Qt::Key_Home);
     QTRY_COMPARE(selectedCount(), 1);
 
+    // The menu's fades in animation time, each to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
     QVERIFY(!rowMenuVisible());
     QTest::keyClick(window, Qt::Key_Menu);
+    settle();
     QTRY_VERIFY(rowMenuVisible());
     QTest::keyClick(window, Qt::Key_Escape);
+    settle();
     QTRY_VERIFY(!rowMenuVisible());
     QTRY_VERIFY(libraryView->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_F10, Qt::ShiftModifier);
+    settle();
     QTRY_VERIFY(rowMenuVisible());
     QTest::keyClick(window, Qt::Key_Escape);
+    settle();
     QTRY_VERIFY(!rowMenuVisible());
 }
 
@@ -1793,13 +1907,10 @@ QStringList datedAndUndatedAlbumKeys(int artistCount) {
 // binding loop, with and without a year, collapsed and expanded, and in a
 // narrow pane (#474). The year stays right-aligned at the scrollbar lane,
 // and the title ends before it.
-void LibraryQueueSmokeTest::libraryRowsLayOutTheirYearsWithoutWarnings() {
+void LibraryQueueSmokeTest::checkLibraryRowsLayOutTheirYearsWithoutWarnings(QQuickWindow *window,
+                                                                            LibraryTreeModel &libraryModel) {
     constexpr int artistCount = 24;
     constexpr int tracksPerAlbum = 3;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
     auto *libraryView = qvariant_cast<QQuickItem *>(window->property("libraryViewRef"));
     QVERIFY(libraryView != nullptr);
     QVERIFY2(takeCapturedMessagesText().isEmpty(), "the window warned before the rows came");
@@ -1946,12 +2057,9 @@ QStringList queueCommands(QObject *bridge) {
 
 } // namespace
 
-void LibraryQueueSmokeTest::deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void LibraryQueueSmokeTest::checkDeleteRemovesQueueTracksOnlyWhileTheQueueHasFocus(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    bridge->setProperty("queueCommands", QStringList{});
     bridge->setProperty("queueRows", sampleQueueRows(5));
     bridge->setProperty("queueLength", 5);
     QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
@@ -1979,9 +2087,13 @@ void LibraryQueueSmokeTest::deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus() 
         }
     }
     QVERIFY(search != nullptr);
+    // The search's fades in animation time, each to its end.
+    std::optional<SteppedAnimationDriver> animations(std::in_place);
+    const auto settle = [&animations] { (void)animations->step(1000); };
     QVERIFY(QMetaObject::invokeMethod(search, "trigger"));
     auto *field = window->findChild<QQuickItem *>(QStringLiteral("globalSearchQueryField"));
     QVERIFY(field != nullptr);
+    settle();
     QTRY_VERIFY(field->hasActiveFocus());
     QTest::keyClick(window, 'a');
     QTest::keyClick(window, Qt::Key_Home);
@@ -1989,6 +2101,10 @@ void LibraryQueueSmokeTest::deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus() 
     QTRY_COMPARE(field->property("text").toString(), QString());
     QTest::keyClick(window, Qt::Key_Escape);
     QCOMPARE(queueCommands(bridge), QStringList{});
+    // Closed, so that the window's shortcuts reach the next check.
+    settle();
+    QTRY_VERIFY(popupsSettled());
+    animations.reset();
 
     // With the queue focused, Delete removes the highlighted rows.
     QVERIFY(QMetaObject::invokeMethod(controller, "setSingleSelection", Q_ARG(QVariant, 1)));
@@ -2009,12 +2125,9 @@ void LibraryQueueSmokeTest::deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus() 
     QVERIFY(qvariant_cast<QObject *>(remove->property("action")) == nullptr);
 }
 
-void LibraryQueueSmokeTest::queueChangesShowNoNoticeAndEditUndoRestoresThem() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
+void LibraryQueueSmokeTest::checkQueueChangesShowNoNoticeAndEditUndoRestoresThem(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    bridge->setProperty("queueCommands", QStringList{});
     bridge->setProperty("queueRows", sampleQueueRows(5));
     bridge->setProperty("queueLength", 5);
     QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
@@ -2047,7 +2160,7 @@ void LibraryQueueSmokeTest::queueChangesShowNoNoticeAndEditUndoRestoresThem() {
         bridge->setProperty("queueUndoId", id);
     };
     const auto takeBackOffer = [&]() {
-        bridge->setProperty("queueUndoKind", 0);
+        bridge->setProperty("queueUndoKind", int(BinaryBridgeCodec::QueueUndoNone));
         bridge->setProperty("queueUndoId", 0.0);
     };
 
@@ -2096,8 +2209,8 @@ void LibraryQueueSmokeTest::queueChangesShowNoNoticeAndEditUndoRestoresThem() {
     QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
     QCOMPARE(queueCommands(bridge).count(QStringLiteral("undo 9")), 2);
 
-    // Moved rows go back the same way.
-    offerUndo(4, 10.0);
+    // Moved rows go back the same way, where they were and selected.
+    offerUndo(int(BinaryBridgeCodec::QueueUndoMoved), 10.0);
     expectNoNotice();
     QVERIFY(undoMenuItem->property("enabled").toBool());
     QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Move in Queue"));
@@ -2105,39 +2218,7 @@ void LibraryQueueSmokeTest::queueChangesShowNoNoticeAndEditUndoRestoresThem() {
     QTRY_VERIFY(queueView->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
     QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 10"));
-}
-
-void LibraryQueueSmokeTest::editMenuNamesTheUndoOfAMoveAndItSelectsTheMovedRows() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
-    bridge->setProperty("queueRows", sampleQueueRows(5));
-    bridge->setProperty("queueLength", 5);
-    QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
-    QObject *undoAction = window->findChild<QObject *>(QStringLiteral("undoQueueChangeAction"));
-    QVERIFY(controller != nullptr && undoAction != nullptr);
-    QObject *undoMenuItem = nullptr;
-    for (QObject *object : window->findChildren<QObject *>()) {
-        if (object->inherits("QQuickMenuItem")
-            && qvariant_cast<QObject *>(object->property("action")) == undoAction) {
-            undoMenuItem = object;
-            break;
-        }
-    }
-    QVERIFY(undoMenuItem != nullptr);
-
-    bridge->setProperty("queueUndoKind", int(BinaryBridgeCodec::QueueUndoMoved));
-    bridge->setProperty("queueUndoId", 10.0);
-    QVERIFY(undoMenuItem->property("enabled").toBool());
-    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Move in Queue"));
-    QVERIFY(QMetaObject::invokeMethod(undoAction, "trigger"));
-    QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 10"));
-
-    // The rows are back where they were, and selected.
-    bridge->setProperty("queueUndoKind", int(BinaryBridgeCodec::QueueUndoNone));
-    bridge->setProperty("queueUndoId", 0.0);
+    takeBackOffer();
     QVERIFY(QMetaObject::invokeMethod(bridge, "queueUndoRestored",
         Q_ARG(QVariant, QVariant(QVariantList{0, 2}))));
     QCOMPARE(controller->property("selectedIndices").toList(), (QVariantList{0, 2}));
@@ -2147,10 +2228,8 @@ void LibraryQueueSmokeTest::editMenuNamesTheUndoOfAMoveAndItSelectsTheMovedRows(
 
 void LibraryQueueSmokeTest::removingALibraryRootAsksFirstAndNamesIt() {
     QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import "components" as Components
@@ -2191,7 +2270,7 @@ ApplicationWindow {
         openLibraryRootNameDialog: function() {}
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
     auto *window = qobject_cast<QQuickWindow *>(root.get());
     QVERIFY(window != nullptr);
@@ -2200,7 +2279,7 @@ ApplicationWindow {
     QVERIFY(confirm != nullptr);
 
     // Remove acts on the selected folder: none at first, then the one
-    // clicked (#373 H4).
+    // clicked.
     QQuickItem *removeButton = visibleItemNamed(window, QStringLiteral("libraryRootRemoveButton"));
     QVERIFY(removeButton != nullptr);
     QVERIFY(!removeButton->isEnabled());
@@ -2210,7 +2289,7 @@ ApplicationWindow {
     QTRY_VERIFY(removeButton->isEnabled());
     QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
-    // A window of its own above the page's (#373 H5).
+    // A window of its own above the page's.
     auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
     QVERIFY(confirmWindow != nullptr);
     QCOMPARE(confirmWindow->transientParent(), window);
@@ -2237,8 +2316,8 @@ ApplicationWindow {
     QCOMPARE(root->property("removed").toStringList(), QStringList{});
 
     // Removing takes the folder's tracks out of the library, so Cancel is
-    // the default button, as KDE's guidelines ask, and has the keyboard
-    // (#373 H37): Enter as the question shows keeps the folder.
+    // the default button, as KDE's guidelines ask, and has the keyboard:
+    // Enter as the question shows keeps the folder.
     QVERIFY(confirm->property("destructive").toBool());
     QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
@@ -2352,9 +2431,7 @@ Item {
 QObject *createLibraryControllerHarness(QQmlApplicationEngine &engine, LibraryTreeModel &model,
                                         QString *errorText) {
     engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    return createQmlObjectFromSource(engine, kLibraryControllerHarness, baseUrl, errorText);
+    return createHarness(engine, kLibraryControllerHarness, errorText);
 }
 
 void callWith(QObject *object, const char *method, const QVariant &first,
@@ -2655,10 +2732,8 @@ void LibraryQueueSmokeTest::revealKeyWaitsForRowsTheBackendHasNotSentWithoutTime
 
 void LibraryQueueSmokeTest::queueMovesAndDropsActOnEveryHighlightedRow() {
     QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
 Item {
@@ -2705,7 +2780,7 @@ Item {
         return taken
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
     QObject *controller = root->property("controller").value<QObject *>();
     QVERIFY(controller != nullptr);
@@ -2785,10 +2860,8 @@ void LibraryQueueSmokeTest::queueSelectionFollowsRowRangeMoves() {
     rows.setRows(initial);
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+    QScopedPointer<QObject> root(createHarness(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
 Item {
@@ -2812,7 +2885,7 @@ Item {
         autoCenterSelection: false
     }
 }
-)QML"), baseUrl, &errorText));
+)QML"), &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
     QObject *controller = root->property("controller").value<QObject *>();
     QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
@@ -2907,152 +2980,9 @@ void LibraryQueueSmokeTest::emptyLibraryAndFileMenuAddALibraryFolder() {
     dropCapturedMessages(QStringLiteral("This plugin does not support propagateSizeHints()"));
 }
 
-namespace {
-
-// The queue pane with its controller, over `queueRowsModel`, and a bridge
-// that records the queue commands.
-const QByteArray kQueuePaneHarness = QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import QtQuick.Controls 2.15
-import QtQuick.Window 2.15
-import "components" as Components
-import "controllers" as Controllers
-import "panes" as Panes
-
-Window {
-    id: harness
-    width: 900
-    height: 400
-    visible: true
-    property alias controller: queueController
-    property var commands: []
-
-    function takeCommands() {
-        const taken = harness.commands.join("; ")
-        harness.commands = []
-        return taken
-    }
-
-    QtObject {
-        id: bridge
-        objectName: "bridge"
-        property var queueRows: queueRowsModel
-        property int queueLength: queueRowsModel.rowCount()
-        property int selectedQueueIndex: -1
-        property int playingQueueIndex: -1
-        property string playbackState: "Stopped"
-        property string currentTrackPath: ""
-        property bool profileLogsEnabled: false
-        signal snapshotChanged()
-        signal trackIdentityChanged()
-        function record(command) { harness.commands = harness.commands.concat([command]) }
-        function selectQueueIndex(index) { selectedQueueIndex = index }
-        function queuePathAt(index) { return "" }
-        function playAt(index) { record("play " + index) }
-        function moveQueueRows(rows, before) { record("move " + rows.join(",") + " before " + before) }
-        function shiftQueueRows(rows, direction) {}
-        function insertPaths(paths, row) {}
-        function removeAt(index) {}
-        function removeIndices(indices) {}
-        function clearQueue() {}
-        function openContainingFolder(path) {}
-    }
-
-    Components.UiPalette {
-        id: palette
-        windowRoot: harness
-    }
-
-    Controllers.QueueController {
-        id: queueController
-        objectName: "queueController"
-        uiBridge: bridge
-        tagEditorApi: QtObject { function openSelection(selection) { return false } }
-        openTagEditorDialog: function() {}
-        autoCenterSelection: false
-    }
-
-    QtObject {
-        id: libraryControllerStub
-        function insertRowItems(rowMap, row) {}
-        function showTrackInLibrary(path) {}
-    }
-
-    // The tracks the playback could not read, as the error history has them.
-    QtObject {
-        id: errorControllerStub
-        objectName: "errorController"
-        property var unreadablePaths: ({})
-    }
-
-    Panes.QueuePane {
-        objectName: "queuePane"
-        anchors.fill: parent
-        controller: queueController
-        uiBridge: bridge
-        uiPalette: palette
-        errorController: errorControllerStub
-        preferredHeight: height
-        playlistIndicatorColumnWidth: 22
-        playlistOrderColumnWidth: 34
-        playlistOrderText: function(index) { return String(index + 1) }
-        libraryController: libraryControllerStub
-        stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
-        snappyScrollFlickDeceleration: 18000
-        snappyScrollMaxFlickVelocity: 1400
-        droppedExternalPaths: function(drop) { return [] }
-    }
-}
-)QML");
-
-void loadQueueRows(QueueRowsModel &rows, int count) {
-    QVector<QueueRowData> initial;
-    for (int number = 0; number < count; ++number) {
-        QueueRowData data;
-        data.title = QStringLiteral("Track %1").arg(number);
-        data.path = QStringLiteral("/music/%1.flac").arg(number);
-        data.lengthText = QStringLiteral("1:00");
-        initial.push_back(data);
-    }
-    rows.setRows(initial);
-}
-
-// The scene position `fraction` of the way down row `row` of `view`.
-QPoint queueRowPoint(QQuickItem *view, int row, double fraction) {
-    QQuickItem *item = nullptr;
-    QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, row));
-    if (item == nullptr) {
-        return {};
-    }
-    return item->mapToScene(QPointF(item->width() / 2, item->height() * fraction)).toPoint();
-}
-
-// Presses at `from`, moves in small steps to `to`, and releases there, as a
-// drag with the mouse does.
-// QTest dates each release past the double-click interval, so the next press
-// does not make a double click.
-void dragWithMouse(QQuickWindow *window, QPoint from, QPoint to) {
-    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, from);
-    const int steps = std::max(4, std::abs(to.y() - from.y()) / 4);
-    for (int step = 1; step <= steps; ++step) {
-        QTest::mouseMove(window, from + (to - from) * step / steps);
-    }
-    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, to);
-}
-
-QList<int> queueSelection(QObject *controller) {
-    QList<int> indices;
-    for (const QVariant &value : controller->property("selectedIndices").toList()) {
-        indices.push_back(value.toInt());
-    }
-    return indices;
-}
-
-} // namespace
-
 void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
-    // A length that is not known, as the transport writes it: en dashes
-    // (#373 H35 AC2), from the bridge and in the row's own fallback.
+    // A length that is not known, as the transport writes it: en dashes,
+    // from the bridge and in the row's own fallback.
     QCOMPARE(formatQueueDuration(-1.0), QStringLiteral("\u2013:\u2013\u2013"));
     QCOMPARE(formatQueueDuration(std::numeric_limits<double>::infinity()), QStringLiteral("\u2013:\u2013\u2013"));
     BinaryBridgeCodec::DecodedQueueTrack unknownTrack;
@@ -3064,31 +2994,23 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QueueRowData unknownLength = *rows.rowAt(5);
     unknownLength.lengthText.clear();
     QVERIFY(rows.updateRow(5, unknownLength));
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    // An application window, whose palette and font the palette follows.
-    QByteArray source = kQueuePaneHarness;
-    source.replace("Window {\n    id: harness", "ApplicationWindow {\n    id: harness");
+    QueuePane pane;
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, source, baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-    auto *window = qobject_cast<QQuickWindow *>(root.get());
-    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
-    QObject *controller = root->property("controller").value<QObject *>();
-    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QVERIFY2(pane.load(rows, asApplicationWindow(kQueuePaneHarness), &errorText), qPrintable(errorText));
+    QObject *root = pane.root.get();
+    QQuickWindow *window = pane.window;
+    QObject *controller = pane.controller;
+    QObject *bridge = pane.bridge;
+    QQuickItem *view = pane.view;
     QObject *palette = nullptr;
     for (QObject *object : root->findChildren<QObject *>()) {
         if (object->property("uiSelectionColor").isValid() && object->property("boldFont").isValid()) {
             palette = object;
         }
     }
-    QVERIFY(controller != nullptr && bridge != nullptr && palette != nullptr);
+    QVERIFY(palette != nullptr);
     QObject *errors = root->findChild<QObject *>(QStringLiteral("errorController"));
     QVERIFY(errors != nullptr);
-    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
-    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
     QTRY_VERIFY(!queueRowPoint(view, 5, 0.5).isNull());
     const auto row = [view](int index) {
         QQuickItem *item = nullptr;
@@ -3183,8 +3105,8 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
 
     // An unreadable file: the status bar's warning sign, at its size and
-    // in its negative colour, and a quieter title (#373 H35 AC1: Breeze's
-    // dialog-warning as a mask was a solid grey triangle).
+    // in its negative colour, and a quieter title (Breeze's dialog-warning
+    // as a mask was a solid grey triangle).
     QVERIFY(errors->setProperty("unreadablePaths",
                                 QVariantMap{{QStringLiteral("/music/3.flac"),
                                              QStringLiteral("Cannot read the file")}}));
@@ -3233,8 +3155,7 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QVERIFY(ring(4));
     QVERIFY(!ring(2));
     // The pointer over a selected row steps its tint toward the text, with
-    // the hover's fade, and back; the other selected row keeps its own
-    // (#373 H35 AC3).
+    // the hover's fade, and back; the other selected row keeps its own.
     QTest::mouseMove(window, queueRowPoint(view, 4, 0.5));
     QTRY_COMPARE(tint(4), paletteColor("selectionHovered"));
     QCOMPARE(tint(2), paletteColor("selection"));
@@ -3270,46 +3191,34 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
 
 void LibraryQueueSmokeTest::queueStateGlyphGrowsWithTheFont_data() {
     QTest::addColumn<qreal>("pointSize");
-    QTest::addColumn<int>("side");
-    QTest::newRow("10 pt") << 10.0 << 12;
-    QTest::newRow("24 pt") << 24.0 << 29;
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
 }
 
 // The playing row's glyph grows with the font, from its 12 px at the
-// default 10 pt, on whole pixels, and is drawn at that size (#373 H9: at
-// 24 pt Kirigami rounded the 29 px glyph down to a 22 px theme icon, a
-// 16 px triangle beside 33 px text).
+// default 10 pt, on whole pixels, and is drawn at that size (at 24 pt
+// Kirigami rounded the 29 px glyph down to a 22 px theme icon, a 16 px
+// triangle beside 33 px text).
 void LibraryQueueSmokeTest::queueStateGlyphGrowsWithTheFont() {
     QFETCH(qreal, pointSize);
-    QFETCH(int, side);
+    const int side = qRound(12 * pointSize / 10);
     QueueRowsModel rows;
     loadQueueRows(rows, 4);
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
-    // An application window, whose font the palette follows.
-    QByteArray source = kQueuePaneHarness;
-    source.replace("Window {\n    id: harness", "ApplicationWindow {\n    id: harness");
     // The glyph's column as wide as the app makes it, which grows with the
     // rows.
+    QByteArray source = asApplicationWindow(kQueuePaneHarness);
     source.replace("playlistIndicatorColumnWidth: 22",
                    "playlistIndicatorColumnWidth: Math.round(palette.rowHeight * 28 / 26)");
+    QueuePane pane;
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, source, baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-    auto *window = qobject_cast<QQuickWindow *>(root.get());
-    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
-    QObject *controller = root->property("controller").value<QObject *>();
-    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
-    QVERIFY(controller != nullptr && bridge != nullptr);
-    QFont font = root->property("font").value<QFont>();
+    QVERIFY2(pane.load(rows, source, &errorText), qPrintable(errorText));
+    QQuickWindow *window = pane.window;
+    QFont font = window->property("font").value<QFont>();
     font.setPointSizeF(pointSize);
-    QVERIFY(root->setProperty("font", font));
-    bridge->setProperty("playingQueueIndex", 1);
-    bridge->setProperty("playbackState", QStringLiteral("Playing"));
-    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
-    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
+    QVERIFY(window->setProperty("font", font));
+    pane.bridge->setProperty("playingQueueIndex", 1);
+    pane.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QQuickItem *view = pane.view;
     QQuickItem *glyph = nullptr;
     QTRY_VERIFY([&]() {
         QQuickItem *row = nullptr;
@@ -3333,7 +3242,6 @@ void LibraryQueueSmokeTest::queueStateGlyphGrowsWithTheFont() {
     // the strongest, so that how the mask is coloured offscreen doesn't
     // count.
     const QRect inked = [&]() {
-        QTest::qWait(50);
         const QImage image = window->grabWindow();
         const qreal scale = static_cast<qreal>(image.width()) / window->width();
         const QRectF rect(glyph->mapToScene(QPointF(0, 0)), glyph->size());
@@ -3367,24 +3275,13 @@ void LibraryQueueSmokeTest::queueStateGlyphGrowsWithTheFont() {
 void LibraryQueueSmokeTest::draggingAHighlightedQueueRowMovesEveryHighlightedRow() {
     QueueRowsModel rows;
     loadQueueRows(rows, 10);
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QueuePane pane;
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kQueuePaneHarness, baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-    auto *window = qobject_cast<QQuickWindow *>(root.get());
-    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
-    QObject *controller = root->property("controller").value<QObject *>();
-    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
-    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
+    QVERIFY2(pane.load(rows, kQueuePaneHarness, &errorText), qPrintable(errorText));
+    QQuickWindow *window = pane.window;
+    QObject *controller = pane.controller;
+    QQuickItem *view = pane.view;
     QTRY_VERIFY(!queueRowPoint(view, 9, 0.5).isNull());
-    const auto takeCommands = [&root]() {
-        QVariant taken;
-        QMetaObject::invokeMethod(root.data(), "takeCommands", Q_RETURN_ARG(QVariant, taken));
-        return taken.toString();
-    };
 
     // Rows 2, 3 and 6 are highlighted; row 3 is dragged, with no modifier,
     // into the upper half of row 8.
@@ -3400,33 +3297,25 @@ void LibraryQueueSmokeTest::draggingAHighlightedQueueRowMovesEveryHighlightedRow
         Q_ARG(QVariant, QVariant(QVariantList{2, 3, 6}))));
 
     dragWithMouse(window, queueRowPoint(view, 3, 0.5), queueRowPoint(view, 8, 0.25));
-    QCOMPARE(takeCommands(), QStringLiteral("move 2,3,6 before 8"));
+    QCOMPARE(pane.takeCommands(), QStringLiteral("move 2,3,6 before 8"));
     QCOMPARE(queueSelection(controller), (QList<int>{2, 3, 6}));
 
     // A row that is not highlighted is dragged alone.
     dragWithMouse(window, queueRowPoint(view, 0, 0.5), queueRowPoint(view, 5, 0.75));
-    QCOMPARE(takeCommands(), QStringLiteral("move 0 before 6"));
+    QCOMPARE(pane.takeCommands(), QStringLiteral("move 0 before 6"));
     QCOMPARE(queueSelection(controller), (QList<int>{0}));
 }
 
 void LibraryQueueSmokeTest::queueDropsFollowTheRowsAfterRowsAboveAreRemoved() {
     QueueRowsModel rows;
     loadQueueRows(rows, 60);
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QueuePane pane;
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kQueuePaneHarness, baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-    auto *window = qobject_cast<QQuickWindow *>(root.get());
-    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
-    QObject *controller = root->property("controller").value<QObject *>();
-    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
-    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
-    auto *dropArea = root->findChild<QQuickItem *>(QStringLiteral("playlistDropArea"));
-    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
-    QVERIFY(dropArea != nullptr && bridge != nullptr);
+    QVERIFY2(pane.load(rows, kQueuePaneHarness, &errorText), qPrintable(errorText));
+    QQuickItem *view = pane.view;
+    QObject *bridge = pane.bridge;
+    auto *dropArea = pane.root->findChild<QQuickItem *>(QStringLiteral("playlistDropArea"));
+    QVERIFY(dropArea != nullptr);
     QTRY_VERIFY(view->height() > 0);
     const double rowHeight = view->property("rowHeight").toDouble();
 
@@ -3454,7 +3343,7 @@ void LibraryQueueSmokeTest::queueDropsFollowTheRowsAfterRowsAboveAreRemoved() {
     // A drop in the top row's upper half goes before it, one in the lower
     // half of the row three down after that row, and the line is there:
     // its 2 px straddle the boundary, one above it, inside the view at
-    // its top (#373 H35 AC4: it lay in the lower row).
+    // its top (it lay in the lower row).
     const auto dropAt = [&](double y) {
         QVERIFY(QMetaObject::invokeMethod(dropArea, "updateQueueDropIndicator", Q_ARG(QVariant, y)));
     };
@@ -3469,28 +3358,19 @@ void LibraryQueueSmokeTest::queueDropsFollowTheRowsAfterRowsAboveAreRemoved() {
 }
 
 // The drop line runs to the scrollbar's lane while the scrollbar shows,
-// and to the queue's edge when it does not, as the focus ring does (#373
-// H35 AC4: it stopped 8 px short with no scrollbar).
+// and to the queue's edge when it does not, as the focus ring does (it
+// stopped 8 px short with no scrollbar).
 void LibraryQueueSmokeTest::queueDropLineKeepsTheScrollbarLaneOnlyWhileItShows() {
     QueueRowsModel rows;
     loadQueueRows(rows, 4);
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QueuePane pane;
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kQueuePaneHarness, baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-    auto *window = qobject_cast<QQuickWindow *>(root.get());
-    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
-    QObject *controller = root->property("controller").value<QObject *>();
-    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
-    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
-    auto *indicator = root->findChild<QQuickItem *>(QStringLiteral("queueDropIndicator"));
-    auto *scrollBar = root->findChild<QQuickItem *>(QStringLiteral("queueScrollBar"));
-    auto *dropArea = root->findChild<QQuickItem *>(QStringLiteral("playlistDropArea"));
-    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
-    QVERIFY(indicator != nullptr && scrollBar != nullptr && dropArea != nullptr && bridge != nullptr);
+    QVERIFY2(pane.load(rows, kQueuePaneHarness, &errorText), qPrintable(errorText));
+    QQuickItem *view = pane.view;
+    auto *indicator = pane.root->findChild<QQuickItem *>(QStringLiteral("queueDropIndicator"));
+    auto *scrollBar = pane.root->findChild<QQuickItem *>(QStringLiteral("queueScrollBar"));
+    auto *dropArea = pane.root->findChild<QQuickItem *>(QStringLiteral("playlistDropArea"));
+    QVERIFY(indicator != nullptr && scrollBar != nullptr && dropArea != nullptr);
     QTRY_VERIFY(view->height() > 0);
     const double rowHeight = view->property("rowHeight").toDouble();
     const double lane = scrollBar->property("lane").toDouble();
@@ -3511,16 +3391,8 @@ void LibraryQueueSmokeTest::queueDropLineKeepsTheScrollbarLaneOnlyWhileItShows()
     QCOMPARE(indicator->y() + indicator->height() / 2, boundary);
 
     // A long one: the scrollbar shows, and the line stops at its lane.
-    QVector<QueueRowData> more;
-    for (int number = 4; number < 60; ++number) {
-        QueueRowData data;
-        data.title = QStringLiteral("Track %1").arg(number);
-        data.path = QStringLiteral("/music/%1.flac").arg(number);
-        data.lengthText = QStringLiteral("1:00");
-        more.push_back(data);
-    }
-    QVERIFY(rows.insertRowsAt(4, more));
-    bridge->setProperty("queueLength", 60);
+    QVERIFY(rows.insertRowsAt(4, queueRows(4, 60)));
+    pane.bridge->setProperty("queueLength", 60);
     QTRY_VERIFY(scrollBar->isVisible());
     QCOMPARE(indicator->width(), view->width() - lane);
 }
@@ -3529,6 +3401,7 @@ namespace {
 
 // The library controller with a saved view state whose selection is in
 // artist A, over `testLibraryModel`, with the bridge's saves in `savedKeys`.
+// It saves at once: the tests check what it saves, not when.
 const QByteArray kRestoreHarness = QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import "controllers" as Controllers
@@ -3562,6 +3435,7 @@ Item {
         tryCaptureGlobalSearchPrefill: function(event) { return false }
         tagEditorApi: tagEditorApi
         openTagEditorDialog: function() {}
+        viewStatePersistTimer.interval: 0
     }
 
     ListView {
@@ -3609,10 +3483,8 @@ void LibraryQueueSmokeTest::aRevealDuringTheSavedViewRestoreKeepsSavingTheView()
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
     engine.rootContext()->setContextProperty(QStringLiteral("treeBytes"), encodeRows(rows));
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kRestoreHarness, baseUrl, &errorText));
+    QScopedPointer<QObject> root(createHarness(engine, kRestoreHarness, &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
     QObject *controller = root->property("controllerRef").value<QObject *>();
 
@@ -3641,26 +3513,15 @@ void LibraryQueueSmokeTest::aRevealDuringTheSavedViewRestoreKeepsSavingTheView()
 void LibraryQueueSmokeTest::escapeCancelsAQueueRowDrag() {
     QueueRowsModel rows;
     loadQueueRows(rows, 10);
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QueuePane pane;
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kQueuePaneHarness, baseUrl, &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-    auto *window = qobject_cast<QQuickWindow *>(root.get());
-    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
-    QObject *controller = root->property("controller").value<QObject *>();
-    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
-    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
-    auto *indicator = root->findChild<QQuickItem *>(QStringLiteral("queueDropIndicator"));
+    QVERIFY2(pane.load(rows, kQueuePaneHarness, &errorText), qPrintable(errorText));
+    QQuickWindow *window = pane.window;
+    QObject *controller = pane.controller;
+    QQuickItem *view = pane.view;
+    auto *indicator = pane.root->findChild<QQuickItem *>(QStringLiteral("queueDropIndicator"));
     QVERIFY(indicator != nullptr);
     QTRY_VERIFY(!queueRowPoint(view, 9, 0.5).isNull());
-    const auto takeCommands = [&root]() {
-        QVariant taken;
-        QMetaObject::invokeMethod(root.data(), "takeCommands", Q_RETURN_ARG(QVariant, taken));
-        return taken.toString();
-    };
     QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
         Q_ARG(QVariant, QVariant(QVariantList{2, 3, 6}))));
 
@@ -3680,12 +3541,12 @@ void LibraryQueueSmokeTest::escapeCancelsAQueueRowDrag() {
     QTest::mouseMove(window, over + QPoint(0, 4));
     QVERIFY(!indicator->isVisible());
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, over + QPoint(0, 4));
-    QCOMPARE(takeCommands(), QString());
+    QCOMPARE(pane.takeCommands(), QString());
     QCOMPARE(queueSelection(controller), (QList<int>{2, 3, 6}));
 
     // The next drag works as before.
     dragWithMouse(window, queueRowPoint(view, 3, 0.5), queueRowPoint(view, 8, 0.25));
-    QCOMPARE(takeCommands(), QStringLiteral("move 2,3,6 before 8"));
+    QCOMPARE(pane.takeCommands(), QStringLiteral("move 2,3,6 before 8"));
 }
 
 void LibraryQueueSmokeTest::aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore() {
@@ -3694,10 +3555,8 @@ void LibraryQueueSmokeTest::aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
     engine.rootContext()->setContextProperty(QStringLiteral("treeBytes"), encodeRows(restoreHarnessRows()));
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kRestoreHarness, baseUrl, &errorText));
+    QScopedPointer<QObject> root(createHarness(engine, kRestoreHarness, &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
     QObject *controller = root->property("controllerRef").value<QObject *>();
 

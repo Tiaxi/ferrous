@@ -3,8 +3,8 @@
 
 // The visualization's modes, by index, for its mode switches: the plot's
 // plate and the fullscreen viewer's title strip. The spectrogram's glyph is
-// the app icon's glide and harmonic, which says frequency over time (#373
-// H14 G7: Breeze's bar chart said statistics); the waveform's is Breeze's.
+// the app icon's glide and harmonic, which says frequency over time
+// (Breeze's bar chart said statistics); the waveform's is Breeze's.
 // `assetsUrl` is the app's assets folder, as the caller resolves it.
 function modes(assetsUrl) {
     return [

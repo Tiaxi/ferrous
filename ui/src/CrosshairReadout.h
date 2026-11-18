@@ -34,7 +34,7 @@ constexpr int kGap = 4;
 // Between the value's plate and the corner's controls beside it: a gap
 // between groups, so that where a lane is too short for the value to go
 // under the corner, it doesn't read as one more plate in the corner's row,
-// as it did ViewCorner::kLabelGap from it (#373 H8).
+// as it did ViewCorner::kLabelGap from it.
 constexpr int kCornerGap = 16;
 constexpr int kRadius = 3;
 

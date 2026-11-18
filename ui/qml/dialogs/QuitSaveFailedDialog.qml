@@ -50,7 +50,7 @@ Components.CompactDialogWindow {
     }
 
     // What happened, in words, with the error that stopped it on a line
-    // of its own below, as the confirmations name their file (#373 H37):
+    // of its own below, as the confirmations name their file:
     // the error is the system's, such as "Permission denied (os error
     // 13)", and reads as a detail, not as the heading.
     ColumnLayout {
@@ -63,17 +63,17 @@ Components.CompactDialogWindow {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             // Short enough for one line: what it can be is in the text
-            // below (#373 H38: the list in it left "saved." alone on a
+            // below (the list in it left "saved." alone on a
             // second line). The lead, semibold, as every dialog's first
-            // sentence is (#373 H40: the three lines read as one grey
-            // block). It says what happened, not again what the title says
-            // (#373 H41: "could not be saved" twice).
+            // sentence is (the three lines read as one grey block). It says
+            // what happened, not again what the title says ("could not be
+            // saved" was there twice).
             font.weight: Font.DemiBold
             text: I18n.i18nc("@info", "Some recent changes were not saved.")
         }
 
         // A path in it breaks between its folders, and the error's code
-        // stays whole (#373 H47: "13)" alone on a line).
+        // stays whole ("13)" was alone on a line).
         Components.MessageLabel {
             objectName: "quitSaveFailedMessage"
             Layout.fillWidth: true
@@ -89,7 +89,7 @@ Components.CompactDialogWindow {
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
         // It names what it speaks of, rather than "They", which could be
-        // read as the error above it (#373 H41).
+        // read as the error above it.
         text: I18n.i18nc("@info", "Unsaved changes can include settings, queue changes and Last.fm scrobbles. "
             + "Retry saves again, for example after freeing disk space. Quit Anyway closes Ferrous and loses them.")
     }

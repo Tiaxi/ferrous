@@ -56,40 +56,32 @@ public:
 private slots:
     void loadsMainQmlWithFallbackBridge();
     void loadsExtractedQmlSlicesWithFallbackProps();
-    void mainWindowContentStartsBelowMenuBar();
-    void draggedSplitSizesSurviveAWindowResize();
-    void theSmallestWindowFitsALaptopScreenAndShowsEveryControl();
+    void splitsFitTheSmallestWindowAndKeepTheirDraggedShares();
     void windowLayoutSurvivesARestart();
     void aWindowSavedOffTheScreensOpensOnOne();
-    void queueColumnWidthsSurviveARestart();
     void unmuteShowsTheVolumeAtOnce();
     void theWindowOpensWithoutASavedLayoutThatDoesNotCome();
     void quittingWhileMinimizedKeepsTheWindowMaximized();
     void aWindowOffScreenStopsTheClockAndTheFeeds();
     void drawsOffscreenUnlessAPlatformIsChosen();
     void drawingWritesNoShaderCache();
-    void nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown();
-    void nowPlayingShowsWhatATaglessFileIs();
-    void nowPlayingHoldsTheTrackThatWentAsItShrinks();
+    void nowPlayingFollowsBridgeClientsSnapshots();
 };
 
 void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
-    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
-    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
-
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
-    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *root = window;
 
-    const QString qmlPath = QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml");
-    QVERIFY2(QFileInfo::exists(qmlPath), qPrintable(QStringLiteral("QML file missing: %1").arg(qmlPath)));
-
-    const QUrl url = QUrl::fromLocalFile(qmlPath);
-    engine.load(url);
-    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
-    QObject *root = engine.rootObjects().constFirst();
-    QVERIFY(root != nullptr);
+    // The content starts below the menu bar.
+    QObject *menuBar = qvariant_cast<QObject *>(root->property("menuBar"));
+    QObject *contentItem = qvariant_cast<QObject *>(root->property("contentItem"));
+    QVERIFY(menuBar != nullptr && contentItem != nullptr);
+    QTRY_VERIFY(menuBar->property("height").toReal() > 0.0);
+    QVERIFY2(contentItem->property("y").toReal() >= menuBar->property("height").toReal(),
+             "Application content must start below the menu bar");
 
     // The preference pages are made when the dialog first opens, not with
     // the window, and stay once made.
@@ -110,8 +102,6 @@ void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
     QVERIFY2(libraryView != nullptr, "Main.qml did not publish the library view ref");
     QCOMPARE(qvariant_cast<QObject *>(libraryView->property("model")), static_cast<QObject *>(&libraryModel));
 
-    auto *window = qobject_cast<QQuickWindow *>(root);
-    QVERIFY(window != nullptr);
     QObject *modeSwitch = nullptr;
     const QList<QObject *> modeSwitches = root->findChildren<QObject *>(
         QStringLiteral("visualizationModeSwitch"));
@@ -125,8 +115,7 @@ void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
     QVERIFY2(modeSwitch != nullptr, "Visualization mode switch was not created");
     QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
     // Two 24 px tool buttons on one plate, 4 px apart with 4 px around,
-    // which keeps a focus ring inside it with 1 px of plate outside it
-    // (#373 H14 G4, H16 I5).
+    // which keeps a focus ring inside it with 1 px of plate outside it.
     QCOMPARE(modeSwitch->property("width").toDouble(), 60.0);
     QCOMPARE(modeSwitch->property("height").toDouble(), 32.0);
     QCOMPARE(modeSwitch->property("pointerHovered").toBool(), false);
@@ -144,9 +133,6 @@ void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
 }
 
 void WindowSmokeTest::loadsExtractedQmlSlicesWithFallbackProps() {
-    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
-    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
-
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -598,32 +584,6 @@ Item {
     QVERIFY2(root != nullptr, qPrintable(errorText));
 }
 
-void WindowSmokeTest::mainWindowContentStartsBelowMenuBar() {
-    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
-    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
-
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
-    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
-
-    const QUrl url = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml"));
-    engine.load(url);
-    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
-    QObject *root = engine.rootObjects().constFirst();
-    QVERIFY(root != nullptr);
-
-    QObject *menuBar = qvariant_cast<QObject *>(root->property("menuBar"));
-    QObject *contentItem = qvariant_cast<QObject *>(root->property("contentItem"));
-    QVERIFY(menuBar != nullptr);
-    QVERIFY(contentItem != nullptr);
-    QTRY_VERIFY(menuBar->property("height").toReal() > 0.0);
-    QVERIFY2(
-        contentItem->property("y").toReal() >= menuBar->property("height").toReal(),
-        "Application content must start below the menu bar");
-}
-
 namespace {
 
 // The item at `index` of the split view `split`.
@@ -658,65 +618,55 @@ void dragSplitHandleBetween(QQuickWindow *window, QQuickItem *item, QQuickItem *
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, at);
 }
 
-} // namespace
+// The main window's splits: the sidebar beside the right split, which
+// holds the queue over the visualization.
+struct MainSplits {
+    explicit MainSplits(QQuickWindow *window)
+        : main(window->findChild<QQuickItem *>(QStringLiteral("mainSplit"))),
+          sidebar(window->findChild<QQuickItem *>(QStringLiteral("sidebarPane"))),
+          right(window->findChild<QQuickItem *>(QStringLiteral("rightSplit"))),
+          queue(window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"))),
+          visualization(splitItemAt(right, 1)) {}
 
-void WindowSmokeTest::draggedSplitSizesSurviveAWindowResize() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    window->resize(1400, 860);
-    QTRY_COMPARE(window->width(), 1400);
-    QTRY_COMPARE(window->height(), 860);
-    auto *mainSplit = window->findChild<QQuickItem *>(QStringLiteral("mainSplit"));
-    QQuickItem *sidebar = splitItemAt(mainSplit, 0);
-    QQuickItem *rightSplit = splitItemAt(mainSplit, 1);
-    QQuickItem *queue = splitItemAt(rightSplit, 0);
-    QVERIFY(mainSplit != nullptr && sidebar != nullptr && rightSplit != nullptr
-            && queue != nullptr);
+    bool found() const {
+        return main != nullptr && sidebar != nullptr && right != nullptr && queue != nullptr
+            && visualization != nullptr;
+    }
+    // Laid out for the window: their last items reach their ends.
+    bool laidOut() const {
+        return qFuzzyCompare(right->x() + right->width(), main->width())
+            && qFuzzyCompare(visualization->y() + visualization->height(), right->height());
+    }
+    qreal sidebarShare() const { return sidebar->width() / main->width(); }
+    qreal queueShare() const { return queue->height() / right->height(); }
+    // Drags the sidebar's handle by `sidebarDelta` and the queue's by
+    // `queueDelta`, as the user does; whether each moved most of the way.
+    bool drag(QQuickWindow *window, int sidebarDelta, int queueDelta) const {
+        const qreal sidebarBefore = sidebar->width();
+        dragSplitHandleBetween(window, sidebar, right, Qt::Horizontal, sidebarDelta);
+        if (!QTest::qWaitFor([&]() { return sidebar->width() > sidebarBefore + sidebarDelta * 2.0 / 3; })) {
+            return false;
+        }
+        const qreal queueBefore = queue->height();
+        dragSplitHandleBetween(window, queue, visualization, Qt::Vertical, queueDelta);
+        return QTest::qWaitFor([&]() { return queue->height() < queueBefore + queueDelta * 2.0 / 3; });
+    }
+    // Why the splits do not hold the shares `sidebar` and `queue`, or "".
+    QString sharesProblem(qreal sidebarWas, qreal queueWas) const {
+        if (std::abs(sidebarShare() - sidebarWas) < 0.01 && std::abs(queueShare() - queueWas) < 0.01) {
+            return {};
+        }
+        return QStringLiteral("sidebar %1 of %2, was %3; queue %4 of %5, was %6")
+            .arg(sidebar->width()).arg(main->width()).arg(sidebarWas)
+            .arg(queue->height()).arg(right->height()).arg(queueWas);
+    }
 
-    // The splits have been laid out for the window when their last items
-    // reach their ends.
-    QQuickItem *visualization = splitItemAt(rightSplit, 1);
-    QVERIFY(visualization != nullptr);
-    const auto laidOut = [&]() {
-        return qFuzzyCompare(rightSplit->x() + rightSplit->width(), mainSplit->width())
-            && qFuzzyCompare(visualization->y() + visualization->height(), rightSplit->height());
-    };
-    QTRY_COMPARE(mainSplit->width(), 1400.0);
-    QTRY_VERIFY(laidOut());
-    const qreal sidebarBefore = sidebar->width();
-    dragSplitHandleBetween(window, sidebar, rightSplit, Qt::Horizontal, 200);
-    QTRY_VERIFY2(sidebar->width() > sidebarBefore + 150,
-                 qPrintable(QStringLiteral("%1 -> %2").arg(sidebarBefore).arg(sidebar->width())));
-    const qreal queueBefore = queue->height();
-    dragSplitHandleBetween(window, queue, visualization, Qt::Vertical, -100);
-    QTRY_VERIFY2(queue->height() < queueBefore - 70,
-                 qPrintable(QStringLiteral("%1 -> %2").arg(queueBefore).arg(queue->height())));
-    const qreal sidebarShare = sidebar->width() / mainSplit->width();
-    const qreal queueShare = queue->height() / rightSplit->height();
-
-    // A larger window keeps the shares the user dragged to, rather than
-    // the sizes the window would have by default.
-    window->resize(1700, 1000);
-    QTRY_COMPARE(window->width(), 1700);
-    QTRY_COMPARE(window->height(), 1000);
-    QTRY_COMPARE(mainSplit->width(), 1700.0);
-    QTRY_VERIFY(laidOut());
-    QTRY_VERIFY2(std::abs(sidebar->width() / mainSplit->width() - sidebarShare) < 0.01,
-                 qPrintable(QStringLiteral("sidebar %1 of %2, was %3")
-                                .arg(sidebar->width())
-                                .arg(mainSplit->width())
-                                .arg(sidebarShare)));
-    QTRY_VERIFY2(std::abs(queue->height() / rightSplit->height() - queueShare) < 0.01,
-                 qPrintable(QStringLiteral("queue %1 of %2, was %3")
-                                .arg(queue->height())
-                                .arg(rightSplit->height())
-                                .arg(queueShare)));
-    QVERIFY(finishIncubation(engine));
-}
-
-namespace {
+    QQuickItem *main;
+    QQuickItem *sidebar;
+    QQuickItem *right;
+    QQuickItem *queue;
+    QQuickItem *visualization;
+};
 
 // Whether `item` is shown, and inside `window`.
 bool shownInside(QQuickWindow *window, QQuickItem *item) {
@@ -753,18 +703,47 @@ bool closeThroughTheQuitFlow(QQuickWindow *window) {
         && QTest::qWaitFor([window]() { return !window->isVisible(); }, 15000);
 }
 
+// The settings the bridge saves, in the test's own config directory; see
+// main().
 QString savedSettingsPath() {
     return QDir(qEnvironmentVariable("XDG_CONFIG_HOME"))
         .filePath(QStringLiteral("ferrous/settings.txt"));
 }
 
+// Saves `settings` as the bridge's saved settings, as an earlier run left
+// them.
+bool writeSavedSettings(const QByteArray &settings) {
+    QFile::remove(savedSettingsPath());
+    QFile file(savedSettingsPath());
+    return QDir().mkpath(QFileInfo(savedSettingsPath()).path()) && file.open(QIODevice::WriteOnly)
+        && file.write(settings) == settings.size();
+}
+
+QByteArray readSavedSettings() {
+    QFile file(savedSettingsPath());
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+}
+
+// The header of the queue's column `column`, while it shows.
+QQuickItem *queueHeader(QQuickWindow *window, const char *column) {
+    auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+    return queue != nullptr ? shownItemNamed(queue, QStringLiteral("queueHeader_") + QLatin1String(column))
+                            : nullptr;
+}
+
 } // namespace
 
-void WindowSmokeTest::theSmallestWindowFitsALaptopScreenAndShowsEveryControl() {
+// The smallest window fits a laptop screen and shows every control whole;
+// in a larger one, the splits keep the shares the user dragged them to as
+// the window grows, rather than the sizes the window would have by default.
+void WindowSmokeTest::splitsFitTheSmallestWindowAndKeepTheirDraggedShares() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const MainSplits splits(window);
+    auto *statusBar = qvariant_cast<QQuickItem *>(window->property("footer"));
+    QVERIFY(splits.found() && statusBar != nullptr);
     // A 1080p screen at 150% has 1280 x 720 logical pixels, of which a
     // panel and the window's frame take some.
     const int minimumWidth = window->minimumWidth();
@@ -774,30 +753,29 @@ void WindowSmokeTest::theSmallestWindowFitsALaptopScreenAndShowsEveryControl() {
              qPrintable(QStringLiteral("%1 x %2").arg(minimumWidth).arg(minimumHeight)));
 
     window->resize(minimumWidth, minimumHeight);
-    QTRY_COMPARE(window->width(), minimumWidth);
-    QTRY_COMPARE(window->height(), minimumHeight);
-    auto *mainSplit = window->findChild<QQuickItem *>(QStringLiteral("mainSplit"));
-    auto *sidebar = window->findChild<QQuickItem *>(QStringLiteral("sidebarPane"));
-    auto *rightSplit = window->findChild<QQuickItem *>(QStringLiteral("rightSplit"));
-    auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
-    QQuickItem *visualization = splitItemAt(rightSplit, 1);
-    auto *statusBar = qvariant_cast<QQuickItem *>(window->property("footer"));
-    QVERIFY(mainSplit != nullptr && sidebar != nullptr && rightSplit != nullptr
-            && queue != nullptr && visualization != nullptr && statusBar != nullptr);
-    QTRY_COMPARE(mainSplit->width(), qreal(minimumWidth));
-    QTRY_VERIFY(qFuzzyCompare(rightSplit->x() + rightSplit->width(), mainSplit->width()));
-    QTRY_VERIFY(qFuzzyCompare(visualization->y() + visualization->height(), rightSplit->height()));
+    QTRY_COMPARE(window->size(), QSize(minimumWidth, minimumHeight));
+    QTRY_COMPARE(splits.main->width(), qreal(minimumWidth));
+    QTRY_VERIFY(splits.laidOut());
 
     // Every pane gets at least its own minimum.
-    QVERIFY2(sidebar->width() >= 250 - 0.5, qPrintable(QString::number(sidebar->width())));
-    QVERIFY2(rightSplit->width() >= queue->property("minimumContentWidth").toReal() - 0.5,
+    const auto atLeastItsMinimum = [](QQuickItem *pane, qreal size, const QString &minimum) {
+        const qreal least = evaluateOn(pane, QStringLiteral("SplitView.") + minimum).toReal();
+        return least > 0 && size >= least - 0.5;
+    };
+    QVERIFY2(atLeastItsMinimum(splits.sidebar, splits.sidebar->width(), QStringLiteral("minimumWidth")),
+             qPrintable(QString::number(splits.sidebar->width())));
+    QVERIFY2(atLeastItsMinimum(splits.right, splits.right->width(), QStringLiteral("minimumWidth")),
+             qPrintable(QString::number(splits.right->width())));
+    QVERIFY2(splits.right->width() >= splits.queue->property("minimumContentWidth").toReal() - 0.5,
              qPrintable(QStringLiteral("%1 < %2")
-                            .arg(rightSplit->width())
-                            .arg(queue->property("minimumContentWidth").toReal())));
-    QVERIFY2(queue->height() >= 220 - 0.5, qPrintable(QString::number(queue->height())));
-    QVERIFY2(visualization->height() >= 220 - 0.5,
-             qPrintable(QString::number(visualization->height())));
-    QVERIFY(shownInside(window, mainSplit));
+                            .arg(splits.right->width())
+                            .arg(splits.queue->property("minimumContentWidth").toReal())));
+    QVERIFY2(atLeastItsMinimum(splits.queue, splits.queue->height(), QStringLiteral("minimumHeight")),
+             qPrintable(QString::number(splits.queue->height())));
+    QVERIFY2(atLeastItsMinimum(splits.visualization, splits.visualization->height(),
+                               QStringLiteral("minimumHeight")),
+             qPrintable(QString::number(splits.visualization->height())));
+    QVERIFY(shownInside(window, splits.main));
     QVERIFY(shownInside(window, statusBar));
 
     // The playback controls stay whole and apart.
@@ -817,6 +795,7 @@ void WindowSmokeTest::theSmallestWindowFitsALaptopScreenAndShowsEveryControl() {
 
     // So do the queue's columns, with room for the titles: Album drops
     // first.
+    QQuickItem *queue = splits.queue;
     QCOMPARE(shownItemNamed(queue, QStringLiteral("queueHeader_album")), nullptr);
     QCOMPARE(shownItemNamed(queue, QStringLiteral("queueColumnHandle_album")), nullptr);
     QList<QQuickItem *> columns;
@@ -830,23 +809,40 @@ void WindowSmokeTest::theSmallestWindowFitsALaptopScreenAndShowsEveryControl() {
     QVERIFY2(columnOverlap.isEmpty(), qPrintable(columnOverlap));
     QVERIFY2(columns.at(2)->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1,
              qPrintable(QString::number(columns.at(2)->width())));
-    const QRectF queueRect = queue->mapRectToScene(QRectF(0, 0, queue->width(), queue->height()));
-    const QRectF lengthRect = columns.last()->mapRectToScene(
-        QRectF(0, 0, columns.last()->width(), columns.last()->height()));
-    QVERIFY(lengthRect.right() <= queueRect.right() + 0.5);
+    QVERIFY(sceneRectOf(columns.last()).right() <= sceneRectOf(queue).right() + 0.5);
 
+    // Dragged in a larger window, the splits keep their shares as it grows.
+    window->resize(1400, 860);
+    QTRY_COMPARE(window->size(), QSize(1400, 860));
+    QTRY_COMPARE(splits.main->width(), 1400.0);
+    QTRY_VERIFY(splits.laidOut());
+    QVERIFY(splits.drag(window, 200, -100));
+    const qreal sidebarShare = splits.sidebarShare();
+    const qreal queueShare = splits.queueShare();
+    window->resize(1700, 1000);
+    QTRY_COMPARE(window->size(), QSize(1700, 1000));
+    QTRY_COMPARE(splits.main->width(), 1700.0);
+    QTRY_VERIFY(splits.laidOut());
+    QTRY_VERIFY2(splits.sharesProblem(sidebarShare, queueShare).isEmpty(),
+                 qPrintable(splits.sharesProblem(sidebarShare, queueShare)));
     QVERIFY(finishIncubation(engine));
 }
 
+// The window's place and size, maximized or not, the splits' shares, the
+// visualization, Follow Current Track and the queue's column widths
+// survive a restart, and so do the settings this build does not know.
 void WindowSmokeTest::windowLayoutSurvivesARestart() {
-    // The bridge runs with the test's own config directory; see main().
-    QFile::remove(savedSettingsPath());
-    const auto restoreQuit = keepRunningWhenTheWindowCloses();
-    // On one of the large test screens, which has room for the window.
-    const QRect geometry(100'200, 150, 1300, 820);
+    // On one of the large test screens, which has room for the window and
+    // its columns beside the wider sidebar; saved by a build that also had a Genre column, which
+    // this one keeps, and a setting it does not know.
+    const QRect geometry(100'200, 150, 1500, 820);
     const QRect normalOnTheSmallScreen(40, 40, 880, 600);
+    QVERIFY(writeSavedSettings("window_geometry=100200,150,1500,820\n"
+                               "queue_column_widths=artist:260,genre:99,album:9\nfuture_key=1\n"));
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
     qreal sidebarShare = 0;
     qreal queueShare = 0;
+    qreal album = 0;
     {
         BridgeClient bridge;
         LibraryTreeModel libraryModel;
@@ -854,42 +850,50 @@ void WindowSmokeTest::windowLayoutSurvivesARestart() {
         engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
         QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
         QVERIFY2(window != nullptr, "Main.qml failed to show");
-        window->setGeometry(geometry);
-        QTRY_COMPARE(window->geometry(), geometry);
-        auto *mainSplit = window->findChild<QQuickItem *>(QStringLiteral("mainSplit"));
-        auto *sidebar = window->findChild<QQuickItem *>(QStringLiteral("sidebarPane"));
-        auto *rightSplit = window->findChild<QQuickItem *>(QStringLiteral("rightSplit"));
-        auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
-        QQuickItem *visualization = splitItemAt(rightSplit, 1);
+        QCOMPARE(window->geometry(), geometry);
+        QQuickItem *artist = queueHeader(window, "artist");
+        QQuickItem *albumHeader = queueHeader(window, "album");
+        QVERIFY(artist != nullptr && albumHeader != nullptr);
+        // As the window is first shown, without a jump from the default.
+        QCOMPARE(artist->width(), 260.0);
+        // The album's width was out of range: its default.
+        const qreal defaultAlbum = albumHeader->width();
+        QVERIFY(defaultAlbum > 100);
+        QQuickItem *handle = shownItemNamed(window->contentItem(), QStringLiteral("queueColumnHandle_album"));
+        QVERIFY(handle != nullptr);
+        QPoint at = handle->mapToScene(QPointF(handle->width() / 2, handle->height() / 2)).toPoint();
+        QTest::mouseMove(window, at);
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, at);
+        for (int step = 0; step < 5; ++step) {
+            at -= QPoint(8, 0);
+            QTest::mouseMove(window, at);
+        }
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, at);
+        QTRY_COMPARE(albumHeader->width(), defaultAlbum + 40);
+        album = albumHeader->width();
+
+        const MainSplits splits(window);
         QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
         QObject *queueController = window->findChild<QObject *>(QStringLiteral("queueController"));
-        QVERIFY(mainSplit != nullptr && sidebar != nullptr && rightSplit != nullptr
-                && queue != nullptr && visualization != nullptr && viewer != nullptr
-                && queueController != nullptr);
-        QTRY_COMPARE(mainSplit->width(), 1300.0);
-        QTRY_VERIFY(qFuzzyCompare(rightSplit->x() + rightSplit->width(), mainSplit->width()));
-        QTRY_VERIFY(
-            qFuzzyCompare(visualization->y() + visualization->height(), rightSplit->height()));
-        const qreal sidebarBefore = sidebar->width();
-        dragSplitHandleBetween(window, sidebar, rightSplit, Qt::Horizontal, 120);
-        QTRY_VERIFY(sidebar->width() > sidebarBefore + 100);
-        const qreal queueBefore = queue->height();
-        dragSplitHandleBetween(window, queue, visualization, Qt::Vertical, -60);
-        QTRY_VERIFY(queue->height() < queueBefore - 40);
-        sidebarShare = sidebar->width() / mainSplit->width();
-        queueShare = queue->height() / rightSplit->height();
+        QVERIFY(splits.found() && viewer != nullptr && queueController != nullptr);
+        QTRY_COMPARE(splits.main->width(), 1500.0);
+        QTRY_VERIFY(splits.laidOut());
+        QVERIFY(splits.drag(window, 120, -60));
+        sidebarShare = splits.sidebarShare();
+        queueShare = splits.queueShare();
         QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
         QVERIFY(queueController->setProperty("autoCenterSelection", false));
 
         QVERIFY(closeThroughTheQuitFlow(window));
     }
-    QFile settings(savedSettingsPath());
-    QVERIFY(settings.open(QIODevice::ReadOnly));
-    const QByteArray saved = settings.readAll();
-    settings.close();
-    QVERIFY2(saved.contains("\nwindow_geometry=100200,150,1300,820\n"), saved.constData());
+    const QByteArray saved = readSavedSettings();
+    QVERIFY2(saved.contains("\nwindow_geometry=100200,150,1500,820\n"), saved.constData());
     QVERIFY2(saved.contains("\nvisualization_mode=1\n"), saved.constData());
     QVERIFY2(saved.contains("\nfollow_current_track=0\n"), saved.constData());
+    const QByteArray columnWidths = "\nqueue_column_widths=artist:260,album:" + QByteArray::number(int(album))
+        + ",genre:99\n";
+    QVERIFY2(saved.contains(columnWidths), saved.constData());
+    QVERIFY2(saved.contains("\nfuture_key=1\n"), saved.constData());
 
     {
         BridgeClient bridge;
@@ -899,23 +903,12 @@ void WindowSmokeTest::windowLayoutSurvivesARestart() {
         QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
         QVERIFY2(window != nullptr, "Main.qml failed to show");
         QCOMPARE(window->geometry(), geometry);
-        auto *mainSplit = window->findChild<QQuickItem *>(QStringLiteral("mainSplit"));
-        auto *sidebar = window->findChild<QQuickItem *>(QStringLiteral("sidebarPane"));
-        auto *rightSplit = window->findChild<QQuickItem *>(QStringLiteral("rightSplit"));
-        auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+        const MainSplits splits(window);
         QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
-        QObject *queueController =
-            window->findChild<QObject *>(QStringLiteral("queueController"));
-        QTRY_VERIFY2(std::abs(sidebar->width() / mainSplit->width() - sidebarShare) < 0.01,
-                     qPrintable(QStringLiteral("%1 of %2, was %3")
-                                    .arg(sidebar->width())
-                                    .arg(mainSplit->width())
-                                    .arg(sidebarShare)));
-        QTRY_VERIFY2(std::abs(queue->height() / rightSplit->height() - queueShare) < 0.01,
-                     qPrintable(QStringLiteral("%1 of %2, was %3")
-                                    .arg(queue->height())
-                                    .arg(rightSplit->height())
-                                    .arg(queueShare)));
+        QObject *queueController = window->findChild<QObject *>(QStringLiteral("queueController"));
+        QVERIFY(splits.found() && viewer != nullptr && queueController != nullptr);
+        QTRY_VERIFY2(splits.sharesProblem(sidebarShare, queueShare).isEmpty(),
+                     qPrintable(splits.sharesProblem(sidebarShare, queueShare)));
         QCOMPARE(viewer->property("visualizationMode").toInt(), 1);
         QCOMPARE(queueController->property("autoCenterSelection").toBool(), false);
         QObject *followAction = nullptr;
@@ -927,6 +920,21 @@ void WindowSmokeTest::windowLayoutSurvivesARestart() {
         }
         QVERIFY(followAction != nullptr);
         QCOMPARE(followAction->property("checked").toBool(), false);
+        QCOMPARE(queueHeader(window, "artist")->width(), 260.0);
+        QCOMPARE(queueHeader(window, "album")->width(), album);
+
+        // In the narrowest window Album drops and Artist gives way, so the
+        // title keeps its minimum, and they come back as the window grows
+        // again.
+        window->resize(window->minimumWidth(), window->minimumHeight());
+        QTRY_COMPARE(window->width(), window->minimumWidth());
+        QTRY_VERIFY(queueHeader(window, "artist")->width() < 260.0);
+        QVERIFY(queueHeader(window, "title")->width()
+                >= splits.queue->property("minimumTitleColumnWidth").toReal() - 1);
+        QCOMPARE(queueHeader(window, "album"), nullptr);
+        window->setGeometry(geometry);
+        QTRY_COMPARE(queueHeader(window, "artist")->width(), 260.0);
+        QTRY_COMPARE(queueHeader(window, "album")->width(), album);
 
         // Maximized, it comes back maximized, keeping the geometry it has
         // when it is not. On the small test screen, so that the
@@ -942,11 +950,8 @@ void WindowSmokeTest::windowLayoutSurvivesARestart() {
         QTRY_COMPARE(window->visibility(), QWindow::Minimized);
         QVERIFY(closeThroughTheQuitFlow(window));
     }
-    QVERIFY(settings.open(QIODevice::ReadOnly));
-    const QByteArray savedMaximized = settings.readAll();
-    settings.close();
-    QVERIFY2(savedMaximized.contains("\nwindow_geometry=40,40,880,600\n"),
-             savedMaximized.constData());
+    const QByteArray savedMaximized = readSavedSettings();
+    QVERIFY2(savedMaximized.contains("\nwindow_geometry=40,40,880,600\n"), savedMaximized.constData());
     QVERIFY2(savedMaximized.contains("\nwindow_maximized=1\n"), savedMaximized.constData());
     BridgeClient bridge;
     LibraryTreeModel libraryModel;
@@ -965,12 +970,7 @@ void WindowSmokeTest::windowLayoutSurvivesARestart() {
 
 void WindowSmokeTest::aWindowSavedOffTheScreensOpensOnOne() {
     // As if it was saved on a monitor that has been disconnected since.
-    QFile::remove(savedSettingsPath());
-    QVERIFY(QDir().mkpath(QFileInfo(savedSettingsPath()).path()));
-    QFile settings(savedSettingsPath());
-    QVERIFY(settings.open(QIODevice::WriteOnly));
-    settings.write("window_geometry=50000,40000,1200,700\nwindow_maximized=0\n");
-    settings.close();
+    QVERIFY(writeSavedSettings("window_geometry=50000,40000,1200,700\nwindow_maximized=0\n"));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
 
     BridgeClient bridge;
@@ -983,103 +983,16 @@ void WindowSmokeTest::aWindowSavedOffTheScreensOpensOnOne() {
     for (const QScreen *screen : QGuiApplication::screens()) {
         onAScreen |= screen->geometry().contains(window->geometry().center());
     }
-    QVERIFY2(onAScreen, qPrintable(QStringLiteral("%1,%2 %3x%4")
-                                       .arg(window->x())
-                                       .arg(window->y())
-                                       .arg(window->width())
-                                       .arg(window->height())));
-    QVERIFY(closeThroughTheQuitFlow(window));
-    QFile::remove(savedSettingsPath());
-}
-
-void WindowSmokeTest::queueColumnWidthsSurviveARestart() {
-    // Saved by a build that also had a Genre column, which this one keeps,
-    // on one of the large test screens, which has room for the columns.
-    QFile::remove(savedSettingsPath());
-    QVERIFY(QDir().mkpath(QFileInfo(savedSettingsPath()).path()));
-    QFile settings(savedSettingsPath());
-    QVERIFY(settings.open(QIODevice::WriteOnly));
-    settings.write("window_geometry=100200,150,1300,820\n"
-                   "queue_column_widths=artist:260,genre:99,album:9\nfuture_key=1\n");
-    settings.close();
-    const auto restoreQuit = keepRunningWhenTheWindowCloses();
-    const auto header = [](QQuickWindow *window, const char *column) {
-        auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
-        return queue != nullptr
-            ? shownItemNamed(queue, QStringLiteral("queueHeader_") + QLatin1String(column))
-            : nullptr;
-    };
-    qreal album = 0;
-    {
-        BridgeClient bridge;
-        LibraryTreeModel libraryModel;
-        QQmlApplicationEngine engine;
-        engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
-        QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
-        QVERIFY2(window != nullptr, "Main.qml failed to show");
-        QQuickItem *artist = header(window, "artist");
-        QQuickItem *albumHeader = header(window, "album");
-        QVERIFY(artist != nullptr && albumHeader != nullptr);
-        // As the window is first shown, without a jump from the default.
-        QCOMPARE(artist->width(), 260.0);
-        // The album's width was out of range: its default.
-        const qreal defaultAlbum = albumHeader->width();
-        QVERIFY(defaultAlbum > 100);
-
-        QQuickItem *handle = shownItemNamed(window->contentItem(),
-                                            QStringLiteral("queueColumnHandle_album"));
-        QVERIFY(handle != nullptr);
-        QPoint at = handle->mapToScene(QPointF(handle->width() / 2, handle->height() / 2)).toPoint();
-        QTest::mouseMove(window, at);
-        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, at);
-        for (int step = 0; step < 5; ++step) {
-            at -= QPoint(8, 0);
-            QTest::mouseMove(window, at);
-        }
-        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, at);
-        QTRY_COMPARE(albumHeader->width(), defaultAlbum + 40);
-        album = albumHeader->width();
-        QVERIFY(closeThroughTheQuitFlow(window));
-    }
-    QVERIFY(settings.open(QIODevice::ReadOnly));
-    const QByteArray saved = settings.readAll();
-    settings.close();
-    const QByteArray line = "\nqueue_column_widths=artist:260,album:" + QByteArray::number(int(album))
-        + ",genre:99\n";
-    QVERIFY2(saved.contains(line), saved.constData());
-    QVERIFY2(saved.contains("\nfuture_key=1\n"), saved.constData());
-
-    BridgeClient bridge;
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
-    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QCOMPARE(header(window, "artist")->width(), 260.0);
-    QCOMPARE(header(window, "album")->width(), album);
-
-    // In the narrowest window Album drops and Artist gives way, so the title
-    // keeps its minimum, and they come back as the window grows again.
-    auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
-    const QRect wide = window->geometry();
-    window->resize(window->minimumWidth(), window->minimumHeight());
-    QTRY_COMPARE(window->width(), window->minimumWidth());
-    QTRY_VERIFY(header(window, "artist")->width() < 260.0);
-    QVERIFY(header(window, "title")->width()
-            >= queue->property("minimumTitleColumnWidth").toReal() - 1);
-    QCOMPARE(header(window, "album"), nullptr);
-    window->setGeometry(wide);
-    QTRY_COMPARE(header(window, "artist")->width(), 260.0);
-    QTRY_COMPARE(header(window, "album")->width(), album);
+    QVERIFY2(onAScreen, qPrintable(describeRect(window->geometry())));
     QVERIFY(closeThroughTheQuitFlow(window));
     QFile::remove(savedSettingsPath());
 }
 
 // Unmuting showed the volume slider at 0, and the muted glyph, until a
-// snapshot of the backend's brought the restored volume some 50 ms later
-// (#373 H34 AA4). With the real bridge and backend: from the mute to the
-// backend's snapshot after the unmute, the slider shows the volume in every
-// frame, and the glyph the state, at once.
+// snapshot of the backend's brought the restored volume some 50 ms later.
+// With the real bridge and backend: from the mute to the backend's snapshot
+// after the unmute, the slider shows the volume in every frame, and the
+// glyph the state, at once.
 void WindowSmokeTest::unmuteShowsTheVolumeAtOnce() {
     QFile::remove(savedSettingsPath());
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
@@ -1399,13 +1312,11 @@ std::unique_ptr<QmlSmokeTest> makeWindowSmokeTest(const QString &userDirectories
     return std::make_unique<WindowSmokeTest>(userDirectoriesParent);
 }
 
-// Track changes whose path comes before the track's queue row and metadata,
-// as BridgeClient tells them: the panel keeps the track before's lines,
-// with no file name or blanks in between, until the next track's own come,
-// tagged or with a tag that lacks its title, artist and album (#560).
-void WindowSmokeTest::nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown() {
-    BridgeClient bridge;
-    // Only the snapshots below reach it, not the real bridge's.
+namespace {
+
+// Cuts `bridge` off from its backend, so that only the snapshots a test
+// delivers reach it.
+void detachFromTheBackend(BridgeClient &bridge) {
     bridge.m_bridgePollTimer.stop();
     if (bridge.m_bridgeWakeNotifier != nullptr) {
         bridge.m_bridgeWakeNotifier->setEnabled(false);
@@ -1419,78 +1330,131 @@ void WindowSmokeTest::nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown() {
         bridge.m_ffiBridge = nullptr;
     }
     bridge.m_connected = false;
+}
 
+// Hands `bridge` a snapshot, as its poll does.
+bool deliverSnapshot(BridgeClient &bridge, const BinaryBridgeCodec::DecodedSnapshot &snapshot) {
+    bridge.resetPollChanges();
+    const bool applied = bridge.processBinarySnapshot(snapshot);
+    bridge.schedulePollChanges();
+    return applied;
+}
+
+// Whether the now-playing panel has settled, its growth and cross-fade
+// ended: this ends those that run, as they would end, for checks of where
+// they leave it (tst_ui_motion has their motion).
+bool panelSettled(QQuickItem *panel) {
+    bool running = false;
+    for (const char *name : {"presenceAnimation", "handoverAnimation"}) {
+        QObject *animation = qvariant_cast<QObject *>(panel->property(name));
+        if (animation != nullptr && animation->property("running").toBool()) {
+            QMetaObject::invokeMethod(animation, "complete");
+            running = running || animation->property("running").toBool();
+        }
+    }
+    return !running;
+}
+
+// Lays `window` out as its next frames would, where a change reaches the
+// sidebar's layout a frame after the panel's own.
+void layOut(QQuickWindow *window) {
+    for (int frame = 0; frame < 2; ++frame) {
+        (void)window->grabWindow();
+    }
+}
+
+// Main.qml over a BridgeClient that the test hands its snapshots, as its
+// poll would.
+struct NowPlayingWindow {
+    NowPlayingWindow(BridgeClient &bridge, QSize size) : bridge(bridge) {
+        engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+        MainWindowOptions options;
+        options.width = size.width();
+        options.height = size.height();
+        options.activate = false;
+        window = loadMainWindow(engine, libraryModel, options);
+        panel = window != nullptr ? named(window, "nowPlayingPanel") : nullptr;
+    }
+    QQuickItem *item(const char *name) const { return named(window, name); }
+    bool deliver(const BinaryBridgeCodec::DecodedSnapshot &snapshot) const {
+        return deliverSnapshot(bridge, snapshot);
+    }
+
+    BridgeClient &bridge;
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
-    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    auto *panel = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingPanel"));
-    auto *title = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingTitle"));
-    auto *artistAlbum = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingArtistAlbum"));
-    QVERIFY(panel != nullptr && title != nullptr && artistAlbum != nullptr);
-    const auto deliver = [&bridge](const BinaryBridgeCodec::DecodedSnapshot &snapshot) {
-        bridge.resetPollChanges();
-        const bool applied = bridge.processBinarySnapshot(snapshot);
-        bridge.schedulePollChanges();
-        return applied;
-    };
+    QQuickWindow *window = nullptr;
+    QQuickItem *panel = nullptr;
+};
 
+// A snapshot of `path` playing, tagged with `name`'s title, artist and
+// album.
+BinaryBridgeCodec::DecodedSnapshot playingTagged(const QString &path, const QString &name) {
     BinaryBridgeCodec::DecodedSnapshot snapshot;
     snapshot.playback.present = true;
     snapshot.playback.state = 1;
-    const auto playTagged = [&snapshot](const QString &path, const QString &name) {
-        snapshot.playback.currentPath = path;
-        snapshot.metadata = {};
-        snapshot.metadata.present = true;
-        snapshot.metadata.sourcePath = path;
-        snapshot.metadata.title = name + QStringLiteral(" Title");
-        snapshot.metadata.artist = name + QStringLiteral(" Artist");
-        snapshot.metadata.album = name + QStringLiteral(" Album");
-    };
+    snapshot.playback.currentPath = path;
+    snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = path;
+    snapshot.metadata.title = name + QStringLiteral(" Title");
+    snapshot.metadata.artist = name + QStringLiteral(" Artist");
+    snapshot.metadata.album = name + QStringLiteral(" Album");
+    return snapshot;
+}
+
+// Track changes whose path comes before the track's queue row and metadata,
+// as BridgeClient tells them: the panel keeps the track before's lines,
+// with no file name or blanks in between, until the next track's own come,
+// tagged or with a tag that lacks its title, artist and album (#560).
+void checkLinesKeptUntilTheNextTracksAreKnown(const NowPlayingWindow &ui) {
+    QQuickItem *title = ui.item("nowPlayingTitle");
+    QQuickItem *artistAlbum = ui.item("nowPlayingArtistAlbum");
+    QVERIFY(title != nullptr && artistAlbum != nullptr);
     const auto expectLines = [&](const QString &titleText, const QString &artistAlbumText) {
+        QTRY_VERIFY(panelSettled(ui.panel));
         QTRY_COMPARE(title->property("text").toString(), titleText);
         QTRY_COMPARE(artistAlbum->property("text").toString(), artistAlbumText);
-        QCOMPARE(panel->property("titleText").toString(), titleText);
-        QCOMPARE(panel->property("artistAlbumText").toString(), artistAlbumText);
+        QCOMPARE(ui.panel->property("titleText").toString(), titleText);
+        QCOMPARE(ui.panel->property("artistAlbumText").toString(), artistAlbumText);
     };
     // The lines stay as they were while the next track's are not known.
     const auto expectLinesHeld = [&](const QString &titleText, const QString &artistAlbumText) {
         QTest::qWait(50);
-        QCOMPARE(panel->property("titleText").toString(), titleText);
-        QCOMPARE(panel->property("artistAlbumText").toString(), artistAlbumText);
+        QCOMPARE(ui.panel->property("titleText").toString(), titleText);
+        QCOMPARE(ui.panel->property("artistAlbumText").toString(), artistAlbumText);
     };
 
-    playTagged(QStringLiteral("/fixture/a.flac"), QStringLiteral("A"));
-    QVERIFY(deliver(snapshot));
+    BinaryBridgeCodec::DecodedSnapshot snapshot = playingTagged(QStringLiteral("/fixture/a.flac"), QStringLiteral("A"));
+    QVERIFY(ui.deliver(snapshot));
     expectLines(QStringLiteral("A Title"), QStringLiteral("A Artist — A Album"));
 
     // B plays, with the metadata still A's; then B's own comes.
     snapshot.playback.currentPath = QStringLiteral("/fixture/b.flac");
-    QVERIFY(deliver(snapshot));
+    QVERIFY(ui.deliver(snapshot));
     expectLinesHeld(QStringLiteral("A Title"), QStringLiteral("A Artist — A Album"));
-    playTagged(QStringLiteral("/fixture/b.flac"), QStringLiteral("B"));
-    QVERIFY(deliver(snapshot));
+    snapshot = playingTagged(QStringLiteral("/fixture/b.flac"), QStringLiteral("B"));
+    QVERIFY(ui.deliver(snapshot));
     expectLines(QStringLiteral("B Title"), QStringLiteral("B Artist — B Album"));
 
     // A track whose tag has none of the three; then its own metadata.
     const QString untaggedPath = QStringLiteral("/fixture/untitled take.flac");
     snapshot.playback.currentPath = untaggedPath;
-    QVERIFY(deliver(snapshot));
+    QVERIFY(ui.deliver(snapshot));
     expectLinesHeld(QStringLiteral("B Title"), QStringLiteral("B Artist — B Album"));
     snapshot.metadata = {};
     snapshot.metadata.present = true;
     snapshot.metadata.sourcePath = untaggedPath;
-    QVERIFY(deliver(snapshot));
+    QVERIFY(ui.deliver(snapshot));
     // Its file name for a title and, in the artist's row, its folder, not
-    // a tag (#373 H29 W2, H30: as the bridge gives the title, never empty).
+    // a tag (as the bridge gives the title, never empty).
+    QTRY_VERIFY(panelSettled(ui.panel));
     QTRY_COMPARE(title->property("text").toString(), QStringLiteral("untitled take.flac"));
     QTRY_COMPARE(artistAlbum->property("text").toString(), QStringLiteral("fixture"));
-    QCOMPARE(panel->property("artistAlbumText").toString(), QString());
-    QCOMPARE(panel->property("folderText").toString(), QStringLiteral("fixture"));
-    QCOMPARE(bridge.currentTrackTitle(), QStringLiteral("untitled take.flac"));
-    QVERIFY(bridge.currentTrackArtist().isEmpty());
-    QVERIFY(bridge.currentTrackAlbum().isEmpty());
+    QCOMPARE(ui.panel->property("artistAlbumText").toString(), QString());
+    QCOMPARE(ui.panel->property("folderText").toString(), QStringLiteral("fixture"));
+    QCOMPARE(ui.bridge.currentTrackTitle(), QStringLiteral("untitled take.flac"));
+    QVERIFY(ui.bridge.currentTrackArtist().isEmpty());
+    QVERIFY(ui.bridge.currentTrackAlbum().isEmpty());
 }
 
 // A file without tags, as BridgeClient tells it, with its file name for a
@@ -1499,143 +1463,74 @@ void WindowSmokeTest::nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown() {
 // cover and in the large-font header, where the album's row, which the
 // file has nothing for, is not kept, so the details follow the folder
 // 4 px under it; the panel's height and the library's place are a tagged
-// track's (#373 H31 Y2: at 24 pt the card stood some 100 px empty under
-// "Unsorted"). The bridge's format label is from the file's extension, and
-// its length from the playback.
-void WindowSmokeTest::nowPlayingShowsWhatATaglessFileIs() {
-    BridgeClient bridge;
-    // Only the snapshots below reach it, not the real bridge's.
-    bridge.m_bridgePollTimer.stop();
-    if (bridge.m_bridgeWakeNotifier != nullptr) {
-        bridge.m_bridgeWakeNotifier->setEnabled(false);
-        delete bridge.m_bridgeWakeNotifier;
-        bridge.m_bridgeWakeNotifier = nullptr;
-    }
-    bridge.m_bridgeWakeFd = -1;
-    bridge.shutdownBridgeGracefully();
-    if (bridge.m_ffiBridge != nullptr) {
-        ferrous_ffi_bridge_destroy(bridge.m_ffiBridge);
-        bridge.m_ffiBridge = nullptr;
-    }
-    bridge.m_connected = false;
-    const auto deliver = [&bridge](const BinaryBridgeCodec::DecodedSnapshot &snapshot) {
-        bridge.resetPollChanges();
-        const bool applied = bridge.processBinarySnapshot(snapshot);
-        bridge.schedulePollChanges();
-        return applied;
-    };
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+// track's (at 24 pt the card stood some 100 px empty under "Unsorted").
+// The bridge's format label is from the file's extension, and its length
+// from the playback.
+void checkTaglessFileFacts(const NowPlayingWindow &ui, bool large) {
+    QQuickItem *header = ui.item("libraryHeader");
+    QQuickItem *details = ui.item(large ? "nowPlayingNarrowDetails" : "nowPlayingDetails");
+    QQuickItem *folder = ui.item(large ? "nowPlayingNarrowArtist" : "nowPlayingArtistAlbum");
+    QObject *palette = qvariant_cast<QObject *>(ui.window->property("uiPalette"));
+    QVERIFY(header != nullptr && details != nullptr && folder != nullptr && palette != nullptr);
     const QString facts = QStringLiteral("FLAC · 0:40");
 
-    for (const bool large : {false, true}) {
-        const QString where = large ? QStringLiteral("24 pt, 1000x720") : QStringLiteral("1600x1000");
-        QFont font = applicationFont;
-        if (large) {
-            font.setPointSizeF(24.0);
-        }
-        QGuiApplication::setFont(font);
-        const QSize size = large ? QSize(1000, 720) : QSize(1600, 1000);
-        LibraryTreeModel libraryModel;
-        QQmlApplicationEngine engine;
-        engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
-        QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
-        QVERIFY2(window != nullptr, "Main.qml failed to show");
-        window->resize(size);
-        QTRY_COMPARE(window->size(), size);
-        auto *panel = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingPanel"));
-        auto *header = window->findChild<QQuickItem *>(QStringLiteral("libraryHeader"));
-        QVERIFY(panel != nullptr && header != nullptr);
-        const auto item = [&](const char *name) {
-            return window->findChild<QQuickItem *>(QString::fromLatin1(name));
-        };
-        QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-        QObject *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
-        QVERIFY(handover != nullptr && growth != nullptr);
-        const auto settled = [&]() {
-            return !handover->property("running").toBool() && !growth->property("running").toBool()
-                && panel->property("presence").toReal() == 1.0;
-        };
+    // A tagged track first.
+    BinaryBridgeCodec::DecodedSnapshot snapshot =
+        playingTagged(QStringLiteral("/fixture/Artist/Album/01.flac"), QStringLiteral("Tagged"));
+    snapshot.playback.durationSeconds = 200.0;
+    snapshot.playback.trackToken = 1;
+    snapshot.metadata.genre = QStringLiteral("Jazz");
+    snapshot.metadata.year = 2005;
+    snapshot.metadata.trackNumber = 1;
+    QVERIFY(ui.deliver(snapshot));
+    QTRY_VERIFY(panelSettled(ui.panel) && ui.panel->property("presence").toReal() == 1.0);
+    QCOMPARE(ui.panel->property("largeHeader").toBool(), large);
+    QCOMPARE(ui.panel->property("layoutMode").toString(), large ? QStringLiteral("narrow") : QStringLiteral("wide"));
+    layOut(ui.window);
+    const qreal panelHeight = ui.panel->height();
+    const qreal headerTop = sceneRectOf(header).top();
 
-        // A tagged track first.
-        BinaryBridgeCodec::DecodedSnapshot snapshot;
-        snapshot.playback.present = true;
-        snapshot.playback.state = 1;
-        snapshot.playback.durationSeconds = 200.0;
-        snapshot.playback.currentPath = QStringLiteral("/fixture/Artist/Album/01.flac");
-        snapshot.playback.trackToken = 1;
-        snapshot.metadata.present = true;
-        snapshot.metadata.sourcePath = snapshot.playback.currentPath;
-        snapshot.metadata.title = QStringLiteral("Tagged Title");
-        snapshot.metadata.artist = QStringLiteral("Tagged Artist");
-        snapshot.metadata.album = QStringLiteral("Tagged Album");
-        snapshot.metadata.genre = QStringLiteral("Jazz");
-        snapshot.metadata.year = 2005;
-        snapshot.metadata.trackNumber = 1;
-        QVERIFY(deliver(snapshot));
-        QTRY_VERIFY(settled());
-        QCOMPARE(panel->property("largeHeader").toBool(), large);
-        QCOMPARE(panel->property("layoutMode").toString(), large ? QStringLiteral("narrow") : QStringLiteral("wide"));
-        QTest::qWait(50);
-        const qreal panelHeight = panel->height();
-        const qreal headerTop = header->mapRectToScene(header->boundingRect()).top();
-
-        // The file without tags, its own metadata after its path.
-        const QString path = QStringLiteral("/fixture/Loose Files/track07.flac");
-        snapshot.playback.currentPath = path;
-        snapshot.playback.durationSeconds = 40.0;
-        snapshot.playback.trackToken = 2;
-        QVERIFY(deliver(snapshot));
-        snapshot.metadata = {};
-        snapshot.metadata.present = true;
-        snapshot.metadata.sourcePath = path;
-        QVERIFY(deliver(snapshot));
-        QTRY_COMPARE(bridge.currentTrackTitle(), QStringLiteral("track07.flac"));
-        QCOMPARE(bridge.currentTrackFormatLabel(), QStringLiteral("FLAC"));
-        QTRY_VERIFY2(panel->property("untagged").toBool(),
-                     qPrintable(QStringLiteral("%1: \"%2\", \"%3\", \"%4\"")
-                                    .arg(where, panel->property("titleText").toString(),
-                                         panel->property("artistAlbumText").toString(),
-                                         panel->property("detailsText").toString())));
-        QCOMPARE(panel->property("fileFactsText").toString(), facts);
-        QTRY_VERIFY(settled());
-        QTest::qWait(50);
-        QQuickItem *details = item(large ? "nowPlayingNarrowDetails" : "nowPlayingDetails");
-        QQuickItem *folder = item(large ? "nowPlayingNarrowArtist" : "nowPlayingArtistAlbum");
-        QVERIFY(details != nullptr && folder != nullptr);
-        QTRY_COMPARE(details->property("text").toString(), facts);
-        QCOMPARE(folder->property("text").toString(), QStringLiteral("Loose Files"));
-        // In the details' style: their size, and the tertiary colour.
-        QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
-        QVERIFY(palette != nullptr);
-        QCOMPARE(details->property("color").value<QColor>().rgba(), palette->property("textTertiary").value<QColor>().rgba());
-        QCOMPARE(details->property("font").value<QFont>().pointSizeF(),
-                 palette->property("smallPointSize").toReal());
-        // The panel and the library where a tagged track has them.
-        QTRY_COMPARE(panel->height(), panelHeight);
-        QTRY_COMPARE(header->mapRectToScene(header->boundingRect()).top(), headerTop);
-        if (large) {
-            // No album row: the details 4 px under the folder.
-            const QRectF folderRect = folder->mapRectToScene(folder->boundingRect());
-            const QRectF detailsRect = details->mapRectToScene(details->boundingRect());
-            QVERIFY2(std::abs(detailsRect.top() - (folderRect.bottom() + 4)) <= 1.0,
-                     qPrintable(QStringLiteral("%1: the folder to %2, the details from %3")
-                                    .arg(where).arg(folderRect.bottom()).arg(detailsRect.top())));
-        }
-
-        // Without a length, the container alone.
-        snapshot.playback.durationSeconds = 0.0;
-        QVERIFY(deliver(snapshot));
-        QTRY_COMPARE(details->property("text").toString(), QStringLiteral("FLAC"));
-
-        // Back to nothing, for the next window.
-        BinaryBridgeCodec::DecodedSnapshot stopped;
-        stopped.playback.present = true;
-        stopped.playback.state = 0;
-        stopped.metadata.present = true;
-        QVERIFY(deliver(stopped));
-        QTRY_VERIFY(!panel->property("hasTrack").toBool());
+    // The file without tags, its own metadata after its path.
+    const QString path = QStringLiteral("/fixture/Loose Files/track07.flac");
+    snapshot.playback.currentPath = path;
+    snapshot.playback.durationSeconds = 40.0;
+    snapshot.playback.trackToken = 2;
+    QVERIFY(ui.deliver(snapshot));
+    snapshot.metadata = {};
+    snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = path;
+    QVERIFY(ui.deliver(snapshot));
+    QTRY_COMPARE(ui.bridge.currentTrackTitle(), QStringLiteral("track07.flac"));
+    QCOMPARE(ui.bridge.currentTrackFormatLabel(), QStringLiteral("FLAC"));
+    QTRY_VERIFY2(ui.panel->property("untagged").toBool(),
+                 qPrintable(QStringLiteral("\"%1\", \"%2\", \"%3\"")
+                                .arg(ui.panel->property("titleText").toString(),
+                                     ui.panel->property("artistAlbumText").toString(),
+                                     ui.panel->property("detailsText").toString())));
+    QTRY_COMPARE(ui.panel->property("fileFactsText").toString(), facts);
+    QTRY_VERIFY(panelSettled(ui.panel));
+    layOut(ui.window);
+    QTRY_COMPARE(details->property("text").toString(), facts);
+    QCOMPARE(folder->property("text").toString(), QStringLiteral("Loose Files"));
+    // In the details' style: their size, and the tertiary colour.
+    QCOMPARE(colorOf(details, "color"), colorOf(palette, "textTertiary"));
+    QCOMPARE(details->property("font").value<QFont>().pointSizeF(), palette->property("smallPointSize").toReal());
+    // The panel and the library where a tagged track has them.
+    QTRY_COMPARE(ui.panel->height(), panelHeight);
+    QTRY_COMPARE(sceneRectOf(header).top(), headerTop);
+    if (large) {
+        // No album row: the details 4 px under the folder.
+        const QRectF folderRect = folder->mapRectToScene(folder->boundingRect());
+        const QRectF detailsRect = details->mapRectToScene(details->boundingRect());
+        QVERIFY2(std::abs(detailsRect.top() - (folderRect.bottom() + 4)) <= 1.0,
+                 qPrintable(QStringLiteral("the folder to %1, the details from %2")
+                                .arg(folderRect.bottom()).arg(detailsRect.top())));
     }
+
+    // Without a length, the container alone.
+    snapshot.playback.durationSeconds = 0.0;
+    QVERIFY(ui.deliver(snapshot));
+    QTRY_COMPARE(details->property("text").toString(), QStringLiteral("FLAC"));
 }
 
 // Stop and Clear, and the queue running out, as BridgeClient tells them:
@@ -1644,100 +1539,54 @@ void WindowSmokeTest::nowPlayingShowsWhatATaglessFileIs() {
 // idle from the first. While the panel shrinks into the compact row it
 // holds the track that showed, its cover and its lines, whichever of them
 // it hears of first; every frame shows that track, it and the row handing
-// over, or the row, and the tile is never at rest while it shows (#373
-// H30: the cover and the lines went in one frame, and the tile's own disc
-// mark stood alone in the band). Stop alone keeps the track.
-void WindowSmokeTest::nowPlayingHoldsTheTrackThatWentAsItShrinks() {
-    BridgeClient bridge;
-    // Only the snapshots below reach it, not the real bridge's.
-    bridge.m_bridgePollTimer.stop();
-    if (bridge.m_bridgeWakeNotifier != nullptr) {
-        bridge.m_bridgeWakeNotifier->setEnabled(false);
-        delete bridge.m_bridgeWakeNotifier;
-        bridge.m_bridgeWakeNotifier = nullptr;
-    }
-    bridge.m_bridgeWakeFd = -1;
-    bridge.shutdownBridgeGracefully();
-    if (bridge.m_ffiBridge != nullptr) {
-        ferrous_ffi_bridge_destroy(bridge.m_ffiBridge);
-        bridge.m_ffiBridge = nullptr;
-    }
-    bridge.m_connected = false;
-
-    QTemporaryDir covers;
-    QVERIFY(covers.isValid());
-    const QString coverFile = covers.filePath(QStringLiteral("cover.png"));
-    QImage image(64, 64, QImage::Format_RGB32);
-    image.fill(QColor(200, 40, 40));
-    QVERIFY(image.save(coverFile));
-    const QString coverUrl = QUrl::fromLocalFile(coverFile).toString();
-
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
-    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    window->resize(1600, 1000);
-    QTRY_COMPARE(window->size(), QSize(1600, 1000));
-    auto *panel = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingPanel"));
-    auto *title = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingTitle"));
-    auto *tile = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingCover"));
-    auto *area = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingCoverArea"));
-    auto *row = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingIdleRow"));
-    auto *lines = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingLines"));
-    QVERIFY(panel && title && tile && area && row && lines);
-    QVERIFY(window->findChild<QQuickItem *>(QStringLiteral("albumArtPlaceholderGlyph")) == nullptr);
-    auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
-    QVERIFY(growth != nullptr);
-    const auto deliver = [&bridge](const BinaryBridgeCodec::DecodedSnapshot &snapshot) {
-        bridge.resetPollChanges();
-        const bool applied = bridge.processBinarySnapshot(snapshot);
-        bridge.schedulePollChanges();
-        return applied;
-    };
+// over, or the row, and the tile is never at rest while it shows (the
+// cover and the lines went in one frame, and the tile's own disc mark stood
+// alone in the band). Stop alone keeps the track.
+void checkTrackHeldAsThePanelShrinks(const NowPlayingWindow &ui, const QString &coverUrl) {
+    QQuickItem *title = ui.item("nowPlayingTitle");
+    QQuickItem *tile = ui.item("nowPlayingCover");
+    QQuickItem *area = ui.item("nowPlayingCoverArea");
+    QQuickItem *row = ui.item("nowPlayingIdleRow");
+    QQuickItem *lines = ui.item("nowPlayingLines");
+    auto *growth = qvariant_cast<QObject *>(ui.panel->property("presenceAnimation"));
+    QVERIFY(title && tile && area && row && lines && growth);
+    QVERIFY(ui.item("albumArtPlaceholderGlyph") == nullptr);
+    // Every frame of the move, on the test's time.
+    SteppedAnimationDriver animations;
 
     for (const bool runsOut : {false, true}) {
         const QString where = runsOut ? QStringLiteral("runs out") : QStringLiteral("stop and clear");
-        BinaryBridgeCodec::DecodedSnapshot snapshot;
-        snapshot.playback.present = true;
-        snapshot.playback.state = 1;
-        snapshot.playback.currentPath = QStringLiteral("/fixture/a.flac");
-        snapshot.metadata.present = true;
-        snapshot.metadata.sourcePath = snapshot.playback.currentPath;
-        snapshot.metadata.title = QStringLiteral("A Title");
-        snapshot.metadata.artist = QStringLiteral("A Artist");
-        snapshot.metadata.album = QStringLiteral("A Album");
+        BinaryBridgeCodec::DecodedSnapshot snapshot = playingTagged(QStringLiteral("/fixture/a.flac"), QStringLiteral("A"));
         snapshot.metadata.coverPath = coverUrl;
-        QVERIFY(deliver(snapshot));
+        QVERIFY(ui.deliver(snapshot));
         QTRY_COMPARE(title->property("text").toString(), QStringLiteral("A Title"));
         QTRY_COMPARE(tile->property("coverPath").toString(), coverUrl);
-        QTRY_VERIFY(panel->property("presence").toDouble() == 1.0 && !growth->property("running").toBool());
-        QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
-        QVERIFY(tile->property("hasCover").toBool());
+        QTRY_VERIFY(tile->property("hasCover").toBool());
+        (void)animations.step(1000);
+        QVERIFY(ui.panel->property("presence").toDouble() == 1.0 && !growth->property("running").toBool());
+        QCOMPARE(ui.panel->property("layoutMode").toString(), QStringLiteral("wide"));
 
         if (!runsOut) {
             // Stop keeps the track, and nothing moves.
             snapshot.playback.state = 0;
-            QVERIFY(deliver(snapshot));
-            QTRY_COMPARE(bridge.playbackState(), QStringLiteral("Stopped"));
-            QTest::qWait(50);
-            QVERIFY(!panel->property("idle").toBool());
+            QVERIFY(ui.deliver(snapshot));
+            QTRY_COMPARE(ui.bridge.playbackState(), QStringLiteral("Stopped"));
+            (void)animations.step(50);
+            QVERIFY(!ui.panel->property("idle").toBool());
             QVERIFY(!growth->property("running").toBool());
             QCOMPARE(title->property("text").toString(), QStringLiteral("A Title"));
         }
 
         QString problem;
         QList<std::pair<double, double>> shown;
-        double rowAtEnd = 0;
-        FrameSampler connection(window, [&]() {
-            if (!panel->property("idle").toBool()) {
+        const auto look = [&]() {
+            if (!ui.panel->property("idle").toBool()) {
                 return;
             }
             const double cover = area->isVisible() && tile->isVisible() ? tile->opacity() : 0.0;
             const double rowShown = row->isVisible() ? row->opacity() : 0.0;
             const double linesShown = lines->isVisible() && title->isVisible() ? lines->opacity() : 0.0;
             shown.push_back({cover, rowShown});
-            rowAtEnd = rowShown;
             if (!problem.isEmpty()) {
                 return;
             }
@@ -1751,26 +1600,71 @@ void WindowSmokeTest::nowPlayingHoldsTheTrackThatWentAsItShrinks() {
             } else if (std::max(cover, rowShown) < 0.49) {
                 problem = QStringLiteral("the cover %1, the row %2").arg(cover).arg(rowShown);
             }
-        });
-        // No track: the queue cleared, or played out.
+        };
+        // No track: the queue cleared, or played out; then each frame as
+        // the panel shrinks, and a few after.
         snapshot.playback.state = 0;
         snapshot.playback.currentPath.clear();
         snapshot.metadata = {};
-        QVERIFY(deliver(snapshot));
-        QTRY_VERIFY(panel->property("idle").toBool());
-        QTRY_VERIFY(!growth->property("running").toBool() && panel->property("presence").toDouble() == 0.0);
-        QTest::qWait(50);
-        connection.stop();
+        QVERIFY(ui.deliver(snapshot));
+        QCoreApplication::processEvents();
+        look();
+        const auto shrunk = [&]() {
+            return ui.panel->property("idle").toBool() && !growth->property("running").toBool()
+                && ui.panel->property("presence").toDouble() == 0.0;
+        };
+        for (int ms = 0, after = 0; ms < 5000 && after < 3; ms += 16) {
+            after += shrunk() ? 1 : 0;
+            (void)animations.step(16);
+            look();
+        }
         QVERIFY2(problem.isEmpty(), qPrintable(where + QStringLiteral(": ") + problem));
-        QVERIFY2(shown.size() >= 3, qPrintable(where + QStringLiteral(": %1 frames").arg(shown.size())));
+        QVERIFY2(shrunk() && shown.size() >= 3, qPrintable(where + QStringLiteral(": %1 frames").arg(shown.size())));
         // The cover whole at the start, the row whole at the end.
         QCOMPARE(shown.first().first, 1.0);
-        QCOMPARE(rowAtEnd, 1.0);
-        QVERIFY(bridge.currentTrackTitle().isEmpty());
-        QVERIFY(bridge.currentTrackCoverPath().isEmpty());
-        QVERIFY(!panel->property("holdsTrack").toBool());
+        QCOMPARE(shown.last().second, 1.0);
+        QVERIFY(ui.bridge.currentTrackTitle().isEmpty());
+        QVERIFY(ui.bridge.currentTrackCoverPath().isEmpty());
+        QVERIFY(!ui.panel->property("holdsTrack").toBool());
         QVERIFY(!area->isVisible());
     }
+}
+
+} // namespace
+
+// The now-playing panel as BridgeClient tells it the tracks, from the
+// snapshots that the backend would send, in the order it sends them: the
+// checks above, each at 1600 x 1000, and at 24 pt in a 1000 x 720 window
+// the tagless file's.
+void WindowSmokeTest::nowPlayingFollowsBridgeClientsSnapshots() {
+    BridgeClient bridge;
+    detachFromTheBackend(bridge);
+    QTemporaryDir covers;
+    QVERIFY(covers.isValid());
+    const QString coverFile = covers.filePath(QStringLiteral("cover.png"));
+    QImage image(64, 64, QImage::Format_RGB32);
+    image.fill(QColor(200, 40, 40));
+    QVERIFY(image.save(coverFile));
+    {
+        const NowPlayingWindow ui(bridge, QSize(1600, 1000));
+        QVERIFY2(ui.panel != nullptr, "Main.qml failed to show");
+        checkTaglessFileFacts(ui, false);
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        checkTrackHeldAsThePanelShrinks(ui, QUrl::fromLocalFile(coverFile).toString());
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        checkLinesKeptUntilTheNextTracksAreKnown(ui);
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+    }
+    const ScopedApplicationFont font(24);
+    const NowPlayingWindow ui(bridge, QSize(1000, 720));
+    QVERIFY2(ui.panel != nullptr, "Main.qml failed to show");
+    checkTaglessFileFacts(ui, true);
 }
 
 #include "tst_qml_smoke_window.moc"

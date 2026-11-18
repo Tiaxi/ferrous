@@ -103,7 +103,7 @@ QtObject {
     // The library pane's least width at `fontScale` (UiPalette.fontScale):
     // 250 px with the default font, and wider with a larger one, so that its
     // names and the now-playing lines keep more than a few characters: 360 px
-    // at 24 pt (#373 H5).
+    // at 24 pt.
     function sidebarMinimumWidth(fontScale) {
         return Math.max(250, Math.round(150 * fontScale))
     }
@@ -117,7 +117,7 @@ QtObject {
     // Where the window allows more with a larger font, the pane is the
     // 360 px of the default font or 22 grid units of the font, `gridUnit`
     // (UiPalette.gridUnit), whichever is more: a column as wide in
-    // characters as the default one (#373 H11: 408 px at 24 pt cut most
+    // characters as the default one (408 px at 24 pt cut most
     // names). The window allows what leaves the panes after it
     // `otherWidth`, the queue with all its columns: at 24 pt nothing more
     // in a 1600 px window, where Album would drop, some 640 px in a
@@ -144,8 +144,8 @@ QtObject {
 
     // The share of the right column the visualization takes before the
     // user drags the split: a little under half, so the window reads as an
-    // instrument with a queue rather than a playlist with a footer (#373
-    // H8: at 0.42 the pane was a 320 px band at 1600 by 1000). It is 423 px
+    // instrument with a queue rather than a playlist with a footer (at
+    // 0.42 the pane was a 320 px band at 1600 by 1000). It is 423 px
     // there, and a little more, as the queue keeps whole rows (queueHeight).
     readonly property real visualizationDefaultShare: 0.47
     // The rows, its header among them, the queue keeps by default before
@@ -163,8 +163,8 @@ QtObject {
     // The queue's height in a split `splitHeight` high, leaving the
     // visualization `otherMinimum`. Before the user drags the split, the
     // queue's list, `listTop` down the pane, is a whole number of its rows,
-    // `rowPitch` high, and the visualization takes what is left over (#373
-    // H9 T8: a row cut at the seam); a dragged split stays where it was put.
+    // `rowPitch` high, and the visualization takes what is left over (a
+    // row was cut at the seam); a dragged split stays where it was put.
     function queueHeight(splitHeight, minimum, otherMinimum, defaultHeight, listTop, rowPitch) {
         const most = Math.max(minimum, splitHeight - otherMinimum)
         if (root.queueHeightRatio > 0) {

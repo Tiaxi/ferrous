@@ -57,7 +57,7 @@ Rectangle {
     readonly property real sizeScale: root.uiPalette.rowHeight / 26
     // An unreadable row's mark: the status bar's warning sign, at its
     // size, in the negative colour, as the status bar marks the same
-    // failure (#373 H35 AC1: Breeze's dialog-warning as a mask was a solid
+    // failure (Breeze's dialog-warning as a mask was a solid
     // triangle that read as a transport glyph).
     readonly property string warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
     readonly property int warningGlyphSize: root.uiPalette.scaledSize(16)
@@ -70,7 +70,7 @@ Rectangle {
     // The share of the text columns' room Artist and Album have by default;
     // the title has the rest, 45%. Half left a gap after short titles and
     // elided artists at a large font while the title had room; these give
-    // Artist and Album about 24 px more each at 1600 px (#373 H6).
+    // Artist and Album about 24 px more each at 1600 px.
     readonly property real defaultArtistColumnShare: 0.283
     readonly property real defaultAlbumColumnShare: 0.263
     readonly property real defaultTitleColumnShare: 1 - root.defaultArtistColumnShare - root.defaultAlbumColumnShare
@@ -80,7 +80,7 @@ Rectangle {
         root.width - root.reservedColumnsWidth - 2 * root.columnGap)
     // Artist by default: its share, or, where that is narrower, as with a
     // large font, minimumArtistColumnWidth, which the title gives way to
-    // as far as its own minimum (#373 H8: at 24 pt Artist showed eleven
+    // as far as its own minimum (at 24 pt Artist showed eleven
     // characters of a name beside a title column twice as wide as its
     // titles).
     readonly property real defaultArtistColumnWidth: Math.max(
@@ -123,7 +123,7 @@ Rectangle {
     // the first to drop, shows from here (albumColumnVisible). The number
     // column is counted as the queue's minimum counts it, for up to 99,999
     // tracks, so that it does not change as tracks are queued. The window
-    // gives the library pane more than its share only past this (#373 H11).
+    // gives the library pane more than its share only past this.
     readonly property real widthWithAllColumns: Math.ceil(2 * (root.playlistIndicatorColumnWidth
         + root.minimumOrderColumnWidth + root.titleGap + root.columnGap + root.defaultLengthColumnWidth
         + root.rightPadding + root.minimumTitleColumnWidth))
@@ -357,7 +357,7 @@ Rectangle {
     // or its longest value: in the narrowest queue it gives up the two
     // characters' room before it, as the resized columns give up theirs,
     // so that the narrow window at a large font, with the wider sidebar,
-    // keeps the title at its minimum (#373 H6).
+    // keeps the title at its minimum.
     readonly property real minimumTitleOnlyWidth: root.playlistIndicatorColumnWidth
         + root.minimumOrderColumnWidth + root.titleGap + root.minimumTitleColumnWidth
         + root.columnGap + root.minimumLengthColumnWidth + root.rightPadding
@@ -365,7 +365,7 @@ Rectangle {
         - root.minimumLengthColumnWidth + root.defaultLengthColumnWidth)
         / (1 - root.minimumArtistColumnShare)
     // The share of the width the narrowest queue is counted with for Artist:
-    // the one it had before its default grew (#373 H6), so the window's
+    // the one it had before its default grew, so the window's
     // minimum width stays. There Artist gives way to the title's minimum.
     readonly property real minimumArtistColumnShare: 0.26
     readonly property real minimumContentWidth: Math.ceil(Math.min(
@@ -477,8 +477,8 @@ Rectangle {
                 uiPalette: root.uiPalette
                 // Over the Title column, or with no rows to align with, at
                 // the panes' 12 px inset, where "Library" is beside it
-                // (#373 H13: an empty queue's name stood alone at the
-                // Title column's 66 px).
+                // (an empty queue's name stood alone at the Title
+                // column's 66 px).
                 leftInset: root.uiBridge.queueLength > 0
                     ? queueHeaderRow.x + titleHeader.x
                     : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
@@ -735,7 +735,7 @@ Rectangle {
                     // the warning of an unreadable file before the stop
                     // mark, as a file that fails to play stays the
                     // current row, stopped, and the warning says why
-                    // (#373 H35 AB7: it showed the stop mark, with the
+                    // (it showed the stop mark, with the
                     // error as its tooltip, until another row played).
                     readonly property bool showsWarning: !isNow && unreadable
                     readonly property string stateGlyph: isNow
@@ -804,7 +804,7 @@ Rectangle {
                             width: playlistRow.showsWarning ? root.warningGlyphSize : root.uiPalette.scaledSize(12)
                             height: width
                             // At its size, which grows with the font
-                            // (#373 H9: Kirigami drew the 29 px glyph of a
+                            // (Kirigami drew the 29 px glyph of a
                             // 24 pt font at 22 px).
                             roundToIconSize: false
                             source: glyph
@@ -1327,8 +1327,7 @@ Rectangle {
 
             // Where a drop lands: a 2 px line in the focus colour, centred
             // on the boundary between the rows, which runs to the
-            // scrollbar's lane while it shows, as the focus ring does
-            // (#373 H35 AC4).
+            // scrollbar's lane while it shows, as the focus ring does.
             Rectangle {
                 objectName: "queueDropIndicator"
                 x: playlistView.x
@@ -1393,7 +1392,7 @@ Rectangle {
 
                 // A 1 px seam under the pointer; with keyboard focus, a
                 // 2 px line in the focus colour the header's full height,
-                // which reads as focus where a short tick did not (#373 H6).
+                // which reads as focus where a short tick did not.
                 Rectangle {
                     objectName: "queueColumnHandleLine"
                     anchors.horizontalCenter: parent.horizontalCenter

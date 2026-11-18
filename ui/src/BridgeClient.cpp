@@ -404,9 +404,9 @@ QVariantMap readImageFileDetails(const QString &path) {
 
 QString BridgeClient::itunesArtworkFoundText(int count) {
     // Only the small previews are fetched with the results; a full-size
-    // image comes when the user previews or applies it (#373 H6: once
-    // "loads on preview/apply"). Short enough for one line in the dialog at
-    // 24 pt (#373 H45: "it." wrapped alone onto a second line).
+    // image comes when the user previews or applies it, said in words rather
+    // than "loads on preview/apply". Short enough for one line in the dialog
+    // at 24 pt (a longer one wrapped "it." alone onto a second line).
     return i18ncp("@info:status",
                   "Found %1 suggestion. Its full-size image downloads when you preview or apply it.",
                   "Found %1 suggestions. Full-size images download when you preview or apply one.",
@@ -414,7 +414,7 @@ QString BridgeClient::itunesArtworkFoundText(int count) {
 }
 
 QString BridgeClient::itunesArtworkPendingDetailsText() {
-    // Not "loads on preview or apply" (#373 H7).
+    // In words, not "loads on preview or apply".
     return i18nc("@info:status", "Its size and format show once you preview or apply it.");
 }
 
@@ -2374,9 +2374,8 @@ void BridgeClient::seek(double seconds) {
 // The volume shows what was asked for from the time it is asked for, as
 // the other settings do, rather than a round trip later: the mute button's
 // unmute showed the slider at 0 and the muted glyph for some 50 ms, until a
-// snapshot brought the restored volume (#373 H34 AA4). Snapshots that the
-// backend built before it took the request leave it as it is; see
-// applySnapshot.
+// snapshot brought the restored volume. Snapshots that the backend
+// built before it took the request leave it as it is; see applySnapshot.
 void BridgeClient::setVolume(double value) {
     if (!std::isfinite(value)) {
         return;
@@ -5562,8 +5561,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     // The engine reports no current track only once its queue is empty: a
     // stop keeps the track current. Nothing current, then, also while
     // stopped, so that Stop then Clear leaves "Nothing playing" rather than
-    // the stopped track (#373 H18 C3: the track's path, and with it its
-    // text, outlived the queue).
+    // the stopped track (otherwise the track's path, and with it its text,
+    // outlived the queue).
     const QString currentPath = snapshot.playback.present ? snapshot.playback.currentPath : m_currentTrackPath;
     int playing = snapshot.playback.present ? snapshot.playback.currentQueueIndex : m_playingQueueIndex;
 
@@ -5781,7 +5780,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         // As the transport and the rows write a time: "1:49", "1:05:52",
         // with no leading zero on the minutes; and, while a queued track's
         // length is unknown (one that can't be read never gets one), a
-        // floor in words (#373 H35: "01:49+?").
+        // floor in words, not "01:49+?".
         QString nextQueueDurationText = formatSeconds(queue.totalDurationSeconds);
         if (nextQueueDurationText.size() > 2 && nextQueueDurationText.at(0) == QLatin1Char('0')
             && nextQueueDurationText.at(1).isDigit() && nextQueueDurationText.at(2) == QLatin1Char(':')) {

@@ -14,7 +14,7 @@ Control {
 
     // The style's Control sets each side to the layout margins itself,
     // which `padding` alone leaves in place: they put the buttons 9 px
-    // further in than the content (#373 H38). The box has the inset.
+    // further in than the content. The box has the inset.
     leftPadding: 0
     rightPadding: 0
     topPadding: 0

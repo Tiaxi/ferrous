@@ -54,9 +54,9 @@ Components.DialogWindow {
     readonly property real contentPadding: Kirigami.Units.gridUnit
     // 920 px wide with the default font, and as much wider as a larger font
     // makes the text, up to 1280 px, within the screen: wider left a gulf
-    // between the titles and their actions (#373 H42: 1964 px at 24 pt);
-    // as tall as the current art and five results, which the list shows
-    // whole (#373 H9: a fixed 680 px left a framed empty band under them).
+    // between the titles and their actions (as at 1964 px at 24 pt); as
+    // tall as the current art and five results, which the list shows whole
+    // (a fixed 680 px left a framed empty band under them).
     // The user may resize it.
     defaultWidth: Math.min(root.uiPalette.scaledSize(920), 1280)
     defaultHeight: Math.ceil(2 * root.contentPadding + root.rowHeight + root.headingHeight
@@ -331,7 +331,7 @@ Components.DialogWindow {
     // thumbnail at the search palette's side inset, the text 12 px after
     // it, and the actions at the end. The thumbnail is 64 px, or half as
     // tall again as the title and its line of details with a larger font
-    // (#373 H42: 64 px under 92 px of text at 24 pt).
+    // (a fixed 64 px stood beside 92 px of text at 24 pt).
     readonly property real sideInset: 16
     readonly property real thumbnailSize: Math.max(64, Math.round(1.5 * (2 * lineMetrics.implicitHeight + 2)))
     readonly property real rowPadding: 8
@@ -340,10 +340,10 @@ Components.DialogWindow {
     // least 16 px clear of them, in the buttons' own sizes. They are flat
     // push buttons, which the style draws in the general font, as the text
     // and Close: it draws a ToolButton's caption in the toolbar font, which
-    // KDE sets apart, so at 24 pt they stayed at 10 pt (#373 H9). Their
-    // glyphs are as large as the captions' font calls for, Kirigami's size
-    // for labels: 16 px with the default font, larger with a larger one
-    // (#373 H42: 16 px beside 24 pt captions).
+    // KDE sets apart, so at 24 pt they stayed at 10 pt. Their glyphs are as
+    // large as the captions' font calls for, Kirigami's size for labels:
+    // 16 px with the default font, larger with a larger one (a fixed 16 px
+    // stood beside 24 pt captions).
     readonly property real actionIconSize: root.uiPalette.labelIconSize
     readonly property real actionSpacing: Kirigami.Units.largeSpacing
     readonly property real textActionsGap: 16
@@ -427,8 +427,8 @@ Components.DialogWindow {
 
     // A row's text: the title, elided, then the secondary line, which
     // wraps to a second line where it does not fit, as with a large font
-    // (#373 H45: the artist and "Loading high-resolution artwork…" elided
-    // at 24 pt), and elides past that, with the whole of it in a tooltip.
+    // (the artist and "Loading high-resolution artwork…" elided at
+    // 24 pt), and elides past that, with the whole of it in a tooltip.
     component ArtworkText: Column {
         property string title: ""
         property string details: ""
@@ -544,7 +544,7 @@ Components.DialogWindow {
             // scrollbar lane, while it searches and once it has rows, so
             // nothing moves as they arrive. With no rows to line up with,
             // when it found nothing or failed, on the content's right
-            // inset, as Close under it (#373 H43: it hung on the absent
+            // inset, as Close under it (rather than hang on the absent
             // column, 117 px short of Close).
             Button {
                 id: currentArtworkPreviewButton
@@ -592,9 +592,9 @@ Components.DialogWindow {
         // The results: a flat list on the view colour, in the view's frame,
         // with a hairline between rows. The frame ends at the last row, and
         // the window's room below the rows stays its own colour; with more
-        // rows than room, they scroll (#373 H9). Searching, or with nothing
-        // found, there is no frame, only a placeholder message on the
-        // dialog's own colour (#373 H8: an empty well framed the message).
+        // rows than room, they scroll. Searching, or with nothing found,
+        // there is no frame, only a placeholder message on the dialog's own
+        // colour (rather than an empty well framing the message).
         Rectangle {
             id: resultsFrame
             objectName: "itunesArtworkResultsFrame"
@@ -708,8 +708,8 @@ Components.DialogWindow {
 
                     // The hairline to the next row, from the text's left edge
                     // to the row's end, so the thumbnails stand in a column
-                    // of their own (#373 H11: it ran under them, from the
-                    // frame's edge).
+                    // of their own (not under them, from the frame's
+                    // edge).
                     Rectangle {
                         objectName: "itunesArtworkResultHairline"
                         visible: suggestionRow.index < itunesArtworkResultsView.count - 1
@@ -724,18 +724,17 @@ Components.DialogWindow {
             }
 
             // Searching, or nothing found: what the search says, a little
-            // above the middle of where the results would be (#373 H38),
-            // with a busy indicator above it while it searches. Quiet, as
-            // the queue's empty state: the base font, with no glyph, for
-            // finding nothing is a routine outcome (#373 H7, H8); searching
-            // is in the secondary colour, what it found in the text's. A
-            // search that failed says so in a semibold heading, with the
-            // system's words under it in the secondary colour (#373 H38: it
-            // read as finding nothing), and a warning glyph in the
-            // spinner's place (#373 H40: the state was text alone). Built from its parts:
-            // Kirigami.PlaceholderMessage's selectable text brings Copy and
-            // Select All actions that would take Ctrl+C and Ctrl+A from the
-            // Edit menu's.
+            // above the middle of where the results would be, with a busy
+            // indicator above it while it searches. Quiet, as the queue's
+            // empty state: the base font, with no glyph, for finding nothing
+            // is a routine outcome; searching is in the secondary colour,
+            // what it found in the text's. A search that failed says so in a
+            // semibold heading, with the system's words under it in the
+            // secondary colour (otherwise it read as finding nothing),
+            // and a warning glyph in the spinner's place. Built from its
+            // parts: Kirigami.PlaceholderMessage's selectable text brings
+            // Copy and Select All actions that would take Ctrl+C and Ctrl+A
+            // from the Edit menu's.
             ColumnLayout {
                 id: placeholder
                 objectName: "itunesArtworkPlaceholder"
@@ -751,8 +750,8 @@ Components.DialogWindow {
                     && (placeholder.searching || placeholderMessage.text.length > 0)
 
                 // The style's spinner, 32 px with the default font and
-                // larger with a larger one, as the text under it (#373 H45:
-                // 32 px over 24 pt text): the state's one glyph.
+                // larger with a larger one, as the text under it (a fixed
+                // 32 px stood over 24 pt text): the state's one glyph.
                 BusyIndicator {
                     objectName: "itunesArtworkBusyIndicator"
                     Layout.alignment: Qt.AlignHCenter
@@ -765,7 +764,7 @@ Components.DialogWindow {
                 // A failed search's glyph, in the spinner's place and size:
                 // the app's own warning mark, as the status bar and the
                 // queue draw it (Breeze's dialog-warning as a mask fills
-                // its "!", leaving a plain triangle; #373 H35, H41).
+                // its "!", leaving a plain triangle).
                 Kirigami.Icon {
                     objectName: "itunesArtworkFailureIcon"
                     Layout.alignment: Qt.AlignHCenter
@@ -832,15 +831,15 @@ Components.DialogWindow {
         title: I18n.i18nc("@title:window", "Replace Album Art")
         // Two short sentences, as the backend applies it: to the folder's
         // cover image where the folder has one, otherwise embedded in the
-        // album's tracks (artwork::apply_artwork_to_track; #373 H45: one
-        // sentence of 31 words).
+        // album's tracks (artwork::apply_artwork_to_track), rather than one
+        // sentence of 31 words.
         details: I18n.i18nc("@info", "The new artwork replaces the album’s cover image file or, if it has none, "
             + "the artwork embedded in its tracks. Ferrous keeps no copy of the current album art.")
         confirmText: I18n.i18nc("@action:button", "Replace")
         // Breeze's swap: one image for the other. Its "document-replace", a
-        // page with a red ×, read as Delete (#373 H47); red is the glyph of
-        // the confirmations that delete or remove. The question and Cancel
-        // as the default say that the current art is lost.
+        // page with a red ×, read as Delete; red is the glyph of the
+        // confirmations that delete or remove. The question and Cancel as
+        // the default say that the current art is lost.
         confirmIcon: "document-swap"
         // The current album art is gone once replaced.
         destructive: true

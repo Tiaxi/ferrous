@@ -29,9 +29,10 @@ Preferences.PreferencesPage {
         : null
 
     // The rows' name column: as wide as the widest folder name, up to 8
-    // grid units scaled with the font, past which a name elides, so every path starts at one x
-    // (#373 H43: each began where its own name ended). A row without a
-    // name leaves the column empty; with no names, there is no column.
+    // grid units scaled with the font, past which a name elides, so every
+    // path starts at one x (each began where its own name ended). A row
+    // without a name leaves the column empty; with no names, there is no
+    // column.
     readonly property real rootNameColumnWidth: {
         let widest = 0
         for (let i = 0; i < rootNameMeasures.count; ++i) {
@@ -102,13 +103,13 @@ Preferences.PreferencesPage {
     title: I18n.i18nc("@title preferences page", "Library")
 
     // The folders take the column's width up to 29 grid units, scaled with
-    // the font (#373 H45: at 24 pt the list stopped at its buttons' width
+    // the font (at 24 pt the list stopped at its buttons' width
     // and cut the path beside free room), and no less than their buttons
     // need: a long path elides.
     ColumnLayout {
         Kirigami.FormData.label: I18n.i18nc("@label", "Library folders:")
         // On the first folder's line: the form centres its label on the
-        // line's height, at its top (#373 H47: at the list's top, the label
+        // line's height, at its top (at the list's top, the label
         // was 5 px above the folder's name).
         Kirigami.FormData.buddyFor: firstRootLine
         Layout.fillWidth: true
@@ -118,10 +119,9 @@ Preferences.PreferencesPage {
         spacing: Kirigami.Units.largeSpacing
 
         // A framed list, as the app's other lists: the view colour in a
-        // 1 px seam, its rows edge to edge inside it (#373 H4). Three rows
-        // tall at least, so a single folder sits in a visible list rather
-        // than reading as a text field (#373 H38), and up to eight before
-        // it scrolls.
+        // 1 px seam, its rows edge to edge inside it. Three rows tall at
+        // least, so a single folder sits in a visible list rather than
+        // reading as a text field, and up to eight before it scrolls.
         Rectangle {
             id: rootListFrame
             objectName: "libraryRootListFrame"
@@ -225,7 +225,7 @@ Preferences.PreferencesPage {
                     // Set here: the style gives every row but a list's last
                     // a bottom padding of its own, which `padding` does not
                     // reset, so each folder's line was 2 px above the last
-                    // one's (#373 H40).
+                    // one's.
                     topPadding: 0
                     bottomPadding: rootRow.hasNotes ? Kirigami.Units.smallSpacing : 0
                     highlighted: ListView.isCurrentItem
@@ -298,8 +298,9 @@ Preferences.PreferencesPage {
                                 Layout.preferredWidth: root.rootNameColumnWidth
                                 // The gap to the path: the row's 10 px with
                                 // the default font, and larger with a larger
-                                // one, so the two columns stay apart (#373
-                                // H45: 10 px between 24 pt names and paths).
+                                // one, so the two columns stay apart (at
+                                // 24 pt, 10 px between names and paths was
+                                // too little).
                                 Layout.rightMargin: root.uiPalette.scaledSize(parent.spacing) - parent.spacing
                                 text: rootRow.rootName
                                 color: root.uiPalette.text
@@ -359,7 +360,7 @@ Preferences.PreferencesPage {
         }
 
         // The folders' actions, their glyphs as large as their captions'
-        // font calls for, as the dialogs' buttons (#373 H43).
+        // font calls for, as the dialogs' buttons.
         RowLayout {
             id: rootButtons
             readonly property real glyphSize: root.uiPalette.labelIconSize
@@ -479,7 +480,7 @@ Preferences.PreferencesPage {
         // As the page's Remove button.
         confirmIcon: "list-remove"
         // Its tracks leave the library, so Cancel is the default, as KDE's
-        // guidelines ask of an action that destroys (#373 H37): Enter as
+        // guidelines ask of an action that destroys: Enter as
         // it shows keeps the folder.
         destructive: true
         onConfirmed: root.uiBridge.removeLibraryRoot(rootPath)

@@ -9,7 +9,7 @@ import org.kde.kirigami 2.20 as Kirigami
 // font of the text around it. The style draws a ToolButton's caption in
 // the toolbar font, which KDE sets apart from the general font, whatever
 // the button's own font: with a 24 pt general font, Recent Issues' Clear
-// All stayed at 10 pt beside its 24 pt title (#373 H10). Here the caption
+// All stayed at 10 pt beside its 24 pt title. Here the caption
 // and the icon are the button's own content, and the style draws only its
 // frame, as for any tool button: on hover, when pressed and with focus.
 ToolButton {
@@ -32,7 +32,7 @@ ToolButton {
             visible: root.icon.name.length > 0
             source: root.icon.name
             // As large as the caption's font calls for: 16 px with the
-            // default font, larger with a larger one (#373 H42).
+            // default font, larger with a larger one.
             Layout.preferredWidth: Kirigami.Units.iconSizes.sizeForLabels
             Layout.preferredHeight: Kirigami.Units.iconSizes.sizeForLabels
             Layout.alignment: Qt.AlignVCenter

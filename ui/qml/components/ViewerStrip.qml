@@ -17,19 +17,19 @@ import "../logic/FormatUtils.js" as FormatUtils
 // left the playing track's title (semibold), "Artist — Album" and
 // "1:17 / 3:49", on the type scale of the viewer's text over the whole
 // screen (UiPalette.fullscreenTextScale), as the album art's details under
-// it are (#373 H40: at the window's size they were a second scale); on the
+// it are (at the window's size they were a second scale); on the
 // right, 8 px in from the edge, flat 24 px tool buttons: a zoom readout and
 // Reset while the view is zoomed, the new issues while there are any, the
 // viewer's own buttons (declared inside the strip, from the left, each taking
 // the strip's `plotColors`) and Close: the album art's info toggle, or the
 // visualization's mode switch, which with its zoom moves here from the
 // plot's corner while the strip is on, so the strip is the viewer's one
-// place for its controls (#373 H40: a plate of them under the strip's Close
-// read as a second cluster). The whole strip
-// shows and hides with the viewer's controls, fading as they do; it is
-// drawn over the view, which never resizes for it. Turned off in
-// Preferences (`available` false), it never shows: the viewer's keys, a
-// double-click and a middle click do what its buttons do.
+// place for its controls (a plate of them under the strip's Close read as
+// a second cluster). The whole strip shows and hides with the viewer's
+// controls, fading as they do; it is drawn over the view, which never
+// resizes for it. Turned off in Preferences (`available` false), it never
+// shows: the viewer's keys, a double-click and a middle click do what its
+// buttons do.
 Rectangle {
     id: root
 
@@ -141,8 +141,8 @@ Rectangle {
         readonly property real textRoom: Math.max(0, track.room - (timeLabel.visible
             ? timeLabel.implicitWidth + track.spacing : 0) - (contextLabel.visible ? track.spacing : 0))
         readonly property real contextNeed: contextLabel.visible ? contextLabel.implicitWidth : 0
-        // 16 px in from the edge (#373 H11: at 12 px, the gap between its
-        // own texts, the title sat too near the edge).
+        // 16 px in from the edge (at 12 px, the gap between its own texts,
+        // the title sat too near the edge).
         x: 2 * Kirigami.Units.largeSpacing
         height: root.bandHeight
         spacing: Math.round(12 * root.textScale)
@@ -189,8 +189,8 @@ Rectangle {
         id: controls
         objectName: "viewerStripControls"
         anchors.right: parent.right
-        // 8 px in from the screen's edge (#373 H40: at 4 px, Close's focus
-        // ring met the screen's corner).
+        // 8 px in from the screen's edge (at 4 px, Close's focus ring met
+        // the screen's corner).
         anchors.rightMargin: Kirigami.Units.largeSpacing
         y: Math.round((root.bandHeight - height) / 2)
         uiPalette: root.uiPalette

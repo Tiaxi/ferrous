@@ -4414,13 +4414,21 @@ QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSi
         }
         const QRectF target(span->rect().topLeft() * scale, span->rect().size() * scale);
         const QRectF source = span->sourceRect();
-        for (int y = 0; y < expected.height(); ++y) {
+        // The pixels whose centres the span may cover, and a pixel either
+        // side; the checks below decide.
+        const int top = std::max(0, static_cast<int>(std::floor(target.top())) - 1);
+        const int bottom = std::min(expected.height(), static_cast<int>(std::ceil(target.bottom())) + 1);
+        const int left = std::max(0, static_cast<int>(std::floor(target.left())) - 1);
+        const int right = std::min(expected.width(), static_cast<int>(std::ceil(target.right())) + 1);
+        for (int y = top; y < bottom; ++y) {
             if (y + 0.5 < target.top() || y + 0.5 >= target.bottom()) {
                 continue;
             }
             const int sy = static_cast<int>(std::floor(
                 source.top() + (y + 0.5 - target.top()) * source.height() / target.height()));
-            for (int x = 0; x < expected.width(); ++x) {
+            auto *expectedRow = reinterpret_cast<QRgb *>(expected.scanLine(y));
+            uchar *maskRow = mask->scanLine(y);
+            for (int x = left; x < right; ++x) {
                 if (x + 0.5 < target.left() || x + 0.5 >= target.right()) {
                     continue;
                 }
@@ -4428,12 +4436,12 @@ QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSi
                     source.left() + (x + 0.5 - target.left()) * source.width() / target.width();
                 const int sx = static_cast<int>(std::floor(at));
                 if (layer && std::abs(at - std::round(at)) < 0.02) {
-                    mask->setPixel(x, y, 0);
+                    maskRow[x] = 0;
                 }
                 // Clamped to the edge, as a texture is sampled.
                 const QRgb pixel = image.pixel(std::min(x0 + sx, image.width() - 1), sy);
                 if (qAlpha(pixel) > 0) {
-                    expected.setPixel(x, y, pixel);
+                    expectedRow[x] = 0xff000000U | pixel;
                 }
             }
         }
@@ -4462,7 +4470,7 @@ QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSi
             }
             for (int y = 0; y < size.height(); ++y) {
                 if (x >= 0 && x < size.width()) {
-                    mask->setPixel(x, y, 0);
+                    mask->scanLine(y)[x] = 0;
                 }
             }
         }
@@ -4479,10 +4487,8 @@ QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSi
         const int left = std::max(0, static_cast<int>(std::floor(playhead.left() * scale)) - 2 * static_cast<int>(std::ceil(scale)));
         const int right = std::min(size.width() - 1,
             static_cast<int>(std::ceil(playhead.right() * scale)) + 2 * static_cast<int>(std::ceil(scale)));
-        for (int y = 0; y < size.height(); ++y) {
-            for (int x = left; x <= right; ++x) {
-                mask->setPixel(x, y, 0);
-            }
+        for (int y = 0; y < size.height() && left <= right; ++y) {
+            std::fill(mask->scanLine(y) + left, mask->scanLine(y) + right + 1, uchar(0));
         }
     }
     return expected;
@@ -4641,8 +4647,11 @@ void SpectrogramCanvasSmokeTest::spectrogramSceneGraphDrawsTheCanvas() {
         const int itemPixels = std::min(expected.width(),
             static_cast<int>(std::floor(item.width() * scale + 1e-6)));
         for (int y = 0; y < expected.height(); ++y) {
+            const auto *shownRow = reinterpret_cast<const QRgb *>(shown.constScanLine(y));
+            const auto *expectedRow = reinterpret_cast<const QRgb *>(expected.constScanLine(y));
+            const uchar *maskRow = mask.constScanLine(y);
             for (int x = 0; x < itemPixels; ++x) {
-                if (mask.constScanLine(y)[x] != 0 && shown.pixel(x, y) != expected.pixel(x, y)) {
+                if (maskRow[x] != 0 && (shownRow[x] | 0xff000000U) != (expectedRow[x] | 0xff000000U)) {
                     if (differing++ == 0) {
                         first = QPoint(x, y);
                     }
@@ -5159,9 +5168,9 @@ void SpectrogramCanvasSmokeTest::spectrogramZoomShowsOlderDataUntilTheNewArrives
     QVector<bool> shown(width, false);
     // Paints a frame, and checks that it shows data wherever the last did,
     // and the new columns and the view before the zoom never in one place
-    // (#373 H7: a double trace was reported): the canvas is opaque wherever
-    // it has a column, so the backdrop and the reserve under it show only
-    // where it has none.
+    // (a double trace was reported): the canvas is opaque wherever it has
+    // a column, so the backdrop and the reserve under it show only where it
+    // has none.
     const auto frame = [&](const char *step) {
         node = item.updatePaintNode(node, nullptr);
         const QImage &canvas = item.m_canvas;

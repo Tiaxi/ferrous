@@ -1603,7 +1603,7 @@ void WaveformEditorItem::shownChanged() {
     if (!shownOnScreen()) {
         // Nothing would see them: no frames and no detail decoding until
         // it is shown again. The detail it has stays, so that shown again
-        // its first frame draws it (#373 H14: the mode switch to the
+        // its first frame draws it (otherwise the mode switch to the
         // waveform waited some 200 ms for a fresh decode).
         cancelPlaybackFrame();
         m_requestTimer.stop();
@@ -1642,7 +1642,7 @@ void WaveformEditorItem::shownChanged() {
         request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
         // With the detail of the view now at its resolution, which it kept
         // while hidden, its next frame draws the picture: what waits for it
-        // need not wait for that frame as well (#373 H14).
+        // need not wait for that frame as well.
         const auto [visibleStart, visibleEnd] = visibleRangeLocked();
         pictureKept = !m_sourcePath.isEmpty() && !m_zoomOutHandoffPending
             && !m_zoomFallbackToOverview && m_detail.framesPerPoint > 0
@@ -3225,9 +3225,9 @@ void WaveformEditorItem::rebuildCacheLocked(
     const double scale = renderScaleLocked();
     m_cacheShowsWaveform = detailReady
         || (useOverview ? overviewDrawableLocked(channels) : detailOverlapsViewport);
-    // Not the picture while detail is on its way (#373 H14): the overview
-    // at another scale, or detail that covers only part of the view or is
-    // of another zoom, standing in for it.
+    // Not the picture while detail is on its way: the overview at another
+    // scale, or detail that covers only part of the view or is of another
+    // zoom, standing in for it.
     m_cacheWaveformProvisional = !detailReady && (!useOverview || overviewProvisionalLocked());
     if (detailReady) {
         drawDetailLocked(

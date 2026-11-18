@@ -230,8 +230,8 @@ struct ReferenceMeter {
 };
 
 // The marks' gaps on a scale `scaleHeight` logical pixels tall: 2 px each,
-// centred on -6, -12 and -24 dB, or on -6 and -24 dB in a lane under 64 px
-// (#373 H16 I3), as [foot, top) in logical pixels up the scale's foot.
+// centred on -6, -12 and -24 dB, or on -6 and -24 dB in a lane under
+// 64 px, as [foot, top) in logical pixels up the scale's foot.
 QList<std::pair<int, int>> markGaps(double scaleHeight) {
     const double laneHeight = scaleHeight + 10;
     QList<double> marks = laneHeight < 64 ? QList<double>{-24, -6} : QList<double>{-24, -12, -6};
@@ -245,8 +245,7 @@ QList<std::pair<int, int>> markGaps(double scaleHeight) {
 
 // Whether the row `row` device pixels up the scale, at `dpr` device pixels
 // to the logical one, is on one of the fill's rungs: 3 px of every 4 from
-// the scale's foot, and again from over each mark's gap, never in one
-// (#373 H14 G3, H16 I3).
+// the scale's foot, and again from over each mark's gap, never in one.
 bool onRung(int row, double dpr, double scaleHeight) {
     const int logical = int(std::floor((row + 0.5) / dpr));
     int from = 0;
@@ -740,9 +739,9 @@ void LevelMeterTest::meterAtRestShowsItsMarksAlone_data() {
 // At rest, with no track or stopped, each column is the trough with the
 // marks' ticks alone, -6, -12 and -24 dB (only -6 and -24 in a short lane),
 // each a 1 px row across the track where it is while playing, in the
-// ticks' colour: no lamp, fill or peak tick (#373 H30: the blank trough at
-// the first run read as a scrollbar's). Framed or out to the edge, at 1x
-// and 2x; the levels it last read, here loud and clipping, show nothing.
+// ticks' colour: no lamp, fill or peak tick (a blank trough read as a
+// scrollbar's). Framed or out to the edge, at 1x and 2x; the levels it last
+// read, here loud and clipping, show nothing.
 void LevelMeterTest::meterAtRestShowsItsMarksAlone() {
     QFETCH(double, dpr);
     QFETCH(bool, framed);
@@ -862,10 +861,10 @@ void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
             QCOMPARE(pixel(5, rung), 0x40);
             QCOMPARE(pixel(5, top + 4), lane == 0 ? 0x70 : 0x60);
             QCOMPARE(pixel(5, top + 6.5), 0x80);
-            // A meter, not a scrollbar (#373 H5, H8, H14 G3): the 11 px
-            // track the lane's height, x 1 to 12, and on it the 10 px bar,
-            // x 2 to 12, out to the column's right edge with no floor
-            // beside it, and the track showing 1 px left of it.
+            // A meter, not a scrollbar: the 11 px track the lane's height,
+            // x 1 to 12, and on it the 10 px bar, x 2 to 12, out to the
+            // column's right edge with no floor beside it, and the track
+            // showing 1 px left of it.
             for (const double y : {rung, top + 4}) {
                 QCOMPARE(pixel(1.5, y), 0x30);
             }
@@ -876,7 +875,7 @@ void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
             }
             QCOMPARE(pixel(1.5, at(-18)), 0x30);
             // The fill a ladder from the scale's foot: 3 px rungs on a 4 px
-            // pitch, the trough between them, across the bar (#373 H16 I3).
+            // pitch, the trough between them, across the bar.
             for (int row = 0; row < 12; ++row) {
                 for (double x = 2.5; x < width; x += 1) {
                     QCOMPARE(pixel(x, meterBottom - row - 0.5), row % 4 < 3 ? 0x40 : 0x30);
@@ -905,8 +904,8 @@ void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
 
 // A top seam colour draws a 1 px line across the whole column's top, over
 // the seam on its left and the lane's floor, and nothing under it; while
-// it is transparent, as on the spectrogram, there is none (#373 H12 Z5:
-// the waveform's meter continued the queue's scrollbar lane above it).
+// it is transparent, as on the spectrogram, there is none (without it the
+// waveform's meter continued the queue's scrollbar lane above it).
 void LevelMeterTest::topSeamCrossesTheColumnOnlyWhenSet() {
     constexpr double width = LevelMeterItem::kColumnWidth;
     QQuickWindow view;
@@ -952,13 +951,12 @@ void LevelMeterTest::topSeamCrossesTheColumnOnlyWhenSet() {
     }
 }
 
-// The meter as part of the plot (#373 H7 P11, H8): its bar out to the
-// column's right edge, with no strip of the plot's floor beside it, or
-// framed by its track, 2 px in from either edge (#373 H16 I3); the fill of
-// one colour from its foot to its level (#373 H15 H2); its marks at -6,
-// -12 and -24 dB, fewer in a short lane, a 2 px gap in the ladder with a
-// 1 px tick across the track in its upper row, on the fill and above it,
-// whatever the plot's scale (#373 H16 I3); the peak tick a mark of its own
+// The meter as part of the plot: its bar out to the column's right edge,
+// with no strip of the plot's floor beside it, or framed by its track, 2 px
+// in from either edge; the fill of one colour from its foot to its level;
+// its marks at -6, -12 and -24 dB, fewer in a short lane, a 2 px gap in the
+// ladder with a 1 px tick across the track in its upper row, on the fill
+// and above it, whatever the plot's scale; the peak tick a mark of its own
 // on any fill.
 void LevelMeterTest::meterIsPartOfThePlot() {
     // The marks: three in a full lane, two in a short one.
@@ -1081,7 +1079,7 @@ void LevelMeterTest::meterIsPartOfThePlot() {
     QVERIFY(rungUnder);
 }
 
-// A loud fill, in the spectrogram's colours (#373 H8, H14 G3, H15 H2):
+// A loud fill, in the spectrogram's colours:
 // every rung, up to the level, in the one fill colour, the app icon's
 // magenta, the trough between them, nothing of another colour; its peak
 // tick at full brightness.
@@ -1157,10 +1155,9 @@ void LevelMeterTest::fillIsALadderOfOneColour_data() {
     }
 }
 
-// The fill is a ladder of one colour (#373 H14 G3, H15 H2): each row of its
-// rungs, from the bottom up to the level, in the fill's colour, the trough
-// between them; above the level, only the trough and the peak tick; at 1x
-// and 2x.
+// The fill is a ladder of one colour: each row of its rungs, from the
+// bottom up to the level, in the fill's colour, the trough between them;
+// above the level, only the trough and the peak tick; at 1x and 2x.
 void LevelMeterTest::fillIsALadderOfOneColour() {
     QFETCH(double, dpr);
     QFETCH(double, level);
@@ -1212,8 +1209,7 @@ void LevelMeterTest::fillIsALadderOfOneColour() {
                 .arg(row).arg(x).arg(pixel(x, row).name(), wanted.name())));
         }
     }
-    // Rungs of 3 px on a 4 px pitch, in logical pixels, from the foot
-    // (#373 H16 I3).
+    // Rungs of 3 px on a 4 px pitch, in logical pixels, from the foot.
     for (int row = 0; row < int(12 * dpr); ++row) {
         QCOMPARE(pixel(barLeft, row) != trough, int(row / dpr) % 4 < 3);
     }

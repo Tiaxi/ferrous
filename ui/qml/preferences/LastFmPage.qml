@@ -56,7 +56,7 @@ Preferences.PreferencesPage {
     }
 
     // The account is a group of its own, as General's groups are apart
-    // (#373 H42: it stood 4 px under the scrobbling group's last row).
+    // (it stood 4 px under the scrobbling group's last row).
     Components.FormGroupGap {
         objectName: "lastFmAccountGap"
         uiPalette: root.uiPalette

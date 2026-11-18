@@ -1150,54 +1150,28 @@ void SpectrogramPlaybackSmokeTest::spectrogramSmoothnessProfileTracksAdvanceFall
 }
 
 void SpectrogramPlaybackSmokeTest::stoppedTrackSwitchRequiresSpectrogramResetOnResume() {
-    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
-    qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
-
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("libraryModel"), &libraryModel);
-    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"), QStringLiteral("test"));
-
-    const QUrl url = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/Main.qml"));
-    engine.load(url);
-    QVERIFY2(!engine.rootObjects().isEmpty(), "Main.qml failed to instantiate");
-    QObject *root = engine.rootObjects().constFirst();
-    QVERIFY(root != nullptr);
-
-    QVariant result;
-    bool invoked = QMetaObject::invokeMethod(
-        root,
-        "shouldResetSpectrogramForStoppedTrackSwitch",
-        Q_RETURN_ARG(QVariant, result),
-        Q_ARG(QVariant, QStringLiteral("Stopped")),
-        Q_ARG(QVariant, QStringLiteral("Playing")),
-        Q_ARG(QVariant, QStringLiteral("/music/old-track.flac")),
-        Q_ARG(QVariant, QStringLiteral("/music/new-track.flac")));
-    QVERIFY(invoked);
-    QCOMPARE(result.toBool(), true);
-
-    invoked = QMetaObject::invokeMethod(
-        root,
-        "shouldResetSpectrogramForStoppedTrackSwitch",
-        Q_RETURN_ARG(QVariant, result),
-        Q_ARG(QVariant, QStringLiteral("Playing")),
-        Q_ARG(QVariant, QStringLiteral("Playing")),
-        Q_ARG(QVariant, QStringLiteral("/music/old-track.flac")),
-        Q_ARG(QVariant, QStringLiteral("/music/new-track.flac")));
-    QVERIFY(invoked);
-    QCOMPARE(result.toBool(), false);
-
-    invoked = QMetaObject::invokeMethod(
-        root,
-        "shouldResetSpectrogramForStoppedTrackSwitch",
-        Q_RETURN_ARG(QVariant, result),
-        Q_ARG(QVariant, QStringLiteral("Stopped")),
-        Q_ARG(QVariant, QStringLiteral("Playing")),
-        Q_ARG(QVariant, QStringLiteral("/music/same-track.flac")),
-        Q_ARG(QVariant, QStringLiteral("/music/same-track.flac")));
-    QVERIFY(invoked);
-    QCOMPARE(result.toBool(), false);
+    // The main window's playback controller, which decides it, on its own.
+    QQmlEngine engine;
+    QString errors;
+    std::unique_ptr<QObject> controller(createQmlObjectFromSource(engine, QByteArrayLiteral(
+        "import QtQuick\n"
+        "import \"controllers\" as Controllers\n"
+        "Controllers.PlaybackController { uiBridge: QtObject {} }\n"),
+        QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml")),
+        &errors));
+    QVERIFY2(controller, qPrintable(errors));
+    const auto resets = [&controller](const char *previous, const char *current, const char *stoppedPath,
+                                      const char *currentPath) {
+        QVariant result;
+        const bool invoked = QMetaObject::invokeMethod(controller.get(),
+            "shouldResetSpectrogramForStoppedTrackSwitch", Q_RETURN_ARG(QVariant, result),
+            Q_ARG(QVariant, QString::fromLatin1(previous)), Q_ARG(QVariant, QString::fromLatin1(current)),
+            Q_ARG(QVariant, QString::fromLatin1(stoppedPath)), Q_ARG(QVariant, QString::fromLatin1(currentPath)));
+        return invoked && result.toBool();
+    };
+    QVERIFY(resets("Stopped", "Playing", "/music/old-track.flac", "/music/new-track.flac"));
+    QVERIFY(!resets("Playing", "Playing", "/music/old-track.flac", "/music/new-track.flac"));
+    QVERIFY(!resets("Stopped", "Playing", "/music/same-track.flac", "/music/same-track.flac"));
 }
 
 void SpectrogramPlaybackSmokeTest::spectrogramStaleTokenChunksAreDropped() {
@@ -3003,10 +2977,13 @@ void SpectrogramPlaybackSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayhea
     const double dueInMs = playbackFrameDueInMs(item, time.nowNs);
     QVERIFY2(dueInMs >= untilChangeMs && dueInMs - untilChangeMs < 1.0,
         qPrintable(QStringLiteral("%1 ms for %2 ms").arg(dueInMs).arg(untilChangeMs)));
-    // The window's scheduler wakes it then, with the playhead on its next
-    // pixel, and the next frame waits for the column after.
+    // The window's scheduler wakes it then, as its timer does, with the
+    // playhead on its next pixel, and the next frame waits for the column
+    // after.
     time.nowNs = item.m_frameScheduler->dueNs(&item);
-    QTRY_COMPARE(item.m_playbackFrameRequests, requested + 1);
+    QVERIFY(item.m_frameScheduler->timerActive());
+    item.m_frameScheduler->fire();
+    QCOMPARE(item.m_playbackFrameRequests, requested + 1);
     auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(kPlayheadChild));
     const double before = playhead->rect().left();
     node = item.updatePaintNode(node, nullptr);
@@ -3031,12 +3008,11 @@ void SpectrogramPlaybackSmokeTest::spectrogramLateFrameCallbackDrawsAtOnce() {
     // 50.35 s. Its frame-swapped callback arrives after that: the next
     // frame is due at once.
     SpectrogramItem item;
+    TestTime time;
+    time.drive(item);
     prepareWholeTrackPlayback(item, 50.0);
     QSGNode *node = paintSettled(item, nullptr);
-    PlaybackClock &clock = testClock(item);
-    QVERIFY(QTest::qWaitFor([&clock]() {
-        return clock.positionAt(monotonicNowNs()) >= 118.2 / kWholeTrackColumnsPerSecond;
-    }, 2000));
+    time.advance(118.2 / kWholeTrackColumnsPerSecond - 50.0);
     const quint64 requested = item.m_playbackFrameRequests;
     item.handleWindowAfterAnimating();
     QCOMPARE(item.m_playbackFrameRequests, requested + 1);
@@ -3185,7 +3161,8 @@ void SpectrogramPlaybackSmokeTest::spectrogramScrollingFramesMoveAPixelAtATime()
                 continue;
             }
             for (int y = 0; y < next.height(); ++y) {
-                if (next.pixel(x, y) != shown.pixel(x + shift, y)) {
+                if (reinterpret_cast<const QRgb *>(next.constScanLine(y))[x]
+                    != reinterpret_cast<const QRgb *>(shown.constScanLine(y))[x + shift]) {
                     return false;
                 }
             }
@@ -3661,12 +3638,14 @@ void SpectrogramPlaybackSmokeTest::spectrogramIdleViewDrawsOnlyFramesThatDiffer(
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     int frames = 0;
     const FrameSampler counting(&window, [&frames]() { ++frames; });
+    // Over half a second, where the window could draw 30 frames: the idle
+    // view's playhead moves a pixel once or twice.
     auto *idle = new SpectrogramItem(window.contentItem());
     prepareWholeTrackPlayback(*idle, 50.0);
-    QTest::qWait(300);
+    QTest::qWait(200);
     frames = 0;
-    QTest::qWait(1000);
-    QVERIFY2(frames >= 1 && frames <= 5, qPrintable(QString::number(frames)));
+    QTest::qWait(500);
+    QVERIFY2(frames >= 1 && frames <= 3, qPrintable(QString::number(frames)));
     const int idleFrames = frames;
     delete idle;
 
@@ -3681,12 +3660,12 @@ void SpectrogramPlaybackSmokeTest::spectrogramIdleViewDrawsOnlyFramesThatDiffer(
     setTestPosition(*scrolling, 40.0);
     scrolling->setPlaying(true);
     setTestPosition(*scrolling, 40.0);
-    QTest::qWait(300);
+    QTest::qWait(200);
     frames = 0;
-    QTest::qWait(1000);
+    QTest::qWait(500);
     // It scrolls a pixel with each of its 46.875 columns a second, and
     // draws a frame for each.
-    QVERIFY2(frames >= std::max(4 * idleFrames, 20) && frames <= 60,
+    QVERIFY2(frames >= std::max(4 * idleFrames, 10) && frames <= 30,
         qPrintable(QString::number(frames)));
 }
 

@@ -17,8 +17,7 @@ import "../logic/KeyUtils.js" as KeyUtils
 // plot it sits on rather than the window, as on a viewer's title strip
 // over the view, and checked is the mode switch's chosen segment: the
 // plot's text colour at 18 % inside a 1 px edge of its segmentEdge, so the
-// plates have one way to show a choice that is on (#373 H14 F4: an accent
-// tint).
+// plates have one way to show a choice that is on (not an accent tint).
 ToolButton {
     id: root
 
@@ -30,8 +29,8 @@ ToolButton {
     property color glyphColor: root.baseTextColor
     // On a plot, hover is a wash of its text colour that reads on the
     // strip and the plates: 14 % on a dark one, some 1.4:1, and 12 % on a
-    // light one, where the same tint steps more (#373 H42: 6.5 %, 1.15:1 on
-    // a 24 px target, hardly showed); pressed is 22 %. On the window's
+    // light one, where the same tint steps more (at 6.5 %, 1.15:1 on a
+    // 24 px target, it hardly showed); pressed is 22 %. On the window's
     // colours, its hover tint.
     readonly property bool _plotIsDark: root.plotColors !== null
         && ColorUtils.colorLuma(root.plotColors.plotBg) < 0.45

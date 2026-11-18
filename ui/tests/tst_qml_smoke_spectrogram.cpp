@@ -84,6 +84,21 @@ private slots:
     void spectrogramCrosshairFadesAsAWhole();
 };
 
+namespace {
+
+// Waits for `done` with animation time passing 100 ms between looks, so
+// that fades end at once, and real time for timers, which Qt runs on it
+// while only they run.
+template <typename Done>
+bool settlesTo(SteppedAnimationDriver &animations, Done done) {
+    return QTest::qWaitFor([&]() {
+        (void)animations.step(100);
+        return done();
+    }, 5000);
+}
+
+} // namespace
+
 void SpectrogramSmokeTest::spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -428,11 +443,16 @@ Window {
     // Hidden, the buttons stay in the scene, for the keyboard.
     QVERIFY(buttons->isVisible());
     QCOMPARE(buttons->opacity(), 0.0);
+    // Their fades in animation time, each to its end.
+    SteppedAnimationDriver animations;
+    const auto buttonsAt = [&](double opacity) {
+        return settlesTo(animations, [&]() { return buttons->opacity() == opacity; });
+    };
 
     // Hover the pane to reveal the controls, then move onto each control.
     // The plate's own hover keeps it shown until the click is released.
     QTest::mouseMove(window, QPoint(320, 160));
-    QTRY_COMPARE(buttons->opacity(), 1.0);
+    QVERIFY(buttonsAt(1.0));
     const QPoint muteCenter = muteButton->mapToScene(QPointF(
         muteButton->width() * 0.5, muteButton->height() * 0.5)).toPoint();
     QTest::mouseMove(window, muteCenter);
@@ -453,9 +473,9 @@ Window {
     // and they stay while it is inside.
     QTest::mouseMove(window, QPoint(320, 310));
     QTest::mouseMove(window, QPoint(-10, -10));
-    QTRY_COMPARE(buttons->opacity(), 0.0);
+    QVERIFY(buttonsAt(0.0));
     muteButton->forceActiveFocus(Qt::TabFocusReason);
-    QTRY_COMPARE(buttons->opacity(), 1.0);
+    QVERIFY(buttonsAt(1.0));
     QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(soloButton->hasActiveFocus());
     QCOMPARE(buttons->opacity(), 1.0);
@@ -463,27 +483,27 @@ Window {
     QTRY_COMPARE(bridge->property("soloCalls").toInt(), 2);
     soloButton->setFocus(false);
     layer->forceActiveFocus();
-    QTRY_COMPARE(buttons->opacity(), 0.0);
+    QVERIFY(buttonsAt(0.0));
 
     // A muted or soloed lane keeps its buttons shown with the pointer away,
-    // compact too, so the checked one stays in sight to undo it (#373 H16
-    // I4: they faded out as the pointer left).
+    // compact too, so the checked one stays in sight to undo it (they
+    // faded out as the pointer left).
     QQuickItem *head = buttons->parentItem();
     QVERIFY(head != nullptr && head->property("buttonsRevealed").isValid());
     for (const bool compact : {false, true}) {
         head->setProperty("compact", compact);
         bridge->setProperty("mutedChannels", QVariantList{true});
-        QTRY_COMPARE(buttons->opacity(), 1.0);
+        QVERIFY(buttonsAt(1.0));
         QVERIFY(muteButton->property("checked").toBool());
-        QTest::qWait(250);
+        (void)animations.step(250);
         QCOMPARE(buttons->opacity(), 1.0);
         bridge->setProperty("mutedChannels", QVariantList{});
-        QTRY_COMPARE(buttons->opacity(), 0.0);
+        QVERIFY(buttonsAt(0.0));
         bridge->setProperty("soloedChannels", QVariantList{true});
-        QTRY_COMPARE(buttons->opacity(), 1.0);
+        QVERIFY(buttonsAt(1.0));
         QVERIFY(soloButton->property("checked").toBool());
         bridge->setProperty("soloedChannels", QVariantList{});
-        QTRY_COMPARE(buttons->opacity(), 0.0);
+        QVERIFY(buttonsAt(0.0));
     }
 }
 
@@ -576,8 +596,8 @@ ApplicationWindow {
     auto *pane = root->findChild<QQuickItem *>(QStringLiteral("floorPane"));
     auto *surface = root->findChild<QQuickItem *>(QStringLiteral("floorSurface"));
     QVERIFY(tokens != nullptr && pane != nullptr && surface != nullptr);
-    // The plot's floor is the palette's plotFloor, its indigo (#373 H11
-    // P19), where the plot has no column to draw. Silence within a track
+    // The plot's floor is the palette's plotFloor, its indigo, where the
+    // plot has no column to draw. Silence within a track
     // is the colour map's lowest entry, black, for the colour and the
     // greyscale (muted) map alike; a canvas pixel without a column is
     // transparent, for the floor to show.
@@ -661,7 +681,7 @@ ApplicationWindow {
     QCOMPARE(drawn(160, 0.5), floor);
     QCOMPARE(drawn(160, 50), floor);
     QCOMPARE(drawn(160, 150), floor);
-    // Never played: the seam at rest, in the floor's violet (#373 H15 H7).
+    // Never played: the seam at rest, in the floor's violet.
     QCOMPARE(drawn(160, 100.5).rgb(), tokens->property("plotRestLaneSeam").value<QColor>().rgb());
 }
 
@@ -675,9 +695,8 @@ void SpectrogramSmokeTest::emptyPaneIsTheModesFloor_data() {
 }
 
 // The pane's floor is the mode's, in both themes, with data or without, so
-// that the first Play keeps it (#373 H4, P5): the spectrogram's is the
-// plot's floor, its indigo; the waveform's the view colour. (H2 made the light theme's bare spectrogram pane the view
-// colour; H3 the dark theme's the map's floor.)
+// that the first Play keeps it: the spectrogram's is the plot's floor, its
+// indigo; the waveform's the view colour.
 void SpectrogramSmokeTest::emptyPaneIsTheModesFloor() {
     QFETCH(bool, dark);
     QFETCH(int, visualizationMode);
@@ -725,8 +744,8 @@ ApplicationWindow {
     QTRY_COMPARE(tokens->property("themeIsDark").toBool(), dark);
     pane->setProperty("visualizationMode", visualizationMode);
 
-    // The plot's floor: its indigo, in both themes (#373 H11 P19; before,
-    // the colour map's lowest entry, black).
+    // The plot's floor: its indigo, in both themes, not the colour map's
+    // lowest entry, black.
     const QColor mapFloor = tokens->property("plotFloor").value<QColor>();
     const QColor view = tokens->property("view").value<QColor>();
     const QColor wanted = visualizationMode == 1 ? view : mapFloor;
@@ -915,7 +934,7 @@ void SpectrogramSmokeTest::spectrogramForceFpsOverlayDoesNotOverrideQmlBinding()
 
 // The time after where a file is cut off (markerSeconds), which the
 // analysis fills with silence to the length the file claims, is the plot's
-// floor, not black (#373 H12 Z10): one floor for everything that is not
+// floor, not black: one floor for everything that is not
 // the track. Silence within the track stays the colour map's black, data.
 void SpectrogramSmokeTest::timeAfterTheCutIsTheFloor() {
     QQuickWindow window;
@@ -985,8 +1004,8 @@ void SpectrogramSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
     delete node;
 }
 
-// The crosshair's value keeps 6 px from the plates in the corner (#373 H5:
-// in the first lane of 5.1, it butted against the mode switch), beside them
+// The crosshair's value keeps 6 px from the plates in the corner (in the
+// first lane of 5.1, it butted against the mode switch), beside them
 // and just below them; further down it is back on the right edge.
 void SpectrogramSmokeTest::crosshairReadoutKeepsItsGapFromTheCornerPlates() {
     QCOMPARE(ViewCorner::kLabelGap, 6);
@@ -996,8 +1015,8 @@ void SpectrogramSmokeTest::crosshairReadoutKeepsItsGapFromTheCornerPlates() {
     const QSizeF corner(60, 33);
     const int cornerLeft = width - 60;
     const QSize plate(90, 20);
-    // The readout's plate keeps a group's gap from them (#373 H8): 6 px
-    // read as one more plate in their row.
+    // The readout's plate keeps a group's gap from them: 6 px read as one
+    // more plate in their row.
     constexpr int gap = CrosshairReadout::kCornerGap;
     QVERIFY(gap >= 2 * ViewCorner::kLabelGap);
     for (const int pointerY : {5, 20, 40, 48, 49, 58, 59, 60, 70}) {
@@ -2225,7 +2244,7 @@ Window {
     }
 }
 
-// 5.1 in the main window at 1600 x 1000, six short lanes (#373 H8): each
+// 5.1 in the main window at 1600 x 1000, six short lanes: each
 // lane's head is compact, a 16 px label with 11 px text and smaller Mute
 // and Solo buttons, which show only on the pointer; taller lanes keep the
 // full heads. The crosshair's readout in the top lane keeps a group's gap
@@ -2313,7 +2332,7 @@ void SpectrogramSmokeTest::shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch
         QCOMPARE(head.mute->height(), head.label->height() + 4);
         // Mute and Solo hidden until the pointer is on the lane.
         QVERIFY(!head.buttons->property("revealed").toBool());
-        // Their plate centred on the label, inside the lane (#373 H18 C4).
+        // Their plate centred on the label, inside the lane.
         const QRectF labelRect = head.label->mapRectToItem(layer, QRectF(0, 0, head.label->width(), head.label->height()));
         const QRectF plateRect = head.buttons->mapRectToItem(layer, QRectF(0, 0, head.buttons->width(), head.buttons->height()));
         QVERIFY2(std::abs(labelRect.center().y() - plateRect.center().y()) <= 0.5,
@@ -2387,7 +2406,9 @@ void SpectrogramSmokeTest::shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch
         QRectF(-1, -1, modeSwitch->width() + 2, modeSwitch->height() + 2));
     const QPointF origin = top->mapToScene(QPointF());
     int checked = 0;
-    for (double x = top->width() - 2; x > top->width() - 400; x -= 37) {
+    // The value's plate, the one in this lane, keeps to the right edge and
+    // follows the pointer's height alone: a few columns of the sweep.
+    for (double x = top->width() - 2; x > top->width() - 400; x -= 131) {
         for (double y = 1; y < top->height() - 1; y += 4) {
             const QPointF at = origin + QPointF(x, y);
             // Not on the switch, which takes the pointer from the plot.
@@ -2716,7 +2737,7 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsItsScaleFaintly_data() {
     QTest::newRow("96 kHz, capped") << 1.0 << false << 96'000 << true;
 }
 
-// The lane at rest (#373 H6 P6): before it has columns, a 1 px line across
+// The lane at rest: before it has columns, a 1 px line across
 // it at each tick of the frequency scale, where a session at the analysis's
 // settings and the lane's rate puts the scale, and the scale's labels where
 // it puts them, in the secondary text colour.
@@ -2787,10 +2808,9 @@ void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates_data()
 
 // A line at rest on a row beside a plate, the mode switch's corner or the
 // lane's label, or within 8 px under or over it, ends 6 px before the
-// corner and starts 6 px after the label (#373 H29 W4: the first line ran
-// along the switch's foot; H30: one rule for both lanes, where the first
-// lane's top line 4 px under its label ran on); every tick keeps its line,
-// and a line clear of both runs the lane's width.
+// corner and starts 6 px after the label (the first line ran along the
+// switch's foot), one rule for both lanes; every tick keeps its line, and a
+// line clear of both runs the lane's width.
 void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates() {
     QFETCH(double, scale);
     SpectrogramItem item;
@@ -2851,11 +2871,10 @@ void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates() {
 }
 
 // With the scale hidden (Preferences), the lane at rest keeps its lines,
-// without the labels: an instrument at rest rather than a hole (#373 H14
-// F3, P23; H10 P18 left it the plain floor). Without labels to keep clear
-// of the lane's head and the mode switch, it has a line at every tick, the
-// top one too, so they are evenly spaced (#373 H15 H7: with the top one
-// left out the lane's top band was some 80 px to the others' 45).
+// without the labels: an instrument at rest rather than a hole. Without
+// labels to keep clear of the lane's head and the mode switch, it has a
+// line at every tick, the top one too, so they are evenly spaced (with the
+// top one left out the lane's top band was some 80 px to the others' 45).
 void SpectrogramSmokeTest::spectrogramAtRestFollowsTheScaleSetting() {
     SpectrogramItem item;
     item.setSampleRateHz(48'000);
@@ -2899,7 +2918,7 @@ void SpectrogramSmokeTest::spectrogramAtRestFollowsTheScaleSetting() {
 
 // As drawn: the lane at rest has its lines in white 11% on the floor with
 // the scale hidden or shown, and the scale's labels only while it shows
-// (#373 H14 F3; H10 P18: black all the way down without the scale).
+// (not black all the way down without the scale).
 void SpectrogramSmokeTest::spectrogramAtRestDrawsLabelsOnlyWithTheScale() {
     QQuickWindow window;
     window.resize(400, 200);
@@ -2918,7 +2937,7 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsLabelsOnlyWithTheScale() {
     QVERIFY(rest.images.isEmpty());
     const auto grab = [&window]() { return window.grabWindow().convertToFormat(QImage::Format_RGB32); };
     const QColor black(0, 0, 0);
-    // The rest lines, white 20 % over the black floor (#373 H28 V4).
+    // The rest lines, white 20 % over the black floor.
     const QColor line(51, 51, 51);
     // The rows of the column at x that are not the floor, and the
     // brightest pixel of them.
@@ -2978,7 +2997,7 @@ void SpectrogramSmokeTest::spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty() {
     const QImage atRest = grab();
     QCOMPARE(atRest.width(), 400);
     const QColor black(0, 0, 0);
-    // The rest lines, white 20 % over the black floor (#373 H28 V4).
+    // The rest lines, white 20 % over the black floor.
     const QColor line(51, 51, 51);
     for (const QRect &rule : std::as_const(rest.lines)) {
         QCOMPARE(atRest.pixelColor(100, rule.y()), line);
@@ -3838,8 +3857,8 @@ void SpectrogramSmokeTest::spectrogramOverlaysDrawNoPaneSizedImages() {
 }
 
 // The crosshair, its lines and its readout's plates, fades as one, at the
-// opacity a viewer's controls give it as they fade (#373 H3: it went at
-// once while they faded); the scene keeps its layers where they were.
+// opacity a viewer's controls give it as they fade (it went at once while
+// they faded); the scene keeps its layers where they were.
 void SpectrogramSmokeTest::spectrogramCrosshairFadesAsAWhole() {
     QQuickWindow window;
     if (!showOnScreen(window, 2.0)) {

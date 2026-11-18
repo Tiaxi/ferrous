@@ -21,7 +21,7 @@ import "../logic/ColorUtils.js" as ColorUtils
 //
 // What is playing is amber: the playing track's row, its glyph and its
 // title; a collapsed row that holds it, its name alone, with no glyph, so
-// that nothing on it reads as a play button (#373 H5).
+// that nothing on it reads as a play button.
 Rectangle {
     id: root
 
@@ -55,11 +55,10 @@ Rectangle {
     // now-playing stand-in's mark, drawn for 20 px, on a tile of the plot's
     // floor with a 1 px edge, in the thumbnail's place, so its name lines
     // up with its neighbours' and the app has one way to say "no cover"
-    // (#373 H14 F2; H12 Z2: the floor's swatch alone, at about 1:1 on the
-    // view, read as a cover that failed to load; H13: Breeze's audio disc
-    // glyph). A cover that has not loaded yet has the hover tint for the
-    // moment it takes, so that rows coming into view do not flash the
-    // mark before their covers.
+    // (the floor's swatch alone, at about 1:1 on the view, read as a cover
+    // that failed to load). A cover that has not loaded yet has the hover
+    // tint for the moment it takes, so that rows coming into view do not
+    // flash the mark before their covers.
     readonly property url thumbnailPlaceholderMark: Qt.resolvedUrl("../assets/no-art-mark-20.svg")
     readonly property color thumbnailLoadingColor: root.uiPalette.hover
     // No fill of the thumbnail's own under the tile: the loading tint,
@@ -68,12 +67,12 @@ Rectangle {
     // its image alone under the software renderer).
     readonly property color thumbnailMissingColor: ColorUtils.withAlpha(root.thumbnailLoadingColor, 0)
     // The year, and a library folder's track count, 4 px in from the
-    // text's right end (#373 H11), clear of the scrollbar.
+    // text's right end, clear of the scrollbar.
     readonly property int yearInset: Kirigami.Units.smallSpacing
     readonly property int stateGlyphSize: root.uiPalette.scaledSize(12)
     // An unreadable track's mark: the status bar's warning sign, at its
-    // size, in the negative colour, as the queue's (#373 H35 AC1). It fills
-    // the chevron column it is centred in.
+    // size, in the negative colour, as the queue's. It fills the chevron
+    // column it is centred in.
     readonly property string warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
     readonly property int warningGlyphSize: root.uiPalette.scaledSize(16)
     // A library folder's glyph, in the thumbnail's column.
@@ -200,7 +199,7 @@ Rectangle {
                 // place at once, under the rows below, which slide down and
                 // uncover them; collapsing is the same played back, the
                 // rows sliding up over the children, on the same duration
-                // and curve (#373 H7, H9 T5). The children show only above
+                // and curve. The children show only above
                 // the fold, the top of the rows sliding: no child's text is
                 // ever under a sliding row's, and none shows below the last
                 // row either. The toggled row and the rows above it stay

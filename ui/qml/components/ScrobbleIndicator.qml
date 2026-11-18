@@ -10,31 +10,31 @@ import "../logic/KeyUtils.js" as KeyUtils
 
 // The status bar's Last.fm slot (#373, #470): the Last.fm glyph, with a
 // short bar beneath it, and a few words before it when something needs
-// saying (#373 H6: a 10 px glyph inside a ring was a smudge at 1x, and
-// its states looked alike).
-// The glyph's ink is centred on the slot, on whole pixels (#373 H10: with
-// the bar's place under it, the glyph sat 2.5 px above the status bar's
-// middle). Its glyphs are one family (#373 H11: a grid of squares for the
-// "as", a staircase for its strike and thin antialiased strokes for
-// offline read as three hands): outlines drawn for 16 px with their
-// straight edges on whole pixels and their corners as arcs, all 16 px.
+// saying (a 10 px glyph inside a ring was a smudge at 1x, and its states
+// looked alike).
+// The glyph's ink is centred on the slot, on whole pixels (with the bar's
+// place under it, the glyph sat 2.5 px above the status bar's middle). Its
+// glyphs are one family (a grid of squares for the "as", a staircase for
+// its strike and thin antialiased strokes for offline read as three
+// hands): outlines drawn for 16 px with their straight edges on whole
+// pixels and their corners as arcs, all 16 px.
 // The bar is the glyph's: as wide as the glyph, 3 px tall and 2 px under
-// its ink, with square ends (#373 H13: at 2 px its proportions did not read
-// at 1x). It is the listening done towards the
-// scrobble, in the glyph's colour, the secondary text colour (at least 3:1
-// on the status bar), over an opaque trough at 3:1 on the status bar, so
-// that it reads as a share of a whole (#373 H11: a bar alone, 6 to 14 px long and
-// brighter than its glyph, did not read as progress). It is a fifth of the
-// scan bar's length, with square ends where the scan bar's are round, and
-// the scan bar has its percent beside it (the scan bar is 72 by 4 px), so
-// that it does not read as a second scan or a download.
+// its ink, with square ends (at 2 px its proportions did not read at 1x).
+// It is the listening done towards the scrobble, in the glyph's colour,
+// the secondary text colour (at least 3:1 on the status bar), over an
+// opaque trough at 3:1 on the status bar, so that it reads as a share of
+// a whole (a bar alone, 6 to 14 px long and brighter than its glyph, did
+// not read as progress). It is a fifth of the scan bar's length, with
+// square ends where the scan bar's are round, and the scan bar has its
+// percent beside it (the scan bar is 72 by 4 px), so that it does not
+// read as a second scan or a download.
 // - Listening: the glyph in the secondary colour, and the bar filling its
 //   trough with the listening done towards the scrobble, from a short mark
 //   at the left; the tooltip says how much is left. Both come from the scrobbler's listened
 //   time, which a seek doesn't move and a pause holds; a new play (a new
 //   track, a replay, Repeat One) starts it over. Listening always has the
 //   trough and the mark and scrobbled has neither, so the two differ
-//   before any listening too (#373 H9, H12).
+//   before any listening too.
 // - Not scrobbled: once playback has stopped, by the end of the queue or
 //   a stop, after a play that ended before its scrobble point. "Not
 //   scrobbled" and the glyph in the tertiary colour, without the bar; the
@@ -50,7 +50,7 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   them back.
 // - Failed: "Scrobble failed" in the text colour and the glyph in the
 //   negative colour, without the bar: the status bar's one treatment of an
-//   error, as its new issues (#373 H11).
+//   error, as its new issues.
 // - Paused by the user: the glyph struck through, in the tertiary colour,
 //   without the bar.
 // - Otherwise (not eligible, skipped, signed out): nothing.
@@ -155,17 +155,17 @@ AbstractButton {
         return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
     // The bar: the secondary text colour, the glyph's. Its trough: the text
-    // at 35% in the status bar (#373 H13), opaque, and darkened or lightened
-    // where that is under 3:1 on it, so that the whole reads as a whole
-    // (#373 H12: the text at 20% was 1.9:1 / 1.5:1), and still well short
-    // of the bar: #6e7173 / #86888b in Breeze.
+    // at 35% in the status bar, opaque, and darkened or lightened where
+    // that is under 3:1 on it, so that the whole reads as a whole (the text
+    // at 20% was 1.9:1 / 1.5:1), and still well short of the bar: #6e7173 /
+    // #86888b in Breeze.
     readonly property color barColor: root.uiPalette.textSecondary
     readonly property color troughColor: root.uiPalette.readableOn(
         ColorUtils.mixColor(root.uiPalette.chrome, root.uiPalette.text, 0.35),
         [root.uiPalette.chrome], 3.1)
     // While listening, the bar is never less than a short mark from the
     // left, so that listening that has just started reads apart from a
-    // scrobble, which has no bar (#373 H12: at 0% the trough alone).
+    // scrobble, which has no bar (at 0% it was the trough alone).
     readonly property int minimumBarLength: Math.max(3, Math.round(root.glyphSize * 3 / 16))
     readonly property real barLength: root.look === "listening"
         ? Math.max(root.minimumBarLength, root.barWidth * root.barProgress)

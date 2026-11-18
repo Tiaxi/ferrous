@@ -13,7 +13,6 @@
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
-#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QQuickWindow>
 #include <QDir>
@@ -28,7 +27,9 @@
 #include <utility>
 
 #include "TestColor.h"
+#include "TestMainWindow.h"
 #include "TestMessages.h"
+#include "TestMotion.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
@@ -290,23 +291,23 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         // Lightened or darkened from the mix to be 4.6:1 on a hovered row.
         {"textTertiary", QStringLiteral("#91989f"), QStringLiteral("#59626d")},
         // Light: darkened from #5a5c5e to be 4.5:1 on a selected queue row
-        // under the pointer (#373 H35 AC3).
+        // under the pointer.
         {"textColumn", QStringLiteral("#c2c2c3"), QStringLiteral("#555759")},
         // The theme's placeholder colour, darkened on light to be 4.6:1 on
-        // the view, which Breeze Light's 4.2:1 was not (#373 H6).
+        // the view, which Breeze Light's 4.2:1 was not.
         {"placeholderText", QStringLiteral("#a1a9b1"), QStringLiteral("#697582")},
         {"seam", QStringLiteral("#383b40"), QStringLiteral("#d6d9dc")},
         {"hairline", QStringLiteral("#26292c"), QStringLiteral("#ebedef")},
         {"chromeLine", QStringLiteral("#383b40"), QStringLiteral("#c9cdd1")},
-        // Light: 38 %, 1.4:1 on the view, past a hovered row (#373 H33 AA1).
+        // Light: 38 %, 1.4:1 on the view, past a hovered row.
         {"selection", QStringLiteral("#1f3e4e"), QStringLiteral("#b5e0f7")},
         {"focusRing", QStringLiteral("#6cc5f2"), QStringLiteral("#1a74a8")},
         {"link", QStringLiteral("#3daee9"), QStringLiteral("#1b73a1")},
         {"negative", QStringLiteral("#ed5a6a"), QStringLiteral("#c4293b")},
         {"wave", QStringLiteral("#b9e1f5"), QStringLiteral("#2c566c")},
         // Light: darkened from #955500 to be 4.5:1 on a hovered list row,
-        // on the selection (#373 H33 AA1: #864c00 on the 1.44:1 hover), and
-        // on a selected queue row under the pointer (#373 H35 AC3).
+        // on the selection (#864c00 on the 1.44:1 hover), and on a selected
+        // queue row under the pointer.
         {"now", QStringLiteral("#f2b035"), QStringLiteral("#814900")},
     };
     for (const Expected &entry : expected) {
@@ -333,7 +334,7 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
     QVERIFY(contrastRatio(drawnOver(lighterHover, view), view) < 1.3);
     QVERIFY(sameColor(colorOf(tokens, "hoveredRow"), drawnOver(colorOf(tokens, "rowHover"), view)));
     // The inactive selection: the view mixed with the accent, at 60 % of
-    // that mix's saturation and the same luminance (#373 H37).
+    // that mix's saturation and the same luminance.
     {
         const QColor mix = mixed(view, accent, dark ? 0.24 : 0.33);
         const QColor inactive = colorOf(tokens, "selectionInactive");
@@ -457,7 +458,7 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
 
     // The paused amber name of a collapsed tree row that holds the playing
     // track is at least 70% and 4.5:1 on every background a row can have,
-    // as the queue's amber title is (#373 H5).
+    // as the queue's amber title is.
     const double pausedOpacity = tokens->property("nowPausedOpacity").toDouble();
     QVERIFY2(pausedOpacity >= 0.7 && pausedOpacity <= 1.0, qPrintable(QString::number(pausedOpacity)));
     for (const QColor &background : {view, hovered, selection, selectionInactive}) {
@@ -528,8 +529,8 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(std::abs(colorOf(spectrogram, "plotTick").alphaF() - 0.75) < 0.002);
     QVERIFY(std::abs(colorOf(spectrogram, "meterClipOff").alphaF() - 0.2) < 0.002);
     QVERIFY(sameColor(colorOf(spectrogram, "meterSeam"), fromHex(QStringLiteral("#0a0318"))));
-    // On the plot's floor, what is drawn is neutral, not tinted,
-    // except the level meter, which is in the colour map's violet (#373 H5).
+    // On the plot's floor, what is drawn is neutral, not tinted, except the
+    // level meter, which is in the colour map's violet.
     for (const char *token : {"plotPlate", "plotStrip", "plotText", "plotTextSecondary", "plotLaneSeam",
                               "plotTick"}) {
         const QColor color = colorOf(spectrogram, token);
@@ -538,14 +539,14 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     }
     // The lane seam and the meter's track stand out from the floor, and the
     // meter's gaps from its track. Its fill is quieter than the plot's text.
-    // The seam reads on the floor (#373 H14 G6: at 1.18:1 it did not).
+    // The seam reads on the floor (at 1.18:1 it did not).
     const double seamContrast = contrastRatio(colorOf(spectrogram, "plotLaneSeam"), colorOf(spectrogram, "plotBg"));
     QVERIFY2(seamContrast >= 1.33, qPrintable(QString::number(seamContrast)));
-    // At rest, never played (#373 H28 V4; the lines as drawn in
+    // At rest, never played (the lines as drawn in
     // TransportInputSmokeTest::paneAtRestIsAStereoInstrument): the seam
     // between lanes is a cut, the plot's deep violet under the floor, the
-    // meter's seam, in the floor's hue rather than the playing seam's grey
-    // (#373 H15 H7), and well apart from the rest lines over the floor.
+    // meter's seam, in the floor's hue rather than the playing seam's grey,
+    // and well apart from the rest lines over the floor.
     {
         const QColor floor = colorOf(spectrogram, "plotBg");
         const QColor restSeam = colorOf(tokens, "plotRestLaneSeam");
@@ -560,8 +561,8 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterFill"), colorOf(spectrogram, "plotBg"))
             < contrastRatio(colorOf(spectrogram, "plotText"), colorOf(spectrogram, "plotBg")));
     // The meter's rungs, the app icon's harmonic magenta, read on their
-    // trough, at 3:1 (#373 H15 H2: the colour map's #c20055 was 2.32:1),
-    // and are not the clip lamp's red: some 30 degrees of hue apart.
+    // trough, at 3:1 (the colour map's #c20055 was 2.32:1), and are not the
+    // clip lamp's red: some 30 degrees of hue apart.
     {
         const double rungs = contrastRatio(colorOf(spectrogram, "meterFill"), colorOf(spectrogram, "meterTrough"));
         QVERIFY2(rungs >= 3.0, qPrintable(QString::number(rungs)));
@@ -571,15 +572,14 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
                  qPrintable(QStringLiteral("%1 against the clip lamp's %2")
                                 .arg(colorOf(spectrogram, "meterFill").name(), clip.name())));
     }
-    // A viewer's title strip is opaque (#373 H5: the playhead showed through
-    // it): the plate on black, neutral as the plate is, and the view on the
-    // waveform.
+    // A viewer's title strip is opaque (the playhead showed through it): the
+    // plate on black, neutral as the plate is, and the view on the waveform.
     QCOMPARE(colorOf(spectrogram, "plotStrip").alphaF(), 1.0f);
     QVERIFY(channelDistance(colorOf(spectrogram, "plotStrip"),
                             drawnOver(colorOf(spectrogram, "plotPlate"), QColor(Qt::black)))
             <= 1);
     // The album art viewer's set is the spectrogram's on a black floor
-    // (#373 H11 P19 made the plot's floor indigo; a cover stays on black).
+    // (the plot's floor is indigo; a cover stays on black).
     QObject *media = tokens->property("mediaPlot").value<QObject *>();
     QVERIFY(media != nullptr && media != spectrogram);
     QVERIFY(sameColor(colorOf(media, "plotBg"), fromHex(QStringLiteral("#000000"))));
@@ -600,12 +600,12 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(std::abs(colorOf(waveform, "plotPlate").alphaF() - 0.94) < 0.002);
     QVERIFY(sameColor(colorOf(waveform, "plotStrip"), view));
     QVERIFY(sameColor(colorOf(waveform, "meterSeam"), view));
-    // The waveform's meter in the waveform's colour (#373 H12 Z5): 35 %
-    // toward the view, or by 5 % steps less, the most that is 3:1 on the
-    // trough; the trough a step off the view that frames the bar, #2b2d2f
-    // in dark and #e8e9ea in light (#373 H16 I3: the text at 6 %, 1.2:1,
-    // did not show); the marks the text at 30 %; a seam across its top in
-    // the seam colour. The spectrogram's meter has no such seam.
+    // The waveform's meter in the waveform's colour: 35 % toward the view,
+    // or by 5 % steps less, the most that is 3:1 on the trough; the trough
+    // a step off the view that frames the bar, #2b2d2f in dark and #e8e9ea
+    // in light (the text at 6 %, 1.2:1, did not show); the marks the text
+    // at 30 %; a seam across its top in the seam colour. The spectrogram's
+    // meter has no such seam.
     {
         const QColor wave = colorOf(tokens, "paneWave");
         QVERIFY(sameColor(colorOf(waveform, "meterTrough"),
@@ -624,9 +624,9 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         const QColor trough = drawnOver(colorOf(waveform, "meterTrough"), view);
         QVERIFY2(contrastRatio(colorOf(waveform, "meterFill"), trough) >= 3.0,
                  qPrintable(describeContrast(QStringLiteral("rungs on the trough"), colorOf(waveform, "meterFill"), trough)));
-        // The pane's waveform (#373 H15 H6): the seek bar's in light; in
-        // dark a quieter tone of the same blue, #87bad4, some 8.6:1 on the
-        // view rather than the seek bar's 13:1.
+        // The pane's waveform: the seek bar's in light; in dark a quieter
+        // tone of the same blue, #87bad4, some 8.6:1 on the view rather
+        // than the seek bar's 13:1.
         if (dark) {
             QVERIFY2(channelDistance(wave, fromHex(QStringLiteral("#87bad4"))) <= 3, qPrintable(wave.name()));
             QVERIFY(!sameColor(wave, colorOf(tokens, "wave")));
@@ -653,10 +653,10 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     // A chosen choice on a plate, as the mode switch's segment and a
     // viewer's info toggle: the plot's text at 18 % or more inside a 1 px
     // edge that is 3:1 or more on the plate, over the floor, and on an 18 %
-    // fill (#373 H14 F4): the dark theme's tertiary text on the
-    // spectrogram's dark plot in both themes, and the theme's on the
-    // waveform's. The mode switch's fuller fill takes the edge further where
-    // it needs it (PlotToolButton's segmentEdgeColor, #373 H15 H4).
+    // fill: the dark theme's tertiary text on the spectrogram's dark plot in
+    // both themes, and the theme's on the waveform's. The mode switch's
+    // fuller fill takes the edge further where it needs it (PlotToolButton's
+    // segmentEdgeColor).
     QVERIFY(sameColor(colorOf(spectrogram, "segmentEdge"), fromHex(QStringLiteral("#8f959a"))));
     QVERIFY(sameColor(colorOf(media, "segmentEdge"), fromHex(QStringLiteral("#8f959a"))));
     QVERIFY(sameColor(colorOf(waveform, "segmentEdge"), colorOf(tokens, "textTertiary")));
@@ -741,13 +741,12 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart_data() {
 }
 
 // The library's and the queue's hover tint is about 1.45:1 on a dark view
-// (#373 H13: at 1.3:1 a hovered row was faint across a wide list) and
-// 1.31:1 on a light one, where more outweighed the selection (#373 H33
-// AA1): the least of the text in whole percent that reaches it, 13% / 14%
-// in Breeze. It stays apart from the selection and the inactive
-// selection, and every text a row has, the playing row's amber title among
-// them, stays readable on it; tertiary text steps up to 4.6:1 there, and
-// only there, where it falls short.
+// (at 1.3:1 a hovered row was faint across a wide list) and 1.31:1 on a
+// light one, where more outweighed the selection: the least of the text in
+// whole percent that reaches it, 13% / 14% in Breeze. It stays apart from
+// the selection and the inactive selection, and every text a row has, the
+// playing row's amber title among them, stays readable on it; tertiary text
+// steps up to 4.6:1 there, and only there, where it falls short.
 void UiFoundationsTest::listRowHoverStandsOutAndApart() {
     QFETCH(bool, dark);
     QQmlEngine engine;
@@ -780,8 +779,8 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
     }
 
     // Apart from the selection, active or not: neutral where they are blue.
-    // The inactive one is a quieter blue, nearer the grey (#373 H37), yet
-    // further from the view and a clear step apart.
+    // The inactive one is a quieter blue, nearer the grey, yet further from
+    // the view and a clear step apart.
     for (const char *selection : {"selection", "selectionInactive"}) {
         const QColor selected = colorOf(tokens, selection);
         const double apart = qstrcmp(selection, "selection") == 0 ? 10.0 : 7.5;
@@ -793,7 +792,7 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
     }
 
     // A row's texts on it; its tertiary figures with the margin that
-    // subpixel antialiasing takes from small figures (#373 H45).
+    // subpixel antialiasing takes from small figures.
     const QColor tertiaryHovered = colorOf(tokens, "textTertiaryHovered");
     const double figureContrast = tokens->property("rowFigureContrast").toDouble();
     QCOMPARE(figureContrast, 5.4);
@@ -834,12 +833,11 @@ void UiFoundationsTest::selectionOutweighsRowHover_data() {
 
 // A selected row of the library or the queue reads as more selected than
 // the row under the pointer, in both themes: further from the view, in
-// contrast and in CIELAB, and blue where the hover is neutral (#373 H33
-// AA1: light's 1.44:1 hover outweighed its 1.2:1 selection). The selection
-// of a list without focus sits between them in contrast: hover < inactive
-// < active (#373 H34 AB2: the dark inactive one, 1.40:1, and the light,
-// 1.27:1, were under the hover). Every text a selected row draws stays
-// 4.5:1 on it, active or not.
+// contrast and in CIELAB, and blue where the hover is neutral (light's
+// 1.44:1 hover outweighed its 1.2:1 selection). The selection of a list
+// without focus sits between them in contrast: hover < inactive < active
+// (the dark inactive one, 1.40:1, and the light, 1.27:1, were under the
+// hover). Every text a selected row draws stays 4.5:1 on it, active or not.
 void UiFoundationsTest::selectionOutweighsRowHover() {
     QFETCH(bool, dark);
     QQmlEngine engine;
@@ -867,7 +865,7 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
                                 .arg(hovered.name())
                                 .arg(labDistance(hovered, view))));
         // Hue: blue, where the hover is a neutral grey; the inactive one
-        // a quieter blue (#373 H37).
+        // a quieter blue.
         QVERIFY2(labChroma(selected) >= (selected == selection ? 10.0 : 7.0) && labChroma(hovered) < 3.0,
                  qPrintable(QStringLiteral("chroma: %1 %2, hover %3 %4")
                                 .arg(selected.name())
@@ -877,8 +875,8 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
     }
     QVERIFY(labDistance(selection, view) > labDistance(selectionInactive, view));
     // The inactive selection reads apart from the active one, not as a
-    // second active selection: a visible difference in colour (#373 H37:
-    // at the accent's full saturation it was 1.5 ΔE on dark).
+    // second active selection: a visible difference in colour (at the
+    // accent's full saturation it was 1.5 ΔE on dark).
     QVERIFY2(labDistance(selection, selectionInactive) >= 5.0,
              qPrintable(QStringLiteral("%1 vs %2: %3").arg(selection.name(), selectionInactive.name())
                             .arg(labDistance(selection, selectionInactive))));
@@ -909,7 +907,7 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
             QVERIFY2(contrastRatio(color, selected) >= 4.5, qPrintable(describeContrast(what, color, selected)));
         }
         // The number with the margin that small figures lose to subpixel
-        // antialiasing, and under the text (#373 H45).
+        // antialiasing, and under the text.
         const double figureContrast = tokens->property("rowFigureContrast").toDouble();
         QVERIFY2(contrastRatio(number.value<QColor>(), selected) >= figureContrast,
                  qPrintable(describeContrast(QStringLiteral("selected number"), number.value<QColor>(), selected)));
@@ -922,7 +920,7 @@ void UiFoundationsTest::hoverAndPressedTintsOnAnotherBackground_data() {
     QTest::addColumn<QString>("background");
     QTest::addColumn<int>("hoverPercent");
     QTest::addColumn<int>("pressedPercent");
-    // Breeze's Header colours, the transport's (#373 H13 P24).
+    // Breeze's Header colours, the transport's.
     QTest::newRow("breeze dark header") << true << QStringLiteral("#292c30") << 9 << 16;
     QTest::newRow("breeze light header") << false << QStringLiteral("#dee0e2") << 15 << 26;
 }
@@ -964,13 +962,12 @@ void UiFoundationsTest::selectedQueueRowAnswersHover_data() {
 
 // A selected queue row under the pointer steps its selection tint toward
 // the text colour, with the hover tint's own fade, active or not; the
-// library's does not (#373 H35 AC3: hover changed nothing on a selected
-// row). The step is the most text, in whole percent up to 6 %, that the
-// text and the secondary text keep 4.5:1 on, and the warning mark 3:1:
-// 4 % on dark, where 5 % took the mark under it, and 6 % on light. It is
-// visible yet under the hover's from the view, and every text a selected
-// row draws, the column text and the playing amber made readable on it,
-// stays 4.5:1 on it.
+// library's does not (hover changed nothing on a selected row). The step is
+// the most text, in whole percent up to 6 %, that the text and the secondary
+// text keep 4.5:1 on, and the warning mark 3:1: 4 % on dark, where 5 % took
+// the mark under it, and 6 % on light. It is visible yet under the hover's
+// from the view, and every text a selected row draws, the column text and
+// the playing amber made readable on it, stays 4.5:1 on it.
 void UiFoundationsTest::selectedQueueRowAnswersHover() {
     QFETCH(bool, dark);
     QQmlEngine engine;
@@ -1038,31 +1035,40 @@ void UiFoundationsTest::selectedQueueRowAnswersHover() {
         QVERIFY(costs);
     }
 
+    // The hover's fade in animation time, to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
+
     // The library's rows: a selected row keeps its tint under the pointer.
     background->setProperty("selected", true);
     background->setProperty("hovered", true);
-    QTRY_COMPARE(hoverTint->opacity(), 1.0);
+    settle();
+    QCOMPARE(hoverTint->opacity(), 1.0);
     QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selection")));
 
     // The queue's: it steps to the hovered selection with the hover's fade,
     // and back.
     background->setProperty("hovered", false);
-    QTRY_COMPARE(hoverTint->opacity(), 0.0);
+    settle();
+    QCOMPARE(hoverTint->opacity(), 0.0);
     background->setProperty("selectedHover", true);
     QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selection")));
     background->setProperty("hovered", true);
-    QTRY_COMPARE(hoverTint->opacity(), 1.0);
+    settle();
+    QCOMPARE(hoverTint->opacity(), 1.0);
     QCOMPARE(background->property("selectionHoverLevel").toReal(), 1.0);
     QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selectionHovered")));
     background->setProperty("active", false);
     QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selectionInactiveHovered")));
     background->setProperty("hovered", false);
-    QTRY_COMPARE(hoverTint->opacity(), 0.0);
+    settle();
+    QCOMPARE(hoverTint->opacity(), 0.0);
     QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selectionInactive")));
     // Selection still changes at once, hovered or not.
     background->setProperty("active", true);
     background->setProperty("hovered", true);
-    QTRY_COMPARE(hoverTint->opacity(), 1.0);
+    settle();
+    QCOMPARE(hoverTint->opacity(), 1.0);
     background->setProperty("selected", false);
     QCOMPARE(colorOf(tintRect, "color").alphaF(), 0.0f);
     background->setProperty("selected", true);
@@ -1077,7 +1083,7 @@ void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground_data() {
 
 // An unreadable row's warning sign, in the negative colour as the status
 // bar's, reads at 3:1 or more, a graphic's minimum, on every background a
-// row of the library or the queue can have (#373 H35 AC1).
+// row of the library or the queue can have.
 void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground() {
     QFETCH(bool, dark);
     QQmlEngine engine;
@@ -1098,33 +1104,13 @@ void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground() {
 
 void UiFoundationsTest::rowBackgroundShowsEachState_data() {
     QTest::addColumn<bool>("dark");
-    QTest::addColumn<bool>("hovered");
-    QTest::addColumn<bool>("selected");
-    QTest::addColumn<bool>("active");
-    QTest::addColumn<bool>("focused");
-    QTest::addColumn<QString>("tint");
-    for (const bool dark : {true, false}) {
-        const QString theme = dark ? QStringLiteral("dark, ") : QStringLiteral("light, ");
-        QTest::newRow(qPrintable(theme + QStringLiteral("rest"))) << dark << false << false << true << false << "";
-        QTest::newRow(qPrintable(theme + QStringLiteral("hovered"))) << dark << true << false << true << false << "";
-        QTest::newRow(qPrintable(theme + QStringLiteral("selected")))
-            << dark << false << true << true << false << "selection";
-        QTest::newRow(qPrintable(theme + QStringLiteral("selected without focus")))
-            << dark << false << true << false << false << "selectionInactive";
-        QTest::newRow(qPrintable(theme + QStringLiteral("selected and focused")))
-            << dark << true << true << true << true << "selection";
-        QTest::newRow(qPrintable(theme + QStringLiteral("focused, not selected")))
-            << dark << false << false << true << true << "";
-    }
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
 }
 
+// Each state of a row in turn: its hover, its tint and its focus ring.
 void UiFoundationsTest::rowBackgroundShowsEachState() {
     QFETCH(bool, dark);
-    QFETCH(bool, hovered);
-    QFETCH(bool, selected);
-    QFETCH(bool, active);
-    QFETCH(bool, focused);
-    QFETCH(QString, tint);
     QQmlEngine engine;
     QString errorText;
     const std::unique_ptr<QObject> root =
@@ -1137,9 +1123,11 @@ void UiFoundationsTest::rowBackgroundShowsEachState() {
     QQuickItem *hoverTint = childNamed(background, QStringLiteral("rowBackgroundHover"));
     QQuickItem *tintRect = childNamed(background, QStringLiteral("rowBackgroundTint"));
     QVERIFY(hoverTint != nullptr && tintRect != nullptr);
+    QObject *border = tintRect->property("border").value<QObject *>();
+    QVERIFY(border != nullptr);
 
-    // The row's tints run to its right edge, under an overlay scrollbar
-    // (#373 H6); a list whose scrollbar takes a lane leaves it free.
+    // The row's tints run to its right edge, under an overlay scrollbar; a
+    // list whose scrollbar takes a lane leaves it free.
     QCOMPARE(background->x(), 0.0);
     QCOMPARE(background->width(), row->width());
     QCOMPARE(background->height(), row->height());
@@ -1147,26 +1135,49 @@ void UiFoundationsTest::rowBackgroundShowsEachState() {
     QCOMPARE(background->width(), row->width() - 8.0);
     background->setProperty("scrollbarLane", 0);
 
-    background->setProperty("hovered", hovered);
-    background->setProperty("selected", selected);
-    background->setProperty("active", active);
-    background->setProperty("focused", focused);
+    struct State {
+        const char *name;
+        bool hovered;
+        bool selected;
+        bool active;
+        bool focused;
+        // The tint's token, or none.
+        const char *tint;
+    };
+    const QList<State> states{
+        {"rest", false, false, true, false, nullptr},
+        {"hovered", true, false, true, false, nullptr},
+        {"selected", false, true, true, false, "selection"},
+        {"selected without focus", false, true, false, false, "selectionInactive"},
+        {"selected and focused", true, true, true, true, "selection"},
+        {"focused, not selected", false, false, true, true, nullptr},
+    };
+    // The hover's fade in animation time, to its end.
+    SteppedAnimationDriver animations;
+    for (const State &state : states) {
+        const QByteArray name(state.name);
+        background->setProperty("hovered", state.hovered);
+        background->setProperty("selected", state.selected);
+        background->setProperty("active", state.active);
+        background->setProperty("focused", state.focused);
+        (void)animations.step(1000);
 
-    QTRY_COMPARE(hoverTint->opacity(), hovered ? 1.0 : 0.0);
-    QCOMPARE(hoverTint->isVisible(), hovered);
-    QVERIFY2(sameColor(colorOf(hoverTint, "color"), colorOf(tokens, "hover")), qPrintable(colorOf(hoverTint, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "hover").name(QColor::HexArgb)));
-    QCOMPARE(tintRect->isVisible(), selected || focused);
-    if (tint.isEmpty()) {
-        QCOMPARE(colorOf(tintRect, "color").alphaF(), 0.0f);
-    } else {
-        QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, qPrintable(tint))));
+        QVERIFY2(hoverTint->opacity() == (state.hovered ? 1.0 : 0.0), name.constData());
+        QVERIFY2(hoverTint->isVisible() == state.hovered, name.constData());
+        QVERIFY2(sameColor(colorOf(hoverTint, "color"), colorOf(tokens, "hover")),
+                 qPrintable(colorOf(hoverTint, "color").name(QColor::HexArgb) + QStringLiteral(" vs ")
+                            + colorOf(tokens, "hover").name(QColor::HexArgb)));
+        QVERIFY2(tintRect->isVisible() == (state.selected || state.focused), name.constData());
+        if (state.tint == nullptr) {
+            QVERIFY2(colorOf(tintRect, "color").alphaF() == 0.0f, name.constData());
+        } else {
+            QVERIFY2(sameColor(colorOf(tintRect, "color"), colorOf(tokens, state.tint)), name.constData());
+        }
+        QVERIFY2(border->property("width").toReal() == (state.focused ? 1.0 : 0.0), name.constData());
+        QVERIFY2(channelDistance(colorOf(border, "color"), colorOf(tokens, "focusRing")) == 0, name.constData());
+        // The ring and the tint are one rectangle.
+        QVERIFY2(tintRect->size() == background->size(), name.constData());
     }
-    QObject *border = tintRect->property("border").value<QObject *>();
-    QVERIFY(border != nullptr);
-    QCOMPARE(border->property("width").toReal(), focused ? 1.0 : 0.0);
-    QCOMPARE(channelDistance(colorOf(border, "color"), colorOf(tokens, "focusRing")), 0);
-    // The ring and the tint are one rectangle.
-    QCOMPARE(tintRect->size(), background->size());
 }
 
 // The focused, selected row draws its 1 px ring on the edge of its tint,
@@ -1316,13 +1327,7 @@ void UiFoundationsTest::regionHeaderGivesUpTheTotalsBeforeTheName_data() {
 // then go. They never run into the name or the items at the right end.
 void UiFoundationsTest::regionHeaderGivesUpTheTotalsBeforeTheName() {
     QFETCH(qreal, pointSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    if (pointSize > 0) {
-        QFont large = applicationFont;
-        large.setPointSizeF(pointSize);
-        QGuiApplication::setFont(large);
-    }
+    const ScopedApplicationFont font(pointSize);
     QQmlEngine engine;
     QString errorText;
     const std::unique_ptr<QObject> root = createWindow(engine, themedWindowQml(kBreezeDark, QStringLiteral(R"QML(
@@ -1510,27 +1515,20 @@ void UiFoundationsTest::plotPlateLabelHasAnEdgeOutside() {
 
 void UiFoundationsTest::smallControlsScaleWithALargeFont_data() {
     QTest::addColumn<qreal>("pointSize");
-    QTest::addColumn<int>("iconSize");
-    QTest::addColumn<int>("buttonSize");
-    QTest::newRow("10 pt") << 10.0 << 16 << 24;
-    // 2.4 times the default: 16 px is 38 px, and the button 4 px more
-    // around it.
-    QTest::newRow("24 pt") << 24.0 << 38 << 46;
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
 }
 
 // The plot's and the viewers' small tool buttons and their glyphs are 24
 // and 16 px at the default 10 pt font, and grow with a larger one as the
-// transport's do; a lane label's plate holds its text's line, 20 px tall
+// transport's do: the glyph by the font's share of 10 pt, the button 4 px
+// more around it. A lane label's plate holds its text's line, 20 px tall
 // at the default font, with 6 px either side of the text.
 void UiFoundationsTest::smallControlsScaleWithALargeFont() {
     QFETCH(qreal, pointSize);
-    QFETCH(int, iconSize);
-    QFETCH(int, buttonSize);
-    const QFont applicationFont = QGuiApplication::font();
-    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont font = applicationFont;
-    font.setPointSizeF(pointSize);
-    QGuiApplication::setFont(font);
+    const int iconSize = qRound(16 * pointSize / 10);
+    const int buttonSize = iconSize + 8;
+    const ScopedApplicationFont font(pointSize);
     QQmlEngine engine;
     QString errorText;
     const std::unique_ptr<QObject> root = createWindow(engine, themedWindowQml(kBreezeDark, kPlotItems + QStringLiteral(R"QML(
@@ -1570,8 +1568,8 @@ void UiFoundationsTest::smallControlsScaleWithALargeFont() {
     QVERIFY(letter->implicitHeight() <= buttonSize);
 
     // The plates' letters, the lane's and the M, drawn as curves with grey
-    // antialiasing at any font size, DemiBold (#373 H14 G8: the platform's
-    // subpixel antialiasing fringed them in colour).
+    // antialiasing at any font size, DemiBold (the platform's subpixel
+    // antialiasing fringed them in colour).
     for (QQuickItem *item : {text, letter}) {
         QCOMPARE(item->property("renderType").toInt(), 2 /* Text.CurveRendering */);
         QCOMPARE(item->property("font").value<QFont>().weight(), QFont::DemiBold);
@@ -1607,15 +1605,14 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate_data() {
 }
 
 // A segment of a plate's choices, as the visualization's mode switch,
-// under the pointer while another is the chosen one (#373 H12 Z4: the
-// 12 % hover with its glyph whole came to the chosen plate's brightness):
-// a wash of the plot's text colour at 10 % or more, against the chosen
-// plate's fill and its edge, with its glyph at 85 %, whole only while
-// pressed (#373 H14 G4: 8 % with the glyph at 60 % was 1.2:1, nearly
-// invisible). As drawn, in both themes and on both plots, the hovered one
-// shows on the plate; the chosen one's fill is 3:1 on the plate, so the
-// choice reads by its fill rather than its edge alone, and 2:1 on the
-// hovered one's wash (#373 H28 V3: at 2:1 on the plate it read by its edge).
+// under the pointer while another is the chosen one (a 12 % hover with its
+// glyph whole came to the chosen plate's brightness): a wash of the plot's
+// text colour at 10 % or more, against the chosen plate's fill and its edge,
+// with its glyph at 85 %, whole only while pressed (8 % with the glyph at
+// 60 % was 1.2:1, nearly invisible). As drawn, in both themes and on both
+// plots, the hovered one shows on the plate; the chosen one's fill is 3:1 on
+// the plate, so the choice reads by its fill rather than its edge alone, and
+// 2:1 on the hovered one's wash (at 2:1 on the plate it read by its edge).
 void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QFETCH(bool, dark);
     QFETCH(int, plotMode);
@@ -1645,20 +1642,22 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QQuickItem *letter = childNamed(other, QStringLiteral("plotToolButtonGlyph"));
     QVERIFY(hover != nullptr && fill != nullptr && letter != nullptr);
 
-    // The pointer over the other one, until its wash has faded in: from
-    // off the plate, as QTest leaves a move to where it already is out.
+    // The pointer over the other one, until its wash has faded in, in
+    // animation time: from off the plate, as QTest leaves a move to where it
+    // already is out.
+    SteppedAnimationDriver animations;
     QTest::mouseMove(window, QPoint(2, 2));
     QTest::mouseMove(window, other->mapToScene(QPointF(12, 12)).toPoint());
     QTRY_VERIFY(other->property("hovered").toBool());
-    QTRY_COMPARE(hover->opacity(), 1.0);
+    (void)animations.step(1000);
+    QCOMPARE(hover->opacity(), 1.0);
     const QColor text = colorOf(plotColors, "plotText");
     const QColor wash = colorOf(hover, "color");
     const QColor plateFill = colorOf(fill, "color");
     QCOMPARE(wash.rgb(), text.rgb());
-    // The wash from 10 % up, as the plate needs (#373 H15 H4: 14 % and 18 %
-    // were 1.14:1 apart in dark, 1.08:1 in light); the chosen fill some
-    // 35 % on the dark plates, 44 % on the light one, where the same tint
-    // steps less.
+    // The wash from 10 % up, as the plate needs (14 % and 18 % were 1.14:1
+    // apart in dark, 1.08:1 in light); the chosen fill some 35 % on the
+    // dark plates, 44 % on the light one, where the same tint steps less.
     QVERIFY2(wash.alphaF() >= 0.095 && wash.alphaF() <= 0.135, qPrintable(QString::number(wash.alphaF())));
     QVERIFY2(std::abs(wash.alphaF() - other->property("segmentHoverOpacity").toReal()) < 0.005,
              qPrintable(QString::number(wash.alphaF())));
@@ -1670,7 +1669,6 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
 
     // As drawn: the plate around the buttons, the chosen one's plate and
     // the hovered one's wash, clear of their glyphs.
-    QTest::qWait(50);
     const QImage image = window->grabWindow();
     QVERIFY(!image.isNull());
     const qreal scale = grabScale(image, window);
@@ -1691,8 +1689,8 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QVERIFY2(hoverStep >= 1.25 && hoverStep < chosenStep,
              qPrintable(QStringLiteral("hovered %1:1, chosen %2:1").arg(hoverStep).arg(chosenStep)));
     // The chosen fill reads on its own: 2:1 on the hovered wash, and on a
-    // dark plate 3:1 on the plate, within a step of rounding (#373 H28 V3);
-    // on a light one some 2.5:1, where its dark glyph keeps 4.5:1 on it.
+    // dark plate 3:1 on the plate, within a step of rounding; on a light one
+    // some 2.5:1, where its dark glyph keeps 4.5:1 on it.
     const bool lightPlate = relativeLuminance(plate) > 0.5;
     QVERIFY2(chosenStep >= (lightPlate ? 2.4 : 2.97),
              qPrintable(describeContrast(QStringLiteral("the chosen plate on the plate"), drawnChosen, plate)));
@@ -1723,8 +1721,8 @@ void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot_data() {
 // viewer's info and close buttons: the pointer over it washes it in the
 // plot's text colour, 14 % on a dark plot and 12 % on a light one, which
 // read on the strip as drawn, some 1.4:1 and 1.25:1, as a plate's hovered
-// segment (#373 H42: 6.5 %, 1.15:1 on a 24 px target, hardly showed).
-// Pressed, 22 %, steps further.
+// segment (at 6.5 %, 1.15:1 on a 24 px target, it hardly showed). Pressed,
+// 22 %, steps further.
 void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot() {
     QFETCH(bool, dark);
     QFETCH(int, plotMode);
@@ -1772,17 +1770,20 @@ void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot() {
     // At rest, nothing.
     QVERIFY(!hover->isVisible());
 
+    // The wash's fade in animation time, to its end.
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
     QTest::mouseMove(window, QPoint(2, 2));
     const QPoint inside = button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint();
     QTest::mouseMove(window, inside);
     QTRY_VERIFY(button->property("hovered").toBool());
-    QTRY_COMPARE(hover->opacity(), 1.0);
+    settle();
+    QCOMPARE(hover->opacity(), 1.0);
     const QColor wash = colorOf(hover, "color");
     QCOMPARE(wash.rgb(), text.rgb());
     QVERIFY2(std::abs(wash.alphaF() - (darkPlot ? 0.14 : 0.12)) < 0.005, qPrintable(QString::number(wash.alphaF())));
 
     // As drawn, clear of the glyph.
-    QTest::qWait(50);
     QImage image = window->grabWindow();
     QVERIFY(!image.isNull());
     const qreal scale = grabScale(image, window);
@@ -1799,7 +1800,7 @@ void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot() {
     const QColor pressed = colorOf(hover, "color");
     QCOMPARE(pressed.rgb(), text.rgb());
     QVERIFY2(std::abs(pressed.alphaF() - 0.22) < 0.005, qPrintable(QString::number(pressed.alphaF())));
-    QTest::qWait(50);
+    settle();
     image = window->grabWindow();
     const QColor drawnPressed = pixelAt(image, button->mapToScene(QPointF(2.5, 2.5)) * scale);
     QVERIFY2(contrastRatio(drawnPressed, surface) > hoverStep,
@@ -2007,6 +2008,10 @@ int main(int argc, char **argv) {
     disableGpuShaderCaches();
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
+    // The basic render loop, whatever the environment asks for: the threaded
+    // one installs an animation driver of its own for the GUI thread, and Qt
+    // then takes no SteppedAnimationDriver.
+    qputenv("QSG_RENDER_LOOP", "basic");
     // The app's controls style and Breeze icons, whatever the desktop the
     // tests run in; TestSessionIsolation.h. With the style, Kirigami draws
     // theme icons in the colour asked for, as the plot tool buttons' glyphs
