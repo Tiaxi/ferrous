@@ -548,11 +548,7 @@ void ScrobbleSmokeTest::scrobbleIndicatorClickAndMenuPauseScrobbling() {
         QQuickItem *content = qvariant_cast<QQuickItem *>(menu->property("contentItem"));
         return content != nullptr ? findQuickItemByObjectName(content, name) : nullptr;
     };
-    // The menu's fades in animation time, each to its end.
-    SteppedAnimationDriver animations;
-    const auto settle = [&animations] { (void)animations.step(1000); };
     QTest::mouseClick(window, Qt::RightButton, {}, centerInWindow(indicator));
-    settle();
     QTRY_VERIFY(menu->property("opened").toBool());
     QQuickItem *pauseItem = menuItem(QStringLiteral("scrobbleIndicatorPauseItem"));
     QQuickItem *settingsItem = menuItem(QStringLiteral("scrobbleIndicatorSettingsItem"));
@@ -561,16 +557,13 @@ void ScrobbleSmokeTest::scrobbleIndicatorClickAndMenuPauseScrobbling() {
     QVERIFY(!pauseItem->property("checked").toBool());
     QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(pauseItem));
     QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
-    settle();
     QTRY_VERIFY(!menu->property("visible").toBool());
 
     QTest::mouseClick(window, Qt::RightButton, {}, centerInWindow(indicator));
-    settle();
     QTRY_VERIFY(menu->property("opened").toBool());
     QVERIFY(pauseItem->property("checked").toBool());
     QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(settingsItem));
     QTRY_COMPARE(harness.root->property("settingsRequests").toInt(), 1);
-    settle();
     QTRY_VERIFY(!menu->property("visible").toBool());
     QVERIFY(bridge->property("lastFmScrobblingPaused").toBool());
 
@@ -584,10 +577,8 @@ void ScrobbleSmokeTest::scrobbleIndicatorClickAndMenuPauseScrobbling() {
     QTest::keyClick(window, Qt::Key_Return);
     QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
     QTest::keyClick(window, Qt::Key_Menu);
-    settle();
     QTRY_VERIFY(menu->property("opened").toBool());
     QTest::keyClick(window, Qt::Key_Escape);
-    settle();
     QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
