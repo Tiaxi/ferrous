@@ -241,6 +241,7 @@ Components.DialogWindow {
                     bottomPadding: Kirigami.Units.smallSpacing + 2
 
                     MouseArea {
+                        id: diagnosticsContextArea
                         anchors.fill: parent
                         acceptedButtons: Qt.RightButton
                         propagateComposedEvents: true
@@ -255,14 +256,14 @@ Components.DialogWindow {
                         onClicked: function(mouse) {
                             if (mouse.button === Qt.RightButton) {
                                 diagnosticsTextArea.forceActiveFocus()
-                                diagnosticsContextMenu.popup()
+                                diagnosticsContextMenu.popupAt(diagnosticsContextArea, mouse.x, mouse.y)
                             } else {
                                 mouse.accepted = false
                             }
                         }
                     }
 
-                    Menu {
+                    Components.AppMenu {
                         id: diagnosticsContextMenu
 
                         MenuItem {

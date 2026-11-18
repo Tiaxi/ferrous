@@ -489,7 +489,7 @@ Rectangle {
 
                     function openContextMenu(x, y) {
                         libraryContextMenu.rowMap = libraryRow.actionRowMap()
-                        libraryContextMenu.popup(libraryRow, x, y)
+                        libraryContextMenu.popupAt(libraryRow, x, y)
                     }
 
                     width: ListView.view.width

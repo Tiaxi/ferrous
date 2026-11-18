@@ -319,7 +319,7 @@ Item {
 
     // Opens the context menu from the keyboard, at the viewer's centre.
     function openContextMenu() {
-        albumArtViewerContextMenu.popup(albumArtViewport,
+        albumArtViewerContextMenu.popupAt(albumArtViewport,
             albumArtViewport.width / 2, albumArtViewport.height / 2)
     }
 
@@ -456,7 +456,7 @@ Item {
 
             onPressed: function(mouse) {
                 if (mouse.button === Qt.RightButton) {
-                    albumArtViewerContextMenu.popup()
+                    albumArtViewerContextMenu.popupAt(albumArtPanArea, mouse.x, mouse.y)
                     return
                 }
                 if (!root.isPointOnImage(albumArtPanArea, mouse.x, mouse.y)) {
@@ -517,9 +517,16 @@ Item {
             }
         }
 
-        Menu {
+        Components.AppMenu {
             id: albumArtViewerContextMenu
             objectName: "albumArtViewerContextMenu"
+            // An item in the viewer's window, not a window of its own. The
+            // viewer moves between its full-screen window and the main
+            // window, and Qt keeps a popup's window on the window it first
+            // opened over, so after the move the menu opened in a window
+            // that never showed. Over the full-screen viewer the menu has
+            // the whole screen anyway.
+            popupType: Popup.Item
 
             MenuItem { action: root.replaceFromItunesAction }
             MenuItem {

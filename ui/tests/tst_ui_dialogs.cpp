@@ -5691,6 +5691,7 @@ int main(int argc, char **argv) {
         qputenv("QT_QPA_PLATFORM", QFile::encodeName(QStringLiteral("offscreen:configfile=") + screens));
     }
     QApplication app(argc, argv);
+    returnFocusFromClosedPopups();
     UiDialogsTest test;
     return QTest::qExec(&test, argc, argv);
 }

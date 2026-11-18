@@ -2031,6 +2031,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     QApplication app(argc, argv);
+    returnFocusFromClosedPopups();
     UiFoundationsTest test;
     return QTest::qExec(&test, argc, argv);
 }

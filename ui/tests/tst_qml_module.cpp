@@ -175,6 +175,7 @@ int main(int argc, char **argv) {
     // tests run in; TestSessionIsolation.h.
     isolateFromDesktopSessionWithAppLook();
     QApplication app(argc, argv);
+    returnFocusFromClosedPopups();
     QmlModuleTest test;
     return QTest::qExec(&test, argc, argv);
 }

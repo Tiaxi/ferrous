@@ -846,7 +846,7 @@ Dialog {
                                 root.contextRowData = root.controller.globalSearchModelApi.rowDataAt(resultRow.index)
                                 // Where the click was, from the event rather
                                 // than the cursor's last known place.
-                                resultMenu.popup(rowMouse, mouse.x, mouse.y)
+                                resultMenu.popupAt(rowMouse, mouse.x, mouse.y)
                             } else resultsView.forceActiveFocus()
                         }
                         onDoubleClicked: function(mouse) {
@@ -1086,11 +1086,11 @@ Dialog {
                 root.contextRowData = resultsView.selectedRow
                 resultsView.positionViewAtIndex(index, ListView.Contain)
                 const row = resultsView.itemAtIndex(index)
-                if (row) resultMenu.popup(row, 0, row.height)
-                else resultMenu.popup(resultsView, 0, 0)
+                if (row) resultMenu.popupAt(row, 0, row.height)
+                else resultMenu.popupAt(resultsView, 0, 0)
             }
         }
-        Menu {
+        Components.AppMenu {
             id: resultMenu
             MenuItem { text: I18n.i18nc("@action:inmenu", "Play"); icon.name: "media-playback-start"; onTriggered: root.controller.activateRow(root.contextRowData) }
             MenuItem { text: I18n.i18nc("@action:inmenu", "Add to Queue"); icon.name: "list-add"; onTriggered: root.controller.queueRow(root.contextRowData) }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "QmlSmokeTest.h"
+#include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 
 // Offscreen screens at 2x, 1.5x and 1.25x beside the default one, so that a
@@ -223,6 +224,7 @@ int main(int argc, char **argv) {
     // tests run in; TestSessionIsolation.h.
     isolateFromDesktopSessionWithAppLook();
     QApplication app(argc, argv);
+    returnFocusFromClosedPopups();
     QStringList arguments;
     for (int i = 0; i < argc; ++i) {
         arguments << QString::fromLocal8Bit(argv[i]);

@@ -199,7 +199,7 @@ Preferences.PreferencesPage {
                 Keys.onDeletePressed: root.removeCurrentRoot()
                 Keys.onMenuPressed: {
                     if (rootList.currentItem) {
-                        rootContextMenu.popup(rootList.currentItem)
+                        rootContextMenu.popupAt(rootList.currentItem, 0, rootList.currentItem.height)
                     }
                 }
 
@@ -246,13 +246,13 @@ Preferences.PreferencesPage {
                         rootList.currentIndex = rootRow.index
                         root.openCurrentRoot()
                     }
-                    onPressAndHold: rootContextMenu.popup()
+                    onPressAndHold: rootContextMenu.popupAt(rootRow, rootRow.pressX, rootRow.pressY)
 
                     TapHandler {
                         acceptedButtons: Qt.RightButton
-                        onTapped: {
+                        onTapped: function(eventPoint) {
                             rootList.currentIndex = rootRow.index
-                            rootContextMenu.popup()
+                            rootContextMenu.popupAt(rootRow, eventPoint.position.x, eventPoint.position.y)
                         }
                     }
 
@@ -439,7 +439,7 @@ Preferences.PreferencesPage {
         onActivated: function(index) { root.settings.setValue("librarySortMode", index) }
     }
 
-    Menu {
+    Components.AppMenu {
         id: rootContextMenu
         MenuItem {
             text: I18n.i18nc("@action:inmenu %1 is the file manager", "Open in %1", root.uiBridge.fileBrowserName || "")

@@ -6,6 +6,7 @@ import QtQuick.Layouts 1.15
 import QtQuick.Shapes
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
+import "." as Components
 
 // The playing track's cover, edge to edge: no inset, radius or frame. A
 // track without a cover has a stand-in in its place (with no tile for it,
@@ -117,7 +118,7 @@ Rectangle {
     Accessible.ignored: true
 
     function openContextMenu(x, y) {
-        albumArtMenu.popup(root, x, y)
+        albumArtMenu.popupAt(root, x, y)
     }
 
     Image {
@@ -366,7 +367,7 @@ Rectangle {
         }
     }
 
-    Menu {
+    Components.AppMenu {
         id: albumArtMenu
         objectName: "albumArtMenu"
 

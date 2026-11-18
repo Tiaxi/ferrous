@@ -4,9 +4,12 @@
 
 #include <QByteArrayView>
 #include <QCursor>
+#include <QEvent>
 #include <QGuiApplication>
+#include <QObject>
 #include <QPoint>
 #include <QString>
+#include <QWindow>
 #include <QtTest/QtTest>
 
 // Makes a test binary that is run without a platform chosen draw offscreen,
@@ -60,6 +63,39 @@ inline void movePointerOffTheWindows() {
     }
     // Above and left of the screen, where the platform places no window.
     QCursor::setPos(QPoint(-1, -1));
+}
+
+// Gives the keyboard back to the window a popup window opened from when the
+// popup closes, as a compositor does. Call it once the application exists.
+//
+// Menus are windows of their own (AppMenu.qml), which take the keyboard
+// while open. The offscreen platform leaves a closed popup the focus
+// window, so the window under it took no keys after a menu had closed.
+inline void returnFocusFromClosedPopups() {
+    if (QGuiApplication::platformName() != QLatin1String("offscreen")) {
+        return;
+    }
+    class PopupFocusReturn : public QObject {
+    public:
+        using QObject::QObject;
+
+    protected:
+        bool eventFilter(QObject *watched, QEvent *event) override {
+            if (event->type() == QEvent::Hide) {
+                auto *window = qobject_cast<QWindow *>(watched);
+                if (window != nullptr && window->type() == Qt::Popup && QGuiApplication::focusWindow() == window
+                    && window->transientParent() != nullptr) {
+                    window->transientParent()->requestActivate();
+                }
+            }
+            return false;
+        }
+    };
+    static PopupFocusReturn *installed = nullptr;
+    if (installed == nullptr) {
+        installed = new PopupFocusReturn(QCoreApplication::instance());
+        QCoreApplication::instance()->installEventFilter(installed);
+    }
 }
 
 // The test of the default, for a test slot of each binary that shows windows.

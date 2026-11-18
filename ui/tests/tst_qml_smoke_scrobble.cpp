@@ -553,16 +553,25 @@ void ScrobbleSmokeTest::scrobbleIndicatorClickAndMenuPauseScrobbling() {
     QQuickItem *pauseItem = menuItem(QStringLiteral("scrobbleIndicatorPauseItem"));
     QQuickItem *settingsItem = menuItem(QStringLiteral("scrobbleIndicatorSettingsItem"));
     QVERIFY(pauseItem != nullptr && settingsItem != nullptr);
+    // The menu is a window of its own, where its items are clicked.
+    QVERIFY(pauseItem->window() != nullptr && pauseItem->window() != window);
     QVERIFY(pauseItem->property("checkable").toBool());
     QVERIFY(!pauseItem->property("checked").toBool());
-    QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(pauseItem));
+    // Picked with the keyboard: offscreen, the release of a click that
+    // closes a menu window also reaches the menu as the end of a
+    // press-drag-release, which clicks the highlighted item again a moment
+    // later; a checkable item then unchecked itself. Under KWin a click
+    // checks it once.
+    menu->setProperty("currentIndex", 0);
+    QTRY_VERIFY(pauseItem->hasActiveFocus());
+    QTest::keyClick(pauseItem->window(), Qt::Key_Return);
     QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
     QTRY_VERIFY(!menu->property("visible").toBool());
 
     QTest::mouseClick(window, Qt::RightButton, {}, centerInWindow(indicator));
     QTRY_VERIFY(menu->property("opened").toBool());
     QVERIFY(pauseItem->property("checked").toBool());
-    QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(settingsItem));
+    QTest::mouseClick(settingsItem->window(), Qt::LeftButton, {}, centerInWindow(settingsItem));
     QTRY_COMPARE(harness.root->property("settingsRequests").toInt(), 1);
     QTRY_VERIFY(!menu->property("visible").toBool());
     QVERIFY(bridge->property("lastFmScrobblingPaused").toBool());

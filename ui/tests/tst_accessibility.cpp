@@ -4950,6 +4950,7 @@ int main(int argc, char **argv) {
         QQuickStyle::setStyle(childStyle);
     }
     QApplication app(argc, argv);
+    returnFocusFromClosedPopups();
     QAccessible::setActive(true);
     AccessibilityTest test;
     return QTest::qExec(&test, argc, argv);

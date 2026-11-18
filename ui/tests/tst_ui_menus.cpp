@@ -4,8 +4,9 @@
 // and order; the Repeat and Visualization headings, which are text the
 // pointer and the keyboard pass over; the radios, which follow the backend
 // and the plot's mode switch; the items that turn off when they cannot act;
-// the window's shortcuts, each taken once; and the context menus of the
-// queue and the library.
+// the window's shortcuts, each taken once; the context menus of the
+// queue and the library; and the menus as windows of their own, which
+// reach past a small window (#480).
 
 #include <QAccessible>
 #include <QApplication>
@@ -29,6 +30,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtEndian>
+#include <QtMath>
 #include <QtTest/QtTest>
 #include <qqml.h>
 
@@ -414,6 +416,73 @@ ApplicationWindow {
              QLatin1String(scheme.inactiveText), QLatin1String(scheme.highlight))
         .toUtf8();
 }
+// A window smaller than its menus: a File menu of twelve items with a
+// submenu, a field that has the keyboard, and an area whose context menu
+// opens where it is pressed.
+QByteArray smallWindowMenusQml() {
+    return QByteArrayLiteral(R"QML(
+import QtQuick
+import QtQuick.Controls
+import "components" as Components
+
+ApplicationWindow {
+    id: window
+    width: 260
+    height: 140
+    visible: true
+    property alias field: field
+    property alias area: area
+    property alias contextMenu: contextMenu
+
+    menuBar: MenuBar {
+        Components.AppMenu {
+            objectName: "smallFileMenu"
+            title: "&File"
+            Repeater {
+                model: 11
+                MenuItem { text: "Item number " + (index + 1) }
+            }
+            Components.AppMenu {
+                objectName: "smallRecentMenu"
+                title: "&Recent"
+                MenuItem { text: "&One" }
+                MenuItem { text: "&Two" }
+            }
+        }
+    }
+
+    TextField {
+        id: field
+        width: 120
+        focus: true
+    }
+
+    Item {
+        id: area
+        anchors.fill: parent
+        anchors.topMargin: 40
+    }
+
+    Components.AppMenu {
+        id: contextMenu
+        objectName: "smallContextMenu"
+        MenuItem { text: "&Copy" }
+        MenuItem { text: "&Paste" }
+    }
+}
+)QML");
+}
+
+// The window a menu's items are in.
+QQuickWindow *menuWindowOf(QObject *menu) {
+    auto *content = qvariant_cast<QQuickItem *>(menu->property("contentItem"));
+    return content != nullptr ? content->window() : nullptr;
+}
+
+// A window's place on the screen.
+QRect globalRect(QWindow *window) {
+    return QRect(window->mapToGlobal(QPoint(0, 0)), window->size());
+}
 } // namespace
 
 // Takes the URLs Qt.openUrlExternally would open, so no browser starts.
@@ -442,6 +511,7 @@ private slots:
     void menusAnswerThePointerAndTheKeyboard();
     void viewMenuFollowsThePlot();
     void queueAndPlaybackItemsActOnTheBackend();
+    void menusAreWindowsThatReachPastASmallWindow();
 
 private:
     // The checks that the tests above run in turn in one window; each says
@@ -466,6 +536,8 @@ private:
     void checkEditMenuNamesItsUndoAndClearsTheQueue(QQuickWindow *window);
     void checkQueueContextMenuShowsKeysItDoesNotTake(QQuickWindow *window);
     void checkLibraryContextMenuNamesWhatItActsOn(MainWindowFixture &main);
+    void checkMenusAreWindowsOfTheirOwn(QQuickWindow *window);
+    void checkContextMenuOpensAtThePointer(QQuickWindow *window);
     void checkShortcutsTriggerTheirActions(QQuickWindow *window);
 };
 
@@ -511,7 +583,8 @@ void UiMenusTest::menusReadInKdesWordsAndOrder() {
                [&] { checkShortcutsAreTakenOnceEach(window); },
                [&] { checkCoverMenusGiveReplaceFromItunesAnIcon(window); },
                [&] { checkMenusHaveNoTransitionsOfTheirOwn(window); },
-               [&] { checkHeadingsAreTextThatIsNotPicked(window); }});
+               [&] { checkHeadingsAreTextThatIsNotPicked(window); },
+               [&] { checkMenusAreWindowsOfTheirOwn(window); }});
 }
 
 // The menus under the pointer and the keyboard, and the pages and dialogs
@@ -548,8 +621,206 @@ void UiMenusTest::queueAndPlaybackItemsActOnTheBackend() {
     runInTurn({[&] { checkRepeatRadiosFollowTheBackendAndSetIt(window); },
                [&] { checkEditMenuNamesItsUndoAndClearsTheQueue(window); },
                [&] { checkQueueContextMenuShowsKeysItDoesNotTake(window); },
+               [&] { checkContextMenuOpensAtThePointer(window); },
                [&] { checkLibraryContextMenuNamesWhatItActsOn(main); },
                [&] { checkShortcutsTriggerTheirActions(window); }});
+}
+
+// A menu is a window of its own, so a window smaller than the menu does not
+// cut it off or squeeze it: it reaches past the window's bottom, its
+// submenu opens beside it as another window, and a context menu opened near
+// the window's corner reaches past its side, from the point it was opened
+// at. The field has the keyboard again once a menu closes.
+//
+// Run offscreen, Qt places the menus; run under KWin (QT_QPA_PLATFORM=wayland
+// in a nested kwin_wayland --virtual), the compositor does, from the item
+// each menu opens beside.
+void UiMenusTest::menusAreWindowsThatReachPastASmallWindow() {
+    movePointerOffTheWindows();
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(smallWindowMenusQml(),
+                      QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/SmallWindowMenus.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    QVERIFY2(root != nullptr, qPrintable(component.errorString()));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    window->requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(window));
+    auto *field = qvariant_cast<QQuickItem *>(root->property("field"));
+    auto *area = qvariant_cast<QQuickItem *>(root->property("area"));
+    QObject *contextMenu = qvariant_cast<QObject *>(root->property("contextMenu"));
+    QObject *fileMenu = root->findChild<QObject *>(QStringLiteral("smallFileMenu"));
+    QObject *recentMenu = root->findChild<QObject *>(QStringLiteral("smallRecentMenu"));
+    QVERIFY(field != nullptr && area != nullptr && contextMenu != nullptr && fileMenu != nullptr
+            && recentMenu != nullptr);
+    QTRY_VERIFY(field->hasActiveFocus());
+    const QRect windowRect = globalRect(window);
+
+    // The menu bar's menu: a window over the main one, from the title down,
+    // the whole of its items past the window's bottom.
+    QQuickItem *file = menuBarItemAt(qvariant_cast<QObject *>(root->property("menuBar")), 0);
+    QVERIFY(file != nullptr);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(file).center().toPoint());
+    QTRY_VERIFY(fileMenu->property("opened").toBool());
+    QQuickWindow *fileWindow = menuWindowOf(fileMenu);
+    QVERIFY(fileWindow != nullptr && fileWindow != window);
+    QCOMPARE(fileWindow->type(), Qt::Popup);
+    QCOMPARE(fileWindow->transientParent(), window);
+    QTRY_VERIFY(fileWindow->isExposed());
+    const QPoint fileAt = window->mapToGlobal(sceneRect(file).bottomLeft().toPoint());
+    QTRY_VERIFY2(std::abs(globalRect(fileWindow).left() - fileAt.x()) <= 2
+                     && std::abs(globalRect(fileWindow).top() - fileAt.y()) <= 2,
+                 qPrintable(QStringLiteral("menu at %1,%2, title's corner at %3,%4")
+                                .arg(globalRect(fileWindow).left()).arg(globalRect(fileWindow).top())
+                                .arg(fileAt.x()).arg(fileAt.y())));
+    QVERIFY2(globalRect(fileWindow).bottom() > windowRect.bottom() + 100,
+             qPrintable(QStringLiteral("menu's bottom %1, window's %2")
+                            .arg(globalRect(fileWindow).bottom()).arg(windowRect.bottom())));
+    QVERIFY(fileWindow->height() >= qCeil(fileMenu->property("implicitHeight").toReal()));
+
+    // Its submenu: another window, beside it, from the keyboard.
+    QQuickItem *recent = menuItems(fileMenu).value(11);
+    QVERIFY(recent != nullptr);
+    fileMenu->setProperty("currentIndex", 11);
+    QTRY_VERIFY(recent->hasActiveFocus());
+    QTest::keyClick(fileWindow, Qt::Key_Right);
+    QTRY_VERIFY(recentMenu->property("opened").toBool());
+    QQuickWindow *recentWindow = menuWindowOf(recentMenu);
+    QVERIFY(recentWindow != nullptr && recentWindow != fileWindow && recentWindow != window);
+    QTRY_VERIFY(recentWindow->isExposed());
+    QTRY_VERIFY2(globalRect(recentWindow).left() >= globalRect(fileWindow).right() - 8,
+                 qPrintable(QStringLiteral("submenu's left %1, menu's right %2")
+                                .arg(globalRect(recentWindow).left()).arg(globalRect(fileWindow).right())));
+    QTest::keyClick(recentWindow, Qt::Key_Escape);
+    QTRY_VERIFY(!recentMenu->property("visible").toBool());
+    QTRY_VERIFY(fileMenu->property("opened").toBool());
+    QTest::keyClick(fileWindow, Qt::Key_Escape);
+    QTRY_VERIFY(!fileMenu->property("visible").toBool());
+    QTRY_VERIFY(field->hasActiveFocus());
+
+    // A context menu near the window's corner: at the point, past the
+    // window's side. Its parent is an item a pixel in size at the point,
+    // hidden, in the item it opened for, which the compositor opens it
+    // beside.
+    const QPointF point(area->width() - 12, area->height() - 12);
+    QVERIFY(QMetaObject::invokeMethod(contextMenu, "popupAt", Q_ARG(QVariant, QVariant::fromValue(area)),
+                                      Q_ARG(QVariant, point.x()), Q_ARG(QVariant, point.y())));
+    QTRY_VERIFY(contextMenu->property("opened").toBool());
+    auto *anchor = qvariant_cast<QQuickItem *>(contextMenu->property("parent"));
+    QVERIFY(anchor != nullptr);
+    QCOMPARE(anchor->objectName(), QStringLiteral("appMenuPointAnchor"));
+    QCOMPARE(anchor->parentItem(), area);
+    QCOMPARE(QPointF(anchor->x(), anchor->y()), point);
+    QCOMPARE(QSizeF(anchor->width(), anchor->height()), QSizeF(1, 1));
+    QVERIFY(!anchor->isVisible());
+    QQuickWindow *contextWindow = menuWindowOf(contextMenu);
+    QVERIFY(contextWindow != nullptr && contextWindow != window);
+    QTRY_VERIFY(contextWindow->isExposed());
+    const QPoint pointAt = window->mapToGlobal(area->mapToScene(point).toPoint());
+    QTRY_VERIFY2(std::abs(globalRect(contextWindow).left() - pointAt.x()) <= 2
+                     && std::abs(globalRect(contextWindow).top() - pointAt.y()) <= 2,
+                 qPrintable(QStringLiteral("menu at %1,%2, point at %3,%4")
+                                .arg(globalRect(contextWindow).left()).arg(globalRect(contextWindow).top())
+                                .arg(pointAt.x()).arg(pointAt.y())));
+    QVERIFY(globalRect(contextWindow).right() > windowRect.right());
+    QVERIFY(globalRect(contextWindow).bottom() > windowRect.bottom());
+    QTest::keyClick(contextWindow, Qt::Key_Escape);
+    QTRY_VERIFY(!contextMenu->property("visible").toBool());
+    QTRY_VERIFY(field->hasActiveFocus());
+}
+
+// Each of the window's menus is a window of its own but the album art
+// viewer's, which moves between the viewer's full-screen window and the
+// main window (see AlbumArtSurface.qml).
+void UiMenusTest::checkMenusAreWindowsOfTheirOwn(QQuickWindow *window) {
+    constexpr int itemPopup = 0;
+    constexpr int windowPopup = 1;
+    QStringList found;
+    const QString ours = QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/")).toString();
+    for (QObject *menu : window->findChildren<QObject *>()) {
+        const QQmlContext *context = qmlContext(menu);
+        // Kirigami's own, such as a link's Copy Link, are left as they are.
+        if (!menu->inherits("QQuickMenu") || context == nullptr || !context->baseUrl().toString().startsWith(ours)) {
+            continue;
+        }
+        const bool viewer = menu->objectName() == QLatin1String("albumArtViewerContextMenu");
+        // A window menu has no fade out (see AppMenu.qml); the viewer's,
+        // an item, keeps the style's.
+        QVERIFY2((qvariant_cast<QObject *>(menu->property("exit")) == nullptr) != viewer,
+                 qPrintable(menu->objectName()));
+        QVERIFY2(menu->property("popupType").toInt() == (viewer ? itemPopup : windowPopup),
+                 qPrintable(QString::fromLatin1(menu->metaObject()->className()) + QLatin1Char(' ')
+                            + menu->objectName() + QLatin1Char(' ')
+                            + context->baseUrl().fileName()));
+        found << menu->objectName();
+    }
+    for (const char *name : {"fileMenu", "playbackMenu", "playlistContextMenu", "libraryContextMenu",
+                             "albumArtMenu", "scrobbleIndicatorMenu", "albumArtViewerContextMenu"}) {
+        QVERIFY2(found.contains(QLatin1String(name)), name);
+    }
+
+    // Each of the menu bar's menus opens as one, over the main window, and
+    // its window goes as it closes: on Wayland a menu opened while another
+    // menu's window still shows is made its child, and goes with it.
+    for (QObject *menu : menusOf(window)) {
+        QMetaObject::invokeMethod(menu, "open");
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QQuickWindow *menuWindow = menuWindowOf(menu);
+        QVERIFY2(menuWindow != nullptr && menuWindow != window, qPrintable(menu->objectName()));
+        QCOMPARE(menuWindow->type(), Qt::Popup);
+        QCOMPARE(menuWindow->transientParent(), window);
+        QTRY_VERIFY(menuWindow->isVisible());
+        QTest::keyClick(menuWindow, Qt::Key_Escape);
+        QVERIFY2(!menuWindow->isVisible(), qPrintable(menu->objectName()));
+        QVERIFY(!menu->property("visible").toBool());
+    }
+    // The style's: Breeze's menu item shows a standard key's first binding
+    // and says so when it has more, as Quit, Undo and Configure do.
+    dropCapturedMessagesMatching(QRegularExpression(QStringLiteral(
+        "^qrc:/qt/qml/org/kde/desktop/MenuItem\\.qml:\\d+:\\d+: QML Shortcut: Shortcut: Only binding to one of "
+        "multiple key bindings associated with \\d+\\.")));
+}
+
+// The queue's context menu opens where the right button pressed, on the
+// row, not at the row's or the list's corner.
+void UiMenusTest::checkContextMenuOpensAtThePointer(QQuickWindow *window) {
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = viewRow(window, "playlistView", 1)) != nullptr);
+    // Its items are as wide closed as open: the menu's window takes the
+    // closed menu's size when it is made (see KeyHintMenuItem.qml).
+    QObject *menu = window->findChild<QObject *>(QStringLiteral("playlistContextMenu"));
+    QVERIFY(menu != nullptr && !menu->property("visible").toBool());
+    QList<qreal> closedWidths;
+    for (QQuickItem *item : menuItems(menu)) {
+        closedWidths << item->implicitWidth();
+    }
+    const QPoint at = (sceneRect(row).topLeft() + QPointF(60, row->height() / 2)).toPoint();
+    QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, at);
+    QTRY_VERIFY(menu->property("opened").toBool());
+    QList<qreal> openWidths;
+    for (QQuickItem *item : menuItems(menu)) {
+        openWidths << item->implicitWidth();
+    }
+    QCOMPARE(openWidths, closedWidths);
+    auto *anchor = qvariant_cast<QQuickItem *>(menu->property("parent"));
+    QVERIFY(anchor != nullptr);
+    QCOMPARE(anchor->objectName(), QStringLiteral("appMenuPointAnchor"));
+    QCOMPARE(anchor->mapToScene(QPointF(0, 0)).toPoint(), at);
+    QVERIFY(row->isAncestorOf(anchor));
+    QQuickWindow *menuWindow = menuWindowOf(menu);
+    QVERIFY(menuWindow != nullptr && menuWindow != window);
+    const QPoint pointAt = window->mapToGlobal(at);
+    QTRY_VERIFY2(std::abs(globalRect(menuWindow).left() - pointAt.x()) <= 2
+                     && std::abs(globalRect(menuWindow).top() - pointAt.y()) <= 2,
+                 qPrintable(QStringLiteral("menu at %1,%2, pressed at %3,%4")
+                                .arg(globalRect(menuWindow).left()).arg(globalRect(menuWindow).top())
+                                .arg(pointAt.x()).arg(pointAt.y())));
+    QTest::keyClick(menuWindow, Qt::Key_Escape);
+    QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
 void UiMenusTest::checkMenuBarHasTheSixKdeMenusInOrder(QQuickWindow *window) {
@@ -1560,6 +1831,7 @@ int main(int argc, char **argv) {
     qputenv("XDG_DATA_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("data"))));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("cache"))));
     QApplication app(argc, argv);
+    returnFocusFromClosedPopups();
     UiMenusTest test;
     return QTest::qExec(&test, argc, argv);
 }
