@@ -123,16 +123,20 @@ def analyse(args):
     # Window coordinates -> shot pixels: the scale, and for a decorated window capture its title bar offset.
     ox, oy = grabbed.get("image_offset", [0, 0])
     arr = None
-    def occ(wname, rect, shown):
+    def occ(wname, rect, shown, off=(ox, oy)):
         # In the shot's pixels when the window is the one in the shot (decorated captures are offset).
-        if shown and rect and (ox or oy or sc != 1):
-            rect = [round(rect[0] * sc + ox), round(rect[1] * sc + oy), round(rect[2] * sc), round(rect[3] * sc)]
+        if shown and rect and (off[0] or off[1] or sc != 1):
+            rect = [round(rect[0] * sc + off[0]), round(rect[1] * sc + off[1]),
+                    round(rect[2] * sc), round(rect[3] * sc)]
         return dict(state=f"{e['area']}/{e['state']}", shot=f"shots/{file}", window=wname, rect=rect, in_shot=shown)
     for w in dump.get("windows", []):
-        is_grabbed = ((grabbed.get("kind") == "main" and w.get("main")) or
+        # a menu of the main window, which a main-window grab draws in at its offset
+        pop = grabbed.get("kind") == "main" and w.get("main_popup_offset")
+        is_grabbed = ((grabbed.get("kind") == "main" and w.get("main")) or bool(pop) or
                       (grabbed.get("kind") == "window" and grabbed.get("name") in (w.get("name"), w.get("title"))) or
                       (grabbed.get("kind") == "dialog" and grabbed.get("cls") == w.get("cls")))
         wname = "main window" if w.get("main") else (w.get("name") or w.get("title") or w.get("cls"))
+        woff = (ox + pop[0] * sc, oy + pop[1] * sc) if pop else (ox, oy)
         for f in w.get("findings", []):
             stats["raw"] += 1
             if matches(ignore, f) or (f["kind"] == "elided" and matches(elide_ok, f)):
@@ -158,7 +162,7 @@ def analyse(args):
             key = (f["kind"], f.get("file", ""), f.get("path", ""), f.get("name", ""), f.get("type", ""),
                    f.get("bound", "") if f["kind"] != "overlap" else f.get("with", ""), tuple(sorted(f.get("by", {}))))
             worst = max([*f.get("by", {}).values(), f.get("over_x", 0), f.get("over_y", 0)] or [0])
-            recs.append((key, f, detail, f.get("text", ""), occ(wname, f.get("rect"), is_grabbed), worst))
+            recs.append((key, f, detail, f.get("text", ""), occ(wname, f.get("rect"), is_grabbed, woff), worst))
         if not is_grabbed:
             continue
         for t in w.get("texts", []):
@@ -172,7 +176,7 @@ def analyse(args):
                 arr = np.asarray(Image.open(os.path.join(rd, "shots", file)).convert("RGB"))
             a, rgb = parse_argb(t["color"])
             x, y, w_, h_ = t["rect"]
-            img_rect = [x + ox / sc, y + oy / sc, w_, h_]  # band_background scales by sc
+            img_rect = [x + woff[0] / sc, y + woff[1] / sc, w_, h_]  # band_background scales by sc
             bg, share = band_background(arr, img_rect, sc, rgb)
             stats["texts"] += 1
             if bg is None or share < 0.5:  # a busy background (image, plot): no reliable sample
@@ -190,7 +194,7 @@ def analyse(args):
             detail = (f"{r:.2f}:1 (needs {need:.1f}; {'large' if large else 'normal'} text {t['pt']:.0f} pt"
                       f"{' bold' if t.get('bold') else ''}): {'#%02x%02x%02x' % fg} on {'#%02x%02x%02x' % bg}")
             recs.append((key, dict(kind="contrast", file=t.get("file", ""), path=t.get("path", ""), name=t.get("name", ""),
-                                   type=t.get("type", "")), detail, t["text"], occ(wname, t.get("rect"), True), r))
+                                   type=t.get("type", "")), detail, t["text"], occ(wname, t.get("rect"), True, woff), r))
     return file, e, stats, recs
 
 

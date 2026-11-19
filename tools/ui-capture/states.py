@@ -2517,15 +2517,22 @@ def m_fakebridge(r, arg):
     time.sleep(0.15)
 
 
+# An item's top left in the main window's coordinates, which its grab uses: an item in a menu (a window of its
+# own, which the grab draws in at its place) is offset by that window's place.
+MAIN_POINT_JS = ("(function(it){var p=it.mapToItem(null,0,0);var w=it.Window.window;"
+                 "return (w&&w!==root)?Qt.point(p.x+w.x-root.x,p.y+w.y-root.y):p})")
+
 MEASURE_JS = ("(function(){{var r=({expr});if(!r)return '';var it=r._m?r.item:r;var ref=r._m?(r.ref||null):null;"
               "if(r._m&&('color' in r)&&(r.color===undefined||r.color===null))return 'ERR: the named colour does not exist';"
               "if(r._m&&('ref' in r)&&!r.ref)return 'ERR: the reference item does not exist';"
-              "var dc=(r._m&&r.color!==undefined)?String(r.color):null;if(!it)return '';var p=it.mapToItem(null,0,0);var c='';"
+              "var dc=(r._m&&r.color!==undefined)?String(r.color):null;if(!it)return '';"
+              "var p=" + MAIN_POINT_JS.replace("{", "{{").replace("}", "}}") + "(it);var c='';"
               "try{{c=dc!==null?dc:((it.border&&it.border.width>0&&it.color!==undefined&&it.color.a===0)?String(it.border.color):String(it.color===undefined?'':it.color))}}catch(e){{}}"
               "var pal=root.uiPalette;var role='';var roles=['text','textSecondary','textTertiary','link','now','negative',"
               "'focusRing','wave','plotText','plotTextSecondary','textColumn','accent','selection','hover'];for(var i=0;i<roles.length;i++){{try{{if(c.length&&pal[roles[i]]!==undefined&&"
               "Qt.colorEqual(pal[roles[i]],c)){{role=roles[i];break}}}}catch(e){{}}}}"
-              "var rr=null;if(ref){{var q=ref.mapToItem(null,0,0);rr=[q.x,q.y,ref.width,ref.height]}}"
+              "var rr=null;if(ref){{var q=" + MAIN_POINT_JS.replace("{", "{{").replace("}", "}}")
+              + "(ref);rr=[q.x,q.y,ref.width,ref.height]}}"
               "return JSON.stringify({{rect:[p.x,p.y,it.width,it.height],ref_rect:rr,declared:c,role:role,"
               "shown:!!it.visible&&it.opacity>0,extra:(r._m&&r.extra)?r.extra:null,"
               "text:String(it.text===undefined?'':it.text).slice(0,40)}})}})()")
@@ -6897,9 +6904,11 @@ NOT_CAPTURED = [
     ("Tag editor saving / quit wait (real)", "Saving writes files; the quit-wait dialog is opened directly instead."),
     ("Tag editor status details with content", "Only reachable after a save error; opened directly (empty)."),
     ("Quit save failed (real)", "Needs a failing save at quit; opened directly with a sample message."),
-    ("Context menu opening strip", "While the frame recorder runs, the probe's right-click selects the queue row "
-                                   "but opens no menu (the same click opens it in the still shots); unresolved "
-                                   "harness interaction. The File menu strip shows the style's menu fade."),
+    ("Menus in strips", "Menus are windows of their own (#642), which the still shots draw in, but a strip's images "
+                        "are of the main window: the File menu strip shows the menu bar, not the menu."),
+    ("Menus at scale 2 in place", "The scale-2 session scales the app with QT_SCALE_FACTOR, not KWin's output scale "
+                                  "as Plasma does; QtWayland then opens a menu window at half its offset, over the "
+                                  "menu bar, and the shot shows it where KWin does."),
     ("Context menus at the pointer", "Context menus are opened from the keyboard (the Menu key, or Shift+F10) wherever "
                                      "the view takes it: library, queue, the scrobble indicator and the fullscreen "
                                      "album art viewer; they open on the selected row or control. The windowed album "
@@ -6979,6 +6988,8 @@ AREA_SUBJECT = {"transport": "transportBar", "seek": "transportBar", "volume": "
 # States of these areas must show an open popup (menu, dialog, palette) at grab time, or the capture fails.
 VERIFY_OPEN_AREAS = {"menu", "dialog", "search"}
 VERIFY_OPEN_EXEMPT = {"menubar-hover"}  # the menu bar itself, hovered: no menu by design
+# States of other areas that show an open menu, which must be shown at grab time too.
+VERIFY_MENU_STATES = {("menubar", "open"), ("contrast", "menu-disabled")}
 # The overview sheet ("every area at rest"), one page per theme, first in the core set: (area, state).
 OVERVIEW = [("main", "playing-spectrogram-centered"), ("transport", "at-rest"), ("nowplaying", "at-rest"),
             ("queue", "at-rest"), ("library", "at-rest"), ("plot", "at-rest"), ("statusbar", "at-rest"),

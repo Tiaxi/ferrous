@@ -201,6 +201,16 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
   are not the fixture library.
 - **KWin's own window animations** are not in the recordings: they run in the compositor, and KWin's screenshot
   interface manages only about 17 frames a second.
+- **Menus are windows of their own** (#642). KWin opens such a popup window only for a client that has had input
+  from the compositor, and the probe's events go to the app's windows directly. So each session first presses
+  Shift once through KWin's fake-input protocol (`kwin_input.py`; the driver's `.desktop` file lets this Python
+  use it). After that the probe sends a key to the open menu's window, and a pointer event to the menu window
+  under it, as KWin would.
+- **A main-window grab draws in its open menus**, each at its place, and grows right and down for a menu that
+  reaches past the window, mid grey there. The menus' KWin shadows are not in it. A recorded strip has only the main
+  window's frames, without the menus. At scale 2 the session scales the app with `QT_SCALE_FACTOR`, not with KWin's
+  output scale as Plasma does, and QtWayland then opens a menu window at half its offset from the window, over the
+  menu bar; KWin shows it there, and so does the shot.
 
 ## Files
 
@@ -210,6 +220,7 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
 | `build_probes.sh` | builds `shotprobe.so` and `iconprobe` into `$SHOT_PROBE_DIR` (default `$SHOT_WORK/probe`), where `driver.py` loads both from |
 | `neutral_ns.sh` | runs a command with the work folder at `/mnt/ferrous` |
 | `driver.py` | starts one isolated app (KWin, D-Bus, XDG folders, settings, theme) and talks to the probe |
+| `kwin_input.py` | sends real input through the session's KWin (its fake-input protocol), with no Wayland library |
 | `shotlib.py` | a session: grabs, recordings, KWin window captures, the shot index |
 | `runner.py` | runs the state table in parallel workers; its docstring lists the step syntax |
 | `states.py` | the state table, sessions, macros, sheets, the core set and the checks a state must pass |
