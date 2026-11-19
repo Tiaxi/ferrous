@@ -490,11 +490,11 @@ private:
     // playhead reaches its next column, so that the frames between are
     // the same.
     double followingStartLocked(double span, double position) const;
-    // How the view is placed with the playhead at `position`, at any zoom.
-    // A detached view whose playhead has reached its re-attach point
-    // glides, though the state still says detached until
+    // How the view at `zoomLevel` is placed with the playhead at
+    // `position`. A detached view whose playhead has reached its re-attach
+    // point glides, though the state still says detached until
     // settleFollowLocked.
-    FollowState followStateLocked(double position) const;
+    FollowState followStateLocked(double zoomLevel, double position) const;
     // Where a detached view of `span` seconds starts, before it is kept
     // within the track: on the track's grid of device columns, with
     // m_anchorSeconds at m_anchorFraction of its width.
@@ -504,10 +504,10 @@ private:
     // track.
     double reattachSecondsLocked(double span) const;
     // Where the playhead starts the glide back: the re-attach point of the
-    // view at the zoom asked for, or of the view a zoom out still shows
-    // while it is handed over, whichever comes first of those armed;
-    // infinity for none.
-    double reattachPointLocked() const;
+    // view a zoom out still shows while it is handed over and, for the
+    // `requestedView`, of the view at the zoom asked for, whichever comes
+    // first of those armed; infinity for none.
+    double reattachPointLocked(bool requestedView) const;
     // Where a view of `span` seconds gliding back starts, with the
     // playhead at `position` and the glide begun at `from`: the playhead
     // eases from kReattachViewFraction of the width to the middle column,
@@ -517,7 +517,12 @@ private:
     // while it glides back.
     double viewSpeedLocked(double span, double position) const;
     // Takes a glide begun or ended at nowNs into the state.
+    // At the zoom shown, or at `zoomLevel`, as a zoom out is handed over.
     void settleFollowLocked(qint64 nowNs);
+    void settleFollowLocked(qint64 nowNs, double zoomLevel);
+    // Whether the view is detached, as detached tells; publishDetached
+    // settles it first.
+    bool detachedLocked(qint64 nowNs) const;
     // The view stays where it shows now at the presented zoom, anchored at
     // `fraction` of its width.
     void detachAtLocked(qint64 nowNs, double fraction);
@@ -651,7 +656,8 @@ private:
     // m_cacheDetailArrivals.
     bool cacheRedrawDueLocked(double visibleStart, double visibleEnd) const;
     void queueGuiContinuationFromPaint(
-        bool notifySamplePointsChanged, bool requestRepaint, bool pictureChanged = false);
+        bool notifySamplePointsChanged, bool requestRepaint, bool pictureChanged = false,
+        bool detachedChanged = false);
     void rebuildCacheLocked(
         int width, int height, double visibleStart, double visibleEnd);
     void rebuildCacheLocked(int width, int height);
@@ -812,8 +818,10 @@ private:
     QPointF m_panPressPosition;
     double m_panOriginStart{0.0};
     double m_panOriginX{0.0};
-    // detached, on the GUI thread.
+    // detached, on the GUI thread, and as frames compare it.
     bool m_detached{false};
+    std::atomic_bool m_detachedShown{false};
+    std::atomic_bool m_detachedCheckPending{false};
     bool m_zoomOutHandoffPending{false};
     bool m_playing{false};
     bool m_zoomEnabled{true};

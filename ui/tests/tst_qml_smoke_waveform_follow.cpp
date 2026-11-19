@@ -373,19 +373,21 @@ void WaveformFollowSmokeTest::zoomOutHandoffKeepsTheDetachedView() {
     QVERIFY(item.detached());
     QVERIFY(sameView(viewOf(item), target));
 
-    // Out to the whole track: nothing to follow, though the detached view
-    // shows until it is handed over, here by a switch of the lanes.
+    // Out to the whole track: the detached view, and Follow Playhead,
+    // stay until it is handed over, here by a switch of the lanes; the
+    // frame that shows the whole track ends it.
     draw();
     const auto before = viewOf(item);
     wheelAt(item, 200.0, -120 * 12);
     QCOMPARE(item.zoomLevel(), 1.0);
     QVERIFY(item.m_zoomOutHandoffPending);
-    QVERIFY(!item.detached());
+    QVERIFY(item.detached());
     QVERIFY(sameView(viewOf(item), before));
     item.setViewMode(1);
     QVERIFY(!item.m_zoomOutHandoffPending);
-    QVERIFY(!item.detached());
     QCOMPARE(viewOf(item), std::make_pair(0.0, kDuration));
+    draw();
+    QTRY_VERIFY(!item.detached());
 
     // A playhead that reaches the re-attach point of the view still shown
     // glides it, though the wider view is short of its own; the glide goes
@@ -443,6 +445,37 @@ void WaveformFollowSmokeTest::zoomOutHandoffKeepsTheDetachedView() {
         const auto view = viewOf(item);
         QVERIFY2(item.positionSeconds() >= view.first && item.positionSeconds() <= view.second,
                  qPrintable(describe(view)));
+        QVERIFY(playheadFraction(item) <= 0.85 + 2.0 / kWidth);
+    }
+    QCOMPARE(item.m_follow, WaveformEditorItem::Follow::Playhead);
+
+    // Past the view shown, but short of the wider view's re-attach point:
+    // the playhead reaching that point while the wider view waits for its
+    // detail leaves the view shown where it is; the wider view glides.
+    middleDrag(item, 0.0, 0.6 * kWidth);
+    QVERIFY(playheadFraction(item) > 1.0);
+    draw();
+    const auto putAside = viewOf(item);
+    wheelAt(item, 0.0, -240);
+    QVERIFY(item.m_zoomOutHandoffPending);
+    const auto aside = targetViewOf(item);
+    QVERIFY((item.positionSeconds() - aside.first) / (aside.second - aside.first) < 0.75);
+    // The playhead is at 70 % of the wider view, its point 2.14 s on.
+    for (int step = 0; step < 600; ++step) {
+        time.advance(1.0 / 240.0);
+        frame(item);
+        QVERIFY(sameView(viewOf(item), putAside));
+    }
+    QVERIFY(item.detached());
+    const auto gliding = targetViewOf(item);
+    QVERIFY(!sameView(gliding, aside));
+    QVERIFY((item.positionSeconds() - gliding.first) / (gliding.second - gliding.first) <= 0.85 + 2.0 / kWidth);
+    commitHandoff();
+    QCOMPARE(item.m_follow, WaveformEditorItem::Follow::Gliding);
+    QVERIFY(sameView(viewOf(item), gliding));
+    for (int step = 0; step < 240 * 3 && item.m_follow != WaveformEditorItem::Follow::Playhead; ++step) {
+        time.advance(1.0 / 240.0);
+        frame(item);
         QVERIFY(playheadFraction(item) <= 0.85 + 2.0 / kWidth);
     }
     QCOMPARE(item.m_follow, WaveformEditorItem::Follow::Playhead);
