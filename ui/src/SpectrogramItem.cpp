@@ -72,19 +72,6 @@ struct SpectrogramProjection {
     std::array<QRgb, 256> colors;
 };
 
-// Maps canvas x positions to where a zoom preview shows them: scaled by
-// `scale` about `fromX`, which lands at `toX`.
-struct SpectrogramZoomPreview {
-    bool active{false};
-    double scale{1.0};
-    double fromX{0.0};
-    double toX{0.0};
-
-    double map(double x) const {
-        return active ? toX + (x - fromX) * scale : x;
-    }
-};
-
 // How rasterizations reach their item, which may be gone by then. The item
 // clears `owner` when it is destroyed; `latestSerial` is the one
 // rasterization whose result it still wants.
@@ -6534,9 +6521,14 @@ void SpectrogramItem::wheelEvent(QWheelEvent *event) {
         // Reckoned from the anchor, which the view keeps at its fraction of
         // the width to within a column, so that zooms in a row about one
         // place do not drift by those columns.
+        // A view held at an end of the track is not where its anchor would
+        // put it: there, the time the view shows at the pointer.
         const SpectrogramViewFollow::Snapshot anchored = followSnapshotLocked();
         const RequestedView view = requestedViewLocked(position);
-        pointerSeconds = view.valid
+        const bool atAnchor = view.valid
+            && view.left == std::llround(anchored.anchorSeconds * view.columnsPerSecond
+                - anchored.anchorFraction * static_cast<double>(view.windowColumns));
+        pointerSeconds = atAnchor
             ? anchored.anchorSeconds + (pointerFraction - anchored.anchorFraction)
                 * static_cast<double>(view.windowColumns) / view.columnsPerSecond
             : viewSecondsAtLocked(event->position().x());
@@ -7102,7 +7094,12 @@ SpectrogramZoomPreview SpectrogramItem::staleCanvasAlignmentLocked(
     }
     // A jump, such as a seek, would move the canvas mostly or wholly off
     // screen and leave the view blank until its replacement arrives. It
-    // stays where it is instead, as a zoom fill keeps it.
+    // stays where it is instead, as a zoom fill keeps it. A view the user
+    // moves shows it at its own times, where the pointer took it: there it
+    // would show columns at the wrong times.
+    if (!rollingMode && viewMovedLocked()) {
+        return alignment;
+    }
     const auto visibleWidth = [viewWidth](double left, double right) {
         return std::max(0.0, std::min(right, viewWidth) - std::max(left, 0.0));
     };

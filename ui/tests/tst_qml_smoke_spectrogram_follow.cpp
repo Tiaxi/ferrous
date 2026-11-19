@@ -23,6 +23,8 @@ private slots:
     void middleDragInRollingModeOrOfTheWholeTrackDoesNothing();
     void wheelZoomsAboutThePointerWhileDetached();
     void wheelZoomsAboutThePlayheadWhileFollowing();
+    void wheelZoomsAboutThePointerAtAnEndOfTheTrack();
+    void farPanShowsTheOldCanvasAtItsOwnTimes();
     void detachedViewGlidesBackFromItsReattachPoint();
     void playheadPastTheReattachPointLeavesTheView();
     void ownSeekKeepsTheViewAndOthersBringItBack_data();
@@ -461,6 +463,71 @@ void SpectrogramFollowSmokeTest::wheelZoomsAboutThePlayheadWhileFollowing() {
         item.canvasWidthLocked(), position, kColumnsPerSecond);
     QVERIFY(target.valid);
     QCOMPARE(target.range.left, target.playheadColumn - target.windowColumns / 2);
+}
+
+// A detached view held at an end of the track is not where its anchor would
+// put it: the wheel zooms about the time the view shows at the pointer.
+void SpectrogramFollowSmokeTest::wheelZoomsAboutThePointerAtAnEndOfTheTrack() {
+    SpectrogramItem item;
+    TestTime time;
+    prepare(item, time, 100.0, false);
+    takeZoomRequests(item);
+    // To the end of the track, and past it, where the view is held.
+    middleDrag(item, 400.0, -1'000.0);
+    QVERIFY(item.detached());
+    QCOMPARE(viewOf(item).left, qint64(kColumns - kWindow));
+    const double pointer = 300.0;
+    for (const int delta : {-240, 240, 240}) {
+        double shown = 0.0;
+        double columnSeconds = 0.0;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            shown = item.viewSecondsAtLocked(pointer);
+            columnSeconds =
+                1.0 / item.requestedViewLocked(item.currentRenderPositionSecondsLocked(item.m_now()))
+                          .columnsPerSecond;
+        }
+        wheelAt(item, pointer, delta);
+        QVERIFY(item.detached());
+        const SpectrogramViewFollow::Snapshot follow = item.viewFollow()->snapshot();
+        QVERIFY2(std::abs(follow.anchorSeconds - shown) <= columnSeconds,
+            qPrintable(QStringLiteral("%1 for %2").arg(follow.anchorSeconds).arg(shown)));
+        QCOMPARE(follow.anchorFraction, pointer / kWidth);
+    }
+}
+
+// A pan by more than half the view, whose canvas the next rasterization
+// replaces, shows the canvas it has at its own times meanwhile, mostly off
+// the view, rather than at the times of the view it moved to.
+void SpectrogramFollowSmokeTest::farPanShowsTheOldCanvasAtItsOwnTimes() {
+    QQuickWindow window;
+    window.resize(400, 100);
+    presentWithoutDrawing(window);
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    TestTime time;
+    prepare(item, time, 60.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    const qint64 canvasLeft = viewOf(item).left;
+    middleDrag(item, 350.0, 50.0);
+    const qint64 left = viewOf(item).left;
+    QCOMPARE(left, canvasLeft + 300);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, canvasLeft);
+        const SpectrogramZoomPreview alignment = item.staleCanvasAlignmentLocked(
+            0.0, kWindow, kWidth, 0.0, left, false, item.canvasZoomLocked(), kColumnsPerSecond);
+        QVERIFY(alignment.active);
+        QCOMPARE(alignment.map(0.0), -300.0);
+    }
+    // Following, a jump keeps the canvas where it is until it is replaced.
+    item.followPlayhead();
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const SpectrogramZoomPreview alignment = item.staleCanvasAlignmentLocked(
+            0.0, kWindow, kWidth, 0.0, left, false, item.canvasZoomLocked(), kColumnsPerSecond);
+        QVERIFY(!alignment.active);
+    }
+    delete node;
 }
 
 // The playhead reaching 85 % of a detached view glides it back, over 2 s

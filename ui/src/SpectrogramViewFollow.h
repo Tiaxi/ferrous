@@ -62,7 +62,6 @@ public:
     void detach(double anchorSeconds, double fraction);
     // Whether a drag pans the view: until it ends, nothing glides back.
     void setPanning(bool panning);
-    bool panning() const;
     // The view `spanSeconds` wide at the zoom asked for, of a track
     // `endSeconds` long, or showing the whole track, with the playhead at
     // `position`. A detached view of the whole track follows the playhead;

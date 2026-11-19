@@ -493,6 +493,9 @@ struct AnalysisRuntimeState {
     /// rather than around the playhead. `None` while the view follows the
     /// playhead, and in rolling mode.
     spectrogram_view_anchor: Option<f64>,
+    /// Whether the live session was told of a view the user moved, since it
+    /// started: its columns may be around that view.
+    spectrogram_session_moved: bool,
     /// Start position (seconds) of the current spectrogram decode session.
     /// Used to determine whether a seek falls within the already-decoded
     /// window, avoiding unnecessary session restarts.
@@ -784,6 +787,7 @@ impl AnalysisRuntimeState {
             worker_continuation: None,
             last_spectrogram_position: 0.0,
             spectrogram_view_anchor: None,
+            spectrogram_session_moved: false,
             spectrogram_session_start: 0.0,
             spectrogram_session_margin: 30.0,
             suppress_next_spectrogram_position_update: false,
@@ -935,8 +939,12 @@ impl AnalysisRuntimeState {
                 // centered view the user moved away has its columns around
                 // that view, not the playhead's history: a fresh one at the
                 // playhead decodes that history, as for a view shown again.
+                // The UI follows the playhead again before it switches, so
+                // the anchor may be gone already while the session, which
+                // takes the two together, has not left the view.
+                self.spectrogram_view_anchor = None;
                 let restart_at_playhead = mode == SpectrogramDisplayMode::Rolling
-                    && self.spectrogram_view_anchor.take().is_some();
+                    && std::mem::take(&mut self.spectrogram_session_moved);
                 self.display_mode = mode;
                 let _ = ctx
                     .spectrogram_cmd_tx
@@ -1881,6 +1889,7 @@ impl AnalysisRuntimeState {
         self.worker_file = Some(path.clone());
         self.worker_continuation = None;
         self.spectrogram_session_start = start.start_seconds;
+        self.spectrogram_session_moved = self.spectrogram_view_anchor.is_some();
         self.spectrogram_session_widget_width = self.spectrogram_widget_width;
         self.spectrogram_session_margin = self.centered_margin_seconds();
         let generation = ctx.spectrogram_decode_generation.load(Ordering::Relaxed);
@@ -2236,11 +2245,17 @@ impl AnalysisRuntimeState {
         let continuation_unsettled = self.staged_continuation_path.is_some()
             || self.provisional_continuation.is_some()
             || self.worker_may_decode_another_file();
-        if self.centered_session_reaches(
-            self.spectrogram_view_position(),
-            continuation_unsettled,
-            ctx,
-        ) {
+        // A worker waiting to hand over columns would read the anchor, and
+        // its seek's reset reach the UI, only after they drain: a new
+        // session makes them stale instead.
+        if !ctx.event_tx.spectral_backpressured()
+            && self.centered_session_reaches(
+                self.spectrogram_view_position(),
+                continuation_unsettled,
+                ctx,
+            )
+        {
+            self.spectrogram_session_moved |= anchor.is_some();
             let _ = ctx
                 .spectrogram_cmd_tx
                 .send(SpectrogramWorkerCommand::SetViewAnchor {
@@ -3966,6 +3981,44 @@ mod tests {
 
     #[test]
     fn a_switch_to_rolling_while_moved_restarts_at_the_playhead() {
+        // The UI follows the playhead again before it switches: the
+        // session, which may take both together, has its columns around
+        // the view still.
+        for follows_first in [false, true] {
+            let harness = AnchorHarness::new();
+            let mut state = centered_state_at_10_seconds();
+            // In the session's window: following again goes to the worker.
+            state.last_spectrogram_position = 50.0;
+            state.handle_command(anchor(3, Some(40.0)), &harness.ctx());
+            if follows_first {
+                state.handle_command(anchor(3, None), &harness.ctx());
+                assert!(matches!(
+                    harness.sent().as_slice(),
+                    [
+                        SpectrogramWorkerCommand::SetViewAnchor { .. },
+                        SpectrogramWorkerCommand::SetViewAnchor {
+                            anchor_seconds: None
+                        }
+                    ]
+                ));
+            }
+            harness.sent();
+            state.handle_command(
+                AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Rolling),
+                &harness.ctx(),
+            );
+            assert!(
+                harness.sent().iter().any(|command| matches!(
+                    command,
+                    SpectrogramWorkerCommand::NewTrack {
+                        view_anchor: None,
+                        display_mode: SpectrogramDisplayMode::Rolling,
+                        ..
+                    }
+                )),
+                "follows first: {follows_first}"
+            );
+        }
         let harness = AnchorHarness::new();
         let mut state = centered_state_at_10_seconds();
         state.last_spectrogram_position = 100.0;
@@ -4006,6 +4059,28 @@ mod tests {
             .sent()
             .iter()
             .all(|command| matches!(command, SpectrogramWorkerCommand::SetDisplayMode(_))));
+    }
+
+    #[test]
+    fn a_view_moved_while_the_stream_is_full_restarts_the_session() {
+        // The worker would read the anchor, and its seek's reset reach the
+        // UI, only after the chunks waiting drain: a new session makes them
+        // stale instead.
+        let harness = AnchorHarness::new();
+        let mut state = centered_state_at_10_seconds();
+        let full = Backpressured(harness.event_tx.clone());
+        let ctx = AnalysisContext {
+            event_tx: &full,
+            ..harness.ctx()
+        };
+        state.handle_command(anchor(3, Some(40.0)), &ctx);
+        assert!(matches!(
+            harness.sent().as_slice(),
+            [SpectrogramWorkerCommand::NewTrack {
+                view_anchor: Some(_),
+                ..
+            }]
+        ));
     }
 
     #[test]

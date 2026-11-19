@@ -38,7 +38,19 @@ class QSGTexture;
 class QWheelEvent;
 struct SpectrogramProjection;
 struct SpectrogramRasterMailbox;
-struct SpectrogramZoomPreview;
+
+// Maps canvas x positions to where a zoom preview shows them: scaled by
+// `scale` about `fromX`, which lands at `toX`.
+struct SpectrogramZoomPreview {
+    bool active{false};
+    double scale{1.0};
+    double fromX{0.0};
+    double toX{0.0};
+
+    double map(double x) const {
+        return active ? toX + (x - fromX) * scale : x;
+    }
+};
 
 // Ring columns in fixed-size, implicitly shared blocks. A rasterization
 // keeps copies of the blocks it reads, so writing a column copies only its

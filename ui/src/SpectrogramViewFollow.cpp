@@ -70,11 +70,6 @@ void SpectrogramViewFollow::setPanning(bool panning) {
     }
 }
 
-bool SpectrogramViewFollow::panning() const {
-    QMutexLocker lock(&m_mutex);
-    return m_panning;
-}
-
 void SpectrogramViewFollow::setGeometry(
     double spanSeconds, double endSeconds, bool wholeTrack, double position) {
     {
