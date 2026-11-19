@@ -28,7 +28,7 @@ use gst::prelude::*;
 use gstreamer as gst;
 
 #[cfg(feature = "gst")]
-use super::ac3_dynamic_range::{find_range_flags, RangeFlags, Unparsed};
+use super::ac3_dynamic_range::{channel_layout, find_range_flags_in_stream, RangeFlags, Unparsed};
 use super::bitstream::plain_ac3_frame_len;
 
 /// The decoders with a sink pad that takes AC3 frames from `ac3parse`.
@@ -150,8 +150,33 @@ struct Concealer {
     /// found, and why the last of them was not.
     unparsed: usize,
     unparsed_reason: Option<Unparsed>,
+    /// The channel layout of the intact frames since the decoder was last
+    /// reset, at its start or a flush, if they all had one.
+    layout: Layout,
     /// Whether to log `concealed` and `unparsed` at the end of the stream.
     report: bool,
+}
+
+/// The channel layouts of the frames a decoder decoded.
+#[cfg(feature = "gst")]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    #[default]
+    None,
+    One((usize, bool)),
+    Several,
+}
+
+#[cfg(feature = "gst")]
+impl Layout {
+    /// Add a frame of `layout`.
+    fn add(&mut self, layout: (usize, bool)) {
+        *self = match *self {
+            Self::None => Self::One(layout),
+            Self::One(one) if one == layout => Self::One(one),
+            _ => Self::Several,
+        };
+    }
 }
 
 /// What the probe does with a frame.
@@ -184,15 +209,19 @@ impl Concealer {
             };
             match check_frame(&map) {
                 Frame::Unchecked => return,
-                Frame::Intact => match find_range_flags(&map) {
-                    Ok(flags) if flags.compress(&map) => Preparation::Neutralize(flags),
-                    Ok(_) => Preparation::Keep,
-                    Err(reason) => {
-                        self.unparsed += 1;
-                        self.unparsed_reason = Some(reason);
-                        Preparation::Keep
+                Frame::Intact => {
+                    // An intact frame is a whole one.
+                    self.layout.add(channel_layout(&map));
+                    match find_range_flags_in_stream(&map, self.layout != Layout::Several) {
+                        Ok(flags) if flags.compress(&map) => Preparation::Neutralize(flags),
+                        Ok(_) => Preparation::Keep,
+                        Err(reason) => {
+                            self.unparsed += 1;
+                            self.unparsed_reason = Some(reason);
+                            Preparation::Keep
+                        }
                     }
-                },
+                }
                 Frame::Damaged => {
                     self.concealed += 1;
                     let frame = match &self.last_intact {
@@ -224,7 +253,13 @@ impl Concealer {
     /// elsewhere, perhaps with another channel layout or another length.
     fn handle_event(&mut self, event: gst::EventType) {
         match event {
-            gst::EventType::FlushStop | gst::EventType::Caps => self.last_intact = None,
+            // A flush resets the decoder, but new caps, which may be the
+            // same, need not.
+            gst::EventType::FlushStop => {
+                self.last_intact = None;
+                self.layout = Layout::None;
+            }
+            gst::EventType::Caps => self.last_intact = None,
             gst::EventType::StreamStart | gst::EventType::Eos => {
                 self.last_intact = None;
                 let concealed = std::mem::take(&mut self.concealed);
@@ -757,9 +792,9 @@ mod tests {
 #[cfg(all(test, feature = "gst"))]
 mod pipeline_tests {
     use super::{
-        prepare_ac3_frames, record_decoder_input, silenced, silent_frame_with, with_damaged_frames,
-        with_dynamic_range, Concealer, DecoderFrame, SilentDba, AC3_DECODERS, AC3_FRAME_LEN,
-        AC3_LAYOUTS, COMPRESSING_DYNRNG, SEAMED_FRAME, TEST_AC3_FRAMES,
+        header_of, prepare_ac3_frames, record_decoder_input, silenced, silent_frame_with,
+        with_damaged_frames, with_dynamic_range, Concealer, DecoderFrame, SilentDba, AC3_DECODERS,
+        AC3_FRAME_LEN, AC3_LAYOUTS, COMPRESSING_DYNRNG, SEAMED_FRAME, TEST_AC3_FRAMES,
     };
     use crate::raw_audio::{
         assert_no_burst, configure_raw_surround_decoding, largest_step, test_path, TEST_AC3,
@@ -1028,6 +1063,36 @@ mod pipeline_tests {
         // set, so the decoder would use one of an earlier frame, which the
         // probe does not know.
         assert_eq!(prepare(&reusing), reusing);
+    }
+
+    #[test]
+    fn an_lfe_frame_after_a_frame_of_another_layout_passes_unchanged_until_a_flush() {
+        gst::init().expect("gst init");
+        // 3.0 and 2.1 have three channels each: the caps stay, and so does
+        // the decoder, with what the third channel of 3.0 left at the slot
+        // of the LFE of 2.1.
+        let front = silent_frame_with(&header_of(20, 3, false), None, SilentDba::Unset);
+        let dba_from_the_first_block = |dynrng| {
+            silent_frame_with(
+                &header_of(20, 2, true),
+                Some(dynrng),
+                SilentDba::NoneFromTheFirstBlock,
+            )
+        };
+        let lfe = dba_from_the_first_block(COMPRESSING_DYNRNG);
+        let plain = dba_from_the_first_block(0);
+        let mut concealer = Concealer::default();
+        let prepare = |concealer: &mut Concealer, frame: &[u8]| {
+            let mut buffer = gst::Buffer::from_slice(frame.to_vec());
+            concealer.prepare(&mut buffer);
+            let map = buffer.map_readable().expect("map frame");
+            map.to_vec()
+        };
+        assert_eq!(prepare(&mut concealer, &lfe), plain);
+        assert_eq!(prepare(&mut concealer, &front), front);
+        assert_eq!(prepare(&mut concealer, &lfe), lfe);
+        concealer.handle_event(gst::EventType::FlushStop);
+        assert_eq!(prepare(&mut concealer, &lfe), plain);
     }
 
     #[test]

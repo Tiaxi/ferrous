@@ -350,14 +350,49 @@ struct Frame<'a> {
     cpl_in_use: bool,
     phase_flags_in_use: bool,
     cpl_bands: usize,
+    /// Whether the decoder has no delta bit allocation for the LFE: see
+    /// [`find_range_flags_in_stream`].
+    lfe_without_dba: bool,
 }
 
-/// Find the dynamic range flags of `frame`, one whole plain AC3 frame.
+/// The channel layout of `frame`, a plain AC3 frame: its `acmod` and
+/// `lfeon`.
+#[cfg(feature = "gst")]
+pub(super) fn channel_layout(frame: &[u8]) -> (usize, bool) {
+    let acmod = usize::from(frame[6] >> 5);
+    // `cmixlev`, `surmixlev`, and `dsurmod` come before `lfeon`.
+    let lfeon = 51
+        + 2 * usize::from(acmod & 1 == 1 && acmod != 1)
+        + 2 * usize::from(acmod & 4 != 0)
+        + 2 * usize::from(acmod == 2);
+    (acmod, bit_at(frame, lfeon) == 1)
+}
+
+/// [`find_range_flags_in_stream`] of a frame whose decoder decoded only
+/// frames of its layout.
+#[cfg(test)]
 pub(super) fn find_range_flags(frame: &[u8]) -> Result<RangeFlags, Unparsed> {
+    find_range_flags_in_stream(frame, true)
+}
+
+/// Find the dynamic range flags of `frame`, one whole plain AC3 frame,
+/// where `one_layout` tells whether every frame the decoder decoded since
+/// it was last reset, at its start or a flush, had the layout of `frame`.
+///
+/// A/52 gives the LFE no delta bit allocation, so no block sets its
+/// strategy, and the decoder keeps what it held: nothing, unless a frame
+/// of another layout had a full-bandwidth channel where this one has the
+/// LFE. `ac3parse` tells only the number of channels, so a change from,
+/// say, 3.0 to 2.1 keeps the decoder and that state.
+pub(super) fn find_range_flags_in_stream(
+    frame: &[u8],
+    one_layout: bool,
+) -> Result<RangeFlags, Unparsed> {
     if plain_ac3_frame_len(frame) != Some(frame.len()) {
         return Err(Unparsed::NotPlainAc3);
     }
     let mut parsed = Frame::new(frame)?;
+    parsed.lfe_without_dba = one_layout;
     let mut flags = RangeFlags::new();
     for block in 0..6 {
         parsed.block(block, &mut flags)?;
@@ -441,6 +476,7 @@ impl<'a> Frame<'a> {
             cpl_in_use: false,
             phase_flags_in_use: false,
             cpl_bands: 0,
+            lfe_without_dba: false,
         })
     }
 
@@ -900,12 +936,8 @@ impl<'a> Frame<'a> {
         }
 
         let segments = match (state.dba_mode, state.dba_segments) {
-            // A/52 gives the LFE no delta bit allocation, so no block sets
-            // its strategy. The decoder's segments for it are those of a
-            // full-bandwidth channel of another layout, and `gst-libav`
-            // opens the decoder anew when the layout changes: there are
-            // none.
-            _ if is_lfe => 0,
+            // The LFE's, which no block sets.
+            _ if is_lfe && self.lfe_without_dba => 0,
             (Some(DBA_NONE), _) => 0,
             (Some(_), Some(segments)) => segments,
             // The coupling channel's, when the first block is uncoupled.
