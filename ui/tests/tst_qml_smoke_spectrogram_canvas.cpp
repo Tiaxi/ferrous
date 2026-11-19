@@ -1967,6 +1967,7 @@ void SpectrogramCanvasSmokeTest::spectrogramDestroyedInItsWindowRunsNoHandlersOf
 
 void SpectrogramCanvasSmokeTest::spectrogramSurfaceCoalescesWidthReports() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<SpectrogramViewFollow>("FerrousUi", 1, 0, "SpectrogramViewFollow");
 
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -3484,6 +3485,7 @@ void SpectrogramCanvasSmokeTest::spectrogramFarSeekTellsTheSurfaceItAwaitsData()
     QFETCH(bool, canvasShown);
     QFETCH(bool, keepsCanvas);
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<SpectrogramViewFollow>("FerrousUi", 1, 0, "SpectrogramViewFollow");
 
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(

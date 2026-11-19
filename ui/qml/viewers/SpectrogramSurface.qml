@@ -127,10 +127,26 @@ Item {
         }
     }
 
-    // Both zooms back to the default, as View › Reset Zoom does.
+    // Both zooms back to the default, as View › Reset Zoom does, and the
+    // view back to the playhead.
     function resetZoom() {
         root._widgetZoomLevel = 0
         root._viewerZoomLevel = 0
+        sharedViewFollow.followPlayhead()
+    }
+
+    // Where the centered view is, shared by the lanes: a middle-drag on any
+    // of them moves all of them, and the analysis decodes the view where it
+    // is (SpectrogramViewFollow).
+    SpectrogramViewFollow {
+        id: sharedViewFollow
+    }
+    // Whether the centered view stays where a middle-drag moved it rather
+    // than following the playhead.
+    readonly property bool detached: sharedViewFollow.detached
+    // The view follows the playhead again, at once.
+    function followPlayhead() {
+        sharedViewFollow.followPlayhead()
     }
 
     // Debounced backend restart after significant width changes
@@ -427,6 +443,7 @@ Item {
                     crosshairSharedX: root._crosshairSharedX
                     onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
+                    viewFollow: sharedViewFollow
                     stretchShortTracks: root.uiBridge.stretchShortTracks
                     // Each lane at its own default, which its data tells.
                     zoomLevel: root._chosenZoomLevel > 0

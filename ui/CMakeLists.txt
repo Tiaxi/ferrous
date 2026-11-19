@@ -129,6 +129,7 @@ qt_add_library(ferrous_ui_core STATIC
     src/TagEditorController.cpp
     src/TagEditorTableModel.cpp
     src/SpectrogramItem.cpp
+    src/SpectrogramViewFollow.cpp
     src/WindowActivation.cpp
     src/WaveformItem.cpp
     src/WaveformSceneGraph.cpp
@@ -707,6 +708,7 @@ if(BUILD_TESTING)
         tests/tst_qml_smoke_spectrogram.cpp
         tests/tst_qml_smoke_spectrogram_playback.cpp
         tests/tst_qml_smoke_spectrogram_canvas.cpp
+        tests/tst_qml_smoke_spectrogram_follow.cpp
         tests/tst_qml_smoke_waveform.cpp
         tests/tst_qml_smoke_waveform_scene_graph.cpp
         tests/tst_qml_smoke_waveform_coverage.cpp

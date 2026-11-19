@@ -3,6 +3,7 @@
 #include "BinaryBridgeCodec.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -830,6 +831,20 @@ QByteArray encodeCommandF64(quint16 cmdId, double value) {
     std::memcpy(&bits, &value, sizeof(bits));
     appendLe<quint64>(payload, bits);
     return finalizeCommand(cmdId, payload);
+}
+
+QByteArray encodeCommandSpectrogramViewAnchor(quint64 trackToken, double centerSeconds) {
+    const bool anchored = std::isfinite(centerSeconds);
+    const double seconds = anchored ? std::max(0.0, centerSeconds) : 0.0;
+    QByteArray payload;
+    payload.reserve(17);
+    appendLe<quint64>(payload, trackToken);
+    payload.append(static_cast<char>(anchored ? 1 : 0));
+    quint64 bits = 0;
+    static_assert(sizeof(seconds) == sizeof(bits), "double size mismatch");
+    std::memcpy(&bits, &seconds, sizeof(bits));
+    appendLe<quint64>(payload, bits);
+    return finalizeCommand(CmdSetSpectrogramViewAnchor, payload);
 }
 
 QByteArray encodeCommandString(quint16 cmdId, const QString &value) {

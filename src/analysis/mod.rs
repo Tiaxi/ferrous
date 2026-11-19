@@ -166,6 +166,15 @@ pub enum AnalysisCommand {
     },
     PositionUpdate(f64),
     SeekPosition(f64),
+    /// The centered spectrogram of `track_token` stays where the user moved
+    /// it, centred on `center_seconds` of the track, rather than following
+    /// the playhead; `None` follows the playhead again. Sessions decode the
+    /// view and its lookahead wherever it is. An anchor for another track
+    /// than the active one is stale and ignored, as is one in rolling mode.
+    SetSpectrogramViewAnchor {
+        track_token: u64,
+        center_seconds: Option<f64>,
+    },
     WaveformProgress {
         track_token: u64,
         update: WaveformUpdate,
@@ -479,6 +488,14 @@ struct AnalysisRuntimeState {
     /// Last raw position forwarded to the spectrogram worker, used to
     /// compute the offset at gapless transitions.
     last_spectrogram_position: f64,
+    /// Where a centered view the user moved away from the playhead is
+    /// centred, in seconds of the active track: sessions decode around it
+    /// rather than around the playhead. `None` while the view follows the
+    /// playhead, and in rolling mode.
+    spectrogram_view_anchor: Option<f64>,
+    /// Whether the live session was told of a view the user moved, since it
+    /// started: its columns may be around that view.
+    spectrogram_session_moved: bool,
     /// Start position (seconds) of the current spectrogram decode session.
     /// Used to determine whether a seek falls within the already-decoded
     /// window, avoiding unnecessary session restarts.
@@ -769,6 +786,8 @@ impl AnalysisRuntimeState {
             worker_file: None,
             worker_continuation: None,
             last_spectrogram_position: 0.0,
+            spectrogram_view_anchor: None,
+            spectrogram_session_moved: false,
             spectrogram_session_start: 0.0,
             spectrogram_session_margin: 30.0,
             suppress_next_spectrogram_position_update: false,
@@ -825,7 +844,8 @@ impl AnalysisRuntimeState {
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 let target = self.last_spectrogram_position;
-                let start = self.spectrogram_restart_start_seconds(target, ctx);
+                let start =
+                    self.spectrogram_restart_start_seconds(self.spectrogram_view_position(), ctx);
                 self.start_spectrogram_session_with_target(start, target, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramFrequencyCap(capped) => {
@@ -841,7 +861,8 @@ impl AnalysisRuntimeState {
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 let target = self.last_spectrogram_position;
-                let start = self.spectrogram_restart_start_seconds(target, ctx);
+                let start =
+                    self.spectrogram_restart_start_seconds(self.spectrogram_view_position(), ctx);
                 self.start_spectrogram_session_with_target(start, target, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramActive(active) => {
@@ -852,8 +873,11 @@ impl AnalysisRuntimeState {
                 let w = width.max(320);
                 self.spectrogram_widget_width = w;
                 if w > self.spectrogram_session_widget_width {
-                    let target = self.last_spectrogram_position;
-                    let visible_left = self.centered_visible_left_edge_seconds(target, w, ctx);
+                    let visible_left = self.centered_visible_left_edge_seconds(
+                        self.spectrogram_view_position(),
+                        w,
+                        ctx,
+                    );
                     // A wider ring cannot restore columns skipped by an earlier
                     // seek or already evicted at the OLD capacity. Refill only
                     // when the enlarged centered viewport exposes that history.
@@ -864,7 +888,7 @@ impl AnalysisRuntimeState {
                     {
                         self.clear_early_continuation(ctx);
                         self.cancel_centered_staging();
-                        self.refill_centered_spectrogram(target, ctx);
+                        self.refill_centered_spectrogram(self.last_spectrogram_position, ctx);
                     } else {
                         // Existing history covers the left edge; let the worker
                         // extend its lookahead without clearing the Qt ring.
@@ -891,7 +915,8 @@ impl AnalysisRuntimeState {
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 let target = self.last_spectrogram_position;
-                let start = self.spectrogram_restart_start_seconds(target, ctx);
+                let start =
+                    self.spectrogram_restart_start_seconds(self.spectrogram_view_position(), ctx);
                 self.start_spectrogram_session_with_target(start, target, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramViewMode(view_mode) => {
@@ -902,17 +927,36 @@ impl AnalysisRuntimeState {
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 let target = self.last_spectrogram_position;
-                let start = self.spectrogram_restart_start_seconds(target, ctx);
+                let start =
+                    self.spectrogram_restart_start_seconds(self.spectrogram_view_position(), ctx);
                 self.start_spectrogram_session_with_target(start, target, true, true, ctx);
             }
             AnalysisCommand::SetSpectrogramDisplayMode(mode) => {
                 self.clear_early_continuation(ctx);
                 self.cancel_centered_staging();
                 profile_eprintln!("[analysis] SetSpectrogramDisplayMode({mode:?})");
+                // A rolling view follows playback. A session that decoded a
+                // centered view the user moved away has its columns around
+                // that view, not the playhead's history: a fresh one at the
+                // playhead decodes that history, as for a view shown again.
+                // The UI follows the playhead again before it switches, so
+                // the anchor may be gone already while the session, which
+                // takes the two together, has not left the view.
+                let rolling = mode == SpectrogramDisplayMode::Rolling;
+                if rolling {
+                    self.spectrogram_view_anchor = None;
+                }
+                let restart_at_playhead =
+                    rolling && std::mem::take(&mut self.spectrogram_session_moved);
                 self.display_mode = mode;
                 let _ = ctx
                     .spectrogram_cmd_tx
                     .send(SpectrogramWorkerCommand::SetDisplayMode(mode));
+                if restart_at_playhead {
+                    let target = self.last_spectrogram_position;
+                    let start = (target - (self.centered_margin_seconds() - 2.0).max(0.0)).max(0.0);
+                    self.start_spectrogram_session_with_target(start, target, true, true, ctx);
+                }
             }
             AnalysisCommand::RestartCurrentTrack {
                 position_seconds,
@@ -929,6 +973,8 @@ impl AnalysisRuntimeState {
                 // playhead and decode a window Qt is not rendering.  A
                 // centered stop seeks to 0 instead, which sets it as well.
                 self.last_spectrogram_position = position_seconds;
+                // The track starts over: its view follows the playhead.
+                self.spectrogram_view_anchor = None;
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 let start = self.spectrogram_restart_start_seconds(position_seconds, ctx);
@@ -949,6 +995,17 @@ impl AnalysisRuntimeState {
             AnalysisCommand::SeekPosition(position_seconds) => {
                 profile_eprintln!("[analysis] SeekPosition pos={position_seconds:.2}");
                 self.seek_spectrogram_position(position_seconds, ctx);
+            }
+            AnalysisCommand::SetSpectrogramViewAnchor {
+                track_token,
+                center_seconds,
+            } => {
+                // An anchor sent for the track before a track change, which
+                // the UI's view of the new track follows the playhead of.
+                if track_token != self.active_track_token {
+                    return;
+                }
+                self.set_spectrogram_view_anchor(center_seconds, ctx);
             }
             AnalysisCommand::WaveformProgress {
                 track_token,
@@ -1042,7 +1099,7 @@ impl AnalysisRuntimeState {
                 // Restore a viewport of history when a hidden rolling view returns.
                 (target - (self.centered_margin_seconds() - 2.0).max(0.0)).max(0.0)
             } else {
-                self.spectrogram_restart_start_seconds(target, ctx)
+                self.spectrogram_restart_start_seconds(self.spectrogram_view_position(), ctx)
             };
             self.start_spectrogram_session_with_target(start, target, true, true, ctx);
         } else {
@@ -1364,6 +1421,8 @@ impl AnalysisRuntimeState {
         let track_change_started_at = std::time::Instant::now();
 
         self.suppress_next_spectrogram_position_update = false;
+        // Another track's view follows its playhead.
+        self.spectrogram_view_anchor = None;
         // A successor still being probed is not the one that follows now.
         self.pending_candidate = None;
         self.unconfirmed_continuation = None;
@@ -1833,6 +1892,7 @@ impl AnalysisRuntimeState {
         self.worker_file = Some(path.clone());
         self.worker_continuation = None;
         self.spectrogram_session_start = start.start_seconds;
+        self.spectrogram_session_moved = self.spectrogram_view_anchor.is_some();
         self.spectrogram_session_widget_width = self.spectrogram_widget_width;
         self.spectrogram_session_margin = self.centered_margin_seconds();
         let generation = ctx.spectrogram_decode_generation.load(Ordering::Relaxed);
@@ -1863,6 +1923,7 @@ impl AnalysisRuntimeState {
                 channel_count: self.active_session_channel_count.max(1),
                 start_seconds: start.start_seconds,
                 target_position_seconds: start.target_position_seconds,
+                view_anchor: self.spectrogram_view_anchor,
                 emit_initial_reset: start.emit_initial_reset,
                 clear_history_on_reset: start.clear_history_on_reset,
                 view_mode: self.spectrogram_view_mode,
@@ -2054,56 +2115,15 @@ impl AnalysisRuntimeState {
         }
 
         if self.display_mode == SpectrogramDisplayMode::Centered {
-            // Windowed centered: check if the seek target is within the
-            // window the session decodes before restarting it.  The
-            // window extends from the session start for approximately
-            // 2× the visible screen width plus lookahead (~10 s).  If
-            // the seek is inside, the session takes it: it keeps its
-            // columns when what it has decoded covers the view, and
-            // otherwise seeks to the view itself, without a restart.
-            // Only the worker knows what it has decoded so far, which
-            // after a recent restart can be far less than the window.
-            // Use the larger of the current margin and the session's
-            // original margin.  The widget width can change between
-            // session start and seek (e.g. fullscreen toggle), which
-            // changes centered_margin_seconds().  Using only the current
-            // margin would flag seeks within the decoded extent as
-            // "outside window" after width shrinks, causing unnecessary
-            // session restarts and data loss.
-            let current_margin = self.centered_margin_seconds();
-            let margin = current_margin.max(self.spectrogram_session_margin);
-            let window_seconds = margin * 2.0 + 10.0;
-            let window_start = self.spectrogram_session_start;
-            let window_end = window_start + window_seconds;
-
-            // Model the Qt display's visible left edge (full-track lock /
-            // EOF detach aware) rather than assuming the playhead stays
-            // centered: near the track end the left edge sits up to a full
-            // window behind the playhead, and at deep zoom-out the display
-            // pins to the track start.  Checking against that edge keeps
-            // seeks near EOF from reusing a window that would render black
-            // on its left.
-            // The view as wide as the session's or the pane's, whichever
-            // is wider, as the margin is.
-            let visible_left = self.centered_visible_left_edge_seconds(
-                position_seconds,
-                self.spectrogram_widget_width
-                    .max(self.spectrogram_session_widget_width),
+            if self.centered_session_reaches(
+                self.spectrogram_view_position(),
+                continuation_unsettled,
                 ctx,
-            );
-            let retained_window_start = self.centered_retained_start_seconds(ctx);
-            // A worker that may still decode another file would seek in
-            // it: after a rolling switch the view left for centered before
-            // the worker reached the successor, or after a continuation
-            // the worker went on with before playback dropped it, as a stop
-            // near the end of a track does.
-            if !continuation_unsettled
-                && visible_left >= retained_window_start
-                && position_seconds <= window_end
-            {
+            ) {
                 // A seek, not a position: a position the session has not
                 // decoded up to yet would have it decode every column
-                // before the playhead's.
+                // before the playhead's. A view the user moved stays
+                // where it is, and the session judges by it.
                 let _ = ctx
                     .spectrogram_cmd_tx
                     .send(SpectrogramWorkerCommand::Seek { position_seconds });
@@ -2118,7 +2138,7 @@ impl AnalysisRuntimeState {
                 // during which old ring data can be briefly visible at the
                 // new playhead position.
                 self.clear_early_continuation(ctx);
-                self.refill_centered_spectrogram(position_seconds, ctx);
+                self.refill_centered_spectrogram(self.last_spectrogram_position, ctx);
             }
         } else if ctx.event_tx.spectral_backpressured() || continuation_unsettled {
             // The worker is waiting to hand over columns decoded before the
@@ -2138,6 +2158,119 @@ impl AnalysisRuntimeState {
         }
     }
 
+    /// Whether the live session can show a centered view centred on
+    /// `view_seconds` by seeking itself, rather than being restarted: the
+    /// view is inside the window the session decodes and its left edge is
+    /// in what the UI's ring still holds. The window extends from the
+    /// session start for approximately 2× the visible screen width plus
+    /// lookahead (~10 s). If the view is inside, the session takes it: it
+    /// keeps its columns when what it has decoded covers the view, and
+    /// otherwise seeks to the view itself, without a restart. Only the
+    /// worker knows what it has decoded so far, which after a recent
+    /// restart can be far less than the window.
+    ///
+    /// The window uses the larger of the current margin and the session's
+    /// original margin. The widget width can change between session start
+    /// and seek (e.g. fullscreen toggle), which changes
+    /// `centered_margin_seconds()`. Using only the current margin would
+    /// flag seeks within the decoded extent as "outside window" after width
+    /// shrinks, causing unnecessary session restarts and data loss.
+    ///
+    /// A worker that may still decode another file (`continuation_unsettled`)
+    /// would seek in it: after a rolling switch the view left for centered
+    /// before the worker reached the successor, or after a continuation the
+    /// worker went on with before playback dropped it, as a stop near the
+    /// end of a track does. So would one on a continued timeline, whose
+    /// positions are offset from the track's.
+    fn centered_session_reaches(
+        &self,
+        view_seconds: f64,
+        continuation_unsettled: bool,
+        ctx: &AnalysisContext<'_>,
+    ) -> bool {
+        let current_margin = self.centered_margin_seconds();
+        let margin = current_margin.max(self.spectrogram_session_margin);
+        let window_seconds = margin * 2.0 + 10.0;
+        let window_start = self.spectrogram_session_start;
+        let window_end = window_start + window_seconds;
+
+        // Model the Qt display's visible left edge (full-track lock / EOF
+        // detach aware) rather than assuming the view stays centered: near
+        // the track end the left edge sits up to a full window behind the
+        // view's middle, and at deep zoom-out the display pins to the track
+        // start. Checking against that edge keeps seeks near EOF from
+        // reusing a window that would render black on its left. The view
+        // as wide as the session's or the pane's, whichever is wider, as
+        // the margin is.
+        let visible_left = self.centered_visible_left_edge_seconds(
+            view_seconds,
+            self.spectrogram_widget_width
+                .max(self.spectrogram_session_widget_width),
+            ctx,
+        );
+        let retained_window_start = self.centered_retained_start_seconds(ctx);
+        !continuation_unsettled
+            && self.spectrogram_position_offset == 0.0
+            && visible_left >= retained_window_start
+            && view_seconds <= window_end
+    }
+
+    /// Where the centered view is centred: on the anchor of a view the user
+    /// moved away from the playhead, and else on the playhead. Sessions
+    /// decode around it.
+    fn spectrogram_view_position(&self) -> f64 {
+        self.spectrogram_view_anchor
+            .unwrap_or(self.last_spectrogram_position)
+    }
+
+    /// The centered view stays centred on `center_seconds` of the active
+    /// track, or follows the playhead again (`None`): the session keeps its
+    /// columns, decodes on into the view, or seeks to it when the view is
+    /// within its window, and is restarted around it otherwise, as for a
+    /// seek. Rolling views always follow the playhead.
+    fn set_spectrogram_view_anchor(
+        &mut self,
+        center_seconds: Option<f64>,
+        ctx: &AnalysisContext<'_>,
+    ) {
+        let anchor = center_seconds
+            .filter(|seconds| seconds.is_finite())
+            .map(|seconds| seconds.max(0.0))
+            .filter(|_| self.display_mode == SpectrogramDisplayMode::Centered);
+        if anchor == self.spectrogram_view_anchor {
+            return;
+        }
+        self.spectrogram_view_anchor = anchor;
+        if !self.spectrogram_active || self.active_track_path.is_none() {
+            // The next session starts around it.
+            return;
+        }
+        let continuation_unsettled = self.staged_continuation_path.is_some()
+            || self.provisional_continuation.is_some()
+            || self.worker_may_decode_another_file();
+        // A worker waiting to hand over columns would read the anchor, and
+        // its seek's reset reach the UI, only after they drain: a new
+        // session makes them stale instead.
+        if !ctx.event_tx.spectral_backpressured()
+            && self.centered_session_reaches(
+                self.spectrogram_view_position(),
+                continuation_unsettled,
+                ctx,
+            )
+        {
+            self.spectrogram_session_moved |= anchor.is_some();
+            let _ = ctx
+                .spectrogram_cmd_tx
+                .send(SpectrogramWorkerCommand::SetViewAnchor {
+                    anchor_seconds: anchor,
+                });
+        } else {
+            self.clear_early_continuation(ctx);
+            self.cancel_centered_staging();
+            self.refill_centered_spectrogram(self.last_spectrogram_position, ctx);
+        }
+    }
+
     /// Whether the worker may decode a file other than the active track, or
     /// nothing: one it reported it went on with, a continuation it was
     /// handed and may have taken, or no file once its session ended. A seek
@@ -2151,6 +2284,9 @@ impl AnalysisRuntimeState {
                 .is_some_and(|path| Some(path) != active)
     }
 
+    /// Restart the session for the centered view with the playhead at
+    /// `position_seconds`: around the playhead, or where the user moved the
+    /// view.
     fn refill_centered_spectrogram(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
         // The worker emits this reset before it opens the file, so the
         // frontend clears the ring before the next render frame and old
@@ -2176,7 +2312,8 @@ impl AnalysisRuntimeState {
             track_frames: 0,
             end_column: 0,
         };
-        let start = self.spectrogram_restart_start_seconds(position_seconds, ctx);
+        let view_seconds = self.spectrogram_view_anchor.unwrap_or(position_seconds);
+        let start = self.spectrogram_restart_start_seconds(view_seconds, ctx);
         self.start_session(
             SessionStart {
                 start_seconds: start,
@@ -3515,6 +3652,469 @@ mod tests {
         std::fs::remove_file(path).expect("remove fixture");
     }
 
+    /// An engine showing `path` centered in a 1,165-pixel view at zoom 1,
+    /// with its playhead at the start: of 8 kHz audio, 46.78 columns a
+    /// second, so the view shows 24.9 s.
+    fn moved_view_engine_on(path: &Path) -> (AnalysisEngine, Receiver<AnalysisEvent>) {
+        let (engine, events) = AnalysisEngine::new();
+        engine.command(AnalysisCommand::SetSpectrogramActive(true));
+        engine.command(AnalysisCommand::SetSpectrogramDisplayMode(
+            SpectrogramDisplayMode::Centered,
+        ));
+        engine.command(AnalysisCommand::SetSpectrogramWidgetWidth(1_165));
+        engine.command(AnalysisCommand::SetTrack {
+            path: path.to_path_buf(),
+            reset_spectrogram: true,
+            track_token: 1,
+            gapless: false,
+        });
+        engine.command(AnalysisCommand::PositionUpdate(0.0));
+        (engine, events)
+    }
+
+    /// The column of 8 kHz audio at zoom 1, 171 samples each, at `seconds`.
+    fn moved_view_column(seconds: f64) -> u64 {
+        f64_to_u64_saturating(seconds * 8_000.0 / 171.0)
+    }
+
+    /// A view the user moves is decoded where it is, wherever the playhead
+    /// is: a drag that sends the view's anchor many times restarts the
+    /// session once, and following the playhead again decodes its view,
+    /// with no column of the moved view's session landing after it.
+    #[test]
+    fn a_moved_view_is_decoded_where_it_is_and_a_drag_restarts_once() {
+        let path = write_engine_test_wave(400, 8_000);
+        let (engine, events) = moved_view_engine_on(&path);
+        let mut ring = ModelRing::default();
+        fill_ring_until(
+            &events,
+            &mut ring,
+            "the playhead's view was not decoded",
+            |ring| ring.covers(0, moved_view_column(24.0)),
+        );
+        let generation = engine.spectrogram_decode_generation.load(Ordering::Relaxed);
+        let resets = ring.resets;
+
+        // Dragged to 300 s and on to 310 s, far past what the session
+        // decodes for the playhead.
+        for step in 0..=20_i32 {
+            engine.command(AnalysisCommand::SetSpectrogramViewAnchor {
+                track_token: 1,
+                center_seconds: Some(300.0 + f64::from(step) * 0.5),
+            });
+        }
+        fill_ring_until(
+            &events,
+            &mut ring,
+            "the moved view was not decoded",
+            |ring| {
+                ring.generation > generation
+                    && ring.covers(moved_view_column(297.6), moved_view_column(322.4))
+            },
+        );
+        assert_eq!(
+            engine.spectrogram_decode_generation.load(Ordering::Relaxed),
+            generation + 1,
+            "one session for the whole drag"
+        );
+        // The refill's clear and its session's reset, and at most one seek
+        // of that session to where the drag ended.
+        assert!(ring.resets - resets <= 3, "{} resets", ring.resets - resets);
+        // An anchor of another track changes nothing.
+        engine.command(AnalysisCommand::SetSpectrogramViewAnchor {
+            track_token: 2,
+            center_seconds: None,
+        });
+        let generation = engine.spectrogram_decode_generation.load(Ordering::Relaxed);
+        let resets = ring.resets;
+        take_for(&events, &mut ring, Duration::from_millis(300));
+        assert_eq!(ring.resets, resets);
+        assert_eq!(
+            engine.spectrogram_decode_generation.load(Ordering::Relaxed),
+            generation
+        );
+
+        // Following the playhead again decodes its view, and nothing of the
+        // moved view's session lands after the refill's reset.
+        engine.command(AnalysisCommand::SetSpectrogramViewAnchor {
+            track_token: 1,
+            center_seconds: None,
+        });
+        fill_ring_until(
+            &events,
+            &mut ring,
+            "the playhead's view was not refilled",
+            |ring| ring.generation > generation && ring.covers(0, moved_view_column(24.0)),
+        );
+        assert_eq!(ring.first(), Some(0), "{:?}", ring.columns);
+        assert_eq!(ring.columns.len(), 1, "{:?}", ring.columns);
+        drop(engine);
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    /// The channels of an analysis thread's state under test, at its
+    /// defaults: 48 kHz, a 1920-pixel view at zoom 1, 40.96 s wide.
+    struct AnchorHarness {
+        event_tx: Sender<AnalysisEvent>,
+        spectrogram_cmd_tx: Sender<SpectrogramWorkerCommand>,
+        commands: Receiver<SpectrogramWorkerCommand>,
+        waveform_job_tx: Sender<WaveformDecodeJob>,
+        waveform_decode_active_token: AtomicU64,
+        spectrogram_decode_generation: AtomicU64,
+        spectrogram_decode_columns_produced: AtomicU64,
+        spectrogram_track_length: PublishedTrackLength,
+    }
+
+    impl AnchorHarness {
+        fn new() -> Self {
+            let (event_tx, _) = unbounded();
+            let (spectrogram_cmd_tx, commands) = unbounded();
+            let (waveform_job_tx, _) = unbounded();
+            Self {
+                event_tx,
+                spectrogram_cmd_tx,
+                commands,
+                waveform_job_tx,
+                waveform_decode_active_token: AtomicU64::new(0),
+                spectrogram_decode_generation: AtomicU64::new(1),
+                spectrogram_decode_columns_produced: AtomicU64::new(0),
+                spectrogram_track_length: PublishedTrackLength::default(),
+            }
+        }
+
+        fn ctx(&self) -> AnalysisContext<'_> {
+            AnalysisContext {
+                event_tx: &self.event_tx,
+                waveform_job_tx: &self.waveform_job_tx,
+                waveform_decode_active_token: &self.waveform_decode_active_token,
+                spectrogram_cmd_tx: &self.spectrogram_cmd_tx,
+                spectrogram_decode_generation: &self.spectrogram_decode_generation,
+                spectrogram_decode_columns_produced: &self.spectrogram_decode_columns_produced,
+                spectrogram_track_length: &self.spectrogram_track_length,
+            }
+        }
+
+        /// The commands sent to the worker since the last call.
+        fn sent(&self) -> Vec<SpectrogramWorkerCommand> {
+            self.commands.try_iter().collect()
+        }
+    }
+
+    /// A centered view of track 3, whose session started at the track's
+    /// start and decodes it, with the playhead at 10 s.
+    fn centered_state_at_10_seconds() -> AnalysisRuntimeState {
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_token = 3;
+        state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        state.worker_file = state.active_track_path.clone();
+        state.spectrogram_session_start = 0.0;
+        state.spectrogram_session_margin = state.centered_margin_seconds();
+        state.last_spectrogram_position = 10.0;
+        state
+    }
+
+    fn anchor(track_token: u64, center_seconds: Option<f64>) -> AnalysisCommand {
+        AnalysisCommand::SetSpectrogramViewAnchor {
+            track_token,
+            center_seconds,
+        }
+    }
+
+    #[test]
+    fn a_moved_view_within_the_sessions_window_is_left_to_the_session() {
+        let harness = AnchorHarness::new();
+        let mut state = centered_state_at_10_seconds();
+        state.handle_command(anchor(3, Some(40.0)), &harness.ctx());
+        assert!(matches!(
+            harness.sent().as_slice(),
+            [SpectrogramWorkerCommand::SetViewAnchor { anchor_seconds: Some(seconds) }]
+                if (*seconds - 40.0).abs() < f64::EPSILON
+        ));
+        // The same anchor again changes nothing.
+        state.handle_command(anchor(3, Some(40.0)), &harness.ctx());
+        assert!(harness.sent().is_empty());
+        // Following the playhead again.
+        state.handle_command(anchor(3, None), &harness.ctx());
+        assert!(matches!(
+            harness.sent().as_slice(),
+            [SpectrogramWorkerCommand::SetViewAnchor {
+                anchor_seconds: None
+            }]
+        ));
+        assert_eq!(state.spectrogram_view_anchor, None);
+    }
+
+    #[test]
+    fn an_anchor_of_another_track_or_of_a_rolling_view_is_ignored() {
+        let harness = AnchorHarness::new();
+        let mut state = centered_state_at_10_seconds();
+        state.handle_command(anchor(2, Some(40.0)), &harness.ctx());
+        assert!(harness.sent().is_empty());
+        assert_eq!(state.spectrogram_view_anchor, None);
+        state.display_mode = SpectrogramDisplayMode::Rolling;
+        state.handle_command(anchor(3, Some(40.0)), &harness.ctx());
+        assert!(harness.sent().is_empty());
+        assert_eq!(state.spectrogram_view_anchor, None);
+    }
+
+    #[test]
+    fn a_view_moved_out_of_the_sessions_window_restarts_it_around_the_view() {
+        let harness = AnchorHarness::new();
+        let mut state = centered_state_at_10_seconds();
+        let expected_start = state.spectrogram_restart_start_seconds(300.0, &harness.ctx());
+        assert!(
+            (expected_start - (300.0 - 20.48 - 2.0)).abs() < 0.05,
+            "{expected_start}"
+        );
+        for (center, generation) in [(300.0, 2), (600.0, 3)] {
+            state.handle_command(anchor(3, Some(center)), &harness.ctx());
+            let sent = harness.sent();
+            let [SpectrogramWorkerCommand::NewTrack {
+                generation: sent_generation,
+                start_seconds,
+                target_position_seconds,
+                view_anchor,
+                clear_history_on_reset,
+                handoff,
+                ..
+            }] = sent.as_slice()
+            else {
+                panic!("no restart for {center}: {sent:?}");
+            };
+            assert_eq!(*sent_generation, generation, "{center}");
+            let expected_start = state.spectrogram_restart_start_seconds(center, &harness.ctx());
+            assert!((start_seconds - expected_start).abs() < 1e-9, "{center}");
+            // The playhead stays where playback is.
+            assert!((target_position_seconds - 10.0).abs() < f64::EPSILON);
+            assert_eq!(*view_anchor, Some(center));
+            assert!(*clear_history_on_reset);
+            // The ring is cleared before the new session's columns.
+            assert!(handoff.prelude.iter().any(|chunk| chunk.buffer_reset));
+            // The newer session makes the older one's columns stale.
+            assert_eq!(
+                harness
+                    .spectrogram_decode_generation
+                    .load(Ordering::Relaxed),
+                generation
+            );
+            // The session decodes from there on.
+            state.spectrogram_session_start = *start_seconds;
+        }
+    }
+
+    #[test]
+    fn a_seek_keeps_a_moved_view_and_restarts_judge_by_it() {
+        let harness = AnchorHarness::new();
+        let mut state = centered_state_at_10_seconds();
+        state.handle_command(anchor(3, Some(40.0)), &harness.ctx());
+        harness.sent();
+        // The plot's own seek, far outside the session's window: the view
+        // stays, and the session judges by it.
+        state.handle_command(AnalysisCommand::SeekPosition(500.0), &harness.ctx());
+        assert!(matches!(
+            harness.sent().as_slice(),
+            [SpectrogramWorkerCommand::Seek { position_seconds }] if *position_seconds == 500.0
+        ));
+        assert_eq!(state.spectrogram_view_anchor, Some(40.0));
+        // A zoom's restart starts around the view, with it.
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramZoomLevel(2.0),
+            &harness.ctx(),
+        );
+        let expected_start = state.spectrogram_restart_start_seconds(40.0, &harness.ctx());
+        let sent = harness.sent();
+        assert!(
+            sent.iter().any(|command| matches!(
+                command,
+                SpectrogramWorkerCommand::NewTrack {
+                    start_seconds,
+                    target_position_seconds,
+                    view_anchor: Some(anchor),
+                    ..
+                } if (*start_seconds - expected_start).abs() < 1e-9
+                    && *target_position_seconds == 500.0
+                    && *anchor == 40.0
+            )),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn a_track_change_or_a_restart_follows_the_playhead_again() {
+        let harness = AnchorHarness::new();
+        let mut state = centered_state_at_10_seconds();
+        state.handle_command(anchor(3, Some(40.0)), &harness.ctx());
+        state.handle_command(
+            AnalysisCommand::RestartCurrentTrack {
+                position_seconds: 0.0,
+                clear_history: true,
+            },
+            &harness.ctx(),
+        );
+        assert_eq!(state.spectrogram_view_anchor, None);
+        assert!(harness.sent().iter().any(|command| matches!(
+            command,
+            SpectrogramWorkerCommand::NewTrack {
+                view_anchor: None,
+                ..
+            }
+        )));
+
+        state.handle_command(anchor(3, Some(40.0)), &harness.ctx());
+        assert_eq!(state.spectrogram_view_anchor, Some(40.0));
+        state.handle_command(
+            AnalysisCommand::SetTrack {
+                path: PathBuf::from("/tmp/next.flac"),
+                reset_spectrogram: true,
+                track_token: 4,
+                gapless: false,
+            },
+            &harness.ctx(),
+        );
+        assert_eq!(state.spectrogram_view_anchor, None);
+        assert!(harness.sent().iter().all(|command| !matches!(
+            command,
+            SpectrogramWorkerCommand::NewTrack {
+                view_anchor: Some(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn a_switch_to_rolling_while_moved_restarts_at_the_playhead() {
+        // The UI follows the playhead again before it switches: the
+        // session, which may take both together, has its columns around
+        // the view still.
+        for follows_first in [false, true] {
+            let harness = AnchorHarness::new();
+            let mut state = centered_state_at_10_seconds();
+            // In the session's window: following again goes to the worker.
+            state.last_spectrogram_position = 50.0;
+            state.handle_command(anchor(3, Some(40.0)), &harness.ctx());
+            if follows_first {
+                state.handle_command(anchor(3, None), &harness.ctx());
+                assert!(matches!(
+                    harness.sent().as_slice(),
+                    [
+                        SpectrogramWorkerCommand::SetViewAnchor { .. },
+                        SpectrogramWorkerCommand::SetViewAnchor {
+                            anchor_seconds: None
+                        }
+                    ]
+                ));
+            }
+            harness.sent();
+            state.handle_command(
+                AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Rolling),
+                &harness.ctx(),
+            );
+            assert!(
+                harness.sent().iter().any(|command| matches!(
+                    command,
+                    SpectrogramWorkerCommand::NewTrack {
+                        view_anchor: None,
+                        display_mode: SpectrogramDisplayMode::Rolling,
+                        ..
+                    }
+                )),
+                "follows first: {follows_first}"
+            );
+        }
+        let harness = AnchorHarness::new();
+        let mut state = centered_state_at_10_seconds();
+        state.last_spectrogram_position = 100.0;
+        state.handle_command(anchor(3, Some(40.0)), &harness.ctx());
+        harness.sent();
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Rolling),
+            &harness.ctx(),
+        );
+        assert_eq!(state.spectrogram_view_anchor, None);
+        let sent = harness.sent();
+        let [SpectrogramWorkerCommand::SetDisplayMode(SpectrogramDisplayMode::Rolling), SpectrogramWorkerCommand::NewTrack {
+            start_seconds,
+            target_position_seconds,
+            view_anchor: None,
+            display_mode: SpectrogramDisplayMode::Rolling,
+            ..
+        }] = sent.as_slice()
+        else {
+            panic!("no rolling session at the playhead: {sent:?}");
+        };
+        // A view of history before the playhead, as when a rolling view
+        // is shown again.
+        let history = state.centered_margin_seconds() - 2.0;
+        assert!((start_seconds - (100.0 - history)).abs() < 1e-9);
+        assert!((target_position_seconds - 100.0).abs() < f64::EPSILON);
+
+        // A centered view told it is centered again stays where it was
+        // moved, and following the playhead again reaches the worker.
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Centered),
+            &harness.ctx(),
+        );
+        state.handle_command(anchor(3, Some(40.0)), &harness.ctx());
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Centered),
+            &harness.ctx(),
+        );
+        assert_eq!(state.spectrogram_view_anchor, Some(40.0));
+        harness.sent();
+        state.handle_command(anchor(3, None), &harness.ctx());
+        assert!(harness.sent().iter().any(|command| matches!(
+            command,
+            SpectrogramWorkerCommand::SetViewAnchor {
+                anchor_seconds: None
+            } | SpectrogramWorkerCommand::NewTrack {
+                view_anchor: None,
+                ..
+            }
+        )));
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Rolling),
+            &harness.ctx(),
+        );
+        harness.sent();
+
+        // Without a moved view, the session goes on as it is.
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Centered),
+            &harness.ctx(),
+        );
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Rolling),
+            &harness.ctx(),
+        );
+        assert!(harness
+            .sent()
+            .iter()
+            .all(|command| matches!(command, SpectrogramWorkerCommand::SetDisplayMode(_))));
+    }
+
+    #[test]
+    fn a_view_moved_while_the_stream_is_full_restarts_the_session() {
+        // The worker would read the anchor, and its seek's reset reach the
+        // UI, only after the chunks waiting drain: a new session makes them
+        // stale instead.
+        let harness = AnchorHarness::new();
+        let mut state = centered_state_at_10_seconds();
+        let full = Backpressured(harness.event_tx.clone());
+        let ctx = AnalysisContext {
+            event_tx: &full,
+            ..harness.ctx()
+        };
+        state.handle_command(anchor(3, Some(40.0)), &ctx);
+        assert!(matches!(
+            harness.sent().as_slice(),
+            [SpectrogramWorkerCommand::NewTrack {
+                view_anchor: Some(_),
+                ..
+            }]
+        ));
+    }
+
     #[test]
     fn emit_snapshot_respects_force_and_waveform_dirty() {
         let (tx, rx) = unbounded::<AnalysisEvent>();
@@ -4771,6 +5371,7 @@ mod tests {
                         track_token: 2,
                         start_seconds: 0.0,
                         target_position_seconds: 0.0,
+                        view_anchor: None,
                         ..
                     }
                 ),

@@ -15,6 +15,7 @@
 #include <QDateTime>
 #include <QHoverEvent>
 #include <QMouseEvent>
+#include <QStyleHints>
 #include <QWheelEvent>
 #include <QMutexLocker>
 #include <QPainter>
@@ -69,19 +70,6 @@ struct SpectrogramProjection {
     Key key;
     std::vector<std::pair<int, int>> binRanges;
     std::array<QRgb, 256> colors;
-};
-
-// Maps canvas x positions to where a zoom preview shows them: scaled by
-// `scale` about `fromX`, which lands at `toX`.
-struct SpectrogramZoomPreview {
-    bool active{false};
-    double scale{1.0};
-    double fromX{0.0};
-    double toX{0.0};
-
-    double map(double x) const {
-        return active ? toX + (x - fromX) * scale : x;
-    }
 };
 
 // How rasterizations reach their item, which may be gone by then. The item
@@ -1751,7 +1739,6 @@ SpectrogramItem::CenteredView SpectrogramItem::centeredViewLocked(
     double canvasZoom,
     double columnsPerSecond) const {
     const double columnF = std::max(0.0, positionSeconds) * columnsPerSecond;
-    const qint64 nowCol = static_cast<qint64>(std::floor(columnF));
     const double columnPhase = std::clamp(columnF - std::floor(columnF), 0.0, 0.999);
     const int visibleWindowCols = static_cast<int>(
         std::ceil(static_cast<double>(canvasWidth) / canvasZoom));
@@ -1761,8 +1748,12 @@ SpectrogramItem::CenteredView SpectrogramItem::centeredViewLocked(
     const CenteredColumns columns = centeredColumnsLocked();
     const qint64 maxColCount = columns.maxColCount;
     const qint64 estimateCount = std::max<qint64>(columns.end, 1);
-    const CenteredDisplayRange range = centeredDisplayRange(
-        nowCol, visibleWindowCols, maxColCount, estimateCount, columnsPerSecond);
+    // Around the playhead, where the user moved it, or gliding back.
+    const SpectrogramViewFollow::Snapshot follow = followSnapshotLocked();
+    const ViewFollow::Mode followMode =
+        SpectrogramViewFollow::stateAt(follow, positionSeconds).mode;
+    const CenteredDisplayRange range = followedDisplayRange(
+        follow, positionSeconds, visibleWindowCols, maxColCount, estimateCount, columnsPerSecond);
     CenteredView view;
     view.left = range.left;
     view.right = range.right;
@@ -1800,7 +1791,10 @@ SpectrogramItem::CenteredView SpectrogramItem::centeredViewLocked(
     const bool isEndCorrection = columns.endKnown
         && range.right >= columns.end - 1
         && range.left < referenceLeft;
-    if (!isSeekJump
+    // A view the user moved, or one gliding back, goes where it is put:
+    // it does not wobble with the playhead.
+    if (followMode == ViewFollow::Mode::Playhead
+        && !isSeekJump
         && !isEndCorrection
         && referenceComparable
         && referenceRight >= referenceLeft
@@ -1809,10 +1803,180 @@ SpectrogramItem::CenteredView SpectrogramItem::centeredViewLocked(
         view.right = std::max(view.right, referenceRight);
     }
 
-    view.scrolls = centeredRangeScrolls(
-        view.left, view.right, maxColCount, estimateCount, view.decodedTailLooksFinal);
+    // A view the user moved stays still while the playhead crosses it.
+    view.scrolls = followMode != ViewFollow::Mode::Detached
+        && centeredRangeScrolls(
+            view.left, view.right, maxColCount, estimateCount, view.decodedTailLooksFinal);
     view.drawX = view.scrolls ? -columnPhase * canvasZoom : 0.0;
     return view;
+}
+
+SpectrogramItem::CenteredDisplayRange SpectrogramItem::followedDisplayRange(
+    const SpectrogramViewFollow::Snapshot &follow,
+    double positionSeconds,
+    int visibleWindowCols,
+    qint64 maxColCount,
+    qint64 estimateCount,
+    double columnsPerSecond) {
+    const qint64 nowCol = static_cast<qint64>(
+        std::floor(std::max(0.0, positionSeconds) * columnsPerSecond));
+    const auto window = static_cast<double>(visibleWindowCols);
+    // The column the view is centred on, as centeredDisplayRange takes it.
+    qint64 centre = nowCol;
+    const ViewFollow::State state = SpectrogramViewFollow::stateAt(follow, positionSeconds);
+    switch (state.mode) {
+    case ViewFollow::Mode::Detached: {
+        // The anchor stays at its fraction of the view's width.
+        const qint64 left = std::llround(
+            follow.anchorSeconds * columnsPerSecond - follow.anchorFraction * window);
+        centre = left + static_cast<qint64>(visibleWindowCols / 2);
+        break;
+    }
+    case ViewFollow::Mode::Gliding:
+        // Whole columns from following, so that the glide ends on the view
+        // that follows, with the playhead easing from its re-attach point to
+        // the middle.
+        centre = nowCol - std::llround(
+            (ViewFollow::glidePlayheadFraction(positionSeconds, state.glideFrom) - 0.5) * window);
+        break;
+    case ViewFollow::Mode::Playhead:
+        break;
+    }
+    return centeredDisplayRange(
+        centre, visibleWindowCols, maxColCount, estimateCount, columnsPerSecond);
+}
+
+SpectrogramViewFollow::Snapshot SpectrogramItem::followSnapshotLocked() const {
+    // A rolling view follows playback.
+    const SpectrogramViewFollow *follow = m_viewFollow.data();
+    return follow != nullptr && m_displayMode == 1 ? follow->snapshot()
+                                                   : SpectrogramViewFollow::Snapshot{};
+}
+
+ViewFollow::State SpectrogramItem::followStateLocked(double positionSeconds) const {
+    return SpectrogramViewFollow::stateAt(followSnapshotLocked(), positionSeconds);
+}
+
+SpectrogramItem::RequestedView SpectrogramItem::requestedViewLocked(
+    double positionSeconds) const {
+    RequestedView view;
+    if (m_precomputedSampleRateHz <= 0 || m_precomputedHopSize <= 0) {
+        return view;
+    }
+    const double columnsPerSecond = static_cast<double>(m_precomputedSampleRateHz)
+        / static_cast<double>(m_precomputedHopSize);
+    const int width = canvasWidthLocked();
+    if (m_awaitingZoomData) {
+        // The view the zoom asked for, which the preview shows.
+        const ZoomTargetView target =
+            centeredZoomTargetLocked(width, positionSeconds, columnsPerSecond);
+        if (!target.valid) {
+            return view;
+        }
+        view.left = target.range.left;
+        view.windowColumns = target.windowColumns;
+        view.columnsPerSecond = target.columnsPerSecond;
+        view.canvasZoom = target.canvasZoom;
+        view.estimateCount = target.estimateCount;
+    } else {
+        view.canvasZoom = std::max(0.001, canvasZoomLocked());
+        view.left = centeredViewLocked(positionSeconds, width, canvasHeightLocked(),
+            view.canvasZoom, columnsPerSecond).left;
+        view.windowColumns = static_cast<qint64>(
+            std::ceil(static_cast<double>(width) / view.canvasZoom));
+        view.columnsPerSecond = columnsPerSecond;
+        view.estimateCount = centeredColumnsLocked().end;
+    }
+    view.valid = view.estimateCount > 0 && view.windowColumns > 0
+        && view.columnsPerSecond > 0.0 && view.canvasZoom > 0.0;
+    return view;
+}
+
+SpectrogramItem::FollowGeometry SpectrogramItem::followGeometryLocked() const {
+    FollowGeometry geometry;
+    const RequestedView view =
+        requestedViewLocked(std::max(0.0, currentRenderPositionSecondsLocked(m_now())));
+    if (!view.valid) {
+        return geometry;
+    }
+    geometry.spanSeconds = static_cast<double>(view.windowColumns) / view.columnsPerSecond;
+    geometry.endSeconds = static_cast<double>(view.estimateCount) / view.columnsPerSecond;
+    // As centeredDisplayRange locks it.
+    geometry.wholeTrack =
+        view.windowColumns * 100 / view.estimateCount >= kCenteredWholeTrackPercent;
+    return geometry;
+}
+
+void SpectrogramItem::reportFollowGeometry() {
+    SpectrogramViewFollow *follow = m_viewFollow.data();
+    if (follow == nullptr) {
+        return;
+    }
+    FollowGeometry geometry;
+    double position = 0.0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_displayMode != 1) {
+            return;
+        }
+        geometry = followGeometryLocked();
+        position = std::max(0.0, currentRenderPositionSecondsLocked(m_now()));
+    }
+    if (geometry.spanSeconds > 0.0) {
+        follow->setGeometry(
+            geometry.spanSeconds, geometry.endSeconds, geometry.wholeTrack, position);
+    }
+    // A glide begun or ended as playback went on.
+    follow->settle(position);
+}
+
+void SpectrogramItem::followChanged() {
+    cancelPlaybackFrame();
+    requestPlaybackFrame();
+}
+
+void SpectrogramItem::setViewFollow(SpectrogramViewFollow *value) {
+    if (value == nullptr) {
+        value = m_ownViewFollow;
+    }
+    if (m_viewFollow == value) {
+        return;
+    }
+    const bool wasDetached = detached();
+    disconnect(m_viewFollowChangedConnection);
+    disconnect(m_viewFollowDetachedConnection);
+    disconnect(m_viewFollowDestroyedConnection);
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_viewFollow = value;
+    }
+    if (value != nullptr) {
+        // Queued: a lane may tell it of a change while it holds its state.
+        m_viewFollowChangedConnection = connect(
+            value, &SpectrogramViewFollow::changed, this, &SpectrogramItem::followChanged,
+            Qt::QueuedConnection);
+        m_viewFollowDetachedConnection = connect(
+            value, &SpectrogramViewFollow::detachedChanged, this, &SpectrogramItem::detachedChanged);
+        if (value != m_ownViewFollow) {
+            // A shared one that goes leaves the lane its own.
+            m_viewFollowDestroyedConnection = connect(
+                value, &QObject::destroyed, this, [this]() { setViewFollow(nullptr); });
+        }
+        if (m_clock != nullptr) {
+            value->clockChanged(m_clock->state(), monotonicNs(m_now()));
+        }
+    }
+    emit viewFollowChanged();
+    if (wasDetached != detached()) {
+        emit detachedChanged();
+    }
+    update();
+}
+
+void SpectrogramItem::followPlayhead() {
+    if (SpectrogramViewFollow *follow = m_viewFollow.data()) {
+        follow->reattach();
+    }
 }
 
 
@@ -1938,6 +2102,8 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     }
 #endif
     rebuildPalette();
+    m_ownViewFollow = new SpectrogramViewFollow(this);
+    setViewFollow(m_ownViewFollow);
     connect(this, &QQuickItem::visibleChanged, this, [this]() {
         if (!isVisible()) {
             // A hidden pane asks for no frames until it is shown again.
@@ -2234,6 +2400,11 @@ void SpectrogramItem::clockStateChanged() {
     } else {
         requestPlaybackFrame();
     }
+    // A seek other than the plot's own, a stop or a track change brings a
+    // view the user moved back to the playhead.
+    if (SpectrogramViewFollow *follow = m_viewFollow.data()) {
+        follow->clockChanged(next, monotonicNs(m_now()));
+    }
 }
 
 bool SpectrogramItem::positionHeldLocked(qint64 nowNs) const {
@@ -2473,6 +2644,10 @@ void SpectrogramItem::setDisplayMode(int value) {
             redraw = true;
         }
     }
+    // A switch between rolling and centered follows the playhead.
+    m_panPressed = false;
+    m_panning = false;
+    followPlayhead();
     emit displayModeChanged();
     if (redraw) {
         update();
@@ -2952,9 +3127,12 @@ SpectrogramZoomPreview SpectrogramItem::zoomPreviewLocked(
     if (!std::isfinite(scale) || scale <= 0.0 || std::abs(scale - 1.0) <= 1e-3) {
         return preview;
     }
-    // Where the playhead is on the canvas as drawn.
+    // The time the preview scales about: the playhead, or the anchor of a
+    // view the user moved, which keeps its place in the width.
+    const double pivotSeconds = zoomPreviewPivotSecondsLocked(positionSeconds, rollingMode);
+    // Where it is on the canvas as drawn.
     const double canvasColumn = static_cast<double>(m_precomputedCanvasEpoch)
-        + positionSeconds * m_precomputedCanvasColumnsPerSecond;
+        + pivotSeconds * m_precomputedCanvasColumnsPerSecond;
     preview.fromX = drawX + m_precomputedCanvasSubpixelOffset
         + (canvasColumn - static_cast<double>(m_precomputedCanvasDisplayLeft))
             * m_precomputedCanvasZoomLevel;
@@ -2969,13 +3147,26 @@ SpectrogramZoomPreview SpectrogramItem::zoomPreviewLocked(
         if (!target.valid) {
             return preview;
         }
-        // The playhead's column, a whole one, as the canvas places it.
-        preview.toX = static_cast<double>(target.playheadColumn - target.range.left)
-            * target.canvasZoom;
+        // The pivot's column, a whole one, as the canvas places it.
+        const qint64 pivotColumn = static_cast<qint64>(
+            std::floor(pivotSeconds * target.columnsPerSecond));
+        preview.toX = static_cast<double>(pivotColumn - target.range.left) * target.canvasZoom;
     }
     preview.scale = scale;
     preview.active = true;
     return preview;
+}
+
+double SpectrogramItem::zoomPreviewPivotSecondsLocked(
+    double positionSeconds, bool rollingMode) const {
+    if (rollingMode) {
+        return positionSeconds;
+    }
+    const SpectrogramViewFollow::Snapshot follow = followSnapshotLocked();
+    return SpectrogramViewFollow::stateAt(follow, positionSeconds).mode
+            == ViewFollow::Mode::Detached
+        ? follow.anchorSeconds
+        : positionSeconds;
 }
 
 SpectrogramItem::ZoomTargetView SpectrogramItem::centeredZoomTargetLocked(
@@ -3027,9 +3218,12 @@ SpectrogramItem::ZoomTargetView SpectrogramItem::centeredZoomTargetLocked(
         static_cast<qint64>(std::floor(positionSeconds * targetColumnsPerSecond));
     target.windowColumns = static_cast<int>(
         std::ceil(static_cast<double>(width) / target.canvasZoom));
-    target.range = centeredDisplayRange(
-        target.playheadColumn, target.windowColumns, targetMaxColCount, targetEstimateCount,
-        targetColumnsPerSecond);
+    // Where the view is placed, as at the zoom shown: a view the user moved
+    // keeps its anchor at its fraction of the width.
+    target.range = followedDisplayRange(followSnapshotLocked(), positionSeconds,
+        target.windowColumns, targetMaxColCount, targetEstimateCount, targetColumnsPerSecond);
+    target.estimateCount = std::max<qint64>(1, targetEstimateCount);
+    target.columnsPerSecond = targetColumnsPerSecond;
     target.valid = true;
     return target;
 }
@@ -3078,6 +3272,9 @@ void SpectrogramItem::setZoomLevel(double value) {
 
     lock.unlock();
     emit zoomLevelChanged();
+    // A view the user moved keeps its anchor at its place in the new width;
+    // a playhead the zoom puts past the re-attach point leaves it there.
+    reportFollowGeometry();
     update();
 }
 
@@ -3287,6 +3484,12 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
         const CenteredView view = centeredViewLocked(playheadSeconds, canvasWidthLocked(),
             canvasHeightLocked(), std::max(0.001, canvasZoomLocked()), cps);
         const qint64 displayLeftCol = view.left;
+        // The column the session decodes first, which a refill waits for:
+        // the playhead's, or the middle of a view the user moved.
+        const qint64 focusCol =
+            followStateLocked(playheadSeconds).mode == ViewFollow::Mode::Detached
+            ? (view.left + view.right) / 2
+            : nowCol;
 
         // Two conditions must be met:
         // 1. The ring has about as many columns as the view (enough data
@@ -3333,7 +3536,7 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
             // first: they end the freeze, and the columns left of them,
             // which come next, draw in as they arrive, as missing columns
             // do until then.
-            if (ringSlotForDisplayIndexLocked(nowCol, false) >= 0 || decodeReachedEnd) {
+            if (ringSlotForDisplayIndexLocked(focusCol, false) >= 0 || decodeReachedEnd) {
                 m_zoomFillActive = false;
                 m_seekFillActive = false;
                 m_precomputedCanvasDirty = true;
@@ -3344,7 +3547,7 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
         // it: a zoom shows the view once it has all of them.
         const bool ringHoldsDisplayLeftHalf = ringCoversDisplayLeft
             && ringHoldsColumnsLocked(displayLeftCol + 1,
-                std::min(nowCol, static_cast<qint64>(m_precomputedMaxColumnIndex)));
+                std::min(focusCol, static_cast<qint64>(m_precomputedMaxColumnIndex)));
         if (ringHoldsDisplayLeftHalf
             && ((ringHasEnoughColumns && ringCoversDisplayRight)
                 || decodeReachedEnd)) {
@@ -3590,7 +3793,14 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedCanvasDirty = true;
         m_awaitingWorkerReset = true;
 
-        if (preserveCanvasForSeek) {
+        if (preserveCanvasForSeek && viewMovedLocked()) {
+            // A view the user moves, or one gliding back from there, is not
+            // frozen: it goes on following the pointer or the playhead, its
+            // canvas under the columns as they arrive, at the times of its
+            // own (see keepCanvasAsBackdropLocked), and missing columns
+            // drawn as missing.
+            m_seekFillActive = false;
+        } else if (preserveCanvasForSeek) {
             // Canvas, m_precomputedReady, and the stored display range
             // all stay as-is so the paint keeps rendering the old
             // image through canvasFreeze, until the playhead's columns
@@ -4448,7 +4658,15 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     }
     // A rasterization of the columns before the reset is obsolete.
     cancelPendingRasterLocked();
-    if (!restartsForZoom) {
+    // A session that decodes the view the user moved, or one gliding back,
+    // of the same track: what is drawn stands in for its columns until they
+    // arrive, at the times of its own, as for a zoom.
+    const bool decodesMovedView = byColumn
+        && m_displayMode == 1
+        && trackToken != 0
+        && trackToken == m_precomputedTrackToken
+        && viewMovedLocked();
+    if (!restartsForZoom && !decodesMovedView) {
         // Older data stands in only for a zoom's: after a seek or a track
         // change, of other times or another track, it goes, with what is
         // being drawn of it.
@@ -4478,7 +4696,8 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     const bool hasCanvas = !m_canvas.isNull()
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft;
     const bool keepCanvas = hasCanvas
-        && ((preserveRollingHistory && m_precomputedCanvasRolling) || restartsForZoom);
+        && ((preserveRollingHistory && m_precomputedCanvasRolling) || restartsForZoom
+            || decodesMovedView);
     // A reset (seek or manual track change) breaks the continuous
     // gapless coordinate space — clear the accumulated offset,
     // per-track column tracking, and canvas display range so the
@@ -5044,6 +5263,11 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             bool writeHeadClamped = false;
 #endif
 
+            // How a centered view is placed: following the playhead, where
+            // the user moved it, or gliding back to the playhead.
+            const SpectrogramViewFollow::Snapshot follow = followSnapshotLocked();
+            const ViewFollow::Mode followMode =
+                SpectrogramViewFollow::stateAt(follow, clampedPositionSeconds).mode;
             if (m_displayMode == 1) {
                 rollingMode = false;
                 centeredView = centeredViewLocked(
@@ -5257,12 +5481,19 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             }
 
             if (zoomPreviewShown && !rollingMode) {
-                playheadPixel = static_cast<int>(std::round(preview.toX));
+                // The playhead, as the preview places the time it scales
+                // about.
+                const double pivotSeconds =
+                    zoomPreviewPivotSecondsLocked(clampedPositionSeconds, rollingMode);
+                playheadPixel = static_cast<int>(std::round(preview.toX
+                    + (clampedPositionSeconds - pivotSeconds) * preview.scale
+                        * m_precomputedCanvasColumnsPerSecond * m_precomputedCanvasZoomLevel));
             }
             m_zoomPreviewShown = zoomPreviewShown;
             if (zoomPreviewShown) {
                 // In logical pixels, where clicks are.
-                m_zoomPreviewAnchorSeconds = clampedPositionSeconds;
+                m_zoomPreviewAnchorSeconds =
+                    zoomPreviewPivotSecondsLocked(clampedPositionSeconds, rollingMode);
                 m_zoomPreviewAnchorX = preview.toX / scale;
                 m_zoomPreviewPixelsPerSecond = preview.scale
                     * m_precomputedCanvasPixelsPerSecond * m_precomputedCanvasScale / scale;
@@ -5407,7 +5638,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 }
             }
 
-            if (!rollingMode && playheadPixel >= 0) {
+            // A view the user moved shows the playhead only while it is in it.
+            const bool playheadOutside = playheadPixel < 0
+                || (followMode == ViewFollow::Mode::Detached && playheadPixel >= cw);
+            if (!rollingMode && !playheadOutside) {
                 showPlayhead = true;
                 playheadRect = QRectF(
                     static_cast<double>(std::clamp(playheadPixel, 0, cw - 1)) / scale,
@@ -5427,7 +5661,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 && !preview.active
                 && visibleCols > 0
                 && !positionHeldLocked(monotonicNs(renderNow));
-            if (viewSettled) {
+            // Gliding back, the view moves on by more than the playhead does,
+            // and every frame differs from the last until it follows again.
+            const bool gliding = !rollingMode && followMode == ViewFollow::Mode::Gliding;
+            if (viewSettled && !gliding) {
                 // Rolling, data up to the playhead's column shows, also
                 // where the ring has not reached it yet.
                 m_idleView.rolling = rollingMode;
@@ -5436,7 +5673,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     ? std::max(displayRight, m_rollingEpoch + static_cast<qint64>(std::max(nowCol, 0)))
                     : displayRight;
             }
-            if (viewSettled && scrolls) {
+            if (gliding) {
+                // Frames are due on every refresh: m_idleView stays invalid.
+            } else if (viewSettled && scrolls) {
                 // The phase stops short of the next column; a step after
                 // that is the next column's.
                 const double nextPhase = columnPhase + columnsToNextPixel;
@@ -5449,20 +5688,27 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const qint64 estimateCount = std::max<qint64>(columns.end, 1);
                 const int visibleWindowCols = static_cast<int>(
                     std::ceil(static_cast<double>(cw) / canvasZoom));
-                const auto drawnPlayhead = [cw](int pixel) {
-                    return pixel < 0 ? -1 : std::clamp(pixel, 0, cw - 1);
+                // Past the right of a view the user moved, it is not drawn.
+                const auto drawnPlayhead = [cw, followMode](int pixel) {
+                    return pixel < 0 || (followMode == ViewFollow::Mode::Detached && pixel >= cw)
+                        ? -1
+                        : std::clamp(pixel, 0, cw - 1);
                 };
                 const int shownPlayhead = drawnPlayhead(playheadPixel);
                 // The playhead moves a pixel within 1 / canvasZoom columns;
                 // a view zoomed out further than this many columns to a
                 // pixel looks again after that many.
                 constexpr qint64 kMaxIdleColumns = 4096;
+                // A view the user moved also changes where the playhead
+                // reaches its re-attach point, and starts to glide back.
                 qint64 column = nowCol + 1;
                 for (; column <= nowCol + kMaxIdleColumns; ++column) {
-                    const CenteredDisplayRange next = centeredDisplayRange(
-                        column, visibleWindowCols, maxColCount, estimateCount, columnsPerSecond);
+                    const double columnSeconds = static_cast<double>(column) / columnsPerSecond;
+                    const CenteredDisplayRange next = followedDisplayRange(follow, columnSeconds,
+                        visibleWindowCols, maxColCount, estimateCount, columnsPerSecond);
                     // The view keeps the canvas's range, as above.
-                    if (std::max(next.left, displayLeft) != displayLeft
+                    if (SpectrogramViewFollow::stateAt(follow, columnSeconds).mode != followMode
+                        || std::max(next.left, displayLeft) != displayLeft
                         || std::max(next.right, displayRight) != displayRight
                         || drawnPlayhead(static_cast<int>(std::round(
                                static_cast<double>(column - displayLeft) * canvasZoom)))
@@ -5947,6 +6193,8 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
     const int oldWidth = static_cast<int>(oldGeometry.width());
     if (newWidth != oldWidth && newWidth > 0) {
         emit spectrogramWidthChanged(newWidth);
+        // A view the user moved keeps its anchor at its place in the width.
+        reportFollowGeometry();
     }
     update();
 }
@@ -6024,9 +6272,13 @@ void SpectrogramItem::hoverLeaveEvent(QHoverEvent *) {
 
 void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
     // A middle click does nothing: Reset Zoom is Ctrl+0, View > Reset Zoom
-    // and the viewer's Reset, and a middle-drag is the waveform's pan.
+    // and the viewer's Reset. A middle-drag pans a zoomed centered view; a
+    // rolling one stays live.
     if (event->button() == Qt::MiddleButton && m_zoomEnabled) {
         event->accept();
+        m_panPressed = m_displayMode == 1;
+        m_panning = false;
+        m_panPressPosition = event->position();
         return;
     }
 
@@ -6059,6 +6311,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
             return;
         }
         event->accept();
+        noteOwnSeek(seconds);
         emit seekRequested(seconds);
         return;
     }
@@ -6105,7 +6358,130 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
     }
 
     event->accept();
+    noteOwnSeek(seconds);
     emit seekRequested(seconds);
+}
+
+void SpectrogramItem::noteOwnSeek(double seconds) {
+    // A view the user moved stays while its own seek lands, so that they
+    // hear what they look at.
+    if (SpectrogramViewFollow *follow = m_viewFollow.data()) {
+        follow->noteOwnSeek(seconds);
+    }
+}
+
+double SpectrogramItem::viewSecondsAtLocked(double x) const {
+    if (m_zoomPreviewShown && m_zoomPreviewPixelsPerSecond > 0.0) {
+        // The scaled preview is on screen: the time where it shows.
+        return m_zoomPreviewAnchorSeconds
+            + (x - m_zoomPreviewAnchorX) / m_zoomPreviewPixelsPerSecond;
+    }
+    // A view the user moved stays still: its columns start at its left.
+    const RequestedView view =
+        requestedViewLocked(std::max(0.0, currentRenderPositionSecondsLocked(m_now())));
+    if (!view.valid) {
+        return -1.0;
+    }
+    return (static_cast<double>(view.left) + x * m_canvasScale / view.canvasZoom)
+        / view.columnsPerSecond;
+}
+
+void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
+    if (!m_panPressed) {
+        event->ignore();
+        return;
+    }
+    event->accept();
+    SpectrogramViewFollow *follow = m_viewFollow.data();
+    const QPointF pointer = event->position();
+    double anchorSeconds = 0.0;
+    bool startsPan = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        // The crosshair keeps to the pointer, which holds the time it
+        // grabbed.
+        if (m_hoverActive) {
+            m_hoverPosition = pointer;
+            m_crosshairDirty = true;
+        }
+        if (follow == nullptr || m_displayMode != 1) {
+            return;
+        }
+        // The view as it shows, also while a zoom's preview shows it, so
+        // that the time grabbed stays under the pointer.
+        const RequestedView view =
+            requestedViewLocked(std::max(0.0, currentRenderPositionSecondsLocked(m_now())));
+        // The whole track has nowhere to pan to.
+        if (!view.valid
+            || view.windowColumns * 100 / view.estimateCount >= kCenteredWholeTrackPercent) {
+            return;
+        }
+        if (!m_panning) {
+            if (std::abs(pointer.x() - m_panPressPosition.x())
+                < QGuiApplication::styleHints()->startDragDistance()) {
+                return;
+            }
+            m_panning = true;
+            startsPan = true;
+            m_panOriginLeft = static_cast<double>(view.left);
+            m_panOriginX = m_panPressPosition.x();
+        }
+        // The column grabbed stays under the pointer. Held at an end of the
+        // track, the pan starts again from there, so that a move back moves
+        // the view at once.
+        const double desired = m_panOriginLeft
+            - (pointer.x() - m_panOriginX) * m_canvasScale / view.canvasZoom;
+        const double left = std::clamp(desired, 0.0,
+            static_cast<double>(std::max<qint64>(0, view.estimateCount - view.windowColumns)));
+        if (left != desired) {
+            m_panOriginLeft = left;
+            m_panOriginX = pointer.x();
+        }
+        // Anchored at its middle, whole columns from the track's start.
+        anchorSeconds = (std::round(left) + 0.5 * static_cast<double>(view.windowColumns))
+            / view.columnsPerSecond;
+    }
+    if (startsPan) {
+        // Where it glides back from is reckoned from the view's width.
+        reportFollowGeometry();
+        follow->setPanning(true);
+    }
+    follow->detach(anchorSeconds, 0.5);
+    followChanged();
+}
+
+void SpectrogramItem::mouseReleaseEvent(QMouseEvent *event) {
+    if (event->button() != Qt::MiddleButton || !m_panPressed) {
+        event->ignore();
+        return;
+    }
+    event->accept();
+    mouseUngrabEvent();
+}
+
+void SpectrogramItem::mouseUngrabEvent() {
+    if (!m_panPressed) {
+        return;
+    }
+    m_panPressed = false;
+    if (!m_panning) {
+        return;
+    }
+    m_panning = false;
+    SpectrogramViewFollow *follow = m_viewFollow.data();
+    if (follow == nullptr) {
+        return;
+    }
+    double position = 0.0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        position = std::max(0.0, currentRenderPositionSecondsLocked(m_now()));
+    }
+    follow->setPanning(false);
+    reportFollowGeometry();
+    // A playhead already past the re-attach point, or past the view, leaves
+    // the view where it was put.
+    follow->arm(position);
 }
 
 void SpectrogramItem::wheelEvent(QWheelEvent *event) {
@@ -6129,15 +6505,52 @@ void SpectrogramItem::wheelEvent(QWheelEvent *event) {
     event->accept();
 
     constexpr double kZoomStepFactor = 1.25;
+    SpectrogramViewFollow *follow = m_viewFollow.data();
     QMutexLocker lock(&m_stateMutex);
     const double minZoom = minimumZoomLevelLocked();
     const double maxZoom = maximumZoomLevelLocked();
     const double currentZoom = m_zoomLevel;
+    // A view the user moved zooms about the pointer: the time under it
+    // stays there. One that follows the playhead, or glides back to it,
+    // zooms about the playhead.
+    double pointerSeconds = -1.0;
+    const double pointerFraction = event->position().x() / std::max(1.0, width());
+    const double position = std::max(0.0, currentRenderPositionSecondsLocked(m_now()));
+    if (follow != nullptr && m_displayMode == 1
+        && followStateLocked(position).mode == ViewFollow::Mode::Detached) {
+        // Reckoned from the anchor, which the view keeps at its fraction of
+        // the width to within a column, so that zooms in a row about one
+        // place do not drift by those columns.
+        // A view held at an end of the track is not where its anchor would
+        // put it: there, the time the view shows at the pointer.
+        const SpectrogramViewFollow::Snapshot anchored = followSnapshotLocked();
+        const RequestedView view = requestedViewLocked(position);
+        const bool atAnchor = view.valid
+            && view.left == std::llround(anchored.anchorSeconds * view.columnsPerSecond
+                - anchored.anchorFraction * static_cast<double>(view.windowColumns));
+        pointerSeconds = atAnchor
+            ? anchored.anchorSeconds + (pointerFraction - anchored.anchorFraction)
+                * static_cast<double>(view.windowColumns) / view.columnsPerSecond
+            : viewSecondsAtLocked(event->position().x());
+    }
     lock.unlock();
+    if (pointerSeconds >= 0.0) {
+        follow->detach(pointerSeconds, pointerFraction);
+    }
     const double newZoom = std::clamp(
         currentZoom * std::pow(kZoomStepFactor, steps),
         minZoom, maxZoom);
     emit zoomRequested(newZoom);
+    if (m_panning) {
+        // A drag goes on from the zoomed view.
+        QMutexLocker panLock(&m_stateMutex);
+        const RequestedView view =
+            requestedViewLocked(std::max(0.0, currentRenderPositionSecondsLocked(m_now())));
+        if (view.valid) {
+            m_panOriginLeft = static_cast<double>(view.left);
+            m_panOriginX = event->position().x();
+        }
+    }
 }
 
 double SpectrogramItem::pixelToFrequencyHzLocked(int pixelY, int viewHeight) const {
@@ -6681,7 +7094,12 @@ SpectrogramZoomPreview SpectrogramItem::staleCanvasAlignmentLocked(
     }
     // A jump, such as a seek, would move the canvas mostly or wholly off
     // screen and leave the view blank until its replacement arrives. It
-    // stays where it is instead, as a zoom fill keeps it.
+    // stays where it is instead, as a zoom fill keeps it. A view the user
+    // moves shows it at its own times, where the pointer took it: there it
+    // would show columns at the wrong times.
+    if (!rollingMode && viewMovedLocked()) {
+        return alignment;
+    }
     const auto visibleWidth = [viewWidth](double left, double right) {
         return std::max(0.0, std::min(right, viewWidth) - std::max(left, 0.0));
     };
@@ -8284,6 +8702,9 @@ void SpectrogramItem::handleWindowAfterAnimating() {
     }
 #endif
     lock.unlock();
+    // A view the user moved may have begun to glide back, or ended its
+    // glide, and its width or the track's length may have changed.
+    reportFollowGeometry();
     // Only sustain the render loop while playing, and only with frames
     // that differ. When stopped or paused the display is static and
     // re-renders are triggered on demand by data feeds

@@ -242,6 +242,10 @@ pub(super) enum SpectrogramWorkerCommand {
         channel_count: usize,
         start_seconds: f64,
         target_position_seconds: f64,
+        /// Where a centered view the user moved away from the playhead is:
+        /// see [`SpectrogramWorkerCommand::SetViewAnchor`]. `None` for a
+        /// view that follows the playhead.
+        view_anchor: Option<f64>,
         emit_initial_reset: bool,
         clear_history_on_reset: bool,
         view_mode: SpectrogramViewMode,
@@ -253,6 +257,15 @@ pub(super) enum SpectrogramWorkerCommand {
     },
     Seek {
         position_seconds: f64,
+    },
+    /// The centered view stays where the user moved it, centred on
+    /// `anchor_seconds` of the playing file, rather than on the playhead,
+    /// or follows the playhead again (`None`). The session decodes the
+    /// view and its lookahead wherever it is: it keeps its columns when
+    /// they show the view, goes on decoding when it is decoding into it,
+    /// and otherwise seeks to it. Only the latest anchor counts.
+    SetViewAnchor {
+        anchor_seconds: Option<f64>,
     },
     /// Continue the current decode session with a new file.  Preserves
     /// STFT, decimator, rate-limiter, and column counter state so the
@@ -1008,8 +1021,9 @@ impl QueuedCommand {
 
 /// Queue `cmd` for a session that has not started, dropping the commands it
 /// supersedes, as the session acts only on the latest of them: a position
-/// supersedes earlier positions, and a seek earlier positions and seeks.
-/// A seek storm so stays one command.
+/// supersedes earlier positions, a seek earlier positions and seeks, and a
+/// view anchor earlier anchors. A seek storm, or a drag that moves a view,
+/// so stays one command.
 fn queue_session_command(
     queued: &mut VecDeque<SpectrogramWorkerCommand>,
     cmd: SpectrogramWorkerCommand,
@@ -1028,6 +1042,10 @@ fn queue_session_command(
                         | SpectrogramWorkerCommand::Seek { .. }
                 )
             });
+        }
+        SpectrogramWorkerCommand::SetViewAnchor { .. } => {
+            queued
+                .retain(|queued| !matches!(queued, SpectrogramWorkerCommand::SetViewAnchor { .. }));
         }
         _ => {}
     }
@@ -1063,6 +1081,11 @@ struct SpectrogramSessionState {
 
     // Position tracking
     target_position_seconds: f64,
+    /// Where a centered view that stays where the user moved it is centred,
+    /// on the playing file's timeline: the session decodes around it rather
+    /// than around the playhead (see [`view_position`]). `None` while the
+    /// view follows the playhead, and in rolling mode.
+    view_anchor: Option<f64>,
     /// Whose timeline the session's columns are on.
     timeline_of: ColumnTimeline,
     /// Absolute column index of the next column to be produced (monotonic within session).
@@ -1264,6 +1287,7 @@ fn run_spectrogram_session(
         channel_count: requested_channel_count,
         start_seconds,
         target_position_seconds,
+        view_anchor,
         emit_initial_reset,
         clear_history_on_reset,
         view_mode,
@@ -1362,16 +1386,18 @@ fn run_spectrogram_session(
         f64::INFINITY
     };
 
+    // A view the user moved away from the playhead is centred on its anchor.
+    let view_anchor = view_anchor.filter(|_| display_mode == SpectrogramDisplayMode::Centered);
     let (start_column, _) = stft_seek_grid(start_seconds, effective_rate, hop_size, effective_hop);
     let (playhead_column, _) = stft_seek_grid(
-        target_position_seconds,
+        view_anchor.unwrap_or(target_position_seconds),
         effective_rate,
         hop_size,
         effective_hop,
     );
     let backfill = plan_backfill(display_mode, start_column, playhead_column);
-    // A centered session that starts left of its playhead decodes the
-    // playhead's columns first.
+    // A centered session that starts left of its playhead, or of the middle
+    // of its view, decodes those columns first.
     let first_column = backfill.map_or(start_column, |backfill| backfill.end);
     let (seek_frame, leading_silence) = centred_window_start(
         column_grid_frame(first_column, hop_size, effective_hop),
@@ -1412,6 +1438,7 @@ fn run_spectrogram_session(
         effective_rate,
         cols_per_second,
         target_position_seconds,
+        view_anchor,
         timeline_of: ColumnTimeline::PlayingFile,
         columns_produced: first_column,
         session_start_column: start_column,
@@ -1887,8 +1914,8 @@ fn session_decode_loop(
         }
 
         // 2. Check lead — park if sufficiently ahead (unless gapless pending).
-        let target_column =
-            f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
+        // A view the user moved away decodes ahead of its own middle.
+        let target_column = f64_to_u64_saturating(view_position(session) * session.cols_per_second);
         let lead = session.columns_produced.saturating_sub(target_column);
 
         if lead >= session.lookahead_columns && !post_reset_window_active(session) {
@@ -2115,10 +2142,12 @@ fn process_session_commands(
 ) -> Option<SessionAction> {
     let mut latest_position: Option<f64> = None;
     let mut latest_seek: Option<f64> = None;
+    let mut latest_anchor: Option<Option<f64>> = None;
     let mut needs_flush_token = false;
 
-    // Drain all pending commands, take the latest seek, and the latest
-    // position after it.
+    // Drain all pending commands, take the latest seek, the latest position
+    // after it, and the latest view anchor: a drag that moves the view
+    // sends many, of which only where it ends up counts.
     while let Ok(cmd) = next_session_command(session, || cmd_rx.try_recv()) {
         match cmd {
             SpectrogramWorkerCommand::PositionUpdate { position_seconds } => {
@@ -2127,6 +2156,9 @@ fn process_session_commands(
             SpectrogramWorkerCommand::Seek { position_seconds } => {
                 latest_seek = Some(position_seconds);
                 latest_position = None;
+            }
+            SpectrogramWorkerCommand::SetViewAnchor { anchor_seconds } => {
+                latest_anchor = Some(anchor_seconds);
             }
             SpectrogramWorkerCommand::NewTrack { .. } => {
                 // The commands queued behind it are for the session it
@@ -2168,6 +2200,12 @@ fn process_session_commands(
     // needs the metadata chunk before the next position update lands.
     // The seek or position then follows it.
     if needs_flush_token {
+        if let Some(anchor_seconds) = latest_anchor {
+            queue_session_command(
+                &mut session.queued_commands,
+                SpectrogramWorkerCommand::SetViewAnchor { anchor_seconds },
+            );
+        }
         if let Some(position_seconds) = latest_seek {
             queue_session_command(
                 &mut session.queued_commands,
@@ -2183,6 +2221,9 @@ fn process_session_commands(
         return Some(SessionAction::FlushToken);
     }
 
+    if let Some(anchor_seconds) = latest_anchor {
+        set_view_anchor(session, anchor_seconds);
+    }
     if let Some(position_seconds) = latest_seek {
         let action = apply_seek(session, position_seconds);
         if let Some(position_seconds) = latest_position {
@@ -2196,6 +2237,15 @@ fn process_session_commands(
             );
         }
         return Some(action);
+    }
+
+    if latest_anchor.is_some() {
+        // The view moved, or follows the playhead again, from where the
+        // playback position played since puts it.
+        if let Some(position_seconds) = latest_position {
+            session.target_position_seconds = position_seconds;
+        }
+        return Some(apply_view_move(session));
     }
 
     // Process position update — check if seek is needed.
@@ -2257,18 +2307,94 @@ fn chunk_end_column(session: &SpectrogramSessionState) -> u32 {
 /// columns around the playhead at once: the session keeps decoding where it
 /// is only if the columns it decoded cover the view, and otherwise seeks
 /// where the view starts, to decode the playhead's columns first rather
-/// than every column up to them.
+/// than every column up to them. A view the user moved away from the
+/// playhead stays where it is, as the plot's own seek leaves it: what
+/// counts is whether the columns show that view.
 ///
 /// The analysis thread seeks in the playing file, which the session decodes,
 /// and adds no continuation's start to the position: from the seek on, the
 /// columns are on that file's timeline.
 fn apply_seek(session: &mut SpectrogramSessionState, position_seconds: f64) -> SessionAction {
-    if decoded_columns_cover_view(session, position_seconds) {
+    let view_seconds = session
+        .view_anchor
+        .filter(|_| session.display_mode == SpectrogramDisplayMode::Centered)
+        .unwrap_or(position_seconds);
+    if view_columns_reachable(session, view_seconds) {
         return apply_position(session, position_seconds).unwrap_or(SessionAction::Continue);
     }
     session.timeline_of = ColumnTimeline::PlayingFile;
     session.target_position_seconds = position_seconds;
     SessionAction::SeekRequired { position_seconds }
+}
+
+/// Where the session's centered view is centred: on the anchor of a view the
+/// user moved away from the playhead, and else on the playhead. The view's
+/// columns, its lookahead and its seeks are reckoned from there.
+fn view_position(session: &SpectrogramSessionState) -> f64 {
+    session
+        .view_anchor
+        .filter(|_| session.display_mode == SpectrogramDisplayMode::Centered)
+        .unwrap_or(session.target_position_seconds)
+}
+
+/// The view stays centred on `anchor_seconds`, or follows the playhead again
+/// (`None`). A rolling view has nowhere else to be.
+fn set_view_anchor(session: &mut SpectrogramSessionState, anchor_seconds: Option<f64>) {
+    session.view_anchor = anchor_seconds
+        .filter(|seconds| seconds.is_finite())
+        .map(|seconds| seconds.max(0.0))
+        .filter(|_| session.display_mode == SpectrogramDisplayMode::Centered);
+}
+
+/// Take a view that moved, or that follows the playhead again: the session
+/// keeps its columns or goes on decoding into the view when that shows it,
+/// and otherwise seeks to where the view starts, on the playing file's
+/// timeline. A session on a continued timeline is the analysis thread's to
+/// restart: the anchor is on the playing file's.
+fn apply_view_move(session: &mut SpectrogramSessionState) -> SessionAction {
+    if session.display_mode != SpectrogramDisplayMode::Centered
+        || session.timeline_of != ColumnTimeline::PlayingFile
+        || view_columns_reachable(session, view_position(session))
+    {
+        return SessionAction::Continue;
+    }
+    SessionAction::SeekRequired {
+        position_seconds: session.target_position_seconds,
+    }
+}
+
+/// Whether the session shows a centered view centred on `view_seconds`
+/// without a seek: the columns it decoded cover it (see
+/// [`decoded_columns_cover_view`]), or, for a view the user moved, the
+/// session decodes on into it from columns it shows. The rest of the view
+/// then comes in as the session goes on, without the reset a seek makes,
+/// which would drop the columns the view shows already.
+fn view_columns_reachable(session: &SpectrogramSessionState, view_seconds: f64) -> bool {
+    decoded_columns_cover_view(session, view_seconds)
+        || (session.view_anchor.is_some() && decodes_into_view(session, view_seconds))
+}
+
+/// Whether a centered session decodes on into the view centred on
+/// `view_seconds`: it decodes its columns in order, from its first, with no
+/// left of a view still to fill, and it has reached the view's left edge,
+/// which the UI's ring holds still, but not its right edge.
+fn decodes_into_view(session: &SpectrogramSessionState, view_seconds: f64) -> bool {
+    if session.display_mode != SpectrogramDisplayMode::Centered
+        || session.timeline_of != ColumnTimeline::PlayingFile
+        || session.backfill.is_some()
+        || session.source_reached_eof
+    {
+        return false;
+    }
+    let view = session_view(session);
+    let left_column = view.left_column(view_seconds);
+    let cursor = session.columns_produced;
+    let retained_left = session
+        .session_start_column
+        .max(cursor.saturating_sub(buffer_limits(session).capacity));
+    left_column >= retained_left
+        && cursor >= left_column
+        && cursor <= left_column.saturating_add(view.window_columns())
 }
 
 /// Whether the columns a centered session has decoded show its view with
@@ -2335,6 +2461,11 @@ fn apply_position(
     if position_seconds < file_start_seconds(session) {
         return None;
     }
+    if session.view_anchor.is_some() {
+        // The view stays where the user moved it while playback goes on;
+        // its columns do not depend on the playhead.
+        return None;
+    }
     let target_col = f64_to_u64_saturating(position_seconds * session.cols_per_second);
     if target_col < session.session_start_column {
         // Backward seek needed.
@@ -2371,6 +2502,10 @@ fn handle_single_command(
         }
         SpectrogramWorkerCommand::Seek { position_seconds } => {
             apply_seek(session, position_seconds)
+        }
+        SpectrogramWorkerCommand::SetViewAnchor { anchor_seconds } => {
+            set_view_anchor(session, anchor_seconds);
+            apply_view_move(session)
         }
         SpectrogramWorkerCommand::NewTrack { .. } => SessionAction::NewSession(cmd),
         SpectrogramWorkerCommand::SetDisplayMode(mode) => {
@@ -2441,9 +2576,14 @@ fn handle_session_seek(
     event_tx: &dyn AnalysisEventOutput,
     reports: &Sender<SessionReport>,
 ) -> anyhow::Result<()> {
-    // The columns before the file are an earlier file's.
+    // The view: around the playhead, or where the user moved it. The
+    // columns before the file are an earlier file's.
+    let view_seconds = session
+        .view_anchor
+        .filter(|_| session.display_mode == SpectrogramDisplayMode::Centered)
+        .unwrap_or(position_seconds);
     let start_seconds =
-        session_seek_start_seconds(session, position_seconds).max(file_start_seconds(session));
+        session_seek_start_seconds(session, view_seconds).max(file_start_seconds(session));
     profile_eprintln!(
         "[spect-worker] SEEK to {start_seconds:.2}s for {position_seconds:.2}s file_start={:.2}s",
         file_start_seconds(session),
@@ -2461,7 +2601,7 @@ fn handle_session_seek(
         session.effective_hop,
     );
     let (playhead_column, _) = stft_seek_grid(
-        position_seconds,
+        view_seconds,
         session.effective_rate,
         session.hop_size,
         session.effective_hop,
@@ -2591,11 +2731,11 @@ fn decoded_frontier(session: &SpectrogramSessionState) -> u64 {
         .unwrap_or(session.columns_produced)
 }
 
-/// The column at the right edge of the session's centered view of its
-/// playback position.
+/// The column at the right edge of the session's centered view: of its
+/// playback position, or of where the user moved it.
 fn view_right_column(session: &SpectrogramSessionState) -> u64 {
     let view = session_view(session);
-    view.left_column(session.target_position_seconds) + view.window_columns()
+    view.left_column(view_position(session)) + view.window_columns()
 }
 
 /// The column the right of a session's view reaches: the right edge of a
@@ -2618,7 +2758,7 @@ fn backfill_right_end(session: &SpectrogramSessionState) -> u64 {
     if session.lookahead_columns == 0 {
         return view_end;
     }
-    let target = f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
+    let target = f64_to_u64_saturating(view_position(session) * session.cols_per_second);
     view_end.min(target.saturating_add(session.lookahead_columns))
 }
 
@@ -2820,6 +2960,10 @@ fn next_target_chunk_columns_for_payload(
 fn apply_display_mode(session: &mut SpectrogramSessionState, mode: SpectrogramDisplayMode) {
     let previous = session.display_mode;
     session.display_mode = mode;
+    if mode == SpectrogramDisplayMode::Rolling {
+        // A rolling view follows playback: its history is the playhead's.
+        session.view_anchor = None;
+    }
     session.rolling_history = match mode {
         SpectrogramDisplayMode::Rolling if previous == SpectrogramDisplayMode::Centered => {
             plan_rolling_history(session)
@@ -3033,7 +3177,7 @@ fn columns_before_park(session: &SpectrogramSessionState) -> u64 {
 
 /// [`columns_before_park`] for the lookahead.
 fn columns_before_lookahead_park(session: &SpectrogramSessionState) -> u64 {
-    let target = f64_to_u64_saturating(session.target_position_seconds * session.cols_per_second);
+    let target = f64_to_u64_saturating(view_position(session) * session.cols_per_second);
     let lookahead_end = if session.lookahead_columns == 0 {
         0
     } else {
@@ -3457,6 +3601,7 @@ mod tests {
                         channel_count: 1,
                         start_seconds: 0.0,
                         target_position_seconds: 0.0,
+                        view_anchor: None,
                         emit_initial_reset: true,
                         clear_history_on_reset: true,
                         view_mode: SpectrogramViewMode::Downmix,
@@ -3659,6 +3804,7 @@ mod tests {
             channel_count: 1,
             start_seconds: 0.0,
             target_position_seconds: 0.0,
+            view_anchor: None,
             emit_initial_reset: true,
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
@@ -3752,6 +3898,7 @@ mod tests {
                     channel_count: 1,
                     start_seconds: 0.0,
                     target_position_seconds: 0.0,
+                    view_anchor: None,
                     emit_initial_reset: true,
                     clear_history_on_reset: true,
                     view_mode: SpectrogramViewMode::Downmix,
@@ -3906,6 +4053,7 @@ mod tests {
                     channel_count: 2,
                     start_seconds: 0.0,
                     target_position_seconds: 0.0,
+                    view_anchor: None,
                     emit_initial_reset: true,
                     clear_history_on_reset: true,
                     view_mode: SpectrogramViewMode::PerChannel,
@@ -4093,6 +4241,7 @@ mod tests {
             channel_count: 1,
             start_seconds: 0.0,
             target_position_seconds: 0.0,
+            view_anchor: None,
             emit_initial_reset: true,
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::PerChannel,
@@ -4222,6 +4371,7 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
+            view_anchor: None,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 256,
             session_start_column: 0,
@@ -4340,6 +4490,7 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
+            view_anchor: None,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 400,
             session_start_column: 400,
@@ -4401,6 +4552,7 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
+            view_anchor: None,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 320,
             session_start_column: 0,
@@ -4470,6 +4622,7 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
+            view_anchor: None,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 320,
             session_start_column: 0,
@@ -4531,6 +4684,7 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
+            view_anchor: None,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 320,
             session_start_column: 0,
@@ -4623,6 +4777,7 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
+            view_anchor: None,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 256,
             session_start_column: 0,
@@ -4873,6 +5028,226 @@ mod tests {
         );
     }
 
+    /// [`centered_session_behind`] with the columns from 213.3 s (column
+    /// 10,000) decoded up to 258.4 s, its cursor, and a ring of 6,228
+    /// columns: a view of 1,185 columns, 25.3 s, and a lookahead of 2,730.
+    fn centered_session_decoded_from_10_000(position_seconds: f64) -> SpectrogramSessionState {
+        let mut session = centered_session_behind(position_seconds);
+        session.session_start_column = 10_000;
+        assert_eq!(buffer_limits(&session).capacity, 6_228);
+        session
+    }
+
+    /// The seconds whose column is `column`, in its middle.
+    fn seconds_of_column(column: u64) -> f64 {
+        #[allow(clippy::cast_precision_loss)]
+        let column = column as f64;
+        (column + 0.5) / 46.875
+    }
+
+    #[test]
+    fn a_moved_view_keeps_the_columns_that_show_it_and_ignores_the_playhead() {
+        let mut session = centered_session_decoded_from_10_000(300.0);
+        // Centred on column 10,781: its view, from 10,189, is decoded.
+        let anchor = seconds_of_column(10_781);
+        assert!(matches!(
+            handle_single_command(
+                &mut session,
+                SpectrogramWorkerCommand::SetViewAnchor {
+                    anchor_seconds: Some(anchor)
+                }
+            ),
+            SessionAction::Continue
+        ));
+        assert_eq!(session.view_anchor, Some(anchor));
+        // Playback far ahead of the view needs no seek: the view stays.
+        assert!(apply_position(&mut session, 609.7).is_none());
+        assert!((session.target_position_seconds - 609.7).abs() < f64::EPSILON);
+        // The session decodes its lookahead from the view's middle, not
+        // the playhead's: 10,781 + 2,730.
+        assert_eq!(columns_before_lookahead_park(&session), 13_511 - 12_112);
+        assert_eq!(view_right_column(&session), 10_189 + 1_185);
+    }
+
+    #[test]
+    fn a_view_moved_into_what_the_session_decodes_goes_on_without_a_seek() {
+        // Centred on column 12,512, 400 past the cursor: its view, from
+        // 11,920, starts in the decoded columns and runs past the cursor.
+        let anchor = seconds_of_column(12_512);
+        let mut session = centered_session_decoded_from_10_000(300.0);
+        assert!(matches!(
+            handle_single_command(
+                &mut session,
+                SpectrogramWorkerCommand::SetViewAnchor {
+                    anchor_seconds: Some(anchor)
+                }
+            ),
+            SessionAction::Continue
+        ));
+        // The rest of the view comes as the session goes on. A seek would
+        // reset the ring, and lose the left of the view it holds.
+        assert!(columns_before_lookahead_park(&session) > 0);
+        // A playhead there would seek: its columns are not decoded yet.
+        let mut following = centered_session_decoded_from_10_000(300.0);
+        assert!(matches!(
+            apply_seek(&mut following, anchor),
+            SessionAction::SeekRequired { .. }
+        ));
+    }
+
+    #[test]
+    fn a_view_moved_past_what_the_session_holds_seeks_to_it() {
+        for anchor in [400.0, 150.0] {
+            let mut session = centered_session_decoded_from_10_000(300.0);
+            assert!(
+                matches!(
+                    handle_single_command(
+                        &mut session,
+                        SpectrogramWorkerCommand::SetViewAnchor {
+                            anchor_seconds: Some(anchor)
+                        }
+                    ),
+                    SessionAction::SeekRequired { position_seconds } if position_seconds == 300.0
+                ),
+                "{anchor}"
+            );
+            // The seek starts where the view does, 12.64 s of half a view
+            // and 2 s of warm-up before its middle.
+            let start = session_seek_start_seconds(&session, view_position(&session));
+            assert!((start - (anchor - 14.64)).abs() < 0.02, "{anchor}: {start}");
+        }
+    }
+
+    #[test]
+    fn a_seek_for_a_moved_view_decodes_the_view_first() {
+        // 31 s, a length of its own: fixtures are named by their length.
+        let path =
+            super::super::waveform_window::tests::write_test_wave(&vec![0; 1_488_000], 48_000, 1);
+        let (mut source, ..) = open_audio_file(&path).expect("open the fixture");
+        // The playhead at 5 s, the view centred on 20 s.
+        let mut session = centered_session_behind(5.0);
+        session.view_anchor = Some(20.0);
+        let (events, event_rx) = unbounded();
+        let (reports, report_rx) = unbounded();
+        handle_session_seek(&mut session, 5.0, &mut source, &events, &reports)
+            .expect("the seek applies");
+        drop(source);
+        std::fs::remove_file(path).expect("remove fixture");
+
+        let Ok(SessionReport::Repositioned { start_seconds, .. }) = report_rx.try_recv() else {
+            panic!("no report of the new start");
+        };
+        // Where the view starts, as for a playhead at 20 s, not at 5 s.
+        assert!((start_seconds - 5.36).abs() < 0.01, "{start_seconds}");
+        assert!((session.target_position_seconds - 5.0).abs() < f64::EPSILON);
+        // The view's middle first, then its left.
+        let backfill = session.backfill.expect("the left of the view comes after");
+        assert_eq!(backfill.end, f64_to_u64_saturating(20.0 * 46.875));
+        assert_eq!(session.columns_produced, backfill.end);
+        let Ok(AnalysisEvent::PrecomputedSpectrogramChunk(reset)) = event_rx.try_recv() else {
+            panic!("no reset");
+        };
+        assert!(reset.buffer_reset);
+    }
+
+    #[test]
+    fn a_view_that_follows_again_seeks_to_the_playhead_unless_its_columns_show_it() {
+        // Back at a playhead whose view the columns do not show.
+        let mut session = centered_session_decoded_from_10_000(300.0);
+        session.view_anchor = Some(seconds_of_column(10_781));
+        assert!(matches!(
+            handle_single_command(
+                &mut session,
+                SpectrogramWorkerCommand::SetViewAnchor {
+                    anchor_seconds: None
+                }
+            ),
+            SessionAction::SeekRequired { position_seconds } if position_seconds == 300.0
+        ));
+        assert_eq!(session.view_anchor, None);
+        // A playhead whose view they show keeps them.
+        let mut session = centered_session_decoded_from_10_000(seconds_of_column(11_000));
+        session.view_anchor = Some(seconds_of_column(10_781));
+        assert!(matches!(
+            handle_single_command(
+                &mut session,
+                SpectrogramWorkerCommand::SetViewAnchor {
+                    anchor_seconds: None
+                }
+            ),
+            SessionAction::Continue
+        ));
+    }
+
+    #[test]
+    fn a_seek_keeps_a_moved_view_that_the_columns_show() {
+        // The plot's own seek leaves the view where it is: the session
+        // judges by the view, wherever the playhead lands.
+        let mut session = centered_session_decoded_from_10_000(300.0);
+        session.view_anchor = Some(seconds_of_column(10_781));
+        assert!(matches!(
+            apply_seek(&mut session, 600.0),
+            SessionAction::Continue
+        ));
+        assert!((session.target_position_seconds - 600.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_drag_of_the_view_takes_only_where_it_ends_up() {
+        // Queued for a session that has not started: one anchor stays.
+        let mut queued = VecDeque::new();
+        for anchor in [Some(100.0), None, Some(120.0)] {
+            queue_session_command(
+                &mut queued,
+                SpectrogramWorkerCommand::SetViewAnchor {
+                    anchor_seconds: anchor,
+                },
+            );
+        }
+        assert!(matches!(
+            queued.make_contiguous(),
+            [SpectrogramWorkerCommand::SetViewAnchor { anchor_seconds: Some(seconds) }]
+                if (*seconds - 120.0).abs() < f64::EPSILON
+        ));
+
+        // A running session drains them and acts on the last: views it
+        // would seek for on the way leave it as it is.
+        let mut session = centered_session_decoded_from_10_000(300.0);
+        let (tx, rx) = unbounded();
+        for anchor in [400.0, 150.0, seconds_of_column(10_781)] {
+            tx.send(SpectrogramWorkerCommand::SetViewAnchor {
+                anchor_seconds: Some(anchor),
+            })
+            .expect("send");
+        }
+        tx.send(SpectrogramWorkerCommand::PositionUpdate {
+            position_seconds: 301.0,
+        })
+        .expect("send");
+        assert!(matches!(
+            process_session_commands(&mut session, &rx),
+            Some(SessionAction::Continue)
+        ));
+        assert_eq!(session.view_anchor, Some(seconds_of_column(10_781)));
+        assert!((session.target_position_seconds - 301.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_rolling_view_follows_the_playhead_and_its_history_is_the_playheads() {
+        let mut session = centered_session_decoded_from_10_000(300.0);
+        session.ring_by_column = true;
+        session.view_anchor = Some(seconds_of_column(10_781));
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Rolling);
+        assert_eq!(session.view_anchor, None);
+        // A view's width left of the playhead, 14,062 - 1,185, is after the
+        // session's first column: nothing more to decode.
+        assert_eq!(session.rolling_history, None);
+        assert!((view_position(&session) - 300.0).abs() < f64::EPSILON);
+        // Rolling, a view has nowhere else to be.
+        set_view_anchor(&mut session, Some(100.0));
+        assert_eq!(session.view_anchor, None);
+    }
+
     #[test]
     fn continue_file_stored_mid_session() {
         let mut session = make_test_session();
@@ -4915,6 +5290,7 @@ mod tests {
             channel_count: 1,
             start_seconds: 0.0,
             target_position_seconds: 0.0,
+            view_anchor: None,
             emit_initial_reset: true,
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
@@ -4944,6 +5320,7 @@ mod tests {
             channel_count: 1,
             start_seconds: 0.0,
             target_position_seconds: 0.0,
+            view_anchor: None,
             emit_initial_reset: true,
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
@@ -4962,6 +5339,7 @@ mod tests {
             channel_count: 1,
             start_seconds: 0.0,
             target_position_seconds: 0.0,
+            view_anchor: None,
             emit_initial_reset: true,
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
@@ -5007,6 +5385,7 @@ mod tests {
             channel_count: 1,
             start_seconds: 0.0,
             target_position_seconds: 0.0,
+            view_anchor: None,
             emit_initial_reset: true,
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
@@ -5024,6 +5403,7 @@ mod tests {
             channel_count: 1,
             start_seconds: 0.0,
             target_position_seconds: 0.0,
+            view_anchor: None,
             emit_initial_reset: true,
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
@@ -5062,6 +5442,7 @@ mod tests {
             channel_count: 1,
             start_seconds: 0.0,
             target_position_seconds: 0.0,
+            view_anchor: None,
             emit_initial_reset: true,
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,
@@ -5355,6 +5736,7 @@ mod tests {
             channel_count: 1,
             start_seconds: 0.0,
             target_position_seconds: 0.0,
+            view_anchor: None,
             emit_initial_reset: true,
             clear_history_on_reset: true,
             view_mode: SpectrogramViewMode::Downmix,

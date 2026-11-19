@@ -1244,39 +1244,17 @@ double WaveformEditorItem::visibleSpanForZoomLocked(double zoomLevel) const {
     return span >= m_durationSeconds * 0.9999 ? m_durationSeconds : span;
 }
 
-namespace {
-
-// The glide's ease, from 0 to 1 as `progress` goes from 0 to 1, and its
-// slope: smooth at both ends, so that the view takes up the playhead at
-// 85 % at playback's speed and hands it over at the middle at the same.
-double glideEase(double progress) {
-    return progress * progress * (3.0 - 2.0 * progress);
-}
-
-double glideEaseSlope(double progress) {
-    return 6.0 * progress * (1.0 - progress);
-}
-
-} // namespace
-
 WaveformEditorItem::FollowState WaveformEditorItem::followStateLocked(
     double zoomLevel, double position) const {
-    FollowState state{m_follow, m_glideFrom};
-    // Purely from the playhead: the frame that finds it at the re-attach
-    // point glides, whenever the state takes that in. While a zoom out is
-    // handed over, the view still shown glides only from its own point,
-    // and the view it hands over to from either.
-    if (state.mode == Follow::Detached) {
+    // While a zoom out is handed over, the view still shown glides only
+    // from its own point, and the view it hands over to from either.
+    double reattach = std::numeric_limits<double>::infinity();
+    if (m_follow == Follow::Detached) {
         const bool handedOver = m_zoomOutHandoffPending
             && std::abs(zoomLevel - m_zoomLevel) >= 0.0001;
-        const double reattach = reattachPointLocked(!handedOver);
-        if (position >= reattach) state = {Follow::Gliding, reattach};
+        reattach = reattachPointLocked(!handedOver);
     }
-    if (state.mode == Follow::Gliding
-        && position >= state.glideFrom + kReattachGlideSeconds) {
-        state = {Follow::Playhead, 0.0};
-    }
-    return state;
+    return ViewFollow::advance({m_follow, m_glideFrom}, position, reattach);
 }
 
 double WaveformEditorItem::detachedStartLocked(double span) const {
@@ -1303,12 +1281,9 @@ double WaveformEditorItem::reattachSecondsLocked(double span) const {
 
 double WaveformEditorItem::glidingStartLocked(
     double span, double position, double from) const {
-    const double progress = std::clamp(
-        (position - from) / kReattachGlideSeconds, 0.0, 1.0);
     // Where the playhead is in the view's width: from the re-attach point
     // to the middle.
-    const double fraction = kReattachViewFraction
-        + (0.5 - kReattachViewFraction) * glideEase(progress);
+    const double fraction = ViewFollow::glidePlayheadFraction(position, from);
     // Whole device columns from following, so that the glide ends on the
     // view that follows.
     const double columns = deviceColumnsLocked();
@@ -1321,12 +1296,8 @@ double WaveformEditorItem::viewSpeedLocked(double span, double position) const {
     switch (state.mode) {
     case Follow::Detached:
         return 0.0;
-    case Follow::Gliding: {
-        const double progress = std::clamp(
-            (position - state.glideFrom) / kReattachGlideSeconds, 0.0, 1.0);
-        return 1.0 + (kReattachViewFraction - 0.5) * span
-            * glideEaseSlope(progress) / kReattachGlideSeconds;
-    }
+    case Follow::Gliding:
+        return ViewFollow::glideViewSpeed(span, position, state.glideFrom);
     case Follow::Playhead:
         break;
     }

@@ -113,6 +113,20 @@ pub(super) fn handle_bridge_command(
                     .command(AnalysisCommand::SetSpectrogramWidgetWidth(width));
                 true
             }
+            BridgeAnalysisCommand::SetSpectrogramViewAnchor {
+                track_token,
+                center_seconds,
+            } => {
+                // Nothing the UI shows changes: the columns come as the
+                // analysis decodes them.
+                context
+                    .analysis
+                    .command(AnalysisCommand::SetSpectrogramViewAnchor {
+                        track_token,
+                        center_seconds,
+                    });
+                false
+            }
         },
         BridgeCommand::Settings(cmd) => {
             handle_settings_bridge_command(&cmd, state, context);

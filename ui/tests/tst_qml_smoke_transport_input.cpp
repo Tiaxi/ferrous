@@ -3544,6 +3544,22 @@ bool detachWaveform(WaveformEditorItem *waveform) {
     return waveform->detached();
 }
 
+// The view of the main spectrogram's lanes, which they share; null if
+// they do not.
+SpectrogramViewFollow *spectrogramFollow(QQuickWindow *window) {
+    SpectrogramViewFollow *shared = nullptr;
+    const QList<QQuickItem *> panes =
+        itemsNamed(window->contentItem(), QStringLiteral("spectrogramPaneItem"));
+    for (QQuickItem *pane : panes) {
+        auto *spectrogram = qobject_cast<SpectrogramItem *>(pane);
+        if (spectrogram == nullptr || (shared != nullptr && spectrogram->viewFollow() != shared)) {
+            return nullptr;
+        }
+        shared = spectrogram->viewFollow();
+    }
+    return shared;
+}
+
 } // namespace
 
 // View › Follow Playhead (F) brings the shown plot back to the playhead,
@@ -3570,8 +3586,12 @@ void TransportInputSmokeTest::followPlayheadBringsTheShownPlotBack() {
     QSignalSpy triggered(follow, SIGNAL(triggered(QObject *)));
     const auto enabled = [follow]() { return follow->property("enabled").toBool(); };
 
-    // In `host`: off while the waveform follows and while the spectrogram
-    // shows; F brings a detached waveform back, playing or paused.
+    SpectrogramViewFollow *spectrogram = spectrogramFollow(window);
+    QVERIFY(spectrogram != nullptr);
+
+    // In `host`: off while the shown plot follows; F brings a detached
+    // waveform or spectrogram back, playing or paused. A switch between
+    // them brings the one left back to the playhead.
     const auto check = [&](QQuickWindow *host, const char *where) {
         for (const QString &state : {QStringLiteral("Playing"), QStringLiteral("Paused")}) {
             const QByteArray label = QByteArray(where) + ' ' + state.toUtf8();
@@ -3584,24 +3604,49 @@ void TransportInputSmokeTest::followPlayheadBringsTheShownPlotBack() {
             QVERIFY2(detachWaveform(waveform), label.constData());
             QTRY_VERIFY2(enabled(), label.constData());
 
-            // The spectrogram does not pan: nothing to follow while it shows.
+            // The spectrogram shows at the playhead, and the waveform goes
+            // back to it.
             viewer->setProperty("visualizationMode", 0);
             QTRY_VERIFY2(!enabled(), label.constData());
+            QVERIFY2(!waveform->detached(), label.constData());
+            // A centered spectrogram moved away comes back on F.
+            spectrogram->detach(30.0, 0.5);
+            QTRY_VERIFY2(enabled(), label.constData());
             const int before = triggered.count();
             QTest::keyClick(host, 'f');
-            QCoreApplication::processEvents();
-            QVERIFY2(triggered.count() == before && waveform->detached(), label.constData());
-            viewer->setProperty("visualizationMode", 1);
-            QTRY_VERIFY2(enabled(), label.constData());
-
-            QTest::keyClick(host, 'f');
             QTRY_VERIFY2(triggered.count() == before + 1, label.constData());
+            QVERIFY2(!spectrogram->detached() && !enabled(), label.constData());
+            // Moved away again, it goes back as the waveform shows.
+            spectrogram->detach(30.0, 0.5);
+            QTRY_VERIFY2(enabled(), label.constData());
+            viewer->setProperty("visualizationMode", 1);
+            QTRY_VERIFY2(!enabled(), label.constData());
+            QVERIFY2(!spectrogram->detached(), label.constData());
+
+            QVERIFY2(detachWaveform(waveform), label.constData());
+            QTRY_VERIFY2(enabled(), label.constData());
+            QTest::keyClick(host, 'f');
+            QTRY_VERIFY2(triggered.count() == before + 2, label.constData());
             QVERIFY2(!waveform->detached(), label.constData());
             QVERIFY2(!enabled(), label.constData());
         }
+        // Reset Zoom brings a moved spectrogram back too.
         bridge->setProperty("playbackState", QStringLiteral("Playing"));
-        waveform->resetZoom();
         viewer->setProperty("visualizationMode", 0);
+        QTRY_VERIFY2(!enabled(), where);
+        auto *spectrogramSurface =
+            window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+        QVERIFY(spectrogramSurface != nullptr);
+        spectrogramSurface->setProperty(
+            viewer->property("spectrogramViewerOpen").toBool() ? "_viewerZoomLevel" : "_widgetZoomLevel",
+            2.0);
+        spectrogram->detach(30.0, 0.5);
+        QTRY_VERIFY2(enabled(), where);
+        QObject *resetZoom = window->findChild<QObject *>(QStringLiteral("resetZoomAction"));
+        QTRY_VERIFY2(resetZoom->property("enabled").toBool(), where);
+        QVERIFY(QMetaObject::invokeMethod(resetZoom, "trigger"));
+        QTRY_VERIFY2(!enabled() && !spectrogram->detached(), where);
+        waveform->resetZoom();
     };
 
     // The queue has focus: a focused library takes F for its type-ahead.
