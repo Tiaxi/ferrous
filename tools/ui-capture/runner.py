@@ -58,7 +58,7 @@ class Runner:
         if spec.startswith("menuitem:"):
             _, m, i = spec.split(":")
             r = s.ev(f"(function(){{var m=root.menuBar.menus[{m}];var k={i};if(k<0)k=m.count+k;var it=m.itemAt(k);"
-                     f"var p=it.mapToItem(null,0,0);return p.x+' '+p.y+' '+it.width+' '+it.height}})()")
+                     f"var p={states.MAIN_POINT_JS}(it);return p.x+' '+p.y+' '+it.width+' '+it.height}})()")
             x, y, w, h = map(float, r.split())
             return x + w / 2, y + h / 2
         m = re.match(r"^([A-Za-z0-9_]+)(?:#(\d+))?(?:@([-\d.]+),([-\d.]+))?$", spec)
@@ -375,8 +375,10 @@ class Runner:
     def popup_open(self, win=None):
         """A menu, dialog or other popup (not just a tooltip) is fully open in the window. Zero-size popups
         don't count: DialogWindow puts an empty modal popup (dialogWindowShortcutBlocker) in the main window
-        while a dialog window is shown, to block its shortcuts; it is not the dialog."""
-        return any(p["opened"] and not p["tooltip"] and p["rect"][2] > 1 and p["rect"][3] > 1
+        while a dialog window is shown, to block its shortcuts; it is not the dialog. A menu in a window of its own
+        counts once KWin shows that window."""
+        return any(p["opened"] and p.get("exposed", True) and not p["tooltip"]
+                   and p["rect"][2] > 1 and p["rect"][3] > 1
                    and p.get("name") != "dialogWindowShortcutBlocker"
                    for p in self.s.popups(self.win if win is None else win))
 

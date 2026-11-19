@@ -18,6 +18,7 @@
 #include <QHash>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPointer>
 #include <QQmlContext>
 #include <QtQml/qqml.h>
@@ -35,6 +36,10 @@
 #include <QWheelEvent>
 #include <QWindow>
 #include <QDir>
+
+// What a grab shows outside the window where one of its menus reaches past it (the desktop under it, which
+// the probe cannot see): a plain mid grey, apart from both themes.
+static const QColor POPUP_BACKDROP(0x80, 0x80, 0x80);
 
 // whether a text names this machine's home folder, read without the invisible break hints a path carries (the
 // app breaks long paths with U+200B): the pack paints such texts out of the shots and fails while one shows
@@ -629,6 +634,58 @@ private:
         QMouseEvent e(t, p, p, w->mapToGlobal(p), b, s, mods);
         QCoreApplication::sendEvent(w, &e);
     }
+    // A window popup: a menu (popupType: Popup.Window, #642) is a top-level window of type Qt::Popup beside the
+    // window it opened from, which the compositor places and gives the input over it.
+    static bool isPopupWindow(const QWindow *w) {
+        return (w->flags() & Qt::WindowType_Mask) == Qt::Popup;
+    }
+    // The shown window popups opened from `w`, a submenu's after its menu's, each with its offset from w's top
+    // left (logical px).
+    QList<QPair<QQuickWindow *, QPoint>> popupWindowsOf(QQuickWindow *w) {
+        QList<QPair<QQuickWindow *, QPoint>> out;
+        QList<const QWindow *> chain{w};
+        for (bool grew = true; grew;) {
+            grew = false;
+            for (QQuickWindow *p : windows()) {
+                if (isPopupWindow(p) && p->isVisible() && p->isExposed() && !chain.contains(p) &&
+                    chain.contains(p->transientParent())) {
+                    chain.append(p);
+                    out.append({p, p->mapToGlobal(QPoint()) - w->mapToGlobal(QPoint())});
+                    grew = true;
+                }
+            }
+        }
+        return out;
+    }
+    // Where the compositor would send pointer input at `p` in `w`: the topmost window popup of w under it (in
+    // that popup's coordinates), else w.
+    QPair<QQuickWindow *, QPointF> pointerTarget(QQuickWindow *w, QPointF p) {
+        const auto pops = popupWindowsOf(w);
+        for (auto it = pops.crbegin(); it != pops.crend(); ++it) {
+            if (QRectF(it->second, it->first->size()).contains(p)) {
+                return {it->first, p - QPointF(it->second)};
+            }
+        }
+        return {w, p};
+    }
+    // Pointer input to `w` at `p`, as the compositor delivers it: to the popup under it. A window the pointer leaves
+    // for a popup, or a popup it leaves, gets a Leave, so that it drops its hover.
+    QPair<QQuickWindow *, QPointF> pointerAt(QQuickWindow *w, QPointF p) {
+        const auto target = pointerTarget(w, p);
+        if (m_pointerWindow && m_pointerWindow != target.first &&
+            (isPopupWindow(m_pointerWindow) || isPopupWindow(target.first))) {
+            QEvent leave(QEvent::Leave);
+            QCoreApplication::sendEvent(m_pointerWindow, &leave);
+        }
+        m_pointerWindow = target.first;
+        return target;
+    }
+    // Where the compositor would send a key for `w`: its innermost window popup (an open menu has the keyboard),
+    // else w.
+    QQuickWindow *keyTarget(QQuickWindow *w) {
+        const auto pops = popupWindowsOf(w);
+        return pops.isEmpty() ? w : pops.last().first;
+    }
     static QString rest(const QString &line, int words) {
         QString s = line;
         for (int i = 0; i < words; ++i) {
@@ -789,13 +846,41 @@ private:
         } else if (name == "grab") {
             // grab <png> [<layout.json>]: the layout walk runs in this same command, right after the frame
             // is read back, with no event processing in between: walk and image describe the same frame.
-            const QImage img = w->grabWindow();
+            // The window's open menus are windows of their own: each is drawn in at its place, and the image
+            // grows right and down for one that reaches past the window (POPUP_BACKDROP outside it).
+            QImage img = w->grabWindow();
+            const auto pops = popupWindowsOf(w);
+            if (!pops.isEmpty()) {
+                const qreal dpr = w->devicePixelRatio();
+                img.setDevicePixelRatio(1);  // drawn in device pixels
+                QList<QPair<QImage, QPoint>> layers;
+                QRect canvas(QPoint(0, 0), img.size());
+                for (const auto &[pw, off] : pops) {
+                    QImage pi = pw->grabWindow();
+                    pi.setDevicePixelRatio(1);
+                    const QPoint at(qRound(off.x() * dpr), qRound(off.y() * dpr));
+                    canvas |= QRect(at, pi.size()).intersected(QRect(0, 0, INT_MAX / 2, INT_MAX / 2));
+                    layers.append({pi, at});
+                }
+                QImage out(canvas.size(), QImage::Format_ARGB32_Premultiplied);
+                out.fill(POPUP_BACKDROP);
+                QPainter painter(&out);
+                painter.drawImage(QPoint(0, 0), img);
+                for (const auto &[pi, at] : layers) {
+                    painter.drawImage(at, pi);
+                }
+                painter.end();
+                img = out;
+            }
             const bool walked = a.size() >= 4 ? writeLayout(a.value(3)) : true;
             const bool ok = img.save(a.value(2), "PNG", 80);
-            reply(id, QString("%1 %2x%3%4").arg(ok ? "ok" : "ERROR save").arg(img.width()).arg(img.height())
+            reply(id, QString("%1 %2x%3%4%5").arg(ok ? "ok" : "ERROR save").arg(img.width()).arg(img.height())
+                          .arg(pops.isEmpty() ? QString() : QString(" with %1 popup window(s)").arg(pops.size()))
                           .arg(walked ? "" : " (layout not written)"));
         } else if (name == "click" || name == "rclick" || name == "dblclick" || name == "press" || name == "release") {
-            const QPointF p(a.value(2).toDouble(), a.value(3).toDouble());
+            // (one target for the whole click: press and release reach the same window)
+            const auto [tw, p] = pointerAt(w, QPointF(a.value(2).toDouble(), a.value(3).toDouble()));
+            w = tw;
             const Qt::MouseButton b = name == "rclick" ? Qt::RightButton : Qt::LeftButton;
             mouse(w, QEvent::MouseMove, p, Qt::NoButton, name == "release" ? Qt::MouseButtons(b) : Qt::MouseButtons(Qt::NoButton));
             if (name != "release") {
@@ -811,7 +896,8 @@ private:
             }
             reply(id, "ok");
         } else if (name == "move") {
-            const QPointF p(a.value(2).toDouble(), a.value(3).toDouble());
+            const auto [tw, p] = pointerAt(w, QPointF(a.value(2).toDouble(), a.value(3).toDouble()));
+            w = tw;
             mouse(w, QEvent::MouseMove, p, Qt::NoButton, Qt::NoButton);
             QEnterEvent e(p, p, w->mapToGlobal(p));
             reply(id, "ok");
@@ -878,6 +964,15 @@ private:
                 QRectF rr(pos.x(), pos.y(), o->property("width").toReal(), o->property("height").toReal());
                 if (QQuickItem *pi = shownItem.value(o))  // where its item is drawn (a shared ToolTip moves)
                     rr = pi->mapRectToScene(QRectF(0, 0, pi->width(), pi->height()));
+                // A popup in a window of its own (a menu): where the compositor put that window, and whether
+                // it shows at all (KWin maps it only for a client that has had real input).
+                bool exposed = true;
+                QQuickItem *content = o->property("contentItem").value<QQuickItem *>();
+                QQuickWindow *own = content != nullptr ? content->window() : nullptr;
+                if (own != nullptr && own != w && isPopupWindow(own)) {
+                    exposed = own->isVisible() && own->isExposed();
+                    rr = QRectF(own->mapToGlobal(QPoint()) - w->mapToGlobal(QPoint()), own->size());
+                }
                 QJsonObject j;
                 j["cls"] = QString(o->metaObject()->className());
                 j["name"] = o->objectName();
@@ -885,6 +980,7 @@ private:
                 j["opacity"] = o->property("opacity").toReal();
                 j["rect"] = QJsonArray{qRound(rr.x()), qRound(rr.y()), qRound(rr.width()), qRound(rr.height())};
                 j["tooltip"] = o->inherits("QQuickToolTip");
+                j["exposed"] = exposed;
                 out.append(j);
             }
             reply(id, QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
@@ -956,18 +1052,21 @@ private:
             const QImage img = r.read();
             reply(id, img.isNull() ? "ERROR " + r.errorString() : (img.save(a.value(4)) ? "ok" : "ERROR save"));
         } else if (name == "dmove") {
-            const QPointF p(a.value(2).toDouble(), a.value(3).toDouble());
+            const auto [tw, p] = pointerAt(w, QPointF(a.value(2).toDouble(), a.value(3).toDouble()));
+            w = tw;
             mouse(w, QEvent::MouseMove, p, Qt::NoButton, Qt::LeftButton);
             reply(id, "ok");
         } else if (name == "mwheel") {
             // mwheel x y delta modifiers
-            const QPointF p(a.value(2).toDouble(), a.value(3).toDouble());
+            const auto [tw, p] = pointerAt(w, QPointF(a.value(2).toDouble(), a.value(3).toDouble()));
+            w = tw;
             QWheelEvent e(p, w->mapToGlobal(p), QPoint(), QPoint(0, a.value(4, "-120").toInt()), Qt::NoButton,
                           Qt::KeyboardModifiers(a.value(5, "0").toInt()), Qt::NoScrollPhase, false);
             QCoreApplication::sendEvent(w, &e);
             reply(id, "ok");
         } else if (name == "wheel") {
-            const QPointF p(a.value(2).toDouble(), a.value(3).toDouble());
+            const auto [tw, p] = pointerAt(w, QPointF(a.value(2).toDouble(), a.value(3).toDouble()));
+            w = tw;
             QWheelEvent e(p, w->mapToGlobal(p), QPoint(), QPoint(0, a.value(4, "-120").toInt()), Qt::NoButton,
                           Qt::NoModifier, Qt::NoScrollPhase, false);
             QCoreApplication::sendEvent(w, &e);
@@ -978,6 +1077,7 @@ private:
             const auto mods = Qt::KeyboardModifiers(a.value(3, "0").toInt());
             // the command line splits on spaces, so a typed space comes as "%20"
             const QString text = a.value(4) == QLatin1String("%20") ? QStringLiteral(" ") : a.value(4);
+            w = keyTarget(w);
             QKeyEvent p(QEvent::KeyPress, key, mods, text);
             QCoreApplication::sendEvent(w, &p);
             QKeyEvent r(QEvent::KeyRelease, key, mods, text);
@@ -1036,6 +1136,11 @@ private:
 
     bool writeLayout(const QString &path) {
         QJsonArray wins;
+        // The main window's open menus, which its grab draws in at these offsets.
+        QHash<QQuickWindow *, QPoint> inMain;
+        if (QQuickWindow *mw = mainWindow()) {
+            for (const auto &[pw, off] : popupWindowsOf(mw)) inMain.insert(pw, off);
+        }
         for (QQuickWindow *ww : windows()) {
             if (!ww->isVisible()) continue;
             QJsonArray finds, texts;
@@ -1063,6 +1168,9 @@ private:
             wo["name"] = ww->objectName();
             wo["size"] = QJsonArray{ww->width(), ww->height()};
             wo["main"] = ww == mainWindow();
+            if (inMain.contains(ww)) {  // a menu of the main window: in a main-window grab at this offset
+                wo["main_popup_offset"] = QJsonArray{inMain[ww].x(), inMain[ww].y()};
+            }
             wo["findings"] = finds;
             wo["texts"] = texts;
             wo["actions"] = actions;
@@ -1371,6 +1479,7 @@ private:
     }
 
     QPointer<QQuickWindow> m_traceWin;
+    QPointer<QQuickWindow> m_pointerWindow;  // the window the last pointer event went to (pointerAt)
     QList<QPointer<QQuickWindow>> m_hooked;
     QStringList m_winInfo;
     QList<QMetaObject::Connection> m_connections;

@@ -73,12 +73,28 @@ class Session:
                                    "is stale (shoot_round.sh rebuilds it when its key, which includes this path, changes)")
         self.settle(0.3)
         time.sleep(0.2)  # the first frames after the window maps
+        if os.environ.get("SHOT_KWIN"):
+            self.prime_input()
         self.startup_s = time.time() - t_app
         r = self.a.ev_soft("GraphicsInfo.api")
         print(f"[{name}/{tag}] renderer: {r}", flush=True)
         if r != 3 and not os.environ.get("SHOT_SOFTWARE"):
             raise RuntimeError(f"renderer {r}, not OpenGL")
         self.renderer = r
+
+    def prime_input(self):
+        """One real key press through KWin (kwin_input.py) before any step: KWin opens a menu, a window of its own
+        since #642, only for a client that has had input from the compositor, and the probe's events go past it.
+        A lone Shift does nothing in the app, and unlike a pointer event it leaves no pointer position behind for
+        a menu to show hovered."""
+        import kwin_input
+        if not self.a.wait_for("root.active", timeout=10, interval=0.05):
+            raise RuntimeError("the main window is not active: a key through KWin would not reach it")
+        inp = kwin_input.KWinInput(kwin_input.socket_path(os.path.join(self.a.iso, "runtime")))
+        try:
+            inp.key(kwin_input.KEY_LEFTSHIFT)
+        finally:
+            inp.close()
 
     # --- probe wrappers
     def cmd(self, c, timeout=20):
@@ -166,17 +182,19 @@ class Session:
                              r"flags=(\w+)(?: active=(\w+))?(?: parent=(-?\d+))?\]", txt):
             out.append(dict(cls=m.group(1), title=m.group(2), name=m.group(3), visible=m.group(4) == "1",
                             w=int(m.group(5)), h=int(m.group(6)), active=m.group(11) in ("1", "true"),
-                            parent=int(m.group(12)) if m.group(12) else -1, index=len(out)))
+                            parent=int(m.group(12)) if m.group(12) else -1, index=len(out),
+                            popup=int(m.group(10), 16) & 0xFF == 0x09))  # Qt::Popup: a menu's window
         return out
 
     def dialog_windows(self):
-        """Every visible dialog window (not the main window, not a viewer), innermost first: a window no other
-        visible dialog window is transient for (a confirmation over Configure or Edit Tags) before its parents,
-        then the active one. KWin's activation of a new transient window can lag the grab, so the structure
+        """Every visible dialog window (not the main window, not a viewer, not a menu's window), innermost first: a
+        window no other visible dialog window is transient for (a confirmation over Configure or Edit Tags) before
+        its parents, then the active one. KWin's activation of a new transient window can lag the grab, so the structure
         decides, not the focus."""
         ws = self.windows()
         main = ws[0]["cls"] if ws else ""
-        cands = [w for w in ws[1:] if w["visible"] and w["cls"] != main and w["name"] not in self.VIEWER_WINDOWS]
+        cands = [w for w in ws[1:] if w["visible"] and w["cls"] != main and w["name"] not in self.VIEWER_WINDOWS
+                 and not w["popup"]]
         parents = {w["parent"] for w in cands}
         return sorted(cands, key=lambda w: (w["index"] in parents, not w["active"]))
 

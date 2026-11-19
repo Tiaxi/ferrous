@@ -115,15 +115,17 @@ class App:
         os.chmod(os.path.join(self.iso, "runtime"), 0o700)
         open(os.path.join(self.iso, "config", "kdeglobals"), "w").write(kdeglobals(scheme, font_pt, anim_off))
         # Lets this harness's Python call KWin's restricted org.kde.KWin.ScreenShot2 (window captures with
-        # their decoration) inside this isolated session only: KWin allows callers whose executable a
-        # .desktop file declares with X-KDE-DBUS-Restricted-Interfaces.
+        # their decoration) and send input through its fake-input protocol (kwin_input.py) inside this isolated
+        # session only: KWin allows callers whose executable a .desktop file declares with
+        # X-KDE-DBUS-Restricted-Interfaces and X-KDE-Wayland-Interfaces.
         apps = os.path.join(self.iso, "data", "applications")
         os.makedirs(apps, exist_ok=True)
         import sys as _sys
         open(os.path.join(apps, "ferrous-shot-capture.desktop"), "w").write(
             "[Desktop Entry]\nType=Application\nName=Ferrous shot capture\nNoDisplay=true\n"
             f"Exec={os.path.realpath(_sys.executable)}\n"
-            "X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2\n")
+            "X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2\n"
+            "X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input\n")
         settings = os.path.join(self.iso, "config", "ferrous", "settings.txt")
         if fresh or not os.path.exists(settings):
             # app_defaults: only the window's size and place, so the app starts with its own defaults (a new

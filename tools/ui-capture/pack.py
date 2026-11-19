@@ -709,8 +709,9 @@ def _home_boxes(rd, e):
     """The boxes (image px) that name this machine's paths in a shot: every recorded text (its layout)
     holding the home folder, and the boxes the runner listed (shots/FILE.redact.json: the diagnostics log). Offsets:
     a dialog capture's own window at its image offset, an outer dialog window of a nested capture below its title bar
-    at the capture's origin; a main-window or viewer-window shot at 0, 0. Returns (boxes, inner): inner, the grabbed
-    window's box in a nested capture (it lies over its parent's boxes)."""
+    at the capture's origin; a main-window or viewer-window shot at 0, 0, and the menus a main-window shot draws in
+    at their offsets. Returns (boxes, inner): inner, the grabbed window's box in a nested capture (it lies over its
+    parent's boxes)."""
     boxes, inner = [], None
     g = e.get("grabbed") or {}
     sc = os.path.join(rd, "shots", e["file"][:-4] + ".redact.json")
@@ -733,6 +734,8 @@ def _home_boxes(rd, e):
                 off = g.get("image_offset", [0, 0])
             elif w.get("main"):
                 off = [0, 0]
+            elif g.get("kind") == "main" and w.get("main_popup_offset"):  # a menu the grab draws in
+                off = w["main_popup_offset"]
             else:
                 continue
             for t in w.get("texts", []):
