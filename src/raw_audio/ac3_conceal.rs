@@ -1091,6 +1091,9 @@ mod pipeline_tests {
         assert_eq!(prepare(&mut concealer, &lfe), plain);
         assert_eq!(prepare(&mut concealer, &front), front);
         assert_eq!(prepare(&mut concealer, &lfe), lfe);
+        // Caps that may be the same keep the decoder.
+        concealer.handle_event(gst::EventType::Caps);
+        assert_eq!(prepare(&mut concealer, &lfe), lfe);
         concealer.handle_event(gst::EventType::FlushStop);
         assert_eq!(prepare(&mut concealer, &lfe), plain);
     }
