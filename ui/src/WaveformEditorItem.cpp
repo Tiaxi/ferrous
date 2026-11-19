@@ -1265,7 +1265,7 @@ WaveformEditorItem::FollowState WaveformEditorItem::followStateLocked(double pos
     // a zoom out is handed over, the view still shown glides as its own is
     // reached too, so the playhead never leaves it. Every zoom glides from
     // the same point.
-    if (state.mode == Follow::Detached && m_reattachArmed) {
+    if (state.mode == Follow::Detached) {
         const double reattach = reattachPointLocked();
         if (position >= reattach) state = {Follow::Gliding, reattach};
     }
@@ -1284,8 +1284,10 @@ double WaveformEditorItem::detachedStartLocked(double span) const {
 }
 
 double WaveformEditorItem::reattachPointLocked() const {
-    const double reattach = reattachSecondsLocked(visibleSpanForZoomLocked(m_zoomLevel));
-    return m_zoomOutHandoffPending
+    constexpr double never = std::numeric_limits<double>::infinity();
+    const double reattach = m_reattachArmed
+        ? reattachSecondsLocked(visibleSpanForZoomLocked(m_zoomLevel)) : never;
+    return m_zoomOutHandoffPending && m_shownReattachArmed
         ? std::min(reattach, reattachSecondsLocked(visibleSpanForZoomLocked(m_presentedZoomLevel)))
         : reattach;
 }
@@ -1354,6 +1356,7 @@ void WaveformEditorItem::detachAtLocked(qint64 nowNs, double fraction) {
     if (m_follow != Follow::Detached) {
         m_ownSeekSeconds = std::numeric_limits<double>::quiet_NaN();
         m_reattachArmed = false;
+        m_shownReattachArmed = false;
     }
     m_follow = Follow::Detached;
 }
@@ -1361,12 +1364,17 @@ void WaveformEditorItem::detachAtLocked(qint64 nowNs, double fraction) {
 void WaveformEditorItem::armReattachLocked(qint64 nowNs) {
     // A view the user still drags stays where it is put.
     if (m_follow != Follow::Detached || m_panning) return;
-    m_reattachArmed = displayedPositionSecondsLocked(nowNs) < reattachPointLocked();
+    // Each view's point counts only for a playhead left of it now.
+    const double position = displayedPositionSecondsLocked(nowNs);
+    m_reattachArmed = position < reattachSecondsLocked(visibleSpanForZoomLocked(m_zoomLevel));
+    m_shownReattachArmed = m_zoomOutHandoffPending
+        && position < reattachSecondsLocked(visibleSpanForZoomLocked(m_presentedZoomLevel));
 }
 
 void WaveformEditorItem::reattachLocked() {
     m_follow = Follow::Playhead;
     m_reattachArmed = false;
+    m_shownReattachArmed = false;
     m_ownSeekSeconds = std::numeric_limits<double>::quiet_NaN();
 }
 
@@ -4195,6 +4203,7 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
             detachAtLocked(nowNs, 0.5);
             // Nothing glides back until the user lets go.
             m_reattachArmed = false;
+            m_shownReattachArmed = false;
             m_panning = true;
             m_panOriginStart = visibleRangeLocked(nowNs).first;
             m_panOriginX = m_panPressPosition.x();

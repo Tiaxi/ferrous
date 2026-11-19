@@ -421,6 +421,31 @@ void WaveformFollowSmokeTest::zoomOutHandoffKeepsTheDetachedView() {
     }
     QCOMPARE(item.m_follow, WaveformEditorItem::Follow::Playhead);
     QVERIFY(sameView(viewOf(item), followingViewOf(item)));
+
+    // Past the re-attach point of the view shown, but short of the wider
+    // view's: the wider view glides once the playhead reaches its own.
+    item.setZoomLevel(8.0);
+    middleDrag(item, 0.0, 0.4 * kWidth);
+    QVERIFY(std::abs(playheadFraction(item) - 0.9) < 2.0 / kWidth);
+    draw();
+    wheelAt(item, 0.0, -120);
+    QVERIFY(item.m_zoomOutHandoffPending);
+    const auto widened = targetViewOf(item);
+    QVERIFY((item.positionSeconds() - widened.first) / (widened.second - widened.first) < 0.75);
+    time.advance(0.05);
+    frame(item);
+    QVERIFY(item.detached());
+    commitHandoff();
+    QVERIFY(sameView(viewOf(item), widened));
+    for (int step = 0; step < 240 * 5 && item.m_follow != WaveformEditorItem::Follow::Playhead; ++step) {
+        time.advance(1.0 / 240.0);
+        frame(item);
+        const auto view = viewOf(item);
+        QVERIFY2(item.positionSeconds() >= view.first && item.positionSeconds() <= view.second,
+                 qPrintable(describe(view)));
+        QVERIFY(playheadFraction(item) <= 0.85 + 2.0 / kWidth);
+    }
+    QCOMPARE(item.m_follow, WaveformEditorItem::Follow::Playhead);
 }
 
 void WaveformFollowSmokeTest::detachedViewGlidesBackFromItsReattachPoint_data() {

@@ -505,7 +505,8 @@ private:
     double reattachSecondsLocked(double span) const;
     // Where the playhead starts the glide back: the re-attach point of the
     // view at the zoom asked for, or of the view a zoom out still shows
-    // while it is handed over, whichever comes first.
+    // while it is handed over, whichever comes first of those armed;
+    // infinity for none.
     double reattachPointLocked() const;
     // Where a view of `span` seconds gliding back starts, with the
     // playhead at `position` and the glide begun at `from`: the playhead
@@ -792,6 +793,8 @@ private:
     // Detached: whether the playhead was left of the re-attach point when
     // the user last placed the view, so that reaching it glides back.
     bool m_reattachArmed{false};
+    // The same for the view a zoom out still shows while it is handed over.
+    bool m_shownReattachArmed{false};
     // Gliding: where the playhead was as the glide began.
     double m_glideFrom{0.0};
     // The time the plot last asked to seek to while detached, or NaN; see
