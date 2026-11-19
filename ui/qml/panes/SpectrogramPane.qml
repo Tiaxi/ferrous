@@ -120,30 +120,15 @@ Rectangle {
     }
 
     // Takes the keyboard focus from the list that has it when the plot is
-    // used, so that the window's shortcuts see the keys a focused library
-    // keeps for its type-ahead, such as F for View › Follow Playhead. Out of
-    // the Tab order, with no frame: a click on the library, the queue or a
-    // control gives it the focus back.
+    // used (see Main.qml's visualizationSurface), so that the window's
+    // shortcuts see the keys a focused library keeps for its type-ahead,
+    // such as F for View › Follow Playhead. Out of the Tab order, with no
+    // frame: a click on the library, the queue or a control takes it back.
     Item {
         id: plotFocus
         objectName: "spectrogramPaneFocus"
     }
-
-    // A press of any button, or the wheel, on the plot takes the focus,
-    // then goes on to the plot, as the viewers' press does. Over the host,
-    // so it sees them first; the viewers have their own.
-    MouseArea {
-        objectName: "spectrogramPaneFocusArea"
-        anchors.fill: parent
-        z: 1
-        acceptedButtons: Qt.AllButtons
-        onPressed: function(mouse) {
-            plotFocus.forceActiveFocus(Qt.MouseFocusReason)
-            mouse.accepted = false
-        }
-        onWheel: function(wheel) {
-            plotFocus.forceActiveFocus(Qt.MouseFocusReason)
-            wheel.accepted = false
-        }
+    function takePlotFocus() {
+        plotFocus.forceActiveFocus(Qt.MouseFocusReason)
     }
 }

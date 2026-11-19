@@ -1845,6 +1845,25 @@ ApplicationWindow {
             seekCommitted: playbackController.seekCommitted
         }
 
+        // A press of any button, or the wheel, on the plot in the pane takes
+        // the keyboard focus for the pane, then goes on to the plot, as the
+        // viewers' press does; they have their own. Under the plot layer, so
+        // that a click on one of its buttons leaves the focus to the button.
+        MouseArea {
+            anchors.fill: parent
+            z: 1.5
+            enabled: !visualizationSurface.inViewer
+            acceptedButtons: Qt.AllButtons
+            onPressed: function(mouse) {
+                spectrogramPane.takePlotFocus()
+                mouse.accepted = false
+            }
+            onWheel: function(wheel) {
+                spectrogramPane.takePlotFocus()
+                wheel.accepted = false
+            }
+        }
+
         // The labels, the mode switch, the level meter and the states, over
         // whichever plot shows, in its colours.
         Viewers.PlotLayer {

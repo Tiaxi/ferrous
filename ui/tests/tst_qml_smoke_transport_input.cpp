@@ -3856,6 +3856,23 @@ void TransportInputSmokeTest::usingThePlotTakesTheFocusFromTheLibrary() {
                       sceneRectOf(spectrogramSurface).center().toPoint());
     QTRY_VERIFY(plotHasFocus());
     QVERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+
+    // A click on a button of the plot's, which has the focus from Tab,
+    // leaves the focus there: Space presses it again.
+    QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
+    QVERIFY(waveformButton != nullptr);
+    waveformButton->forceActiveFocus(Qt::TabFocusReason);
+    QVERIFY(waveformButton->hasActiveFocus());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      sceneRectOf(waveformButton).center().toPoint());
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
+    QVERIFY(waveformButton->hasActiveFocus());
+    const int toggledBefore = toggled.count();
+    QTest::keyClick(window, Qt::Key_Space);
+    QCOMPARE(toggled.count(), toggledBefore);
+    // A press on the plot takes the focus from it.
+    QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, plotPoint);
+    QTRY_VERIFY(plotHasFocus());
 }
 
 // In the visualization viewer, a press on the plot leaves the focus with
