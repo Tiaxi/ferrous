@@ -743,6 +743,16 @@ void SpectrogramCanvasSmokeTest::spectrogramVisibleRangeIsTheViewAFrameShows() {
     }
     item.handleWindowAfterAnimating();
     QVERIFY(std::isnan(item.visibleStartSeconds()) && std::isnan(item.visibleEndSeconds()));
+
+    // Paused once that hold has run out, before a frame ends it: the
+    // position parked is the clock's, of its track, which keeps its range.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_positionJumpHoldUntilNs = time.nowNs - 1;
+    }
+    item.setPlaying(false);
+    item.handleWindowAfterAnimating();
+    QVERIFY(std::isfinite(item.visibleStartSeconds()) && std::isfinite(item.visibleEndSeconds()));
     delete node;
 }
 

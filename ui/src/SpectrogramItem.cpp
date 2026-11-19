@@ -2326,7 +2326,10 @@ void SpectrogramItem::setPlaying(bool value) {
             PlaybackClockState frozen;
             frozen.anchorSeconds = parked;
             frozen.anchorNs = monotonicNs(now);
-            frozen.trackToken = m_positionHoldTrajectory.trackToken;
+            // The track of the position parked: the held one's until its
+            // hold ends, the clock's after.
+            frozen.trackToken = positionHeldLocked(frozen.anchorNs)
+                ? m_positionHoldTrajectory.trackToken : m_clockState.trackToken;
             holdPositionLocked(frozen, 0.0, now);
             m_positionSeconds = parked;
         }
