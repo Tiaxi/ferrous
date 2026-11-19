@@ -4185,6 +4185,7 @@ mod tests {
         runtime.lastfm = lastfm;
         let track = p("/music/last-of-session.flac");
         runtime.state.lastfm.enabled = true;
+        runtime.state.lastfm.build_configured = true;
         runtime.state.playback.current = Some(track.clone());
         runtime.state.playback.state = PlaybackState::Playing;
         // A 40 s track qualifies after 20 s of listening.
@@ -4654,6 +4655,7 @@ mod tests {
         let (old_path, new_path) = (p("/music/old name.flac"), p("/music/new name.flac"));
         runtime.state.queue = vec![old_path.clone()];
         runtime.state.lastfm.enabled = true;
+        runtime.state.lastfm.build_configured = true;
         runtime.state.playback.current = Some(old_path.clone());
         runtime.state.playback.current_queue_index = Some(0);
         runtime.state.playback.state = PlaybackState::Playing;
