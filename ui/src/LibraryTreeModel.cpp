@@ -472,6 +472,8 @@ void LibraryTreeModel::collapseAll() {
     if (!changed) {
         return;
     }
+    // What the user does in the tree wins over a reveal still waiting.
+    cancelReveal();
     for (const QString &key : expandedKeys) {
         emit nodeExpansionRequested(key, false);
     }
@@ -486,6 +488,10 @@ void LibraryTreeModel::toggleKey(const QString &key) {
     for (int i = 0; i < rowTotal(); ++i) {
         const FlatRow &row = rowAt(i);
         if (row.key == key && row.hasChildren) {
+            // What the user does in the tree wins over a reveal still
+            // waiting: its rows, once they come, would end it there, and it
+            // would open the rows above them again.
+            cancelReveal();
             const bool nextExpanded = !row.expanded;
             m_expandedByKey.insert(key, nextExpanded);
             if (row.rowType != QStringLiteral("root")) {
@@ -814,8 +820,10 @@ int LibraryTreeModel::revealKey(const QStringList &expandKeys, const QString &se
     const bool wasPending = revealPending();
     m_revealKey.clear();
     m_revealExpandKeys.clear();
+    m_revealAskedKeys.clear();
     QStringList keys;
     keys.reserve(expandKeys.size());
+    QSet<QString> asked;
     bool expanded = false;
     for (const QString &raw : expandKeys) {
         const QString key = raw.trimmed();
@@ -832,6 +840,7 @@ int LibraryTreeModel::revealKey(const QStringList &expandKeys, const QString &se
         // The backend sends the rows of an artist or album once it knows the
         // row is expanded; roots are always sent whole.
         if (!isRoot) {
+            asked.insert(key);
             emit nodeExpansionRequested(key, true);
         }
     }
@@ -853,9 +862,13 @@ int LibraryTreeModel::revealKey(const QStringList &expandKeys, const QString &se
     }
     m_revealKey = target;
     m_revealExpandKeys = keys;
+    m_revealAskedKeys = std::move(asked);
     if (!wasPending) {
         emit revealPendingChanged();
     }
+    // A row expanded here before may wait for rows the backend no longer
+    // sends.
+    askForRevealRows();
     return -1;
 }
 
@@ -865,6 +878,7 @@ void LibraryTreeModel::cancelReveal() {
     }
     m_revealKey.clear();
     m_revealExpandKeys.clear();
+    m_revealAskedKeys.clear();
     emit revealPendingChanged();
 }
 
@@ -935,6 +949,40 @@ bool LibraryTreeModel::expandAncestorsOf(const QString &selectionKey) {
     return expanded;
 }
 
+// A reveal waits for the rows of its keys' nodes, so it asks the backend
+// for each of them that has none: the model may hold a row expanded whose
+// expansion the backend forgot, as it does when the row leaves the library,
+// and no tree would bring its rows unasked. Each key is asked about once.
+void LibraryTreeModel::askForRevealRows() {
+    if (!revealPending() || m_revealExpandKeys.isEmpty()) {
+        return;
+    }
+    const QSet<QString> keys(m_revealExpandKeys.cbegin(), m_revealExpandKeys.cend());
+    QStringList unasked;
+    collectUnaskedRevealNodes(m_tree, keys, &unasked);
+    for (const QString &key : std::as_const(unasked)) {
+        m_revealAskedKeys.insert(key);
+    }
+    // Told once the nodes are no longer needed: a listener may change the tree.
+    for (const QString &key : std::as_const(unasked)) {
+        emit nodeExpansionRequested(key, true);
+    }
+}
+
+void LibraryTreeModel::collectUnaskedRevealNodes(
+    const QVector<TreeNode> &nodes, const QSet<QString> &keys, QStringList *unasked) const {
+    const bool autoExpand = !m_searchLower.isEmpty();
+    for (const TreeNode &node : nodes) {
+        if (!node.children.isEmpty()) {
+            collectUnaskedRevealNodes(node.children, keys, unasked);
+        } else if (keys.contains(node.key) && node.rowType != QStringLiteral("root")
+                   && isExpanded(node, autoExpand) && !m_revealAskedKeys.contains(node.key)
+                   && !unasked->contains(node.key)) {
+            unasked->push_back(node.key);
+        }
+    }
+}
+
 void LibraryTreeModel::settleReveal() {
     if (m_revealKey.isEmpty()) {
         return;
@@ -946,6 +994,7 @@ void LibraryTreeModel::settleReveal() {
     const QString key = std::move(m_revealKey);
     m_revealKey.clear();
     m_revealExpandKeys.clear();
+    m_revealAskedKeys.clear();
     emit revealPendingChanged();
     emit revealFinished(key, row);
 }
@@ -1325,4 +1374,7 @@ void LibraryTreeModel::rebuildRows() {
     emit treeApplied();
     // After the views took the rows and their positions.
     settleReveal();
+    // Rows that came may hold nodes the reveal waits on that it has not
+    // asked about.
+    askForRevealRows();
 }
