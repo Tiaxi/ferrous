@@ -36,6 +36,8 @@ private slots:
     void followPlayheadReattachesAtOnce();
     void movedViewKeepsWhatItShowsWhileItsColumnsCome();
     void staleChunksAfterFastPansAreDiscarded();
+    void secondRefillKeepsTheColumnsTheFirstDrew();
+    void refillForAWiderViewKeepsTheColumnsOfTheViewBefore();
     void gstreamerMovedViewIsDecodedAndSeeksBringItBack();
     void autoscrollMovesByThePointersDistance();
     void autoscrollMovesEveryLaneOfThePlot();
@@ -177,6 +179,42 @@ void feedTrack(SpectrogramItem &item, quint64 token = 1, quint64 generation = 1)
     item.feedPrecomputedChunk(QByteArray(kBins * kColumns, '\x50'), kBins, 0, kColumns, 0,
         kColumns, kRate, kHop, true, true, token, true, generation, 0, 2'048,
         quint64(120) * kRate, kColumns);
+}
+
+// A restart of the session for track 1, of `generation`, from column
+// `start`, as the analysis sends it: the analysis thread's reset, then the
+// worker's, which waits for the session's first columns. A refill of the
+// centered view keeps the track's columns (src/analysis/mod.rs,
+// refill_centered_spectrogram); a restart for other settings clears them.
+void restartSession(SpectrogramItem &item, qint64 start, quint64 generation, bool clearsHistory) {
+    item.feedPrecomputedChunk(QByteArray(), 0, 0, 0, 0, 0, 0, 0, false, true, 1, clearsHistory,
+        generation);
+    item.feedPrecomputedChunk(QByteArray(), kBins, 0, 0, static_cast<int>(start), kColumns, kRate,
+        kHop, false, true, 1, clearsHistory, generation, 0, 2'048, quint64(120) * kRate, kColumns);
+}
+
+// `count` columns of track 1 from column `start`, of a session of
+// `generation`, each `value` throughout.
+void sessionColumns(SpectrogramItem &item, qint64 start, qint64 count, quint64 generation,
+                    char value) {
+    item.feedPrecomputedChunk(QByteArray(kBins * static_cast<int>(count), value), kBins, 0,
+        static_cast<int>(count), static_cast<int>(start), kColumns, kRate, kHop, false, false, 1,
+        false, generation, 0, 2'048, quint64(120) * kRate, kColumns);
+}
+
+// Empty when the ring holds the columns from `left` to `right` as the
+// session that sent `value` drew them; else what it holds instead.
+QString ringUnlike(SpectrogramItem &item, qint64 left, qint64 right, char value) {
+    QMutexLocker lock(&item.m_stateMutex);
+    for (qint64 column = left; column <= right; ++column) {
+        const quint8 *data = item.ringColumnLocked(column, false);
+        if (data == nullptr || data[0] != static_cast<quint8>(value)) {
+            return QStringLiteral("column %1 of %2..%3 is %4").arg(column).arg(left).arg(right)
+                .arg(data == nullptr ? QStringLiteral("missing")
+                                     : QStringLiteral("another session's"));
+        }
+    }
+    return QString();
 }
 
 // The item, centered and kWidth wide, plays the track from `position`, on
@@ -882,31 +920,233 @@ void SpectrogramFollowSmokeTest::staleChunksAfterFastPansAreDiscarded() {
     TestTime time;
     prepare(item, time, 60.0);
     middleDrag(item, 300.0, 100.0);
-    const auto refill = [&item](int start, quint64 generation) {
-        item.feedPrecomputedChunk(QByteArray(), 0, 0, 0, 0, 0, 0, 0, false, true, 1, true, 0);
-        item.feedPrecomputedChunk(QByteArray(), kBins, 0, 0, start, kColumns, kRate, kHop,
-            false, true, 1, true, generation, 0, 2'048, quint64(120) * kRate, kColumns);
-    };
-    const auto columns = [&item](int start, int count, quint64 generation, char value) {
-        item.feedPrecomputedChunk(QByteArray(kBins * count, value), kBins, 0, count, start,
-            kColumns, kRate, kHop, false, false, 1, false, generation, 0, 2'048,
-            quint64(120) * kRate, kColumns);
-    };
     // A session for the view at 80 s, then one for the view at 90 s.
-    refill(columnAt(80.0) - 200, 2);
-    refill(columnAt(90.0) - 200, 3);
+    restartSession(item, columnAt(80.0) - 200, 2, false);
+    restartSession(item, columnAt(90.0) - 200, 3, false);
     // The newer one's columns, then the older one's, late.
-    columns(static_cast<int>(columnAt(90.0)) - 200, 400, 3, '\x30');
-    columns(static_cast<int>(columnAt(80.0)) - 200, 400, 2, '\x60');
+    sessionColumns(item, columnAt(90.0) - 200, 400, 3, '\x30');
+    sessionColumns(item, columnAt(80.0) - 200, 400, 2, '\x60');
     // Its own, after them, at the same place as the newer one's.
-    columns(static_cast<int>(columnAt(90.0)) - 200, 10, 2, '\x60');
+    sessionColumns(item, columnAt(90.0) - 200, 10, 2, '\x60');
+    QCOMPARE(ringUnlike(item, columnAt(90.0) - 200, columnAt(90.0) + 199, '\x30'), QString());
     QMutexLocker lock(&item.m_stateMutex);
-    for (qint64 column = columnAt(90.0) - 200; column < columnAt(90.0) + 200; ++column) {
-        const quint8 *data = item.ringColumnLocked(column, false);
-        QVERIFY(data != nullptr);
-        QCOMPARE(data[0], quint8(0x30));
-    }
     QVERIFY(item.ringColumnLocked(columnAt(80.0), false) == nullptr);
+}
+
+// Two refills in quick succession, as two quick pans make: the columns the
+// first session drew, which the second session's window covers, stay shown
+// until the second session's columns replace them, rather than going
+// missing until it decodes them again. A restart that clears the history
+// still clears them, also when the refill comes before its data, and so
+// does a refill in a rolling view; a view that follows the playhead still
+// holds its picture until the playhead's columns come.
+void SpectrogramFollowSmokeTest::secondRefillKeepsTheColumnsTheFirstDrew() {
+    QQuickWindow window;
+    window.resize(400, 100);
+    presentWithoutDrawing(window);
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    TestTime time;
+    prepare(item, time, 60.0);
+    QSGNode *node = paintSettled(item, nullptr);
+
+    // A pan far past the session's window: a session around the view,
+    // whose columns all arrive, the view's middle first.
+    middleDrag(item, 350.0, 50.0);
+    const SpectrogramItem::CenteredView first = viewOf(item);
+    const qint64 firstStart = first.left - 94;
+    restartSession(item, firstStart, 2, false);
+    const qint64 middle = (first.left + first.right) / 2;
+    sessionColumns(item, middle, first.right + 200 - middle, 2, '\x70');
+    sessionColumns(item, firstStart, middle - firstStart, 2, '\x70');
+    node = paintSettled(item, node);
+    QCOMPARE(ringUnlike(item, first.left, first.right, '\x70'), QString());
+
+    // A quick pan back by an eighth of the view, which the analysis
+    // refills too, before its session has drawn anything.
+    middleDrag(item, 100.0, 150.0);
+    const SpectrogramItem::CenteredView second = viewOf(item);
+    QCOMPARE(second.left, first.left - 50);
+    QVERIFY(second.left >= firstStart);
+    const qint64 secondStart = second.left - 94;
+    restartSession(item, secondStart, 3, false);
+    QCOMPARE(ringUnlike(item, second.left, second.right, '\x70'), QString());
+
+    // Its first columns, the view's middle, replace the first session's
+    // there; the rest of the view stays as the first session drew it.
+    const qint64 secondMiddle = (second.left + second.right) / 2;
+    sessionColumns(item, secondMiddle, 8, 3, '\x30');
+    QCOMPARE(ringUnlike(item, secondMiddle, secondMiddle + 7, '\x30'), QString());
+    QCOMPARE(ringUnlike(item, second.left, secondMiddle - 1, '\x70'), QString());
+    QCOMPARE(ringUnlike(item, secondMiddle + 8, second.right, '\x70'), QString());
+    node = paintSettled(item, node);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_canvasComplete);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, second.left);
+        // Only what the session has room for: none left of its first.
+        QVERIFY(item.ringColumnLocked(secondStart - 1, false) == nullptr);
+    }
+    // The session goes on and replaces the rest.
+    sessionColumns(item, secondMiddle + 8, second.right - secondMiddle - 7, 3, '\x30');
+    sessionColumns(item, secondStart, secondMiddle - secondStart, 3, '\x30');
+    QCOMPARE(ringUnlike(item, second.left, second.right, '\x30'), QString());
+
+    // A restart for other settings, as a switch from the channels to their
+    // downmix makes, clears the history with the worker's reset; a refill
+    // before its data comes does not bring the columns before back.
+    item.feedPrecomputedChunk(QByteArray(), kBins, 0, 0, static_cast<int>(secondStart),
+        kColumns, kRate, kHop, false, true, 1, true, 4, 0, 2'048, quint64(120) * kRate,
+        kColumns);
+    restartSession(item, secondStart, 5, false);
+    sessionColumns(item, secondMiddle, 8, 5, '\x20');
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.ringColumnLocked(secondMiddle - 1, false) == nullptr);
+        QVERIFY(item.ringColumnLocked(secondMiddle + 8, false) == nullptr);
+    }
+    QCOMPARE(ringUnlike(item, secondMiddle, secondMiddle + 7, '\x20'), QString());
+
+    // A refill from left of the column the ring is numbered from numbers it
+    // from a capacity before: the columns stay in their slots, and the
+    // session's own land in theirs.
+    qint64 capacity = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_ringColumnBase.value_or(-1), secondStart);
+        capacity = item.m_ringCapacity;
+        QVERIFY(secondMiddle + 8 - (secondStart - 10) < capacity);
+    }
+    restartSession(item, secondStart - 10, 6, false);
+    sessionColumns(item, secondStart - 10, 10, 6, '\x40');
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_ringColumnBase.value_or(-1), secondStart - capacity);
+    }
+    QCOMPARE(ringUnlike(item, secondStart - 10, secondStart - 1, '\x40'), QString());
+    QCOMPARE(ringUnlike(item, secondMiddle, secondMiddle + 7, '\x20'), QString());
+
+    // A switch from the downmix to the channels, whose restart a refill
+    // superseded before its reset came: the refill's columns, of another
+    // layout, replace the ring's rather than join them.
+    QCOMPARE(ringUnlike(item, secondStart - 10, secondStart - 1, '\x40'), QString());
+    restartSession(item, secondStart - 10, 7, false);
+    item.feedPrecomputedChunk(QByteArray(kBins * 2 * 8, '\x60'), kBins, 0, 8,
+        static_cast<int>(secondMiddle), kColumns, kRate, kHop, false, false, 1, false, 7, 0,
+        2'048, quint64(120) * kRate, kColumns);
+    QCOMPARE(ringUnlike(item, secondMiddle, secondMiddle + 7, '\x60'), QString());
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.ringColumnLocked(secondStart - 10, false) == nullptr);
+    }
+
+    // A refill whose session cannot read its file ends with a reset that
+    // clears the ring the refill kept.
+    item.feedPrecomputedChunk(QByteArray(), 0, 0, 0, 0, 0, 0, 0, false, true, 1, false, 8);
+    item.feedPrecomputedChunk(QByteArray(), 0, 0, 0, 0, 0, 0, 0, false, true, 1, true, 8);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_ringCapacity, 0);
+    }
+
+    // A view that follows the playhead, sought to where the ring has no
+    // columns, holds its picture after the refill until the playhead's
+    // columns come, as after any seek.
+    item.followPlayhead();
+    restartSession(item, columnAt(60.0) - 300, 9, true);
+    sessionColumns(item, columnAt(60.0) - 300, 600, 9, '\x50');
+    node = paintSettled(item, node);
+    setTestPosition(item, 100.0, 1);
+    restartSession(item, columnAt(100.0) - 200, 10, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY(item.m_seekFillActive);
+    }
+    sessionColumns(item, columnAt(100.0), 8, 10, '\x30');
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_zoomFillActive);
+        QVERIFY(!item.m_seekFillActive);
+    }
+
+    // A view that turns rolling between a refill's resets places the
+    // refill's columns where their column puts them, as the worker made
+    // them for the centered view.
+    item.feedPrecomputedChunk(QByteArray(), 0, 0, 0, 0, 0, 0, 0, false, true, 1, false, 11);
+    item.setDisplayMode(0);
+    item.feedPrecomputedChunk(QByteArray(), kBins, 0, 0, static_cast<int>(columnAt(100.0) - 200),
+        kColumns, kRate, kHop, false, true, 1, false, 11, 0, 2'048, quint64(120) * kRate,
+        kColumns);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_precomputedResetPending);
+        QVERIFY(item.m_precomputedPendingResetByColumn);
+    }
+    // So too when the view is rolling already as the refill comes, also
+    // after a reset that cleared the ring while it waited for its session.
+    item.feedPrecomputedChunk(QByteArray(), 0, 0, 0, 0, 0, 0, 0, false, true, 1, true, 12);
+    item.feedPrecomputedChunk(QByteArray(), 0, 0, 0, 0, 0, 0, 0, false, true, 1, false, 12);
+    item.feedPrecomputedChunk(QByteArray(), kBins, 0, 0, static_cast<int>(columnAt(100.0) - 200),
+        kColumns, kRate, kHop, false, true, 1, false, 12, 0, 2'048, quint64(120) * kRate,
+        kColumns);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_precomputedResetPending);
+        QVERIFY(item.m_precomputedPendingResetByColumn);
+    }
+
+    // A rolling view takes its columns in the order they come: a refill
+    // that reaches it there clears them.
+    feedTrack(item, 1, 13);
+    restartSession(item, columnAt(80.0) - 200, 14, false);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_ringCapacity, 0);
+    }
+    delete node;
+}
+
+// A refill for a view that has grown, before any column of the session
+// before it grew the ring: the new session, decoding for the wider view,
+// starts further left, and the ring has room for it and for the columns
+// of the view before, which stay.
+void SpectrogramFollowSmokeTest::refillForAWiderViewKeepsTheColumnsOfTheViewBefore() {
+    SpectrogramItem item;
+    TestTime time;
+    prepare(item, time, 60.0);
+    // A longer track, of which a session decoded 6,000 columns, as many as
+    // a ring for the narrow view holds.
+    constexpr int kLong = 20'000;
+    const auto chunk = [&item](qint64 start, int count, quint64 generation, bool reset,
+                               int sessionWidth, char value) {
+        item.feedPrecomputedChunk(QByteArray(kBins * count, value), kBins, 0, count,
+            static_cast<int>(start), kLong, kRate, kHop, false, reset, 1, reset, generation,
+            sessionWidth, 2'048, quint64(kLong) * kHop, kLong);
+    };
+    chunk(10'000, 0, 2, true, 0, '\x00');
+    chunk(10'000, 6'000, 2, false, 0, '\x70');
+    int narrowCapacity = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        narrowCapacity = item.m_ringCapacity;
+    }
+    QVERIFY(narrowCapacity >= 6'000);
+    QVERIFY(9'000 + narrowCapacity < 16'000);
+    QCOMPARE(ringUnlike(item, 10'000, 15'999, '\x70'), QString());
+
+    // The refill for a view 6,000 pixels wide.
+    item.feedPrecomputedChunk(QByteArray(), 0, 0, 0, 0, 0, 0, 0, false, true, 1, false, 3);
+    item.feedPrecomputedChunk(QByteArray(), kBins, 0, 0, 9'000, kLong, kRate, kHop, false,
+        true, 1, false, 3, 6'000, 2'048, quint64(kLong) * kHop, kLong);
+    item.feedPrecomputedChunk(QByteArray(kBins * 8, '\x30'), kBins, 0, 8, 12'000, kLong, kRate,
+        kHop, false, false, 1, false, 3, 6'000, 2'048, quint64(kLong) * kHop, kLong);
+    QCOMPARE(ringUnlike(item, 12'000, 12'007, '\x30'), QString());
+    QCOMPARE(ringUnlike(item, 10'000, 11'999, '\x70'), QString());
+    QCOMPARE(ringUnlike(item, 12'008, 15'999, '\x70'), QString());
+    // The session's columns from its first on have room too.
+    item.feedPrecomputedChunk(QByteArray(kBins * 8, '\x30'), kBins, 0, 8, 9'000, kLong, kRate,
+        kHop, false, false, 1, false, 3, 6'000, 2'048, quint64(kLong) * kHop, kLong);
+    QCOMPARE(ringUnlike(item, 9'000, 9'007, '\x30'), QString());
 }
 
 // With the real bridge and the GStreamer backend, playing in real time
@@ -1006,13 +1246,45 @@ void SpectrogramFollowSmokeTest::gstreamerMovedViewIsDecodedAndSeeksBringItBack(
     QTRY_VERIFY_WITH_TIMEOUT(holds(put), 5000);
     QCOMPARE(view().left, put.left);
 
+    // A quick pan back, to a view that starts before the session's first
+    // column, restarts the session around it. The columns the session
+    // before drew of that view stay until the new session's replace them.
+    const auto sessionState = [item]() {
+        QMutexLocker lock(&item->m_stateMutex);
+        return std::pair(item->m_ringColumnBase.value_or(-1), item->m_precomputedSessionGeneration);
+    };
+    const auto [firstColumn, firstGeneration] = sessionState();
+    QVERIFY(firstColumn > 0 && firstColumn <= put.left);
+    SpectrogramItem::CenteredView drawn = put;
+    drawn.left = firstColumn;
+    QTRY_VERIFY_WITH_TIMEOUT(holds(drawn), 5000);
+    const qint64 back = put.left - (firstColumn - kWindow / 4);
+    middleDrag(*item, 0.0, static_cast<double>(back));
+    const auto backView = view();
+    QCOMPARE(backView.left, firstColumn - kWindow / 4);
+    SpectrogramItem::CenteredView kept = backView;
+    kept.left = firstColumn;
+    QString lost;
+    QTimer watch;
+    QObject::connect(&watch, &QTimer::timeout, item, [&]() {
+        if (lost.isEmpty() && !holds(kept)) {
+            lost = QStringLiteral("columns %1..%2 went missing, generation %3")
+                .arg(kept.left).arg(kept.right).arg(sessionState().second);
+        }
+    });
+    watch.start(0);
+    QTRY_VERIFY_WITH_TIMEOUT(sessionState().second > firstGeneration && holds(backView), 5000);
+    watch.stop();
+    QVERIFY2(lost.isEmpty(), qPrintable(lost));
+    QCOMPARE(view().left, backView.left);
+
     // The plot's own seek, into the view, keeps it while the engine seeks
     // and confirms it.
     const double target = rightClickAt(*item, 0.1 * kWidth);
     QVERIFY(target > 25.0);
     QTRY_VERIFY_WITH_TIMEOUT(engineDone(), 10000);
     QVERIFY(item->detached());
-    QCOMPARE(view().left, put.left);
+    QCOMPARE(view().left, backView.left);
 
     // A seek from elsewhere, as the seek bar's, brings it back, and the
     // analysis decodes the playhead's view again.

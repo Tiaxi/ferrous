@@ -718,6 +718,10 @@ private:
     // Whether the ring holds every column of the current track from
     // firstColumn to lastColumn.
     bool ringHoldsColumnsLocked(qint64 firstColumn, qint64 lastColumn) const;
+    // keptColumnsRoom: when the session's columns are the ring's (see
+    // resetKeepsColumnsLocked), the capacity the ring takes for them; the
+    // ring of a centered view keeps those the session has room for
+    // (keepRingColumnsFromLocked). 0 keeps none.
     void applyPrecomputedResetLocked(
         int startIndex,
         int bins,
@@ -725,7 +729,26 @@ private:
         quint64 generation,
         bool clearHistoryOnReset,
         int hopSize,
-        bool byColumn);
+        bool byColumn,
+        int keptColumnsRoom);
+    // The ring's capacity for the columns of a session decoding for
+    // sessionWidth: the view, and what the session decodes ahead.
+    int ringCapacityForLocked(
+        int sessionWidth, int sampleRate, int hopSize, int bins, int channelCount) const;
+    // Whether the ring's columns are a centered session's of trackToken,
+    // each where its column puts it.
+    bool ringColumnsAddressedForLocked(quint64 trackToken) const;
+    // Whether a session whose reset does not clear the history, and whose
+    // columns have this format, makes the columns the ring has: the
+    // analysis restarted it for the same track and settings, as a refill
+    // of a centered view the user moves does.
+    bool resetKeepsColumnsLocked(bool clearHistoryOnReset, int bins, int channelCount,
+        int hopSize, int sampleRate, int fftSize) const;
+    // Keeps the ring's columns of trackToken that a session from column
+    // startIndex has room for, `room` columns, or the ring's capacity if
+    // more, numbered for it, and drops the rest; each stays in its slot.
+    // Returns whether any is kept.
+    bool keepRingColumnsFromLocked(qint64 startIndex, quint64 trackToken, qint64 room);
     // Whether a session reset of trackToken, hopSize frames a column, is
     // the backend's restart for the zoom being waited for: at the hop of
     // the zoom asked for or of one sent to the backend since, of the track
@@ -1202,6 +1225,9 @@ private:
     // in order of arrival; the track of those columns, or 0 for any.
     std::optional<qint64> m_ringColumnBase;
     quint64 m_ringColumnToken{0};
+    // The channels of the chunks the ring's columns came in: a channel of
+    // another layout, as of the downmix, is other columns.
+    int m_ringChannelCount{0};
     // A column-addressed ring of a rolling view that is not allocated yet:
     // renumberRingForRollingHistoryLocked numbers it once it is.
     bool m_renumberRingForHistory{false};
@@ -1212,6 +1238,9 @@ private:
     qint64 m_rollingEpoch{0};         // maps track columns to rolling write-order history
     qint32 m_precomputedMaxColumnIndex{-1}; // highest column for current token
     bool m_awaitingWorkerReset{false};    // block data until worker's proper reset
+    // The worker's reset awaited is a refill's of a centered view, which
+    // kept the ring: its session places its columns by column.
+    bool m_awaitingCenteredRefillReset{false};
     int m_precomputedBinsPerColumn{0};
     // The FFT size of the analysis columns (0 if unknown).
     int m_precomputedFftSize{0};

@@ -886,9 +886,14 @@ impl AnalysisRuntimeState {
                         && self.display_mode == SpectrogramDisplayMode::Centered
                         && visible_left < retained_start
                     {
+                        let keeps_columns = self.ring_holds_the_tracks_own_columns();
                         self.clear_early_continuation(ctx);
                         self.cancel_centered_staging();
-                        self.refill_centered_spectrogram(self.last_spectrogram_position, ctx);
+                        self.refill_centered_spectrogram(
+                            self.last_spectrogram_position,
+                            keeps_columns,
+                            ctx,
+                        );
                     } else {
                         // Existing history covers the left edge; let the worker
                         // extend its lookahead without clearing the Qt ring.
@@ -2107,6 +2112,7 @@ impl AnalysisRuntimeState {
         let continuation_unsettled = self.staged_continuation_path.is_some()
             || self.provisional_continuation.is_some()
             || self.worker_may_decode_another_file();
+        let keeps_columns = self.ring_holds_the_tracks_own_columns();
         self.reset_position_offset();
         self.unconfirmed_continuation = None;
         self.last_spectrogram_position = position_seconds;
@@ -2128,17 +2134,14 @@ impl AnalysisRuntimeState {
                     .spectrogram_cmd_tx
                     .send(SpectrogramWorkerCommand::Seek { position_seconds });
             } else {
-                // Seek outside decoded window — restart session and clear
-                // the ring buffer.
-                //
-                // Emit an immediate reset chunk from the analysis thread so
-                // the frontend clears the ring BEFORE the next render frame.
-                // Without this, there's a 3-5 ms gap between the position
-                // property jumping and the worker's reset chunk arriving,
-                // during which old ring data can be briefly visible at the
-                // new playhead position.
+                // Seek outside decoded window: restart the session around
+                // the view (see refill_centered_spectrogram).
                 self.clear_early_continuation(ctx);
-                self.refill_centered_spectrogram(self.last_spectrogram_position, ctx);
+                self.refill_centered_spectrogram(
+                    self.last_spectrogram_position,
+                    keeps_columns,
+                    ctx,
+                );
             }
         } else if ctx.event_tx.spectral_backpressured() || continuation_unsettled {
             // The worker is waiting to hand over columns decoded before the
@@ -2265,9 +2268,10 @@ impl AnalysisRuntimeState {
                     anchor_seconds: anchor,
                 });
         } else {
+            let keeps_columns = self.ring_holds_the_tracks_own_columns();
             self.clear_early_continuation(ctx);
             self.cancel_centered_staging();
-            self.refill_centered_spectrogram(self.last_spectrogram_position, ctx);
+            self.refill_centered_spectrogram(self.last_spectrogram_position, keeps_columns, ctx);
         }
     }
 
@@ -2284,13 +2288,44 @@ impl AnalysisRuntimeState {
                 .is_some_and(|path| Some(path) != active)
     }
 
+    /// Whether the columns the UI's ring holds of the active track are its
+    /// own: on the track's column grid, of no other file. A session of the
+    /// track with the same settings decodes the same columns. Not so on a
+    /// continued timeline, whose columns are counted from an earlier
+    /// file's start, nor while the worker may decode a successor, whose
+    /// columns can come under the active track's token.
+    fn ring_holds_the_tracks_own_columns(&self) -> bool {
+        self.spectrogram_position_offset == 0.0
+            && self.provisional_continuation.is_none()
+            && self.staged_continuation_path.is_none()
+            && self.worker_continuation.is_none()
+            && self
+                .worker_file
+                .as_ref()
+                .is_none_or(|file| Some(file) == self.active_track_path.as_ref())
+    }
+
     /// Restart the session for the centered view with the playhead at
     /// `position_seconds`: around the playhead, or where the user moved the
     /// view.
-    fn refill_centered_spectrogram(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
-        // The worker emits this reset before it opens the file, so the
-        // frontend clears the ring before the next render frame and old
-        // ring data is not briefly visible at the new playhead.
+    ///
+    /// With `keeps_columns`, the ring's columns are the track's own (see
+    /// [`Self::ring_holds_the_tracks_own_columns`]) and the new session
+    /// decodes the same ones: its resets do not clear the history, and the
+    /// UI keeps the columns the new session's window covers until the
+    /// session replaces them, so that refills in quick succession, as a
+    /// pan makes, do not blank what an earlier one drew. Otherwise the
+    /// ring is cleared.
+    fn refill_centered_spectrogram(
+        &mut self,
+        position_seconds: f64,
+        keeps_columns: bool,
+        ctx: &AnalysisContext<'_>,
+    ) {
+        // The analysis thread's reset, which reaches the UI before the
+        // worker opens the file: it ends the old session's columns there at
+        // once, before the next render frame, and clears the ring unless
+        // the ring keeps its columns.
         let clear_ring = PrecomputedSpectrogramChunk {
             track_token: self.active_track_token,
             generation: 0,
@@ -2307,7 +2342,7 @@ impl AnalysisRuntimeState {
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: true,
-            clear_history: true,
+            clear_history: !keeps_columns,
             widget_width: 0,
             track_frames: 0,
             end_column: 0,
@@ -2319,7 +2354,7 @@ impl AnalysisRuntimeState {
                 start_seconds: start,
                 target_position_seconds: position_seconds,
                 emit_initial_reset: true,
-                clear_history_on_reset: true,
+                clear_history_on_reset: !keeps_columns,
                 handoff: SessionHandoff {
                     prelude: vec![clear_ring],
                     ..SessionHandoff::default()
@@ -3888,9 +3923,16 @@ mod tests {
             // The playhead stays where playback is.
             assert!((target_position_seconds - 10.0).abs() < f64::EPSILON);
             assert_eq!(*view_anchor, Some(center));
-            assert!(*clear_history_on_reset);
-            // The ring is cleared before the new session's columns.
-            assert!(handoff.prelude.iter().any(|chunk| chunk.buffer_reset));
+            // The old session's columns end at once, and the UI keeps those
+            // of the track that the new session's window covers until the
+            // session replaces them: a refill does not blank what the one
+            // before drew.
+            assert!(!*clear_history_on_reset);
+            assert!(
+                matches!(handoff.prelude.as_slice(), [chunk]
+                    if chunk.buffer_reset && !chunk.clear_history && chunk.bins_per_column == 0),
+                "{handoff:?}"
+            );
             // The newer session makes the older one's columns stale.
             assert_eq!(
                 harness
@@ -3900,6 +3942,62 @@ mod tests {
             );
             // The session decodes from there on.
             state.spectrogram_session_start = *start_seconds;
+        }
+    }
+
+    #[test]
+    fn a_refill_clears_the_columns_unless_they_are_the_tracks_own() {
+        type Prepare = fn(&mut AnalysisRuntimeState);
+        fn next() -> Option<PathBuf> {
+            Some(PathBuf::from("/tmp/next.flac"))
+        }
+        let cases: [(&str, Prepare, bool); 5] = [
+            // A session that ended has left the track's columns as they
+            // were.
+            ("ended", |state| state.worker_file = None, true),
+            // On a continued timeline, the columns are counted from an
+            // earlier file's start; a worker that goes on, or may go on, to
+            // another file sends that file's columns under the active
+            // track's token.
+            (
+                "continued",
+                |state| state.spectrogram_position_offset = 180.0,
+                false,
+            ),
+            (
+                "continuing",
+                |state| state.worker_continuation = next(),
+                false,
+            ),
+            ("other file", |state| state.worker_file = next(), false),
+            (
+                "staged",
+                |state| state.staged_continuation_path = next(),
+                false,
+            ),
+        ];
+        for (name, prepare, keeps) in cases {
+            let harness = AnchorHarness::new();
+            let mut state = centered_state_at_10_seconds();
+            prepare(&mut state);
+            state.handle_command(anchor(3, Some(300.0)), &harness.ctx());
+            let sent = harness.sent();
+            let Some(SpectrogramWorkerCommand::NewTrack {
+                clear_history_on_reset,
+                handoff,
+                ..
+            }) = sent
+                .iter()
+                .find(|command| matches!(command, SpectrogramWorkerCommand::NewTrack { .. }))
+            else {
+                panic!("{name}: no restart: {sent:?}");
+            };
+            assert_eq!(*clear_history_on_reset, !keeps, "{name}");
+            assert!(
+                matches!(handoff.prelude.as_slice(), [chunk]
+                    if chunk.buffer_reset && chunk.clear_history != keeps),
+                "{name}: {handoff:?}"
+            );
         }
     }
 
@@ -4752,7 +4850,7 @@ mod tests {
                 ..
             } if (start_seconds - expected_start).abs() < 0.01
                 && (target_position_seconds - seek_target).abs() < 0.01
-                && clear_history_on_reset),
+                && !clear_history_on_reset),
             "seek whose visible left edge was evicted from the centered ring should restart, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
@@ -4812,7 +4910,7 @@ mod tests {
                 ..
             } if (start_seconds - fast_start).abs() < 0.01
                 && (target_position_seconds - seek_target).abs() < 0.01
-                && clear_history_on_reset),
+                && !clear_history_on_reset),
             "centered restart should prioritize the visible-left edge while targeting the playhead, got {cmd:?}"
         );
     }
@@ -5102,12 +5200,12 @@ mod tests {
                 ..
             } if (start_seconds - expected_start).abs() < 0.01
                 && (target_position_seconds - 287.0).abs() < 0.01
-                && clear_history_on_reset),
+                && !clear_history_on_reset),
             "seek near EOF with an uncovered detached left edge should restart at the edge, \
              got {cmd:?}"
         );
-        // The worker emits a synthetic reset before it opens the file so
-        // the frontend clears the ring before the next render frame.
+        // The analysis thread's reset reaches the frontend before the
+        // worker opens the file, and ends the old session's columns there.
         assert!(
             matches!(prelude(&cmd), [chunk] if chunk.buffer_reset && chunk.generation == 1),
             "restart path should emit a synthetic buffer reset, got {cmd:?}"
@@ -5289,8 +5387,8 @@ mod tests {
                 ..
             } if (start_seconds - expected_start).abs() < 0.01
                 && (target_position_seconds - 200.0).abs() < 0.01
-                && clear_history_on_reset),
-            "centered seek outside window should restart with clear_history=true and target the playhead, got {cmd:?}"
+                && !clear_history_on_reset),
+            "centered seek outside window should restart, keeping the track's columns, and target the playhead, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
     }
@@ -6123,7 +6221,7 @@ mod tests {
                     SpectrogramWorkerCommand::NewTrack {
                         start_seconds, target_position_seconds, widget_width,
                         generation: new_generation, emit_initial_reset: true,
-                        clear_history_on_reset: true, ..
+                        clear_history_on_reset: false, ..
                     } if (*start_seconds - expected_start).abs() < 0.001
                         && (*target_position_seconds - target).abs() < 0.001
                         && *widget_width == fullscreen_width && *new_generation > generation
@@ -6131,7 +6229,7 @@ mod tests {
                 "fullscreen must decode the missing left edge: {commands:?}"
             );
             assert!(commands.iter().any(|cmd| matches!(prelude(cmd), [chunk]
-                if chunk.buffer_reset && chunk.clear_history && chunk.column_count == 0
+                if chunk.buffer_reset && !chunk.clear_history && chunk.column_count == 0
             )));
 
             // The session keeps decoding for the fullscreen width while the
@@ -7561,14 +7659,15 @@ mod tests {
                 );
                 assert_eq!(channels.generation.load(Ordering::Relaxed), 0);
 
-                // Outside the window there is no history to keep.
+                // Outside the window the session restarts, and the UI keeps
+                // the track's columns that its window covers.
                 state.handle_command(AnalysisCommand::SeekPosition(500.0), &ctx);
                 let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
                 assert!(
                     matches!(
                         commands.as_slice(),
                         [SpectrogramWorkerCommand::NewTrack {
-                            clear_history_on_reset: true,
+                            clear_history_on_reset: false,
                             ..
                         }]
                     ),
