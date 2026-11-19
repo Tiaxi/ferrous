@@ -710,6 +710,7 @@ if(BUILD_TESTING)
         tests/tst_qml_smoke_waveform.cpp
         tests/tst_qml_smoke_waveform_scene_graph.cpp
         tests/tst_qml_smoke_waveform_coverage.cpp
+        tests/tst_qml_smoke_waveform_follow.cpp
         tests/tst_qml_smoke_library_queue.cpp
         tests/tst_qml_smoke_transport_input.cpp
         tests/tst_qml_smoke_album_art.cpp

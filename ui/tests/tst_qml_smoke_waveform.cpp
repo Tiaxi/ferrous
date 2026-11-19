@@ -974,9 +974,25 @@ void WaveformSmokeTest::waveformEditorSignalsWithoutItsStateLocked() {
     QWheelEvent wheel(QPointF(40.0, 30.0), QPointF(40.0, 30.0), QPoint(), QPoint(0, 120),
         Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
     item.wheelEvent(&wheel);
-    QMouseEvent reset(QEvent::MouseButtonPress, QPointF(40.0, 30.0), QPointF(40.0, 30.0),
+    // A middle-drag detaches the view; Follow Playhead and Reset Zoom
+    // bring it back.
+    QMouseEvent pan(QEvent::MouseButtonPress, QPointF(40.0, 30.0), QPointF(40.0, 30.0),
         Qt::MiddleButton, Qt::MiddleButton, Qt::NoModifier);
-    item.mousePressEvent(&reset);
+    item.mousePressEvent(&pan);
+    QMouseEvent move(QEvent::MouseMove, QPointF(140.0, 30.0), QPointF(140.0, 30.0),
+        Qt::NoButton, Qt::MiddleButton, Qt::NoModifier);
+    item.mouseMoveEvent(&move);
+    QMouseEvent release(QEvent::MouseButtonRelease, QPointF(140.0, 30.0), QPointF(140.0, 30.0),
+        Qt::MiddleButton, Qt::NoButton, Qt::NoModifier);
+    item.mouseReleaseEvent(&release);
+    QVERIFY(item.detached());
+    item.followPlayhead();
+    QVERIFY(!item.detached());
+    item.mousePressEvent(&pan);
+    item.mouseMoveEvent(&move);
+    item.mouseReleaseEvent(&release);
+    item.resetZoom();
+    QVERIFY(!item.detached());
     item.setPlaying(false);
     item.setSourcePath(QString());
     QTRY_VERIFY(!item.m_decodeActive);

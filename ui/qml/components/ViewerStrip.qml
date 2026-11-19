@@ -28,8 +28,7 @@ import "../logic/FormatUtils.js" as FormatUtils
 // a second cluster). The whole strip shows and hides with the viewer's
 // controls, fading as they do; it is drawn over the view, which never
 // resizes for it. Turned off in Preferences (`available` false), it never
-// shows: the viewer's keys, a double-click and a middle click do what its
-// buttons do.
+// shows: the viewer's keys and a double-click do what its buttons do.
 Rectangle {
     id: root
 

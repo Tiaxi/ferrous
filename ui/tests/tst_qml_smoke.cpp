@@ -47,6 +47,7 @@ std::unique_ptr<QmlSmokeTest> makeSpectrogramCanvasSmokeTest(const QString &user
 std::unique_ptr<QmlSmokeTest> makeWaveformSmokeTest(const QString &userDirectoriesParent);
 std::unique_ptr<QmlSmokeTest> makeWaveformSceneGraphSmokeTest(const QString &userDirectoriesParent);
 std::unique_ptr<QmlSmokeTest> makeWaveformCoverageSmokeTest(const QString &userDirectoriesParent);
+std::unique_ptr<QmlSmokeTest> makeWaveformFollowSmokeTest(const QString &userDirectoriesParent);
 std::unique_ptr<QmlSmokeTest> makeLibraryQueueSmokeTest(const QString &userDirectoriesParent);
 std::unique_ptr<QmlSmokeTest> makeTransportInputSmokeTest(const QString &userDirectoriesParent);
 std::unique_ptr<QmlSmokeTest> makeAlbumArtSmokeTest(const QString &userDirectoriesParent);
@@ -65,12 +66,13 @@ struct SmokeTestArea {
 
 // Every test class, by the area name that the CTest entries use. An area
 // may have several classes, which run in turn in its process.
-const std::array<SmokeTestArea, 14> kSmokeTestAreas{{
+const std::array<SmokeTestArea, 15> kSmokeTestAreas{{
     {"spectrogram", &makeSpectrogramSmokeTest},
     {"spectrogram", &makeSpectrogramPlaybackSmokeTest},
     {"spectrogram", &makeSpectrogramCanvasSmokeTest},
     {"waveform", &makeWaveformSmokeTest},
     {"waveform", &makeWaveformSceneGraphSmokeTest},
+    {"waveform", &makeWaveformFollowSmokeTest},
     {"waveform_coverage", &makeWaveformCoverageSmokeTest},
     {"library_queue", &makeLibraryQueueSmokeTest},
     {"transport_input", &makeTransportInputSmokeTest},

@@ -6017,9 +6017,10 @@ void SpectrogramItem::hoverLeaveEvent(QHoverEvent *) {
 }
 
 void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
+    // A middle click does nothing: Reset Zoom is Ctrl+0, View > Reset Zoom
+    // and the viewer's Reset, and a middle-drag is the waveform's pan.
     if (event->button() == Qt::MiddleButton && m_zoomEnabled) {
         event->accept();
-        emit zoomResetRequested();
         return;
     }
 

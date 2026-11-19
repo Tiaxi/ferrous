@@ -13,6 +13,20 @@ function isPlainSpace(event) {
     return event.key === Qt.Key_Space && isUnmodified(event)
 }
 
+// Whether `event` types a character other than Space, such as a letter
+// or a digit, with Shift or without: a list's type-ahead takes it before
+// the shortcuts, such as F for View › Follow Playhead. Space stays Play or
+// Pause, and keys with Ctrl, Alt or Meta stay the shortcuts'.
+function isTypedCharacter(event) {
+    const text = event.text || ""
+    if (text.length !== 1 || text.trim().length !== 1) {
+        return false
+    }
+    const code = text.charCodeAt(0)
+    return code >= 0x20 && code !== 0x7f
+        && (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) === 0
+}
+
 // Whether `event` is Return or Enter alone, which presses a dialog's
 // default button.
 function isEnter(event) {

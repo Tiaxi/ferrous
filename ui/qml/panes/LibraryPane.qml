@@ -8,6 +8,7 @@ import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
 import "../logic/ColorUtils.js" as ColorUtils
+import "../logic/KeyUtils.js" as KeyUtils
 
 // The library: its region header, then the tree, on the view colour.
 //
@@ -335,6 +336,11 @@ Rectangle {
                     }
                 }
 
+                // Typing selects by type-ahead, before shortcuts of a
+                // single letter, such as F, see the key.
+                Keys.onShortcutOverride: function(event) {
+                    event.accepted = KeyUtils.isTypedCharacter(event)
+                }
                 Keys.onPressed: function(event) {
                     if (event.key === Qt.Key_Menu
                             || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {

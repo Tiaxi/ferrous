@@ -117,7 +117,7 @@ Item {
         }
     }
 
-    // Both zooms back to the default, as a middle click does.
+    // Both zooms back to the default, as View › Reset Zoom does.
     function resetZoom() {
         root._widgetZoomLevel = 0
         root._viewerZoomLevel = 0

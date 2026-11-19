@@ -40,6 +40,8 @@ private slots:
     void mainPaneZoomShowsAReadoutBesideTheModeSwitch();
     void resetZoomResetsOnlyTheShownPlotsZoom();
     void resetZoomIsOffAtAShortTracksStretchedDefault();
+    void followPlayheadBringsTheShownPlotBack();
+    void fTypesInTheLibraryAndFollowsThePlayheadElsewhere();
     void viewerControlsComeBackForTheKeyboard();
     void viewerKeysWorkFromEveryControl();
     void viewerControlsStayWhileOneHasFocus();
@@ -2850,7 +2852,11 @@ void TransportInputSmokeTest::resetZoomResetsOnlyTheShownPlotsZoom() {
     };
 
     // The main window.
-    window->contentItem()->forceActiveFocus();
+    // The queue has focus: a focused library takes F for its type-ahead.
+    auto *queueView = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
+    QVERIFY(queueView != nullptr);
+    queueView->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(queueView->hasActiveFocus());
     check(window, "main window");
 
     // The viewer inside the main window.
@@ -3512,6 +3518,208 @@ void TransportInputSmokeTest::menuMnemonicsOpenTheMenusAndShowShortcuts() {
     QVERIFY(shown);
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!playback->property("visible").toBool());
+}
+
+namespace {
+
+// Detaches `waveform` from the playhead at a zoom of 4, with a middle-drag
+// across it that moves the view on by its width.
+bool detachWaveform(WaveformEditorItem *waveform) {
+    if (waveform->zoomLevel() < 4.0) waveform->setZoomLevel(4.0);
+    const double width = std::floor(waveform->width());
+    const auto send = [waveform](QEvent::Type type, double x, Qt::MouseButton button,
+                                 Qt::MouseButtons buttons) {
+        QMouseEvent event(type, QPointF(x, 20.0), QPointF(x, 20.0), button, buttons, Qt::NoModifier);
+        if (type == QEvent::MouseButtonPress) {
+            waveform->mousePressEvent(&event);
+        } else if (type == QEvent::MouseMove) {
+            waveform->mouseMoveEvent(&event);
+        } else {
+            waveform->mouseReleaseEvent(&event);
+        }
+    };
+    send(QEvent::MouseButtonPress, width, Qt::MiddleButton, Qt::MiddleButton);
+    send(QEvent::MouseMove, width / 2, Qt::NoButton, Qt::MiddleButton);
+    send(QEvent::MouseMove, 0.0, Qt::NoButton, Qt::MiddleButton);
+    send(QEvent::MouseButtonRelease, 0.0, Qt::MiddleButton, Qt::NoButton);
+    return waveform->detached();
+}
+
+} // namespace
+
+// View › Follow Playhead (F) brings the shown plot back to the playhead,
+// playing or paused, in the main window and in both viewers. It is
+// available only while the shown plot is detached: never for the
+// spectrogram, which does not pan yet, and not while the album art viewer
+// is open.
+void TransportInputSmokeTest::followPlayheadBringsTheShownPlotBack() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *follow = window->findChild<QObject *>(QStringLiteral("followPlayheadAction"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && follow != nullptr && waveformSurface != nullptr);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    QCOMPARE(follow->property("shortcut").value<QKeySequence>(), QKeySequence(Qt::Key_F));
+    QCOMPARE(follow->property("text").toString(), QStringLiteral("Follow &Playhead"));
+    QSignalSpy triggered(follow, SIGNAL(triggered(QObject *)));
+    const auto enabled = [follow]() { return follow->property("enabled").toBool(); };
+
+    // In `host`: off while the waveform follows and while the spectrogram
+    // shows; F brings a detached waveform back, playing or paused.
+    const auto check = [&](QQuickWindow *host, const char *where) {
+        for (const QString &state : {QStringLiteral("Playing"), QStringLiteral("Paused")}) {
+            const QByteArray label = QByteArray(where) + ' ' + state.toUtf8();
+            bridge->setProperty("playbackState", state);
+            viewer->setProperty("visualizationMode", 1);
+            QTRY_VERIFY2(waveform->isVisible(), label.constData());
+            QVERIFY2(!waveform->detached() && !enabled(), label.constData());
+            // Laid out in the host.
+            QTRY_VERIFY2(waveform->width() > 100, label.constData());
+            QVERIFY2(detachWaveform(waveform), label.constData());
+            QTRY_VERIFY2(enabled(), label.constData());
+
+            // The spectrogram does not pan: nothing to follow while it shows.
+            viewer->setProperty("visualizationMode", 0);
+            QTRY_VERIFY2(!enabled(), label.constData());
+            const int before = triggered.count();
+            QTest::keyClick(host, 'f');
+            QCoreApplication::processEvents();
+            QVERIFY2(triggered.count() == before && waveform->detached(), label.constData());
+            viewer->setProperty("visualizationMode", 1);
+            QTRY_VERIFY2(enabled(), label.constData());
+
+            QTest::keyClick(host, 'f');
+            QTRY_VERIFY2(triggered.count() == before + 1, label.constData());
+            QVERIFY2(!waveform->detached(), label.constData());
+            QVERIFY2(!enabled(), label.constData());
+        }
+        bridge->setProperty("playbackState", QStringLiteral("Playing"));
+        waveform->resetZoom();
+        viewer->setProperty("visualizationMode", 0);
+    };
+
+    // The queue has focus: a focused library takes F for its type-ahead.
+    auto *queueView = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
+    QVERIFY(queueView != nullptr);
+    queueView->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(queueView->hasActiveFocus());
+    check(window, "main window");
+
+    // The album art viewer zooms the art: it leaves the key alone.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    viewer->setProperty("visualizationMode", 1);
+    QVERIFY(detachWaveform(waveform));
+    QTRY_VERIFY(enabled());
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewerForCurrentArt"));
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QTRY_VERIFY(!enabled());
+    const int beforeAlbumArt = triggered.count();
+    QTest::keyClick(window, 'f');
+    QCoreApplication::processEvents();
+    QCOMPARE(triggered.count(), beforeAlbumArt);
+    QVERIFY(waveform->detached());
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+    QTRY_VERIFY(enabled());
+    waveform->followPlayhead();
+    QTRY_VERIFY(!enabled());
+    waveform->resetZoom();
+    viewer->setProperty("visualizationMode", 0);
+
+    // The viewer inside the main window.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    check(window, "viewer in the window");
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+
+    // The viewer over the whole screen.
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(waveformSurface->window() != nullptr && waveformSurface->window() != window);
+    QQuickWindow *fullscreen = waveformSurface->window();
+    QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+    check(fullscreen, "viewer over the screen");
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+// A focused library takes the letters typed for its type-ahead, F too,
+// before the shortcuts see them; Space stays Play or Pause, and keys with a
+// modifier stay the shortcuts'. Anywhere else, F follows the playhead.
+void TransportInputSmokeTest::fTypesInTheLibraryAndFollowsThePlayheadElsewhere() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    libraryModel.setExpandedKeys(QStringList{
+        QStringLiteral("artist|Artist A"),
+        QStringLiteral("album|Artist A|Album A"),
+    });
+    libraryModel.setLibraryTreeFromBinary(sampleArtistAlbumTreeBinary());
+    QTRY_COMPARE(libraryModel.rowCount(), 3);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *follow = window->findChild<QObject *>(QStringLiteral("followPlayheadAction"));
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QObject *library = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *libraryView = qvariant_cast<QQuickItem *>(window->property("libraryViewRef"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && follow != nullptr && playPause != nullptr
+            && library != nullptr && waveformSurface != nullptr && libraryView != nullptr);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveform->isVisible());
+    QSignalSpy followed(follow, SIGNAL(triggered(QObject *)));
+    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject *)));
+
+    QVERIFY(detachWaveform(waveform));
+    QTRY_VERIFY(follow->property("enabled").toBool());
+    QVERIFY(QMetaObject::invokeMethod(libraryView, "forceActiveFocus"));
+    QTRY_VERIFY(libraryView->hasActiveFocus());
+    QVERIFY(QMetaObject::invokeMethod(library, "selectIndex", Q_ARG(QVariant, 0)));
+
+    // F, and Shift+F, go to the type-ahead.
+    QTest::keyClick(window, 'f');
+    QTest::keyClick(window, 'F', Qt::ShiftModifier);
+    QCOMPARE(library->property("typeAheadBuffer").toString(), QStringLiteral("ff"));
+    QCOMPARE(followed.count(), 0);
+    QVERIFY(waveform->detached());
+    // Space still plays or pauses.
+    QTest::keyClick(window, Qt::Key_Space);
+    QCOMPARE(toggled.count(), 1);
+    // A shortcut with a modifier still works: Ctrl+0 resets the zoom, which
+    // follows the playhead again.
+    QTest::keyClick(window, Qt::Key_0, Qt::ControlModifier);
+    QTRY_COMPARE(waveform->zoomLevel(), 1.0);
+    QVERIFY(!waveform->detached());
+    QCOMPARE(followed.count(), 0);
+
+    // Elsewhere, as in the queue, F follows the playhead.
+    QVERIFY(detachWaveform(waveform));
+    auto *queueView = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
+    QVERIFY(queueView != nullptr);
+    queueView->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(queueView->hasActiveFocus());
+    QTest::keyClick(window, 'f');
+    QTRY_COMPARE(followed.count(), 1);
+    QVERIFY(!waveform->detached());
 }
 
 std::unique_ptr<QmlSmokeTest> makeTransportInputSmokeTest(const QString &userDirectoriesParent) {
