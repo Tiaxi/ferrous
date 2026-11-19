@@ -873,7 +873,12 @@ fn queue_lastfm_scrobble_if_ready(
     lastfm_handle: &LastFmHandle,
     tracker: &mut LastFmPlaybackTracker,
 ) {
+    // A build without Last.fm app credentials can never send a scrobble,
+    // so it queues none, even with scrobbling left on in the shared config.
+    // A build with them queues before the account is connected, to send
+    // the backlog once it is.
     if !state.lastfm.enabled
+        || !state.lastfm.build_configured
         || state.lastfm_scrobbling_paused
         || tracker.scrobble != PlayScrobble::Counting
         || tracker.started_at_utc.is_none()
@@ -1881,6 +1886,7 @@ mod tests {
     fn lastfm_playing_state(track_path: &Path) -> BridgeState {
         let mut state = BridgeState::default();
         state.lastfm.enabled = true;
+        state.lastfm.build_configured = true;
         state.lastfm.auth_state = lastfm::AuthState::Connected;
         state.playback.current = Some(track_path.to_path_buf());
         state.playback.state = PlaybackState::Playing;
@@ -2109,6 +2115,73 @@ mod tests {
 
         assert!(!tracker.scrobble_queued());
         assert!(commands.try_iter().next().is_none());
+    }
+
+    #[test]
+    fn lastfm_scrobbles_are_queued_only_in_a_build_that_can_send_them() {
+        for with_credentials in [false, true] {
+            let dir = crate::paths::test_root()
+                .join(format!("lastfm-queue-build-credentials-{with_credentials}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create scratch directory");
+            let queue_path = dir.join("lastfm_queue.json");
+            let (lastfm_handle, lastfm_events) =
+                lastfm::test_support::spawn_unconnected(with_credentials, queue_path.clone());
+            let track_path = p("/music/build-credentials.flac");
+            let mut state = lastfm_playing_state(&track_path);
+            // Scrobbling is on from the shared config; the service tells
+            // whether this build has the app credentials. No account is
+            // connected either way.
+            let Ok(lastfm::Event::State(runtime)) =
+                lastfm_events.recv_timeout(Duration::from_secs(10))
+            else {
+                panic!("the Last.fm service publishes its state");
+            };
+            state.lastfm = runtime;
+            assert!(state.lastfm.enabled);
+            assert_eq!(state.lastfm.build_configured, with_credentials);
+            assert_ne!(state.lastfm.auth_state, lastfm::AuthState::Connected);
+
+            let mut tracker = LastFmPlaybackTracker::default();
+            let start = Instant::now();
+            for seconds in [0, 60, 121] {
+                tick_lastfm_playback_at(
+                    &state,
+                    &lastfm_handle,
+                    &mut tracker,
+                    start + Duration::from_secs(seconds),
+                    1_700_000_000,
+                );
+            }
+            finalize_lastfm_track(
+                &state,
+                &lastfm_handle,
+                &mut tracker,
+                start + Duration::from_secs(240),
+            );
+            assert_eq!(tracker.scrobble_queued(), with_credentials);
+
+            // Once the service has handled everything sent to it, only the
+            // build with credentials holds the play, to send it once the
+            // account is connected.
+            assert_eq!(
+                lastfm_handle.shutdown(Duration::from_secs(10)),
+                lastfm::ShutdownOutcome::Stopped
+            );
+            let final_state = lastfm_events
+                .try_iter()
+                .filter_map(|event| match event {
+                    lastfm::Event::State(runtime) => Some(runtime),
+                    lastfm::Event::SavedForQuit { .. } => None,
+                })
+                .last();
+            assert_eq!(
+                final_state.map_or(0, |runtime| runtime.pending_scrobble_count),
+                usize::from(with_credentials)
+            );
+            assert_eq!(queue_path.exists(), with_credentials);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

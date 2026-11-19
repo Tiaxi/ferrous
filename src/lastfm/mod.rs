@@ -2219,6 +2219,30 @@ pub(crate) mod test_support {
         (handle, events)
     }
 
+    /// Starts a service with scrobbling on and no account connected, built
+    /// with app credentials or without them, that saves its queue to
+    /// `queue_path` and cannot reach the network.
+    pub(crate) fn spawn_unconnected(
+        with_credentials: bool,
+        queue_path: PathBuf,
+    ) -> (Handle, Receiver<Event>) {
+        super::spawn_with_backends(
+            ServiceOptions {
+                queue_path: Some(queue_path),
+                initial_enabled: true,
+            },
+            move || ServiceBackends {
+                transport: Box::new(OfflineTransport),
+                session_keys: Box::new(MemorySessionKeys::default()),
+                credentials: with_credentials.then(|| AppCredentials {
+                    api_key: "api-key".to_string(),
+                    shared_secret: "secret".to_string(),
+                }),
+                retry: RetryPolicy::DEFAULT,
+            },
+        )
+    }
+
     /// Holds every request until the test releases it, as a server that
     /// does not answer would.
     pub(crate) struct BlockingTransport {
