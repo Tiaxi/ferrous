@@ -230,6 +230,8 @@ jobs:
             glib2-devel \
             gstreamer1-devel \
             gstreamer1-plugins-base-devel \
+            gstreamer1-plugins-good \
+            gstreamer1-plugins-bad-free \
             qt6-qtbase-devel \
             qt6-qtdeclarative-devel \
             qt6-qtquickcontrols2-devel \
