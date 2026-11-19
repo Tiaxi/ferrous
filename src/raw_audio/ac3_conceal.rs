@@ -987,7 +987,7 @@ mod pipeline_tests {
     }
 
     #[test]
-    fn a_frame_that_reuses_what_the_frame_before_set_passes_unchanged() {
+    fn a_frame_that_reuses_a_delta_bit_allocation_it_did_not_set_passes_unchanged() {
         gst::init().expect("gst init");
         let header = &TEST_AC3[..AC3_FRAME_LEN];
         let compressed = silent_frame_with(header, Some(COMPRESSING_DYNRNG), None);
@@ -1001,9 +1001,9 @@ mod pipeline_tests {
             map.to_vec()
         };
         assert_eq!(prepare(&compressed), plain);
-        // The decoder counts the mantissas of block 4 with the delta bit
-        // allocation of an earlier frame, which the probe does not know:
-        // where block 5's word is, it cannot tell.
+        // Block 4 reuses a delta bit allocation that no block of the frame
+        // set, so the decoder would use one of an earlier frame, which the
+        // probe does not know.
         assert_eq!(prepare(&reusing), reusing);
     }
 

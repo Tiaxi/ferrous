@@ -282,10 +282,12 @@ struct Channel {
     start: usize,
     end: usize,
     exponents: [u8; 256],
-    exponents_set: bool,
+    /// The coefficients whose exponents a block of this frame set.
+    exponents_set: Option<(usize, usize)>,
     offsets: Option<Offsets>,
     in_coupling: bool,
-    dba_mode: usize,
+    /// The delta bit allocation strategy a block of this frame set.
+    dba_mode: Option<usize>,
     /// How many delta bit allocation segments a block of this frame set.
     dba_segments: Option<usize>,
     dba_offsets: [usize; 8],
@@ -298,10 +300,10 @@ impl Channel {
         start: 0,
         end: 0,
         exponents: [0; 256],
-        exponents_set: false,
+        exponents_set: None,
         offsets: None,
         in_coupling: false,
-        dba_mode: DBA_NONE,
+        dba_mode: None,
         dba_segments: None,
         dba_offsets: [0; 8],
         dba_lengths: [0; 8],
@@ -614,7 +616,7 @@ impl<'a> Frame<'a> {
                 (absolute, 0)
             };
             let repeat = if strategy == EXP_D45 { 4 } else { strategy };
-            self.channels[channel].exponents_set = true;
+            self.channels[channel].exponents_set = Some((state.start, state.end));
             if first == 0 {
                 self.store_exponents(channel, 0, 1, exponent)?;
             }
@@ -707,10 +709,10 @@ impl<'a> Frame<'a> {
                         "a delta bit allocation from the frame before",
                     ));
                 }
-                self.channels[channel].dba_mode = mode;
+                self.channels[channel].dba_mode = Some(mode);
             }
             for channel in delta_channels {
-                if self.channels[channel].dba_mode != DBA_NEW {
+                if self.channels[channel].dba_mode != Some(DBA_NEW) {
                     continue;
                 }
                 let segments = self.reader.read(3)? + 1;
@@ -724,7 +726,7 @@ impl<'a> Frame<'a> {
             }
         } else if block == 0 {
             for channel in &mut self.channels {
-                channel.dba_mode = DBA_NONE;
+                channel.dba_mode = Some(DBA_NONE);
             }
         }
         Ok(())
@@ -756,15 +758,19 @@ impl<'a> Frame<'a> {
     /// `counts` (A/52 section 7.2.2).
     fn count_pointers(&self, channel: usize, counts: &mut [usize; 16]) -> Result<(), Unparsed> {
         let state = &self.channels[channel];
-        let (true, Some(offsets)) = (state.exponents_set, state.offsets) else {
+        let (start, end) = (state.start, state.end);
+        // A coupling range can grow in a block that reuses exponents.
+        let (Some((first, last)), Some(offsets)) = (state.exponents_set, state.offsets) else {
             return Err(Unparsed::Invalid(
                 "exponents or SNR offsets from the frame before",
             ));
         };
+        if start < first || last < end {
+            return Err(Unparsed::Invalid("exponents from the frame before"));
+        }
         if channel == CPL && !self.allocation.cpl_leak_set {
             return Err(Unparsed::Invalid("a coupling leak from the frame before"));
         }
-        let (start, end) = (state.start, state.end);
         if end <= start || end > 253 {
             return Err(Unparsed::Invalid("an empty or too wide channel"));
         }
@@ -893,21 +899,29 @@ impl<'a> Frame<'a> {
             mask[band] = threshold.max(excite[band]);
         }
 
-        if let Some(segments) = state.dba_segments.filter(|_| state.dba_mode != DBA_NONE) {
-            let mut band = band_start;
-            for segment in 0..segments {
-                band += state.dba_offsets[segment];
-                let length = state.dba_lengths[segment];
-                if band >= CRITICAL_BANDS || length > CRITICAL_BANDS - band {
-                    return Err(Unparsed::Invalid("delta bit allocation past the last band"));
-                }
-                let value = state.dba_values[segment];
-                let delta = 128 * if value >= 4 { value - 3 } else { value - 4 };
-                for masked in &mut mask[band..band + length] {
-                    *masked += delta;
-                }
-                band += length;
+        let segments = match (state.dba_mode, state.dba_segments) {
+            (Some(DBA_NONE), _) => 0,
+            (Some(_), Some(segments)) => segments,
+            // The coupling channel's, when the first block is uncoupled.
+            _ => {
+                return Err(Unparsed::Invalid(
+                    "a delta bit allocation from the frame before",
+                ))
             }
+        };
+        let mut band = band_start;
+        for segment in 0..segments {
+            band += state.dba_offsets[segment];
+            let length = state.dba_lengths[segment];
+            if band >= CRITICAL_BANDS || length > CRITICAL_BANDS - band {
+                return Err(Unparsed::Invalid("delta bit allocation past the last band"));
+            }
+            let value = state.dba_values[segment];
+            let delta = 128 * if value >= 4 { value - 3 } else { value - 4 };
+            for masked in &mut mask[band..band + length] {
+                *masked += delta;
+            }
+            band += length;
         }
         Ok(mask)
     }
@@ -1053,6 +1067,37 @@ mod tests {
         let frame = silent_frame_with(header, None, Some(4));
         assert_eq!(
             find_range_flags(&frame),
+            Err(Unparsed::Invalid(
+                "a delta bit allocation from the frame before"
+            ))
+        );
+    }
+
+    #[test]
+    fn coupling_exponents_or_strategies_from_the_frame_before_leave_the_frame_unparsed() {
+        let frame = frames(AC3_LAYOUTS[1].1)[0];
+        let mut parsed = super::Frame::new(frame).expect("a header");
+        parsed
+            .block(0, &mut super::RangeFlags::new())
+            .expect("the first block");
+        assert!(parsed.cpl_in_use, "a coupled fixture");
+        let mut counts = [0; 16];
+        let coupling = |parsed: &super::Frame, counts: &mut [usize; 16]| {
+            parsed.count_pointers(super::CPL, counts)
+        };
+        assert_eq!(coupling(&parsed, &mut counts), Ok(()));
+        // A later block that starts coupling lower but reuses exponents.
+        parsed.channels[super::CPL].start -= 12;
+        assert_eq!(
+            coupling(&parsed, &mut counts),
+            Err(Unparsed::Invalid("exponents from the frame before"))
+        );
+        parsed.channels[super::CPL].start += 12;
+        // A first block without coupling that sets the delta bit allocation
+        // of the other channels only.
+        parsed.channels[super::CPL].dba_mode = None;
+        assert_eq!(
+            coupling(&parsed, &mut counts),
             Err(Unparsed::Invalid(
                 "a delta bit allocation from the frame before"
             ))
