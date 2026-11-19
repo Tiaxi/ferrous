@@ -413,6 +413,10 @@ public:
     Q_INVOKABLE void setSpectrogramFrequencyCap(bool value);
     Q_INVOKABLE void setSpectrogramZoomLevel(float level);
     Q_INVOKABLE void setSpectrogramWidgetWidth(int width);
+    // Where the centered spectrogram of the track of `trackToken` is
+    // centred after the user moved it away from the playhead, for the
+    // analysis to decode around it; NaN once it follows the playhead.
+    void setSpectrogramViewAnchor(quint64 trackToken, double centerSeconds);
     Q_INVOKABLE void registerSpectrogramItem(QObject *item, int channelIndex);
     Q_INVOKABLE void unregisterSpectrogramItem(QObject *item);
     Q_INVOKABLE void setSystemMediaControlsEnabled(bool value);
@@ -727,6 +731,10 @@ private:
     void scheduleSpectrogramActivityUpdate();
     void updateSpectrogramActivity();
     void observeSpectrogramWindow(QQuickWindow *window);
+    // Sends the anchors of the view of `item`, a SpectrogramItem, and of the
+    // views it is given later, once for a view its lanes share.
+    void observeSpectrogramFollow(QObject *item);
+    void observeSpectrogramFollowOf(QObject *follow);
     bool readSpectrogramStops(quint64 &count, quint64 &generation) const;
     // Whether a frame of `generation` is from a session before analysis
     // last turned off.
@@ -1135,6 +1143,8 @@ private:
     QString m_globalSearchSuggestion;
     QVector<SpectrogramRoute> m_spectrogramRoutes;
     QSet<QQuickWindow *> m_spectrogramWindows;
+    // The views whose anchors are sent (SpectrogramViewFollow).
+    QSet<QObject *> m_spectrogramFollows;
     bool m_spectrogramActivityPending{false};
     bool m_spectrogramActive{true};
     // Turning analysis off releases the panes' columns. Spectral frames of

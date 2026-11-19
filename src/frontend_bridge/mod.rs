@@ -312,6 +312,14 @@ pub enum BridgeAnalysisCommand {
     SetSpectrogramZoomLevel(f32),
     SetSpectrogramWidgetWidth(u32),
     SetSpectrogramActive(bool),
+    /// Where the centered spectrogram of the track of `track_token` stays,
+    /// centred on `center_seconds`, after the user moved it away from the
+    /// playhead; `None` once it follows the playhead again. See
+    /// [`crate::analysis::AnalysisCommand::SetSpectrogramViewAnchor`].
+    SetSpectrogramViewAnchor {
+        track_token: u64,
+        center_seconds: Option<f64>,
+    },
 }
 
 #[derive(Debug, Clone)]

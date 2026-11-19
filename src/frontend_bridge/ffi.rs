@@ -2572,6 +2572,24 @@ fn parse_analysis_command(
         }
         58 => BridgeAnalysisCommand::SetSpectrogramWidgetWidth(reader.read_u32()?),
         64 => BridgeAnalysisCommand::SetSpectrogramActive(reader.read_u8()? != 0),
+        // The u64 track token, a u8 that is 1 for a view the user moved away
+        // from the playhead and 0 for one that follows it, and the f64
+        // seconds the moved view is centred on (ignored when it follows).
+        78 => {
+            let track_token = reader.read_u64()?;
+            let anchored = reader.read_u8()?;
+            let seconds = reader.read_f64()?;
+            let center_seconds = match anchored {
+                0 => None,
+                1 if seconds.is_finite() && seconds >= 0.0 => Some(seconds),
+                1 => return Err("a view anchor must be finite and >= 0".to_string()),
+                _ => return Err("unknown view anchor kind".to_string()),
+            };
+            BridgeAnalysisCommand::SetSpectrogramViewAnchor {
+                track_token,
+                center_seconds,
+            }
+        }
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -3951,6 +3969,51 @@ mod tests {
         );
         assert_eq!(&bytes[68..72], &0.0_f32.to_le_bytes());
         assert_eq!(&bytes[80..84], &0.75_f32.to_le_bytes());
+    }
+
+    #[test]
+    fn view_anchor_command_decodes_its_track_and_anchor() {
+        // Mirrored by BinaryBridgeCodec::encodeCommandSpectrogramViewAnchor.
+        let payload = |token: u64, kind: u8, seconds: f64| {
+            let mut payload = Vec::new();
+            push_u64(&mut payload, token);
+            payload.push(kind);
+            payload.extend_from_slice(&seconds.to_le_bytes());
+            payload
+        };
+        let parse = |payload: &[u8]| parse_binary_command(&encode_command(78, payload));
+        assert!(matches!(
+            parse(&payload(7, 1, 42.5)).expect("anchored").expect("command"),
+            BridgeCommand::Analysis(BridgeAnalysisCommand::SetSpectrogramViewAnchor {
+                track_token: 7,
+                center_seconds: Some(seconds),
+            }) if (seconds - 42.5).abs() < f64::EPSILON
+        ));
+        // A view that follows the playhead carries no anchor, whatever the
+        // seconds say.
+        assert!(matches!(
+            parse(&payload(7, 0, f64::NAN))
+                .expect("following")
+                .expect("command"),
+            BridgeCommand::Analysis(BridgeAnalysisCommand::SetSpectrogramViewAnchor {
+                track_token: 7,
+                center_seconds: None,
+            })
+        ));
+        for bad in [
+            payload(7, 1, f64::NAN),
+            payload(7, 1, -1.0),
+            payload(7, 1, f64::INFINITY),
+            payload(7, 2, 1.0),
+        ] {
+            assert!(parse(&bad).is_err());
+        }
+        let mut truncated = payload(7, 1, 1.0);
+        truncated.pop();
+        assert!(parse(&truncated).is_err());
+        let mut longer = payload(7, 1, 1.0);
+        longer.push(0);
+        assert!(parse(&longer).is_err());
     }
 
     #[test]

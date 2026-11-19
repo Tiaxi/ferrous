@@ -6,6 +6,7 @@
 #include "DiagnosticsLog.h"
 #include "FerrousBridgeFfi.h"
 #include "SpectrogramItem.h"
+#include "SpectrogramViewFollow.h"
 #include "SpectrogramSeekTrace.h"
 #include "SpectrogramTraceLogging.h"
 #include "WindowPresence.h"
@@ -2673,6 +2674,11 @@ void BridgeClient::setSpectrogramZoomLevel(float level) {
         BinaryBridgeCodec::CmdSetSpectrogramZoomLevel, level));
 }
 
+void BridgeClient::setSpectrogramViewAnchor(quint64 trackToken, double centerSeconds) {
+    sendBinaryCommand(
+        BinaryBridgeCodec::encodeCommandSpectrogramViewAnchor(trackToken, centerSeconds));
+}
+
 void BridgeClient::setSpectrogramWidgetWidth(int width) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU32(
         BinaryBridgeCodec::CmdSetSpectrogramWidgetWidth,
@@ -2706,7 +2712,32 @@ void BridgeClient::registerSpectrogramItem(QObject *item, int channelIndex) {
         route.destructionConnection = connect(view, &QObject::destroyed, this, &BridgeClient::scheduleSpectrogramActivityUpdate);
         observeSpectrogramWindow(view->window());
     }
+    observeSpectrogramFollow(item);
     scheduleSpectrogramActivityUpdate();
+}
+
+void BridgeClient::observeSpectrogramFollow(QObject *item) {
+    auto *spectrogram = qobject_cast<SpectrogramItem *>(item);
+    if (spectrogram == nullptr) {
+        return;
+    }
+    observeSpectrogramFollowOf(spectrogram->viewFollow());
+    connect(spectrogram, &SpectrogramItem::viewFollowChanged, this, [this, spectrogram]() {
+        observeSpectrogramFollowOf(spectrogram->viewFollow());
+    });
+}
+
+void BridgeClient::observeSpectrogramFollowOf(QObject *object) {
+    auto *follow = qobject_cast<SpectrogramViewFollow *>(object);
+    if (follow == nullptr || m_spectrogramFollows.contains(follow)) {
+        return;
+    }
+    m_spectrogramFollows.insert(follow);
+    connect(follow, &SpectrogramViewFollow::backendAnchorChanged,
+        this, &BridgeClient::setSpectrogramViewAnchor);
+    connect(follow, &QObject::destroyed, this, [this, follow]() {
+        m_spectrogramFollows.remove(follow);
+    });
 }
 
 void BridgeClient::unregisterSpectrogramItem(QObject *item) {

@@ -29,6 +29,7 @@
 #include "CrosshairReadout.h"
 #include "PlaybackClock.h"
 #include "PlaybackFrameScheduler.h"
+#include "SpectrogramViewFollow.h"
 #include "WindowPresence.h"
 
 class QQuickWindow;
@@ -355,6 +356,13 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // view is zoomed.
     Q_PROPERTY(double visibleStartSeconds READ visibleStartSeconds NOTIFY visibleRangeChanged)
     Q_PROPERTY(double visibleEndSeconds READ visibleEndSeconds NOTIFY visibleRangeChanged)
+    // Where a centered view is, shared with the other lanes of its plot: one
+    // of its own until given one. A middle-drag on a zoomed centered view
+    // pans it and detaches it from the playhead; see SpectrogramViewFollow.
+    Q_PROPERTY(SpectrogramViewFollow *viewFollow READ viewFollow WRITE setViewFollow NOTIFY viewFollowChanged)
+    // Whether the centered view stays where a middle-drag panned it rather
+    // than following the playhead; see SpectrogramViewFollow::detached.
+    Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -444,6 +452,12 @@ public:
     bool stretchShortTracks() const;
     void setStretchShortTracks(bool value);
     double defaultZoomLevel() const;
+
+    SpectrogramViewFollow *viewFollow() const { return m_viewFollow; }
+    void setViewFollow(SpectrogramViewFollow *value);
+    bool detached() const { return m_viewFollow != nullptr && m_viewFollow->detached(); }
+    // The view follows the playhead again, at once.
+    Q_INVOKABLE void followPlayhead();
 
     double pixelToFrequencyHz(int pixelY, int viewHeight) const;
 
@@ -538,6 +552,8 @@ signals:
     void zoomResetRequested();
     void backendZoomRequested(float zoomLevel);
     void spectrogramWidthChanged(int width);
+    void viewFollowChanged();
+    void detachedChanged();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -546,6 +562,9 @@ protected:
     void hoverEnterEvent(QHoverEvent *event) override;
     void hoverLeaveEvent(QHoverEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseUngrabEvent() override;
     void wheelEvent(QWheelEvent *event) override;
     QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
     void releaseResources() override;
@@ -598,6 +617,55 @@ private:
         bool endKnown{false};
     };
     CenteredColumns centeredColumnsLocked() const;
+    // centeredDisplayRange of a view placed as `follow` places it with the
+    // playhead at `positionSeconds`: around the playhead, where the user
+    // moved it, or gliding back from there; see SpectrogramViewFollow.
+    static CenteredDisplayRange followedDisplayRange(
+        const SpectrogramViewFollow::Snapshot &follow,
+        double positionSeconds,
+        int visibleWindowCols,
+        qint64 maxColCount,
+        qint64 estimateCount,
+        double columnsPerSecond);
+    SpectrogramViewFollow::Snapshot followSnapshotLocked() const;
+    // How a centered view is placed with the playhead at positionSeconds;
+    // a rolling one follows the playhead.
+    ViewFollow::State followStateLocked(double positionSeconds) const;
+    // Whether the centered view does not follow the playhead now: the user
+    // moved it, or it glides back from there.
+    bool viewMovedLocked() const {
+        return followSnapshotLocked().state.mode != ViewFollow::Mode::Playhead;
+    }
+    // The view the zoom asked for shows this many seconds of the track, of
+    // `endSeconds`, or the whole track; 0 seconds while unknown.
+    struct FollowGeometry {
+        double spanSeconds{0.0};
+        double endSeconds{0.0};
+        bool wholeTrack{false};
+    };
+    FollowGeometry followGeometryLocked() const;
+    // The centered view the zoom asked for, as it shows: the zoom's preview
+    // while its data has not come, with the playhead at `positionSeconds`:
+    // its left column, its columns, their rate and canvas pixels each, and
+    // the track's columns. Not valid without columns.
+    struct RequestedView {
+        bool valid{false};
+        qint64 left{0};
+        qint64 windowColumns{0};
+        double columnsPerSecond{0.0};
+        double canvasZoom{1.0};
+        qint64 estimateCount{0};
+    };
+    RequestedView requestedViewLocked(double positionSeconds) const;
+    // Tells the view's follow of the view's width, the track's length and
+    // where the playhead is, which may begin or end a glide back.
+    void reportFollowGeometry();
+    // A lane, or the follow, moved the view: a frame for it.
+    void followChanged();
+    // The plot asked to seek to `seconds`; see SpectrogramViewFollow.
+    void noteOwnSeek(double seconds);
+    // The time a centered view shows at logical x, or -1 without columns.
+    double viewSecondsAtLocked(double x) const;
     CenteredView centeredViewLocked(
         double positionSeconds,
         int canvasWidth,
@@ -854,7 +922,13 @@ private:
         int windowColumns{0};
         CenteredDisplayRange range;
         qint64 playheadColumn{0};
+        // The columns of the track, and a second, at the requested zoom.
+        qint64 estimateCount{0};
+        double columnsPerSecond{0.0};
     };
+    // The time a zoom preview scales the canvas about: the playhead, or the
+    // anchor of a view the user moved.
+    double zoomPreviewPivotSecondsLocked(double positionSeconds, bool rollingMode) const;
     ZoomTargetView centeredZoomTargetLocked(
         int width,
         double positionSeconds,
@@ -1251,6 +1325,22 @@ private:
     // The view publishVisibleRange last published, on the GUI thread.
     double m_visibleStartSeconds{std::numeric_limits<double>::quiet_NaN()};
     double m_visibleEndSeconds{std::numeric_limits<double>::quiet_NaN()};
+
+    // Where the centered view is: m_ownViewFollow, or one shared with the
+    // plot's other lanes.
+    SpectrogramViewFollow *m_ownViewFollow{nullptr};
+    QPointer<SpectrogramViewFollow> m_viewFollow;
+    QMetaObject::Connection m_viewFollowChangedConnection;
+    QMetaObject::Connection m_viewFollowDetachedConnection;
+    QMetaObject::Connection m_viewFollowDestroyedConnection;
+    // A middle-drag: whether the button is down, whether it has moved far
+    // enough to pan, where it was pressed, and where the pan last started
+    // from, as the view's left column and the pointer's x.
+    bool m_panPressed{false};
+    bool m_panning{false};
+    QPointF m_panPressPosition;
+    double m_panOriginLeft{0.0};
+    double m_panOriginX{0.0};
 
     // Crosshair overlay state.
     bool m_crosshairEnabled{false};

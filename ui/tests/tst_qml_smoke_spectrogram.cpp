@@ -184,6 +184,7 @@ ApplicationWindow {
 
 void SpectrogramSmokeTest::spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<SpectrogramViewFollow>("FerrousUi", 1, 0, "SpectrogramViewFollow");
 
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -332,6 +333,7 @@ Item {
 
 void SpectrogramSmokeTest::spectrogramHoverChannelButtonsRemainClickable() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<SpectrogramViewFollow>("FerrousUi", 1, 0, "SpectrogramViewFollow");
 
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -2070,6 +2072,7 @@ void SpectrogramSmokeTest::spectrogramCrosshairWidestValueCoversRoundedHertz() {
 void SpectrogramSmokeTest::spectrogramCrosshairTimeKeepsClearOfTheLaneHead() {
     // Six lanes in the pane at its 220 px minimum, with their real heads.
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<SpectrogramViewFollow>("FerrousUi", 1, 0, "SpectrogramViewFollow");
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
         QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
@@ -2603,6 +2606,7 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutShowsAfterEveryClick() {
     // The readout is drawn on the plot with the crosshair. A tooltip that a
     // click closed did not show again until its pane was made anew.
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<SpectrogramViewFollow>("FerrousUi", 1, 0, "SpectrogramViewFollow");
 
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -3958,6 +3962,7 @@ void SpectrogramSmokeTest::spectrogramClickToSeekMatchesCrosshairAtDevicePixels(
 
 void SpectrogramSmokeTest::spectrogramSurfaceFollowsTheStretchedDefaultZoom() {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    qmlRegisterType<SpectrogramViewFollow>("FerrousUi", 1, 0, "SpectrogramViewFollow");
 
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(

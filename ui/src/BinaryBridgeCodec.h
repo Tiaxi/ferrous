@@ -167,6 +167,9 @@ enum CommandId : quint16 {
     // Whether the spectrogram's default zoom stretches a track shorter than
     // the view to its width (u8).
     CmdSetStretchShortTracks = 77,
+    // Where the centered spectrogram's view is, for the analysis to decode;
+    // see encodeCommandSpectrogramViewAnchor.
+    CmdSetSpectrogramViewAnchor = 78,
 };
 
 // The narrowest and widest queue column the backend keeps, in logical
@@ -595,6 +598,11 @@ QByteArray encodeCommandU32(quint16 cmdId, quint32 value);
 QByteArray encodeCommandU64(quint16 cmdId, quint64 value);
 QByteArray encodeCommandF32(quint16 cmdId, float value);
 QByteArray encodeCommandF64(quint16 cmdId, double value);
+// CmdSetSpectrogramViewAnchor: the u64 token of the track the view is of, a
+// u8 that is 1 for a view the user moved away from the playhead and 0 for
+// one that follows it, and the f64 seconds the moved view is centred on (0
+// when it follows). A `centerSeconds` that is NaN follows the playhead.
+QByteArray encodeCommandSpectrogramViewAnchor(quint64 trackToken, double centerSeconds);
 QByteArray encodeCommandString(quint16 cmdId, const QString &value);
 QByteArray encodeCommandStringPair(quint16 cmdId, const QString &first, const QString &second);
 // CmdApplyAlbumArt: the track and artwork paths, then the track file's u64

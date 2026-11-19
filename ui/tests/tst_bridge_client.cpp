@@ -230,6 +230,7 @@ private slots:
     void lastFmScrobbleIndicatorFollowsSnapshotsAndPausingIsSent();
     void queueColumnWidthsKeepTheNewestWhileAcksAreLate();
     void spectrogramActivityFollowsVisibleItemsAndWindows();
+    void spectrogramViewAnchorsReachTheBackend();
     void spectrogramActivityStopsForAWindowOffScreen();
     void spectrogramPanesOnScreenKeepTheirHistoryWhileAnotherWindowIsAway();
     void spectrogramTrackChangeWhileNoPaneIsShownAllocatesNoRings_data();
@@ -558,6 +559,78 @@ void BridgeClientTest::spectrogramActivityFollowsVisibleItemsAndWindows() {
     const QByteArray activeCommand = BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSpectrogramActive, 1);
     QCOMPARE(activeCommand, QByteArray::fromHex("40000100000001"));
+}
+
+// Where a centered view the user moved is reaches the analysis: once for
+// the lanes that share it, the last of a drag's anchors always, and at once
+// when the view follows the playhead again. The layout is the one
+// view_anchor_command_decodes_its_track_and_anchor in
+// src/frontend_bridge/ffi.rs reads.
+void BridgeClientTest::spectrogramViewAnchorsReachTheBackend() {
+    const QByteArray encoded = BinaryBridgeCodec::encodeCommandSpectrogramViewAnchor(7, 42.5);
+    QCOMPARE(encoded.size(), 6 + 17);
+    QCOMPARE(qFromLittleEndian<quint16>(encoded.constData()), quint16(78));
+    QCOMPARE(qFromLittleEndian<quint32>(encoded.constData() + 2), quint32(17));
+    QCOMPARE(qFromLittleEndian<quint64>(encoded.constData() + 6), quint64(7));
+    QCOMPARE(encoded.at(14), char(1));
+    double seconds = 0.0;
+    std::memcpy(&seconds, encoded.constData() + 15, sizeof(seconds));
+    QCOMPARE(seconds, 42.5);
+    const QByteArray follows = BinaryBridgeCodec::encodeCommandSpectrogramViewAnchor(
+        7, std::numeric_limits<double>::quiet_NaN());
+    QCOMPARE(follows.at(14), char(0));
+    std::memcpy(&seconds, follows.constData() + 15, sizeof(seconds));
+    QCOMPARE(seconds, 0.0);
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &command) {
+        if (qFromLittleEndian<quint16>(command.constData())
+            == BinaryBridgeCodec::CmdSetSpectrogramViewAnchor) {
+            sent.push_back(command);
+        }
+        return true;
+    };
+    SpectrogramViewFollow follow;
+    SpectrogramItem left;
+    SpectrogramItem right;
+    left.setViewFollow(&follow);
+    right.setViewFollow(&follow);
+    client.registerSpectrogramItem(&left, 0);
+    client.registerSpectrogramItem(&right, 1);
+    PlaybackClockState state;
+    state.trackToken = 7;
+    state.anchorSeconds = 10.0;
+    follow.clockChanged(state, 0);
+    // An 8 s view of a 120 s track, centred where the drag puts it.
+    follow.setGeometry(8.0, 120.0, false, 10.0);
+    QVERIFY(sent.isEmpty());
+    follow.detach(30.0, 0.5);
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandSpectrogramViewAnchor(7, 30.0));
+    // A drag goes on: its anchors wait for the interval, and the last goes.
+    follow.detach(31.0, 0.5);
+    follow.detach(32.0, 0.25);
+    QCOMPARE(sent.size(), 1);
+    QTRY_COMPARE(sent.size(), 2);
+    QCOMPARE(sent[1], BinaryBridgeCodec::encodeCommandSpectrogramViewAnchor(7, 34.0));
+    QTest::qWait(2 * SpectrogramViewFollow::kBackendAnchorIntervalMs);
+    QCOMPARE(sent.size(), 2);
+    // Once the interval is over, an anchor goes at once.
+    follow.detach(33.0, 0.5);
+    QCOMPARE(sent.size(), 3);
+    QCOMPARE(sent[2], BinaryBridgeCodec::encodeCommandSpectrogramViewAnchor(7, 33.0));
+    // Following again goes at once, and the anchor waiting goes nowhere.
+    follow.detach(33.5, 0.5);
+    follow.reattach();
+    QCOMPARE(sent.size(), 4);
+    QCOMPARE(sent[3], BinaryBridgeCodec::encodeCommandSpectrogramViewAnchor(
+        7, std::numeric_limits<double>::quiet_NaN()));
+    QTest::qWait(2 * SpectrogramViewFollow::kBackendAnchorIntervalMs);
+    QCOMPARE(sent.size(), 4);
+    client.unregisterSpectrogramItem(&left);
+    client.unregisterSpectrogramItem(&right);
 }
 
 void BridgeClientTest::spectrogramActivityStopsForAWindowOffScreen() {

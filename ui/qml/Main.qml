@@ -1793,15 +1793,25 @@ ApplicationWindow {
         }
 
         // Whether the shown plot stays where a middle-drag panned it rather
-        // than following the playhead: only the waveform pans.
-        readonly property bool detached: !visualizationSurface.spectrogramShown
-            && waveformSurface.waveformItem.detached
+        // than following the playhead: the waveform, or the centered
+        // spectrogram.
+        readonly property bool detached: visualizationSurface.spectrogramShown
+            ? spectrogramSurface.detached
+            : waveformSurface.waveformItem.detached
 
         // View › Follow Playhead: the shown plot follows the playhead again.
         function followPlayhead() {
-            if (!visualizationSurface.spectrogramShown) {
+            if (visualizationSurface.spectrogramShown) {
+                spectrogramSurface.followPlayhead()
+            } else {
                 waveformSurface.waveformItem.followPlayhead()
             }
+        }
+        // A switch between the spectrogram and the waveform shows the
+        // chosen one at the playhead, and leaves the other there.
+        onSpectrogramShownChanged: {
+            spectrogramSurface.followPlayhead()
+            waveformSurface.waveformItem.followPlayhead()
         }
 
         // The pointer over the visualization, its plot or anything on it,

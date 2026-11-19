@@ -33,6 +33,7 @@
 
 #include "PlaybackClock.h"
 #include "PlaybackFrameScheduler.h"
+#include "ViewFollow.h"
 #include "WaveformReaderLease.h"
 #include "WaveformSceneGraph.h"
 #include "WindowPresence.h"
@@ -309,23 +310,13 @@ private:
 #endif
 
     // How the view is placed: following the playhead, where the user
-    // panned it, or gliding back to the playhead from there.
-    enum class Follow { Playhead, Detached, Gliding };
-    struct FollowState {
-        Follow mode{Follow::Playhead};
-        // Gliding: where the playhead was as the glide began.
-        double glideFrom{0.0};
-    };
-    // Where in a detached view's width the playhead, moving through it,
-    // starts the glide back to following it.
-    static constexpr double kReattachViewFraction = 0.85;
-    // The playback, in seconds of the track, over which the glide brings
-    // the playhead from kReattachViewFraction to the middle: about 2 s at
-    // normal speed.
-    static constexpr double kReattachGlideSeconds = 2.0;
-    // How near the time the plot asked to seek to a jump of the playhead
-    // lands for it to be that seek, which keeps a detached view.
-    static constexpr double kOwnSeekToleranceSeconds = 0.5;
+    // panned it, or gliding back to the playhead from there; see
+    // ViewFollow, which the spectrogram shares.
+    using Follow = ViewFollow::Mode;
+    using FollowState = ViewFollow::State;
+    static constexpr double kReattachViewFraction = ViewFollow::kReattachViewFraction;
+    static constexpr double kReattachGlideSeconds = ViewFollow::kReattachGlideSeconds;
+    static constexpr double kOwnSeekToleranceSeconds = ViewFollow::kOwnSeekToleranceSeconds;
 
     struct DetailWindow {
         // Which window this is: a new one, from a decode or cleared, has
