@@ -489,6 +489,9 @@ struct DecodedLastFm {
     quint32 scrobbleThresholdMs{0};
     // Why the scrobble is waiting or failed.
     QString scrobbleMessage;
+    // How many queued scrobbles this run of the app dropped unsent, because
+    // Last.fm no longer accepts them or the queue was full.
+    quint32 droppedScrobbleCount{0};
 };
 
 // Mirrors QueueUndoKind in src/frontend_bridge/queue_undo.rs, whose tests

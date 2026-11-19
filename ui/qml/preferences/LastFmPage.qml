@@ -82,8 +82,8 @@ Preferences.PreferencesPage {
         id: statusLabel
         objectName: "lastFmStatusLabel"
         uiPalette: root.uiPalette
-        // The waiting scrobbles' line goes on from it, as one status.
-        trailingSpace: pendingLabel.visible
+        // The scrobbles' lines go on from it, as one status.
+        trailingSpace: pendingLabel.visible || droppedLabel.visible
             ? 0
             : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing - statusLabel.rowSpacing
         // The account line already says when the build has no Last.fm.
@@ -95,9 +95,25 @@ Preferences.PreferencesPage {
         id: pendingLabel
         objectName: "lastFmPendingLabel"
         uiPalette: root.uiPalette
+        // The dropped scrobbles' line goes on from it.
+        trailingSpace: droppedLabel.visible
+            ? 0
+            : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing - pendingLabel.rowSpacing
         visible: (root.uiBridge.lastFmPendingScrobbleCount || 0) > 0
         text: I18n.i18ncp("@info", "%1 scrobble waiting to be sent", "%1 scrobbles waiting to be sent",
             root.uiBridge.lastFmPendingScrobbleCount || 0)
+    }
+
+    // Scrobbles older than Last.fm accepts, or the oldest past the queue's
+    // limit, are dropped unsent; this run's count. The diagnostics log says
+    // which.
+    Components.FormHelpText {
+        id: droppedLabel
+        objectName: "lastFmDroppedLabel"
+        uiPalette: root.uiPalette
+        visible: (root.uiBridge.lastFmDroppedScrobbleCount || 0) > 0
+        text: I18n.i18ncp("@info", "%1 old scrobble was discarded without being sent",
+            "%1 old scrobbles were discarded without being sent", root.uiBridge.lastFmDroppedScrobbleCount || 0)
     }
 
     // Only the buttons that apply now.

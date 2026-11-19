@@ -726,6 +726,7 @@ bool decodeLastFmSection(const QByteArray &payload, DecodedLastFm *out) {
             || !reader.readU32(&out->scrobbleListenedMs)
             || !reader.readU32(&out->scrobbleThresholdMs)
             || !reader.readUtf8(&out->scrobbleMessage)
+            || !reader.readU32(&out->droppedScrobbleCount)
             || scrobbleState > ScrobbleStateLast
             || scrobbleIneligibility > ScrobbleIneligibilityLast)) {
         return false;

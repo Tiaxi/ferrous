@@ -145,6 +145,9 @@ class BridgeClient : public QObject {
     // BinaryBridgeCodec::DecodedLastFm::pendingScrobbleCount.
     Q_PROPERTY(int lastFmPendingScrobbleCount READ lastFmPendingScrobbleCount NOTIFY snapshotChanged)
     Q_PROPERTY(QString lastFmStatusText READ lastFmStatusText NOTIFY snapshotChanged)
+    // The queued scrobbles dropped unsent in this run; see
+    // BinaryBridgeCodec::DecodedLastFm::droppedScrobbleCount.
+    Q_PROPERTY(int lastFmDroppedScrobbleCount READ lastFmDroppedScrobbleCount NOTIFY snapshotChanged)
     // Whether the status bar shows the scrobble progress indicator.
     Q_PROPERTY(bool lastFmShowScrobbleProgress READ lastFmShowScrobbleProgress NOTIFY snapshotChanged)
     // Whether scrobbling is paused until the app quits.
@@ -325,6 +328,7 @@ public:
     int lastFmAuthState() const;
     int lastFmPendingScrobbleCount() const;
     QString lastFmStatusText() const;
+    int lastFmDroppedScrobbleCount() const;
     bool lastFmShowScrobbleProgress() const;
     bool lastFmScrobblingPaused() const;
     int lastFmScrobbleState() const;
@@ -992,6 +996,7 @@ private:
     int m_lastFmAuthState{0};
     int m_lastFmPendingScrobbleCount{0};
     QString m_lastFmStatusText;
+    int m_lastFmDroppedScrobbleCount{0};
     QString m_lastFmAuthUrl;
     bool m_lastFmShowScrobbleProgress{true};
     bool m_lastFmScrobblingPaused{false};

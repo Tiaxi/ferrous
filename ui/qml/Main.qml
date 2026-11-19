@@ -312,6 +312,7 @@ ApplicationWindow {
         property string lastFmUsername: ""
         property int lastFmAuthState: 0
         property int lastFmPendingScrobbleCount: 0
+        property int lastFmDroppedScrobbleCount: 0
         property string lastFmStatusText: ""
         property bool lastFmShowScrobbleProgress: true
         property bool lastFmScrobblingPaused: false

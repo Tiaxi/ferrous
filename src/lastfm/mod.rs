@@ -35,6 +35,13 @@ const LASTFM_IGNORED_DAILY_LIMIT: i64 = 5;
 /// How many tracks a line of the diagnostics log names; the rest are
 /// counted.
 const LOGGED_TRACKS: usize = 3;
+/// How old a scrobble Last.fm still accepts: it ignores one whose play
+/// started more than 14 days ago.
+const MAX_SCROBBLE_AGE_SECONDS: i64 = 14 * 24 * 60 * 60;
+/// The most scrobbles the queue keeps; beyond it, the oldest are dropped.
+/// Far more than two weeks of listening, so that only a queue Last.fm could
+/// not take anyway reaches it, while every scrobble still rewrites the file.
+const MAX_QUEUED_SCROBBLES: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppCredentials {
@@ -78,6 +85,10 @@ pub struct RuntimeState {
     pub problems: Vec<Problem>,
     /// What became of the most recent [`Command::QueueScrobble`].
     pub latest_scrobble: Option<LatestScrobble>,
+    /// How many queued scrobbles this run of the app dropped unsent: those
+    /// older than Last.fm accepts, and the oldest beyond
+    /// [`MAX_QUEUED_SCROBBLES`].
+    pub dropped_scrobble_count: usize,
 }
 
 /// What became of the most recent scrobble the service received.
@@ -413,6 +424,9 @@ pub(crate) struct ServiceBackends {
     pub(crate) session_keys: Box<dyn SessionKeyStore>,
     pub(crate) credentials: Option<AppCredentials>,
     pub(crate) retry: RetryPolicy,
+    /// The time now, in seconds since the Unix epoch, which decides what is
+    /// too old to send.
+    pub(crate) now_utc: fn() -> i64,
 }
 
 impl ServiceBackends {
@@ -423,6 +437,7 @@ impl ServiceBackends {
             session_keys: Box::new(KeyringSessionKeys),
             credentials: app_credentials(),
             retry: RetryPolicy::DEFAULT,
+            now_utc: unix_time_now,
         }
     }
 
@@ -434,8 +449,19 @@ impl ServiceBackends {
             session_keys: Box::new(test_support::MemorySessionKeys::default()),
             credentials: None,
             retry: RetryPolicy::DEFAULT,
+            now_utc: test_support::fixture_now,
         }
     }
+}
+
+/// The time now, in seconds since the Unix epoch; 0 before it.
+#[cfg(not(test))]
+fn unix_time_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 struct HttpTransport {
@@ -558,6 +584,8 @@ struct Service {
     listed_scrobbles: usize,
     queue_path: Option<PathBuf>,
     queue: Vec<ScrobbleEntry>,
+    /// See [`ServiceBackends::now_utc`].
+    now_utc: fn() -> i64,
     /// Problem found while loading the queue file, shown for the session.
     queue_load_notice: Option<String>,
     /// Why the queue file could not be read at startup. Saving stays off
@@ -792,6 +820,7 @@ impl Service {
             listed_scrobbles: 0,
             queue_path: options.queue_path,
             queue: Vec::new(),
+            now_utc: backends.now_utc,
             queue_load_notice: None,
             queue_unreadable: None,
             queue_save_error: None,
@@ -822,7 +851,12 @@ impl Service {
             return;
         };
         match queue_file::load(&path) {
-            LoadOutcome::Loaded(entries) => self.queue = entries,
+            LoadOutcome::Loaded(entries) => {
+                self.queue = entries;
+                if self.drop_unsendable() {
+                    self.save_queue();
+                }
+            }
             LoadOutcome::MovedAside { moved_to, reason } => {
                 eprintln!(
                     "Last.fm: scrobble queue {} is not valid ({reason}); moved it to {}",
@@ -958,7 +992,6 @@ impl Service {
     /// Queue `entry` and save the queue.
     fn queue_scrobble(&mut self, entry: ScrobbleEntry) {
         self.queue.push(entry);
-        self.save_queue();
         self.state.scrobbles_received += 1;
         self.state.latest_scrobble = Some(LatestScrobble {
             ordinal: self.state.scrobbles_received,
@@ -966,9 +999,77 @@ impl Service {
             message: String::new(),
         });
         self.latest_queued = true;
+        self.drop_unsendable();
+        self.save_queue();
         // A flush follows at once; whether it can send the scrobble is
         // known now.
         self.latest_on_first_send = !self.holding() && self.can_send();
+    }
+
+    /// Drops the queued scrobbles that Last.fm would no longer accept, and
+    /// the oldest beyond [`MAX_QUEUED_SCROBBLES`], so that a queue that
+    /// cannot be sent for weeks stays bounded. Counts them for the UI and
+    /// logs them. Returns whether any were dropped; the caller saves.
+    fn drop_unsendable(&mut self) -> bool {
+        let oldest_accepted = (self.now_utc)().saturating_sub(MAX_SCROBBLE_AGE_SECONDS);
+        let latest = self.queue.len().checked_sub(1);
+        let mut index = 0;
+        let mut listed_dropped = 0;
+        let mut latest_dropped = false;
+        let listed = self.listed_scrobbles;
+        self.queue.retain(|entry| {
+            let keep = entry.timestamp_utc >= oldest_accepted;
+            if !keep {
+                listed_dropped += usize::from(index < listed);
+                latest_dropped |= Some(index) == latest;
+            }
+            index += 1;
+            keep
+        });
+        let expired = index - self.queue.len();
+        let over_limit = self.queue.len().saturating_sub(MAX_QUEUED_SCROBBLES);
+        self.queue.drain(..over_limit);
+        // The listed entries lead the queue.
+        let listed_left = listed - listed_dropped;
+        self.listed_scrobbles = listed_left.saturating_sub(over_limit);
+        if expired > 0 {
+            log_warning(
+                ErrorCategory::LastFm,
+                &format!(
+                    "Dropped {expired} queued {} older than 14 days, which Last.fm no longer \
+                     accepts.",
+                    if expired == 1 {
+                        "scrobble"
+                    } else {
+                        "scrobbles"
+                    }
+                ),
+            );
+        }
+        if over_limit > 0 {
+            log_warning(
+                ErrorCategory::LastFm,
+                &format!(
+                    "Dropped the {over_limit} oldest queued {} to keep the queue at \
+                     {MAX_QUEUED_SCROBBLES}.",
+                    if over_limit == 1 {
+                        "scrobble"
+                    } else {
+                        "scrobbles"
+                    }
+                ),
+            );
+        }
+        if latest_dropped {
+            self.set_latest_delivery(
+                ScrobbleDelivery::Failed,
+                "Too old for Last.fm to accept",
+                false,
+            );
+        }
+        let dropped = expired + over_limit;
+        self.state.dropped_scrobble_count += dropped;
+        dropped > 0
     }
 
     /// Records what became of the latest scrobble, if it is still queued,
@@ -2192,6 +2293,16 @@ pub(crate) mod test_support {
         ServiceOptions, SessionKeyStore, Transport,
     };
 
+    /// The time tests run at, in seconds since the Unix epoch: a day after
+    /// the plays of their fixtures, which start at 1 700 000 000, so that
+    /// those are recent enough to send.
+    pub(crate) const FIXTURE_NOW: i64 = 1_700_000_000 + 24 * 60 * 60;
+
+    /// [`super::ServiceBackends::now_utc`] for tests: [`FIXTURE_NOW`].
+    pub(crate) fn fixture_now() -> i64 {
+        FIXTURE_NOW
+    }
+
     /// Starts a service, connected with a stored session, that sends its
     /// requests through `transport` and saves its queue to `queue_path`.
     pub(crate) fn spawn_connected(
@@ -2211,6 +2322,7 @@ pub(crate) mod test_support {
                     shared_secret: "secret".to_string(),
                 }),
                 retry: RetryPolicy::DEFAULT,
+                now_utc: fixture_now,
             },
         );
         handle.command(Command::LoadStoredSession {
@@ -2239,6 +2351,7 @@ pub(crate) mod test_support {
                     shared_secret: "secret".to_string(),
                 }),
                 retry: RetryPolicy::DEFAULT,
+                now_utc: fixture_now,
             },
         )
     }
@@ -2504,6 +2617,7 @@ mod tests {
                 shared_secret: "secret".to_string(),
             }),
             retry: RetryPolicy::DEFAULT,
+            now_utc: test_support::fixture_now,
         }
     }
 
@@ -3882,6 +3996,114 @@ mod tests {
         assert!(service.retry_due.is_none());
     }
 
+    /// A scrobble whose play started `age_seconds` before the tests' time.
+    fn entry_aged(index: usize, age_seconds: i64) -> ScrobbleEntry {
+        ScrobbleEntry {
+            timestamp_utc: test_support::FIXTURE_NOW - age_seconds,
+            ..entry(index)
+        }
+    }
+
+    /// A service with scrobbling on and no account, so that nothing is sent.
+    fn unconnected_service(queue_path: &Path) -> Service {
+        Service::new(
+            ServiceOptions {
+                queue_path: Some(queue_path.to_path_buf()),
+                initial_enabled: true,
+            },
+            backends(&ScriptedTransport::default(), MemorySessionKeys::default()),
+        )
+    }
+
+    #[test]
+    fn loading_the_queue_drops_scrobbles_lastfm_no_longer_accepts() {
+        let dir = scratch_dir("expired-on-load");
+        let queue_path = dir.join("lastfm_queue.json");
+        let two_weeks = MAX_SCROBBLE_AGE_SECONDS;
+        let saved = vec![
+            entry_aged(0, two_weeks + 3600),
+            entry_aged(1, two_weeks),
+            entry_aged(2, two_weeks + 1),
+            entry_aged(3, 60),
+        ];
+        fs::write(&queue_path, serde_json::to_vec(&saved).expect("encode")).expect("write");
+
+        let service = unconnected_service(&queue_path);
+
+        let kept = vec![saved[1].clone(), saved[3].clone()];
+        assert_eq!(service.queue, kept);
+        // The file holds only what can still be sent.
+        assert_eq!(read_queue_file(&queue_path), kept);
+        let state = service.published_state();
+        assert_eq!(state.dropped_scrobble_count, 2);
+        assert_eq!(state.pending_scrobble_count, 2);
+        assert!(!state.unsaved_scrobbles);
+    }
+
+    #[test]
+    fn queueing_drops_scrobbles_that_grew_too_old_while_waiting() {
+        let dir = scratch_dir("expired-on-queue");
+        let queue_path = dir.join("lastfm_queue.json");
+        let mut service = unconnected_service(&queue_path);
+        // Queued earlier in a run that has gone on for weeks.
+        service.queue = vec![
+            entry_aged(0, MAX_SCROBBLE_AGE_SECONDS * 2),
+            entry_aged(1, MAX_SCROBBLE_AGE_SECONDS + 1),
+            entry_aged(2, 3600),
+        ];
+
+        service.handle_command(Command::QueueScrobble(entry_aged(3, 0)));
+
+        let kept = vec![entry_aged(2, 3600), entry_aged(3, 0)];
+        assert_eq!(service.queue, kept);
+        assert_eq!(read_queue_file(&queue_path), kept);
+        let state = service.published_state();
+        assert_eq!(state.dropped_scrobble_count, 2);
+        // The new scrobble itself is queued as usual.
+        let latest = state.latest_scrobble.expect("latest scrobble");
+        assert_eq!(latest.delivery, ScrobbleDelivery::Pending);
+        assert!(service.latest_queued);
+    }
+
+    #[test]
+    fn a_scrobble_too_old_to_send_is_not_queued() {
+        let dir = scratch_dir("expired-latest");
+        let queue_path = dir.join("lastfm_queue.json");
+        let mut service = unconnected_service(&queue_path);
+
+        service.handle_command(Command::QueueScrobble(entry_aged(
+            0,
+            MAX_SCROBBLE_AGE_SECONDS + 1,
+        )));
+
+        assert!(service.queue.is_empty());
+        assert!(!queue_path.exists());
+        let state = service.published_state();
+        assert_eq!(state.dropped_scrobble_count, 1);
+        let latest = state.latest_scrobble.expect("latest scrobble");
+        assert_eq!(latest.delivery, ScrobbleDelivery::Failed);
+        assert!(!service.latest_queued);
+    }
+
+    #[test]
+    fn the_queue_keeps_at_most_its_limit_dropping_the_oldest() {
+        let dir = scratch_dir("queue-limit");
+        let queue_path = dir.join("lastfm_queue.json");
+        let mut service = unconnected_service(&queue_path);
+        service.queue = entries(0..MAX_QUEUED_SCROBBLES);
+        service.listed_scrobbles = 10;
+
+        service.handle_command(Command::QueueScrobble(entry(MAX_QUEUED_SCROBBLES)));
+
+        assert_eq!(service.queue.len(), MAX_QUEUED_SCROBBLES);
+        assert_eq!(service.queue.first(), Some(&entry(1)));
+        assert_eq!(service.queue.last(), Some(&entry(MAX_QUEUED_SCROBBLES)));
+        // The rest of the listed entries still lead the queue.
+        assert_eq!(service.listed_scrobbles, 9);
+        assert_eq!(read_queue_file(&queue_path).len(), MAX_QUEUED_SCROBBLES);
+        assert_eq!(service.published_state().dropped_scrobble_count, 1);
+    }
+
     #[test]
     fn truncated_queue_file_is_moved_aside_and_preserved() {
         let dir = scratch_dir("truncated-queue");
@@ -4907,6 +5129,7 @@ mod tests {
                     shared_secret: SHARED_SECRET.to_string(),
                 }),
                 retry: RetryPolicy::DEFAULT,
+                now_utc: test_support::fixture_now,
             },
         );
         service.handle_command(Command::LoadStoredSession {
