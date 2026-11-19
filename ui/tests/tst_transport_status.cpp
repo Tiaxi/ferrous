@@ -1050,6 +1050,10 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     transport->setProperty("viewStartSeconds", 200.0);
     transport->setProperty("viewEndSeconds", 260.0);
     QCOMPARE(sceneRect(band).right(), bar.left() + barPixels / ratio);
+    transport->setProperty("viewStartSeconds", 228.99);
+    transport->setProperty("viewEndSeconds", 229.5);
+    QCOMPARE(sceneRect(band).left(), bar.left() + (barPixels - 1) / ratio);
+    QCOMPARE(sceneRect(band).right(), bar.left() + barPixels / ratio);
     transport->setProperty("viewStartSeconds", 50.0);
     transport->setProperty("viewEndSeconds", 50.001);
     QVERIFY(band->isVisible());

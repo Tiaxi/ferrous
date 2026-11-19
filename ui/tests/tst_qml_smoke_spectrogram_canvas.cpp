@@ -706,6 +706,23 @@ void SpectrogramCanvasSmokeTest::spectrogramVisibleRangeIsTheViewAFrameShows() {
         }
         delete node;
     }
+
+    // A rolling view that plays the previous track on while the clock's new
+    // track's columns are on their way shows none of the new track.
+    TestTime time;
+    SpectrogramItem item;
+    prepareScrollingPlayback(item, time, 0);
+    QSGNode *node = paintSettled(item, nullptr);
+    item.handleWindowAfterAnimating();
+    QVERIFY(std::isfinite(item.visibleStartSeconds()));
+    setTestPosition(item, 0.0, 2);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_positionJumpHoldActive);
+    }
+    item.handleWindowAfterAnimating();
+    QVERIFY(std::isnan(item.visibleStartSeconds()) && std::isnan(item.visibleEndSeconds()));
+    delete node;
 }
 
 void SpectrogramCanvasSmokeTest::spectrogramRebuildBenchmark() {

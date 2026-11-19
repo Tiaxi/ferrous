@@ -570,9 +570,11 @@ ToolBar {
                 return Math.round((mirrored ? 1 - fraction : fraction) * barDevicePixels)
                     / windowDevicePixelRatio
             }
+            // At least a device pixel wide, however deep the zoom, and on
+            // the bar at its end.
             readonly property real viewBandLeft: !viewBandShown ? 0
-                : Math.min(barXOf(root.viewStartSeconds), barXOf(root.viewEndSeconds))
-            // At least a device pixel wide, however deep the zoom.
+                : Math.min(barXOf(root.viewStartSeconds), barXOf(root.viewEndSeconds),
+                           (barDevicePixels - 1) / windowDevicePixelRatio)
             readonly property real viewBandRight: !viewBandShown ? 0
                 : Math.max(barXOf(root.viewStartSeconds), barXOf(root.viewEndSeconds),
                            viewBandLeft + 1 / windowDevicePixelRatio)

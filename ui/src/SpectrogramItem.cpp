@@ -8170,6 +8170,13 @@ std::pair<double, double> SpectrogramItem::visibleRangeLocked(
         || m_precomputedTotalColumnsEstimate <= 0 || canvasWidth <= 0 || canvasZoom <= 0.0) {
         return {unknown, unknown};
     }
+    // A rolling view that still plays the previous track, until the clock's
+    // track's columns come or the track's gapless start, shows none of the
+    // clock's track.
+    if (positionHeldLocked(monotonicNs(now))
+        && m_positionHoldTrajectory.trackToken != m_clockState.trackToken) {
+        return {unknown, unknown};
+    }
     if (m_zoomPreviewShown && m_zoomPreviewPixelsPerSecond > 0.0) {
         // The canvas scaled to a zoom whose columns are still to come, as
         // the last frame drew it and a click seeks in it.

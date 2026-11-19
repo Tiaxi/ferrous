@@ -3723,9 +3723,12 @@ void TransportInputSmokeTest::seekBarMarksTheZoomedViewOfTheShownPlot() {
     QTRY_VERIFY(bandIsWaveforms());
     QVERIFY(bandOnBar(waveform->visibleStartSeconds(), waveform->visibleEndSeconds()));
     QCOMPARE(seekState(), seekBefore);
-    // Reset Zoom.
+    // Reset Zoom: the band stays while the view still shows less than the
+    // whole track, as a zoom out does until it has its detail.
     QVERIFY(QMetaObject::invokeMethod(resetAction, "trigger"));
+    QCOMPARE(band->isVisible(), waveform->visibleEndSeconds() - waveform->visibleStartSeconds() < 229.0);
     QTRY_VERIFY(!band->isVisible());
+    QCOMPARE(waveform->visibleEndSeconds() - waveform->visibleStartSeconds(), 229.0);
     // Without a length.
     waveform->setZoomLevel(4.0);
     QTRY_VERIFY(bandIsWaveforms());

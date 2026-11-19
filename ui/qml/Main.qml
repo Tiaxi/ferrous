@@ -1759,13 +1759,19 @@ ApplicationWindow {
         readonly property bool zoomed: Math.abs(visualizationSurface.zoomLevel - 1.0) > 0.001
 
         // The part of the track the shown plot's view covers, in seconds,
-        // while it is zoomed, for the seek bar's band; NaN otherwise. At
-        // its default zoom the waveform shows the whole track.
-        readonly property real viewStartSeconds: !visualizationSurface.zoomed ? NaN
+        // while it is zoomed, for the seek bar's band; NaN otherwise. The
+        // waveform is zoomed while its view shows less than the whole
+        // track, which a zoom out keeps showing until it has its detail.
+        readonly property bool viewZoomed: visualizationSurface.spectrogramShown
+            ? visualizationSurface.zoomed
+            : waveformSurface.waveformItem.visibleEndSeconds
+                - waveformSurface.waveformItem.visibleStartSeconds
+                < waveformSurface.waveformItem.durationSeconds
+        readonly property real viewStartSeconds: !visualizationSurface.viewZoomed ? NaN
             : visualizationSurface.spectrogramShown
                 ? spectrogramSurface.visibleStartSeconds
                 : waveformSurface.waveformItem.visibleStartSeconds
-        readonly property real viewEndSeconds: !visualizationSurface.zoomed ? NaN
+        readonly property real viewEndSeconds: !visualizationSurface.viewZoomed ? NaN
             : visualizationSurface.spectrogramShown
                 ? spectrogramSurface.visibleEndSeconds
                 : waveformSurface.waveformItem.visibleEndSeconds
