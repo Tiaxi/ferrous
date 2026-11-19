@@ -774,12 +774,6 @@ impl<'a> Frame<'a> {
         if end <= start || end > 253 {
             return Err(Unparsed::Invalid("an empty or too wide channel"));
         }
-        if offsets.snr == -960 {
-            // All SNR offsets 0: no bits for any coefficient.
-            counts[0] += end - start;
-            return Ok(());
-        }
-
         // Exponents to power spectral density, integrated per band.
         let mut psd = [0_i32; 256];
         let mut band_psd = [0_i32; CRITICAL_BANDS + 1];
@@ -806,7 +800,13 @@ impl<'a> Frame<'a> {
             }
         }
 
+        // The decoder works out the masking curve, which can fail, before
+        // it gives no coefficient any bits for all SNR offsets 0.
         let mask = self.masking_curve(channel, offsets.fast_gain, &band_psd)?;
+        if offsets.snr == -960 {
+            counts[0] += end - start;
+            return Ok(());
+        }
 
         let allocation = &self.allocation;
         let mut bin = start;
@@ -900,6 +900,12 @@ impl<'a> Frame<'a> {
         }
 
         let segments = match (state.dba_mode, state.dba_segments) {
+            // A/52 gives the LFE no delta bit allocation, so no block sets
+            // its strategy. The decoder's segments for it are those of a
+            // full-bandwidth channel of another layout, and `gst-libav`
+            // opens the decoder anew when the layout changes: there are
+            // none.
+            _ if is_lfe => 0,
             (Some(DBA_NONE), _) => 0,
             (Some(_), Some(segments)) => segments,
             // The coupling channel's, when the first block is uncoupled.
@@ -951,7 +957,8 @@ fn low_comp_at(low_comp: i32, psd: i32, next_psd: i32, band: usize) -> i32 {
 mod tests {
     use super::{find_range_flags, Unparsed};
     use crate::raw_audio::ac3_conceal::{
-        silent_frame_of, silent_frame_with, with_dynamic_range, AC3_LAYOUTS, COMPRESSING_DYNRNG,
+        header_of, silent_frame_of, silent_frame_with, with_dynamic_range, SilentDba, AC3_LAYOUTS,
+        COMPRESSING_DYNRNG,
     };
     use crate::raw_audio::bitstream::plain_ac3_frame_len;
 
@@ -1064,7 +1071,7 @@ mod tests {
     #[test]
     fn a_delta_bit_allocation_from_the_frame_before_leaves_the_frame_unparsed() {
         let header = frames(AC3_LAYOUTS[0].1)[0];
-        let frame = silent_frame_with(header, None, Some(4));
+        let frame = silent_frame_with(header, None, SilentDba::ReusedIn(4));
         assert_eq!(
             find_range_flags(&frame),
             Err(Unparsed::Invalid(
@@ -1102,6 +1109,20 @@ mod tests {
                 "a delta bit allocation from the frame before"
             ))
         );
+    }
+
+    #[test]
+    fn a_delta_bit_allocation_in_the_first_block_leaves_the_lfe_without_one() {
+        // 5.1 and 2.1: `deltbae` covers the full-bandwidth channels only.
+        for acmod in [7, 2] {
+            let frame = silent_frame_with(
+                &header_of(20, acmod, true),
+                Some(COMPRESSING_DYNRNG),
+                SilentDba::NoneFromTheFirstBlock,
+            );
+            let flags = find_range_flags(&frame).expect("a frame that parses");
+            assert!(flags.compress(&frame), "acmod {acmod}");
+        }
     }
 
     #[test]

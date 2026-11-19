@@ -460,19 +460,25 @@ fn find_range_flags_for_test(frame: &[u8]) -> super::ac3_dynamic_range::RangeFla
 /// reuse them.
 #[cfg(test)]
 pub(crate) fn silent_frame(frame: &[u8]) -> Vec<u8> {
-    silent_frame_with(frame, None, None)
+    silent_frame_with(frame, None, SilentDba::Unset)
 }
 
-/// [`silent_frame`] with `dynrng` in its first block, and with a block
-/// `reusing_dba` that has each channel reuse a delta bit allocation, which
-/// no block of the frame sets: the decoder would use one from the frame
-/// before.
+/// The delta bit allocation of a [`silent_frame_with`].
 #[cfg(test)]
-pub(crate) fn silent_frame_with(
-    frame: &[u8],
-    dynrng: Option<u8>,
-    reusing_dba: Option<usize>,
-) -> Vec<u8> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SilentDba {
+    /// No block sets one.
+    Unset,
+    /// The first block sets none for each full-bandwidth channel.
+    NoneFromTheFirstBlock,
+    /// This block has each channel reuse one, which no block of the frame
+    /// sets: the decoder would use one from the frame before.
+    ReusedIn(usize),
+}
+
+/// [`silent_frame`] with `dynrng` in its first block, and `dba`.
+#[cfg(test)]
+pub(crate) fn silent_frame_with(frame: &[u8], dynrng: Option<u8>, dba: SilentDba) -> Vec<u8> {
     use super::ac3_dynamic_range::FULL_BANDWIDTH_CHANNELS;
     // `acmod`, the 3 bits after `bsid` and `bsmod`, starts byte 6.
     let acmod = usize::from(frame[6] >> 5);
@@ -543,15 +549,24 @@ pub(crate) fn silent_frame_with(
             // and `fgaincod` 0.
             bits.put(1, 1);
             bits.put(0, 6 + 7 * (channels + usize::from(lfe)));
-            // No `deltbaie` or `skiple`.
-            bits.put(0, 2);
+            // `deltbaie`, with `deltbae` 2, none, for each channel.
+            if dba == SilentDba::NoneFromTheFirstBlock {
+                bits.put(1, 1);
+                for _ in 0..channels {
+                    bits.put(0b10, 2);
+                }
+            } else {
+                bits.put(0, 1);
+            }
+            // No `skiple`.
+            bits.put(0, 1);
         } else {
             // No `cplstre`, `rematstr`, new exponents, `baie`, or
             // `snroffste`.
             let rematrixing = usize::from(acmod == 2);
             bits.put(0, 1 + rematrixing + 2 * channels + usize::from(lfe) + 2);
             // `deltbaie`, with `deltbae` 0, reuse, for each channel.
-            if reusing_dba == Some(block) {
+            if dba == SilentDba::ReusedIn(block) {
                 bits.put(1, 1);
                 bits.put(0, 2 * channels);
             } else {
@@ -571,6 +586,14 @@ pub(crate) fn silent_frame_with(
 /// `lfeon`, tells the channels `acmod` and `lfe`, and is silent.
 #[cfg(test)]
 pub(crate) fn silent_frame_of(frmsizecod: u8, acmod: u8, lfe: bool) -> Vec<u8> {
+    silent_frame(&header_of(frmsizecod, acmod, lfe))
+}
+
+/// A 48 kHz frame of the bitrate of `frmsizecod` whose header, up to
+/// `lfeon`, tells the channels `acmod` and `lfe`, and which holds nothing
+/// after it.
+#[cfg(test)]
+pub(crate) fn header_of(frmsizecod: u8, acmod: u8, lfe: bool) -> Vec<u8> {
     let mut bits = BitWriter::default();
     // The sync word, `crc1`, `fscod` 48 kHz, `frmsizecod`, `bsid` 8, and
     // `bsmod`.
@@ -586,7 +609,7 @@ pub(crate) fn silent_frame_of(frmsizecod: u8, acmod: u8, lfe: bool) -> Vec<u8> {
     let mut frame = bits.bytes;
     let len = plain_ac3_frame_len(&frame).expect("a frame length");
     frame.resize(len, 0);
-    silent_frame(&frame)
+    frame
 }
 
 /// Whether `frame` is one whose CRC fails.
@@ -735,8 +758,8 @@ mod tests {
 mod pipeline_tests {
     use super::{
         prepare_ac3_frames, record_decoder_input, silenced, silent_frame_with, with_damaged_frames,
-        with_dynamic_range, Concealer, DecoderFrame, AC3_DECODERS, AC3_FRAME_LEN, AC3_LAYOUTS,
-        COMPRESSING_DYNRNG, SEAMED_FRAME, TEST_AC3_FRAMES,
+        with_dynamic_range, Concealer, DecoderFrame, SilentDba, AC3_DECODERS, AC3_FRAME_LEN,
+        AC3_LAYOUTS, COMPRESSING_DYNRNG, SEAMED_FRAME, TEST_AC3_FRAMES,
     };
     use crate::raw_audio::{
         assert_no_burst, configure_raw_surround_decoding, largest_step, test_path, TEST_AC3,
@@ -990,9 +1013,9 @@ mod pipeline_tests {
     fn a_frame_that_reuses_a_delta_bit_allocation_it_did_not_set_passes_unchanged() {
         gst::init().expect("gst init");
         let header = &TEST_AC3[..AC3_FRAME_LEN];
-        let compressed = silent_frame_with(header, Some(COMPRESSING_DYNRNG), None);
-        let reusing = silent_frame_with(header, Some(COMPRESSING_DYNRNG), Some(4));
-        let plain = silent_frame_with(header, Some(0), None);
+        let compressed = silent_frame_with(header, Some(COMPRESSING_DYNRNG), SilentDba::Unset);
+        let reusing = silent_frame_with(header, Some(COMPRESSING_DYNRNG), SilentDba::ReusedIn(4));
+        let plain = silent_frame_with(header, Some(0), SilentDba::Unset);
         let mut concealer = Concealer::default();
         let mut prepare = |frame: &[u8]| {
             let mut buffer = gst::Buffer::from_slice(frame.to_vec());
