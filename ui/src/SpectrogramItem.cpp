@@ -1931,6 +1931,14 @@ void SpectrogramItem::reportFollowGeometry() {
 }
 
 void SpectrogramItem::followChanged() {
+    // A view brought back to the playhead, as by Follow Playhead, Reset
+    // Zoom, a seek, a track change or a switch to rolling, ends autoscroll.
+    if (m_autoscroll.active()) {
+        const SpectrogramViewFollow *follow = m_viewFollow.data();
+        if (follow == nullptr || !follow->autoscrolling()) {
+            m_autoscroll.stop();
+        }
+    }
     cancelPlaybackFrame();
     requestPlaybackFrame();
 }
@@ -1942,6 +1950,8 @@ void SpectrogramItem::setViewFollow(SpectrogramViewFollow *value) {
     if (m_viewFollow == value) {
         return;
     }
+    // The view it autoscrolled is another's now.
+    m_autoscroll.stop();
     const bool wasDetached = detached();
     disconnect(m_viewFollowChangedConnection);
     disconnect(m_viewFollowDetachedConnection);
@@ -2104,6 +2114,7 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     rebuildPalette();
     m_ownViewFollow = new SpectrogramViewFollow(this);
     setViewFollow(m_ownViewFollow);
+    connect(&m_autoscroll, &ViewAutoscroll::stopped, this, &SpectrogramItem::autoscrollStopped);
     connect(this, &QQuickItem::visibleChanged, this, [this]() {
         if (!isVisible()) {
             // A hidden pane asks for no frames until it is shown again.
@@ -6271,9 +6282,11 @@ void SpectrogramItem::hoverLeaveEvent(QHoverEvent *) {
 }
 
 void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
-    // A middle click does nothing: Reset Zoom is Ctrl+0, View > Reset Zoom
-    // and the viewer's Reset. A middle-drag pans a zoomed centered view; a
-    // rolling one stays live.
+    // A middle click resets no zoom: Reset Zoom is Ctrl+0, View > Reset
+    // Zoom and the viewer's Reset. A middle-drag pans a zoomed centered
+    // view, and a middle click, as it is released, starts autoscroll; a
+    // rolling one stays live. While autoscroll runs, the middle press that
+    // stops it is its own (see ViewAutoscroll).
     if (event->button() == Qt::MiddleButton && m_zoomEnabled) {
         event->accept();
         m_panPressed = m_displayMode == 1;
@@ -6456,7 +6469,118 @@ void SpectrogramItem::mouseReleaseEvent(QMouseEvent *event) {
         return;
     }
     event->accept();
+    // A middle click that did not drag starts autoscroll; a drag pans.
+    const bool click = !m_panning && ViewAutoscroll::isClick(m_panPressPosition, event->position());
+    const QPointF pressed = m_panPressPosition;
     mouseUngrabEvent();
+    if (click) {
+        startAutoscroll(pressed);
+    }
+}
+
+qint64 SpectrogramItem::autoscrollNowNs() const {
+    return monotonicNs(m_now());
+}
+
+void SpectrogramItem::startAutoscroll(QPointF position) {
+    SpectrogramViewFollow *follow = m_viewFollow.data();
+    if (follow == nullptr || m_autoscroll.active()) {
+        return;
+    }
+    double anchorSeconds = 0.0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        // A rolling view stays live.
+        if (m_displayMode != 1) {
+            return;
+        }
+        const RequestedView view =
+            requestedViewLocked(std::max(0.0, currentRenderPositionSecondsLocked(m_now())));
+        // The whole track has nowhere to scroll to.
+        if (!view.valid
+            || view.windowColumns * 100 / view.estimateCount >= kCenteredWholeTrackPercent) {
+            return;
+        }
+        // The view stays where it is, anchored at its middle, as a drag
+        // anchors it.
+        anchorSeconds = (static_cast<double>(view.left)
+                            + 0.5 * static_cast<double>(view.windowColumns))
+            / view.columnsPerSecond;
+    }
+    // Where it glides back from, once autoscroll stops, is reckoned from the
+    // view's width.
+    reportFollowGeometry();
+    follow->setAutoscrolling(true);
+    if (!detached()) {
+        follow->detach(anchorSeconds, 0.5);
+    }
+    m_autoscroll.start(position);
+    followChanged();
+}
+
+bool SpectrogramItem::autoscrollBy(double viewsPerSecond, double seconds) {
+    SpectrogramViewFollow *follow = m_viewFollow.data();
+    if (follow == nullptr || !follow->autoscrolling()) {
+        return false;
+    }
+    double anchorSeconds = 0.0;
+    double anchorFraction = 0.5;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_displayMode != 1) {
+            return false;
+        }
+        const SpectrogramViewFollow::Snapshot anchored = followSnapshotLocked();
+        if (anchored.state.mode != ViewFollow::Mode::Detached) {
+            return false;
+        }
+        const RequestedView view =
+            requestedViewLocked(std::max(0.0, currentRenderPositionSecondsLocked(m_now())));
+        if (!view.valid) {
+            return false;
+        }
+        const double spanSeconds =
+            static_cast<double>(view.windowColumns) / view.columnsPerSecond;
+        const double speed = std::clamp(viewsPerSecond * spanSeconds,
+            -kAutoscrollMaxSecondsPerSecond, kAutoscrollMaxSecondsPerSecond);
+        // From the view as it shows, held within the track, so that a view
+        // held at an end moves back from there at once.
+        const double lastLeft =
+            static_cast<double>(std::max<qint64>(0, view.estimateCount - view.windowColumns))
+            / view.columnsPerSecond;
+        const double left = std::clamp(
+            anchored.anchorSeconds - anchored.anchorFraction * spanSeconds, 0.0, lastLeft);
+        const double next = std::clamp(left + speed * seconds, 0.0, lastLeft);
+        if (next == left) {
+            return false;
+        }
+        // The anchor is not rounded to the view's columns, so that a slow
+        // scroll, by less than a column a frame, still moves the view.
+        anchorFraction = anchored.anchorFraction;
+        anchorSeconds = next + anchorFraction * spanSeconds;
+    }
+    // The analysis is told where the view is at most every
+    // SpectrogramViewFollow::kBackendAnchorIntervalMs, as for a drag.
+    follow->detach(anchorSeconds, anchorFraction);
+    followChanged();
+    return true;
+}
+
+void SpectrogramItem::autoscrollStopped() {
+    SpectrogramViewFollow *follow = m_viewFollow.data();
+    if (follow == nullptr) {
+        return;
+    }
+    double position = 0.0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        position = std::max(0.0, currentRenderPositionSecondsLocked(m_now()));
+    }
+    follow->setAutoscrolling(false);
+    reportFollowGeometry();
+    // A playhead already past the re-attach point, or past the view, leaves
+    // the view where autoscroll left it, as at the end of a drag.
+    follow->arm(position);
 }
 
 void SpectrogramItem::mouseUngrabEvent() {

@@ -30,6 +30,7 @@
 #include "PlaybackClock.h"
 #include "PlaybackFrameScheduler.h"
 #include "SpectrogramViewFollow.h"
+#include "ViewAutoscroll.h"
 #include "WindowPresence.h"
 
 class QQuickWindow;
@@ -370,10 +371,12 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     Q_PROPERTY(double visibleEndSeconds READ visibleEndSeconds NOTIFY visibleRangeChanged)
     // Where a centered view is, shared with the other lanes of its plot: one
     // of its own until given one. A middle-drag on a zoomed centered view
-    // pans it and detaches it from the playhead; see SpectrogramViewFollow.
+    // pans it, and a middle click autoscrolls it, which detaches it from the
+    // playhead; see SpectrogramViewFollow and ViewAutoscroll.
     Q_PROPERTY(SpectrogramViewFollow *viewFollow READ viewFollow WRITE setViewFollow NOTIFY viewFollowChanged)
-    // Whether the centered view stays where a middle-drag panned it rather
-    // than following the playhead; see SpectrogramViewFollow::detached.
+    // Whether the centered view stays where a middle-drag or autoscroll
+    // moved it rather than following the playhead; see
+    // SpectrogramViewFollow::detached.
     Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
 
 public:
@@ -676,6 +679,24 @@ private:
     void followChanged();
     // The plot asked to seek to `seconds`; see SpectrogramViewFollow.
     void noteOwnSeek(double seconds);
+    // The fastest autoscroll moves the view, in seconds of the track a
+    // second, whatever its width: the analysis decodes the view where it
+    // goes, and keeps up with this, with the columns still to come drawn as
+    // missing meanwhile.
+    static constexpr double kAutoscrollMaxSecondsPerSecond = 40.0;
+    // Autoscroll, the plot's second way to move a centered view, beside the
+    // middle-drag: a middle click that did not drag, at `position`, starts
+    // it on a centered view that does not show the whole track, which it
+    // detaches where it is. A rolling view stays live.
+    void startAutoscroll(QPointF position);
+    // Moves the detached view by `viewsPerSecond` of its width a second for
+    // `seconds`, up to kAutoscrollMaxSecondsPerSecond and held within the
+    // track: whether it moved.
+    bool autoscrollBy(double viewsPerSecond, double seconds);
+    // Autoscroll stopped: the view arms its re-attach point, as at the end
+    // of a drag.
+    void autoscrollStopped();
+    qint64 autoscrollNowNs() const;
     // The time a centered view shows at logical x, or -1 without columns.
     double viewSecondsAtLocked(double x) const;
     CenteredView centeredViewLocked(
@@ -1353,6 +1374,15 @@ private:
     QPointF m_panPressPosition;
     double m_panOriginLeft{0.0};
     double m_panOriginX{0.0};
+    // Autoscroll after a middle click; see startAutoscroll. Whether it
+    // moves the view is the follow's (SpectrogramViewFollow::autoscrolling),
+    // which the plot's lanes share; it runs on the lane clicked.
+    ViewAutoscroll m_autoscroll{
+        this,
+        [this](double viewsPerSecond, double seconds) {
+            return autoscrollBy(viewsPerSecond, seconds);
+        },
+        [this]() { return autoscrollNowNs(); }};
 
     // Crosshair overlay state.
     bool m_crosshairEnabled{false};

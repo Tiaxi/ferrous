@@ -4012,6 +4012,23 @@ void TransportInputSmokeTest::usingThePlotTakesTheFocusFromTheLibrary() {
     QVERIFY(!waveform->detached());
     QVERIFY(plotHasFocus());
 
+    // A middle click on the plot starts autoscroll, which F stops, and a
+    // switch to the spectrogram too, bringing the view back to the playhead.
+    waveform->setZoomLevel(4.0);
+    QTest::mouseClick(window, Qt::MiddleButton, Qt::NoModifier, plotPoint);
+    QVERIFY(waveform->m_autoscroll.active() && waveform->detached());
+    QTest::keyClick(window, 'f');
+    QTRY_COMPARE(followed.count(), 2);
+    QVERIFY(!waveform->m_autoscroll.active() && !waveform->detached());
+    QTest::mouseClick(window, Qt::MiddleButton, Qt::NoModifier, plotPoint);
+    QVERIFY(waveform->m_autoscroll.active());
+    viewer->setProperty("visualizationMode", 0);
+    QTRY_VERIFY(!waveform->m_autoscroll.active());
+    QVERIFY(!waveform->detached());
+    QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveform->isVisible());
+
     // A click on the library gives it the focus back: F types there, and
     // leaves a detached view as it is.
     waveform->setZoomLevel(4.0);
@@ -4025,7 +4042,7 @@ void TransportInputSmokeTest::usingThePlotTakesTheFocusFromTheLibrary() {
     QTRY_VERIFY(libraryView->hasActiveFocus());
     QTest::keyClick(window, 'f');
     QCOMPARE(library->property("typeAheadBuffer").toString(), QStringLiteral("f"));
-    QCOMPARE(followed.count(), 1);
+    QCOMPARE(followed.count(), 2);
     QVERIFY(waveform->detached());
 
     // A right-click seek on the plot takes the focus too.
@@ -4134,7 +4151,9 @@ void TransportInputSmokeTest::viewerKeysWorkAfterAPressOnItsPlot() {
         QTest::keyClick(host, Qt::Key_Space);
         QTRY_VERIFY2(!viewer->property("spectrogramViewerOpen").toBool(), where.constData());
 
-        // Escape closes it after a press on the plot.
+        // Escape closes it after a press on the plot. While autoscroll,
+        // after a middle click, runs, Escape stops that and leaves the
+        // viewer open.
         QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
         QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
         QVERIFY(QTest::qWaitForWindowActive(host));
@@ -4142,6 +4161,12 @@ void TransportInputSmokeTest::viewerKeysWorkAfterAPressOnItsPlot() {
         QTest::mouseClick(host, Qt::RightButton, Qt::NoModifier,
                           sceneRectOf(waveformSurface).center().toPoint());
         QTRY_VERIFY2(host->activeFocusItem() == viewFocus, where.constData());
+        QTest::mouseClick(host, Qt::MiddleButton, Qt::NoModifier,
+                          sceneRectOf(waveformSurface).center().toPoint());
+        QVERIFY2(waveform->m_autoscroll.active() && waveform->detached(), where.constData());
+        QTest::keyClick(host, Qt::Key_Escape);
+        QVERIFY2(!waveform->m_autoscroll.active(), where.constData());
+        QVERIFY2(viewer->property("spectrogramViewerOpen").toBool(), where.constData());
         QTest::keyClick(host, Qt::Key_Escape);
         QTRY_VERIFY2(!viewer->property("spectrogramViewerOpen").toBool(), where.constData());
         waveform->resetZoom();

@@ -99,6 +99,7 @@
 #include "WaveformReaderLog.h"
 #define protected public
 #define private public
+#include "../src/ViewAutoscroll.h"
 #include "../src/SpectrogramItem.h"
 #include "../src/TagEditorController.h"
 #include "../src/WaveformItem.h"

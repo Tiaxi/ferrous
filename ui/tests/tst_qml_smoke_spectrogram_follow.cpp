@@ -2,10 +2,13 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QShortcut>
+
 #include <gst/gst.h>
 
 // The centered spectrogram's view following the playhead, as the waveform's
-// does (tst_qml_smoke_waveform_follow.cpp): a middle-drag detaches it, the
+// does (tst_qml_smoke_waveform_follow.cpp): a middle-drag detaches it, as
+// autoscroll after a middle click does, the
 // wheel zooms about the pointer while detached, the playhead reaching 85 %
 // of a detached view glides it back, and seeks, track changes, a mode
 // switch and Follow Playhead bring it back at once. The lanes of a plot
@@ -34,6 +37,14 @@ private slots:
     void movedViewKeepsWhatItShowsWhileItsColumnsCome();
     void staleChunksAfterFastPansAreDiscarded();
     void gstreamerMovedViewIsDecodedAndSeeksBringItBack();
+    void autoscrollMovesByThePointersDistance();
+    void autoscrollMovesEveryLaneOfThePlot();
+    void autoscrollInRollingModeOrOfTheWholeTrackDoesNothing();
+    void autoscrollArmsTheReattachPointWhenItStops_data();
+    void autoscrollArmsTheReattachPointWhenItStops();
+    void autoscrollStopsAsTheViewComesBack_data();
+    void autoscrollStopsAsTheViewComesBack();
+    void autoscrollInAWindow();
 };
 
 namespace {
@@ -103,6 +114,30 @@ void middleDrag(SpectrogramItem &item, double fromX, double toX) {
                   Qt::NoButton, Qt::MiddleButton);
     }
     sendMouse(item, QEvent::MouseButtonRelease, toX, Qt::MiddleButton, Qt::NoButton);
+}
+
+// A middle click at `x`, which starts autoscroll, or stops it.
+void middleClick(SpectrogramItem &item, double x) {
+    middleDrag(item, x, x);
+}
+
+// The pointer at `x` of the item, as autoscroll follows it in the window.
+void pointerAt(SpectrogramItem &item, double x) {
+    item.m_autoscroll.pointerMoved(item.mapToScene(QPointF(x, 40.0)));
+}
+
+void frame(SpectrogramItem &item);
+
+// `seconds` of the window's frames, 60 a second, as autoscroll moves the
+// view with them.
+void autoscrollFor(SpectrogramItem &item, TestTime &time, double seconds) {
+    for (int step = 0; step < std::lround(seconds * 60.0); ++step) {
+        time.advance(1.0 / 60.0);
+        item.m_autoscroll.frameShown();
+        frame(item);
+    }
+    // What the lanes are told of the view, queued.
+    QCoreApplication::processEvents();
 }
 
 void wheelAt(SpectrogramItem &item, double x, int delta) {
@@ -203,16 +238,27 @@ void SpectrogramFollowSmokeTest::middleDragDetachesAndPans() {
     QCOMPARE(following, columnAt(60.0) - kWindow / 2);
     QVERIFY(viewOf(item).scrolls);
 
-    // A click, or a move short of a drag, changes nothing.
-    middleDrag(item, 200.0, 200.0);
-    middleDrag(item, 200.0, 201.0);
+    // A click, or a move short of a drag, pans nothing: it starts
+    // autoscroll, which holds the view where it is until the pointer moves.
+    for (const double to : {200.0, 201.0}) {
+        middleDrag(item, 200.0, to);
+        QVERIFY(item.m_autoscroll.active());
+        QVERIFY(item.detached());
+        QCOMPARE(viewOf(item).left, following);
+        item.followPlayhead();
+        QCoreApplication::processEvents();
+        QVERIFY(!item.m_autoscroll.active());
+    }
     QVERIFY(!item.detached());
     QCOMPARE(viewOf(item).left, following);
-    QCOMPARE(detachedChanges.count(), 0);
+    QCOMPARE(detachedChanges.count(), 4);
+    detachedChanges.clear();
 
-    // 200 px to the left: the view moves on by 200 columns, and stays.
+    // 200 px to the left: the view moves on by 200 columns, and stays. A
+    // drag starts no autoscroll.
     middleDrag(item, 300.0, 100.0);
     QVERIFY(item.detached());
+    QVERIFY(!item.m_autoscroll.active());
     QCOMPARE(detachedChanges.count(), 1);
     QCOMPARE(viewOf(item).left, following + 200);
     QVERIFY(!viewOf(item).scrolls);
@@ -995,7 +1041,345 @@ void SpectrogramFollowSmokeTest::gstreamerMovedViewIsDecodedAndSeeksBringItBack(
     QTRY_VERIFY_WITH_TIMEOUT(bridge.playbackClock()->state().trackToken != token, 10000);
     QCOMPARE(bridge.currentTrackPath(), second);
     QTRY_VERIFY_WITH_TIMEOUT(!item->detached(), 10000);
+
+    // Autoscroll, zoomed in 8 times, a view of about a second scrolling a
+    // view a second towards the end: the analysis decodes the view where it
+    // goes, and has it once it stops. A seek from elsewhere stops it.
+    bridge.setRepeatMode(0);
+    bridge.seek(5.0);
+    item->setZoomLevel(8.0);
+    QTRY_VERIFY_WITH_TIMEOUT(engineDone() && columnsPerSecond() > 300.0 && holds(view()), 10000);
+    QObject::connect(&frames, &QTimer::timeout, item,
+        [item]() { item->m_autoscroll.frameShown(); });
+    middleClick(*item, 200.0);
+    QVERIFY(item->m_autoscroll.active() && item->detached());
+    const qint64 clicked = view().left;
+    pointerAt(*item, kWidth);
+    QTRY_VERIFY_WITH_TIMEOUT(view().left > clicked + 4 * kWindow, 10000);
+    item->m_autoscroll.stop();
+    QVERIFY(item->detached());
+    QTRY_VERIFY_WITH_TIMEOUT(holds(view()), 5000);
+    middleClick(*item, 200.0);
+    QVERIFY(item->m_autoscroll.active());
+    bridge.seek(2.0);
+    QTRY_VERIFY_WITH_TIMEOUT(!item->m_autoscroll.active() && !item->detached(), 10000);
+
+    // A track change stops it: Repeat-One, the same file again.
+    bridge.setRepeatMode(1);
+    bridge.seek(kTrackSeconds - 2.0);
+    QTRY_VERIFY_WITH_TIMEOUT(engineDone() && view().left > 0, 10000);
+    middleClick(*item, 200.0);
+    QVERIFY(item->m_autoscroll.active());
+    const quint64 repeatToken = bridge.playbackClock()->state().trackToken;
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.playbackClock()->state().trackToken != repeatToken, 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(!item->m_autoscroll.active() && !item->detached(), 10000);
     frames.stop();
+}
+
+// Autoscroll after a middle click moves the centered view by the pointer's
+// distance from the click, as the waveform's does: none within the dead
+// zone, a view a second at half the plot's width, up to two, and at most
+// kAutoscrollMaxSecondsPerSecond of the track, so that the analysis keeps
+// up. It asks for frames only while the view moves.
+void SpectrogramFollowSmokeTest::autoscrollMovesByThePointersDistance() {
+    SpectrogramItem item;
+    TestTime time;
+    prepare(item, time, 60.0, false);
+    const qint64 following = viewOf(item).left;
+    middleClick(item, 200.0);
+    QVERIFY(item.m_autoscroll.active());
+    QVERIFY(item.detached());
+    QVERIFY(item.viewFollow()->autoscrolling());
+    QCOMPARE(viewOf(item).left, following);
+    QVERIFY(!viewOf(item).scrolls);
+
+    // Within the dead zone the view holds still and asks for no frames.
+    for (const double x : {200.0, 211.0, 189.0}) {
+        pointerAt(item, x);
+        autoscrollFor(item, time, 0.5);
+        QCOMPARE(viewOf(item).left, following);
+        QCOMPARE(item.m_autoscroll.m_lastFrameNs, qint64(0));
+    }
+
+    const double reach = kWidth / 2.0 - ViewAutoscroll::kDeadZonePixels;
+    struct Case { double x; double viewsPerSecond; };
+    for (const Case &c : {Case{200.0 + 12.0 + reach / 2.0, 0.5}, Case{400.0, 1.0},
+                          Case{0.0, -1.0}, Case{200.0 - 12.0 - reach / 2.0, -0.5},
+                          Case{2000.0, 2.0}, Case{-2000.0, -2.0}}) {
+        pointerAt(item, c.x);
+        const qint64 before = viewOf(item).left;
+        autoscrollFor(item, time, 0.5);
+        const qint64 moved = viewOf(item).left - before;
+        QVERIFY2(std::abs(static_cast<double>(moved) - c.viewsPerSecond * kWindow * 0.5) <= 1.0,
+                 qPrintable(QStringLiteral("%1 px: moved %2").arg(c.x).arg(moved)));
+        QVERIFY(item.detached());
+    }
+
+    // Held at the end of the track, it asks for no more frames; a move back
+    // moves the view from there at once.
+    pointerAt(item, 2000.0);
+    autoscrollFor(item, time, 70.0 / 8.53);
+    QCOMPARE(viewOf(item).left, qint64(kColumns - kWindow));
+    QCOMPARE(item.m_autoscroll.m_lastFrameNs, qint64(0));
+    pointerAt(item, 0.0);
+    autoscrollFor(item, time, 0.5);
+    QVERIFY(std::abs(viewOf(item).left - (kColumns - kWindow - kWindow / 2)) <= 1);
+
+    // The wheel zooms about the pointer meanwhile, and autoscroll goes on.
+    takeZoomRequests(item);
+    wheelAt(item, 300.0, 120);
+    QVERIFY(item.m_autoscroll.active() && item.detached());
+    QCOMPARE(item.viewFollow()->snapshot().anchorFraction, 300.0 / kWidth);
+    const double anchor = item.viewFollow()->snapshot().anchorSeconds;
+    autoscrollFor(item, time, 0.5);
+    QVERIFY(item.viewFollow()->snapshot().anchorSeconds < anchor);
+
+    // A view wider than 40 s scrolls at most 40 s of the track a second.
+    SpectrogramItem wide;
+    TestTime wideTime;
+    prepare(wide, wideTime, 30.0, false);
+    wide.setWidth(2'000.0);
+    frame(wide);
+    middleClick(wide, 1'000.0);
+    QVERIFY(wide.m_autoscroll.active());
+    pointerAt(wide, 2'000.0);
+    const qint64 wideBefore = viewOf(wide).left;
+    autoscrollFor(wide, wideTime, 0.5);
+    const double wideMoved = static_cast<double>(viewOf(wide).left - wideBefore);
+    QVERIFY2(std::abs(wideMoved - SpectrogramItem::kAutoscrollMaxSecondsPerSecond * 0.5
+                     * kColumnsPerSecond) <= 1.0,
+             qPrintable(QString::number(wideMoved)));
+}
+
+// The lanes of a plot share their view: autoscroll on one moves all of
+// them, and a middle click on another, which the window gives to the
+// autoscroll, stops it.
+void SpectrogramFollowSmokeTest::autoscrollMovesEveryLaneOfThePlot() {
+    SpectrogramViewFollow follow;
+    SpectrogramItem left;
+    SpectrogramItem right;
+    TestTime time;
+    left.setViewFollow(&follow);
+    right.setViewFollow(&follow);
+    prepare(left, time, 60.0, false);
+    prepare(right, time, 60.0, false);
+    const qint64 following = viewOf(left).left;
+    middleClick(right, 200.0);
+    QVERIFY(left.detached() && right.detached());
+    pointerAt(right, 400.0);
+    autoscrollFor(right, time, 0.5);
+    QVERIFY(std::abs(viewOf(left).left - (following + kWindow / 2)) <= 1);
+    QCOMPARE(viewOf(left).left, viewOf(right).left);
+    // Follow Playhead on the other lane stops it.
+    left.followPlayhead();
+    QCoreApplication::processEvents();
+    QVERIFY(!right.m_autoscroll.active());
+    QVERIFY(!left.detached() && !right.detached());
+}
+
+// A rolling view stays live, and a view of the whole track has nowhere to
+// scroll to: a middle click there does nothing.
+void SpectrogramFollowSmokeTest::autoscrollInRollingModeOrOfTheWholeTrackDoesNothing() {
+    SpectrogramItem rolling;
+    TestTime time;
+    prepare(rolling, time, 60.0);
+    rolling.setDisplayMode(0);
+    middleClick(rolling, 200.0);
+    QVERIFY(!rolling.m_autoscroll.active());
+    QVERIFY(!rolling.detached());
+    QVERIFY(!rolling.viewFollow()->autoscrolling());
+
+    SpectrogramItem whole;
+    TestTime wholeTime;
+    prepare(whole, wholeTime, 60.0);
+    whole.setWidth(5'200.0);
+    middleClick(whole, 3'000.0);
+    QVERIFY(!whole.m_autoscroll.active());
+    QVERIFY(!whole.detached());
+    QCOMPARE(viewOf(whole).left, qint64(0));
+}
+
+void SpectrogramFollowSmokeTest::autoscrollArmsTheReattachPointWhenItStops_data() {
+    QTest::addColumn<double>("pointer");
+    QTest::addColumn<bool>("glidesBack");
+    QTest::addRow("playhead left of the re-attach point") << 400.0 << true;
+    QTest::addRow("playhead past the view") << 0.0 << false;
+}
+
+// While autoscroll runs, nothing glides back; when it stops, the view arms
+// its re-attach point as at the end of a drag.
+void SpectrogramFollowSmokeTest::autoscrollArmsTheReattachPointWhenItStops() {
+    QFETCH(double, pointer);
+    QFETCH(bool, glidesBack);
+    SpectrogramItem item;
+    TestTime time;
+    prepare(item, time, 60.0);
+    middleClick(item, 200.0);
+    const qint64 held = viewOf(item).left;
+    // Held in the dead zone while the playhead plays through the view and
+    // past it: no glide.
+    autoscrollFor(item, time, 9.0);
+    QVERIFY(playheadFraction(item) > 1.0);
+    QCOMPARE(viewOf(item).left, held);
+    QCOMPARE(modeOf(item), ViewFollow::Mode::Detached);
+    QVERIFY(std::isinf(item.viewFollow()->snapshot().reattachSeconds));
+
+    pointerAt(item, pointer);
+    autoscrollFor(item, time, 1.0);
+    item.m_autoscroll.stop();
+    QVERIFY(!item.viewFollow()->autoscrolling());
+    QCOMPARE(std::isfinite(item.viewFollow()->snapshot().reattachSeconds), glidesBack);
+    bool glided = false;
+    for (int step = 0; step < 60 * 20; ++step) {
+        time.advance(1.0 / 60.0);
+        frame(item);
+        glided = glided || modeOf(item) != ViewFollow::Mode::Detached;
+    }
+    QCOMPARE(glided, glidesBack);
+    QCOMPARE(item.detached(), !glidesBack);
+}
+
+void SpectrogramFollowSmokeTest::autoscrollStopsAsTheViewComesBack_data() {
+    QTest::addColumn<QString>("event");
+    QTest::addColumn<bool>("keeps");
+    QTest::addRow("own seek") << QStringLiteral("own seek") << true;
+    QTest::addRow("follow playhead") << QStringLiteral("follow playhead") << false;
+    QTest::addRow("seek bar") << QStringLiteral("seek bar") << false;
+    QTest::addRow("stop") << QStringLiteral("stop") << false;
+    QTest::addRow("gapless successor") << QStringLiteral("gapless successor") << false;
+    QTest::addRow("repeat one") << QStringLiteral("repeat one") << false;
+    QTest::addRow("switch to rolling") << QStringLiteral("switch to rolling") << false;
+    QTest::addRow("zoom out to the whole track") << QStringLiteral("zoom out") << false;
+    QTest::addRow("hidden") << QStringLiteral("hidden") << false;
+}
+
+// Follow Playhead (and Reset Zoom, which calls it), a seek other than the
+// plot's own, a stop, a track change, including a gapless successor and
+// Repeat-One, and a switch to rolling stop autoscroll and bring the view
+// back to the playhead; the plot's own seek keeps both. Hiding the plot, as
+// a switch to the waveform does, stops it too.
+void SpectrogramFollowSmokeTest::autoscrollStopsAsTheViewComesBack() {
+    QFETCH(QString, event);
+    QFETCH(bool, keeps);
+    SpectrogramItem item;
+    TestTime time;
+    prepare(item, time, 60.0);
+    takeZoomRequests(item);
+    QSignalSpy stops(&item.m_autoscroll, &ViewAutoscroll::stopped);
+    middleClick(item, 200.0);
+    pointerAt(item, 100.0);
+    autoscrollFor(item, time, 0.5);
+    QVERIFY(item.m_autoscroll.active() && item.detached());
+    const qint64 scrolled = viewOf(item).left;
+    PlaybackClock &clock = testClock(item);
+    const quint64 token = clock.state().trackToken;
+    if (event == QStringLiteral("own seek")) {
+        const double target = rightClickAt(item, 300.0);
+        clock.holdAt(target);
+        engineLands(item, target + 0.04);
+    } else if (event == QStringLiteral("follow playhead")) {
+        item.followPlayhead();
+    } else if (event == QStringLiteral("seek bar")) {
+        clock.holdAt(10.0);
+        engineLands(item, 10.03);
+    } else if (event == QStringLiteral("stop")) {
+        item.setPlaying(false);
+        PlaybackSample stopped;
+        stopped.trackToken = token;
+        clock.applySample(stopped, true);
+    } else if (event == QStringLiteral("gapless successor")
+               || event == QStringLiteral("repeat one")) {
+        PlaybackSample next;
+        next.positionSeconds = 0.0;
+        next.sampledAtNs = clock.nowNs();
+        next.advancing = true;
+        next.trackToken = token + 1;
+        clock.applySample(next, false);
+    } else if (event == QStringLiteral("switch to rolling")) {
+        item.setDisplayMode(0);
+        item.setDisplayMode(1);
+    } else if (event == QStringLiteral("zoom out")) {
+        item.setWidth(5'200.0);
+    } else {
+        item.setVisible(false);
+    }
+    frame(item);
+    QCoreApplication::processEvents();
+    QCOMPARE(item.m_autoscroll.active(), keeps);
+    QCOMPARE(stops.count(), keeps ? 0 : 1);
+    QCOMPARE(item.viewFollow()->autoscrolling(), keeps);
+    if (keeps) {
+        QVERIFY(item.detached());
+        QCOMPARE(viewOf(item).left, scrolled);
+        autoscrollFor(item, time, 0.5);
+        QVERIFY(viewOf(item).left < scrolled);
+    } else if (event == QStringLiteral("hidden")) {
+        // Stopped as at the end of a drag: where it was.
+        QCOMPARE(viewOf(item).left, scrolled);
+    } else {
+        QVERIFY(!item.detached());
+        QCOMPARE(modeOf(item), ViewFollow::Mode::Playhead);
+        if (event != QStringLiteral("zoom out")) {
+            QCOMPARE(viewOf(item).left, followingLeftOf(item));
+        }
+    }
+}
+
+// In a window: a middle click on a centered view starts autoscroll, and the
+// pointer moves the view with the window's frames, with a horizontal
+// resize cursor; Escape stops it before the window's own Escape takes the
+// key, and another middle click stops it. A rolling view ignores the click.
+void SpectrogramFollowSmokeTest::autoscrollInAWindow() {
+    QQuickWindow window;
+    window.resize(600, 200);
+    auto *item = new SpectrogramItem(window.contentItem());
+    item->setX(100.0);
+    item->setY(20.0);
+    item->setWidth(kWidth);
+    item->setHeight(100.0);
+    item->setDisplayMode(1);
+    item->setZoomEnabled(true);
+    feedTrack(*item);
+    setTestPosition(*item, 60.0, 1);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    QShortcut escape(QKeySequence(Qt::Key_Escape), &window);
+    QSignalSpy escapes(&escape, &QShortcut::activated);
+    const QPoint click(300, 70);
+    const qint64 following = viewOf(*item).left;
+
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(item->m_autoscroll.active());
+    QVERIFY(item->detached());
+    QVERIFY(QGuiApplication::overrideCursor() != nullptr);
+    QCOMPARE(QGuiApplication::overrideCursor()->shape(), Qt::SizeHorCursor);
+    QTest::mouseMove(&window, QPoint(560, 70));
+    QTRY_VERIFY_WITH_TIMEOUT(viewOf(*item).left > following + 50, 5000);
+
+    QTest::keyClick(&window, Qt::Key_Escape);
+    QVERIFY(!item->m_autoscroll.active());
+    QCOMPARE(escapes.count(), 0);
+    QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+    QVERIFY(item->detached());
+    const qint64 stopped = viewOf(*item).left;
+    QTest::qWait(100);
+    QCOMPARE(viewOf(*item).left, stopped);
+
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(item->m_autoscroll.active());
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(560, 70));
+    QVERIFY(!item->m_autoscroll.active());
+    QTest::qWait(100);
+    QCOMPARE(viewOf(*item).left, stopped);
+
+    // Rolling, the click does nothing.
+    item->setDisplayMode(0);
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(!item->m_autoscroll.active());
+    QVERIFY(!item->detached());
+    QVERIFY(QGuiApplication::overrideCursor() == nullptr);
 }
 
 std::unique_ptr<QmlSmokeTest> makeSpectrogramFollowSmokeTest(const QString &userDirectoriesParent) {

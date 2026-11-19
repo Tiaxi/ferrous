@@ -36,7 +36,7 @@ SpectrogramViewFollow::Snapshot SpectrogramViewFollow::snapshot() const {
     snapshot.state = m_state;
     snapshot.anchorSeconds = m_anchorSeconds;
     snapshot.anchorFraction = m_anchorFraction;
-    if (m_state.mode == ViewFollow::Mode::Detached && m_reattachArmed && !m_panning) {
+    if (m_state.mode == ViewFollow::Mode::Detached && m_reattachArmed && !heldLocked()) {
         snapshot.reattachSeconds = reattachPointLocked();
     }
     return snapshot;
@@ -68,6 +68,20 @@ void SpectrogramViewFollow::setPanning(bool panning) {
         // Nothing glides back until the user lets go.
         m_reattachArmed = false;
     }
+}
+
+void SpectrogramViewFollow::setAutoscrolling(bool autoscrolling) {
+    QMutexLocker lock(&m_mutex);
+    m_autoscrolling = autoscrolling;
+    if (autoscrolling) {
+        // Nothing glides back until autoscroll stops.
+        m_reattachArmed = false;
+    }
+}
+
+bool SpectrogramViewFollow::autoscrolling() const {
+    QMutexLocker lock(&m_mutex);
+    return m_autoscrolling;
 }
 
 void SpectrogramViewFollow::setGeometry(
@@ -104,8 +118,8 @@ void SpectrogramViewFollow::arm(double position) {
 }
 
 void SpectrogramViewFollow::armLocked(double position) {
-    // A view the user still drags stays where it is put.
-    if (m_state.mode != ViewFollow::Mode::Detached || m_panning) {
+    // A view the user still drags, or autoscrolls, stays where it is put.
+    if (m_state.mode != ViewFollow::Mode::Detached || heldLocked()) {
         return;
     }
     // A playhead past the point already, or past the view, leaves the view
@@ -120,7 +134,7 @@ void SpectrogramViewFollow::settle(double position) {
             return;
         }
         const double reattach = m_state.mode == ViewFollow::Mode::Detached && m_reattachArmed
-                && !m_panning
+                && !heldLocked()
             ? reattachPointLocked()
             : std::numeric_limits<double>::infinity();
         const ViewFollow::State next = ViewFollow::advance(m_state, position, reattach);
@@ -210,6 +224,7 @@ void SpectrogramViewFollow::reattachLocked() {
     m_state = {ViewFollow::Mode::Playhead, 0.0};
     m_reattachArmed = false;
     m_panning = false;
+    m_autoscrolling = false;
     m_ownSeekSeconds = std::numeric_limits<double>::quiet_NaN();
 }
 

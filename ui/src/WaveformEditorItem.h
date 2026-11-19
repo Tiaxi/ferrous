@@ -33,6 +33,7 @@
 
 #include "PlaybackClock.h"
 #include "PlaybackFrameScheduler.h"
+#include "ViewAutoscroll.h"
 #include "ViewFollow.h"
 #include "WaveformReaderLease.h"
 #include "WaveformSceneGraph.h"
@@ -119,11 +120,12 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // it has: shown again, it has the picture at once when that detail
     // covers the view at its resolution, as its next frame draws.
     Q_PROPERTY(bool pictureReady READ pictureReady NOTIFY pictureReadyChanged)
-    // Whether a zoomed view stays where a middle-drag panned it rather than
-    // following the playhead. It follows again once the playhead, moving
-    // through it, reaches kReattachViewFraction of its width, and at once
-    // on followPlayhead(), a seek other than the plot's own, a track change
-    // or a reset of the zoom. A view gliding back to the playhead is not.
+    // Whether a zoomed view stays where a middle-drag panned it, or where
+    // autoscroll moves it, rather than following the playhead. It follows
+    // again once the playhead, moving through it, reaches
+    // kReattachViewFraction of its width, and at once on followPlayhead(), a
+    // seek other than the plot's own, a track change or a reset of the zoom.
+    // A view gliding back to the playhead is not.
     Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
     // The part of the track the view shows, in seconds, from its left edge
     // to its right: following the playhead, where a middle-drag panned it
@@ -532,6 +534,16 @@ private:
     void armReattachLocked(qint64 nowNs);
     // The view follows the playhead again.
     void reattachLocked();
+    // Autoscroll, the plot's second way to move its view, beside the
+    // middle-drag: a middle click that did not drag, at `position`, starts
+    // it on a zoomed view, which it detaches where it is.
+    void startAutoscroll(QPointF position);
+    // Moves the detached view by `viewsPerSecond` of its width a second for
+    // `seconds`, held within the track: whether it moved.
+    bool autoscrollBy(double viewsPerSecond, double seconds);
+    // Autoscroll stopped: the view arms its re-attach point, as at the end
+    // of a drag.
+    void autoscrollStopped();
     // Follows detached, and the visible range with it, on the GUI thread,
     // after the state has changed.
     void publishDetached();
@@ -823,6 +835,9 @@ private:
     QPointF m_panPressPosition;
     double m_panOriginStart{0.0};
     double m_panOriginX{0.0};
+    // Whether autoscroll moves the view (see m_autoscroll): nothing glides
+    // back until it stops. A view brought back to the playhead ends it.
+    bool m_autoscrolling{false};
     // detached, on the GUI thread, and as frames compare it.
     bool m_detached{false};
     std::atomic_bool m_detachedShown{false};
@@ -982,4 +997,11 @@ private:
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     ProfileState m_profile;
 #endif
+    // Autoscroll after a middle click; see startAutoscroll.
+    ViewAutoscroll m_autoscroll{
+        this,
+        [this](double viewsPerSecond, double seconds) {
+            return autoscrollBy(viewsPerSecond, seconds);
+        },
+        [this]() { return m_nowNs(); }};
 };
