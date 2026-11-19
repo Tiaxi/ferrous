@@ -95,13 +95,16 @@ ToolButton {
     }
 
     background: Item {
+        // Only the hover fades. It steps aside while the button is down,
+        // so the pressed fill below shows alone and whole from the first
+        // frame, from the keyboard as from the pointer.
         Rectangle {
             objectName: "viewerToolButtonHover"
             anchors.fill: parent
             radius: 3
-            color: root.down ? root.pressedColor : root.hoverColor
-            opacity: (root.hovered || root.down) && !root.checked ? 1 : 0
-            visible: opacity > 0
+            color: root.hoverColor
+            opacity: root.hovered && !root.checked ? 1 : 0
+            visible: opacity > 0 && !root.down
 
             Behavior on opacity {
                 enabled: Kirigami.Units.shortDuration > 0
@@ -110,6 +113,14 @@ ToolButton {
                     easing.type: Easing.OutCubic
                 }
             }
+        }
+
+        Rectangle {
+            objectName: "viewerToolButtonPressed"
+            anchors.fill: parent
+            radius: 3
+            visible: root.down && !root.checked
+            color: root.pressedColor
         }
 
         // Checked: the fill, and on a plot its edge; never the focus ring.

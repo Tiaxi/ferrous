@@ -143,7 +143,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 
 - **Rest:** no fill. Flat tool buttons show their glyph only.
 - **Hover:** the hover tint for the surface (`hover`, `rowHover`, or `hoverOn(bg)`) fades in and out over `shortDuration`. On a viewer's strip and corner plate, hover is a wash of the plot's text colour: 14 % on dark (about 1.4:1), 12 % on light. At 6.5 %, hover looked the same as rest.
-- **Pressed:** `pressed` or `pressedOn(bg)`, a clear step past the hover. It shows on the first frame of the press, never faded in. A press that matches the hover reads as nothing. Known exception: the viewers' tool buttons fade their background in when pressed from the keyboard without a hover first.
+- **Pressed:** `pressed` or `pressedOn(bg)`, a clear step past the hover. It shows on the first frame of the press, never faded in. A press that matches the hover reads as nothing.
 - **Focus:** a focus ring appears only while the keyboard is in use:
   - a focused list row gets a 1 px `focusRing`, drawn as one rectangle with the selection tint when the row is also selected;
   - Ferrous's own tool buttons and link actions get a 2 px ring;
@@ -172,7 +172,7 @@ Durations are Kirigami's (`shortDuration` 100 ms, `longDuration` 200 ms, `veryLo
 | What | Motion |
 |---|---|
 | hover on rows and buttons, plates revealing, the crosshair hiding over a plate | fade, `shortDuration`, OutCubic |
-| selection, focus ring, a press | none (except the viewers' tool buttons pressed from the keyboard, see States) |
+| selection, focus ring, a press | none |
 | Play ↔ Pause glyph | cross-fade from one progress value, `shortDuration`, so the button never goes blank |
 | amber on a track change | queue: the old row fades out as the new one fades in, so two rows are never both fully amber. Tree: the new row is amber at once and the old one fades. Both over `shortDuration` |
 | now playing, next track on the same album | the lines that change fade over `shortDuration`. Words and numbers that stay the same stay still |

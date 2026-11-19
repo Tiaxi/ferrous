@@ -237,6 +237,8 @@ private slots:
     void plotSegmentHoverStaysUnderTheChosenPlate();
     void viewerToolButtonHoverReadsOnThePlot_data();
     void viewerToolButtonHoverReadsOnThePlot();
+    void viewerToolButtonShowsAKeyPressAtOnce_data();
+    void viewerToolButtonShowsAKeyPressAtOnce();
     void plotToolButtonDrawsCheckedAndFocusApart_data();
     void plotToolButtonDrawsCheckedAndFocusApart();
     void plotToolButtonIsAnAccessibleCheckableButton();
@@ -1792,18 +1794,98 @@ void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot() {
     QVERIFY2(hoverStep >= (darkPlot ? 1.35 : 1.25),
              qPrintable(describeContrast(QStringLiteral("the hover wash"), drawnHover, surface)));
 
-    // Pressed, further.
+    // Pressed, further: the pressed fill alone, over no hover.
+    QQuickItem *pressedFill = childNamed(button, QStringLiteral("viewerToolButtonPressed"));
+    QVERIFY(pressedFill != nullptr);
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, inside);
     QTRY_VERIFY(button->property("down").toBool());
-    const QColor pressed = colorOf(hover, "color");
+    QVERIFY(pressedFill->isVisible());
+    QVERIFY(!hover->isVisible());
+    const QColor pressed = colorOf(pressedFill, "color");
     QCOMPARE(pressed.rgb(), text.rgb());
     QVERIFY2(std::abs(pressed.alphaF() - 0.22) < 0.005, qPrintable(QString::number(pressed.alphaF())));
-    settle();
+    // On the press's first frame.
     image = window->grabWindow();
     const QColor drawnPressed = pixelAt(image, button->mapToScene(QPointF(2.5, 2.5)) * scale);
     QVERIFY2(contrastRatio(drawnPressed, surface) > hoverStep,
              qPrintable(describeContrast(QStringLiteral("the pressed wash"), drawnPressed, surface)));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, inside);
+}
+
+void UiFoundationsTest::viewerToolButtonShowsAKeyPressAtOnce_data() {
+    QTest::addColumn<bool>("onPlot");
+    QTest::newRow("on a plot") << true;
+    QTest::newRow("on the window") << false;
+}
+
+// Space on a focused viewer button that the pointer is not over draws the
+// pressed fill whole on the press's first frame, as a pointer press does;
+// only the hover fades (#601). The release takes it away at once too.
+void UiFoundationsTest::viewerToolButtonShowsAKeyPressAtOnce() {
+    QFETCH(bool, onPlot);
+    const QString strip = QStringLiteral(R"QML(
+        Rectangle {
+            objectName: "strip"
+            x: 16
+            y: 150
+            width: 120
+            height: 40
+            color: %1
+
+            Components.ViewerToolButton {
+                objectName: "viewerButton"
+                x: 8
+                y: 8
+                uiPalette: tokens
+                plotColors: %2
+                text: "Close"
+                icon.name: "ferrous-fixture-square"
+            }
+        }
+)QML")
+                              .arg(onPlot ? QStringLiteral("plot.plotColors.plotStrip") : QStringLiteral("tokens.chrome"),
+                                   onPlot ? QStringLiteral("plot.plotColors") : QStringLiteral("null"));
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(kBreezeDark, kPlotItems + strip), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickItem *stripItem = itemNamed(root.get(), QStringLiteral("strip"));
+    QQuickItem *button = itemNamed(root.get(), QStringLiteral("viewerButton"));
+    QVERIFY(stripItem != nullptr && button != nullptr);
+    const QColor surface = colorOf(stripItem, "color");
+    const QColor pressed = colorOf(button, "pressedColor");
+    QVERIFY(pressed.alpha() > 0);
+
+    // Focused from the keyboard, with the pointer elsewhere.
+    QTest::mouseMove(window, QPoint(2, 2));
+    button->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(button->property("visualFocus").toBool());
+    QVERIFY(!button->property("hovered").toBool());
+
+    // Animation time stands still: what shows is the press's first frame.
+    SteppedAnimationDriver animations;
+    // Inside the 2 px focus ring, clear of the glyph.
+    const auto drawnFill = [&] {
+        const QImage image = window->grabWindow();
+        return pixelAt(image, button->mapToScene(QPointF(3.5, 3.5)) * grabScale(image, window));
+    };
+    QTest::keyPress(window, Qt::Key_Space);
+    QVERIFY(button->property("down").toBool());
+    const QColor drawnPressed = drawnFill();
+    QVERIFY2(channelDistance(drawnPressed, drawnOver(pressed, surface)) <= 3,
+             qPrintable(QStringLiteral("the first frame of the press is %1, not %2")
+                            .arg(drawnPressed.name(), drawnOver(pressed, surface).name())));
+
+    QTest::keyRelease(window, Qt::Key_Space);
+    QVERIFY(!button->property("down").toBool());
+    const QColor drawnReleased = drawnFill();
+    QVERIFY2(channelDistance(drawnReleased, surface) <= 3,
+             qPrintable(QStringLiteral("the first frame after the release is %1, not %2")
+                            .arg(drawnReleased.name(), surface.name())));
 }
 
 void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart_data() {
