@@ -6,8 +6,10 @@
 #include <QCursor>
 #include <QEvent>
 #include <QGuiApplication>
+#include <QHash>
 #include <QObject>
 #include <QPoint>
+#include <QSize>
 #include <QString>
 #include <QWindow>
 #include <QtTest/QtTest>
@@ -97,6 +99,37 @@ inline void returnFocusFromClosedPopups() {
         QCoreApplication::instance()->installEventFilter(installed);
     }
 }
+
+// Records the size each popup window has as it is shown, while it lives.
+//
+// QWindow sends its Show event before the platform shows the window, so
+// this is the size the platform first shows it at: on Wayland, the size the
+// compositor is first asked for and answers with, which Qt applies even
+// when the popup has asked for another size since (#646).
+class PopupShowSizes : public QObject {
+public:
+    PopupShowSizes() { QCoreApplication::instance()->installEventFilter(this); }
+    ~PopupShowSizes() override { QCoreApplication::instance()->removeEventFilter(this); }
+    PopupShowSizes(const PopupShowSizes &) = delete;
+    PopupShowSizes &operator=(const PopupShowSizes &) = delete;
+
+    // The size the window had when it was last shown; invalid if it never was.
+    QSize lastShown(const QWindow *window) const { return m_sizes.value(window); }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (event->type() == QEvent::Show) {
+            auto *window = qobject_cast<QWindow *>(watched);
+            if (window != nullptr && window->type() == Qt::Popup) {
+                m_sizes.insert(window, window->size());
+            }
+        }
+        return false;
+    }
+
+private:
+    QHash<const QWindow *, QSize> m_sizes;
+};
 
 // The test of the default, for a test slot of each binary that shows windows.
 inline void verifyOffscreenPlatformByDefault() {

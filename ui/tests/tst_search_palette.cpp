@@ -1409,8 +1409,9 @@ void SearchPaletteTest::keyboardSelectsAndActs() {
 }
 
 // A click selects; a double click plays; a right click opens the result's
-// menu.
+// menu, whose window shows whole the first time (#646).
 void SearchPaletteTest::mouseSelectsAndActs() {
+    PopupShowSizes popupSizes;
     Harness harness;
     QString errorText;
     QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
@@ -1455,6 +1456,16 @@ void SearchPaletteTest::mouseSelectsAndActs() {
     QVERIFY2(std::abs(menuAt.x() - clicked.x()) <= 16 && std::abs(menuAt.y() - clicked.y()) <= 16,
              qPrintable(QStringLiteral("menu at %1,%2, clicked at %3,%4")
                             .arg(menuAt.x()).arg(menuAt.y()).arg(clicked.x()).arg(clicked.y())));
+    // Its window, the first the palette opens, shows at the size the menu
+    // ends at: on Wayland the compositor kept the size a menu window was
+    // first shown at, and the menu was an empty strip.
+    QQuickWindow *menuWindow = menuContent->window();
+    QVERIFY(menuWindow != nullptr && menuWindow != harness.window);
+    QTRY_VERIFY(menuWindow->isExposed());
+    QCOMPARE(popupSizes.lastShown(menuWindow), menuWindow->size());
+    QQmlExpression menuSize(qmlContext(harness.field()), harness.field(),
+                            QStringLiteral("Qt.size(Math.ceil(resultMenu.implicitWidth), Math.ceil(resultMenu.implicitHeight))"));
+    QCOMPARE(menuSize.evaluate().toSizeF().toSize(), menuWindow->size());
     // Show in Library has the queue menu's icon.
     QQmlExpression showInLibraryIcon(qmlContext(harness.field()), harness.field(),
                                      QStringLiteral("resultMenu.itemAt(2).text + '|' + resultMenu.itemAt(2).icon.name"));

@@ -483,6 +483,35 @@ QQuickWindow *menuWindowOf(QObject *menu) {
 QRect globalRect(QWindow *window) {
     return QRect(window->mapToGlobal(QPoint(0, 0)), window->size());
 }
+// A menu's window shows at the size the menu ends at, its items whole in
+// it. On Wayland the compositor keeps the size a menu window is first shown
+// at when the menu has asked for another since, and menus showed as empty
+// strips a few pixels high (#646).
+void verifyMenuShownWhole(QObject *menu, QQuickWindow *window, const PopupShowSizes &sizes) {
+    const QString name = menu->objectName().isEmpty()
+        ? menu->property("title").toString() + QLatin1Char(' ') + qmlContext(menu)->baseUrl().fileName()
+        : menu->objectName();
+    QTRY_VERIFY2(menu->property("opened").toBool(), qPrintable(name));
+    QQuickWindow *menuWindow = menuWindowOf(menu);
+    QVERIFY2(menuWindow != nullptr && menuWindow != window, qPrintable(name));
+    QTRY_VERIFY2(menuWindow->isExposed(), qPrintable(name));
+    auto *list = qvariant_cast<QQuickItem *>(menu->property("contentItem"));
+    QVERIFY2(list != nullptr, qPrintable(name));
+    QTRY_VERIFY2(list->property("contentHeight").toReal() > 0, qPrintable(name));
+    const QSize shown = sizes.lastShown(menuWindow);
+    const QSize now = menuWindow->size();
+    QVERIFY2(shown == now, qPrintable(QStringLiteral("%1: shown at %2x%3, then %4x%5")
+                                          .arg(name).arg(shown.width()).arg(shown.height())
+                                          .arg(now.width()).arg(now.height())));
+    QCOMPARE(now, QSize(qCeil(menu->property("implicitWidth").toReal()),
+                        qCeil(menu->property("implicitHeight").toReal())));
+    // The items, as laid out open, fill the window, with no scroll bar.
+    const qreal itemsHeight = list->property("contentHeight").toReal() + menu->property("topPadding").toReal()
+        + menu->property("bottomPadding").toReal();
+    QVERIFY2(std::abs(itemsHeight - now.height()) <= 1.0,
+             qPrintable(QStringLiteral("%1: items %2 high in a window %3 high").arg(name).arg(itemsHeight).arg(now.height())));
+    QVERIFY2(!list->property("interactive").toBool(), qPrintable(name));
+}
 } // namespace
 
 // Takes the URLs Qt.openUrlExternally would open, so no browser starts.
@@ -512,6 +541,7 @@ private slots:
     void viewMenuFollowsThePlot();
     void queueAndPlaybackItemsActOnTheBackend();
     void menusAreWindowsThatReachPastASmallWindow();
+    void menuWindowsShowAtTheirFinalSize();
 
 private:
     // The checks that the tests above run in turn in one window; each says
@@ -728,6 +758,96 @@ void UiMenusTest::menusAreWindowsThatReachPastASmallWindow() {
     QTest::keyClick(contextWindow, Qt::Key_Escape);
     QTRY_VERIFY(!contextMenu->property("visible").toBool());
     QTRY_VERIFY(field->hasActiveFocus());
+}
+
+// Each menu's window shows at the size the menu ends at, its items whole in
+// it, the first time it opens and every time after: a context menu first
+// opened in a fresh window, the menu bar's menus as the pointer moves from
+// title to title with one open, and every other menu of the window (#646).
+// Closed, Breeze's menu items are 0 high, and the menu was a strip a few
+// pixels high; Qt shows a menu's window at its closed size.
+void UiMenusTest::menuWindowsShowAtTheirFinalSize() {
+    PopupShowSizes sizes;
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+
+    // The queue's context menu, the window's first menu.
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = viewRow(window, "playlistView", 1)) != nullptr);
+    QObject *queueMenu = window->findChild<QObject *>(QStringLiteral("playlistContextMenu"));
+    QVERIFY(queueMenu != nullptr);
+    QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier,
+                      (sceneRect(row).topLeft() + QPointF(60, row->height() / 2)).toPoint());
+    verifyMenuShownWhole(queueMenu, window, sizes);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QTest::keyClick(menuWindowOf(queueMenu), Qt::Key_Escape);
+    QTRY_VERIFY(!queueMenu->property("visible").toBool());
+
+    // The menu bar: File opened with a click, then each title hovered in
+    // turn, which opens its menu in place of the last, and back to File.
+    const QList<QObject *> menus = menusOf(window);
+    QVERIFY(menus.size() >= 2);
+    QObject *menuBar = menuBarOf(window);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(menuBarItemAt(menuBar, 0)).center().toPoint());
+    verifyMenuShownWhole(menus.first(), window, sizes);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QList<int> order;
+    for (int i = 1; i < menus.size(); ++i) {
+        order << i;
+    }
+    order << 0;
+    int last = 0;
+    for (int index : order) {
+        QTest::mouseMove(window, sceneRect(menuBarItemAt(menuBar, index)).center().toPoint());
+        verifyMenuShownWhole(menus.at(index), window, sizes);
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        QTRY_VERIFY(!menus.at(last)->property("visible").toBool());
+        last = index;
+    }
+    QTest::keyClick(menuWindowOf(menus.first()), Qt::Key_Escape);
+    QTRY_VERIFY(!menus.first()->property("visible").toBool());
+
+    // Every other menu of the window that is a window of its own, opened
+    // over the item it opens beside.
+    const QString ours = QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/")).toString();
+    constexpr int windowPopup = 1;
+    int opened = 0;
+    for (QObject *menu : window->findChildren<QObject *>()) {
+        const QQmlContext *context = qmlContext(menu);
+        if (!menu->inherits("QQuickMenu") || context == nullptr || !context->baseUrl().toString().startsWith(ours)
+            || menu->property("popupType").toInt() != windowPopup || menus.contains(menu) || menu == queueMenu) {
+            continue;
+        }
+        auto *parent = qvariant_cast<QQuickItem *>(menu->property("parent"));
+        // Those of dialogs, which are closed, are left out.
+        if (parent == nullptr || !parent->isVisible() || parent->window() != window) {
+            continue;
+        }
+        QMetaObject::invokeMethod(menu, "open");
+        verifyMenuShownWhole(menu, window, sizes);
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        QTest::keyClick(menuWindowOf(menu), Qt::Key_Escape);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+        ++opened;
+    }
+    QVERIFY(opened > 0);
+    // The style's: Breeze's menu item shows a standard key's first binding
+    // and says so when it has more, as Quit, Undo and Configure do.
+    dropCapturedMessagesMatching(QRegularExpression(QStringLiteral(
+        "^qrc:/qt/qml/org/kde/desktop/MenuItem\\.qml:\\d+:\\d+: QML Shortcut: Shortcut: Only binding to one of "
+        "multiple key bindings associated with \\d+\\.")));
 }
 
 // Each of the window's menus is a window of its own but the album art
