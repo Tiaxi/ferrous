@@ -50,6 +50,7 @@
 #include "../src/QueueRows.h"
 #include "../src/Localization.h"
 #include "../src/SpectrogramItem.h"
+#include "../src/StandardKeys.h"
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
 #include "../src/WindowPresence.h"
@@ -618,6 +619,7 @@ void UiDialogsTest::initTestCase() {
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
     InputModality::registerQmlTypes();
+    StandardKeys::registerQmlTypes();
 }
 
 void UiDialogsTest::init() {

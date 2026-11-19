@@ -46,6 +46,7 @@
 #include "../src/LibraryTreeModel.h"
 #include "../src/Localization.h"
 #include "../src/SpectrogramItem.h"
+#include "../src/StandardKeys.h"
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
 #include "../src/WindowPresence.h"
@@ -1119,6 +1120,7 @@ void UiMainWindowTest::initTestCase() {
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
     InputModality::registerQmlTypes();
+    StandardKeys::registerQmlTypes();
 }
 
 void UiMainWindowTest::init() {

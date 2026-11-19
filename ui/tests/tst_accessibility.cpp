@@ -48,6 +48,7 @@
 #include "../src/Localization.h"
 #include "../src/PlaybackClock.h"
 #include "../src/SpectrogramItem.h"
+#include "../src/StandardKeys.h"
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
 #include "../src/WindowPresence.h"
@@ -323,6 +324,7 @@ void AccessibilityTest::initTestCase() {
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
     InputModality::registerQmlTypes();
+    StandardKeys::registerQmlTypes();
 }
 
 void AccessibilityTest::init() {

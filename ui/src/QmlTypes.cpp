@@ -11,6 +11,7 @@
 #include "PlaybackClock.h"
 #include "SpectrogramItem.h"
 #include "SpectrogramViewFollow.h"
+#include "StandardKeys.h"
 #include "WaveformEditorItem.h"
 #include "WaveformItem.h"
 #include "WindowPresence.h"
@@ -25,6 +26,7 @@ void registerFerrousQmlTypes() {
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
     InputModality::registerQmlTypes();
+    StandardKeys::registerQmlTypes();
     qmlRegisterUncreatableType<PlaybackClock>(
         "FerrousUi", 1, 0, "PlaybackClock", QStringLiteral("The bridge owns the playback clock"));
 }

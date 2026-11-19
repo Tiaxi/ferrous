@@ -5,7 +5,8 @@ import QtQml.Models 2.15
 
 // The shortcuts of the main window's actions, for a modal popup, which
 // blocks the main window's own shortcuts while it is open. Windows whose
-// transient parent is the main window already get its shortcuts.
+// transient parent is the main window already get its shortcuts. A
+// StandardKeyAction's are every binding of its standard key.
 Item {
     id: root
 
@@ -17,7 +18,7 @@ Item {
 
         delegate: Shortcut {
             required property var modelData
-            sequence: modelData.shortcut
+            sequences: modelData.keyBindings !== undefined ? modelData.keyBindings : [modelData.shortcut]
             context: Qt.WindowShortcut
             enabled: root.active && modelData.enabled
             onActivated: modelData.trigger()
