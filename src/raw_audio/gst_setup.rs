@@ -28,6 +28,11 @@ pub(crate) fn configure_raw_surround_decoding() {
         // has no CRC check, so a damaged frame can decode to a brief
         // full-bandwidth noise burst, far above full scale, and the
         // concealment in `ac3_conceal` covers only the FFmpeg decoders.
+        // liba52 0.7.4 also rebuilds a table that all of its decoders share
+        // whenever one starts, so one decoding meanwhile, as playback does
+        // while analysis starts, outputs samples millions of times full
+        // scale. avdec_ac3 would apply dynamic range compression from the
+        // start but not after a seek; `ac3_conceal` neutralizes the words.
         if let Some(factory) = gst::ElementFactory::find("a52dec") {
             factory.set_rank(gst::Rank::NONE);
         }

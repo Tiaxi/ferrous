@@ -12,6 +12,38 @@ ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5 -ac 1 \
   -c:a dca -strict -2 -b:a 192k -f dts -bitexact raw-tone.dts
 ```
 
+`raw-stereo-coupled.ac3`, `raw-2.1.ac3`, `raw-3.1-coupled.ac3`, `raw-5.0.ac3`,
+`raw-5.1-coupled.ac3`, and `raw-5.1-gated.ac3` are short AC-3 streams in other
+channel layouts, some with coupling, for the parser that finds the dynamic range
+words of each block (`src/raw_audio/ac3_dynamic_range.rs`). They are 6 frames of
+tones with a little noise and a click at 0.1 s, but for `raw-5.0.ac3`, whose
+tones are high over quieter noise, and `raw-5.1-gated.ac3`, frames 7 to 9 of
+gated noise and tones, whose bands reach far into the PSD integration's
+log-addition table. The FFmpeg encoder writes no dynamic range words; tests
+add them. Made with FFmpeg 8.1:
+
+```bash
+tone() { echo "0.25*sin(2*PI*$1*t)+0.03*(random($2)-0.5)+0.5*exp(-2000*abs(t-0.1))*sin(2*PI*3000*t)"; }
+high() { echo "0.002*(random($1)-0.5)+0.3*sin(2*PI*$2*t)+0.3*sin(2*PI*$3*t)+0.2*sin(2*PI*15000*t)+0.5*exp(-2000*abs(t-0.1))*sin(2*PI*3000*t)"; }
+ac3() { # name, layout, bitrate, coupling, seconds, then one expression a channel
+  local name=$1 layout=$2 rate=$3 coupling=$4 seconds=$5; shift 5; local IFS='|'
+  ffmpeg -f lavfi -i "aevalsrc=$*:s=48000:d=$seconds:c=$layout" -c:a ac3 -b:a "$rate" \
+    -channel_coupling "$coupling" -f ac3 -bitexact "$name.ac3"
+}
+ac3 raw-stereo-coupled stereo 96k 1 0.192 "$(tone 440 1)" "$(tone 554 2)"
+ac3 raw-2.1 2.1 96k 0 0.192 "$(tone 440 1)" "$(tone 554 2)" "0.3*sin(2*PI*60*t)"
+ac3 raw-3.1-coupled 4.0 128k 1 0.192 "$(tone 440 1)" "$(tone 554 2)" "$(tone 660 3)" "$(tone 880 5)"
+ac3 raw-5.0 5.0 160k 0 0.192 "$(high 1 5100 9300)" "$(high 2 6100 11300)" \
+  "$(high 3 7100 12700)" "$(high 5 8100 13900)" "$(high 6 9900 16100)"
+ac3 raw-5.1-coupled 5.1 192k 1 0.192 "$(tone 440 1)" "$(tone 554 2)" "$(tone 660 3)" \
+  "0.3*sin(2*PI*60*t)" "$(tone 880 5)" "$(tone 990 6)"
+ac3 gated 5.1 448k -1 0.384 "(random(1)-0.5)*gt(sin(2*PI*23*t)\,0)" \
+  "(random(2)-0.5)*gt(sin(2*PI*29*t)\,0)" "sin(2*PI*12000*t)*gt(sin(2*PI*37*t)\,0.5)" \
+  "0.5*sin(2*PI*50*t)" "(random(3)-0.5)*0.01+sin(2*PI*16000*t)*gt(sin(2*PI*13*t)\,0)" \
+  "(random(4)-0.5)*lt(mod(t\,0.05)\,0.002)"
+dd if=gated.ac3 of=raw-5.1-gated.ac3 bs=1792 skip=7 count=3
+```
+
 `raw-tone-44k.dts` is the same tone at 44.1 kHz in 44 DTS frames of 224 bytes
 (about 0.51 s). That bitrate makes each frame fill whole 14-bit words, as the
 frames of DTS-CDs do; GStreamer's parser loses most frames of a stream whose

@@ -1469,6 +1469,50 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "gst")]
+    #[test]
+    fn ac3_windows_show_its_full_dynamic_range_at_every_zoom() {
+        use crate::raw_audio::{with_dynamic_range, COMPRESSING_DYNRNG, TEST_AC3};
+
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-waveform-windows-dynamic-range-{}",
+            std::process::id()
+        ));
+        // Only a folder of this test, which it removes.
+        std::fs::create_dir(&dir).expect("a new fixture folder");
+        let path = dir.join("compressed.ac3");
+        std::fs::write(
+            &path,
+            with_dynamic_range(&TEST_AC3.repeat(4), COMPRESSING_DYNRNG),
+        )
+        .expect("write fixture");
+        // The peaks of the points of a window of the mono tone, which
+        // peaks at 1/8 of full scale, and its dynamic range words would
+        // turn down to 1/32.
+        let point_peaks = |start: f64, end: f64, points: usize| -> Vec<f32> {
+            let window = decode_waveform_window(&path, start, end, points).expect("window");
+            window
+                .extrema
+                .chunks_exact(2)
+                .map(|extrema| extrema[0].abs().max(extrema[1].abs()))
+                .collect()
+        };
+        let full = |peak: f32| (peak - 0.125).abs() < 0.01;
+        // Zoomed in after the start, which the session seeks to, and at
+        // sample resolution.
+        for (start, end, points) in [(2.5, 3.0, 2_048), (1.0, 1.02, 960)] {
+            let peak = point_peaks(start, end, points)
+                .into_iter()
+                .fold(0.0, f32::max);
+            assert!(full(peak), "{start} s to {end} s: peak {peak}");
+        }
+        // The whole track, each point of which holds whole cycles of the
+        // tone, from the start on.
+        let peaks = point_peaks(0.0, 4.0, 64);
+        assert!(peaks.iter().copied().all(full), "{peaks:?}");
+        std::fs::remove_dir_all(&dir).expect("remove fixtures");
+    }
+
     #[test]
     fn the_level_meter_is_not_blocked_by_a_detail_decode_in_progress() {
         // Twenty seconds: the detail view decodes all of it, tile by tile.
