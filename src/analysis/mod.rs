@@ -942,9 +942,12 @@ impl AnalysisRuntimeState {
                 // The UI follows the playhead again before it switches, so
                 // the anchor may be gone already while the session, which
                 // takes the two together, has not left the view.
-                self.spectrogram_view_anchor = None;
-                let restart_at_playhead = mode == SpectrogramDisplayMode::Rolling
-                    && std::mem::take(&mut self.spectrogram_session_moved);
+                let rolling = mode == SpectrogramDisplayMode::Rolling;
+                if rolling {
+                    self.spectrogram_view_anchor = None;
+                }
+                let restart_at_playhead =
+                    rolling && std::mem::take(&mut self.spectrogram_session_moved);
                 self.display_mode = mode;
                 let _ = ctx
                     .spectrogram_cmd_tx
@@ -4045,6 +4048,35 @@ mod tests {
         let history = state.centered_margin_seconds() - 2.0;
         assert!((start_seconds - (100.0 - history)).abs() < 1e-9);
         assert!((target_position_seconds - 100.0).abs() < f64::EPSILON);
+
+        // A centered view told it is centered again stays where it was
+        // moved, and following the playhead again reaches the worker.
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Centered),
+            &harness.ctx(),
+        );
+        state.handle_command(anchor(3, Some(40.0)), &harness.ctx());
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Centered),
+            &harness.ctx(),
+        );
+        assert_eq!(state.spectrogram_view_anchor, Some(40.0));
+        harness.sent();
+        state.handle_command(anchor(3, None), &harness.ctx());
+        assert!(harness.sent().iter().any(|command| matches!(
+            command,
+            SpectrogramWorkerCommand::SetViewAnchor {
+                anchor_seconds: None
+            } | SpectrogramWorkerCommand::NewTrack {
+                view_anchor: None,
+                ..
+            }
+        )));
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Rolling),
+            &harness.ctx(),
+        );
+        harness.sent();
 
         // Without a moved view, the session goes on as it is.
         state.handle_command(
