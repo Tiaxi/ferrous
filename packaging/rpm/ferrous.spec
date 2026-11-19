@@ -43,6 +43,8 @@ BuildRequires:  pkgconfig(gstreamer-audio-1.0)
 BuildRequires:  pkgconfig(gstreamer-pbutils-1.0)
 BuildRequires:  appstream
 BuildRequires:  desktop-file-utils
+# flock, which scripts/build-slot.sh and its test use.
+BuildRequires:  util-linux-core
 
 Requires:       qt6-qtbase
 Requires:       qt6-qtdeclarative
