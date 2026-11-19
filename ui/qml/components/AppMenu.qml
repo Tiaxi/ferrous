@@ -57,6 +57,49 @@ Menu {
         visible: false
     }
 
+    // A menu window shows at the size of its items as they are shown.
+    //
+    // Qt shows a menu's window, and only then the menu in it: the window
+    // took the size of the menu as it was closed. Breeze sizes a menu from
+    // its items as they are shown: hidden, an item is 0 high, a separator
+    // has no height, a shortcut has no text, and the columns for check
+    // marks and icons come when the items first show. So a menu window was
+    // first a strip a few pixels high, which grew as its items showed. On
+    // Wayland the compositor answers each size Qt asks for after Qt has
+    // asked for the next: Qt took the strip's size back from it, the
+    // strip's scroll bar made the menu wider, and Qt asked for that width
+    // at the strip's height, which the compositor then kept. The menu
+    // showed as an empty strip, opened on the menu bar by the pointer or
+    // as a context menu.
+    //
+    // The window turns visible before the platform shows it, so the menu
+    // shows itself then, and lays out its items' rows: an item lays out
+    // its row when it is drawn, after the window has shown. The window then
+    // takes the menu's size as it will be drawn, and the compositor is
+    // asked for that size alone. A menu that is an item has no window of
+    // its own to size.
+    Connections {
+        target: root.contentItem ? root.contentItem.Window.window : null
+        enabled: root.popupType === Popup.Window
+
+        function onVisibleChanged(visible) {
+            if (visible)
+                root.showWithWindow()
+        }
+    }
+
+    function showWithWindow() {
+        // The item that holds the menu, which Qt shows next.
+        const menuItem = root.contentItem.parent
+        if (menuItem !== null)
+            menuItem.visible = true
+        for (let i = 0; i < root.count; ++i) {
+            const item = root.itemAt(i)
+            if (item && item.contentItem)
+                item.contentItem.ensurePolished()
+        }
+    }
+
     Binding {
         target: root.contentItem
         property: "keyNavigationEnabled"
