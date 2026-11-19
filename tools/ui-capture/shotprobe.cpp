@@ -846,10 +846,11 @@ private:
         } else if (name == "grab") {
             // grab <png> [<layout.json>]: the layout walk runs in this same command, right after the frame
             // is read back, with no event processing in between: walk and image describe the same frame.
-            // The window's open menus are windows of their own: each is drawn in at its place, and the image
-            // grows right and down for one that reaches past the window (POPUP_BACKDROP outside it).
+            // The main window's open menus are windows of their own: each is drawn in at its place (the layout
+            // walk's main_popup_offset), and the image grows right and down for one that reaches past the window
+            // (POPUP_BACKDROP outside it).
             QImage img = w->grabWindow();
-            const auto pops = popupWindowsOf(w);
+            const auto pops = w == mainWindow() ? popupWindowsOf(w) : QList<QPair<QQuickWindow *, QPoint>>();
             if (!pops.isEmpty()) {
                 const qreal dpr = w->devicePixelRatio();
                 img.setDevicePixelRatio(1);  // drawn in device pixels
@@ -1199,6 +1200,9 @@ private:
             }
             const int index = int(m_hooked.size());
             m_hooked.append(w);
+            if (isPopupWindow(w)) {
+                continue;  // a menu window: strips record the main window's frames (and its item trace) only
+            }
             const bool matches = !g_winFilter.isEmpty() &&
                 (w->title().contains(g_winFilter) || w->objectName().contains(g_winFilter));
             if (!g_winFilter.isEmpty() && !matches) {

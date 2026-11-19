@@ -372,14 +372,15 @@ class Runner:
         """repaint: the window renders a frame now (a strip then shows a held state at this time)."""
         self.s.cmd(f"update{self.at()}")
 
-    def popup_open(self, win=None):
-        """A menu, dialog or other popup (not just a tooltip) is fully open in the window. Zero-size popups
-        don't count: DialogWindow puts an empty modal popup (dialogWindowShortcutBlocker) in the main window
-        while a dialog window is shown, to block its shortcuts; it is not the dialog. A menu in a window of its own
-        counts once KWin shows that window."""
+    def popup_open(self, win=None, menu=False):
+        """A menu, dialog or other popup (not just a tooltip) is fully open in the window; with `menu`, a menu (an
+        open search palette under it is not the state). Zero-size popups don't count: DialogWindow puts an empty
+        modal popup (dialogWindowShortcutBlocker) in the main window while a dialog window is shown, to block its
+        shortcuts; it is not the dialog. A menu in a window of its own counts once KWin shows that window."""
         return any(p["opened"] and p.get("exposed", True) and not p["tooltip"]
                    and p["rect"][2] > 1 and p["rect"][3] > 1
                    and p.get("name") != "dialogWindowShortcutBlocker"
+                   and (not menu or "Menu" in p["cls"])
                    for p in self.s.popups(self.win if win is None else win))
 
 
@@ -408,7 +409,9 @@ def run_session(name, tag, lines, only):
                 r.run_steps(steps)
                 if not setup and area != "motion":
                     dialog_win = None
-                    if area in states.VERIFY_OPEN_AREAS and state not in states.VERIFY_OPEN_EXEMPT:
+                    menu_state = ((area == "menu" and state not in states.VERIFY_OPEN_EXEMPT)
+                                  or (area, state) in states.VERIFY_MENU_STATES)
+                    if (area in states.VERIFY_OPEN_AREAS and state not in states.VERIFY_OPEN_EXEMPT) or menu_state:
                         # A dialog that is its own top-level window (DialogWindow: Configure, About) is the
                         # state when it is shown: it is grabbed, with any popup inside it (the folder-name
                         # dialog, the Remove confirmation). Otherwise a real popup must be open in the window.
@@ -420,9 +423,9 @@ def run_session(name, tag, lines, only):
                                 time.sleep(0.04)
                             time.sleep(0.2)  # mapped, activated and drawn by KWin
                         else:
-                            if not r.popup_open():
+                            if not r.popup_open(menu=menu_state):
                                 r.settle_or(1.0)
-                            if not r.popup_open():  # a capture failure, not a shot of something else
+                            if not r.popup_open(menu=menu_state):  # a capture failure, not a shot of something else
                                 raise RuntimeError("no dialog window, menu or popup shown at grab time")
                     if not r.win and not dialog_win:  # no popup (a tooltip) caught mid-fade: it settles, or fails
                         moving = lambda: [p for p in s.popups() if not p["opened"] or 0.02 < p["opacity"] < 0.99]

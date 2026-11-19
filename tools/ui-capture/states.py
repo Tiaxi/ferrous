@@ -6988,6 +6988,8 @@ AREA_SUBJECT = {"transport": "transportBar", "seek": "transportBar", "volume": "
 # States of these areas must show an open popup (menu, dialog, palette) at grab time, or the capture fails.
 VERIFY_OPEN_AREAS = {"menu", "dialog", "search"}
 VERIFY_OPEN_EXEMPT = {"menubar-hover"}  # the menu bar itself, hovered: no menu by design
+# States of other areas that show an open menu, which must be shown at grab time too.
+VERIFY_MENU_STATES = {("menubar", "open"), ("contrast", "menu-disabled")}
 # The overview sheet ("every area at rest"), one page per theme, first in the core set: (area, state).
 OVERVIEW = [("main", "playing-spectrogram-centered"), ("transport", "at-rest"), ("nowplaying", "at-rest"),
             ("queue", "at-rest"), ("library", "at-rest"), ("plot", "at-rest"), ("statusbar", "at-rest"),

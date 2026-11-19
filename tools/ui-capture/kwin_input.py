@@ -4,7 +4,7 @@
 
 The probe's events go to the app's windows directly, past the compositor. KWin opens a window popup (a menu,
 since #642) only for a client that has had input from the compositor, so a session gives the app one real
-pointer event through this client first (Session.prime_input).
+key press through this client first (Session.prime_input).
 
 KWin offers the protocol only to a client whose executable a .desktop file names with
 X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input; driver.py writes one for this Python in the session's
@@ -15,18 +15,13 @@ import socket
 import struct
 
 # org_kde_kwin_fake_input requests (fake-input.xml in plasma-wayland-protocols)
-_AUTHENTICATE, _BUTTON, _POINTER_MOTION_ABSOLUTE, _KEYBOARD_KEY = 0, 2, 9, 10
-BTN_LEFT = 0x110
+_AUTHENTICATE, _KEYBOARD_KEY = 0, 10
 KEY_LEFTSHIFT = 42
 
 
 def _string(s):
     b = s.encode() + b"\0"
     return struct.pack("<I", len(b)) + b + b"\0" * (-len(b) % 4)
-
-
-def _fixed(v):
-    return struct.pack("<i", int(round(v * 256)))
 
 
 class KWinInput:
@@ -87,16 +82,6 @@ class KWinInput:
                 return
             if on_event:
                 on_event(obj, op, body)
-
-    def move(self, x, y):
-        """The pointer to (x, y), in the compositor's logical pixels."""
-        self._send(self.fake, _POINTER_MOTION_ABSOLUTE, _fixed(x) + _fixed(y))
-        self._roundtrip()
-
-    def click(self, button=BTN_LEFT):
-        for state in (1, 0):
-            self._send(self.fake, _BUTTON, struct.pack("<II", button, state))
-        self._roundtrip()
 
     def key(self, code):
         """A key (evdev code) pressed and released."""

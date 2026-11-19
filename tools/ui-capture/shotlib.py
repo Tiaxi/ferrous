@@ -74,7 +74,11 @@ class Session:
         self.settle(0.3)
         time.sleep(0.2)  # the first frames after the window maps
         if os.environ.get("SHOT_KWIN"):
-            self.prime_input()
+            try:
+                self.prime_input()
+            except Exception:
+                self.a.quit()  # (the runner's cleanup starts only once the session exists)
+                raise
         self.startup_s = time.time() - t_app
         r = self.a.ev_soft("GraphicsInfo.api")
         print(f"[{name}/{tag}] renderer: {r}", flush=True)
