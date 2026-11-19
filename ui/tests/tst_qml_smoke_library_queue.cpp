@@ -2955,34 +2955,49 @@ void LibraryQueueSmokeTest::revealKeyAsksForTheRowsOfAnExpandedRowTheBackendForg
     const QString trackX = QStringLiteral("/music/Artist X/Album/01.flac");
     const QString trackKeyX = QStringLiteral("track|") + trackX;
     const QString artistY = QStringLiteral("artist|/music|Artist Y");
-    const auto tree = [&](bool withX, bool openX) {
+    // Artist X absent (-1), sent collapsed (0), with its album collapsed
+    // (1), or with the album's track (2).
+    const auto tree = [&](int x) {
         QVector<BinaryTreeRow> rows;
-        if (withX) {
+        if (x >= 0) {
             rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("Artist X"), artistX,
                 QStringLiteral("Artist X"), QStringLiteral("/music/Artist X"), {}, {}, {}});
-            if (openX) {
-                rows.push_back(BinaryTreeRow{2, 1, -1, 0, 1, QStringLiteral("Album"), albumX,
-                    QStringLiteral("Artist X"), QStringLiteral("/music/Artist X/Album"), {}, {},
-                    QStringList{trackX}});
-                rows.push_back(BinaryTreeRow{4, 2, -1, 1, 0, QStringLiteral("01"), trackKeyX,
-                    QStringLiteral("Artist X"), trackX, {}, trackX, QStringList{trackX}});
-            }
+        }
+        if (x >= 1) {
+            rows.push_back(BinaryTreeRow{2, 1, -1, 0, 1, QStringLiteral("Album"), albumX,
+                QStringLiteral("Artist X"), QStringLiteral("/music/Artist X/Album"), {}, {},
+                QStringList{trackX}});
+        }
+        if (x >= 2) {
+            rows.push_back(BinaryTreeRow{4, 2, -1, 1, 0, QStringLiteral("01"), trackKeyX,
+                QStringLiteral("Artist X"), trackX, {}, trackX, QStringList{trackX}});
         }
         rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("Artist Y"), artistY,
             QStringLiteral("Artist Y"), QStringLiteral("/music/Artist Y"), {}, {}, {}});
         return encodeRows(rows);
     };
+    const auto askedKeys = [](const QSignalSpy &spy) {
+        QStringList asked;
+        for (const QList<QVariant> &expansion : spy) {
+            if (expansion.at(1).toBool()) {
+                asked.push_back(expansion.at(0).toString());
+            }
+        }
+        return asked;
+    };
 
     LibraryTreeModel model;
-    QVERIFY(applyLibraryTree(model, tree(true, false)));
-    // The user expands artist X, and its rows come.
+    QVERIFY(applyLibraryTree(model, tree(0)));
+    // The user expands artist X and its album, and their rows come.
     model.toggleKey(artistX);
-    QVERIFY(applyLibraryTree(model, tree(true, true)));
-    QCOMPARE(model.rowCount(), 3);
-    // Artist X leaves the library, and the backend forgets it was expanded.
-    QVERIFY(applyLibraryTree(model, tree(false, false)));
+    QVERIFY(applyLibraryTree(model, tree(1)));
+    model.toggleKey(albumX);
+    QVERIFY(applyLibraryTree(model, tree(2)));
+    QCOMPARE(model.rowCount(), 4);
+    // Artist X leaves the library, and the backend forgets both expansions.
+    QVERIFY(applyLibraryTree(model, tree(-1)));
     // It comes back, collapsed as far as the backend knows.
-    QVERIFY(applyLibraryTree(model, tree(true, false)));
+    QVERIFY(applyLibraryTree(model, tree(0)));
     const int artistRow = model.indexForSelectionKey(artistX);
     QVERIFY(model.data(model.index(artistRow, 0), LibraryTreeModel::ExpandedRole).toBool());
 
@@ -2990,28 +3005,36 @@ void LibraryQueueSmokeTest::revealKeyAsksForTheRowsOfAnExpandedRowTheBackendForg
     QSignalSpy finished(&model, &LibraryTreeModel::revealFinished);
     QCOMPARE(model.revealKey(QStringList{artistX, albumX}, trackKeyX), -1);
     QVERIFY(model.revealPending());
-    // It asked for the rows of both keys, once each.
-    QStringList asked;
-    for (const QList<QVariant> &expansion : std::as_const(expansions)) {
-        QVERIFY(expansion.at(1).toBool());
-        asked.push_back(expansion.at(0).toString());
-    }
-    asked.sort();
-    QCOMPARE(asked, (QStringList{albumX, artistX}));
-    // A tree from before the backend heard of it changes nothing, and
-    // asks for nothing again.
-    QVERIFY(applyLibraryTree(model, tree(true, false)));
+    // It asks for the artist's rows; the album's row is not here yet.
+    QCOMPARE(askedKeys(expansions), QStringList{artistX});
+    // A tree from before the backend heard of it asks for nothing again.
+    QVERIFY(applyLibraryTree(model, tree(0)));
     QVERIFY(model.revealPending());
+    QCOMPARE(expansions.count(), 1);
+
+    // The album comes without its track: the reveal asks for it, once.
+    QVERIFY(applyLibraryTree(model, tree(1)));
+    QVERIFY(model.revealPending());
+    QCOMPARE(askedKeys(expansions), (QStringList{artistX, albumX}));
+    QVERIFY(applyLibraryTree(model, tree(1)));
     QCOMPARE(expansions.count(), 2);
     QCOMPARE(finished.count(), 0);
 
     // The backend's answer ends the reveal on the row.
-    QVERIFY(applyLibraryTree(model, tree(true, true)));
+    QVERIFY(applyLibraryTree(model, tree(2)));
     QCOMPARE(finished.count(), 1);
     QCOMPARE(finished.at(0).at(0).toString(), trackKeyX);
     QCOMPARE(finished.at(0).at(1).toInt(), 2);
     QVERIFY(!model.revealPending());
     QCOMPARE(expansions.count(), 2);
+
+    // Collapse All ends a waiting reveal also with no row expanded, as
+    // before the first tree.
+    LibraryTreeModel empty;
+    QCOMPARE(empty.revealKey({}, trackKeyX), -1);
+    QVERIFY(empty.revealPending());
+    empty.collapseAll();
+    QVERIFY(!empty.revealPending());
 }
 
 // A reveal asked for while a scan sends tree after tree ends with the first
@@ -3964,6 +3987,21 @@ void LibraryQueueSmokeTest::openingOrClosingARowEndsTheSavedViewRestore() {
     QCOMPARE(controller->property("selectedSelectionKey").toString(), QString());
     QVERIFY(!model.isKeySelected(QStringLiteral("track|") + trackA));
     QVERIFY(model.indexForSelectionKey(artistA) >= 0);
+
+    // Show in Library, which the backend saved as the view, waits for
+    // artist A's rows. The user opens a row, and the view the user is at is
+    // saved over it, though the selection did not change.
+    QVERIFY(QMetaObject::invokeMethod(controller, "requestTreeApply", Q_ARG(QVariant, 3),
+        Q_ARG(QVariant, encodeRows(restoreHarnessRows()))));
+    QTRY_VERIFY(!model.parsing());
+    const qsizetype saved = root->property("savedKeys").toStringList().size();
+    QVERIFY(QMetaObject::invokeMethod(controller, "requestBridgeReveal",
+        Q_ARG(QVariant, QVariant(QStringList{artistA})), Q_ARG(QVariant, QStringLiteral("track|") + trackA)));
+    QVERIFY(model.revealPending());
+    QVERIFY(QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, artistB)));
+    QVERIFY(!model.revealPending());
+    QTRY_COMPARE(root->property("savedKeys").toStringList().size(), saved + 1);
+    QCOMPARE(root->property("savedKeys").toStringList().last(), QString());
 }
 
 std::unique_ptr<QmlSmokeTest> makeLibraryQueueSmokeTest(const QString &userDirectoriesParent) {

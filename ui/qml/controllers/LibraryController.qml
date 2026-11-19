@@ -1012,11 +1012,13 @@ QtObject {
         }
         if (root.pendingRevealPurpose === "restore") {
             root.cancelPendingRestoredViewState()
-            root.scheduleLibraryViewStatePersist()
         }
         root.pendingRevealKey = ""
         root.pendingRevealPurpose = ""
         root.libraryModel.cancelReveal()
+        // The view the user is at is saved, rather than the saved view or
+        // the row the backend saved for Show in Library.
+        root.scheduleLibraryViewStatePersist()
     }
 
     function finishReveal(purpose, row) {

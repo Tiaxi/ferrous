@@ -461,6 +461,8 @@ void LibraryTreeModel::collapseAll() {
         }
     }
 
+    // What the user does in the tree wins over a reveal still waiting.
+    cancelReveal();
     bool changed = !expandedKeys.isEmpty();
     for (const TreeNode &node : m_tree) {
         if (node.rowType == QStringLiteral("root") && isExpanded(node, false)) {
@@ -472,8 +474,6 @@ void LibraryTreeModel::collapseAll() {
     if (!changed) {
         return;
     }
-    // What the user does in the tree wins over a reveal still waiting.
-    cancelReveal();
     for (const QString &key : expandedKeys) {
         emit nodeExpansionRequested(key, false);
     }
