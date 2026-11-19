@@ -1188,4 +1188,30 @@ mod tests {
         short.truncate(128);
         assert_eq!(find_range_flags(&short), Err(Unparsed::PastEnd));
     }
+
+    #[test]
+    fn a_frame_with_any_one_bit_flipped_never_panics() {
+        // The parser reads files the user plays on the streaming thread,
+        // where a panic would end the app: a frame with a damaged field,
+        // whose CRCs the encoder still made match, is passed on or
+        // neutralized, never a panic. The first frame of each layout, with
+        // words in every block, takes each path of the parser that the
+        // layout has; every frame would take minutes in a debug build.
+        for (layout, stream) in AC3_LAYOUTS {
+            let stream = with_dynamic_range(stream, COMPRESSING_DYNRNG);
+            let mut flipped = frames(&stream)[0].to_vec();
+            // From the first byte after the sync word and CRC.
+            for bit in 32..flipped.len() * 8 {
+                flipped[bit / 8] ^= 0x80 >> (bit % 8);
+                for one_layout in [true, false] {
+                    if let Ok(flags) = super::find_range_flags_in_stream(&flipped, one_layout) {
+                        let mut neutralized = flipped.clone();
+                        flags.neutralize(&mut neutralized);
+                        assert!(!flags.compress(&neutralized), "{layout} bit {bit}");
+                    }
+                }
+                flipped[bit / 8] ^= 0x80 >> (bit % 8);
+            }
+        }
+    }
 }
