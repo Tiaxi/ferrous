@@ -53,7 +53,8 @@ class Session:
         self.scale = scale
         self.size = size
         self.index = []
-        self.composite_sources = []  # raw_grab/source_shot since the last composite entry (take_sources)
+        self.composite_sources = []  # raw_grab/source_shot in the running macro (composite_evidence)
+        self.composite_no_app_pixels = False  # the running macro draws images without app pixels
         self.suffix = f"{tag}_{scale}x_{size[0]}x{size[1]}" + suffix_extra
         t_app = time.time()
         prefix = os.environ.get("SHOT_RUN_PREFIX", "run")
@@ -486,10 +487,21 @@ class Session:
 
     # --- privacy evidence for composites: images a macro cuts from grabs that have no index entry of their own.
     # pack.py's privacy check needs, for every image it publishes, the layout walk of what it shows; a composite's
-    # entry lists its sources (take_sources), and an entry with neither a walk nor sources fails the check.
+    # entry lists its sources (composite_evidence), or says it has no app pixels, and an entry with neither a walk,
+    # nor sources, nor that marker fails the check.
+    def begin_composites(self):
+        """Starts a macro's evidence (runner.step_macro): forgets the sources and the marker of the macro before."""
+        self.composite_sources = []
+        self.composite_no_app_pixels = False
+
+    def draws_without_app_pixels(self):
+        """Declares that the running macro's images cut from no grab are drawn without app pixels (an icon
+        rendered from its SVGs): they get the explicit marker instead of failing as images without sources."""
+        self.composite_no_app_pixels = True
+
     def raw_grab(self, path, win=""):
         """Grabs the window to `path` with its layout walk beside it (path[:-4] + ".layout.json"; none when
-        SHOT_LAYOUT=0) and records it as a source of the next composite entry. Returns the probe's reply."""
+        SHOT_LAYOUT=0) and records it as a source of the running macro's composites. Returns the probe's reply."""
         walk = None if os.environ.get("SHOT_LAYOUT", "1") == "0" else path[:-4] + ".layout.json"
         r = self.cmd(f"grab{('@' + win) if win else ''} {path}" + (f" {walk}" if walk else ""), timeout=30)
         if str(r).startswith("ok"):
@@ -499,14 +511,20 @@ class Session:
         return r
 
     def source_shot(self, file):
-        """Records an indexed shot (shots/FILE) that the next composite entry reuses pixels of."""
+        """Records an indexed shot (shots/FILE) that the running macro's composites reuse pixels of."""
         self.composite_sources.append("shot:" + file)
 
-    def take_sources(self):
-        """The sources recorded since the last composite entry, for its `sources` (and forgets them). Sources a
-        macro grabbed but never used go to the next composite: checked more than needed, never less."""
-        s, self.composite_sources = self.composite_sources, []
-        return s
+    def composite_evidence(self, file):
+        """The privacy fields of the composite entry `file`: as `sources`, every grab and shot the running macro
+        recorded so far, so each image cut from one grab lists it, not only the first (checked more than needed,
+        never less); for an image from none, in a macro that declared draws_without_app_pixels, `sources=[]` with
+        `no_app_pixels=True`. Raises for an image from no grab and without that marker."""
+        if self.composite_sources:
+            return dict(sources=list(self.composite_sources))
+        if self.composite_no_app_pixels:
+            return dict(sources=[], no_app_pixels=True)
+        raise RuntimeError(f"{file}: a composite from no grab or shot: grab with raw_grab or record the shot with "
+                           "source_shot, or declare draws_without_app_pixels if it holds no app pixels")
 
     def layout_path(self, file):
         """Where the layout checker's walk for this shot goes (None when SHOT_LAYOUT=0)."""

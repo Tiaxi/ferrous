@@ -640,7 +640,7 @@ def _save_shot(r, img, area, state, desc):
     img.save(os.path.join(os.environ["SHOT_OUT"], name + ".png"))
     r.s.index.append(dict(file=name + ".png", area=area, state=state, theme=r.s.tag, scale=r.s.scale,
                           size=f"{r.s.size[0]}x{r.s.size[1]}", image=f"{img.width}x{img.height}",
-                          renderer=r.s.renderer, window="main", desc=desc, sources=r.s.take_sources()))
+                          renderer=r.s.renderer, window="main", desc=desc, **r.s.composite_evidence(name + ".png")))
 
 
 QUEUE_END_JS = ("(function(){var v=" + FIND + "('playlistView');if(!v)return '';var q=v.mapToItem(null,0,0);var bot=q.y+v.height;"
@@ -2462,6 +2462,7 @@ def m_launch_focus(r, arg):
 
 def m_icons(r, arg):
     """Renders the app icon's per-size SVGs with Qt's SVG plugin, on dark and light grounds."""
+    r.s.draws_without_app_pixels()  # (drawn from the icon's SVGs)
     if r.s.tag != "dark":  # (the icons session runs both themes; this makes both grounds itself, once)
         return
     from PIL import Image, ImageDraw, ImageFont
@@ -2499,7 +2500,7 @@ def m_icons(r, arg):
             im.save(os.path.join(out, name + ".png"))
             r.s.index.append(dict(file=name + ".png", area="icon", state="app-icon" + ("-zoom4" if zoom != 1 else ""),
                                   theme=tag, scale=1, size=f"{im.width}x{im.height}", renderer=r.s.renderer,
-                                  sources=r.s.take_sources(),
+                                  **r.s.composite_evidence(name + ".png"),
                                   desc=f"App icon per-size SVGs (16-256 px) rendered by Qt's SVG plugin on a Breeze "
                                        f"{tag} window colour{' , 4x nearest-neighbour zoom' if zoom != 1 else ''}"))
 
@@ -2756,6 +2757,7 @@ def m_appicon(r, arg):
     appicon/sizes (16-256 px at 1:1, 4x of 16/22/32), appicon/context (a panel row at 22 and 32 px and a launcher
     grid at 48 px beside real Breeze app icons), appicon/variants (installed vs each variant at 16/22/48/128, when the
     variant folders exist; SHOT_ICON_VARIANTS=1 makes them required); per-size measures into facts.jsonl."""
+    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFont
     src = os.environ.get("SHOT_SRC", "")
     a_root = os.path.join(src, "ui/assets/icons/hicolor")
@@ -2980,6 +2982,7 @@ def m_appicon2(r, arg):
     32 px with an audio badge, a 16 px menu, Alt-Tab 64 px tiles, a 48 px launcher grid; neighbours incl. Elisa and the
     chart-like LabPlot and KmPlot), appicon/sizes2x (1:1 16-256, 32@2x = the 64 px file, 22@2x = 44 px from the
     scalable and from the 48 px file, 4x of 48); appicon/icon128 (for the motif sheet); facts per size."""
+    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFont, ImageFilter
     src = os.environ.get("SHOT_SRC", "")
     a_root = os.path.join(src, "ui/assets/icons/hicolor")
@@ -3252,6 +3255,7 @@ def m_appicon3(r, arg):
     appicon/scales (the slots at 1.25x and 1.5x device px, the file Plasma's lookup takes named; 16@2 and 22@2), appicon/large (128 and
     256 px beside Elisa and Kate), appicon/variants20 (installed vs the variants at 32-256 beside LabPlot and KmPlot,
     when they exist; SHOT_ICON_VARIANTS=1 requires them)."""
+    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFont, ImageFilter
     src = os.environ.get("SHOT_SRC", "")
     a_root = os.path.join(src, "ui/assets/icons/hicolor")
@@ -3507,6 +3511,7 @@ def m_appicon4(r, arg):
     beside Elisa's: KIconEffect's default for the disabled state, to grey and semi-transparent), appicon/wallpaper (a
     blue-violet desktop: desktop icons, an Overview-like grid, a 44 px floating panel with icons at 32 and 36 px);
     facts: per size the traces' geometry (_icon_measure3), the rim's width in device px per slot incl. @2."""
+    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
     src = os.environ.get("SHOT_SRC", "")
     a_root = os.path.join(src, "ui/assets/icons/hicolor")
@@ -3717,6 +3722,7 @@ def m_appicon5(r, arg):
     cut from this run's About window, 1:1 and 4x, with the icon's measured size; the icon at 48 and 128 px on the dark
     panel as seen with deuteranopia and protanopia); facts: the installed-only table rows (appicon-table-*), CVD
     contrasts, the title-bar icon size."""
+    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFont
     import numpy as np
     src = os.environ.get("SHOT_SRC", "")
@@ -4034,6 +4040,7 @@ def m_appicon6(r, arg):
     lookup never takes at the folder sizes, where else it takes them; the window icon's and the About dialog's
     files), appicon-lookup-engine (what the lookup emulates, checked against KIconLoader itself; where Qt's own
     QIconLoader differs)."""
+    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFont
     import subprocess
     src = os.environ.get("SHOT_SRC", "")
@@ -4407,6 +4414,7 @@ def m_appicon7(r, arg):
     audio badge on it); the audio badge on Ferrous at 22, 32, 40 and 48 px slots; a 48 px launcher grid beside
     Breeze app icons with labels. The badge: Breeze's audio-volume-high at 0.4 of the icon (at most 22 px), on its
     top-right corner (Plasma 6's task manager rule as the harness knows it: the applet's QML is compiled in)."""
+    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFont
     src = os.environ.get("SHOT_SRC", "")
     a_root = os.path.join(src, "ui/assets/icons/hicolor")
@@ -4525,6 +4533,7 @@ def m_appicon8(r, arg):
     renderer, as a lookup would scale it) beside the hand-drawn 32 px file, 1:1 and 4x; (3) a squint row per size
     (the file the lookup takes at 1x; greyscale, blurred by px/24), each trace's grey level. Facts (dark):
     appicon-drift-32 (the two 32 px drawings' centre lines compared), appicon-squint-sizes."""
+    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFilter, ImageFont
     src = os.environ.get("SHOT_SRC", "")
     a_root = os.path.join(src, "ui/assets/icons/hicolor")
@@ -4632,6 +4641,7 @@ def m_appicon9(r, arg):
     the files Plasma's lookup takes) among Breeze icons on 66 and 88 px panels. appicon/ctx-discover: a Discover-like
     tile with the icon at 256 px. The drawn menus, lists and frames follow Breeze's colours; only the focus frame is
     Plasma's own artwork."""
+    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFont
     src = os.environ.get("SHOT_SRC", "")
     a_root = os.path.join(src, "ui/assets/icons/hicolor")
@@ -4877,6 +4887,7 @@ def m_appicon10(r, arg):
     against the true ones at 25/50/75 % across), appicon-air-032/036 (top air per column over the top trace's last
     10 columns, the tile's top in each column: its rounded corner), appicon-weight-1x2x (each slot's traces' widths
     at 1x and at 2x, halved)."""
+    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFont
     import numpy as np
     src = os.environ.get("SHOT_SRC", "")
@@ -5000,6 +5011,7 @@ def m_appicon11(r, arg):
     launcher row, a 64 px Alt-Tab row, About headers at 128 px; appicon/var-large: Discover-like cards at 256 px;
     appicon/var-mark-<name>-<360|152> (dark): the variant's no-art mark PNGs as rendered with the variant. The files a
     variant gives come from the same lookup as the installed ones (its own hicolor tree)."""
+    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFont
     import glob as glob_
     if os.environ.get("SHOT_ICON_VARIANTS") != "1":
@@ -5256,6 +5268,7 @@ def m_motif(r, arg):
 def m_icons_ab(r, arg):
     """When variant B icons exist (ICON_B_DIR), one sheet: A (installed, from the source tree) vs B at every
     size, on Breeze dark and light, 1x and (16-64 px) 4x nearest-neighbour."""
+    r.s.draws_without_app_pixels()  # (drawn from the icon's SVGs)
     from PIL import Image, ImageDraw, ImageFont
     if r.s.tag != "dark":  # (the icons session runs both themes; this sheet has both grounds already, made once)
         return
@@ -5325,7 +5338,7 @@ def m_icons_ab(r, arg):
     name = "iconab_a-vs-b_dark"
     S.save(os.path.join(out, name + ".png"))
     r.s.index.append(dict(file=name + ".png", area="iconab", state="a-vs-b", theme="dark", scale=1,
-                          size=f"{S.width}x{S.height}", renderer=r.s.renderer, sources=r.s.take_sources(),
+                          size=f"{S.width}x{S.height}", renderer=r.s.renderer, **r.s.composite_evidence(name + ".png"),
                           desc=(f"App icon, {ICON_A_LABEL} (this source) vs {ICON_B_LABEL} ({ICON_B_DIR}), 1x at 16-128 "
                                 "px and 4x of 16-32 px on Breeze Dark and Light (Qt's SVG renderer)") if ICON_AB else
                           "App icon (installed, this source), 1x at 16-128 px and 4x of 16-48 px on Breeze Dark and Light"
@@ -5494,7 +5507,7 @@ def m_closeups(r, arg):
     name = f"closeup_controls_{r.s.suffix}"
     S.save(os.path.join(out, name + ".png"))
     r.s.index.append(dict(file=name + ".png", area="closeup", state="controls", theme=r.s.tag, scale=r.s.scale,
-                          size=f"{S.width}x{S.height}", renderer=r.s.renderer, window="main", sources=r.s.take_sources(),
+                          size=f"{S.width}x{S.height}", renderer=r.s.renderer, window="main", **r.s.composite_evidence(name + ".png"),
                           desc=f"Close-ups at {Z}x: a transport button at rest, hovered and pressed with sampled fills; "
                                "the level meter's top at 2x on the spectrogram (scale on, off), the waveform and paused; the queue thumb above it"))
 
@@ -5579,7 +5592,7 @@ def m_ring_progression(r, arg):
     S.save(os.path.join(out, name + ".png"))
     r.s.index.append(dict(file=name + ".png", area="scrobblering", state="progression", theme=r.s.tag,
                           scale=r.s.scale, size=f"{S.width}x{S.height}", renderer=r.s.renderer, window="main",
-                          sources=r.s.take_sources(),
+                          **r.s.composite_evidence(name + ".png"),
                           desc="Scrobble indicator, every state, beside a running library scan's bar: the status bar's "
                                "right end at 1x, the indicator (glyph and bar) at 6x (states injected)"))
 
