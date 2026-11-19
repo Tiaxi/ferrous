@@ -18,8 +18,8 @@ use crate::analysis::AnalysisCommand;
 #[cfg(feature = "profiling-logs")]
 use crate::profile_logging::heartbeat_trace_enabled;
 use crate::raw_audio::{
-    conceal_and_report_damaged_ac3_frames, configure_raw_surround_decoding, index_raw_ac3_frames,
-    install_raw_surround_source_probe, is_dts_file, is_raw_surround_file,
+    configure_raw_surround_decoding, index_raw_ac3_frames, install_raw_surround_source_probe,
+    is_dts_file, is_raw_surround_file, prepare_and_report_ac3_frames,
 };
 
 use super::channel_mix::ChannelMix;
@@ -3141,7 +3141,7 @@ fn start_gst_engine(
     // sync-aligned audio.  Without this, the parser must scan for sync
     // words through garbage data, causing gaps during gapless transitions.
     install_raw_surround_source_probe(&playbin);
-    conceal_and_report_damaged_ac3_frames(&playbin);
+    prepare_and_report_ac3_frames(&playbin);
     // Accurate seeks in a raw AC3 file read from the second before their
     // target rather than from the last frame played.
     index_raw_ac3_frames(&playbin);
@@ -5793,8 +5793,8 @@ mod engine_tests {
     };
     use crate::playback::PathRenames;
     use crate::raw_audio::{
-        ac3_frame_is_damaged, record_decoder_input, with_damaged_frames, SEAMED_FRAME,
-        TEST_AC3_FRAMES,
+        ac3_frame_is_damaged, record_decoder_input, with_damaged_frames, with_dynamic_range,
+        COMPRESSING_DYNRNG, SEAMED_FRAME, TEST_AC3_FRAMES,
     };
 
     const TIMEOUT: Duration = Duration::from_secs(10);
@@ -5893,6 +5893,15 @@ mod engine_tests {
             let path = self.dir.join(name);
             let stream = crate::raw_audio::TEST_DTS_44K.repeat(4);
             std::fs::write(&path, crate::raw_audio::ripped_dts_cd_bytes(&stream).0).unwrap();
+            path
+        }
+
+        /// `seconds` of a raw AC3 tone whose every block carries a dynamic
+        /// range word that would turn it down by 12 dB.
+        fn compressed_ac3(&self, name: &str, seconds: usize) -> PathBuf {
+            let path = self.dir.join(name);
+            let stream = crate::raw_audio::TEST_AC3.repeat(seconds);
+            std::fs::write(&path, with_dynamic_range(&stream, COMPRESSING_DYNRNG)).unwrap();
             path
         }
 
@@ -12251,6 +12260,84 @@ mod engine_tests {
         for frame in frames.iter() {
             assert!(!ac3_frame_is_damaged(&frame.bytes), "{:?}", frame.pts);
         }
+    }
+
+    /// The peak of `TEST_AC3`'s tone, which its dynamic range words would
+    /// turn down to a quarter.
+    const AC3_TONE_PEAK: f64 = 0.125;
+
+    /// The loudest of `buffers` within `times` of their stream.
+    fn loudest_within(buffers: &[OutputBuffer], times: std::ops::Range<Duration>) -> f64 {
+        buffers
+            .iter()
+            .filter(|buffer| times.contains(&buffer.stream_time))
+            .fold(0.0, |loudest, buffer| loudest.max(buffer.peak))
+    }
+
+    #[track_caller]
+    fn assert_full_ac3_level(what: &str, peak: f64) {
+        assert!(
+            (peak - AC3_TONE_PEAK).abs() < 0.01,
+            "{what}: the tone peaks at {peak}, not {AC3_TONE_PEAK}"
+        );
+    }
+
+    #[test]
+    fn ac3_plays_at_its_full_dynamic_range_from_the_start_and_after_a_seek() {
+        let fixtures = Fixtures::new("ac3-dynamic-range");
+        let track = fixtures.compressed_ac3("compressed.ac3", 4);
+        let (mut engine, output) = start_recording(TestOutput::Fake);
+        engine.send(PlaybackCommand::LoadQueue(vec![track]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 1.5 s", |engine| {
+            engine.snapshot.position >= millis(1_500)
+        });
+        let from_start = loudest_within(&output.lock().unwrap(), millis(500)..millis(1_400));
+        assert_full_ac3_level("from the start", from_start);
+
+        let before_seek = output.lock().unwrap().len();
+        engine.send(PlaybackCommand::Seek(millis(2_500)));
+        engine.wait_until("the seek did not land", |engine| {
+            engine.snapshot.seek_landed_serial == 1
+        });
+        engine.wait_until("the position did not reach 3.5 s", |engine| {
+            engine.snapshot.position >= millis(3_500)
+        });
+        let after_seek = loudest_within(
+            &output.lock().unwrap()[before_seek..],
+            millis(2_700)..millis(3_400),
+        );
+        assert_full_ac3_level("after a seek", after_seek);
+    }
+
+    #[test]
+    fn ac3_plays_at_its_full_dynamic_range_after_a_gapless_switch_into_it() {
+        let fixtures = Fixtures::new("ac3-dynamic-range-gapless");
+        let a = fixtures.compressed_ac3("a.ac3", 2);
+        let b = fixtures.compressed_ac3("b.ac3", 2);
+        let (mut engine, output) = start_recording(TestOutput::Fake);
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
+        engine.wait_until("row 1 did not reach 1.5 s", |engine| {
+            engine.snapshot.current_queue_index == Some(1)
+                && engine.snapshot.position >= millis(1_500)
+        });
+        let buffers = output.lock().unwrap().clone();
+        // The second track's buffers start where the stream time goes back.
+        let switch = buffers
+            .windows(2)
+            .position(|pair| pair[1].stream_time < pair[0].stream_time)
+            .expect("the output played into the second track")
+            + 1;
+        assert_full_ac3_level(
+            "the first track",
+            loudest_within(&buffers[..switch], millis(500)..millis(1_900)),
+        );
+        assert_full_ac3_level(
+            "the second track",
+            loudest_within(&buffers[switch..], millis(200)..millis(1_400)),
+        );
     }
 
     #[test]

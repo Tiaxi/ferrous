@@ -15,8 +15,8 @@ use super::track_io::stamp_of;
 use super::waveform_prefill::PrefillSlot;
 use crate::playback::file_source::FileSource;
 use crate::raw_audio::{
-    audio_byte_range_of, conceal_damaged_ac3_frames, configure_raw_surround_decoding,
-    filter_raw_surround_source_to,
+    audio_byte_range_of, configure_raw_surround_decoding, filter_raw_surround_source_to,
+    prepare_ac3_frames,
 };
 
 /// The frames assumed for a file that tells no duration, which only sizes
@@ -84,7 +84,7 @@ where
     gst::init()?;
     configure_raw_surround_decoding();
     let pipeline = gst::Pipeline::new();
-    conceal_damaged_ac3_frames(pipeline.upcast_ref());
+    prepare_ac3_frames(pipeline.upcast_ref());
     decode_overview_in(
         path,
         pipeline,
@@ -225,7 +225,7 @@ pub(super) fn overview_failing_after(
     gst::init().expect("gstreamer initialization");
     configure_raw_surround_decoding();
     let pipeline = gst::Pipeline::new();
-    conceal_damaged_ac3_frames(pipeline.upcast_ref());
+    prepare_ac3_frames(pipeline.upcast_ref());
     let end_ns = Arc::new(AtomicU64::new(0));
     let (failed_tx, failed_rx) = crossbeam_channel::bounded(1);
     let passed_end_ns = Arc::clone(&end_ns);
@@ -434,6 +434,29 @@ mod tests {
     }
 
     #[test]
+    fn the_overview_has_the_peaks_of_ac3_at_its_full_dynamic_range() {
+        use crate::raw_audio::{with_dynamic_range, COMPRESSING_DYNRNG, TEST_AC3};
+
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-waveform-dynamic-range-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let stream = TEST_AC3.repeat(2);
+        let plain = dir.join("plain.ac3");
+        let compressed = dir.join("compressed.ac3");
+        std::fs::write(&plain, &stream).expect("write fixture");
+        std::fs::write(&compressed, with_dynamic_range(&stream, COMPRESSING_DYNRNG))
+            .expect("write fixture");
+        let (expected, _) = complete_overview(overview_updates(&plain, 64));
+        let (peaks, _) = complete_overview(overview_updates(&compressed, 64));
+        std::fs::remove_dir_all(&dir).expect("remove fixtures");
+        let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+        assert!((loudest - 0.125).abs() < 0.01, "peak {loudest}");
+        assert_eq!(peaks, expected);
+    }
+
+    #[test]
     fn the_overview_decodes_no_damaged_ac3_frame() {
         use crate::raw_audio::{
             ac3_frame_is_damaged, record_decoder_input, with_damaged_frames, SEAMED_FRAME,
@@ -449,7 +472,7 @@ mod tests {
         let stream = with_damaged_frames(TEST_AC3, &[SEAMED_FRAME]);
         std::fs::write(&path, stream).expect("write fixture");
         let pipeline = gst::Pipeline::new();
-        conceal_damaged_ac3_frames(pipeline.upcast_ref());
+        prepare_ac3_frames(pipeline.upcast_ref());
         let frames = record_decoder_input(pipeline.upcast_ref());
         let mut complete = false;
         let result = decode_overview_in(

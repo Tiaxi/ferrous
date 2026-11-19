@@ -5,6 +5,8 @@
 
 #[cfg(any(feature = "gst", test))]
 mod ac3_conceal;
+#[cfg(any(feature = "gst", test))]
+mod ac3_dynamic_range;
 mod apev2;
 #[cfg(any(feature = "gst", test))]
 mod bitstream;
@@ -20,10 +22,11 @@ use std::path::Path;
 
 #[cfg(all(test, feature = "gst"))]
 pub(crate) use ac3_conceal::{
-    ac3_frame_is_damaged, record_decoder_input, with_damaged_frames, SEAMED_FRAME, TEST_AC3_FRAMES,
+    ac3_frame_is_damaged, record_decoder_input, with_damaged_frames, with_dynamic_range,
+    COMPRESSING_DYNRNG, SEAMED_FRAME, TEST_AC3_FRAMES,
 };
 #[cfg(feature = "gst")]
-pub(crate) use ac3_conceal::{conceal_and_report_damaged_ac3_frames, conceal_damaged_ac3_frames};
+pub(crate) use ac3_conceal::{prepare_ac3_frames, prepare_and_report_ac3_frames};
 #[cfg(test)]
 pub(crate) use apev2::{build_test_apev2_tag, write_test_apev2_file};
 pub(crate) use apev2::{

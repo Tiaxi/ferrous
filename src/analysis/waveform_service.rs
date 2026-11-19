@@ -1469,6 +1469,40 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "gst")]
+    #[test]
+    fn ac3_windows_show_its_full_dynamic_range_at_every_zoom() {
+        use crate::raw_audio::{with_dynamic_range, COMPRESSING_DYNRNG, TEST_AC3};
+
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-waveform-windows-dynamic-range-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let stream = TEST_AC3.repeat(4);
+        let plain = dir.join("plain.ac3");
+        let compressed = dir.join("compressed.ac3");
+        std::fs::write(&plain, &stream).expect("write fixture");
+        std::fs::write(&compressed, with_dynamic_range(&stream, COMPRESSING_DYNRNG))
+            .expect("write fixture");
+        // Zoomed in after the start, which the session seeks to, at sample
+        // resolution, and the whole track from the start.
+        for (start, end, points) in [(2.5, 3.0, 2_048), (1.0, 1.02, 960), (0.0, 4.0, 64)] {
+            let expected = decode_waveform_window(&plain, start, end, points).expect("window");
+            let window = decode_waveform_window(&compressed, start, end, points).expect("window");
+            let peak = window
+                .extrema
+                .iter()
+                .fold(0.0_f32, |peak, value| peak.max(value.abs()));
+            assert!(
+                (peak - 0.125).abs() < 0.01,
+                "{start} s to {end} s: peak {peak}"
+            );
+            assert_eq!(window.extrema, expected.extrema, "{start} s to {end} s");
+        }
+        std::fs::remove_dir_all(&dir).expect("remove fixtures");
+    }
+
     #[test]
     fn the_level_meter_is_not_blocked_by_a_detail_decode_in_progress() {
         // Twenty seconds: the detail view decodes all of it, tile by tile.

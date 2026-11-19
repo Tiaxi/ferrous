@@ -558,8 +558,8 @@ mod gst_tests {
     use crate::playback::InputSwitches;
     use crate::raw_audio::{build_test_apev2_tag, test_path, TEST_AC3, TEST_DTS};
     use crate::raw_audio::{
-        conceal_damaged_ac3_frames, configure_raw_surround_decoding,
-        ripped_surround_bytes_after_junk, with_damaged_frames, SEAMED_FRAME,
+        configure_raw_surround_decoding, prepare_ac3_frames, ripped_surround_bytes_after_junk,
+        with_damaged_frames, SEAMED_FRAME,
     };
     use gst::prelude::*;
     use gstreamer as gst;
@@ -681,7 +681,7 @@ mod gst_tests {
                 .build()
                 .expect("playbin3");
             install_raw_surround_source_probe(&playbin);
-            conceal_damaged_ac3_frames(&playbin);
+            prepare_ac3_frames(&playbin);
             let activation = SourceActivation::connect(&playbin);
             let switches = Arc::<InputSwitches>::default();
             switches.connect(&playbin);

@@ -7462,6 +7462,40 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "gst")]
+    #[test]
+    fn ac3_columns_show_its_full_dynamic_range_from_the_start_and_after_a_seek() {
+        use crate::raw_audio::{with_dynamic_range, COMPRESSING_DYNRNG, TEST_AC3};
+
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-session-dynamic-range-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let stream = TEST_AC3.repeat(4);
+        let plain = dir.join("plain.ac3");
+        let compressed = dir.join("compressed.ac3");
+        std::fs::write(&plain, &stream).expect("write fixture");
+        std::fs::write(&compressed, with_dynamic_range(&stream, COMPRESSING_DYNRNG))
+            .expect("write fixture");
+        for mode in [
+            SpectrogramDisplayMode::Rolling,
+            SpectrogramDisplayMode::Centered,
+        ] {
+            for start in [0.0, 2.0] {
+                let session = |path: &Path| timing_session(path, 512, 1.0, mode, start);
+                let expected = columns_until_eof(vec![session(&plain)]);
+                let columns = columns_until_eof(vec![session(&compressed)]);
+                assert!(!columns.is_empty(), "{mode:?} from {start} s");
+                assert!(
+                    columns == expected,
+                    "{mode:?} from {start} s: the columns differ"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).expect("remove fixtures");
+    }
+
     #[test]
     fn an_mp3_click_shows_at_its_playback_time_after_the_encoder_delay_is_trimmed() {
         // A click at 0.2 s of a 0.4 s 44.1 kHz MP3 with a LAME tag, which

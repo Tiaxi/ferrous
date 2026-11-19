@@ -23,8 +23,8 @@ use gstreamer as gst;
 use crate::raw_audio::is_raw_surround_file;
 #[cfg(feature = "gst")]
 use crate::raw_audio::{
-    conceal_damaged_ac3_frames, configure_raw_surround_decoding, estimate_duration_from_bitstream,
-    filter_raw_surround_source, index_raw_ac3_frames, is_dts_file,
+    configure_raw_surround_decoding, estimate_duration_from_bitstream, filter_raw_surround_source,
+    index_raw_ac3_frames, is_dts_file, prepare_ac3_frames,
 };
 #[cfg(feature = "gst")]
 use gstreamer_app as gst_app;
@@ -797,7 +797,7 @@ fn open_gstreamer_pipeline(
     path: &Path,
     pipeline: gst::Pipeline,
 ) -> Option<(AudioFrameSource, u64, usize, TrackLength)> {
-    conceal_damaged_ac3_frames(pipeline.upcast_ref());
+    prepare_ac3_frames(pipeline.upcast_ref());
     // Seeks in a raw AC3 file read from the second before their target
     // rather than from the last frame read.
     index_raw_ac3_frames(pipeline.upcast_ref());
@@ -1720,6 +1720,63 @@ mod tests {
         std::fs::remove_file(&path).expect("remove fixture");
         assert_eq!(samples.len(), TEST_AC3_FRAMES * 1536);
         assert_no_burst("analysis", &samples);
+    }
+
+    /// The frames of `path` that analysis decodes, from the start or from
+    /// a seek to `seek_frame`: the first of them, and their samples. How
+    /// they come in chunks depends on timing.
+    #[cfg(feature = "gst")]
+    fn analysis_decode(path: &Path, seek_frame: Option<u64>) -> (Option<u64>, Vec<f32>) {
+        use std::time::{Duration, Instant};
+
+        let (mut source, rate, _, _) = open_audio_file(path).expect("open");
+        if let Some(frame) = seek_frame {
+            source
+                .seek_to_frame(frame, u32::try_from(rate).expect("rate"))
+                .expect("seek");
+        }
+        let (mut first_frame, mut samples) = (None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match source.next_frames().expect("decode") {
+                AudioRead::Frames(frames) => {
+                    first_frame = first_frame.or(Some(frames.first_frame));
+                    samples.extend(frames.samples);
+                }
+                AudioRead::Pending => assert!(Instant::now() < deadline, "stalled"),
+                AudioRead::Eof => break,
+            }
+        }
+        (first_frame, samples)
+    }
+
+    #[cfg(feature = "gst")]
+    #[test]
+    fn ac3_is_analysed_at_its_full_dynamic_range_from_the_start_and_after_a_seek() {
+        use crate::raw_audio::{with_dynamic_range, COMPRESSING_DYNRNG, TEST_AC3};
+
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-analysis-dynamic-range-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let stream = TEST_AC3.repeat(4);
+        let plain = dir.join("plain.ac3");
+        let compressed = dir.join("compressed.ac3");
+        std::fs::write(&plain, &stream).expect("write fixture");
+        std::fs::write(&compressed, with_dynamic_range(&stream, COMPRESSING_DYNRNG))
+            .expect("write fixture");
+        for seek_frame in [None, Some(96_000)] {
+            let expected = analysis_decode(&plain, seek_frame);
+            let decoded = analysis_decode(&compressed, seek_frame);
+            let peak = decoded
+                .1
+                .iter()
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+            assert!((peak - 0.125).abs() < 0.01, "{seek_frame:?}: peak {peak}");
+            assert!(decoded == expected, "{seek_frame:?}: the samples differ");
+        }
+        std::fs::remove_dir_all(&dir).expect("remove fixtures");
     }
 
     #[test]
