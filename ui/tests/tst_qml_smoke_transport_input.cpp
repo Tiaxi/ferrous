@@ -2852,11 +2852,7 @@ void TransportInputSmokeTest::resetZoomResetsOnlyTheShownPlotsZoom() {
     };
 
     // The main window.
-    // The queue has focus: a focused library takes F for its type-ahead.
-    auto *queueView = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
-    QVERIFY(queueView != nullptr);
-    queueView->forceActiveFocus(Qt::TabFocusReason);
-    QTRY_VERIFY(queueView->hasActiveFocus());
+    window->contentItem()->forceActiveFocus();
     check(window, "main window");
 
     // The viewer inside the main window.

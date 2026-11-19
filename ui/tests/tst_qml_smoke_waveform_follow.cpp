@@ -18,6 +18,7 @@ private slots:
     void middleDragDetachesAndPans();
     void middleClickResetsNeitherVisualizationsZoom();
     void wheelZoomsAboutThePlayheadOrThePointer();
+    void zoomOutHandoffKeepsTheDetachedView();
     void detachedViewGlidesBackFromItsReattachPoint_data();
     void detachedViewGlidesBackFromItsReattachPoint();
     void playheadPastTheReattachPointLeavesTheView_data();
@@ -177,6 +178,11 @@ void WaveformFollowSmokeTest::middleDragDetachesAndPans() {
     WaveformEditorItem item;
     TestTime time;
     playZoomed(item, time, 8.0, 30.0);
+    // A track whose detail has not come, and its overview.
+    item.setSourcePath(QStringLiteral("/fixture/pan.wav"));
+    item.setOverviewData(QByteArray(512, '\x40'));
+    item.setOverviewCoverageSeconds(kDuration);
+    item.setOverviewComplete(true);
     QSignalSpy detachedChanges(&item, &WaveformEditorItem::detachedChanged);
     const double span = kDuration / 8.0;
     const auto following = viewOf(item);
@@ -200,11 +206,26 @@ void WaveformFollowSmokeTest::middleDragDetachesAndPans() {
     QCOMPARE(panned.second - panned.first, span);
     QCOMPARE(item.zoomLevel(), 8.0);
 
+    // A drag past the cache draws it again at once, from the overview,
+    // rather than leave the view empty until the detail comes.
+    {
+        QImage image(static_cast<int>(kWidth), 120, QImage::Format_ARGB32_Premultiplied);
+        QPainter painter(&image);
+        item.paint(&painter);
+    }
+    QVERIFY(!item.m_cacheDirty);
+    // A span back: the cache of playback reaches a quarter of one behind.
+    middleDrag(item, 0.0, kWidth);
+    QVERIFY(item.m_cacheDirty);
+    middleDrag(item, kWidth, 0.0);
+    const auto pannedBack = viewOf(item);
+    QVERIFY2(std::abs(pannedBack.first - panned.first) < columnOf(item), qPrintable(describe(pannedBack)));
+
     // Playback goes on; the view stays.
     for (int step = 0; step < 10; ++step) {
         time.advance(0.1);
         frame(item);
-        QVERIFY(sameView(viewOf(item), panned));
+        QVERIFY(sameView(viewOf(item), pannedBack));
     }
     QVERIFY(item.positionSeconds() > 30.9);
     QVERIFY(item.detached());
@@ -302,6 +323,68 @@ void WaveformFollowSmokeTest::wheelZoomsAboutThePlayheadOrThePointer() {
     QVERIFY2(std::abs(timeAt(target, 300.0) - pointed) <= (target.second - target.first) / kWidth,
              qPrintable(describe(target)));
     QVERIFY(item.detached());
+}
+
+// A zoom out that waits for the wider view's detail keeps showing the
+// detached view until it is handed over: the playhead past the re-attach
+// point of the wider view leaves it where it is, and a zoom out to the
+// whole track shows the detached view until the whole track shows.
+void WaveformFollowSmokeTest::zoomOutHandoffKeepsTheDetachedView() {
+    WaveformEditorItem item;
+    TestTime time;
+    playZoomed(item, time, 8.0, 30.0);
+    item.setSourcePath(QStringLiteral("/fixture/handoff.wav"));
+    item.setOverviewData(QByteArray(512, '\x40'));
+    item.setOverviewCoverageSeconds(kDuration);
+    item.setOverviewComplete(true);
+    const auto draw = [&item]() {
+        QImage image(static_cast<int>(kWidth), 120, QImage::Format_ARGB32_Premultiplied);
+        QPainter painter(&image);
+        item.paint(&painter);
+    };
+    const auto commitHandoff = [&item]() {
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.invalidateCacheLocked();
+        }
+        item.publishDetached();
+    };
+
+    // The playhead at 82 %, short of the re-attach point; zoomed out about
+    // 95 %, it is past the wider view's.
+    middleDrag(item, 0.0, 0.32 * kWidth);
+    QVERIFY(std::abs(playheadFraction(item) - 0.82) < 2.0 / kWidth);
+    draw();
+    const auto shown = viewOf(item);
+    wheelAt(item, 0.95 * kWidth, -240);
+    QVERIFY(item.m_zoomOutHandoffPending);
+    const auto target = targetViewOf(item);
+    QVERIFY((item.positionSeconds() - target.first) / (target.second - target.first) > 0.85);
+    time.advance(0.05);
+    frame(item);
+    QVERIFY(item.detached());
+    QVERIFY(sameView(viewOf(item), shown));
+    QVERIFY(sameView(targetViewOf(item), target));
+    commitHandoff();
+    for (int step = 0; step < 20; ++step) {
+        time.advance(0.1);
+        frame(item);
+    }
+    QVERIFY(item.detached());
+    QVERIFY(sameView(viewOf(item), target));
+
+    // Out to the whole track: the detached view shows until it is handed
+    // over, and then there is nothing to follow.
+    draw();
+    const auto before = viewOf(item);
+    wheelAt(item, 200.0, -120 * 12);
+    QCOMPARE(item.zoomLevel(), 1.0);
+    QVERIFY(item.m_zoomOutHandoffPending);
+    QVERIFY(item.detached());
+    QVERIFY(sameView(viewOf(item), before));
+    commitHandoff();
+    QVERIFY(!item.detached());
+    QCOMPARE(viewOf(item), std::make_pair(0.0, kDuration));
 }
 
 void WaveformFollowSmokeTest::detachedViewGlidesBackFromItsReattachPoint_data() {

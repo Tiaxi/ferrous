@@ -490,11 +490,11 @@ private:
     // playhead reaches its next column, so that the frames between are
     // the same.
     double followingStartLocked(double span, double position) const;
-    // How a view of `span` seconds is placed with the playhead at
-    // `position`. A detached view whose playhead has reached its re-attach
-    // point glides, though the state still says detached until
-    // settleFollowLocked.
-    FollowState followStateLocked(double span, double position) const;
+    // How the view at `zoomLevel` is placed with the playhead at
+    // `position`. A detached view whose playhead has reached the re-attach
+    // point of the view at the zoom asked for glides, though the state
+    // still says detached until settleFollowLocked.
+    FollowState followStateLocked(double zoomLevel, double position) const;
     // Where a detached view of `span` seconds starts, before it is kept
     // within the track: on the track's grid of device columns, with
     // m_anchorSeconds at m_anchorFraction of its width.
