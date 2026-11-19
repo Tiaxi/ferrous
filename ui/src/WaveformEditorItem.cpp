@@ -1112,8 +1112,6 @@ bool WaveformEditorItem::startDetailRequest() {
             updatePictureReady();
             return;
         }
-        // A zoom out handed over shows the zoom: see publishDetached.
-        publishDetached();
         if (channelsChanged) emit channelCountChanged();
         if (rateChanged) emit sampleRateHzChanged();
         if (zoomChanged) emit zoomLevelChanged();
@@ -1259,16 +1257,16 @@ double glideEaseSlope(double progress) {
 
 } // namespace
 
-WaveformEditorItem::FollowState WaveformEditorItem::followStateLocked(
-    double zoomLevel, double position) const {
+WaveformEditorItem::FollowState WaveformEditorItem::followStateLocked(double position) const {
     FollowState state{m_follow, m_glideFrom};
     // Purely from the playhead: the frame that finds it at the re-attach
-    // point of the view at the zoom asked for glides, whenever the state
-    // takes that in. The view a zoom out still shows while it is handed
-    // over stays until then.
-    if (state.mode == Follow::Detached && m_reattachArmed
-        && std::abs(zoomLevel - m_zoomLevel) < 0.0001) {
-        const double reattach = reattachSecondsLocked(visibleSpanForZoomLocked(m_zoomLevel));
+    // point glides, whenever the state takes that in. The point is the
+    // view's at the zoom asked for, against which the view was armed; while
+    // a zoom out is handed over, the view still shown glides as its own is
+    // reached too, so the playhead never leaves it. Every zoom glides from
+    // the same point.
+    if (state.mode == Follow::Detached && m_reattachArmed) {
+        const double reattach = reattachPointLocked();
         if (position >= reattach) state = {Follow::Gliding, reattach};
     }
     if (state.mode == Follow::Gliding
@@ -1283,6 +1281,13 @@ double WaveformEditorItem::detachedStartLocked(double span) const {
     const double start = m_anchorSeconds - m_anchorFraction * span;
     // On the grid playback tiles, sample chunks and the cache keep to.
     return column > 0.0 ? std::round(start / column) * column : start;
+}
+
+double WaveformEditorItem::reattachPointLocked() const {
+    const double reattach = reattachSecondsLocked(visibleSpanForZoomLocked(m_zoomLevel));
+    return m_zoomOutHandoffPending
+        ? std::min(reattach, reattachSecondsLocked(visibleSpanForZoomLocked(m_presentedZoomLevel)))
+        : reattach;
 }
 
 double WaveformEditorItem::reattachSecondsLocked(double span) const {
@@ -1307,7 +1312,7 @@ double WaveformEditorItem::glidingStartLocked(
 }
 
 double WaveformEditorItem::viewSpeedLocked(double span, double position) const {
-    const FollowState state = followStateLocked(m_presentedZoomLevel, position);
+    const FollowState state = followStateLocked(position);
     switch (state.mode) {
     case Follow::Detached:
         return 0.0;
@@ -1331,7 +1336,7 @@ void WaveformEditorItem::settleFollowLocked(qint64 nowNs) {
         reattachLocked();
         return;
     }
-    const FollowState state = followStateLocked(m_presentedZoomLevel, displayedPositionSecondsLocked(nowNs));
+    const FollowState state = followStateLocked(displayedPositionSecondsLocked(nowNs));
     if (state.mode == Follow::Playhead) {
         reattachLocked();
     } else if (state.mode == Follow::Gliding) {
@@ -1356,11 +1361,7 @@ void WaveformEditorItem::detachAtLocked(qint64 nowNs, double fraction) {
 void WaveformEditorItem::armReattachLocked(qint64 nowNs) {
     // A view the user still drags stays where it is put.
     if (m_follow != Follow::Detached || m_panning) return;
-    // Against the view at the zoom asked for, which a zoom out hands over
-    // to: see followStateLocked.
-    const double span = visibleSpanForZoomLocked(m_zoomLevel);
-    m_reattachArmed = span > 0.0
-        && displayedPositionSecondsLocked(nowNs) < reattachSecondsLocked(span);
+    m_reattachArmed = displayedPositionSecondsLocked(nowNs) < reattachPointLocked();
 }
 
 void WaveformEditorItem::reattachLocked() {
@@ -1374,7 +1375,10 @@ void WaveformEditorItem::publishDetached() {
     {
         QMutexLocker lock(&m_stateMutex);
         settleFollowLocked(m_nowNs());
-        detached = m_follow == Follow::Detached;
+        // A zoom out to the whole track has nothing to follow, though the
+        // view it hands over from shows until then.
+        detached = m_follow == Follow::Detached
+            && visibleSpanForZoomLocked(m_zoomLevel) < m_durationSeconds;
     }
     if (m_detached == detached) return;
     m_detached = detached;
@@ -1407,7 +1411,7 @@ std::pair<double, double> WaveformEditorItem::visibleRangeForZoomLocked(
     const double span = visibleSpanForZoomLocked(zoomLevel);
     if (span >= m_durationSeconds) return {0.0, m_durationSeconds};
     const double position = displayedPositionSecondsLocked(nowNs);
-    const FollowState state = followStateLocked(zoomLevel, position);
+    const FollowState state = followStateLocked(position);
     double start = 0.0;
     switch (state.mode) {
     case Follow::Detached:
@@ -2019,7 +2023,7 @@ double WaveformEditorItem::frameChangeSecondsLocked(
     // the playhead reaches its next column of the track.
     const bool wholeTrack = span >= m_durationSeconds * 0.9999;
     const FollowState follow = wholeTrack
-        ? FollowState{} : followStateLocked(m_presentedZoomLevel, position);
+        ? FollowState{} : followStateLocked(position);
     if (follow.mode == Follow::Gliding
         && glidingStartLocked(span, position, follow.glideFrom) < m_durationSeconds - span) {
         // Gliding back, the view moves on by more than the playhead does,
@@ -2212,6 +2216,8 @@ bool WaveformEditorItem::deferredZoomDrawnByPlaybackLocked(qint64 nowNs) const {
 
 void WaveformEditorItem::invalidateCacheLocked() {
     if (m_zoomOutHandoffPending) {
+        // A glide the view still shown began goes on in the zoom.
+        settleFollowLocked(m_nowNs());
         const auto [targetStart, targetEnd] = visibleRangeForZoomLocked(
             m_zoomLevel);
         m_presentedZoomLevel = m_zoomLevel;
@@ -2355,6 +2361,8 @@ bool WaveformEditorItem::advanceStagedCacheLocked(qint64 nowNs) {
         m_cacheShowsWaveform = true;
         m_cacheWaveformProvisional = false;
         if (commitsDeferredZoom) {
+            // A glide the view still shown began goes on in the zoom.
+            settleFollowLocked(nowNs);
             m_presentedZoomLevel = m_zoomLevel;
             m_zoomOutHandoffPending = false;
             m_zoomFallbackToOverview = false;
@@ -2405,8 +2413,6 @@ void WaveformEditorItem::queueGuiContinuationFromPaint(
             if (m_samplePointsNotificationPending.exchange(
                     false, std::memory_order_acq_rel)) {
                 emit samplePointsVisibleChanged();
-                // A zoom out to the whole track shows: nothing to follow.
-                publishDetached();
             }
             if (m_guiRepaintPending.exchange(false, std::memory_order_acq_rel)) {
                 update();

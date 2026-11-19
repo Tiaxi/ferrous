@@ -373,18 +373,54 @@ void WaveformFollowSmokeTest::zoomOutHandoffKeepsTheDetachedView() {
     QVERIFY(item.detached());
     QVERIFY(sameView(viewOf(item), target));
 
-    // Out to the whole track: the detached view shows until it is handed
-    // over, and then there is nothing to follow.
+    // Out to the whole track: nothing to follow, though the detached view
+    // shows until it is handed over, here by a switch of the lanes.
     draw();
     const auto before = viewOf(item);
     wheelAt(item, 200.0, -120 * 12);
     QCOMPARE(item.zoomLevel(), 1.0);
     QVERIFY(item.m_zoomOutHandoffPending);
-    QVERIFY(item.detached());
+    QVERIFY(!item.detached());
     QVERIFY(sameView(viewOf(item), before));
-    commitHandoff();
+    item.setViewMode(1);
+    QVERIFY(!item.m_zoomOutHandoffPending);
     QVERIFY(!item.detached());
     QCOMPARE(viewOf(item), std::make_pair(0.0, kDuration));
+
+    // A playhead that reaches the re-attach point of the view still shown
+    // glides it, though the wider view is short of its own; the glide goes
+    // on in the wider view once it shows, the playhead where it was.
+    item.setViewMode(0);
+    item.setZoomLevel(8.0);
+    QVERIFY(!item.detached());
+    middleDrag(item, 0.0, 0.34 * kWidth);
+    QVERIFY(std::abs(playheadFraction(item) - 0.84) < 2.0 / kWidth);
+    draw();
+    wheelAt(item, 0.0, -120);
+    QVERIFY(item.m_zoomOutHandoffPending);
+    const auto wider = targetViewOf(item);
+    QVERIFY((item.positionSeconds() - wider.first) / (wider.second - wider.first) < 0.7);
+    for (int step = 0; step < 60; ++step) {
+        time.advance(1.0 / 240.0);
+        frame(item);
+        const auto view = viewOf(item);
+        QVERIFY2(item.positionSeconds() >= view.first && item.positionSeconds() <= view.second,
+                 qPrintable(describe(view)));
+        QVERIFY(playheadFraction(item) <= 0.85 + 2.0 / kWidth);
+    }
+    QVERIFY(!item.detached());
+    const double fraction = playheadFraction(item);
+    commitHandoff();
+    QVERIFY(!item.m_zoomOutHandoffPending);
+    QCOMPARE(item.m_follow, WaveformEditorItem::Follow::Gliding);
+    QVERIFY2(std::abs(playheadFraction(item) - fraction) < 2.0 / kWidth,
+             qPrintable(QStringLiteral("%1 then %2").arg(fraction).arg(playheadFraction(item))));
+    for (int step = 0; step < 240 * 3; ++step) {
+        time.advance(1.0 / 240.0);
+        frame(item);
+    }
+    QCOMPARE(item.m_follow, WaveformEditorItem::Follow::Playhead);
+    QVERIFY(sameView(viewOf(item), followingViewOf(item)));
 }
 
 void WaveformFollowSmokeTest::detachedViewGlidesBackFromItsReattachPoint_data() {
