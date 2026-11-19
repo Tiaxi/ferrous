@@ -20,10 +20,11 @@ double ViewAutoscroll::viewsPerSecond(double offset, double plotWidth) {
     if (!std::isfinite(beyond) || beyond <= 0.0) {
         return 0.0;
     }
-    // Half the plot's width from the click, past the dead zone, is one view
-    // a second.
+    // Half the plot's width from the click, past the dead zone, is the
+    // reference distance: kEdgeViewsPerSecond there.
     const double reference = std::max(1.0, 0.5 * plotWidth - kDeadZonePixels);
-    return std::copysign(std::min(kMaxViewsPerSecond, beyond / reference), offset);
+    const double speed = kEdgeViewsPerSecond * std::pow(beyond / reference, kCurveExponent);
+    return std::copysign(std::min(kMaxViewsPerSecond, speed), offset);
 }
 
 bool ViewAutoscroll::isClick(QPointF pressed, QPointF released) {
@@ -63,7 +64,6 @@ void ViewAutoscroll::start(QPointF position) {
     m_active = true;
     m_originScene = m_plot->mapToScene(position);
     m_pointerScene = m_originScene;
-    m_pointerInWindow = true;
     m_lastFrameNs = 0;
     m_swallowMiddleRelease = false;
     watchWindow(m_plot->window());
@@ -92,7 +92,7 @@ void ViewAutoscroll::stop() {
 }
 
 double ViewAutoscroll::currentViewsPerSecond() const {
-    if (!m_active || !m_pointerInWindow) {
+    if (!m_active) {
         return 0.0;
     }
     return viewsPerSecond(m_pointerScene.x() - m_originScene.x(), m_plot->width());
@@ -110,13 +110,11 @@ void ViewAutoscroll::resume() {
 
 void ViewAutoscroll::pointerMoved(QPointF scenePosition) {
     m_pointerScene = scenePosition;
-    m_pointerInWindow = true;
-    wake();
-}
-
-void ViewAutoscroll::setPointerInWindow(bool inWindow) {
-    m_pointerInWindow = inWindow;
-    // Out of the window, the view holds still from the next frame on.
+    if (m_window != nullptr) {
+        // Off the window, the speed is the one at its edge.
+        m_pointerScene.setX(
+            std::clamp(m_pointerScene.x(), 0.0, static_cast<double>(m_window->width())));
+    }
     wake();
 }
 
@@ -198,11 +196,6 @@ bool ViewAutoscroll::eventFilter(QObject *watched, QEvent *event) {
         if (m_active) {
             // Where it came back, which may be the other side of the click.
             pointerMoved(static_cast<QEnterEvent *>(event)->scenePosition());
-        }
-        break;
-    case QEvent::Leave:
-        if (m_active) {
-            setPointerInWindow(false);
         }
         break;
     case QEvent::MouseButtonPress:

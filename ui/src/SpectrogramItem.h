@@ -681,9 +681,13 @@ private:
     void noteOwnSeek(double seconds);
     // The fastest autoscroll moves the view, in seconds of the track a
     // second, whatever its width: the analysis decodes the view where it
-    // goes, and keeps up with this, with the columns still to come drawn as
-    // missing meanwhile.
-    static constexpr double kAutoscrollMaxSecondsPerSecond = 40.0;
+    // goes, with the columns still to come drawn as missing meanwhile. It
+    // throttles none of ViewAutoscroll::kEdgeViewsPerSecond at the default
+    // zoom for a view up to 50 s wide, a plot of about 2,150 px, and the
+    // centered decode of a 44.1 kHz stereo FLAC or MP3 file kept every
+    // column of a view scrolling at this pace on a desktop CPU, and lagged
+    // only from about 250 s a second on.
+    static constexpr double kAutoscrollMaxSecondsPerSecond = 200.0;
     // Autoscroll, the plot's second way to move a centered view, beside the
     // middle-drag: a middle click that did not drag, at `position`, starts
     // it on a centered view that does not show the whole track, which it

@@ -32,6 +32,7 @@ private slots:
     void followPlayheadReattachesAtOnce();
     void gstreamerSeeksAndTrackChangesBringTheViewBack();
     void visibleRangeIsTheViewAFrameShows();
+    void autoscrollSpeedRisesSteeplyWithTheDistance();
     void autoscrollMovesByThePointersDistance();
     void autoscrollOfTheWholeTrackDoesNothing();
     void autoscrollArmsTheReattachPointWhenItStops_data();
@@ -967,11 +968,47 @@ void WaveformFollowSmokeTest::gstreamerSeeksAndTrackChangesBringTheViewBack() {
     QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
 }
 
+// The speed curve: none within the dead zone, either side, then rising
+// as the square of the distance past it, kEdgeViewsPerSecond at half the
+// plot's width from the click, on past the plot up to kMaxViewsPerSecond,
+// and towards the side the pointer is on.
+void WaveformFollowSmokeTest::autoscrollSpeedRisesSteeplyWithTheDistance() {
+    using A = ViewAutoscroll;
+    constexpr double kPlot = 1'000.0;
+    const double reach = kPlot / 2.0 - A::kDeadZonePixels;
+    QCOMPARE(A::viewsPerSecond(0.0, kPlot), 0.0);
+    QCOMPARE(A::viewsPerSecond(A::kDeadZonePixels, kPlot), 0.0);
+    QCOMPARE(A::viewsPerSecond(-A::kDeadZonePixels, kPlot), 0.0);
+    QVERIFY(A::viewsPerSecond(A::kDeadZonePixels + 1.0, kPlot) > 0.0);
+    QVERIFY(A::viewsPerSecond(-A::kDeadZonePixels - 1.0, kPlot) < 0.0);
+    // Four views a second at the plot's edge, from a click in its middle.
+    QCOMPARE(A::kEdgeViewsPerSecond, 4.0);
+    QVERIFY(std::abs(A::viewsPerSecond(kPlot / 2.0, kPlot) - 4.0) < 1e-12);
+    QVERIFY(std::abs(A::viewsPerSecond(-kPlot / 2.0, kPlot) + 4.0) < 1e-12);
+    // Fine near the click: a quarter of that half way out.
+    QVERIFY(std::abs(A::viewsPerSecond(A::kDeadZonePixels + reach / 2.0, kPlot) - 1.0) < 1e-12);
+    // On past the plot, up to the cap, which it keeps.
+    QVERIFY(A::viewsPerSecond(kPlot * 0.6, kPlot) > 4.0);
+    QVERIFY(A::viewsPerSecond(kPlot * 0.6, kPlot) < A::kMaxViewsPerSecond);
+    QCOMPARE(A::viewsPerSecond(kPlot * 5.0, kPlot), A::kMaxViewsPerSecond);
+    QCOMPARE(A::viewsPerSecond(-kPlot * 5.0, kPlot), -A::kMaxViewsPerSecond);
+    // Monotonic, and odd.
+    double last = 0.0;
+    for (double offset = 0.0; offset <= kPlot * 2.0; offset += 0.5) {
+        const double speed = A::viewsPerSecond(offset, kPlot);
+        QVERIFY2(speed >= last, qPrintable(QString::number(offset)));
+        QCOMPARE(A::viewsPerSecond(-offset, kPlot), -speed);
+        last = speed;
+    }
+    QCOMPARE(last, A::kMaxViewsPerSecond);
+    // Nothing for a distance that is not a number.
+    QCOMPARE(A::viewsPerSecond(std::nan(""), kPlot), 0.0);
+}
+
 // Autoscroll after a middle click moves the view by the pointer's distance
-// from the click: none within the dead zone, then in proportion to the
-// distance past it, a view a second at half the plot's width, up to two,
-// right of the click towards the end of the track and left of it towards
-// the start. It asks for frames only while the view moves.
+// from the click (see autoscrollSpeedRisesSteeplyWithTheDistance), right
+// of the click towards the end of the track and left of it towards the
+// start. It asks for frames only while the view moves.
 void WaveformFollowSmokeTest::autoscrollMovesByThePointersDistance() {
     WaveformEditorItem item;
     TestTime time;
@@ -995,19 +1032,19 @@ void WaveformFollowSmokeTest::autoscrollMovesByThePointersDistance() {
     }
     QCOMPARE(item.m_playbackFrameRequests, requests);
 
-    // Speed and direction against the distance: half a view a second half
-    // way to the plot's edge, one at its edge, two, at most, past it.
+    // Speed and direction against the distance: a view a second half way
+    // to the plot's edge, four at its edge, eight, at most, past it.
     const double reach = kWidth / 2.0 - ViewAutoscroll::kDeadZonePixels;
     struct Case { double x; double viewsPerSecond; };
-    for (const Case &c : {Case{200.0 + 12.0 + reach / 2.0, 0.5}, Case{400.0, 1.0},
-                          Case{0.0, -1.0}, Case{200.0 - 12.0 - reach / 2.0, -0.5},
-                          Case{2000.0, 2.0}, Case{-2000.0, -2.0}}) {
+    for (const Case &c : {Case{200.0 + 12.0 + reach / 2.0, 1.0}, Case{400.0, 4.0},
+                          Case{0.0, -4.0}, Case{200.0 - 12.0 - reach / 2.0, -1.0},
+                          Case{2000.0, 8.0}, Case{-2000.0, -8.0}}) {
         pointerAt(item, c.x);
         QVERIFY(std::abs(item.m_autoscroll.currentViewsPerSecond() - c.viewsPerSecond) < 1e-9);
         const auto before = viewOf(item);
-        autoscrollFor(item, time, 0.5);
+        autoscrollFor(item, time, 0.25);
         const double moved = viewOf(item).first - before.first;
-        QVERIFY2(std::abs(moved - c.viewsPerSecond * span * 0.5) <= column + 1e-9,
+        QVERIFY2(std::abs(moved - c.viewsPerSecond * span * 0.25) <= column + 1e-9,
                  qPrintable(QStringLiteral("%1 px: moved %2").arg(c.x).arg(moved)));
         QCOMPARE(viewOf(item).second - viewOf(item).first, span);
         QVERIFY(item.detached());
@@ -1020,8 +1057,8 @@ void WaveformFollowSmokeTest::autoscrollMovesByThePointersDistance() {
     QCOMPARE(viewOf(item).second, kDuration);
     QCOMPARE(item.m_autoscroll.m_lastFrameNs, qint64(0));
     pointerAt(item, 0.0);
-    autoscrollFor(item, time, 0.5);
-    QVERIFY(std::abs(viewOf(item).second - (kDuration - span * 0.5)) <= column + 1e-9);
+    autoscrollFor(item, time, 0.25);
+    QVERIFY(std::abs(viewOf(item).second - (kDuration - span)) <= column + 1e-9);
 
     // The wheel zooms about the pointer meanwhile, and autoscroll goes on
     // at the new zoom.
@@ -1112,9 +1149,10 @@ void WaveformFollowSmokeTest::autoscrollArmsTheReattachPointWhenItStops() {
     QVERIFY(item.detached());
     QCOMPARE(item.m_follow, WaveformEditorItem::Follow::Detached);
 
-    // A view's span on or back from there.
+    // A view's span on or back from there: four views a second at the
+    // plot's edge.
     pointerAt(item, pointer);
-    autoscrollFor(item, time, 1.0);
+    autoscrollFor(item, time, 0.25);
     QVERIFY(item.detached());
     item.m_autoscroll.stop();
     QCOMPARE(item.m_reattachArmed, glidesBack);
@@ -1250,20 +1288,40 @@ void WaveformFollowSmokeTest::autoscrollInAWindow() {
     QVERIFY(item->detached());
     QVERIFY(QGuiApplication::overrideCursor() != nullptr);
     QCOMPARE(QGuiApplication::overrideCursor()->shape(), Qt::SizeHorCursor);
-    // Right of the click and of the plot: the frames move the view on.
-    QTest::mouseMove(&window, QPoint(650, 80));
+    // Right of the click: the frames move the view on.
+    QTest::mouseMove(&window, QPoint(380, 80));
     QTRY_VERIFY_WITH_TIMEOUT(viewOf(*item).first > following.first + 1.0, 5000);
-    // Out of the window it holds still; back on the other side of the
-    // click, it scrolls that way at once.
+    const double leaving = item->m_autoscroll.currentViewsPerSecond();
+    QVERIFY(leaving > 0.0);
+    // Out of the window, whose Leave tells no position, it goes on at the
+    // speed it had where the pointer was last seen, with the frames alone
+    // and no more events, by whichever edge it left: here the bottom.
+    QTest::mouseMove(&window, QPoint(380, 199));
     QEvent leave(QEvent::Leave);
     QCoreApplication::sendEvent(&window, &leave);
-    QCOMPARE(item->m_autoscroll.currentViewsPerSecond(), 0.0);
+    QCOMPARE(item->m_autoscroll.currentViewsPerSecond(), leaving);
+    auto outside = viewOf(*item);
+    QTRY_VERIFY_WITH_TIMEOUT(viewOf(*item).first > outside.first + 1.0, 5000);
+    QCOMPARE(item->m_autoscroll.currentViewsPerSecond(), leaving);
+    // Back in on the other side of the click, it scrolls that way at once,
+    // and follows the pointer again.
     QEnterEvent enter(QPointF(20, 80), QPointF(20, 80), window.mapToGlobal(QPointF(20, 80)));
     QCoreApplication::sendEvent(&window, &enter);
     QVERIFY(item->m_autoscroll.currentViewsPerSecond() < 0.0);
-    QTest::mouseMove(&window, QPoint(650, 80));
+    const auto back = viewOf(*item);
+    QTRY_VERIFY_WITH_TIMEOUT(viewOf(*item).first < back.first - 1.0, 5000);
+    QTest::mouseMove(&window, QPoint(300, 80));
+    QCOMPARE(item->m_autoscroll.currentViewsPerSecond(), 0.0);
+    // A position past the window's edge, as a window may be told of, is
+    // that edge.
+    QMouseEvent past(QEvent::MouseMove, QPointF(5'000, 80), QPointF(5'000, 80),
+        window.mapToGlobal(QPointF(5'000, 80)), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(&window, &past);
+    QCOMPARE(item->m_autoscroll.m_pointerScene.x(), 700.0);
 
-    // Escape stops it, and only it.
+    // Escape stops it, and only it, with the pointer outside too.
+    QTest::mouseMove(&window, QPoint(380, 80));
+    QCoreApplication::sendEvent(&window, &leave);
     QTest::keyClick(&window, Qt::Key_Escape);
     QVERIFY(!item->m_autoscroll.active());
     QCOMPARE(escapes.count(), 0);
