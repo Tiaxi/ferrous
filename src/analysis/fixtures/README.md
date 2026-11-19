@@ -44,6 +44,17 @@ ac3 gated 5.1 448k -1 0.384 "(random(1)-0.5)*gt(sin(2*PI*23*t)\,0)" \
 dd if=gated.ac3 of=raw-5.1-gated.ac3 bs=1792 skip=7 count=3
 ```
 
+`raw-5.1-side.ac3` is 8 frames (0.256 s) of tones in a 5.1(side) layout at
+48 kHz and 448 kb/s, as surround discs carry it. A Qt test repeats its frames,
+each of which decodes on its own, into a stream of a few seconds that the
+GStreamer backend plays. Made with FFmpeg 8.1:
+
+```bash
+ffmpeg -f lavfi -i "aevalsrc=0.25*sin(2*PI*440*t)|0.25*sin(2*PI*554*t)|0.25*sin(2*PI*660*t)|\
+0.3*sin(2*PI*60*t)|0.25*sin(2*PI*880*t)|0.25*sin(2*PI*990*t):s=48000:d=0.256:c=5.1(side)" \
+  -c:a ac3 -b:a 448k -f ac3 -bitexact raw-5.1-side.ac3
+```
+
 `raw-tone-44k.dts` is the same tone at 44.1 kHz in 44 DTS frames of 224 bytes
 (about 0.51 s). That bitrate makes each frame fill whole 14-bit words, as the
 frames of DTS-CDs do; GStreamer's parser loses most frames of a stream whose

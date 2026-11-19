@@ -416,7 +416,10 @@ fn process_playback_snapshot_event(
                 }
             }
         }
-        if !state.analysis.waveform_peaks.is_empty() {
+        // The stopped track keeps its overview, as the analysis does: no
+        // decode follows when it plays again, so the overview would stay
+        // missing until the next track. Without a track, it has none.
+        if state.playback.current.is_none() && !state.analysis.waveform_peaks.is_empty() {
             state.analysis.waveform_peaks.clear();
             state.analysis.waveform_coverage_seconds = 0.0;
             state.analysis.waveform_complete = false;
@@ -1564,23 +1567,73 @@ mod tests {
     }
 
     #[test]
-    fn stopped_snapshot_clears_waveform_peaks() {
-        let (analysis, _analysis_rx) = AnalysisEngine::new();
-        let (metadata, _metadata_rx) = MetadataService::new();
-        let (playback_tx, playback_rx) = crossbeam_channel::unbounded::<PlaybackEvent>();
+    fn a_stopped_track_keeps_its_overview_when_it_plays_again() {
+        // Playing the stopped track again starts no overview decode, in
+        // either mode: the overview it had is the one it shows (#653).
+        for mode in [
+            SpectrogramDisplayMode::Centered,
+            SpectrogramDisplayMode::Rolling,
+        ] {
+            let (analysis, command_rx, playback_tx, playback_rx, metadata, mut state) =
+                playback_harness(mode);
+            let harness = (
+                &analysis,
+                &command_rx,
+                &playback_tx,
+                &playback_rx,
+                &metadata,
+            );
+            state.analysis.track_token = 7;
+            state.analysis.waveform_peaks = vec![0.1, 0.2, 0.3];
+            state.analysis.waveform_complete = true;
+            let kept = |state: &BridgeState| {
+                state.analysis.waveform_peaks == [0.1, 0.2, 0.3]
+                    && state.analysis.waveform_complete
+                    && state.analysis.track_token == 7
+            };
 
-        let mut state = BridgeState::default();
+            let mut stopped = state.playback.clone();
+            stopped.state = PlaybackState::Stopped;
+            stopped.position = Duration::ZERO;
+            snapshot_commands(stopped.clone(), harness, &mut state);
+            assert!(kept(&state), "{mode:?}");
+
+            let mut playing = stopped;
+            playing.state = PlaybackState::Playing;
+            let commands = snapshot_commands(playing, harness, &mut state);
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| matches!(command, AnalysisCommand::SetTrack { .. })),
+                "{mode:?} {commands:?}"
+            );
+            assert!(kept(&state), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_stop_with_no_track_left_clears_the_overview() {
+        let (analysis, command_rx, playback_tx, playback_rx, metadata, mut state) =
+            playback_harness(SpectrogramDisplayMode::Centered);
+        let harness = (
+            &analysis,
+            &command_rx,
+            &playback_tx,
+            &playback_rx,
+            &metadata,
+        );
         state.analysis.waveform_peaks = vec![0.1, 0.2, 0.3];
+        state.analysis.waveform_coverage_seconds = 2.0;
+        state.analysis.waveform_complete = true;
 
-        let mut snapshot = state.playback.clone();
-        snapshot.state = PlaybackState::Stopped;
-        playback_tx
-            .send(PlaybackEvent::Snapshot(snapshot))
-            .expect("send stopped snapshot");
-
-        let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
-        assert!(changed);
+        let mut stopped = state.playback.clone();
+        stopped.state = PlaybackState::Stopped;
+        stopped.current = None;
+        stopped.current_queue_index = None;
+        snapshot_commands(stopped, harness, &mut state);
         assert!(state.analysis.waveform_peaks.is_empty());
+        assert!(state.analysis.waveform_coverage_seconds.abs() < f32::EPSILON);
+        assert!(!state.analysis.waveform_complete);
     }
 
     fn playback_harness(

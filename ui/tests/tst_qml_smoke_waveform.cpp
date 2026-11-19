@@ -2,6 +2,8 @@
 
 #include "QmlSmokeTest.h"
 
+#include <gst/gst.h>
+
 // The waveform, the level meter, and the waveform editor's detail, cache,
 // crosshair and rulers.
 class WaveformSmokeTest : public QmlSmokeTest {
@@ -15,6 +17,8 @@ private slots:
     void waveformSurfaceMuteButtonsFollowTheMutedChannels();
     void waveformPointerBringsTheControlsBackOverItsOverlays();
     void pointerOverTheViewBringsTheViewerControlsBack();
+    void gstreamerStoppedTrackPlaysAgainWithItsOverview_data();
+    void gstreamerStoppedTrackPlaysAgainWithItsOverview();
     void modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPicture_data();
     void modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPicture();
     void hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds_data();
@@ -4131,6 +4135,90 @@ void WaveformSmokeTest::waveformItemCachesAtDevicePixels() {
     shown.setWaveformComplete(true);
     shown.setPeaksData(peaks);
     QTRY_COMPARE(shown.m_waveformCache.size(), QSize(400, 80));
+}
+
+void WaveformSmokeTest::gstreamerStoppedTrackPlaysAgainWithItsOverview_data() {
+    QTest::addColumn<int>("displayMode");
+    // Centered, playing again seeks the spectrogram's session and loads
+    // nothing; rolling restarts it, which sends the overview again too.
+    QTest::newRow("centered") << 1;
+    QTest::newRow("rolling") << 0;
+}
+
+// A track stopped and played again decodes no overview: it shows the one it
+// had, and "Analysing…" never comes over the waveform (#653). Against the
+// GStreamer backend, with a raw 5.1 AC-3 stream in lanes per channel.
+void WaveformSmokeTest::gstreamerStoppedTrackPlaysAgainWithItsOverview() {
+    QFETCH(int, displayMode);
+    QVERIFY(gst_init_check(nullptr, nullptr, nullptr));
+    GstElementFactory *fakeAudioSink = gst_element_factory_find("fakeaudiosink");
+    QVERIFY2(fakeAudioSink != nullptr, "fakeaudiosink, from the GStreamer bad plugins, is missing");
+    gst_object_unref(fakeAudioSink);
+    GstElementFactory *ac3Decoder = gst_element_factory_find("avdec_ac3");
+    if (ac3Decoder == nullptr) {
+        QSKIP("Plays AC-3: install the GStreamer libav plugin (docs/INSTALL.md)");
+    }
+    gst_object_unref(ac3Decoder);
+    // A sink that keeps time, so that the track plays rather than ends at once.
+    const QByteArray sink = qgetenv("FERROUS_GST_OUTPUT_SINK");
+    qputenv("FERROUS_GST_OUTPUT_SINK", "fakeaudiosink");
+    const auto restoreSink = qScopeGuard([&sink]() { qputenv("FERROUS_GST_OUTPUT_SINK", sink); });
+    // About 6 s of the fixture's 8 frames over and over: each AC-3 frame
+    // stands on its own.
+    QFile fixture(QStringLiteral(FERROUS_UI_SOURCE_DIR "/../src/analysis/fixtures/raw-5.1-side.ac3"));
+    QVERIFY(fixture.open(QIODevice::ReadOnly));
+    const QByteArray frames = fixture.readAll();
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = QFileInfo(dir.path()).canonicalFilePath() + QStringLiteral("/surround.ac3");
+    QFile track(path);
+    QVERIFY(track.open(QIODevice::WriteOnly));
+    QCOMPARE(track.write(frames.repeated(24)), qint64(frames.size()) * 24);
+    track.close();
+
+    BridgeClient bridge;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const auto finish = qScopeGuard([&bridge]() {
+        bridge.stop();
+        bridge.clearQueue();
+    });
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *analysing = window->findChild<QQuickItem *>(QStringLiteral("plotAnalysingText"));
+    QVERIFY(viewer && waveformSurface && analysing);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+    bridge.setRepeatMode(0);
+    bridge.setSpectrogramViewMode(1);
+    bridge.setSpectrogramDisplayMode(displayMode);
+    const auto awaiting = [waveformSurface]() {
+        return waveformSurface->property("awaitingData").toBool();
+    };
+    const auto playing = [&bridge](double from) {
+        return bridge.playbackState() == QStringLiteral("Playing")
+            && bridge.playbackClock()->currentPositionSeconds() > from;
+    };
+
+    bridge.replaceWithPaths({path});
+    QTRY_VERIFY_WITH_TIMEOUT(playing(0.2) && bridge.waveformComplete() && !awaiting(), 10000);
+    const QByteArray overview = bridge.waveformPeaksPacked();
+    QVERIFY(!overview.isEmpty());
+
+    bridge.stop();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.playbackState(), QStringLiteral("Stopped"), 10000);
+
+    bridge.play();
+    QTRY_VERIFY_WITH_TIMEOUT(playing(0.5), 10000);
+    QVERIFY(!awaiting());
+    QVERIFY(bridge.waveformComplete());
+    QCOMPARE(bridge.waveformPeaksPacked(), overview);
+    // Well past the moment "Analysing…" waits before it shows (PlotLayer).
+    QTest::qWait(1000);
+    QVERIFY(!analysing->isVisible());
+    QVERIFY(!awaiting());
 }
 
 std::unique_ptr<QmlSmokeTest> makeWaveformSmokeTest(const QString &userDirectoriesParent) {
