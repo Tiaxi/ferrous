@@ -27,6 +27,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QScopeGuard>
+#include <QScreen>
 #include <QTemporaryDir>
 #include <QTextLayout>
 #include <QTextOption>
@@ -526,6 +527,7 @@ private slots:
     void configureFitsTheVisualizationPageAtTheDefaultFont();
     void compactDialogsHoldTheirText_data();
     void compactDialogsHoldTheirText();
+    void compactDialogStaysWithinASmallScreenAsItGrows();
     void breakableTextKeepsNamesAndErrorCodesWhole();
     void lastFmPageFollowsTheBuildAndTheAccount();
     void aboutDialogsLayOutTheirPages_data();
@@ -2332,6 +2334,96 @@ void UiDialogsTest::compactDialogsHoldTheirText() {
                [&] { checkLibraryFolderNameDialogShowsItsPath(window, pointSize); },
                [&] { checkCompactDialogsKeepTheirMeasure(window, pointSize); },
                [&] { checkAutoNumberIsOneFormInReadingOrder(main); }});
+}
+
+// At 24 pt on a small screen, 1000 × 720, a compact dialog whose message
+// grows after it has opened, and again before it reopens, stays within the
+// screen: its content scrolls above the buttons, and the default button
+// stays on the screen (a height that followed the content alone ran them
+// off it, #602).
+void UiDialogsTest::compactDialogStaysWithinASmallScreenAsItGrows() {
+    const ScopedApplicationFont font(24);
+    QScreen *small = nullptr;
+    for (QScreen *screen : QGuiApplication::screens()) {
+        if (screen->name() == QLatin1String("Small")) {
+            small = screen;
+        }
+    }
+    if (small == nullptr) {
+        QSKIP("needs the offscreen platform's small screen; see main()");
+    }
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(dialog != nullptr);
+    // The dialogs leave a grid unit of the screen free at each edge.
+    const qreal gridUnit = evaluate(dialog, QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+    QVERIFY(gridUnit > 0);
+    QQuickWindow *dialogWindow = windowOf(dialog);
+    QVERIFY(dialogWindow != nullptr);
+    // At the screen's top, as a window manager may place a tall window.
+    dialogWindow->setScreen(small);
+    dialogWindow->setPosition(small->geometry().topLeft() + QPoint(qCeil(gridUnit), qCeil(gridUnit)));
+    const qreal room = small->geometry().height() - 2 * gridUnit;
+
+    const QString sentence = QStringLiteral("Settings could not be saved: Permission denied (os error 13). ");
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, sentence)));
+    QVERIFY(waitForDialogWindow(dialog));
+    QCOMPARE(dialogWindow->screen(), small);
+    QQuickItem *view = visibleNamed(dialogWindow, QStringLiteral("dialogBodyView"));
+    QQuickItem *retry = visibleNamed(dialogWindow, QStringLiteral("quitSaveFailedRetryButton"));
+    QQuickItem *details = visibleNamed(dialogWindow, QStringLiteral("quitSaveFailedDetails"));
+    QVERIFY(view != nullptr && retry != nullptr && details != nullptr);
+    // It holds the short message whole, with nothing to scroll.
+    QTRY_COMPARE(dialogWindow->height(), dialog->property("fittedHeight").toInt());
+    QVERIFY(dialogWindow->height() <= room);
+    QVERIFY(!view->property("interactive").toBool());
+
+    // Within the screen, its content scrolling, and the default button on
+    // the screen, whole, below the content.
+    const auto checkWithinTheScreen = [&](const QString &when) {
+        QTRY_VERIFY2(!layoutPendingUnder(view), qPrintable(when));
+        const QString where = QStringLiteral("%1: the window %2 on a screen %3, fitted %4")
+            .arg(when, describeRect(dialogWindow->frameGeometry()), describeRect(small->geometry()))
+            .arg(dialog->property("fittedHeight").toInt());
+        QVERIFY2(dialog->property("fittedHeight").toInt() > room, qPrintable(where));
+        QVERIFY2(dialogWindow->height() <= qCeil(room), qPrintable(where));
+        QVERIFY2(small->geometry().contains(dialogWindow->frameGeometry()), qPrintable(where));
+        QTRY_VERIFY2(view->property("interactive").toBool(), qPrintable(where));
+        QVERIFY2(within(sceneRect(view), QRectF(0, 0, dialogWindow->width(), dialogWindow->height())),
+                 qPrintable(where));
+        QVERIFY2(retry->isVisible() && retry->isEnabled(), qPrintable(where));
+        const QRectF button = sceneRect(retry);
+        QVERIFY2(button.top() >= sceneRect(view).bottom() - 0.5, qPrintable(where));
+        QVERIFY2(within(button, QRectF(0, 0, dialogWindow->width(), dialogWindow->height())),
+                 qPrintable(where + QStringLiteral(", the default button %1").arg(describeRect(button))));
+        // Scrolled to its end, the content shows its last line.
+        view->setProperty("contentY", view->property("contentHeight").toReal() - view->height());
+        QVERIFY2(within(sceneRect(details), sceneRect(view)), qPrintable(where));
+        view->setProperty("contentY", 0);
+    };
+
+    // The message grows while the dialog shows.
+    QString longer;
+    for (int i = 0; i < 12; ++i) {
+        longer += sentence;
+    }
+    dialog->setProperty("message", longer);
+    QTRY_VERIFY(dialog->property("fittedHeight").toInt() > room);
+    checkWithinTheScreen(QStringLiteral("grown while open"));
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    // And again while it is closed: it reopens within the screen.
+    QVERIFY(QMetaObject::invokeMethod(dialog, "dismiss"));
+    QTRY_VERIFY(!dialogWindow->isVisible());
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, longer + longer)));
+    QVERIFY(waitForDialogWindow(dialog));
+    checkWithinTheScreen(QStringLiteral("reopened"));
+    QVERIFY(QMetaObject::invokeMethod(dialog, "dismiss"));
+    QTRY_VERIFY(!dialogWindow->isVisible());
 }
 
 // The quit failure's message wraps as its words allow, but a path in it
@@ -5790,12 +5882,15 @@ int main(int argc, char **argv) {
     qputenv("XDG_DATA_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("data"))));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("cache"))));
     // A desktop's screen, rather than the offscreen platform's 800 × 600:
-    // the dialogs in windows of their own size themselves within it.
+    // the dialogs in windows of their own size themselves within it. Beside
+    // it, a small one, for the dialogs on a screen with little room.
     if (qgetenv("QT_QPA_PLATFORM") == QByteArrayLiteral("offscreen")) {
         const QString screens = fixtures.filePath(QStringLiteral("offscreen-screens.json"));
         QFile file(screens);
         if (!file.open(QIODevice::WriteOnly)
             || file.write(R"({"screens": [{"name": "Desktop", "x": 0, "y": 0, "width": 2560, "height": 1600,
+                "logicalDpi": 96, "logicalBaseDpi": 96, "dpr": 1},
+                {"name": "Small", "x": 2560, "y": 0, "width": 1000, "height": 720,
                 "logicalDpi": 96, "logicalBaseDpi": 96, "dpr": 1}]})") < 0) {
             return 1;
         }

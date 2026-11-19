@@ -10,7 +10,9 @@ import org.kde.kirigami 2.20 as Kirigami
 // dialogs are: a question, a message or a short form, at the dialogs'
 // inset above the button row, with KWin's title bar for its title. The
 // window opens as tall as what it holds, and follows it as it changes,
-// such as text that wraps anew at a width the user gives it.
+// such as text that wraps anew at a width the user gives it, within the
+// screen: where the screen leaves too little room, the content scrolls
+// above the buttons.
 //
 // Put the content in it as in a ColumnLayout, and the buttons, a
 // DialogFooter or DialogButtons, in `footer`. The keyboard is in the
@@ -53,10 +55,11 @@ DialogWindow {
 
     // The window's height follows the content's rather than its minimum
     // and maximum, which the window system would take as a window the
-    // user may not resize.
+    // user may not resize. Within the screen, as it opens: text that wraps
+    // further, at a large font, ran the buttons off the screen.
     onFittedHeightChanged: {
         if (root.visible) {
-            root.height = root.fittedHeight
+            root.height = root.heightWithinScreen(root.fittedHeight)
         }
     }
 
@@ -66,7 +69,7 @@ DialogWindow {
             // The width it had, or the buttons' and the content's, which
             // may have changed, within the screen.
             root.width = Math.max(root.width, Math.min(root._neededWidth, root._roomWidth))
-            root.height = root.fittedHeight
+            root.height = root.heightWithinScreen(root.fittedHeight)
             if (root.initialFocusItem) {
                 root.initialFocusItem.forceActiveFocus(Qt.PopupFocusReason)
             }
@@ -78,20 +81,38 @@ DialogWindow {
         font: root.uiPalette.baseFont
     }
 
-    ColumnLayout {
-        id: body
-        objectName: "dialogBody"
-        x: root.contentPadding
-        y: root.contentPadding
-        width: Math.max(0, root.width - 2 * root.contentPadding)
-        spacing: root.contentSpacing
-        focus: true
+    // The content, which scrolls only when the window is shorter than it,
+    // on a screen with too little room or at a height the user gives it;
+    // the buttons stay below it.
+    Flickable {
+        id: bodyView
+        objectName: "dialogBodyView"
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: body.implicitHeight + 2 * root.contentPadding
+        clip: true
+        interactive: contentHeight > height
+        boundsBehavior: Flickable.StopAtBounds
+        ScrollBar.vertical: ScrollBar {
+            objectName: "dialogBodyScrollBar"
+            policy: bodyView.interactive ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+        }
 
-        // Enter presses the default button, as in KDE's dialogs; a text
-        // field takes its own.
-        Keys.onPressed: function(event) {
-            if (root.footer && root.footer.handleEnter) {
-                root.footer.handleEnter(event, Window.activeFocusItem, root.visible)
+        ColumnLayout {
+            id: body
+            objectName: "dialogBody"
+            x: root.contentPadding
+            y: root.contentPadding
+            width: Math.max(0, root.width - 2 * root.contentPadding)
+            spacing: root.contentSpacing
+            focus: true
+
+            // Enter presses the default button, as in KDE's dialogs; a text
+            // field takes its own.
+            Keys.onPressed: function(event) {
+                if (root.footer && root.footer.handleEnter) {
+                    root.footer.handleEnter(event, Window.activeFocusItem, root.visible)
+                }
             }
         }
     }
