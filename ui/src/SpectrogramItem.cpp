@@ -2638,6 +2638,112 @@ void SpectrogramItem::renumberRingForRollingHistoryLocked() {
     m_crosshairDirty = true;
 }
 
+bool SpectrogramItem::ringColumnsAddressedForLocked(quint64 trackToken) const {
+    return trackToken != 0
+        && m_ringColumnBase
+        && m_ringColumnToken == trackToken
+        && m_ringCapacity > 0
+        && m_ringColumnId.size() == static_cast<size_t>(m_ringCapacity)
+        && m_ringSequenceId.size() == static_cast<size_t>(m_ringCapacity)
+        && m_ringTrackToken.size() == static_cast<size_t>(m_ringCapacity);
+}
+
+bool SpectrogramItem::resetKeepsColumnsLocked(bool clearHistoryOnReset, int bins,
+    int channelCount, int hopSize, int sampleRate, int fftSize) const {
+    return !clearHistoryOnReset
+        && bins > 0
+        && bins == m_ring.bins()
+        && channelCount > 0
+        && channelCount == m_ringChannelCount
+        && hopSize > 0
+        && hopSize == m_precomputedHopSize
+        && sampleRate > 0
+        && sampleRate == m_precomputedSampleRateHz
+        && std::max(0, fftSize) == m_precomputedFftSize;
+}
+
+int SpectrogramItem::ringCapacityForLocked(
+    int sessionWidth, int sampleRate, int hopSize, int bins, int channelCount) const {
+    const int screenWidth = std::max({static_cast<int>(width()), 1920, sessionWidth});
+    return static_cast<int>(ferrous_ffi_spectrogram_ring_capacity(
+        static_cast<std::uint32_t>(screenWidth),
+        static_cast<std::uint32_t>(sampleRate),
+        static_cast<std::uint32_t>(hopSize),
+        static_cast<std::uint32_t>(bins),
+        static_cast<std::uint32_t>(channelCount),
+        static_cast<double>(static_cast<float>(m_zoomLevel)), m_displayMode == 1));
+}
+
+bool SpectrogramItem::keepRingColumnsFromLocked(
+    qint64 startIndex, quint64 trackToken, qint64 room) {
+    if (!ringColumnsAddressedForLocked(trackToken)) {
+        return false;
+    }
+    // The session's columns go to the sequence of their offset from the
+    // ring's first column (see m_ringColumnBase), and each sequence to its
+    // slot. Numbered from a column a whole number of capacities from the
+    // old first, the ring's columns keep their slots: from the last such
+    // column at or before the session's first, so that every column the
+    // session has room for, from its first to a capacity on, has one.
+    const qint64 capacity = m_ringCapacity;
+    const qint64 oldBase = *m_ringColumnBase;
+    const qint64 start = std::max<qint64>(0, startIndex);
+    const qint64 base = start - ((start - oldBase) % capacity + capacity) % capacity;
+    const qint64 shift = oldBase - base;
+    // The ring grows to the session's room as its first columns come, so
+    // that a wider view's session has room for the columns of the view
+    // before. Past where the track's columns end, they would be another
+    // file's.
+    const qint64 reach = start + std::max(capacity, room);
+    const qint64 end = m_precomputedEndColumn > 0
+        ? std::min(reach, static_cast<qint64>(m_precomputedEndColumn))
+        : reach;
+    qint64 writeSeq = 0;
+    qint64 maxColumn = -1;
+    for (size_t slot = 0; slot < static_cast<size_t>(capacity); ++slot) {
+        qint64 &seq = m_ringSequenceId[slot];
+        const qint64 column = m_ringColumnId[slot];
+        // Only a column the ring still holds where its column puts it.
+        if (seq >= m_ringOldestSeq && seq < m_ringWriteSeq
+            && column >= start && column < end
+            && m_ringTrackToken[slot] == trackToken
+            && seq == column - oldBase) {
+            seq += shift;
+            writeSeq = std::max(writeSeq, seq + 1);
+            maxColumn = std::max(maxColumn, column);
+        } else {
+            seq = -1;
+            m_ringColumnId[slot] = -1;
+            m_ringTrackToken[slot] = 0;
+        }
+    }
+    // The columns' sequences, renumbered in place: those of the slots kept.
+    QHash<qint32, qint64> columns = m_trackColumnToSeqByToken.take(trackToken);
+    m_trackColumnToSeqByToken.clear();
+    columns.removeIf([this, shift, capacity](std::pair<const qint32 &, qint64 &> entry) {
+        const qint64 seq = entry.second + shift;
+        if (seq < 0) {
+            return true;
+        }
+        const auto slot = static_cast<size_t>(seq % capacity);
+        if (m_ringSequenceId[slot] != seq || m_ringColumnId[slot] != entry.first) {
+            return true;
+        }
+        entry.second = seq;
+        return false;
+    });
+    if (columns.isEmpty()) {
+        return false;
+    }
+    m_trackColumnToSeqByToken.insert(trackToken, std::move(columns));
+    m_ringWriteSeq = writeSeq;
+    m_ringOldestSeq = std::max<qint64>(0, writeSeq - capacity);
+    m_ringColumnBase = base;
+    m_ringColumnToken = trackToken;
+    m_precomputedMaxColumnIndex = static_cast<qint32>(maxColumn);
+    return true;
+}
+
 void SpectrogramItem::setDisplayMode(int value) {
     const int clamped = std::clamp(value, 0, 1);
     if (m_displayMode == clamped) {
@@ -3703,13 +3809,20 @@ void SpectrogramItem::feedPrecomputedChunk(
     // This blocks stale queued chunks from refilling the ring after
     // a synthetic clear.  Must be checked BEFORE the implicit reset
     // below, which would otherwise recreate the ring from stale data.
+    // Whether the reset is a centered refill's that kept the ring.
+    bool resetOfCenteredRefill = false;
     if (m_awaitingWorkerReset) {
-        if (bufferReset && bins > 0) {
+        if (bufferReset && columns <= 0 && bins <= 0) {
+            // The session ends again, as when it cannot read its file or
+            // another refill comes: it is handled below, and the gate
+            // stays.
+        } else if (bufferReset && bins > 0) {
             FERROUS_SPECTROGRAM_LOGF(stderr,
                 "[Qt-gate-open@%p] worker reset arrived, bins=%d tok=%llu\n",
                 static_cast<const void *>(this), bins,
                 static_cast<unsigned long long>(trackToken));
             m_awaitingWorkerReset = false;
+            resetOfCenteredRefill = std::exchange(m_awaitingCenteredRefillReset, false);
             // Fall through to normal reset handling below.
         } else {
             FERROUS_SPECTROGRAM_LOGF(stderr,
@@ -3758,7 +3871,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     bool appliedImplicitReset = false;
     if (!bufferReset && columns > 0 && m_ringCapacity == 0 && !m_precomputedResetPending) {
         applyPrecomputedResetLocked(
-            startIndex, bins, trackToken, generation, true, hopSize, m_displayMode == 1);
+            startIndex, bins, trackToken, generation, true, hopSize, m_displayMode == 1, 0);
         appliedImplicitReset = true;
         if (m_ringColumnBase) {
             // Where the session's columns start is unknown: the columns
@@ -3770,7 +3883,40 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     bool appliedReset = false;
 
-    if (bufferReset && columns <= 0 && clearHistoryOnReset && bins <= 0) {
+    // The analysis thread's reset, without a format, which ends the
+    // session before the worker's own reset starts the next: on a refill
+    // of the centered view, or when the session cannot read its file.
+    const bool endsSession = bufferReset && columns <= 0 && bins <= 0;
+    // A refill of the same track and settings keeps the ring's columns
+    // until the worker's reset says which of them its session has room
+    // for.
+    const bool endsSessionKeepingColumns = endsSession
+        && !clearHistoryOnReset
+        && m_displayMode == 1
+        && ringColumnsAddressedForLocked(trackToken);
+    if (endsSessionKeepingColumns) {
+        // Columns of the session it ends that are still on their way are
+        // dropped, while those of the ring stay at the times of their own
+        // until the worker's reset and the next session's columns come.
+        m_awaitingWorkerReset = true;
+        m_awaitingCenteredRefillReset = true;
+        const bool hasCanvas = !m_canvas.isNull()
+            && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft;
+        if (hasCanvas && !viewMovedLocked()) {
+            // A view that follows the playhead to where the ring has no
+            // columns yet keeps its picture until the playhead's arrive,
+            // as after any seek (see below).
+            m_seekFillActive = m_seekFillActive || !m_zoomFillActive;
+            m_zoomFillActive = true;
+        }
+        FERROUS_SPECTROGRAM_LOGF(stderr,
+            "[Qt-synthetic-keep@%p] ring kept, gate armed\n",
+            static_cast<const void *>(this));
+        lock.unlock();
+        update();
+        return;
+    }
+    if (endsSession) {
         // Immediate ring clear from a synthetic reset chunk (emitted by
         // the analysis thread on far seeks).  Clear the ring and block
         // all subsequent data until the worker's proper reset arrives.
@@ -3809,6 +3955,10 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedMaxColumnIndex = -1;
         m_precomputedCanvasDirty = true;
         m_awaitingWorkerReset = true;
+        // A centered refill's, which reached a view that cannot keep the
+        // ring, as one that turned rolling: its session's columns still go
+        // where their column puts them.
+        m_awaitingCenteredRefillReset = !clearHistoryOnReset;
 
         if (preserveCanvasForSeek && viewMovedLocked()) {
             // A view the user moves, or one gliding back from there, is not
@@ -3861,7 +4011,7 @@ void SpectrogramItem::feedPrecomputedChunk(
 
         m_zoomFillActive = false;
         applyPrecomputedResetLocked(startIndex, bins, trackToken, generation,
-            clearHistoryOnReset, hopSize, m_displayMode == 1);
+            clearHistoryOnReset, hopSize, m_displayMode == 1, 0);
         invalidateCanvas();
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
@@ -3933,16 +4083,22 @@ void SpectrogramItem::feedPrecomputedChunk(
         // chunk arrives. Resetting on the metadata-only frame makes the
         // item repaint against an empty/new timeline before there is any
         // matching data, which shows up as a blank flash on backward seeks.
+        // A reset that replaces one still waiting clears the history if
+        // either does: the ring's columns are of the settings before both.
+        m_precomputedPendingResetClearHistory = clearHistoryOnReset
+            || (m_precomputedResetPending && m_precomputedPendingResetClearHistory);
         m_precomputedResetPending = true;
         m_precomputedPendingResetStartIndex = startIndex;
         m_precomputedPendingResetBins = bins;
         m_precomputedPendingResetTrackToken = trackToken;
         m_precomputedPendingResetGeneration = generation;
-        m_precomputedPendingResetClearHistory = clearHistoryOnReset;
-        m_precomputedPendingResetByColumn = m_displayMode == 1;
+        // A centered refill's session, whose worker made the reset for a
+        // centered view, places its columns by column whatever the view is
+        // when its data comes.
+        m_precomputedPendingResetByColumn = m_displayMode == 1 || resetOfCenteredRefill;
     } else if (bufferReset) {
         applyPrecomputedResetLocked(startIndex, bins, trackToken, generation,
-            clearHistoryOnReset, hopSize, m_displayMode == 1);
+            clearHistoryOnReset, hopSize, m_displayMode == 1, 0);
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
         m_precomputedPendingResetBins = 0;
@@ -3976,7 +4132,11 @@ void SpectrogramItem::feedPrecomputedChunk(
                 ? m_precomputedPendingResetGeneration
                 : generation,
             m_precomputedPendingResetClearHistory, hopSize,
-            m_precomputedPendingResetByColumn);
+            m_precomputedPendingResetByColumn,
+            resetKeepsColumnsLocked(m_precomputedPendingResetClearHistory, bins, channelCount,
+                hopSize, sampleRate, fftSize)
+                ? ringCapacityForLocked(sessionWidth, sampleRate, hopSize, bins, channelCount)
+                : 0);
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
         m_precomputedPendingResetBins = 0;
@@ -4174,15 +4334,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         // and a reset within it (a seek) must not leave a ring narrower
         // than that. The ring grows as either does, and its next reset
         // sizes it for the session then.
-        const int screenWidth = std::max(
-            {static_cast<int>(width()), 1920, sessionWidth});
-        const int neededCapacity = static_cast<int>(ferrous_ffi_spectrogram_ring_capacity(
-            static_cast<std::uint32_t>(screenWidth),
-            static_cast<std::uint32_t>(m_precomputedSampleRateHz),
-            static_cast<std::uint32_t>(m_precomputedHopSize),
-            static_cast<std::uint32_t>(bins),
-            static_cast<std::uint32_t>(channelCount),
-            static_cast<double>(static_cast<float>(m_zoomLevel)), m_displayMode == 1));
+        const int neededCapacity = ringCapacityForLocked(sessionWidth,
+            m_precomputedSampleRateHz, m_precomputedHopSize, bins, channelCount);
 
         // Check if we need to (re)allocate: either more columns, or
         // columns of another bin count (an FFT size or band switch), which
@@ -4254,6 +4407,7 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     // Write columns into the ring buffer.
     if (columns > 0 && m_ringCapacity > 0) {
+        m_ringChannelCount = channelCount;
         const int stridePerColumn = channelCount * bins;
         const int channelOffset = channelIndex * bins;
         const auto *srcData =
@@ -4660,7 +4814,8 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     quint64 generation,
     bool clearHistoryOnReset,
     int hopSize,
-    bool byColumn) {
+    bool byColumn,
+    int keptColumnsRoom) {
     // Decided before anything of the reset changes what it looks at.
     const bool restartsForZoom = resetRestartsForZoomLocked(trackToken, hopSize);
     // A zoom's restart of a gapless successor whose data has come, while
@@ -4730,7 +4885,20 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         m_precomputedCanvasDisplayLeft = 0;
         m_precomputedCanvasDisplayRight = -1;
     }
-    if (!preserveRollingHistory) {
+    // A refill of a centered view, for the same track and settings, makes
+    // the columns the ring has: those it has room for stay until the
+    // session's own replace them, so that refills in quick succession, as
+    // a pan makes, do not take away what an earlier one drew.
+    const bool keptColumns = !preserveRollingHistory
+        && keptColumnsRoom > 0
+        && byColumn
+        && m_displayMode == 1
+        && keepRingColumnsFromLocked(startIndex, trackToken, keptColumnsRoom);
+    if (keptColumns) {
+        m_trackEpochSeq = 0;
+        m_rollingEpoch = 0;
+        m_renumberRingForHistory = false;
+    } else if (!preserveRollingHistory) {
         m_ringOldestSeq = 0;
         m_ringWriteSeq = 0;
         m_trackEpochSeq = 0;
@@ -8716,6 +8884,7 @@ void SpectrogramItem::releaseStorageLocked() {
     // Once shown, the columns come from a fresh session, which starts with
     // a reset: columns that arrive before it are from an older one.
     m_awaitingWorkerReset = true;
+    m_awaitingCenteredRefillReset = false;
 }
 
 std::pair<double, double> SpectrogramItem::visibleRangeLocked(

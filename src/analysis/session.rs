@@ -9814,7 +9814,7 @@ mod tests {
                 spectrogram_decode_columns_produced: &columns_produced,
                 spectrogram_track_length: &track_length,
             };
-            state.refill_centered_spectrogram(first_target, &ctx);
+            state.refill_centered_spectrogram(first_target, true, &ctx);
             reached
                 .recv_timeout(OUTPUT_WAIT)
                 .expect("the playhead's first column");
@@ -10115,7 +10115,7 @@ mod tests {
                 spectrogram_decode_columns_produced: &columns_produced,
                 spectrogram_track_length: &track_length,
             };
-            state.refill_centered_spectrogram(0.0, &ctx);
+            state.refill_centered_spectrogram(0.0, true, &ctx);
             worker.reached[0]
                 .recv_timeout(OUTPUT_WAIT)
                 .expect("the first column");
@@ -10123,7 +10123,7 @@ mod tests {
             // it, which the seek is placed by.
             assert_eq!(track_length.frames_of(path, rate), Some(u64::from(frames)));
             match how {
-                EndSeek::Restart => state.refill_centered_spectrogram(target, &ctx),
+                EndSeek::Restart => state.refill_centered_spectrogram(target, true, &ctx),
                 EndSeek::Seek => state.seek_spectrogram_position(target, &ctx),
             }
             state.update_spectrogram_position(target, &ctx);
@@ -10344,7 +10344,7 @@ mod tests {
                 spectrogram_track_length: &track_length,
             };
             // The outgoing track's session waits to open its file.
-            state.refill_centered_spectrogram(0.0, &ctx);
+            state.refill_centered_spectrogram(0.0, true, &ctx);
             worker.reached[0]
                 .recv_timeout(OUTPUT_WAIT)
                 .expect("the outgoing session at its file");
@@ -10374,7 +10374,7 @@ mod tests {
                 "the restart starts at {restart_start} s, not {unknown} s (by the outgoing \
                  file's length, {by_outgoing} s)"
             );
-            state.refill_centered_spectrogram(target, &ctx);
+            state.refill_centered_spectrogram(target, true, &ctx);
             let restart_generation = generation.load(Ordering::Relaxed);
             drop(worker.go_on.remove(0));
             let first_chunk = loop {
