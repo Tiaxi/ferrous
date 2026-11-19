@@ -130,6 +130,7 @@ qt_add_library(ferrous_ui_core STATIC
     src/TagEditorTableModel.cpp
     src/SpectrogramItem.cpp
     src/SpectrogramViewFollow.cpp
+    src/ViewAutoscroll.cpp
     src/WindowActivation.cpp
     src/WaveformItem.cpp
     src/WaveformSceneGraph.cpp

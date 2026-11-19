@@ -28,8 +28,8 @@
 // queued signal.
 class SpectrogramViewFollow : public QObject {
     Q_OBJECT
-    // Whether the view stays where a middle-drag moved it rather than
-    // following the playhead. It follows again once the playhead, moving
+    // Whether the view stays where a middle-drag or autoscroll moved it
+    // rather than following the playhead. It follows again once the playhead, moving
     // through it, reaches ViewFollow::kReattachViewFraction of its width, and
     // at once on followPlayhead(), a seek other than the plot's own, a track
     // change, or a reset of the zoom. A view gliding back is not detached.
@@ -62,6 +62,11 @@ public:
     void detach(double anchorSeconds, double fraction);
     // Whether a drag pans the view: until it ends, nothing glides back.
     void setPanning(bool panning);
+    // Whether autoscroll moves the view: until it stops, nothing glides
+    // back. A view brought back to the playhead is not autoscrolled, and
+    // the lane that autoscrolls it stops as it is told of that change.
+    void setAutoscrolling(bool autoscrolling);
+    bool autoscrolling() const;
     // The view `spanSeconds` wide at the zoom asked for, of a track
     // `endSeconds` long, or showing the whole track, with the playhead at
     // `position`. A detached view of the whole track follows the playhead;
@@ -96,6 +101,9 @@ private:
     void publish();
     void sendBackendAnchor();
     double reattachPointLocked() const;
+    // Whether the user holds the view where it is, dragging it or
+    // autoscrolling it: nothing glides back meanwhile.
+    bool heldLocked() const { return m_panning || m_autoscrolling; }
     double detachedLeftLocked() const;
     void reattachLocked();
     void armLocked(double position);
@@ -106,6 +114,7 @@ private:
     double m_anchorFraction{0.5};
     bool m_reattachArmed{false};
     bool m_panning{false};
+    bool m_autoscrolling{false};
     double m_spanSeconds{0.0};
     double m_endSeconds{0.0};
     // The time the plot last asked to seek to while detached, or NaN. Once a

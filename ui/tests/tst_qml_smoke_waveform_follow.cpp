@@ -2,12 +2,15 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QShortcut>
+
 #include <gst/gst.h>
 
 // The waveform's view following the playhead: a middle-drag detaches it,
-// the wheel zooms about the pointer while detached, the playhead reaching
-// 85 % of a detached view glides it back, and seeks, track changes, Reset
-// Zoom and Follow Playhead bring it back at once.
+// as autoscroll after a middle click does, the wheel zooms about the pointer
+// while detached, the playhead reaching 85 % of a detached view glides it
+// back, and seeks, track changes, Reset Zoom and Follow Playhead bring it
+// back at once.
 class WaveformFollowSmokeTest : public QmlSmokeTest {
     Q_OBJECT
 
@@ -29,6 +32,13 @@ private slots:
     void followPlayheadReattachesAtOnce();
     void gstreamerSeeksAndTrackChangesBringTheViewBack();
     void visibleRangeIsTheViewAFrameShows();
+    void autoscrollMovesByThePointersDistance();
+    void autoscrollOfTheWholeTrackDoesNothing();
+    void autoscrollArmsTheReattachPointWhenItStops_data();
+    void autoscrollArmsTheReattachPointWhenItStops();
+    void autoscrollStopsAsTheViewComesBack_data();
+    void autoscrollStopsAsTheViewComesBack();
+    void autoscrollInAWindow();
 };
 
 namespace {
@@ -101,6 +111,28 @@ void middleDrag(WaveformEditorItem &item, double fromX, double toX) {
                   Qt::NoButton, Qt::MiddleButton);
     }
     sendMouse(item, QEvent::MouseButtonRelease, toX, Qt::MiddleButton, Qt::NoButton);
+}
+
+// A middle click at `x`, which starts autoscroll, or stops it.
+void middleClick(WaveformEditorItem &item, double x) {
+    middleDrag(item, x, x);
+}
+
+// The pointer at `x` of the item, as autoscroll follows it in the window.
+void pointerAt(WaveformEditorItem &item, double x) {
+    item.m_autoscroll.pointerMoved(item.mapToScene(QPointF(x, 40.0)));
+}
+
+void frame(WaveformEditorItem &item);
+
+// `seconds` of the window's frames, 60 a second, as autoscroll moves the
+// view with them.
+void autoscrollFor(WaveformEditorItem &item, TestTime &time, double seconds) {
+    for (int step = 0; step < std::lround(seconds * 60.0); ++step) {
+        time.advance(1.0 / 60.0);
+        item.m_autoscroll.frameShown();
+        frame(item);
+    }
 }
 
 void wheelAt(WaveformEditorItem &item, double x, int delta) {
@@ -268,17 +300,26 @@ void WaveformFollowSmokeTest::middleDragDetachesAndPans() {
     const auto following = viewOf(item);
     QVERIFY(sameView(following, followingViewOf(item)));
 
-    // A click, or a move short of a drag, changes nothing.
-    middleDrag(item, 200.0, 200.0);
-    middleDrag(item, 200.0, 201.0);
+    // A click, or a move short of a drag, pans nothing: it starts
+    // autoscroll, which holds the view where it is until the pointer moves.
+    for (const double to : {200.0, 201.0}) {
+        middleDrag(item, 200.0, to);
+        QVERIFY(item.m_autoscroll.active());
+        QVERIFY(item.detached());
+        QCOMPARE(item.zoomLevel(), 8.0);
+        QVERIFY(sameView(viewOf(item), following));
+        item.followPlayhead();
+        QVERIFY(!item.m_autoscroll.active());
+    }
     QVERIFY(!item.detached());
-    QCOMPARE(item.zoomLevel(), 8.0);
-    QVERIFY(sameView(viewOf(item), following));
-    QCOMPARE(detachedChanges.count(), 0);
+    QCOMPARE(detachedChanges.count(), 4);
+    detachedChanges.clear();
 
-    // 200 px to the left: the view moves on by half its span.
+    // 200 px to the left: the view moves on by half its span. A drag starts
+    // no autoscroll.
     middleDrag(item, 300.0, 100.0);
     QVERIFY(item.detached());
+    QVERIFY(!item.m_autoscroll.active());
     QCOMPARE(detachedChanges.count(), 1);
     const auto panned = viewOf(item);
     QVERIFY2(std::abs(panned.first - (following.first + span / 2)) < columnOf(item),
@@ -325,11 +366,12 @@ void WaveformFollowSmokeTest::middleDragDetachesAndPans() {
 }
 
 // A middle click resets neither plot's zoom: Reset Zoom is Ctrl+0, View ›
-// Reset Zoom and the viewer's Reset.
+// Reset Zoom and the viewer's Reset. It starts autoscroll instead.
 void WaveformFollowSmokeTest::middleClickResetsNeitherVisualizationsZoom() {
     WaveformEditorItem waveform;
     TestTime time;
     playZoomed(waveform, time, 4.0, 20.0);
+    const auto view = viewOf(waveform);
     QMouseEvent press(QEvent::MouseButtonPress, QPointF(50.0, 40.0), QPointF(50.0, 40.0),
         Qt::MiddleButton, Qt::MiddleButton, Qt::NoModifier);
     waveform.mousePressEvent(&press);
@@ -337,7 +379,8 @@ void WaveformFollowSmokeTest::middleClickResetsNeitherVisualizationsZoom() {
         Qt::MiddleButton, Qt::NoButton, Qt::NoModifier);
     waveform.mouseReleaseEvent(&release);
     QCOMPARE(waveform.zoomLevel(), 4.0);
-    QVERIFY(!waveform.detached());
+    QVERIFY(waveform.m_autoscroll.active());
+    QVERIFY(sameView(viewOf(waveform), view));
 
     SpectrogramItem spectrogram;
     spectrogram.setWidth(kWidth);
@@ -892,10 +935,406 @@ void WaveformFollowSmokeTest::gstreamerSeeksAndTrackChangesBringTheViewBack() {
     QCOMPARE(bridge.currentTrackPath(), second);
     QTRY_VERIFY_WITH_TIMEOUT(!item.detached(), 10000);
 
+    // Autoscroll, which the plot's own seek leaves running, and which a
+    // seek from elsewhere stops, bringing the view back.
+    bridge.setRepeatMode(0);
+    bridge.seek(3.0);
+    QTRY_VERIFY_WITH_TIMEOUT(engineDone(), 10000);
+    middleClick(item, 200.0);
+    QVERIFY(item.m_autoscroll.active() && item.detached());
+    rightClickAt(item, 300.0);
+    QTRY_VERIFY_WITH_TIMEOUT(engineDone(), 10000);
+    QVERIFY(item.m_autoscroll.active() && item.detached());
+    bridge.seek(0.5);
+    QTRY_VERIFY_WITH_TIMEOUT(!item.m_autoscroll.active(), 10000);
+    QVERIFY(!item.detached());
+    QVERIFY(sameView(viewOf(item), followingViewOf(item)));
+
+    // A track change stops it: Repeat-One, the same file again.
+    bridge.setRepeatMode(1);
+    bridge.seek(kTrackSeconds - 1.5);
+    QTRY_VERIFY_WITH_TIMEOUT(engineDone(), 10000);
+    middleClick(item, 200.0);
+    QVERIFY(item.m_autoscroll.active());
+    const quint64 repeatToken = bridge.playbackClock()->state().trackToken;
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.playbackClock()->state().trackToken != repeatToken, 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(!item.m_autoscroll.active(), 10000);
+    QVERIFY(!item.detached());
+
     bridge.setRepeatMode(0);
     bridge.stop();
     bridge.clearQueue();
     QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
+}
+
+// Autoscroll after a middle click moves the view by the pointer's distance
+// from the click: none within the dead zone, then in proportion to the
+// distance past it, a view a second at half the plot's width, up to two,
+// right of the click towards the end of the track and left of it towards
+// the start. It asks for frames only while the view moves.
+void WaveformFollowSmokeTest::autoscrollMovesByThePointersDistance() {
+    WaveformEditorItem item;
+    TestTime time;
+    playZoomed(item, time, 8.0, 30.0, false);
+    const double span = kDuration / 8.0;
+    const double column = span / kWidth;
+    const auto following = viewOf(item);
+    middleClick(item, 200.0);
+    QVERIFY(item.m_autoscroll.active());
+    QVERIFY(item.detached());
+    QVERIFY(sameView(viewOf(item), following));
+
+    // Within the dead zone, either side, the view holds still and asks for
+    // no frames.
+    const quint64 requests = item.m_playbackFrameRequests;
+    for (const double x : {200.0, 211.0, 189.0}) {
+        pointerAt(item, x);
+        autoscrollFor(item, time, 0.5);
+        QVERIFY(sameView(viewOf(item), following));
+        QCOMPARE(item.m_autoscroll.m_lastFrameNs, qint64(0));
+    }
+    QCOMPARE(item.m_playbackFrameRequests, requests);
+
+    // Speed and direction against the distance: half a view a second half
+    // way to the plot's edge, one at its edge, two, at most, past it.
+    const double reach = kWidth / 2.0 - ViewAutoscroll::kDeadZonePixels;
+    struct Case { double x; double viewsPerSecond; };
+    for (const Case &c : {Case{200.0 + 12.0 + reach / 2.0, 0.5}, Case{400.0, 1.0},
+                          Case{0.0, -1.0}, Case{200.0 - 12.0 - reach / 2.0, -0.5},
+                          Case{2000.0, 2.0}, Case{-2000.0, -2.0}}) {
+        pointerAt(item, c.x);
+        QVERIFY(std::abs(item.m_autoscroll.currentViewsPerSecond() - c.viewsPerSecond) < 1e-9);
+        const auto before = viewOf(item);
+        autoscrollFor(item, time, 0.5);
+        const double moved = viewOf(item).first - before.first;
+        QVERIFY2(std::abs(moved - c.viewsPerSecond * span * 0.5) <= column + 1e-9,
+                 qPrintable(QStringLiteral("%1 px: moved %2").arg(c.x).arg(moved)));
+        QCOMPARE(viewOf(item).second - viewOf(item).first, span);
+        QVERIFY(item.detached());
+    }
+
+    // Held at the end of the track, it asks for no more frames; a move back
+    // moves the view from there at once.
+    pointerAt(item, 2000.0);
+    autoscrollFor(item, time, 8.0);
+    QCOMPARE(viewOf(item).second, kDuration);
+    QCOMPARE(item.m_autoscroll.m_lastFrameNs, qint64(0));
+    pointerAt(item, 0.0);
+    autoscrollFor(item, time, 0.5);
+    QVERIFY(std::abs(viewOf(item).second - (kDuration - span * 0.5)) <= column + 1e-9);
+
+    // The wheel zooms about the pointer meanwhile, and autoscroll goes on
+    // at the new zoom.
+    pointerAt(item, 300.0);
+    const double underPointer = timeAt(viewOf(item), 300.0);
+    wheelAt(item, 300.0, 120);
+    QVERIFY(item.m_autoscroll.active() && item.detached());
+    QVERIFY(std::abs(timeAt(viewOf(item), 300.0) - underPointer) <= columnOf(item) + 1e-9);
+    const auto zoomed = viewOf(item);
+    QVERIFY(zoomed.second - zoomed.first < span);
+    autoscrollFor(item, time, 0.5);
+    QVERIFY(viewOf(item).first > zoomed.first);
+
+    // Held at the end of the track, a zoom about the pointer near the
+    // plot's right edge makes room to scroll on: it goes on at once.
+    pointerAt(item, 390.0);
+    autoscrollFor(item, time, 10.0);
+    QCOMPARE(viewOf(item).second, kDuration);
+    QCOMPARE(item.m_autoscroll.m_lastFrameNs, qint64(0));
+    wheelAt(item, 390.0, 120);
+    const auto zoomedAtEnd = viewOf(item);
+    QVERIFY(zoomedAtEnd.second < kDuration);
+    QVERIFY(item.m_autoscroll.m_lastFrameNs != 0);
+    autoscrollFor(item, time, 0.1);
+    QVERIFY(viewOf(item).first > zoomedAtEnd.first);
+
+    // Another middle click stops it, where it is.
+    const auto stopped = viewOf(item);
+    item.m_autoscroll.stop();
+    QVERIFY(!item.m_autoscroll.active());
+    autoscrollFor(item, time, 0.5);
+    QVERIFY(sameView(viewOf(item), stopped));
+    QVERIFY(item.detached());
+
+    // The press that stopped it, become a drag, pans; the next click, even
+    // one of the same timestamp, starts autoscroll again.
+    item.m_autoscroll.m_stopPressTimestamp = 0;
+    middleDrag(item, 300.0, 200.0);
+    QVERIFY(!item.m_autoscroll.active());
+    middleClick(item, 200.0);
+    QVERIFY(item.m_autoscroll.active());
+}
+
+// A view of the whole track has nowhere to scroll to: a middle click there
+// does nothing, nor without zoom at all.
+void WaveformFollowSmokeTest::autoscrollOfTheWholeTrackDoesNothing() {
+    WaveformEditorItem item;
+    TestTime time;
+    playZoomed(item, time, 1.0, 30.0);
+    middleClick(item, 200.0);
+    QVERIFY(!item.m_autoscroll.active());
+    QVERIFY(!item.detached());
+    item.setZoomEnabled(false);
+    item.setZoomLevel(8.0);
+    middleClick(item, 200.0);
+    QVERIFY(!item.m_autoscroll.active());
+    QVERIFY(!item.detached());
+}
+
+void WaveformFollowSmokeTest::autoscrollArmsTheReattachPointWhenItStops_data() {
+    QTest::addColumn<double>("pointer");
+    QTest::addColumn<bool>("glidesBack");
+    // The view scrolled on past the playhead: the playhead, left of the
+    // re-attach point as it stops, reaches it and glides back.
+    QTest::addRow("playhead left of the re-attach point") << 400.0 << true;
+    // Scrolled back: the playhead past the view leaves it where it is.
+    QTest::addRow("playhead past the view") << 0.0 << false;
+}
+
+// While autoscroll runs, nothing glides back, however far the playhead
+// goes. When it stops, the view arms its re-attach point as at the end of a
+// drag: a playhead left of it glides the view back as it reaches it, one
+// past it, or past the view, leaves the view where it is.
+void WaveformFollowSmokeTest::autoscrollArmsTheReattachPointWhenItStops() {
+    QFETCH(double, pointer);
+    QFETCH(bool, glidesBack);
+    WaveformEditorItem item;
+    TestTime time;
+    playZoomed(item, time, 8.0, 30.0);
+    const double span = kDuration / 8.0;
+    middleClick(item, 200.0);
+    // Held still in the dead zone while the playhead plays through the
+    // view and past it: no glide.
+    const auto held = viewOf(item);
+    autoscrollFor(item, time, span);
+    QVERIFY(item.positionSeconds() > held.second);
+    QVERIFY(sameView(viewOf(item), held));
+    QVERIFY(item.detached());
+    QCOMPARE(item.m_follow, WaveformEditorItem::Follow::Detached);
+
+    // A view's span on or back from there.
+    pointerAt(item, pointer);
+    autoscrollFor(item, time, 1.0);
+    QVERIFY(item.detached());
+    item.m_autoscroll.stop();
+    QCOMPARE(item.m_reattachArmed, glidesBack);
+    bool glided = false;
+    for (int step = 0; step < 60 * 20; ++step) {
+        time.advance(1.0 / 60.0);
+        frame(item);
+        glided = glided || item.m_follow != WaveformEditorItem::Follow::Detached;
+    }
+    QCOMPARE(glided, glidesBack);
+    QCOMPARE(item.detached(), !glidesBack);
+}
+
+void WaveformFollowSmokeTest::autoscrollStopsAsTheViewComesBack_data() {
+    QTest::addColumn<QString>("event");
+    QTest::addColumn<bool>("keeps");
+    QTest::addRow("own seek") << QStringLiteral("own seek") << true;
+    QTest::addRow("follow playhead") << QStringLiteral("follow playhead") << false;
+    QTest::addRow("seek bar") << QStringLiteral("seek bar") << false;
+    QTest::addRow("stop") << QStringLiteral("stop") << false;
+    QTest::addRow("gapless successor") << QStringLiteral("gapless successor") << false;
+    QTest::addRow("repeat one") << QStringLiteral("repeat one") << false;
+    QTest::addRow("next track") << QStringLiteral("next track") << false;
+    QTest::addRow("reset zoom") << QStringLiteral("reset zoom") << false;
+    QTest::addRow("zoom out to the whole track") << QStringLiteral("zoom out") << false;
+    QTest::addRow("hidden") << QStringLiteral("hidden") << false;
+}
+
+// Follow Playhead, Reset Zoom, a seek other than the plot's own, a stop and
+// a track change, including a gapless successor and Repeat-One, stop
+// autoscroll and bring the view back to the playhead; the plot's own seek
+// keeps both. Hiding the plot, as a switch to the spectrogram does, stops
+// it too.
+void WaveformFollowSmokeTest::autoscrollStopsAsTheViewComesBack() {
+    QFETCH(QString, event);
+    QFETCH(bool, keeps);
+    WaveformEditorItem item;
+    TestTime time;
+    playZoomed(item, time, 8.0, 30.0);
+    item.setSourcePath(QStringLiteral("/fixture/one.wav"));
+    QSignalSpy stops(&item.m_autoscroll, &ViewAutoscroll::stopped);
+    middleClick(item, 200.0);
+    pointerAt(item, 100.0);
+    autoscrollFor(item, time, 0.5);
+    QVERIFY(item.m_autoscroll.active() && item.detached());
+    const auto scrolled = viewOf(item);
+    PlaybackClock &clock = testClock(item);
+    const quint64 token = clock.state().trackToken;
+    if (event == QStringLiteral("own seek")) {
+        const double target = rightClickAt(item, 300.0);
+        clock.holdAt(target);
+        engineLands(item, target + 0.04);
+    } else if (event == QStringLiteral("follow playhead")) {
+        item.followPlayhead();
+    } else if (event == QStringLiteral("seek bar")) {
+        clock.holdAt(10.0);
+        engineLands(item, 10.03);
+    } else if (event == QStringLiteral("stop")) {
+        item.setPlaying(false);
+        PlaybackSample stopped;
+        stopped.trackToken = token;
+        clock.applySample(stopped, true);
+    } else if (event == QStringLiteral("gapless successor")
+               || event == QStringLiteral("repeat one")
+               || event == QStringLiteral("next track")) {
+        if (event == QStringLiteral("next track")) {
+            item.setSourcePath(QStringLiteral("/fixture/two.wav"));
+        }
+        PlaybackSample next;
+        next.positionSeconds = 0.0;
+        next.sampledAtNs = clock.nowNs();
+        next.advancing = true;
+        next.trackToken = token + 1;
+        clock.applySample(next, false);
+    } else if (event == QStringLiteral("reset zoom")) {
+        item.resetZoom();
+    } else if (event == QStringLiteral("zoom out")) {
+        wheelAt(item, 100.0, -120 * 20);
+        QCOMPARE(item.zoomLevel(), 1.0);
+    } else {
+        item.setVisible(false);
+    }
+    frame(item);
+    QCOMPARE(item.m_autoscroll.active(), keeps);
+    QCOMPARE(stops.count(), keeps ? 0 : 1);
+    if (keeps) {
+        QVERIFY(item.detached());
+        QVERIFY(sameView(viewOf(item), scrolled));
+        autoscrollFor(item, time, 0.5);
+        QVERIFY(viewOf(item).first < scrolled.first);
+    } else if (event == QStringLiteral("hidden")) {
+        // Stopped as at the end of a drag: where it was.
+        QVERIFY(sameView(viewOf(item), scrolled));
+    } else {
+        QVERIFY(!item.detached());
+        QCOMPARE(item.m_follow, WaveformEditorItem::Follow::Playhead);
+        QVERIFY(sameView(viewOf(item), followingViewOf(item)));
+        // The pointer moves nothing any more.
+        pointerAt(item, 0.0);
+        autoscrollFor(item, time, 0.5);
+        QVERIFY(sameView(viewOf(item), followingViewOf(item)));
+    }
+}
+
+// In a window: a middle click on the plot starts autoscroll, and the
+// pointer, also past the plot, moves the view with the window's frames,
+// with a horizontal resize cursor and nothing else to show it. Escape stops
+// it before the window's own Escape takes the key, and another middle
+// click, anywhere in the window, stops it without panning or starting it
+// again. A middle-drag still pans. The window losing focus stops it.
+void WaveformFollowSmokeTest::autoscrollInAWindow() {
+    QQuickWindow window;
+    window.resize(700, 200);
+    auto *item = new WaveformEditorItem(window.contentItem());
+    item->setX(100.0);
+    item->setY(20.0);
+    item->setWidth(kWidth);
+    item->setHeight(120.0);
+    item->setDurationSeconds(kDuration);
+    setTestPosition(*item, 30.0, 1);
+    item->setZoomLevel(8.0);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    QShortcut escape(QKeySequence(Qt::Key_Escape), &window);
+    QSignalSpy escapes(&escape, &QShortcut::activated);
+    const QPoint click(300, 80);
+    const auto following = viewOf(*item);
+
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(item->m_autoscroll.active());
+    QVERIFY(item->detached());
+    QVERIFY(QGuiApplication::overrideCursor() != nullptr);
+    QCOMPARE(QGuiApplication::overrideCursor()->shape(), Qt::SizeHorCursor);
+    // Right of the click and of the plot: the frames move the view on.
+    QTest::mouseMove(&window, QPoint(650, 80));
+    QTRY_VERIFY_WITH_TIMEOUT(viewOf(*item).first > following.first + 1.0, 5000);
+    // Out of the window it holds still; back on the other side of the
+    // click, it scrolls that way at once.
+    QEvent leave(QEvent::Leave);
+    QCoreApplication::sendEvent(&window, &leave);
+    QCOMPARE(item->m_autoscroll.currentViewsPerSecond(), 0.0);
+    QEnterEvent enter(QPointF(20, 80), QPointF(20, 80), window.mapToGlobal(QPointF(20, 80)));
+    QCoreApplication::sendEvent(&window, &enter);
+    QVERIFY(item->m_autoscroll.currentViewsPerSecond() < 0.0);
+    QTest::mouseMove(&window, QPoint(650, 80));
+
+    // Escape stops it, and only it.
+    QTest::keyClick(&window, Qt::Key_Escape);
+    QVERIFY(!item->m_autoscroll.active());
+    QCOMPARE(escapes.count(), 0);
+    QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+    QVERIFY(item->detached());
+    const auto stopped = viewOf(*item);
+    QTest::mouseMove(&window, QPoint(20, 80));
+    QTest::qWait(100);
+    QVERIFY(sameView(viewOf(*item), stopped));
+    QTest::keyClick(&window, Qt::Key_Escape);
+    QCOMPARE(escapes.count(), 1);
+
+    // A middle click starts it again; another on the plot stops it, and
+    // does not start it again as it is released.
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(item->m_autoscroll.active());
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(320, 80));
+    QVERIFY(!item->m_autoscroll.active());
+    QVERIFY(sameView(viewOf(*item), stopped));
+
+    // A middle press that stops it, then drags, pans as a drag does.
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(item->m_autoscroll.active());
+    QTest::mousePress(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(300, 80));
+    QVERIFY(!item->m_autoscroll.active());
+    QTest::mouseMove(&window, QPoint(250, 80));
+    QTest::mouseMove(&window, QPoint(200, 80));
+    QTest::mouseRelease(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(200, 80));
+    QVERIFY(!item->m_autoscroll.active());
+    QVERIFY(std::abs(viewOf(*item).first - (stopped.first + 100.0 * kDuration / 8.0 / kWidth))
+            <= columnOf(*item) + 1e-9);
+    item->followPlayhead();
+    item->setZoomLevel(8.0);
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QTest::keyClick(&window, Qt::Key_Escape);
+    const auto restopped = viewOf(*item);
+
+    // A middle click starts it again; another, off the plot, stops it, and
+    // neither pans the view nor starts autoscroll again as it is released.
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(item->m_autoscroll.active());
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(600, 180));
+    QVERIFY(!item->m_autoscroll.active());
+    QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+    QVERIFY(sameView(viewOf(*item), restopped));
+    QTest::mouseMove(&window, QPoint(20, 80));
+    QTest::qWait(100);
+    QVERIFY(sameView(viewOf(*item), restopped));
+
+    // A middle-drag pans, as before, and starts no autoscroll.
+    QTest::mousePress(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(400, 80));
+    QTest::mouseMove(&window, QPoint(350, 80));
+    QTest::mouseMove(&window, QPoint(300, 80));
+    QTest::mouseRelease(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(300, 80));
+    QVERIFY(!item->m_autoscroll.active());
+    QVERIFY(std::abs(viewOf(*item).first - (restopped.first + 100.0 * kDuration / 8.0 / kWidth))
+            <= columnOf(*item) + 1e-9);
+
+    // Another window taking the focus stops it, also a dialog of this
+    // window's, with which Qt still counts this one as active.
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(item->m_autoscroll.active());
+    QWindow dialog;
+    dialog.setTransientParent(&window);
+    dialog.resize(100, 100);
+    dialog.show();
+    dialog.requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(&dialog));
+    QVERIFY(window.isActive());
+    QTRY_VERIFY(!item->m_autoscroll.active());
+    QVERIFY(QGuiApplication::overrideCursor() == nullptr);
 }
 
 std::unique_ptr<QmlSmokeTest> makeWaveformFollowSmokeTest(const QString &userDirectoriesParent) {
