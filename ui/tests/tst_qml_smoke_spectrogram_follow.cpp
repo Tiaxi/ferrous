@@ -1187,6 +1187,23 @@ void SpectrogramFollowSmokeTest::autoscrollMovesEveryLaneOfThePlot() {
     QVERIFY(!right.m_autoscroll.active());
     QVERIFY(!left.detached() && !right.detached());
 
+    // The wheel on the other lane zooms both, as the surface passes it on:
+    // a view held at the end of the track goes on at once.
+    takeZoomRequests(left);
+    QObject::connect(&left, &SpectrogramItem::zoomRequested, &right,
+        [&right](double zoom) { right.setZoomLevel(zoom); });
+    middleClick(right, 200.0);
+    pointerAt(right, 390.0);
+    autoscrollFor(right, time, 20.0);
+    QCOMPARE(viewOf(right).left, qint64(kColumns - kWindow));
+    QCOMPARE(right.m_autoscroll.m_lastFrameNs, qint64(0));
+    wheelAt(left, 390.0, 120);
+    QVERIFY(right.m_autoscroll.m_lastFrameNs != 0);
+    const double zoomedAnchor = follow.snapshot().anchorSeconds;
+    autoscrollFor(right, time, 0.1);
+    QVERIFY(follow.snapshot().anchorSeconds > zoomedAnchor);
+    right.m_autoscroll.stop();
+
     // A lane that goes while it autoscrolls, as when the channels change,
     // leaves the view to the others, as at the end of a drag.
     auto *gone = new SpectrogramItem;

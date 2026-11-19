@@ -1245,6 +1245,15 @@ void WaveformFollowSmokeTest::autoscrollInAWindow() {
     // Right of the click and of the plot: the frames move the view on.
     QTest::mouseMove(&window, QPoint(650, 80));
     QTRY_VERIFY_WITH_TIMEOUT(viewOf(*item).first > following.first + 1.0, 5000);
+    // Out of the window it holds still; back on the other side of the
+    // click, it scrolls that way at once.
+    QEvent leave(QEvent::Leave);
+    QCoreApplication::sendEvent(&window, &leave);
+    QCOMPARE(item->m_autoscroll.currentViewsPerSecond(), 0.0);
+    QEnterEvent enter(QPointF(20, 80), QPointF(20, 80), window.mapToGlobal(QPointF(20, 80)));
+    QCoreApplication::sendEvent(&window, &enter);
+    QVERIFY(item->m_autoscroll.currentViewsPerSecond() < 0.0);
+    QTest::mouseMove(&window, QPoint(650, 80));
 
     // Escape stops it, and only it.
     QTest::keyClick(&window, Qt::Key_Escape);

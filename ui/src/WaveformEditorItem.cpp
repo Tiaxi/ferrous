@@ -4264,7 +4264,7 @@ void WaveformEditorItem::mouseReleaseEvent(QMouseEvent *event) {
     // A middle click that did not drag starts autoscroll, unless it stopped
     // autoscroll; a drag pans.
     const bool click = !m_panning && ViewAutoscroll::isClick(m_panPressPosition, event->position())
-        && !m_autoscroll.stoppedByPress(m_panPressTimestamp);
+        && !m_autoscroll.takeStopPress(m_panPressTimestamp);
     const QPointF pressed = m_panPressPosition;
     mouseUngrabEvent();
     if (click) startAutoscroll(pressed);

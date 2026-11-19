@@ -3289,6 +3289,9 @@ void SpectrogramItem::setZoomLevel(double value) {
     // A view the user moved keeps its anchor at its place in the new width;
     // a playhead the zoom puts past the re-attach point leaves it there.
     reportFollowGeometry();
+    // A view autoscroll held at an end of the track may have room now,
+    // whichever lane of the plot the zoom came from.
+    m_autoscroll.resume();
     update();
 }
 
@@ -6476,7 +6479,7 @@ void SpectrogramItem::mouseReleaseEvent(QMouseEvent *event) {
     // A middle click that did not drag starts autoscroll, unless it stopped
     // autoscroll; a drag pans.
     const bool click = !m_panning && ViewAutoscroll::isClick(m_panPressPosition, event->position())
-        && !m_autoscroll.stoppedByPress(m_panPressTimestamp);
+        && !m_autoscroll.takeStopPress(m_panPressTimestamp);
     const QPointF pressed = m_panPressPosition;
     mouseUngrabEvent();
     if (click) {
@@ -6681,8 +6684,6 @@ void SpectrogramItem::wheelEvent(QWheelEvent *event) {
             m_panOriginX = event->position().x();
         }
     }
-    // A view autoscroll held at an end of the track may have room now.
-    m_autoscroll.resume();
 }
 
 double SpectrogramItem::pixelToFrequencyHzLocked(int pixelY, int viewHeight) const {

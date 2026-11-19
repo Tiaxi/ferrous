@@ -76,8 +76,9 @@ public:
     double currentViewsPerSecond() const;
 
     // Whether the middle press of `timestamp` stopped it: the plot, which
-    // that press reached, starts no autoscroll as it is released.
-    bool stoppedByPress(quint64 timestamp) const;
+    // that press reached, starts no autoscroll as it is released. Asked once
+    // for that press, as it is released.
+    bool takeStopPress(quint64 timestamp);
     // The view may move again where it could not, such as at an end of the
     // track after a zoom: asks for a frame if the pointer would move it.
     void resume();

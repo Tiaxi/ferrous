@@ -98,8 +98,10 @@ double ViewAutoscroll::currentViewsPerSecond() const {
     return viewsPerSecond(m_pointerScene.x() - m_originScene.x(), m_plot->width());
 }
 
-bool ViewAutoscroll::stoppedByPress(quint64 timestamp) const {
-    return m_stopPressTimestamp == timestamp;
+bool ViewAutoscroll::takeStopPress(quint64 timestamp) {
+    const bool stopped = m_stopPressTimestamp == timestamp;
+    m_stopPressTimestamp.reset();
+    return stopped;
 }
 
 void ViewAutoscroll::resume() {
@@ -213,7 +215,7 @@ bool ViewAutoscroll::eventFilter(QObject *watched, QEvent *event) {
             // Another middle press, anywhere in the window, stops it. On the
             // plot, it goes on to the plot, so that a drag from it pans as
             // ever; the plot does not start autoscroll again as it is
-            // released (see stoppedByPress). Elsewhere it is its own.
+            // released (see takeStopPress). Elsewhere it is its own.
             m_stopPressTimestamp = mouse->timestamp();
             if (m_plot->contains(m_plot->mapFromScene(mouse->scenePosition()))) {
                 stop();
