@@ -26,6 +26,8 @@ mkdir -p "${WORK_DIR}/bin"
 log="${WORK_DIR}/log"
 : >"${log}"
 
+# The script's settings come from each check, not from the caller.
+unset BUILD_SLOTS BUILD_SLOT_JOBS BUILD_SLOT_NICE
 # Every run uses locks of its own, never the user's shared ones.
 export BUILD_SLOT_DIR="${WORK_DIR}/locks"
 slot() {
@@ -70,22 +72,50 @@ status=0
 slot bash -c 'exit 7' || status=$?
 [[ "${status}" == 7 ]] || fail "exit status ${status}, not 7"
 
-# One slot: the second command waits until the first has finished.
-BUILD_SLOTS=1 slot "${WORK_DIR}/bin/hold" a &
-first=$!
-wait_for "${WORK_DIR}/a.started" || fail "the first command never started"
-BUILD_SLOTS=1 slot "${WORK_DIR}/bin/hold" b 2>"${WORK_DIR}/b.err" &
-second=$!
-touch "${WORK_DIR}/b.release"
-# Longer than the script's poll interval, so a second command that does not
-# wait would have started by now.
-sleep 3
-[[ ! -e "${WORK_DIR}/b.started" ]] || fail "the second command ran beside the first in one slot"
-grep -q 'build slots are busy' "${WORK_DIR}/b.err" || fail "the waiting command did not say it waits"
-touch "${WORK_DIR}/a.release"
-wait "${first}" "${second}"
-expected=$'a start\na end\nb start\nb end'
-[[ "$(cat "${log}")" == "${expected}" ]] || fail "one slot ran: $(tr '\n' ',' <"${log}")"
+# One slot: a second command, run with the environment in the array named
+# by $2 (the first with the one named by $1), waits until the first has
+# finished. With $3 set, the first script gets a TERM of its own while its
+# command runs, and still keeps the slot until the command exits.
+one_slot_waits() {
+    local -n first_env="$1" second_env="$2"
+    local term="${3:-}" first second
+    : >"${log}"
+    rm -f -- "${WORK_DIR}"/[ab].started "${WORK_DIR}"/[ab].release
+    env "${first_env[@]}" BUILD_SLOTS=1 bash "${BUILD_SLOT}" "${WORK_DIR}/bin/hold" a &
+    first=$!
+    wait_for "${WORK_DIR}/a.started" || fail "the first command never started"
+    if [[ -n "${term}" ]]; then
+        kill -TERM "${first}"
+    fi
+    env "${second_env[@]}" BUILD_SLOTS=1 bash "${BUILD_SLOT}" "${WORK_DIR}/bin/hold" b 2>"${WORK_DIR}/b.err" &
+    second=$!
+    touch "${WORK_DIR}/b.release"
+    # Longer than the script's poll interval, so a second command that does
+    # not wait would have started by now.
+    sleep 3
+    [[ ! -e "${WORK_DIR}/b.started" ]] || fail "the second command ran beside the first in one slot ($*)"
+    grep -q 'build slots are busy' "${WORK_DIR}/b.err" || fail "the waiting command did not say it waits ($*)"
+    touch "${WORK_DIR}/a.release"
+    wait "${first}" || true
+    wait "${second}"
+    local expected=$'a start\na end\nb start\nb end'
+    [[ "$(cat "${log}")" == "${expected}" ]] || fail "one slot ran ($*): $(tr '\n' ',' <"${log}")"
+}
+same_env=()
+one_slot_waits same_env same_env
+one_slot_waits same_env same_env term
+
+# The default lock directory is in the account's home directory, so runs
+# that point HOME and XDG_CACHE_HOME at directories of their own share it.
+cat >"${WORK_DIR}/bin/getent" <<SH
+#!/bin/sh
+echo "builder:x:\$(id -u):\$(id -g)::${WORK_DIR}/account:/bin/sh"
+SH
+chmod +x "${WORK_DIR}/bin/getent"
+own_dirs_1=(-u BUILD_SLOT_DIR PATH="${WORK_DIR}/bin:${PATH}" HOME="${WORK_DIR}/home1" XDG_CACHE_HOME="${WORK_DIR}/cache1")
+own_dirs_2=(-u BUILD_SLOT_DIR PATH="${WORK_DIR}/bin:${PATH}" HOME="${WORK_DIR}/home2" XDG_CACHE_HOME="${WORK_DIR}/cache2")
+one_slot_waits own_dirs_1 own_dirs_2
+[[ -e "${WORK_DIR}/account/.cache/build-slot/slot1" ]] || fail "the default slots are not in the account's home directory"
 
 # Two slots: two commands run at once. Each waits for the other to start.
 cat >"${WORK_DIR}/bin/meet" <<'SH'

@@ -42,14 +42,18 @@ if command -v ccache >/dev/null 2>&1; then
     export CMAKE_C_COMPILER_LAUNCHER="${CMAKE_C_COMPILER_LAUNCHER-ccache}"
     export CMAKE_CXX_COMPILER_LAUNCHER="${CMAKE_CXX_COMPILER_LAUNCHER-ccache}"
     export CCACHE_BASEDIR="${CCACHE_BASEDIR:-${HOME}}"
-    export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR:-true}"
 fi
 
 told=0
 while :; do
     for ((slot = 1; slot <= slots; slot++)); do
-        exec {fd}>"${lock_dir}/slot${slot}"
+        exec {fd}>>"${lock_dir}/slot${slot}"
         if flock -n "${fd}"; then
+            # A signal to this script alone waits until the command exits, so
+            # the slot is not given back while the command still runs. Bash
+            # runs the trap only after the command, which keeps the default
+            # handlers of its own.
+            trap ':' TERM HUP INT
             # The command does not inherit the lock, so a process it leaves
             # running does not keep the slot once the command has exited.
             status=0
