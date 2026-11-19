@@ -41,6 +41,7 @@ private slots:
     void resetZoomResetsOnlyTheShownPlotsZoom();
     void resetZoomIsOffAtAShortTracksStretchedDefault();
     void followPlayheadBringsTheShownPlotBack();
+    void seekBarMarksTheZoomedViewOfTheShownPlot();
     void fTypesInTheLibraryAndFollowsThePlayheadElsewhere();
     void usingThePlotTakesTheFocusFromTheLibrary();
     void viewerKeysWorkAfterAPressOnItsPlot();
@@ -3653,6 +3654,155 @@ void TransportInputSmokeTest::followPlayheadBringsTheShownPlotBack() {
     check(fullscreen, "viewer over the screen");
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+// While the shown plot is zoomed, the seek bar marks the part of the track
+// its view shows with a band, the range the plot gives at its frames: the
+// waveform's, following and panned, in the main window and in the viewer
+// there, and the spectrogram's. None at either's default zoom, after Reset
+// Zoom, or while the track's length is unknown; and the seek bar's value
+// and what assistive technology reads of it stay as they were.
+void TransportInputSmokeTest::seekBarMarksTheZoomedViewOfTheShownPlot() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *resetAction = window->findChild<QObject *>(QStringLiteral("resetZoomAction"));
+    auto *transport = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
+    auto *seek = window->findChild<QQuickItem *>(QStringLiteral("seekSlider"));
+    auto *band = window->findChild<QQuickItem *>(QStringLiteral("seekViewBand"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge && viewer && resetAction && transport && seek && band && spectrogramSurface
+            && waveformSurface);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(seek);
+    QVERIFY(accessible != nullptr && accessible->valueInterface() != nullptr);
+    const auto seekState = [&]() {
+        return QVariantList{seek->property("value"), accessible->valueInterface()->currentValue(),
+                            accessible->text(QAccessible::Name), accessible->text(QAccessible::Description)};
+    };
+    const QVariantList seekBefore = seekState();
+    const auto bandIs = [transport, band](double start, double end) {
+        return band->isVisible()
+            && std::abs(transport->property("viewStartSeconds").toDouble() - start) < 1e-9
+            && std::abs(transport->property("viewEndSeconds").toDouble() - end) < 1e-9;
+    };
+    const auto bandIsWaveforms = [&]() {
+        return bandIs(waveform->visibleStartSeconds(), waveform->visibleEndSeconds());
+    };
+    // Where the band is on the bar.
+    const auto bandOnBar = [&](double start, double end) {
+        const QRectF bar = sceneRect(seek);
+        const qreal ratio = window->effectiveDevicePixelRatio();
+        const double pixels = std::floor(bar.width() * ratio + 1e-6);
+        const QRectF drawn = sceneRect(band);
+        return std::abs(drawn.left() - (bar.left() + std::round(start / 229.0 * pixels) / ratio)) < 1e-6
+            && std::abs(drawn.right() - (bar.left() + std::round(end / 229.0 * pixels) / ratio)) < 1e-6;
+    };
+
+    // The waveform, once it has come in: its default zoom shows the whole
+    // track.
+    QObject *surface = window->findChild<QObject *>(QStringLiteral("visualizationSurface"));
+    QVERIFY(surface != nullptr);
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(surface->property("settledMode").toInt() == 1);
+    QTRY_VERIFY(waveform->isVisible() && waveform->width() > 100);
+    QTRY_VERIFY(waveform->visibleEndSeconds() == 229.0);
+    QVERIFY(!band->isVisible());
+    // Zoomed: the band shows the zoomed view at once.
+    waveform->setZoomLevel(4.0);
+    QVERIFY(bandIsWaveforms());
+    QCOMPARE(waveform->visibleEndSeconds() - waveform->visibleStartSeconds(), 229.0 / 4.0);
+    QVERIFY(bandOnBar(waveform->visibleStartSeconds(), waveform->visibleEndSeconds()));
+    // Panned by a middle-drag.
+    const double followingStart = waveform->visibleStartSeconds();
+    QVERIFY(detachWaveform(waveform));
+    QTRY_VERIFY(waveform->visibleStartSeconds() > followingStart + 229.0 / 8.0);
+    QTRY_VERIFY(bandIsWaveforms());
+    QVERIFY(bandOnBar(waveform->visibleStartSeconds(), waveform->visibleEndSeconds()));
+    QCOMPARE(seekState(), seekBefore);
+    // Reset Zoom: the zoom out waits for detail of the whole track, which
+    // the fixture's track never gets, and the view stays zoomed meanwhile;
+    // so does the band, though the zoom asked for is the default. It goes
+    // as the whole track shows.
+    QVERIFY(QMetaObject::invokeMethod(resetAction, "trigger"));
+    QCOMPARE(waveform->zoomLevel(), 1.0);
+    {
+        QMutexLocker lock(&waveform->m_stateMutex);
+        QVERIFY(waveform->m_zoomOutHandoffPending);
+    }
+    QVERIFY(bandIsWaveforms());
+    QCOMPARE(waveform->visibleEndSeconds() - waveform->visibleStartSeconds(), 229.0 / 4.0);
+    {
+        QMutexLocker lock(&waveform->m_stateMutex);
+        waveform->invalidateCacheLocked();
+    }
+    waveform->publishDetached();
+    QCOMPARE(waveform->visibleEndSeconds() - waveform->visibleStartSeconds(), 229.0);
+    QVERIFY(!band->isVisible());
+    // Without a length.
+    waveform->setZoomLevel(4.0);
+    QTRY_VERIFY(bandIsWaveforms());
+    bridge->setProperty("durationSeconds", std::numeric_limits<double>::quiet_NaN());
+    QTRY_VERIFY(!band->isVisible());
+    // The waveform keeps no zoom without a length: zoomed again once it
+    // has one.
+    bridge->setProperty("durationSeconds", 229.0);
+    waveform->setZoomLevel(4.0);
+    QTRY_VERIFY(bandIsWaveforms());
+
+    // In the viewer in the window, as in the pane.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    waveform->setZoomLevel(8.0);
+    QTRY_VERIFY(bandIsWaveforms()
+                && std::abs(waveform->visibleEndSeconds() - waveform->visibleStartSeconds() - 229.0 / 8.0) < 1e-9);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    waveform->resetZoom();
+    QTRY_VERIFY(!band->isVisible());
+
+    // The centered spectrogram, with a track's columns. (A rolling view at
+    // the track's start shows only the time before it.)
+    bridge->setProperty("spectrogramDisplayMode", 1);
+    viewer->setProperty("visualizationMode", 0);
+    QList<QQuickItem *> panes;
+    QTRY_VERIFY(!(panes = itemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem"))).isEmpty());
+    auto *spectrogram = qobject_cast<SpectrogramItem *>(panes.constFirst());
+    QVERIFY(spectrogram != nullptr);
+    feedColumnStripes(*spectrogram);
+    QTRY_VERIFY(std::isfinite(spectrogram->visibleStartSeconds()));
+    QVERIFY(!band->isVisible());
+    const double defaultZoom = spectrogramSurface->property("defaultZoomLevel").toDouble();
+    spectrogramSurface->setProperty("_widgetZoomLevel", 2.0 * defaultZoom);
+    QTRY_VERIFY(bandIs(spectrogram->visibleStartSeconds(), spectrogram->visibleEndSeconds()));
+    QVERIFY(bandOnBar(spectrogram->visibleStartSeconds(), spectrogram->visibleEndSeconds()));
+    QCOMPARE(seekState(), seekBefore);
+    // Through a switch to the waveform, at its default zoom: the
+    // spectrogram's band while it is the plot that shows, until the
+    // waveform has come in.
+    const auto spectrogramStillShows = [surface]() {
+        return surface->property("settledMode").toInt() == 0
+            && surface->property("modeFade").toDouble() <= 0.0;
+    };
+    viewer->setProperty("visualizationMode", 1);
+    QVERIFY(!spectrogramStillShows()
+            || bandIs(spectrogram->visibleStartSeconds(), spectrogram->visibleEndSeconds()));
+    QTRY_VERIFY(surface->property("settledMode").toInt() == 1);
+    QVERIFY(!band->isVisible());
+    viewer->setProperty("visualizationMode", 0);
+    QTRY_VERIFY(bandIs(spectrogram->visibleStartSeconds(), spectrogram->visibleEndSeconds()));
+    QVERIFY(QMetaObject::invokeMethod(resetAction, "trigger"));
+    QTRY_VERIFY(!band->isVisible());
+    QCOMPARE(seekState(), seekBefore);
 }
 
 // A focused library takes the letters typed for its type-ahead, F too,

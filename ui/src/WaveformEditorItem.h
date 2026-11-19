@@ -124,6 +124,13 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // on followPlayhead(), a seek other than the plot's own, a track change
     // or a reset of the zoom. A view gliding back to the playhead is not.
     Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
+    // The part of the track the view shows, in seconds, from its left edge
+    // to its right: following the playhead, where a middle-drag panned it
+    // or gliding back, at the zoom it shows. Taken at each frame of the
+    // window and as the item is shown; NaN while the track's length is
+    // unknown. The seek bar marks it while the view is zoomed.
+    Q_PROPERTY(double visibleStartSeconds READ visibleStartSeconds NOTIFY visibleRangeChanged)
+    Q_PROPERTY(double visibleEndSeconds READ visibleEndSeconds NOTIFY visibleRangeChanged)
 
 public:
     explicit WaveformEditorItem(QQuickItem *parent = nullptr);
@@ -207,6 +214,8 @@ public:
     void setPlayheadVisible(bool value);
 
     bool detached() const { return m_detached; }
+    double visibleStartSeconds() const { return m_visibleStartSeconds; }
+    double visibleEndSeconds() const { return m_visibleEndSeconds; }
 
     Q_INVOKABLE void resetZoom();
     // The view follows the playhead again, at once.
@@ -247,6 +256,7 @@ signals:
     void markerSecondsChanged();
     void markerXChanged();
     void detachedChanged();
+    void visibleRangeChanged();
     void seekRequested(double seconds);
 
 protected:
@@ -531,8 +541,12 @@ private:
     void armReattachLocked(qint64 nowNs);
     // The view follows the playhead again.
     void reattachLocked();
-    // Follows detached on the GUI thread, after the state has changed.
+    // Follows detached, and the visible range with it, on the GUI thread,
+    // after the state has changed.
     void publishDetached();
+    // Follows visibleStartSeconds and visibleEndSeconds on the GUI thread:
+    // at each frame, and as the view is moved.
+    void publishVisibleRange();
     // Asks for what a view that moved by the user's hand needs: its detail,
     // a cache for it and a frame.
     void viewMoved();
@@ -967,6 +981,9 @@ private:
     // frameChangeSecondsLocked of the frame painted last; NaN, due at
     // once, until the first and while playback tiles are still drawn.
     double m_paintedFrameChangeSeconds{std::numeric_limits<double>::quiet_NaN()};
+    // The view publishVisibleRange last published, on the GUI thread.
+    double m_visibleStartSeconds{std::numeric_limits<double>::quiet_NaN()};
+    double m_visibleEndSeconds{std::numeric_limits<double>::quiet_NaN()};
     std::atomic_bool m_guiContinuationQueued{false};
     std::atomic_bool m_guiRepaintPending{false};
     std::atomic_bool m_samplePointsNotificationPending{false};

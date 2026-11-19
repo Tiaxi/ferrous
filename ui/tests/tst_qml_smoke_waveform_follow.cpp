@@ -28,6 +28,7 @@ private slots:
     void followPlayheadReattachesAtOnce_data();
     void followPlayheadReattachesAtOnce();
     void gstreamerSeeksAndTrackChangesBringTheViewBack();
+    void visibleRangeIsTheViewAFrameShows();
 };
 
 namespace {
@@ -171,6 +172,85 @@ bool writeWav(const QString &path, double seconds) {
 }
 
 } // namespace
+
+// The view's range, which the seek bar marks while the view is zoomed, is
+// the view a frame of the window showed: following the playhead, panned,
+// gliding back, at another zoom, playing or paused, and the whole track at
+// the default zoom. None while the track's length is unknown.
+void WaveformFollowSmokeTest::visibleRangeIsTheViewAFrameShows() {
+    WaveformEditorItem item;
+    TestTime time;
+    QSignalSpy changes(&item, &WaveformEditorItem::visibleRangeChanged);
+    const auto published = [&item]() {
+        return std::pair<double, double>{item.visibleStartSeconds(), item.visibleEndSeconds()};
+    };
+    QVERIFY(std::isnan(item.visibleStartSeconds()) && std::isnan(item.visibleEndSeconds()));
+    playZoomed(item, time, 8.0, 30.0);
+    item.setSourcePath(QStringLiteral("/fixture/range.wav"));
+    item.setOverviewData(QByteArray(512, '\x40'));
+    item.setOverviewCoverageSeconds(kDuration);
+    item.setOverviewComplete(true);
+
+    // Following, about the playhead: from the zoom, and at a frame.
+    QVERIFY(changes.count() > 0);
+    QVERIFY2(sameView(published(), viewOf(item)), qPrintable(describe(published())));
+    frame(item);
+    const int initialChanges = changes.count();
+    QVERIFY2(sameView(published(), viewOf(item)), qPrintable(describe(published())));
+    QVERIFY(sameView(published(), followingViewOf(item)));
+    QCOMPARE(published().second - published().first, kDuration / 8.0);
+    QVERIFY(std::abs((published().first + published().second) / 2 - 30.0) <= columnOf(item));
+    // Playback moves it on, from the next frame; a frame that shows the
+    // same view says nothing.
+    const auto before = published();
+    time.advance(0.5);
+    QVERIFY(sameView(published(), before));
+    frame(item);
+    QCOMPARE(changes.count(), initialChanges + 1);
+    QVERIFY2(sameView(published(), viewOf(item)), qPrintable(describe(published())));
+    QVERIFY(std::abs(published().first - (before.first + 0.5)) <= columnOf(item));
+    frame(item);
+    QCOMPARE(changes.count(), initialChanges + 1);
+
+    // Panned: where the drag put it, from the drag on, as playback goes on.
+    middleDrag(item, 300.0, 100.0);
+    QVERIFY(item.detached());
+    const auto panned = published();
+    QVERIFY2(sameView(panned, viewOf(item)), qPrintable(describe(panned)));
+    QVERIFY(!sameView(panned, followingViewOf(item)));
+    const int pannedChanges = changes.count();
+    time.advance(0.5);
+    frame(item);
+    QVERIFY(sameView(published(), panned));
+    QCOMPARE(changes.count(), pannedChanges);
+
+    // Gliding back once the playhead reaches its re-attach point, and
+    // following again: the view of every frame.
+    bool glided = false;
+    for (int step = 0; step < 240; ++step) {
+        time.advance(0.05);
+        frame(item);
+        QVERIFY2(sameView(published(), viewOf(item)),
+                 qPrintable(QStringLiteral("%1 at %2").arg(describe(published())).arg(item.positionSeconds())));
+        glided = glided || !item.detached();
+    }
+    QVERIFY(glided && !item.detached());
+    QVERIFY2(sameView(published(), followingViewOf(item)), qPrintable(describe(published())));
+
+    // Paused, at another zoom, from the zoom on.
+    item.setPlaying(false);
+    item.setZoomLevel(2.0);
+    QVERIFY2(sameView(published(), viewOf(item)), qPrintable(describe(published())));
+    QCOMPARE(published().second - published().first, kDuration / 2.0);
+
+    // At the default zoom, the whole track; without a length, none, from
+    // its next frame.
+    item.resetZoom();
+    QVERIFY(sameView(published(), {0.0, kDuration}));
+    item.setDurationSeconds(0.0);
+    frame(item);
+    QVERIFY(std::isnan(item.visibleStartSeconds()) && std::isnan(item.visibleEndSeconds()));
+}
 
 // A middle-drag pans a zoomed view, which then stays where it was put while
 // playback goes on; the time grabbed stays under the pointer.

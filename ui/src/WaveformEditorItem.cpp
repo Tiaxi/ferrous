@@ -465,6 +465,8 @@ void WaveformEditorItem::setPlaying(bool value) {
 void WaveformEditorItem::setDurationSeconds(double value) {
     { QMutexLocker lock(&m_stateMutex); value = std::max(0.0, value); if (std::abs(m_durationSeconds - value) < 0.0001) return; m_durationSeconds = value; m_zoomLevel = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked()); m_presentedZoomLevel = m_zoomLevel; m_zoomOutHandoffPending = false; invalidateDetailRequestLocked(); clearPendingRequestLocked(); clearDetailLocked(); m_zoomFallbackToOverview = false; invalidateCacheLocked(); }
     emit durationSecondsChanged(); emit zoomLevelChanged(); emit samplePointsVisibleChanged(); scheduleDetailRequest(); updateStandbyFetch(); update();
+    // A view of the new length, not one of the old in its seconds.
+    publishVisibleRange();
 }
 
 void WaveformEditorItem::setZoomLevel(double value) {
@@ -1391,9 +1393,28 @@ void WaveformEditorItem::publishDetached() {
         detached = detachedLocked(m_nowNs());
     }
     m_detachedShown.store(detached, std::memory_order_release);
+    // What moved the view, such as a zoom or a pan, moves the range in the
+    // same frame.
+    publishVisibleRange();
     if (m_detached == detached) return;
     m_detached = detached;
     emit detachedChanged();
+}
+
+void WaveformEditorItem::publishVisibleRange() {
+    double start = std::numeric_limits<double>::quiet_NaN();
+    double end = start;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_durationSeconds > 0.0) std::tie(start, end) = visibleRangeLocked();
+    }
+    const auto same = [](double a, double b) {
+        return a == b || (std::isnan(a) && std::isnan(b));
+    };
+    if (same(start, m_visibleStartSeconds) && same(end, m_visibleEndSeconds)) return;
+    m_visibleStartSeconds = start;
+    m_visibleEndSeconds = end;
+    emit visibleRangeChanged();
 }
 
 bool WaveformEditorItem::detachedLocked(qint64 nowNs) const {
@@ -1885,7 +1906,9 @@ void WaveformEditorItem::shownChanged() {
         updateStandbyFetch();
         return;
     }
-    // Shown, it asks for its detail as ever.
+    // Shown, it asks for its detail as ever, and its view is the one it
+    // shows now rather than the one it last showed.
+    publishVisibleRange();
     m_standbyFetch = false;
     updateReaderLease();
     bool request = false;
@@ -1958,6 +1981,8 @@ bool WaveformEditorItem::standbyFetchWantedLocked() const {
 
 void WaveformEditorItem::handleWindowFrameSwapped() {
     if (!isVisible()) return;
+    // The view the frame showed, paused or playing.
+    publishVisibleRange();
     bool request = false;
     bool followChanges = false;
     qint64 frameDelayNs = 0;

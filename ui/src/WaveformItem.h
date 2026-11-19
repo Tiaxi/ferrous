@@ -18,6 +18,8 @@ class WaveformItem : public QQuickPaintedItem {
     Q_PROPERTY(double positionSeconds READ positionSeconds WRITE setPositionSeconds NOTIFY positionSecondsChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds WRITE setDurationSeconds NOTIFY durationSecondsChanged)
     Q_PROPERTY(QColor barColor READ barColor WRITE setBarColor NOTIFY barColorChanged)
+    // What the item draws where there are no bars: one with alpha, such as
+    // transparent, lets what is under the item show there.
     Q_PROPERTY(QColor bgColor READ bgColor WRITE setBgColor NOTIFY bgColorChanged)
     // The line through the middle where there is no waveform to draw yet:
     // past a partial or early-ending waveform's end, or across the item

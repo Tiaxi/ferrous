@@ -32,7 +32,7 @@ Every colour comes from the window's palette and the Kirigami theme. The only fi
 | Token | Use it for | Why |
 |---|---|---|
 | `chrome` | the window colour: the status bar, dialogs and their button rows [#202326 / #eff0f1] | window chrome reads apart from content |
-| `view` | the base colour: all content, lists, now playing, the search palette | content sits on one surface |
+| `view` | the base colour: all content, lists, now playing, the search palette; behind the seek bar's waveform, the band that marks a zoomed visualization's view | content sits on one surface. On the Header chrome the band is a quiet well, darker than dark chrome and lighter than light, so the waveform keeps its contrast on it |
 | `seam` | the 1 px line where two regions meet | regions are separated by seams, not gaps or cards |
 | `hairline` | the 1 px line under a header row | quieter than a seam: it divides inside a region |
 | `chromeLine` | the 1 px line between chrome and content | chrome and content meet at one edge |

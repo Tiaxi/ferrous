@@ -2875,13 +2875,18 @@ void AccessibilityTest::seekBarPlayheadContrastsWithTheBar() {
     QVERIFY(casing.alphaF() > 0.5f && casing.alphaF() < 1.0f);
 
     // The bar is the transport's chrome, its Header colour;
-    // the waveform is drawn on it, and the unplayed part is the chrome over
-    // it.
+    // the waveform is drawn on it, letting it show through, and the
+    // unplayed part is the chrome over it.
     const QColor chrome = background->property("color").value<QColor>();
     const QColor played = waveform->property("barColor").value<QColor>();
-    const QColor cover = unplayed->property("color").value<QColor>();
+    QObject *transport = nullptr;
+    for (QQuickItem *item = unplayed; item != nullptr && transport == nullptr; item = item->parentItem()) {
+        transport = item->property("seekUnplayedCover").isValid() ? item : nullptr;
+    }
+    QVERIFY(transport != nullptr);
+    const QColor cover = transport->property("seekUnplayedCover").value<QColor>();
     QCOMPARE(chrome, QColor::fromString(header));
-    QCOMPARE(waveform->property("bgColor").value<QColor>(), chrome);
+    QCOMPARE(waveform->property("bgColor").value<QColor>().alpha(), 0);
     QCOMPARE(chrome.alphaF(), 1.0f);
     QCOMPARE(played.alphaF(), 1.0f);
     QVERIFY(cover.alphaF() > 0.0f && cover.alphaF() < 1.0f);
@@ -3905,7 +3910,12 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     QCOMPARE(background->property("color").value<QColor>(), header);
     QQuickItem *unplayed = visibleItemNamed(window, QStringLiteral("seekUnplayed"));
     QVERIFY(unplayed != nullptr);
-    QVERIFY(sameRgb(unplayed->property("color").value<QColor>(), header));
+    QObject *transport = nullptr;
+    for (QQuickItem *item = unplayed; item != nullptr && transport == nullptr; item = item->parentItem()) {
+        transport = item->property("seekUnplayedCover").isValid() ? item : nullptr;
+    }
+    QVERIFY(transport != nullptr);
+    QVERIFY(sameRgb(transport->property("seekUnplayedCover").value<QColor>(), header));
     QQuickItem *playhead = visibleItemNamed(window, QStringLiteral("seekPlayhead"));
     QQuickItem *playheadLine = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
     QVERIFY(playhead != nullptr && playheadLine != nullptr);
@@ -3922,7 +3932,8 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     };
     findWaveforms(window->contentItem());
     QCOMPARE(waveforms.size(), 1);
-    QCOMPARE(waveforms.first()->property("bgColor").value<QColor>(), header);
+    // The chrome shows through the waveform.
+    QCOMPARE(waveforms.first()->property("bgColor").value<QColor>().alpha(), 0);
     // The theme's `wave`, mixed 30% toward the text on a light theme.
     const QColor wave = paletteColor("wave");
     const QColor text = paletteColor("text");

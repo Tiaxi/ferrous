@@ -4576,7 +4576,8 @@ void UiMainWindowTest::transportIsWindowChromeInTheHeaderColours() {
     QCOMPARE(transport->property("chromeColor").value<QColor>(), header);
     QCOMPARE(background->property("color").value<QColor>(), header);
     QCOMPARE(seekBackground->property("color").value<QColor>(), header);
-    QCOMPARE(named(window, "seekWaveform")->property("bgColor").value<QColor>(), header);
+    // The waveform lets the bar's chrome show through it.
+    QCOMPARE(named(window, "seekWaveform")->property("bgColor").value<QColor>().alpha(), 0);
     // As drawn: one band from the menu bar through the transport.
     const QRectF menuRect = sceneRect(menuBar);
     const QRectF transportRect = sceneRect(transport);

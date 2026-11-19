@@ -2326,6 +2326,10 @@ void SpectrogramItem::setPlaying(bool value) {
             PlaybackClockState frozen;
             frozen.anchorSeconds = parked;
             frozen.anchorNs = monotonicNs(now);
+            // The track of the position parked: the held one's until its
+            // hold ends, the clock's after.
+            frozen.trackToken = positionHeldLocked(frozen.anchorNs)
+                ? m_positionHoldTrajectory.trackToken : m_clockState.trackToken;
             holdPositionLocked(frozen, 0.0, now);
             m_positionSeconds = parked;
         }
@@ -3924,6 +3928,8 @@ void SpectrogramItem::feedPrecomputedChunk(
                     dataStart.anchorSeconds = dataStartSeconds;
                     dataStart.anchorNs = monotonicNs(now);
                     dataStart.rate = m_clockState.advancing() ? 1.0 : 0.0;
+                    // The data's track, which the view shows meanwhile.
+                    dataStart.trackToken = trackToken != 0 ? trackToken : m_clockState.trackToken;
                     holdPositionLocked(dataStart, 0.0, now);
                     m_positionSeconds = dataStartSeconds;
                 }
@@ -8061,6 +8067,8 @@ void SpectrogramItem::windowPresenceChanged() {
         QMutexLocker lock(&m_stateMutex);
         m_animationTickInitialized = false;
     }
+    // Its view is the one it shows now rather than the one it last showed.
+    publishVisibleRange();
     // One frame shows playback as it is now; the frames that follow it
     // ask for their own.
     requestPlaybackFrame();
@@ -8159,8 +8167,69 @@ void SpectrogramItem::releaseStorageLocked() {
     m_awaitingWorkerReset = true;
 }
 
+std::pair<double, double> SpectrogramItem::visibleRangeLocked(
+    std::chrono::steady_clock::time_point now) const {
+    const double unknown = std::numeric_limits<double>::quiet_NaN();
+    const int canvasWidth = canvasWidthLocked();
+    const double canvasZoom = canvasZoomLocked();
+    if (m_precomputedSampleRateHz <= 0 || m_precomputedHopSize <= 0
+        || m_precomputedTotalColumnsEstimate <= 0 || canvasWidth <= 0 || canvasZoom <= 0.0) {
+        return {unknown, unknown};
+    }
+    // A rolling view that still plays another track than the clock's, until
+    // the clock's track's columns come or its gapless start, shows none of
+    // the clock's track. A token of 0 is unknown.
+    if (positionHeldLocked(monotonicNs(now))
+        && m_positionHoldTrajectory.trackToken != 0 && m_clockState.trackToken != 0
+        && m_positionHoldTrajectory.trackToken != m_clockState.trackToken) {
+        return {unknown, unknown};
+    }
+    if (m_zoomPreviewShown && m_zoomPreviewPixelsPerSecond > 0.0) {
+        // The canvas scaled to a zoom whose columns are still to come, as
+        // the last frame drew it and a click seeks in it.
+        const double start = m_zoomPreviewAnchorSeconds
+            - m_zoomPreviewAnchorX / m_zoomPreviewPixelsPerSecond - m_gaplessPositionOffset;
+        return {start, start + width() / m_zoomPreviewPixelsPerSecond};
+    }
+    const double columnsPerSecond = static_cast<double>(m_precomputedSampleRateHz)
+        / static_cast<double>(m_precomputedHopSize);
+    const double position = currentRenderPositionSecondsLocked(now);
+    const double columns = static_cast<double>(canvasWidth) / canvasZoom;
+    // The track's column at the view's left edge, in the time of the
+    // columns, which runs on across a gapless transition.
+    double leftColumn = 0.0;
+    if (m_displayMode == 1) {
+        const CenteredView view = centeredViewLocked(
+            position, canvasWidth, canvasHeightLocked(), canvasZoom, columnsPerSecond);
+        leftColumn = static_cast<double>(view.left) - view.drawX / canvasZoom;
+    } else {
+        leftColumn = position * columnsPerSecond - columns;
+    }
+    const double start = leftColumn / columnsPerSecond - m_gaplessPositionOffset;
+    return {start, start + columns / columnsPerSecond};
+}
+
+void SpectrogramItem::publishVisibleRange() {
+    std::pair<double, double> range;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        range = visibleRangeLocked(m_now());
+    }
+    const auto same = [](double a, double b) {
+        return a == b || (std::isnan(a) && std::isnan(b));
+    };
+    if (same(range.first, m_visibleStartSeconds) && same(range.second, m_visibleEndSeconds)) {
+        return;
+    }
+    m_visibleStartSeconds = range.first;
+    m_visibleEndSeconds = range.second;
+    emit visibleRangeChanged();
+}
+
 void SpectrogramItem::handleWindowAfterAnimating() {
     if (!isVisible()) return;
+    // The view the frame showed, paused or playing.
+    publishVisibleRange();
     const auto now = m_now();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();

@@ -22,6 +22,7 @@ private slots:
     void spectrogramRingHoldsTheSessionsWidthUntilTheNextSession();
     void spectrogramRingHoldsEveryColumnOfAWiderSession();
     void spectrogramZoomPreviewRequestsEveryFrame();
+    void spectrogramVisibleRangeIsTheViewAFrameShows();
     void spectrogramDynamicRangePreservesSilence();
     void spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans();
     void spectrogramProjectionWritesPreserveSharedCanvasImages();
@@ -616,6 +617,143 @@ void SpectrogramCanvasSmokeTest::spectrogramZoomPreviewRequestsEveryFrame() {
         }
         delete node;
     }
+}
+
+// The view's range, which the seek bar marks while it is zoomed: what the
+// last frame showed, in centered mode about the playhead and in rolling
+// mode the history up to it, and the canvas scaled to a zoom still to come
+// while that shows. A right-click in a centered view seeks within it. None
+// before the item has its columns.
+void SpectrogramCanvasSmokeTest::spectrogramVisibleRangeIsTheViewAFrameShows() {
+    {
+        SpectrogramItem item;
+        item.setWidth(400);
+        item.setHeight(120);
+        QSignalSpy changes(&item, &SpectrogramItem::visibleRangeChanged);
+        item.handleWindowAfterAnimating();
+        QVERIFY(std::isnan(item.visibleStartSeconds()) && std::isnan(item.visibleEndSeconds()));
+        QCOMPARE(changes.count(), 0);
+    }
+    for (const int mode : {0, 1}) {
+        const QByteArray label = mode == 0 ? "rolling" : "centered";
+        TestTime time;
+        SpectrogramItem item;
+        prepareScrollingPlayback(item, time, mode);
+        item.setCrosshairEnabled(true);
+        QSignalSpy changes(&item, &SpectrogramItem::visibleRangeChanged);
+        QSignalSpy seeks(&item, &SpectrogramItem::seekRequested);
+        const auto seekAt = [&item, &seeks](double x) {
+            QMouseEvent press(QEvent::MouseButtonPress, QPointF(x, 40.0), QPointF(x, 40.0),
+                              Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+            item.mousePressEvent(&press);
+            return seeks.isEmpty() ? std::numeric_limits<double>::quiet_NaN()
+                                   : seeks.takeLast().first().toDouble();
+        };
+        double columnSeconds = 0.0;
+        double span = 0.0;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            columnSeconds = static_cast<double>(item.m_precomputedHopSize)
+                / static_cast<double>(item.m_precomputedSampleRateHz);
+            span = 400.0 / item.effectiveZoomLocked() * columnSeconds;
+        }
+        QSGNode *node = paintSettled(item, nullptr);
+        item.handleWindowAfterAnimating();
+        QCOMPARE(changes.count(), 1);
+        double start = item.visibleStartSeconds();
+        double end = item.visibleEndSeconds();
+        QVERIFY2(std::abs(end - start - span) < 1e-9, label.constData());
+        if (mode == 1) {
+            QVERIFY2(std::abs((start + end) / 2 - 40.0) <= columnSeconds, label.constData());
+            QVERIFY2(std::abs(seekAt(0.0) - start) <= 2 * columnSeconds, label.constData());
+            QVERIFY2(std::abs(seekAt(399.5) - end) <= 2 * columnSeconds, label.constData());
+        } else {
+            QVERIFY2(std::abs(end - 40.0) < 1e-9, label.constData());
+        }
+
+        // Playback moves it on, from the next frame. A frame that shows the
+        // same view says nothing.
+        time.advance(1.0);
+        QCOMPARE(item.visibleStartSeconds(), start);
+        node = item.updatePaintNode(node, nullptr);
+        item.handleWindowAfterAnimating();
+        QCOMPARE(changes.count(), 2);
+        QVERIFY2(std::abs(item.visibleStartSeconds() - (start + 1.0)) <= columnSeconds, label.constData());
+        QVERIFY2(std::abs(item.visibleEndSeconds() - item.visibleStartSeconds() - span) < 1e-9,
+                 label.constData());
+        item.handleWindowAfterAnimating();
+        QCOMPARE(changes.count(), 2);
+
+        // Zoomed in, before the columns for the zoom come: the canvas
+        // scaled to it, about the playhead.
+        item.setZoomLevel(2.0);
+        node = item.updatePaintNode(node, nullptr);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY2(item.m_zoomPreviewShown, label.constData());
+        }
+        item.handleWindowAfterAnimating();
+        start = item.visibleStartSeconds();
+        end = item.visibleEndSeconds();
+        QVERIFY2(std::abs((end - start) / span - 0.5) < 0.05,
+                 qPrintable(QStringLiteral("%1: %2").arg(label).arg((end - start) / span)));
+        if (mode == 1) {
+            QVERIFY2(std::abs((start + end) / 2 - 41.0) <= columnSeconds, label.constData());
+            QVERIFY2(std::abs(seekAt(0.0) - start) <= 1e-9, label.constData());
+            QVERIFY2(std::abs(seekAt(400.0) - end) <= 1e-9, label.constData());
+        } else {
+            QVERIFY2(std::abs(end - 41.0) < 1e-9, label.constData());
+        }
+        delete node;
+    }
+
+    TestTime time;
+    SpectrogramItem item;
+    prepareScrollingPlayback(item, time, 0);
+    // The clock plays the columns' track.
+    setTestPosition(item, 40.0, 1);
+    QSGNode *node = paintSettled(item, nullptr);
+    item.handleWindowAfterAnimating();
+    QVERIFY(std::isfinite(item.visibleStartSeconds()));
+
+    // A seek in the track whose columns come before the clock catches up:
+    // the rolling view starts from them, and has its range, playing and
+    // paused.
+    const int seekColumn = static_cast<int>(20.0 * kStripeColumnsPerSecond);
+    item.feedPrecomputedChunk(QByteArray(kStripeBins * 64, '\x50'), kStripeBins, 0, 64, seekColumn,
+        kStripeColumns, 48'000, 1024, false, true, 1, true, 2);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_positionJumpHoldActive);
+    }
+    item.handleWindowAfterAnimating();
+    QVERIFY2(std::abs(item.visibleEndSeconds() - 20.0) < 0.1, qPrintable(QString::number(item.visibleEndSeconds())));
+    item.setPlaying(false);
+    item.handleWindowAfterAnimating();
+    QVERIFY2(std::abs(item.visibleEndSeconds() - 20.0) < 0.1, qPrintable(QString::number(item.visibleEndSeconds())));
+    item.setPlaying(true);
+    setTestPosition(item, 20.0);
+
+    // A rolling view that plays the previous track on while the clock's new
+    // track's columns are on their way shows none of the new track.
+    setTestPosition(item, 0.0, 2);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_positionJumpHoldActive);
+    }
+    item.handleWindowAfterAnimating();
+    QVERIFY(std::isnan(item.visibleStartSeconds()) && std::isnan(item.visibleEndSeconds()));
+
+    // Paused once that hold has run out, before a frame ends it: the
+    // position parked is the clock's, of its track, which keeps its range.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_positionJumpHoldUntilNs = time.nowNs - 1;
+    }
+    item.setPlaying(false);
+    item.handleWindowAfterAnimating();
+    QVERIFY(std::isfinite(item.visibleStartSeconds()) && std::isfinite(item.visibleEndSeconds()));
+    delete node;
 }
 
 void SpectrogramCanvasSmokeTest::spectrogramRebuildBenchmark() {
