@@ -199,6 +199,8 @@ void WaveformItem::setBgColor(const QColor &color) {
         markDirtyAllLocked();
         dirtyRect = m_dirtyRect;
     }
+    // A background with alpha shows what is under the item.
+    setOpaquePainting(color.alpha() == 255);
     emit bgColorChanged();
     update(dirtyRect);
 }
@@ -329,12 +331,15 @@ void WaveformItem::ensureCacheLocked(double scale) {
     const QSize pixels(
         std::max(1, static_cast<int>(std::ceil(width * scale - 1e-6))),
         std::max(1, static_cast<int>(std::ceil(height * scale - 1e-6))));
+    // With alpha only where the background has some.
+    const QImage::Format format = m_bgColor.alpha() == 255
+        ? QImage::Format_RGB32 : QImage::Format_ARGB32_Premultiplied;
     if (m_waveformCache.size() == pixels
         && m_waveformCache.devicePixelRatio() == scale
-        && m_waveformCache.format() == QImage::Format_RGB32) {
+        && m_waveformCache.format() == format) {
         return;
     }
-    m_waveformCache = QImage(pixels, QImage::Format_RGB32);
+    m_waveformCache = QImage(pixels, format);
     m_waveformCache.setDevicePixelRatio(scale);
     m_waveformCache.fill(m_bgColor);
     m_dirtyRect = QRect(0, 0, width, height);
@@ -387,7 +392,10 @@ void WaveformItem::updateWaveformCacheLocked() {
     QPainter cachePainter(&m_waveformCache);
     // In device pixels.
     cachePainter.setWorldTransform(QTransform::fromScale(1.0 / scale, 1.0 / scale));
+    // The background replaces what was there, alpha and all.
+    cachePainter.setCompositionMode(QPainter::CompositionMode_Source);
     cachePainter.fillRect(dirty, m_bgColor);
+    cachePainter.setCompositionMode(QPainter::CompositionMode_SourceOver);
     // Where the waveform ends: nothing drawn past it but the empty line.
     int drawWidth = 0;
     if (!m_peaksData.isEmpty()) {

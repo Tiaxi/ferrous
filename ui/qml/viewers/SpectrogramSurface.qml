@@ -26,6 +26,16 @@ Item {
         const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
         return first && first.spectrogramItem ? first.spectrogramItem.markerX : NaN
     }
+    // The part of the track the view shows, in seconds; every lane shows
+    // the same. NaN while it is unknown.
+    readonly property real visibleStartSeconds: {
+        const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
+        return first && first.spectrogramItem ? first.spectrogramItem.visibleStartSeconds : NaN
+    }
+    readonly property real visibleEndSeconds: {
+        const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
+        return first && first.spectrogramItem ? first.spectrogramItem.visibleEndSeconds : NaN
+    }
     // The lanes, each one's label ("" for none) and the one under the pointer.
     readonly property int laneCount: Math.max(1, root.channelDescriptors.length)
     readonly property var laneLabels: {

@@ -23,6 +23,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "CrosshairReadout.h"
@@ -346,6 +347,14 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // The deepest zoom: 16, or the default zoom where that is deeper. A zoom
     // deeper than it comes back to it when it drops.
     Q_PROPERTY(double maximumZoomLevel READ maximumZoomLevel NOTIFY maximumZoomLevelChanged)
+    // The part of the track the view shows, in seconds of the track, from
+    // its left edge to its right: in centered mode the view about the
+    // playhead, in rolling mode the history up to it. Taken at each frame
+    // of the window and as the item is shown; NaN until the item has the
+    // track's columns to place the view by. The seek bar marks it while the
+    // view is zoomed.
+    Q_PROPERTY(double visibleStartSeconds READ visibleStartSeconds NOTIFY visibleRangeChanged)
+    Q_PROPERTY(double visibleEndSeconds READ visibleEndSeconds NOTIFY visibleRangeChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -469,6 +478,8 @@ public:
     // The deepest zoom the wheel goes to: 16, or the default zoom where that
     // is deeper.
     double maximumZoomLevel() const;
+    double visibleStartSeconds() const { return m_visibleStartSeconds; }
+    double visibleEndSeconds() const { return m_visibleEndSeconds; }
 
     // Frees the ring and the canvas, which nothing uses while analysis is
     // off because no pane is shown, and takes no columns until retained:
@@ -522,6 +533,7 @@ signals:
     void stretchShortTracksChanged();
     void defaultZoomLevelChanged();
     void maximumZoomLevelChanged();
+    void visibleRangeChanged();
     void zoomRequested(double newZoomLevel);
     void zoomResetRequested();
     void backendZoomRequested(float zoomLevel);
@@ -877,6 +889,13 @@ private:
     bool showsPlaybackFrames() const;
     // Its window came on screen or left it.
     void windowPresenceChanged();
+    // The view at `now`, as visibleStartSeconds and visibleEndSeconds give
+    // it, from the view a frame draws: the zoom preview while it shows,
+    // centeredViewLocked in centered mode, and the playhead at the right
+    // edge in rolling mode.
+    std::pair<double, double> visibleRangeLocked(std::chrono::steady_clock::time_point now) const;
+    // Follows visibleStartSeconds and visibleEndSeconds on the GUI thread.
+    void publishVisibleRange();
     void releaseStorageLocked();
     // What a data chunk could change of a frame besides its columns.
     struct ShownDataState {
@@ -1229,6 +1248,9 @@ private:
     double m_zoomPreviewAnchorSeconds{0.0};
     double m_zoomPreviewAnchorX{0.0};
     double m_zoomPreviewPixelsPerSecond{0.0};
+    // The view publishVisibleRange last published, on the GUI thread.
+    double m_visibleStartSeconds{std::numeric_limits<double>::quiet_NaN()};
+    double m_visibleEndSeconds{std::numeric_limits<double>::quiet_NaN()};
 
     // Crosshair overlay state.
     bool m_crosshairEnabled{false};

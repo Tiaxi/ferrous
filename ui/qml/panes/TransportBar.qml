@@ -51,6 +51,11 @@ ToolBar {
     required property var setAppVolume
     required property var normalizedVolumeValue
     required property var seekCommitted
+    // The part of the track the visualization's view shows while it is
+    // zoomed, in seconds, or NaN: the seek bar marks it with a band behind
+    // its waveform.
+    property real viewStartSeconds: NaN
+    property real viewEndSeconds: NaN
 
     readonly property alias seekPressed: seekSlider.pressed
     // The time of one device pixel of the seek bar's playhead: the smallest
@@ -98,6 +103,15 @@ ToolBar {
         : Qt.rgba(1, 1, 1, 0.85)
     readonly property color seekHoverLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.7)
     readonly property color seekEmptyLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.18)
+    // The band of the visualization's view: the view colour, of the panes
+    // the window shows its content in, as a quiet well in the chrome (about
+    // 1.35:1 on Breeze's Header colours). It is darker than the dark
+    // chrome and lighter than the light one, away from the waveform's
+    // tones, so the waveform on it keeps its contrast. The unplayed part
+    // is the waveform at the unplayed opacity on the band as on the chrome.
+    readonly property color seekViewBandColor: root.uiPalette.view
+    readonly property color seekViewBandUnplayedCover: ColorUtils.withAlpha(
+        root.seekViewBandColor, 1 - root.seekUnplayedOpacity)
     // The volume slider, in the seek bar's language: its groove filled up
     // to the thumb in the played colour and the rest in the unplayed one,
     // opaque, and a solid thumb in the played colour. While muted, the
@@ -544,6 +558,24 @@ ToolBar {
                 const fraction = Math.max(0, Math.min(1, (shownSeconds - from) / (to - from)))
                 return mirrored ? 1 - fraction : fraction
             }
+            // The band of the visualization's view, from its left edge to
+            // its right on whole device pixels, within the bar: while a
+            // track of known length is loaded and the view's range is given.
+            readonly property bool viewBandShown: seekAllowed
+                && isFinite(root.viewStartSeconds) && isFinite(root.viewEndSeconds)
+                && root.viewEndSeconds > root.viewStartSeconds
+                && root.viewEndSeconds > from && root.viewStartSeconds < to
+            function barXOf(seconds) {
+                const fraction = Math.max(0, Math.min(1, (seconds - from) / (to - from)))
+                return Math.round((mirrored ? 1 - fraction : fraction) * barDevicePixels)
+                    / windowDevicePixelRatio
+            }
+            readonly property real viewBandLeft: !viewBandShown ? 0
+                : Math.min(barXOf(root.viewStartSeconds), barXOf(root.viewEndSeconds))
+            // At least a device pixel wide, however deep the zoom.
+            readonly property real viewBandRight: !viewBandShown ? 0
+                : Math.max(barXOf(root.viewStartSeconds), barXOf(root.viewEndSeconds),
+                           viewBandLeft + 1 / windowDevicePixelRatio)
             // The handle is a grab target wider than the line and not drawn.
             // Padding of half their difference outside the bar puts the
             // handle's centre, which a press or drag moves under the
@@ -709,9 +741,22 @@ ToolBar {
                     color: root.chromeColor
                 }
 
-                // Without a track: a 1 px line through the middle. With
-                // one, the waveform draws the line where it has nothing to
-                // draw yet.
+                // The band of the visualization's view, across the bar's
+                // height behind the waveform: decoration, which assistive
+                // technology does not see.
+                Rectangle {
+                    objectName: "seekViewBand"
+                    visible: seekSlider.viewBandShown
+                    antialiasing: false
+                    x: seekSlider.viewBandLeft
+                    width: seekSlider.viewBandRight - seekSlider.viewBandLeft
+                    height: parent.height
+                    color: root.seekViewBandColor
+                }
+
+                // Without peaks: a 1 px line through the middle. With them,
+                // the waveform draws the line where it has nothing to draw
+                // yet.
                 Rectangle {
                     objectName: "seekEmptyLine"
                     visible: !root.hasWaveform
@@ -732,7 +777,9 @@ ToolBar {
                     // device pixels.
                     y: root.snapped((parent.height - seekSlider.waveformHeight) / 2)
                     height: seekSlider.waveformHeight
-                    visible: root.uiBridge.playbackState !== "Stopped"
+                    // Only with peaks: it lets what is under it show, the
+                    // empty line too.
+                    visible: root.hasWaveform
                     peaksData: root.uiBridge.playbackState === "Stopped"
                         ? ""
                         : root.uiBridge.waveformPeaksPacked
@@ -741,22 +788,52 @@ ToolBar {
                     positionSeconds: root.displayedPositionSeconds
                     durationSeconds: root.uiBridge.durationSeconds
                     barColor: root.seekPlayedColor
-                    bgColor: root.chromeColor
+                    // The chrome and the band show through it.
+                    bgColor: "transparent"
                     // Past the waveform's end, as without one.
                     emptyLineColor: root.seekEmptyLineColor
                 }
 
                 // The unplayed part: the chrome over the waveform after the
-                // playhead's line, which leaves it at the unplayed opacity.
-                Rectangle {
+                // playhead's line, which leaves it at the unplayed opacity,
+                // and the band's colour where the band is, so the band is
+                // the same on either side of the playhead.
+                Item {
+                    id: seekUnplayed
                     objectName: "seekUnplayed"
                     visible: seekSlider.trackLoaded
-                    antialiasing: false
                     x: seekSlider.playheadX
                     width: Math.max(0, parent.width - x)
                     y: waveformItem.y
                     height: waveformItem.height
-                    color: root.seekUnplayedCover
+                    // Where the band is in it.
+                    readonly property real bandLeft: seekSlider.viewBandShown
+                        ? Math.max(0, Math.min(width, seekSlider.viewBandLeft - x)) : width
+                    readonly property real bandRight: seekSlider.viewBandShown
+                        ? Math.max(bandLeft, Math.min(width, seekSlider.viewBandRight - x)) : width
+
+                    Rectangle {
+                        antialiasing: false
+                        width: seekUnplayed.bandLeft
+                        height: parent.height
+                        color: root.seekUnplayedCover
+                    }
+                    Rectangle {
+                        objectName: "seekViewBandUnplayed"
+                        visible: width > 0
+                        antialiasing: false
+                        x: seekUnplayed.bandLeft
+                        width: seekUnplayed.bandRight - seekUnplayed.bandLeft
+                        height: parent.height
+                        color: root.seekViewBandUnplayedCover
+                    }
+                    Rectangle {
+                        antialiasing: false
+                        x: seekUnplayed.bandRight
+                        width: seekUnplayed.width - seekUnplayed.bandRight
+                        height: parent.height
+                        color: root.seekUnplayedCover
+                    }
                 }
 
                 // The playhead: its casing, cut to the bar at either end,
