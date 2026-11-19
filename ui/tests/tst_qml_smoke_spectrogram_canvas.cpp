@@ -707,14 +707,35 @@ void SpectrogramCanvasSmokeTest::spectrogramVisibleRangeIsTheViewAFrameShows() {
         delete node;
     }
 
-    // A rolling view that plays the previous track on while the clock's new
-    // track's columns are on their way shows none of the new track.
     TestTime time;
     SpectrogramItem item;
     prepareScrollingPlayback(item, time, 0);
+    // The clock plays the columns' track.
+    setTestPosition(item, 40.0, 1);
     QSGNode *node = paintSettled(item, nullptr);
     item.handleWindowAfterAnimating();
     QVERIFY(std::isfinite(item.visibleStartSeconds()));
+
+    // A seek in the track whose columns come before the clock catches up:
+    // the rolling view starts from them, and has its range, playing and
+    // paused.
+    const int seekColumn = static_cast<int>(20.0 * kStripeColumnsPerSecond);
+    item.feedPrecomputedChunk(QByteArray(kStripeBins * 64, '\x50'), kStripeBins, 0, 64, seekColumn,
+        kStripeColumns, 48'000, 1024, false, true, 1, true, 2);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_positionJumpHoldActive);
+    }
+    item.handleWindowAfterAnimating();
+    QVERIFY2(std::abs(item.visibleEndSeconds() - 20.0) < 0.1, qPrintable(QString::number(item.visibleEndSeconds())));
+    item.setPlaying(false);
+    item.handleWindowAfterAnimating();
+    QVERIFY2(std::abs(item.visibleEndSeconds() - 20.0) < 0.1, qPrintable(QString::number(item.visibleEndSeconds())));
+    item.setPlaying(true);
+    setTestPosition(item, 20.0);
+
+    // A rolling view that plays the previous track on while the clock's new
+    // track's columns are on their way shows none of the new track.
     setTestPosition(item, 0.0, 2);
     {
         QMutexLocker lock(&item.m_stateMutex);

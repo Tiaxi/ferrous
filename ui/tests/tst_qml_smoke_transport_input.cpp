@@ -3706,8 +3706,12 @@ void TransportInputSmokeTest::seekBarMarksTheZoomedViewOfTheShownPlot() {
             && std::abs(drawn.right() - (bar.left() + std::round(end / 229.0 * pixels) / ratio)) < 1e-6;
     };
 
-    // The waveform: its default zoom shows the whole track.
+    // The waveform, once it has come in: its default zoom shows the whole
+    // track.
+    QObject *surface = window->findChild<QObject *>(QStringLiteral("visualizationSurface"));
+    QVERIFY(surface != nullptr);
     viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(surface->property("settledMode").toInt() == 1);
     QTRY_VERIFY(waveform->isVisible() && waveform->width() > 100);
     QTRY_VERIFY(waveform->visibleEndSeconds() == 229.0);
     QVERIFY(!band->isVisible());
@@ -3723,12 +3727,25 @@ void TransportInputSmokeTest::seekBarMarksTheZoomedViewOfTheShownPlot() {
     QTRY_VERIFY(bandIsWaveforms());
     QVERIFY(bandOnBar(waveform->visibleStartSeconds(), waveform->visibleEndSeconds()));
     QCOMPARE(seekState(), seekBefore);
-    // Reset Zoom: the band stays while the view still shows less than the
-    // whole track, as a zoom out does until it has its detail.
+    // Reset Zoom: the zoom out waits for detail of the whole track, which
+    // the fixture's track never gets, and the view stays zoomed meanwhile;
+    // so does the band, though the zoom asked for is the default. It goes
+    // as the whole track shows.
     QVERIFY(QMetaObject::invokeMethod(resetAction, "trigger"));
-    QCOMPARE(band->isVisible(), waveform->visibleEndSeconds() - waveform->visibleStartSeconds() < 229.0);
-    QTRY_VERIFY(!band->isVisible());
+    QCOMPARE(waveform->zoomLevel(), 1.0);
+    {
+        QMutexLocker lock(&waveform->m_stateMutex);
+        QVERIFY(waveform->m_zoomOutHandoffPending);
+    }
+    QVERIFY(bandIsWaveforms());
+    QCOMPARE(waveform->visibleEndSeconds() - waveform->visibleStartSeconds(), 229.0 / 4.0);
+    {
+        QMutexLocker lock(&waveform->m_stateMutex);
+        waveform->invalidateCacheLocked();
+    }
+    waveform->publishDetached();
     QCOMPARE(waveform->visibleEndSeconds() - waveform->visibleStartSeconds(), 229.0);
+    QVERIFY(!band->isVisible());
     // Without a length.
     waveform->setZoomLevel(4.0);
     QTRY_VERIFY(bandIsWaveforms());
@@ -3769,6 +3786,20 @@ void TransportInputSmokeTest::seekBarMarksTheZoomedViewOfTheShownPlot() {
     QTRY_VERIFY(bandIs(spectrogram->visibleStartSeconds(), spectrogram->visibleEndSeconds()));
     QVERIFY(bandOnBar(spectrogram->visibleStartSeconds(), spectrogram->visibleEndSeconds()));
     QCOMPARE(seekState(), seekBefore);
+    // Through a switch to the waveform, at its default zoom: the
+    // spectrogram's band while it is the plot that shows, until the
+    // waveform has come in.
+    const auto spectrogramStillShows = [surface]() {
+        return surface->property("settledMode").toInt() == 0
+            && surface->property("modeFade").toDouble() <= 0.0;
+    };
+    viewer->setProperty("visualizationMode", 1);
+    QVERIFY(!spectrogramStillShows()
+            || bandIs(spectrogram->visibleStartSeconds(), spectrogram->visibleEndSeconds()));
+    QTRY_VERIFY(surface->property("settledMode").toInt() == 1);
+    QVERIFY(!band->isVisible());
+    viewer->setProperty("visualizationMode", 0);
+    QTRY_VERIFY(bandIs(spectrogram->visibleStartSeconds(), spectrogram->visibleEndSeconds()));
     QVERIFY(QMetaObject::invokeMethod(resetAction, "trigger"));
     QTRY_VERIFY(!band->isVisible());
     QCOMPARE(seekState(), seekBefore);

@@ -1760,19 +1760,24 @@ ApplicationWindow {
 
         // The part of the track the shown plot's view covers, in seconds,
         // while it is zoomed, for the seek bar's band; NaN otherwise. The
-        // waveform is zoomed while its view shows less than the whole
-        // track, which a zoom out keeps showing until it has its detail.
-        readonly property bool viewZoomed: visualizationSurface.spectrogramShown
-            ? visualizationSurface.zoomed
+        // plot is the one whose playhead shows: through a mode switch, the
+        // one before until the chosen one has come in at all. The waveform
+        // is zoomed while its view shows less than the whole track, which a
+        // zoom out keeps showing until it has its detail.
+        readonly property int viewBandMode: visualizationSurface.modeSwitching
+            && visualizationSurface.modeFade <= 0
+            ? visualizationSurface.settledMode : visualizationSurface.chosenMode
+        readonly property bool viewZoomed: visualizationSurface.viewBandMode === 0
+            ? Math.abs(spectrogramSurface.zoomLevel / spectrogramSurface.defaultZoomLevel - 1.0) > 0.001
             : waveformSurface.waveformItem.visibleEndSeconds
                 - waveformSurface.waveformItem.visibleStartSeconds
                 < waveformSurface.waveformItem.durationSeconds
         readonly property real viewStartSeconds: !visualizationSurface.viewZoomed ? NaN
-            : visualizationSurface.spectrogramShown
+            : visualizationSurface.viewBandMode === 0
                 ? spectrogramSurface.visibleStartSeconds
                 : waveformSurface.waveformItem.visibleStartSeconds
         readonly property real viewEndSeconds: !visualizationSurface.viewZoomed ? NaN
-            : visualizationSurface.spectrogramShown
+            : visualizationSurface.viewBandMode === 0
                 ? spectrogramSurface.visibleEndSeconds
                 : waveformSurface.waveformItem.visibleEndSeconds
 

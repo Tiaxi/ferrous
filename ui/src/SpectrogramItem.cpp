@@ -2326,6 +2326,7 @@ void SpectrogramItem::setPlaying(bool value) {
             PlaybackClockState frozen;
             frozen.anchorSeconds = parked;
             frozen.anchorNs = monotonicNs(now);
+            frozen.trackToken = m_positionHoldTrajectory.trackToken;
             holdPositionLocked(frozen, 0.0, now);
             m_positionSeconds = parked;
         }
@@ -3924,6 +3925,8 @@ void SpectrogramItem::feedPrecomputedChunk(
                     dataStart.anchorSeconds = dataStartSeconds;
                     dataStart.anchorNs = monotonicNs(now);
                     dataStart.rate = m_clockState.advancing() ? 1.0 : 0.0;
+                    // The data's track, which the view shows meanwhile.
+                    dataStart.trackToken = trackToken != 0 ? trackToken : m_clockState.trackToken;
                     holdPositionLocked(dataStart, 0.0, now);
                     m_positionSeconds = dataStartSeconds;
                 }
@@ -8170,10 +8173,11 @@ std::pair<double, double> SpectrogramItem::visibleRangeLocked(
         || m_precomputedTotalColumnsEstimate <= 0 || canvasWidth <= 0 || canvasZoom <= 0.0) {
         return {unknown, unknown};
     }
-    // A rolling view that still plays the previous track, until the clock's
-    // track's columns come or the track's gapless start, shows none of the
-    // clock's track.
+    // A rolling view that still plays another track than the clock's, until
+    // the clock's track's columns come or its gapless start, shows none of
+    // the clock's track. A token of 0 is unknown.
     if (positionHeldLocked(monotonicNs(now))
+        && m_positionHoldTrajectory.trackToken != 0 && m_clockState.trackToken != 0
         && m_positionHoldTrajectory.trackToken != m_clockState.trackToken) {
         return {unknown, unknown};
     }
