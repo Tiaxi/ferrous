@@ -432,6 +432,7 @@ private slots:
     void mouseSelectsAndActs();
     void menuKeyOpensTheSelectedResultsMenu();
     void staleAndBusyResultsDoNotAct();
+    void reopeningWithKeptTextShowsNoEmptySearch();
     void paletteAndDimFadeTogether();
     void clearUsesTheBreezeIconAndNoTextGlyphs();
     void textMeetsItsContrastAsDrawn_data();
@@ -1585,6 +1586,63 @@ void SearchPaletteTest::staleAndBusyResultsDoNotAct() {
     harness.field()->setProperty("text", QStringLiteral("other"));
     QVERIFY(!harness.controller->property("pendingExpansion").toMap().contains(QStringLiteral("rowType")));
     QCOMPARE(harness.strings("queries").last(), QStringLiteral("other"));
+}
+
+// Reopened with the text it kept, the palette searches it again before it
+// shows: "No results" never shows between opening and the results for that
+// text (#647).
+void SearchPaletteTest::reopeningWithKeptTextShowsNoEmptySearch() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+
+    // Closing clears the search, and its empty results arrive; the field
+    // keeps its text.
+    QTest::keyClick(harness.window, Qt::Key_Escape);
+    QTRY_VERIFY(!harness.dialog->property("visible").toBool());
+    QCOMPARE(harness.strings("queries").last(), QString());
+    harness.model.presentSearchRows({}, {0, 0, 0}, false);
+    harness.settleRows();
+    QCOMPARE(harness.model.rowCount(), 0);
+    QCOMPARE(harness.field()->property("text").toString(), QStringLiteral("meridian"));
+
+    // As the bridge is: busy from a query until its results arrive.
+    QQmlExpression busyWhileSearching(qmlContext(harness.root.get()), harness.root.get(), QStringLiteral(R"JS(
+        bridge.queriesChanged.connect(function() {
+            bridge.globalSearchBusy = bridge.queries[bridge.queries.length - 1].trim().length > 0
+        }))JS"));
+    busyWhileSearching.evaluate();
+    QVERIFY2(!busyWhileSearching.hasError(), qPrintable(busyWhileSearching.error().toString()));
+
+    QQuickItem *noResults = harness.item(QStringLiteral("globalSearchNoResults"));
+    QVERIFY(noResults != nullptr);
+    QVERIFY(!noResults->isVisible());
+    bool noResultsShown = false;
+    const auto connection = QObject::connect(noResults, &QQuickItem::visibleChanged, noResults, [&] {
+        noResultsShown = noResultsShown || noResults->isVisible();
+    });
+    const auto disconnect = qScopeGuard([&] { QObject::disconnect(connection); });
+
+    // Reopened with a fade, as it is by default: the frames of the fade
+    // come before the results.
+    harness.dialog->setProperty("fadeDuration", 150);
+    QMetaObject::invokeMethod(harness.controller, "openDialog");
+    QVERIFY(harness.dialog->property("visible").toBool());
+    QVERIFY(!noResults->isVisible());
+    QTRY_VERIFY(harness.dialog->property("opened").toBool());
+    QCOMPARE(harness.strings("queries").last(), QStringLiteral("meridian"));
+    QVERIFY(harness.bridge->property("globalSearchBusy").toBool());
+    QVERIFY(!noResultsShown);
+
+    harness.model.presentSearchRows(meridianRows(harness.coverUrl), {1, 2, 4}, true);
+    harness.bridge->setProperty("globalSearchBusy", false);
+    harness.settleRows();
+    QTRY_VERIFY(harness.view()->isVisible());
+    QVERIFY(harness.model.rowCount() > 0);
+    QVERIFY(!noResultsShown);
 }
 
 // The palette and the dim fade in together over the short duration, and

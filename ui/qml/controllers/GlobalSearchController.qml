@@ -178,16 +178,19 @@ QtObject {
         root.ignoreRefocusFind = true
         root.pendingPrefillText = ""
         root.openInitialText = root.queryField ? (root.queryField.text || "") : ""
+        // Closing cleared the search, so the text kept in the field is
+        // searched again before the palette shows: until its results
+        // arrive the search is in progress, not one that found nothing.
+        root.uiBridge.setGlobalSearchQuery(root.openInitialText)
     }
 
-    function handleDialogOpened(queryText) {
+    function handleDialogOpened() {
         root.opening = false
         root.ignoreRefocusFind = true
         openSettleTimer.restart()
         root.syncSelectionAfterResultsChange()
         root.focusQueryField(false)
         root.applyOpenText()
-        root.uiBridge.setGlobalSearchQuery(queryText || "")
     }
 
     function endOpen(closeDialog) {

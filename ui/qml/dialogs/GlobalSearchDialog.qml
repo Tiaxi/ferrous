@@ -178,7 +178,7 @@ Dialog {
     }
 
     Component.onCompleted: root.controller.registerRefs(root, queryField, resultsView)
-    onOpened: root.controller.handleDialogOpened(queryField.text || "")
+    onOpened: root.controller.handleDialogOpened()
     onClosed: root.controller.endOpen(true)
 
     function escaped(value) {
