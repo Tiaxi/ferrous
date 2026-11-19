@@ -220,6 +220,11 @@ void SpectrogramFollowSmokeTest::middleDragDetachesAndPans() {
     frame(item);
     QVERIFY(item.detached());
     QCOMPARE(viewOf(item).left, following + 200);
+    // The seek bar's band marks the view where it was put.
+    QVERIFY(std::abs(item.visibleStartSeconds()
+                     - static_cast<double>(following + 200) / kColumnsPerSecond) < 1e-9);
+    QVERIFY(std::abs(item.visibleEndSeconds()
+                     - static_cast<double>(following + 200 + kWindow) / kColumnsPerSecond) < 1e-9);
     // Back by 300 px.
     middleDrag(item, 100.0, 400.0);
     QCOMPARE(viewOf(item).left, following - 100);
