@@ -3,6 +3,7 @@
 #include "ViewAutoscroll.h"
 
 #include <QCursor>
+#include <QEnterEvent>
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -83,7 +84,7 @@ void ViewAutoscroll::stop() {
         m_cursorSet = false;
     }
     disconnect(m_frameConnection);
-    disconnect(m_activeConnection);
+    disconnect(m_focusConnection);
     if (!m_swallowMiddleRelease) {
         unwatchWindow();
     }
@@ -95,6 +96,14 @@ double ViewAutoscroll::currentViewsPerSecond() const {
         return 0.0;
     }
     return viewsPerSecond(m_pointerScene.x() - m_originScene.x(), m_plot->width());
+}
+
+bool ViewAutoscroll::stoppedByPress(quint64 timestamp) const {
+    return m_stopPressTimestamp == timestamp;
+}
+
+void ViewAutoscroll::resume() {
+    wake();
 }
 
 void ViewAutoscroll::pointerMoved(QPointF scenePosition) {
@@ -154,16 +163,19 @@ void ViewAutoscroll::watchWindow(QQuickWindow *window) {
     m_frameConnection = connect(
         window, &QQuickWindow::frameSwapped, this, &ViewAutoscroll::frameShown,
         Qt::QueuedConnection);
-    m_activeConnection = connect(window, &QWindow::activeChanged, this, [this]() {
-        if (m_window != nullptr && !m_window->isActive()) {
-            stop();
-        }
-    });
+    // Focus moving to any other window stops it, also to a dialog of this
+    // window's, with which Qt still counts this one as active.
+    m_focusConnection = connect(
+        qGuiApp, &QGuiApplication::focusWindowChanged, this, [this](QWindow *focus) {
+            if (focus != m_window) {
+                stop();
+            }
+        });
 }
 
 void ViewAutoscroll::unwatchWindow() {
     disconnect(m_frameConnection);
-    disconnect(m_activeConnection);
+    disconnect(m_focusConnection);
     if (m_window != nullptr) {
         m_window->removeEventFilter(this);
     }
@@ -182,7 +194,8 @@ bool ViewAutoscroll::eventFilter(QObject *watched, QEvent *event) {
         break;
     case QEvent::Enter:
         if (m_active) {
-            setPointerInWindow(true);
+            // Where it came back, which may be the other side of the click.
+            pointerMoved(static_cast<QEnterEvent *>(event)->scenePosition());
         }
         break;
     case QEvent::Leave:
@@ -191,16 +204,30 @@ bool ViewAutoscroll::eventFilter(QObject *watched, QEvent *event) {
         }
         break;
     case QEvent::MouseButtonPress:
-    case QEvent::MouseButtonDblClick:
-        if (static_cast<QMouseEvent *>(event)->button() == Qt::MiddleButton
-            && (m_active || m_swallowMiddleRelease)) {
-            // Another middle click, anywhere in the window, stops it, and
-            // is its own: it neither pans nor starts it again.
+    case QEvent::MouseButtonDblClick: {
+        const auto *mouse = static_cast<QMouseEvent *>(event);
+        if (mouse->button() != Qt::MiddleButton) {
+            break;
+        }
+        if (m_active) {
+            // Another middle press, anywhere in the window, stops it. On the
+            // plot, it goes on to the plot, so that a drag from it pans as
+            // ever; the plot does not start autoscroll again as it is
+            // released (see stoppedByPress). Elsewhere it is its own.
+            m_stopPressTimestamp = mouse->timestamp();
+            if (m_plot->contains(m_plot->mapFromScene(mouse->scenePosition()))) {
+                stop();
+                return false;
+            }
             m_swallowMiddleRelease = true;
             stop();
             return true;
         }
+        if (m_swallowMiddleRelease) {
+            return true;
+        }
         break;
+    }
     case QEvent::MouseButtonRelease:
         if (static_cast<QMouseEvent *>(event)->button() == Qt::MiddleButton
             && m_swallowMiddleRelease) {

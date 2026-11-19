@@ -8,6 +8,7 @@
 #include <QPointer>
 
 #include <functional>
+#include <optional>
 
 class QQuickItem;
 class QQuickWindow;
@@ -74,6 +75,13 @@ public:
     // have it.
     double currentViewsPerSecond() const;
 
+    // Whether the middle press of `timestamp` stopped it: the plot, which
+    // that press reached, starts no autoscroll as it is released.
+    bool stoppedByPress(quint64 timestamp) const;
+    // The view may move again where it could not, such as at an end of the
+    // track after a zoom: asks for a frame if the pointer would move it.
+    void resume();
+
     // The pointer is at `scenePosition`, in the window: from the window's
     // events, and from tests.
     void pointerMoved(QPointF scenePosition);
@@ -114,9 +122,11 @@ private:
     // The middle press that stopped it: its release, and a double click of
     // it, are its own, not the window's.
     bool m_swallowMiddleRelease{false};
+    // The timestamp of the middle press that last stopped it.
+    std::optional<quint64> m_stopPressTimestamp;
     QPointer<QQuickWindow> m_window;
     QMetaObject::Connection m_frameConnection;
-    QMetaObject::Connection m_activeConnection;
+    QMetaObject::Connection m_focusConnection;
     QMetaObject::Connection m_visibleConnection;
     QMetaObject::Connection m_windowConnection;
 };

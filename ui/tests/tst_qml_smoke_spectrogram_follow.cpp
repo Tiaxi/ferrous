@@ -1134,6 +1134,17 @@ void SpectrogramFollowSmokeTest::autoscrollMovesByThePointersDistance() {
     autoscrollFor(item, time, 0.5);
     QVERIFY(item.viewFollow()->snapshot().anchorSeconds < anchor);
 
+    // Held at the end of the track, a zoom about the pointer near the
+    // plot's right edge makes room to scroll on: it goes on at once.
+    pointerAt(item, 390.0);
+    autoscrollFor(item, time, 10.0);
+    QCOMPARE(item.m_autoscroll.m_lastFrameNs, qint64(0));
+    wheelAt(item, 390.0, 120);
+    QVERIFY(item.m_autoscroll.m_lastFrameNs != 0);
+    const double zoomedAnchor = item.viewFollow()->snapshot().anchorSeconds;
+    autoscrollFor(item, time, 0.1);
+    QVERIFY(item.viewFollow()->snapshot().anchorSeconds > zoomedAnchor);
+
     // A view wider than 40 s scrolls at most 40 s of the track a second.
     SpectrogramItem wide;
     TestTime wideTime;
@@ -1175,6 +1186,17 @@ void SpectrogramFollowSmokeTest::autoscrollMovesEveryLaneOfThePlot() {
     QCoreApplication::processEvents();
     QVERIFY(!right.m_autoscroll.active());
     QVERIFY(!left.detached() && !right.detached());
+
+    // A lane that goes while it autoscrolls, as when the channels change,
+    // leaves the view to the others, as at the end of a drag.
+    auto *gone = new SpectrogramItem;
+    gone->setViewFollow(&follow);
+    prepare(*gone, time, 60.0, false);
+    middleClick(*gone, 200.0);
+    QVERIFY(follow.autoscrolling());
+    delete gone;
+    QVERIFY(!follow.autoscrolling());
+    QVERIFY(left.detached());
 }
 
 // A rolling view stays live, and a view of the whole track has nowhere to
@@ -1373,6 +1395,23 @@ void SpectrogramFollowSmokeTest::autoscrollInAWindow() {
     QVERIFY(!item->m_autoscroll.active());
     QTest::qWait(100);
     QCOMPARE(viewOf(*item).left, stopped);
+
+    // One on the plot stops it too, without starting it again, and a drag
+    // from it pans as a drag does.
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(item->m_autoscroll.active());
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(320, 70));
+    QVERIFY(!item->m_autoscroll.active());
+    QCOMPARE(viewOf(*item).left, stopped);
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(item->m_autoscroll.active());
+    QTest::mousePress(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(300, 70));
+    QVERIFY(!item->m_autoscroll.active());
+    QTest::mouseMove(&window, QPoint(250, 70));
+    QTest::mouseMove(&window, QPoint(200, 70));
+    QTest::mouseRelease(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(200, 70));
+    QVERIFY(!item->m_autoscroll.active());
+    QCOMPARE(viewOf(*item).left, stopped + 100);
 
     // Rolling, the click does nothing.
     item->setDisplayMode(0);

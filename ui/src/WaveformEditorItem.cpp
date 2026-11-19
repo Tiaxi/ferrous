@@ -4190,6 +4190,7 @@ void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
         m_panPressed = true;
         m_panning = false;
         m_panPressPosition = event->position();
+        m_panPressTimestamp = event->timestamp();
         return;
     }
     if (event->button() != Qt::RightButton || !crosshairEnabled()) { event->ignore(); return; }
@@ -4260,8 +4261,10 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
 void WaveformEditorItem::mouseReleaseEvent(QMouseEvent *event) {
     if (event->button() != Qt::MiddleButton || !m_panPressed) { event->ignore(); return; }
     event->accept();
-    // A middle click that did not drag starts autoscroll; a drag pans.
-    const bool click = !m_panning && ViewAutoscroll::isClick(m_panPressPosition, event->position());
+    // A middle click that did not drag starts autoscroll, unless it stopped
+    // autoscroll; a drag pans.
+    const bool click = !m_panning && ViewAutoscroll::isClick(m_panPressPosition, event->position())
+        && !m_autoscroll.stoppedByPress(m_panPressTimestamp);
     const QPointF pressed = m_panPressPosition;
     mouseUngrabEvent();
     if (click) startAutoscroll(pressed);
@@ -4355,4 +4358,6 @@ void WaveformEditorItem::wheelEvent(QWheelEvent *event) {
         m_panOriginStart = visibleRangeLocked().first;
         m_panOriginX = event->position().x();
     }
+    // A view autoscroll held at an end of the track may have room now.
+    m_autoscroll.resume();
 }

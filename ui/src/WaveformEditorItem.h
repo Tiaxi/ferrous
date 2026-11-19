@@ -833,6 +833,7 @@ private:
     bool m_panPressed{false};
     bool m_panning{false};
     QPointF m_panPressPosition;
+    quint64 m_panPressTimestamp{0};
     double m_panOriginStart{0.0};
     double m_panOriginX{0.0};
     // Whether autoscroll moves the view (see m_autoscroll): nothing glides

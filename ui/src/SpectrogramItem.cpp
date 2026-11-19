@@ -2153,6 +2153,9 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
 }
 
 SpectrogramItem::~SpectrogramItem() {
+    // A view its lanes share, which may outlive this one, is not left held
+    // by its autoscroll.
+    m_autoscroll.stop();
     // ~QQuickItem takes the item out of its window, which emits
     // windowChanged and visibleChanged once this item's members are gone:
     // its handlers for them must not run then.
@@ -6292,6 +6295,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
         m_panPressed = m_displayMode == 1;
         m_panning = false;
         m_panPressPosition = event->position();
+        m_panPressTimestamp = event->timestamp();
         return;
     }
 
@@ -6469,8 +6473,10 @@ void SpectrogramItem::mouseReleaseEvent(QMouseEvent *event) {
         return;
     }
     event->accept();
-    // A middle click that did not drag starts autoscroll; a drag pans.
-    const bool click = !m_panning && ViewAutoscroll::isClick(m_panPressPosition, event->position());
+    // A middle click that did not drag starts autoscroll, unless it stopped
+    // autoscroll; a drag pans.
+    const bool click = !m_panning && ViewAutoscroll::isClick(m_panPressPosition, event->position())
+        && !m_autoscroll.stoppedByPress(m_panPressTimestamp);
     const QPointF pressed = m_panPressPosition;
     mouseUngrabEvent();
     if (click) {
@@ -6675,6 +6681,8 @@ void SpectrogramItem::wheelEvent(QWheelEvent *event) {
             m_panOriginX = event->position().x();
         }
     }
+    // A view autoscroll held at an end of the track may have room now.
+    m_autoscroll.resume();
 }
 
 double SpectrogramItem::pixelToFrequencyHzLocked(int pixelY, int viewHeight) const {

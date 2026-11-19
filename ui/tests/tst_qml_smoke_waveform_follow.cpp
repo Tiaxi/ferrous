@@ -1035,6 +1035,19 @@ void WaveformFollowSmokeTest::autoscrollMovesByThePointersDistance() {
     autoscrollFor(item, time, 0.5);
     QVERIFY(viewOf(item).first > zoomed.first);
 
+    // Held at the end of the track, a zoom about the pointer near the
+    // plot's right edge makes room to scroll on: it goes on at once.
+    pointerAt(item, 390.0);
+    autoscrollFor(item, time, 10.0);
+    QCOMPARE(viewOf(item).second, kDuration);
+    QCOMPARE(item.m_autoscroll.m_lastFrameNs, qint64(0));
+    wheelAt(item, 390.0, 120);
+    const auto zoomedAtEnd = viewOf(item);
+    QVERIFY(zoomedAtEnd.second < kDuration);
+    QVERIFY(item.m_autoscroll.m_lastFrameNs != 0);
+    autoscrollFor(item, time, 0.1);
+    QVERIFY(viewOf(item).first > zoomedAtEnd.first);
+
     // Another middle click stops it, where it is.
     const auto stopped = viewOf(item);
     item.m_autoscroll.stop();
@@ -1246,6 +1259,31 @@ void WaveformFollowSmokeTest::autoscrollInAWindow() {
     QTest::keyClick(&window, Qt::Key_Escape);
     QCOMPARE(escapes.count(), 1);
 
+    // A middle click starts it again; another on the plot stops it, and
+    // does not start it again as it is released.
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(item->m_autoscroll.active());
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(320, 80));
+    QVERIFY(!item->m_autoscroll.active());
+    QVERIFY(sameView(viewOf(*item), stopped));
+
+    // A middle press that stops it, then drags, pans as a drag does.
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QVERIFY(item->m_autoscroll.active());
+    QTest::mousePress(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(300, 80));
+    QVERIFY(!item->m_autoscroll.active());
+    QTest::mouseMove(&window, QPoint(250, 80));
+    QTest::mouseMove(&window, QPoint(200, 80));
+    QTest::mouseRelease(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(200, 80));
+    QVERIFY(!item->m_autoscroll.active());
+    QVERIFY(std::abs(viewOf(*item).first - (stopped.first + 100.0 * kDuration / 8.0 / kWidth))
+            <= columnOf(*item) + 1e-9);
+    item->followPlayhead();
+    item->setZoomLevel(8.0);
+    QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
+    QTest::keyClick(&window, Qt::Key_Escape);
+    const auto restopped = viewOf(*item);
+
     // A middle click starts it again; another, off the plot, stops it, and
     // neither pans the view nor starts autoscroll again as it is released.
     QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
@@ -1253,10 +1291,10 @@ void WaveformFollowSmokeTest::autoscrollInAWindow() {
     QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(600, 180));
     QVERIFY(!item->m_autoscroll.active());
     QVERIFY(QGuiApplication::overrideCursor() == nullptr);
-    QVERIFY(sameView(viewOf(*item), stopped));
+    QVERIFY(sameView(viewOf(*item), restopped));
     QTest::mouseMove(&window, QPoint(20, 80));
     QTest::qWait(100);
-    QVERIFY(sameView(viewOf(*item), stopped));
+    QVERIFY(sameView(viewOf(*item), restopped));
 
     // A middle-drag pans, as before, and starts no autoscroll.
     QTest::mousePress(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(400, 80));
@@ -1264,17 +1302,20 @@ void WaveformFollowSmokeTest::autoscrollInAWindow() {
     QTest::mouseMove(&window, QPoint(300, 80));
     QTest::mouseRelease(&window, Qt::MiddleButton, Qt::NoModifier, QPoint(300, 80));
     QVERIFY(!item->m_autoscroll.active());
-    QVERIFY(std::abs(viewOf(*item).first - (stopped.first + 100.0 * kDuration / 8.0 / kWidth))
+    QVERIFY(std::abs(viewOf(*item).first - (restopped.first + 100.0 * kDuration / 8.0 / kWidth))
             <= columnOf(*item) + 1e-9);
 
-    // Another window taking the focus stops it.
+    // Another window taking the focus stops it, also a dialog of this
+    // window's, with which Qt still counts this one as active.
     QTest::mouseClick(&window, Qt::MiddleButton, Qt::NoModifier, click);
     QVERIFY(item->m_autoscroll.active());
-    QWindow other;
-    other.resize(100, 100);
-    other.show();
-    other.requestActivate();
-    QVERIFY(QTest::qWaitForWindowActive(&other));
+    QWindow dialog;
+    dialog.setTransientParent(&window);
+    dialog.resize(100, 100);
+    dialog.show();
+    dialog.requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(&dialog));
+    QVERIFY(window.isActive());
     QTRY_VERIFY(!item->m_autoscroll.active());
     QVERIFY(QGuiApplication::overrideCursor() == nullptr);
 }
