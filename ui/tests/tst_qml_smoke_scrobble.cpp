@@ -83,7 +83,6 @@ ApplicationWindow {
         property int lastFmScrobbleThresholdMs: 120000
         property string lastFmScrobbleMessage: ""
         property int lastFmPendingScrobbleCount: 0
-        property int lastFmDroppedScrobbleCount: 0
         property int pauseRequests: 0
         function setLastFmScrobblingPaused(value) {
             lastFmScrobblingPaused = value
@@ -646,7 +645,6 @@ ApplicationWindow {
         property string lastFmUsername: ""
         property int lastFmAuthState: 0
         property int lastFmPendingScrobbleCount: 0
-        property int lastFmDroppedScrobbleCount: 0
         property string lastFmStatusText: ""
         property bool lastFmShowScrobbleProgress: true
         property int settingChanges: 0

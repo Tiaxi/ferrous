@@ -112,8 +112,8 @@ Preferences.PreferencesPage {
         objectName: "lastFmDroppedLabel"
         uiPalette: root.uiPalette
         visible: (root.uiBridge.lastFmDroppedScrobbleCount || 0) > 0
-        text: I18n.i18ncp("@info", "%1 old scrobble was discarded without being sent",
-            "%1 old scrobbles were discarded without being sent", root.uiBridge.lastFmDroppedScrobbleCount || 0)
+        text: I18n.i18ncp("@info", "%1 old scrobble was discarded from the queue",
+            "%1 old scrobbles were discarded from the queue", root.uiBridge.lastFmDroppedScrobbleCount || 0)
     }
 
     // Only the buttons that apply now.

@@ -152,7 +152,6 @@ ApplicationWindow {
         property int lastFmScrobbleThresholdMs: 0
         property string lastFmScrobbleMessage: ""
         property int lastFmPendingScrobbleCount: 0
-        property int lastFmDroppedScrobbleCount: 0
         function setLastFmScrobblingPaused(paused) { lastFmScrobblingPaused = paused }
         signal trackIdentityChanged()
     }
