@@ -70,6 +70,8 @@ DialogWindow {
             // may have changed, within the screen.
             root.width = Math.max(root.width, Math.min(root._neededWidth, root._roomWidth))
             root.height = root.heightWithinScreen(root.fittedHeight)
+            // From its start, whatever it was scrolled to when it closed.
+            bodyView.contentY = 0
             if (root.initialFocusItem) {
                 root.initialFocusItem.forceActiveFocus(Qt.PopupFocusReason)
             }
@@ -94,7 +96,6 @@ DialogWindow {
         interactive: contentHeight > height
         boundsBehavior: Flickable.StopAtBounds
         ScrollBar.vertical: ScrollBar {
-            objectName: "dialogBodyScrollBar"
             policy: bodyView.interactive ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
         }
 

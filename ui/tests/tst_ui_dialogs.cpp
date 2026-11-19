@@ -2350,6 +2350,8 @@ void UiDialogsTest::compactDialogStaysWithinASmallScreenAsItGrows() {
         }
     }
     if (small == nullptr) {
+        // main() adds it to the offscreen platform, which the tests run on.
+        QVERIFY(QGuiApplication::platformName() != QLatin1String("offscreen"));
         QSKIP("needs the offscreen platform's small screen; see main()");
     }
     DialogsWindow main;
@@ -2398,10 +2400,10 @@ void UiDialogsTest::compactDialogStaysWithinASmallScreenAsItGrows() {
         QVERIFY2(button.top() >= sceneRect(view).bottom() - 0.5, qPrintable(where));
         QVERIFY2(within(button, QRectF(0, 0, dialogWindow->width(), dialogWindow->height())),
                  qPrintable(where + QStringLiteral(", the default button %1").arg(describeRect(button))));
-        // Scrolled to its end, the content shows its last line.
+        // Scrolled to its end, the content shows its last line; it is left
+        // there.
         view->setProperty("contentY", view->property("contentHeight").toReal() - view->height());
         QVERIFY2(within(sceneRect(details), sceneRect(view)), qPrintable(where));
-        view->setProperty("contentY", 0);
     };
 
     // The message grows while the dialog shows.
@@ -2421,6 +2423,8 @@ void UiDialogsTest::compactDialogStaysWithinASmallScreenAsItGrows() {
     QTRY_VERIFY(!dialogWindow->isVisible());
     QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, longer + longer)));
     QVERIFY(waitForDialogWindow(dialog));
+    // From the start of the new message, not where the last was scrolled to.
+    QCOMPARE(view->property("contentY").toReal(), 0.0);
     checkWithinTheScreen(QStringLiteral("reopened"));
     QVERIFY(QMetaObject::invokeMethod(dialog, "dismiss"));
     QTRY_VERIFY(!dialogWindow->isVisible());
