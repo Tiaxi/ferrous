@@ -338,7 +338,7 @@ void SpectrogramCanvasSmokeTest::spectrogramSameHopEstimateIncreaseUpdatesZoomOu
 
 void SpectrogramCanvasSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     // Contract for the stopped zoom-reset flow: with playback stopped at
-    // position 0, a middle-click zoom reset (deep zoom-out hop -> reference
+    // position 0, a zoom reset (deep zoom-out hop -> reference
     // hop) restarts the decode session from the track start.  The widget
     // must leave the zoom-fill state and show the refilled canvas instead
     // of a frozen or black view.
@@ -380,7 +380,7 @@ void SpectrogramCanvasSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     QVERIFY(!item.m_canvas.isNull());
     QVERIFY(item.m_canvasFilledCols > 0);
 
-    // --- Phase 2: middle-click zoom reset (zoom 1.0 session) ---
+    // --- Phase 2: zoom reset (zoom 1.0 session) ---
     item.m_zoomLevel = 1.0;
     item.m_awaitingZoomData = true;
     item.feedPrecomputedChunk(

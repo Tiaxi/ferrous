@@ -11,6 +11,7 @@
 #include <QDataStream>
 #include <QFontMetrics>
 #include <QFutureWatcher>
+#include <QGuiApplication>
 #include <QHoverEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -19,6 +20,7 @@
 #include <QQuickWindow>
 #include <QScreen>
 #include <QSGRendererInterface>
+#include <QStyleHints>
 #include <QThreadPool>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtEndian>
@@ -284,6 +286,8 @@ void WaveformEditorItem::setSourcePath(const QString &value) {
         QMutexLocker lock(&m_stateMutex);
         if (m_sourcePath == value) return;
         m_sourcePath = value;
+        // Another track: the view follows its playhead.
+        reattachLocked();
         invalidateDetailRequestLocked();
         clearPendingRequestLocked();
         clearDetailLocked();
@@ -301,6 +305,7 @@ void WaveformEditorItem::setSourcePath(const QString &value) {
         m_pictureReady = false;
         emit pictureReadyChanged();
     }
+    publishDetached();
     emit sourcePathChanged();
     emit channelCountChanged();
     emit sampleRateHzChanged();
@@ -381,10 +386,36 @@ void WaveformEditorItem::clockStateChanged() {
             && state.durationSeconds == m_clockState.durationSeconds;
         // A jump moves the view at once, and the detail of the old range is
         // no longer needed.
-        const bool explicitSeek = state.epoch != m_clockState.epoch
-            || state.trackToken != m_clockState.trackToken;
+        const bool trackChanged = state.trackToken != m_clockState.trackToken;
+        const bool explicitSeek = state.epoch != m_clockState.epoch || trackChanged;
         const auto previousRange = visibleRangeLocked();
+        const double previousPosition = displayedPositionSecondsLocked(nowNs);
         m_clockState = state;
+        if (m_follow != Follow::Playhead) {
+            const double position = displayedPositionSecondsLocked(nowNs);
+            const auto near = [this](double seconds) {
+                return std::abs(seconds - m_ownSeekSeconds) <= kOwnSeekToleranceSeconds;
+            };
+            const bool ownSeek = !std::isnan(m_ownSeekSeconds) && near(position)
+                && (!explicitSeek || !m_ownSeekLanded || near(previousPosition));
+            if (explicitSeek) {
+                // The plot's own seek, as it lands and as the engine
+                // confirms it, keeps a detached view where it is. Any other
+                // jump, such as a seek from the seek bar, the keyboard or
+                // MPRIS, a stop or a track change, including a gapless
+                // successor and Repeat-One, brings it back to the playhead.
+                if (ownSeek && !trackChanged && m_follow == Follow::Detached) {
+                    m_ownSeekLanded = true;
+                    armReattachLocked(nowNs);
+                } else {
+                    reattachLocked();
+                }
+            } else if (!ownSeek) {
+                // Playback has moved on from it: a later seek there is
+                // another's.
+                m_ownSeekSeconds = std::numeric_limits<double>::quiet_NaN();
+            }
+        }
         const auto [start, end] = visibleRangeLocked();
         const auto [requestStart, requestEnd] = detailRequestVisibleRangeLocked();
         request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
@@ -407,6 +438,7 @@ void WaveformEditorItem::clockStateChanged() {
         if (courseCorrection) frameDelayNs = playbackFrameDelayNsLocked(nowNs);
     }
     emit positionSecondsChanged();
+    publishDetached();
     if (request) scheduleDetailRequest();
     if (courseCorrection) {
         schedulePlaybackFrame(frameDelayNs, nowNs);
@@ -441,6 +473,7 @@ void WaveformEditorItem::setZoomLevel(double value) {
         QMutexLocker lock(&m_stateMutex);
         value = std::clamp(value, 1.0, maximumZoomLevelLocked());
         if (std::abs(m_zoomLevel - value) < 0.0001) return;
+        settleFollowLocked(m_nowNs());
         const bool previousSampleCurve = sampleCurveVisibleLocked();
         const bool previousSamplePoints = samplePointsVisibleLocked();
         const double previousPresentedZoom = m_presentedZoomLevel;
@@ -493,9 +526,13 @@ void WaveformEditorItem::setZoomLevel(double value) {
                 || sampleCurveScaleChanged)) {
             invalidateCacheLocked();
         }
+        // A detached view zoomed so that the playhead is past its re-attach
+        // point stays, as one dragged there does.
+        armReattachLocked(m_nowNs());
     }
     emit zoomLevelChanged();
     if (presentationChanged) emit samplePointsVisibleChanged();
+    publishDetached();
     scheduleDetailRequest();
     update();
 }
@@ -700,7 +737,23 @@ void WaveformEditorItem::setChannelCountHint(int value) {
     update();
 }
 
-void WaveformEditorItem::resetZoom() { setZoomLevel(1.0); }
+void WaveformEditorItem::resetZoom() {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        reattachLocked();
+    }
+    setZoomLevel(1.0);
+    publishDetached();
+}
+
+void WaveformEditorItem::followPlayhead() {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_follow == Follow::Playhead) return;
+        reattachLocked();
+    }
+    viewMoved();
+}
 double WaveformEditorItem::maximumZoomLevel() const { QMutexLocker lock(&m_stateMutex); return maximumZoomLevelLocked(); }
 
 void WaveformEditorItem::setHoverPosition(double x, double y, bool active) {
@@ -737,7 +790,12 @@ void WaveformEditorItem::geometryChange(const QRectF &newGeometry, const QRectF 
             invalidateDetailRequestLocked();
             clearPendingRequestLocked();
             invalidateCacheLocked();
+            // A detached view keeps its anchor at its place in the width; a
+            // playhead the new width puts past the re-attach point stays.
+            settleFollowLocked(m_nowNs());
+            armReattachLocked(m_nowNs());
         }
+        publishDetached();
         scheduleDetailRequest();
         updateStandbyFetch();
     }
@@ -1184,14 +1242,210 @@ double WaveformEditorItem::visibleSpanForZoomLocked(double zoomLevel) const {
     return span >= m_durationSeconds * 0.9999 ? m_durationSeconds : span;
 }
 
+namespace {
+
+// The glide's ease, from 0 to 1 as `progress` goes from 0 to 1, and its
+// slope: smooth at both ends, so that the view takes up the playhead at
+// 85 % at playback's speed and hands it over at the middle at the same.
+double glideEase(double progress) {
+    return progress * progress * (3.0 - 2.0 * progress);
+}
+
+double glideEaseSlope(double progress) {
+    return 6.0 * progress * (1.0 - progress);
+}
+
+} // namespace
+
+WaveformEditorItem::FollowState WaveformEditorItem::followStateLocked(
+    double zoomLevel, double position) const {
+    FollowState state{m_follow, m_glideFrom};
+    // Purely from the playhead: the frame that finds it at the re-attach
+    // point glides, whenever the state takes that in. While a zoom out is
+    // handed over, the view still shown glides only from its own point,
+    // and the view it hands over to from either.
+    if (state.mode == Follow::Detached) {
+        const bool handedOver = m_zoomOutHandoffPending
+            && std::abs(zoomLevel - m_zoomLevel) >= 0.0001;
+        const double reattach = reattachPointLocked(!handedOver);
+        if (position >= reattach) state = {Follow::Gliding, reattach};
+    }
+    if (state.mode == Follow::Gliding
+        && position >= state.glideFrom + kReattachGlideSeconds) {
+        state = {Follow::Playhead, 0.0};
+    }
+    return state;
+}
+
+double WaveformEditorItem::detachedStartLocked(double span) const {
+    const double column = span / deviceColumnsLocked();
+    const double start = m_anchorSeconds - m_anchorFraction * span;
+    // On the grid playback tiles, sample chunks and the cache keep to.
+    return column > 0.0 ? std::round(start / column) * column : start;
+}
+
+double WaveformEditorItem::reattachPointLocked(bool requestedView) const {
+    constexpr double never = std::numeric_limits<double>::infinity();
+    const double reattach = requestedView && m_reattachArmed
+        ? reattachSecondsLocked(visibleSpanForZoomLocked(m_zoomLevel)) : never;
+    return m_zoomOutHandoffPending && m_shownReattachArmed
+        ? std::min(reattach, reattachSecondsLocked(visibleSpanForZoomLocked(m_presentedZoomLevel)))
+        : reattach;
+}
+
+double WaveformEditorItem::reattachSecondsLocked(double span) const {
+    const double start = std::clamp(
+        detachedStartLocked(span), 0.0, std::max(0.0, m_durationSeconds - span));
+    return start + kReattachViewFraction * span;
+}
+
+double WaveformEditorItem::glidingStartLocked(
+    double span, double position, double from) const {
+    const double progress = std::clamp(
+        (position - from) / kReattachGlideSeconds, 0.0, 1.0);
+    // Where the playhead is in the view's width: from the re-attach point
+    // to the middle.
+    const double fraction = kReattachViewFraction
+        + (0.5 - kReattachViewFraction) * glideEase(progress);
+    // Whole device columns from following, so that the glide ends on the
+    // view that follows.
+    const double columns = deviceColumnsLocked();
+    const double offset = std::round((fraction - 0.5) * columns);
+    return followingStartLocked(span, position) - offset * span / columns;
+}
+
+double WaveformEditorItem::viewSpeedLocked(double span, double position) const {
+    const FollowState state = followStateLocked(m_presentedZoomLevel, position);
+    switch (state.mode) {
+    case Follow::Detached:
+        return 0.0;
+    case Follow::Gliding: {
+        const double progress = std::clamp(
+            (position - state.glideFrom) / kReattachGlideSeconds, 0.0, 1.0);
+        return 1.0 + (kReattachViewFraction - 0.5) * span
+            * glideEaseSlope(progress) / kReattachGlideSeconds;
+    }
+    case Follow::Playhead:
+        break;
+    }
+    return 1.0;
+}
+
+void WaveformEditorItem::settleFollowLocked(qint64 nowNs) {
+    settleFollowLocked(nowNs, m_presentedZoomLevel);
+}
+
+void WaveformEditorItem::settleFollowLocked(qint64 nowNs, double zoomLevel) {
+    if (m_follow == Follow::Playhead) return;
+    const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
+    if (span <= 0.0 || span >= m_durationSeconds) {
+        // A view of the whole track has nothing to follow.
+        reattachLocked();
+        return;
+    }
+    const FollowState state = followStateLocked(zoomLevel, displayedPositionSecondsLocked(nowNs));
+    if (state.mode == Follow::Playhead) {
+        reattachLocked();
+    } else if (state.mode == Follow::Gliding) {
+        m_follow = Follow::Gliding;
+        m_glideFrom = state.glideFrom;
+        m_ownSeekSeconds = std::numeric_limits<double>::quiet_NaN();
+    }
+}
+
+void WaveformEditorItem::detachAtLocked(qint64 nowNs, double fraction) {
+    const auto [start, end] = visibleRangeLocked(nowNs);
+    fraction = std::clamp(fraction, 0.0, 1.0);
+    m_anchorSeconds = start + fraction * (end - start);
+    m_anchorFraction = fraction;
+    if (m_follow != Follow::Detached) {
+        m_ownSeekSeconds = std::numeric_limits<double>::quiet_NaN();
+        m_reattachArmed = false;
+        m_shownReattachArmed = false;
+    }
+    m_follow = Follow::Detached;
+}
+
+void WaveformEditorItem::armReattachLocked(qint64 nowNs) {
+    // A view the user still drags stays where it is put.
+    if (m_follow != Follow::Detached || m_panning) return;
+    // Each view's point counts only for a playhead left of it now.
+    const double position = displayedPositionSecondsLocked(nowNs);
+    m_reattachArmed = position < reattachSecondsLocked(visibleSpanForZoomLocked(m_zoomLevel));
+    m_shownReattachArmed = m_zoomOutHandoffPending
+        && position < reattachSecondsLocked(visibleSpanForZoomLocked(m_presentedZoomLevel));
+}
+
+void WaveformEditorItem::reattachLocked() {
+    m_follow = Follow::Playhead;
+    m_reattachArmed = false;
+    m_shownReattachArmed = false;
+    m_ownSeekSeconds = std::numeric_limits<double>::quiet_NaN();
+}
+
+void WaveformEditorItem::publishDetached() {
+    bool detached = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        settleFollowLocked(m_nowNs());
+        detached = detachedLocked(m_nowNs());
+    }
+    m_detachedShown.store(detached, std::memory_order_release);
+    if (m_detached == detached) return;
+    m_detached = detached;
+    emit detachedChanged();
+}
+
+bool WaveformEditorItem::detachedLocked(qint64 nowNs) const {
+    // Zoomed, at the zoom asked for or at the one a zoom out still shows,
+    // as one to the whole track does until it has its detail.
+    const double span = std::min(visibleSpanForZoomLocked(m_zoomLevel),
+                                 visibleSpanForZoomLocked(m_presentedZoomLevel));
+    return span < m_durationSeconds
+        && followStateLocked(m_presentedZoomLevel, displayedPositionSecondsLocked(nowNs)).mode
+            == Follow::Detached;
+}
+
+void WaveformEditorItem::viewMoved() {
+    bool request = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        const auto [start, end] = visibleRangeLocked();
+        const auto [requestStart, requestEnd] = detailRequestVisibleRangeLocked();
+        request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
+        // As for a seek: a cache that does not cover the view is drawn
+        // for it at once, from the overview if nothing better has come.
+        if (!playbackTilesEligibleLocked(start, end) && !m_zoomOutHandoffPending
+            && !cacheCoversRangeLocked(start, end)) {
+            invalidateCacheLocked();
+        }
+    }
+    publishDetached();
+    if (request) scheduleDetailRequest();
+    cancelPlaybackFrame();
+    requestPlaybackFrame();
+}
+
 std::pair<double, double> WaveformEditorItem::visibleRangeForZoomLocked(
     double zoomLevel, qint64 nowNs) const {
     if (m_durationSeconds <= 0.0) return {0.0, 0.0};
     const double span = visibleSpanForZoomLocked(zoomLevel);
     if (span >= m_durationSeconds) return {0.0, m_durationSeconds};
-    const double start = std::clamp(
-        followingStartLocked(span, displayedPositionSecondsLocked(nowNs)),
-        0.0, m_durationSeconds - span);
+    const double position = displayedPositionSecondsLocked(nowNs);
+    const FollowState state = followStateLocked(zoomLevel, position);
+    double start = 0.0;
+    switch (state.mode) {
+    case Follow::Detached:
+        start = detachedStartLocked(span);
+        break;
+    case Follow::Gliding:
+        start = glidingStartLocked(span, position, state.glideFrom);
+        break;
+    case Follow::Playhead:
+        start = followingStartLocked(span, position);
+        break;
+    }
+    start = std::clamp(start, 0.0, m_durationSeconds - span);
     return {start, start + span};
 }
 
@@ -1705,6 +1959,7 @@ bool WaveformEditorItem::standbyFetchWantedLocked() const {
 void WaveformEditorItem::handleWindowFrameSwapped() {
     if (!isVisible()) return;
     bool request = false;
+    bool followChanges = false;
     qint64 frameDelayNs = 0;
     const qint64 nowNs = m_nowNs();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
@@ -1731,6 +1986,8 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
         }
         // Detail arriving asks for its own frame.
         frameDelayNs = playbackFrameDelayNsLocked(nowNs);
+        // A detached view may have begun to glide back, or ended its glide.
+        followChanges = m_follow != Follow::Playhead;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         if (m_profile.enabled) {
             if (m_profile.frameInitialized) {
@@ -1769,6 +2026,7 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
             request ? 1 : 0);
     }
 #endif
+    if (followChanges) publishDetached();
     // At the first raw-sample zoom, the point cap can leave less than 40 ms
     // of headroom when prefetch becomes due. Do not spend it on zoom debounce.
     if (request) scheduleDetailRequest(true);
@@ -1785,14 +2043,25 @@ double WaveformEditorItem::frameChangeSecondsLocked(
     // is on the track's grid, both the view and the playhead change when
     // the playhead reaches its next column of the track.
     const bool wholeTrack = span >= m_durationSeconds * 0.9999;
-    if (!wholeTrack
+    const FollowState follow = wholeTrack
+        ? FollowState{} : followStateLocked(m_presentedZoomLevel, position);
+    if (follow.mode == Follow::Gliding
+        && glidingStartLocked(span, position, follow.glideFrom) < m_durationSeconds - span) {
+        // Gliding back, the view moves on by more than the playhead does,
+        // by a column at a time of its own: each frame differs from the
+        // last, until it follows again.
+        return std::nextafter(position, std::numeric_limits<double>::infinity());
+    }
+    if (!wholeTrack && follow.mode == Follow::Playhead
         && followingStartLocked(span, position) < m_durationSeconds - span) {
         const double column = span / deviceColumnsLocked();
         const double playheadColumn = std::floor(position / column + kColumnEpsilon);
         return (playheadColumn + 1.0 - kColumnEpsilon) * column;
     }
-    // Held still, the playhead moves a device column at a time, and leaves
-    // the view after its end: see paint.
+    // Held still, as a detached view is, the playhead moves a device
+    // column at a time, and leaves the view after its end: see paint. A
+    // detached view starts to glide back where the playhead reaches its
+    // re-attach point, past the start of a column it is drawn on.
     const TimeAxis axis{visibleStart, visibleEnd, width, renderScaleLocked()};
     double change = std::numeric_limits<double>::infinity();
     if (position < visibleStart) {
@@ -1824,13 +2093,15 @@ int WaveformEditorItem::fastScrollRefreshDivisor(double refreshRateHz) {
     return std::max(1, static_cast<int>(std::lround(refreshRateHz / kFastScrollFramesPerSecond)));
 }
 
-double WaveformEditorItem::scrollPixelsPerSecondLocked(int width) const {
+double WaveformEditorItem::scrollPixelsPerSecondLocked(int width, double position) const {
     const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
-    return span > 0.0 ? static_cast<double>(width) / span : 0.0;
+    return span > 0.0
+        ? static_cast<double>(width) / span * viewSpeedLocked(span, position)
+        : 0.0;
 }
 
-bool WaveformEditorItem::fastScrollCappedLocked(int width) const {
-    const double speed = scrollPixelsPerSecondLocked(width);
+bool WaveformEditorItem::fastScrollCappedLocked(int width, double position) const {
+    const double speed = scrollPixelsPerSecondLocked(width, position);
     return m_fastScrollCapped ? speed >= kFastScrollUncapPixelsPerSecond
                               : speed > kFastScrollCapPixelsPerSecond;
 }
@@ -1966,6 +2237,8 @@ bool WaveformEditorItem::deferredZoomDrawnByPlaybackLocked(qint64 nowNs) const {
 
 void WaveformEditorItem::invalidateCacheLocked() {
     if (m_zoomOutHandoffPending) {
+        // A glide the view handed over to has begun goes on as it shows.
+        settleFollowLocked(m_nowNs(), m_zoomLevel);
         const auto [targetStart, targetEnd] = visibleRangeForZoomLocked(
             m_zoomLevel);
         m_presentedZoomLevel = m_zoomLevel;
@@ -2109,6 +2382,8 @@ bool WaveformEditorItem::advanceStagedCacheLocked(qint64 nowNs) {
         m_cacheShowsWaveform = true;
         m_cacheWaveformProvisional = false;
         if (commitsDeferredZoom) {
+            // A glide the view handed over to has begun goes on as it shows.
+            settleFollowLocked(nowNs, m_zoomLevel);
             m_presentedZoomLevel = m_zoomLevel;
             m_zoomOutHandoffPending = false;
             m_zoomFallbackToOverview = false;
@@ -2134,9 +2409,12 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
 }
 
 void WaveformEditorItem::queueGuiContinuationFromPaint(
-    bool notifySamplePointsChanged, bool requestRepaint, bool pictureChanged) {
+    bool notifySamplePointsChanged, bool requestRepaint, bool pictureChanged, bool detachedChanged) {
     if (pictureChanged) {
         m_pictureCheckPending.store(true, std::memory_order_release);
+    }
+    if (detachedChanged) {
+        m_detachedCheckPending.store(true, std::memory_order_release);
     }
     if (notifySamplePointsChanged) {
         m_samplePointsNotificationPending.store(true, std::memory_order_release);
@@ -2165,6 +2443,9 @@ void WaveformEditorItem::queueGuiContinuationFromPaint(
             }
             if (m_pictureCheckPending.exchange(false, std::memory_order_acq_rel)) {
                 updatePictureReady();
+            }
+            if (m_detachedCheckPending.exchange(false, std::memory_order_acq_rel)) {
+                publishDetached();
             }
         },
         Qt::QueuedConnection);
@@ -2356,6 +2637,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     bool presentationCommitted = false;
     bool stagingContinues = false;
     bool pictureChanged = false;
+    bool detachedChanged = false;
     double scale = 1.0;
     Colors colors;
     double markerSeconds = -1.0;
@@ -2473,7 +2755,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         m_paintedFrameChangeSeconds = tilesContinue
             ? std::numeric_limits<double>::quiet_NaN()
             : frameChangeSecondsLocked(visibleStart, visibleEnd, position, canvasWidth);
-        m_fastScrollCapped = fastScrollCappedLocked(canvasWidth);
+        m_fastScrollCapped = fastScrollCappedLocked(canvasWidth, position);
         if (const qint64 interval = cappedFrameIntervalNsLocked(); interval > 0) {
             // A frame drawn when the last one asked for it, or within a
             // refresh after, as a timer wakes late, keeps to the grid;
@@ -2512,6 +2794,9 @@ void WaveformEditorItem::paint(QPainter *painter) {
                               : m_cacheShowsWaveform && !m_cacheWaveformProvisional);
         pictureChanged = !m_framePainted || (drawsWaveform && !m_waveformPainted)
             || (provisional && !m_waveformPainted);
+        // Whatever handed a zoom over, or began a glide: detached follows.
+        detachedChanged = detachedLocked(frameNs)
+            != m_detachedShown.load(std::memory_order_acquire);
         m_framePainted = true;
         m_waveformPainted = m_waveformPainted || drawsWaveform;
     }
@@ -2766,8 +3051,9 @@ void WaveformEditorItem::paint(QPainter *painter) {
         }
     }
 #endif
-    if (presentationCommitted || stagingContinues || pictureChanged) {
-        queueGuiContinuationFromPaint(presentationCommitted, stagingContinues, pictureChanged);
+    if (presentationCommitted || stagingContinues || pictureChanged || detachedChanged) {
+        queueGuiContinuationFromPaint(
+            presentationCommitted, stagingContinues, pictureChanged, detachedChanged);
     }
 }
 
@@ -3888,23 +4174,120 @@ void WaveformEditorItem::hoverEnterEvent(QHoverEvent *event) { hoverMoveEvent(ev
 void WaveformEditorItem::hoverLeaveEvent(QHoverEvent *) { { QMutexLocker lock(&m_stateMutex); m_hoverActive = false; } update(); }
 
 void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
-    if (event->button() == Qt::MiddleButton && zoomEnabled()) { event->accept(); resetZoom(); return; }
+    if (event->button() == Qt::MiddleButton) {
+        if (!zoomEnabled()) { event->ignore(); return; }
+        // A drag pans a zoomed view; a click without one does nothing.
+        event->accept();
+        m_panPressed = true;
+        m_panning = false;
+        m_panPressPosition = event->position();
+        return;
+    }
     if (event->button() != Qt::RightButton || !crosshairEnabled()) { event->ignore(); return; }
     double seconds = 0.0;
     {
         QMutexLocker lock(&m_stateMutex);
-        const auto [start, end] = visibleRangeLocked();
+        const qint64 nowNs = m_nowNs();
+        settleFollowLocked(nowNs);
+        const auto [start, end] = visibleRangeLocked(nowNs);
         // Where the crosshair is: see drawCrosshair.
         const TimeAxis axis{
             start, end, std::max(1, static_cast<int>(std::floor(width()))), renderScaleLocked()};
         seconds = end > start ? axis.timeAt(axis.columnAt(event->position().x())) : start;
+        // A detached view stays while its own seek lands, so that the user
+        // hears what they look at; see clockStateChanged.
+        if (m_follow == Follow::Detached) {
+            m_ownSeekSeconds = seconds;
+            m_ownSeekLanded = false;
+        }
     }
     event->accept(); emit seekRequested(seconds);
+}
+
+void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
+    if (!m_panPressed) { event->ignore(); return; }
+    event->accept();
+    const QPointF pointer = event->position();
+    const double canvasWidth = std::max(1.0, std::floor(width()));
+    {
+        QMutexLocker lock(&m_stateMutex);
+        // The crosshair keeps to the pointer, which holds the time it
+        // grabbed.
+        if (m_hoverActive) m_hoverPosition = pointer;
+        const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
+        // The whole track has nowhere to pan to.
+        if (span <= 0.0 || span >= m_durationSeconds) return;
+        const qint64 nowNs = m_nowNs();
+        if (!m_panning) {
+            if (std::abs(pointer.x() - m_panPressPosition.x())
+                < QGuiApplication::styleHints()->startDragDistance()) {
+                return;
+            }
+            settleFollowLocked(nowNs);
+            detachAtLocked(nowNs, 0.5);
+            // Nothing glides back until the user lets go.
+            m_reattachArmed = false;
+            m_shownReattachArmed = false;
+            m_panning = true;
+            m_panOriginStart = visibleRangeLocked(nowNs).first;
+            m_panOriginX = m_panPressPosition.x();
+        }
+        // The time grabbed stays under the pointer. Held at an end of the
+        // track, the pan starts again from there, so that a move back
+        // moves the view at once.
+        const double desired = m_panOriginStart
+            - (pointer.x() - m_panOriginX) * span / canvasWidth;
+        const double start = std::clamp(desired, 0.0, m_durationSeconds - span);
+        if (start != desired) {
+            m_panOriginStart = start;
+            m_panOriginX = pointer.x();
+        }
+        m_anchorSeconds = start + 0.5 * span;
+        m_anchorFraction = 0.5;
+    }
+    viewMoved();
+}
+
+void WaveformEditorItem::mouseReleaseEvent(QMouseEvent *event) {
+    if (event->button() != Qt::MiddleButton || !m_panPressed) { event->ignore(); return; }
+    event->accept();
+    mouseUngrabEvent();
+}
+
+void WaveformEditorItem::mouseUngrabEvent() {
+    if (!m_panPressed) return;
+    m_panPressed = false;
+    if (!m_panning) return;
+    m_panning = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        // A playhead already past the re-attach point, or past the view,
+        // leaves the view where it was put.
+        armReattachLocked(m_nowNs());
+    }
+    publishDetached();
 }
 
 void WaveformEditorItem::wheelEvent(QWheelEvent *event) {
     if (!zoomEnabled()) { event->ignore(); return; }
     const double steps = event->angleDelta().y() / 120.0;
     if (std::abs(steps) < 0.01) { event->ignore(); return; }
-    event->accept(); setZoomLevel(zoomLevel() * std::pow(kZoomStep, steps));
+    event->accept();
+    {
+        QMutexLocker lock(&m_stateMutex);
+        const qint64 nowNs = m_nowNs();
+        settleFollowLocked(nowNs);
+        // Detached, it zooms about the pointer: the time under it stays
+        // there. Following, or gliding back, about the playhead.
+        if (m_follow == Follow::Detached) {
+            detachAtLocked(nowNs, event->position().x() / std::max(1.0, std::floor(width())));
+        }
+    }
+    setZoomLevel(zoomLevel() * std::pow(kZoomStep, steps));
+    if (m_panning) {
+        // A drag goes on from the zoomed view.
+        QMutexLocker lock(&m_stateMutex);
+        m_panOriginStart = visibleRangeLocked().first;
+        m_panOriginX = event->position().x();
+    }
 }

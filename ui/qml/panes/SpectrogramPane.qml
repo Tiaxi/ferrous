@@ -118,4 +118,17 @@ Rectangle {
         id: spectrogramMainHost
         anchors.fill: parent
     }
+
+    // Takes the keyboard focus from the list that has it when the plot is
+    // used (see Main.qml's visualizationSurface), so that the window's
+    // shortcuts see the keys a focused library keeps for its type-ahead,
+    // such as F for View › Follow Playhead. Out of the Tab order, with no
+    // frame: a click on the library, the queue or a control takes it back.
+    Item {
+        id: plotFocus
+        objectName: "spectrogramPaneFocus"
+    }
+    function takePlotFocus() {
+        plotFocus.forceActiveFocus(Qt.MouseFocusReason)
+    }
 }

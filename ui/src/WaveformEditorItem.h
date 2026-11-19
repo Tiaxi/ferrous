@@ -51,7 +51,7 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     Q_PROPERTY(QByteArray overviewData READ overviewData WRITE setOverviewData NOTIFY overviewDataChanged)
     Q_PROPERTY(double overviewCoverageSeconds READ overviewCoverageSeconds WRITE setOverviewCoverageSeconds NOTIFY overviewCoverageChanged)
     Q_PROPERTY(bool overviewComplete READ overviewComplete WRITE setOverviewComplete NOTIFY overviewCoverageChanged)
-    // Where playback is; the view follows its position.
+    // Where playback is; the view follows its position, unless detached.
     Q_PROPERTY(PlaybackClock *clock READ clock WRITE setClock NOTIFY clockChanged)
     Q_PROPERTY(double positionSeconds READ positionSeconds NOTIFY positionSecondsChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds WRITE setDurationSeconds NOTIFY durationSecondsChanged)
@@ -118,6 +118,12 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // it has: shown again, it has the picture at once when that detail
     // covers the view at its resolution, as its next frame draws.
     Q_PROPERTY(bool pictureReady READ pictureReady NOTIFY pictureReadyChanged)
+    // Whether a zoomed view stays where a middle-drag panned it rather than
+    // following the playhead. It follows again once the playhead, moving
+    // through it, reaches kReattachViewFraction of its width, and at once
+    // on followPlayhead(), a seek other than the plot's own, a track change
+    // or a reset of the zoom. A view gliding back to the playhead is not.
+    Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
 
 public:
     explicit WaveformEditorItem(QQuickItem *parent = nullptr);
@@ -200,7 +206,11 @@ public:
     bool playheadVisible() const;
     void setPlayheadVisible(bool value);
 
+    bool detached() const { return m_detached; }
+
     Q_INVOKABLE void resetZoom();
+    // The view follows the playhead again, at once.
+    Q_INVOKABLE void followPlayhead();
     Q_INVOKABLE double maximumZoomLevel() const;
     Q_INVOKABLE void setHoverPosition(double x, double y, bool active);
 
@@ -236,6 +246,7 @@ signals:
     void pictureReadyChanged();
     void markerSecondsChanged();
     void markerXChanged();
+    void detachedChanged();
     void seekRequested(double seconds);
 
 protected:
@@ -246,6 +257,9 @@ protected:
     void hoverEnterEvent(QHoverEvent *event) override;
     void hoverLeaveEvent(QHoverEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseUngrabEvent() override;
     void wheelEvent(QWheelEvent *event) override;
 
 private:
@@ -283,6 +297,25 @@ private:
         double maximumTileRenderMs{0.0};
     };
 #endif
+
+    // How the view is placed: following the playhead, where the user
+    // panned it, or gliding back to the playhead from there.
+    enum class Follow { Playhead, Detached, Gliding };
+    struct FollowState {
+        Follow mode{Follow::Playhead};
+        // Gliding: where the playhead was as the glide began.
+        double glideFrom{0.0};
+    };
+    // Where in a detached view's width the playhead, moving through it,
+    // starts the glide back to following it.
+    static constexpr double kReattachViewFraction = 0.85;
+    // The playback, in seconds of the track, over which the glide brings
+    // the playhead from kReattachViewFraction to the middle: about 2 s at
+    // normal speed.
+    static constexpr double kReattachGlideSeconds = 2.0;
+    // How near the time the plot asked to seek to a jump of the playhead
+    // lands for it to be that seek, which keeps a detached view.
+    static constexpr double kOwnSeekToleranceSeconds = 0.5;
 
     struct DetailWindow {
         // Which window this is: a new one, from a decode or cleared, has
@@ -457,6 +490,52 @@ private:
     // playhead reaches its next column, so that the frames between are
     // the same.
     double followingStartLocked(double span, double position) const;
+    // How the view at `zoomLevel` is placed with the playhead at
+    // `position`. A detached view whose playhead has reached its re-attach
+    // point glides, though the state still says detached until
+    // settleFollowLocked.
+    FollowState followStateLocked(double zoomLevel, double position) const;
+    // Where a detached view of `span` seconds starts, before it is kept
+    // within the track: on the track's grid of device columns, with
+    // m_anchorSeconds at m_anchorFraction of its width.
+    double detachedStartLocked(double span) const;
+    // Where the playhead starts the glide back in a detached view of
+    // `span` seconds: kReattachViewFraction of its width, kept within the
+    // track.
+    double reattachSecondsLocked(double span) const;
+    // Where the playhead starts the glide back: the re-attach point of the
+    // view a zoom out still shows while it is handed over and, for the
+    // `requestedView`, of the view at the zoom asked for, whichever comes
+    // first of those armed; infinity for none.
+    double reattachPointLocked(bool requestedView) const;
+    // Where a view of `span` seconds gliding back starts, with the
+    // playhead at `position` and the glide begun at `from`: the playhead
+    // eases from kReattachViewFraction of the width to the middle column,
+    // so it never leaves the view, however deep the zoom.
+    double glidingStartLocked(double span, double position, double from) const;
+    // The view's speed over playback's: 0 held still, 1 following, more
+    // while it glides back.
+    double viewSpeedLocked(double span, double position) const;
+    // Takes a glide begun or ended at nowNs into the state.
+    // At the zoom shown, or at `zoomLevel`, as a zoom out is handed over.
+    void settleFollowLocked(qint64 nowNs);
+    void settleFollowLocked(qint64 nowNs, double zoomLevel);
+    // Whether the view is detached, as detached tells; publishDetached
+    // settles it first.
+    bool detachedLocked(qint64 nowNs) const;
+    // The view stays where it shows now at the presented zoom, anchored at
+    // `fraction` of its width.
+    void detachAtLocked(qint64 nowNs, double fraction);
+    // Whether a detached view glides back once the playhead reaches its
+    // re-attach point: only when it is left of it now.
+    void armReattachLocked(qint64 nowNs);
+    // The view follows the playhead again.
+    void reattachLocked();
+    // Follows detached on the GUI thread, after the state has changed.
+    void publishDetached();
+    // Asks for what a view that moved by the user's hand needs: its detail,
+    // a cache for it and a frame.
+    void viewMoved();
     std::pair<double, double> visibleRangeLocked(qint64 nowNs) const;
     std::pair<double, double> visibleRangeLocked() const;
     std::pair<double, double> detailRequestVisibleRangeLocked() const;
@@ -512,10 +591,12 @@ private:
     // The logical pixels a second a view `width` wide at the presented
     // zoom scrolls by while playing: its pixels a sample times the
     // track's sample rate.
-    double scrollPixelsPerSecondLocked(int width) const;
-    // Whether playback frames of a view `width` wide are capped, from
-    // whether they were; see kFastScrollCapPixelsPerSecond.
-    bool fastScrollCappedLocked(int width) const;
+    // A detached view scrolls by none, and one gliding back faster.
+    double scrollPixelsPerSecondLocked(int width, double position) const;
+    // Whether playback frames of a view `width` wide, with the playhead at
+    // `position`, are capped, from whether they were; see
+    // kFastScrollCapPixelsPerSecond.
+    bool fastScrollCappedLocked(int width, double position) const;
     // The time from one capped frame to the next, or 0 while frames are
     // not capped: paused, slower, or on a display at 144 Hz or below.
     qint64 cappedFrameIntervalNsLocked() const;
@@ -575,7 +656,8 @@ private:
     // m_cacheDetailArrivals.
     bool cacheRedrawDueLocked(double visibleStart, double visibleEnd) const;
     void queueGuiContinuationFromPaint(
-        bool notifySamplePointsChanged, bool requestRepaint, bool pictureChanged = false);
+        bool notifySamplePointsChanged, bool requestRepaint, bool pictureChanged = false,
+        bool detachedChanged = false);
     void rebuildCacheLocked(
         int width, int height, double visibleStart, double visibleEnd);
     void rebuildCacheLocked(int width, int height);
@@ -707,6 +789,39 @@ private:
     double m_durationSeconds{0.0};
     double m_zoomLevel{1.0};
     double m_presentedZoomLevel{1.0};
+    // How the view is placed; see Follow.
+    Follow m_follow{Follow::Playhead};
+    // Detached: the time that stays at m_anchorFraction of the view's
+    // width, at any zoom, so that a zoom about the pointer keeps the time
+    // under it, also while a zoom out is handed over.
+    double m_anchorSeconds{0.0};
+    double m_anchorFraction{0.5};
+    // Detached: whether the playhead was left of the re-attach point when
+    // the user last placed the view, so that reaching it glides back.
+    bool m_reattachArmed{false};
+    // The same for the view a zoom out still shows while it is handed over.
+    bool m_shownReattachArmed{false};
+    // Gliding: where the playhead was as the glide began.
+    double m_glideFrom{0.0};
+    // The time the plot last asked to seek to while detached, or NaN; see
+    // kOwnSeekToleranceSeconds. Once a jump has landed there, a later jump
+    // is the same seek only from there, as the engine confirms it: a seek
+    // that lands there again from elsewhere, such as Shift+Left five
+    // seconds on, is another.
+    double m_ownSeekSeconds{std::numeric_limits<double>::quiet_NaN()};
+    bool m_ownSeekLanded{false};
+    // A middle-drag: whether the button is down, whether it has moved far
+    // enough to pan, where it was pressed, and where the pan last
+    // started from, as the view's unrounded start and the pointer's x.
+    bool m_panPressed{false};
+    bool m_panning{false};
+    QPointF m_panPressPosition;
+    double m_panOriginStart{0.0};
+    double m_panOriginX{0.0};
+    // detached, on the GUI thread, and as frames compare it.
+    bool m_detached{false};
+    std::atomic_bool m_detachedShown{false};
+    std::atomic_bool m_detachedCheckPending{false};
     bool m_zoomOutHandoffPending{false};
     bool m_playing{false};
     bool m_zoomEnabled{true};

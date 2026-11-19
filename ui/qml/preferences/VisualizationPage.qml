@@ -214,7 +214,7 @@ Preferences.PreferencesPage {
         objectName: "zoomHelp"
         uiPalette: root.uiPalette
         indent: zoomCheckBox.contentItem.x
-        text: I18n.i18nc("@info", "Scroll to zoom in or out; middle-click to reset.")
+        text: I18n.i18nc("@info", "Scroll to zoom in or out, and drag with the middle button to move a zoomed waveform. Ctrl+0 resets the zoom.")
     }
 
     CheckBox {

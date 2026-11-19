@@ -964,9 +964,9 @@ ApplicationWindow {
         checked: queueController.autoCenterSelection
         onTriggered: queueController.autoCenterSelection = checked
     }
-    // The shown plot's zoom back to the default, as a middle click and the
-    // viewer's Reset do. Ctrl+0 is KDE's Actual Size key. The album art
-    // viewer zooms the art, not the plot, so it leaves the key alone.
+    // The shown plot's zoom back to the default, as the viewer's Reset does.
+    // Ctrl+0 is KDE's Actual Size key. The album art viewer zooms the art,
+    // not the plot, so it leaves the key alone.
     Action {
         id: resetZoomAction
         objectName: "resetZoomAction"
@@ -975,6 +975,18 @@ ApplicationWindow {
         shortcut: "Ctrl+0"
         enabled: visualizationSurface.zoomed && !viewerController.albumArtViewerOpen
         onTriggered: visualizationSurface.resetZoom()
+    }
+    // The shown plot back to following the playhead, at once, playing or
+    // paused, after a middle-drag has panned it away. A focused library
+    // keeps F for its type-ahead; the album art viewer leaves it alone, as
+    // it does Reset Zoom's key.
+    Action {
+        id: followPlayheadAction
+        objectName: "followPlayheadAction"
+        text: I18n.i18nc("@action:inmenu", "Follow &Playhead")
+        shortcut: "F"
+        enabled: visualizationSurface.detached && !viewerController.albumArtViewerOpen
+        onTriggered: visualizationSurface.followPlayhead()
     }
 
     // Playback
@@ -1179,7 +1191,8 @@ ApplicationWindow {
         seekBackwardAction, seekForwardAction,
         volumeUpAction, volumeDownAction, muteAction,
         visualizationViewerAction, albumArtViewerAction,
-        spectrogramModeAction, waveformModeAction, resetZoomAction, quitAction
+        spectrogramModeAction, waveformModeAction, resetZoomAction, followPlayheadAction,
+        quitAction
     ]
     // The menus take the style's size, icons and motion. The open or hovered
     // title is lit with the selection tint, as in the lists.
@@ -1235,6 +1248,7 @@ ApplicationWindow {
             MenuSeparator {}
             MenuItem { action: autoCenterSelectionAction }
             MenuItem { action: resetZoomAction }
+            MenuItem { action: followPlayheadAction }
         }
         Components.AppMenu {
             objectName: "playbackMenu"
@@ -1743,13 +1757,25 @@ ApplicationWindow {
         readonly property bool zoomed: Math.abs(visualizationSurface.zoomLevel - 1.0) > 0.001
 
         // View › Reset Zoom, and the viewer's Reset: the shown plot at its
-        // default zoom, as a middle click leaves it. Nothing else changes;
-        // the spectrogram keeps what it has drawn.
+        // default zoom, following the playhead. Nothing else changes; the
+        // spectrogram keeps what it has drawn.
         function resetZoom() {
             if (visualizationSurface.spectrogramShown) {
                 spectrogramSurface.resetZoom()
             } else {
                 waveformSurface.waveformItem.resetZoom()
+            }
+        }
+
+        // Whether the shown plot stays where a middle-drag panned it rather
+        // than following the playhead: only the waveform pans.
+        readonly property bool detached: !visualizationSurface.spectrogramShown
+            && waveformSurface.waveformItem.detached
+
+        // View › Follow Playhead: the shown plot follows the playhead again.
+        function followPlayhead() {
+            if (!visualizationSurface.spectrogramShown) {
+                waveformSurface.waveformItem.followPlayhead()
             }
         }
 
@@ -1817,6 +1843,25 @@ ApplicationWindow {
             uiPalette: root.uiPalette
             clock: playbackController.playbackClock
             seekCommitted: playbackController.seekCommitted
+        }
+
+        // A press of any button, or the wheel, on the plot in the pane takes
+        // the keyboard focus for the pane, then goes on to the plot, as the
+        // viewers' press does; they have their own. Under the plot layer, so
+        // that a click on one of its buttons leaves the focus to the button.
+        MouseArea {
+            anchors.fill: parent
+            z: 1.5
+            enabled: !visualizationSurface.inViewer
+            acceptedButtons: Qt.AllButtons
+            onPressed: function(mouse) {
+                spectrogramPane.takePlotFocus()
+                mouse.accepted = false
+            }
+            onWheel: function(wheel) {
+                spectrogramPane.takePlotFocus()
+                wheel.accepted = false
+            }
         }
 
         // The labels, the mode switch, the level meter and the states, over
