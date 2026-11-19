@@ -2092,7 +2092,8 @@ void UiDialogsTest::checkLibraryFolderMenuOpensOnItsFolder(QQuickWindow *window)
     QTest::mouseRelease(prefs, Qt::LeftButton, Qt::NoModifier, holdAt);
 
     // A folder whose notes make its row taller than the list: the Menu key
-    // opens the menu on the part of the row in view, not under the list.
+    // and Shift+F10 open the menu on the part of the row in view, not
+    // under the list.
     const QString problem = QStringLiteral("could not read 1 folder; ").repeated(80);
     QVERIFY(bridge->setProperty(
         "libraryRootEntries",
@@ -2102,25 +2103,30 @@ void UiDialogsTest::checkLibraryFolderMenuOpensOnItsFolder(QQuickWindow *window)
                                  {QStringLiteral("unwatchedReason"), problem},
                                  {QStringLiteral("scanProblem"), problem}}}));
     QTRY_VERIFY(rowAt(0) != nullptr && rowAt(1) == nullptr);
-    QTRY_VERIFY(rowAt(0)->height() > list->height() + rowAt(0)->height() / 4);
-    click(prefs, rowAt(0));
+    QTRY_VERIFY(rowAt(0)->height() > list->height());
+    // On the row's first line, inside the list.
+    QTest::mouseClick(prefs, Qt::LeftButton, Qt::NoModifier,
+                      rowAt(0)->mapToScene(QPointF(rowAt(0)->width() / 2, 4)).toPoint());
     QTRY_COMPARE(list->property("currentIndex").toInt(), 0);
     QTRY_VERIFY(list->hasActiveFocus());
-    QTest::keyClick(prefs, Qt::Key_Menu);
-    QTRY_VERIFY(menu->property("opened").toBool());
-    anchor = qvariant_cast<QQuickItem *>(menu->property("parent"));
-    QVERIFY(anchor != nullptr && rowAt(0)->isAncestorOf(anchor));
-    const QPointF tallAt = anchor->mapToScene(QPointF(0, 0));
-    QVERIFY2(sceneRect(list).adjusted(0, 0, 0, 1).contains(tallAt),
-             qPrintable(QStringLiteral("menu at %1,%2, outside the list %3,%4 %5x%6")
-                            .arg(tallAt.x())
-                            .arg(tallAt.y())
-                            .arg(sceneRect(list).x())
-                            .arg(sceneRect(list).y())
-                            .arg(sceneRect(list).width())
-                            .arg(sceneRect(list).height())));
-    QTest::keyClick(qvariant_cast<QQuickItem *>(menu->property("contentItem"))->window(), Qt::Key_Escape);
-    QTRY_VERIFY(!menu->property("visible").toBool());
+    for (const auto &[key, modifiers] :
+         {std::pair{Qt::Key_Menu, Qt::NoModifier}, std::pair{Qt::Key_F10, Qt::ShiftModifier}}) {
+        QTest::keyClick(prefs, key, modifiers);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        anchor = qvariant_cast<QQuickItem *>(menu->property("parent"));
+        QVERIFY(anchor != nullptr && rowAt(0)->isAncestorOf(anchor));
+        const QPointF tallAt = anchor->mapToScene(QPointF(0, 0));
+        QVERIFY2(sceneRect(list).adjusted(0, 0, 0, 1).contains(tallAt),
+                 qPrintable(QStringLiteral("menu at %1,%2, outside the list %3,%4 %5x%6")
+                                .arg(tallAt.x())
+                                .arg(tallAt.y())
+                                .arg(sceneRect(list).x())
+                                .arg(sceneRect(list).y())
+                                .arg(sceneRect(list).width())
+                                .arg(sceneRect(list).height())));
+        QTest::keyClick(qvariant_cast<QQuickItem *>(menu->property("contentItem"))->window(), Qt::Key_Escape);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+    }
     QVERIFY(reject(dialog));
 }
 

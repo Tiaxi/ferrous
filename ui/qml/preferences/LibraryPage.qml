@@ -197,7 +197,12 @@ Preferences.PreferencesPage {
                 Keys.onReturnPressed: root.openCurrentRoot()
                 Keys.onEnterPressed: root.openCurrentRoot()
                 Keys.onDeletePressed: root.removeCurrentRoot()
-                Keys.onMenuPressed: {
+                Keys.onPressed: function(event) {
+                    if (event.key !== Qt.Key_Menu
+                            && !(event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+                        return
+                    }
+                    event.accepted = true
                     if (rootList.currentIndex < 0) {
                         return
                     }
