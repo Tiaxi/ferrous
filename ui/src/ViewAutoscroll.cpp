@@ -216,8 +216,8 @@ bool ViewAutoscroll::eventFilter(QObject *watched, QEvent *event) {
             // plot, it goes on to the plot, so that a drag from it pans as
             // ever; the plot does not start autoscroll again as it is
             // released (see takeStopPress). Elsewhere it is its own.
-            m_stopPressTimestamp = mouse->timestamp();
             if (m_plot->contains(m_plot->mapFromScene(mouse->scenePosition()))) {
+                m_stopPressTimestamp = mouse->timestamp();
                 stop();
                 return false;
             }

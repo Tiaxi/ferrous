@@ -1160,6 +1160,15 @@ void SpectrogramFollowSmokeTest::autoscrollMovesByThePointersDistance() {
     QVERIFY2(std::abs(wideMoved - SpectrogramItem::kAutoscrollMaxSecondsPerSecond * 0.5
                      * kColumnsPerSecond) <= 1.0,
              qPrintable(QString::number(wideMoved)));
+
+    // The press that stopped it, become a drag, pans; the next click, even
+    // one of the same timestamp, starts autoscroll again.
+    wide.m_autoscroll.stop();
+    wide.m_autoscroll.m_stopPressTimestamp = 0;
+    middleDrag(wide, 1'000.0, 900.0);
+    QVERIFY(!wide.m_autoscroll.active());
+    middleClick(wide, 1'000.0);
+    QVERIFY(wide.m_autoscroll.active());
 }
 
 // The lanes of a plot share their view: autoscroll on one moves all of

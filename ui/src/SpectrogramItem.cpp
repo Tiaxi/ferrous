@@ -6298,7 +6298,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
         m_panPressed = m_displayMode == 1;
         m_panning = false;
         m_panPressPosition = event->position();
-        m_panPressTimestamp = event->timestamp();
+        m_panStopsAutoscroll = m_autoscroll.takeStopPress(event->timestamp());
         return;
     }
 
@@ -6479,7 +6479,7 @@ void SpectrogramItem::mouseReleaseEvent(QMouseEvent *event) {
     // A middle click that did not drag starts autoscroll, unless it stopped
     // autoscroll; a drag pans.
     const bool click = !m_panning && ViewAutoscroll::isClick(m_panPressPosition, event->position())
-        && !m_autoscroll.takeStopPress(m_panPressTimestamp);
+        && !m_panStopsAutoscroll;
     const QPointF pressed = m_panPressPosition;
     mouseUngrabEvent();
     if (click) {

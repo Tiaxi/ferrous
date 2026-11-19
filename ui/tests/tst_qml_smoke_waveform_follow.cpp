@@ -1055,6 +1055,14 @@ void WaveformFollowSmokeTest::autoscrollMovesByThePointersDistance() {
     autoscrollFor(item, time, 0.5);
     QVERIFY(sameView(viewOf(item), stopped));
     QVERIFY(item.detached());
+
+    // The press that stopped it, become a drag, pans; the next click, even
+    // one of the same timestamp, starts autoscroll again.
+    item.m_autoscroll.m_stopPressTimestamp = 0;
+    middleDrag(item, 300.0, 200.0);
+    QVERIFY(!item.m_autoscroll.active());
+    middleClick(item, 200.0);
+    QVERIFY(item.m_autoscroll.active());
 }
 
 // A view of the whole track has nowhere to scroll to: a middle click there
