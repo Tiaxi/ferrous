@@ -42,6 +42,8 @@ private slots:
     void resetZoomIsOffAtAShortTracksStretchedDefault();
     void followPlayheadBringsTheShownPlotBack();
     void fTypesInTheLibraryAndFollowsThePlayheadElsewhere();
+    void usingThePlotTakesTheFocusFromTheLibrary();
+    void viewerKeysWorkAfterAPressOnItsPlot();
     void viewerControlsComeBackForTheKeyboard();
     void viewerKeysWorkFromEveryControl();
     void viewerControlsStayWhileOneHasFocus();
@@ -3716,6 +3718,224 @@ void TransportInputSmokeTest::fTypesInTheLibraryAndFollowsThePlayheadElsewhere()
     QTest::keyClick(window, 'f');
     QTRY_COMPARE(followed.count(), 1);
     QVERIFY(!waveform->detached());
+}
+
+namespace {
+
+// A wheel notch up at `point` in `host`, as the pointer sends it.
+void wheelAt(QQuickWindow *host, QPointF point) {
+    QWheelEvent wheel(point, host->mapToGlobal(point), QPoint(), QPoint(0, 120), Qt::NoButton,
+                      Qt::NoModifier, Qt::NoScrollPhase, false);
+    QCoreApplication::sendEvent(host, &wheel);
+}
+
+// A middle-drag in `host` across `plot`, from right of its middle to left of
+// it, as the pointer makes it.
+void middleDragAcross(QQuickWindow *host, QQuickItem *plot) {
+    const QRectF rect = sceneRectOf(plot);
+    const int y = int(rect.center().y());
+    const int from = int(rect.center().x() + rect.width() / 4);
+    const int to = int(rect.center().x() - rect.width() / 4);
+    QTest::mousePress(host, Qt::MiddleButton, Qt::NoModifier, QPoint(from, y));
+    QTest::mouseMove(host, QPoint((from + to) / 2, y));
+    QTest::mouseMove(host, QPoint(to, y));
+    QTest::mouseRelease(host, Qt::MiddleButton, Qt::NoModifier, QPoint(to, y));
+}
+
+} // namespace
+
+// The library has the focus at startup and keeps typed letters, F too, for
+// its type-ahead. Using the plot, with any button or the wheel, takes the
+// focus from it, so that F right after a middle-drag follows the playhead;
+// the window's shortcuts work from there. A click on the library gives it
+// the focus back.
+void TransportInputSmokeTest::usingThePlotTakesTheFocusFromTheLibrary() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    libraryModel.setExpandedKeys(QStringList{
+        QStringLiteral("artist|Artist A"),
+        QStringLiteral("album|Artist A|Album A"),
+    });
+    libraryModel.setLibraryTreeFromBinary(sampleArtistAlbumTreeBinary());
+    QTRY_COMPARE(libraryModel.rowCount(), 3);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *follow = window->findChild<QObject *>(QStringLiteral("followPlayheadAction"));
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QObject *library = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *libraryView = qvariant_cast<QQuickItem *>(window->property("libraryViewRef"));
+    auto *plotFocus = window->findChild<QQuickItem *>(QStringLiteral("spectrogramPaneFocus"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && follow != nullptr && playPause != nullptr
+            && library != nullptr && waveformSurface != nullptr && spectrogramSurface != nullptr
+            && libraryView != nullptr && plotFocus != nullptr);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    // Out of the Tab order.
+    QVERIFY(!plotFocus->activeFocusOnTab());
+    setPlayingTrack(bridge);
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveform->isVisible());
+    QTRY_VERIFY(waveform->width() > 100);
+    waveform->setZoomLevel(4.0);
+    QSignalSpy followed(follow, SIGNAL(triggered(QObject *)));
+    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject *)));
+    QSignalSpy seeked(waveform, &WaveformEditorItem::seekRequested);
+    const auto focusLibrary = [&]() {
+        return QMetaObject::invokeMethod(libraryView, "forceActiveFocus")
+            && QTest::qWaitFor([&]() { return libraryView->hasActiveFocus(); });
+    };
+    const auto plotHasFocus = [&]() { return window->activeFocusItem() == plotFocus; };
+    const QPoint plotPoint = sceneRectOf(waveformSurface).center().toPoint();
+
+    // A middle-drag with the library focused, then F: the view follows again.
+    QVERIFY(focusLibrary());
+    QVERIFY(QMetaObject::invokeMethod(library, "selectIndex", Q_ARG(QVariant, 0)));
+    middleDragAcross(window, waveformSurface);
+    QVERIFY(waveform->detached());
+    QTRY_VERIFY(follow->property("enabled").toBool());
+    QTest::keyClick(window, 'f');
+    QTRY_COMPARE(followed.count(), 1);
+    QVERIFY(!waveform->detached());
+    QCOMPARE(library->property("typeAheadBuffer").toString(), QString());
+    QVERIFY(plotHasFocus());
+    QVERIFY(!libraryView->hasActiveFocus());
+
+    // From the plot, Space plays or pauses, and Ctrl+0 resets the zoom.
+    QTest::keyClick(window, Qt::Key_Space);
+    QCOMPARE(toggled.count(), 1);
+    QTest::keyClick(window, Qt::Key_Space);
+    QCOMPARE(toggled.count(), 2);
+    middleDragAcross(window, waveformSurface);
+    QVERIFY(waveform->detached());
+    QTest::keyClick(window, Qt::Key_0, Qt::ControlModifier);
+    QTRY_COMPARE(waveform->zoomLevel(), 1.0);
+    QVERIFY(!waveform->detached());
+    QVERIFY(plotHasFocus());
+
+    // A click on the library gives it the focus back: F types there, and
+    // leaves a detached view as it is.
+    waveform->setZoomLevel(4.0);
+    middleDragAcross(window, waveformSurface);
+    QVERIFY(waveform->detached());
+    QQuickItem *row = nullptr;
+    QVERIFY(QMetaObject::invokeMethod(libraryView, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row),
+                                      Q_ARG(int, 2)));
+    QVERIFY(row != nullptr);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRectOf(row).center().toPoint());
+    QTRY_VERIFY(libraryView->hasActiveFocus());
+    QTest::keyClick(window, 'f');
+    QCOMPARE(library->property("typeAheadBuffer").toString(), QStringLiteral("f"));
+    QCOMPARE(followed.count(), 1);
+    QVERIFY(waveform->detached());
+
+    // A right-click seek on the plot takes the focus too.
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    QTRY_VERIFY(waveform->crosshairEnabled());
+    QVERIFY(focusLibrary());
+    QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, plotPoint);
+    QTRY_VERIFY(plotHasFocus());
+    QCOMPARE(seeked.count(), 1);
+
+    // So does a wheel zoom.
+    QVERIFY(focusLibrary());
+    const double zoomBefore = waveform->zoomLevel();
+    wheelAt(window, plotPoint);
+    QTRY_VERIFY(plotHasFocus());
+    QTRY_VERIFY(waveform->zoomLevel() > zoomBefore);
+
+    // And a press on the spectrogram.
+    viewer->setProperty("visualizationMode", 0);
+    QTRY_VERIFY(spectrogramSurface->isEnabled() && spectrogramSurface->opacity() > 0);
+    QVERIFY(focusLibrary());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      sceneRectOf(spectrogramSurface).center().toPoint());
+    QTRY_VERIFY(plotHasFocus());
+    QVERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+// In the visualization viewer, a press on the plot leaves the focus with
+// the viewer, as before: its keys, Tab through its controls, F and Escape
+// work from there, in the window and over the whole screen.
+void TransportInputSmokeTest::viewerKeysWorkAfterAPressOnItsPlot() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *follow = window->findChild<QObject *>(QStringLiteral("followPlayheadAction"));
+    QQuickItem *pane = itemNamed(window->contentItem(), QStringLiteral("spectrogramPane"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *plotFocus = window->findChild<QQuickItem *>(QStringLiteral("spectrogramPaneFocus"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && follow != nullptr && pane != nullptr
+            && waveformSurface != nullptr && plotFocus != nullptr);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveform->isVisible());
+    QSignalSpy followed(follow, SIGNAL(triggered(QObject *)));
+
+    for (const int fullscreenMode : {1, 0}) {
+        const QByteArray where = QByteArray("fullscreen ") + QByteArray::number(fullscreenMode);
+        bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+        QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+        QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+        QQuickWindow *host = fullscreenMode == 1
+            ? viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow")) : window;
+        QVERIFY2(host != nullptr, where.constData());
+        QVERIFY(QTest::qWaitForWindowActive(host));
+        QTRY_VERIFY2(!pane->isAncestorOf(waveformSurface), where.constData());
+        QTRY_VERIFY2(waveform->width() > 100, where.constData());
+        QQuickItem *viewFocus = host->findChild<QQuickItem *>(
+            fullscreenMode == 1 ? QStringLiteral("spectrogramFullscreenViewFocus")
+                                : QStringLiteral("spectrogramPopupViewFocus"));
+        QQuickItem *close = visibleItemNamed(host, fullscreenMode == 1
+            ? QStringLiteral("spectrogramFullscreenCloseButton")
+            : QStringLiteral("spectrogramPopupCloseButton"));
+        QVERIFY2(viewFocus != nullptr && close != nullptr, where.constData());
+
+        // A middle-drag on the plot: the viewer's view has the focus, not
+        // the pane's, and F follows the playhead.
+        waveform->setZoomLevel(4.0);
+        middleDragAcross(host, waveformSurface);
+        QVERIFY2(waveform->detached(), where.constData());
+        QTRY_VERIFY2(host->activeFocusItem() == viewFocus, where.constData());
+        QVERIFY2(!plotFocus->hasActiveFocus(), where.constData());
+        const int before = followed.count();
+        QTest::keyClick(host, 'f');
+        QTRY_VERIFY2(followed.count() == before + 1, where.constData());
+        QVERIFY2(!waveform->detached(), where.constData());
+
+        // Tab reaches the viewer's controls, and Space presses the one
+        // focused, as before.
+        QTest::mouseClick(host, Qt::RightButton, Qt::NoModifier,
+                          sceneRectOf(waveformSurface).center().toPoint());
+        QTRY_VERIFY2(host->activeFocusItem() == viewFocus, where.constData());
+        QVERIFY2(tabTo(host, close), where.constData());
+        QTest::keyClick(host, Qt::Key_Space);
+        QTRY_VERIFY2(!viewer->property("spectrogramViewerOpen").toBool(), where.constData());
+
+        // Escape closes it after a press on the plot.
+        QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+        QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+        QVERIFY(QTest::qWaitForWindowActive(host));
+        QTRY_VERIFY2(!pane->isAncestorOf(waveformSurface), where.constData());
+        QTest::mouseClick(host, Qt::RightButton, Qt::NoModifier,
+                          sceneRectOf(waveformSurface).center().toPoint());
+        QTRY_VERIFY2(host->activeFocusItem() == viewFocus, where.constData());
+        QTest::keyClick(host, Qt::Key_Escape);
+        QTRY_VERIFY2(!viewer->property("spectrogramViewerOpen").toBool(), where.constData());
+        waveform->resetZoom();
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
 }
 
 std::unique_ptr<QmlSmokeTest> makeTransportInputSmokeTest(const QString &userDirectoriesParent) {
