@@ -37,6 +37,9 @@ private slots:
     void revealKeyExpandsADeepKeyInOneCall();
     void revealKeyWaitsForRowsTheBackendHasNotSentWithoutTimers();
     void revealKeyOpensTheCollapsedLibraryFolderOfTheRow();
+    void revealKeyGivesWayToTheUserTogglingRows();
+    void revealKeyAsksForTheRowsOfAnExpandedRowTheBackendForgot();
+    void revealKeyDuringAScanEndsWithTheTreeThatAnswersIt();
     void queueMovesAndDropsActOnEveryHighlightedRow();
     void queueSelectionFollowsRowRangeMoves();
     void emptyLibraryAndFileMenuAddALibraryFolder();
@@ -49,6 +52,7 @@ private slots:
     void aRevealDuringTheSavedViewRestoreKeepsSavingTheView();
     void escapeCancelsAQueueRowDrag();
     void aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore();
+    void openingOrClosingARowEndsTheSavedViewRestore();
     void trackIdentityChangedSignalTriggersQmlHandler();
     void queueAutoCenterIsDeferredOffHandlerStack();
     void queueRemovalSendsOneBatch();
@@ -2831,6 +2835,264 @@ void LibraryQueueSmokeTest::revealKeyOpensTheCollapsedLibraryFolderOfTheRow() {
     QCOMPARE(finished.count(), 1);
 }
 
+// A reveal still waiting for its rows gives way to the user's browsing:
+// once the user collapses or expands a row, the rows that come later
+// neither reopen the folder the user collapsed nor end the reveal (#649).
+void LibraryQueueSmokeTest::revealKeyGivesWayToTheUserTogglingRows() {
+    const QString rootA = QStringLiteral("root|/music-a");
+    const QString artistA = QStringLiteral("artist|/music-a|Artist A");
+    const QString albumA = QStringLiteral("album|/music-a|Artist A|Album");
+    const QString trackA = QStringLiteral("/music-a/Artist A/Album/01.flac");
+    const QString trackKeyA = QStringLiteral("track|") + trackA;
+    const QString rootB = QStringLiteral("root|/music-b");
+    const QString artistB = QStringLiteral("artist|/music-b|Artist B");
+    const QString albumB = QStringLiteral("album|/music-b|Artist B|Album");
+    const QString trackB = QStringLiteral("/music-b/Artist B/Album/01.flac");
+    // The backend sends the rows of each artist and album it was told is
+    // expanded.
+    const auto tree = [&](bool openA, bool openArtistB, bool openAlbumB) {
+        QVector<BinaryTreeRow> rows;
+        rows.push_back(BinaryTreeRow{0, 0, -1, 0, 1, QStringLiteral("/music-a"), rootA, {},
+            QStringLiteral("/music-a"), {}, {}, {}});
+        rows.push_back(BinaryTreeRow{1, 1, -1, 0, 1, QStringLiteral("Artist A"), artistA,
+            QStringLiteral("Artist A"), QStringLiteral("/music-a/Artist A"), {}, {}, {}});
+        if (openA) {
+            rows.push_back(BinaryTreeRow{2, 2, -1, 0, 1, QStringLiteral("Album"), albumA,
+                QStringLiteral("Artist A"), QStringLiteral("/music-a/Artist A/Album"), {}, {},
+                QStringList{trackA}});
+            rows.push_back(BinaryTreeRow{4, 3, -1, 1, 0, QStringLiteral("01"), trackKeyA,
+                QStringLiteral("Artist A"), trackA, {}, trackA, QStringList{trackA}});
+        }
+        rows.push_back(BinaryTreeRow{0, 0, -1, 0, 1, QStringLiteral("/music-b"), rootB, {},
+            QStringLiteral("/music-b"), {}, {}, {}});
+        rows.push_back(BinaryTreeRow{1, 1, -1, 0, 1, QStringLiteral("Artist B"), artistB,
+            QStringLiteral("Artist B"), QStringLiteral("/music-b/Artist B"), {}, {}, {}});
+        if (openArtistB) {
+            rows.push_back(BinaryTreeRow{2, 2, -1, 0, 1, QStringLiteral("Album"), albumB,
+                QStringLiteral("Artist B"), QStringLiteral("/music-b/Artist B/Album"), {}, {},
+                QStringList{trackB}});
+            if (openAlbumB) {
+                rows.push_back(BinaryTreeRow{4, 3, -1, 1, 0, QStringLiteral("01"),
+                    QStringLiteral("track|") + trackB, QStringLiteral("Artist B"), trackB, {},
+                    trackB, QStringList{trackB}});
+            }
+        }
+        return encodeRows(rows);
+    };
+    const auto expanded = [](const LibraryTreeModel &model, const QString &key) {
+        const int row = model.indexForSelectionKey(key);
+        return row >= 0 && model.data(model.index(row, 0), LibraryTreeModel::ExpandedRole).toBool();
+    };
+
+    LibraryTreeModel model;
+    QVERIFY(applyLibraryTree(model, tree(false, false, false)));
+    QCOMPARE(model.rowCount(), 4);
+    QSignalSpy expansions(&model, &LibraryTreeModel::nodeExpansionRequested);
+    QSignalSpy finished(&model, &LibraryTreeModel::revealFinished);
+    QSignalSpy pendingChanges(&model, &LibraryTreeModel::revealPendingChanged);
+    // Show in Library on track A, whose rows the backend has not sent.
+    QCOMPARE(model.revealKey(QStringList{artistA, albumA}, trackKeyA), -1);
+    QVERIFY(model.revealPending());
+
+    // The user collapses folder A: the reveal ends there.
+    model.toggleKey(rootA);
+    QVERIFY(!model.revealPending());
+    QCOMPARE(pendingChanges.count(), 2);
+    QVERIFY(!expanded(model, rootA));
+    QCOMPARE(model.rowCount(), 3);
+
+    // The user expands artist B, then its album, and the trees with their
+    // rows, and those of track A, come.
+    model.toggleKey(artistB);
+    QVERIFY(applyLibraryTree(model, tree(true, true, false)));
+    model.toggleKey(albumB);
+    QVERIFY(applyLibraryTree(model, tree(true, true, true)));
+    QCOMPARE(finished.count(), 0);
+    QVERIFY(!model.revealPending());
+    // Folder A stays collapsed, and folder B shows what the user opened.
+    QVERIFY(!expanded(model, rootA));
+    QCOMPARE(model.indexForSelectionKey(trackKeyA), -1);
+    QCOMPARE(model.rowCount(), 5);
+    QVERIFY(expanded(model, albumB));
+
+    // Expanding a row, as collapsing one, ends a reveal still waiting.
+    model.toggleKey(rootA);
+    model.toggleKey(artistA);
+    model.toggleKey(artistB);
+    QVERIFY(applyLibraryTree(model, tree(false, false, false)));
+    QCOMPARE(model.revealKey(QStringList{artistA}, QStringLiteral("track|/music-a/Artist A/New.flac")),
+        -1);
+    QVERIFY(model.revealPending());
+    model.toggleKey(artistB);
+    QVERIFY(!model.revealPending());
+    QVERIFY(applyLibraryTree(model, tree(true, true, false)));
+    QCOMPARE(finished.count(), 0);
+
+    // So does Collapse All.
+    QCOMPARE(model.revealKey(QStringList{albumB}, QStringLiteral("track|/music-b/Artist B/Album/02.flac")),
+        -1);
+    QVERIFY(model.revealPending());
+    model.collapseAll();
+    QVERIFY(!model.revealPending());
+    QVERIFY(applyLibraryTree(model, tree(true, true, true)));
+    QCOMPARE(finished.count(), 0);
+    // None of these asked the backend for a library folder's rows.
+    for (const QList<QVariant> &expansion : std::as_const(expansions)) {
+        QVERIFY2(!expansion.at(1).toBool()
+                     || !expansion.at(0).toString().startsWith(QStringLiteral("root|")),
+                 qPrintable(expansion.at(0).toString()));
+    }
+}
+
+// A row the model holds expanded can come from the backend without its
+// rows: the backend forgets the expansion of a row that leaves the library,
+// the model does not, and the row may come back. A reveal through that row
+// asks the backend for its rows, rather than waiting for rows no tree
+// would bring and ending much later, while the user browses (#649).
+void LibraryQueueSmokeTest::revealKeyAsksForTheRowsOfAnExpandedRowTheBackendForgot() {
+    const QString artistX = QStringLiteral("artist|/music|Artist X");
+    const QString albumX = QStringLiteral("album|/music|Artist X|Album");
+    const QString trackX = QStringLiteral("/music/Artist X/Album/01.flac");
+    const QString trackKeyX = QStringLiteral("track|") + trackX;
+    const QString artistY = QStringLiteral("artist|/music|Artist Y");
+    // Artist X absent (-1), sent collapsed (0), with its album collapsed
+    // (1), or with the album's track (2).
+    const auto tree = [&](int x) {
+        QVector<BinaryTreeRow> rows;
+        if (x >= 0) {
+            rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("Artist X"), artistX,
+                QStringLiteral("Artist X"), QStringLiteral("/music/Artist X"), {}, {}, {}});
+        }
+        if (x >= 1) {
+            rows.push_back(BinaryTreeRow{2, 1, -1, 0, 1, QStringLiteral("Album"), albumX,
+                QStringLiteral("Artist X"), QStringLiteral("/music/Artist X/Album"), {}, {},
+                QStringList{trackX}});
+        }
+        if (x >= 2) {
+            rows.push_back(BinaryTreeRow{4, 2, -1, 1, 0, QStringLiteral("01"), trackKeyX,
+                QStringLiteral("Artist X"), trackX, {}, trackX, QStringList{trackX}});
+        }
+        rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("Artist Y"), artistY,
+            QStringLiteral("Artist Y"), QStringLiteral("/music/Artist Y"), {}, {}, {}});
+        return encodeRows(rows);
+    };
+    const auto askedKeys = [](const QSignalSpy &spy) {
+        QStringList asked;
+        for (const QList<QVariant> &expansion : spy) {
+            if (expansion.at(1).toBool()) {
+                asked.push_back(expansion.at(0).toString());
+            }
+        }
+        return asked;
+    };
+
+    LibraryTreeModel model;
+    QVERIFY(applyLibraryTree(model, tree(0)));
+    // The user expands artist X and its album, and their rows come.
+    model.toggleKey(artistX);
+    QVERIFY(applyLibraryTree(model, tree(1)));
+    model.toggleKey(albumX);
+    QVERIFY(applyLibraryTree(model, tree(2)));
+    QCOMPARE(model.rowCount(), 4);
+    // Artist X leaves the library, and the backend forgets both expansions.
+    QVERIFY(applyLibraryTree(model, tree(-1)));
+    // It comes back, collapsed as far as the backend knows.
+    QVERIFY(applyLibraryTree(model, tree(0)));
+    const int artistRow = model.indexForSelectionKey(artistX);
+    QVERIFY(model.data(model.index(artistRow, 0), LibraryTreeModel::ExpandedRole).toBool());
+
+    QSignalSpy expansions(&model, &LibraryTreeModel::nodeExpansionRequested);
+    QSignalSpy finished(&model, &LibraryTreeModel::revealFinished);
+    QCOMPARE(model.revealKey(QStringList{artistX, albumX}, trackKeyX), -1);
+    QVERIFY(model.revealPending());
+    // It asks for the artist's rows; the album's row is not here yet.
+    QCOMPARE(askedKeys(expansions), QStringList{artistX});
+    // A tree from before the backend heard of it asks for nothing again.
+    QVERIFY(applyLibraryTree(model, tree(0)));
+    QVERIFY(model.revealPending());
+    QCOMPARE(expansions.count(), 1);
+
+    // The album comes without its track: the reveal asks for it, once.
+    QVERIFY(applyLibraryTree(model, tree(1)));
+    QVERIFY(model.revealPending());
+    QCOMPARE(askedKeys(expansions), (QStringList{artistX, albumX}));
+    QVERIFY(applyLibraryTree(model, tree(1)));
+    QCOMPARE(expansions.count(), 2);
+    QCOMPARE(finished.count(), 0);
+
+    // The backend's answer ends the reveal on the row.
+    QVERIFY(applyLibraryTree(model, tree(2)));
+    QCOMPARE(finished.count(), 1);
+    QCOMPARE(finished.at(0).at(0).toString(), trackKeyX);
+    QCOMPARE(finished.at(0).at(1).toInt(), 2);
+    QVERIFY(!model.revealPending());
+    QCOMPARE(expansions.count(), 2);
+
+    // Collapse All ends a waiting reveal also with no row expanded, as
+    // before the first tree.
+    LibraryTreeModel empty;
+    QCOMPARE(empty.revealKey({}, trackKeyX), -1);
+    QVERIFY(empty.revealPending());
+    empty.collapseAll();
+    QVERIFY(!empty.revealPending());
+}
+
+// A reveal asked for while a scan sends tree after tree ends with the first
+// tree the model has parsed in full that answers it: when the track is not
+// in it yet, as not found. The scan's later trees, which have the track,
+// do not end it again, nor move to the row (#649).
+void LibraryQueueSmokeTest::revealKeyDuringAScanEndsWithTheTreeThatAnswersIt() {
+    const QString artistN = QStringLiteral("artist|/music|New Artist");
+    const QString albumN = QStringLiteral("album|/music|New Artist|Album");
+    const QString trackN = QStringLiteral("/music/New Artist/Album/01.flac");
+    const QString trackKeyN = QStringLiteral("track|") + trackN;
+    // Enough artists that the model parses each tree off the UI thread.
+    const auto tree = [&](int artists, bool withNew) {
+        QVector<BinaryTreeRow> rows;
+        for (int i = 0; i < artists; ++i) {
+            const QString name = QStringLiteral("Scanned Artist %1").arg(i, 4, 10, QLatin1Char('0'));
+            rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, name, QStringLiteral("artist|/music|") + name,
+                name, QStringLiteral("/music/") + name, {}, {}, {}});
+        }
+        if (withNew) {
+            rows.push_back(BinaryTreeRow{1, 0, -1, 0, 1, QStringLiteral("New Artist"), artistN,
+                QStringLiteral("New Artist"), QStringLiteral("/music/New Artist"), {}, {}, {}});
+            rows.push_back(BinaryTreeRow{2, 1, -1, 0, 1, QStringLiteral("Album"), albumN,
+                QStringLiteral("New Artist"), QStringLiteral("/music/New Artist/Album"), {}, {},
+                QStringList{trackN}});
+            rows.push_back(BinaryTreeRow{4, 2, -1, 1, 0, QStringLiteral("01"), trackKeyN,
+                QStringLiteral("New Artist"), trackN, {}, trackN, QStringList{trackN}});
+        }
+        return encodeRows(rows);
+    };
+    QVERIFY(tree(200, false).size() > 16 * 1024);
+
+    LibraryTreeModel model;
+    QVERIFY(applyLibraryTree(model, tree(200, false)));
+    QSignalSpy finished(&model, &LibraryTreeModel::revealFinished);
+    // The scan's next tree is parsed, and one more waits, as the reveal comes.
+    model.setLibraryTreeFromBinary(tree(220, false));
+    QVERIFY(model.parsing());
+    model.setLibraryTreeFromBinary(tree(240, false));
+    QCOMPARE(model.revealKey(QStringList{artistN, albumN}, trackKeyN), -1);
+    QVERIFY(model.revealPending());
+    QCOMPARE(finished.count(), 0);
+
+    // The tree that waited answers it: the track is not in the library yet.
+    QTRY_VERIFY(!model.parsing());
+    QCOMPARE(model.rowCount(), 240);
+    QCOMPARE(finished.count(), 1);
+    QCOMPARE(finished.at(0).at(0).toString(), trackKeyN);
+    QCOMPARE(finished.at(0).at(1).toInt(), -1);
+    QVERIFY(!model.revealPending());
+
+    // The scan reaches the track: its rows come and nothing moves to them.
+    QVERIFY(applyLibraryTree(model, tree(240, true)));
+    QVERIFY(model.indexForSelectionKey(trackKeyN) >= 0);
+    QCOMPARE(finished.count(), 1);
+    QVERIFY(!model.revealPending());
+}
+
 void LibraryQueueSmokeTest::queueMovesAndDropsActOnEveryHighlightedRow() {
     QQmlApplicationEngine engine;
     QString errorText;
@@ -3683,6 +3945,63 @@ void LibraryQueueSmokeTest::aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore
     QVERIFY(trackRow > 0);
     QVERIFY(QMetaObject::invokeMethod(root.get(), "clickRow", Q_ARG(QVariant, trackRow)));
     QTRY_COMPARE(root->property("savedKeys").toStringList().last(), QStringLiteral("track|") + trackB);
+}
+
+// The saved view's restore at start waits for the rows of the saved
+// selection like any reveal. When the user opens or closes a row first,
+// the restore ends there: the rows that come later do not select the saved
+// row, and what the user does is saved (#649).
+void LibraryQueueSmokeTest::openingOrClosingARowEndsTheSavedViewRestore() {
+    const QString artistA = QStringLiteral("artist|/music|Artist A");
+    const QString artistB = QStringLiteral("artist|/music|Artist B");
+    const QString trackA = QStringLiteral("/music/Artist A/01.flac");
+    LibraryTreeModel model;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("testLibraryModel"), &model);
+    engine.rootContext()->setContextProperty(QStringLiteral("treeBytes"), encodeRows(restoreHarnessRows()));
+    QString errorText;
+    QScopedPointer<QObject> root(createHarness(engine, kRestoreHarness, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *controller = root->property("controllerRef").value<QObject *>();
+
+    // The saved selection is in artist A, whose rows have not come.
+    QVERIFY(QMetaObject::invokeMethod(root.get(), "start"));
+    QVERIFY(controller->property("restoringViewState").toBool());
+    QVERIFY(model.revealPending());
+
+    // The user opens artist B: the restore ends, and the view is saved.
+    QVERIFY(QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, artistB)));
+    QVERIFY(!controller->property("restoringViewState").toBool());
+    QVERIFY(!model.revealPending());
+    QCOMPARE(controller->property("pendingRevealKey").toString(), QString());
+    QTRY_VERIFY(!root->property("savedKeys").toStringList().isEmpty());
+
+    // Artist A's rows come: the saved row is not selected.
+    QVector<BinaryTreeRow> rows = restoreHarnessRows();
+    rows.insert(1, BinaryTreeRow{4, 1, -1, 1, 0, QStringLiteral("01"), QStringLiteral("track|") + trackA,
+        QStringLiteral("Artist A"), trackA, {}, trackA, QStringList{trackA}});
+    QVERIFY(QMetaObject::invokeMethod(controller, "requestTreeApply", Q_ARG(QVariant, 2),
+        Q_ARG(QVariant, encodeRows(rows))));
+    QTRY_VERIFY(!model.parsing());
+    QVERIFY(model.indexForSelectionKey(QStringLiteral("track|") + trackA) >= 0);
+    QCOMPARE(controller->property("selectedSelectionKey").toString(), QString());
+    QVERIFY(!model.isKeySelected(QStringLiteral("track|") + trackA));
+    QVERIFY(model.indexForSelectionKey(artistA) >= 0);
+
+    // Show in Library, which the backend saved as the view, waits for
+    // artist A's rows. The user opens a row, and the view the user is at is
+    // saved over it, though the selection did not change.
+    QVERIFY(QMetaObject::invokeMethod(controller, "requestTreeApply", Q_ARG(QVariant, 3),
+        Q_ARG(QVariant, encodeRows(restoreHarnessRows()))));
+    QTRY_VERIFY(!model.parsing());
+    const qsizetype saved = root->property("savedKeys").toStringList().size();
+    QVERIFY(QMetaObject::invokeMethod(controller, "requestBridgeReveal",
+        Q_ARG(QVariant, QVariant(QStringList{artistA})), Q_ARG(QVariant, QStringLiteral("track|") + trackA)));
+    QVERIFY(model.revealPending());
+    QVERIFY(QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, artistB)));
+    QVERIFY(!model.revealPending());
+    QTRY_COMPARE(root->property("savedKeys").toStringList().size(), saved + 1);
+    QCOMPARE(root->property("savedKeys").toStringList().last(), QString());
 }
 
 std::unique_ptr<QmlSmokeTest> makeLibraryQueueSmokeTest(const QString &userDirectoriesParent) {

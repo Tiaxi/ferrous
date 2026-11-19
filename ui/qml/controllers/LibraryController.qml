@@ -342,6 +342,8 @@ QtObject {
         if (!key || key.length === 0) {
             return
         }
+        // What the user opens or closes wins over a row still being revealed.
+        root.cancelPendingReveal()
         const index = root.libraryModel.indexForSelectionKey(key)
         let expanding = false
         if (index >= 0) {
@@ -771,6 +773,7 @@ QtObject {
     }
 
     function collapseAll() {
+        root.cancelPendingReveal()
         root.pendingAnchorValid = false
         root.pendingExpandFitKey = ""
         root.pendingExpandFitAttempts = 0
@@ -852,6 +855,28 @@ QtObject {
         return false
     }
 
+    // Whether handleKeyPress moves in the tree, opens or closes a row, or
+    // types ahead for `event`.
+    function isNavigationKey(event) {
+        switch (event.key) {
+        case Qt.Key_Up:
+        case Qt.Key_Down:
+        case Qt.Key_Left:
+        case Qt.Key_Right:
+        case Qt.Key_PageUp:
+        case Qt.Key_PageDown:
+        case Qt.Key_Home:
+        case Qt.Key_End:
+        case Qt.Key_Return:
+        case Qt.Key_Enter:
+            return true
+        default:
+            break
+        }
+        const text = event.text || ""
+        return text.length === 1 && text !== "\n" && text !== "\r" && text !== "\t"
+    }
+
     function handleKeyPress(event) {
         if (root.tryCaptureGlobalSearchPrefill(event)) {
             return
@@ -863,6 +888,11 @@ QtObject {
             return
         }
         const extendSelection = (event.modifiers & Qt.ShiftModifier) !== 0
+        // Where the user goes with the keyboard wins over a row still being
+        // revealed.
+        if (root.isNavigationKey(event)) {
+            root.cancelPendingReveal()
+        }
         if (event.key === Qt.Key_Up) {
             root.selectRelative(-1, extendSelection)
             event.accepted = true
@@ -982,11 +1012,13 @@ QtObject {
         }
         if (root.pendingRevealPurpose === "restore") {
             root.cancelPendingRestoredViewState()
-            root.scheduleLibraryViewStatePersist()
         }
         root.pendingRevealKey = ""
         root.pendingRevealPurpose = ""
         root.libraryModel.cancelReveal()
+        // The view the user is at is saved, rather than the saved view or
+        // the row the backend saved for Show in Library.
+        root.scheduleLibraryViewStatePersist()
     }
 
     function finishReveal(purpose, row) {

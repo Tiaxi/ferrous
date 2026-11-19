@@ -103,7 +103,8 @@ public:
     // Expand `expandKeys` and return the row of `selectionKey`. Rows the
     // backend has not loaded yet are -1 for now: once a tree update brings
     // them, or shows the key is not in the tree, revealFinished reports
-    // the row, or -1. A later call or cancelReveal drops the wait.
+    // the row, or -1. A later call, cancelReveal, or the user expanding or
+    // collapsing a row (toggleKey, collapseAll) drops the wait.
     Q_INVOKABLE int revealKey(const QStringList &expandKeys, const QString &selectionKey);
     Q_INVOKABLE void cancelReveal();
 
@@ -200,6 +201,11 @@ private:
     // Expand every collapsed row above the row of `selectionKey`, so that
     // the row is shown; whether any was collapsed.
     bool expandAncestorsOf(const QString &selectionKey);
+    // Ask the backend for the rows of each node of the pending reveal's
+    // keys that waits for them and that the reveal has not asked about.
+    void askForRevealRows();
+    void collectUnaskedRevealNodes(const QVector<TreeNode> &nodes, const QSet<QString> &keys,
+                                   QStringList *unasked) const;
     void settleReveal();
 
     QVector<TreeNode> m_tree;
@@ -218,6 +224,8 @@ private:
     // The reveal waiting for rows, if any.
     QString m_revealKey;
     QStringList m_revealExpandKeys;
+    // The keys whose rows the pending reveal asked the backend for.
+    QSet<QString> m_revealAskedKeys;
     bool m_hasTree{false};
     QString m_searchLower;
     QFutureWatcher<QVector<TreeNode>> m_parseWatcher;
