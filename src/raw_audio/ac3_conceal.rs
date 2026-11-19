@@ -460,6 +460,19 @@ fn find_range_flags_for_test(frame: &[u8]) -> super::ac3_dynamic_range::RangeFla
 /// reuse them.
 #[cfg(test)]
 pub(crate) fn silent_frame(frame: &[u8]) -> Vec<u8> {
+    silent_frame_with(frame, None, None)
+}
+
+/// [`silent_frame`] with `dynrng` in its first block, and with a block
+/// `reusing_dba` that has each channel reuse a delta bit allocation, which
+/// no block of the frame sets: the decoder would use one from the frame
+/// before.
+#[cfg(test)]
+pub(crate) fn silent_frame_with(
+    frame: &[u8],
+    dynrng: Option<u8>,
+    reusing_dba: Option<usize>,
+) -> Vec<u8> {
     use super::ac3_dynamic_range::FULL_BANDWIDTH_CHANNELS;
     // `acmod`, the 3 bits after `bsid` and `bsmod`, starts byte 6.
     let acmod = usize::from(frame[6] >> 5);
@@ -483,8 +496,15 @@ pub(crate) fn silent_frame(frame: &[u8]) -> Vec<u8> {
     // No `copyrightb`, `origbs`, `timecod1e`, `timecod2e`, or `addbsie`.
     bits.put(0, 5);
     for block in 0..6 {
-        // `blksw` and `dithflag` of each channel, and no `dynrnge`.
-        bits.put(0, 2 * channels + programmes);
+        // `blksw` and `dithflag` of each channel, and `dynrnge`.
+        bits.put(0, 2 * channels);
+        match dynrng.filter(|_| block == 0) {
+            Some(word) => {
+                bits.put(0x100 | u32::from(word), 9);
+                bits.put(0, programmes - 1);
+            }
+            None => bits.put(0, programmes),
+        }
         if block == 0 {
             // `cplstre` set and `cplinu` clear: no coupling.
             bits.put(0b10, 2);
@@ -526,10 +546,19 @@ pub(crate) fn silent_frame(frame: &[u8]) -> Vec<u8> {
             // No `deltbaie` or `skiple`.
             bits.put(0, 2);
         } else {
-            // No `cplstre`, `rematstr`, new exponents, `baie`,
-            // `snroffste`, `deltbaie`, or `skiple`.
+            // No `cplstre`, `rematstr`, new exponents, `baie`, or
+            // `snroffste`.
             let rematrixing = usize::from(acmod == 2);
-            bits.put(0, 1 + rematrixing + 2 * channels + usize::from(lfe) + 4);
+            bits.put(0, 1 + rematrixing + 2 * channels + usize::from(lfe) + 2);
+            // `deltbaie`, with `deltbae` 0, reuse, for each channel.
+            if reusing_dba == Some(block) {
+                bits.put(1, 1);
+                bits.put(0, 2 * channels);
+            } else {
+                bits.put(0, 1);
+            }
+            // No `skiple`.
+            bits.put(0, 1);
         }
     }
     let mut silent = bits.bytes;
@@ -705,7 +734,7 @@ mod tests {
 #[cfg(all(test, feature = "gst"))]
 mod pipeline_tests {
     use super::{
-        prepare_ac3_frames, record_decoder_input, silenced, with_damaged_frames,
+        prepare_ac3_frames, record_decoder_input, silenced, silent_frame_with, with_damaged_frames,
         with_dynamic_range, Concealer, DecoderFrame, AC3_DECODERS, AC3_FRAME_LEN, AC3_LAYOUTS,
         COMPRESSING_DYNRNG, SEAMED_FRAME, TEST_AC3_FRAMES,
     };
@@ -955,6 +984,27 @@ mod pipeline_tests {
         let decoded = decode("all", &stream, true);
         assert_sounds_clean("all", &decoded, &clean);
         assert!(decoded.samples.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn a_frame_that_reuses_what_the_frame_before_set_passes_unchanged() {
+        gst::init().expect("gst init");
+        let header = &TEST_AC3[..AC3_FRAME_LEN];
+        let compressed = silent_frame_with(header, Some(COMPRESSING_DYNRNG), None);
+        let reusing = silent_frame_with(header, Some(COMPRESSING_DYNRNG), Some(4));
+        let plain = silent_frame_with(header, Some(0), None);
+        let mut concealer = Concealer::default();
+        let mut prepare = |frame: &[u8]| {
+            let mut buffer = gst::Buffer::from_slice(frame.to_vec());
+            concealer.prepare(&mut buffer);
+            let map = buffer.map_readable().expect("map frame");
+            map.to_vec()
+        };
+        assert_eq!(prepare(&compressed), plain);
+        // The decoder counts the mantissas of block 4 with the delta bit
+        // allocation of an earlier frame, which the probe does not know:
+        // where block 5's word is, it cannot tell.
+        assert_eq!(prepare(&reusing), reusing);
     }
 
     #[test]

@@ -7471,7 +7471,8 @@ mod tests {
             "ferrous-session-dynamic-range-{}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&dir).expect("fixture dir");
+        // Only a folder of this test, which it removes.
+        std::fs::create_dir(&dir).expect("a new fixture folder");
         let stream = TEST_AC3.repeat(4);
         let plain = dir.join("plain.ac3");
         let compressed = dir.join("compressed.ac3");
@@ -7486,10 +7487,21 @@ mod tests {
                 let session = |path: &Path| timing_session(path, 512, 1.0, mode, start);
                 let expected = columns_until_eof(vec![session(&plain)]);
                 let columns = columns_until_eof(vec![session(&compressed)]);
-                assert!(!columns.is_empty(), "{mode:?} from {start} s");
+                // The loudest bin of each column: the words would put it
+                // 12 dB lower, about 20 steps of the quantized scale. A
+                // column at the edge of a seek may differ a little.
+                let louder: Vec<i32> = columns
+                    .iter()
+                    .filter_map(|(column, bins)| {
+                        let loudest = |bins: &Vec<u8>| bins.iter().copied().max().map(i32::from);
+                        Some(loudest(bins)? - loudest(expected.get(column)?)?)
+                    })
+                    .collect();
+                assert!(louder.len() > 50, "{mode:?} from {start} s: {louder:?}");
+                let off = louder.iter().filter(|steps| steps.abs() > 2).count();
                 assert!(
-                    columns == expected,
-                    "{mode:?} from {start} s: the columns differ"
+                    off * 20 <= louder.len(),
+                    "{mode:?} from {start} s: {louder:?}"
                 );
             }
         }

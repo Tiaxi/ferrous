@@ -1478,28 +1478,38 @@ mod tests {
             "ferrous-waveform-windows-dynamic-range-{}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&dir).expect("fixture dir");
-        let stream = TEST_AC3.repeat(4);
-        let plain = dir.join("plain.ac3");
-        let compressed = dir.join("compressed.ac3");
-        std::fs::write(&plain, &stream).expect("write fixture");
-        std::fs::write(&compressed, with_dynamic_range(&stream, COMPRESSING_DYNRNG))
-            .expect("write fixture");
-        // Zoomed in after the start, which the session seeks to, at sample
-        // resolution, and the whole track from the start.
-        for (start, end, points) in [(2.5, 3.0, 2_048), (1.0, 1.02, 960), (0.0, 4.0, 64)] {
-            let expected = decode_waveform_window(&plain, start, end, points).expect("window");
-            let window = decode_waveform_window(&compressed, start, end, points).expect("window");
-            let peak = window
+        // Only a folder of this test, which it removes.
+        std::fs::create_dir(&dir).expect("a new fixture folder");
+        let path = dir.join("compressed.ac3");
+        std::fs::write(
+            &path,
+            with_dynamic_range(&TEST_AC3.repeat(4), COMPRESSING_DYNRNG),
+        )
+        .expect("write fixture");
+        // The peaks of the points of a window of the mono tone, which
+        // peaks at 1/8 of full scale, and its dynamic range words would
+        // turn down to 1/32.
+        let point_peaks = |start: f64, end: f64, points: usize| -> Vec<f32> {
+            let window = decode_waveform_window(&path, start, end, points).expect("window");
+            window
                 .extrema
-                .iter()
-                .fold(0.0_f32, |peak, value| peak.max(value.abs()));
-            assert!(
-                (peak - 0.125).abs() < 0.01,
-                "{start} s to {end} s: peak {peak}"
-            );
-            assert_eq!(window.extrema, expected.extrema, "{start} s to {end} s");
+                .chunks_exact(2)
+                .map(|extrema| extrema[0].abs().max(extrema[1].abs()))
+                .collect()
+        };
+        let full = |peak: f32| (peak - 0.125).abs() < 0.01;
+        // Zoomed in after the start, which the session seeks to, and at
+        // sample resolution.
+        for (start, end, points) in [(2.5, 3.0, 2_048), (1.0, 1.02, 960)] {
+            let peak = point_peaks(start, end, points)
+                .into_iter()
+                .fold(0.0, f32::max);
+            assert!(full(peak), "{start} s to {end} s: peak {peak}");
         }
+        // The whole track, each point of which holds whole cycles of the
+        // tone, from the start on.
+        let peaks = point_peaks(0.0, 4.0, 64);
+        assert!(peaks.iter().copied().all(full), "{peaks:?}");
         std::fs::remove_dir_all(&dir).expect("remove fixtures");
     }
 

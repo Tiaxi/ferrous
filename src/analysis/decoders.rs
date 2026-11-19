@@ -1723,8 +1723,7 @@ mod tests {
     }
 
     /// The frames of `path` that analysis decodes, from the start or from
-    /// a seek to `seek_frame`: the first of them, and their samples. How
-    /// they come in chunks depends on timing.
+    /// a seek to `seek_frame`: the first of them, and their samples.
     #[cfg(feature = "gst")]
     fn analysis_decode(path: &Path, seek_frame: Option<u64>) -> (Option<u64>, Vec<f32>) {
         use std::time::{Duration, Instant};
@@ -1759,22 +1758,36 @@ mod tests {
             "ferrous-analysis-dynamic-range-{}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&dir).expect("fixture dir");
-        let stream = TEST_AC3.repeat(4);
-        let plain = dir.join("plain.ac3");
-        let compressed = dir.join("compressed.ac3");
-        std::fs::write(&plain, &stream).expect("write fixture");
-        std::fs::write(&compressed, with_dynamic_range(&stream, COMPRESSING_DYNRNG))
-            .expect("write fixture");
+        // Only a folder of this test, which it removes.
+        std::fs::create_dir(&dir).expect("a new fixture folder");
+        let path = dir.join("compressed.ac3");
+        std::fs::write(
+            &path,
+            with_dynamic_range(&TEST_AC3.repeat(4), COMPRESSING_DYNRNG),
+        )
+        .expect("write fixture");
         for seek_frame in [None, Some(96_000)] {
-            let expected = analysis_decode(&plain, seek_frame);
-            let decoded = analysis_decode(&compressed, seek_frame);
-            let peak = decoded
-                .1
-                .iter()
-                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-            assert!((peak - 0.125).abs() < 0.01, "{seek_frame:?}: peak {peak}");
-            assert!(decoded == expected, "{seek_frame:?}: the samples differ");
+            let (first_frame, samples) = analysis_decode(&path, seek_frame);
+            assert_eq!(first_frame, Some(seek_frame.unwrap_or(0)));
+            // Each 0.1 s holds whole cycles of the mono tone, which peaks at
+            // 1/8 of full scale; its words would turn it down to 1/32.
+            let peaks: Vec<f32> = samples
+                .chunks_exact(4_800)
+                .map(|chunk| {
+                    chunk
+                        .iter()
+                        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+                })
+                .collect();
+            assert!(
+                peaks.len() >= 20,
+                "{seek_frame:?}: {} samples",
+                samples.len()
+            );
+            assert!(
+                peaks.iter().all(|peak| (peak - 0.125).abs() < 0.01),
+                "{seek_frame:?}: {peaks:?}"
+            );
         }
         std::fs::remove_dir_all(&dir).expect("remove fixtures");
     }

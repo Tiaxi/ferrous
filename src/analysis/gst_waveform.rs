@@ -441,7 +441,8 @@ mod tests {
             "ferrous-waveform-dynamic-range-{}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&dir).expect("fixture dir");
+        // Only a folder of this test, which it removes.
+        std::fs::create_dir(&dir).expect("a new fixture folder");
         let stream = TEST_AC3.repeat(2);
         let plain = dir.join("plain.ac3");
         let compressed = dir.join("compressed.ac3");

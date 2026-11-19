@@ -29,10 +29,11 @@ pub(super) enum Unparsed {
     NotPlainAc3,
     /// A field ran past the end of the audio blocks.
     PastEnd,
-    /// A value that the decoder rejects, or one that has it use what it kept
-    /// from the frame before, which this module does not know: a first
-    /// block that reuses exponents or a delta bit allocation, which A/52
-    /// does not allow either. The text names what.
+    /// A value that the decoder rejects, or a block that has it use what it
+    /// kept from the frame before, which this module does not know:
+    /// exponents, SNR offsets, a coupling leak, or a delta bit allocation
+    /// that no block of the frame has set yet. A/52 requires the first block
+    /// to set what the frame uses. The text names what.
     Invalid(&'static str),
 }
 
@@ -273,17 +274,20 @@ const FLOOR: [i32; 8] = [0x2f0, 0x2b0, 0x270, 0x230, 0x1f0, 0x170, 0x0f0, -0x800
 const FAST_GAIN: [i32; 8] = [0x080, 0x100, 0x180, 0x200, 0x280, 0x300, 0x380, 0x400];
 
 /// What the blocks of a frame say about a channel and keep for the blocks
-/// after, until a block says otherwise.
+/// after, until a block says otherwise. The decoder keeps them from frame to
+/// frame too, so a block that reuses one no block of this frame has set
+/// leaves the frame unparsed.
 #[derive(Clone, Copy)]
 struct Channel {
     start: usize,
     end: usize,
     exponents: [u8; 256],
-    snr_offset: i32,
-    fast_gain: i32,
+    exponents_set: bool,
+    offsets: Option<Offsets>,
     in_coupling: bool,
     dba_mode: usize,
-    dba_segments: usize,
+    /// How many delta bit allocation segments a block of this frame set.
+    dba_segments: Option<usize>,
     dba_offsets: [usize; 8],
     dba_lengths: [usize; 8],
     dba_values: [i32; 8],
@@ -294,15 +298,22 @@ impl Channel {
         start: 0,
         end: 0,
         exponents: [0; 256],
-        snr_offset: 0,
-        fast_gain: 0,
+        exponents_set: false,
+        offsets: None,
         in_coupling: false,
         dba_mode: DBA_NONE,
-        dba_segments: 0,
+        dba_segments: None,
         dba_offsets: [0; 8],
         dba_lengths: [0; 8],
         dba_values: [0; 8],
     };
+}
+
+/// A channel's SNR offset and fast gain.
+#[derive(Clone, Copy)]
+struct Offsets {
+    snr: i32,
+    fast_gain: i32,
 }
 
 /// The parameters of the bit allocation that the frame sets for all
@@ -316,6 +327,7 @@ struct BitAllocation {
     floor: i32,
     cpl_fast_leak: i32,
     cpl_slow_leak: i32,
+    cpl_leak_set: bool,
     /// `fscod`, and the shift of a half- or quarter-rate stream.
     sample_rate_code: usize,
     rate_shift: usize,
@@ -336,7 +348,6 @@ struct Frame<'a> {
     cpl_in_use: bool,
     phase_flags_in_use: bool,
     cpl_bands: usize,
-    rematrixing_bands: usize,
 }
 
 /// Find the dynamic range flags of `frame`, one whole plain AC3 frame.
@@ -428,7 +439,6 @@ impl<'a> Frame<'a> {
             cpl_in_use: false,
             phase_flags_in_use: false,
             cpl_bands: 0,
-            rematrixing_bands: 0,
         })
     }
 
@@ -459,8 +469,8 @@ impl<'a> Frame<'a> {
         if self.cpl_in_use {
             self.coupling_coordinates(block)?;
         }
-        self.rematrixing(block)?;
-        let strategies = self.exponent_strategies(block)?;
+        self.rematrixing()?;
+        let strategies = self.exponent_strategies()?;
         self.exponents(&strategies)?;
         self.bit_allocation_parameters(block)?;
         let bits = self.mantissa_bits()?;
@@ -536,39 +546,26 @@ impl<'a> Frame<'a> {
     }
 
     /// `rematstr` and `rematflg` of a stereo stream (A/52 section 7.5).
-    fn rematrixing(&mut self, block: usize) -> Result<(), Unparsed> {
-        if self.acmod != 2 {
+    fn rematrixing(&mut self) -> Result<(), Unparsed> {
+        if self.acmod != 2 || !self.reader.flag()? {
             return Ok(());
         }
-        if self.reader.flag()? {
-            self.rematrixing_bands = 4;
-            let cpl_start = self.channels[CPL].start;
-            if self.cpl_in_use && cpl_start <= 61 {
-                self.rematrixing_bands -= 1 + usize::from(cpl_start == 37);
-            }
-            self.reader.skip(self.rematrixing_bands)?;
-        } else if block == 0 {
-            // The decoder warns, and rematrixes nothing.
-            self.rematrixing_bands = 0;
-        }
-        Ok(())
+        let cpl_start = self.channels[CPL].start;
+        let bands = if self.cpl_in_use && cpl_start <= 61 {
+            3 - usize::from(cpl_start == 37)
+        } else {
+            4
+        };
+        self.reader.skip(bands)
     }
 
     /// The exponent strategies of the coded channels, and the bandwidth of
     /// the full-bandwidth channels with new exponents.
-    fn exponent_strategies(&mut self, block: usize) -> Result<[usize; MAX_CHANNELS], Unparsed> {
+    fn exponent_strategies(&mut self) -> Result<[usize; MAX_CHANNELS], Unparsed> {
         let mut strategies = [EXP_REUSE; MAX_CHANNELS];
         for channel in self.coded_channels() {
             let bits = if Some(channel) == self.lfe { 1 } else { 2 };
             strategies[channel] = self.reader.read(bits)?;
-        }
-        if block == 0
-            && self
-                .coded_channels()
-                .any(|channel| strategies[channel] == EXP_REUSE)
-        {
-            // The decoder would use exponents from before the frame.
-            return Err(Unparsed::Invalid("exponents reused in block 0"));
         }
         let cpl_start = self.channels[CPL].start;
         let full_bandwidth = 1..=self.full_bandwidth;
@@ -617,6 +614,7 @@ impl<'a> Frame<'a> {
                 (absolute, 0)
             };
             let repeat = if strategy == EXP_D45 { 4 } else { strategy };
+            self.channels[channel].exponents_set = true;
             if first == 0 {
                 self.store_exponents(channel, 0, 1, exponent)?;
             }
@@ -678,8 +676,10 @@ impl<'a> Frame<'a> {
             let coarse = (self.reader.number(6)? - 15) << 4;
             for channel in self.coded_channels() {
                 let fine = self.reader.number(4)?;
-                self.channels[channel].snr_offset = (coarse + fine) << 2;
-                self.channels[channel].fast_gain = FAST_GAIN[self.reader.read(3)?];
+                self.channels[channel].offsets = Some(Offsets {
+                    snr: (coarse + fine) << 2,
+                    fast_gain: FAST_GAIN[self.reader.read(3)?],
+                });
             }
         } else if block == 0 {
             return Err(Unparsed::Invalid("no SNR offsets in block 0"));
@@ -689,6 +689,7 @@ impl<'a> Frame<'a> {
             if self.reader.flag()? {
                 self.allocation.cpl_fast_leak = self.reader.number(3)?;
                 self.allocation.cpl_slow_leak = self.reader.number(3)?;
+                self.allocation.cpl_leak_set = true;
             } else if block == 0 {
                 return Err(Unparsed::Invalid("no coupling leak in block 0"));
             }
@@ -701,9 +702,10 @@ impl<'a> Frame<'a> {
                 if mode == DBA_RESERVED {
                     return Err(Unparsed::Invalid("a reserved delta bit allocation"));
                 }
-                if mode == DBA_REUSE && block == 0 {
-                    // The decoder would use segments from before the frame.
-                    return Err(Unparsed::Invalid("delta bit allocation reused in block 0"));
+                if mode == DBA_REUSE && self.channels[channel].dba_segments.is_none() {
+                    return Err(Unparsed::Invalid(
+                        "a delta bit allocation from the frame before",
+                    ));
                 }
                 self.channels[channel].dba_mode = mode;
             }
@@ -713,7 +715,7 @@ impl<'a> Frame<'a> {
                 }
                 let segments = self.reader.read(3)? + 1;
                 let state = &mut self.channels[channel];
-                state.dba_segments = segments;
+                state.dba_segments = Some(segments);
                 for segment in 0..segments {
                     state.dba_offsets[segment] = self.reader.read(5)?;
                     state.dba_lengths[segment] = self.reader.read(4)?;
@@ -754,11 +756,19 @@ impl<'a> Frame<'a> {
     /// `counts` (A/52 section 7.2.2).
     fn count_pointers(&self, channel: usize, counts: &mut [usize; 16]) -> Result<(), Unparsed> {
         let state = &self.channels[channel];
+        let (true, Some(offsets)) = (state.exponents_set, state.offsets) else {
+            return Err(Unparsed::Invalid(
+                "exponents or SNR offsets from the frame before",
+            ));
+        };
+        if channel == CPL && !self.allocation.cpl_leak_set {
+            return Err(Unparsed::Invalid("a coupling leak from the frame before"));
+        }
         let (start, end) = (state.start, state.end);
         if end <= start || end > 253 {
             return Err(Unparsed::Invalid("an empty or too wide channel"));
         }
-        if state.snr_offset == -960 {
+        if offsets.snr == -960 {
             // All SNR offsets 0: no bits for any coefficient.
             counts[0] += end - start;
             return Ok(());
@@ -790,14 +800,14 @@ impl<'a> Frame<'a> {
             }
         }
 
-        let mask = self.masking_curve(channel, &band_psd)?;
+        let mask = self.masking_curve(channel, offsets.fast_gain, &band_psd)?;
 
         let allocation = &self.allocation;
         let mut bin = start;
         let mut band = BIN_TO_BAND[start];
         loop {
-            let masked = ((mask[band] - state.snr_offset - allocation.floor).max(0) & 0x1FE0)
-                + allocation.floor;
+            let masked =
+                ((mask[band] - offsets.snr - allocation.floor).max(0) & 0x1FE0) + allocation.floor;
             band += 1;
             let band_end = BAND_START[band].min(end);
             while bin < band_end {
@@ -818,12 +828,12 @@ impl<'a> Frame<'a> {
     fn masking_curve(
         &self,
         channel: usize,
+        fast_gain: i32,
         band_psd: &[i32; CRITICAL_BANDS + 1],
     ) -> Result<[i32; CRITICAL_BANDS], Unparsed> {
         let state = &self.channels[channel];
         let allocation = &self.allocation;
         let is_lfe = Some(channel) == self.lfe;
-        let fast_gain = state.fast_gain;
         let band_start = BIN_TO_BAND[state.start];
         let band_end = BIN_TO_BAND[state.end - 1] + 1;
         let mut excite = [0_i32; CRITICAL_BANDS];
@@ -883,9 +893,9 @@ impl<'a> Frame<'a> {
             mask[band] = threshold.max(excite[band]);
         }
 
-        if state.dba_mode != DBA_NONE {
+        if let Some(segments) = state.dba_segments.filter(|_| state.dba_mode != DBA_NONE) {
             let mut band = band_start;
-            for segment in 0..state.dba_segments {
+            for segment in 0..segments {
                 band += state.dba_offsets[segment];
                 let length = state.dba_lengths[segment];
                 if band >= CRITICAL_BANDS || length > CRITICAL_BANDS - band {
@@ -927,7 +937,7 @@ fn low_comp_at(low_comp: i32, psd: i32, next_psd: i32, band: usize) -> i32 {
 mod tests {
     use super::{find_range_flags, Unparsed};
     use crate::raw_audio::ac3_conceal::{
-        silent_frame_of, with_dynamic_range, AC3_LAYOUTS, COMPRESSING_DYNRNG,
+        silent_frame_of, silent_frame_with, with_dynamic_range, AC3_LAYOUTS, COMPRESSING_DYNRNG,
     };
     use crate::raw_audio::bitstream::plain_ac3_frame_len;
 
@@ -1035,6 +1045,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_delta_bit_allocation_from_the_frame_before_leaves_the_frame_unparsed() {
+        let header = frames(AC3_LAYOUTS[0].1)[0];
+        let frame = silent_frame_with(header, None, Some(4));
+        assert_eq!(
+            find_range_flags(&frame),
+            Err(Unparsed::Invalid(
+                "a delta bit allocation from the frame before"
+            ))
+        );
     }
 
     #[test]
