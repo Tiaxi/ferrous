@@ -4440,6 +4440,15 @@ void SpectrogramItem::feedPrecomputedChunk(
             reinterpret_cast<const char *>(data.constData());
         const quint64 effectiveTrackToken =
             trackToken != 0 ? trackToken : m_precomputedTrackToken;
+        // The history a rolling view shows, left of the session's first
+        // column, can come while the view is centered: the worker goes on
+        // with one it began while the view was rolling (#688). Numbered a
+        // capacity on, as after a switch to rolling mode, the ring has room
+        // for it too, and keeps it for the next switch.
+        if (ringColumnsAddressedForLocked(effectiveTrackToken)
+            && startIndex < *m_ringColumnBase) {
+            renumberRingForRollingHistoryLocked();
+        }
         auto activeTokenIt = m_trackColumnToSeqByToken.find(effectiveTrackToken);
         if (activeTokenIt == m_trackColumnToSeqByToken.end()) {
             activeTokenIt = m_trackColumnToSeqByToken.insert(
@@ -4452,6 +4461,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         // rolling mode, those left of its first.
         const bool columnAddressed = m_ringColumnBase
             && (m_ringColumnToken == 0 || effectiveTrackToken == m_ringColumnToken);
+        const bool columnAddressedForTrack = columnAddressed && m_ringColumnToken != 0;
         const qint64 oldestBefore = m_ringOldestSeq;
 
         for (int col = 0; col < columns; ++col) {
@@ -4471,11 +4481,13 @@ void SpectrogramItem::feedPrecomputedChunk(
                     // column: it would drop a column to the right of it.
                     continue;
                 }
-            } else if (m_displayMode == 0 && trackCol <= m_precomputedMaxColumnIndex) {
-                // A rolling ring in the order its columns came has no place
-                // for one of its track before its newest, such as the
-                // history a session sends a view it took for centered: it
-                // would show as the newest.
+            } else if (columnAddressedForTrack
+                || (m_displayMode == 0 && trackCol <= m_precomputedMaxColumnIndex)) {
+                // A ring of its track's columns by their column has no place
+                // for one further left than it reaches, nor has a rolling
+                // ring in the order its columns came for one of its track
+                // before its newest, such as the history a session sends a
+                // view it took for centered: it would show as the newest.
                 continue;
             }
             const int slot = static_cast<int>(seq % m_ringCapacity);

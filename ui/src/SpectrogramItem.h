@@ -1229,7 +1229,8 @@ private:
     // drops the columns furthest left first. After a switch to rolling
     // mode the session's columns go on so, and those the worker then sends
     // left of its first, the history a rolling view shows, go before them
-    // (renumberRingForRollingHistoryLocked). Unset when the ring is written
+    // (renumberRingForRollingHistoryLocked), as they do when they come to
+    // a view that became centered again. Unset when the ring is written
     // in order of arrival; the track of those columns, or 0 for any.
     std::optional<qint64> m_ringColumnBase;
     quint64 m_ringColumnToken{0};
