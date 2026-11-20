@@ -86,9 +86,11 @@ pub(super) enum After {
 pub(super) struct Redo {
     pub(super) kind: QueueUndoKind,
     pub(super) after: After,
-    /// The selected row before the undo.
+    /// The selected row before the undo, which a redone clear or
+    /// replacement brings back.
     pub(super) selected: Option<usize>,
-    /// The row of the track the engine had open before the undo.
+    /// The row of the track the engine had open before the undo, where a
+    /// redone replacement stops when that track is not in its queue.
     pub(super) current: Option<usize>,
 }
 
@@ -165,6 +167,14 @@ impl QueueUndo {
     pub(super) fn offer_redo(&mut self, redo: Redo) {
         self.last_id += 1;
         self.redo = Some((self.last_id, redo));
+    }
+
+    /// Whether the redo offered under `id` replaces the whole queue, as a
+    /// clear or a replacement does.
+    pub(super) fn redo_replaces_queue(&self, id: u64) -> bool {
+        self.redo
+            .as_ref()
+            .is_some_and(|(offered, redo)| *offered == id && matches!(redo.after, After::Queue(_)))
     }
 
     /// The redo offered under `id`, which is no longer offered.

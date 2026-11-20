@@ -7643,6 +7643,9 @@ mod engine_tests {
         engine.wait_for_playing(1, millis(4_500));
     }
 
+    /// The engine's side of an undo and a redo of a replacement: two
+    /// restores in a row, with the rows the bridge would send. Which rows
+    /// the bridge sends is covered by its own tests.
     #[test]
     fn an_undone_and_redone_replacement_stops_at_the_current_row_of_each_queue() {
         let fixtures = Fixtures::new("restore-redo");

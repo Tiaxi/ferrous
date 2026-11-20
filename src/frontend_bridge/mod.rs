@@ -2156,6 +2156,19 @@ impl BridgeLoopRuntime {
         SnapshotUrgency::Immediate
     }
 
+    /// Whether `cmd` ends what the queue held, so that queue changes still
+    /// being read must not land after it.
+    fn discards_pending_imports(&self, cmd: &BridgeCommand) -> bool {
+        match cmd {
+            BridgeCommand::Shutdown | BridgeCommand::Queue(BridgeQueueCommand::Clear) => true,
+            // A redone clear or replacement, as the change it makes again.
+            BridgeCommand::Queue(BridgeQueueCommand::Redo(id)) => {
+                self.state.queue_undo.redo_replaces_queue(*id)
+            }
+            _ => false,
+        }
+    }
+
     fn handle_command(
         &mut self,
         cmd: BridgeCommand,
@@ -2205,15 +2218,12 @@ impl BridgeLoopRuntime {
             }
             cmd => cmd,
         };
-        match &cmd {
-            BridgeCommand::Shutdown | BridgeCommand::Queue(BridgeQueueCommand::Clear) => {
-                self.imports.discard_pending();
-            }
-            BridgeCommand::SaveState(request_id) => {
-                self.save_state_for_quit(*request_id, event_tx);
-                return SnapshotUrgency::None;
-            }
-            _ => {}
+        if self.discards_pending_imports(&cmd) {
+            self.imports.discard_pending();
+        }
+        if let BridgeCommand::SaveState(request_id) = &cmd {
+            self.save_state_for_quit(*request_id, event_tx);
+            return SnapshotUrgency::None;
         }
 
         let session_only = matches!(
@@ -5295,6 +5305,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn redoing_a_clear_discards_a_pending_import() {
+        let _guard = test_guard();
+        let (mut runtime, _engine_rx, event_tx, _album) = queue_order_runtime();
+        let (dir, track) = import_fixture("redo-clear-after-add");
+        replace_queue(&mut runtime, &[p("/music/a.flac")], &event_tx);
+        runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
+        let undo = runtime.state.snapshot(false).queue_undo.offer_id;
+        runtime.handle_command(ui_undo(undo), &event_tx);
+        let redo = runtime.state.snapshot(false).queue_undo.redo_id;
+
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::AddTrack(track)),
+            &event_tx,
+        );
+        wait_for_import_result(&runtime);
+        runtime.handle_command(ui_redo(redo), &event_tx);
+        apply_next_import_result(&mut runtime, &event_tx);
+
+        assert!(runtime.state.queue.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// What the UI sends to remove the row at `index` of the queue it
     /// shows at `revision`.
     fn ui_remove(revision: u64, index: usize) -> BridgeCommand {
@@ -5872,6 +5905,12 @@ mod tests {
         assert_eq!(ui, moved);
         let offer = snapshot.queue_undo;
         assert_eq!(offer.kind, Some(QueueUndoKind::Moved));
+        // B, which did not move, is selected; the undo brings back the
+        // selection from before the move.
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Select(Some(0))),
+            &event_tx,
+        );
         assert!(runtime.emit_snapshot(&event_tx));
 
         runtime.handle_command(ui_undo(offer.offer_id), &event_tx);
@@ -5898,7 +5937,7 @@ mod tests {
         assert!(runtime.emit_snapshot(&event_tx));
 
         // A redo moves them again, in one step, and selects them where they
-        // went; the selection is the one the undo found.
+        // went; the selected row, C, goes along.
         runtime.handle_command(ui_redo(redo), &event_tx);
         assert_eq!(runtime.state.queue, moved);
         assert_eq!(reorders(&engine_rx), vec![vec![1, 2, 4, 0, 3, 5]]);

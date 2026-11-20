@@ -291,8 +291,9 @@ fn undo_queue_change(
 /// is still offered; otherwise tell the user nothing was redone. Like the
 /// change, the redo can be undone. Like an undo, it never starts playback:
 /// a removal is made again as it was, and a replaced queue comes back as
-/// an undo brings one back. The selection comes back as it was before the
-/// undo, or follows a removal; moved rows are selected where they went.
+/// an undo brings one back, with the selection it had before the undo. A
+/// removal or a move takes the selection along, and moved rows are
+/// selected where they went.
 fn redo_queue_change(
     id: u64,
     state: &mut BridgeState,
@@ -322,7 +323,6 @@ fn redo_queue_change(
                 return false;
             };
             apply_reorder(state, playback, &order);
-            state.selected_queue_index = redo.selected.filter(|row| *row < state.queue.len());
             let mut moved_to: Vec<usize> = moved.iter().map(|row| positions[*row]).collect();
             moved_to.sort_unstable();
             state.queue_undo.record(Some(Change {
