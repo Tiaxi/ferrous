@@ -756,12 +756,12 @@ ApplicationWindow {
     // opens a dialog ends in "…".
 
     // File
-    Action {
+    Components.StandardKeyAction {
         id: openFilesAction
         objectName: "openFilesAction"
         text: I18n.i18nc("@action:inmenu", "&Open Files…")
         icon.name: "document-open"
-        shortcut: StandardKey.Open
+        standardKey: StandardKey.Open
         enabled: !root.viewerOpen
         onTriggered: root.openExternalFiles()
     }
@@ -804,19 +804,19 @@ ApplicationWindow {
         enabled: libraryController.canPlayAllTracks()
         onTriggered: libraryController.appendAllTracks()
     }
-    Action {
+    Components.StandardKeyAction {
         id: quitAction
         objectName: "quitAction"
         text: I18n.i18nc("@action:inmenu", "&Quit")
         icon.name: "application-exit"
-        shortcut: StandardKey.Quit
+        standardKey: StandardKey.Quit
         // Closing the window, not quitting, runs onClosing, which saves the
         // settings and the queue and stops the backend.
         onTriggered: root.close()
     }
 
     // Edit
-    Action {
+    Components.StandardKeyAction {
         id: undoQueueChangeAction
         objectName: "undoQueueChangeAction"
         text: {
@@ -835,18 +835,18 @@ ApplicationWindow {
         }
         icon.name: "edit-undo"
         // Text fields keep Ctrl+Z for their own text.
-        shortcut: StandardKey.Undo
+        standardKey: StandardKey.Undo
         enabled: uiBridge.queueUndoId > 0 && !root.viewerOpen
         onTriggered: uiBridge.undoQueueChange()
     }
     // Opens search. Text fields keep Ctrl+F; the search field takes it to
     // edit its query.
-    Action {
+    Components.StandardKeyAction {
         id: globalSearchAction
         objectName: "findAction"
         text: I18n.i18nc("@action:inmenu", "&Find…")
         icon.name: "edit-find"
-        shortcut: StandardKey.Find
+        standardKey: StandardKey.Find
         enabled: !root.viewerOpen
         onTriggered: globalSearchController.openDialog()
     }
@@ -1128,14 +1128,21 @@ ApplicationWindow {
     }
 
     // Settings
-    Action {
+    Components.StandardKeyAction {
         id: preferencesAction
         objectName: "configureAction"
         text: I18n.i18nc("@action:inmenu", "&Configure Ferrous…")
         icon.name: "configure"
-        shortcut: StandardKey.Preferences
+        standardKey: StandardKey.Preferences
         enabled: !root.viewerOpen
         onTriggered: preferencesDialog.open()
+    }
+
+    // The standard keys' other bindings, such as the Open key.
+    Components.StandardKeyShortcuts {
+        actions: [
+            openFilesAction, quitAction, undoQueueChangeAction, globalSearchAction, preferencesAction
+        ]
     }
 
     // Help
@@ -1369,6 +1376,7 @@ ApplicationWindow {
 
     Platform.FileDialog {
         id: externalFileDialog
+        objectName: "externalFileDialog"
         title: pendingFileDialogContext === "open"
             ? I18n.i18nc("@title:window", "Open Files")
             : I18n.i18nc("@title:window", "Add Files")

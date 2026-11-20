@@ -24,6 +24,7 @@
 #include <QQmlListReference>
 #include <QQmlProperty>
 #include <QQuickItem>
+#include <QQuickStyle>
 #include <QQuickWindow>
 #include <QRegularExpression>
 #include <QScopeGuard>
@@ -45,6 +46,7 @@
 #include "../src/LibraryTreeModel.h"
 #include "../src/Localization.h"
 #include "../src/SpectrogramItem.h"
+#include "../src/StandardKeys.h"
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
 #include "../src/WindowPresence.h"
@@ -118,6 +120,13 @@ QString withoutMnemonic(QString text) {
     text.remove(QLatin1Char('&'));
     text.replace(QStringLiteral("\x01"), QStringLiteral("&"));
     return text;
+}
+
+// The warnings captured so far that hold `text`, which it leaves for
+// cleanup() to take.
+QStringList capturedMessagesContaining(const QString &text) {
+    QMutexLocker locker(&capturedMessageMutex());
+    return capturedMessages().filter(text);
 }
 
 // A shortcut as text, from a string or a standard key.
@@ -419,6 +428,43 @@ ApplicationWindow {
 // A window smaller than its menus: a File menu of twelve items with a
 // submenu, a field that has the keyboard, and an area whose context menu
 // opens where it is pressed.
+// A standard key's action as the main window has it, its other bindings
+// in the window, and a modal popup that repeats all of them, as a viewer
+// does.
+QByteArray standardKeyActionQml() {
+    return QByteArrayLiteral(R"QML(
+import QtQuick
+import QtQuick.Controls
+import "components" as Components
+
+ApplicationWindow {
+    width: 240
+    height: 160
+    visible: true
+    property alias action: action
+    property alias popup: popup
+
+    Components.StandardKeyAction {
+        id: action
+        standardKey: StandardKey.Open
+    }
+    Components.StandardKeyShortcuts {
+        actions: [action]
+    }
+    Popup {
+        id: popup
+        modal: true
+        width: 120
+        height: 80
+        Components.ActionShortcuts {
+            actions: [action]
+            active: popup.visible
+        }
+    }
+}
+)QML");
+}
+
 QByteArray smallWindowMenusQml() {
     return QByteArrayLiteral(R"QML(
 import QtQuick
@@ -542,6 +588,7 @@ private slots:
     void queueAndPlaybackItemsActOnTheBackend();
     void menusAreWindowsThatReachPastASmallWindow();
     void menuWindowsShowAtTheirFinalSize();
+    void standardKeyActionTakesEveryBindingUnderAModalPopup();
 
 private:
     // The checks that the tests above run in turn in one window; each says
@@ -557,6 +604,7 @@ private:
     void checkHeadingsAreSkippedByThePointerAndTheKeyboard(QQuickWindow *window);
     void checkPlayPauseItemNamesWhatItDoes(QQuickWindow *window);
     void checkFindOpensSearchOnCtrlF(QQuickWindow *window);
+    void checkStandardKeysTriggerTheirActionsByEveryBinding(QQuickWindow *window);
     void checkSettingsAndHelpOpenTheirPages(QQuickWindow *window);
     void checkAboutKdeLinksTakeTheKeyboard(QQuickWindow *window);
     void checkVisualizationRadiosFollowThePlotSwitch(QQuickWindow *window);
@@ -582,6 +630,7 @@ void UiMenusTest::initTestCase() {
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
     InputModality::registerQmlTypes();
+    StandardKeys::registerQmlTypes();
 }
 
 void UiMenusTest::init() {
@@ -628,6 +677,7 @@ void UiMenusTest::menusAnswerThePointerAndTheKeyboard() {
                [&] { checkHeadingsAreSkippedByThePointerAndTheKeyboard(window); },
                [&] { checkPlayPauseItemNamesWhatItDoes(window); },
                [&] { checkFindOpensSearchOnCtrlF(window); },
+               [&] { checkStandardKeysTriggerTheirActionsByEveryBinding(window); },
                [&] { checkSettingsAndHelpOpenTheirPages(window); },
                [&] { checkAboutKdeLinksTakeTheKeyboard(window); }});
 }
@@ -844,11 +894,51 @@ void UiMenusTest::menuWindowsShowAtTheirFinalSize() {
         ++opened;
     }
     QVERIFY(opened > 0);
-    // The style's: Breeze's menu item shows a standard key's first binding
-    // and says so when it has more, as Quit, Undo and Configure do.
-    dropCapturedMessagesMatching(QRegularExpression(QStringLiteral(
-        "^qrc:/qt/qml/org/kde/desktop/MenuItem\\.qml:\\d+:\\d+: QML Shortcut: Shortcut: Only binding to one of "
-        "multiple key bindings associated with \\d+\\.")));
+    // Opening them warned of nothing, in the style the app sets: Breeze's
+    // menu item, shown an action's standard key, took only its first binding
+    // and warned of the rest, as of Open's Open key (#581).
+    QCOMPARE(QQuickStyle::name(), QStringLiteral("org.kde.desktop"));
+    const QStringList shortcutWarnings = capturedMessagesContaining(QStringLiteral("Shortcut:"));
+    QVERIFY2(shortcutWarnings.isEmpty(), qPrintable(shortcutWarnings.join(QLatin1Char('\n'))));
+}
+
+// A viewer's modal popup blocks the window's shortcuts and repeats them, a
+// standard key's with every binding, as the window has them (#581). On
+// Plasma, Quit has more than one; offscreen, Open does.
+void UiMenusTest::standardKeyActionTakesEveryBindingUnderAModalPopup() {
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(standardKeyActionQml(),
+                      QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/StandardKeyAction.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    QVERIFY2(root != nullptr, qPrintable(component.errorString()));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    window->requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(window));
+    QObject *action = qvariant_cast<QObject *>(root->property("action"));
+    QObject *popup = qvariant_cast<QObject *>(root->property("popup"));
+    QVERIFY(action != nullptr && popup != nullptr);
+    const QList<QKeySequence> bindings = QKeySequence::keyBindings(QKeySequence::Open);
+    QVERIFY(bindings.size() > 1);
+
+    QSignalSpy triggered(action, SIGNAL(triggered(QObject *)));
+    for (const bool underPopup : {false, true}) {
+        if (underPopup) {
+            QMetaObject::invokeMethod(popup, "open");
+            QTRY_VERIFY(popup->property("opened").toBool());
+        }
+        for (const QKeySequence &binding : bindings) {
+            const int before = triggered.count();
+            QTest::keySequence(window, binding);
+            // Once: a key two shortcuts shared would trigger neither.
+            QTRY_VERIFY2(triggered.count() == before + 1,
+                         qPrintable(binding.toString() + (underPopup ? QStringLiteral(" under the popup") : QString())));
+        }
+    }
+    QCOMPARE(triggered.count(), 2 * bindings.size());
+    // QTest's, as it gives the Open key no text.
+    dropCapturedMessagesMatching(QRegularExpression(QStringLiteral("^keyToAscii Unhandled key code Qt::Key_\\w+$")));
 }
 
 // Each of the window's menus is a window of its own but the album art
@@ -896,11 +986,6 @@ void UiMenusTest::checkMenusAreWindowsOfTheirOwn(QQuickWindow *window) {
         QVERIFY2(!menuWindow->isVisible(), qPrintable(menu->objectName()));
         QVERIFY(!menu->property("visible").toBool());
     }
-    // The style's: Breeze's menu item shows a standard key's first binding
-    // and says so when it has more, as Quit, Undo and Configure do.
-    dropCapturedMessagesMatching(QRegularExpression(QStringLiteral(
-        "^qrc:/qt/qml/org/kde/desktop/MenuItem\\.qml:\\d+:\\d+: QML Shortcut: Shortcut: Only binding to one of "
-        "multiple key bindings associated with \\d+\\.")));
 }
 
 // The queue's context menu opens where the right button pressed, on the
@@ -1595,13 +1680,78 @@ void UiMenusTest::checkFindOpensSearchOnCtrlF(QQuickWindow *window) {
     QTRY_VERIFY(!search->property("dialogVisible").toBool());
 }
 
+// Each binding of an action's standard key triggers it, not only the first
+// (#581): Open's Ctrl+O and Open key, Undo's Ctrl+Z, Alt+Backspace and Undo
+// key, and Find's Ctrl+F and Find key. The first is the action's shortcut,
+// which its menu item shows.
+void UiMenusTest::checkStandardKeysTriggerTheirActionsByEveryBinding(QQuickWindow *window) {
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("queueUndoId", 3.0);
+    bridge->setProperty("queueUndoKind", 2);
+    QObject *search = child(window, "globalSearchController");
+    QObject *fileDialog = child(window, "externalFileDialog");
+    QVERIFY(search != nullptr && fileDialog != nullptr);
+
+    struct Key {
+        const char *action;
+        QKeySequence::StandardKey key;
+        // Closes what the action opened.
+        std::function<void()> close;
+    };
+    const QList<Key> keys{
+        {"openFilesAction", QKeySequence::Open,
+         [&] {
+             QTRY_VERIFY(fileDialog->property("visible").toBool());
+             QMetaObject::invokeMethod(fileDialog, "close");
+             QTRY_VERIFY(!fileDialog->property("visible").toBool());
+         }},
+        {"undoQueueChangeAction", QKeySequence::Undo, [] {}},
+        {"findAction", QKeySequence::Find,
+         [&] {
+             QTRY_VERIFY(search->property("dialogVisible").toBool());
+             QTest::keyClick(window, Qt::Key_Escape);
+             QTRY_VERIFY(!search->property("dialogVisible").toBool());
+         }},
+    };
+    for (const Key &key : keys) {
+        QObject *action = child(window, key.action);
+        QVERIFY2(action != nullptr, key.action);
+        const QList<QKeySequence> bindings = QKeySequence::keyBindings(key.key);
+        // Each has more than one wherever the tests run.
+        QVERIFY2(bindings.size() > 1, key.action);
+        for (const QKeySequence &binding : bindings) {
+            const QString name = QStringLiteral("%1 %2").arg(QLatin1String(key.action), binding.toString());
+            QVERIFY2(action->property("enabled").toBool(), qPrintable(name));
+            QSignalSpy triggered(action, SIGNAL(triggered(QObject *)));
+            window->requestActivate();
+            QTRY_VERIFY(window->isActive());
+            window->contentItem()->forceActiveFocus();
+            QTest::keySequence(window, binding);
+            QTRY_VERIFY2_WITH_TIMEOUT(triggered.count() == 1, qPrintable(name), 1000);
+            key.close();
+            if (QTest::currentTestFailed()) {
+                return;
+            }
+        }
+        QCOMPARE(action->property("shortcut").toString(), bindings.first().toString());
+    }
+    // QTest's, as it gives the Open, Undo and Find keys no text.
+    dropCapturedMessagesMatching(QRegularExpression(QStringLiteral("^keyToAscii Unhandled key code Qt::Key_\\w+$")));
+}
+
 void UiMenusTest::checkShortcutsAreTakenOnceEach(QQuickWindow *window) {
 
     QHash<QString, QString> owners;
     for (QObject *action : actionsOf(window)) {
         const QVariant shortcut = action->property("shortcut");
+        const QVariant keyBindings = action->property("keyBindings");
         QList<QKeySequence> sequences;
-        if (shortcut.typeId() == QMetaType::Int) {
+        if (keyBindings.isValid()) {
+            // A StandardKeyAction's: every binding of its standard key.
+            for (const QString &binding : keyBindings.toStringList()) {
+                sequences << QKeySequence(binding);
+            }
+        } else if (shortcut.typeId() == QMetaType::Int) {
             sequences = QKeySequence::keyBindings(static_cast<QKeySequence::StandardKey>(shortcut.toInt()));
         } else if (!shortcut.toString().isEmpty()) {
             sequences << QKeySequence(shortcut.toString());

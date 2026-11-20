@@ -41,6 +41,7 @@
 
 #include "InputModality.h"
 #include "Localization.h"
+#include "StandardKeys.h"
 #include "TestColor.h"
 #include "TestItems.h"
 #include "TestMainWindow.h"
@@ -3788,6 +3789,7 @@ int main(int argc, char **argv) {
     FerrousLocalization::registerQmlTypes();
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     InputModality::registerQmlTypes();
+    StandardKeys::registerQmlTypes();
     TransportStatusTest test;
     return QTest::qExec(&test, argc, argv);
 }

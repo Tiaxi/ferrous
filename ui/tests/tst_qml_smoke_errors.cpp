@@ -453,7 +453,7 @@ void ErrorsSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
     QVERIFY2(ui.loaded(), "Main.qml failed to show");
     QObject *quitAction = ui.child("quitAction");
     QVERIFY(quitAction != nullptr);
-    QCOMPARE(quitAction->property("shortcut").toInt(), static_cast<int>(QKeySequence::Quit));
+    QCOMPARE(quitAction->property("standardKey").toInt(), static_cast<int>(QKeySequence::Quit));
     const auto restoreQuit = keepRunningWhenTheWindowCloses();
     // By its signature: the member pointer would import a symbol of Qt's
     // private API (its argument is private), which no binary may.

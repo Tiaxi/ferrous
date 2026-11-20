@@ -125,6 +125,7 @@ qt_add_library(ferrous_ui_core STATIC
     src/PlaybackFrameScheduler.cpp
     src/WindowPresence.cpp
     src/InputModality.cpp
+    src/StandardKeys.cpp
     src/WaveformReaderLease.cpp
     src/TagEditorController.cpp
     src/TagEditorTableModel.cpp
@@ -274,6 +275,8 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/RegionHeader.qml
         qml/components/RowBackground.qml
         qml/components/ScrobbleIndicator.qml
+        qml/components/StandardKeyAction.qml
+        qml/components/StandardKeyShortcuts.qml
         qml/components/TextToolButton.qml
         qml/components/UiPalette.qml
         qml/components/ViewerControls.qml
@@ -658,6 +661,7 @@ if(BUILD_TESTING)
         tests/tst_transport_status.cpp
         src/InputModality.cpp
         src/Localization.cpp
+        src/StandardKeys.cpp
         src/WaveformItem.cpp
     )
     set_target_properties(ferrous_transport_status_tests PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
