@@ -7623,6 +7623,78 @@ mod tests {
     }
 
     #[test]
+    fn clearing_the_queue_keeps_the_running_decodes_overview_away() {
+        // The engine clears its track; the overview decode of the track
+        // goes on and keeps reporting under its token (#671).
+        let _guard = test_guard();
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-cleared-overview-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let track = dir.join("01.wav");
+        crate::metadata::write_numbered_test_wave(&track, 1, 1);
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded::<AnalysisEvent>();
+        runtime.analysis_rx = analysis_rx;
+        let pump_until =
+            |runtime: &mut BridgeLoopRuntime, what: &str, done: &dyn Fn(&BridgeState) -> bool| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !done(&runtime.state) {
+                    assert!(Instant::now() < deadline, "{what}");
+                    let _ = runtime.drain_pending_updates(&event_tx);
+                    while event_rx.try_recv().is_ok() {}
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            };
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Replace {
+                tracks: vec![track.clone()],
+                autoplay: false,
+            }),
+            &event_tx,
+        );
+        pump_until(&mut runtime, "the engine loads the track", &|state| {
+            state.playback.current.as_ref() == Some(&track) && state.analysis_track_token != 0
+        });
+        let token = runtime.state.analysis_track_token;
+        let progress = |seconds: f32, complete: bool| {
+            AnalysisEvent::Snapshot(AnalysisSnapshot {
+                waveform_peaks: vec![0.5; 8],
+                waveform_coverage_seconds: seconds,
+                waveform_complete: complete,
+                sample_rate_hz: 44_100,
+                track_token: token,
+                ..AnalysisSnapshot::default()
+            })
+        };
+        analysis_tx
+            .send(progress(60.0, false))
+            .expect("queue the snapshot");
+        pump_until(&mut runtime, "the overview shows", &|state| {
+            !state.analysis.waveform_peaks.is_empty()
+        });
+
+        runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
+        pump_until(&mut runtime, "the engine clears its track", &|state| {
+            state.playback.current.is_none() && state.analysis.waveform_peaks.is_empty()
+        });
+        analysis_tx
+            .send(progress(600.0, true))
+            .expect("queue the snapshot");
+        let _ = runtime.drain_pending_updates(&event_tx);
+        assert!(analysis_tx.is_empty(), "the bridge took the snapshot");
+        assert!(runtime.state.analysis.waveform_peaks.is_empty());
+        assert!(!runtime.state.analysis.waveform_complete);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn analysis_worker_failures_reach_the_ui_as_errors() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);

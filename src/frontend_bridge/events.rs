@@ -418,13 +418,9 @@ fn process_playback_snapshot_event(
         }
         // The stopped track keeps its overview, as the analysis does: no
         // decode follows when it plays again, so the overview would stay
-        // missing until the next track. Without a track, it has none.
-        if state.playback.current.is_none() && !state.analysis.waveform_peaks.is_empty() {
-            state.analysis.waveform_peaks.clear();
-            state.analysis.waveform_coverage_seconds = 0.0;
-            state.analysis.waveform_complete = false;
-            state.analysis.waveform_ends_early = false;
-            urgency = SnapshotUrgency::Immediate;
+        // missing until the next track.
+        if state.playback.current.is_none() {
+            urgency = urgency.max(forget_analysed_track(state));
         }
         return urgency;
     }
@@ -494,6 +490,21 @@ fn process_playback_snapshot_event(
         analysis.command(AnalysisCommand::PositionUpdate(pos_seconds));
     }
     urgency
+}
+
+/// A stop that leaves no track: the overview goes, and the analysis of the
+/// track before, whose overview decode may still be running, is no track's,
+/// so its token is taken no more (#671).
+fn forget_analysed_track(state: &mut BridgeState) -> SnapshotUrgency {
+    state.analysis_track_token = 0;
+    if state.analysis.waveform_peaks.is_empty() {
+        return SnapshotUrgency::None;
+    }
+    state.analysis.waveform_peaks.clear();
+    state.analysis.waveform_coverage_seconds = 0.0;
+    state.analysis.waveform_complete = false;
+    state.analysis.waveform_ends_early = false;
+    SnapshotUrgency::Immediate
 }
 
 /// Command (if any) that moves the spectrogram to the stopped transport's
@@ -1635,6 +1646,64 @@ mod tests {
         assert!(state.analysis.waveform_peaks.is_empty());
         assert!(state.analysis.waveform_coverage_seconds.abs() < f32::EPSILON);
         assert!(!state.analysis.waveform_complete);
+    }
+
+    #[test]
+    fn a_cleared_queue_shows_no_overview_from_the_decode_still_running() {
+        // The queue is cleared while the playing track's (token 7) overview
+        // is still decoding, before its first preview: what the decode sends
+        // after is no track's (#671). The next track's overview shows.
+        let (analysis, command_rx, playback_tx, playback_rx, metadata, mut state) =
+            playback_harness(SpectrogramDisplayMode::Centered);
+        let harness = (
+            &analysis,
+            &command_rx,
+            &playback_tx,
+            &playback_rx,
+            &metadata,
+        );
+        let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded::<AnalysisEvent>();
+        let (event_tx, _event_rx) = crossbeam_channel::unbounded::<BridgeEvent>();
+        let progress = |token: u64, seconds: f32, complete: bool| {
+            AnalysisEvent::Snapshot(AnalysisSnapshot {
+                waveform_peaks: vec![0.5; 8],
+                waveform_coverage_seconds: seconds,
+                waveform_complete: complete,
+                sample_rate_hz: 44_100,
+                track_token: token,
+                ..AnalysisSnapshot::default()
+            })
+        };
+        let mut cleared = state.playback.clone();
+        cleared.state = PlaybackState::Stopped;
+        cleared.current = None;
+        cleared.current_queue_index = None;
+        snapshot_commands(cleared, harness, &mut state);
+        for (seconds, complete) in [(120.0, false), (600.0, true)] {
+            analysis_tx
+                .send(progress(7, seconds, complete))
+                .expect("queue the snapshot");
+            drain_analysis_events(&analysis_rx, &event_tx, &mut state);
+            assert!(state.analysis.waveform_peaks.is_empty(), "{seconds}");
+            assert!(state.analysis.waveform_coverage_seconds.abs() < f32::EPSILON);
+            assert!(!state.analysis.waveform_complete, "{seconds}");
+        }
+
+        playback_tx
+            .send(PlaybackEvent::TrackChanged {
+                path: p("/music/next.flac"),
+                queue_index: 0,
+                kind: TrackChangeKind::Manual,
+                track_token: 8,
+            })
+            .expect("send the track change");
+        pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+        analysis_tx
+            .send(progress(8, 30.0, false))
+            .expect("queue the snapshot");
+        drain_analysis_events(&analysis_rx, &event_tx, &mut state);
+        assert_eq!(state.analysis.waveform_peaks, vec![0.5; 8]);
+        assert!((state.analysis.waveform_coverage_seconds - 30.0).abs() < f32::EPSILON);
     }
 
     fn playback_harness(
