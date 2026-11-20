@@ -821,7 +821,9 @@ def _private_names(rd, entries):
 
 def _walk_names_home(rd, rel):
     """Whether the layout walk at rd/rel records a text that names the home folder (as _home_boxes reads it)."""
-    for w in json.load(open(os.path.join(rd, rel)))["windows"]:
+    with open(os.path.join(rd, rel)) as f:
+        windows = json.load(f)["windows"]
+    for w in windows:
         for t in w.get("texts", []):
             if t.get("home") or _has_home(t.get("text")) or _has_home(t.get("shown_text")):
                 return True
@@ -834,7 +836,8 @@ def privacy_evidence(rd, entries):
     - a shot needs its layout walk (missing with SHOT_LAYOUT=0, or when the probe could not write it);
     - a composite (cut from grabs with no entry of their own) needs `sources`: the walk of every grab it was cut
       from, or a shot it reuses, none of them naming the home folder (a composite cannot be painted: its crops'
-      offsets are not recorded); `sources=[]` is an image with no app pixels (an icon rendered from its SVGs);
+      offsets are not recorded); an image with no app pixels (an icon rendered from its SVGs) has `sources=[]` and
+      the explicit marker `no_app_pixels`, and one with neither sources nor the marker is unverified;
     - a recording needs its item trace and must have been made at the neutral paths (neutral_ns.sh): its trace
       names no texts, so at the real paths (SHOT_NEUTRAL=0) a home-folder text in a frame could go unseen.
     Returns (failures, counts)."""
@@ -851,6 +854,13 @@ def privacy_evidence(rd, entries):
         if "sources" not in e:
             fails.append(f"privacy: {e['file']} is unverified: it has no layout walk (SHOT_LAYOUT=0, or the probe "
                          "could not write it)")
+            continue
+        if not e["sources"]:
+            if e.get("no_app_pixels") is True:
+                n["drawn"] += 1
+            else:
+                fails.append(f"privacy: composite {e['file']} is unverified: it lists no grab it was cut from and is "
+                             "not marked as drawn without app pixels")
             continue
         bad = []
         for src in e["sources"]:
@@ -939,7 +949,8 @@ def redact_round(rd, entries):
             if bad:
                 fails.append(f"privacy: {os.path.basename(d)}/{f[4]} still shows a home-folder item at {bad[:2]}")
     print(f"pack: privacy: checked {counts['shots']} shots by their layout walks, {counts['composites']} composites by "
-          f"their sources' walks and {counts['recordings']} recordings (neutral paths, traced); home-folder texts "
+          f"their sources' walks, {counts['drawn']} images drawn without app pixels and {counts['recordings']} "
+          "recordings (neutral paths, traced); home-folder texts "
           f"painted out of the shots and {n_frames} recorded frames"
           + (f"; {len(fails)} FAILED or unverified" if fails else "; check passed"))
     return fails

@@ -343,6 +343,7 @@ class Runner:
 
     def step_macro(self, a):
         name, _, rest = a.partition(" ")
+        self.s.begin_composites()
         states.MACROS[name](self, rest.strip())
 
     def step_strip(self, a):

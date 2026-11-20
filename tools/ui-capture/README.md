@@ -170,7 +170,11 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
 - for a shot, its layout walk, so `SHOT_LAYOUT=0` fails the check;
 - for a composite (an image a macro cuts from grabs that have no entry of their own, such as the 1:1 sheets), the
   layout walk of every grab it was cut from, none of which may name the home folder, since a composite cannot be
-  painted;
+  painted. Every image a macro saves lists all the grabs and shots that macro has used so far, so each image cut
+  from one grab lists it;
+- for an image drawn without app pixels (the icon sheets, drawn from SVGs), the marker `no_app_pixels`, which a
+  macro sets with `draws_without_app_pixels()`. A macro that saves an image from no grab without it fails its
+  state, and an index entry with neither sources nor the marker fails the check;
 - for a recording, its item trace, and the neutral paths: the trace records where items are, not their text, so
   frames recorded with `SHOT_NEUTRAL=0` cannot be checked. A run at the real paths therefore fails the check
   whenever it records a transition.
@@ -230,6 +234,9 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
 | `setup_db_round.py` | scans the fixture library into the template DB |
 | `make_*.py` | the fixture generators |
 | `shotprobe.cpp`, `iconprobe.cpp` | the probes |
+
+`test_*.py` are unit tests of the harness that need no KWin, app or shots:
+`python3 -m unittest discover -s tools/ui-capture -p 'test_*.py'`.
 
 To add a state, add one line to `states.STATES`: `(session, area, state, steps, description)`, with steps separated
 by ` | ` (see `runner.py`). Lines run in order in one app per session and theme; a state starting with `_` is setup
