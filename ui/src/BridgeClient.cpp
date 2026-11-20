@@ -2078,6 +2078,10 @@ QString BridgeClient::lastFmStatusText() const {
     return m_lastFmStatusText;
 }
 
+int BridgeClient::lastFmDroppedScrobbleCount() const {
+    return m_lastFmDroppedScrobbleCount;
+}
+
 bool BridgeClient::lastFmShowScrobbleProgress() const {
     return m_lastFmShowScrobbleProgress;
 }
@@ -6413,6 +6417,16 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const QString lastFmStatusText = snapshot.lastfm.present ? snapshot.lastfm.statusText : m_lastFmStatusText;
     if (m_lastFmStatusText != lastFmStatusText) {
         m_lastFmStatusText = lastFmStatusText;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
+
+    const int lastFmDroppedScrobbleCount = snapshot.lastfm.present
+        ? static_cast<int>(qMin<quint32>(snapshot.lastfm.droppedScrobbleCount,
+                                         static_cast<quint32>(std::numeric_limits<int>::max())))
+        : m_lastFmDroppedScrobbleCount;
+    if (m_lastFmDroppedScrobbleCount != lastFmDroppedScrobbleCount) {
+        m_lastFmDroppedScrobbleCount = lastFmDroppedScrobbleCount;
         changed = true;
         snapshotSignalChanged = true;
     }

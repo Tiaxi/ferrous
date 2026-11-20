@@ -2322,8 +2322,8 @@ void BridgeClientTest::stretchShortTracksSettingIsSentAndDecodedAsTheBackendHasI
 
 namespace {
 
-// The Last.fm section as the backend lays it out; without `indicator`, as
-// older backends send it.
+// The Last.fm section as the backend lays it out, with 4 scrobbles
+// dropped; without `indicator`, as older backends send it.
 QByteArray lastFmSectionPayload(bool indicator, quint8 paused, quint8 state, quint8 ineligibility,
                                 quint32 listenedMs, quint32 thresholdMs, const QByteArray &message) {
     QByteArray payload;
@@ -2340,6 +2340,7 @@ QByteArray lastFmSectionPayload(bool indicator, quint8 paused, quint8 state, qui
     if (indicator) {
         out << paused << state << ineligibility << listenedMs << thresholdMs;
         string(message);
+        out << quint32(4);
     }
     return payload;
 }
@@ -2364,6 +2365,7 @@ void BridgeClientTest::lastFmScrobbleIndicatorIsDecodedAsTheBackendSendsIt() {
     QCOMPARE(decoded.lastfm.scrobbleListenedMs, quint32(61250));
     QCOMPARE(decoded.lastfm.scrobbleThresholdMs, quint32(120000));
     QCOMPARE(decoded.lastfm.scrobbleMessage, QStringLiteral("offline for testing"));
+    QCOMPARE(decoded.lastfm.droppedScrobbleCount, quint32(4));
 
     // Every state and reason the backend has; nothing past them.
     for (quint8 state = 0; state <= BinaryBridgeCodec::ScrobbleStateLast; ++state) {
@@ -2412,6 +2414,7 @@ void BridgeClientTest::lastFmScrobbleIndicatorIsDecodedAsTheBackendSendsIt() {
         &older, &error));
     QVERIFY(older.lastfm.present);
     QVERIFY(!older.lastfm.scrobblingPaused);
+    QCOMPARE(older.lastfm.droppedScrobbleCount, quint32(0));
     QCOMPARE(older.lastfm.scrobbleState, int(BinaryBridgeCodec::ScrobbleStateIdle));
 }
 
@@ -2456,6 +2459,16 @@ void BridgeClientTest::lastFmScrobbleIndicatorFollowsSnapshotsAndPausingIsSent()
     QTRY_COMPARE(changes.count(), 2);
     QCOMPARE(client.lastFmScrobbleMessage(), QStringLiteral("refused for testing"));
 
+    // The scrobbles the backend dropped unsent.
+    QCOMPARE(client.lastFmDroppedScrobbleCount(), 0);
+    QSignalSpy snapshotChanges(&client, &BridgeClient::snapshotChanged);
+    snapshot.lastfm.droppedScrobbleCount = 3;
+    client.resetPollChanges();
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    client.schedulePollChanges();
+    QCOMPARE(client.lastFmDroppedScrobbleCount(), 3);
+    QTRY_VERIFY(snapshotChanges.count() > 0);
+
     // Pausing is sent at once, and the backend confirms it.
     client.setLastFmScrobblingPaused(true);
     QVERIFY(client.lastFmScrobblingPaused());
@@ -2478,6 +2491,7 @@ void BridgeClientTest::lastFmScrobbleIndicatorFollowsSnapshotsAndPausingIsSent()
     playbackOnly.playback.present = true;
     client.processBinarySnapshot(playbackOnly);
     QCOMPARE(client.lastFmScrobbleState(), int(BinaryBridgeCodec::ScrobbleStateFailed));
+    QCOMPARE(client.lastFmDroppedScrobbleCount(), 3);
 }
 
 void BridgeClientTest::queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLayout() {

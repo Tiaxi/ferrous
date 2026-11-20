@@ -3298,6 +3298,8 @@ fn encode_lastfm_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u32(&mut out, indicator.listened_ms);
     push_u32(&mut out, indicator.threshold_ms);
     push_string(&mut out, &indicator.message);
+    // The scrobbles dropped unsent in this run, last.
+    push_u32(&mut out, clamp_u32(snapshot.lastfm.dropped_scrobble_count));
     out
 }
 
@@ -3875,6 +3877,7 @@ mod tests {
                 auth_state: crate::lastfm::AuthState::Connected,
                 pending_scrobble_count: 3,
                 waiting_scrobble_count: 2,
+                dropped_scrobble_count: 4,
                 status_text: "Connected".to_string(),
                 auth_url: String::new(),
                 ..crate::lastfm::RuntimeState::default()
@@ -6004,11 +6007,13 @@ mod tests {
         assert_eq!(read_u32(&lastfm, &mut lastfm_offset), 0);
         assert_eq!(read_u32(&lastfm, &mut lastfm_offset), 0);
         assert_eq!(read_string(&lastfm, &mut lastfm_offset), "");
+        // The scrobbles dropped unsent.
+        assert_eq!(read_u32(&lastfm, &mut lastfm_offset), 4);
         assert_eq!(lastfm_offset, lastfm.len());
     }
 
     #[test]
-    fn lastfm_section_ends_with_the_pause_and_the_scrobble_indicator() {
+    fn lastfm_section_ends_with_the_pause_the_scrobble_indicator_and_the_dropped_count() {
         use super::super::{ScrobbleIndicator, ScrobbleIndicatorState, ScrobbleIneligibility};
         let cases = [
             (
@@ -6086,7 +6091,7 @@ mod tests {
             };
             let lastfm = lastfm_section_of(&snapshot);
             let message = format!("message {index}");
-            let tail_len = 1 + 1 + 1 + 4 + 4 + 4 + message.len();
+            let tail_len = 1 + 1 + 1 + 4 + 4 + 4 + message.len() + 4;
             let mut offset = lastfm.len() - tail_len;
             assert_eq!(lastfm[offset], u8::from(index % 2 == 1), "{state:?}");
             assert_eq!(lastfm[offset + 1], state_code, "{state:?}");
@@ -6098,6 +6103,7 @@ mod tests {
             );
             assert_eq!(read_u32(&lastfm, &mut offset), 120_000);
             assert_eq!(read_string(&lastfm, &mut offset), message);
+            assert_eq!(read_u32(&lastfm, &mut offset), 4);
             assert_eq!(offset, lastfm.len());
         }
     }

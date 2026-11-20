@@ -227,6 +227,7 @@ Item {
         property bool lastFmBuildConfigured: false
         property string lastFmStatusText: ""
         property int lastFmPendingScrobbleCount: 0
+        property int lastFmDroppedScrobbleCount: 0
         property string lastFmUsername: ""
         property int lastFmAuthState: 0
         property bool lastFmShowScrobbleProgress: true

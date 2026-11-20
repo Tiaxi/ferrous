@@ -579,6 +579,7 @@ private:
     void checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *window);
     void checkLastFmPageShowsOnlyTheButtonsThatApply(QQuickWindow *window);
     void checkLastFmAccountIsAGroupApart(QQuickWindow *window, bool connected);
+    void checkLastFmStatusCountsDroppedScrobbles(QQuickWindow *window);
     void checkAboutShowsTheIconVersionTabsAndCopiesTheVersion(QQuickWindow *window);
     void checkAboutKdeHasAboutsHeadingAndPage(QQuickWindow *window, qreal pointSize);
     void checkAboutPagesSitOnAFrameJoinedToTheTabs(QQuickWindow *window);
@@ -2468,7 +2469,43 @@ void UiDialogsTest::lastFmPageFollowsTheBuildAndTheAccount() {
     runInTurn({[&] { checkLastFmScrobblingNeedsABuildWithLastFm(window); },
                [&] { checkLastFmAccountIsAGroupApart(window, false); },
                [&] { checkLastFmPageShowsOnlyTheButtonsThatApply(window); },
-               [&] { checkLastFmAccountIsAGroupApart(window, true); }});
+               [&] { checkLastFmAccountIsAGroupApart(window, true); },
+               [&] { checkLastFmStatusCountsDroppedScrobbles(window); }});
+}
+
+// Scrobbles the backend dropped unsent, as too old for Last.fm, get a line
+// of the status of their own, after the waiting ones; none, no line.
+void UiDialogsTest::checkLastFmStatusCountsDroppedScrobbles(QQuickWindow *window) {
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
+    QVERIFY(bridge->setProperty("lastFmStatusText", QStringLiteral("Last.fm scrobble queue flushed.")));
+    QVERIFY(bridge->setProperty("lastFmPendingScrobbleCount", 2));
+    QVERIFY(bridge->setProperty("lastFmDroppedScrobbleCount", 0));
+    QObject *dialog = openPreferences(window, 3);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *pending = nullptr;
+    QTRY_VERIFY((pending = visibleNamed(prefs, QStringLiteral("lastFmPendingLabel"))) != nullptr);
+    QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmDroppedLabel")) == nullptr);
+
+    QVERIFY(bridge->setProperty("lastFmDroppedScrobbleCount", 1));
+    QQuickItem *dropped = nullptr;
+    QTRY_VERIFY((dropped = visibleNamed(prefs, QStringLiteral("lastFmDroppedLabel"))) != nullptr);
+    QCOMPARE(dropped->property("text").toString(),
+             QStringLiteral("1 old scrobble was discarded from the queue"));
+    QVERIFY(bridge->setProperty("lastFmDroppedScrobbleCount", 12));
+    QTRY_COMPARE(dropped->property("text").toString(),
+                 QStringLiteral("12 old scrobbles were discarded from the queue"));
+    // It goes on from the waiting scrobbles' line, as one status.
+    QTRY_VERIFY(sceneRect(dropped).top() >= sceneRect(pending).bottom() - 1);
+    QCOMPARE(pending->property("trailingSpace").toReal(), 0.0);
+
+    QVERIFY(bridge->setProperty("lastFmDroppedScrobbleCount", 0));
+    QTRY_VERIFY(visibleNamed(prefs, QStringLiteral("lastFmDroppedLabel")) == nullptr);
+    QVERIFY(pending->property("trailingSpace").toReal() > 0);
+    QVERIFY(bridge->setProperty("lastFmPendingScrobbleCount", 0));
+    QVERIFY(bridge->setProperty("lastFmStatusText", QString()));
+    QVERIFY(reject(dialog));
 }
 
 // Connect while not connected; Complete and Disconnect while waiting for
