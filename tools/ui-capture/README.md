@@ -52,6 +52,7 @@ only and are rebuilt when their source changes or the system Qt does:
 | `--out DIR` or `SHOT_OUT_ROOT` | `$SHOT_WORK/rounds` | where `<round>/` and `<round>-focus/` go |
 | `SHOT_WORK` | `$XDG_CACHE_HOME/ferrous-ui-capture` | source mirror (`src/`), build (`build/`), probes (`probe/`), fixtures (`fixtures/`), app folders and the template library DB (`run/`), bus sockets (`b/`), `tmp-<round>/` |
 | `SHOT_BUILD_WRAPPER` | none | a command the compiles run under, e.g. one that holds a build slot or lowers priority |
+| `SHOT_PACK_JOBS` | `pack.py`'s (half the CPUs, 2 to 8) | the pack's parallel jobs (`pack.py --jobs`), fewer on a machine short of memory |
 | `SHOT_BUILD_TAG` | none | a separate mirror and build (`src$TAG`, `build$TAG`), so a test of the harness never shares a binary with a real round; runs of every tag still take turns (see the run lock below) |
 | `SHOT_NEUTRAL=0` | `1` | run the app at the real paths instead of `/mnt/ferrous` |
 
@@ -212,9 +213,12 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
   under it, as KWin would.
 - **A main-window grab draws in its open menus**, each at its place, and grows right and down for a menu that
   reaches past the window, mid grey there. The menus' KWin shadows are not in it. A recorded strip has only the main
-  window's frames, without the menus. At scale 2 the session scales the app with `QT_SCALE_FACTOR`, not with KWin's
-  output scale as Plasma does, and QtWayland then opens a menu window at half its offset from the window, over the
-  menu bar; KWin shows it there, and so does the shot.
+  window's frames, without the menus.
+- **Scale 2 is KWin's output scale**, as on Plasma: the driver writes the session's `kwinoutputconfig.json` (KWin's
+  `--scale` alone sizes the virtual output but leaves its scale at 1), and the app gets no Qt scale variable. With
+  `QT_SCALE_FACTOR` instead, QtWayland would open a menu window at half its offset from the window (#665). KWin's
+  coordinates (window frames, area captures) are then logical px like the app's, and its captures, its decorations
+  and every grab are in device px. A session fails when its window's device pixel ratio is not its scale.
 
 ## Files
 

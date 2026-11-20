@@ -102,6 +102,53 @@ def kdeglobals(scheme, pt=10, anim_off=False):
             + ("AnimationDurationFactor=0\n" if anim_off else ""))
 
 
+# Every environment variable through which Qt scales a program by itself. Under KWin the app is scaled by the
+# output's scale alone, as on Plasma: with QT_SCALE_FACTOR, QtWayland opens a menu window at half its offset from
+# its window (#665).
+QT_SCALE_VARS = ("QT_SCALE_FACTOR", "QT_SCREEN_SCALE_FACTORS", "QT_ENABLE_HIGHDPI_SCALING",
+                 "QT_AUTO_SCREEN_SCALE_FACTOR", "QT_SCALE_FACTOR_ROUNDING_POLICY", "QT_USE_PHYSICAL_DPI")
+# The output `kwin_wayland --virtual` makes, by the name its output configuration matches it by.
+KWIN_OUTPUT = "Virtual-0"
+
+
+def kwin_output_size(size):
+    """The virtual KWin output's size (logical px) for a main window of `size`: room for menus and dialogs."""
+    return size[0] + 400, size[1] + 400
+
+
+def kwin_output_config(size, scale):
+    """kwinoutputconfig.json for the virtual output: logical `size` at `scale`, so its mode is size * scale
+    device px. KWin's --scale only sizes the virtual output's mode; its output configuration (generated with
+    scale 1 for an output without a physical size) sets the scale, as System Settings does on Plasma."""
+    import json
+    w, h = (int(round(v * scale)) for v in size)
+    return json.dumps([
+        {"name": "outputs", "data": [{"connectorName": KWIN_OUTPUT, "scale": scale,
+                                      "mode": {"basic": {"width": w, "height": h, "refreshRate": 60000}, "flags": 1}}]},
+        {"name": "setups", "data": [{"lidClosed": False, "outputs": [
+            {"enabled": True, "outputIndex": 0, "position": {"x": 0, "y": 0}, "priority": 0}]}]},
+    ], indent=1) + "\n"
+
+
+def kwin_session(iso, size, scale, script):
+    """The command that runs `script` (which execs the app) under a nested, headless KWin whose output has
+    `scale`, with the files it reads in the session folder `iso`: KWin's output configuration (in the session's
+    XDG_CONFIG_HOME, iso/config) and the app's launcher, which sets no Qt scale variable, so the app takes its
+    device pixel ratio from the output, as on Plasma."""
+    ow, oh = kwin_output_size(size)
+    os.makedirs(os.path.join(iso, "config"), exist_ok=True)
+    open(os.path.join(iso, "config", "kwinoutputconfig.json"), "w").write(kwin_output_config((ow, oh), scale))
+    launcher = os.path.join(iso, "launch.sh")
+    open(launcher, "w").write(
+        "#!/bin/bash\nexport QT_QPA_PLATFORM=wayland WAYLAND_DISPLAY=shotwl\n"
+        f"export LD_PRELOAD={PROBE}\n"
+        f"unset {' '.join(QT_SCALE_VARS)}\n" + script + "\n")
+    os.chmod(launcher, 0o755)
+    return ["kwin_wayland", "--virtual", "--socket", "shotwl", "--width", str(ow), "--height", str(oh),
+            "--scale", f"{scale:g}", "--no-lockscreen", "--no-global-shortcuts", "--no-kactivities",
+            "--inputmethod", "/bin/true", "--exit-with-session", launcher]
+
+
 class App:
     def __init__(self, name, scheme="BreezeLight", scale=1, size=(1600, 1000), fresh=True,
                  db_from=None, extra_env=None, font_pt=10, settings_extra="", anim_off=False, app_defaults=False):
@@ -203,18 +250,11 @@ class App:
         del env["QT_SCALE_FACTOR"]
         argv = ["bash", "-c", script]
         if os.environ.get("SHOT_KWIN"):
-            launcher = os.path.join(self.iso, "launch.sh")
-            open(launcher, "w").write(
-                "#!/bin/bash\nexport QT_QPA_PLATFORM=wayland WAYLAND_DISPLAY=shotwl\n"
-                f"export LD_PRELOAD={PROBE}\n"
-                "unset QT_SCREEN_SCALE_FACTORS\n" + (f"export QT_SCALE_FACTOR={scale}\n" if scale != 1 else "") + script.replace("exec ", "exec ") + "\n")
-            os.chmod(launcher, 0o755)
-            ow, oh = (size[0] + 400) * scale, (size[1] + 400) * scale
-            env.pop("LD_PRELOAD", None)
+            argv = kwin_session(self.iso, size, scale, script)
+            env.pop("LD_PRELOAD", None)  # (the launcher gives it to the app, not to KWin)
+            for k in QT_SCALE_VARS:  # KWin is a Qt program too: it runs unscaled, its output is scaled
+                env.pop(k, None)
             env["QT_QPA_PLATFORM"] = "offscreen"
-            argv = ["kwin_wayland", "--virtual", "--socket", "shotwl", "--width", str(ow), "--height", str(oh),
-                    "--scale", "1", "--no-lockscreen", "--no-global-shortcuts", "--no-kactivities", "--inputmethod", "/bin/true",
-                    "--exit-with-session", launcher]
         self.proc = subprocess.Popen(["dbus-run-session", f"--config-file={busconf}", "--"] + argv,
                                      env=env, stdout=self.log, stderr=subprocess.STDOUT,
                                      start_new_session=True)
