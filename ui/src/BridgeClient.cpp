@@ -2946,27 +2946,22 @@ void BridgeClient::applyBackendQueueColumnWidths(
 }
 
 bool BridgeClient::setKeyboardShortcuts(const QVariantMap &shortcuts) {
-    if (shortcuts.size() > BinaryBridgeCodec::kMaxKeyboardShortcutEntries) {
-        return false;
-    }
     BinaryBridgeCodec::KeyboardShortcuts next;
     for (auto it = shortcuts.cbegin(); it != shortcuts.cend(); ++it) {
         if (!it.value().canConvert<QString>()) {
             return false;
         }
-        const QString sequences = it.value().toString();
-        if (!BinaryBridgeCodec::isValidKeyboardShortcutId(it.key())
-            || !BinaryBridgeCodec::isValidKeyboardShortcutSequences(sequences)) {
-            return false;
-        }
-        next.insert(it.key(), sequences);
+        next.insert(it.key(), it.value().toString());
     }
     if (next == m_keyboardShortcuts) {
         return true;
     }
     // The whole set, so a request that overtakes an earlier one keeps it.
     const quint32 generation = m_keyboardShortcutsGeneration + 1;
-    if (!sendBinaryCommand(BinaryBridgeCodec::encodeCommandKeyboardShortcuts(next, generation))) {
+    const QByteArray command = BinaryBridgeCodec::encodeCommandKeyboardShortcuts(next, generation);
+    // Empty for shortcuts out of the backend's bounds, which are not an
+    // oversized command to report.
+    if (command.isEmpty() || !sendBinaryCommand(command)) {
         return false;
     }
     m_keyboardShortcutsGeneration = generation;
@@ -5664,6 +5659,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         // Before the window is shown, so the queue opens with its widths;
         // they are what the settings had before any the UI sends.
         applyBackendQueueColumnWidths(snapshot.windowLayoutQueueColumns, 0);
+        // So that no default shortcut the user changed works meanwhile.
+        applyBackendKeyboardShortcuts(snapshot.windowLayoutKeyboardShortcuts, 0);
         emit savedWindowLayoutRead();
         return false;
     }

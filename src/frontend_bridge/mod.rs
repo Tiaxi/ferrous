@@ -491,11 +491,13 @@ pub enum BridgeEvent {
         result: Result<(), String>,
     },
     /// The window layout saved in the settings, sent once at startup, for
-    /// the UI to show the window with, and the widths of the queue's
-    /// columns, so that the queue opens with them.
+    /// the UI to show the window with, the widths of the queue's columns,
+    /// so that the queue opens with them, and the changed keyboard
+    /// shortcuts, so that no default one works before the first snapshot.
     WindowLayout {
         layout: WindowLayout,
         queue_columns: QueueColumnWidths,
+        keyboard_shortcuts: KeyboardShortcuts,
     },
 }
 
@@ -3136,6 +3138,7 @@ fn send_window_layout(options: &mut BridgeRuntimeOptions, event_tx: &Sender<Brid
         BridgeEvent::WindowLayout {
             layout: settings.window,
             queue_columns: settings.queue_columns.widths,
+            keyboard_shortcuts: settings.keyboard_shortcuts.clone(),
         },
     );
     options.settings = Some(settings);

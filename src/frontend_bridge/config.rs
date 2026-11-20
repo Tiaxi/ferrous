@@ -13,7 +13,9 @@ use crate::playback::{
     PlaybackState, RepeatMode,
 };
 
-use super::{BridgeSettings, BridgeState, LibrarySortMode, ViewerFullscreenMode};
+use super::{
+    BridgeSettings, BridgeState, KeyboardShortcuts, LibrarySortMode, ViewerFullscreenMode,
+};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(super) struct SessionSnapshot {
@@ -539,6 +541,9 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
         settings.display.show_level_meter = true;
     }
     settings.unknown_lines.clear();
+    // The file has every changed shortcut; one it no longer has is the
+    // default again.
+    settings.keyboard_shortcuts = KeyboardShortcuts::default();
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else {
             continue;
@@ -1054,6 +1059,14 @@ mod tests {
         assert_eq!(parsed.keyboard_shortcuts, settings.keyboard_shortcuts);
         assert_eq!(parsed.unknown_lines, vec!["future_key=1".to_string()]);
         assert_eq!(format_settings_text(&parsed), text);
+
+        // Read again from a file without them, as when the settings are
+        // loaded again, every shortcut is the default again.
+        parse_settings_text(&mut parsed, "volume_cubic=0.5\nshortcut.find=Ctrl+K\n");
+        assert_eq!(
+            parsed.keyboard_shortcuts.iter().collect::<Vec<_>>(),
+            vec![("find", "Ctrl+K")]
+        );
     }
 
     #[test]

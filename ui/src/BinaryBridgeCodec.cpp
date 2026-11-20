@@ -1236,9 +1236,12 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
                 && sectionReader.readF32(&layout.queueHeightRatio)
                 && sectionReader.readU8(&layout.visualizationMode)
                 && sectionReader.readU8(&follow);
-            // Older backends end the section with the layout.
+            // Older backends end the section with the layout, or with the
+            // queue's column widths.
             QueueColumnWidths queueColumns;
+            KeyboardShortcuts keyboardShortcuts;
             ok = ok && (sectionReader.atEnd() || readQueueColumnWidths(sectionReader, &queueColumns))
+                && (sectionReader.atEnd() || readKeyboardShortcuts(sectionReader, &keyboardShortcuts))
                 && sectionReader.atEnd();
             if (ok) {
                 layout.hasGeometry = hasGeometry != 0;
@@ -1247,6 +1250,7 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
                 out->hasWindowLayout = true;
                 out->windowLayout = layout;
                 out->windowLayoutQueueColumns = queueColumns;
+                out->windowLayoutKeyboardShortcuts = keyboardShortcuts;
             }
             break;
         }

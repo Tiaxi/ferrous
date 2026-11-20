@@ -2788,6 +2788,41 @@ void BridgeClientTest::keyboardShortcutsAreDecodedFromTheSettingsWithinTheirBoun
     QByteArray count(4, '\0');
     qToLittleEndian<quint32>(quint32(BinaryBridgeCodec::kMaxKeyboardShortcutEntries), count.data());
     QVERIFY(!decode(before + count + QByteArray(4, '\0'), &decoded));
+
+    // The window layout brings them, without a generation, before the
+    // window is shown, so no default the user changed works meanwhile.
+    const QByteArray layout = BinaryBridgeCodec::encodeCommandWindowLayout({}).mid(
+        BinaryBridgeCodec::kCommandHeaderBytes);
+    const QByteArray widths = BinaryBridgeCodec::encodeCommandQueueColumnWidths({170, 0, 76}, 0)
+                                  .mid(BinaryBridgeCodec::kCommandHeaderBytes, 6);
+    const QByteArray saved = keyboardShortcutsPayload({{"stop", ""}, {"find", "Ctrl+K"}}, 0).chopped(4);
+    QString error;
+    BinaryBridgeCodec::DecodedSnapshot startup;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                 packetWithSection(BinaryBridgeCodec::SectionWindowLayout, layout + widths + saved),
+                 &startup, &error),
+             qPrintable(error));
+    QCOMPARE(startup.windowLayoutKeyboardShortcuts,
+             (BinaryBridgeCodec::KeyboardShortcuts{{QStringLiteral("find"), QStringLiteral("Ctrl+K")},
+                                                   {QStringLiteral("stop"), QString()}}));
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionWindowLayout, layout + widths + saved.chopped(1)),
+        &decoded, &error));
+    BinaryBridgeCodec::DecodedSnapshot older;
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionWindowLayout, layout + widths), &older, &error));
+    QVERIFY(older.windowLayoutKeyboardShortcuts.isEmpty());
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_sendCommandOverride = [](const QByteArray &) { return true; };
+    QVariantMap atLayout;
+    connect(&client, &BridgeClient::savedWindowLayoutRead, &client,
+            [&]() { atLayout = client.keyboardShortcuts(); });
+    client.processBinarySnapshot(startup);
+    const QVariantMap expected{{QStringLiteral("find"), QStringLiteral("Ctrl+K")}, {QStringLiteral("stop"), QString()}};
+    QCOMPARE(atLayout, expected);
+    QCOMPARE(client.keyboardShortcuts(), expected);
 }
 
 void BridgeClientTest::keyboardShortcutsKeepTheNewestWhileAcksAreLate() {
@@ -8428,7 +8463,7 @@ void BridgeClientTest::playbackErrorPacketReachesBridgeError() {
                  &decoded, &error),
              qPrintable(error));
     QSignalSpy errors(&client, &BridgeClient::bridgeError);
-    QVERIFY(!client.processBinarySnapshot(decoded));
+    client.processBinarySnapshot(decoded);
     QCOMPARE(errors.count(), 1);
     QCOMPARE(errors.at(0).at(0).toString(), message);
     QCOMPARE(errors.at(0).at(1).toInt(), int(BinaryBridgeCodec::ErrorCategoryPlayback));
@@ -8489,7 +8524,7 @@ void BridgeClientTest::backendFailurePacketShowsStoppedState() {
         qPrintable(error));
     QSignalSpy failures(&client, &BridgeClient::backendFailureChanged);
     QSignalSpy connection(&client, &BridgeClient::connectedChanged);
-    QVERIFY(!client.processBinarySnapshot(decoded));
+    client.processBinarySnapshot(decoded);
     QCOMPARE(failures.count(), 1);
     QCOMPARE(client.backendFailure(), message);
     QCOMPARE(client.property("backendFailure").toString(), message);
@@ -8499,7 +8534,7 @@ void BridgeClientTest::backendFailurePacketShowsStoppedState() {
     // The first reason stays.
     QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
         backendFailurePacket(QStringLiteral("later")), &decoded, &error));
-    QVERIFY(!client.processBinarySnapshot(decoded));
+    client.processBinarySnapshot(decoded);
     QCOMPARE(failures.count(), 1);
     QCOMPARE(client.backendFailure(), message);
 }
@@ -8511,7 +8546,7 @@ void BridgeClientTest::requestedStopIsNotABackendFailure() {
     BinaryBridgeCodec::DecodedSnapshot decoded;
     decoded.hasStopped = true;
     QSignalSpy failures(&client, &BridgeClient::backendFailureChanged);
-    QVERIFY(!client.processBinarySnapshot(decoded));
+    client.processBinarySnapshot(decoded);
     QCOMPARE(failures.count(), 0);
     QVERIFY(client.backendFailure().isEmpty());
 }

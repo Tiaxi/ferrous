@@ -585,6 +585,8 @@ struct DecodedSnapshot {
     WindowLayout windowLayout;
     // The queue's column widths, sent with the window layout.
     QueueColumnWidths windowLayoutQueueColumns;
+    // The changed keyboard shortcuts the settings had at startup.
+    KeyboardShortcuts windowLayoutKeyboardShortcuts;
     DecodedPlayback playback;
     DecodedQueue queue;
     DecodedLibraryMeta library;

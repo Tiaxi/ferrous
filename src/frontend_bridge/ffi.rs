@@ -699,10 +699,12 @@ impl FfiEncoder {
                 BridgeEvent::WindowLayout {
                     layout,
                     queue_columns,
+                    keyboard_shortcuts,
                 } => {
                     prepared.push(PreparedEvent::Binary(encode_window_layout_event(
                         &layout,
                         &queue_columns,
+                        &keyboard_shortcuts,
                     )));
                 }
             }
@@ -2508,12 +2510,10 @@ fn push_queue_column_widths(out: &mut Vec<u8>, widths: &QueueColumnWidths) {
     }
 }
 
-/// Command 80: a u32 count of actions, each its id and its key sequences as
-/// strings, then the u32 generation of the request. An entry the settings
-/// could not keep, or more than they keep, refuses the command.
-fn read_keyboard_shortcuts_command(
-    reader: &mut BinaryReader<'_>,
-) -> Result<BridgeSettingsCommand, String> {
+/// A u32 count of actions, each its id and its key sequences as strings,
+/// as [`push_keyboard_shortcuts`] writes them. An entry the settings could
+/// not keep, or more than they keep, is refused.
+fn read_keyboard_shortcuts(reader: &mut BinaryReader<'_>) -> Result<KeyboardShortcuts, String> {
     // Two string lengths at least.
     let count = reader.read_count(8)?;
     if count > keyboard_shortcuts::MAX_ENTRIES {
@@ -2523,10 +2523,17 @@ fn read_keyboard_shortcuts_command(
     for _ in 0..count {
         entries.push((reader.read_string()?, reader.read_string()?));
     }
-    let shortcuts = KeyboardShortcuts::from_entries(entries)
-        .ok_or_else(|| "a keyboard shortcut is out of bounds".to_string())?;
+    KeyboardShortcuts::from_entries(entries)
+        .ok_or_else(|| "a keyboard shortcut is out of bounds".to_string())
+}
+
+/// Command 80: the keyboard shortcuts, then the u32 generation of the
+/// request.
+fn read_keyboard_shortcuts_command(
+    reader: &mut BinaryReader<'_>,
+) -> Result<BridgeSettingsCommand, String> {
     Ok(BridgeSettingsCommand::SetKeyboardShortcuts {
-        shortcuts,
+        shortcuts: read_keyboard_shortcuts(reader)?,
         generation: reader.read_u32()?,
     })
 }
@@ -2877,7 +2884,11 @@ fn encode_state_saved_event(request_id: u32, result: &Result<(), String>) -> Vec
 
 /// The window layout saved in the settings, laid out as the command that
 /// sets it, see [`read_window_layout`], then the queue's column widths.
-fn encode_window_layout_event(layout: &WindowLayout, queue_columns: &QueueColumnWidths) -> Vec<u8> {
+fn encode_window_layout_event(
+    layout: &WindowLayout,
+    queue_columns: &QueueColumnWidths,
+    keyboard_shortcuts: &KeyboardShortcuts,
+) -> Vec<u8> {
     let geometry = layout.geometry.unwrap_or(WindowGeometry {
         x: 0,
         y: 0,
@@ -2896,6 +2907,7 @@ fn encode_window_layout_event(layout: &WindowLayout, queue_columns: &QueueColumn
     push_u8(&mut payload, layout.visualization_mode);
     push_u8(&mut payload, u8::from(layout.follow_current_track));
     push_queue_column_widths(&mut payload, queue_columns);
+    push_keyboard_shortcuts(&mut payload, keyboard_shortcuts);
     encode_packet(&[(SECTION_WINDOW_LAYOUT, payload)])
 }
 
@@ -4559,6 +4571,9 @@ mod tests {
             read_queue_column_widths(&mut reader).expect("read the column widths"),
             QueueColumnWidths::default()
         );
+        assert!(read_keyboard_shortcuts(&mut reader)
+            .expect("read the shortcuts")
+            .is_empty());
         reader.expect_done().expect("the whole section");
         // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
         assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
@@ -4567,6 +4582,12 @@ mod tests {
         config::load_settings_into(&mut settings);
         settings.window = saved;
         settings.queue_columns.widths = saved_columns;
+        let saved_shortcuts = KeyboardShortcuts::from_entries([
+            ("play_pause".to_string(), "Ctrl+Alt+P".to_string()),
+            ("stop".to_string(), String::new()),
+        ])
+        .expect("valid shortcuts");
+        settings.keyboard_shortcuts = saved_shortcuts.clone();
         config::save_settings(&settings).expect("save the settings");
         let handle = ffi_bridge_with(BridgeRuntimeOptions {
             persisted_state_enabled: true,
@@ -4580,6 +4601,10 @@ mod tests {
         assert_eq!(
             read_queue_column_widths(&mut reader).expect("read the column widths"),
             saved_columns
+        );
+        assert_eq!(
+            read_keyboard_shortcuts(&mut reader).expect("read the shortcuts"),
+            saved_shortcuts
         );
         reader.expect_done().expect("the whole section");
         // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
