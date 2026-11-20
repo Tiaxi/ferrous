@@ -7670,14 +7670,14 @@ mod engine_tests {
             engine.snapshot.current.as_deref() == Some(d.as_path())
                 && engine.snapshot.state == PlaybackState::Stopped
         });
-        // Its redo brings back A and B, at B, which was current before the
+        // Its redo brings back A and B, at A, which was current before the
         // undo, without starting playback.
         engine.send(PlaybackCommand::RestoreQueue {
-            paths: vec![a, b.clone()],
-            current: 1,
+            paths: vec![a.clone(), b],
+            current: 0,
         });
         engine.wait_until("the redo did not stop at its current row", |engine| {
-            engine.snapshot.current.as_deref() == Some(b.as_path())
+            engine.snapshot.current.as_deref() == Some(a.as_path())
         });
         assert_eq!(engine.snapshot.state, PlaybackState::Stopped);
         assert_eq!(engine.snapshot.position, Duration::ZERO);
