@@ -5991,11 +5991,22 @@ void SpectrogramCanvasSmokeTest::spectrogramLateGaplessZoomRestartOfUnknownLengt
         item.feedPrecomputedChunk(QByteArray(bins * 4, '\x50'), bins, 0, 4, 0, 6000, 48'000,
             1024, false, false, next, true, 1);
         node = paintWithReserve(item, node);
+        // The clock's sample of the successor, playing `seconds` in, as the
+        // bridge reports it: one sample, advancing.
+        const auto successorPlays = [&](double seconds) {
+            PlaybackClock &clock = testClock(item);
+            PlaybackSample sample;
+            sample.positionSeconds = seconds;
+            sample.sampledAtNs = clock.nowNs();
+            sample.trackToken = next;
+            sample.advancing = true;
+            clock.applySample(sample, false);
+        };
         // The successor starts at the first track's end; the zoom's restart
         // of it, from its start, arrives a tenth of a second later.
         time.advance(end - 19.5 + latency);
         if (clockFirst) {
-            setTestPosition(item, latency, next);
+            successorPlays(latency);
         }
         feedRollingZoomRestart(item, 0.0, 0.5, next, 2);
         QVERIFY(!item.m_awaitingZoomData);
@@ -6007,7 +6018,7 @@ void SpectrogramCanvasSmokeTest::spectrogramLateGaplessZoomRestartOfUnknownLengt
         }
         time.advance(0.01);
         if (!clockFirst) {
-            setTestPosition(item, latency + 0.01, next);
+            successorPlays(latency + 0.01);
         }
         node = paintWithReserve(item, node);
         QVERIFY(!item.m_gaplessContinuationPending);

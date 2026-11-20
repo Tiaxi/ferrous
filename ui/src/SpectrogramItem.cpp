@@ -2351,9 +2351,13 @@ void SpectrogramItem::clockStateChanged() {
         const double previousPosition = currentRenderPositionSecondsLocked(now);
         if (next.trackToken != previous.trackToken) {
             // Where the previous track goes on, in case its successor
-            // follows it gaplessly.
-            m_previousTrackClockState = held ? m_positionHoldTrajectory : previous;
-            m_previousTrackPositionOffset = held ? m_positionHoldOffset : m_gaplessPositionOffset;
+            // follows it gaplessly. A zoom's restart of that successor holds
+            // the playhead at its data, which does not tell where the
+            // previous track ends: that track's clock does.
+            const bool heldTrack = held && !m_gaplessContinuationRebased;
+            m_previousTrackClockState = heldTrack ? m_positionHoldTrajectory : previous;
+            m_previousTrackPositionOffset =
+                heldTrack ? m_positionHoldOffset : m_gaplessPositionOffset;
         }
         m_clockState = next;
         if (next.trackToken != previous.trackToken
