@@ -1291,7 +1291,9 @@ def m_switchstates(r, arg):
             tgt = un if label.startswith("unselected") else ck
             r.s.ev(f"{FIND}('visualizationModeButton{tgt[0]}').forceActiveFocus(Qt.TabFocusReason)")
         time.sleep(0.6)
-        im = _grab_window(r, "switch-" + label.replace(" ", "-").replace("+", "and"))
+        # (the waveform run's grabs apart from the spectrogram run's: each composite's sources name its own walks)
+        im = _grab_window(r, "switch-" + ("waveform-" if plate_kind == "waveform" else "")
+                          + label.replace(" ", "-").replace("+", "and"))
         sw = r.s.rect("visualizationModeSwitch")
         er = r.s.visible_rects("plotToolButtonCheckedEdge")
         er = next((v[1:] for v in er if sw[0] <= v[1] + v[3] / 2 <= sw[0] + sw[2] and sw[1] <= v[2] + v[4] / 2 <= sw[1] + sw[3]), None)
@@ -4641,7 +4643,6 @@ def m_appicon9(r, arg):
     the files Plasma's lookup takes) among Breeze icons on 66 and 88 px panels. appicon/ctx-discover: a Discover-like
     tile with the icon at 256 px. The drawn menus, lists and frames follow Breeze's colours; only the focus frame is
     Plasma's own artwork."""
-    r.s.draws_without_app_pixels()  # (SVGs and icon files; app pixels only from shots it names)
     from PIL import Image, ImageDraw, ImageFont
     src = os.environ.get("SHOT_SRC", "")
     a_root = os.path.join(src, "ui/assets/icons/hicolor")
@@ -5377,7 +5378,9 @@ def m_closeups(r, arg):
         p = os.path.join(raw, f"{tag}_{r.s.suffix}.png")
         if settle:
             r.s.settle_opacity()
-        r.s.raw_grab(p)
+        res = r.s.raw_grab(p)
+        if not str(res).startswith("ok"):  # (never an older grab at this path, without its walk)
+            raise RuntimeError(f"closeups: grab {tag}: {res}")
         tips = [q for q in r.s.popups() if q.get("tooltip") and q["opacity"] > 0.02]
         if tips:  # loudly: a "1 px band" in a pressed crop was once the tooltip's edge fading in
             raise RuntimeError(f"closeups: a tooltip shows in the {tag} grab (opacity {tips[0]['opacity']:.2f}, "
@@ -5548,7 +5551,9 @@ def m_ring_progression(r, arg):
             r.s.settle_opacity()
             box, bar, scan = need("scrobbleIndicatorBox"), need("statusBar"), need("statusBarScanBar")
             p = os.path.join(raw, f"ring_{r.s.suffix}_{len(cells)}.png")
-            r.s.raw_grab(p)
+            res = r.s.raw_grab(p)
+            if not str(res).startswith("ok"):  # (never an older grab at this path, without its walk)
+                raise RuntimeError(f"ring_progression: grab {label}: {res}")
             im = Image.open(p).convert("RGB")
             x, y, w, h = [int(round(v * sc)) for v in box]
             pad = 4 * sc
