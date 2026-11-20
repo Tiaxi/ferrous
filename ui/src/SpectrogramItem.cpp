@@ -2351,9 +2351,13 @@ void SpectrogramItem::clockStateChanged() {
         const double previousPosition = currentRenderPositionSecondsLocked(now);
         if (next.trackToken != previous.trackToken) {
             // Where the previous track goes on, in case its successor
-            // follows it gaplessly.
-            m_previousTrackClockState = held ? m_positionHoldTrajectory : previous;
-            m_previousTrackPositionOffset = held ? m_positionHoldOffset : m_gaplessPositionOffset;
+            // follows it gaplessly. A zoom's restart of that successor holds
+            // the playhead at its data, which does not tell where the
+            // previous track ends: that track's clock does.
+            const bool heldTrack = held && !m_gaplessContinuationRebased;
+            m_previousTrackClockState = heldTrack ? m_positionHoldTrajectory : previous;
+            m_previousTrackPositionOffset =
+                heldTrack ? m_positionHoldOffset : m_gaplessPositionOffset;
         }
         m_clockState = next;
         if (next.trackToken != previous.trackToken
@@ -2461,18 +2465,37 @@ void SpectrogramItem::continueGaplessLocked(std::chrono::steady_clock::time_poin
                 m_clockState.anchorSeconds / m_clockState.rate * 1'000'000'000.0));
         startPosition = 0.0;
     }
+    // Where the previous track ends, in the times it was shown at: at its
+    // length, or, not knowing it, where its clock is at the successor's
+    // start.
+    const double previousDuration = m_previousTrackClockState.durationSeconds;
+    const double previousEnd = m_previousTrackPositionOffset
+        + (previousDuration > 0.0
+            ? previousDuration
+            : m_previousTrackClockState.positionAt(startNs));
     if (m_gaplessContinuationRebased) {
         // A zoom's restart of the successor already counts its columns, and
         // the times from it, from its start, at the previous track's end:
         // the playhead follows the successor's clock, as its columns do.
         m_gaplessContinuationRebased = false;
         m_gaplessPositionOffset = 0.0;
+        // Not knowing the previous track's length, the restart took its end
+        // from where its clock was when the reset came, which had run on
+        // past it by then by the reset's latency. The successor's start
+        // tells where it ends: the times from it start there, and so do
+        // those of a canvas of the restart's columns. The history before,
+        // counted from that end, stays at its own times.
+        const double correction = previousDuration > 0.0 ? 0.0 : previousEnd - startPosition;
+        if (correction != 0.0) {
+            m_streamOrigin += correction;
+            m_previousTrackPositionOffset -= correction;
+            if (m_precomputedCanvasRingGeneration == m_ringGeneration) {
+                m_precomputedCanvasStreamOrigin += correction;
+            }
+            // A rasterization under way counts them from the guess.
+            cancelPendingRasterLocked();
+        }
     } else {
-        const double previousDuration = m_previousTrackClockState.durationSeconds;
-        const double previousEnd = m_previousTrackPositionOffset
-            + (previousDuration > 0.0
-                ? previousDuration
-                : m_previousTrackClockState.positionAt(startNs));
         m_gaplessPositionOffset = previousEnd - startPosition;
     }
     if (m_awaitingZoomData && m_zoomClockEpoch == m_previousTrackClockState.epoch) {
