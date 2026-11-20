@@ -5514,10 +5514,7 @@ bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
         return m_sendCommandOverride(payload);
     }
     if (m_ffiBridge == nullptr) {
-        reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    m_backendFailure.isEmpty()
-                        ? i18nc("@info", "bridge is not initialized")
-                        : i18nc("@info", "command not sent: the backend has stopped"));
+        reportCommandNotSent(payload, i18nc("@info", "bridge is not initialized"));
         return false;
     }
     const auto *ptr = reinterpret_cast<const std::uint8_t *>(payload.constData());
@@ -5525,13 +5522,23 @@ bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
         logDiagnostic(
             QStringLiteral("bridge"),
             QStringLiteral("failed to send command bytes=%1").arg(payload.size()));
-        reportError(BinaryBridgeCodec::ErrorCategorySystem,
-                    m_backendFailure.isEmpty()
-                        ? i18nc("@info", "failed to send command to in-process bridge")
-                        : i18nc("@info", "command not sent: the backend has stopped"));
+        reportCommandNotSent(payload, i18nc("@info", "failed to send command to in-process bridge"));
         return false;
     }
     return true;
+}
+
+void BridgeClient::reportCommandNotSent(const QByteArray &payload, const QString &message) {
+    if (!m_backendFailure.isEmpty()) {
+        // Recent Issues and the status bar already say the backend has
+        // stopped, and why; each command after it, most of them sent by the
+        // window on its own as it lays out, would only repeat that.
+        logDiagnostic(QStringLiteral("bridge"),
+                      QStringLiteral("command not sent: the backend has stopped (bytes=%1)")
+                          .arg(payload.size()));
+        return;
+    }
+    reportError(BinaryBridgeCodec::ErrorCategorySystem, message);
 }
 
 void BridgeClient::sendLibraryRootCommand(quint16 cmdId, const QString &path) {

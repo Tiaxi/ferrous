@@ -864,6 +864,9 @@ private:
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
     // Returns whether the bridge took the command.
     bool sendBinaryCommand(const QByteArray &payload);
+    // Reports a command that could not be sent; once the backend has
+    // stopped, only to the diagnostics log.
+    void reportCommandNotSent(const QByteArray &payload, const QString &message);
     // Tell the UI about an error, which Recent Issues shows, and add it to
     // the diagnostics log with its category and severity; see bridgeError.
     // What the user need not see goes to logDiagnostic only.

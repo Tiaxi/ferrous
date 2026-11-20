@@ -403,7 +403,7 @@ private slots:
     void playbackErrorPacketReachesBridgeError();
     void backendFailurePacketShowsStoppedState();
     void requestedStopIsNotABackendFailure();
-    void commandsToAStoppedBackendFailVisibly();
+    void commandsToAStoppedBackendFailWithoutRepeatingWhy();
     void aBackendThatCannotStartIsABackendFailure();
     void quittingSendsNothingToTheStoppedBackend();
     void eachTestStartsWithEmptyUserDirectories_data();
@@ -8226,7 +8226,10 @@ void BridgeClientTest::requestedStopIsNotABackendFailure() {
     QVERIFY(client.backendFailure().isEmpty());
 }
 
-void BridgeClientTest::commandsToAStoppedBackendFailVisibly() {
+// Since #188 a command to a stopped backend fails rather than vanishing;
+// the backend's failure says why, so each command adds no Recent Issues
+// entry of its own (#622), only a line in the diagnostics log.
+void BridgeClientTest::commandsToAStoppedBackendFailWithoutRepeatingWhy() {
     BridgeClient client;
     QVERIFY(client.m_ffiBridge != nullptr);
     QSignalSpy errors(&client, &BridgeClient::bridgeError);
@@ -8242,14 +8245,16 @@ void BridgeClientTest::commandsToAStoppedBackendFailVisibly() {
     QVERIFY(!client.connected());
     QVERIFY(client.backendFailure().contains(QStringLiteral("stopped unexpectedly")));
 
-    // Once the backend thread has ended, commands fail and say why.
+    // Once the backend thread has ended, commands fail, into the log only.
+    const qsizetype errorsBefore = errors.count();
     const QByteArray snapshot =
         BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRequestSnapshot);
     QTRY_VERIFY_WITH_TIMEOUT(!client.sendBinaryCommand(snapshot), 10000);
-    QVERIFY(!errors.isEmpty());
-    QCOMPARE(
-        errors.constLast().at(0).toString(),
-        QStringLiteral("command not sent: the backend has stopped"));
+    QCOMPARE(errors.count(), errorsBefore);
+    const QString log = client.m_diagnosticsLines.join(QLatin1Char('\n'));
+    QVERIFY2(log.contains(QStringLiteral("command not sent: the backend has stopped (bytes=%1)")
+                              .arg(snapshot.size())),
+             qPrintable(log));
 }
 
 void BridgeClientTest::aBackendThatCannotStartIsABackendFailure() {
@@ -8268,12 +8273,14 @@ void BridgeClientTest::aBackendThatCannotStartIsABackendFailure() {
                                 "Restart Ferrous to try again.")
                      .arg(reason));
 
-        // Commands fail as they do once the backend has stopped.
+        // Commands fail as they do once the backend has stopped: into the
+        // log, as the failure already says why.
         QVERIFY(!client.sendBinaryCommand(
             BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRequestSnapshot)));
-        QCOMPARE(errors.count(), 1);
-        QCOMPARE(errors.constLast().at(0).toString(),
-                 QStringLiteral("command not sent: the backend has stopped"));
+        QCOMPARE(errors.count(), 0);
+        const QString log = client.m_diagnosticsLines.join(QLatin1Char('\n'));
+        QVERIFY2(log.contains(QStringLiteral("command not sent: the backend has stopped (bytes=")),
+                 qPrintable(log));
         // Quitting does not wait for a save that cannot happen.
         const quint32 save = client.saveStateBeforeQuit();
         QTRY_COMPARE(finished.count(), 1);

@@ -1700,6 +1700,14 @@ void WindowSmokeTest::aBackendThatCannotStartShowsWhyInRecentErrorsAndTheStatusB
              int(BinaryBridgeCodec::ErrorSeverityError));
     QCOMPARE(entries->index(row, 0).data(roles.key("count")).toInt(), 1);
     QVERIFY(errors->property("unseenCount").toInt() >= 1);
+    // And only it: the commands the window sends on its own as it lays out,
+    // such as the visualization's activity, fail into the diagnostics log
+    // without entries that would only repeat it (#622).
+    QTRY_VERIFY(bridge.m_spectrogramActive);
+    QCOMPARE(errorHistoryMessages(errors), QStringList{failure});
+    QCOMPARE(errors->property("unseenCount").toInt(), 1);
+    const QString log = bridge.m_diagnosticsLines.join(QLatin1Char('\n'));
+    QVERIFY2(log.contains(QStringLiteral("command not sent: the backend has stopped")), qPrintable(log));
 
     // The status bar shows the engine stopped, not merely not running, with
     // the reason in its tooltip.
