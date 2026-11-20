@@ -64,6 +64,12 @@ ApplicationWindow {
     readonly property real openingWidth: Math.ceil(Math.max(root.minimumWidth,
         Math.min(root.defaultWidth, root._roomWidth)))
 
+    // `height` within the screen's room, and at least its minimum: the
+    // height to give the window for content that wants `height`.
+    function heightWithinScreen(height) {
+        return Math.ceil(Math.max(root.minimumHeight, Math.min(height, root._roomHeight)))
+    }
+
     function open() {
         if (!root.visible) {
             root._gone = false
@@ -71,7 +77,7 @@ ApplicationWindow {
             if (!root._sized || root.sizesOnEachOpen) {
                 root._sized = true
                 root.width = root.openingWidth
-                root.height = Math.ceil(Math.max(root.minimumHeight, Math.min(root.defaultHeight, root._roomHeight)))
+                root.height = root.heightWithinScreen(root.defaultHeight)
             }
             root.show()
         }
