@@ -2233,6 +2233,46 @@ void LibraryQueueSmokeTest::checkQueueChangesShowNoNoticeAndEditUndoRestoresThem
     QCOMPARE(controller->property("selectedIndices").toList(), (QVariantList{0, 2}));
     QVERIFY(!undoMenuItem->property("enabled").toBool());
     QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo"));
+
+    // The undo leaves the move to redo, from Ctrl+Shift+Z, which selects
+    // the rows where they went again.
+    QObject *redoAction = window->findChild<QObject *>(QStringLiteral("redoQueueChangeAction"));
+    QVERIFY(redoAction != nullptr);
+    QVERIFY(!redoAction->property("enabled").toBool());
+    bridge->setProperty("queueRedoKind", int(BinaryBridgeCodec::QueueUndoMoved));
+    bridge->setProperty("queueRedoId", 11.0);
+    expectNoNotice();
+    QVERIFY(redoAction->property("enabled").toBool());
+    QCOMPARE(redoAction->property("text").toString(), QStringLiteral("&Redo Move in Queue"));
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(queueCommands(bridge).last(), QStringLiteral("redo 11"));
+    bridge->setProperty("queueRedoKind", int(BinaryBridgeCodec::QueueUndoNone));
+    bridge->setProperty("queueRedoId", 0.0);
+    offerUndo(int(BinaryBridgeCodec::QueueUndoMoved), 12.0);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "queueUndoRestored",
+        Q_ARG(QVariant, QVariant(QVariantList{3, 4}))));
+    QCOMPARE(controller->property("selectedIndices").toList(), (QVariantList{3, 4}));
+    QVERIFY(!redoAction->property("enabled").toBool());
+    QCOMPARE(redoAction->property("text").toString(), QStringLiteral("&Redo"));
+
+    // A text field keeps Ctrl+Z and Ctrl+Shift+Z for its own text.
+    bridge->setProperty("queueRedoKind", int(BinaryBridgeCodec::QueueUndoMoved));
+    bridge->setProperty("queueRedoId", 13.0);
+    QObject *search = window->findChild<QObject *>(QStringLiteral("findAction"));
+    QVERIFY(search != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(search, "trigger"));
+    auto *field = window->findChild<QQuickItem *>(QStringLiteral("globalSearchQueryField"));
+    QVERIFY(field != nullptr);
+    QTRY_VERIFY(field->hasActiveFocus());
+    const qsizetype sent = queueCommands(bridge).size();
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(queueCommands(bridge).size(), sent);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(popupsSettled());
+    takeBackOffer();
+    bridge->setProperty("queueRedoKind", int(BinaryBridgeCodec::QueueUndoNone));
+    bridge->setProperty("queueRedoId", 0.0);
 }
 
 // Search closes and fades out: the window's shortcuts work at once, so

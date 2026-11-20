@@ -457,6 +457,9 @@ ApplicationWindow {
         property int queueUndoTrackCount: 0
         signal queueUndoRestored(var rows)
         function undoQueueChange() { queueCommands = queueCommands.concat(["undo " + queueUndoId]) }
+        property double queueRedoId: 0
+        property int queueRedoKind: 0
+        function redoQueueChange() { queueCommands = queueCommands.concat(["redo " + queueRedoId]) }
         function replaceAlbumAt(index) {}
         function appendAlbumAt(index) {}
         function playTrack(path) {}
@@ -839,6 +842,29 @@ ApplicationWindow {
         enabled: uiBridge.queueUndoId > 0 && !root.viewerOpen
         onTriggered: uiBridge.undoQueueChange()
     }
+    Components.StandardKeyAction {
+        id: redoQueueChangeAction
+        objectName: "redoQueueChangeAction"
+        text: {
+            switch (uiBridge.queueRedoKind) {
+            case 1:
+                return I18n.i18nc("@action:inmenu", "&Redo Clear Queue")
+            case 2:
+                return I18n.i18nc("@action:inmenu", "&Redo Remove from Queue")
+            case 3:
+                return I18n.i18nc("@action:inmenu", "&Redo Replace Queue")
+            case 4:
+                return I18n.i18nc("@action:inmenu", "&Redo Move in Queue")
+            default:
+                return I18n.i18nc("@action:inmenu", "&Redo")
+            }
+        }
+        icon.name: "edit-redo"
+        // Text fields keep Ctrl+Shift+Z for their own text.
+        standardKey: StandardKey.Redo
+        enabled: uiBridge.queueRedoId > 0 && !root.viewerOpen
+        onTriggered: uiBridge.redoQueueChange()
+    }
     // Opens search. Text fields keep Ctrl+F; the search field takes it to
     // edit its query.
     Components.StandardKeyAction {
@@ -1141,7 +1167,8 @@ ApplicationWindow {
     // The standard keys' other bindings, such as the Open key.
     Components.StandardKeyShortcuts {
         actions: [
-            openFilesAction, quitAction, undoQueueChangeAction, globalSearchAction, preferencesAction
+            openFilesAction, quitAction, undoQueueChangeAction, redoQueueChangeAction, globalSearchAction,
+            preferencesAction
         ]
     }
 
@@ -1227,6 +1254,7 @@ ApplicationWindow {
             objectName: "editMenu"
             title: I18n.i18nc("@title:menu", "&Edit")
             MenuItem { action: undoQueueChangeAction }
+            MenuItem { action: redoQueueChangeAction }
             MenuSeparator {}
             MenuItem { action: globalSearchAction }
             MenuSeparator {}

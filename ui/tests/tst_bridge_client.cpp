@@ -262,7 +262,8 @@ private slots:
     void thousandsOfAppendedPathsReachTheBackendInOrder();
     void queueUndoSectionIsDecoded();
     void undoSendsTheOfferedChangeAndSelectsTheRestoredRowsOnce();
-    void aClearedQueueComesBackThroughTheBackend();
+    void redoSendsTheOfferedRedoAndFollowsItsKind();
+    void aClearedQueueComesBackAndGoesAgainThroughTheBackend();
     void removedAndReplacedRowsComeBackThroughTheBackend();
     void tagEditorPreviewsRenamesWithoutRenaming();
     void aRenamePreviewOfRowsLoadedAgainIsOutOfDate();
@@ -3382,6 +3383,8 @@ void BridgeClientTest::queueUndoSectionIsDecoded() {
     QByteArray section;
     putLe<quint64>(section, 7);
     putLe<quint8>(section, BinaryBridgeCodec::QueueUndoRemoved);
+    putLe<quint64>(section, 6);
+    putLe<quint8>(section, BinaryBridgeCodec::QueueUndoMoved);
     putLe<quint64>(section, 5);
     putLe<quint64>(section, 9);
     putLe<quint32>(section, 2);
@@ -3405,12 +3408,16 @@ void BridgeClientTest::queueUndoSectionIsDecoded() {
     QVERIFY(decoded.queueUndo.present);
     QCOMPARE(decoded.queueUndo.offerId, quint64(7));
     QCOMPARE(decoded.queueUndo.kind, int(BinaryBridgeCodec::QueueUndoRemoved));
+    QCOMPARE(decoded.queueUndo.redoId, quint64(6));
+    QCOMPARE(decoded.queueUndo.redoKind, int(BinaryBridgeCodec::QueueUndoMoved));
     QCOMPARE(decoded.queueUndo.restoredId, quint64(5));
     QCOMPARE(decoded.queueUndo.restoredRevision, quint64(9));
     QCOMPARE(decoded.queueUndo.restoredRanges,
              (QVector<QPair<int, int>>{{1, 2}, {6, 1}}));
-    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(packet(QByteArray(29, '\0')), &decoded, &error));
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(packet(QByteArray(38, '\0')), &decoded, &error));
     QCOMPARE(decoded.queueUndo.offerId, quint64(0));
+    QCOMPARE(decoded.queueUndo.redoId, quint64(0));
+    QCOMPARE(decoded.queueUndo.redoKind, int(BinaryBridgeCodec::QueueUndoNone));
 
     // A move is the last kind the backend sends, as
     // queue_undo_kinds_keep_their_values_on_the_wire encodes it.
@@ -3426,6 +3433,9 @@ void BridgeClientTest::queueUndoSectionIsDecoded() {
     QByteArray unknownKind = section;
     unknownKind[8] = 5;
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(unknownKind), &decoded, &error));
+    QByteArray unknownRedoKind = section;
+    unknownRedoKind[17] = 5;
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(unknownRedoKind), &decoded, &error));
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(section.left(section.size() - 4)),
                                                      &decoded, &error));
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packet(section + QByteArray(1, '\0')),
@@ -3483,6 +3493,48 @@ void BridgeClientTest::undoSendsTheOfferedChangeAndSelectsTheRestoredRowsOnce() 
     snapshot.queueUndo.restoredRanges = {{0, 1}};
     QVERIFY(client.processBinarySnapshot(snapshot));
     QCOMPARE(restored.count(), 1);
+}
+
+void BridgeClientTest::redoSendsTheOfferedRedoAndFollowsItsKind() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QSignalSpy changed(&client, &BridgeClient::queueUndoChanged);
+
+    // Nothing is offered: nothing is sent.
+    client.redoQueueChange();
+    QVERIFY(sent.isEmpty());
+
+    auto snapshot = fullQueueSnapshot(4, numberedPaths(3));
+    snapshot.queueUndo.present = true;
+    snapshot.queueUndo.redoId = 12;
+    snapshot.queueUndo.redoKind = BinaryBridgeCodec::QueueUndoReplaced;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(changed.count(), 1);
+    QCOMPARE(client.queueUndoId(), 0.0);
+    QCOMPARE(client.queueRedoId(), 12.0);
+    QCOMPARE(client.queueRedoKind(), int(BinaryBridgeCodec::QueueUndoReplaced));
+    client.redoQueueChange();
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent[0], BinaryBridgeCodec::encodeCommandU64(BinaryBridgeCodec::CmdRedoQueueChange, 12));
+    QCOMPARE(qFromLittleEndian<quint16>(sent[0].constData()), quint16(79));
+
+    // The redo made its change again, which can be undone.
+    snapshot = fullQueueSnapshot(5, numberedPaths(2));
+    snapshot.queueUndo.present = true;
+    snapshot.queueUndo.offerId = 13;
+    snapshot.queueUndo.kind = BinaryBridgeCodec::QueueUndoReplaced;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(changed.count(), 2);
+    QCOMPARE(client.queueRedoId(), 0.0);
+    QCOMPARE(client.queueRedoKind(), int(BinaryBridgeCodec::QueueUndoNone));
+    QCOMPARE(client.queueUndoId(), 13.0);
+    client.redoQueueChange();
+    QCOMPARE(sent.size(), 1);
 }
 
 void BridgeClientTest::removedAndReplacedRowsComeBackThroughTheBackend() {
@@ -3545,7 +3597,7 @@ void BridgeClientTest::removedAndReplacedRowsComeBackThroughTheBackend() {
     QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
 }
 
-void BridgeClientTest::aClearedQueueComesBackThroughTheBackend() {
+void BridgeClientTest::aClearedQueueComesBackAndGoesAgainThroughTheBackend() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString base = QFileInfo(dir.path()).canonicalFilePath();
@@ -3596,6 +3648,28 @@ void BridgeClientTest::aClearedQueueComesBackThroughTheBackend() {
     QCOMPARE(errors[0][1].toInt(), int(BinaryBridgeCodec::ErrorCategoryPlayback));
     QCOMPARE(errors[0][2].toInt(), int(BinaryBridgeCodec::ErrorSeverityWarning));
     QCOMPARE(bridge.queueLength(), 3);
+
+    // The undo left the clear to redo, and the refused undo, which changed
+    // nothing, kept it.
+    QCOMPARE(bridge.queueRedoKind(), int(BinaryBridgeCodec::QueueUndoCleared));
+    const double redo = bridge.queueRedoId();
+    QVERIFY(redo != 0.0 && redo != cleared);
+    bridge.redoQueueChange();
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 0
+                                 && bridge.queueUndoKind() == BinaryBridgeCodec::QueueUndoCleared,
+                             10000);
+    QTRY_COMPARE(bridge.queueRedoId(), 0.0);
+    QCOMPARE(errors.count(), 1);
+
+    // Redoing it again is refused as the undo was.
+    bridge.m_queueRedoId = static_cast<quint64>(redo);
+    bridge.redoQueueChange();
+    QTRY_COMPARE_WITH_TIMEOUT(errors.count(), 2, 10000);
+    QVERIFY2(errors[1][0].toString().contains(QStringLiteral("Nothing was redone")),
+             qPrintable(errors[1][0].toString()));
+    QCOMPARE(errors[1][1].toInt(), int(BinaryBridgeCodec::ErrorCategoryPlayback));
+    QCOMPARE(errors[1][2].toInt(), int(BinaryBridgeCodec::ErrorSeverityWarning));
+    QCOMPARE(bridge.queueLength(), 0);
     // Leave no queue of removed fixtures to the tests after this one.
     bridge.clearQueue();
     QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);

@@ -611,7 +611,7 @@ private:
     void checkScaleItemIsOffInWaveformMode(QQuickWindow *window);
     void checkLevelMeterIsPartOfThePlot(QQuickWindow *window);
     void checkRepeatRadiosFollowTheBackendAndSetIt(QQuickWindow *window);
-    void checkEditMenuNamesItsUndoAndClearsTheQueue(QQuickWindow *window);
+    void checkEditMenuNamesItsUndoAndRedoAndClearsTheQueue(QQuickWindow *window);
     void checkQueueContextMenuShowsKeysItDoesNotTake(QQuickWindow *window);
     void checkLibraryContextMenuNamesWhatItActsOn(MainWindowFixture &main);
     void checkMenusAreWindowsOfTheirOwn(QQuickWindow *window);
@@ -700,7 +700,7 @@ void UiMenusTest::queueAndPlaybackItemsActOnTheBackend() {
     QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     runInTurn({[&] { checkRepeatRadiosFollowTheBackendAndSetIt(window); },
-               [&] { checkEditMenuNamesItsUndoAndClearsTheQueue(window); },
+               [&] { checkEditMenuNamesItsUndoAndRedoAndClearsTheQueue(window); },
                [&] { checkQueueContextMenuShowsKeysItDoesNotTake(window); },
                [&] { checkContextMenuOpensAtThePointer(window); },
                [&] { checkLibraryContextMenuNamesWhatItActsOn(main); },
@@ -1195,10 +1195,10 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  QStringLiteral("sep"),
                  QStringLiteral("item|Quit|%1|application-exit").arg(standardKey(QKeySequence::Quit)),
              }));
-    // No Redo: the queue's undo has none yet.
     QCOMPARE(rowsOf(menuNamed(window, "editMenu")),
              (QStringList{
                  QStringLiteral("item|Undo|%1|edit-undo").arg(standardKey(QKeySequence::Undo)),
+                 QStringLiteral("item|Redo|%1|edit-redo").arg(standardKey(QKeySequence::Redo)),
                  QStringLiteral("sep"),
                  QStringLiteral("item|Find…|%1|edit-find").arg(standardKey(QKeySequence::Find)),
                  QStringLiteral("sep"),
@@ -1633,14 +1633,16 @@ void UiMenusTest::checkLevelMeterIsPartOfThePlot(QQuickWindow *window) {
     QCOMPARE(LevelMeterItem::meterPosition(-6.0, scaleHeight), 0.8 * scaleHeight);
 }
 
-void UiMenusTest::checkEditMenuNamesItsUndoAndClearsTheQueue(QQuickWindow *window) {
+void UiMenusTest::checkEditMenuNamesItsUndoAndRedoAndClearsTheQueue(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QObject *editMenu = menuNamed(window, "editMenu");
     QQuickItem *undo = menuItems(editMenu).value(0);
+    QQuickItem *redo = menuItems(editMenu).value(1);
     QQuickItem *clear = menuItemWithText(editMenu, QStringLiteral("Clear Queue"));
-    QVERIFY(undo != nullptr && clear != nullptr);
+    QVERIFY(undo != nullptr && redo != nullptr && clear != nullptr);
 
     QVERIFY(!undo->isEnabled());
+    QVERIFY(!redo->isEnabled());
     QVERIFY(!clear->isEnabled());
     bridge->setProperty("queueUndoId", 7.0);
     const QStringList names{QStringLiteral("Undo Clear Queue"), QStringLiteral("Undo Remove from Queue"),
@@ -1652,6 +1654,23 @@ void UiMenusTest::checkEditMenuNamesItsUndoAndClearsTheQueue(QQuickWindow *windo
     QVERIFY(undo->isEnabled());
     QMetaObject::invokeMethod(qvariant_cast<QObject *>(undo->property("action")), "trigger");
     QTRY_VERIFY(bridge->property("queueCommands").toStringList().contains(QStringLiteral("undo 7")));
+
+    // Redo is named as Undo is, and only while the backend offers one.
+    QCOMPARE(withoutMnemonic(redo->property("text").toString()), QStringLiteral("Redo"));
+    QVERIFY(!redo->isEnabled());
+    bridge->setProperty("queueRedoId", 8.0);
+    const QStringList redoNames{QStringLiteral("Redo Clear Queue"), QStringLiteral("Redo Remove from Queue"),
+                                QStringLiteral("Redo Replace Queue"), QStringLiteral("Redo Move in Queue")};
+    for (qsizetype kind = 1; kind <= redoNames.size(); ++kind) {
+        bridge->setProperty("queueRedoKind", static_cast<int>(kind));
+        QTRY_COMPARE(withoutMnemonic(redo->property("text").toString()), redoNames.at(kind - 1));
+    }
+    QVERIFY(redo->isEnabled());
+    QMetaObject::invokeMethod(qvariant_cast<QObject *>(redo->property("action")), "trigger");
+    QTRY_VERIFY(bridge->property("queueCommands").toStringList().contains(QStringLiteral("redo 8")));
+    bridge->setProperty("queueRedoId", 0.0);
+    bridge->setProperty("queueRedoKind", 0);
+    QTRY_VERIFY(!redo->isEnabled());
 
     bridge->setProperty("queueRows", sampleQueueRows(2));
     bridge->setProperty("queueLength", 2);
@@ -1682,12 +1701,14 @@ void UiMenusTest::checkFindOpensSearchOnCtrlF(QQuickWindow *window) {
 
 // Each binding of an action's standard key triggers it, not only the first
 // (#581): Open's Ctrl+O and Open key, Undo's Ctrl+Z, Alt+Backspace and Undo
-// key, and Find's Ctrl+F and Find key. The first is the action's shortcut,
-// which its menu item shows.
+// key, Redo's, and Find's Ctrl+F and Find key. The first is the action's
+// shortcut, which its menu item shows.
 void UiMenusTest::checkStandardKeysTriggerTheirActionsByEveryBinding(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     bridge->setProperty("queueUndoId", 3.0);
     bridge->setProperty("queueUndoKind", 2);
+    bridge->setProperty("queueRedoId", 4.0);
+    bridge->setProperty("queueRedoKind", 2);
     QObject *search = child(window, "globalSearchController");
     QObject *fileDialog = child(window, "externalFileDialog");
     QVERIFY(search != nullptr && fileDialog != nullptr);
@@ -1706,6 +1727,7 @@ void UiMenusTest::checkStandardKeysTriggerTheirActionsByEveryBinding(QQuickWindo
              QTRY_VERIFY(!fileDialog->property("visible").toBool());
          }},
         {"undoQueueChangeAction", QKeySequence::Undo, [] {}},
+        {"redoQueueChangeAction", QKeySequence::Redo, [] {}},
         {"findAction", QKeySequence::Find,
          [&] {
              QTRY_VERIFY(search->property("dialogVisible").toBool());
@@ -1764,9 +1786,9 @@ void UiMenusTest::checkShortcutsAreTakenOnceEach(QQuickWindow *window) {
             owners.insert(key, name);
         }
     }
-    // Nothing takes Redo's keys until there is a redo.
+    // Redo's keys are Redo's.
     for (const QKeySequence &redo : QKeySequence::keyBindings(QKeySequence::Redo)) {
-        QVERIFY2(!owners.contains(redo.toString()), qPrintable(redo.toString()));
+        QCOMPARE(owners.value(redo.toString()), QStringLiteral("Redo"));
     }
     // KDE's own: Ctrl+M shows the menu bar.
     QVERIFY(!owners.contains(QStringLiteral("Ctrl+M")));
@@ -1784,6 +1806,8 @@ void UiMenusTest::checkShortcutsTriggerTheirActions(QQuickWindow *window) {
     bridge->setProperty("queueLength", 3);
     bridge->setProperty("queueUndoId", 3.0);
     bridge->setProperty("queueUndoKind", 2);
+    bridge->setProperty("queueRedoId", 4.0);
+    bridge->setProperty("queueRedoKind", 2);
 
     struct Press {
         const char *action;
@@ -1799,6 +1823,7 @@ void UiMenusTest::checkShortcutsTriggerTheirActions(QQuickWindow *window) {
         {"volumeDownAction", Qt::Key_Down, Qt::AltModifier},
         {"muteAction", Qt::Key_M, Qt::ControlModifier | Qt::ShiftModifier},
         {"undoQueueChangeAction", Qt::Key_Z, Qt::ControlModifier},
+        {"redoQueueChangeAction", Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier},
         {"waveformModeAction", Qt::Key_2, Qt::ControlModifier},
         {"spectrogramModeAction", Qt::Key_1, Qt::ControlModifier},
         {"selectNextTrackAction", Qt::Key_Down, Qt::ControlModifier},

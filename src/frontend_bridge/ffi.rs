@@ -2300,6 +2300,12 @@ fn parse_queue_command(
         reader.expect_done()?;
         return Ok(Some(BridgeCommand::Queue(BridgeQueueCommand::Undo(id))));
     }
+    if cmd_id == 79 {
+        // The u64 ID of the change to redo, from the queue undo section.
+        let id = reader.read_u64()?;
+        reader.expect_done()?;
+        return Ok(Some(BridgeCommand::Queue(BridgeQueueCommand::Redo(id))));
+    }
     if !matches!(cmd_id, 8 | 9 | 10 | 11 | 63 | 70) {
         return Ok(None);
     }
@@ -2764,14 +2770,19 @@ fn snapshot_sections(
     sections
 }
 
+/// The queue undo section: the undo's offer ID and kind, the redo's, the
+/// restored rows' change ID and revision, and their ranges.
+/// `decodeQueueUndoSection` in `ui/src/BinaryBridgeCodec.cpp` reads it.
 fn encode_queue_undo_section(undo: &QueueUndoState) -> Vec<u8> {
     let ranges = undo
         .restored
         .as_ref()
         .map_or(&[][..], |restored| restored.ranges.as_slice());
-    let mut out = Vec::with_capacity(29 + 8 * ranges.len());
+    let mut out = Vec::with_capacity(38 + 8 * ranges.len());
     push_u64(&mut out, undo.offer_id);
     push_u8(&mut out, undo.kind.map_or(0, |kind| kind as u8));
+    push_u64(&mut out, undo.redo_id);
+    push_u8(&mut out, undo.redo_kind.map_or(0, |kind| kind as u8));
     push_u64(
         &mut out,
         undo.restored.as_ref().map_or(0, |restored| restored.id),
@@ -7249,6 +7260,8 @@ mod tests {
         let state = QueueUndoState {
             offer_id: 7,
             kind: Some(super::super::QueueUndoKind::Removed),
+            redo_id: 6,
+            redo_kind: Some(super::super::QueueUndoKind::Moved),
             restored: Some(super::super::QueueUndoRestored {
                 id: 5,
                 revision: 9,
@@ -7258,6 +7271,8 @@ mod tests {
         let mut expected = Vec::new();
         expected.extend_from_slice(&7_u64.to_le_bytes());
         expected.push(2);
+        expected.extend_from_slice(&6_u64.to_le_bytes());
+        expected.push(4);
         expected.extend_from_slice(&5_u64.to_le_bytes());
         expected.extend_from_slice(&9_u64.to_le_bytes());
         expected.extend_from_slice(&2_u32.to_le_bytes());
@@ -7267,13 +7282,18 @@ mod tests {
         assert_eq!(encode_queue_undo_section(&state), expected);
         assert_eq!(
             encode_queue_undo_section(&QueueUndoState::default()),
-            [0_u8; 29].to_vec()
+            [0_u8; 38].to_vec()
         );
         assert!(matches!(
             parse_binary_command(&encode_command(68, &7_u64.to_le_bytes())),
             Ok(Some(BridgeCommand::Queue(BridgeQueueCommand::Undo(7))))
         ));
         assert!(parse_binary_command(&encode_command(68, &[1, 2, 3])).is_err());
+        assert!(matches!(
+            parse_binary_command(&encode_command(79, &6_u64.to_le_bytes())),
+            Ok(Some(BridgeCommand::Queue(BridgeQueueCommand::Redo(6))))
+        ));
+        assert!(parse_binary_command(&encode_command(79, &[1, 2, 3])).is_err());
     }
 
     #[test]
@@ -7284,9 +7304,12 @@ mod tests {
             let state = QueueUndoState {
                 offer_id: 7,
                 kind: Some(kind),
+                redo_id: 8,
+                redo_kind: Some(kind),
                 ..QueueUndoState::default()
             };
-            assert_eq!(encode_queue_undo_section(&state)[8], value, "{kind:?}");
+            let section = encode_queue_undo_section(&state);
+            assert_eq!((section[8], section[17]), (value, value), "{kind:?}");
         }
     }
 
@@ -7295,6 +7318,8 @@ mod tests {
     struct TestQueueUndo {
         offer_id: u64,
         kind: u8,
+        redo_id: u64,
+        redo_kind: u8,
         restored_id: u64,
         restored_revision: u64,
         ranges: Vec<(u32, u32)>,
@@ -7307,6 +7332,9 @@ mod tests {
             ..TestQueueUndo::default()
         };
         decoded.kind = section[offset];
+        offset += 1;
+        decoded.redo_id = read_u64(section, &mut offset);
+        decoded.redo_kind = section[offset];
         offset += 1;
         decoded.restored_id = read_u64(section, &mut offset);
         decoded.restored_revision = read_u64(section, &mut offset);
@@ -7365,7 +7393,8 @@ mod tests {
     }
 
     #[test]
-    fn a_cleared_queue_comes_back_through_the_protocol_and_a_stale_undo_is_refused() {
+    fn a_cleared_queue_comes_back_and_goes_again_through_the_protocol_and_stale_offers_are_refused()
+    {
         let dir = std::env::temp_dir().join(format!("ferrous-ffi-undo-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("fixture dir");
         let tracks: Vec<String> = ["a", "b", "c"]
@@ -7424,6 +7453,31 @@ mod tests {
             )]
         );
         assert_eq!(ui.queue.paths, tracks);
+
+        // The undo left the clear to redo.
+        assert_eq!(ui.undo.redo_kind, 1);
+        let redo = ui.undo.redo_id;
+        assert!(redo != 0 && redo != id);
+        assert!(ffi_send_binary(
+            handle,
+            &encode_command(79, &redo.to_le_bytes())
+        ));
+        ui.wait(handle, "the redone clear", |ui| {
+            ui.queue.paths.is_empty() && ui.undo.offer_id != 0
+        });
+        assert_eq!((ui.undo.kind, ui.undo.redo_id), (1, 0));
+
+        // The same redo again is stale: the redo changed the queue.
+        assert!(ffi_send_binary(
+            handle,
+            &encode_command(79, &redo.to_le_bytes())
+        ));
+        ui.wait(handle, "the refusal of the redo", |ui| ui.errors.len() == 2);
+        assert_eq!(
+            ui.errors[1],
+            format!("1 0 {}", super::super::queue_undo::STALE_REDO_MESSAGE)
+        );
+        assert!(ui.queue.paths.is_empty());
 
         // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
         unsafe { ferrous_ffi_bridge_destroy(handle) };

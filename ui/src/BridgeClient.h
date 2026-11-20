@@ -64,6 +64,10 @@ class BridgeClient : public QObject {
     // which names it in the Edit menu.
     Q_PROPERTY(double queueUndoId READ queueUndoId NOTIFY queueUndoChanged)
     Q_PROPERTY(int queueUndoKind READ queueUndoKind NOTIFY queueUndoChanged)
+    // The undone queue change the user can redo, as queueUndoId and
+    // queueUndoKind name the change to undo.
+    Q_PROPERTY(double queueRedoId READ queueRedoId NOTIFY queueUndoChanged)
+    Q_PROPERTY(int queueRedoKind READ queueRedoKind NOTIFY queueUndoChanged)
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY trackIdentityChanged)
     Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY trackIdentityChanged)
     // Changes whenever a play starts: on every track change, also when the
@@ -261,6 +265,8 @@ public:
     int queueLength() const;
     double queueUndoId() const;
     int queueUndoKind() const;
+    double queueRedoId() const;
+    int queueRedoKind() const;
     QString queueDurationText() const;
     QObject *queueRows() const;
     int selectedQueueIndex() const;
@@ -474,6 +480,9 @@ public:
     // Undo the change of queueUndoId. The backend refuses, with an error,
     // one that a newer change has withdrawn.
     Q_INVOKABLE void undoQueueChange();
+    // Redo the change of queueRedoId. The backend refuses, with an error,
+    // one that a newer change has withdrawn.
+    Q_INVOKABLE void redoQueueChange();
     Q_INVOKABLE void replaceAlbumAt(int index);
     Q_INVOKABLE void appendAlbumAt(int index);
     Q_INVOKABLE void playTrack(const QString &path);
@@ -599,8 +608,9 @@ signals:
     // and ErrorSeverity, and the file or folder it is about, or empty.
     void bridgeError(const QString &message, int category, int severity, const QString &subject);
     void queueUndoChanged();
-    // An undo brought back these rows, which the queue view selects; they
-    // are rows of the queue as it is when this is emitted.
+    // An undo brought back these rows, or a redo moved them here, and the
+    // queue view selects them; they are rows of the queue as it is when
+    // this is emitted.
     void queueUndoRestored(const QVariantList &rows);
     // The answer to the saveStateBeforeQuit call that returned requestId:
     // whether the settings and the queue were saved, and what to show the
@@ -930,7 +940,9 @@ private:
     bool m_queueResyncRequested{false};
     quint64 m_queueUndoId{0};
     int m_queueUndoKind{0};
-    // The undo whose restored rows were last selected.
+    quint64 m_queueRedoId{0};
+    int m_queueRedoKind{0};
+    // The undo or redo whose restored rows were last selected.
     quint64 m_queueUndoRestoredId{0};
     // The first row of each path, built when needed after the rows change.
     mutable QHash<QString, int> m_queuePathFirstIndex;

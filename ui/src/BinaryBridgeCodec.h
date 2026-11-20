@@ -170,6 +170,9 @@ enum CommandId : quint16 {
     // Where the centered spectrogram's view is, for the analysis to decode;
     // see encodeCommandSpectrogramViewAnchor.
     CmdSetSpectrogramViewAnchor = 78,
+    // Payload: the u64 redo ID of SectionQueueUndo. The backend refuses,
+    // with an error, an ID it no longer offers.
+    CmdRedoQueueChange = 79,
 };
 
 // The narrowest and widest queue column the backend keeps, in logical
@@ -510,8 +513,12 @@ struct DecodedQueueUndo {
     // 0 when there is nothing to undo.
     quint64 offerId{0};
     int kind{QueueUndoNone};
-    // The offer the latest undo restored, 0 for none; the queue revision it
-    // left; and the rows it brought back, as ascending (start, count) pairs.
+    // The undone change the user can redo, 0 for none, and its kind.
+    quint64 redoId{0};
+    int redoKind{QueueUndoNone};
+    // The offer the latest undo restored, or the latest redo made again, 0
+    // for none; the queue revision it left; and the rows it brought back or
+    // moved, as ascending (start, count) pairs.
     quint64 restoredId{0};
     quint64 restoredRevision{0};
     QVector<QPair<int, int>> restoredRanges;
