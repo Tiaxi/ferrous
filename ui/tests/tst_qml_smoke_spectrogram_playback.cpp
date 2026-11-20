@@ -18,6 +18,7 @@ private slots:
     void spectrogramSwitchBeforeACenteredSeeksDataPlacesItsColumns_data();
     void spectrogramSwitchBeforeACenteredSeeksDataPlacesItsColumns();
     void spectrogramRollingRingInArrivalOrderIgnoresEarlierColumns();
+    void spectrogramCenteredRingIgnoresHistoryFurtherLeftThanItReaches();
     void spectrogramGaplessSuccessorAfterARollingSwitchFollowsTheHistory();
     void spectrogramLargePositionJumpWaitsForResetHandoff();
     void spectrogramCenteredSmallSeekMovesAtOnce();
@@ -445,10 +446,15 @@ void SpectrogramPlaybackSmokeTest::spectrogramCenteredToRollingFillsTheHistoryLe
 
 void SpectrogramPlaybackSmokeTest::spectrogramSwitchBeforeACenteredSeeksDataPlacesItsColumns_data() {
     QTest::addColumn<bool>("switchBeforeReset");
-    QTest::newRow("switch after the reset") << false;
+    QTest::addColumn<bool>("centeredAgainBeforeData");
+    QTest::newRow("switch after the reset") << false << false;
     // The view learns of the switch before the worker, which made the
     // reset for a centered view just before it learned of it (#625).
-    QTest::newRow("switch before the reset") << true;
+    QTest::newRow("switch before the reset") << true << false;
+    // The view becomes centered again before the data comes, after the
+    // worker began the history, which it goes on to send; the view becomes
+    // rolling once more after it came (#688).
+    QTest::newRow("centered again before the data") << false << true;
 }
 
 void SpectrogramPlaybackSmokeTest::spectrogramSwitchBeforeACenteredSeeksDataPlacesItsColumns() {
@@ -458,6 +464,7 @@ void SpectrogramPlaybackSmokeTest::spectrogramSwitchBeforeACenteredSeeksDataPlac
     // of the view and then the history before it. The view places them by
     // their column, as the reset says, not in the order they come.
     QFETCH(bool, switchBeforeReset);
+    QFETCH(bool, centeredAgainBeforeData);
     QQuickWindow window;
     window.resize(400, 100);
     window.show();
@@ -496,6 +503,9 @@ void SpectrogramPlaybackSmokeTest::spectrogramSwitchBeforeACenteredSeeksDataPlac
         sampleRate, hop, false, true, token, false, 2, 0, 0, 0, 0, /*placedByColumn=*/true);
     setTestPosition(item, (playhead + 0.5) / columnsPerSecond, token);
     item.setDisplayMode(0);
+    if (centeredAgainBeforeData) {
+        item.setDisplayMode(1);
+    }
 
     feed(playhead, decodedEnd - playhead, '\x50', 2);
     feed(sessionStart, playhead - sessionStart, '\x50', 2);
@@ -508,6 +518,9 @@ void SpectrogramPlaybackSmokeTest::spectrogramSwitchBeforeACenteredSeeksDataPlac
     QVERIFY2(historyStart < sessionStart, qPrintable(QString::number(viewColumns)));
     for (int first = historyStart; first < sessionStart; first += 64) {
         feed(first, std::min(64, sessionStart - first), '\x70', 2);
+    }
+    if (centeredAgainBeforeData) {
+        item.setDisplayMode(0);
     }
     node = paintSettled(item, node);
     QCOMPARE(rollingFloorPixels(item, 400), 0);
@@ -543,6 +556,38 @@ void SpectrogramPlaybackSmokeTest::spectrogramRollingRingInArrivalOrderIgnoresEa
     QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(100));
     const int newest = static_cast<int>((item.m_ringWriteSeq - 1) % item.m_ringCapacity);
     QCOMPARE(item.m_ringColumnId[static_cast<size_t>(newest)], 499);
+}
+
+void SpectrogramPlaybackSmokeTest::spectrogramCenteredRingIgnoresHistoryFurtherLeftThanItReaches() {
+    // A centered view's ring, full of its session's columns, has no room
+    // for the history the worker goes on to send after the view was
+    // rolling for a moment (#688): it must not be drawn as the newest.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDisplayMode(1);
+    constexpr int bins = 8;
+    constexpr int start = 20'000;
+    constexpr quint64 token = 5;
+    const auto feed = [&item](int first, int count, char value, bool reset) {
+        item.feedPrecomputedChunk(QByteArray(count * bins, value), bins, 0, count, first,
+            100'000, 48'000, 1'024, false, reset, token, reset, 1);
+    };
+    feed(start, 0, '\0', true);
+    feed(start, 1, '\x40', false);
+    int capacity = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        capacity = item.m_ringCapacity;
+    }
+    QVERIFY(capacity > 0 && capacity + 100 < start);
+    feed(start + 1, capacity + 99, '\x40', false);
+    feed(start - 64, 64, '\x60', false);
+    QMutexLocker lock(&item.m_stateMutex);
+    QCOMPARE(item.m_ringWriteSeq, static_cast<qint64>(capacity + 100));
+    const int newest = static_cast<int>((item.m_ringWriteSeq - 1) % item.m_ringCapacity);
+    QCOMPARE(item.m_ringColumnId[static_cast<size_t>(newest)], start + capacity + 99);
+    QCOMPARE(item.ringSlotForDisplayIndexLocked(start - 1, false), -1);
 }
 
 void SpectrogramPlaybackSmokeTest::spectrogramGaplessSuccessorAfterARollingSwitchFollowsTheHistory() {
