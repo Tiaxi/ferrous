@@ -926,7 +926,7 @@ def redact_round(rd, entries):
         if not os.path.exists(os.path.join(d, "frames.tsv")):
             continue
         meta = json.load(open(os.path.join(d, "meta.json"))) if os.path.exists(os.path.join(d, "meta.json")) else {}
-        ox, oy = (meta.get("crop") or [0, 0])[:2]  # (device px; the trace's rects are logical)
+        ox, oy = (meta.get("crop") or [0, 0])[:2]  # (logical px, as the trace's rects; the frames are device px)
         s = float(meta.get("scale", 1) or 1)
         tracks, _ = motion_strip.read_trace(d, 0.0)
         priv = [tr for k, tr in tracks.items() if k.split("/")[-1].split("#")[0] in names and tr["pts"]]
@@ -942,7 +942,7 @@ def redact_round(rd, entries):
                 i = max([k for k, (tt, _v) in enumerate(tr["pts"]) if tt <= t] or [0])
                 if tr["pts"][i][1] > 0.02:
                     x, y, w, h = tr["rects"][i]
-                    boxes.append([x * s - ox, y * s - oy, w * s, h * s])
+                    boxes.append([(x - ox) * s, (y - oy) * s, w * s, h * s])
             if not boxes or not os.path.exists(fp):
                 continue
             im = Image.open(fp).convert("RGB")

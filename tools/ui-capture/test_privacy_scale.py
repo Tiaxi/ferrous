@@ -107,7 +107,8 @@ class PrivacyAtScale2(unittest.TestCase):
         self.assert_painted("main1.png", [(20, 10, 40, 8)], [e])
 
     def test_a_recorded_frame(self):
-        # a recording of the window cropped at (20, 10) device px; the item at (20, 10) logical px, 40x8
+        # a recording of the window cropped at (10, 5) logical px (as Session.strip records its crop; the probe reads
+        # the frame at (20, 10) device px); the item at (20, 10) logical px, 40x8
         d = os.path.join(self.rd, "strips-raw", "rec_dark_2x")
         os.makedirs(d)
         im = Image.new("RGB", (160, 80), GREY)
@@ -118,7 +119,7 @@ class PrivacyAtScale2(unittest.TestCase):
         with open(os.path.join(d, "opacity.tsv"), "w") as f:
             f.write("#t0\t0\nwin/folderRow#1\t1\t20,10,40,8\t0:1\t-\n")
         with open(os.path.join(d, "meta.json"), "w") as f:
-            json.dump(dict(name="rec", crop=[20, 10, 160, 80], scale=2, neutral=True), f)
+            json.dump(dict(name="rec", crop=[10, 5, 80, 40], scale=2, neutral=True), f)
         e = self.shot("main.png", (200, 120), [(40, 20, 80, 16)],
                       [dict(cls="QQuickApplicationWindow", main=True, size=[100, 60], texts=[home_text([20, 10, 40, 8])])],
                       dict(kind="main", name="", image_offset=[0, 0]))
