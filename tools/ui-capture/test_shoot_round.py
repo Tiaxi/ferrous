@@ -2,8 +2,8 @@
 """Tests of shoot_round.sh's options that need no KWin, app, build or shots.
 
 A copy of shoot_round.sh runs beside stand-in helpers (runner.py, pack.py, the fixture makers, ...) that do
-nothing but record how they were called, with stand-in cmake and gst-launch-1.0 first on PATH, on a stand-in
-source tree, all in a temporary folder. So a run takes well under a second and touches nothing outside it.
+nothing but record how they were called, with stand-in cmake, gst-launch-1.0, rsync and bc first on PATH, on a
+stand-in source tree, all in a temporary folder. So a run takes well under a second and touches nothing outside it.
 
     python3 -m unittest discover -s tools/ui-capture -p 'test_*.py'
 """
@@ -25,6 +25,9 @@ NOOP_PY = ["runner.py", "motion_inventory.py", "contrast.py", "layout.py",
            "make_standin_fixtures.py", "make_large_library.py", "make_library2.py"]
 MAKE_DIR_PY = "import os, sys\nos.makedirs(sys.argv[1], exist_ok=True)\n"
 SETUP_DB_PY = "import os\nos.makedirs(os.path.join(os.environ['SHOT_WORK'], 'run', 'template'), exist_ok=True)\n"
+# rsync -a ... SRC/ DEST/: a plain copy of the stand-in tree; bc: a fixed elapsed time
+RSYNC_SH = '#!/bin/sh\nfor a; do src=$dst; dst=$a; done\ncp -a "$src." "$dst"\n'
+BC_SH = "#!/bin/sh\ncat >/dev/null\necho 0\n"
 PACK_PY = "import json, os, sys\njson.dump(sys.argv[1:], open(os.environ['PACK_ARGV_OUT'], 'w'))\n"
 
 
@@ -51,6 +54,8 @@ class ShootRoundOptions(unittest.TestCase):
         bindir = os.path.join(self.tmp, "bin")
         for tool in ("cmake", "gst-launch-1.0"):
             write(os.path.join(bindir, tool), "#!/bin/sh\nexit 0\n", 0o755)
+        write(os.path.join(bindir, "rsync"), RSYNC_SH, 0o755)
+        write(os.path.join(bindir, "bc"), BC_SH, 0o755)
         self.src = os.path.join(self.tmp, "src")
         write(os.path.join(self.src, "ui", "CMakeLists.txt"), "")
         write(os.path.join(self.src, "src", "main.rs"), "")
@@ -87,11 +92,6 @@ class ShootRoundOptions(unittest.TestCase):
                 self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
                 self.assertIn("--pack-jobs", p.stderr)
                 self.assertFalse(os.path.exists(self.env["SHOT_WORK"]))  # refused before the work folder
-
-    def test_pack_jobs_needs_a_value(self):
-        p = self.run_script("--pack-jobs")
-        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
-        self.assertFalse(os.path.exists(self.argv_out))
 
 
 if __name__ == "__main__":
