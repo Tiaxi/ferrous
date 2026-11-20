@@ -3,6 +3,7 @@
 #
 #   shoot_round.sh <round> [<source-dir>] [--out DIR] [--only AREA[,AREA...]] [--themes dark,light]
 #                  [--sessions S1,S2] [--workers N]   (parallel isolated app sessions; default 4, at most 4)
+#                  [--pack-jobs N]   (pack.py's worker processes; default pack.py's own, 2 to 8 by the CPUs)
 #                  [--focus SCOPE | --focus-only SCOPE]   (<round>/focus/: the small pack for one scope of
 #                  focus.py; --focus-only shoots just the scope's sessions, for iteration)
 #
@@ -24,7 +25,7 @@
 # sheets and INDEX.md. See README.md.
 set -euo pipefail
 
-usage() { sed -n '2,24p' "$0"; exit 2; }
+usage() { sed -n '2,25p' "$0"; exit 2; }
 [ $# -ge 1 ] || usage
 case $1 in -h|--help|-*) usage ;; esac
 H=$(dirname "$(realpath "$0")")
@@ -46,6 +47,7 @@ PARTIAL=""
 FOCUS_ONLY=""
 WORKERS=4
 RUNNER_ARGS=()
+PACK_ARGS=()
 while [ $# -gt 0 ]; do
     [ $# -ge 2 ] || { echo "option $1 needs a value" >&2; exit 2; }
     case $1 in
@@ -53,6 +55,10 @@ while [ $# -gt 0 ]; do
         --only) ONLY=$2; PARTIAL=1; RUNNER_ARGS+=(--only "$2"); shift 2 ;;
         --themes|--sessions) PARTIAL=1; RUNNER_ARGS+=("$1" "$2"); shift 2 ;;
         --workers) WORKERS=$(( $2 > 4 ? 4 : $2 )); shift 2 ;;
+        # fewer pack workers use less memory (see README.md); without it, pack.py picks its own count
+        --pack-jobs)
+            [[ $2 =~ ^[1-9][0-9]*$ ]] || { echo "--pack-jobs needs a whole number of 1 or more (got '$2')" >&2; exit 2; }
+            PACK_ARGS=(--jobs "$2"); shift 2 ;;
         # the focus pack (focus.py) after the whole pack; --focus-only also shoots only the scope's sessions
         --focus) export SHOT_FOCUS=$2; shift 2 ;;
         --focus-only) export SHOT_FOCUS=$2 SHOT_FOCUS_ONLY=1; FOCUS_ONLY=1; shift 2 ;;
@@ -239,7 +245,7 @@ CONTRAST_STATUS=0
 python3 "$H/contrast.py" "$OUT" || CONTRAST_STATUS=$?
 nice -n 10 python3 "$H/layout.py" "$OUT"
 PACK_STATUS=0
-SHOT_PARTIAL="$PARTIAL" nice -n 10 python3 "$H/pack.py" "$OUT" "$SRC" || PACK_STATUS=$?
+SHOT_PARTIAL="$PARTIAL" nice -n 10 python3 "$H/pack.py" "$OUT" "$SRC" "${PACK_ARGS[@]}" || PACK_STATUS=$?
 phase package
 # publish the focus pack of a focus-only run to <round>/focus/ (whole or not at all), when it passed
 if [ -n "$FOCUS_ONLY" ] && [ "$PACK_STATUS" -eq 0 ] && [ -d "$OUT/focus" ]; then

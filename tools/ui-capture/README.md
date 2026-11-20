@@ -84,6 +84,10 @@ While fixing one area: `--only AREA[,AREA]`, `--sessions S1,S2` or `--themes dar
 into an existing round (wiping nothing) and rebuild its sheets and `INDEX.md`. `--workers N` sets the parallel
 sessions (at most 4).
 
+`--pack-jobs N` sets the worker processes of `pack.py` (default: half the CPU threads, from 2 to 8). Memory grows
+with them: at 8 workers a full pack took about 6.6 GB; at 3 it finished in about 4 minutes with no process above
+130 MB resident. Beside a build, use `--pack-jobs 3`.
+
 The exit status is not 0 when a state failed (`failures.txt`, 4), a check in the pack failed (a dialog shot not
 of its dialog, a missing core image, an image over its size, a home-folder path left in a shot, an image the
 privacy check cannot verify: 3), or `CONTRAST.md` is incomplete (5).
