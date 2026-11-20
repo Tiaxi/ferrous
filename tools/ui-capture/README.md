@@ -181,7 +181,7 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
   state, and an index entry with neither sources nor the marker fails the check;
 - for a recording, its item trace, and the neutral paths: the trace records where items are, not their text, so
   frames recorded with `SHOT_NEUTRAL=0` cannot be checked. A run at the real paths therefore fails the check
-  whenever it records a transition.
+  whenever it records a transition. A menu drawn into a recording's frames needs its items in the trace too.
 
 ## Known traps
 
@@ -215,8 +215,11 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
   use it). After that the probe sends a key to the open menu's window, and a pointer event to the menu window
   under it, as KWin would.
 - **A main-window grab draws in its open menus**, each at its place, and grows right and down for a menu that
-  reaches past the window, mid grey there. The menus' KWin shadows are not in it. A recorded strip has only the main
-  window's frames, without the menus.
+  reaches past the window, mid grey there. The menus' KWin shadows are not in it. A main-window strip does the same
+  for every frame (`popup_frames.py`): the probe records each menu window's frames and notes where it shows, moves
+  and hides, and its item trace has the menus' items at their place in the main window, so the privacy check covers
+  them. A menu is cut at the strip's crop; without one the frames grow for it. A `win=` strip records its window
+  alone.
 - **Scale 2 is KWin's output scale**, as on Plasma: the driver writes the session's `kwinoutputconfig.json` (KWin's
   `--scale` alone sizes the virtual output but leaves its scale at 1), and the app gets no Qt scale variable. With
   `QT_SCALE_FACTOR` instead, QtWayland would open a menu window at half its offset from the window (#665). KWin's
@@ -236,6 +239,7 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
 | `runner.py` | runs the state table in parallel workers; its docstring lists the step syntax |
 | `states.py` | the state table, sessions, macros, sheets, the core set and the checks a state must pass |
 | `focus.py` | the focus scopes: sessions, sheets and images with what to look at |
+| `popup_frames.py` | draws a main-window strip's menus into its frames |
 | `layout.py`, `contrast.py`, `motion_strip.py`, `motion_inventory.py` | the analysers |
 | `pack.py` | sheets, strips, privacy painting, `INDEX.md`, `CORE-FACTS.md`, the focus pack |
 | `setup_db_round.py` | scans the fixture library into the template DB |
