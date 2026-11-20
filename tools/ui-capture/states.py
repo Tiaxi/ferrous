@@ -1746,19 +1746,21 @@ def private_sidecar(r, file):
     windows the image shows, as boxes in the image for pack.py to paint over (shots/FILE.redact.json): PRIVATE_ITEMS
     whole (the diagnostics log's body); in a text edit (TextArea: Tag Editor Details' save errors) the exact boxes of
     the home-folder characters, line by line (positionToRectangle), its name listed as `precise`; any other item whose
-    text names it (a label, a tooltip, which the layout's 60 recorded characters can miss) whole. Windows: a dialog
-    capture's own window at its image offset and an outer dialog window of a nested capture at the capture's origin
-    below its title bar; a viewer window's or the main window's shot at 0, 0."""
+    text names it (a label, a tooltip, which the layout's 60 recorded characters can miss) whole. The windows answer
+    in logical px, scaled to the image's device px (#666). Windows: a dialog capture's own window at its image offset
+    and an outer dialog window of a nested capture at the capture's origin below its title bar (28 logical px); a
+    viewer window's or the main window's shot at 0, 0."""
     e = next((x for x in reversed(r.s.index) if x["file"] == file + ".png"), None)
     if not e:
         return
     g = e.get("grabbed") or {}
     home = os.path.expanduser("~")
+    sc = r.s.scale
     targets = []  # (how to evaluate, root expression, offset)
     if g.get("kind") == "dialog":
         dws = r.s.dialog_windows()
         for k, dw in enumerate(dws):
-            off = g.get("image_offset", [0, 0]) if dw["cls"] == g.get("cls") else ((0, 28) if k == len(dws) - 1 else None)
+            off = g.get("image_offset", [0, 0]) if dw["cls"] == g.get("cls") else ((0, 28 * sc) if k == len(dws) - 1 else None)
             if off is not None:
                 targets.append((dw["cls"], "(function(){var x=contentItem;while(x.parent)x=x.parent;return x})()", off))
     elif g.get("kind") == "window" and g.get("name"):
@@ -1790,7 +1792,7 @@ def private_sidecar(r, file):
             got = json.loads(got) if isinstance(got, str) else got
         except (TypeError, ValueError):
             raise RuntimeError(f"private_sidecar {file}: the window {win or 'main'} did not answer ({str(rr)[:80]})")
-        boxes += [[x_ + off[0], y_ + off[1], w_, h_] for x_, y_, w_, h_ in got["boxes"]]
+        boxes += [[x_ * sc + off[0], y_ * sc + off[1], w_ * sc, h_ * sc] for x_, y_, w_, h_ in got["boxes"]]
         precise += got["precise"]
     if boxes:
         with open(os.path.join(os.environ["SHOT_OUT"], file + ".redact.json"), "w") as f:
