@@ -486,6 +486,9 @@ public:
     // with `fftSize`, where a session at another zoom ends. `endColumn` is
     // the column after the session's last, which the decoder's centered
     // views end at (0 if unknown): the centered view ends there too.
+    // `placedByColumn`, on a reset, says the session's columns go where
+    // their column puts them, as the worker's view was centered when it
+    // made the reset, whatever this view's mode is when it arrives.
     Q_INVOKABLE void feedPrecomputedChunk(
         const QByteArray &data, int bins, int channelIndex,
         int columns, int startIndex, int totalEstimate,
@@ -496,7 +499,8 @@ public:
         int sessionWidth = 0,
         int fftSize = 0,
         quint64 trackFrames = 0,
-        int endColumn = 0);
+        int endColumn = 0,
+        bool placedByColumn = false);
     Q_INVOKABLE void clearPrecomputed();
 
     Q_INVOKABLE void reset();

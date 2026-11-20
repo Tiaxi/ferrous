@@ -24,8 +24,8 @@ use super::{
     RowsMove, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
-    AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramStops,
-    SpectrogramViewMode,
+    AnalysisEvent, ColumnPlacement, PrecomputedSpectrogramChunk, SpectrogramDisplayMode,
+    SpectrogramStops, SpectrogramViewMode,
 };
 use crate::library::{track_file_fingerprint, TrackRefresh};
 use crate::panic_guard;
@@ -3541,10 +3541,11 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
 /// [49..53] u32  fft_size (a bin is sample_rate_hz / fft_size Hz; 0 = unknown)
 /// [53..61] u64  track_frames (the file's, for its sessions' ends; 0 = unknown)
 /// [61..65] u32  end_column (where the session's centered view ends; 0 = unknown)
-/// [65..]   column_data (column_count × channel_count × bins_per_column bytes)
+/// [65]     u8   column_placement (on a reset: 0 = in order, 1 = by column)
+/// [66..]   column_data (column_count × channel_count × bins_per_column bytes)
 /// ```
 fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> Vec<u8> {
-    let header_len = 65;
+    let header_len = 66;
     let data_len = chunk.columns_u8.len();
     let total_len = header_len + data_len;
 
@@ -3569,6 +3570,9 @@ fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> 
     out.extend_from_slice(&chunk.fft_size.to_le_bytes());
     out.extend_from_slice(&chunk.track_frames.to_le_bytes());
     out.extend_from_slice(&chunk.end_column.to_le_bytes());
+    out.push(u8::from(
+        chunk.column_placement == ColumnPlacement::ByColumn,
+    ));
     out.extend_from_slice(&chunk.columns_u8);
     out
 }
@@ -6142,6 +6146,8 @@ mod tests {
             complete: false,
             buffer_reset: true,
             clear_history: true,
+            // A centered session's reset: its columns go by their column.
+            column_placement: ColumnPlacement::ByColumn,
             widget_width: 3_440,
             // More than 32 bits.
             track_frames: 5_000_000_000,
@@ -6150,7 +6156,7 @@ mod tests {
 
         let frame = encode_precomputed_spectrogram_chunk(&chunk);
         let payload_len = u32::from_le_bytes(frame[0..4].try_into().expect("length prefix"));
-        assert_eq!(payload_len, 65 + 4);
+        assert_eq!(payload_len, 66 + 4);
 
         let mut offset = 4usize;
         assert_eq!(frame[offset], PRECOMPUTED_SPECTROGRAM_MAGIC);
@@ -6174,7 +6180,15 @@ mod tests {
         assert_eq!(read_u32(&frame, &mut offset), 8_192);
         assert_eq!(read_u64(&frame, &mut offset), 5_000_000_000);
         assert_eq!(read_u32(&frame, &mut offset), 1_868);
-        assert_eq!(offset, 4 + 65);
+        assert_eq!(frame[offset], 1);
+        offset += 1;
+        assert_eq!(offset, 4 + 66);
+        // A session whose columns go in the order they come says so.
+        let in_order = encode_precomputed_spectrogram_chunk(&PrecomputedSpectrogramChunk {
+            column_placement: ColumnPlacement::InOrder,
+            ..chunk.clone()
+        });
+        assert_eq!(in_order[4 + 65], 0);
         assert_eq!(&frame[offset..], chunk.columns_u8.as_slice());
     }
 
@@ -6198,6 +6212,7 @@ mod tests {
             complete: false,
             buffer_reset: start_column_index == 0,
             clear_history: start_column_index == 0,
+            column_placement: ColumnPlacement::InOrder,
             widget_width: 0,
             track_frames: 0,
             end_column: 0,
@@ -6244,6 +6259,7 @@ mod tests {
             complete: false,
             buffer_reset: start == 0,
             clear_history: start == 0,
+            column_placement: ColumnPlacement::InOrder,
             widget_width: 0,
             track_frames: 0,
             end_column: 0,

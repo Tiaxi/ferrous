@@ -102,8 +102,9 @@ QByteArray makePrecomputedFrame(
     const quint32 sampleRate = 48000,
     const quint32 fftSize = 0,
     const quint64 trackFrames = 0,
-    const quint32 endColumn = 0) {
-    constexpr int headerLen = 69;
+    const quint32 endColumn = 0,
+    const bool placedByColumn = false) {
+    constexpr int headerLen = 70;
     QByteArray raw(headerLen + bins * channelCount * columns, '\0');
     auto *d = reinterpret_cast<quint8 *>(raw.data());
 
@@ -131,6 +132,7 @@ QByteArray makePrecomputedFrame(
     memcpy(d + base + 49, &fftSize, sizeof(fftSize));
     memcpy(d + base + 53, &trackFrames, sizeof(trackFrames));
     memcpy(d + base + 61, &endColumn, sizeof(endColumn));
+    d[base + 65] = placedByColumn ? 1 : 0;
 
     for (int col = 0; col < columns; ++col) {
         for (int ch = 0; ch < channelCount; ++ch) {
@@ -314,6 +316,7 @@ private slots:
     void precomputedSpectrogramChunksRouteDirectlyToRegisteredItems();
     void spectrogramPanesSizeTheirRingsForTheWidthTheSessionDecodesFor();
     void spectrogramFramesCarryTheTracksFrames();
+    void spectrogramResetFramesSayHowTheirColumnsArePlaced();
     void cappedSpectrogramFramesShrinkEachPanesRingColumns();
     void spectrogramFramesCarryHopsOfMoreThanSixteenBits();
     void delayedSpectrogramBatchesPreserveColumnsAndRejectOldGeneration();
@@ -5198,6 +5201,35 @@ void BridgeClientTest::spectrogramFramesCarryTheTracksFrames() {
     QVERIFY(client.parsePrecomputedSpectrogramFrame(unknown).valid);
     QCOMPARE(pane.m_precomputedTrackFrames, quint64(0));
     QCOMPARE(pane.m_precomputedEndColumn, 0);
+}
+
+void BridgeClientTest::spectrogramResetFramesSayHowTheirColumnsArePlaced() {
+    // A reset says whether its session's columns go where their column
+    // puts them, as the worker's view was centered when it made it; a
+    // rolling pane takes them so (#625). The Rust side's layout is tested in
+    // precomputed_spectrogram_frame_includes_generation.
+    for (const bool placedByColumn : {false, true}) {
+        BridgeClient client;
+        isolateBridgeClient(client);
+        SpectrogramItem pane;
+        pane.setWidth(1920);
+        pane.setDisplayMode(0);
+        client.registerSpectrogramItem(&pane, 0);
+        const QByteArray frame = makePrecomputedFrame(
+            4, 1, 3, 500, 20'000, 42, 1, 1920, 1'024, 48'000, 2'048, 0, 0, placedByColumn);
+        const BridgeClient::PrecomputedDispatchStats stats =
+            client.parsePrecomputedSpectrogramFrame(frame);
+        QVERIFY(stats.valid);
+        QCOMPARE(stats.placedByColumn, placedByColumn);
+        QCOMPARE(stats.dataBytes, qsizetype{12});
+        QCOMPARE(pane.m_ringColumnBase.has_value(), placedByColumn);
+        if (placedByColumn) {
+            // Counted from the session's first column, numbered a capacity
+            // on for the history a rolling view takes left of it.
+            QCOMPARE(*pane.m_ringColumnBase + pane.m_ringCapacity, qint64{500});
+        }
+        QCOMPARE(pane.m_ring.column(0)[0], static_cast<quint8>(0x11));
+    }
 }
 
 void BridgeClientTest::cappedSpectrogramFramesShrinkEachPanesRingColumns() {

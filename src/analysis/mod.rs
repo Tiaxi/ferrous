@@ -256,6 +256,20 @@ pub struct AnalysisSnapshot {
     pub track_token: u64,
 }
 
+/// How the UI's ring takes the columns of the session a reset starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColumnPlacement {
+    /// In the order they come, as a session's that started, or last
+    /// sought, in rolling mode; also on chunks other than resets.
+    #[default]
+    InOrder,
+    /// Where their column puts them, as a session's that started, or last
+    /// sought, in centered mode: it sends the columns left of its playhead
+    /// after it, and after a switch to rolling mode the history left of its
+    /// first.
+    ByColumn,
+}
+
 #[derive(Debug, Clone)]
 pub struct PrecomputedSpectrogramChunk {
     pub track_token: u64,
@@ -283,6 +297,10 @@ pub struct PrecomputedSpectrogramChunk {
     /// When true, the UI should discard previous-track history instead of
     /// preserving rolling continuity across the reset handoff.
     pub clear_history: bool,
+    /// On a reset that starts a session's columns, how the UI's ring takes
+    /// them. The worker's view, not the UI's when the reset arrives,
+    /// decides how its session sends them (#625).
+    pub column_placement: ColumnPlacement,
     /// The widget width the session decodes for, in logical pixels (0 if
     /// unknown). The UI sizes its ring for at least this width, so the ring
     /// holds the session's lookahead even in a narrower view.
@@ -2343,6 +2361,7 @@ impl AnalysisRuntimeState {
             complete: false,
             buffer_reset: true,
             clear_history: !keeps_columns,
+            column_placement: ColumnPlacement::InOrder,
             widget_width: 0,
             track_frames: 0,
             end_column: 0,
@@ -6030,6 +6049,7 @@ mod tests {
                         complete: false,
                         buffer_reset: false,
                         clear_history: false,
+                        column_placement: ColumnPlacement::InOrder,
                         widget_width: 0,
                         track_frames: 0,
                         end_column: 0,
@@ -6056,6 +6076,7 @@ mod tests {
                     complete: false,
                     buffer_reset: false,
                     clear_history: false,
+                    column_placement: ColumnPlacement::InOrder,
                     widget_width: 0,
                     track_frames: 0,
                     end_column: 0,
@@ -6096,6 +6117,7 @@ mod tests {
                 complete: false,
                 buffer_reset: false,
                 clear_history: false,
+                column_placement: ColumnPlacement::InOrder,
                 widget_width: 0,
                 track_frames: 0,
                 end_column: 0,
@@ -6896,6 +6918,7 @@ mod tests {
             complete: false,
             buffer_reset: false,
             clear_history: false,
+            column_placement: ColumnPlacement::InOrder,
             widget_width: 0,
             track_frames: 0,
             end_column: 0,

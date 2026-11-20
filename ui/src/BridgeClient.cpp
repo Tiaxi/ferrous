@@ -5035,8 +5035,9 @@ BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     // [53..57] u32  fft_size (a bin is sample_rate / fft_size Hz; 0 = unknown)
     // [57..65] u64  track_frames (the file's, for its sessions' ends; 0 = unknown)
     // [65..69] u32  end_column (where the session's centered view ends; 0 = unknown)
-    // [69..]   column_data
-    constexpr int kHeaderLen = 69;
+    // [69]     u8   column_placement (on a reset: 0 = in order, 1 = by column)
+    // [70..]   column_data
+    constexpr int kHeaderLen = 70;
     if (raw.size() < kHeaderLen) {
         return stats;
     }
@@ -5089,6 +5090,7 @@ BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     const quint64 trackFrames = readU64(base + 53);
     const int endColumn = static_cast<int>(
         std::min<quint32>(readU32(base + 61), std::numeric_limits<int>::max()));
+    const bool placedByColumn = d[base + 65] != 0;
 
     const int dataOffset = kHeaderLen;
     const qint64 expectedDataLen =
@@ -5115,6 +5117,7 @@ BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     stats.fftSize = fftSize;
     stats.trackFrames = trackFrames;
     stats.endColumn = endColumn;
+    stats.placedByColumn = placedByColumn;
     stats.dataBytes = static_cast<qsizetype>(expectedDataLen);
 
     QElapsedTimer dispatchTimer;
@@ -5182,7 +5185,8 @@ void BridgeClient::routePrecomputedSpectrogramFrame(
             stats.widgetWidth,
             stats.fftSize,
             stats.trackFrames,
-            stats.endColumn);
+            stats.endColumn,
+            stats.placedByColumn);
     }
 }
 
