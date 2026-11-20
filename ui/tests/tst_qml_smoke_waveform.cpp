@@ -4,6 +4,8 @@
 
 #include <gst/gst.h>
 
+#include <Kirigami/Platform/Units>
+
 // The waveform, the level meter, and the waveform editor's detail, cache,
 // crosshair and rulers.
 class WaveformSmokeTest : public QmlSmokeTest {
@@ -3368,21 +3370,32 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QTest::addColumn<int>("viewMode");
     QTest::addColumn<bool>("decodes");
     QTest::addColumn<int>("channels");
+    QTest::addColumn<bool>("animated");
+    // The spectrogram's display mode: 0 rolling, 1 centered.
+    QTest::addColumn<int>("displayMode");
     // Per channel, the overview has no lanes to draw: the detail is the
     // first picture.
-    QTest::newRow("per channel") << 1 << true << 2;
+    QTest::newRow("per channel") << 1 << true << 2 << true << 0;
+    // With animations off, the chosen plot shows whole at once, in both
+    // directions, and the switch is no binding loop: the waveform shown
+    // with its detail kept has its picture as it shows, which settles the
+    // switch then.
+    QTest::newRow("per channel, animations off") << 1 << true << 2 << false << 0;
+    QTest::newRow("per channel, animations off, centered") << 1 << true << 2 << false << 1;
     // A file whose detail cannot be read has no more to wait for.
-    QTest::newRow("per channel, unreadable") << 1 << false << 2;
+    QTest::newRow("per channel, unreadable") << 1 << false << 2 << true << 0;
     // Mixed, the overview of more than one channel is the peak of them
     // all, not the downmix the detail draws (a 5.1 track's was a near
     // solid envelope for some 300 ms, then the downmix): the detail is the
     // first picture; without one, the overview. A stereo track's is the
     // same case.
-    QTest::newRow("mixed, 5.1") << 0 << true << 6;
-    QTest::newRow("mixed, 5.1, unreadable") << 0 << false << 6;
+    QTest::newRow("mixed, 5.1") << 0 << true << 6 << true << 0;
+    QTest::newRow("mixed, 5.1, animations off") << 0 << true << 6 << false << 0;
+    QTest::newRow("mixed, 5.1, animations off, centered") << 0 << true << 6 << false << 1;
+    QTest::newRow("mixed, 5.1, unreadable") << 0 << false << 6 << true << 0;
     // A mono track's overview is to its detail's scale: the first picture,
     // whatever the detail does.
-    QTest::newRow("mixed, mono") << 0 << true << 1;
+    QTest::newRow("mixed, mono") << 0 << true << 1 << true << 0;
 }
 
 // The mode switch to the waveform never shows an empty plot (the
@@ -3395,6 +3408,8 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QFETCH(int, viewMode);
     QFETCH(bool, decodes);
     QFETCH(int, channels);
+    QFETCH(bool, animated);
+    QFETCH(int, displayMode);
     // Whether its first picture is the detail's.
     const bool waitsForDetail = viewMode == 1 || channels > 1;
     LibraryTreeModel libraryModel;
@@ -3412,9 +3427,25 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QVERIFY(waveform != nullptr);
     QObject *fade = qvariant_cast<QObject *>(surface->property("modeFadeAnimation"));
     QVERIFY(fade != nullptr);
+    // Animations off as Plasma turns them off: Kirigami's shortDuration,
+    // which QML cannot write, at 0.
+    auto *units = qobject_cast<Kirigami::Platform::Units *>(
+        evaluateOn(surface, QStringLiteral("Kirigami.Units")).value<QObject *>());
+    QVERIFY(units != nullptr);
+    if (!animated) {
+        units->setShortDuration(0);
+    }
+    QCOMPARE(fade->property("duration").toInt() > 0, animated);
     // The cross-fades in animation time, each to its end.
     SteppedAnimationDriver animations;
     const auto settle = [&animations]() { (void)animations.step(300); };
+    // What a step logged, as a binding loop: nothing, or the step and
+    // its messages.
+    const auto logged = [](const char *step) {
+        const QString messages = takeCapturedMessagesText();
+        return messages.isEmpty() ? QString()
+                                  : QStringLiteral("%1: %2").arg(QLatin1StringView(step), messages);
+    };
 
     // A detail window of one channel for [start, end] at 48 kHz, as the
     // decoder sends one, or nothing a window can be read from; held until
@@ -3451,6 +3482,7 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
 
     // A track playing, with its overview and its spectrogram.
     bridge->setProperty("spectrogramViewMode", viewMode);
+    bridge->setProperty("spectrogramDisplayMode", displayMode);
     bridge->setProperty("durationSeconds", 60.0);
     bridge->setProperty("currentTrackChannels", channels);
     bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/stereo.flac"));
@@ -3483,6 +3515,8 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QVERIFY(!waveformSurface->property("awaitingData").toBool());
     QTRY_VERIFY(spectrogramSurface->isVisible() && !waveformSurface->isVisible());
     QVERIFY(!waveform->pictureReady());
+    QString messages = logged("before the switch");
+    QVERIFY2(messages.isEmpty(), qPrintable(messages));
 
     // Every frame from the click on: the waveform shows at all only once
     // it has its picture, and until then the spectrogram is whole.
@@ -3542,10 +3576,18 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     // picture, and the cross-fade.
     QVERIFY(soon([&]() { return waveform->pictureReady(); }));
     QVERIFY(fade->property("running").toBool() || !surface->property("modeSwitching").toBool());
+    if (!animated) {
+        // At once, whole.
+        QVERIFY(!surface->property("modeSwitching").toBool());
+        QCOMPARE(waveformSurface->opacity(), 1.0);
+        QCOMPARE(spectrogramSurface->opacity(), 0.0);
+    }
     settle();
     QVERIFY(!surface->property("modeSwitching").toBool());
     QCOMPARE(waveformSurface->opacity(), 1.0);
     QTRY_COMPARE(spectrogramSurface->opacity(), 0.0);
+    messages = logged("to the waveform");
+    QVERIFY2(messages.isEmpty(), qPrintable(messages));
     QVERIFY(waitFrames(2));
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QCOMPARE(waitsForDetail && decodes, waveform->m_detail.pointCount > 0);
@@ -3553,9 +3595,17 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     // Hidden again, it keeps the track and its detail, and gives its
     // picture up: the view moves on with playback while it is hidden.
     QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
+    if (!animated) {
+        // The spectrogram whole at once, and the waveform gone.
+        QVERIFY(!surface->property("modeSwitching").toBool());
+        QVERIFY(!waveformSurface->isVisible());
+        QCOMPARE(spectrogramSurface->opacity(), 1.0);
+    }
     settle();
     QVERIFY(!waveformSurface->isVisible());
     QVERIFY(!waveform->pictureReady());
+    messages = logged("back to the spectrogram");
+    QVERIFY2(messages.isEmpty(), qPrintable(messages));
     QCOMPARE(waveform->sourcePath(), QStringLiteral("/fixture/stereo.flac"));
     QCOMPARE(waitsForDetail && decodes, waveform->m_detail.pointCount > 0);
     QVERIFY(!surface->property("modeSwitching").toBool());
@@ -3580,10 +3630,16 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
         // picture, and the cross-fade starts at the click.
         QVERIFY(waveform->pictureReady());
         QVERIFY(fade->property("running").toBool() || !surface->property("modeSwitching").toBool());
+        if (!animated) {
+            QVERIFY(!surface->property("modeSwitching").toBool());
+            QCOMPARE(waveformSurface->opacity(), 1.0);
+        }
     }
     QVERIFY(soon([&]() { return waveform->pictureReady(); }));
     settle();
     QVERIFY(!surface->property("modeSwitching").toBool());
+    messages = logged("to the waveform with its detail kept");
+    QVERIFY2(messages.isEmpty(), qPrintable(messages));
     QVERIFY(waitFrames(1));
     shownConnection.stop();
     QVERIFY2(failure.isEmpty(), qPrintable(failure));

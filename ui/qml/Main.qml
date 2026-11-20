@@ -1742,9 +1742,14 @@ ApplicationWindow {
         Component.onCompleted: {
             visualizationSurface.settledMode = viewerController.visualizationMode
         }
-        // Whether `mode`'s plot shows: settled, or chosen and coming in.
+        // Whether `mode`'s plot shows: chosen, coming in or whole, or
+        // settled while the other comes in. The chosen plot's shows
+        // whatever has settled, and reads nothing of it: showing it can
+        // settle the switch (the waveform's picture, kept while it was
+        // hidden, is ready as it shows, and with no fade that settles), and
+        // reading settledMode would make its visible depend on itself.
         function plotShown(mode) {
-            return visualizationSurface.settledMode === mode || visualizationSurface.chosenMode === mode
+            return visualizationSurface.chosenMode === mode || visualizationSurface.settledMode === mode
         }
         // The chosen plot over the settled one, at how far it has come in.
         function plotOpacity(mode) {
