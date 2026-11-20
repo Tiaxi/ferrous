@@ -439,6 +439,9 @@ private slots:
     void moreRowShowsTheWholeSectionAndKeepsTheSelection();
     void resultsListEndsOnAWholeRow_data();
     void resultsListEndsOnAWholeRow();
+    void scrolledResultsTakeANewRowCountWithoutABindingLoop_data();
+    void scrolledResultsTakeANewRowCountWithoutABindingLoop();
+    void modelNotifiesItsCountAsRowsChange();
     void keyboardSelectsAndActs();
     void mouseSelectsAndActs();
     void menuKeyOpensTheSelectedResultsMenu();
@@ -1323,6 +1326,111 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     if (few + 6 <= room) {
         QTRY_COMPARE(view->height(), few + 6);
     }
+}
+
+void SearchPaletteTest::scrolledResultsTakeANewRowCountWithoutABindingLoop_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowHeight");
+    QTest::newRow("default font") << 0.0 << 1000;
+    QTest::newRow("default font, short window") << 0.0 << 420;
+    QTest::newRow("24 pt") << 24.0 << 1000;
+    QTest::newRow("24 pt, short window") << 24.0 << 520;
+}
+
+// Typing on with the results scrolled down changes how many rows there
+// are, and with them the palette's height. The list, scrolled past its new
+// end, scrolls back into bounds as it takes that height, and lays itself
+// out; its count, which the height followed, notified from there, so the
+// height was worked out again from within itself: a binding loop on
+// resultsHeight and the body's implicitHeight (#619). The palette's height
+// follows the model's rows instead. The test fails on the warning, in
+// cleanup(). With a large font, and in a window short enough that its room
+// limits the palette, the list still ends on a whole row over the footer.
+void SearchPaletteTest::scrolledResultsTakeANewRowCountWithoutABindingLoop() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowHeight);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText, 1600, windowHeight), qPrintable(errorText));
+    QVERIFY(harness.open());
+    // Results shaped as the backend's: a section of each type, each with
+    // its heading and a more row, as many as Rust's limits for a short
+    // query.
+    const auto rowsFor = [](int artists, int albums, int tracks) {
+        QVector<Row> rows;
+        for (int i = 0; i < artists; ++i) {
+            rows << result(QStringLiteral("artist"), QStringLiteral("Artist %1").arg(i), 1.0f + float(i));
+        }
+        for (int i = 0; i < albums; ++i) {
+            rows << result(QStringLiteral("album"), QStringLiteral("Album %1").arg(i), 2.0f + float(i));
+        }
+        for (int i = 0; i < tracks; ++i) {
+            Row track = result(QStringLiteral("track"), QStringLiteral("Track %1").arg(i), 0.5f + float(i));
+            track.trackPath = QStringLiteral("/fixture/track%1.flac").arg(i);
+            track.lengthText = QStringLiteral("3:00");
+            rows << track;
+        }
+        return rows;
+    };
+    struct Step {
+        QString query;
+        int artists;
+        int albums;
+        int tracks;
+    };
+    const QList<Step> steps{
+        {QStringLiteral("m"), 5, 10, 20},  {QStringLiteral("me"), 3, 6, 12}, {QStringLiteral("mer"), 1, 2, 3},
+        {QStringLiteral("me"), 3, 6, 12}, {QStringLiteral("m"), 5, 10, 20},
+    };
+    QQuickItem *view = harness.view();
+    QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
+    QVERIFY(footer != nullptr);
+    for (const Step &step : steps) {
+        // To the end of the list, which scrolls it where it is longer than
+        // its room.
+        for (int i = 0; i < 4; ++i) QTest::keyClick(harness.window, Qt::Key_PageDown);
+        if (view->isVisible() && view->property("contentHeight").toReal() > view->height()) {
+            QVERIFY2(view->property("contentY").toReal() > 0, qPrintable(step.query));
+        }
+        harness.bridge->setProperty("globalSearchBusy", true);
+        harness.field()->setProperty("text", step.query);
+        harness.model.presentSearchRows(rowsFor(step.artists, step.albums, step.tracks),
+                                        {2 * step.artists, 2 * step.albums, 2 * step.tracks}, true);
+        harness.bridge->setProperty("globalSearchBusy", false);
+        harness.settleRows();
+        QTRY_VERIFY(view->isVisible());
+        QTRY_COMPARE(sceneRect(footer).top() - 1, sceneRect(view).bottom());
+        QVERIFY(sceneRect(harness.palette()).bottom() <= windowHeight - 32 + 0.5);
+    }
+}
+
+// The palette's height follows the model's count, which notifies as the
+// rows are inserted or removed, with the new count already read back:
+// fewer rows, more rows, and none.
+void SearchPaletteTest::modelNotifiesItsCountAsRowsChange() {
+    GlobalSearchResultsModel model;
+    QList<int> counts;
+    QObject::connect(&model, &GlobalSearchResultsModel::countChanged, &model,
+                     [&] { counts << model.property("count").toInt(); });
+    const auto rows = [](int n) {
+        QVector<Row> list;
+        for (int i = 0; i < n; ++i) list << result(QStringLiteral("track"), QStringLiteral("Track %1").arg(i), 1.0f);
+        return list;
+    };
+    model.replaceRows(rows(5));
+    model.replaceRows(rows(3));
+    model.replaceRows(rows(3));
+    model.replaceRows(rows(8));
+    model.replaceRows({});
+    QCOMPARE(counts, (QList<int>{5, 3, 8, 0}));
+    QCOMPARE(model.property("count").toInt(), 0);
 }
 
 // Up and Down move between results (wrapping, skipping headings), Page Up

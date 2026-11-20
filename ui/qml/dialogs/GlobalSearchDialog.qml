@@ -30,9 +30,14 @@ Dialog {
     readonly property bool retained: !!root.controller.uiBridge.globalSearchModelRetained
     readonly property string queryText: queryField.text.trim()
     readonly property string suggestion: root.controller.uiBridge.globalSearchSuggestion || ""
-    readonly property bool resultsShown: root.queryText.length > 0 && !root.retained && resultsView.count > 0
+    // The result rows, from the model rather than the view: the view's
+    // count notifies when the view next lays itself out, which the
+    // palette's height, bound to it, sets off when it scrolls the view
+    // back into bounds (#619).
+    readonly property int rowCount: root.controller.globalSearchModelApi.count || 0
+    readonly property bool resultsShown: root.queryText.length > 0 && !root.retained && root.rowCount > 0
     readonly property bool noResults: root.queryText.length > 0 && !root.searching && !root.retained
-        && resultsView.count === 0
+        && root.rowCount === 0
     // The rows outside the results: the recent searches before typing, and
     // a suggested spelling when nothing was found. One is selected, as a
     // result would be.
@@ -517,7 +522,7 @@ Dialog {
                 const room = root.maximumHeight - root.fieldHeight - 2 - root.footerHeight
                 const rows = root.controller.globalSearchModelApi
                 let used = 0
-                for (let i = 0; root.rowsRevision >= 0 && i < resultsView.count; ++i) {
+                for (let i = 0; root.rowsRevision >= 0 && i < root.rowCount; ++i) {
                     const kind = rows.rowDataAt(i).kind || ""
                     const rowHeight = kind === "item" ? root.resultHeight : (kind === "" ? 0 : root.headingHeight)
                     if (used + rowHeight > room) {
@@ -550,7 +555,7 @@ Dialog {
                 // The selected row's data, for the key hints.
                 readonly property var selectedRow: {
                     const index = root.controller.selectedDisplayIndex
-                    return root.rowsRevision >= 0 && index >= 0 && count > index
+                    return root.rowsRevision >= 0 && index >= 0 && root.rowCount > index
                         ? root.controller.globalSearchModelApi.rowDataAt(index) : null
                 }
                 currentIndex: root.controller.selectedDisplayIndex

@@ -18,6 +18,9 @@ GlobalSearchResultsModel::GlobalSearchResultsModel(QObject *parent)
     m_batchTimer.setSingleShot(true);
     m_batchTimer.setInterval(0);
     connect(&m_batchTimer, &QTimer::timeout, this, &GlobalSearchResultsModel::insertNextBatch);
+    connect(this, &QAbstractItemModel::rowsInserted, this, &GlobalSearchResultsModel::countChanged);
+    connect(this, &QAbstractItemModel::rowsRemoved, this, &GlobalSearchResultsModel::countChanged);
+    connect(this, &QAbstractItemModel::modelReset, this, &GlobalSearchResultsModel::countChanged);
 }
 
 int GlobalSearchResultsModel::rowCount(const QModelIndex &parent) const {
