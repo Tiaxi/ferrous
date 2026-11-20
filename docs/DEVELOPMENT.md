@@ -69,6 +69,17 @@ cargo install cargo-llvm-cov
 ./scripts/run-tests.sh --rust-only --coverage
 ```
 
+### Builds in several checkouts at once
+
+Builds and test runs in several checkouts or worktrees at once, for example by agents working in parallel, can together take more memory than the machine has: some test sources take over 1 GB per compiler process. `./scripts/build-slot.sh <command> [args...]` runs a command once it holds one of a fixed number of slots, which every checkout of the same user shares, and waits for one to come free otherwise:
+
+```bash
+./scripts/build-slot.sh ./scripts/run-tests.sh --ui-only
+BUILD_SLOTS=1 BUILD_SLOT_JOBS=4 ./scripts/build-slot.sh cargo test
+```
+
+`BUILD_SLOTS` sets the number of slots, 2 by default; the commands sharing them should agree on it. The slots are lock files in `~/.cache/build-slot` of the account's home directory, whatever `HOME` and `XDG_CACHE_HOME` say, as test and app runs often point those at temporary directories; `BUILD_SLOT_DIR` chooses another directory. `BUILD_SLOT_JOBS` sets `CMAKE_BUILD_PARALLEL_LEVEL` and `CARGO_BUILD_JOBS` where they are not already set; without it, the job counts are left alone. The command runs `BUILD_SLOT_NICE` steps nicer, 10 by default. With ccache installed, the script points CMake's C and C++ compiler launchers at it, unless they are set (empty ones build without it), and sets `CCACHE_BASEDIR` to `HOME` unless it is set (an empty one turns ccache's path rewriting off), so that checkouts can share compiled objects; CMake reads the launchers when it first configures a build directory. Builds with debug info, which the tests' sources always have, share objects across checkouts only with ccache's `hash_dir` off (`CCACHE_NOHASHDIR=true`), at the cost of debug info that names the directory of the checkout that compiled them first; the script leaves that choice to you. The command does not inherit the lock, so a process it leaves running does not keep its slot, and a signal to the script alone waits for the command to exit before the slot is given back. The script exits with the command's status.
+
 ### Stress runs
 
 Timing-sensitive tests fail only now and then, mostly on a loaded machine. `./scripts/stress-tests.sh` runs the suites again and again to find them: the Rust tests with the GStreamer backend (`gst`) and with the mock backend (`mock`), and the CTest tests (`ctest`), 30 times each by default. It builds first unless given `--no-build`. Run *i* of a suite uses the *i*-th value of its parallelism list, cycling: `--test-threads` 1, libtest's default and 32 for the mock backend; 4, the default and 32 for GStreamer, whose tests play their fixtures in real time and take about 20 minutes on one thread; and `ctest -j` 1, 4 and the number of CPUs. Every third run is under load, from `stress-ng --cpu` with twice as many workers as CPUs, or busy shell loops without `stress-ng`; the load ends with the run. The whole loop takes about two hours on a machine with 16 CPU threads.

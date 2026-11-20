@@ -27,6 +27,7 @@ Install these tools and development libraries:
 - KDE Frameworks 6 Kirigami development libraries and QML runtime modules
 - KDE Frameworks 6 KI18n 6.8 or newer, which translates the interface
 - GNU gettext (`xgettext`, `msgen`, `msgfilter`, `msgfmt`) for the tests and the translation template, and the `en_US.UTF-8` locale for the translation tests
+- `flock` from util-linux, for `scripts/build-slot.sh` and its test
 - GLib/GIO and GStreamer development libraries, including app, audio, and pbutils
 - The D-Bus development library (libdbus), which the Last.fm keyring support links
 - GStreamer runtime codec plugins for the formats you want to play
@@ -44,7 +45,7 @@ sudo dnf install git rust cargo cmake ninja-build gcc-c++ \
   gstreamer1-plugins-base-devel qt6-qtbase-devel \
   qt6-qtdeclarative-devel qt6-qtquickcontrols2-devel kf6-kirigami-devel \
   kf6-ki18n-devel kf6-qqc2-desktop-style breeze-icon-theme gettext \
-  glibc-langpack-en
+  glibc-langpack-en util-linux-core
 ```
 
 ### Optional developer tools

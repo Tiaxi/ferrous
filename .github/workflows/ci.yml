@@ -254,6 +254,7 @@ jobs:
             breeze-icon-theme \
             gettext \
             glibc-langpack-en \
+            util-linux-core \
             xorg-x11-server-Xvfb \
             mesa-dri-drivers
 
