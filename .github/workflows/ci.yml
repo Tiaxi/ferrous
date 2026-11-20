@@ -214,6 +214,9 @@ jobs:
       # Give up on a stalled mirror instead of waiting on it.
       DNF_OPTS: --setopt=retries=3 --setopt=timeout=30 --setopt=minrate=10240
       FEDORA: '44'
+      # The job installs the libav plugin for the tests that play AC-3, so
+      # they fail rather than skip without its decoder.
+      FERROUS_TEST_REQUIRE_DECODERS: '1'
     steps:
       - name: Install system dependencies
         timeout-minutes: 10
