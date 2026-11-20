@@ -113,6 +113,8 @@ private slots:
     void spectrogramGaplessContinuationKeepsTheRollingHistory_data();
     void spectrogramGaplessContinuationKeepsTheRollingHistory();
     void spectrogramCenteredGaplessZoomRestartBeforeTheClockFollowsTheClock();
+    void spectrogramLateGaplessZoomRestartOfUnknownLengthKeepsTheHistoryInPlace_data();
+    void spectrogramLateGaplessZoomRestartOfUnknownLengthKeepsTheHistoryInPlace();
 };
 
 namespace {
@@ -5859,16 +5861,14 @@ void SpectrogramCanvasSmokeTest::spectrogramGaplessContinuationKeepsTheRollingHi
     QVERIFY(!item.m_backdrop.isNull() || !item.m_reserve.isNull());
     // In every order, the successor's playhead follows its clock, as the
     // restart's columns do, and its times start at the previous track's
-    // end: where the successor's clock puts it, at the previous track's
-    // length, or where the restart's first column was at the playhead.
+    // end: where the successor's clock puts it, or at the previous track's
+    // length. Not knowing that, the restart's guess, where its first column
+    // was at the playhead, gives way to the successor's clock (issue 571).
     QVERIFY(!item.m_gaplessContinuationPending);
     QVERIFY(!item.m_gaplessContinuationRebased);
     QCOMPARE(item.m_gaplessPositionOffset, 0.0);
     QVERIFY(std::abs(item.m_positionSeconds - 0.05) < 1e-9);
-    const int restartHop = item.m_precomputedHopSize;
-    const double successorStart = order != restartBeforeClock ? 19.85
-        : lengthKnown ? 19.9
-        : 19.9 - std::floor(0.05 * 48'000 / restartHop) * restartHop / 48'000.0;
+    const double successorStart = order == restartBeforeClock && lengthKnown ? 19.9 : 19.85;
     QVERIFY2(std::abs(item.m_streamOrigin - successorStart) < 1e-9,
         qPrintable(QStringLiteral("%1, not %2").arg(item.m_streamOrigin, 0, 'f', 6)
             .arg(successorStart, 0, 'f', 6)));
@@ -5927,6 +5927,138 @@ void SpectrogramCanvasSmokeTest::spectrogramCenteredGaplessZoomRestartBeforeTheC
     QCOMPARE(item.m_gaplessPositionOffset, 0.0);
     QCOMPARE(item.m_streamOrigin, 0.0);
     QVERIFY(std::abs(item.m_positionSeconds - 0.05) < 1e-9);
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramLateGaplessZoomRestartOfUnknownLengthKeepsTheHistoryInPlace_data() {
+    QTest::addColumn<bool>("centered");
+    QTest::addColumn<bool>("rasterUnderWay");
+    QTest::newRow("rolling") << false << false;
+    QTest::newRow("rolling, raster under way") << false << true;
+    QTest::newRow("centered") << true << false;
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramLateGaplessZoomRestartOfUnknownLengthKeepsTheHistoryInPlace() {
+    // Issue 571: playing a track of unknown length, a zoom's restart of its
+    // gapless successor can arrive after the successor has started but
+    // before the clock reports it. The track before still seems to play on
+    // then, past its end by the restart's latency, so where it ends is a
+    // guess until the successor's clock tells it. The history then is where
+    // it would be had the clock come first, also when the restart's columns
+    // are still being rasterized when the clock does.
+    QFETCH(bool, centered);
+    QFETCH(bool, rasterUnderWay);
+    constexpr int width = 200;
+    constexpr int bins = 8;
+    // The first track's columns, 937 at a hop of 1024, end at 19.989 s.
+    constexpr int columns = 20 * 48'000 / 1024;
+    constexpr double end = columns * 1024 / 48'000.0;
+    constexpr double latency = 0.1;
+    struct Outcome {
+        double origin{0.0};
+        double position{0.0};
+        int hop{0};
+        QVector<QRgb> colors;
+    };
+    const auto play = [&](bool clockFirst, Outcome &outcome) {
+        QQuickWindow window;
+        window.resize(240, 160);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+        TestTime time;
+        SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+        time.drive(item);
+        item.setWidth(width);
+        item.setHeight(100);
+        item.setDisplayMode(centered ? 1 : 0);
+        item.setPlaying(true);
+        // Each second of another colour.
+        QByteArray data(bins * columns, Qt::Uninitialized);
+        for (int column = 0; column < columns; ++column) {
+            const int second = column * 1024 / 48'000;
+            std::fill_n(data.data() + static_cast<qsizetype>(column) * bins, bins,
+                static_cast<char>(0x20 + (second % 8) * 0x18));
+        }
+        item.feedPrecomputedChunk(data, bins, 0, columns, 0, 6000, 48'000, 1024, false, true,
+            1, true, 1);
+        // Its length unknown, it plays from 19.5 s.
+        setTestPosition(item, 19.5, 1);
+        QSGNode *node = paintWithReserve(item, nullptr);
+        item.setZoomLevel(0.8);
+        node = item.updatePaintNode(node, nullptr);
+        QVERIFY(sendPendingBackendZoom(item));
+        // The successor's first columns follow, decoded ahead.
+        const quint64 next = 2;
+        item.feedPrecomputedChunk(QByteArray(bins * 4, '\x50'), bins, 0, 4, 0, 6000, 48'000,
+            1024, false, false, next, true, 1);
+        node = paintWithReserve(item, node);
+        // The successor starts at the first track's end; the zoom's restart
+        // of it, from its start, arrives a tenth of a second later.
+        time.advance(end - 19.5 + latency);
+        if (clockFirst) {
+            setTestPosition(item, latency, next);
+        }
+        feedRollingZoomRestart(item, 0.0, 0.5, next, 2);
+        QVERIFY(!item.m_awaitingZoomData);
+        if (rasterUnderWay && !clockFirst) {
+            node = item.updatePaintNode(node, nullptr);
+            QVERIFY(spectrogramRasterPending(item));
+        } else {
+            node = paintWithReserve(item, node);
+        }
+        time.advance(0.01);
+        if (!clockFirst) {
+            setTestPosition(item, latency + 0.01, next);
+        }
+        node = paintWithReserve(item, node);
+        QVERIFY(!item.m_gaplessContinuationPending);
+        QCOMPARE(item.m_gaplessPositionOffset, 0.0);
+        if (!centered) {
+            QVERIFY(!item.m_backdrop.isNull() || !item.m_reserve.isNull());
+        }
+        outcome.origin = item.m_streamOrigin;
+        outcome.position = item.currentRenderPositionSecondsLocked(item.m_now());
+        outcome.hop = item.m_precomputedHopSize;
+        outcome.colors = plotColumnColors(item, node, width);
+        delete node;
+    };
+    Outcome clockFirst;
+    play(true, clockFirst);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    Outcome late;
+    play(false, late);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    // The successor's playhead follows its clock in both orders, and its
+    // times start where the first track ends: within a column, at the
+    // zoom's hop, of where the clock put it.
+    QVERIFY(std::abs(late.position - (latency + 0.01)) < 1e-9);
+    QVERIFY(std::abs(clockFirst.position - late.position) < 1e-9);
+    QCOMPARE(late.hop, clockFirst.hop);
+    const double column = late.hop / 48'000.0;
+    QVERIFY(std::abs(clockFirst.origin - (centered ? 0.0 : end)) < 1e-6);
+    QVERIFY2(std::abs(late.origin - clockFirst.origin) <= column,
+        qPrintable(QStringLiteral("%1, not %2").arg(late.origin, 0, 'f', 6)
+            .arg(clockFirst.origin, 0, 'f', 6)));
+    // And so is the history drawn, give or take a pixel, a column at this
+    // zoom.
+    int compared = 0;
+    for (int x = 2; x < width - 2; ++x) {
+        // Within a colour, a pixel from its edges.
+        const QRgb color = clockFirst.colors[x];
+        if (color == 0 || clockFirst.colors[x - 2] != color || clockFirst.colors[x + 2] != color) {
+            continue;
+        }
+        QVERIFY2(late.colors[x - 1] == color || late.colors[x] == color
+                || late.colors[x + 1] == color,
+            qPrintable(QStringLiteral("x %1 shows %2, not %3").arg(x)
+                .arg(late.colors[x], 0, 16).arg(color, 0, 16)));
+        ++compared;
+    }
+    // A centered view shows only the successor's restart, half a second.
+    QVERIFY2(compared > (centered ? 10 : 50), qPrintable(QString::number(compared)));
 }
 
 std::unique_ptr<QmlSmokeTest> makeSpectrogramCanvasSmokeTest(const QString &userDirectoriesParent) {
