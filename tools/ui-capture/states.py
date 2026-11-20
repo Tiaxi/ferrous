@@ -6925,9 +6925,6 @@ NOT_CAPTURED = [
     ("Quit save failed (real)", "Needs a failing save at quit; opened directly with a sample message."),
     ("Menus in strips", "Menus are windows of their own (#642), which the still shots draw in, but a strip's images "
                         "are of the main window: the File menu strip shows the menu bar, not the menu."),
-    ("Menus at scale 2 in place", "The scale-2 session scales the app with QT_SCALE_FACTOR, not KWin's output scale "
-                                  "as Plasma does; QtWayland then opens a menu window at half its offset, over the "
-                                  "menu bar, and the shot shows it where KWin does."),
     ("Context menus at the pointer", "Context menus are opened from the keyboard (the Menu key, or Shift+F10) wherever "
                                      "the view takes it: library, queue, the scrobble indicator and the fullscreen "
                                      "album art viewer; they open on the selected row or control. The windowed album "

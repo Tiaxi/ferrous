@@ -212,9 +212,12 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
   under it, as KWin would.
 - **A main-window grab draws in its open menus**, each at its place, and grows right and down for a menu that
   reaches past the window, mid grey there. The menus' KWin shadows are not in it. A recorded strip has only the main
-  window's frames, without the menus. At scale 2 the session scales the app with `QT_SCALE_FACTOR`, not with KWin's
-  output scale as Plasma does, and QtWayland then opens a menu window at half its offset from the window, over the
-  menu bar; KWin shows it there, and so does the shot.
+  window's frames, without the menus.
+- **Scale 2 is KWin's output scale**, as on Plasma: the driver writes the session's `kwinoutputconfig.json` (KWin's
+  `--scale` alone sizes the virtual output but leaves its scale at 1), and the app gets no Qt scale variable. With
+  `QT_SCALE_FACTOR` instead, QtWayland would open a menu window at half its offset from the window (#665). KWin's
+  coordinates (window frames, area captures) are then logical px like the app's, and its captures, its decorations
+  and every grab are in device px. A session fails when its window's device pixel ratio is not its scale.
 
 ## Files
 

@@ -74,6 +74,12 @@ class Session:
                                    "is stale (shoot_round.sh rebuilds it when its key, which includes this path, changes)")
         self.settle(0.3)
         time.sleep(0.2)  # the first frames after the window maps
+        # Loudly: the window renders at the session's scale (under KWin, its output's scale, from the output
+        # configuration the driver writes), or every shot and measurement of the session is at the wrong size.
+        dpr = self.a.ev_soft("root.screen.devicePixelRatio")
+        if not isinstance(dpr, (int, float)) or abs(dpr - scale) > 0.01:
+            self.a.quit()
+            raise RuntimeError(f"the main window's screen has device pixel ratio {dpr}, not the session's scale {scale}")
         if os.environ.get("SHOT_KWIN"):
             try:
                 self.prime_input()
