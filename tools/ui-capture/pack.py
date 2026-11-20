@@ -842,8 +842,11 @@ def privacy_evidence(rd, entries):
       offsets are not recorded); an image with no app pixels (an icon rendered from its SVGs) has `sources=[]` and
       the explicit marker `no_app_pixels`, and one with neither sources nor the marker is unverified;
     - a recording needs its item trace and must have been made at the neutral paths (neutral_ns.sh): its trace
-      names no texts, so at the real paths (SHOT_NEUTRAL=0) a home-folder text in a frame could go unseen.
+      names no texts, so at the real paths (SHOT_NEUTRAL=0) a home-folder text in a frame could go unseen. A menu
+      its frames draw in (meta `popup_windows`, popup_frames.py) needs its items in the trace (layer popup@w<window>),
+      where the painting reads their rects.
     Returns (failures, counts)."""
+    import motion_strip
     fails = []
     n = Counter()
     by_file = {e["file"]: e for e in entries}
@@ -893,7 +896,13 @@ def privacy_evidence(rd, entries):
             fails.append(f"privacy: recording {os.path.basename(d)} is unverified: recorded at the real paths "
                          "(SHOT_NEUTRAL=0, or before its meta.json said), where its frames cannot be checked")
         else:
-            n["recordings"] += 1
+            layers = {la for tr in motion_strip.read_trace(d, 0.0)[0].values() for la in tr["layers"]}
+            untraced = [w for w in meta.get("popup_windows") or [] if f"popup@w{w}" not in layers]
+            if untraced:
+                fails.append(f"privacy: recording {os.path.basename(d)} is unverified: its frames draw in menu "
+                             f"window(s) {untraced}, whose items are not in its item trace")
+            else:
+                n["recordings"] += 1
     return fails, n
 
 

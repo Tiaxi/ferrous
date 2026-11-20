@@ -9,6 +9,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from driver import App, WORK, LIB  # noqa: E402
+import popup_frames  # noqa: E402
 
 TEMPLATE_DB = f"{WORK}/run/template/library.sqlite3"
 STRIP_GEOMETRY = ("sidebarPane", "spectrogramPane", "transportBar", "nowPlayingPanel", "libraryPane", "mainQueuePane", "statusBar",
@@ -575,13 +576,17 @@ class Session:
         time.sleep(duration)
         ts = time.time()
         r = self.cmd(f"stripstop {d}", timeout=120)
+        # the main window's menus (windows of their own) drawn into its frames at their place; a win= strip has none
+        fscale = next((float(o[6:]) for o in opts.split() if o.startswith("scale=")), 1.0)
+        popups = popup_frames.merge(d, dpr=self.scale, crop=[int(v) for v in crop] if crop else None,
+                                    frame_scale=fscale)
         self.t_stripsave = getattr(self, "t_stripsave", 0) + time.time() - ts
-        print(f"  strip {name}: {r}", flush=True)
+        print(f"  strip {name}: {r}" + (f", menu window(s) {popups} drawn in" if popups else ""), flush=True)
         with open(os.path.join(d, "meta.json"), "w") as f:
             # neutral: recorded with the work folder at /mnt/ferrous (neutral_ns.sh), which the privacy check needs:
             # a recording's trace names no texts, so frames recorded at the real paths cannot be checked
             json.dump(dict(name=name, theme=self.tag, desc=desc, crop=crop, scale=self.scale,
-                           size=list(self.size), opts=opts, variant=self.suffix, items=items,
+                           size=list(self.size), opts=opts, variant=self.suffix, items=items, popup_windows=popups,
                            neutral=bool(os.environ.get("SHOT_NEUTRAL_WORK"))), f)
         return d
 

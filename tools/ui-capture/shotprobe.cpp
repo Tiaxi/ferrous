@@ -81,6 +81,7 @@ struct StripFrame {
     qint64 ns;
     int win;
     QImage img;
+    bool alpha;  // a menu window's frame: its transparent margins stay transparent (drawn over the main window's)
 };
 struct StripSettings {
     QRect crop;          // logical, of the target window (main, or win=); empty = whole window
@@ -100,7 +101,7 @@ std::atomic<bool> g_recording{false};
 // GUI thread only (stripstart, hookWindows):
 QString g_winFilter;  // win=NAME: record only windows whose title/objectName contains NAME
 
-void readbackFrame(QQuickWindow *w, int winIndex, bool isMain) {
+void readbackFrame(QQuickWindow *w, int winIndex, bool isMain, bool alpha) {
     if (!g_recording.load()) {
         return;
     }
@@ -138,6 +139,9 @@ void readbackFrame(QQuickWindow *w, int winIndex, bool isMain) {
     f->glReadPixels(r.x(), fh - r.y() - r.height(), r.width(), r.height(), GL_RGBA, GL_UNSIGNED_BYTE, img.bits());
     w->endExternalCommands();
     img = img.flipped(Qt::Vertical);
+    if (alpha) {
+        img.reinterpretAsFormat(QImage::Format_RGBA8888_Premultiplied);  // (Qt Quick draws premultiplied)
+    }
     if (strip.scale > 0 && strip.scale < 1.0) {
         img = img.scaled(qRound(img.width() * strip.scale), qRound(img.height() * strip.scale), Qt::IgnoreAspectRatio,
                          Qt::SmoothTransformation);
@@ -147,7 +151,7 @@ void readbackFrame(QQuickWindow *w, int winIndex, bool isMain) {
     if (!g_recording.load() || g_stripGeneration != generation) {
         return;  // that recording stopped (and maybe another started) while this frame was read
     }
-    g_frames.push_back({ns, winIndex, std::move(img)});
+    g_frames.push_back({ns, winIndex, std::move(img), alpha});
 }
 
 
@@ -570,7 +574,10 @@ public:
             connect(m_notifier, &QSocketNotifier::activated, this, [this] { readCommands(); });
         }
         g_clock.start();
-        connect(&m_hookTimer, &QTimer::timeout, this, [this] { hookWindows(); });
+        connect(&m_hookTimer, &QTimer::timeout, this, [this] {
+            hookWindows();
+            notePopups();
+        });
         reply("0", "started");
     }
 
@@ -640,14 +647,15 @@ private:
         return (w->flags() & Qt::WindowType_Mask) == Qt::Popup;
     }
     // The shown window popups opened from `w`, a submenu's after its menu's, each with its offset from w's top
-    // left (logical px).
-    QList<QPair<QQuickWindow *, QPoint>> popupWindowsOf(QQuickWindow *w) {
+    // left (logical px). `exposed`: only those the compositor shows already (a grab reads their pixels); a strip
+    // notes a menu from its show, before its first frame.
+    QList<QPair<QQuickWindow *, QPoint>> popupWindowsOf(QQuickWindow *w, bool exposed = true) {
         QList<QPair<QQuickWindow *, QPoint>> out;
         QList<const QWindow *> chain{w};
         for (bool grew = true; grew;) {
             grew = false;
             for (QQuickWindow *p : windows()) {
-                if (isPopupWindow(p) && p->isVisible() && p->isExposed() && !chain.contains(p) &&
+                if (isPopupWindow(p) && p->isVisible() && (!exposed || p->isExposed()) && !chain.contains(p) &&
                     chain.contains(p->transientParent())) {
                     chain.append(p);
                     out.append({p, p->mapToGlobal(QPoint()) - w->mapToGlobal(QPoint())});
@@ -755,12 +763,15 @@ private:
             }
             m_hooked.clear();
             m_winInfo.clear();
+            m_popupLines.clear();
+            m_popupShown.clear();
             hookWindows();
             {
                 QMutexLocker lock(&g_stripMutex);
                 ++g_stripGeneration;
                 g_recording.store(true);
             }
+            notePopups();  // a menu open already (it renders again: hookWindows asked it to)
             {
                 QQuickWindow *tw = mainWindow();
                 if (!g_winFilter.isEmpty()) {
@@ -774,7 +785,7 @@ private:
                 m_connections.append(QObject::connect(tw, &QQuickWindow::afterAnimating, this,
                                                       [this, tw] { if (g_recording.load()) traceSample(tw); }));
             }
-            m_hookTimer.start(5);
+            m_hookTimer.start(5);  // (new windows, and the menus' places: hookWindows, notePopups)
             if (QQuickWindow *mw = mainWindow()) {
                 mw->update();
             }
@@ -782,7 +793,9 @@ private:
             return;
         }
         if (cmd == "stripstop") {
-            // stripstop <dir>: writes <dir>/f<NNNN>_w<win>.png and <dir>/frames.tsv.
+            // stripstop <dir>: writes <dir>/f<NNNN>_w<win>.png and <dir>/frames.tsv: its frames, marks, windows and
+            // (a main-window strip) the main window's menus' popup lines, from which popup_frames.py draws each
+            // menu's frames in at its place.
             std::vector<StripFrame> frames;
             std::vector<QString> marks;
             {
@@ -811,7 +824,8 @@ private:
                               .arg(frames[i].win).arg(file).toUtf8());
                 QImage img = std::move(frames[i].img);
                 const QString path = dir + "/" + file;
-                jobs.append(QtConcurrent::run([img, path] { img.convertToFormat(QImage::Format_RGB888).save(path, "PNG", 80); }));
+                const QImage::Format fmt = frames[i].alpha ? QImage::Format_ARGB32 : QImage::Format_RGB888;
+                jobs.append(QtConcurrent::run([img, path, fmt] { img.convertToFormat(fmt).save(path, "PNG", 80); }));
             }
             for (auto &j : jobs) {
                 j.waitForFinished();
@@ -821,6 +835,9 @@ private:
             }
             for (const QString &wi : m_winInfo) {
                 tsv.write(("window\t" + wi + "\n").toUtf8());
+            }
+            for (const QString &pl : m_popupLines) {
+                tsv.write(("popup\t" + pl + "\n").toUtf8());
             }
             tsv.close();
             reply(id, QString("saved %1 frames").arg(frames.size()));
@@ -1200,20 +1217,24 @@ private:
             }
             const int index = int(m_hooked.size());
             m_hooked.append(w);
-            if (isPopupWindow(w)) {
-                continue;  // a menu window: strips record the main window's frames (and its item trace) only
+            // A menu window (#642): a main-window strip records its frames whole, with alpha, and notes where it is
+            // (notePopups); popup_frames.py draws them in at its place in the main window's frames, and the item
+            // trace has its items there. A win= strip records that window alone.
+            const bool popup = isPopupWindow(w);
+            if (popup && !g_winFilter.isEmpty()) {
+                continue;
             }
             const bool matches = !g_winFilter.isEmpty() &&
                 (w->title().contains(g_winFilter) || w->objectName().contains(g_winFilter));
             if (!g_winFilter.isEmpty() && !matches) {
                 continue;  // win=: only that window is recorded (it may appear later)
             }
-            const bool isMain = g_winFilter.isEmpty() ? w == mw : true;
-            m_winInfo.append(QString("%1\t%2\t%3\t%4,%5,%6x%7\t%8").arg(index).arg(w->metaObject()->className())
+            const bool isMain = !popup && (g_winFilter.isEmpty() ? w == mw : true);
+            m_winInfo.append(QString("%1\t%2\t%3\t%4,%5,%6x%7\t%8\t%9").arg(index).arg(w->metaObject()->className())
                                  .arg(w->title()).arg(w->x()).arg(w->y()).arg(w->width()).arg(w->height())
-                                 .arg(QString::number(g_clock.nsecsElapsed() / 1e6, 'f', 3)));
+                                 .arg(QString::number(g_clock.nsecsElapsed() / 1e6, 'f', 3), popup ? "popup" : "window"));
             m_connections.append(QObject::connect(
-                w, &QQuickWindow::afterRendering, w, [w, index, isMain] { readbackFrame(w, index, isMain); },
+                w, &QQuickWindow::afterRendering, w, [w, index, isMain, popup] { readbackFrame(w, index, isMain, popup); },
                 Qt::DirectConnection));
             m_connections.append(QObject::connect(w, &QWindow::visibleChanged, this, [this, w, index](bool v) {
                 if (g_recording.load()) {
@@ -1222,8 +1243,60 @@ private:
                                       QString("\twindow %1 visible=%2 pos=%3,%4 size=%5x%6")
                                           .arg(index).arg(v).arg(w->x()).arg(w->y()).arg(w->width()).arg(w->height()));
                 }
+                notePopups();  // (a menu shown or hidden: at once, not at the next timer tick)
             }));
+            if (popup) {
+                m_connections.append(QObject::connect(w, &QWindow::xChanged, this, [this] { notePopups(); }));
+                m_connections.append(QObject::connect(w, &QWindow::yChanged, this, [this] { notePopups(); }));
+                // its animations run in its own window: the trace samples with its frames too
+                m_connections.append(QObject::connect(w, &QQuickWindow::afterAnimating, this, [this] {
+                    if (g_recording.load() && m_traceWin) traceSample(m_traceWin);
+                }));
+                w->update();  // its next frame is recorded, though it may have drawn its first before it was hooked
+            }
         }
+    }
+
+    // While a main-window strip records: a "popup" line whenever one of the main window's menus shows, moves or
+    // hides: "<ms>\t<win>\t<shown 0|1>\t<x>,<y>\t<main win>\t<depth>", its offset from the main window's top left
+    // in logical px, depth its place in the menu chain (a submenu after its menu). GUI thread only.
+    void notePopups() {
+        if (!g_recording.load() || !g_winFilter.isEmpty()) {
+            return;
+        }
+        QQuickWindow *mw = mainWindow();
+        const int mainIndex = mw ? int(m_hooked.indexOf(mw)) : -1;
+        if (mainIndex < 0) {
+            return;
+        }
+        const QString t = QString::number(g_clock.nsecsElapsed() / 1e6, 'f', 3);
+        QHash<QQuickWindow *, QPair<int, QPoint>> now;
+        int depth = 0;
+        for (const auto &[pw, off] : popupWindowsOf(mw, false)) {
+            const int index = int(m_hooked.indexOf(pw));
+            if (index < 0) {
+                continue;  // (hooked at the next tick, which notes it)
+            }
+            now.insert(pw, {index, off});
+            const auto was = m_popupShown.constFind(pw);
+            if (was != m_popupShown.cend() && was->first != index) {  // (another window at a destroyed one's address)
+                m_popupLines.append(QString("%1\t%2\t0\t%3,%4\t%5\t-1").arg(t).arg(was->first).arg(was->second.x())
+                                        .arg(was->second.y()).arg(mainIndex));
+            }
+            if (was == m_popupShown.cend() || was->first != index || was->second != off) {
+                m_popupLines.append(QString("%1\t%2\t1\t%3,%4\t%5\t%6").arg(t).arg(index).arg(off.x()).arg(off.y())
+                                        .arg(mainIndex).arg(depth));
+            }
+            ++depth;
+        }
+        // (only the keys are compared: a menu window destroyed since is never dereferenced)
+        for (auto it = m_popupShown.cbegin(); it != m_popupShown.cend(); ++it) {
+            if (!now.contains(it.key())) {
+                m_popupLines.append(QString("%1\t%2\t0\t%3,%4\t%5\t-1").arg(t).arg(it->first).arg(it->second.x())
+                                        .arg(it->second.y()).arg(mainIndex));
+            }
+        }
+        m_popupShown = now;
     }
 
     // ---- motion trace during a strip: per-frame effective opacity of changing items, and the QML
@@ -1312,23 +1385,34 @@ private:
         const double t = g_clock.nsecsElapsed() / 1e6 - m_t0;
         // Opacity of every item in the traced region, recorded when it changes.
         // Each item's rect is cut to its clipping ancestors (a list's rows behind a footer are not on screen).
-        QList<QPair<QQuickItem *, QRectF>> stack{{tw->contentItem(), QRectF()}};
+        // A main-window strip also traces the main window's shown menus (windows of their own, #642) at their
+        // place in it, as its frames draw them in (popup_frames.py), each its own layer "popup@w<window index>":
+        // the privacy check reads their items' rects from here. Exposed ones: a menu is placed (QtWayland moves it
+        // after showing it) before the compositor exposes it, and it draws its first frame after that.
+        struct Node { QQuickItem *it; QRectF clipTo; QPointF off; QString layer; };
+        QList<Node> stack{{tw->contentItem(), QRectF(), QPointF(), QString()}};
+        if (tw == mainWindow() && g_winFilter.isEmpty()) {
+            for (const auto &[pw, off] : popupWindowsOf(tw)) {
+                stack.append({pw->contentItem(), QRectF(), QPointF(off), "popup@w" + QString::number(m_hooked.indexOf(pw))});
+            }
+        }
         QSet<QQuickItem *> seen;
         while (!stack.isEmpty()) {
-            const auto [it, clipTo] = stack.takeLast();
-            const QRectF full = it->mapRectToScene(QRectF(0, 0, it->width(), it->height()));
-            const QRectF r = clipTo.isNull() ? full : full.intersected(clipTo);
-            const QRectF childClip = it->clip() ? r : clipTo;
+            const Node nd = stack.takeLast();
+            QQuickItem *it = nd.it;
+            const QRectF full = it->mapRectToScene(QRectF(0, 0, it->width(), it->height())).translated(nd.off);
+            const QRectF r = nd.clipTo.isNull() ? full : full.intersected(nd.clipTo);
+            const QRectF childClip = it->clip() ? r : nd.clipTo;
             if (!(it->clip() && r.isEmpty()))
-                for (QQuickItem *c : it->childItems()) stack.append({c, childClip});
+                for (QQuickItem *c : it->childItems()) stack.append({c, childClip, nd.off, nd.layer});
             if (it->width() < 1 || it->height() < 1 || r.width() < 1 || r.height() < 1) continue;
             if (!m_traceCrop.isEmpty() && !m_traceCrop.intersects(r)) continue;
             seen.insert(it);
             const double o = effOpacity(it);
             // its layer: the popup it is in (drawn over the content on purpose), or the window's content; it can
             // change (the viewer's plot is reparented into its popup)
-            QString layer;
-            for (QQuickItem *p = it; p != nullptr; p = p->parentItem())
+            QString layer = nd.layer;
+            for (QQuickItem *p = it; layer.isEmpty() && p != nullptr; p = p->parentItem())
                 if (p->inherits("QQuickPopupItem")) { layer = "popup@" + QString::number(quintptr(p), 16); break; }
             auto f = m_op.find(it);
             if (f == m_op.end()) {
@@ -1486,6 +1570,8 @@ private:
     QPointer<QQuickWindow> m_pointerWindow;  // the window the last pointer event went to (pointerAt)
     QList<QPointer<QQuickWindow>> m_hooked;
     QStringList m_winInfo;
+    QStringList m_popupLines;  // notePopups
+    QHash<QQuickWindow *, QPair<int, QPoint>> m_popupShown;  // the main window's menus noted shown: index, offset
     QList<QMetaObject::Connection> m_connections;
     QTimer m_hookTimer;
     int m_fd = -1;
