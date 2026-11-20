@@ -1384,6 +1384,7 @@ mod tests {
             complete: true,
             buffer_reset: false,
             clear_history: false,
+            column_placement: crate::analysis::ColumnPlacement::InOrder,
             widget_width: 0,
             track_frames: 0,
             end_column: 0,

@@ -26,8 +26,9 @@ use super::retention::{lookahead_seconds, SpectrogramBufferConfig, SpectrogramBu
 use super::stft_batch;
 use super::track_io::{source_stamp, TrackFormat};
 use super::{
-    f64_to_u64_saturating, usize_to_u64, AnalysisEvent, PrecomputedSpectrogramChunk,
-    SpectrogramDisplayMode, SpectrogramViewMode, ESTIMATE_COLUMN_FRAMES,
+    f64_to_u64_saturating, usize_to_u64, AnalysisEvent, ColumnPlacement,
+    PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
+    ESTIMATE_COLUMN_FRAMES,
 };
 use crate::playback::{remap_path, PathRenames};
 use crate::worker_thread::{spawn_joinable, JoinableThread};
@@ -459,6 +460,7 @@ impl StagingChunkState {
             complete: false,
             buffer_reset: false,
             clear_history: false,
+            column_placement: ColumnPlacement::InOrder,
             widget_width: 0,
             track_frames: 0,
             end_column: 0,
@@ -547,6 +549,7 @@ fn staging_drain_stft_rows(
                 complete: false,
                 buffer_reset: false,
                 clear_history: false,
+                column_placement: ColumnPlacement::InOrder,
                 widget_width: 0,
                 track_frames: 0,
                 end_column: 0,
@@ -1151,6 +1154,12 @@ struct SpectrogramSessionState {
     /// for a centered view, from its first to the session's first: decoded
     /// once the session has no backfill left (see [`plan_rolling_history`]).
     rolling_history: Option<(u64, u64)>,
+    /// The first column of the rolling view's history the session has sent,
+    /// is sending, or has planned, left of its first: a later switch to
+    /// rolling mode plans only the columns left of it, rather than decode
+    /// again what it sent or will send (#625). `None` while it has planned
+    /// none.
+    rolling_history_start: Option<u64>,
     /// The column after the file's last, once the session has decoded to
     /// its end: the extent every later chunk carries as its estimate.
     end_column: Option<u64>,
@@ -1475,6 +1484,7 @@ fn run_spectrogram_session(
         backfill,
         ring_by_column: display_mode == SpectrogramDisplayMode::Centered,
         rolling_history: None,
+        rolling_history_start: None,
         end_column: None,
         stream_at_end: None,
     };
@@ -1500,6 +1510,11 @@ fn run_spectrogram_session(
             complete: false,
             buffer_reset: emit_initial_reset,
             clear_history: emit_initial_reset && clear_history_on_reset,
+            column_placement: if emit_initial_reset {
+                reset_column_placement(&session)
+            } else {
+                ColumnPlacement::InOrder
+            },
             widget_width: session.widget_width,
             track_frames: session.track_frames.unwrap_or(0),
             end_column: chunk_end_column(&session),
@@ -1632,6 +1647,7 @@ fn run_spectrogram_session(
                 // come, after the outgoing file's.
                 session.ring_by_column = false;
                 session.rolling_history = None;
+                session.rolling_history_start = None;
                 session.session_start_column = session.columns_produced;
                 session.post_reset_unthrottled_columns =
                     post_reset_unthrottled_columns(session.display_mode);
@@ -1740,6 +1756,7 @@ fn fail_session(
             complete: false,
             buffer_reset: true,
             clear_history: true,
+            column_placement: ColumnPlacement::InOrder,
             widget_width: 0,
             track_frames: 0,
             end_column: 0,
@@ -2618,6 +2635,7 @@ fn handle_session_seek(
     // rolling view.
     session.ring_by_column = session.display_mode == SpectrogramDisplayMode::Centered;
     session.rolling_history = None;
+    session.rolling_history_start = None;
     session.session_start_column = new_column;
     session.target_chunk_columns = 1; // Fast first-pixel after seek
     session.throttle_origin = None;
@@ -2642,6 +2660,7 @@ fn handle_session_seek(
             complete: false,
             buffer_reset: true,
             clear_history: false,
+            column_placement: reset_column_placement(session),
             widget_width: session.widget_width,
             track_frames: session.track_frames.unwrap_or(0),
             end_column: chunk_end_column(session),
@@ -2658,6 +2677,15 @@ fn handle_session_seek(
 // ---------------------------------------------------------------------------
 // Playhead first: the left of a centered view after its right
 // ---------------------------------------------------------------------------
+
+/// How the UI's ring takes the columns of `session` from its reset on.
+fn reset_column_placement(session: &SpectrogramSessionState) -> ColumnPlacement {
+    if session.ring_by_column {
+        ColumnPlacement::ByColumn
+    } else {
+        ColumnPlacement::InOrder
+    }
+}
 
 /// A centered session decodes the columns left of its playhead after the
 /// right only if there are at least this many; fewer take less time than
@@ -2707,10 +2735,11 @@ fn plan_backfill(
 
 /// The history a rolling view shows that a centered session has not
 /// decoded: the columns from a view's width left of the playhead up to the
-/// session's first. A centered session decodes from the left edge of its
-/// view, half a view left of the playhead, and a rolling view shows a whole
-/// view left of it (#586). `None` when the session decoded them, or when the
-/// UI's ring has no place for them: one in the order its columns came.
+/// session's first, or up to the history it sent or is sending already. A
+/// centered session decodes from the left edge of its view, half a view
+/// left of the playhead, and a rolling view shows a whole view left of it
+/// (#586). `None` when the session decoded them, or will, or when the UI's
+/// ring has no place for them: one in the order its columns came.
 fn plan_rolling_history(session: &SpectrogramSessionState) -> Option<(u64, u64)> {
     if !session.ring_by_column || session.timeline_of != ColumnTimeline::PlayingFile {
         return None;
@@ -2719,7 +2748,10 @@ fn plan_rolling_history(session: &SpectrogramSessionState) -> Option<(u64, u64)>
     let first = view
         .column_at(session.target_position_seconds)
         .saturating_sub(view.window_columns());
-    (first < session.session_start_column).then_some((first, session.session_start_column))
+    let end = session
+        .rolling_history_start
+        .unwrap_or(session.session_start_column);
+    (first < end).then_some((first, end))
 }
 
 /// The column after the last the session decoded on the right, where the
@@ -2964,13 +2996,23 @@ fn apply_display_mode(session: &mut SpectrogramSessionState, mode: SpectrogramDi
         // A rolling view follows playback: its history is the playhead's.
         session.view_anchor = None;
     }
-    session.rolling_history = match mode {
+    match mode {
         SpectrogramDisplayMode::Rolling if previous == SpectrogramDisplayMode::Centered => {
-            plan_rolling_history(session)
+            session.rolling_history = plan_rolling_history(session);
+            if let Some((first, _)) = session.rolling_history {
+                session.rolling_history_start = Some(first);
+            }
         }
-        SpectrogramDisplayMode::Rolling => session.rolling_history,
-        SpectrogramDisplayMode::Centered => None,
-    };
+        SpectrogramDisplayMode::Rolling => {}
+        SpectrogramDisplayMode::Centered => {
+            // A centered view shows no history: one not begun is not sent,
+            // and a switch back plans it again. One the session decodes
+            // goes on.
+            if let Some((_, end)) = session.rolling_history.take() {
+                session.rolling_history_start = Some(end);
+            }
+        }
+    }
     // Columns decoded at the centered mode's unlimited rate do not count
     // against the rolling limit.
     session.throttle_origin = None;
@@ -3223,6 +3265,7 @@ fn session_send_full_chunk(
             complete: false,
             buffer_reset: false,
             clear_history: false,
+            column_placement: ColumnPlacement::InOrder,
             widget_width: session.widget_width,
             track_frames: session.track_frames.unwrap_or(0),
             end_column: chunk_end_column(session),
@@ -3432,6 +3475,7 @@ fn session_emit_pending_chunk(
                 complete: false,
                 buffer_reset: false,
                 clear_history: false,
+                column_placement: ColumnPlacement::InOrder,
                 widget_width: session.widget_width,
                 track_frames: session.track_frames.unwrap_or(0),
                 end_column: chunk_end_column(session),
@@ -3476,6 +3520,7 @@ fn session_flush_token(
             complete: false,
             buffer_reset: false,
             clear_history: false,
+            column_placement: ColumnPlacement::InOrder,
             widget_width: session.widget_width,
             track_frames: session.track_frames.unwrap_or(0),
             end_column: chunk_end_column(session),
@@ -3521,6 +3566,7 @@ fn session_emit_finalize_chunk(
             complete: true,
             buffer_reset: false,
             clear_history: false,
+            column_placement: ColumnPlacement::InOrder,
             widget_width: session.widget_width,
             track_frames: session.track_frames.unwrap_or(0),
             end_column: chunk_end_column(session),
@@ -4399,6 +4445,7 @@ mod tests {
             backfill: None,
             ring_by_column: false,
             rolling_history: None,
+            rolling_history_start: None,
             end_column: None,
             stream_at_end: None,
         };
@@ -4520,6 +4567,7 @@ mod tests {
             backfill: None,
             ring_by_column: false,
             rolling_history: None,
+            rolling_history_start: None,
             end_column: None,
             stream_at_end: None,
         };
@@ -4580,6 +4628,7 @@ mod tests {
             backfill: None,
             ring_by_column: false,
             rolling_history: None,
+            rolling_history_start: None,
             end_column: None,
             stream_at_end: None,
         };
@@ -4650,6 +4699,7 @@ mod tests {
             backfill: None,
             ring_by_column: false,
             rolling_history: None,
+            rolling_history_start: None,
             end_column: None,
             stream_at_end: None,
         };
@@ -4712,6 +4762,7 @@ mod tests {
             backfill: None,
             ring_by_column: false,
             rolling_history: None,
+            rolling_history_start: None,
             end_column: None,
             stream_at_end: None,
         };
@@ -4805,6 +4856,7 @@ mod tests {
             backfill: None,
             ring_by_column: false,
             rolling_history: None,
+            rolling_history_start: None,
             end_column: None,
             stream_at_end: None,
         }
@@ -5246,6 +5298,40 @@ mod tests {
         // Rolling, a view has nowhere else to be.
         set_view_anchor(&mut session, Some(100.0));
         assert_eq!(session.view_anchor, None);
+    }
+
+    #[test]
+    fn a_rolling_views_history_is_planned_once_and_again_only_if_dropped_unsent() {
+        // #625: a view's width left of the playhead, 10,600 - 1,185, is
+        // before the session's first column.
+        let mut session = centered_session_decoded_from_10_000(seconds_of_column(10_600));
+        session.ring_by_column = true;
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Rolling);
+        assert_eq!(session.rolling_history, Some((9_415, 10_000)));
+        // Back to centered before the session began it: nothing of it is
+        // sent, and a switch to rolling again plans it again.
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Centered);
+        assert_eq!(session.rolling_history, None);
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Rolling);
+        assert_eq!(session.rolling_history, Some((9_415, 10_000)));
+        // Once the session decodes it, as it takes it to, switching back
+        // and forth plans none of it again.
+        session.rolling_history = None;
+        for mode in [
+            SpectrogramDisplayMode::Centered,
+            SpectrogramDisplayMode::Rolling,
+            SpectrogramDisplayMode::Centered,
+            SpectrogramDisplayMode::Rolling,
+        ] {
+            apply_display_mode(&mut session, mode);
+            assert_eq!(session.rolling_history, None, "{mode:?}");
+        }
+        // A playhead further left, after a seek back that the session's
+        // columns cover, gets only what is left of what the session sent.
+        session.target_position_seconds = seconds_of_column(10_400);
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Centered);
+        apply_display_mode(&mut session, SpectrogramDisplayMode::Rolling);
+        assert_eq!(session.rolling_history, Some((9_215, 9_415)));
     }
 
     #[test]
@@ -6830,6 +6916,7 @@ mod tests {
             complete: false,
             buffer_reset: true,
             clear_history: true,
+            column_placement: ColumnPlacement::InOrder,
             widget_width: 0,
             track_frames: 0,
             end_column: 0,
@@ -8831,6 +8918,59 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_says_whether_the_ring_takes_its_columns_by_their_column() {
+        // Regression for #625: a centered seek's reset reaches the UI after
+        // its view became rolling, which the UI learns before the worker.
+        // The reset says the session's columns go where their column puts
+        // them, as the worker sends them; one made for a rolling view says
+        // they go in the order they come.
+        let path = write_noise_fixture("placement", 2);
+        let (commands, command_rx) = unbounded();
+        let sender = commands.clone();
+        let stage = AtomicU64::new(0);
+        let chunks = run_watched_session(
+            backfill_session_on(&path, 2, BACKFILL_PLAYHEAD),
+            1,
+            (commands, command_rx),
+            &Arc::new(AtomicU64::new(1)),
+            move |chunk| {
+                let command = match stage.load(Ordering::Relaxed) {
+                    0 if chunk.column_count > 0 => SpectrogramWorkerCommand::Seek {
+                        position_seconds: 90.0,
+                    },
+                    // The seek's reset, which the centered session made: the
+                    // view becomes rolling just after.
+                    1 if chunk.buffer_reset => {
+                        SpectrogramWorkerCommand::SetDisplayMode(SpectrogramDisplayMode::Rolling)
+                    }
+                    2 if chunk.column_count > 0 => SpectrogramWorkerCommand::Seek {
+                        position_seconds: 30.0,
+                    },
+                    _ => return,
+                };
+                sender.send(command).unwrap();
+                stage.fetch_add(1, Ordering::Relaxed);
+            },
+            |chunks| {
+                chunks.iter().filter(|chunk| chunk.buffer_reset).count() >= 3
+                    && chunks.last().is_some_and(|chunk| chunk.column_count > 0)
+            },
+        );
+        let resets: Vec<_> = chunks
+            .iter()
+            .filter(|chunk| chunk.buffer_reset)
+            .map(|chunk| chunk.column_placement == ColumnPlacement::ByColumn)
+            .collect();
+        // The session's own, the centered seek's, and the rolling one's.
+        assert_eq!(resets, vec![true, true, false]);
+        // Other chunks say nothing of it.
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.buffer_reset || chunk.column_placement == ColumnPlacement::InOrder));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn a_superseded_centered_session_does_not_decode_the_left_of_its_view() {
         let path = write_noise_fixture("superseded", 2);
         let playhead = backfill_column(BACKFILL_PLAYHEAD);
@@ -8913,6 +9053,89 @@ mod tests {
         let spans = spans_of(&chunks);
         assert_eq!(spans.len(), 4, "{spans:?}");
         // The right, the whole left of the view, the history before it, and
+        // the right on from where it was.
+        assert_eq!(spans[0].0, playhead);
+        assert_eq!(spans[1], (start, playhead));
+        assert_eq!(spans[2], (history, start));
+        assert_eq!(spans[3].0, spans[0].1);
+        for (index, bytes) in columns_of(&chunks) {
+            assert_eq!(Some(&bytes), reference.get(&index), "column {index}");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn switching_a_rolling_view_back_and_forth_decodes_its_history_once() {
+        // Regression for #625: a view that becomes centered and rolling again
+        // while the session decodes its history, and again once it has
+        // sent it, gets the history once, with nothing of it decoded again
+        // or overlapping the pass that is running. The playhead stays put
+        // while the view switches, as when paused.
+        let path = write_noise_fixture("rolling-again", 2);
+        let reference = continuous_reference(&path, 2, 1);
+        let playhead = backfill_column(BACKFILL_PLAYHEAD);
+        let start = backfill_column(backfill_start_seconds(BACKFILL_PLAYHEAD));
+        let history = rolling_history_start(BACKFILL_PLAYHEAD);
+        assert!(history + 64 < start, "{history} {start}");
+        let (commands, command_rx) = unbounded();
+        let switch = commands.clone();
+        let stage = Arc::new(AtomicU64::new(0));
+        let watched = Arc::clone(&stage);
+        let send_mode = move |mode| {
+            switch
+                .send(SpectrogramWorkerCommand::SetDisplayMode(mode))
+                .unwrap();
+        };
+        let switches = commands.clone();
+        let chunks = run_watched_session(
+            backfill_session_on(&path, 2, BACKFILL_PLAYHEAD),
+            1,
+            (commands, command_rx),
+            &Arc::new(AtomicU64::new(1)),
+            move |chunk| {
+                if chunk.column_count == 0 {
+                    return;
+                }
+                let first = u64::from(chunk.start_column_index);
+                let end = first + u64::from(chunk.column_count);
+                let switched = match watched.load(Ordering::Relaxed) {
+                    // The left of the view: the view becomes rolling.
+                    0 if first < playhead => {
+                        send_mode(SpectrogramDisplayMode::Rolling);
+                        true
+                    }
+                    // The history's first chunk, with more of it to come:
+                    // back to centered and rolling again.
+                    1 if first < start && end < start => {
+                        send_mode(SpectrogramDisplayMode::Centered);
+                        send_mode(SpectrogramDisplayMode::Rolling);
+                        true
+                    }
+                    // Its last: again, and playback goes on, so that the
+                    // rolling session's lookahead holds more than a chunk
+                    // past what it decoded.
+                    2 if end == start => {
+                        send_mode(SpectrogramDisplayMode::Centered);
+                        send_mode(SpectrogramDisplayMode::Rolling);
+                        switches
+                            .send(SpectrogramWorkerCommand::PositionUpdate {
+                                position_seconds: BACKFILL_PLAYHEAD + 20.0,
+                            })
+                            .unwrap();
+                        true
+                    }
+                    _ => false,
+                };
+                if switched {
+                    watched.fetch_add(1, Ordering::Relaxed);
+                }
+            },
+            |chunks| spans_of(chunks).len() >= 4,
+        );
+        assert_eq!(stage.load(Ordering::Relaxed), 3, "every switch was sent");
+        let spans = spans_of(&chunks);
+        assert_eq!(spans.len(), 4, "{spans:?}");
+        // The right, the left of the view, the history before it once, and
         // the right on from where it was.
         assert_eq!(spans[0].0, playhead);
         assert_eq!(spans[1], (start, playhead));

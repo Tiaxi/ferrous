@@ -721,6 +721,9 @@ private:
         quint64 trackFrames{0};
         // Where the session's centered view ends (0 if unknown).
         int endColumn{0};
+        // On a reset: whether the session's columns go where their column
+        // puts them, as the worker's view was centered when it made it.
+        bool placedByColumn{false};
         qsizetype dataBytes{0};
     };
 

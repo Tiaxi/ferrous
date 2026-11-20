@@ -3690,7 +3690,8 @@ void SpectrogramItem::feedPrecomputedChunk(
     int columns, int startIndex, int totalEstimate,
     int sampleRate, int hopSize, bool complete,
     bool bufferReset, quint64 trackToken, bool clearHistoryOnReset,
-    quint64 generation, int sessionWidth, int fftSize, quint64 trackFrames, int endColumn) {
+    quint64 generation, int sessionWidth, int fftSize, quint64 trackFrames, int endColumn,
+    bool placedByColumn) {
     QMutexLocker lock(&m_stateMutex);
     if (m_storageReleased) {
         // No one sees it: it keeps no columns until it is shown again.
@@ -4092,13 +4093,15 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedPendingResetBins = bins;
         m_precomputedPendingResetTrackToken = trackToken;
         m_precomputedPendingResetGeneration = generation;
-        // A centered refill's session, whose worker made the reset for a
-        // centered view, places its columns by column whatever the view is
-        // when its data comes.
-        m_precomputedPendingResetByColumn = m_displayMode == 1 || resetOfCenteredRefill;
+        // A session whose worker made the reset for a centered view, as a
+        // centered refill's, places its columns by column whatever the view
+        // is when the reset or its data comes: a switch to rolling mode
+        // reaches this view before the worker (#625).
+        m_precomputedPendingResetByColumn =
+            m_displayMode == 1 || resetOfCenteredRefill || placedByColumn;
     } else if (bufferReset) {
         applyPrecomputedResetLocked(startIndex, bins, trackToken, generation,
-            clearHistoryOnReset, hopSize, m_displayMode == 1, 0);
+            clearHistoryOnReset, hopSize, m_displayMode == 1 || placedByColumn, 0);
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
         m_precomputedPendingResetBins = 0;

@@ -15,6 +15,7 @@ private slots:
     void spectrogramRollingSeekKeepsHistoryContinuous();
     void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
     void spectrogramCenteredToRollingFillsTheHistoryLeftOfTheSession();
+    void spectrogramSwitchBeforeACenteredSeeksDataPlacesItsColumns_data();
     void spectrogramSwitchBeforeACenteredSeeksDataPlacesItsColumns();
     void spectrogramRollingRingInArrivalOrderIgnoresEarlierColumns();
     void spectrogramGaplessSuccessorAfterARollingSwitchFollowsTheHistory();
@@ -442,12 +443,21 @@ void SpectrogramPlaybackSmokeTest::spectrogramCenteredToRollingFillsTheHistoryLe
     delete node;
 }
 
+void SpectrogramPlaybackSmokeTest::spectrogramSwitchBeforeACenteredSeeksDataPlacesItsColumns_data() {
+    QTest::addColumn<bool>("switchBeforeReset");
+    QTest::newRow("switch after the reset") << false;
+    // The view learns of the switch before the worker, which made the
+    // reset for a centered view just before it learned of it (#625).
+    QTest::newRow("switch before the reset") << true;
+}
+
 void SpectrogramPlaybackSmokeTest::spectrogramSwitchBeforeACenteredSeeksDataPlacesItsColumns() {
     // A centered seek's reset comes before its data. The view becomes
-    // rolling in between: the worker made the reset for a centered view, and
-    // sends the playhead's columns, the left of the view and then the
-    // history before it. The view places them by their column, as the
-    // reset said when it came, not in the order they come.
+    // rolling in between, or just before the reset: the worker made the
+    // reset for a centered view, and sends the playhead's columns, the left
+    // of the view and then the history before it. The view places them by
+    // their column, as the reset says, not in the order they come.
+    QFETCH(bool, switchBeforeReset);
     QQuickWindow window;
     window.resize(400, 100);
     window.show();
@@ -478,9 +488,12 @@ void SpectrogramPlaybackSmokeTest::spectrogramSwitchBeforeACenteredSeeksDataPlac
     setTestPosition(item, 1'000.5 / columnsPerSecond, token);
     QSGNode *node = paintSettled(item, nullptr);
 
+    if (switchBeforeReset) {
+        item.setDisplayMode(0);
+    }
     // The seek's reset, which keeps what the view shows until its data.
     item.feedPrecomputedChunk(QByteArray(), bins, 0, 0, sessionStart, totalEstimate,
-        sampleRate, hop, false, true, token, false, 2);
+        sampleRate, hop, false, true, token, false, 2, 0, 0, 0, 0, /*placedByColumn=*/true);
     setTestPosition(item, (playhead + 0.5) / columnsPerSecond, token);
     item.setDisplayMode(0);
 
