@@ -637,10 +637,11 @@ def _grab_window(r, tag, settle=True):
 
 def _save_shot(r, img, area, state, desc):
     name = f"{area}_{state}_{r.s.suffix}"
+    evidence = r.s.composite_evidence(name + ".png")  # (before the save: a refused image replaces no earlier one)
     img.save(os.path.join(os.environ["SHOT_OUT"], name + ".png"))
     r.s.index.append(dict(file=name + ".png", area=area, state=state, theme=r.s.tag, scale=r.s.scale,
                           size=f"{r.s.size[0]}x{r.s.size[1]}", image=f"{img.width}x{img.height}",
-                          renderer=r.s.renderer, window="main", desc=desc, **r.s.composite_evidence(name + ".png")))
+                          renderer=r.s.renderer, window="main", desc=desc, **evidence))
 
 
 QUEUE_END_JS = ("(function(){var v=" + FIND + "('playlistView');if(!v)return '';var q=v.mapToItem(null,0,0);var bot=q.y+v.height;"

@@ -135,6 +135,8 @@ class CompositeSources(unittest.TestCase):
     def test_an_image_from_no_grab_and_no_marker_fails_its_state(self):
         with self.assertRaisesRegex(RuntimeError, "details_test-undeclared_dark_1x_64x48.png"):
             self.run_macros(FakeSession(), "test_undeclared")
+        # (and writes no image: on a partial rerun it would replace an earlier one that keeps its old entry)
+        self.assertFalse(os.path.exists(os.path.join(os.environ["SHOT_OUT"], "details_test-undeclared_dark_1x_64x48.png")))
 
     def test_sources_do_not_carry_into_the_next_macro(self):
         entries = self.run_macros(FakeSession(), "test_two_from_one", "test_drawn")
