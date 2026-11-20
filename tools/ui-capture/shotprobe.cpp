@@ -1281,8 +1281,8 @@ private:
         if (mainIndex < 0) {
             return;
         }
-        const QString t = QString::number(g_clock.nsecsElapsed() / 1e6, 'f', 3);
         QHash<QQuickWindow *, QPair<int, QPoint>> now;
+        QStringList lines;  // (without their time, taken below)
         int depth = 0;
         for (const auto &[pw, off] : popupWindowsOf(mw, false)) {
             const int index = int(m_hooked.indexOf(pw));
@@ -1292,24 +1292,33 @@ private:
             now.insert(pw, {index, off});
             const auto was = m_popupShown.constFind(pw);
             if (was != m_popupShown.cend() && was->first != index) {  // (another window at a destroyed one's address)
-                m_popupLines.append(QString("%1\t%2\t0\t%3,%4\t%5\t-1").arg(t).arg(was->first).arg(was->second.x())
-                                        .arg(was->second.y()).arg(mainIndex));
+                lines.append(QString("%1\t0\t%2,%3\t%4\t-1").arg(was->first).arg(was->second.x()).arg(was->second.y())
+                                 .arg(mainIndex));
             }
             if (was == m_popupShown.cend() || was->first != index || was->second != off) {
-                m_popupLines.append(QString("%1\t%2\t1\t%3,%4\t%5\t%6").arg(t).arg(index).arg(off.x()).arg(off.y())
-                                        .arg(mainIndex).arg(depth));
+                lines.append(QString("%1\t1\t%2,%3\t%4\t%5").arg(index).arg(off.x()).arg(off.y()).arg(mainIndex)
+                                 .arg(depth));
             }
             ++depth;
         }
         // (only the keys are compared: a menu window destroyed since is never dereferenced)
         for (auto it = m_popupShown.cbegin(); it != m_popupShown.cend(); ++it) {
             if (!now.contains(it.key())) {
-                m_popupLines.append(QString("%1\t%2\t0\t%3,%4\t%5\t-1").arg(t).arg(it->first).arg(it->second.x())
-                                        .arg(it->second.y()).arg(mainIndex));
+                lines.append(QString("%1\t0\t%2,%3\t%4\t-1").arg(it->first).arg(it->second.x()).arg(it->second.y())
+                                 .arg(mainIndex));
             }
         }
-        if (m_popupShown != now && m_traceWin) {
-            traceSample(m_traceWin);  // a menu moved need not draw again: its items' places are traced now
+        if (lines.isEmpty()) {
+            return;
+        }
+        if (m_traceWin) {
+            // A menu that moves need not draw again: its items' places are traced now, before the time its lines
+            // take, so the frame drawn for the move finds them in the trace.
+            traceSample(m_traceWin);
+        }
+        const QString t = QString::number(g_clock.nsecsElapsed() / 1e6, 'f', 3);
+        for (const QString &line : lines) {
+            m_popupLines.append(t + "\t" + line);
         }
         m_popupShown = now;
     }

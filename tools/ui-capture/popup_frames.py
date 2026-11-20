@@ -18,6 +18,19 @@ from PIL import Image
 POPUP_BACKDROP = (0x80, 0x80, 0x80)  # (shotprobe.cpp's POPUP_BACKDROP)
 
 
+def frame_scale(opts):
+    """The downscale of a strip's frames, read from its options as the probe reads it: the last `scale=F`, only
+    0 < F < 1, anything else none."""
+    f = 1.0
+    for o in opts.split():
+        if o.startswith("scale="):
+            try:
+                f = float(o[6:])
+            except ValueError:
+                f = 0.0  # (QString::toDouble: 0)
+    return f if 0 < f < 1 else 1.0
+
+
 def read_tsv(d):
     """frames.tsv split into its frame lines (dicts), popup lines (dicts), menu window indices and its lines other
     than frames (the popup lines too)."""
@@ -137,10 +150,14 @@ def merge(d, dpr=1.0, crop=None, frame_scale=1.0):
 
 def _composite(canvas, im, xy):
     """Draws `im` over the canvas at xy, which may be left of or above it (a menu the crop cuts); returns whether
-    any of it is on the canvas."""
+    any of its pixels (not its transparent margin) are on the canvas."""
     x, y = xy
     sx, sy = max(0, -x), max(0, -y)
-    if sx < im.width and sy < im.height and x < canvas.width and y < canvas.height:
-        canvas.alpha_composite(im, (max(0, x), max(0, y)), (sx, sy))
-        return True
-    return False
+    ex, ey = min(im.width, canvas.width - x), min(im.height, canvas.height - y)
+    if sx >= ex or sy >= ey:
+        return False  # none of it is on the canvas
+    part = im.crop((sx, sy, ex, ey))
+    if part.getchannel("A").getbbox() is None:
+        return False  # only its transparent margin is
+    canvas.alpha_composite(part, (max(0, x), max(0, y)))
+    return True

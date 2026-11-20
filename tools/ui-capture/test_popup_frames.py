@@ -142,6 +142,17 @@ class MergeMenuFrames(unittest.TestCase):
         self.assertEqual([f["win"] for f in frames], [0, 0, 0, 0])
         self.assertEqual({tuple(self.image(f["file"]).getcolors()) for f in frames}, {((40 * 30, MAIN),)})
 
+    def test_a_crop_over_only_its_transparent_margin_does_not_draw_it_in(self):
+        # the menu at (30, 20) with a 4 px transparent margin; the crop ends 2 px into the margin
+        self.assertEqual(self.open_close(scale=1, crop=[0, 0, 32, 22], margin=4), [])
+
+    def test_the_frame_scale_is_read_as_the_probe_reads_it(self):
+        self.assertEqual(popup_frames.frame_scale(""), 1.0)
+        self.assertEqual(popup_frames.frame_scale("every=2 scale=0.5"), 0.5)
+        self.assertEqual(popup_frames.frame_scale("scale=0.5 scale=0.25"), 0.25)
+        for bad in ("scale=0", "scale=2", "scale=x", "scale=0.5 scale=x"):
+            self.assertEqual(popup_frames.frame_scale(bad), 1.0, bad)
+
     def test_without_a_crop_the_frames_grow_for_a_menu_past_the_window(self):
         self.open_close(scale=2, off=(80, 40))
         frames = self.merged()[0]
