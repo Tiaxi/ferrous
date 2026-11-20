@@ -248,6 +248,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/Main.qml
         qml/components/ActionShortcuts.qml
         qml/components/AlbumArtTile.qml
+        qml/components/AlternateShortcuts.qml
         qml/components/AppMenu.qml
         qml/components/AppMenuBarItem.qml
         qml/components/CompactDialogWindow.qml
@@ -275,8 +276,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/RegionHeader.qml
         qml/components/RowBackground.qml
         qml/components/ScrobbleIndicator.qml
-        qml/components/StandardKeyAction.qml
-        qml/components/StandardKeyShortcuts.qml
+        qml/components/ShortcutAction.qml
         qml/components/TextToolButton.qml
         qml/components/UiPalette.qml
         qml/components/ViewerControls.qml

@@ -2062,6 +2062,14 @@ QVariantMap BridgeClient::queueColumnWidths() const {
     return widths;
 }
 
+QVariantMap BridgeClient::keyboardShortcuts() const {
+    QVariantMap shortcuts;
+    for (auto it = m_keyboardShortcuts.cbegin(); it != m_keyboardShortcuts.cend(); ++it) {
+        shortcuts.insert(it.key(), it.value());
+    }
+    return shortcuts;
+}
+
 bool BridgeClient::lastFmScrobblingEnabled() const {
     return m_lastFmScrobblingEnabled;
 }
@@ -2935,6 +2943,48 @@ void BridgeClient::applyBackendQueueColumnWidths(
         m_queueColumnWidths = widths;
         emit queueColumnWidthsChanged();
     }
+}
+
+bool BridgeClient::setKeyboardShortcuts(const QVariantMap &shortcuts) {
+    if (shortcuts.size() > BinaryBridgeCodec::kMaxKeyboardShortcutEntries) {
+        return false;
+    }
+    BinaryBridgeCodec::KeyboardShortcuts next;
+    for (auto it = shortcuts.cbegin(); it != shortcuts.cend(); ++it) {
+        if (!it.value().canConvert<QString>()) {
+            return false;
+        }
+        const QString sequences = it.value().toString();
+        if (!BinaryBridgeCodec::isValidKeyboardShortcutId(it.key())
+            || !BinaryBridgeCodec::isValidKeyboardShortcutSequences(sequences)) {
+            return false;
+        }
+        next.insert(it.key(), sequences);
+    }
+    if (next == m_keyboardShortcuts) {
+        return true;
+    }
+    // The whole set, so a request that overtakes an earlier one keeps it.
+    const quint32 generation = m_keyboardShortcutsGeneration + 1;
+    if (!sendBinaryCommand(BinaryBridgeCodec::encodeCommandKeyboardShortcuts(next, generation))) {
+        return false;
+    }
+    m_keyboardShortcutsGeneration = generation;
+    m_keyboardShortcuts = next;
+    emit keyboardShortcutsChanged();
+    return true;
+}
+
+// Take the shortcuts the backend sent once it has taken the latest ones sent
+// to it, as applyBackendQueueColumnWidths does the column widths: a snapshot
+// it built before then must not replace a newer edit.
+void BridgeClient::applyBackendKeyboardShortcuts(
+    const BinaryBridgeCodec::KeyboardShortcuts &shortcuts, quint32 generation) {
+    if (generation != m_keyboardShortcutsGeneration || m_keyboardShortcuts == shortcuts) {
+        return;
+    }
+    m_keyboardShortcuts = shortcuts;
+    emit keyboardShortcutsChanged();
 }
 
 QRect BridgeClient::fitWindowToScreens(
@@ -6318,6 +6368,10 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (snapshot.settings.present && snapshot.settings.hasQueueColumnWidths) {
         applyBackendQueueColumnWidths(
             snapshot.settings.queueColumnWidths, snapshot.settings.queueColumnWidthsGeneration);
+    }
+    if (snapshot.settings.present && snapshot.settings.hasKeyboardShortcuts) {
+        applyBackendKeyboardShortcuts(
+            snapshot.settings.keyboardShortcuts, snapshot.settings.keyboardShortcutsGeneration);
     }
     const bool showFps = snapshot.settings.present ? snapshot.settings.showFps : m_showFps;
     if (m_showFps != showFps) {

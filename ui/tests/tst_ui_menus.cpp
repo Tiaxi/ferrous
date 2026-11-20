@@ -444,11 +444,11 @@ ApplicationWindow {
     property alias action: action
     property alias popup: popup
 
-    Components.StandardKeyAction {
+    Components.ShortcutAction {
         id: action
         standardKey: StandardKey.Open
     }
-    Components.StandardKeyShortcuts {
+    Components.AlternateShortcuts {
         actions: [action]
     }
     Popup {
@@ -589,6 +589,7 @@ private slots:
     void menusAreWindowsThatReachPastASmallWindow();
     void menuWindowsShowAtTheirFinalSize();
     void standardKeyActionTakesEveryBindingUnderAModalPopup();
+    void standardKeysReadAndWriteTheListsTheSettingsKeep();
 
 private:
     // The checks that the tests above run in turn in one window; each says
@@ -909,7 +910,7 @@ void UiMenusTest::standardKeyActionTakesEveryBindingUnderAModalPopup() {
     QQmlEngine engine;
     QQmlComponent component(&engine);
     component.setData(standardKeyActionQml(),
-                      QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/StandardKeyAction.qml")));
+                      QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/ShortcutAction.qml")));
     std::unique_ptr<QObject> root(component.create());
     QVERIFY2(root != nullptr, qPrintable(component.errorString()));
     auto *window = qobject_cast<QQuickWindow *>(root.get());
@@ -1699,6 +1700,34 @@ void UiMenusTest::checkFindOpensSearchOnCtrlF(QQuickWindow *window) {
     QTRY_VERIFY(!search->property("dialogVisible").toBool());
 }
 
+// The lists of key sequences the settings keep for changed shortcuts
+// (#458): QKeySequence::listToString's portable text, read into each
+// sequence's portable text and written back, whatever form a sequence comes
+// in, without empty sequences or repeats.
+void UiMenusTest::standardKeysReadAndWriteTheListsTheSettingsKeep() {
+    QCOMPARE(StandardKeys::splitSequences(QStringLiteral("Media Play; Space")),
+             (QStringList{QStringLiteral("Media Play"), QStringLiteral("Space")}));
+    QCOMPARE(StandardKeys::splitSequences(QStringLiteral("Ctrl+K, Ctrl+P; Shift+F11")),
+             (QStringList{QStringLiteral("Ctrl+K, Ctrl+P"), QStringLiteral("Shift+F11")}));
+    QVERIFY(StandardKeys::splitSequences(QString()).isEmpty());
+    QCOMPARE(StandardKeys::splitSequences(QStringLiteral("Ctrl+P; Ctrl+P")), QStringList{QStringLiteral("Ctrl+P")});
+
+    QCOMPARE(StandardKeys::portableText(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Comma)),
+             QStringLiteral("Ctrl+Alt+,"));
+    QCOMPARE(StandardKeys::portableText(QStringLiteral("ctrl+shift+m")), QStringLiteral("Ctrl+Shift+M"));
+    QVERIFY(StandardKeys::portableText(QString()).isEmpty());
+    QVERIFY(StandardKeys::portableText(QKeySequence()).isEmpty());
+
+    QCOMPARE(StandardKeys::joinSequences({QStringLiteral("Media Play"), QVariant::fromValue(QKeySequence(Qt::Key_Space)),
+                                          QString(), QStringLiteral("Space")}),
+             QStringLiteral("Media Play; Space"));
+    QVERIFY(StandardKeys::joinSequences({}).isEmpty());
+    QVERIFY(StandardKeys::joinSequences({QString()}).isEmpty());
+    // Back and forth.
+    const QString text = QStringLiteral("Ctrl+Alt+P; Media Play; Ctrl+=");
+    QCOMPARE(StandardKeys::joinSequences(QVariant(StandardKeys::splitSequences(text)).toList()), text);
+}
+
 // Each binding of an action's standard key triggers it, not only the first
 // (#581): Open's Ctrl+O and Open key, Undo's Ctrl+Z, Alt+Backspace and Undo
 // key, Redo's, and Find's Ctrl+F and Find key. The first is the action's
@@ -1769,7 +1798,7 @@ void UiMenusTest::checkShortcutsAreTakenOnceEach(QQuickWindow *window) {
         const QVariant keyBindings = action->property("keyBindings");
         QList<QKeySequence> sequences;
         if (keyBindings.isValid()) {
-            // A StandardKeyAction's: every binding of its standard key.
+            // A ShortcutAction's: all its bindings.
             for (const QString &binding : keyBindings.toStringList()) {
                 sequences << QKeySequence(binding);
             }

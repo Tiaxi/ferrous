@@ -6,7 +6,7 @@ import QtQml.Models 2.15
 // The shortcuts of the main window's actions, for a modal popup, which
 // blocks the main window's own shortcuts while it is open. Windows whose
 // transient parent is the main window already get its shortcuts. A
-// StandardKeyAction's are every binding of its standard key.
+// ShortcutAction's are all its bindings, the user's or its defaults.
 Item {
     id: root
 

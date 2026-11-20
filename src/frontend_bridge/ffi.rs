@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use std::os::fd::RawFd;
 
 use super::imports::{ImportGate, RenamedDetails};
+use super::keyboard_shortcuts::{self, KeyboardShortcuts};
 use super::queue_columns::{self, QueueColumnWidths};
 use super::queue_relay::{QueueBatch, QueueRelay};
 use super::window_layout::{self, WindowGeometry, WindowLayout};
@@ -2507,6 +2508,39 @@ fn push_queue_column_widths(out: &mut Vec<u8>, widths: &QueueColumnWidths) {
     }
 }
 
+/// Command 80: a u32 count of actions, each its id and its key sequences as
+/// strings, then the u32 generation of the request. An entry the settings
+/// could not keep, or more than they keep, refuses the command.
+fn read_keyboard_shortcuts_command(
+    reader: &mut BinaryReader<'_>,
+) -> Result<BridgeSettingsCommand, String> {
+    // Two string lengths at least.
+    let count = reader.read_count(8)?;
+    if count > keyboard_shortcuts::MAX_ENTRIES {
+        return Err("too many keyboard shortcuts".to_string());
+    }
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        entries.push((reader.read_string()?, reader.read_string()?));
+    }
+    let shortcuts = KeyboardShortcuts::from_entries(entries)
+        .ok_or_else(|| "a keyboard shortcut is out of bounds".to_string())?;
+    Ok(BridgeSettingsCommand::SetKeyboardShortcuts {
+        shortcuts,
+        generation: reader.read_u32()?,
+    })
+}
+
+/// The keyboard shortcuts as command 80 lays them out, without the
+/// generation.
+fn push_keyboard_shortcuts(out: &mut Vec<u8>, shortcuts: &KeyboardShortcuts) {
+    push_u32(out, clamp_u32(shortcuts.len()));
+    for (id, sequences) in shortcuts.iter() {
+        push_string(out, id);
+        push_string(out, sequences);
+    }
+}
+
 fn parse_settings_command(
     cmd_id: u16,
     reader: &mut BinaryReader<'_>,
@@ -2558,6 +2592,7 @@ fn parse_settings_command(
         75 => BridgeSettingsCommand::SetLastFmShowScrobbleProgress(reader.read_u8()? != 0),
         76 => BridgeSettingsCommand::SetShowFullscreenTitleStrip(reader.read_u8()? != 0),
         77 => BridgeSettingsCommand::SetStretchShortTracks(reader.read_u8()? != 0),
+        80 => read_keyboard_shortcuts_command(reader)?,
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -3278,9 +3313,12 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         &mut out,
         u8::from(snapshot.settings.display.stretch_short_tracks),
     );
-    // The volume requests taken, last: see
-    // `BridgeSnapshot::volume_requests_taken`.
+    // The volume requests taken: see `BridgeSnapshot::volume_requests_taken`.
     push_u64(&mut out, snapshot.volume_requests_taken);
+    // The keyboard shortcuts, last, as command 80 lays them out, with the
+    // generation of the latest request the bridge took.
+    push_keyboard_shortcuts(&mut out, &snapshot.settings.keyboard_shortcuts);
+    push_u32(&mut out, snapshot.keyboard_shortcuts_generation);
     out
 }
 
@@ -3881,9 +3919,11 @@ mod tests {
                 },
                 window: WindowLayout::default(),
                 queue_columns: super::super::QueueColumnSettings::default(),
+                keyboard_shortcuts: super::super::KeyboardShortcuts::default(),
                 unknown_lines: Vec::new(),
             },
             queue_column_widths_generation: 0,
+            keyboard_shortcuts_generation: 0,
             volume_requests_taken: 0,
             lastfm: crate::lastfm::RuntimeState {
                 enabled: true,
@@ -5691,17 +5731,23 @@ mod tests {
     /// latest ones the UI sent.
     const SETTINGS_QUEUE_COLUMNS_BYTES: usize = 10;
 
-    /// The bytes of the count of volume requests the bridge took, which
-    /// ends the settings section.
+    /// The bytes of the count of volume requests the bridge took.
     const SETTINGS_VOLUME_REQUESTS_BYTES: usize = 8;
+
+    /// The bytes of no changed keyboard shortcuts and their generation,
+    /// which end the settings section.
+    const SETTINGS_NO_KEYBOARD_SHORTCUTS_BYTES: usize = 8;
 
     /// The bytes that end the settings section: the queue's column widths
     /// and their generation, then the spectrogram's frequency cap, whether
     /// the scrobble progress indicator is shown, whether a viewer over the
     /// whole screen shows its title strip, whether short tracks are
-    /// stretched to the spectrogram's width, and the volume requests taken.
-    const SETTINGS_TAIL_BYTES: usize =
-        SETTINGS_QUEUE_COLUMNS_BYTES + 4 + SETTINGS_VOLUME_REQUESTS_BYTES;
+    /// stretched to the spectrogram's width, the volume requests taken, and
+    /// the keyboard shortcuts, none here.
+    const SETTINGS_TAIL_BYTES: usize = SETTINGS_QUEUE_COLUMNS_BYTES
+        + 4
+        + SETTINGS_VOLUME_REQUESTS_BYTES
+        + SETTINGS_NO_KEYBOARD_SHORTCUTS_BYTES;
 
     #[test]
     fn frequency_cap_setting_command_and_snapshot_share_protocol() {
@@ -5718,7 +5764,10 @@ mod tests {
             // Followed by the scrobble progress indicator's setting, the
             // title strip's and the stretch's.
             assert_eq!(
-                settings[settings.len() - 4 - SETTINGS_VOLUME_REQUESTS_BYTES],
+                settings[settings.len()
+                    - 4
+                    - SETTINGS_VOLUME_REQUESTS_BYTES
+                    - SETTINGS_NO_KEYBOARD_SHORTCUTS_BYTES],
                 u8::from(enabled)
             );
         }
@@ -5740,7 +5789,10 @@ mod tests {
             let settings = encode_settings_section(&snapshot);
             // Followed by the title strip's setting and the stretch's.
             assert_eq!(
-                settings[settings.len() - 3 - SETTINGS_VOLUME_REQUESTS_BYTES],
+                settings[settings.len()
+                    - 3
+                    - SETTINGS_VOLUME_REQUESTS_BYTES
+                    - SETTINGS_NO_KEYBOARD_SHORTCUTS_BYTES],
                 u8::from(show)
             );
         }
@@ -5762,7 +5814,10 @@ mod tests {
             let settings = encode_settings_section(&snapshot);
             // Followed by the stretch's setting.
             assert_eq!(
-                settings[settings.len() - 2 - SETTINGS_VOLUME_REQUESTS_BYTES],
+                settings[settings.len()
+                    - 2
+                    - SETTINGS_VOLUME_REQUESTS_BYTES
+                    - SETTINGS_NO_KEYBOARD_SHORTCUTS_BYTES],
                 u8::from(show)
             );
         }
@@ -5784,7 +5839,10 @@ mod tests {
             let settings = encode_settings_section(&snapshot);
             // The last byte of the section.
             assert_eq!(
-                settings[settings.len() - 1 - SETTINGS_VOLUME_REQUESTS_BYTES],
+                settings[settings.len()
+                    - 1
+                    - SETTINGS_VOLUME_REQUESTS_BYTES
+                    - SETTINGS_NO_KEYBOARD_SHORTCUTS_BYTES],
                 u8::from(stretch)
             );
         }
@@ -5864,7 +5922,10 @@ mod tests {
             .push("genre:90".to_string());
         let settings = encode_settings_section(&snapshot);
         let tail = &settings[settings.len() - SETTINGS_TAIL_BYTES
-            ..settings.len() - 4 - SETTINGS_VOLUME_REQUESTS_BYTES];
+            ..settings.len()
+                - 4
+                - SETTINGS_VOLUME_REQUESTS_BYTES
+                - SETTINGS_NO_KEYBOARD_SHORTCUTS_BYTES];
         assert_eq!(tail, queue_column_widths_payload(170, 0, 76, 9).as_slice());
         let mut reader = BinaryReader::new(tail);
         assert_eq!(read_queue_column_widths(&mut reader).expect("read"), widths);
@@ -5873,16 +5934,107 @@ mod tests {
     }
 
     #[test]
-    fn settings_section_ends_with_the_volume_requests_taken() {
+    fn settings_section_has_the_volume_requests_taken_before_the_shortcuts() {
         for taken in [0, 1, 7, u64::MAX] {
             let mut snapshot = sample_snapshot();
             snapshot.volume_requests_taken = taken;
             let settings = encode_settings_section(&snapshot);
+            let end = settings.len() - SETTINGS_NO_KEYBOARD_SHORTCUTS_BYTES;
             let mut reader =
-                BinaryReader::new(&settings[settings.len() - SETTINGS_VOLUME_REQUESTS_BYTES..]);
+                BinaryReader::new(&settings[end - SETTINGS_VOLUME_REQUESTS_BYTES..end]);
             assert_eq!(reader.read_u64().expect("the count"), taken);
             reader.expect_done().expect("the whole tail");
         }
+    }
+
+    /// Command 80's payload: the entries, then the generation.
+    fn keyboard_shortcuts_payload(entries: &[(&str, &str)], generation: u32) -> Vec<u8> {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, u32::try_from(entries.len()).expect("count"));
+        for (id, sequences) in entries {
+            push_string(&mut payload, id);
+            push_string(&mut payload, sequences);
+        }
+        push_u32(&mut payload, generation);
+        payload
+    }
+
+    #[test]
+    fn keyboard_shortcuts_command_and_snapshot_share_protocol() {
+        let parsed = |payload: &[u8]| match parse_binary_command(&encode_command(80, payload)) {
+            Ok(Some(BridgeCommand::Settings(BridgeSettingsCommand::SetKeyboardShortcuts {
+                shortcuts,
+                generation,
+            }))) => Ok((shortcuts, generation)),
+            other => Err(format!("{other:?}")),
+        };
+        let entries = [("stop", ""), ("play_pause", "Media Play; Space")];
+        let (shortcuts, generation) =
+            parsed(&keyboard_shortcuts_payload(&entries, 7)).expect("parse");
+        assert_eq!(generation, 7);
+        assert_eq!(
+            shortcuts.iter().collect::<Vec<_>>(),
+            vec![("play_pause", "Media Play; Space"), ("stop", "")]
+        );
+        let (none, _) = parsed(&keyboard_shortcuts_payload(&[], u32::MAX)).expect("parse");
+        assert!(none.is_empty());
+
+        // At the bounds, and past them.
+        let longest_id = "a".repeat(keyboard_shortcuts::MAX_ID_BYTES);
+        let longest = "A".repeat(keyboard_shortcuts::MAX_SEQUENCES_BYTES);
+        assert!(parsed(&keyboard_shortcuts_payload(&[(&longest_id, &longest)], 1)).is_ok());
+        let too_long_id = format!("{longest_id}a");
+        let too_long = format!("{longest}A");
+        for bad in [
+            (too_long_id.as_str(), ""),
+            ("stop", too_long.as_str()),
+            ("Stop", ""),
+            ("", ""),
+            ("stop", "Ctrl+A\nnext=Ctrl+B"),
+            ("stop", " Space"),
+        ] {
+            assert!(
+                parsed(&keyboard_shortcuts_payload(&[bad], 1)).is_err(),
+                "{bad:?}"
+            );
+        }
+        let ids: Vec<String> = (0..=keyboard_shortcuts::MAX_ENTRIES)
+            .map(|index| format!("a{index}"))
+            .collect();
+        let most: Vec<(&str, &str)> = ids[..keyboard_shortcuts::MAX_ENTRIES]
+            .iter()
+            .map(|id| (id.as_str(), ""))
+            .collect();
+        assert_eq!(
+            parsed(&keyboard_shortcuts_payload(&most, 1))
+                .expect("the most")
+                .0
+                .len(),
+            keyboard_shortcuts::MAX_ENTRIES
+        );
+        let too_many: Vec<(&str, &str)> = ids.iter().map(|id| (id.as_str(), "")).collect();
+        assert!(parsed(&keyboard_shortcuts_payload(&too_many, 1)).is_err());
+        let payload = keyboard_shortcuts_payload(&entries, 3);
+        assert!(parsed(&payload[..payload.len() - 1]).is_err());
+        let mut long = payload.clone();
+        long.push(0);
+        assert!(parsed(&long).is_err());
+        // A count the payload cannot hold is refused before anything is
+        // allocated for it.
+        assert!(parsed(&[0xff, 0xff, 0xff, 0x7f, 0, 0, 0, 0]).is_err());
+
+        // The settings section ends with them, as the command lays them
+        // out, with the generation of the latest request the bridge took.
+        let mut snapshot = sample_snapshot();
+        snapshot.settings.keyboard_shortcuts = shortcuts;
+        snapshot.keyboard_shortcuts_generation = 9;
+        let settings = encode_settings_section(&snapshot);
+        let tail =
+            keyboard_shortcuts_payload(&[("play_pause", "Media Play; Space"), ("stop", "")], 9);
+        assert!(settings.ends_with(&tail), "{settings:?}");
+        let mut snapshot = sample_snapshot();
+        snapshot.keyboard_shortcuts_generation = 2;
+        assert!(encode_settings_section(&snapshot).ends_with(&keyboard_shortcuts_payload(&[], 2)));
     }
 
     #[test]

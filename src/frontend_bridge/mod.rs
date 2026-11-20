@@ -36,6 +36,7 @@ mod event_log;
 mod events;
 pub mod ffi;
 mod imports;
+mod keyboard_shortcuts;
 mod library_alias;
 mod library_index;
 pub mod library_tree;
@@ -71,6 +72,7 @@ use events::{
     process_lastfm_state, process_metadata_event, process_playback_event, scrobble_indicator,
     tick_lastfm_playback,
 };
+pub use keyboard_shortcuts::KeyboardShortcuts;
 pub use queue_columns::{QueueColumnSettings, QueueColumnWidths};
 pub use queue_sync::{QueueEdit, QueueUpdate};
 pub use queue_undo::{QueueUndoKind, QueueUndoRestored, QueueUndoState};
@@ -365,6 +367,14 @@ pub enum BridgeSettingsCommand {
         widths: QueueColumnWidths,
         generation: u32,
     },
+    /// The shortcuts of every action the user changed, which replace the
+    /// ones kept; the others keep their defaults. They are saved at once.
+    /// `generation` numbers the UI's requests, as for
+    /// [`Self::SetQueueColumnWidths`].
+    SetKeyboardShortcuts {
+        shortcuts: KeyboardShortcuts,
+        generation: u32,
+    },
     BeginLastFmAuth,
     CompleteLastFmAuth,
     DisconnectLastFm,
@@ -575,6 +585,9 @@ pub struct BridgeSnapshot {
     /// The generation of the latest queue column widths the UI sent; see
     /// [`BridgeSettingsCommand::SetQueueColumnWidths`].
     pub queue_column_widths_generation: u32,
+    /// The generation of the latest keyboard shortcuts the UI sent; see
+    /// [`BridgeSettingsCommand::SetKeyboardShortcuts`].
+    pub keyboard_shortcuts_generation: u32,
     /// How many volume requests from the UI the bridge has taken: a
     /// `SetVolume` command, of playback or of the settings. The UI shows a
     /// volume it asked for at once, and takes the snapshot's again once the
@@ -729,6 +742,8 @@ pub struct BridgeSettings {
     /// The widths of the queue's columns the user resized, which only the
     /// UI uses.
     pub queue_columns: QueueColumnSettings,
+    /// The keyboard shortcuts the user changed, which only the UI uses.
+    pub keyboard_shortcuts: KeyboardShortcuts,
     /// Lines of the settings file with keys this build does not know, such
     /// as a newer build's, kept as they were.
     pub unknown_lines: Vec<String>,
@@ -772,6 +787,7 @@ impl Default for BridgeSettings {
             },
             window: WindowLayout::default(),
             queue_columns: QueueColumnSettings::default(),
+            keyboard_shortcuts: KeyboardShortcuts::default(),
             unknown_lines: Vec::new(),
         }
     }
@@ -822,6 +838,8 @@ pub(super) struct BridgeState {
     settings: BridgeSettings,
     /// See [`BridgeSnapshot::queue_column_widths_generation`].
     queue_column_widths_generation: u32,
+    /// See [`BridgeSnapshot::keyboard_shortcuts_generation`].
+    keyboard_shortcuts_generation: u32,
     /// See [`BridgeSnapshot::volume_requests_taken`].
     volume_requests_taken: u64,
     lastfm: LastFmRuntimeState,
@@ -1058,6 +1076,7 @@ impl BridgeState {
             queue_undo: self.queue_undo.state(),
             settings: self.settings.clone(),
             queue_column_widths_generation: self.queue_column_widths_generation,
+            keyboard_shortcuts_generation: self.keyboard_shortcuts_generation,
             volume_requests_taken: self.volume_requests_taken,
             lastfm: self.lastfm.clone(),
             lastfm_scrobbling_paused: self.lastfm_scrobbling_paused,
@@ -3984,6 +4003,106 @@ mod tests {
                 vec!["genre:90".to_string()]
             );
         }
+    }
+
+    #[test]
+    fn changed_keyboard_shortcuts_are_saved_at_once_and_a_failed_save_is_shown_and_retried() {
+        let _guard = test_guard();
+        let _config = crate::paths::TestConfigDir::new();
+        let mut runtime = BridgeLoopRuntime::new(
+            BridgeRuntimeOptions {
+                persisted_state_enabled: true,
+                ..BridgeRuntimeOptions::default()
+            },
+            None,
+        );
+        let (event_tx, event_rx) = unbounded();
+        let settings_path = config::settings_path().expect("settings path");
+        let saved_text = || std::fs::read_to_string(&settings_path).expect("read the settings");
+        let shortcuts = |entries: &[(&str, &str)]| {
+            KeyboardShortcuts::from_entries(
+                entries
+                    .iter()
+                    .map(|(id, sequences)| ((*id).to_string(), (*sequences).to_string())),
+            )
+            .expect("valid shortcuts")
+        };
+        let send = |runtime: &mut BridgeLoopRuntime, sent: &KeyboardShortcuts, generation| {
+            runtime.handle_command(
+                BridgeCommand::Settings(BridgeSettingsCommand::SetKeyboardShortcuts {
+                    shortcuts: sent.clone(),
+                    generation,
+                }),
+                &event_tx,
+            );
+        };
+        // A newer build's line, which this one keeps.
+        runtime
+            .state
+            .settings
+            .unknown_lines
+            .push("future_key=1".to_string());
+
+        // Without waiting for the periodic save.
+        runtime.last_settings_save = Instant::now();
+        let first = shortcuts(&[("play_pause", "Media Play; Space"), ("stop", "")]);
+        send(&mut runtime, &first, 1);
+        assert_eq!(runtime.next_settings_save_delay(), Some(Duration::ZERO));
+        runtime.maybe_persist();
+        runtime.settle_persistence(&event_tx);
+        let text = saved_text();
+        assert!(
+            text.contains("\nshortcut.play_pause=Media Play; Space\nshortcut.stop=\n"),
+            "{text}"
+        );
+        assert!(text.contains("\nfuture_key=1\n"), "{text}");
+        assert!(!runtime.flags.settings_dirty);
+        assert_eq!(error_messages(&event_rx), Vec::<String>::new());
+        // The snapshot tells the UI which request it reflects.
+        let snapshot = runtime.state.snapshot(false);
+        assert_eq!(snapshot.keyboard_shortcuts_generation, 1);
+        assert_eq!(snapshot.settings.keyboard_shortcuts, first);
+
+        // The same set again is not saved again, but its generation is
+        // taken.
+        send(&mut runtime, &first, 2);
+        assert!(!runtime.flags.settings_dirty);
+        assert_eq!(
+            runtime.state.snapshot(false).keyboard_shortcuts_generation,
+            2
+        );
+
+        // Nothing can be renamed over a directory.
+        std::fs::remove_file(&settings_path).expect("remove the settings");
+        std::fs::create_dir(&settings_path).expect("block the settings");
+        let second = shortcuts(&[("find", "Ctrl+K")]);
+        send(&mut runtime, &second, 3);
+        runtime.maybe_persist();
+        runtime.settle_persistence(&event_tx);
+        let messages = error_messages(&event_rx);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].starts_with("Settings could not be saved"),
+            "{messages:?}"
+        );
+        assert!(runtime.flags.settings_dirty);
+        assert_eq!(
+            runtime.flags.settings_save_timing,
+            SettingsSaveTiming::Periodic
+        );
+
+        // The periodic save tries again; every default is left out.
+        std::fs::remove_dir(&settings_path).expect("unblock the settings");
+        runtime.last_settings_save = Instant::now() - Duration::from_secs(3);
+        runtime.maybe_persist();
+        runtime.settle_persistence(&event_tx);
+        let text = saved_text();
+        assert!(text.contains("\nshortcut.find=Ctrl+K\n"), "{text}");
+        assert_eq!(text.matches("shortcut.").count(), 1, "{text}");
+        assert!(!runtime.flags.settings_dirty);
+        let mut reread = BridgeSettings::default();
+        config::parse_settings_text(&mut reread, &text);
+        assert_eq!(reread.keyboard_shortcuts, second);
     }
 
     #[test]

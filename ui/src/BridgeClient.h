@@ -141,6 +141,11 @@ class BridgeClient : public QObject {
     // under "artist", "album" and "length"; a column that is not there has
     // its default width.
     Q_PROPERTY(QVariantMap queueColumnWidths READ queueColumnWidths NOTIFY queueColumnWidthsChanged)
+    // The shortcuts of the actions the user changed, by action id: each the
+    // action's key sequences in QKeySequence::listToString's portable text
+    // (StandardKeys.splitSequences reads it), empty for none. An action that
+    // is not there has its default shortcuts.
+    Q_PROPERTY(QVariantMap keyboardShortcuts READ keyboardShortcuts NOTIFY keyboardShortcutsChanged)
     Q_PROPERTY(bool lastFmScrobblingEnabled READ lastFmScrobblingEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool lastFmBuildConfigured READ lastFmBuildConfigured NOTIFY snapshotChanged)
     Q_PROPERTY(QString lastFmUsername READ lastFmUsername NOTIFY snapshotChanged)
@@ -328,6 +333,7 @@ public:
     bool systemMediaControlsEnabled() const;
     bool libraryWatchEnabled() const;
     QVariantMap queueColumnWidths() const;
+    QVariantMap keyboardShortcuts() const;
     bool lastFmScrobblingEnabled() const;
     bool lastFmBuildConfigured() const;
     QString lastFmUsername() const;
@@ -435,6 +441,13 @@ public:
     // save it with the settings; 0 restores its default. A width out of the
     // range the backend keeps is ignored.
     Q_INVOKABLE void setQueueColumnWidth(const QString &column, int width);
+    // Replace the changed shortcuts with `shortcuts`, as keyboardShortcuts
+    // has them, and save them at once; an action left out gets its default
+    // shortcuts back. Returns false, changing nothing, if an entry is out of
+    // the bounds the backend keeps (BinaryBridgeCodec's
+    // isValidKeyboardShortcutId and isValidKeyboardShortcutSequences), there
+    // are more than it keeps, or the command could not be sent.
+    Q_INVOKABLE bool setKeyboardShortcuts(const QVariantMap &shortcuts);
     // Whether the backend has sent the window layout saved in the settings,
     // which it does once at startup; savedWindowLayoutRead tells when.
     Q_INVOKABLE bool hasSavedWindowLayout() const;
@@ -619,6 +632,7 @@ signals:
     // The backend sent the window layout saved in the settings.
     void savedWindowLayoutRead();
     void queueColumnWidthsChanged();
+    void keyboardShortcutsChanged();
 
 private:
     struct SearchWorkerInputFrame {
@@ -777,6 +791,8 @@ private:
     void applyQueueUndo(const BinaryBridgeCodec::DecodedQueueUndo &undo);
     void applyBackendQueueColumnWidths(
         const BinaryBridgeCodec::QueueColumnWidths &widths, quint32 generation);
+    void applyBackendKeyboardShortcuts(
+        const BinaryBridgeCodec::KeyboardShortcuts &shortcuts, quint32 generation);
     // Read the size and modification time of the artwork target's track,
     // for the search of `generation`, into its "identity": empty if the file
     // is not there.
@@ -1121,6 +1137,10 @@ private:
     // to the backend; see applyBackendQueueColumnWidths.
     BinaryBridgeCodec::QueueColumnWidths m_queueColumnWidths;
     quint32 m_queueColumnWidthsGeneration{0};
+    // The changed keyboard shortcuts, and the generation of the latest ones
+    // sent to the backend; see applyBackendKeyboardShortcuts.
+    BinaryBridgeCodec::KeyboardShortcuts m_keyboardShortcuts;
+    quint32 m_keyboardShortcutsGeneration{0};
     // Set once the UI has asked the backend to stop, after which its stop is expected.
     bool m_bridgeShutdownRequested{false};
     bool m_loggedStartupQueueMissing{false};
