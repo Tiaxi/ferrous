@@ -150,7 +150,8 @@ class MergeMenuFrames(unittest.TestCase):
         self.assertEqual(popup_frames.frame_scale(""), 1.0)
         self.assertEqual(popup_frames.frame_scale("every=2 scale=0.5"), 0.5)
         self.assertEqual(popup_frames.frame_scale("scale=0.5 scale=0.25"), 0.25)
-        for bad in ("scale=0", "scale=2", "scale=x", "scale=0.5 scale=x"):
+        self.assertEqual(popup_frames.frame_scale("scale=.5e-0"), 0.5)
+        for bad in ("scale=0", "scale=2", "scale=x", "scale=0.5 scale=x", "scale=0.2_5", "scale=nan"):
             self.assertEqual(popup_frames.frame_scale(bad), 1.0, bad)
 
     def test_without_a_crop_the_frames_grow_for_a_menu_past_the_window(self):

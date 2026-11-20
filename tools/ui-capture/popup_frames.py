@@ -12,6 +12,7 @@ Coordinates: the frames are device px (the session's scale), cut to the recordin
 its `scale=F` option. A menu that reaches past the crop is cut there; with no crop, the frames grow right and down
 for it, mid grey outside the window (as a grab does)."""
 import os
+import re
 
 from PIL import Image
 
@@ -22,12 +23,10 @@ def frame_scale(opts):
     """The downscale of a strip's frames, read from its options as the probe reads it: the last `scale=F`, only
     0 < F < 1, anything else none."""
     f = 1.0
-    for o in opts.split():
+    for o in opts.split(" "):
         if o.startswith("scale="):
-            try:
-                f = float(o[6:])
-            except ValueError:
-                f = 0.0  # (QString::toDouble: 0)
+            # (QString::toDouble's syntax; anything else reads as 0, where Python's float would take "0.2_5")
+            f = float(o[6:]) if re.fullmatch(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?", o[6:]) else 0.0
     return f if 0 < f < 1 else 1.0
 
 
