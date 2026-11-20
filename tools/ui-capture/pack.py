@@ -707,13 +707,16 @@ def _has_home(text):
 
 def _home_boxes(rd, e):
     """The boxes (image px) that name this machine's paths in a shot: every recorded text (its layout)
-    holding the home folder, and the boxes the runner listed (shots/FILE.redact.json: the diagnostics log). Offsets:
-    a dialog capture's own window at its image offset, an outer dialog window of a nested capture below its title bar
-    at the capture's origin; a main-window or viewer-window shot at 0, 0, and the menus a main-window shot draws in
-    at their offsets. Returns (boxes, inner): inner, the grabbed window's box in a nested capture (it lies over its
-    parent's boxes)."""
+    holding the home folder, and the boxes the runner listed (shots/FILE.redact.json: the diagnostics log, already in
+    image px). The walk is in logical px and the shot in device px, so its rects, sizes and logical offsets are
+    scaled by the shot's scale (#666). Offsets: a dialog capture's own window at its image offset (image px), an
+    outer dialog window of a nested capture below its title bar at the capture's origin (28 logical px: KWin draws
+    title bars at the session's scale); a main-window or viewer-window shot at 0, 0, and the menus a main-window shot
+    draws in at their offsets (logical px). Returns (boxes, inner): inner, the grabbed window's box in a nested
+    capture (it lies over its parent's boxes)."""
     boxes, inner = [], None
     g = e.get("grabbed") or {}
+    s = float(e.get("scale", 1) or 1)
     sc = os.path.join(rd, "shots", e["file"][:-4] + ".redact.json")
     side = json.load(open(sc)) if os.path.exists(sc) else {}
     precise = set(side.get("precise", []))  # texts whose home-folder characters the runner boxed exactly
@@ -725,7 +728,7 @@ def _home_boxes(rd, e):
                 if w["cls"] == g.get("cls"):
                     off = g.get("image_offset", [0, 0])
                 elif not w.get("main") and outer and w is outer[0]:
-                    off = [0, 28]
+                    off = [0, 28 * s]
                 else:
                     continue
             elif g.get("kind") == "window":
@@ -735,18 +738,18 @@ def _home_boxes(rd, e):
             elif w.get("main"):
                 off = [0, 0]
             elif g.get("kind") == "main" and w.get("main_popup_offset"):  # a menu the grab draws in
-                off = w["main_popup_offset"]
+                off = [v * s for v in w["main_popup_offset"]]
             else:
                 continue
             for t in w.get("texts", []):
                 if (t.get("home") or _has_home(t.get("text")) or _has_home(t.get("shown_text"))) \
                         and t.get("name") not in precise:
                     x, y, ww, hh = t["rect"]
-                    boxes.append([x + off[0], y + off[1], ww, hh])
+                    boxes.append([x * s + off[0], y * s + off[1], ww * s, hh * s])
         if g.get("kind") == "dialog" and len(outer) > 1:
             ww_, wh_ = next((w["size"] for w in wins if w["cls"] == g.get("cls")), (0, 0))
             dx_, dy_ = g.get("image_offset", [0, 0])
-            inner = (dx_, dy_ - 30, dx_ + ww_, dy_ + wh_)
+            inner = (dx_, dy_ - 30 * s, dx_ + ww_ * s, dy_ + wh_ * s)
     boxes += side.get("boxes", [])
     return boxes, inner
 
@@ -923,7 +926,8 @@ def redact_round(rd, entries):
         if not os.path.exists(os.path.join(d, "frames.tsv")):
             continue
         meta = json.load(open(os.path.join(d, "meta.json"))) if os.path.exists(os.path.join(d, "meta.json")) else {}
-        ox, oy = (meta.get("crop") or [0, 0])[:2]
+        ox, oy = (meta.get("crop") or [0, 0])[:2]  # (logical px, as the trace's rects; the frames are device px)
+        s = float(meta.get("scale", 1) or 1)
         tracks, _ = motion_strip.read_trace(d, 0.0)
         priv = [tr for k, tr in tracks.items() if k.split("/")[-1].split("#")[0] in names and tr["pts"]]
         if not priv:
@@ -938,7 +942,7 @@ def redact_round(rd, entries):
                 i = max([k for k, (tt, _v) in enumerate(tr["pts"]) if tt <= t] or [0])
                 if tr["pts"][i][1] > 0.02:
                     x, y, w, h = tr["rects"][i]
-                    boxes.append([x - ox, y - oy, w, h])
+                    boxes.append([(x - ox) * s, (y - oy) * s, w * s, h * s])
             if not boxes or not os.path.exists(fp):
                 continue
             im = Image.open(fp).convert("RGB")
