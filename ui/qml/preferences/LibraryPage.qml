@@ -197,16 +197,24 @@ Preferences.PreferencesPage {
                 Keys.onReturnPressed: root.openCurrentRoot()
                 Keys.onEnterPressed: root.openCurrentRoot()
                 Keys.onDeletePressed: root.removeCurrentRoot()
-                Keys.onMenuPressed: {
+                Keys.onPressed: function(event) {
+                    if (event.key !== Qt.Key_Menu
+                            && !(event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+                        return
+                    }
+                    event.accepted = true
                     if (rootList.currentIndex < 0) {
                         return
                     }
                     // Under the selected folder, scrolled into view: the
-                    // menu opens beside the row (see AppMenu.popupAt).
+                    // menu opens beside the row (see AppMenu.popupAt). A
+                    // row taller than the list shows from its top, so the
+                    // menu opens at the list's bottom edge, on the row.
                     rootList.positionViewAtIndex(rootList.currentIndex, ListView.Contain)
                     const row = rootList.currentItem
                     if (row) {
-                        rootContextMenu.popupAt(row, 0, row.height)
+                        const listBottom = row.mapFromItem(rootList, 0, rootList.height).y
+                        rootContextMenu.popupAt(row, 0, Math.min(row.height, listBottom))
                     }
                 }
 
