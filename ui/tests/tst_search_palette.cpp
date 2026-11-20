@@ -147,14 +147,14 @@ ApplicationWindow {
             width: parent.width
             height: 48
             color: tokens.chrome
-            property int clicks: 0
+            property int presses: 0
             property int wheels: 0
 
             MouseArea {
                 objectName: "transportMouseArea"
                 anchors.fill: parent
                 hoverEnabled: true
-                onClicked: transport.clicks += 1
+                onPressed: transport.presses += 1
                 onWheel: transport.wheels += 1
             }
         }
@@ -1658,7 +1658,7 @@ void SearchPaletteTest::reopeningWithKeptTextShowsNoEmptySearch() {
 
 // The palette and the dim fade in and out together over the short
 // duration, and open at once when animations are off. Fading out, the
-// palette is closed: the window under it takes clicks, and Find opens it
+// palette is closed: the window under it takes presses, and Find opens it
 // again.
 void SearchPaletteTest::paletteAndDimFadeTogether() {
     Harness harness;
@@ -1694,7 +1694,7 @@ void SearchPaletteTest::paletteAndDimFadeTogether() {
     QCOMPARE(palette->opacity(), 1.0);
     QCOMPARE(dim->opacity(), 1.0);
 
-    // Open, the window under the dim takes no hover, wheel or clicks.
+    // Open, the window under the dim takes no hover, wheel or presses.
     QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
     QQuickItem *transportMouse = harness.item(QStringLiteral("transportMouseArea"));
     QVERIFY(transport != nullptr && transportMouse != nullptr);
@@ -1714,7 +1714,7 @@ void SearchPaletteTest::paletteAndDimFadeTogether() {
     QVERIFY(harness.dialog->property("opened").toBool());
     // A press outside closes it, and the window takes nothing.
     QTest::mouseClick(harness.window, Qt::LeftButton, {}, overTransport);
-    QCOMPARE(transport->property("clicks").toInt(), 0);
+    QCOMPARE(transport->property("presses").toInt(), 0);
     QVERIFY(animations->step(48));
     QVERIFY(harness.dialog->property("visible").toBool());
     (void)animations->step(400);
@@ -1731,7 +1731,7 @@ void SearchPaletteTest::paletteAndDimFadeTogether() {
     QVERIFY2(palette->opacity() > 0 && palette->opacity() < 1, qPrintable(QString::number(palette->opacity())));
     QVERIFY(palette->isAncestorOf(findDim()));
     QTest::mouseClick(harness.window, Qt::LeftButton, {}, overTransport);
-    QCOMPARE(transport->property("clicks").toInt(), 1);
+    QCOMPARE(transport->property("presses").toInt(), 1);
 
     // Find opens it again while it fades out.
     QMetaObject::invokeMethod(harness.controller, "openDialog");
