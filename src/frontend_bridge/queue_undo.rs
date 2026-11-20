@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The undo of the latest destructive queue change.
+//! The undo of the latest destructive queue change, and the redo of the
+//! latest undo.
 //!
 //! Clearing the queue, removing rows, replacing a queue that had rows, and
 //! moving rows keep what they changed here, under a new ID that the UI
-//! offers to undo.
-//! The undo applies only to the queue that change left: any later change to
-//! the rows withdraws it, and a later destructive change replaces it. An
-//! undo with an ID that is no longer offered is refused, so it never
-//! applies to a queue the user did not see. Renames keep the offer, with
-//! the new paths.
+//! offers to undo. An undo leaves, under another new ID, the redo of the
+//! change it undid, and a redo leaves its undo again: one level each way.
+//! Each offer applies only to the queue it was made for: any other change
+//! to the rows withdraws both, and a later destructive change offers its
+//! own undo. An undo or redo with an ID that is no longer offered is
+//! refused, so it never applies to a queue the user did not see. Renames
+//! keep the offers, with the new paths.
 
 use std::path::PathBuf;
 
@@ -18,6 +20,9 @@ use crate::playback::{remap_path, PathRenames};
 /// Shown when the UI asks to undo a change that is no longer offered.
 pub(super) const STALE_UNDO_MESSAGE: &str =
     "Nothing was undone: the queue changed after that change.";
+
+/// Shown when the UI asks to redo a change that is no longer offered.
+pub(super) const STALE_REDO_MESSAGE: &str = "Nothing was redone: the queue changed after the undo.";
 
 /// The most restored ranges a snapshot names; past this many, the UI
 /// selects only the restored selection.
@@ -61,6 +66,32 @@ pub(super) struct Change {
     pub(super) current: Option<usize>,
 }
 
+/// What a redone change makes of the queue an undo left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum After {
+    /// The queue a clear or a replacement left; empty for a clear.
+    Queue(Vec<PathBuf>),
+    /// The rows to remove again, ascending.
+    Rows(Vec<usize>),
+    /// The reorder to make again, and the rows it moves, ascending, as
+    /// [`Before::Order`] names them.
+    Order {
+        order: Vec<usize>,
+        moved: Vec<usize>,
+    },
+}
+
+/// The change an undo undid, with what redoing it takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Redo {
+    pub(super) kind: QueueUndoKind,
+    pub(super) after: After,
+    /// The selected row before the undo.
+    pub(super) selected: Option<usize>,
+    /// The row of the track the engine had open before the undo.
+    pub(super) current: Option<usize>,
+}
+
 impl Change {
     fn is_empty(&self) -> bool {
         match &self.before {
@@ -71,20 +102,24 @@ impl Change {
     }
 }
 
-/// The undo the UI may offer, and the rows the latest undo brought back.
+/// The undo and the redo the UI may offer, and the rows the latest undo
+/// brought back or the latest redo moved.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueueUndoState {
     /// 0 when there is nothing to undo.
     pub offer_id: u64,
     pub kind: Option<QueueUndoKind>,
+    /// 0 when there is nothing to redo.
+    pub redo_id: u64,
+    pub redo_kind: Option<QueueUndoKind>,
     pub restored: Option<QueueUndoRestored>,
 }
 
-/// The rows an undo brought back, for the UI to select. It lasts until the
-/// rows change again.
+/// The rows an undo brought back, or a redo of a move moved, for the UI to
+/// select. It lasts until the rows change again.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueueUndoRestored {
-    /// The ID of the undone change.
+    /// The ID of the undone or redone change.
     pub id: u64,
     /// The queue revision the undo left.
     pub revision: u64,
@@ -97,15 +132,17 @@ pub struct QueueUndoRestored {
 pub(super) struct QueueUndo {
     last_id: u64,
     offered: Option<(u64, Change)>,
+    redo: Option<(u64, Redo)>,
     restored: Option<QueueUndoRestored>,
 }
 
 impl QueueUndo {
     /// Note that the queue's rows changed. `change` is what a destructive
     /// change took, which the UI can now undo; any other change withdraws
-    /// the undo.
+    /// the undo. Either withdraws the redo.
     pub(super) fn record(&mut self, change: Option<Change>) {
         self.restored = None;
+        self.redo = None;
         self.offered = change.filter(|change| !change.is_empty()).map(|change| {
             self.last_id += 1;
             (self.last_id, change)
@@ -124,7 +161,25 @@ impl QueueUndo {
         None
     }
 
-    /// Note that the undo of `id` restored `rows`, ascending, leaving
+    /// Offer to redo the change an undo just undid.
+    pub(super) fn offer_redo(&mut self, redo: Redo) {
+        self.last_id += 1;
+        self.redo = Some((self.last_id, redo));
+    }
+
+    /// The redo offered under `id`, which is no longer offered.
+    pub(super) fn take_redo(&mut self, id: u64) -> Option<Redo> {
+        if self
+            .redo
+            .as_ref()
+            .is_some_and(|(offered, _)| *offered == id)
+        {
+            return self.redo.take().map(|(_, redo)| redo);
+        }
+        None
+    }
+
+    /// Note that the undo or redo of `id` restored `rows`, ascending, leaving
     /// `revision`.
     pub(super) fn restored(&mut self, id: u64, revision: u64, rows: &[usize]) {
         let mut ranges: Vec<(usize, usize)> = Vec::new();
@@ -144,8 +199,14 @@ impl QueueUndo {
         });
     }
 
-    /// Follow renamed files, so an undo brings back their new paths.
+    /// Follow renamed files, so an undo or a redo brings back their new
+    /// paths.
     pub(super) fn remap_paths(&mut self, renames: &PathRenames) {
+        if let Some(After::Queue(paths)) = self.redo.as_mut().map(|(_, redo)| &mut redo.after) {
+            for path in paths {
+                remap_path(path, renames);
+            }
+        }
         let Some((_, change)) = self.offered.as_mut() else {
             return;
         };
@@ -165,9 +226,10 @@ impl QueueUndo {
         }
     }
 
-    /// Drop any undo, for a queue loaded from the saved session.
+    /// Drop any undo and redo, for a queue loaded from the saved session.
     pub(super) fn forget(&mut self) {
         self.offered = None;
+        self.redo = None;
         self.restored = None;
     }
 
@@ -176,9 +238,15 @@ impl QueueUndo {
             .offered
             .as_ref()
             .map_or((0, None), |(id, change)| (*id, Some(change.kind)));
+        let (redo_id, redo_kind) = self
+            .redo
+            .as_ref()
+            .map_or((0, None), |(id, redo)| (*id, Some(redo.kind)));
         QueueUndoState {
             offer_id,
             kind,
+            redo_id,
+            redo_kind,
             restored: self.restored.clone(),
         }
     }
@@ -296,6 +364,66 @@ mod tests {
         assert_eq!(
             change.before,
             Before::Rows(vec![(1, p("/new.flac")), (3, p("/kept.flac"))])
+        );
+    }
+
+    fn redo_of_clear() -> Redo {
+        Redo {
+            kind: QueueUndoKind::Cleared,
+            after: After::Queue(Vec::new()),
+            selected: None,
+            current: None,
+        }
+    }
+
+    #[test]
+    fn an_undo_leaves_a_redo_that_applies_once_under_its_own_id() {
+        let mut undo = QueueUndo::default();
+        undo.record(Some(cleared(&["/a.flac"])));
+        let undone = undo.state().offer_id;
+        assert!(undo.take(undone).is_some());
+        undo.offer_redo(redo_of_clear());
+        let state = undo.state();
+        assert_eq!((state.offer_id, state.kind), (0, None));
+        assert_eq!(state.redo_kind, Some(QueueUndoKind::Cleared));
+        assert!(state.redo_id > undone, "a redo has an ID no undo had");
+        assert_eq!(undo.take(state.redo_id), None, "an undo is not a redo");
+        assert_eq!(undo.take_redo(undone), None, "nor a redo an undo");
+        assert_eq!(undo.take_redo(state.redo_id), Some(redo_of_clear()));
+        assert_eq!(undo.take_redo(state.redo_id), None, "a redo applies once");
+        assert_eq!(undo.state(), QueueUndoState::default());
+    }
+
+    #[test]
+    fn any_change_withdraws_the_redo_and_so_does_a_saved_session() {
+        for change in [None, Some(cleared(&["/b.flac"]))] {
+            let mut undo = QueueUndo::default();
+            undo.offer_redo(redo_of_clear());
+            let id = undo.state().redo_id;
+            undo.record(change);
+            assert_eq!(undo.state().redo_id, 0);
+            assert_eq!(undo.take_redo(id), None);
+        }
+        let mut undo = QueueUndo::default();
+        undo.offer_redo(redo_of_clear());
+        undo.forget();
+        assert_eq!(undo.state(), QueueUndoState::default());
+    }
+
+    #[test]
+    fn renames_reach_the_queue_a_redo_brings_back() {
+        let mut undo = QueueUndo::default();
+        undo.offer_redo(Redo {
+            kind: QueueUndoKind::Replaced,
+            after: After::Queue(vec![p("/old.flac"), p("/kept.flac")]),
+            selected: Some(0),
+            current: Some(1),
+        });
+        let id = undo.state().redo_id;
+        undo.remap_paths(&PathRenames::from([(p("/old.flac"), p("/new.flac"))]));
+        assert_eq!(
+            undo.take_redo(id).expect("still offered").after,
+            After::Queue(vec![p("/new.flac"), p("/kept.flac")])
         );
     }
 

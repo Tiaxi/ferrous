@@ -7644,6 +7644,43 @@ mod engine_tests {
     }
 
     #[test]
+    fn an_undone_and_redone_replacement_stops_at_the_current_row_of_each_queue() {
+        let fixtures = Fixtures::new("restore-redo");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_000);
+        let c = fixtures.wav("c.wav", 4_000);
+        let d = fixtures.wav("d.wav", 4_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_for_playing(0, millis(4_000));
+        engine.wait_until("A did not start", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+        });
+        // An undo of the replacement that queued A and B, while A plays,
+        // brings back C and D, at D, which was current.
+        engine.send(PlaybackCommand::RestoreQueue {
+            paths: vec![c.clone(), d.clone()],
+            current: 1,
+        });
+        engine.wait_until("the undo did not stop at its current row", |engine| {
+            engine.snapshot.current.as_deref() == Some(d.as_path())
+                && engine.snapshot.state == PlaybackState::Stopped
+        });
+        // Its redo brings back A and B, at B, which was current before the
+        // undo, without starting playback.
+        engine.send(PlaybackCommand::RestoreQueue {
+            paths: vec![a, b.clone()],
+            current: 1,
+        });
+        engine.wait_until("the redo did not stop at its current row", |engine| {
+            engine.snapshot.current.as_deref() == Some(b.as_path())
+        });
+        assert_eq!(engine.snapshot.state, PlaybackState::Stopped);
+        assert_eq!(engine.snapshot.position, Duration::ZERO);
+    }
+
+    #[test]
     fn reordering_rows_inside_the_window_keeps_the_audible_track_and_its_successor() {
         let fixtures = Fixtures::new("reorder-keep");
         let a = fixtures.wav("a.wav", 4_000);

@@ -195,6 +195,9 @@ pub enum BridgeQueueCommand {
     /// Undo the destructive queue change the UI was offered under this ID;
     /// see [`queue_undo`].
     Undo(u64),
+    /// Redo the queue change whose undo left the redo the UI was offered
+    /// under this ID; see [`queue_undo`].
+    Redo(u64),
 }
 
 /// Where [`BridgeQueueCommand::MoveRows`] moves its rows.
@@ -5413,6 +5416,16 @@ mod tests {
             .expect("a command")
     }
 
+    /// The redo the bridge offers, as the UI sends it.
+    fn ui_redo(id: u64) -> BridgeCommand {
+        let mut command = 79_u16.to_le_bytes().to_vec();
+        command.extend_from_slice(&8_u32.to_le_bytes());
+        command.extend_from_slice(&id.to_le_bytes());
+        ffi::parse_binary_command(&command)
+            .expect("a valid command")
+            .expect("a command")
+    }
+
     fn restored_queues(engine_rx: &Receiver<PlaybackCommand>) -> Vec<(Vec<PathBuf>, usize)> {
         engine_rx
             .try_iter()
@@ -5798,7 +5811,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_rows_moves_them_all_and_one_undo_puts_them_back() {
+    fn moving_rows_moves_them_all_one_undo_puts_them_back_and_a_redo_moves_them_again() {
         let _guard = test_guard();
         let (mut runtime, engine_rx, _event_tx, _album) = queue_order_runtime();
         // Snapshots reach the UI, so edits travel as edits.
@@ -5880,6 +5893,35 @@ mod tests {
             snapshot.queue_undo.restored.expect("restored").ranges,
             vec![(0, 1), (3, 1)]
         );
+        let redo = snapshot.queue_undo.redo_id;
+        assert_eq!(snapshot.queue_undo.redo_kind, Some(QueueUndoKind::Moved));
+        assert!(runtime.emit_snapshot(&event_tx));
+
+        // A redo moves them again, in one step, and selects them where they
+        // went; the selection is the one the undo found.
+        runtime.handle_command(ui_redo(redo), &event_tx);
+        assert_eq!(runtime.state.queue, moved);
+        assert_eq!(reorders(&engine_rx), vec![vec![1, 2, 4, 0, 3, 5]]);
+        assert_eq!(runtime.state.playback.current_queue_index, Some(1));
+        assert_eq!(runtime.state.selected_queue_index, Some(4));
+        let snapshot = runtime.state.snapshot(false);
+        let Some(QueueUpdate::Edits { edits, .. }) = &snapshot.queue_update else {
+            panic!("row moves, got {:?}", snapshot.queue_update);
+        };
+        for edit in edits {
+            assert!(edit.apply_to(&mut ui));
+        }
+        assert_eq!(ui, moved);
+        assert_eq!(snapshot.queue_undo.redo_id, 0, "a redo applies once");
+        assert_eq!(snapshot.queue_undo.kind, Some(QueueUndoKind::Moved));
+        let restored = snapshot.queue_undo.restored.expect("the moved rows");
+        assert_eq!((restored.id, restored.ranges), (redo, vec![(3, 2)]));
+        assert!(runtime.emit_snapshot(&event_tx));
+
+        // And it can be undone again.
+        runtime.handle_command(ui_undo(snapshot.queue_undo.offer_id), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        assert_eq!(runtime.state.selected_queue_index, Some(3));
     }
 
     #[test]
@@ -6015,6 +6057,196 @@ mod tests {
         apply_next_import_result(&mut runtime, &event_tx);
         assert_eq!(runtime.state.queue, vec![first.clone(), queue[0].clone()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_redo_clears_the_queue_again_and_its_undo_brings_it_back() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let queue = vec![p("/music/a.flac"), p("/music/b.flac"), p("/music/c.flac")];
+        replace_queue(&mut runtime, &queue, &event_tx);
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Select(Some(1))),
+            &event_tx,
+        );
+        runtime.state.playback.current_queue_index = Some(2);
+        runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
+        runtime.state.playback.current_queue_index = None;
+        let undo = runtime.state.snapshot(false).queue_undo.offer_id;
+        runtime.handle_command(ui_undo(undo), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        // The engine has C open again, stopped, so it reports no row.
+        runtime.state.playback.current = Some(queue[2].clone());
+        let offer = runtime.state.snapshot(false).queue_undo;
+        assert_eq!((offer.offer_id, offer.kind), (0, None));
+        assert_eq!(offer.redo_kind, Some(QueueUndoKind::Cleared));
+        let _ = queue_ops(&engine_rx);
+
+        runtime.handle_command(ui_redo(offer.redo_id), &event_tx);
+        assert!(runtime.state.queue.is_empty());
+        assert_eq!(runtime.state.selected_queue_index, None);
+        assert_eq!(queue_ops(&engine_rx), ["ClearQueue"]);
+        let offer = runtime.state.snapshot(false).queue_undo;
+        assert_eq!(offer.redo_id, 0, "a redo applies once");
+        assert_eq!(offer.kind, Some(QueueUndoKind::Cleared));
+
+        runtime.handle_command(ui_undo(offer.offer_id), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        assert_eq!(runtime.state.selected_queue_index, Some(1));
+        // The track that was open when the redo was made.
+        assert_eq!(restored_queues(&engine_rx), vec![(queue, 2)]);
+    }
+
+    #[test]
+    fn a_redo_removes_the_rows_again_and_the_selection_follows() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, _album) = queue_order_runtime();
+        let queue: Vec<PathBuf> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|name| p(&format!("/music/{name}.flac")))
+            .collect();
+        replace_queue(&mut runtime, &queue, &event_tx);
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Select(Some(4))),
+            &event_tx,
+        );
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::RemoveMany(vec![3, 0, 1])),
+            &event_tx,
+        );
+        let undo = runtime.state.snapshot(false).queue_undo.offer_id;
+        runtime.handle_command(ui_undo(undo), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        assert_eq!(runtime.state.selected_queue_index, Some(4));
+        let offer = runtime.state.snapshot(false).queue_undo;
+        assert_eq!(offer.redo_kind, Some(QueueUndoKind::Removed));
+        let _ = queue_ops(&engine_rx);
+
+        runtime.handle_command(ui_redo(offer.redo_id), &event_tx);
+        assert_eq!(
+            runtime.state.queue,
+            vec![queue[2].clone(), queue[4].clone()]
+        );
+        assert_eq!(runtime.state.selected_queue_index, Some(1));
+        assert_eq!(queue_ops(&engine_rx), ["RemoveMany([0, 1, 3])"]);
+        let offer = runtime.state.snapshot(false).queue_undo;
+        assert_eq!(
+            (offer.kind, offer.redo_id),
+            (Some(QueueUndoKind::Removed), 0)
+        );
+        runtime.handle_command(ui_undo(offer.offer_id), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+    }
+
+    #[test]
+    fn a_redo_of_a_replacement_brings_back_its_queue_without_starting_playback() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, event_tx, album) = queue_order_runtime();
+        let queue = vec![p("/music/a.flac"), p("/music/b.flac"), p("/music/c.flac")];
+        replace_queue(&mut runtime, &queue, &event_tx);
+        runtime.handle_command(
+            BridgeCommand::Library(BridgeLibraryCommand::ReplaceAlbumByKey {
+                artist: "Artist".to_string(),
+                album: "Album".to_string(),
+            }),
+            &event_tx,
+        );
+        assert_eq!(runtime.state.queue, album);
+        // The album's second track plays, and its first is selected.
+        runtime.state.playback.current_queue_index = Some(1);
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Select(Some(0))),
+            &event_tx,
+        );
+        let undo = runtime.state.snapshot(false).queue_undo.offer_id;
+        runtime.handle_command(ui_undo(undo), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        // The engine stops in the restored queue.
+        runtime.state.playback.current_queue_index = Some(1);
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Select(Some(2))),
+            &event_tx,
+        );
+        let redo = runtime.state.snapshot(false).queue_undo;
+        assert_eq!(
+            redo.redo_kind,
+            Some(QueueUndoKind::Replaced),
+            "a selection keeps it"
+        );
+        let _ = queue_ops(&engine_rx);
+
+        runtime.handle_command(ui_redo(redo.redo_id), &event_tx);
+        assert_eq!(runtime.state.queue, album);
+        assert_eq!(runtime.state.selected_queue_index, Some(0));
+        // The album comes back as an undo brings a queue back, at the row
+        // that was current before the undo, and nothing starts playing.
+        assert_eq!(
+            queue_ops(&engine_rx),
+            [format!(
+                "{:?}",
+                PlaybackCommand::RestoreQueue {
+                    paths: album.clone(),
+                    current: 1
+                }
+            )]
+        );
+        let offer = runtime.state.snapshot(false).queue_undo;
+        assert_eq!(
+            (offer.kind, offer.redo_id),
+            (Some(QueueUndoKind::Replaced), 0)
+        );
+
+        runtime.handle_command(ui_undo(offer.offer_id), &event_tx);
+        assert_eq!(runtime.state.queue, queue);
+        assert_eq!(runtime.state.selected_queue_index, Some(2));
+        assert_eq!(restored_queues(&engine_rx), vec![(queue, 1)]);
+    }
+
+    #[test]
+    fn a_stale_redo_is_refused_and_leaves_the_queue_alone() {
+        let _guard = test_guard();
+        let (mut runtime, engine_rx, _event_tx, _album) = queue_order_runtime();
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        let warnings = || -> Vec<String> {
+            event_rx
+                .try_iter()
+                .filter_map(|event| match event {
+                    BridgeEvent::Error(error)
+                        if error.category == ErrorCategory::Playback
+                            && error.severity == ErrorSeverity::Warning =>
+                    {
+                        Some(error.message)
+                    }
+                    BridgeEvent::Error(error) => Some(format!("unexpected: {error:?}")),
+                    _ => None,
+                })
+                .collect()
+        };
+        replace_queue(&mut runtime, &[p("/music/a.flac")], &event_tx);
+        runtime.handle_command(BridgeCommand::Queue(BridgeQueueCommand::Clear), &event_tx);
+        let undo = runtime.state.snapshot(false).queue_undo.offer_id;
+        runtime.handle_command(ui_undo(undo), &event_tx);
+        let redo = runtime.state.snapshot(false).queue_undo.redo_id;
+        assert_ne!(redo, 0);
+        // Another change after the undo withdraws the redo.
+        runtime.handle_command(
+            BridgeCommand::Queue(BridgeQueueCommand::Append(vec![p("/music/new.flac")])),
+            &event_tx,
+        );
+        assert_eq!(runtime.state.snapshot(false).queue_undo.redo_id, 0);
+        let _ = warnings();
+        let _ = queue_ops(&engine_rx);
+
+        runtime.handle_command(ui_redo(redo), &event_tx);
+        assert_eq!(
+            runtime.state.queue,
+            vec![p("/music/a.flac"), p("/music/new.flac")]
+        );
+        assert!(queue_ops(&engine_rx).is_empty());
+        assert_eq!(warnings(), [queue_undo::STALE_REDO_MESSAGE]);
+        // An undo's ID is no redo's.
+        runtime.handle_command(ui_redo(undo), &event_tx);
+        assert_eq!(warnings(), [queue_undo::STALE_REDO_MESSAGE]);
     }
 
     #[test]

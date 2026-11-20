@@ -7,7 +7,9 @@ use crossbeam_channel::Sender;
 use crate::playback::{PlaybackCommand, PlaybackEngine, PlaybackState};
 
 use super::queue_sync::QueueEdit;
-use super::queue_undo::{Before, Change, QueueUndoKind, STALE_UNDO_MESSAGE};
+use super::queue_undo::{
+    After, Before, Change, QueueUndoKind, Redo, STALE_REDO_MESSAGE, STALE_UNDO_MESSAGE,
+};
 use super::{
     send_error, sync_queue_details, BridgeError, BridgeEvent, BridgeQueueCommand, BridgeState,
     ErrorCategory, RowsMove,
@@ -27,6 +29,7 @@ pub(super) fn handle_queue_command(
 ) -> bool {
     let cmd = match cmd {
         BridgeQueueCommand::Undo(id) => return undo_queue_change(id, state, playback, event_tx),
+        BridgeQueueCommand::Redo(id) => return redo_queue_change(id, state, playback, event_tx),
         BridgeQueueCommand::MoveRows { rows, to } => {
             return move_queue_rows(&rows, to, state, playback);
         }
@@ -182,7 +185,7 @@ fn removed_rows(queue: &[PathBuf], indices: &[usize]) -> Before {
 /// is still offered; otherwise tell the user nothing was undone. The
 /// selection comes back, and the engine keeps the track it has open when
 /// that track is in the restored queue; see
-/// [`PlaybackCommand::RestoreQueue`].
+/// [`PlaybackCommand::RestoreQueue`]. The change can then be redone.
 fn undo_queue_change(
     id: u64,
     state: &mut BridgeState,
@@ -197,29 +200,42 @@ fn undo_queue_change(
         );
         return false;
     };
+    let redo = |after| Redo {
+        kind: change.kind,
+        after,
+        selected: state.selected_queue_index,
+        current: current_row(state),
+    };
     // The engine's row in the queue that the change left.
     let engine_row = state.playback.current_queue_index;
-    let (restored_rows, engine_row) = match change.before {
+    let (restored_rows, engine_row, redo) = match change.before {
         Before::Order { order, moved } => {
             // The rows go back where they were, as a reorder of their own:
             // each row now at `order`'s position goes back to its old row.
             let Some(back) = crate::playback::reorder_positions(&order, state.queue.len()) else {
                 return false;
             };
+            let redo = redo(After::Order {
+                order,
+                moved: moved.clone(),
+            });
             apply_reorder(state, playback, &back);
             state.selected_queue_index = change.selected.filter(|row| *row < state.queue.len());
             sync_queue_details(state);
             state
                 .queue_undo
                 .restored(id, state.queue_sync.revision(), &moved);
+            state.queue_undo.offer_redo(redo);
             return true;
         }
         Before::Queue(paths) => {
-            state.queue = paths;
+            let mut redo = redo(After::Queue(Vec::new()));
+            redo.after = After::Queue(std::mem::replace(&mut state.queue, paths));
             state.queue_sync.reset();
-            (change.selected.into_iter().collect::<Vec<_>>(), None)
+            (change.selected.into_iter().collect::<Vec<_>>(), None, redo)
         }
         Before::Rows(rows) => {
+            let redo = redo(After::Rows(rows.iter().map(|(index, _)| *index).collect()));
             // Each restored row before the engine's row moves it down.
             let engine_row = engine_row.map(|engine_row| {
                 rows.iter().fold(
@@ -247,7 +263,7 @@ fn undo_queue_change(
                     .queue_sync
                     .record(QueueEdit::Insert { at, paths }, state.queue.len());
             }
-            (restored, engine_row)
+            (restored, engine_row, redo)
         }
     };
     let Some(last) = state.queue.len().checked_sub(1) else {
@@ -267,7 +283,84 @@ fn undo_queue_change(
     state
         .queue_undo
         .restored(id, state.queue_sync.revision(), &restored_rows);
+    state.queue_undo.offer_redo(redo);
     true
+}
+
+/// Make again the change whose undo left the redo offered under `id`, if it
+/// is still offered; otherwise tell the user nothing was redone. Like the
+/// change, the redo can be undone. Like an undo, it never starts playback:
+/// a removal is made again as it was, and a replaced queue comes back as
+/// an undo brings one back. The selection comes back as it was before the
+/// undo, or follows a removal; moved rows are selected where they went.
+fn redo_queue_change(
+    id: u64,
+    state: &mut BridgeState,
+    playback: &PlaybackEngine,
+    event_tx: &Sender<BridgeEvent>,
+) -> bool {
+    let Some(redo) = state.queue_undo.take_redo(id) else {
+        // Nothing changed, but the user asked for something that did not happen.
+        send_error(
+            event_tx,
+            BridgeError::warning(ErrorCategory::Playback, STALE_REDO_MESSAGE),
+        );
+        return false;
+    };
+    let selected = state.selected_queue_index;
+    let current = current_row(state);
+    match redo.after {
+        After::Rows(rows) => handle_queue_command(
+            BridgeQueueCommand::RemoveMany(rows),
+            state,
+            playback,
+            event_tx,
+        ),
+        After::Order { order, moved } => {
+            let Some(positions) = crate::playback::reorder_positions(&order, state.queue.len())
+            else {
+                return false;
+            };
+            apply_reorder(state, playback, &order);
+            state.selected_queue_index = redo.selected.filter(|row| *row < state.queue.len());
+            let mut moved_to: Vec<usize> = moved.iter().map(|row| positions[*row]).collect();
+            moved_to.sort_unstable();
+            state.queue_undo.record(Some(Change {
+                kind: redo.kind,
+                before: Before::Order { order, moved },
+                selected,
+                current,
+            }));
+            state
+                .queue_undo
+                .restored(id, state.queue_sync.revision(), &moved_to);
+            true
+        }
+        After::Queue(paths) => {
+            let before = std::mem::replace(&mut state.queue, paths);
+            state.queue_sync.reset();
+            state.selected_queue_index = redo.selected.filter(|row| *row < state.queue.len());
+            match state.queue.len().checked_sub(1) {
+                None => playback.command(PlaybackCommand::ClearQueue),
+                Some(last) => playback.command(PlaybackCommand::RestoreQueue {
+                    paths: state.queue.clone(),
+                    current: redo
+                        .current
+                        .or(state.selected_queue_index)
+                        .unwrap_or(0)
+                        .min(last),
+                }),
+            }
+            sync_queue_details(state);
+            state.queue_undo.record(Some(Change {
+                kind: redo.kind,
+                before: Before::Queue(before),
+                selected,
+                current,
+            }));
+            true
+        }
+    }
 }
 
 /// Move `rows` as `to` says, as one change the UI can undo. The engine's
@@ -682,11 +775,11 @@ pub(super) fn apply_queue_command_state(
                 ..QueueCommandOutcome::default()
             }
         }
-        // `handle_queue_command` undoes changes and moves rows; see
-        // `undo_queue_change` and `move_queue_rows`.
-        BridgeQueueCommand::Undo(_) | BridgeQueueCommand::MoveRows { .. } => {
-            QueueCommandOutcome::default()
-        }
+        // `handle_queue_command` undoes and redoes changes and moves rows;
+        // see `undo_queue_change`, `redo_queue_change` and `move_queue_rows`.
+        BridgeQueueCommand::Undo(_)
+        | BridgeQueueCommand::Redo(_)
+        | BridgeQueueCommand::MoveRows { .. } => QueueCommandOutcome::default(),
         BridgeQueueCommand::Clear => {
             queue.clear();
             *selected_queue_index = None;

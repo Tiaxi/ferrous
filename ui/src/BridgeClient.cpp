@@ -1821,6 +1821,14 @@ int BridgeClient::queueUndoKind() const {
     return m_queueUndoKind;
 }
 
+double BridgeClient::queueRedoId() const {
+    return static_cast<double>(m_queueRedoId);
+}
+
+int BridgeClient::queueRedoKind() const {
+    return m_queueRedoKind;
+}
+
 QString BridgeClient::queueDurationText() const {
     return m_queueDurationText;
 }
@@ -3200,6 +3208,14 @@ void BridgeClient::undoQueueChange() {
     }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU64(
         BinaryBridgeCodec::CmdUndoQueueChange, m_queueUndoId));
+}
+
+void BridgeClient::redoQueueChange() {
+    if (m_queueRedoId == 0) {
+        return;
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU64(
+        BinaryBridgeCodec::CmdRedoQueueChange, m_queueRedoId));
 }
 
 void BridgeClient::replaceAlbumAt(int index) {
@@ -6735,12 +6751,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
 }
 
 void BridgeClient::applyQueueUndo(const BinaryBridgeCodec::DecodedQueueUndo &undo) {
-    if (m_queueUndoId != undo.offerId || m_queueUndoKind != undo.kind) {
+    if (m_queueUndoId != undo.offerId || m_queueUndoKind != undo.kind
+        || m_queueRedoId != undo.redoId || m_queueRedoKind != undo.redoKind) {
         m_queueUndoId = undo.offerId;
         m_queueUndoKind = undo.kind;
+        m_queueRedoId = undo.redoId;
+        m_queueRedoKind = undo.redoKind;
         emit queueUndoChanged();
     }
-    // Each undo's rows are selected once, and only while the rows are the
+    // Each undo's or redo's rows are selected once, and only while the rows are the
     // ones it left; later edits withdraw them in the backend.
     if (undo.restoredId == 0 || undo.restoredId == m_queueUndoRestoredId
         || m_queueRevision == 0 || undo.restoredRevision > m_queueRevision) {

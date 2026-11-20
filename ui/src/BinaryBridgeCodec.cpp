@@ -751,10 +751,14 @@ bool decodeQueueUndoSection(const QByteArray &payload, DecodedQueueUndo *out) {
     }
     Reader reader(payload);
     quint8 kind = 0;
+    quint8 redoKind = 0;
     quint32 rangeCount = 0;
     if (!reader.readU64(&out->offerId)
         || !reader.readU8(&kind)
         || kind > QueueUndoLast
+        || !reader.readU64(&out->redoId)
+        || !reader.readU8(&redoKind)
+        || redoKind > QueueUndoLast
         || !reader.readU64(&out->restoredId)
         || !reader.readU64(&out->restoredRevision)
         || !reader.readU32(&rangeCount)
@@ -777,6 +781,7 @@ bool decodeQueueUndoSection(const QByteArray &payload, DecodedQueueUndo *out) {
     }
     out->present = true;
     out->kind = kind;
+    out->redoKind = redoKind;
     return true;
 }
 

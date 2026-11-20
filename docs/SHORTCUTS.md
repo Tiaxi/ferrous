@@ -27,6 +27,7 @@ These work in the main window only:
 | Open files | Ctrl+O |
 | Find (open global search) | Ctrl+F |
 | Undo the latest Clear Queue, removal of queue tracks, move of queue tracks, or replacement of the queue | Ctrl+Z |
+| Redo the queue change that Undo undid | Ctrl+Shift+Z |
 | Select the previous or next track in the queue | Ctrl+Up, Ctrl+Down |
 | Move the selected tracks up or down the queue | Ctrl+Shift+Up, Ctrl+Shift+Down |
 | Configure Ferrous | Ctrl+Shift+, (Plasma's standard key) |
@@ -46,7 +47,7 @@ Alt and an underlined letter open a menu, such as Alt+P for **Playback**. The me
 
 In the library, typing the start of an artist's name selects that artist. While the library has focus, the letters you type go to it, so F there selects rather than follows the playhead.
 
-Delete acts only while the queue has focus. Playing from the library or global search replaces the queue. After **Edit › Clear Queue**, Delete, or a replacement, Undo in the **Edit** menu (Ctrl+Z) stays available until the queue changes again. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start.
+Delete acts only while the queue has focus. Playing from the library or global search replaces the queue. After **Edit › Clear Queue**, Delete, or a replacement, Undo in the **Edit** menu (Ctrl+Z) stays available until the queue changes again. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start. After an undo, Redo in the **Edit** menu (Ctrl+Shift+Z) makes the change again, until the queue changes some other way, and the change can then be undone again. Redo does not start playback either: redoing a replacement brings the new queue back as Undo brings back the old one.
 
 The handles between the queue's column headings resize the Artist, Album and Length columns; the title takes the rest. Tab reaches them: Left widens the column after the handle, Right narrows it, and Home, or a double-click, restores its default width. Ferrous keeps the widths you set.
 
