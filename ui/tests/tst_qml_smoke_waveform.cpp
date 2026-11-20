@@ -4212,6 +4212,10 @@ void WaveformSmokeTest::gstreamerStoppedTrackPlaysAgainWithItsOverview() {
     gst_object_unref(fakeAudioSink);
     GstElementFactory *ac3Decoder = gst_element_factory_find("avdec_ac3");
     if (ac3Decoder == nullptr) {
+        // CI installs the decoder, so that this test runs there: a missing
+        // one fails rather than skips (#672).
+        QVERIFY2(qEnvironmentVariableIntValue("FERROUS_TEST_REQUIRE_DECODERS") == 0,
+                 "avdec_ac3, from the GStreamer libav plugin, is missing and FERROUS_TEST_REQUIRE_DECODERS is set");
         QSKIP("Plays AC-3: install the GStreamer libav plugin (docs/INSTALL.md)");
     }
     gst_object_unref(ac3Decoder);
