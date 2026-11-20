@@ -109,8 +109,16 @@ Dialog {
     // row's data rather than on its index.
     property int rowsRevision: 0
 
-    modal: true
-    dim: true
+    // Closed from when its fade out starts. Qt holds back the window's
+    // shortcuts, Ctrl+Z among them, while a popup that is modal or closes
+    // on Escape is still shown, so a closing palette is neither (#617).
+    readonly property bool closing: exitFade.running
+    modal: !root.closing
+    // A press outside closes it on the dim.
+    closePolicy: root.closing ? Popup.NoAutoClose : Popup.CloseOnEscape
+    // Qt drops its dim at once when modal changes, so the palette draws its
+    // own, under its background.
+    dim: false
     focus: true
     parent: Overlay.overlay
     // Placed by x and y, not centred as the style's dialogs are; kept
@@ -153,17 +161,38 @@ Dialog {
         shadow.yOffset: 4
         shadow.size: 8
         shadow.color: Qt.rgba(0, 0, 0, 0.3)
-    }
 
-    // The dim over the whole window, the pane too, fading with the palette.
-    Overlay.modal: Rectangle {
-        objectName: "globalSearchDim"
-        color: root.uiPalette.dim
-        Behavior on opacity {
-            enabled: root.fadeDuration > 0
-            NumberAnimation { duration: root.fadeDuration; easing.type: Easing.OutCubic }
+        // The dim over the whole window, the pane too, under the palette and
+        // fading with it. While the palette is open, the window under it
+        // takes no hover or presses, as under a modal popup's dim, and a
+        // press outside the palette closes it.
+        Rectangle {
+            objectName: "globalSearchDim"
+            z: -1
+            x: -root.x
+            y: -root.y
+            width: root.parent ? root.parent.width : 0
+            height: root.parent ? root.parent.height : 0
+            color: root.uiPalette.dim
+
+            MouseArea {
+                anchors.fill: parent
+                enabled: !root.closing
+                acceptedButtons: Qt.AllButtons
+                hoverEnabled: true
+                cursorShape: Qt.ArrowCursor
+                onPressed: function(mouse) {
+                    // A press on the palette is the palette's.
+                    const point = mapToItem(root.background, mouse.x, mouse.y)
+                    mouse.accepted = !root.background.contains(point)
+                    if (mouse.accepted) {
+                        root.reject()
+                    }
+                }
+            }
         }
     }
+
     enter: Transition {
         NumberAnimation {
             property: "opacity"; from: 0; to: 1
@@ -171,6 +200,7 @@ Dialog {
         }
     }
     exit: Transition {
+        id: exitFade
         NumberAnimation {
             property: "opacity"; from: 1; to: 0
             duration: root.fadeDuration; easing.type: Easing.OutCubic

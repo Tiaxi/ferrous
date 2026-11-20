@@ -72,6 +72,7 @@ private:
     void checkQueueKeysReachBothEndsAndOpenTheContextMenu(QQuickWindow *window);
     void checkDeleteRemovesQueueTracksOnlyWhileTheQueueHasFocus(QQuickWindow *window);
     void checkQueueChangesShowNoNoticeAndEditUndoRestoresThem(QQuickWindow *window);
+    void checkCtrlZUndoesAQueueChangeAsSearchFadesOut(QQuickWindow *window);
     void checkLibraryRowsLayOutTheirYearsWithoutWarnings(QQuickWindow *window, LibraryTreeModel &libraryModel);
     void checkLibraryKeysReachBothEndsAndOpenTheContextMenu(QQuickWindow *window, LibraryTreeModel &libraryModel);
 };
@@ -1708,7 +1709,8 @@ void LibraryQueueSmokeTest::mainWindowQueueAnswersTheWheelTheKeysAndUndo() {
     runInTurn({[&] { checkWheelScrollsListsByTheWheelDelta(main.window); },
                [&] { checkQueueKeysReachBothEndsAndOpenTheContextMenu(main.window); },
                [&] { checkDeleteRemovesQueueTracksOnlyWhileTheQueueHasFocus(main.window); },
-               [&] { checkQueueChangesShowNoNoticeAndEditUndoRestoresThem(main.window); }});
+               [&] { checkQueueChangesShowNoNoticeAndEditUndoRestoresThem(main.window); },
+               [&] { checkCtrlZUndoesAQueueChangeAsSearchFadesOut(main.window); }});
 }
 
 // The rows first, from an empty library, as the app starts.
@@ -2107,7 +2109,8 @@ void LibraryQueueSmokeTest::checkDeleteRemovesQueueTracksOnlyWhileTheQueueHasFoc
     QTRY_COMPARE(field->property("text").toString(), QString());
     QTest::keyClick(window, Qt::Key_Escape);
     QCOMPARE(queueCommands(bridge), QStringList{});
-    // Closed, so that the window's shortcuts reach the next check.
+    // Closed to the end of its fade, which gives the focus back, before
+    // the next check.
     settle();
     QTRY_VERIFY(popupsSettled());
     animations.reset();
@@ -2230,6 +2233,52 @@ void LibraryQueueSmokeTest::checkQueueChangesShowNoNoticeAndEditUndoRestoresThem
     QCOMPARE(controller->property("selectedIndices").toList(), (QVariantList{0, 2}));
     QVERIFY(!undoMenuItem->property("enabled").toBool());
     QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo"));
+}
+
+// Search closes and fades out: the window's shortcuts work at once, so
+// Ctrl+Z undoes a queue change while the palette still fades.
+void LibraryQueueSmokeTest::checkCtrlZUndoesAQueueChangeAsSearchFadesOut(QQuickWindow *window) {
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    bridge->setProperty("queueCommands", QStringList{});
+    bridge->setProperty("queueRows", sampleQueueRows(5));
+    bridge->setProperty("queueLength", 5);
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QObject *search = window->findChild<QObject *>(QStringLiteral("findAction"));
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("globalSearchDialog"));
+    auto *queueView = window->findChild<QQuickItem *>(QStringLiteral("playlistView"));
+    QVERIFY(controller != nullptr && search != nullptr && dialog != nullptr && queueView != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSingleSelection", Q_ARG(QVariant, 1)));
+    QVERIFY(QMetaObject::invokeMethod(queueView, "forceActiveFocus"));
+    QTRY_VERIFY(queueView->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Delete);
+    QCOMPARE(queueCommands(bridge), QStringList{QStringLiteral("remove 1")});
+    // The backend removed the row and offers to undo it.
+    bridge->setProperty("queueRows", sampleQueueRows(4));
+    bridge->setProperty("queueLength", 4);
+    bridge->setProperty("queueUndoKind", 2);
+    bridge->setProperty("queueUndoId", 12.0);
+
+    // Search opens and closes with its fade, in animation time.
+    QVERIFY(dialog->property("fadeDuration").toInt() > 0);
+    std::optional<SteppedAnimationDriver> animations(std::in_place);
+    QVERIFY(QMetaObject::invokeMethod(search, "trigger"));
+    auto *field = window->findChild<QQuickItem *>(QStringLiteral("globalSearchQueryField"));
+    QVERIFY(field != nullptr);
+    (void)animations->step(1000);
+    QTRY_VERIFY(field->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QVERIFY2(dialog->property("visible").toBool(), "search has no fade to close with");
+
+    // Ctrl+Z at once, as the palette fades out.
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 12"));
+    QVERIFY(dialog->property("visible").toBool());
+
+    (void)animations->step(1000);
+    QTRY_VERIFY(popupsSettled());
+    animations.reset();
+    bridge->setProperty("queueUndoKind", int(BinaryBridgeCodec::QueueUndoNone));
+    bridge->setProperty("queueUndoId", 0.0);
 }
 
 void LibraryQueueSmokeTest::removingALibraryRootAsksFirstAndNamesIt() {

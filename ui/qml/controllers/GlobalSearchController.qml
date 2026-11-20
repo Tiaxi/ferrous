@@ -151,7 +151,8 @@ QtObject {
     }
 
     function openDialog() {
-        if (root.dialogVisible) {
+        // A palette that is fading out opens again.
+        if (root.dialogVisible && !root.dialog.closing) {
             root.focusQueryField(!root.ignoreRefocusFind)
             return
         }

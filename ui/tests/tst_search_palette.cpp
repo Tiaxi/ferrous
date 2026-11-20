@@ -29,6 +29,7 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QUrl>
+#include <QWheelEvent>
 #include <QtTest/QtTest>
 
 #include <algorithm>
@@ -146,6 +147,16 @@ ApplicationWindow {
             width: parent.width
             height: 48
             color: tokens.chrome
+            property int clicks: 0
+            property int wheels: 0
+
+            MouseArea {
+                objectName: "transportMouseArea"
+                anchors.fill: parent
+                hoverEnabled: true
+                onClicked: transport.clicks += 1
+                onWheel: transport.wheels += 1
+            }
         }
     }
 
@@ -1645,8 +1656,10 @@ void SearchPaletteTest::reopeningWithKeptTextShowsNoEmptySearch() {
     QVERIFY(!noResultsShown);
 }
 
-// The palette and the dim fade in together over the short duration, and
-// open at once when animations are off.
+// The palette and the dim fade in and out together over the short
+// duration, and open at once when animations are off. Fading out, the
+// palette is closed: the window under it takes clicks, and Find opens it
+// again.
 void SearchPaletteTest::paletteAndDimFadeTogether() {
     Harness harness;
     QString errorText;
@@ -1673,12 +1686,59 @@ void SearchPaletteTest::paletteAndDimFadeTogether() {
     QMetaObject::invokeMethod(harness.controller, "openDialog");
     QTRY_VERIFY(findDim() != nullptr);
     QQuickItem *dim = findDim();
+    // The palette draws the dim, which fades with it.
+    QVERIFY(palette->isAncestorOf(dim));
     QVERIFY(animations->step(96));
     QVERIFY2(palette->opacity() > 0 && palette->opacity() < 1, qPrintable(QString::number(palette->opacity())));
-    QVERIFY2(dim->opacity() > 0 && dim->opacity() < 1, qPrintable(QString::number(dim->opacity())));
     (void)animations->step(400);
     QCOMPARE(palette->opacity(), 1.0);
     QCOMPARE(dim->opacity(), 1.0);
+
+    // Open, the window under the dim takes no hover, wheel or clicks.
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *transportMouse = harness.item(QStringLiteral("transportMouseArea"));
+    QVERIFY(transport != nullptr && transportMouse != nullptr);
+    const QPoint overTransport(20, 20);
+    QVERIFY(!sceneRect(palette).contains(overTransport));
+    QTest::mouseMove(harness.window, overTransport);
+    QTest::mouseMove(harness.window, overTransport + QPoint(4, 0));
+    QVERIFY(!transportMouse->property("containsMouse").toBool());
+    QWheelEvent wheel(overTransport, harness.window->mapToGlobal(QPointF(overTransport)), QPoint(), QPoint(0, -120),
+                      Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QCoreApplication::sendEvent(harness.window, &wheel);
+    QCOMPARE(transport->property("wheels").toInt(), 0);
+    // A press on the palette, here its footer, leaves it open.
+    QTest::mouseClick(harness.window, Qt::LeftButton, {},
+                      sceneCentre(harness.item(QStringLiteral("globalSearchFooter"))));
+    (void)animations->step(48);
+    QVERIFY(harness.dialog->property("opened").toBool());
+    // A press outside closes it, and the window takes nothing.
+    QTest::mouseClick(harness.window, Qt::LeftButton, {}, overTransport);
+    QCOMPARE(transport->property("clicks").toInt(), 0);
+    QVERIFY(animations->step(48));
+    QVERIFY(harness.dialog->property("visible").toBool());
+    (void)animations->step(400);
+    QTRY_VERIFY(!harness.dialog->property("visible").toBool());
+
+    // Closing, the dim fades out with the palette, which already takes
+    // nothing from the window: a click reaches it.
+    QMetaObject::invokeMethod(harness.controller, "openDialog");
+    (void)animations->step(400);
+    QTRY_VERIFY(harness.dialog->property("opened").toBool());
+    QTest::keyClick(harness.window, Qt::Key_Escape);
+    QVERIFY(animations->step(96));
+    QVERIFY(harness.dialog->property("visible").toBool());
+    QVERIFY2(palette->opacity() > 0 && palette->opacity() < 1, qPrintable(QString::number(palette->opacity())));
+    QVERIFY(palette->isAncestorOf(findDim()));
+    QTest::mouseClick(harness.window, Qt::LeftButton, {}, overTransport);
+    QCOMPARE(transport->property("clicks").toInt(), 1);
+
+    // Find opens it again while it fades out.
+    QMetaObject::invokeMethod(harness.controller, "openDialog");
+    (void)animations->step(400);
+    QTRY_VERIFY(harness.dialog->property("opened").toBool());
+    QCOMPARE(palette->opacity(), 1.0);
+    QTRY_VERIFY(harness.field()->hasActiveFocus());
     QTest::keyClick(harness.window, Qt::Key_Escape);
     (void)animations->step(400);
     QTRY_VERIFY(!harness.dialog->property("visible").toBool());
