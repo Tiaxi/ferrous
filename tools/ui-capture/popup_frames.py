@@ -75,15 +75,15 @@ def plan(frames, popups, main):
 
 def merge(d, dpr=1.0, crop=None, frame_scale=1.0):
     """Rewrites the recording in `d` as main-window frames with its menus drawn in. Returns the menu windows drawn
-    in (window indices), [] when there were none; any menu window's own frames are removed either way."""
+    in (window indices: those with pixels in a frame), [] when there were none; any menu window's own frames are
+    removed either way."""
     frames, popups, popup_wins, other = read_tsv(d)
     popup_wins |= {p["win"] for p in popups}
     if not any(f["win"] in popup_wins for f in frames):
         return []  # no menu rendered while it recorded: the recording stays as it was
     main = min((p["main"] for p in popups), default=0)
     merged = plan(frames, popups, main)
-    win_of = {f["file"]: f["win"] for f in frames}
-    drawn = sorted({win_of[pf] for _t, _m, pops in merged for pf, _o in pops})
+    win_of, drawn = {f["file"]: f["win"] for f in frames}, set()
     k = dpr * frame_scale
     ox, oy = (crop or (0, 0, 0, 0))[:2]
     sizes = {}
@@ -116,7 +116,8 @@ def merge(d, dpr=1.0, crop=None, frame_scale=1.0):
             if pf not in cache:
                 with Image.open(os.path.join(d, pf)) as im:
                     cache[pf] = im.convert("RGBA")
-            _composite(canvas, cache[pf], at(off))
+            if _composite(canvas, cache[pf], at(off)):
+                drawn.add(win_of[pf])
         name = f"m{n:04d}_w{main}.png"
         canvas.convert("RGB").save(os.path.join(d, name), compress_level=1)  # (the probe's PNG level)
         out_frames.append((t, name))
@@ -131,12 +132,15 @@ def merge(d, dpr=1.0, crop=None, frame_scale=1.0):
     for f in frames:
         if f["file"] not in used:
             os.remove(os.path.join(d, f["file"]))  # a menu's own frame, drawn in where it was shown
-    return drawn
+    return sorted(drawn)
 
 
 def _composite(canvas, im, xy):
-    """Draws `im` over the canvas at xy, which may be left of or above it (a menu the crop cuts)."""
+    """Draws `im` over the canvas at xy, which may be left of or above it (a menu the crop cuts); returns whether
+    any of it is on the canvas."""
     x, y = xy
     sx, sy = max(0, -x), max(0, -y)
-    if sx < im.width and sy < im.height and x + im.width > 0 and y + im.height > 0:
+    if sx < im.width and sy < im.height and x < canvas.width and y < canvas.height:
         canvas.alpha_composite(im, (max(0, x), max(0, y)), (sx, sy))
+        return True
+    return False

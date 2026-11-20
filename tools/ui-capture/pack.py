@@ -896,8 +896,9 @@ def privacy_evidence(rd, entries):
             fails.append(f"privacy: recording {os.path.basename(d)} is unverified: recorded at the real paths "
                          "(SHOT_NEUTRAL=0, or before its meta.json said), where its frames cannot be checked")
         else:
-            layers = {la for tr in motion_strip.read_trace(d, 0.0)[0].values() for la in tr["layers"]}
-            untraced = [w for w in meta.get("popup_windows") or [] if f"popup@w{w}" not in layers]
+            drawn = meta.get("popup_windows") or []
+            layers = {la for tr in motion_strip.read_trace(d, 0.0)[0].values() for la in tr["layers"]} if drawn else set()
+            untraced = [w for w in drawn if f"popup@w{w}" not in layers]
             if untraced:
                 fails.append(f"privacy: recording {os.path.basename(d)} is unverified: its frames draw in menu "
                              f"window(s) {untraced}, whose items are not in its item trace")

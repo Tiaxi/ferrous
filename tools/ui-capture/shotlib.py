@@ -578,6 +578,7 @@ class Session:
         r = self.cmd(f"stripstop {d}", timeout=120)
         # the main window's menus (windows of their own) drawn into its frames at their place; a win= strip has none
         fscale = next((float(o[6:]) for o in opts.split() if o.startswith("scale=")), 1.0)
+        fscale = fscale if 0 < fscale < 1 else 1.0  # (as the probe reads it: only a downscale)
         popups = popup_frames.merge(d, dpr=self.scale, crop=[int(v) for v in crop] if crop else None,
                                     frame_scale=fscale)
         self.t_stripsave = getattr(self, "t_stripsave", 0) + time.time() - ts

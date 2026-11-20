@@ -581,6 +581,16 @@ public:
         reply("0", "started");
     }
 
+    // While a strip records: a window being shown (a menu opening) is hooked and noted as it shows, before the
+    // compositor exposes it and it draws its first frame, which the 5 ms scan could miss.
+    bool eventFilter(QObject *o, QEvent *e) override {
+        if (e->type() == QEvent::Show && g_recording.load() && qobject_cast<QQuickWindow *>(o) != nullptr) {
+            hookWindows();
+            notePopups();
+        }
+        return QObject::eventFilter(o, e);
+    }
+
 private:
     QList<QQuickWindow *> windows() {
         QList<QQuickWindow *> out;
@@ -771,7 +781,7 @@ private:
                 ++g_stripGeneration;
                 g_recording.store(true);
             }
-            notePopups();  // a menu open already (it renders again: hookWindows asked it to)
+            QCoreApplication::instance()->installEventFilter(this);
             {
                 QQuickWindow *tw = mainWindow();
                 if (!g_winFilter.isEmpty()) {
@@ -785,6 +795,7 @@ private:
                 m_connections.append(QObject::connect(tw, &QQuickWindow::afterAnimating, this,
                                                       [this, tw] { if (g_recording.load()) traceSample(tw); }));
             }
+            notePopups();  // a menu open already (it renders again: hookWindows asked it to)
             m_hookTimer.start(5);  // (new windows, and the menus' places: hookWindows, notePopups)
             if (QQuickWindow *mw = mainWindow()) {
                 mw->update();
@@ -808,6 +819,7 @@ private:
                 marks.swap(g_marks);
             }
             m_hookTimer.stop();
+            QCoreApplication::instance()->removeEventFilter(this);
             for (const auto &c : m_connections) {
                 QObject::disconnect(c);
             }
@@ -1295,6 +1307,9 @@ private:
                 m_popupLines.append(QString("%1\t%2\t0\t%3,%4\t%5\t-1").arg(t).arg(it->first).arg(it->second.x())
                                         .arg(it->second.y()).arg(mainIndex));
             }
+        }
+        if (m_popupShown != now && m_traceWin) {
+            traceSample(m_traceWin);  // a menu moved need not draw again: its items' places are traced now
         }
         m_popupShown = now;
     }

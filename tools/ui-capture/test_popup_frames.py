@@ -135,6 +135,13 @@ class MergeMenuFrames(unittest.TestCase):
         self.assertEqual(im.getpixel((0, 20)), MENU)  # (the menu's columns 10 on)
         self.assertEqual(im.getpixel((30, 20)), MAIN)
 
+    def test_a_menu_outside_the_crop_is_not_drawn_in(self):
+        # (the pack then needs no trace of its items: none of its pixels are in the frames)
+        self.assertEqual(self.open_close(scale=2, crop=[0, 0, 20, 15]), [])
+        frames = self.merged()[0]
+        self.assertEqual([f["win"] for f in frames], [0, 0, 0, 0])
+        self.assertEqual({tuple(self.image(f["file"]).getcolors()) for f in frames}, {((40 * 30, MAIN),)})
+
     def test_without_a_crop_the_frames_grow_for_a_menu_past_the_window(self):
         self.open_close(scale=2, off=(80, 40))
         frames = self.merged()[0]
