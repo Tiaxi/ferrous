@@ -257,19 +257,22 @@ class PrivacyOfMenuFrames(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
-    def record(self, trace_rows):
+    def record(self, trace_rows, scale=1, crop=None):
+        """A recording at `scale` (frames in device px) whose menu at (30, 20) logical shows a bright text block at
+        (5, 4) in it, 30x8 logical; `crop` (logical), as Session.strip records it."""
         r = Recording(self.d)
-        r.frame(1.0, 0, Image.new("RGB", (100, 60), MAIN))
+        cw, ch = (crop[2], crop[3]) if crop else (100, 60)
+        r.frame(1.0, 0, Image.new("RGB", (cw * scale, ch * scale), MAIN))
         r.popup(10.0, 1, True, (30, 20))
-        menu = menu_image(40, 30)
-        menu.paste(Image.new("RGBA", (30, 8), (250, 250, 250, 255)), (5, 4))  # (its item's text, bright)
+        menu = menu_image(40 * scale, 30 * scale)
+        menu.paste(Image.new("RGBA", (30 * scale, 8 * scale), (250, 250, 250, 255)), (5 * scale, 4 * scale))
         r.frame(12.0, 1, menu)
         r.write()
-        drawn = popup_frames.merge(self.d)
+        drawn = popup_frames.merge(self.d, dpr=scale, crop=crop)
         with open(os.path.join(self.d, "opacity.tsv"), "w") as f:
             f.write("#t0\t0\n" + "".join(row + "\n" for row in trace_rows))
         with open(os.path.join(self.d, "meta.json"), "w") as f:
-            json.dump(dict(name="menu-open-close", scale=1, neutral=True, popup_windows=drawn), f)
+            json.dump(dict(name="menu-open-close", scale=scale, crop=crop, neutral=True, popup_windows=drawn), f)
 
     def test_a_menu_whose_items_are_not_traced_is_unverified(self):
         self.record(["root/statusLabel\t1\t0,0,50,10\t0:1\t-"])
@@ -277,21 +280,28 @@ class PrivacyOfMenuFrames(unittest.TestCase):
         self.assertEqual(len(fails), 1)
         self.assertIn("menu window(s) [1]", fails[0])
 
-    def test_a_home_folder_item_of_a_menu_is_painted_out(self):
-        # its item at (5, 4) in the menu, so at (35, 24) in the main window, as the probe traces it
-        self.record(["menu/recentFile\t1\t35,24,30,8\t0:1\tpopup@w1"])
+    def painted(self, scale, crop=None):
+        """Records the menu with its item traced at (35, 24) in the main window (logical, as the probe traces it),
+        packs it, and returns how many of the item's bright pixels are left in the frame it is drawn into."""
+        self.record(["menu/recentFile\t1\t35,24,30,8\t0:1\tpopup@w1"], scale, crop)
         walk = dict(windows=[dict(main=True, texts=[]),
                              dict(texts=[dict(name="recentFile", text="/home/example/Music/a.flac", rect=[5, 4, 30, 8])],
                                   main_popup_offset=[30, 20])])
-        Image.new("RGB", (100, 60), MAIN).save(os.path.join(self.rd, "shots", "menu.png"))
+        Image.new("RGB", (100 * scale, 60 * scale), MAIN).save(os.path.join(self.rd, "shots", "menu.png"))
         with open(os.path.join(self.rd, "shots", "layout", "menu.json"), "w") as f:
             json.dump(walk, f)
-        e = dict(file="menu.png", scale=1, layout="shots/layout/menu.json", grabbed=dict(kind="main"))
+        e = dict(file="menu.png", scale=scale, layout="shots/layout/menu.json", grabbed=dict(kind="main"))
+        path = os.path.join(self.d, popup_frames.read_tsv(self.d)[0][1]["file"])
+        bright = lambda: list(Image.open(path).convert("RGB").getdata()).count((250, 250, 250))
+        self.assertEqual(bright(), 30 * 8 * scale * scale, "the item's text is drawn into the frame")
         self.assertEqual(pack.redact_round(self.rd, [e]), [])
-        frames = popup_frames.read_tsv(self.d)[0]
-        im = Image.open(os.path.join(self.d, frames[1]["file"])).convert("RGB")
-        left = [im.getpixel((x, y)) for y in range(24, 32) for x in range(35, 65)].count((250, 250, 250))
-        self.assertEqual(left, 0, f"{left} px of the menu's home-folder item not painted")
+        return bright()
+
+    def test_a_home_folder_item_of_a_menu_is_painted_out(self):
+        self.assertEqual(self.painted(1), 0)
+
+    def test_at_scale_2_with_a_crop(self):
+        self.assertEqual(self.painted(2, crop=[20, 10, 70, 45]), 0)
 
 
 if __name__ == "__main__":
