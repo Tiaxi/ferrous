@@ -11,6 +11,10 @@
 
 class GlobalSearchResultsModel : public QAbstractListModel {
     Q_OBJECT
+    // The rows, notified as soon as they are inserted or removed. A view's
+    // own count notifies only when the view next lays itself out, which a
+    // height bound to that count can set off from within itself (#619).
+    Q_PROPERTY(int count READ count NOTIFY countChanged)
 
 public:
     struct SearchDisplayRow {
@@ -150,6 +154,7 @@ public:
     void replaceRowsBatched(QVector<SearchDisplayRow> rows, int batchSize = 10);
     void cancelBatchedInsertion();
 
+    int count() const { return rowCount(); }
     Q_INVOKABLE QVariantMap rowDataAt(int index) const;
     Q_INVOKABLE bool isSelectableIndex(int index) const;
     Q_INVOKABLE int nextSelectableIndex(int startIndex, int step, bool wrap) const;
@@ -158,6 +163,7 @@ public:
 
 signals:
     void searchRowsChanged();
+    void countChanged();
 
 private:
     void rebuildSearchRows();
