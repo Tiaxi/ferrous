@@ -21,7 +21,7 @@ Item {
     // Whether it starts the form, with no group above it.
     property bool first: false
 
-    // Kirigami.FormLayout's space between its rows.
+    // The form's space between its rows (Kirigami's, and Configure's).
     readonly property real rowSpacing: Kirigami.Units.smallSpacing
     readonly property real groupSpacing: Kirigami.Units.largeSpacing * 2
     readonly property real headingSpacing: Kirigami.Units.largeSpacing

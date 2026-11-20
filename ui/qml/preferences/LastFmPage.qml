@@ -20,6 +20,15 @@ Preferences.PreferencesPage {
     readonly property int authState: root.uiBridge.lastFmAuthState || 0
     readonly property bool connected: (root.uiBridge.lastFmUsername || "").length > 0
     readonly property bool buildConfigured: root.uiBridge.lastFmBuildConfigured === true
+    // Which rows show. The rows' spacing follows these, not whether a row
+    // shows: while the page is out of view no row does, and the page keeps
+    // its height for Configure's.
+    // Only a connected account has scrobbles to show.
+    readonly property bool showsScrobbleProgress: root.authState === 2
+    // The account line already says when the build has no Last.fm.
+    readonly property bool showsStatus: (root.uiBridge.lastFmStatusText || "").length > 0 && root.buildConfigured
+    readonly property bool showsPending: (root.uiBridge.lastFmPendingScrobbleCount || 0) > 0
+    readonly property bool showsDropped: (root.uiBridge.lastFmDroppedScrobbleCount || 0) > 0
 
     title: I18n.i18nc("@title preferences page", "Last.fm")
 
@@ -40,7 +49,7 @@ Preferences.PreferencesPage {
         uiPalette: root.uiPalette
         indent: scrobblingCheckBox.contentItem.x
         // Without the status check box, it ends the scrobbling group.
-        endsGroup: !showScrobbleProgressCheckBox.visible
+        endsGroup: !root.showsScrobbleProgress
         text: I18n.i18nc("@info", "Tracks longer than 30 seconds are scrobbled when playback stops or the track "
             + "ends, once half of the track or 4 minutes has been played, whichever comes first.")
     }
@@ -48,8 +57,7 @@ Preferences.PreferencesPage {
     CheckBox {
         id: showScrobbleProgressCheckBox
         objectName: "lastFmShowScrobbleProgressCheckBox"
-        // Only a connected account has scrobbles to show.
-        visible: root.authState === 2
+        visible: root.showsScrobbleProgress
         text: I18n.i18nc("@option:check", "Show the Last.fm status in the status bar")
         checked: root.settings.value("lastFmShowScrobbleProgress")
         onToggled: root.settings.setValue("lastFmShowScrobbleProgress", checked)
@@ -60,7 +68,7 @@ Preferences.PreferencesPage {
     Components.FormGroupGap {
         objectName: "lastFmAccountGap"
         uiPalette: root.uiPalette
-        visible: showScrobbleProgressCheckBox.visible
+        visible: root.showsScrobbleProgress
     }
 
     Label {
@@ -83,11 +91,10 @@ Preferences.PreferencesPage {
         objectName: "lastFmStatusLabel"
         uiPalette: root.uiPalette
         // The scrobbles' lines go on from it, as one status.
-        trailingSpace: pendingLabel.visible || droppedLabel.visible
+        trailingSpace: root.showsPending || root.showsDropped
             ? 0
             : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing - statusLabel.rowSpacing
-        // The account line already says when the build has no Last.fm.
-        visible: text.length > 0 && root.buildConfigured
+        visible: root.showsStatus
         text: root.uiBridge.lastFmStatusText || ""
     }
 
@@ -96,10 +103,10 @@ Preferences.PreferencesPage {
         objectName: "lastFmPendingLabel"
         uiPalette: root.uiPalette
         // The dropped scrobbles' line goes on from it.
-        trailingSpace: droppedLabel.visible
+        trailingSpace: root.showsDropped
             ? 0
             : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing - pendingLabel.rowSpacing
-        visible: (root.uiBridge.lastFmPendingScrobbleCount || 0) > 0
+        visible: root.showsPending
         text: I18n.i18ncp("@info", "%1 scrobble waiting to be sent", "%1 scrobbles waiting to be sent",
             root.uiBridge.lastFmPendingScrobbleCount || 0)
     }
@@ -111,7 +118,7 @@ Preferences.PreferencesPage {
         id: droppedLabel
         objectName: "lastFmDroppedLabel"
         uiPalette: root.uiPalette
-        visible: (root.uiBridge.lastFmDroppedScrobbleCount || 0) > 0
+        visible: root.showsDropped
         text: I18n.i18ncp("@info", "%1 old scrobble was discarded from the queue",
             "%1 old scrobbles were discarded from the queue", root.uiBridge.lastFmDroppedScrobbleCount || 0)
     }

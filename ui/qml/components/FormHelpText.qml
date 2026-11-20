@@ -29,8 +29,8 @@ Item {
     readonly property bool formHelpText: true
     // Whether the next row starts another group.
     property bool endsGroup: false
-    // Kirigami.FormLayout's space between its rows, which it puts under
-    // this one too.
+    // The form's space between its rows (Kirigami's, and Configure's),
+    // which it puts under this one too.
     readonly property real rowSpacing: Kirigami.Units.smallSpacing
     // The room under the text, besides the row spacing.
     property real trailingSpace: (root.endsGroup
@@ -38,8 +38,8 @@ Item {
         : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing) - root.rowSpacing
     readonly property real maximumTextWidth: Math.round(helpFontMetrics.averageCharacterWidth * 63)
     readonly property real minimumTextWidth: Math.round(helpFontMetrics.averageCharacterWidth * 20)
-    // Whether the form it is in has its labels beside the fields. Kirigami's
-    // form keeps its rows as its own children.
+    // Whether the form it is in has its labels beside the fields. A form
+    // keeps its rows as its own children.
     readonly property bool inWideForm: !root.parent || root.parent.wideMode !== false
     readonly property real naturalTextWidth: Math.min(label.implicitWidth, root.maximumTextWidth)
 

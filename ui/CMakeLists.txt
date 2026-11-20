@@ -316,6 +316,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/preferences/GeneralPage.qml
         qml/preferences/LastFmPage.qml
         qml/preferences/LibraryPage.qml
+        qml/preferences/PreferencesForm.qml
         qml/preferences/PreferencesPage.qml
         qml/preferences/VisualizationPage.qml
         qml/viewers/AlbumArtSurface.qml
