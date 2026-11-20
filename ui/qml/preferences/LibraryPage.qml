@@ -127,7 +127,9 @@ Preferences.PreferencesPage {
             objectName: "libraryRootListFrame"
             readonly property int frameWidth: 1
             Layout.fillWidth: true
-            implicitHeight: Math.max(root.uiPalette.rowHeight * 3, rootList.visible
+            // From the folders, not whether the list shows: a page out of
+            // view shows nothing, and keeps its height for Configure's.
+            implicitHeight: Math.max(root.uiPalette.rowHeight * 3, root.rootEntries.length > 0
                 ? Math.min(rootList.contentHeight, root.uiPalette.rowHeight * 8)
                 : emptyRootsLabel.implicitHeight + 2 * Kirigami.Units.largeSpacing) + 2 * frameWidth
             color: root.uiPalette.view

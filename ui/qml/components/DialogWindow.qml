@@ -36,6 +36,10 @@ ApplicationWindow {
     // Whether it opens at its default size each time, for a dialog whose
     // default follows what it shows; otherwise it keeps the size it had.
     property bool sizesOnEachOpen: false
+    // Whether its default size follows its content as laid out at the
+    // width it opens at. Content is laid out only once its window shows,
+    // so such a window lays its content out before it takes its size.
+    property bool sizesToLaidOutContent: false
 
     // As the window shows: the moment to set up what it shows.
     signal aboutToShow()
@@ -77,6 +81,9 @@ ApplicationWindow {
             if (!root._sized || root.sizesOnEachOpen) {
                 root._sized = true
                 root.width = root.openingWidth
+                if (root.sizesToLaidOutContent) {
+                    root._layOutContent(root.openingWidth, root._roomHeight)
+                }
                 root.height = root.heightWithinScreen(root.defaultHeight)
             }
             root.show()
@@ -102,6 +109,33 @@ ApplicationWindow {
     // Cancels, as the title bar's close button does.
     function dismiss() {
         root._hide()
+    }
+
+    // Lays the content out at `width` by `height`, as the window will show
+    // it, for a default size that follows it. The window gives its content
+    // its size only once it shows; until then, the layouts place their
+    // items only when asked to. Each pass places what the one before it
+    // sized, such as a help text that wraps to its column, until the
+    // default height stays as it is.
+    function _layOutContent(width, height) {
+        const footerHeight = root.footer ? root.footer.implicitHeight : 0
+        root.contentItem.width = width
+        root.contentItem.height = Math.max(0, height - footerHeight)
+        for (let pass = 0; pass < 4; ++pass) {
+            const before = root.defaultHeight
+            root._polishTree(root.contentItem)
+            if (root.defaultHeight === before) {
+                break
+            }
+        }
+    }
+
+    function _polishTree(item) {
+        item.ensurePolished()
+        const children = item.children
+        for (let i = 0; i < children.length; ++i) {
+            root._polishTree(children[i])
+        }
     }
 
     // Hides the window and gives the keyboard back to the window it is

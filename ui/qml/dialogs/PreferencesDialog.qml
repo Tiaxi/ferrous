@@ -181,27 +181,17 @@ Components.DialogWindow {
 
     // 49 grid units wide, or the page list and 39 of them for the pages
     // when the list is wider, scaled with the font, or wider for every
-    // page's wide layout. As
-    // tall as the tallest page, Visualization with its three subheadings,
-    // measured whole at the default font, with the buttons under it and a
-    // margin for a font whose lines run taller for its size; or taller for
-    // the page it opens on. The height cannot follow the pages it is not
-    // on (#585): a page out of view has its form's rows hidden, and
-    // Kirigami's FormLayout leaves hidden rows out of its height, so only
-    // the page in view has one. A larger font makes the window larger,
-    // within the screen; it lays its pages out for the room it has, and
-    // the user may make it larger.
+    // page's wide layout. As tall as its tallest page laid out at that
+    // width, whichever page it opens on, with the buttons under it: every
+    // page keeps its height while out of view (#585), and the pages are
+    // laid out before the window first shows. A larger font makes the
+    // window larger, within the screen; it lays its pages out for the room
+    // it has, and the user may make it larger.
     defaultWidth: Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 49), root.pageListWidth + 1
         + Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 39),
             pagesLoader.item ? pagesLoader.item.wideWidth : 0))
-    // Visualization's height at 10 pt: 684 px with Noto Sans, 38 grid
-    // units of the window's font, which it grows with (in 41 of
-    // Kirigami's, which do not, for the whole window, it scrolled by 8 px,
-    // and at 24 pt by half its height).
-    readonly property real tallestPageHeight: root.uiPalette.gridUnit * 38
-    defaultHeight: Math.max(Math.ceil(root.tallestPageHeight + Kirigami.Units.largeSpacing)
-            + preferencesFooter.implicitHeight,
-        preferencesContent.implicitHeight + preferencesFooter.implicitHeight)
+    defaultHeight: Math.ceil(preferencesContent.implicitHeight + preferencesFooter.implicitHeight)
+    sizesToLaidOutContent: true
     // The page list, and a page with room for its widest control.
     minimumWidth: Math.ceil(root.pageListWidth + 1 + Math.max(Kirigami.Units.gridUnit * 20,
         pagesLoader.item ? pagesLoader.item.minimumWidth : 0))
@@ -415,7 +405,9 @@ Components.DialogWindow {
         }
 
         // The pages are made when the dialog first opens, rather than with
-        // the window, which then shows sooner.
+        // the window, which then shows sooner. Every page is as large as
+        // the room for them, the pages out of view too, so each has its
+        // height for the room's width.
         Loader {
             id: pagesLoader
             objectName: "preferencesPagesLoader"
@@ -423,13 +415,17 @@ Components.DialogWindow {
             Layout.fillHeight: true
             active: false
             sourceComponent: Component {
-                StackLayout {
+                Item {
                     id: pagesStack
                     objectName: "preferencesPages"
+                    // The page in view.
+                    property int currentIndex: root.pageIndex
                     // The width that fits every page, and the width for
                     // every page's wide layout.
                     readonly property real minimumWidth: pagesStack.widest("minimumWidth")
                     readonly property real wideWidth: pagesStack.widest("wideWidth")
+                    // The tallest page, whole.
+                    implicitHeight: pagesStack.widest("wholeHeight")
                     // The labels' column of every page: the widest label of
                     // them all, up to a limit that grows with the font,
                     // past which a page with a longer one has a wider
@@ -444,9 +440,10 @@ Components.DialogWindow {
                         }
                         return widest
                     }
-                    currentIndex: root.pageIndex
 
                     Preferences.LibraryPage {
+                        anchors.fill: parent
+                        visible: pagesStack.currentIndex === 0
                         sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesLibraryPage"
                         uiBridge: root.uiBridge
@@ -458,6 +455,8 @@ Components.DialogWindow {
                     }
 
                     Preferences.VisualizationPage {
+                        anchors.fill: parent
+                        visible: pagesStack.currentIndex === 1
                         sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesVisualizationPage"
                         uiPalette: root.uiPalette
@@ -466,6 +465,8 @@ Components.DialogWindow {
                     }
 
                     Preferences.GeneralPage {
+                        anchors.fill: parent
+                        visible: pagesStack.currentIndex === 2
                         sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesGeneralPage"
                         uiPalette: root.uiPalette
@@ -473,6 +474,8 @@ Components.DialogWindow {
                     }
 
                     Preferences.LastFmPage {
+                        anchors.fill: parent
+                        visible: pagesStack.currentIndex === 3
                         sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesLastFmPage"
                         uiBridge: root.uiBridge

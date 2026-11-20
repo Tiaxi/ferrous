@@ -525,7 +525,9 @@ private slots:
     void enterInATextFieldTakesTheTextNotTheDefaultButton();
     void everyConfigureSettingReachesTheBridge();
     void titleStripSettingIsOnlyForTheWholeScreen();
-    void configureFitsTheVisualizationPageAtTheDefaultFont();
+    void configureOpensTallEnoughForItsTallestPage_data();
+    void configureOpensTallEnoughForItsTallestPage();
+    void configureMeasuresAPageThatGrowsOutOfView();
     void compactDialogsHoldTheirText_data();
     void compactDialogsHoldTheirText();
     void compactDialogStaysWithinASmallScreenAsItGrows();
@@ -1570,64 +1572,154 @@ void UiDialogsTest::checkConfigureFitsItsPagesAtAnyWidth(QQuickWindow *window) {
 // Analysis, Display and Interaction, with the "Show:" check boxes together.
 // General holds the fullscreen viewers and, under a plain subheading,
 // Plasma's media controls. A help text is 4 px under its control, 12 px
-// above the next row, and at most about 440 px wide. At the default 10 pt
-// font, Configure opens tall enough for the Visualization page, its tallest,
-// with its three subheadings: it shows whole, with no vertical scroll bar,
-// whichever page Configure opens on (its last row once sat under the
-// buttons), and so does every other page. The pages are laid out only once
-// they show, so its height cannot follow them (#585): it is Visualization's
-// as measured with Noto Sans, 38 grid units, and a margin of 8 px (with Noto
-// Sans it scrolled by 8 px in 41 grid units for the whole window).
-void UiDialogsTest::configureFitsTheVisualizationPageAtTheDefaultFont() {
-    const ScopedApplicationFont font(10);
-    for (const int openOn : {0, 1}) {
-        DialogsWindow main;
-        QQuickWindow *window = main.window;
-        QVERIFY2(window != nullptr, "Main.qml failed to show");
-        QCOMPARE(paletteOf(window)->property("basePointSize").toReal(), 10.0);
-        QObject *dialog = openPreferences(window, openOn);
-        QVERIFY(dialog != nullptr);
-        QQuickWindow *prefs = windowOf(dialog);
-        // Within the 1000 px screen of the reviews.
-        QVERIFY2(prefs->height() <= 1000 - 2 * 18 - 28, qPrintable(QString::number(prefs->height())));
-        QQuickItem *stack = nullptr;
-        QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
-        // Room for Visualization as measured, and the margin.
-        const qreal gridUnit = paletteOf(window)->property("gridUnit").toReal();
-        QVERIFY2(stack->childItems().at(openOn)->height() >= 38 * gridUnit + 8 - 0.5,
-                 qPrintable(QString::number(stack->childItems().at(openOn)->height())));
-        // Every page whole, no vertical scroll bar.
-        for (int index = 0; index < 4; ++index) {
-            dialog->setProperty("pageIndex", index);
-            QQuickItem *page = stack->childItems().at(index);
-            QTRY_VERIFY(page->isVisible() && !layoutPending(page));
-            QVERIFY2(page->property("contentHeight").toReal() <= page->height() + 0.5,
-                     qPrintable(QStringLiteral("opened on %1, page %2: %3 of %4 px, window %5").arg(openOn).arg(index)
-                                    .arg(page->property("contentHeight").toReal()).arg(page->height())
-                                    .arg(prefs->height())));
-            for (QQuickItem *child : page->childItems()) {
-                if (QString::fromLatin1(child->metaObject()->className()).contains(QStringLiteral("ScrollBar"))
-                    && child->property("orientation").toInt() == Qt::Vertical) {
-                    QVERIFY2(child->property("size").toReal() >= 1.0 - 1e-6 || !child->isVisible(),
-                             qPrintable(describeItem(child)));
-                }
+// above the next row, and at most about 440 px wide.
+
+namespace {
+
+// Whether every page of Configure, `dialog` in `prefs`, shows whole, with no
+// vertical scroll bar, and has the height it said it needs while out of
+// view. Returns the tallest page's height, whole.
+qreal checkEveryConfigurePageIsWhole(QObject *dialog, QQuickWindow *prefs, QQuickItem *stack, const QString &at) {
+    qreal tallest = 0;
+    for (int index = 0; index < 4; ++index) {
+        QQuickItem *page = stack->childItems().at(index);
+        const qreal measured = page->property("wholeHeight").toReal();
+        dialog->setProperty("pageIndex", index);
+        [&] { QTRY_VERIFY(page->isVisible() && !layoutPendingUnder(page)); }();
+        if (QTest::currentTestFailed()) {
+            return 0;
+        }
+        const QString where = QStringLiteral("%1, page %2: %3 of %4 px, window %5")
+                                  .arg(at).arg(index).arg(page->property("contentHeight").toReal())
+                                  .arg(page->height()).arg(prefs->height());
+        if (page->property("contentHeight").toReal() > page->height() + 0.5) {
+            QTest::qFail(qPrintable(where), __FILE__, __LINE__);
+            return 0;
+        }
+        for (QQuickItem *child : page->childItems()) {
+            if (QString::fromLatin1(child->metaObject()->className()).contains(QStringLiteral("ScrollBar"))
+                && child->property("orientation").toInt() == Qt::Vertical && child->isVisible()
+                && child->property("size").toReal() < 1.0 - 1e-6) {
+                QTest::qFail(qPrintable(where + QStringLiteral(": scrolls")), __FILE__, __LINE__);
+                return 0;
             }
         }
-        // Visualization's subheadings in view, its last row above the
-        // buttons.
-        dialog->setProperty("pageIndex", 1);
-        QQuickItem *page = stack->childItems().at(1);
-        QTRY_VERIFY(page->isVisible() && !layoutPending(page));
-        for (const QString &name : {QStringLiteral("visualizationAnalysisHeading"),
-                                    QStringLiteral("visualizationDisplayHeading"),
-                                    QStringLiteral("visualizationInteractionHeading"),
-                                    QStringLiteral("stretchShortTracksCheckBox")}) {
-            QQuickItem *item = visibleNamed(prefs, name);
-            QVERIFY2(item != nullptr, qPrintable(name));
-            QVERIFY2(within(sceneRect(item), sceneRect(page)), qPrintable(describeItem(item)));
+        // As measured while the page was out of view.
+        const qreal whole = std::ceil(page->property("contentHeight").toReal()
+                                      + page->property("topPadding").toReal()
+                                      + page->property("bottomPadding").toReal());
+        if (qAbs(page->property("wholeHeight").toReal() - whole) > 0.5 || qAbs(measured - whole) > 0.5) {
+            QTest::qFail(qPrintable(QStringLiteral("%1: measured %2 out of view, %3 in view, needs %4")
+                                        .arg(where).arg(measured).arg(page->property("wholeHeight").toReal())
+                                        .arg(whole)),
+                         __FILE__, __LINE__);
+            return 0;
         }
-        QVERIFY(reject(dialog));
+        tallest = std::max(tallest, whole);
     }
+    return tallest;
+}
+
+} // namespace
+
+void UiDialogsTest::configureOpensTallEnoughForItsTallestPage_data() {
+    QTest::addColumn<int>("pointSize");
+    QTest::addColumn<int>("openOn");
+    for (const int pointSize : {10, 12}) {
+        for (const int openOn : {0, 3}) {
+            QTest::addRow("%d pt, on page %d", pointSize, openOn) << pointSize << openOn;
+        }
+    }
+}
+
+// Configure opens as tall as its tallest page needs, whichever page it
+// opens on and whatever the font: every page shows whole, and the tallest
+// fills the room. The pages are laid out before the window first shows,
+// and each keeps its height while out of view (#585): the height once came
+// from Visualization's as measured with one font at 10 pt, and a page out
+// of view had none.
+void UiDialogsTest::configureOpensTallEnoughForItsTallestPage() {
+    QFETCH(int, pointSize);
+    QFETCH(int, openOn);
+    const ScopedApplicationFont font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = openPreferences(window, openOn);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    // Within the 1000 px screen of the reviews.
+    QVERIFY2(prefs->height() <= 1000 - 2 * 18 - 28, qPrintable(QString::number(prefs->height())));
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    const qreal room = stack->height();
+    const qreal tallest = checkEveryConfigurePageIsWhole(dialog, prefs, stack, QStringLiteral("%1 pt").arg(pointSize));
+    QVERIFY(!QTest::currentTestFailed());
+    // No taller than the tallest page needs.
+    QVERIFY2(tallest >= room - 0.5, qPrintable(QStringLiteral("%1 of %2").arg(tallest).arg(room)));
+    QVERIFY(reject(dialog));
+}
+
+// A page out of view keeps its height as its rows change: the Last.fm page,
+// given a long status while Configure shows Library, says it needs the room
+// it takes once in view, and Configure's pages take the tallest page's
+// height. Configure opened after that is tall enough for it.
+void UiDialogsTest::configureMeasuresAPageThatGrowsOutOfView() {
+    const ScopedApplicationFont font(10);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    QQuickItem *lastFm = stack->childItems().at(3);
+    QVERIFY(!lastFm->isVisible());
+    const qreal before = lastFm->property("wholeHeight").toReal();
+    QVERIFY2(before > 0, qPrintable(QString::number(before)));
+
+    QStringList status;
+    for (int line = 0; line < 30; ++line) {
+        status << QStringLiteral("A status that runs long enough to wrap across the help text's column.");
+    }
+    QVERIFY(bridge->setProperty("lastFmStatusText", status.join(QLatin1Char(' '))));
+    QVERIFY(bridge->setProperty("lastFmPendingScrobbleCount", 3));
+    QTRY_VERIFY(!layoutPendingUnder(lastFm));
+    const qreal grown = lastFm->property("wholeHeight").toReal();
+    QVERIFY2(grown > before + 200, qPrintable(QStringLiteral("%1, before %2").arg(grown).arg(before)));
+    QVERIFY(!lastFm->isVisible());
+    // The tallest page now.
+    QCOMPARE(stack->implicitHeight(), grown);
+    // As tall as it said once in view.
+    dialog->setProperty("pageIndex", 3);
+    QTRY_VERIFY(lastFm->isVisible() && !layoutPendingUnder(lastFm));
+    QCOMPARE(lastFm->property("wholeHeight").toReal(),
+             std::ceil(lastFm->property("contentHeight").toReal() + lastFm->property("topPadding").toReal()
+                       + lastFm->property("bottomPadding").toReal()));
+    QCOMPARE(lastFm->property("wholeHeight").toReal(), grown);
+    QVERIFY(reject(dialog));
+
+    // Opened for the first time with the long status, on Library, in a
+    // window of its own: Last.fm shows whole.
+    DialogsWindow second;
+    QVERIFY2(second.window != nullptr, "Main.qml failed to show");
+    QObject *secondBridge = bridgeOf(second.window);
+    QVERIFY(secondBridge->setProperty("lastFmBuildConfigured", true));
+    QVERIFY(secondBridge->setProperty("lastFmStatusText", status.mid(0, 28).join(QLatin1Char(' '))));
+    QVERIFY(secondBridge->setProperty("lastFmPendingScrobbleCount", 3));
+    QObject *secondDialog = openPreferences(second.window, 0);
+    QVERIFY(secondDialog != nullptr);
+    QQuickWindow *secondPrefs = windowOf(secondDialog);
+    QQuickItem *secondStack = nullptr;
+    QTRY_VERIFY((secondStack = visibleNamed(secondPrefs, QStringLiteral("preferencesPages"))) != nullptr);
+    // Last.fm is the tallest page.
+    QCOMPARE(secondStack->implicitHeight(), secondStack->childItems().at(3)->property("wholeHeight").toReal());
+    checkEveryConfigurePageIsWhole(secondDialog, secondPrefs, secondStack, QStringLiteral("long status"));
+    QVERIFY(!QTest::currentTestFailed());
+    QVERIFY(reject(secondDialog));
 }
 
 void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *window) {
@@ -1669,7 +1761,7 @@ void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *win
     for (const auto &[page, controls] : placement) {
         dialog->setProperty("pageIndex", page);
         QQuickItem *pageItem = stack->childItems().at(page);
-        QTRY_VERIFY(pageItem->isVisible() && !layoutPending(pageItem));
+        QTRY_VERIFY(pageItem->isVisible() && !layoutPendingUnder(pageItem));
         qreal lastTop = -1;
         for (const QString &name : controls) {
             const QList<QQuickItem *> found = itemsNamed(stack, name);
@@ -1706,7 +1798,7 @@ void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *win
     // its subheading, 16 px below the group above and 8 px above its rows.
     dialog->setProperty("pageIndex", 1);
     QTRY_VERIFY(named("spectrogramZoomCheckBox") != nullptr);
-    QTRY_VERIFY(!layoutPending(stack->childItems().at(1)));
+    QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(1)));
     // The tallest page, whole in the window as it opens: the pages are laid
     // out only once it shows, so its size cannot follow them.
     QQuickItem *visualization = stack->childItems().at(1);
@@ -1766,7 +1858,7 @@ void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *win
     dialog->setProperty("pageIndex", 2);
     QQuickItem *media = nullptr;
     QTRY_VERIFY((media = named("systemMediaControlsCheckBox")) != nullptr);
-    QTRY_VERIFY(!layoutPending(stack->childItems().at(2)));
+    QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(2)));
     QQuickItem *generalPage = stack->childItems().at(2);
     QVERIFY(named("desktopIntegrationGap") != nullptr);
     for (QQuickItem *subheading : itemsNamed(generalPage, QStringLiteral("formSubheading"))) {
@@ -2730,7 +2822,7 @@ void UiDialogsTest::checkLastFmAccountIsAGroupApart(QQuickWindow *window, bool c
     };
     // General's room between its groups: from the viewers' last row to the
     // media controls' check box.
-    QTRY_VERIFY(!layoutPending(stack->childItems().at(2)));
+    QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(2)));
     QQuickItem *sleep = visibleNamed(prefs, QStringLiteral("preventDisplaySleepInFullscreenCheckBox"));
     QQuickItem *media = visibleNamed(prefs, QStringLiteral("systemMediaControlsCheckBox"));
     QVERIFY(sleep != nullptr && media != nullptr);
@@ -2740,7 +2832,7 @@ void UiDialogsTest::checkLastFmAccountIsAGroupApart(QQuickWindow *window, bool c
     dialog->setProperty("pageIndex", 3);
     QQuickItem *account = nullptr;
     QTRY_VERIFY((account = visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))) != nullptr);
-    QTRY_VERIFY(!layoutPending(stack->childItems().at(3)));
+    QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
     QQuickItem *box = visibleNamed(prefs, QStringLiteral("lastFmScrobblingCheckBox"));
     QQuickItem *helpRow = visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp"));
     QVERIFY(box != nullptr && helpRow != nullptr);
@@ -5288,9 +5380,8 @@ void UiDialogsTest::checkDialogsHoldTheirContents(DialogsWindow &main) {
     QCOMPARE(formModes(preferences, stack), QList<bool>(4, true));
     checkPreferencesPages(preferences, prefs, stack, QStringLiteral("24 pt, default size"));
     QVERIFY(!QTest::currentTestFailed());
-    // In a larger window too. (Narrower, Kirigami's narrow layout caps its
-    // column at 32 grid units, which in a test do not follow the font as
-    // they do on the desktop; configureFitsItsPagesAtAnyWidth checks it.)
+    // In a larger window too. (Narrower, configureFitsItsPagesAtAnyWidth
+    // checks it.)
     prefs->resize(2200, prefs->height());
     QTRY_COMPARE(prefs->width(), 2200);
     QCOMPARE(formModes(preferences, stack), QList<bool>(4, true));
