@@ -239,8 +239,7 @@ CONTRAST_STATUS=0
 python3 "$H/contrast.py" "$OUT" || CONTRAST_STATUS=$?
 nice -n 10 python3 "$H/layout.py" "$OUT"
 PACK_STATUS=0
-# SHOT_PACK_JOBS: the pack's parallel jobs (pack.py --jobs; its default suits a machine with memory to spare)
-SHOT_PARTIAL="$PARTIAL" nice -n 10 python3 "$H/pack.py" "$OUT" "$SRC" ${SHOT_PACK_JOBS:+--jobs "$SHOT_PACK_JOBS"} || PACK_STATUS=$?
+SHOT_PARTIAL="$PARTIAL" nice -n 10 python3 "$H/pack.py" "$OUT" "$SRC" || PACK_STATUS=$?
 phase package
 # publish the focus pack of a focus-only run to <round>/focus/ (whole or not at all), when it passed
 if [ -n "$FOCUS_ONLY" ] && [ "$PACK_STATUS" -eq 0 ] && [ -d "$OUT/focus" ]; then
