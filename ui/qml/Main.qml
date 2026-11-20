@@ -224,14 +224,6 @@ ApplicationWindow {
         return root.overlayHost
     }
 
-    function shouldResetSpectrogramForStoppedTrackSwitch(previousPlaybackState, currentPlaybackState, stoppedTrackPath, currentTrackPath) {
-        return playbackController.shouldResetSpectrogramForStoppedTrackSwitch(
-            previousPlaybackState,
-            currentPlaybackState,
-            stoppedTrackPath,
-            currentTrackPath)
-    }
-
     function canOpenTagEditorForLibrary(rowMap) {
         return libraryController.canOpenTagEditorForRow(rowMap)
     }
