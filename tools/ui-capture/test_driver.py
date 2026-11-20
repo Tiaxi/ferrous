@@ -28,8 +28,10 @@ class KWinSessionTest(unittest.TestCase):
     def session(self, scale, size=(1600, 1000)):
         iso = tempfile.mkdtemp(dir=_WORK.name)
         argv = driver.kwin_session(iso, size, scale, 'exec "/app"')
-        config = json.load(open(os.path.join(iso, "config", "kwinoutputconfig.json")))
-        launcher = open(os.path.join(iso, "launch.sh")).read()
+        with open(os.path.join(iso, "config", "kwinoutputconfig.json")) as f:
+            config = json.load(f)
+        with open(os.path.join(iso, "launch.sh")) as f:
+            launcher = f.read()
         return argv, config, launcher
 
     def test_output_is_logical_size_at_the_scale(self):

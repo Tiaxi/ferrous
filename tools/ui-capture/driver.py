@@ -137,12 +137,13 @@ def kwin_session(iso, size, scale, script):
     device pixel ratio from the output, as on Plasma."""
     ow, oh = kwin_output_size(size)
     os.makedirs(os.path.join(iso, "config"), exist_ok=True)
-    open(os.path.join(iso, "config", "kwinoutputconfig.json"), "w").write(kwin_output_config((ow, oh), scale))
+    with open(os.path.join(iso, "config", "kwinoutputconfig.json"), "w") as f:
+        f.write(kwin_output_config((ow, oh), scale))
     launcher = os.path.join(iso, "launch.sh")
-    open(launcher, "w").write(
-        "#!/bin/bash\nexport QT_QPA_PLATFORM=wayland WAYLAND_DISPLAY=shotwl\n"
-        f"export LD_PRELOAD={PROBE}\n"
-        f"unset {' '.join(QT_SCALE_VARS)}\n" + script + "\n")
+    with open(launcher, "w") as f:
+        f.write("#!/bin/bash\nexport QT_QPA_PLATFORM=wayland WAYLAND_DISPLAY=shotwl\n"
+                f"export LD_PRELOAD={PROBE}\n"
+                f"unset {' '.join(QT_SCALE_VARS)}\n" + script + "\n")
     os.chmod(launcher, 0o755)
     return ["kwin_wayland", "--virtual", "--socket", "shotwl", "--width", str(ow), "--height", str(oh),
             "--scale", f"{scale:g}", "--no-lockscreen", "--no-global-shortcuts", "--no-kactivities",
