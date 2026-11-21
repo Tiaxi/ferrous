@@ -228,11 +228,12 @@ Components.DialogWindow {
     }
 
     // Gives `action` `bindings`, asking first if another action has one of
-    // them, which it then loses.
+    // those it does not have yet, which that action then loses.
     function giveBindings(action, bindings) {
+        const had = root.bindingsOf(action)
         const moves = []
         for (let i = 0; i < bindings.length; ++i) {
-            const owner = root.ownerOf(bindings[i], action)
+            const owner = had.indexOf(bindings[i]) < 0 ? root.ownerOf(bindings[i], action) : null
             if (owner) {
                 moves.push({ key: bindings[i], owner: owner })
             }
