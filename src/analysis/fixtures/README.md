@@ -113,6 +113,10 @@ lame -t -b 32 --resample 22.05 -m m mono.wav mono.mp3
 cat stereo.mp3 mono.mp3 > channel-change.mp3
 ```
 
+`seek-tone.mp3` is 1 s of a 440 Hz mono tone at 48 kHz in 64 kbps MP3, encoded
+with FFmpeg's libmp3lame. Tests of analysis seeks and of the spectrogram
+worker decode copies of it.
+
 `centered-view.txt` lists where a centered spectrogram view starts for a
 playhead position, a window and a track duration. The decoder's model of the
 view (`src/analysis/centered_view.rs`) and the Qt view
