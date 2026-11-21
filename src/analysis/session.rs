@@ -7361,10 +7361,26 @@ mod tests {
         std::fs::remove_file(path).expect("remove fixture");
     }
 
+    /// How far ahead of its playhead a centered session at zoom 64, which
+    /// sent `chunk`, decodes for a view `width` pixels wide before it
+    /// parks, worked out from the chunk as the UI does.
+    fn centered_lookahead(chunk: &PrecomputedSpectrogramChunk, width: u32) -> u32 {
+        let lookahead = SpectrogramBufferConfig {
+            width,
+            sample_rate: chunk.sample_rate_hz,
+            hop: chunk.hop_size,
+            bins: u32::from(chunk.bins_per_column),
+            channels: u32::from(chunk.channel_count),
+            zoom: 64.0,
+            centered: true,
+        }
+        .limits(lookahead_seconds())
+        .lookahead;
+        u32::try_from(lookahead).expect("lookahead fits a column index")
+    }
+
     #[test]
     fn a_widget_width_queued_behind_a_new_track_takes_effect() {
-        // At zoom 64 a 1920-pixel centered view parks 138 columns ahead,
-        // and a 3840-pixel one 198.
         let path = write_tone_fixture("queued-width", 30, 8_000);
         let worker = QueuedWorker::start(vec![
             with_new_track(session_on(&path, 1, 1), |zoom, width, _| {
@@ -7375,8 +7391,14 @@ mod tests {
                 widget_width: 3_840,
             },
         ]);
-        worker
-            .chunks_until(|chunk| chunk.start_column_index + u32::from(chunk.column_count) >= 190);
+        let first = next_chunk(&worker.events);
+        let narrow = centered_lookahead(&first, 1_920);
+        assert!(centered_lookahead(&first, 3_840) > narrow);
+        // Past the narrow view's lookahead only if the wider width took
+        // effect; otherwise the session parks there and no chunk comes.
+        worker.chunks_until(|chunk| {
+            chunk.start_column_index + u32::from(chunk.column_count) > narrow
+        });
         worker.finish();
         std::fs::remove_file(path).expect("remove fixture");
     }
@@ -7386,8 +7408,7 @@ mod tests {
         // The UI sizes its ring for the width a chunk carries, so a column
         // decoded ahead for a wider view must come in a chunk that says so,
         // and a later session for a narrower view carries that view's
-        // width. At zoom 64 a 1920-pixel centered view
-        // parks 138 columns ahead, and a 3840-pixel one 198.
+        // width.
         let path = write_tone_fixture("chunk-width", 30, 8_000);
         let end = |chunk: &PrecomputedSpectrogramChunk| {
             chunk.start_column_index + u32::from(chunk.column_count)
@@ -7400,8 +7421,18 @@ mod tests {
                 *mode = SpectrogramDisplayMode::Centered;
             },
         )]);
-        let narrow = worker.chunks_until(|chunk| end(chunk) >= 130);
+        // The width changes once the session parks for the narrow view, so
+        // that the columns after that are decoded for the wide one.
+        let first = next_chunk(&worker.events);
+        let lookahead = centered_lookahead(&first, 1_920);
+        let mut narrow = vec![first];
+        narrow.extend(worker.chunks_until(|chunk| end(chunk) >= lookahead));
         assert!(narrow.iter().all(|chunk| chunk.widget_width == 1_920));
+        assert_eq!(
+            narrow.last().map(end),
+            Some(lookahead),
+            "the session parks at the narrow lookahead"
+        );
 
         worker
             .commands
@@ -7409,25 +7440,11 @@ mod tests {
                 widget_width: 3_840,
             })
             .unwrap();
-        let wide = worker.chunks_until(|chunk| end(chunk) >= 190);
+        let wide = worker.chunks_until(|chunk| end(chunk) > lookahead);
         assert!(
-            wide.windows(2)
-                .all(|pair| pair[0].widget_width <= pair[1].widget_width),
-            "the width of a session only grows"
+            wide.iter().all(|chunk| chunk.widget_width == 3_840),
+            "columns past the narrow lookahead"
         );
-        for chunk in &wide {
-            assert!(
-                matches!(chunk.widget_width, 1_920 | 3_840),
-                "{}",
-                chunk.widget_width
-            );
-            if end(chunk) > 138 {
-                assert_eq!(
-                    chunk.widget_width, 3_840,
-                    "columns past the narrow lookahead"
-                );
-            }
-        }
 
         // The next session is for a narrower view again. (The worker's
         // generation counter stays at 1 here, so the track token tells the
