@@ -4271,11 +4271,24 @@ mod tests {
     #[test]
     fn a_new_scrobble_indicator_state_is_sent_at_once_but_listened_time_waits_for_heartbeats() {
         let _guard = test_guard();
-        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
         let (lastfm, _commands) = crate::lastfm::test_support::command_handle();
-        runtime.lastfm = lastfm;
-        let (event_tx, event_rx) = event_channel();
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let mut runtime = BridgeLoopRuntime::new(
+            BridgeRuntimeOptions {
+                lastfm: Some((lastfm, never())),
+                ..BridgeRuntimeOptions::default()
+            },
+            None,
+        );
+        // The test sets the playback and Last.fm state itself. The workers'
+        // replies to the startup commands, which can come at any time, would
+        // replace that state or ask for a snapshot of their own.
+        runtime.playback_rx = never();
+        runtime.analysis_rx = never();
+        runtime.metadata_rx = never();
+        runtime.library_rx = never();
+        runtime.search_results_rx = never();
+        runtime.apply_album_art_rx = never();
+        let (event_tx, _event_rx) = event_channel();
         let track = p("/fixtures/indicator-urgency.flac");
         runtime.state.lastfm.enabled = true;
         runtime.state.lastfm.auth_state = crate::lastfm::AuthState::Connected;
