@@ -26,6 +26,9 @@ Action {
     // The shortcuts the user changed, by shortcutId, as
     // BridgeClient.keyboardShortcuts has them.
     property var overrides: ({})
+    // Its name in Configure Keyboard Shortcuts, for an action whose text
+    // follows what it does now, such as Play and Pause; its text otherwise.
+    property string shortcutText: ""
 
     // Whether the user changed this action's shortcuts.
     readonly property bool hasCustomKeyBindings: shortcutId.length > 0 && !!overrides

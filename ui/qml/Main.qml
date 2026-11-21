@@ -852,6 +852,7 @@ ApplicationWindow {
                 return I18n.i18nc("@action:inmenu", "&Undo")
             }
         }
+        shortcutText: I18n.i18nc("@action keyboard shortcut of Edit › Undo", "Undo")
         icon.name: "edit-undo"
         // Text fields keep Ctrl+Z for their own text.
         standardKey: StandardKey.Undo
@@ -877,6 +878,7 @@ ApplicationWindow {
                 return I18n.i18nc("@action:inmenu", "&Redo")
             }
         }
+        shortcutText: I18n.i18nc("@action keyboard shortcut of Edit › Redo", "Redo")
         icon.name: "edit-redo"
         // Text fields keep Ctrl+Shift+Z for their own text.
         standardKey: StandardKey.Redo
@@ -1074,6 +1076,7 @@ ApplicationWindow {
         text: playbackController.isPlaying
             ? I18n.i18nc("@action:inmenu", "&Pause")
             : I18n.i18nc("@action:inmenu", "&Play")
+        shortcutText: I18n.i18nc("@action keyboard shortcut of Playback › Play or Pause", "Play/Pause")
         icon.name: playbackController.isPlaying ? "media-playback-pause" : "media-playback-start"
         // Text fields take Space for typing before shortcuts see it.
         defaultKeyBindings: ["Space"]
@@ -1228,6 +1231,18 @@ ApplicationWindow {
     }
 
     // Settings
+    // Ctrl+Alt+, beside Configure's Ctrl+Shift+,.
+    Components.ShortcutAction {
+        id: configureShortcutsAction
+        objectName: "configureShortcutsAction"
+        shortcutId: "configure_shortcuts"
+        overrides: root.keyboardShortcutOverrides
+        text: I18n.i18nc("@action:inmenu", "Configure Keyboard S&hortcuts…")
+        icon.name: "configure-shortcuts"
+        defaultKeyBindings: ["Ctrl+Alt+,"]
+        enabled: !root.viewerOpen
+        onTriggered: keyboardShortcutsDialog.open()
+    }
     Components.ShortcutAction {
         id: preferencesAction
         objectName: "configureAction"
@@ -1331,7 +1346,7 @@ ApplicationWindow {
         {
             name: "settings",
             title: I18n.i18nc("@title:group keyboard shortcuts of the Settings menu", "Settings"),
-            actions: [preferencesAction]
+            actions: [configureShortcutsAction, preferencesAction]
         },
         {
             name: "help",
@@ -1456,6 +1471,7 @@ ApplicationWindow {
         Components.AppMenu {
             objectName: "settingsMenu"
             title: I18n.i18nc("@title:menu", "&Settings")
+            MenuItem { action: configureShortcutsAction }
             MenuItem { action: preferencesAction }
         }
         Components.AppMenu {
@@ -1490,6 +1506,19 @@ ApplicationWindow {
         spectrogramFftChoices: root.spectrogramFftChoices
         promptAddLibraryRoot: root.promptAddLibraryRoot
         openLibraryRootNameDialog: root.openLibraryRootNameDialog
+        resetZoomShortcut: resetZoomAction.keyBindings.length > 0
+            ? StandardKeys.nativeText(resetZoomAction.keyBindings[0])
+            : ""
+    }
+
+    Dialogs.KeyboardShortcutsDialog {
+        id: keyboardShortcutsDialog
+        objectName: "keyboardShortcutsDialog"
+        uiBridge: root.uiBridge
+        uiPalette: root.uiPalette
+        windowRoot: root
+        actionGroups: root.shortcutActionGroups
+        viewerActions: root.viewerActions
     }
 
     // Over Configure Ferrous while it is open, whose Library page asks for

@@ -28,6 +28,9 @@ BuildRequires:  kf6-kirigami-devel
 # style, with icons recoloured as Breeze's are.
 BuildRequires:  kf6-qqc2-desktop-style
 BuildRequires:  breeze-icon-theme
+# KDE's key capture control for Configure Keyboard Shortcuts, which the UI
+# tests load with the main window.
+BuildRequires:  kf6-kdeclarative
 # KI18n translates the interface; the tests extract the translation template
 # and make a pseudo-translation with GNU gettext.
 BuildRequires:  kf6-ki18n-devel
@@ -54,6 +57,9 @@ Requires:       kf6-ki18n
 # The org.kde.desktop controls style, which Ferrous selects at startup; without
 # it, for example outside Plasma, the main window fails to load.
 Requires:       kf6-qqc2-desktop-style
+# org.kde.kquickcontrols' KeySequenceItem, which Configure Keyboard Shortcuts
+# captures keys with; the main window does not load without it.
+Requires:       kf6-kdeclarative
 Requires:       gstreamer1
 Requires:       gstreamer1-plugins-base
 Requires:       gstreamer1-plugins-good
