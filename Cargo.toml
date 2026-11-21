@@ -55,6 +55,13 @@ profiling-logs = []
 [profile.release]
 debug = "line-tables-only"
 
+# Build tests optimised: the suite decodes, analyses and fuzzes a lot of
+# audio, which runs several times faster than in debug code. Debug
+# assertions and overflow checks stay on, and `cargo build` keeps the dev
+# profile.
+[profile.test]
+opt-level = 1
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

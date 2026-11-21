@@ -55,6 +55,9 @@ jobs:
       # Give up on a stalled mirror instead of waiting on it.
       DNF_OPTS: --setopt=retries=3 --setopt=timeout=30 --setopt=minrate=10240
       FEDORA: ${{ matrix.fedora }}
+      # Most tests wait on real-time playback rather than use the CPU, so
+      # run more of them at once than the runner has CPUs.
+      RUST_TEST_THREADS: 16
     steps:
       - name: Install system dependencies
         timeout-minutes: 10
