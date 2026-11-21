@@ -58,9 +58,12 @@ debug = "line-tables-only"
 # Build tests optimised: the suite decodes, analyses and fuzzes a lot of
 # audio, which runs several times faster than in debug code. Debug
 # assertions and overflow checks stay on, and `cargo build` keeps the dev
-# profile.
+# profile. Line tables keep file and line numbers in backtraces and
+# debugger stacks while the build, which CI makes from scratch for every
+# feature set, takes a sixth less time than with full debug info.
 [profile.test]
 opt-level = 1
+debug = "line-tables-only"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
