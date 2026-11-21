@@ -36,7 +36,9 @@ struct TestShard {
     QString error;
 };
 
-inline TestShard testShardFromEnvironment() {
+// `listingArguments` go before -datatags when the binary lists its tests,
+// such as the smoke tests' `-area <name>`, which lists one area's.
+inline TestShard testShardFromEnvironment(const QStringList &listingArguments = {}) {
     TestShard shard;
     const QString value = qEnvironmentVariable("FERROUS_TEST_SHARD");
     if (value.isEmpty()) {
@@ -59,7 +61,7 @@ inline TestShard testShardFromEnvironment() {
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
     environment.remove(QStringLiteral("FERROUS_TEST_SHARD"));
     listing.setProcessEnvironment(environment);
-    listing.start(QCoreApplication::applicationFilePath(), {QStringLiteral("-datatags")});
+    listing.start(QCoreApplication::applicationFilePath(), listingArguments + QStringList{QStringLiteral("-datatags")});
     if (!listing.waitForFinished(30000) || listing.exitStatus() != QProcess::NormalExit
         || listing.exitCode() != 0) {
         shard.error = QStringLiteral("Could not list the tests with -datatags: %1 %2")

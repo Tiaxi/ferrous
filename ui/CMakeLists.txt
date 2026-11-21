@@ -444,28 +444,39 @@ if(BUILD_TESTING)
     endfunction()
 
     # The tests of `target` in `shards` shards, each in a process of its own
-    # and in parallel with the others, offscreen, as `<target>_shard_<n>_of_
+    # and in parallel with the others, offscreen, as `<name>_shard_<n>_of_
     # <shards>`; FERROUS_TEST_SHARD picks a shard's tests (tests/TestShard.h).
     # `cost` is about each shard's seconds when run alone, for ctest -j, as
     # the costs at the end of this file. A test of its own checks that the
-    # shards together run every test once.
+    # shards together run every test once. NAME is `target` unless given,
+    # ARGS go to every run of `target`, such as the smoke tests' -area, and
+    # TIMEOUT, each shard's, is 180 s unless given.
     function(ferrous_add_sharded_test target shards cost)
+        cmake_parse_arguments(PARSE_ARGV 3 sharded "" "NAME;TIMEOUT" "ARGS")
+        if(NOT sharded_NAME)
+            set(sharded_NAME ${target})
+        endif()
+        if(NOT sharded_TIMEOUT)
+            set(sharded_TIMEOUT 180)
+        endif()
         foreach(shard RANGE 1 ${shards})
-            set(shard_test ${target}_shard_${shard}_of_${shards})
-            add_test(NAME ${shard_test} COMMAND ${target})
+            set(shard_test ${sharded_NAME}_shard_${shard}_of_${shards})
+            add_test(NAME ${shard_test} COMMAND ${target} ${sharded_ARGS})
             set_tests_properties(${shard_test} PROPERTIES
                 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;FERROUS_TEST_SHARD=${shard}/${shards}"
-                TIMEOUT 180
+                TIMEOUT ${sharded_TIMEOUT}
                 COST ${cost}
             )
         endforeach()
-        add_test(NAME ${target}_shards_run_every_test
+        list(JOIN sharded_ARGS " " sharded_arguments)
+        add_test(NAME ${sharded_NAME}_shards_run_every_test
             COMMAND "${CMAKE_COMMAND}"
                 -DBINARY=$<TARGET_FILE:${target}>
                 -DSHARDS=${shards}
+                "-DARGUMENTS=${sharded_arguments}"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_test_shards.cmake"
         )
-        set_tests_properties(${target}_shards_run_every_test PROPERTIES TIMEOUT 60)
+        set_tests_properties(${sharded_NAME}_shards_run_every_test PROPERTIES TIMEOUT 60)
     endfunction()
 
     # Test class names may have digits and underscores.
@@ -750,6 +761,13 @@ if(BUILD_TESTING)
         scrobble 60
         keyboard_shortcuts 120
     )
+    # The areas that run in shards, as `<area> <shards> <cost>`, the cost
+    # each shard's seconds when run alone, as ferrous_add_sharded_test takes
+    # it: in one process, transport_input took most of its timeout in the
+    # Debug CI job, and the longest of the run.
+    set(FERROUS_QML_SMOKE_SHARDED_AREAS
+        transport_input 2 22
+    )
     set(ferrous_smoke_area_names "")
     list(LENGTH FERROUS_QML_SMOKE_AREAS ferrous_smoke_area_values)
     math(EXPR ferrous_smoke_area_last "${ferrous_smoke_area_values} - 1")
@@ -758,11 +776,21 @@ if(BUILD_TESTING)
         list(GET FERROUS_QML_SMOKE_AREAS ${index} area)
         list(GET FERROUS_QML_SMOKE_AREAS ${timeout_index} timeout)
         list(APPEND ferrous_smoke_area_names ${area})
-        add_test(NAME ferrous_qml_smoke_${area} COMMAND ferrous_qml_smoke_tests -area ${area})
-        set_tests_properties(ferrous_qml_smoke_${area} PROPERTIES
-            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-            TIMEOUT ${timeout}
-        )
+        list(FIND FERROUS_QML_SMOKE_SHARDED_AREAS ${area} sharded_index)
+        if(sharded_index GREATER_EQUAL 0)
+            math(EXPR shards_index "${sharded_index} + 1")
+            math(EXPR cost_index "${sharded_index} + 2")
+            list(GET FERROUS_QML_SMOKE_SHARDED_AREAS ${shards_index} shards)
+            list(GET FERROUS_QML_SMOKE_SHARDED_AREAS ${cost_index} cost)
+            ferrous_add_sharded_test(ferrous_qml_smoke_tests ${shards} ${cost}
+                NAME ferrous_qml_smoke_${area} ARGS -area ${area} TIMEOUT ${timeout})
+        else()
+            add_test(NAME ferrous_qml_smoke_${area} COMMAND ferrous_qml_smoke_tests -area ${area})
+            set_tests_properties(ferrous_qml_smoke_${area} PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+                TIMEOUT ${timeout}
+            )
+        endif()
     endforeach()
     # The shortcut editor's KeySequenceItem asks kglobalaccel on the session
     # bus about KDE's global shortcuts: these tests have a bus that is not
@@ -1098,9 +1126,9 @@ if(BUILD_TESTING)
     # end waiting on a long test that started last. CTest takes the times of
     # the build directory's last run instead where it has them; these, about
     # each test's seconds when run alone, are for a first run, as in CI.
-    # The shards of ferrous_ui_motion_tests have theirs where they are added.
+    # Sharded tests, such as ferrous_ui_motion_tests and the smoke tests'
+    # transport_input, have theirs where they are added.
     foreach(test_and_cost IN ITEMS
-            ferrous_qml_smoke_transport_input:44
             ferrous_qml_smoke_album_art:18
             ferrous_qml_smoke_tag_editor:36
             ferrous_ui_dialogs_tests:40

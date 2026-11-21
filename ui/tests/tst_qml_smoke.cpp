@@ -2,7 +2,10 @@
 
 #include "QmlSmokeTest.h"
 #include "TestPlatform.h"
+#include "TestShard.h"
 #include "TestSessionIsolation.h"
+
+#include <algorithm>
 
 // Offscreen screens at 2x, 1.5x and 1.25x beside the default one, so that a
 // HiDPI test can move a window to another scale as on a desktop. The first
@@ -154,6 +157,39 @@ int runSmokeTests(const QString &userDirectoriesParent, const QStringList &argum
         return 1;
     }
 
+    // An area in shards (TestShard.h), with FERROUS_TEST_SHARD, as CTest
+    // runs a long one: the shard's tests of the area that -area names. Its
+    // tests are listed with -datatags, after which QTest exits, so the area
+    // must be one class.
+    if (!qEnvironmentVariableIsEmpty("FERROUS_TEST_SHARD")) {
+        const auto classes = std::count_if(kSmokeTestAreas.cbegin(), kSmokeTestAreas.cend(),
+            [&onlyArea](const SmokeTestArea &area) { return onlyArea == QLatin1String(area.name); });
+        if (classes != 1 || !functions.isEmpty()) {
+            // To standard error, as qExecShard() does: before qExec(), Qt
+            // logs to the journal where standard error is not a terminal.
+            std::fprintf(stderr,
+                "FERROUS_TEST_SHARD shards one area of one test class, named with -area, and no test functions\n");
+            return 1;
+        }
+    }
+    const TestShard shard =
+        testShardFromEnvironment(onlyArea.isEmpty() ? QStringList{} : QStringList{QStringLiteral("-area"), onlyArea});
+    if (shard.sharded) {
+        if (!shard.error.isEmpty()) {
+            std::fprintf(stderr, "%s\n", qPrintable(shard.error));
+            return 1;
+        }
+        // QTest's -datatags lists every test: list the shard's, which
+        // check_test_shards.cmake checks against it.
+        if (options.contains(QStringLiteral("-datatags"))) {
+            for (const QString &line : shard.listing) {
+                std::printf("%s\n", qPrintable(line));
+            }
+            return 0;
+        }
+        functions = shard.tests;
+    }
+
     // QTest exits after listing one class's functions: list every class's.
     if (options.contains(QStringLiteral("-functions"))) {
         const QStringList fixtures{QStringLiteral("initTestCase"), QStringLiteral("init"),
@@ -211,7 +247,9 @@ int main(int argc, char **argv) {
     // Bridge construction starts library workers; keep scans and tag operations
     // independent of saved application data and concurrent test processes.
     // Each test also gets user directories of its own; see init().
-    QTemporaryDir testStorage;
+    // Static, so that it is removed when QTest exits the process itself, as
+    // after -datatags, which a sharded area's shards run to list its tests.
+    static QTemporaryDir testStorage;
     if (!testStorage.isValid()) return 1;
     qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));
     qputenv("XDG_CONFIG_HOME", QFile::encodeName(testStorage.filePath("config")));

@@ -3,6 +3,8 @@
 # FERROUS_TEST_SHARD=<shard>/<SHARDS>, together run every test that QTest's
 # -datatags lists for the binary (a function without data, or a row of one),
 # each in exactly one shard. A shard lists its tests with -datatags.
+# ARGUMENTS, if set, go before -datatags, as `-area transport_input` for the
+# smoke tests' area of that name.
 foreach(variable IN ITEMS BINARY SHARDS)
     if(NOT ${variable})
         message(FATAL_ERROR "Set ${variable}.")
@@ -15,8 +17,9 @@ function(ferrous_shard_tests out shard)
     else()
         set(environment "--unset=FERROUS_TEST_SHARD")
     endif()
+    separate_arguments(arguments UNIX_COMMAND "${ARGUMENTS}")
     execute_process(
-        COMMAND "${CMAKE_COMMAND}" -E env ${environment} "${BINARY}" -datatags
+        COMMAND "${CMAKE_COMMAND}" -E env ${environment} "${BINARY}" ${arguments} -datatags
         OUTPUT_VARIABLE listing
         ERROR_VARIABLE errors
         RESULT_VARIABLE result
