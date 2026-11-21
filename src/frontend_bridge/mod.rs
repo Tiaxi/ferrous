@@ -9156,6 +9156,11 @@ mod tests {
         Receiver<BridgeEvent>,
     ) {
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        // The library is the test's own. The library worker reads the
+        // database the tests share, and its reports, which can come at any
+        // time, would replace that library while the alias worker answers
+        // for it.
+        runtime.library_rx = never();
         let (event_tx, event_rx) = event_channel();
         drain_initial_events(&mut runtime, &event_tx, &event_rx);
         runtime.state.library = Arc::new(LibrarySnapshot {
