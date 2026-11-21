@@ -20,8 +20,8 @@ RUNS=30
 FIRST=1
 LOAD_EVERY=3
 LOAD_WORKERS=$((NPROC * 2))
-# Single-threaded, the GStreamer tests, which play their fixtures in real
-# time, take about 20 minutes; with 4 threads about 5.
+# The GStreamer tests play their fixtures in real time, so they start at 4
+# threads rather than 1.
 MOCK_THREADS=(1 default 32)
 GST_THREADS=(4 default 32)
 RUST_THREADS=()
