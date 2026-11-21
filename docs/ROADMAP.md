@@ -14,7 +14,7 @@ These are open ideas, not a release schedule. Implemented features are described
 
 ## Queue and playlists
 
-- Add a Play Next action that puts tracks after the current one; today they go to the end of the queue unless dragged into place.
+- Add a Play Next action that puts tracks after the current one.
 - Save the queue as an M3U playlist; playlists can only be imported today.
 
 ## Library and metadata

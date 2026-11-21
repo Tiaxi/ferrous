@@ -58,7 +58,7 @@ The handles between the queue's column headings resize the Artist, Album and Len
 
 Tab and Shift+Tab move between the controls, including the transport buttons, the seek bar and the volume. With the seek bar focused, Left and Right seek back or forward 5 seconds.
 
-In **Configure Ferrous** (**Settings › Configure Ferrous…**), the page list has the keyboard first: Up and Down move between the pages, and so do Ctrl+Tab and Ctrl+Shift+Tab, or Ctrl+PageDown and Ctrl+PageUp, from anywhere in the dialog. Tab goes on to the page's controls and the buttons. Changes take effect with OK or Apply; Escape cancels them.
+In **Configure Ferrous** (**Settings › Configure Ferrous…**), the page list has the keyboard first: Up and Down move between the pages, and so do Ctrl+Tab and Ctrl+Shift+Tab, or Ctrl+PageDown and Ctrl+PageUp, from anywhere in the dialog. Tab goes on to the page's controls and the buttons. Changes to the settings take effect with OK or Apply, and Escape cancels them; changes to the library folders and the Last.fm account take effect at once.
 
 In **Recent Issues**, the arrow and Page keys scroll the list, and Tab reaches each issue's action, Open Diagnostics… and Clear All.
 
