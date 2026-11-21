@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   rust-backend:
-    name: "Rust Backend Checks${{ matrix.toolchain == 'fedora' && ' (Fedora Rust)' || '' }}${{ matrix.fedora != '44' && format(' (Fedora {0}{1})', matrix.fedora, matrix.experimental && ', non-blocking' || '') || '' }}"
+    name: "Rust ${{ matrix.check }}${{ matrix.toolchain == 'fedora' && ' (Fedora Rust)' || '' }}${{ matrix.fedora != '44' && format(' (Fedora {0}{1})', matrix.fedora, matrix.experimental && ', non-blocking' || '') || '' }}"
     strategy:
       fail-fast: false
       matrix:
@@ -33,22 +33,61 @@ jobs:
         # is not out yet, which does not block merges.
         # deny_warnings: fail the build on compiler warnings. Clippy already
         # denies them on the lint entry.
+        # Each check is a job of its own, so that they run at once: each test
+        # suite builds the crate for its own features anyway. features: the
+        # suite's Cargo features. cache: the build cache it shares; the
+        # profiling instrumentation builds the same dependencies as the
+        # GStreamer backend.
         include:
           - fedora: '44'
             toolchain: pinned
+            check: Lint
             lint: true
-            timeout: 30
+            cache: lint
+          - fedora: '44'
+            toolchain: pinned
+            check: Tests (GStreamer backend)
+            features: --features gst
+            cache: gst
+          - fedora: '44'
+            toolchain: pinned
+            check: Tests (profiling instrumentation)
+            features: --features "gst profiling-logs"
+            cache: gst
+          # The mock backend builds code that the GStreamer features leave
+          # out. gst is a default feature, so it builds without the defaults.
+          - fedora: '44'
+            toolchain: pinned
+            check: Tests (mock backend)
+            features: --no-default-features --features cli
+            cache: mock
           - fedora: '44'
             toolchain: fedora
+            check: Tests (GStreamer backend)
+            features: --features gst
+            cache: gst
             deny_warnings: true
-            timeout: 30
           - fedora: '45'
             toolchain: pinned
+            check: Tests (GStreamer backend)
+            features: --features gst
+            cache: gst
             deny_warnings: true
-            timeout: 40
+          - fedora: '45'
+            toolchain: pinned
+            check: Tests (profiling instrumentation)
+            features: --features "gst profiling-logs"
+            cache: gst
+            deny_warnings: true
+          - fedora: '45'
+            toolchain: pinned
+            check: Tests (mock backend)
+            features: --no-default-features --features cli
+            cache: mock
+            deny_warnings: true
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.experimental == true }}
-    timeout-minutes: ${{ matrix.timeout }}
+    timeout-minutes: 30
     container:
       image: fedora:${{ matrix.fedora }}
     env:
@@ -136,6 +175,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v0-rust-fedora-${{ matrix.fedora }}${{ matrix.toolchain == 'fedora' && '-fedora-rust' || '' }}"
+          key: ${{ matrix.cache }}
 
       # Lints stay on the pinned toolchain, so that new lints in a Fedora Rust
       # update do not fail CI. Test code is linted too; src/lib.rs exempts it
@@ -148,8 +188,7 @@ jobs:
         if: matrix.lint
         run: cargo clippy --locked --all-features --all-targets -- -D warnings -D clippy::pedantic
 
-      # The mock backend builds code that the GStreamer features leave out.
-      # gst is a default feature, so it builds without the defaults.
+      # The mock backend's code, which the GStreamer features leave out.
       - name: Clippy (mock backend)
         if: matrix.lint
         run: cargo clippy --locked --no-default-features --features cli --all-targets -- -D warnings -D clippy::pedantic
@@ -166,6 +205,7 @@ jobs:
         run: cargo audit
 
       - name: Isolate test user directories
+        if: ${{ !matrix.lint }}
         run: |
           mkdir -p "$RUNNER_TEMP/xdg/config" "$RUNNER_TEMP/xdg/data" "$RUNNER_TEMP/xdg/cache"
           {
@@ -175,6 +215,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Create an unprivileged test user
+        if: ${{ !matrix.lint }}
         run: |
           # Root reads locked folders and may give files away, so the tests
           # of those refusals skip under it. Test as a user in a supplementary
@@ -183,19 +224,10 @@ jobs:
           useradd --create-home --groups ferrous-test tester
           chown -R tester: "$GITHUB_WORKSPACE" "$HOME" "$RUNNER_TEMP/xdg"
 
-      - name: Test (GStreamer backend)
+      - name: Test
+        if: ${{ !matrix.lint }}
         shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
-        run: cargo test --locked --features gst
-
-      - name: Test (profiling instrumentation)
-        if: matrix.toolchain == 'pinned'
-        shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
-        run: cargo test --locked --features "gst profiling-logs"
-
-      - name: Test (mock backend)
-        if: matrix.toolchain == 'pinned'
-        shell: setpriv --reuid=tester --regid=tester --init-groups bash -e {0}
-        run: cargo test --locked --no-default-features --features cli
+        run: cargo test --locked ${{ matrix.features }}
 
   ui:
     name: "UI Build + Smoke Tests${{ matrix.profile_logs == 'ON' && ' (profiling, Debug)' || '' }}"
