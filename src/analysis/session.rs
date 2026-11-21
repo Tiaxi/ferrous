@@ -1595,6 +1595,13 @@ fn run_spectrogram_session(
                         stamp,
                         format,
                     });
+                    // The timeline ends with the file after all: the rows
+                    // of the interval it ends in, which the end of the file
+                    // left for the continuation, are its last column.
+                    if session_flush_chunk(&mut session, event_tx, columns_produced_out) {
+                        record_end_column(&mut session);
+                        session_emit_finalize_chunk(&session, event_tx);
+                    }
                     if track_token != session.track_token {
                         return None;
                     }
@@ -2058,7 +2065,13 @@ fn session_decode_loop(
                 // track is still current. Waiting until the parked worker
                 // exits leaves the UI using a padded estimate.
                 session.source_reached_eof = true;
-                session_flush_chunk(session, event_tx, columns_produced_out);
+                if session.pending_continue.is_some() {
+                    // The timeline goes on into the next file, whose rows
+                    // complete the interval this one ends in (#714).
+                    session_emit_pending_chunk(session, event_tx, columns_produced_out);
+                } else {
+                    session_flush_chunk(session, event_tx, columns_produced_out);
+                }
                 record_end_column(session);
                 session_emit_finalize_chunk(session, event_tx);
                 continue;
@@ -3406,11 +3419,14 @@ fn maybe_update_columns_estimate(
     }
 }
 
+/// Send the session's columns at the end of its timeline, the rows of the
+/// interval its audio ends in as the last. Returns whether there were such
+/// rows.
 fn session_flush_chunk(
     session: &mut SpectrogramSessionState,
     event_tx: &dyn AnalysisEventOutput,
     columns_produced_out: &AtomicU64,
-) {
+) -> bool {
     // The left of a view ends where its right began: a partial interval
     // there is not the end of anything.
     if session
@@ -3418,7 +3434,7 @@ fn session_flush_chunk(
         .is_some_and(|backfill| backfill.resume.is_some())
     {
         session_emit_pending_chunk(session, event_tx, columns_produced_out);
-        return;
+        return false;
     }
     // Drain any partial resampler window at track end.
     // All channels must flush together — if any channel has no
@@ -3429,7 +3445,8 @@ fn session_flush_chunk(
         .iter_mut()
         .map(PeakHoldResampler::flush)
         .collect();
-    if !flushed.is_empty() && flushed.iter().all(Option::is_some) {
+    let partial = !flushed.is_empty() && flushed.iter().all(Option::is_some);
+    if partial {
         for maybe_row in &flushed {
             let row = maybe_row.as_ref().unwrap();
             append_quantized_row(
@@ -3444,6 +3461,7 @@ fn session_flush_chunk(
     }
 
     session_emit_pending_chunk(session, event_tx, columns_produced_out);
+    partial
 }
 
 /// Publish already-complete columns without finalizing the resampler's
@@ -8612,11 +8630,33 @@ mod tests {
     /// A 16-bit WAV of `channels` channels of noise, every channel its
     /// own, named for the test.
     fn write_noise_fixture(name: &str, channels: u16) -> PathBuf {
+        let samples = BACKFILL_SECONDS * BACKFILL_RATE * u32::from(channels);
+        write_wave_fixture(
+            name,
+            channels,
+            &noise_samples(0x9e37_79b9 ^ u32::from(channels), samples),
+        )
+    }
+
+    /// `count` samples of noise, from `seed`.
+    fn noise_samples(seed: u32, count: u32) -> Vec<i16> {
+        let mut random = seed;
+        (0..count)
+            .map(|_| {
+                random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                i16::try_from(random >> 18).unwrap() - 8_192
+            })
+            .collect()
+    }
+
+    /// A 16-bit WAV at [`BACKFILL_RATE`] of the interleaved `samples` of
+    /// `channels` channels, named for the test.
+    fn write_wave_fixture(name: &str, channels: u16, samples: &[i16]) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "ferrous-backfill-{name}-{channels}-{}.wav",
             std::process::id()
         ));
-        let data_bytes = BACKFILL_SECONDS * BACKFILL_RATE * u32::from(channels) * 2;
+        let data_bytes = u32::try_from(samples.len() * 2).unwrap();
         let mut bytes = b"RIFF".to_vec();
         bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
         bytes.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0");
@@ -8626,10 +8666,7 @@ mod tests {
         bytes.extend_from_slice(&(channels * 2).to_le_bytes());
         bytes.extend_from_slice(b"\x10\0data");
         bytes.extend_from_slice(&data_bytes.to_le_bytes());
-        let mut random = 0x9e37_79b9_u32 ^ u32::from(channels);
-        for _ in 0..data_bytes / 2 {
-            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let sample = i16::try_from(random >> 18).unwrap() - 8_192;
+        for sample in samples {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         std::fs::write(&path, bytes).unwrap();
@@ -9308,6 +9345,177 @@ mod tests {
             assert_eq!(index, reference_index);
             assert!(bytes == reference_bytes, "column {index}");
         }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_gapless_continuation_keeps_the_columns_on_the_frame_grid() {
+        // Regression for #714. Each column is four rows of the STFT, and the
+        // first file ends one, two or three rows into one: the rest of its
+        // rows are the next file's. The columns of the continuation are
+        // those of the two files joined, decoded as one, whether the
+        // continuation comes before the end of the first file or after the
+        // session parked there. Then the end of the file has sent the
+        // column it ends in, with its rows: the column stays, and the
+        // columns after it are the joined files'. A seek is in the playing
+        // file, whose columns the session then decodes on its own timeline.
+        const CHANNELS: u16 = 2;
+        const FRAMES: u32 = 4 * BACKFILL_RATE;
+        let token = 30;
+        let next_samples = noise_samples(0x0005_eed5, FRAMES * u32::from(CHANNELS));
+        let next = write_wave_fixture("continued-next", CHANNELS, &next_samples);
+        let next_alone = continuous_reference(&next, CHANNELS.into(), 1);
+        for rows in 1..=3 {
+            let first_frames = 24 * 1_024 + 77 + (rows - 1) * 256;
+            let mut samples = noise_samples(0x9e37_79b9, first_frames * u32::from(CHANNELS));
+            let first = write_wave_fixture("continued-first", CHANNELS, &samples);
+            samples.extend_from_slice(&next_samples);
+            let joined = write_wave_fixture("continued-joined", CHANNELS, &samples);
+            let reference = continuous_reference(&joined, CHANNELS.into(), 1);
+            let (last, last_alone) = continuous_reference(&first, CHANNELS.into(), 1)
+                .pop_last()
+                .unwrap();
+            assert_ne!(reference.get(&last), Some(&last_alone));
+            for display_mode in [
+                SpectrogramDisplayMode::Rolling,
+                SpectrogramDisplayMode::Centered,
+            ] {
+                for parked in [false, true] {
+                    for seek in [false, true] {
+                        let context = format!(
+                            "{rows} rows into a column, {display_mode:?}, continued {}{}",
+                            if parked { "at the end" } else { "before it" },
+                            if seek { ", then sought" } else { "" },
+                        );
+                        let mut command = backfill_session_on(&first, CHANNELS.into(), 0.0);
+                        if let SpectrogramWorkerCommand::NewTrack {
+                            display_mode: mode, ..
+                        } = &mut command
+                        {
+                            *mode = display_mode;
+                        }
+                        let continuation = SpectrogramWorkerCommand::ContinueWithFile {
+                            path: next.clone(),
+                            track_token: token,
+                        };
+                        let (commands, command_rx) = unbounded();
+                        if !parked {
+                            commands.send(continuation.clone()).unwrap();
+                        }
+                        let watcher = commands.clone();
+                        let ends = AtomicU64::new(0);
+                        let ends_wanted = if seek { 3 } else { 2 };
+                        let chunks = run_watched_session(
+                            command,
+                            1,
+                            (commands, command_rx),
+                            &Arc::new(AtomicU64::new(1)),
+                            move |chunk| {
+                                if !chunk.complete {
+                                    return;
+                                }
+                                match ends.fetch_add(1, Ordering::Relaxed) + 1 {
+                                    1 if parked => watcher.send(continuation.clone()).unwrap(),
+                                    2 if seek => watcher
+                                        .send(SpectrogramWorkerCommand::Seek {
+                                            position_seconds: 2.0,
+                                        })
+                                        .unwrap(),
+                                    _ => {}
+                                }
+                            },
+                            move |chunks| {
+                                chunks.iter().filter(|chunk| chunk.complete).count() == ends_wanted
+                            },
+                        );
+                        let ends: Vec<usize> = chunks
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, chunk)| chunk.complete.then_some(index))
+                            .collect();
+                        assert_eq!(ends.len(), ends_wanted, "{context}");
+                        let continued = columns_of(&chunks[..ends[1]]);
+                        assert!(
+                            continued
+                                .keys()
+                                .copied()
+                                .eq(0..usize_to_u64(continued.len())),
+                            "{context}: {:?}",
+                            spans_of(&chunks[..ends[1]])
+                        );
+                        assert_eq!(
+                            continued.len(),
+                            reference.len(),
+                            "{context}: the columns of the files joined"
+                        );
+                        for (index, bytes) in &continued {
+                            let expected = if parked && *index == last {
+                                &last_alone
+                            } else {
+                                &reference[index]
+                            };
+                            assert!(bytes == expected, "{context}: column {index}");
+                        }
+                        if seek {
+                            let sought = columns_of(&chunks[ends[1]..]);
+                            assert_eq!(
+                                sought.keys().next_back(),
+                                next_alone.keys().next_back(),
+                                "{context}: after the seek"
+                            );
+                            for (index, bytes) in &sought {
+                                assert!(
+                                    Some(bytes) == next_alone.get(index),
+                                    "{context}: column {index} after the seek"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            std::fs::remove_file(first).unwrap();
+            std::fs::remove_file(joined).unwrap();
+        }
+        std::fs::remove_file(next).unwrap();
+    }
+
+    #[test]
+    fn a_rejected_continuation_leaves_the_file_its_last_column() {
+        // The end of a file whose continuation is pending leaves the
+        // interval it ends in, two rows into a column, to the next file's
+        // rows. A continuation that cannot be opened ends the timeline
+        // there after all: the rows are the file's last column, and its end
+        // comes after it.
+        let samples = noise_samples(0x9e37_79b9, (24 * 1_024 + 333) * 2);
+        let path = write_wave_fixture("rejected-continuation", 2, &samples);
+        let alone = continuous_reference(&path, 2, 1);
+        let end = usize_to_u64(alone.len());
+        let (commands, command_rx) = unbounded();
+        commands
+            .send(SpectrogramWorkerCommand::ContinueWithFile {
+                path: path.with_extension("missing.wav"),
+                track_token: 30,
+            })
+            .unwrap();
+        let chunks = run_watched_session(
+            backfill_session_on(&path, 2, 0.0),
+            1,
+            (commands, command_rx),
+            &Arc::new(AtomicU64::new(1)),
+            |_| {},
+            move |chunks| {
+                chunks.last().is_some_and(|chunk| {
+                    chunk.complete && u64::from(chunk.total_columns_estimate) == end
+                })
+            },
+        );
+        let columns = columns_of(&chunks);
+        assert_eq!(columns.len(), alone.len(), "{:?}", spans_of(&chunks));
+        assert!(columns == alone, "the columns of the file alone");
+        let last = chunks.last().unwrap();
+        assert!(last.complete);
+        assert_eq!(u64::from(last.total_columns_estimate), end);
+        assert_eq!(u64::from(last.end_column), end);
         std::fs::remove_file(path).unwrap();
     }
 

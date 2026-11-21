@@ -157,6 +157,8 @@ pub(super) struct PeakHoldResampler {
     accumulator: f64,
     peak: Vec<f32>,
     output: Vec<f32>,
+    /// Whether [`Self::flush`] sent the open interval as a column.
+    flushed: bool,
 }
 
 impl PeakHoldResampler {
@@ -166,6 +168,7 @@ impl PeakHoldResampler {
             accumulator: 0.0,
             peak: Vec::new(),
             output: Vec::new(),
+            flushed: false,
         }
     }
 
@@ -178,6 +181,7 @@ impl PeakHoldResampler {
             self.accumulator = -(offset as f64) / input_hop.max(1) as f64;
         }
         self.peak.fill(f32::NEG_INFINITY);
+        self.flushed = false;
     }
 
     pub(super) fn push(&mut self, row: &[f32]) -> Option<&[f32]> {
@@ -193,7 +197,11 @@ impl PeakHoldResampler {
 
         if self.accumulator >= self.output_interval {
             self.accumulator -= self.output_interval;
-            self.output.clone_from(&self.peak);
+            // A flushed interval was sent as a column already.
+            let sent = std::mem::take(&mut self.flushed);
+            if !sent {
+                self.output.clone_from(&self.peak);
+            }
             // The boundary row contributes to the NEXT interval too
             // (peak-hold is idempotent — including a value twice is safe).
             if self.accumulator > 0.0 {
@@ -201,20 +209,25 @@ impl PeakHoldResampler {
             } else {
                 self.peak.fill(f32::NEG_INFINITY);
             }
-            Some(&self.output)
+            (!sent).then_some(&self.output)
         } else {
             None
         }
     }
 
+    /// The rows of the open interval as a column, at the end of the audio,
+    /// once. The interval stays open: the rows of a gapless continuation's
+    /// next file complete it, and the next column after it starts where the
+    /// interval grid puts it. The column they complete is not emitted again,
+    /// as the one sent here holds its place.
     pub(super) fn flush(&mut self) -> Option<&[f32]> {
-        if self.accumulator > 0.0
+        if !self.flushed
+            && self.accumulator > 0.0
             && !self.peak.is_empty()
             && self.peak.iter().any(|&v| v > f32::NEG_INFINITY)
         {
-            self.accumulator = 0.0;
+            self.flushed = true;
             self.output.clone_from(&self.peak);
-            self.peak.fill(f32::NEG_INFINITY);
             Some(&self.output)
         } else {
             None
@@ -729,5 +742,27 @@ mod tests {
         assert_eq!(out, vec![5.0, 4.0]); // peak across the 2 rows
                                          // Second flush returns None (already drained).
         assert!(r.flush().is_none());
+    }
+
+    #[test]
+    fn peak_hold_resampler_keeps_its_grid_after_a_flush() {
+        // Rows pushed after a flush, as a gapless continuation's are,
+        // complete the flushed interval without emitting it again, and the
+        // next interval starts where the grid puts it.
+        let mut r = PeakHoldResampler::new(3.0);
+        assert!(r.push(&[2.0]).is_none());
+        assert!(r.push(&[5.0]).is_none());
+        assert_eq!(r.flush().expect("partial window"), vec![5.0]);
+        assert!(r.push(&[7.0]).is_none(), "the flushed interval was sent");
+        assert!(r.push(&[1.0]).is_none());
+        assert!(r.push(&[3.0]).is_none());
+        assert_eq!(r.push(&[2.0]).expect("the next interval"), vec![3.0]);
+        // A reset starts a grid with nothing sent.
+        assert!(r.push(&[4.0]).is_none());
+        assert_eq!(r.flush().expect("partial window"), vec![4.0]);
+        r.reset_at_column(0, 1, 1);
+        assert!(r.push(&[1.0]).is_none());
+        assert!(r.push(&[1.0]).is_none());
+        assert_eq!(r.push(&[6.0]).expect("a whole interval"), vec![6.0]);
     }
 }
