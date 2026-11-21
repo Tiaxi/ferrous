@@ -8,8 +8,8 @@ use std::fs;
 use std::sync::atomic::AtomicUsize;
 
 use super::watch_test_hooks::{
-    fail_watches, hold_changes, hold_watching, observe_deferred_walks, observe_pending,
-    observe_watched, set_fs_type,
+    fail_watches, hold_changes, hold_watching, observe_catch_up_rescans, observe_deferred_walks,
+    observe_pending, observe_watched, set_fs_type,
 };
 use super::*;
 use crate::library::scan::scan_test_hooks::{hold_walk, scans_of};
@@ -803,9 +803,17 @@ fn turning_watching_off_and_on_while_an_added_root_waits_watches_and_walks_it_on
     // The late watches are removed, with the worker still held.
     wait_for_count(&watched, "the added root watched late", |count| count > 0);
     wait_for_count(&watched, "the late watches removed", |count| count == 0);
+    let caught_up = observe_catch_up_rescans(&fixture.root);
     running.service.set_watching(true);
     let count = wait_for_count(&watched, "watched again", |count| count > 0);
     assert_eq!(count, 1, "the root's one folder");
+    // The worker is released only once the watcher has sent the catch-up
+    // rescan of the added root, so that the worker merges it with the
+    // deferred walk before running that: one arriving while the walk runs
+    // is a second walk, as the walk may have passed changed files.
+    caught_up
+        .recv_timeout(WAIT)
+        .expect("the catch-up rescan of the added root sent, with the worker still held");
 
     drop(release);
     running.wait_for("the walks and the catch-up rescans", |mirror| {
