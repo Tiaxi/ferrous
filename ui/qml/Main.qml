@@ -299,6 +299,7 @@ ApplicationWindow {
         property bool systemMediaControlsEnabled: true
         property bool libraryWatchEnabled: true
         property var queueColumnWidths: ({})
+        property var keyboardShortcuts: ({})
         property bool lastFmScrobblingEnabled: false
         property bool lastFmBuildConfigured: false
         property string lastFmUsername: ""
@@ -549,6 +550,10 @@ ApplicationWindow {
             }
             bridgeFallback.queueColumnWidths = widths
         }
+        function setKeyboardShortcuts(shortcuts) {
+            bridgeFallback.keyboardShortcuts = Object.assign({}, shortcuts)
+            return true
+        }
         function shutdown() {}
         signal stateSaveFinished(int requestId, bool saved, string message)
         function saveStateBeforeQuit() {
@@ -748,60 +753,77 @@ ApplicationWindow {
 
     // The window's actions. Menus show them; their shortcuts work wherever
     // the main window has focus. Titles are Title Case, and an item that
-    // opens a dialog ends in "…".
+    // opens a dialog ends in "…". Each menu bar action's shortcuts can be
+    // changed: its shortcutId names them in the settings, and must not
+    // change; shortcutActionGroups lists them.
+    readonly property var keyboardShortcutOverrides: root.uiBridge.keyboardShortcuts || ({})
 
     // File
-    Components.StandardKeyAction {
+    Components.ShortcutAction {
         id: openFilesAction
         objectName: "openFilesAction"
+        shortcutId: "open_files"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Open Files…")
         icon.name: "document-open"
         standardKey: StandardKey.Open
         enabled: !root.viewerOpen
         onTriggered: root.openExternalFiles()
     }
-    Action {
+    Components.ShortcutAction {
         id: addFilesAction
         objectName: "addFilesAction"
+        shortcutId: "add_files"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Add Files to Queue…")
         icon.name: "media-playlist-append"
         onTriggered: root.addExternalFiles()
     }
     // The folder dialog picks one folder.
-    Action {
+    Components.ShortcutAction {
         id: addFolderAction
         objectName: "addFolderAction"
+        shortcutId: "add_folder"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Add &Folder to Queue…")
         icon.name: "folder-add"
         onTriggered: root.addExternalFolder()
     }
     // As Configure Ferrous › Library adds one.
-    Action {
+    Components.ShortcutAction {
         id: addLibraryFolderAction
         objectName: "addLibraryFolderAction"
+        shortcutId: "add_library_folder"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Add Library Fol&der…")
         icon.name: "folder-music"
         onTriggered: root.promptAddLibraryRoot("add-library-root")
     }
-    Action {
+    Components.ShortcutAction {
         id: playAllLibraryTracksAction
         objectName: "playAllLibraryTracksAction"
+        shortcutId: "play_whole_library"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Play Whole Library")
         icon.name: "media-playback-start"
         enabled: libraryController.canPlayAllTracks()
         onTriggered: libraryController.playAllTracks()
     }
-    Action {
+    Components.ShortcutAction {
         id: appendAllLibraryTracksAction
         objectName: "appendAllLibraryTracksAction"
+        shortcutId: "queue_whole_library"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Queue &Whole Library")
         icon.name: "media-playlist-append"
         enabled: libraryController.canPlayAllTracks()
         onTriggered: libraryController.appendAllTracks()
     }
-    Components.StandardKeyAction {
+    Components.ShortcutAction {
         id: quitAction
         objectName: "quitAction"
+        shortcutId: "quit"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Quit")
         icon.name: "application-exit"
         standardKey: StandardKey.Quit
@@ -811,9 +833,11 @@ ApplicationWindow {
     }
 
     // Edit
-    Components.StandardKeyAction {
+    Components.ShortcutAction {
         id: undoQueueChangeAction
         objectName: "undoQueueChangeAction"
+        shortcutId: "undo"
+        overrides: root.keyboardShortcutOverrides
         text: {
             switch (uiBridge.queueUndoKind) {
             case 1:
@@ -834,9 +858,11 @@ ApplicationWindow {
         enabled: uiBridge.queueUndoId > 0 && !root.viewerOpen
         onTriggered: uiBridge.undoQueueChange()
     }
-    Components.StandardKeyAction {
+    Components.ShortcutAction {
         id: redoQueueChangeAction
         objectName: "redoQueueChangeAction"
+        shortcutId: "redo"
+        overrides: root.keyboardShortcutOverrides
         text: {
             switch (uiBridge.queueRedoKind) {
             case 1:
@@ -859,9 +885,11 @@ ApplicationWindow {
     }
     // Opens search. Text fields keep Ctrl+F; the search field takes it to
     // edit its query.
-    Components.StandardKeyAction {
+    Components.ShortcutAction {
         id: globalSearchAction
         objectName: "findAction"
+        shortcutId: "find"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Find…")
         icon.name: "edit-find"
         standardKey: StandardKey.Find
@@ -869,9 +897,11 @@ ApplicationWindow {
         onTriggered: globalSearchController.openDialog()
     }
     // The one menu item that clears the queue; Undo brings it back.
-    Action {
+    Components.ShortcutAction {
         id: clearQueueAction
         objectName: "clearQueueAction"
+        shortcutId: "clear_queue"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Clear Queue")
         icon.name: "edit-clear-list"
         enabled: uiBridge.queueLength > 0 && !root.viewerOpen
@@ -879,55 +909,67 @@ ApplicationWindow {
     }
     // Queue edits with no menu item of their own in the menu bar: the
     // queue's context menu offers them for its rows.
-    Action {
+    Components.ShortcutAction {
         id: moveTrackUpAction
         objectName: "moveTrackUpAction"
+        shortcutId: "move_track_up"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Move Up")
-        shortcut: "Ctrl+Shift+Up"
+        defaultKeyBindings: ["Ctrl+Shift+Up"]
         enabled: !root.viewerOpen
         onTriggered: queueController.moveSelected(-1)
     }
-    Action {
+    Components.ShortcutAction {
         id: moveTrackDownAction
         objectName: "moveTrackDownAction"
+        shortcutId: "move_track_down"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Move Down")
-        shortcut: "Ctrl+Shift+Down"
+        defaultKeyBindings: ["Ctrl+Shift+Down"]
         enabled: !root.viewerOpen
         onTriggered: queueController.moveSelected(1)
     }
-    Action {
+    Components.ShortcutAction {
         id: selectPreviousTrackAction
         objectName: "selectPreviousTrackAction"
+        shortcutId: "select_previous_track"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Select Previous Track")
-        shortcut: "Ctrl+Up"
+        defaultKeyBindings: ["Ctrl+Up"]
         enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: queueController.selectRelative(-1)
     }
-    Action {
+    Components.ShortcutAction {
         id: selectNextTrackAction
         objectName: "selectNextTrackAction"
+        shortcutId: "select_next_track"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Select Next Track")
-        shortcut: "Ctrl+Down"
+        defaultKeyBindings: ["Ctrl+Down"]
         enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: queueController.selectRelative(1)
     }
 
     // View
-    Action {
+    Components.ShortcutAction {
         id: visualizationViewerAction
         objectName: "visualizationViewerAction"
+        shortcutId: "visualization_viewer"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Open &Visualization Viewer")
         icon.name: "view-media-visualization"
-        shortcut: "F11"
+        defaultKeyBindings: ["F11"]
         // Also closes it: the viewer repeats the shortcut.
         onTriggered: viewerController.toggleSpectrogramViewer()
     }
-    Action {
+    Components.ShortcutAction {
         id: albumArtViewerAction
         objectName: "albumArtViewerAction"
+        shortcutId: "album_art_viewer"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Open &Album Art Viewer")
         icon.name: "view-preview"
-        shortcut: "Shift+F11"
+        defaultKeyBindings: ["Shift+F11"]
         enabled: viewerController.albumArtViewerOpen
             || (uiBridge.currentTrackCoverPath || "").length > 0
         onTriggered: viewerController.toggleAlbumArtViewer()
@@ -937,47 +979,57 @@ ApplicationWindow {
         id: visualizationModeGroup
         exclusive: true
     }
-    Action {
+    Components.ShortcutAction {
         id: spectrogramModeAction
         objectName: "spectrogramModeAction"
+        shortcutId: "spectrogram_mode"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu visualization mode", "&Spectrogram")
-        shortcut: "Ctrl+1"
+        defaultKeyBindings: ["Ctrl+1"]
         checkable: true
         checked: viewerController.visualizationMode === 0
         ActionGroup.group: visualizationModeGroup
         onTriggered: viewerController.setVisualizationMode(0)
     }
-    Action {
+    Components.ShortcutAction {
         id: waveformModeAction
         objectName: "waveformModeAction"
+        shortcutId: "waveform_mode"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu visualization mode", "&Waveform")
-        shortcut: "Ctrl+2"
+        defaultKeyBindings: ["Ctrl+2"]
         checkable: true
         checked: viewerController.visualizationMode === 1
         ActionGroup.group: visualizationModeGroup
         onTriggered: viewerController.setVisualizationMode(1)
     }
-    Action {
+    Components.ShortcutAction {
         id: showLevelMeterAction
         objectName: "showLevelMeterAction"
+        shortcutId: "show_level_meter"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Show &Level Meter")
         checkable: true
         checked: uiBridge.showLevelMeter
         onTriggered: uiBridge.setShowLevelMeter(checked)
     }
     // The scale is the spectrogram's only: the waveform has none.
-    Action {
+    Components.ShortcutAction {
         id: showScaleAction
         objectName: "showScaleAction"
+        shortcutId: "show_scale"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Show Frequency and &Time Scale")
         checkable: true
         checked: uiBridge.showSpectrogramScale
         enabled: viewerController.visualizationMode === 0
         onTriggered: uiBridge.setShowSpectrogramScale(checked)
     }
-    Action {
+    Components.ShortcutAction {
         id: autoCenterSelectionAction
         objectName: "followCurrentTrackAction"
+        shortcutId: "follow_current_track"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Follow Current Track in Queue")
         checkable: true
         checked: queueController.autoCenterSelection
@@ -986,12 +1038,14 @@ ApplicationWindow {
     // The shown plot's zoom back to the default, as the viewer's Reset does.
     // Ctrl+0 is KDE's Actual Size key. The album art viewer zooms the art,
     // not the plot, so it leaves the key alone.
-    Action {
+    Components.ShortcutAction {
         id: resetZoomAction
         objectName: "resetZoomAction"
+        shortcutId: "reset_zoom"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Reset Zoom")
         icon.name: "zoom-original"
-        shortcut: "Ctrl+0"
+        defaultKeyBindings: ["Ctrl+0"]
         enabled: visualizationSurface.zoomed && !viewerController.albumArtViewerOpen
         onTriggered: visualizationSurface.resetZoom()
     }
@@ -999,26 +1053,30 @@ ApplicationWindow {
     // paused, after a middle-drag has panned it away. A focused library
     // keeps F for its type-ahead; the album art viewer leaves it alone, as
     // it does Reset Zoom's key.
-    Action {
+    Components.ShortcutAction {
         id: followPlayheadAction
         objectName: "followPlayheadAction"
+        shortcutId: "follow_playhead"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Follow &Playhead")
-        shortcut: "F"
+        defaultKeyBindings: ["F"]
         enabled: visualizationSurface.detached && !viewerController.albumArtViewerOpen
         onTriggered: visualizationSurface.followPlayhead()
     }
 
     // Playback
-    Action {
+    Components.ShortcutAction {
         id: playPauseAction
         objectName: "playPauseAction"
+        shortcutId: "play_pause"
+        overrides: root.keyboardShortcutOverrides
         // What it does now: Pause while playing, Play otherwise.
         text: playbackController.isPlaying
             ? I18n.i18nc("@action:inmenu", "&Pause")
             : I18n.i18nc("@action:inmenu", "&Play")
         icon.name: playbackController.isPlaying ? "media-playback-pause" : "media-playback-start"
         // Text fields take Space for typing before shortcuts see it.
-        shortcut: "Space"
+        defaultKeyBindings: ["Space"]
         onTriggered: playbackController.togglePlayPause()
     }
     Action {
@@ -1033,53 +1091,65 @@ ApplicationWindow {
         icon.name: "media-playback-pause"
         onTriggered: uiBridge.pause()
     }
-    Action {
+    Components.ShortcutAction {
         id: stopAction
         objectName: "stopAction"
+        shortcutId: "stop"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Stop")
         icon.name: "media-playback-stop"
         // Not Ctrl+Space, which switches input methods in Fcitx and IBus,
         // nor Shift+Space, which toggles full-width input in Fcitx.
-        shortcut: "Ctrl+Shift+Space"
+        defaultKeyBindings: ["Ctrl+Shift+Space"]
         onTriggered: uiBridge.stop()
     }
-    Action {
+    Components.ShortcutAction {
         id: previousAction
         objectName: "previousAction"
+        shortcutId: "previous"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "P&revious")
         icon.name: "media-skip-backward"
-        shortcut: "Ctrl+Left"
+        defaultKeyBindings: ["Ctrl+Left"]
         onTriggered: uiBridge.previous()
     }
-    Action {
+    Components.ShortcutAction {
         id: nextAction
         objectName: "nextAction"
+        shortcutId: "next"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Next")
         icon.name: "media-skip-forward"
-        shortcut: "Ctrl+Right"
+        defaultKeyBindings: ["Ctrl+Right"]
         onTriggered: uiBridge.next()
     }
-    Action {
+    Components.ShortcutAction {
         id: seekBackwardAction
         objectName: "seekBackwardAction"
+        shortcutId: "seek_backward"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Seek &Backward")
         icon.name: "media-seek-backward"
-        shortcut: "Shift+Left"
+        defaultKeyBindings: ["Shift+Left"]
         enabled: playbackController.canSeek
         onTriggered: playbackController.seekBy(-root.keyboardSeekStepSeconds)
     }
-    Action {
+    Components.ShortcutAction {
         id: seekForwardAction
         objectName: "seekForwardAction"
+        shortcutId: "seek_forward"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Seek &Forward")
         icon.name: "media-seek-forward"
-        shortcut: "Shift+Right"
+        defaultKeyBindings: ["Shift+Right"]
         enabled: playbackController.canSeek
         onTriggered: playbackController.seekBy(root.keyboardSeekStepSeconds)
     }
-    Action {
+    Components.ShortcutAction {
         id: shuffleAction
         objectName: "shuffleAction"
+        shortcutId: "shuffle"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "S&huffle")
         checkable: true
         checked: uiBridge.shuffleEnabled
@@ -1091,64 +1161,78 @@ ApplicationWindow {
         id: repeatModeGroup
         exclusive: true
     }
-    Action {
+    Components.ShortcutAction {
         id: repeatOffAction
         objectName: "repeatOffAction"
+        shortcutId: "repeat_off"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu repeat mode", "&Off")
         checkable: true
         checked: uiBridge.repeatMode === 0
         ActionGroup.group: repeatModeGroup
         onTriggered: uiBridge.setRepeatMode(0)
     }
-    Action {
+    Components.ShortcutAction {
         id: repeatOneAction
         objectName: "repeatOneAction"
+        shortcutId: "repeat_one"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu repeat mode", "One &Track")
         checkable: true
         checked: uiBridge.repeatMode === 1
         ActionGroup.group: repeatModeGroup
         onTriggered: uiBridge.setRepeatMode(1)
     }
-    Action {
+    Components.ShortcutAction {
         id: repeatAllAction
         objectName: "repeatAllAction"
+        shortcutId: "repeat_all"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu repeat mode", "&Whole Queue")
         checkable: true
         checked: uiBridge.repeatMode === 2
         ActionGroup.group: repeatModeGroup
         onTriggered: uiBridge.setRepeatMode(2)
     }
-    Action {
+    Components.ShortcutAction {
         id: volumeUpAction
         objectName: "volumeUpAction"
+        shortcutId: "volume_up"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Volume &Up")
         icon.name: "audio-volume-high"
-        shortcut: "Alt+Up"
+        defaultKeyBindings: ["Alt+Up"]
         onTriggered: playbackController.changeVolumeBy(root.keyboardVolumeStep)
     }
-    Action {
+    Components.ShortcutAction {
         id: volumeDownAction
         objectName: "volumeDownAction"
+        shortcutId: "volume_down"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Volume &Down")
         icon.name: "audio-volume-low"
-        shortcut: "Alt+Down"
+        defaultKeyBindings: ["Alt+Down"]
         onTriggered: playbackController.changeVolumeBy(-root.keyboardVolumeStep)
     }
-    Action {
+    Components.ShortcutAction {
         id: muteAction
         objectName: "muteAction"
+        shortcutId: "mute"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Mute")
         // Not Ctrl+M, which KDE applications use to show the menu bar.
-        shortcut: "Ctrl+Shift+M"
+        defaultKeyBindings: ["Ctrl+Shift+M"]
         checkable: true
         checked: playbackController.volumeMuted
         onTriggered: playbackController.toggleMutedVolume()
     }
 
     // Settings
-    Components.StandardKeyAction {
+    Components.ShortcutAction {
         id: preferencesAction
         objectName: "configureAction"
+        shortcutId: "configure"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Configure Ferrous…")
         icon.name: "configure"
         standardKey: StandardKey.Preferences
@@ -1156,40 +1240,40 @@ ApplicationWindow {
         onTriggered: preferencesDialog.open()
     }
 
-    // The standard keys' other bindings, such as the Open key.
-    Components.StandardKeyShortcuts {
-        actions: [
-            openFilesAction, quitAction, undoQueueChangeAction, redoQueueChangeAction, globalSearchAction,
-            preferencesAction
-        ]
-    }
-
     // Help
-    Action {
+    Components.ShortcutAction {
         id: reportBugAction
         objectName: "reportBugAction"
+        shortcutId: "report_bug"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Report Bug…")
         icon.name: "tools-report-bug"
         onTriggered: Qt.openUrlExternally(root.bugReportUrl)
     }
-    Action {
+    Components.ShortcutAction {
         id: diagnosticsAction
         objectName: "diagnosticsAction"
+        shortcutId: "diagnostics"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&Diagnostics…")
         icon.name: "view-list-details"
         onTriggered: root.openDiagnostics()
     }
-    Action {
+    Components.ShortcutAction {
         id: aboutAction
         objectName: "aboutAction"
+        shortcutId: "about"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "&About Ferrous")
         // The app icon's own 16 px drawing, which is built in.
         icon.source: "qrc:/icons/hicolor/16x16/apps/ferrous.svg"
         onTriggered: aboutDialog.open()
     }
-    Action {
+    Components.ShortcutAction {
         id: aboutKdeAction
         objectName: "aboutKdeAction"
+        shortcutId: "about_kde"
+        overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "About &KDE")
         icon.name: "kde"
         onTriggered: aboutKdeDialog.open()
@@ -1204,6 +1288,64 @@ ApplicationWindow {
         icon.name: "download"
         enabled: viewerController.currentTrackItunesArtworkDisabledReason().length === 0
         onTriggered: root.openItunesArtworkDialog()
+    }
+
+    // The actions whose shortcuts can be changed, by the menu they are in,
+    // in its order; the queue's moves and selections, which no menu has,
+    // are with the Edit menu's.
+    readonly property var shortcutActionGroups: [
+        {
+            name: "file",
+            title: I18n.i18nc("@title:group keyboard shortcuts of the File menu", "File"),
+            actions: [
+                openFilesAction, addFilesAction, addFolderAction, addLibraryFolderAction,
+                playAllLibraryTracksAction, appendAllLibraryTracksAction, quitAction
+            ]
+        },
+        {
+            name: "edit",
+            title: I18n.i18nc("@title:group keyboard shortcuts of the Edit menu", "Edit"),
+            actions: [
+                undoQueueChangeAction, redoQueueChangeAction, globalSearchAction, clearQueueAction,
+                moveTrackUpAction, moveTrackDownAction, selectPreviousTrackAction, selectNextTrackAction
+            ]
+        },
+        {
+            name: "view",
+            title: I18n.i18nc("@title:group keyboard shortcuts of the View menu", "View"),
+            actions: [
+                visualizationViewerAction, albumArtViewerAction, spectrogramModeAction, waveformModeAction,
+                showLevelMeterAction, showScaleAction, autoCenterSelectionAction, resetZoomAction,
+                followPlayheadAction
+            ]
+        },
+        {
+            name: "playback",
+            title: I18n.i18nc("@title:group keyboard shortcuts of the Playback menu", "Playback"),
+            actions: [
+                playPauseAction, stopAction, previousAction, nextAction, seekBackwardAction,
+                seekForwardAction, shuffleAction, repeatOffAction, repeatOneAction, repeatAllAction,
+                volumeUpAction, volumeDownAction, muteAction
+            ]
+        },
+        {
+            name: "settings",
+            title: I18n.i18nc("@title:group keyboard shortcuts of the Settings menu", "Settings"),
+            actions: [preferencesAction]
+        },
+        {
+            name: "help",
+            title: I18n.i18nc("@title:group keyboard shortcuts of the Help menu", "Help"),
+            actions: [reportBugAction, diagnosticsAction, aboutAction, aboutKdeAction]
+        }
+    ]
+    readonly property var shortcutActions: root.shortcutActionGroups.reduce(
+        function(all, group) { return all.concat(group.actions) }, [])
+
+    // The bindings after the first, which the actions do not take
+    // themselves: the Open key beside Ctrl+O, and the user's second ones.
+    Components.AlternateShortcuts {
+        actions: root.shortcutActions
     }
 
     readonly property string bugReportUrl: "https://github.com/Tiaxi/ferrous/issues/new"

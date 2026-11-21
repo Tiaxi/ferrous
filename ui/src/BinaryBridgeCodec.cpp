@@ -586,6 +586,28 @@ bool readQueueColumnWidths(Reader &reader, QueueColumnWidths *out) {
         && reader.readU16(&out->length);
 }
 
+// The keyboard shortcuts as CmdSetKeyboardShortcuts lays them out, without
+// the generation. Refuses an entry the backend would not keep.
+bool readKeyboardShortcuts(Reader &reader, KeyboardShortcuts *out) {
+    quint32 count = 0;
+    // Two string lengths each at least.
+    if (!reader.readU32(&count) || count > kMaxKeyboardShortcutEntries
+        || static_cast<qsizetype>(count) > reader.remaining() / 8) {
+        return false;
+    }
+    out->clear();
+    for (quint32 index = 0; index < count; ++index) {
+        QString id;
+        QString sequences;
+        if (!reader.readUtf8(&id) || !reader.readUtf8(&sequences)
+            || !isValidKeyboardShortcutId(id) || !isValidKeyboardShortcutSequences(sequences)) {
+            return false;
+        }
+        out->insert(id, sequences);
+    }
+    return true;
+}
+
 bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!out) {
         return false;
@@ -669,6 +691,12 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     }
     out->hasVolumeRequestsTaken = !reader.atEnd();
     if (out->hasVolumeRequestsTaken && !reader.readU64(&out->volumeRequestsTaken)) {
+        return false;
+    }
+    out->hasKeyboardShortcuts = !reader.atEnd();
+    if (out->hasKeyboardShortcuts
+        && (!readKeyboardShortcuts(reader, &out->keyboardShortcuts)
+            || !reader.readU32(&out->keyboardShortcutsGeneration))) {
         return false;
     }
     if (!reader.atEnd()) {
@@ -948,6 +976,36 @@ QByteArray encodeCommandSearchQuery(quint16 cmdId, quint32 seq, const QString &q
     return finalizeCommand(cmdId, payload);
 }
 
+bool isValidKeyboardShortcutId(const QString &id) {
+    return !id.isEmpty() && id.size() <= kMaxKeyboardShortcutIdBytes
+        && std::all_of(id.cbegin(), id.cend(), [](QChar c) {
+               return (c >= u'a' && c <= u'z') || (c >= u'0' && c <= u'9') || c == u'_';
+           });
+}
+
+bool isValidKeyboardShortcutSequences(const QString &sequences) {
+    return sequences.toUtf8().size() <= kMaxKeyboardShortcutSequencesBytes
+        && std::none_of(sequences.cbegin(), sequences.cend(),
+                        [](QChar c) { return c.category() == QChar::Other_Control; })
+        && sequences.trimmed() == sequences;
+}
+
+QByteArray encodeCommandKeyboardShortcuts(const KeyboardShortcuts &shortcuts, quint32 generation) {
+    if (shortcuts.size() > kMaxKeyboardShortcutEntries) {
+        return {};
+    }
+    QByteArray payload;
+    appendLe<quint32>(payload, static_cast<quint32>(shortcuts.size()));
+    for (auto it = shortcuts.cbegin(); it != shortcuts.cend(); ++it) {
+        if (!isValidKeyboardShortcutId(it.key()) || !isValidKeyboardShortcutSequences(it.value())
+            || !appendUtf8(payload, it.key()) || !appendUtf8(payload, it.value())) {
+            return {};
+        }
+    }
+    appendLe<quint32>(payload, generation);
+    return finalizeCommand(CmdSetKeyboardShortcuts, payload);
+}
+
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values) {
     if (values.size() > static_cast<qsizetype>(kMaxCommandPayloadBytes / 4)) {
         return {};
@@ -1178,9 +1236,12 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
                 && sectionReader.readF32(&layout.queueHeightRatio)
                 && sectionReader.readU8(&layout.visualizationMode)
                 && sectionReader.readU8(&follow);
-            // Older backends end the section with the layout.
+            // Older backends end the section with the layout, or with the
+            // queue's column widths.
             QueueColumnWidths queueColumns;
+            KeyboardShortcuts keyboardShortcuts;
             ok = ok && (sectionReader.atEnd() || readQueueColumnWidths(sectionReader, &queueColumns))
+                && (sectionReader.atEnd() || readKeyboardShortcuts(sectionReader, &keyboardShortcuts))
                 && sectionReader.atEnd();
             if (ok) {
                 layout.hasGeometry = hasGeometry != 0;
@@ -1189,6 +1250,7 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
                 out->hasWindowLayout = true;
                 out->windowLayout = layout;
                 out->windowLayoutQueueColumns = queueColumns;
+                out->windowLayoutKeyboardShortcuts = keyboardShortcuts;
             }
             break;
         }

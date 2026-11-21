@@ -17,6 +17,7 @@ private slots:
     void spaceTogglesPlaybackWhenTheLibraryHasFocus();
     void spaceTypesIntoTextFields();
     void playbackShortcutsWorkInTheViewers();
+    void changedShortcutsApplyToTheWindowAndTheViewers();
     void viewerShortcutsOpenAndCloseTheViewers();
     void fullscreenViewerWindowsAreMadeOnFirstOpenAndKept();
     void visualizationModeSwitchTakesKeyboardFocus();
@@ -440,6 +441,104 @@ void TransportInputSmokeTest::playbackShortcutsWorkInTheViewers() {
     QTest::keyClick(fullscreen, Qt::Key_Up, Qt::AltModifier);
     QVERIFY(std::abs(bridge->property("volume").toDouble() - 1.0) < 1e-9);
     QTest::keyClick(fullscreen, Qt::Key_Escape);
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+// The shortcuts the settings keep for an action replace its defaults at
+// once: its own, which its menu item shows, the second one, which the
+// window's AlternateShortcuts take, and both in a viewer, which repeats the
+// window's (#458). An action cleared has none; one left out keeps its
+// defaults, a standard key's following the platform's.
+void TransportInputSmokeTest::changedShortcutsApplyToTheWindowAndTheViewers() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QObject *stop = window->findChild<QObject *>(QStringLiteral("stopAction"));
+    QObject *open = window->findChild<QObject *>(QStringLiteral("openFilesAction"));
+    QObject *find = window->findChild<QObject *>(QStringLiteral("findAction"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && playPause != nullptr && stop != nullptr
+            && open != nullptr && find != nullptr);
+    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
+    QSignalSpy stopped(stop, SIGNAL(triggered(QObject*)));
+    const auto bindingsOf = [](QObject *action) {
+        return action->property("keyBindings").toStringList();
+    };
+    const auto shortcutOf = [](QObject *action) {
+        return action->property("shortcut").value<QKeySequence>();
+    };
+    const auto portable = [](QKeySequence::StandardKey key) {
+        QStringList texts;
+        for (const QKeySequence &binding : QKeySequence::keyBindings(key)) {
+            texts << binding.toString(QKeySequence::PortableText);
+        }
+        return texts;
+    };
+
+    // The defaults.
+    QCOMPARE(bindingsOf(playPause), QStringList{QStringLiteral("Space")});
+    QVERIFY(!playPause->property("hasCustomKeyBindings").toBool());
+    QCOMPARE(bindingsOf(open), portable(QKeySequence::Open));
+    QCOMPARE(shortcutOf(open), QKeySequence::keyBindings(QKeySequence::Open).value(0));
+    QCOMPARE(bindingsOf(find), portable(QKeySequence::Find));
+
+    bridge->setProperty(
+        "keyboardShortcuts",
+        QVariantMap{{QStringLiteral("play_pause"), QStringLiteral("Ctrl+Alt+P; Ctrl+Alt+J")},
+                    {QStringLiteral("stop"), QString()},
+                    {QStringLiteral("open_files"), QStringLiteral("Ctrl+Alt+O")},
+                    // An action this build does not have.
+                    {QStringLiteral("future_action"), QStringLiteral("Ctrl+Alt+K")}});
+    QCOMPARE(bindingsOf(playPause),
+             (QStringList{QStringLiteral("Ctrl+Alt+P"), QStringLiteral("Ctrl+Alt+J")}));
+    QVERIFY(playPause->property("hasCustomKeyBindings").toBool());
+    QCOMPARE(shortcutOf(playPause), QKeySequence(QStringLiteral("Ctrl+Alt+P")));
+    QVERIFY(bindingsOf(stop).isEmpty());
+    QVERIFY(shortcutOf(stop).isEmpty());
+    QCOMPARE(bindingsOf(open), QStringList{QStringLiteral("Ctrl+Alt+O")});
+    // Left out, so its standard key's.
+    QCOMPARE(bindingsOf(find), portable(QKeySequence::Find));
+
+    // In the main window. A shortcut is taken as its key is sent, so a key
+    // that triggers nothing has triggered nothing once it is sent.
+    window->contentItem()->forceActiveFocus();
+    QTest::keyClick(window, Qt::Key_P, Qt::ControlModifier | Qt::AltModifier);
+    QTRY_COMPARE(toggled.count(), 1);
+    QTest::keyClick(window, Qt::Key_J, Qt::ControlModifier | Qt::AltModifier);
+    QTRY_COMPARE(toggled.count(), 2);
+    QTest::keyClick(window, Qt::Key_Space);
+    QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(toggled.count(), 2);
+    QCOMPARE(stopped.count(), 0);
+
+    // In the viewer, as a modal popup that blocks the window's shortcuts.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_P, Qt::ControlModifier | Qt::AltModifier);
+    QTRY_COMPARE(toggled.count(), 3);
+    QTest::keyClick(window, Qt::Key_J, Qt::ControlModifier | Qt::AltModifier);
+    QTRY_COMPARE(toggled.count(), 4);
+    QTest::keyClick(window, Qt::Key_Space);
+    QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(toggled.count(), 4);
+    QCOMPARE(stopped.count(), 0);
+
+    // Back to the defaults, at once, also in the open viewer.
+    bridge->setProperty("keyboardShortcuts", QVariantMap{});
+    QCOMPARE(bindingsOf(playPause), QStringList{QStringLiteral("Space")});
+    QCOMPARE(bindingsOf(open), portable(QKeySequence::Open));
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_COMPARE(toggled.count(), 5);
+    QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier | Qt::ShiftModifier);
+    QTRY_COMPARE(stopped.count(), 1);
+    QTest::keyClick(window, Qt::Key_P, Qt::ControlModifier | Qt::AltModifier);
+    QCOMPARE(toggled.count(), 5);
+    QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
 

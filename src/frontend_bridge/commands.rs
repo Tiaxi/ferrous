@@ -285,6 +285,22 @@ fn set_queue_column_widths(
     }
 }
 
+/// Keep the keyboard shortcuts the UI sent and save them at once, so a
+/// change the user made is not lost to a crash, and the generation of its
+/// request, which the snapshots echo.
+fn set_keyboard_shortcuts(
+    state: &mut BridgeState,
+    context: &mut BridgeCommandContext<'_>,
+    shortcuts: &super::KeyboardShortcuts,
+    generation: u32,
+) {
+    state.keyboard_shortcuts_generation = generation;
+    if state.settings.keyboard_shortcuts != *shortcuts {
+        state.settings.keyboard_shortcuts = shortcuts.clone();
+        save_settings_now(context);
+    }
+}
+
 fn handle_settings_bridge_command(
     cmd: &BridgeSettingsCommand,
     state: &mut BridgeState,
@@ -359,6 +375,10 @@ fn handle_settings_bridge_command(
         BridgeSettingsCommand::SetQueueColumnWidths { widths, generation } => {
             set_queue_column_widths(state, context, *widths, *generation);
         }
+        BridgeSettingsCommand::SetKeyboardShortcuts {
+            shortcuts,
+            generation,
+        } => set_keyboard_shortcuts(state, context, shortcuts, *generation),
         BridgeSettingsCommand::SetLastFmScrobblingEnabled(_)
         | BridgeSettingsCommand::BeginLastFmAuth
         | BridgeSettingsCommand::CompleteLastFmAuth

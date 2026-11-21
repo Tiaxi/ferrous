@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QMap>
 #include <QPair>
 #include <QString>
 #include <QStringList>
@@ -173,6 +174,10 @@ enum CommandId : quint16 {
     // Payload: the u64 redo ID of SectionQueueUndo. The backend refuses,
     // with an error, an ID it no longer offers.
     CmdRedoQueueChange = 79,
+    // The shortcuts of every action the user changed and the generation of
+    // the request, which SectionSettings echoes; see
+    // encodeCommandKeyboardShortcuts.
+    CmdSetKeyboardShortcuts = 80,
 };
 
 // The narrowest and widest queue column the backend keeps, in logical
@@ -189,6 +194,25 @@ struct QueueColumnWidths {
     quint16 length{0};
     friend bool operator==(const QueueColumnWidths &, const QueueColumnWidths &) = default;
 };
+
+// The bounds of the keyboard shortcuts the backend keeps. Mirrors
+// MAX_ID_BYTES, MAX_SEQUENCES_BYTES and MAX_ENTRIES in
+// src/frontend_bridge/keyboard_shortcuts.rs.
+constexpr qsizetype kMaxKeyboardShortcutIdBytes = 64;
+constexpr qsizetype kMaxKeyboardShortcutSequencesBytes = 256;
+constexpr qsizetype kMaxKeyboardShortcutEntries = 512;
+
+// The changed shortcuts by action id: each a list of key sequences in
+// QKeySequence::listToString's portable text, empty for none.
+using KeyboardShortcuts = QMap<QString, QString>;
+
+// Whether `id` can name an action: 1 to kMaxKeyboardShortcutIdBytes of
+// a-z, 0-9 and _.
+bool isValidKeyboardShortcutId(const QString &id);
+// Whether `sequences` can be an action's shortcuts as the settings keep
+// them: at most kMaxKeyboardShortcutSequencesBytes of UTF-8, without
+// control characters, and without spaces at either end.
+bool isValidKeyboardShortcutSequences(const QString &sequences);
 
 // Where CmdQueueLibraryItems puts its tracks.
 enum QueuePlacement : quint8 {
@@ -431,6 +455,12 @@ struct DecodedSettings {
     // every SetVolume command it took.
     bool hasVolumeRequestsTaken{false};
     quint64 volumeRequestsTaken{0};
+    // Whether the section ended with the keyboard shortcuts, which older
+    // backends do not send, the shortcuts, and the generation of the latest
+    // ones the UI sent that the backend had taken.
+    bool hasKeyboardShortcuts{false};
+    KeyboardShortcuts keyboardShortcuts;
+    quint32 keyboardShortcutsGeneration{0};
 };
 
 // What the scrobble progress indicator shows. Mirrors ScrobbleIndicatorState
@@ -555,6 +585,8 @@ struct DecodedSnapshot {
     WindowLayout windowLayout;
     // The queue's column widths, sent with the window layout.
     QueueColumnWidths windowLayoutQueueColumns;
+    // The changed keyboard shortcuts the settings had at startup.
+    KeyboardShortcuts windowLayoutKeyboardShortcuts;
     DecodedPlayback playback;
     DecodedQueue queue;
     DecodedLibraryMeta library;
@@ -634,6 +666,10 @@ QByteArray encodeCommandWindowLayout(const WindowLayout &layout);
 // CmdSetQueueColumnWidths: the artist, album and length widths (u16), 0 for
 // the default, then the request's u32 generation.
 QByteArray encodeCommandQueueColumnWidths(const QueueColumnWidths &widths, quint32 generation);
+// CmdSetKeyboardShortcuts: a u32 count of actions, each its id and its
+// sequences as strings, then the request's u32 generation. Empty, which is
+// not sent, for an entry out of bounds or more than the backend keeps.
+QByteArray encodeCommandKeyboardShortcuts(const KeyboardShortcuts &shortcuts, quint32 generation);
 QByteArray encodeCommandStringList(quint16 cmdId, const QStringList &values);
 // Queue commands for rows of the queue at `revision`.
 QByteArray encodeCommandQueueRow(quint16 cmdId, quint64 revision, quint32 index);

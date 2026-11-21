@@ -13,7 +13,9 @@ use crate::playback::{
     PlaybackState, RepeatMode,
 };
 
-use super::{BridgeSettings, BridgeState, LibrarySortMode, ViewerFullscreenMode};
+use super::{
+    BridgeSettings, BridgeState, KeyboardShortcuts, LibrarySortMode, ViewerFullscreenMode,
+};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(super) struct SessionSnapshot {
@@ -519,6 +521,14 @@ fn parse_unit_f32(value: &str) -> Option<f32> {
         .map(|x| x.clamp(0.0, 1.0))
 }
 
+/// Apply the settings line `key=value` to the settings only the UI uses, if
+/// it is one of theirs. Returns whether it is.
+fn parse_ui_setting(settings: &mut BridgeSettings, key: &str, value: &str) -> bool {
+    super::window_layout::parse_setting(&mut settings.window, key, value)
+        || super::queue_columns::parse_setting(&mut settings.queue_columns, key, value)
+        || super::keyboard_shortcuts::parse_setting(&mut settings.keyboard_shortcuts, key, value)
+}
+
 pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
     // Builds before the cubic volume scale saved only `volume`, the linear
     // gain.  Convert it to the level with the same loudness, unless the file
@@ -531,6 +541,9 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
         settings.display.show_level_meter = true;
     }
     settings.unknown_lines.clear();
+    // The file has every changed shortcut; one it no longer has is the
+    // default again.
+    settings.keyboard_shortcuts = KeyboardShortcuts::default();
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else {
             continue;
@@ -615,8 +628,7 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                 settings.integrations.lastfm_username = value.to_string();
             }
             "library_watch_enabled" => parse_flag(value, &mut settings.library_watch_enabled),
-            _ if super::window_layout::parse_setting(&mut settings.window, key, value) => {}
-            _ if super::queue_columns::parse_setting(&mut settings.queue_columns, key, value) => {}
+            _ if parse_ui_setting(settings, key, value) => {}
             // Kept for the build that wrote it.
             _ => settings.unknown_lines.push(line.to_string()),
         }
@@ -712,6 +724,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
     );
     super::window_layout::format_settings(&settings.window, &mut text);
     super::queue_columns::format_settings(&settings.queue_columns, &mut text);
+    super::keyboard_shortcuts::format_settings(&settings.keyboard_shortcuts, &mut text);
     for line in &settings.unknown_lines {
         text.push_str(line);
         text.push('\n');
@@ -802,6 +815,7 @@ mod tests {
             },
             window: WindowLayout::default(),
             queue_columns: QueueColumnSettings::default(),
+            keyboard_shortcuts: super::super::KeyboardShortcuts::default(),
             unknown_lines: Vec::new(),
         };
         let text = format_settings_text(&settings);
@@ -998,6 +1012,61 @@ mod tests {
         assert_eq!(parsed.window, settings.window);
         assert_eq!(parsed.unknown_lines, vec!["future_key=1".to_string()]);
         assert_eq!(format_settings_text(&parsed), text);
+    }
+
+    #[test]
+    fn changed_keyboard_shortcuts_are_saved_with_the_settings_and_keep_unknown_lines() {
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(&mut settings, "volume_cubic=0.5\nfuture_key=1\n");
+        assert!(settings.keyboard_shortcuts.is_empty(), "older files");
+        assert!(
+            !format_settings_text(&settings).contains("shortcut."),
+            "the defaults are never written"
+        );
+
+        // A newer build's action is kept as it is, a cleared one stays
+        // cleared, and lines the settings could not keep are dropped.
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(
+            &mut settings,
+            "volume_cubic=0.5\n\
+             shortcut.play_pause=Media Play; Space\n\
+             shortcut.future_action=Ctrl+Alt+J\n\
+             shortcut.stop=\n\
+             shortcut.Bad-Id=Ctrl+B\n\
+             future_key=1\n",
+        );
+        assert_eq!(
+            settings.keyboard_shortcuts.iter().collect::<Vec<_>>(),
+            vec![
+                ("future_action", "Ctrl+Alt+J"),
+                ("play_pause", "Media Play; Space"),
+                ("stop", ""),
+            ]
+        );
+        let text = format_settings_text(&settings);
+        assert!(
+            text.contains(
+                "\nshortcut.future_action=Ctrl+Alt+J\nshortcut.play_pause=Media Play; Space\n\
+                 shortcut.stop=\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("Bad-Id"), "{text}");
+        assert!(text.contains("\nfuture_key=1\n"), "{text}");
+        let mut parsed = BridgeSettings::default();
+        parse_settings_text(&mut parsed, &text);
+        assert_eq!(parsed.keyboard_shortcuts, settings.keyboard_shortcuts);
+        assert_eq!(parsed.unknown_lines, vec!["future_key=1".to_string()]);
+        assert_eq!(format_settings_text(&parsed), text);
+
+        // Read again from a file without them, as when the settings are
+        // loaded again, every shortcut is the default again.
+        parse_settings_text(&mut parsed, "volume_cubic=0.5\nshortcut.find=Ctrl+K\n");
+        assert_eq!(
+            parsed.keyboard_shortcuts.iter().collect::<Vec<_>>(),
+            vec![("find", "Ctrl+K")]
+        );
     }
 
     #[test]

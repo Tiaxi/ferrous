@@ -231,6 +231,9 @@ private slots:
     void lastFmScrobbleIndicatorIsDecodedAsTheBackendSendsIt();
     void lastFmScrobbleIndicatorFollowsSnapshotsAndPausingIsSent();
     void queueColumnWidthsKeepTheNewestWhileAcksAreLate();
+    void keyboardShortcutsAreSentAsTheBackendReadsThem();
+    void keyboardShortcutsAreDecodedFromTheSettingsWithinTheirBounds();
+    void keyboardShortcutsKeepTheNewestWhileAcksAreLate();
     void spectrogramActivityFollowsVisibleItemsAndWindows();
     void spectrogramViewAnchorsReachTheBackend();
     void spectrogramActivityStopsForAWindowOffScreen();
@@ -2612,6 +2615,254 @@ void BridgeClientTest::queueColumnWidthsKeepTheNewestWhileAcksAreLate() {
     client.processBinarySnapshot(columnWidthsSnapshot({0, 0, 90}, 3));
     QCOMPARE(client.queueColumnWidths(), (QVariantMap{{QStringLiteral("length"), 90}}));
     QCOMPARE(changed.count(), 2);
+}
+
+namespace {
+
+// The keyboard shortcuts as CmdSetKeyboardShortcuts and the end of the
+// settings section lay them out: a count, each id and its sequences, and
+// the generation.
+QByteArray keyboardShortcutsPayload(const QList<QPair<QByteArray, QByteArray>> &entries,
+                                    quint32 generation) {
+    QByteArray payload;
+    QDataStream out(&payload, QIODevice::WriteOnly);
+    out.setByteOrder(QDataStream::LittleEndian);
+    out << quint32(entries.size());
+    for (const auto &[id, sequences] : entries) {
+        out << quint32(id.size());
+        out.writeRawData(id.constData(), int(id.size()));
+        out << quint32(sequences.size());
+        out.writeRawData(sequences.constData(), int(sequences.size()));
+    }
+    out << generation;
+    return payload;
+}
+
+// The settings section up to the volume requests taken, which the keyboard
+// shortcuts follow.
+QByteArray settingsSectionBeforeKeyboardShortcuts() {
+    QByteArray payload = settingsSectionPayload({300, 190, 0}, 12);
+    // The frequency cap, scrobble progress, title strip and stretch.
+    payload.append(QByteArray(4, '\1'));
+    payload.append(QByteArray(8, '\0'));
+    return payload;
+}
+
+BinaryBridgeCodec::DecodedSnapshot keyboardShortcutsSnapshot(
+    const BinaryBridgeCodec::KeyboardShortcuts &shortcuts, quint32 generation) {
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.settings.present = true;
+    snapshot.settings.hasKeyboardShortcuts = true;
+    snapshot.settings.keyboardShortcuts = shortcuts;
+    snapshot.settings.keyboardShortcutsGeneration = generation;
+    return snapshot;
+}
+
+} // namespace
+
+void BridgeClientTest::keyboardShortcutsAreSentAsTheBackendReadsThem() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    bool sending = true;
+    client.m_sendCommandOverride = [&sent, &sending](const QByteArray &payload) {
+        if (sending) {
+            sent.push_back(payload);
+        }
+        return sending;
+    };
+    QSignalSpy changed(&client, &BridgeClient::keyboardShortcutsChanged);
+    QVERIFY(client.keyboardShortcuts().isEmpty());
+
+    // The whole set, in the order of the ids; a cleared action keeps an
+    // empty entry.
+    const QVariantMap shortcuts{{QStringLiteral("stop"), QString()},
+                                {QStringLiteral("play_pause"), QStringLiteral("Media Play; Space")}};
+    QVERIFY(client.setKeyboardShortcuts(shortcuts));
+    QCOMPARE(client.keyboardShortcuts(), shortcuts);
+    QCOMPARE(changed.count(), 1);
+    QCOMPARE(sent.size(), 1);
+    const QByteArray expected =
+        keyboardShortcutsPayload({{"play_pause", "Media Play; Space"}, {"stop", ""}}, 1);
+    QCOMPARE(qFromLittleEndian<quint16>(sent[0].constData()),
+             quint16(BinaryBridgeCodec::CmdSetKeyboardShortcuts));
+    QCOMPARE(qFromLittleEndian<quint32>(sent[0].constData() + 2), quint32(expected.size()));
+    QCOMPARE(sent[0].mid(BinaryBridgeCodec::kCommandHeaderBytes), expected);
+
+    // The same set again sends nothing.
+    QVERIFY(client.setKeyboardShortcuts(shortcuts));
+    QCOMPARE(sent.size(), 1);
+
+    // At the bounds, and past them: nothing is sent or changed.
+    const QString longestId(BinaryBridgeCodec::kMaxKeyboardShortcutIdBytes, u'a');
+    const QString longest(BinaryBridgeCodec::kMaxKeyboardShortcutSequencesBytes, u'A');
+    QVERIFY(client.setKeyboardShortcuts({{longestId, longest}}));
+    QCOMPARE(sent.size(), 2);
+    QCOMPARE(sent[1].mid(BinaryBridgeCodec::kCommandHeaderBytes),
+             keyboardShortcutsPayload({{longestId.toUtf8(), longest.toUtf8()}}, 2));
+    const QList<QVariantMap> refused{
+        {{longestId + u'a', QString()}},
+        {{QStringLiteral("stop"), longest + u'A'}},
+        // Two bytes each in UTF-8.
+        {{QStringLiteral("stop"), QString(BinaryBridgeCodec::kMaxKeyboardShortcutSequencesBytes / 2 + 1, u'\u00e4')}},
+        {{QStringLiteral("Stop"), QString()}},
+        {{QString(), QString()}},
+        {{QStringLiteral("stop"), QStringLiteral("Ctrl+A\nnext=Ctrl+B")}},
+        {{QStringLiteral("stop"), QStringLiteral(" Space")}},
+    };
+    for (const QVariantMap &bad : refused) {
+        QVERIFY2(!client.setKeyboardShortcuts(bad), qPrintable(bad.firstKey()));
+    }
+    QVariantMap most;
+    for (int index = 0; index < BinaryBridgeCodec::kMaxKeyboardShortcutEntries; ++index) {
+        most.insert(QStringLiteral("a%1").arg(index), QString());
+    }
+    QVERIFY(client.setKeyboardShortcuts(most));
+    QCOMPARE(sent.size(), 3);
+    most.insert(QStringLiteral("one_more"), QString());
+    QVERIFY(!client.setKeyboardShortcuts(most));
+    QCOMPARE(sent.size(), 3);
+    QCOMPARE(client.keyboardShortcuts().size(), BinaryBridgeCodec::kMaxKeyboardShortcutEntries);
+
+    // Shortcuts that could not be sent are not taken, and use no
+    // generation, so the backend's next answer is still taken.
+    sending = false;
+    QVERIFY(!client.setKeyboardShortcuts(shortcuts));
+    QCOMPARE(client.keyboardShortcuts().size(), BinaryBridgeCodec::kMaxKeyboardShortcutEntries);
+    sending = true;
+    QVERIFY(client.setKeyboardShortcuts({}));
+    QVERIFY(client.keyboardShortcuts().isEmpty());
+    QCOMPARE(qFromLittleEndian<quint32>(sent.last().constData() + sent.last().size() - 4), quint32(4));
+}
+
+void BridgeClientTest::keyboardShortcutsAreDecodedFromTheSettingsWithinTheirBounds() {
+    const QByteArray before = settingsSectionBeforeKeyboardShortcuts();
+    const auto decode = [](const QByteArray &payload, BinaryBridgeCodec::DecodedSnapshot *decoded) {
+        QString error;
+        return BinaryBridgeCodec::decodeSnapshotPacket(
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload), decoded, &error);
+    };
+    // Older backends end the section before them.
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QVERIFY(decode(before, &decoded));
+    QVERIFY(decoded.settings.hasVolumeRequestsTaken);
+    QVERIFY(!decoded.settings.hasKeyboardShortcuts);
+
+    decoded = {};
+    QVERIFY(decode(before + keyboardShortcutsPayload({{"stop", ""}, {"play_pause", "Media Play; Space"}}, 5),
+                   &decoded));
+    QVERIFY(decoded.settings.hasKeyboardShortcuts);
+    QCOMPARE(decoded.settings.keyboardShortcuts,
+             (BinaryBridgeCodec::KeyboardShortcuts{{QStringLiteral("play_pause"), QStringLiteral("Media Play; Space")},
+                                                   {QStringLiteral("stop"), QString()}}));
+    QCOMPARE(decoded.settings.keyboardShortcutsGeneration, quint32(5));
+    decoded = {};
+    QVERIFY(decode(before + keyboardShortcutsPayload({}, 0), &decoded));
+    QVERIFY(decoded.settings.hasKeyboardShortcuts);
+    QVERIFY(decoded.settings.keyboardShortcuts.isEmpty());
+
+    // At the bounds, and past them.
+    const QByteArray longestId(BinaryBridgeCodec::kMaxKeyboardShortcutIdBytes, 'a');
+    const QByteArray longest(BinaryBridgeCodec::kMaxKeyboardShortcutSequencesBytes, 'A');
+    QVERIFY(decode(before + keyboardShortcutsPayload({{longestId, longest}}, 1), &decoded));
+    QCOMPARE(decoded.settings.keyboardShortcuts.value(QString::fromLatin1(longestId)), QString::fromLatin1(longest));
+    for (const QPair<QByteArray, QByteArray> &bad : QList<QPair<QByteArray, QByteArray>>{
+             {longestId + 'a', ""}, {"stop", longest + 'A'}, {"Stop", ""}, {"", ""},
+             {"stop", "Ctrl+A\tB"}, {"stop", "Space "}}) {
+        QVERIFY2(!decode(before + keyboardShortcutsPayload({bad}, 1), &decoded), bad.first.constData());
+    }
+    QList<QPair<QByteArray, QByteArray>> most;
+    for (int index = 0; index < BinaryBridgeCodec::kMaxKeyboardShortcutEntries; ++index) {
+        most.push_back({QByteArray("a") + QByteArray::number(index), ""});
+    }
+    QVERIFY(decode(before + keyboardShortcutsPayload(most, 1), &decoded));
+    QCOMPARE(decoded.settings.keyboardShortcuts.size(), BinaryBridgeCodec::kMaxKeyboardShortcutEntries);
+    most.push_back({"one_more", ""});
+    QVERIFY(!decode(before + keyboardShortcutsPayload(most, 1), &decoded));
+    // Cut short, or followed by more, it is no section.
+    const QByteArray tail = keyboardShortcutsPayload({{"stop", ""}}, 1);
+    QVERIFY(!decode(before + tail.chopped(1), &decoded));
+    QVERIFY(!decode(before + tail.left(2), &decoded));
+    QVERIFY(!decode(before + tail + '\0', &decoded));
+    // A count the section cannot hold.
+    QByteArray count(4, '\0');
+    qToLittleEndian<quint32>(quint32(BinaryBridgeCodec::kMaxKeyboardShortcutEntries), count.data());
+    QVERIFY(!decode(before + count + QByteArray(4, '\0'), &decoded));
+
+    // The window layout brings them, without a generation, before the
+    // window is shown, so no default the user changed works meanwhile.
+    const QByteArray layout = BinaryBridgeCodec::encodeCommandWindowLayout({}).mid(
+        BinaryBridgeCodec::kCommandHeaderBytes);
+    const QByteArray widths = BinaryBridgeCodec::encodeCommandQueueColumnWidths({170, 0, 76}, 0)
+                                  .mid(BinaryBridgeCodec::kCommandHeaderBytes, 6);
+    const QByteArray saved = keyboardShortcutsPayload({{"stop", ""}, {"find", "Ctrl+K"}}, 0).chopped(4);
+    QString error;
+    BinaryBridgeCodec::DecodedSnapshot startup;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                 packetWithSection(BinaryBridgeCodec::SectionWindowLayout, layout + widths + saved),
+                 &startup, &error),
+             qPrintable(error));
+    QCOMPARE(startup.windowLayoutKeyboardShortcuts,
+             (BinaryBridgeCodec::KeyboardShortcuts{{QStringLiteral("find"), QStringLiteral("Ctrl+K")},
+                                                   {QStringLiteral("stop"), QString()}}));
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionWindowLayout, layout + widths + saved.chopped(1)),
+        &decoded, &error));
+    BinaryBridgeCodec::DecodedSnapshot older;
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionWindowLayout, layout + widths), &older, &error));
+    QVERIFY(older.windowLayoutKeyboardShortcuts.isEmpty());
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_sendCommandOverride = [](const QByteArray &) { return true; };
+    QVariantMap atLayout;
+    connect(&client, &BridgeClient::savedWindowLayoutRead, &client,
+            [&]() { atLayout = client.keyboardShortcuts(); });
+    client.processBinarySnapshot(startup);
+    const QVariantMap expected{{QStringLiteral("find"), QStringLiteral("Ctrl+K")}, {QStringLiteral("stop"), QString()}};
+    QCOMPARE(atLayout, expected);
+    QCOMPARE(client.keyboardShortcuts(), expected);
+}
+
+void BridgeClientTest::keyboardShortcutsKeepTheNewestWhileAcksAreLate() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_sendCommandOverride = [](const QByteArray &) { return true; };
+    const BinaryBridgeCodec::KeyboardShortcuts saved{{QStringLiteral("find"), QStringLiteral("Ctrl+K")}};
+    QSignalSpy changed(&client, &BridgeClient::keyboardShortcutsChanged);
+
+    // What the settings had, before the UI sent any.
+    client.processBinarySnapshot(keyboardShortcutsSnapshot(saved, 0));
+    QCOMPARE(client.keyboardShortcuts(), (QVariantMap{{QStringLiteral("find"), QStringLiteral("Ctrl+K")}}));
+    QCOMPARE(changed.count(), 1);
+    // A snapshot without them, as an older backend's, changes nothing.
+    BinaryBridgeCodec::DecodedSnapshot older;
+    older.settings.present = true;
+    client.processBinarySnapshot(older);
+    QCOMPARE(changed.count(), 1);
+
+    // Two edits before the backend has taken the first: snapshots from
+    // before either, and with the first only, leave the second.
+    QVERIFY(client.setKeyboardShortcuts({{QStringLiteral("stop"), QString()}}));
+    const QVariantMap second{{QStringLiteral("stop"), QString()}, {QStringLiteral("next"), QStringLiteral("Ctrl+N")}};
+    QVERIFY(client.setKeyboardShortcuts(second));
+    QCOMPARE(changed.count(), 3);
+    client.processBinarySnapshot(keyboardShortcutsSnapshot(saved, 0));
+    client.processBinarySnapshot(keyboardShortcutsSnapshot({{QStringLiteral("stop"), QString()}}, 1));
+    QCOMPARE(client.keyboardShortcuts(), second);
+    QCOMPARE(changed.count(), 3);
+    // The backend's answer to the second, as the client has it.
+    client.processBinarySnapshot(keyboardShortcutsSnapshot(
+        {{QStringLiteral("stop"), QString()}, {QStringLiteral("next"), QStringLiteral("Ctrl+N")}}, 2));
+    QCOMPARE(client.keyboardShortcuts(), second);
+    QCOMPARE(changed.count(), 3);
+
+    // Once it has taken them, a change of its own is taken, as when it
+    // reads the settings again.
+    client.processBinarySnapshot(keyboardShortcutsSnapshot({}, 2));
+    QVERIFY(client.keyboardShortcuts().isEmpty());
+    QCOMPARE(changed.count(), 4);
 }
 
 namespace {
@@ -8212,7 +8463,7 @@ void BridgeClientTest::playbackErrorPacketReachesBridgeError() {
                  &decoded, &error),
              qPrintable(error));
     QSignalSpy errors(&client, &BridgeClient::bridgeError);
-    QVERIFY(!client.processBinarySnapshot(decoded));
+    client.processBinarySnapshot(decoded);
     QCOMPARE(errors.count(), 1);
     QCOMPARE(errors.at(0).at(0).toString(), message);
     QCOMPARE(errors.at(0).at(1).toInt(), int(BinaryBridgeCodec::ErrorCategoryPlayback));
@@ -8273,7 +8524,7 @@ void BridgeClientTest::backendFailurePacketShowsStoppedState() {
         qPrintable(error));
     QSignalSpy failures(&client, &BridgeClient::backendFailureChanged);
     QSignalSpy connection(&client, &BridgeClient::connectedChanged);
-    QVERIFY(!client.processBinarySnapshot(decoded));
+    client.processBinarySnapshot(decoded);
     QCOMPARE(failures.count(), 1);
     QCOMPARE(client.backendFailure(), message);
     QCOMPARE(client.property("backendFailure").toString(), message);
@@ -8283,7 +8534,7 @@ void BridgeClientTest::backendFailurePacketShowsStoppedState() {
     // The first reason stays.
     QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
         backendFailurePacket(QStringLiteral("later")), &decoded, &error));
-    QVERIFY(!client.processBinarySnapshot(decoded));
+    client.processBinarySnapshot(decoded);
     QCOMPARE(failures.count(), 1);
     QCOMPARE(client.backendFailure(), message);
 }
@@ -8295,7 +8546,7 @@ void BridgeClientTest::requestedStopIsNotABackendFailure() {
     BinaryBridgeCodec::DecodedSnapshot decoded;
     decoded.hasStopped = true;
     QSignalSpy failures(&client, &BridgeClient::backendFailureChanged);
-    QVERIFY(!client.processBinarySnapshot(decoded));
+    client.processBinarySnapshot(decoded);
     QCOMPARE(failures.count(), 0);
     QVERIFY(client.backendFailure().isEmpty());
 }
