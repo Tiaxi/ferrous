@@ -390,6 +390,32 @@ void KeyboardShortcutsSmokeTest::keysAnotherActionHasMoveOnlyWhenTheUserAgrees()
     QVERIFY(!reassign->isVisible());
     QCOMPARE(fixture.shownBindings(QStringLiteral("stop")), QStringList{QStringLiteral("Space")});
 
+    // Play/Pause's Default would take Space back: that asks too.
+    QVERIFY(fixture.select(QStringLiteral("play_pause")));
+    QVERIFY(clickVisibleButton(fixture.dialog, QStringLiteral("keyboardShortcutsDefaultRadio")));
+    QTRY_VERIFY(reassign->isVisible());
+    QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign ‘Space’ to ‘Play/Pause’?"));
+    QCOMPARE(reassign->property("details").toString(),
+             QStringLiteral("The ‘Space’ key combination is already assigned to the ‘Stop’ action, "
+                            "which will no longer have it."));
+    QVERIFY(clickVisibleButton(reassign, QStringLiteral("confirmDialogCancelButton")));
+    QTRY_VERIFY(!reassign->isVisible());
+    QVERIFY(fixture.shownBindings(QStringLiteral("play_pause")).isEmpty());
+    QVERIFY(!fixture.item("keyboardShortcutsDefaultRadio")->property("checked").toBool());
+    QVERIFY(clickVisibleButton(fixture.dialog, QStringLiteral("keyboardShortcutsDefaultRadio")));
+    QTRY_VERIFY(reassign->isVisible());
+    QVERIFY(clickVisibleButton(reassign, QStringLiteral("confirmDialogConfirmButton")));
+    QTRY_VERIFY(!reassign->isVisible());
+    QCOMPARE(fixture.shownBindings(QStringLiteral("play_pause")), QStringList{QStringLiteral("Space")});
+    QVERIFY(fixture.shownBindings(QStringLiteral("stop")).isEmpty());
+    // Back to Stop's Space for what follows.
+    QVERIFY(fixture.select(QStringLiteral("stop")));
+    QVERIFY(fixture.capture("keyboardShortcutsShortcutEditor", Qt::Key_Space));
+    QTRY_VERIFY(reassign->isVisible());
+    QVERIFY(clickVisibleButton(reassign, QStringLiteral("confirmDialogConfirmButton")));
+    QTRY_VERIFY(!reassign->isVisible());
+    QCOMPARE(fixture.shownBindings(QStringLiteral("stop")), QStringList{QStringLiteral("Space")});
+
     QVERIFY(fixture.click("keyboardShortcutsOkButton"));
     QTRY_VERIFY(!fixture.dialog->isVisible());
     QCOMPARE(fixture.stored(), (QVariantMap{{QStringLiteral("stop"), QStringLiteral("Space")},
@@ -466,9 +492,11 @@ void KeyboardShortcutsSmokeTest::defaultsAndCancelLeaveOnlyWhatIsApplied() {
     QVERIFY(fixture.open());
     QTest::keyClick(fixture.dialog, Qt::Key_Escape);
     QTRY_VERIFY(!fixture.dialog->isVisible());
+    // "constructor" names a property of every JavaScript object.
     const QVariantMap changed{{QStringLiteral("stop"), QString()},
                               {QStringLiteral("open_files"), QStringLiteral("Ctrl+Alt+O")},
-                              {QStringLiteral("future_action"), QStringLiteral("Ctrl+Alt+K")}};
+                              {QStringLiteral("future_action"), QStringLiteral("Ctrl+Alt+K")},
+                              {QStringLiteral("constructor"), QStringLiteral("Ctrl+Alt+C")}};
     QVERIFY(QMetaObject::invokeMethod(fixture.bridge, "setKeyboardShortcuts", Q_ARG(QVariant, changed)));
     QCOMPARE(fixture.stored(), changed);
 
@@ -500,7 +528,8 @@ void KeyboardShortcutsSmokeTest::defaultsAndCancelLeaveOnlyWhatIsApplied() {
     QVERIFY(fixture.click("keyboardShortcutsOkButton"));
     QTRY_VERIFY(!fixture.dialog->isVisible());
     QCOMPARE(fixture.stored(), (QVariantMap{{QStringLiteral("stop"), QString()},
-                                            {QStringLiteral("future_action"), QStringLiteral("Ctrl+Alt+K")}}));
+                                            {QStringLiteral("future_action"), QStringLiteral("Ctrl+Alt+K")},
+                                            {QStringLiteral("constructor"), QStringLiteral("Ctrl+Alt+C")}}));
     QCOMPARE(bindingsOf(fixture.action("openFilesAction")), portableBindings(QKeySequence::Open));
 
     // Defaults and OK: none but the unknown action's.
@@ -508,7 +537,8 @@ void KeyboardShortcutsSmokeTest::defaultsAndCancelLeaveOnlyWhatIsApplied() {
     QVERIFY(fixture.click("keyboardShortcutsDefaultsButton"));
     QVERIFY(fixture.click("keyboardShortcutsOkButton"));
     QTRY_VERIFY(!fixture.dialog->isVisible());
-    QCOMPARE(fixture.stored(), (QVariantMap{{QStringLiteral("future_action"), QStringLiteral("Ctrl+Alt+K")}}));
+    QCOMPARE(fixture.stored(), (QVariantMap{{QStringLiteral("future_action"), QStringLiteral("Ctrl+Alt+K")},
+                                            {QStringLiteral("constructor"), QStringLiteral("Ctrl+Alt+C")}}));
     QCOMPARE(bindingsOf(fixture.action("stopAction")), QStringList{QStringLiteral("Ctrl+Shift+Space")});
 
     // Custom on an action at its defaults starts the capture; the key
@@ -524,7 +554,8 @@ void KeyboardShortcutsSmokeTest::defaultsAndCancelLeaveOnlyWhatIsApplied() {
     QCOMPARE(fixture.shownBindings(QStringLiteral("add_files")), QStringList{QStringLiteral("Ctrl+Alt+A")});
     QVERIFY(fixture.click("keyboardShortcutsCancelButton"));
     QTRY_VERIFY(!fixture.dialog->isVisible());
-    QCOMPARE(fixture.stored(), (QVariantMap{{QStringLiteral("future_action"), QStringLiteral("Ctrl+Alt+K")}}));
+    QCOMPARE(fixture.stored(), (QVariantMap{{QStringLiteral("future_action"), QStringLiteral("Ctrl+Alt+K")},
+                                            {QStringLiteral("constructor"), QStringLiteral("Ctrl+Alt+C")}}));
 }
 
 // The search finds an action by its name, its mnemonic left out, or by
@@ -548,6 +579,15 @@ void KeyboardShortcutsSmokeTest::searchFindsActionsByNameAndByKey() {
 
     // By its key.
     field->setProperty("text", QStringLiteral("ctrl+shift+space"));
+    QCOMPARE(fixture.rows(), QStringList{QStringLiteral("stop")});
+    // An edit keeps the row it changed, though its new key no longer
+    // matches; the next search follows the new key.
+    QVERIFY(fixture.capture("keyboardShortcutsShortcutEditor", Qt::Key_P, Qt::ControlModifier | Qt::AltModifier));
+    QCOMPARE(fixture.rows(), QStringList{QStringLiteral("stop")});
+    QCOMPARE(fixture.dialog->property("currentShortcutId").toString(), QStringLiteral("stop"));
+    field->setProperty("text", QStringLiteral("ctrl+shift+spac"));
+    QVERIFY(fixture.rows().isEmpty());
+    field->setProperty("text", QStringLiteral("ctrl+alt+p"));
     QCOMPARE(fixture.rows(), QStringList{QStringLiteral("stop")});
     field->setProperty("text", QStringLiteral("F11"));
     QCOMPARE(fixture.rows(), (QStringList{QStringLiteral("visualization_viewer"), QStringLiteral("album_art_viewer")}));

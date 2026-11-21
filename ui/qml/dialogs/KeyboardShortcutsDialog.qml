@@ -41,8 +41,10 @@ Components.DialogWindow {
 
     readonly property var actions: root.actionGroups.reduce(
         function(all, group) { return all.concat(group.actions) }, [])
+    // Without a prototype, so that an id such as "constructor" names no
+    // property of Object's.
     readonly property var actionsById: {
-        const byId = {}
+        const byId = Object.create(null)
         for (let i = 0; i < root.actions.length; ++i) {
             byId[root.actions[i].shortcutId] = root.actions[i]
         }
@@ -52,6 +54,12 @@ Components.DialogWindow {
     // The bindings the user changed and has yet to apply, by shortcutId:
     // each action's whole list, as portable text, the first its shortcut.
     property var pending: ({})
+    // A search by key follows the keys as they change.
+    onPendingChanged: {
+        if (searchField.text.trim().length > 0) {
+            root.rebuildRows(true)
+        }
+    }
     readonly property bool modified: Object.keys(root.pending).length > 0
     readonly property bool atDefaults: {
         for (let i = 0; i < root.actions.length; ++i) {
@@ -77,7 +85,8 @@ Components.DialogWindow {
     // saved; empty for none.
     property string refusal: ""
     property bool saveFailed: false
-    // The key waiting for the user to agree to take it from another action.
+    // The bindings waiting for the user to agree to take keys from other
+    // actions: { action, bindings, moves: [{ key, owner }] }.
     property var pendingReassignment: null
 
     // The action's name, as the menus show it, without its mnemonic.
@@ -213,15 +222,27 @@ Components.DialogWindow {
             root.syncEditors()
             return
         }
-        const owner = root.ownerOf(key, action)
         // Until the user agrees, the editors show the keys as they were.
         root.syncEditors()
-        if (owner) {
-            root.pendingReassignment = { action: action, owner: owner, slot: slot, key: key }
-            reassignDialog.open()
+        root.giveBindings(action, root.withKey(bindings, slot, key))
+    }
+
+    // Gives `action` `bindings`, asking first if another action has one of
+    // them, which it then loses.
+    function giveBindings(action, bindings) {
+        const moves = []
+        for (let i = 0; i < bindings.length; ++i) {
+            const owner = root.ownerOf(bindings[i], action)
+            if (owner) {
+                moves.push({ key: bindings[i], owner: owner })
+            }
+        }
+        if (moves.length === 0) {
+            root.setBindings(action, bindings)
             return
         }
-        root.setBindings(action, root.withKey(bindings, slot, key))
+        root.pendingReassignment = { action: action, bindings: bindings, moves: moves }
+        reassignDialog.open()
     }
 
     function reassign() {
@@ -230,17 +251,40 @@ Components.DialogWindow {
         if (!change) {
             return
         }
-        root.setBindings(change.owner, root.bindingsOf(change.owner).filter(function(binding) {
-            return binding !== change.key
-        }))
-        root.setBindings(change.action, root.withKey(root.bindingsOf(change.action), change.slot, change.key))
+        for (let i = 0; i < change.moves.length; ++i) {
+            const move = change.moves[i]
+            root.setBindings(move.owner, root.bindingsOf(move.owner).filter(function(binding) {
+                return binding !== move.key
+            }))
+        }
+        root.setBindings(change.action, change.bindings)
     }
 
+    // The keys and the actions a reassignment takes them from, as the
+    // question names them.
+    function movedKeysText(change) {
+        return change.moves.map(function(move) { return StandardKeys.nativeText(move.key) })
+            .join(I18n.i18nc("@info separator of a list of keys", ", "))
+    }
+
+    function movedFromText(change) {
+        const names = []
+        for (let i = 0; i < change.moves.length; ++i) {
+            const name = root.nameOf(change.moves[i].owner)
+            if (names.indexOf(name) < 0) {
+                names.push(name)
+            }
+        }
+        return names.join(I18n.i18nc("@info separator of a list of actions", ", "))
+    }
+
+    // Default: its defaults, which another action may have been given
+    // since.
     function setCurrentToDefaults() {
         if (root.currentAction) {
             root.refusal = ""
             root.customChosen = false
-            root.setBindings(root.currentAction, root.currentAction.defaultKeyBindings)
+            root.giveBindings(root.currentAction, root.currentAction.defaultKeyBindings)
         }
     }
 
@@ -265,9 +309,9 @@ Components.DialogWindow {
     // the actions whose bindings differ from their defaults, empty for
     // none, and those of actions this build does not have, as they were.
     function overrides() {
-        const result = {}
+        const result = Object.create(null)
         const stored = root.uiBridge.keyboardShortcuts || ({})
-        for (const id in stored) {
+        for (const id of Object.keys(stored)) {
             if (root.actionsById[id] === undefined) {
                 result[id] = stored[id]
             }
@@ -333,16 +377,19 @@ Components.DialogWindow {
     }
 
     // The rows that match the search, by menu; the current row stays
-    // current while it shows, or the first one becomes current.
-    function rebuildRows() {
+    // current while it shows, or the first one becomes current. After an
+    // edit (`keepCurrent`), the row edited stays, though its new keys may
+    // no longer match.
+    function rebuildRows(keepCurrent) {
         const query = searchField.text.trim().toLowerCase()
+        const currentId = keepCurrent ? root.currentShortcutId : ""
         rowsModel.clear()
         let currentRow = -1
         for (let g = 0; g < root.actionGroups.length; ++g) {
             const group = root.actionGroups[g]
             for (let a = 0; a < group.actions.length; ++a) {
                 const action = group.actions[a]
-                if (root.matches(action, query)) {
+                if (action.shortcutId === currentId || root.matches(action, query)) {
                     if (action.shortcutId === root.currentShortcutId) {
                         currentRow = rowsModel.count
                     }
@@ -855,13 +902,17 @@ Components.DialogWindow {
         windowRoot: root
         title: I18n.i18nc("@title:window", "Shortcut Conflict")
         message: root.pendingReassignment
-            ? I18n.i18nc("@info %1 is a key, %2 an action", "Reassign ‘%1’ to ‘%2’?",
-                StandardKeys.nativeText(root.pendingReassignment.key), root.nameOf(root.pendingReassignment.action))
+            ? I18n.i18nc("@info %1 is a key, or a list of them, %2 an action", "Reassign ‘%1’ to ‘%2’?",
+                root.movedKeysText(root.pendingReassignment), root.nameOf(root.pendingReassignment.action))
             : ""
         details: root.pendingReassignment
-            ? I18n.i18nc("@info %1 is a key, %2 an action",
-                "The ‘%1’ key combination is already assigned to the ‘%2’ action, which will no longer have it.",
-                StandardKeys.nativeText(root.pendingReassignment.key), root.nameOf(root.pendingReassignment.owner))
+            ? (root.pendingReassignment.moves.length === 1
+                ? I18n.i18nc("@info %1 is a key, %2 an action",
+                    "The ‘%1’ key combination is already assigned to the ‘%2’ action, which will no longer have it.",
+                    root.movedKeysText(root.pendingReassignment), root.movedFromText(root.pendingReassignment))
+                : I18n.i18nc("@info %1 is a list of keys, %2 of actions",
+                    "The ‘%1’ key combinations are already assigned to ‘%2’, which will no longer have them.",
+                    root.movedKeysText(root.pendingReassignment), root.movedFromText(root.pendingReassignment)))
             : ""
         confirmText: I18n.i18nc("@action:button", "Reassign")
         onConfirmed: root.reassign()
