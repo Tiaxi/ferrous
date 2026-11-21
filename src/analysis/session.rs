@@ -5172,7 +5172,7 @@ mod tests {
 
     #[test]
     fn a_seek_for_a_moved_view_decodes_the_view_first() {
-        // 31 s, a length of its own: fixtures are named by their length.
+        // 31 s.
         let path =
             super::super::waveform_window::tests::write_test_wave(&vec![0; 1_488_000], 48_000, 1);
         let (mut source, ..) = open_audio_file(&path).expect("open the fixture");

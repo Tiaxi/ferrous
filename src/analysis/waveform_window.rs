@@ -577,19 +577,36 @@ pub(super) mod tests {
         std::fs::remove_file(path).expect("remove fixture");
     }
 
+    /// A WAV fixture in the temp directory, at a path no other call in this
+    /// process shares, so tests running in parallel never remove each
+    /// other's files.
     pub(crate) fn write_test_wave(
         samples: &[i16],
         sample_rate: u32,
         channels: u16,
     ) -> std::path::PathBuf {
+        static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let fixture = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "ferrous-waveform-window-{}-{}.wav",
-            std::process::id(),
-            samples.len()
+            "ferrous-waveform-window-{}-{fixture}.wav",
+            std::process::id()
         ));
         write_test_wave_to(&path, samples, sample_rate, channels);
         path
+    }
+
+    #[test]
+    fn fixtures_of_the_same_length_get_their_own_files() {
+        let first = write_test_wave(&[1_000; 64], 1_000, 1);
+        let second = write_test_wave(&[-1_000; 64], 1_000, 1);
+        assert_ne!(first, second);
+        std::fs::remove_file(&first).expect("remove first fixture");
+        assert!(
+            second.exists(),
+            "removing one fixture left the other in place"
+        );
+        std::fs::remove_file(&second).expect("remove second fixture");
     }
 
     /// A 16-bit PCM WAV file of `samples` at `path`.
