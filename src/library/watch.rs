@@ -795,8 +795,10 @@ impl Watcher {
                 ),
             );
         }
-        for root in present {
-            let _ = self.commands.send(LibraryCommand::RescanRoot(root));
+        for root in &present {
+            let _ = self.commands.send(LibraryCommand::RescanRoot(root.clone()));
+            #[cfg(test)]
+            watch_test_hooks::note_catch_up_rescan(root);
         }
     }
 
@@ -1414,6 +1416,7 @@ pub(crate) mod watch_test_hooks {
     type HeldWatch = (PathBuf, Sender<()>, Receiver<()>);
     static HELD_WATCHING: Mutex<Vec<HeldWatch>> = Mutex::new(Vec::new());
     static DEFERRED_WALKS: Mutex<Vec<(PathBuf, Sender<()>)>> = Mutex::new(Vec::new());
+    static CATCH_UP_RESCANS: Mutex<Vec<(PathBuf, Sender<()>)>> = Mutex::new(Vec::new());
 
     fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -1546,6 +1549,23 @@ pub(crate) mod watch_test_hooks {
 
     pub(in crate::library) fn note_walk_deferred(root: &Path) {
         for (observed, tx) in lock(&DEFERRED_WALKS).iter() {
+            if observed == root {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    /// Receives a message whenever the watcher has sent the worker the
+    /// rescan of `root` that catches up with changes made while watching
+    /// was off.
+    pub(crate) fn observe_catch_up_rescans(root: &Path) -> Receiver<()> {
+        let (tx, rx) = unbounded();
+        lock(&CATCH_UP_RESCANS).push((root.to_path_buf(), tx));
+        rx
+    }
+
+    pub(super) fn note_catch_up_rescan(root: &Path) {
+        for (observed, tx) in lock(&CATCH_UP_RESCANS).iter() {
             if observed == root {
                 let _ = tx.send(());
             }
