@@ -94,9 +94,10 @@ struct ShortcutsFixture {
 
     // Makes the row of `shortcutId` current, as a click on it does.
     bool select(const QString &shortcutId) {
-        bool shown = false;
-        QMetaObject::invokeMethod(dialog, "selectAction", Q_RETURN_ARG(bool, shown), Q_ARG(QString, shortcutId));
-        return shown && dialog->property("currentShortcutId").toString() == shortcutId;
+        QVariant shown;
+        QMetaObject::invokeMethod(dialog, "selectAction", Q_RETURN_ARG(QVariant, shown),
+                                  Q_ARG(QVariant, shortcutId));
+        return shown.toBool() && dialog->property("currentShortcutId").toString() == shortcutId;
     }
 
     // What the dialog shows for `shortcutId`, changes waiting included.
