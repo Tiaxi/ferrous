@@ -2,6 +2,7 @@
 
 #include "QmlSmokeTest.h"
 #include "TestPlatform.h"
+#include "TestShard.h"
 #include "TestSessionIsolation.h"
 
 // Offscreen screens at 2x, 1.5x and 1.25x beside the default one, so that a
@@ -152,6 +153,32 @@ int runSmokeTests(const QString &userDirectoriesParent, const QStringList &argum
         qCritical("No smoke test area %s; the areas are %s", qPrintable(onlyArea),
             qPrintable(areaNames.join(QLatin1Char(' '))));
         return 1;
+    }
+
+    // An area in shards (TestShard.h), with FERROUS_TEST_SHARD, as CTest
+    // runs a long one: the shard's tests of the area that -area names.
+    const TestShard shard =
+        testShardFromEnvironment(onlyArea.isEmpty() ? QStringList{} : QStringList{QStringLiteral("-area"), onlyArea});
+    if (shard.sharded) {
+        if (onlyArea.isEmpty() || !functions.isEmpty()) {
+            // To standard error, as qExecShard() does: before qExec(), Qt
+            // logs to the journal where standard error is not a terminal.
+            std::fprintf(stderr, "FERROUS_TEST_SHARD shards one area, named with -area, and no test functions\n");
+            return 1;
+        }
+        if (!shard.error.isEmpty()) {
+            std::fprintf(stderr, "%s\n", qPrintable(shard.error));
+            return 1;
+        }
+        // QTest's -datatags lists every test: list the shard's, which
+        // check_test_shards.cmake checks against it.
+        if (options.contains(QStringLiteral("-datatags"))) {
+            for (const QString &line : shard.listing) {
+                std::printf("%s\n", qPrintable(line));
+            }
+            return 0;
+        }
+        functions = shard.tests;
     }
 
     // QTest exits after listing one class's functions: list every class's.
