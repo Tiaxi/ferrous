@@ -214,7 +214,6 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 | Area | Rejected | Why |
 |---|---|---|
 | Main window | banners or notices for routine events | the main window stays quiet: routine events go to the status bar; a dialog appears only when the user must act |
-| Settings menu | a "Configure Keyboard Shortcuts…" item | there is no shortcut editor yet, and a menu item that does nothing is worse |
 | Transport | the window's own colour as its background | the bar read as part of the content; it uses Breeze's Header colours |
 | Seek bar | an accent or amber waveform fill | amber is reserved for "now" and the playhead |
 | Seek time readout | a box on the waveform; a readout under the bar | it hid the part being scrubbed to; under the bar, it hung over the queue's header |

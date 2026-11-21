@@ -23,7 +23,7 @@ Install these tools and development libraries:
 - Rust toolchain (`cargo`, `rustc`)
 - Bash, for the repository scripts
 - CMake 3.24 or newer, Ninja, pkg-config, and a C++20 compiler; the tests need CMake 3.29 or newer
-- Qt 6.8 or newer development libraries: Core, DBus, Gui, Qml, Quick, QuickControls2, Network, Widgets, Concurrent, and Test
+- Qt 6.8 or newer development libraries: Core, DBus, Gui, Qml, Quick, QuickControls2, Network, Widgets, and Concurrent, and for the tests Test and QuickTest
 - KDE Frameworks 6 Kirigami development libraries and QML runtime modules
 - KDE Frameworks 6 KI18n 6.8 or newer, which translates the interface
 - GNU gettext (`xgettext`, `msgen`, `msgfilter`, `msgfmt`) for the tests and the translation template, and the `en_US.UTF-8` locale for the translation tests
