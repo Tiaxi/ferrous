@@ -3733,8 +3733,9 @@ mod tests {
 
     /// A view the user moves is decoded where it is, wherever the playhead
     /// is: a drag that sends the view's anchor many times restarts the
-    /// session once, and following the playhead again decodes its view,
-    /// with no column of the moved view's session landing after it.
+    /// session once, which seeks only on along the drag, and following the
+    /// playhead again decodes its view, with no column of the moved view's
+    /// session landing after it.
     #[test]
     fn a_moved_view_is_decoded_where_it_is_and_a_drag_restarts_once() {
         let path = write_engine_test_wave(400, 8_000);
@@ -3748,6 +3749,7 @@ mod tests {
         );
         let generation = engine.spectrogram_decode_generation.load(Ordering::Relaxed);
         let resets = ring.resets;
+        let session_resets = ring.session_resets.len();
 
         // Dragged to 300 s and on to 310 s, far past what the session
         // decodes for the playhead.
@@ -3771,9 +3773,32 @@ mod tests {
             generation + 1,
             "one session for the whole drag"
         );
-        // The refill's clear and its session's reset, and at most one seek
-        // of that session to where the drag ended.
-        assert!(ring.resets - resets <= 3, "{} resets", ring.resets - resets);
+        // The refill's clear, and the resets of its session: its first and
+        // those of its seeks. The session takes the anchors queued for it
+        // at once and acts on the last (see the session's tests), but the
+        // drag can reach it in more than one batch, as a user's drag does:
+        // then it seeks for each batch whose view it would not decode soon
+        // enough, each time on along the drag, up to where it ended.
+        let drag_resets = &ring.session_resets[session_resets..];
+        assert_eq!(
+            ring.resets - resets - drag_resets.len(),
+            1,
+            "one clear: {drag_resets:?}"
+        );
+        assert!(
+            !drag_resets.is_empty()
+                && drag_resets
+                    .iter()
+                    .all(|&(reset_generation, _)| reset_generation == generation + 1),
+            "{drag_resets:?}"
+        );
+        assert!(
+            drag_resets.windows(2).all(|pair| pair[0].1 < pair[1].1)
+                && drag_resets.iter().all(|&(_, start)| {
+                    (moved_view_column(270.0)..=moved_view_column(297.6)).contains(&start)
+                }),
+            "{drag_resets:?}"
+        );
         // An anchor of another track changes nothing.
         engine.command(AnalysisCommand::SetSpectrogramViewAnchor {
             track_token: 2,
@@ -7406,6 +7431,9 @@ mod tests {
         /// Every reset taken, the ring clears of the immediate refills
         /// included.
         resets: usize,
+        /// The generation and first column of every reset a session sent:
+        /// its first, and those of its seeks.
+        session_resets: Vec<(u64, u64)>,
         /// Every column taken.
         columns_taken: u64,
     }
@@ -7419,6 +7447,8 @@ mod tests {
             self.resets += usize::from(chunk.buffer_reset);
             self.columns_taken += u64::from(chunk.column_count);
             if chunk.buffer_reset && chunk.bins_per_column > 0 {
+                self.session_resets
+                    .push((chunk.generation, u64::from(chunk.start_column_index)));
                 self.reset_pending = true;
                 self.complete = false;
             }
