@@ -4920,8 +4920,16 @@ mod tests {
         let track = dir.join("02.wav");
         crate::metadata::write_numbered_test_wave(&track, 2, 8);
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
-        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        // The tests set the playback state and send the library reports
+        // themselves. The workers' replies to the startup commands, which can
+        // come at any time, would replace that state: a playback snapshot
+        // naming no track makes the bridge forget the playing file's read.
+        runtime.playback_rx = never();
+        runtime.analysis_rx = never();
+        runtime.library_rx = never();
+        runtime.search_results_rx = never();
+        runtime.apply_album_art_rx = never();
+        let (event_tx, _) = bounded::<BridgeEvent>(64);
         runtime.state.playback.current = Some(track.clone());
         (dir, track, runtime, event_tx)
     }

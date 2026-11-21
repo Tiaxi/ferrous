@@ -1550,9 +1550,11 @@ fn run_spectrogram_session(
             continue;
         }
 
-        // Flush any partially accumulated chunk so the final columns are
-        // not lost.
-        session_flush_chunk(&mut session, event_tx, columns_produced_out);
+        // Send the columns the session computed, so that none is lost. The
+        // end of the file sent its partial interval when the session reached
+        // it; one that a stop or a new session cuts short is not a column, as
+        // the rest of its rows were never read.
+        session_emit_pending_chunk(&mut session, event_tx, columns_produced_out);
 
         match result {
             Some(SpectrogramWorkerCommand::ContinueWithFile { path, track_token }) => {
@@ -8795,19 +8797,9 @@ mod tests {
         channels: usize,
         max_groups: usize,
     ) -> std::collections::BTreeMap<u64, Vec<u8>> {
-        let mut command = backfill_session_on(path, channels, BACKFILL_PLAYHEAD);
-        if let SpectrogramWorkerCommand::NewTrack {
-            target_position_seconds,
-            start_seconds,
-            ..
-        } = &mut command
-        {
-            // A session at the start of the file, which has nothing left of it.
-            *start_seconds = 0.0;
-            *target_position_seconds = 0.0;
-        }
+        // A session at the start of the file, which has nothing left of it.
         let chunks = run_watched_session(
-            command,
+            backfill_session_on(path, channels, 0.0),
             max_groups,
             unbounded(),
             &Arc::new(AtomicU64::new(1)),
@@ -8820,6 +8812,49 @@ mod tests {
             "a session from the start decodes in order"
         );
         columns_of(&chunks)
+    }
+
+    #[test]
+    fn a_stopped_session_sends_only_the_columns_whose_rows_it_read() {
+        // Regression for #710: a session stopped before the end of its file
+        // sent the rows it had read of its next column as that column. Each
+        // column here is four rows of the STFT, which a packet's audio does
+        // not end on, so most of the points the session stops at fall
+        // inside a column.
+        let path = write_noise_fixture("stopped", 2);
+        let reference = continuous_reference(&path, 2, 1);
+        let end = reference.keys().next_back().copied().expect("columns");
+        for stop_at in 1..=8 {
+            let (commands, command_rx) = unbounded();
+            let stop = commands.clone();
+            let chunks_seen = AtomicU64::new(0);
+            let chunks = run_watched_session(
+                backfill_session_on(&path, 2, 0.0),
+                1,
+                (commands, command_rx),
+                &Arc::new(AtomicU64::new(1)),
+                move |chunk| {
+                    if chunk.column_count > 0
+                        && chunks_seen.fetch_add(1, Ordering::Relaxed) + 1 == stop_at
+                    {
+                        stop.send(SpectrogramWorkerCommand::StopSession).unwrap();
+                    }
+                },
+                // Until the stopped worker ends.
+                |_| false,
+            );
+            let spans = spans_of(&chunks);
+            assert_eq!(spans.len(), 1, "stopped at chunk {stop_at}: {spans:?}");
+            assert!(spans[0].1 < end, "stopped at chunk {stop_at}: {spans:?}");
+            for (index, bytes) in columns_of(&chunks) {
+                assert_eq!(
+                    Some(&bytes),
+                    reference.get(&index),
+                    "stopped at chunk {stop_at}: column {index}"
+                );
+            }
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
