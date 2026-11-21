@@ -392,7 +392,7 @@ Components.DialogWindow {
     readonly property real rowLeftPadding: Kirigami.Units.largeSpacing
     readonly property real iconSpacing: Kirigami.Units.largeSpacing
     defaultWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 40)
-    defaultHeight: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 34)
+    defaultHeight: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 38)
     minimumWidth: Math.ceil(Kirigami.Units.gridUnit * 14 + 2 * root.keyColumnWidth + 2 * Kirigami.Units.gridUnit)
     minimumHeight: Kirigami.Units.gridUnit * 24
 
@@ -510,6 +510,8 @@ Components.DialogWindow {
             objectName: "keyboardShortcutsSearchField"
             Layout.fillWidth: true
             placeholderText: I18n.i18nc("@info:placeholder", "Search by action or shortcut…")
+            // Breeze's is under 4.5:1 on the light view colour.
+            placeholderTextColor: root.uiPalette.placeholderText
             Accessible.name: I18n.i18nc("@label accessible name of the search field", "Search")
             onTextChanged: root.rebuildRows()
             // The arrow keys move through the list, as in KDE's dialog.
@@ -593,7 +595,19 @@ Components.DialogWindow {
                     }
                     currentIndex = Math.max(0, Math.min(count - 1, currentIndex + step))
                 }
-                onCurrentIndexChanged: root.selectRow(currentIndex)
+                // The current row stays in view as a message under the
+                // list makes it shorter.
+                onHeightChanged: {
+                    if (currentIndex >= 0) {
+                        positionViewAtIndex(currentIndex, ListView.Contain)
+                    }
+                }
+                onCurrentIndexChanged: {
+                    if (currentIndex >= 0) {
+                        positionViewAtIndex(currentIndex, ListView.Contain)
+                    }
+                    root.selectRow(currentIndex)
+                }
 
                 section.property: "groupTitle"
                 section.criteria: ViewSection.FullString
@@ -798,30 +812,28 @@ Components.DialogWindow {
                     onKeySequenceModified: root.takeKey(1, alternateEditor)
                 }
             }
+        }
 
-            // What keeps a key the user tried, or that the library and the
-            // text fields type a key this action has.
-            Label {
-                objectName: "keyboardShortcutsRefusal"
-                Layout.columnSpan: 3
-                Layout.fillWidth: true
-                visible: root.refusal.length > 0
-                text: root.refusal
-                wrapMode: Text.Wrap
-                color: root.uiPalette.negative
-            }
-            Label {
-                readonly property string typedKey: root.typedKeyOf(root.currentBindings)
-                objectName: "keyboardShortcutsTypedKeyNote"
-                Layout.columnSpan: 3
-                Layout.fillWidth: true
-                visible: typedKey.length > 0 && root.refusal.length === 0
-                text: I18n.i18nc("@info %1 is a key",
-                    "While the library or a text field has the keyboard focus, ‘%1’ types there instead.",
-                    StandardKeys.nativeText(typedKey))
-                wrapMode: Text.Wrap
-                color: root.uiPalette.textSecondary
-            }
+        // What keeps a key the user tried, or that the library and the
+        // text fields type a key this action has.
+        Label {
+            objectName: "keyboardShortcutsRefusal"
+            Layout.fillWidth: true
+            visible: root.refusal.length > 0
+            text: root.refusal
+            wrapMode: Text.Wrap
+            color: root.uiPalette.negative
+        }
+        Label {
+            readonly property string typedKey: root.typedKeyOf(root.currentBindings)
+            objectName: "keyboardShortcutsTypedKeyNote"
+            Layout.fillWidth: true
+            visible: typedKey.length > 0 && root.refusal.length === 0
+            text: I18n.i18nc("@info %1 is a key",
+                "While the library or a text field has the keyboard focus, ‘%1’ types there instead.",
+                StandardKeys.nativeText(typedKey))
+            wrapMode: Text.Wrap
+            color: root.uiPalette.textSecondary
         }
 
         // That the bridge refused the set, which stays to change or cancel.
