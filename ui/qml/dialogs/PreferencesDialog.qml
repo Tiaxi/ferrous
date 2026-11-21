@@ -22,6 +22,8 @@ Components.DialogWindow {
     required property var spectrogramFftChoices
     required property var promptAddLibraryRoot
     required property var openLibraryRootNameDialog
+    // View › Reset Zoom's shortcut, which the Visualization page names.
+    property string resetZoomShortcut: ""
 
     property int pageIndex: 0
     readonly property var pages: [
@@ -462,6 +464,7 @@ Components.DialogWindow {
                         uiPalette: root.uiPalette
                         settings: settingsState
                         spectrogramFftChoices: root.spectrogramFftChoices
+                        resetZoomShortcut: root.resetZoomShortcut
                     }
 
                     Preferences.GeneralPage {

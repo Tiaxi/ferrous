@@ -15,6 +15,8 @@ Preferences.PreferencesPage {
     id: root
 
     required property var spectrogramFftChoices
+    // View › Reset Zoom's shortcut as the user reads it; empty for none.
+    property string resetZoomShortcut: ""
 
     // A combo box's width in the form, or what its longest option needs.
     readonly property real comboWidth: Kirigami.Units.gridUnit * 9
@@ -214,7 +216,9 @@ Preferences.PreferencesPage {
         objectName: "zoomHelp"
         uiPalette: root.uiPalette
         indent: zoomCheckBox.contentItem.x
-        text: I18n.i18nc("@info", "Scroll to zoom in or out, and drag with the middle button to move a zoomed waveform or centered spectrogram. Ctrl+0 resets the zoom.")
+        text: root.resetZoomShortcut.length > 0
+            ? I18n.i18nc("@info %1 is the shortcut of View › Reset Zoom", "Scroll to zoom in or out, and drag with the middle button to move a zoomed waveform or centered spectrogram. %1 resets the zoom.", root.resetZoomShortcut)
+            : I18n.i18nc("@info", "Scroll to zoom in or out, and drag with the middle button to move a zoomed waveform or centered spectrogram.")
     }
 
     CheckBox {

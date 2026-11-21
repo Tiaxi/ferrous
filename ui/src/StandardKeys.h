@@ -40,6 +40,26 @@ public:
     // portableText does, without empty ones or repeats; empty for none.
     Q_INVOKABLE static QString joinSequences(const QVariantList &sequences);
 
+    // `sequence` as the user reads it, in the platform's words: empty for
+    // no keys.
+    Q_INVOKABLE static QString nativeText(const QVariant &sequence);
+
+    // What the window, its lists or its text fields keep `sequence` for,
+    // so that no action may take it, as a code the shortcut editor words:
+    // "activate" for Enter, which plays a list's selection and presses a
+    // dialog's default button; "delete" for Delete and Backspace; "focus"
+    // for Tab and Shift+Tab; "cancel" for Escape; "navigate" for the arrow,
+    // Page, Home and End keys alone; "contextMenu" for Menu and Shift+F10;
+    // "menuBar" for Ctrl+M, which shows KDE's menu bar. Empty for a key an
+    // action may take, and for a sequence of more than one key.
+    Q_INVOKABLE static QString keptKeyRole(const QVariant &sequence);
+
+    // Whether `sequence` is one key that types a character, with Shift or
+    // without, such as F or Shift+F: the library's type-ahead and text
+    // fields take it while they have the keyboard focus. Not Space, which
+    // the lists leave to the shortcuts.
+    Q_INVOKABLE static bool typesCharacter(const QVariant &sequence);
+
     // Registers the singleton with the FerrousUi module.
     static void registerQmlTypes();
 };

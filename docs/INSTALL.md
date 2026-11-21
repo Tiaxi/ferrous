@@ -33,7 +33,7 @@ Install these tools and development libraries:
 - GStreamer runtime codec plugins for the formats you want to play
 - For the GStreamer backend tests, the good and bad-free GStreamer plugins (`gstreamer1-plugins-good` and `gstreamer1-plugins-bad-free` on Fedora); the AC-3 and DTS tests also need `gstreamer1-plugin-libav`
 
-To run Ferrous, also install the KDE `qqc2-desktop-style` QML module (`kf6-qqc2-desktop-style` on Fedora). Ferrous uses its `org.kde.desktop` controls style and does not start without it, and the UI tests use it too, with the Breeze icon theme (`breeze-icon-theme`). Plasma desktops include both.
+To run Ferrous, also install the KDE `qqc2-desktop-style` QML module (`kf6-qqc2-desktop-style` on Fedora). Ferrous uses its `org.kde.desktop` controls style and does not start without it, and the UI tests use it too, with the Breeze icon theme (`breeze-icon-theme`). Ferrous and its UI tests also need KDE's `org.kde.kquickcontrols` QML module from KDeclarative (`kf6-kdeclarative` on Fedora), whose key capture control Configure Keyboard Shortcuts uses. Plasma desktops include all three.
 
 CMake refuses a Qt older than 6.8. See [UI CI](../.github/workflows/ci.yml) for the reference distribution and Rust toolchain.
 
@@ -44,7 +44,7 @@ sudo dnf install git rust cargo cmake ninja-build gcc-c++ \
   pkgconf-pkg-config dbus-devel glib2-devel gstreamer1-devel \
   gstreamer1-plugins-base-devel qt6-qtbase-devel \
   qt6-qtdeclarative-devel qt6-qtquickcontrols2-devel kf6-kirigami-devel \
-  kf6-ki18n-devel kf6-qqc2-desktop-style breeze-icon-theme gettext \
+  kf6-ki18n-devel kf6-qqc2-desktop-style kf6-kdeclarative breeze-icon-theme gettext \
   glibc-langpack-en util-linux-core
 ```
 

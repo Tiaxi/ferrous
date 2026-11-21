@@ -297,6 +297,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/dialogs/DiagnosticsDialog.qml
         qml/dialogs/GlobalSearchDialog.qml
         qml/dialogs/ItunesArtworkDialog.qml
+        qml/dialogs/KeyboardShortcutsDialog.qml
         qml/dialogs/LibraryRootNameDialog.qml
         qml/dialogs/PreferencesDialog.qml
         qml/dialogs/QuitSaveFailedDialog.qml
@@ -727,6 +728,7 @@ if(BUILD_TESTING)
         tests/tst_qml_smoke_errors.cpp
         tests/tst_qml_smoke_tag_editor.cpp
         tests/tst_qml_smoke_scrobble.cpp
+        tests/tst_qml_smoke_keyboard_shortcuts.cpp
     )
     target_link_libraries(ferrous_qml_smoke_tests PRIVATE ferrous_app_icon)
     # The smoke tests run by area, each area in a process of its own, so a
@@ -746,6 +748,7 @@ if(BUILD_TESTING)
         errors 120
         tag_editor 180
         scrobble 60
+        keyboard_shortcuts 120
     )
     set(ferrous_smoke_area_names "")
     list(LENGTH FERROUS_QML_SMOKE_AREAS ferrous_smoke_area_values)
@@ -761,6 +764,13 @@ if(BUILD_TESTING)
             TIMEOUT ${timeout}
         )
     endforeach()
+    # The shortcut editor's KeySequenceItem asks kglobalaccel on the session
+    # bus about KDE's global shortcuts: these tests have a bus that is not
+    # there, so they never reach the desktop's, and check that a capture
+    # does not wait on it.
+    set_tests_properties(ferrous_qml_smoke_keyboard_shortcuts PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;DBUS_SESSION_BUS_ADDRESS=unix:path=${CMAKE_CURRENT_BINARY_DIR}/no-session-bus"
+    )
     # The Last.fm slot's glyph and ring move by device pixels: their tests
     # again at 2x.
     add_test(NAME ferrous_qml_smoke_scrobble_2x

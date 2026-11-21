@@ -6222,6 +6222,23 @@ STATES = [
     ("dialogs", "dialog", "confirm-clear-diagnostics", "macro open_child diagnosticsDialog ConfirmDialog",
      "Confirmation: clear the diagnostics log (over Diagnostics)"),
     ("dialogs", "dialog", "confirm-clear-diagnostics-default-focus", "focusdefault", "Clear-log confirmation, default focus"),
+    ("dialogs", "dialog", "keyboard-shortcuts", "esc 2 | macro opendialog keyboardShortcutsDialog | settle 1.1 | away",
+     "Settings > Configure Keyboard Shortcuts"),
+    ("dialogs", "dialog", "keyboard-shortcuts-default-focus", "focusdefault", "Configure Keyboard Shortcuts, default focus"),
+    ("dialogs", "dialog", "keyboard-shortcuts-custom",
+     "js (function(){var d=keyboardShortcutsDialog;d.selectAction('stop');d.setBindings(stopAction,['Ctrl+Alt+S','Media Stop']);"
+     "return true})() | settle 0.6", "Configure Keyboard Shortcuts: Stop with keys of its own, not yet applied"),
+    ("dialogs", "dialog", "keyboard-shortcuts-refused",
+     "js (function(){var d=keyboardShortcutsDialog;d.selectAction('next');d.refusal=d.refusalFor(nextAction,'Del');"
+     "return true})() | settle 0.6", "Configure Keyboard Shortcuts: a key the queue keeps, refused"),
+    ("dialogs", "dialog", "keyboard-shortcuts-typed-key",
+     "js (function(){var d=keyboardShortcutsDialog;d.refusal='';d.selectAction('follow_playhead');return true})() | settle 0.6",
+     "Configure Keyboard Shortcuts: Follow Playhead's F, with its note"),
+    ("dialogs", "dialog", "keyboard-shortcuts-reassign",
+     "js (function(){var d=keyboardShortcutsDialog;d.selectAction('stop');"
+     "d.pendingReassignment={action:stopAction,owner:playPauseAction,slot:0,key:'Space'};return true})()"
+     " | macro open_child keyboardShortcutsDialog ConfirmDialog",
+     "Shortcut Conflict: a key Play/Pause has, for Stop (over Configure Keyboard Shortcuts)"),
     ("dialogs", "dialog", "quit-save-failed",
      "esc 2 | js root.showQuitSaveFailedDialog('Settings could not be saved: Permission denied (os error 13)') | settle 0.9",
      "Quit: saving the state failed (opened directly with a sample message)"),

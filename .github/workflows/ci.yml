@@ -254,6 +254,7 @@ jobs:
             kf6-kirigami-devel \
             kf6-ki18n-devel \
             kf6-qqc2-desktop-style \
+            kf6-kdeclarative \
             breeze-icon-theme \
             gettext \
             glibc-langpack-en \

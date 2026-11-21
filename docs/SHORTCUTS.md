@@ -4,6 +4,8 @@
 
 These work in the main window and in the fullscreen viewers. Text fields, such as global search, keep the keys they use for typing and selecting text.
 
+To change a shortcut, open **Settings › Configure Keyboard Shortcuts…** (Ctrl+Alt+,). Select an action, choose **Custom**, and press the keys for its shortcut or its alternate; **Default** gives it back its defaults, and **Defaults** does so for every action. A key another action has moves to the new one once you agree. Keys the lists, text fields and dialogs use themselves, such as Enter, Delete, Tab, Escape and the arrow keys alone, cannot be shortcuts. The changes take effect with OK or Apply, in the main window and in the viewers. The tables below list the default shortcuts; those of Open, Quit, Undo, Redo, Find and Configure Ferrous follow Plasma's standard keys.
+
 | Action | Keys |
 | --- | --- |
 | Play or pause | Space |
@@ -31,6 +33,7 @@ These work in the main window only:
 | Select the previous or next track in the queue | Ctrl+Up, Ctrl+Down |
 | Move the selected tracks up or down the queue | Ctrl+Shift+Up, Ctrl+Shift+Down |
 | Configure Ferrous | Ctrl+Shift+, (Plasma's standard key) |
+| Configure Keyboard Shortcuts | Ctrl+Alt+, |
 
 Alt and an underlined letter open a menu, such as Alt+P for **Playback**. The menus show each item's shortcut; the queue's and the library's context menus also show the keys that do the same in the list, such as Enter and Delete. [Global search](SEARCH.md) has keys of its own.
 

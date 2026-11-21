@@ -1243,6 +1243,8 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
              }));
     QCOMPARE(rowsOf(menuNamed(window, "settingsMenu")),
              (QStringList{
+                 // KDE's place for it, with the board's Ctrl+Alt+, (#458).
+                 QStringLiteral("item|Configure Keyboard Shortcuts…|Ctrl+Alt+,|configure-shortcuts"),
                  QStringLiteral("item|Configure Ferrous…|%1|configure").arg(standardKey(QKeySequence::Preferences)),
              }));
     QCOMPARE(rowsOf(menuNamed(window, "helpMenu")),
@@ -2046,6 +2048,28 @@ void UiMenusTest::checkSettingsAndHelpOpenTheirPages(QQuickWindow *window) {
     QTRY_VERIFY(preferences->property("opened").toBool());
     QMetaObject::invokeMethod(preferences, "close");
     QTRY_VERIFY(!preferences->property("visible").toBool());
+
+    // Configure Keyboard Shortcuts, by its Ctrl+Alt+, too (#458); not while
+    // a viewer is open, as Configure.
+    QObject *shortcuts = child(window, "keyboardShortcutsDialog");
+    QObject *shortcutsAction = child(window, "configureShortcutsAction");
+    QVERIFY(shortcuts != nullptr && shortcutsAction != nullptr);
+    QVERIFY(shortcutsAction->property("enabled").toBool());
+    window->requestActivate();
+    QTRY_VERIFY(window->isActive());
+    QTest::keyClick(window, Qt::Key_Comma, Qt::ControlModifier | Qt::AltModifier);
+    QTRY_VERIFY(shortcuts->property("opened").toBool());
+    QMetaObject::invokeMethod(shortcuts, "close");
+    QTRY_VERIFY(!shortcuts->property("visible").toBool());
+    QTRY_VERIFY(window->isActive());
+    QObject *viewer = child(window, "viewerController");
+    QVERIFY(viewer != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(window->property("viewerOpen").toBool());
+    QVERIFY(!shortcutsAction->property("enabled").toBool());
+    QVERIFY(!child(window, "configureAction")->property("enabled").toBool());
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!window->property("viewerOpen").toBool());
 
     // About KDE: KDE's icon and its words, with links.
     QObject *aboutKde = child(window, "aboutKdeDialog");
