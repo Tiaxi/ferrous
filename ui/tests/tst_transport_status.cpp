@@ -539,6 +539,8 @@ private slots:
     void statusBarShowsRepeatAndShuffleInWords();
     void statusBarShowsTheFormatGroupWithoutThePosition();
     void statusBarFormatShowsWhatFitsWhole();
+    void statusBarFormatKeepsItsPlace_data();
+    void statusBarFormatKeepsItsPlace();
     void statusBarShowsTheScanWithItsBar();
     void statusBarScanBarFillsOnlyOnceTheRescanEnds();
     void statusBarScanWithoutATotalIsStill();
@@ -2752,16 +2754,21 @@ void TransportStatusTest::statusBarShowsRepeatAndShuffleInWords() {
     QQuickItem *shuffleGlyph = harness.item(QStringLiteral("statusBarShuffleGlyph"));
     QQuickItem *shuffleLabel = harness.item(QStringLiteral("statusBarShuffleLabel"));
     QQuickItem *repeatGlyph = nullptr;
+    QQuickItem *format = harness.item(QStringLiteral("statusBarFormat"));
     QQuickItem *state = harness.item(QStringLiteral("statusBarPlaybackState"));
-    QVERIFY(group && repeat && shuffle && shuffleGlyph && shuffleLabel && state);
+    QVERIFY(group && repeat && shuffle && shuffleGlyph && shuffleLabel && state && format);
     // Off: nothing.
     QVERIFY(!group->isVisible());
     harness.bridge->setProperty("repeatMode", 1);
     QTRY_VERIFY(repeat->isVisible());
     QCOMPARE(repeat->property("text").toString(), QStringLiteral("Repeat One Track"));
     QVERIFY(!shuffle->isVisible());
-    // 16 px after the playback state.
+    // 16 px after the format, or after the playback state without one.
+    QTRY_COMPARE(sceneRect(group).left(), sceneRect(format).right() + 16.0);
+    harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QTRY_COMPARE(sceneRect(group).left(), sceneRect(state).right() + 16.0);
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_COMPARE(sceneRect(group).left(), sceneRect(format).right() + 16.0);
     harness.bridge->setProperty("repeatMode", 2);
     QCOMPARE(repeat->property("text").toString(), QStringLiteral("Repeat Whole Queue"));
     // Shuffle as repeat is (it was a glyph alone, named only in its
@@ -2790,7 +2797,7 @@ void TransportStatusTest::statusBarShowsRepeatAndShuffleInWords() {
     harness.bridge->setProperty("repeatMode", 0);
     QTRY_VERIFY(!repeat->isVisible());
     QVERIFY(group->isVisible() && shuffle->isVisible());
-    QTRY_COMPARE(sceneRect(group).left(), sceneRect(state).right() + 16.0);
+    QTRY_COMPARE(sceneRect(group).left(), sceneRect(format).right() + 16.0);
     QTRY_COMPARE(sceneRect(shuffle).left(), sceneRect(group).left());
 }
 
@@ -2891,6 +2898,102 @@ void TransportStatusTest::statusBarFormatShowsWhatFitsWhole() {
     // And back: all of it once there is room again.
     harness.window->setWidth(1000);
     QTRY_COMPARE(format->property("text").toString(), parts.join(separator));
+}
+
+void TransportStatusTest::statusBarFormatKeepsItsPlace_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The format keeps one x as Repeat and Shuffle toggle, after the playback
+// state, and the modes follow it at an x a changing bitrate doesn't move
+// (the format jumped some 210 px with the modes). Where there is too little
+// room, the format gives its parts up and the modes stay whole.
+void TransportStatusTest::statusBarFormatKeepsItsPlace() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(kBreezeDark, 2400), qPrintable(harness.error));
+    QQuickItem *format = harness.item(QStringLiteral("statusBarFormat"));
+    QQuickItem *row = harness.item(QStringLiteral("statusBarFormatRow"));
+    QQuickItem *modes = harness.item(QStringLiteral("statusBarRepeatShuffle"));
+    QQuickItem *state = harness.item(QStringLiteral("statusBarPlaybackState"));
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QVERIFY(format && row && modes && state && status);
+    QObject *bridge = harness.bridge;
+    qreal scale = 1;
+    const auto laidOut = [&]() { grabbed(harness.window, &scale); };
+    laidOut();
+    const qreal formatLeft = sceneRect(row).left();
+    QCOMPARE(formatLeft, sceneRect(state).right() + 16.0);
+    for (const auto &[repeat, shuffle] :
+         {std::pair{1, false}, std::pair{2, true}, std::pair{0, true}, std::pair{1, true}, std::pair{0, false}}) {
+        bridge->setProperty("repeatMode", repeat);
+        bridge->setProperty("shuffleEnabled", shuffle);
+        laidOut();
+        QCOMPARE(sceneRect(row).left(), formatLeft);
+        if (modes->isVisible()) {
+            QVERIFY2(sceneRect(modes).left() >= sceneRect(row).right() + 15.5,
+                     qPrintable(describeRect(sceneRect(modes))));
+        }
+    }
+    bridge->setProperty("repeatMode", 2);
+    laidOut();
+    const qreal modesLeft = sceneRect(modes).left();
+    // It follows the format, and is not at the bar's other end.
+    QVERIFY(modesLeft - sceneRect(row).right() < 16.0 + 2 * pointSize * 2);
+    for (const int kbps : {64, 320, 999, 1411, 9216, 987, 1000}) {
+        bridge->setProperty("currentTrackCurrentBitrateKbps", kbps);
+        laidOut();
+        QCOMPARE(sceneRect(modes).left(), modesLeft);
+        QCOMPARE(sceneRect(row).left(), formatLeft);
+    }
+
+    // With less room than both take, the modes stay whole and in the bar.
+    const int narrow = int(std::ceil(sceneRect(state).right() + 16 + modes->width() + 40));
+    harness.window->setWidth(narrow);
+    QTRY_COMPARE(status->width(), qreal(narrow));
+    laidOut();
+    QVERIFY2(sceneRect(modes).right() <= sceneRect(status).right() + 0.5, qPrintable(describeRect(sceneRect(modes))));
+    QVERIFY(row->implicitWidth() <= format->width() + 0.5);
+    QVERIFY(format->property("text").toString() != QStringLiteral("FLAC · 16-bit / 44.1 kHz · Stereo · 1000 kbps"));
+
+    // Where only some of the format fits, the modes follow what is shown,
+    // with no hole where the parts that were dropped would be.
+    QSet<qsizetype> shown;
+    for (int width = 2400; width >= narrow; width -= 23) {
+        harness.window->setWidth(width);
+        QTRY_COMPARE(status->width(), qreal(width));
+        laidOut();
+        QVERIFY2(sceneRect(modes).right() <= sceneRect(status).right() + 0.5, qPrintable(QString::number(width)));
+        const QString text = format->property("text").toString();
+        if (text.isEmpty() || text.contains(QStringLiteral("kbps"))) {
+            continue;
+        }
+        shown.insert(text.size());
+        QVERIFY2(sceneRect(modes).left() - sceneRect(row).right() >= 12.0
+                     && sceneRect(modes).left() - sceneRect(row).right() <= 20.0,
+                 qPrintable(QStringLiteral("%1 px after \"%2\" at %3")
+                                .arg(sceneRect(modes).left() - sceneRect(row).right()).arg(text).arg(width)));
+    }
+    QVERIFY(!shown.isEmpty());
+
+    // With room for the modes alone, they take the format's place, with no
+    // gap kept for it to push the bar's right end out of the window.
+    const int tight = int(std::ceil(formatLeft + modes->width())) + 8;
+    harness.window->setWidth(tight);
+    QTRY_COMPARE(status->width(), qreal(tight));
+    laidOut();
+    QCOMPARE(format->property("text").toString(), QString());
+    QCOMPARE(sceneRect(modes).left(), formatLeft);
+    auto *content = status->property("contentItem").value<QQuickItem *>();
+    QVERIFY(content != nullptr);
+    QVERIFY2(content->implicitWidth() > 0 && sceneRect(modes).right() <= sceneRect(content).right() + 0.5,
+             qPrintable(describeRect(sceneRect(modes))));
+    QVERIFY2(modes->parentItem()->width() >= modes->width()
+                 && modes->parentItem()->width() < modes->width() + 16,
+             qPrintable(QString::number(modes->parentItem()->width())));
 }
 
 void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
