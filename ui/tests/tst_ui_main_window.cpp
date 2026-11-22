@@ -1565,8 +1565,10 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
         QVERIFY2(block > 96.0 + 12, qPrintable(QString::number(block)));
         QCOMPARE(sceneRect(cover).topLeft(), sceneRect(panel).topLeft());
         QCOMPARE(sceneRect(cover).bottom(), sceneRect(seam).top());
-        // The lines' top stays, 10 px down beside it.
-        QCOMPARE(sceneRect(named(window, "nowPlayingNarrowTitle")).top() - sceneRect(panel).top(), 10.0);
+        // The lines' top, one for every track, lower than 10 px down.
+        const qreal top = panel->property("centredTextTop").toReal();
+        QVERIFY2(top > 10.0, qPrintable(QString::number(top)));
+        QCOMPARE(sceneRect(named(window, "nowPlayingNarrowTitle")).top() - sceneRect(panel).top(), top);
     }
     QQuickItem *narrowTitle = named(window, "nowPlayingNarrowTitle");
     QVERIFY(shown(narrowTitle));
@@ -1578,12 +1580,14 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     QCOMPARE(colorOf(named(window, "nowPlayingNarrowDetails")), tokenHex(window, "textTertiary"));
     // Beside the cover the long title wraps onto a second line, where it
     // is cut off (on one line, beside the cover at 24 pt, most of a title
-    // was), and the seam is 12 px under the lowest of the lines, the cover
-    // flush with it.
+    // was), and the seam is 6 px or more under the lowest of the lines, the
+    // cover flush with it.
     QTRY_COMPARE(narrowTitle->property("lineCount").toInt(), 2);
     QVERIFY(narrowTitle->property("elided").toBool());
     QVERIFY(QQuickTest::qWaitForPolish(window));
-    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(named(window, "nowPlayingNarrowDetails")).bottom(), 12.0);
+    const qreal leastFoot = panel->property("besideLeastFoot").toReal();
+    QVERIFY(leastFoot >= 6.0);
+    QTRY_VERIFY(sceneRect(seam).top() - sceneRect(named(window, "nowPlayingNarrowDetails")).bottom() >= leastFoot - 0.5);
     QCOMPARE(sceneRect(cover).bottom(), sceneRect(seam).top());
     QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
     // A title that fits stays on one line, and the block keeps the room of
@@ -1908,8 +1912,16 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     // but where the cover fills the block beside the lines, flush with the
     // seam: the block keeps the room of a title on two lines, whatever the
     // track (nowPlayingNarrowBlockIsOneHeightForEveryTrack).
-    QTRY_VERIFY(sceneRect(seam).top() - bottom >= 12.0);
-    if (arrangement == QStringLiteral("beside") && coverSide > 96.0) {
+    const bool fillsBlock = arrangement == QStringLiteral("beside") && coverSide > 96.0;
+    QTRY_VERIFY(sceneRect(seam).top() - bottom >= (fillsBlock ? 6.0 : 12.0) - 0.5);
+    if (fillsBlock) {
+        // A title on one line and the three under it centred on the cover,
+        // as far as the room for a title's second line lets them (10 px
+        // down, they had some 14 px over and 36 under).
+        const qreal above = sceneRect(title).top() - tile.top();
+        const qreal below = tile.bottom() - sceneRect(details).bottom();
+        QVERIFY2(above > 10.0 && below - above <= 14.0 && below >= above - 1.0,
+                 qPrintable(QStringLiteral("%1 over and %2 under").arg(above).arg(below)));
         QCOMPARE(tile.bottom(), sceneRect(seam).top());
     } else {
         QVERIFY(sceneRect(seam).top() - tile.bottom() >= 12.0);
@@ -2086,9 +2098,17 @@ void UiMainWindowTest::nowPlayingNarrowBlockIsOneHeightForEveryTrack() {
     QCOMPARE(colorOf(named(window, "nowPlayingNarrowAlbum")), tokenHex(window, "textSecondary"));
     QCOMPARE(colorOf(details), tokenHex(window, "textTertiary"));
     QVERIFY(tokenHex(window, "textSecondary") != tokenHex(window, "text"));
-    // The lines stay in the block, 12 px or more over the seam.
+    // The lines stay in the block, 12 px or more over the seam, or 6 beside
+    // a cover that fills the block, whose middle they keep to; and their
+    // top is the same for every track, so a track change moves no title.
+    const qreal coverSide = named(window, "nowPlayingCover")->width();
+    const bool fillsBlock = arrangement == QStringLiteral("beside") && coverSide > 96.0;
+    const qreal leastFoot = fillsBlock ? 5.0 : 11.0;
+    QQuickItem *titleLine = named(window, "nowPlayingNarrowTitle");
+    const qreal titleTop = sceneRect(titleLine).top();
     const auto linesInside = [&]() {
-        return sceneRect(seam).top() - sceneRect(details).bottom() >= 11.0;
+        return sceneRect(seam).top() - sceneRect(details).bottom() >= leastFoot
+            && (!fillsBlock || sceneRect(titleLine).top() == titleTop);
     };
     QVERIFY(linesInside());
 

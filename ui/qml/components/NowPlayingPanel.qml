@@ -24,9 +24,10 @@ import "../logic/PathUtils.js" as PathUtils
 // - Narrow (a sidebar under narrowWidth): the cover at the panel's top
 //   left corner, as the wide one is, at every font size (not inset 12 px,
 //   at the top of the title's capitals), with four short lines beside it,
-//   12 px after it and 10 px down, the cover as high as the block, flush
-//   with the seam, where the lines keep a dozen characters beside it, and
-//   96 px otherwise (besideCoverSize); or a 96 px cover with the lines
+//   12 px after it, the cover as high as the block, flush with the seam,
+//   where the lines keep a dozen characters beside it, the lines centred
+//   on it (centredTextTop), and 96 px otherwise (besideCoverSize), the
+//   lines 10 px down; or a 96 px cover with the lines
 //   under it when there is no room beside it, then 12 px before the seam.
 //   Under it, the title wraps onto a second line rather than be cut off,
 //   and under a title on one line the artist, or else the album, and the
@@ -1092,7 +1093,19 @@ Item {
     // The top of the lines beside the narrow cover; beside the large-font
     // header's cover, at its top (besideTextTop).
     readonly property int narrowTextTop: 10
-    readonly property int besideTextTop: root.largeHeader ? 0 : root.narrowTextTop
+    readonly property int besideTextTop: root.largeHeader ? 0
+        : root.narrowBeside ? root.centredTextTop : root.narrowTextTop
+    // The top of the lines beside a cover that fills the block, one for
+    // every track, from the room they keep (narrowReservedHeight): a
+    // title's four lines centred on the cover, as far as the second line
+    // of a title on two, which that room is for, leaves besideLeastFoot
+    // over the seam (10 px down, the common four stood 14 px under the
+    // cover's top and 36 over its foot; centred whole, a title on two
+    // lines set the details on the seam).
+    readonly property int besideLeastFoot: 6
+    readonly property int centredTextTop: Math.max(root.narrowTextTop, Math.round(Math.min(
+        (root.besideCoverSize - (root.narrowReservedHeight - narrowTitleProbe.implicitHeight / 2)) / 2,
+        root.besideCoverSize - root.narrowReservedHeight - root.besideLeastFoot)))
     // Where the line under the cover starts down: under the cover's
     // place, and while the track's layout grows from the compact
     // row, or shrinks into it, never above the row's foot, so the lines do
