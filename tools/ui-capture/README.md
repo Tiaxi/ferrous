@@ -37,7 +37,8 @@ With RPM Fusion's `ffmpeg` installed, leave out `ffmpeg-free`; either has the en
   `iconprobe` links.
 
 The probes are built by `build_probes.sh`, which `shoot_round.sh` runs before each capture. They use public Qt API
-only and are rebuilt when their source changes or the system Qt does:
+only and are rebuilt when their source, their flags, the compiler or the system Qt change (by content: another
+checkout of the same source needs no rebuild):
 
 - `shotprobe.cpp`: loaded into the app with `LD_PRELOAD`; reads commands from a FIFO (evaluate QML, find, click,
   key, hover, grab, record frames, walk the item tree) and writes replies to a file;
@@ -58,29 +59,31 @@ only and are rebuilt when their source changes or the system Qt does:
 The icon comparison sheets read candidate icon trees from outside the source, and only when set:
 `SHOT_ICON_B` with `SHOT_ICON_AB=1`, `SHOT_ICON_VARIANTS_DIR` with `SHOT_ICON_VARIANT_NAMES` (and
 `SHOT_ICON_VARIANTS=1` to require them), `SHOT_ICON_BEFORE`. `SHOT_DIALOG_HOVER=1` adds the dialogs' hovered
-footer and sidebar states. See the comments in `states.py`.
+footer and sidebar states. `SHOT_FOCUS_WHOLE=1` makes a focus capture shoot whole sessions (see Running). See
+the comments in `states.py`.
 
 ## Running
 
-A full capture: every state, both themes, all reports. About 4 to 6 minutes on 4 workers once built. The first run
-also builds the app into the work folder (about 2 minutes with a warm compiler cache) and generates the fixtures
-(about 8 minutes, mostly the large library); later runs reuse both.
+A full capture: every state, both themes, all reports. About 4.5 minutes once built (a 16-thread machine, 8
+workers: about 210 s shooting, 60 s reports and packing). The first run also
+builds the app into the work folder (about 90 seconds with a warm compiler cache) and generates the fixtures
+(about 8 minutes, mostly the large library); later runs reuse both, and the build is then a no-op of under a second.
 
 ```bash
 tools/ui-capture/shoot_round.sh r1                      # this checkout
 tools/ui-capture/shoot_round.sh r2 ~/src/ferrous-branch --out /tmp/ui-rounds
 ```
 
-A focus capture shoots the sessions that the named scopes of `focus.py` need, once (the union of theirs), and
-packs only their images, into `<round>-focus/`; when the whole run passes (no failed check or state), it
+A focus capture shoots what the packs of the named scopes of `focus.py` read, each state once (the union of theirs),
+and packs only their images, into `<round>-focus/`; when the whole run passes (no failed check or state), it
 publishes each to `<round>/focus/<scope>/`. So does a full capture given `--focus`. A scope's folder is the whole of one reviewer task: `FOCUS.md`, `FOCUS-FACTS.md` and the
 images. The round's packs of other scopes stay.
 
 ```bash
-tools/ui-capture/shoot_round.sh r1 --census                      # the seven census packs, one run
-tools/ui-capture/shoot_round.sh r1 --focus-only dialogs          # one pack
+tools/ui-capture/shoot_round.sh r1 --census                      # the seven census packs, one run: 4 min
+tools/ui-capture/shoot_round.sh r1 --focus-only dialogs          # one pack: 15 s (app-icon) to 2 min (whole-app)
 tools/ui-capture/shoot_round.sh r1 --focus-only viewers,dialogs  # several, one run
-tools/ui-capture/shoot_round.sh r1 --focus census                # the full capture, then the census packs
+tools/ui-capture/shoot_round.sh r1 --focus census                # the full capture and the census packs: 4.5 min
 ```
 
 `census` stands for the seven census scopes in either list, and `--census` is `--focus-only census`. The census
@@ -98,13 +101,32 @@ grades the whole app surface by surface:
 
 `app-icon` is a scope outside the census.
 
+Of each session and theme, a focus capture runs the lines up to the last one that makes something any of the packs
+reads (`focus_select.py`), and none of a session they read nothing of. A state's lines before it always run, so it
+looks as it does in a full capture. `whole-app` reads every shot of its run (the worst value in the round of each
+layout finding), so a census, or any list with that scope, is cut only after a session's last shot.
+
+What a line makes is read from the state table and from the few helpers in `states.py` that write facts, shots,
+floors, accessibility events and contrast measures (`_fact`, `_save_shot`, ...): write through those, with the key's
+start as a literal where it can be. A key known only at run time counts as needed by every scope; a write the
+selection cannot read makes focus captures shoot whole sessions, and say so in the log (`whole sessions are shot`).
+`SHOT_FOCUS_WHOLE=1` forces whole sessions, to check a cut.
+
+When a round needs both the census packs and the full capture's checks, `--focus census` is the cheaper way
+(about 270 s, against 240 + 265 s for the two runs): the full capture shoots every census state anyway. But it
+publishes the packs only when the full capture's own checks pass too; while one of those fails, use `--census`.
+
 While fixing one area: `--only AREA[,AREA]`, `--sessions S1,S2` or `--themes dark` re-shoot just those states
 into an existing round (wiping nothing) and rebuild its sheets and `INDEX.md`. `--workers N` sets the parallel
-sessions (at most 4).
+sessions (at most 8; default: half the CPU threads, from 4 to 8). They mostly wait, but as they start and analyse
+their first tracks 8 fill every CPU for a second or two; 12 already cost the recordings' timing fidelity.
 
 `--pack-jobs N` sets the worker processes of `pack.py` (default: half the CPU threads, from 2 to 8). Memory grows
-with them: at 8 workers a full pack took about 6.6 GB; at 3 it finished in about 4 minutes with no process above
-130 MB resident. Beside a build, use `--pack-jobs 3`.
+with them: each holds one recording's frames, as tiles, up to 256 MB of them (`framestore.py`). Beside a build, use
+`--pack-jobs 3`.
+
+Where the time went is in `<round>/timings/`: `phases.tsv` (the run's phases and reports), `pack.tsv` (pack.py's
+steps) and one file per session and theme (startup, each line, and each step verb's and macro's total).
 
 The exit status is not 0 when a state failed (`failures.txt`, 4), a check in the pack failed (a dialog shot not
 of its dialog, a missing core image, an image over its size, a home-folder path left in a shot, an image the
@@ -116,8 +138,10 @@ privacy check cannot verify: 3), or `CONTRAST.md` is incomplete (5).
    target there (Release, `BUILD_TESTING=OFF`). The build always runs; it is a no-op when nothing changed.
 2. Builds the probes, generates any missing fixtures, and rescans the fixture library into a template database
    with the new binary when the Rust sources or the fixtures changed.
-3. Runs `states.py` with `runner.py` in up to 4 isolated workers, longest sessions first (scheduled from the last
-   run's timings), each at `nice 10`.
+3. Runs `states.py` with `runner.py` in isolated workers, each at `nice 10` and with its own GStreamer registry and
+   shader cache, kept from round to round (`run/gst-registry-w*`, `run/mesa-cache-w*`). They share one queue, the
+   longest sessions first (by the work folder's history of their times, `run/session-times.json`); a session that a
+   worker did not finish fails the run.
 4. Writes `MOTION.md`, `CONTRAST.md` and `LAYOUT.md`, then `pack.py` builds the sheets, strips and `INDEX.md`.
 
 ## Fixtures
@@ -212,9 +236,9 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
 - **Always rebuild.** The build step always runs. Never point `SHOT_APP` at a binary someone else may rebuild
   mid-run, and never skip the build because the mirror looked unchanged: a failed build would leave an older
   binary under a newer source.
-- **Don't overlap captures with builds.** A full capture and a focus capture use about 11 GB together over the
-  idle baseline; with a build beside them, a 32 GB machine can run out of memory. The recordings are also timing
-  measurements, which a busy machine skews. Runs take one lock per work folder (`$SHOT_WORK/.run.lock`), whatever
+- **Don't overlap captures with builds.** A census or a full capture uses about 10 GB over the idle baseline at
+  its peak, while packing (shooting with 8 workers: about 5 GB); with a build beside it, a 32 GB machine can run
+  out of memory. The recordings are also timing measurements, which a busy machine skews. Runs take one lock per work folder (`$SHOT_WORK/.run.lock`), whatever
   their build tag: a second run waits for the first. Every tag shares the probes, the fixtures, the template
   database, the setup app and the bus sockets, so runs that must go side by side need separate work folders
   (`SHOT_WORK`). Use `SHOT_BUILD_WRAPPER` to keep the compile step in line with your other builds.
@@ -232,6 +256,9 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
   already there. Run it from a terminal session; it unsets `DISPLAY` and `WAYLAND_DISPLAY` for the app and opens
   no window. Use `SHOT_KWIN=1` (the default in `shoot_round.sh`): plain `QT_QPA_PLATFORM=offscreen` uses the
   software renderer, which draws the plots wrong.
+- **A grab takes as long as the machine is busy** (it encodes a PNG and walks the layout). Never make one race
+  a timer of the app's, as `closeups` once raced a tooltip's 700 ms delay with two: hold the timer back
+  (`states.tooltip_held`) or wait for the state.
 - **Fresh template database.** The library database stores absolute paths. It is rebuilt when its key (Rust
   sources, fixtures, the library's path, neutral or not) changes; a session fails loudly if the library's roots
   are not the fixture library.
@@ -242,6 +269,10 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
   Shift once through KWin's fake-input protocol (`kwin_input.py`; the driver's `.desktop` file lets this Python
   use it). After that the probe sends a key to the open menu's window, and a pointer event to the menu window
   under it, as KWin would.
+- **Qt's pointer starts at 0, 0.** On Wayland Qt knows the pointer from where it last entered a window, and the
+  probe's events are no enter. Until one, a closing menu hovered what is at 0, 0, File, and later clicks on the
+  menu bar opened File in place of the menu clicked. So each session also moves KWin's pointer into the window
+  at `away`'s neutral spot and out again, and `menu I` fails unless menu I is what shows.
 - **A main-window grab draws in its open menus**, each at its place, and grows right and down for a menu that
   reaches past the window, mid grey there. The menus' KWin shadows are not in it. A main-window strip does the same
   for every frame (`popup_frames.py`): the probe records each menu window's frames and notes where it shows, moves
@@ -267,6 +298,8 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
 | `runner.py` | runs the state table in parallel workers; its docstring lists the step syntax |
 | `states.py` | the state table, sessions, macros, sheets, the core set and the checks a state must pass |
 | `focus.py` | the focus scopes and the census: sessions, sheets and images with what to look at |
+| `focus_select.py` | which lines of each session a focus capture shoots, and what its pack builds |
+| `colours.py`, `framestore.py` | exact colour counts, and a recording's frames decoded once, for the analysers |
 | `popup_frames.py` | draws a main-window strip's menus into its frames |
 | `layout.py`, `contrast.py`, `motion_strip.py`, `motion_inventory.py` | the analysers |
 | `pack.py` | sheets, strips, privacy painting, `INDEX.md`, `CORE-FACTS.md`, the focus packs |

@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("SHOT_OUT", "/nonexistent/shots")
 os.environ.setdefault("SHOT_APP", "x")
 import states as st  # noqa: E402
+from colours import unique_colours  # noqa: E402
 
 SEVERITY = {"text-clipped": 1, "text-overflow": 1, "out-of-bounds": 1, "overlap": 2, "elided": 3, "contrast": 4}
 TITLES = {1: "Clipped or overflowing text, and items out of bounds", 2: "Overlapping siblings in layouts",
@@ -89,7 +90,8 @@ def band_background(arr, rect, sc, ink):
     if x1 - x0 < 2 or y1 - y0 < 2:
         return None, 0
     sub = arr[y0:y1, x0:x1].reshape(-1, 3).astype(np.int32)
-    sub = sub[((sub - np.array(ink)) ** 2).sum(1) > 70 ** 2]
+    dr, dg, db = (sub[:, c] - int(ink[c]) for c in range(3))  # (per channel: a sum over an axis of 3 is slow)
+    sub = sub.take(np.flatnonzero(dr * dr + dg * dg + db * db > 70 ** 2), axis=0)
     if len(sub) == 0:
         return None, 0
     keys = (sub[:, 0] << 16) | (sub[:, 1] << 8) | sub[:, 2]
@@ -313,7 +315,7 @@ def drawn_caption(img, a, off, sc):
         return None
     arr = np.asarray(img.crop((X0, Y0, X1, Y1)).convert("RGB")).astype(int)
     flat = arr.reshape(-1, 3)
-    vals, counts = np.unique(flat, axis=0, return_counts=True)
+    vals, counts = unique_colours(flat)
     bg = vals[counts.argmax()]
     ink = np.abs(arr - bg).sum(axis=2) > 120
     cols = np.nonzero(ink.any(axis=0))[0]

@@ -25,7 +25,7 @@ SCRIPT = os.path.join(HERE, "shoot_round.sh")
 # the helpers shoot_round.sh runs from its own folder; make_fixtures.py makes the folder it is given (the script
 # then renames it into place), setup_db_round.py the template folder (the script writes its key there), and
 # pack.py records its arguments
-NOOP_PY = ["runner.py", "motion_inventory.py", "contrast.py", "layout.py",
+NOOP_PY = ["motion_inventory.py", "contrast.py", "layout.py",
            "make_extra_fixtures.py", "make_cover_art.py", "make_broadband_fixtures.py",
            "make_standin_fixtures.py", "make_large_library.py", "make_library2.py"]
 MAKE_DIR_PY = "import os, sys\nos.makedirs(sys.argv[1], exist_ok=True)\n"
@@ -78,21 +78,25 @@ class ShootRoundBase(unittest.TestCase):
         write(os.path.join(self.h, "make_fixtures.py"), MAKE_DIR_PY)
         write(os.path.join(self.h, "setup_db_round.py"), SETUP_DB_PY)
         write(os.path.join(self.h, "pack.py"), PACK_PY)
+        write(os.path.join(self.h, "runner.py"), RUNNER_PY)
         write(os.path.join(self.h, "build_probes.sh"), "#!/bin/sh\nexit 0\n", 0o755)
         bindir = os.path.join(self.tmp, "bin")
         for tool in ("cmake", "gst-launch-1.0"):
             write(os.path.join(bindir, tool), "#!/bin/sh\nexit 0\n", 0o755)
         write(os.path.join(bindir, "rsync"), RSYNC_SH, 0o755)
         write(os.path.join(bindir, "bc"), BC_SH, 0o755)
+        write(os.path.join(bindir, "nproc"), '#!/bin/sh\necho "${STUB_NPROC:-16}"\n', 0o755)
         self.src = os.path.join(self.tmp, "src")
         write(os.path.join(self.src, "ui", "CMakeLists.txt"), "")
         write(os.path.join(self.src, "src", "main.rs"), "")
         write(os.path.join(self.src, "Cargo.lock"), "")
         self.argv_out = os.path.join(self.tmp, "pack-argv.json")
+        self.runner_argv_out = os.path.join(self.tmp, "runner-argv.json")
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("SHOT_")}
         self.env.update(PATH=bindir + os.pathsep + os.environ.get("PATH", ""),
                         HOME=self.tmp, XDG_CACHE_HOME=os.path.join(self.tmp, "cache"),
-                        SHOT_WORK=os.path.join(self.tmp, "work"), SHOT_NEUTRAL="0", PACK_ARGV_OUT=self.argv_out)
+                        SHOT_WORK=os.path.join(self.tmp, "work"), SHOT_NEUTRAL="0", PACK_ARGV_OUT=self.argv_out,
+                        RUNNER_ARGV_OUT=self.runner_argv_out)
 
     def run_script(self, *args):
         return subprocess.run(["bash", os.path.join(self.h, "shoot_round.sh"), "r1", self.src, *args],
@@ -105,6 +109,21 @@ class ShootRoundOptions(ShootRoundBase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         with open(self.argv_out) as f:
             return json.load(f)
+
+    def runner_argv(self, *args):
+        self.pack_argv(*args)
+        with open(self.runner_argv_out) as f:
+            return json.load(f)
+
+    def test_workers_default_to_half_the_threads_from_4_to_8(self):
+        for threads, workers in (("2", "4"), ("12", "6"), ("16", "8"), ("64", "8")):
+            with self.subTest(threads=threads):
+                self.env["STUB_NPROC"] = threads
+                self.assertEqual(self.runner_argv(), ["--workers", workers])
+
+    def test_workers_are_capped_at_8(self):
+        self.assertEqual(self.runner_argv("--workers", "3"), ["--workers", "3"])
+        self.assertEqual(self.runner_argv("--workers", "30"), ["--workers", "8"])
 
     def test_pack_jobs_reaches_pack(self):
         argv = self.pack_argv("--pack-jobs", "3")
@@ -156,6 +175,19 @@ class ShootRoundFocus(ShootRoundBase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(self.sessions_shot(), focus.sessions_of(focus.CENSUS))
         self.assertEqual(self.published(), sorted(focus.CENSUS))
+
+    def test_the_runner_shoots_only_what_the_named_scopes_read(self):
+        for given, scopes in (("census", focus.CENSUS), ("viewers, dialogs,viewers", ["viewers", "dialogs"])):
+            with self.subTest(scopes=given):
+                self.assertEqual(self.run_script("--focus-only", given).returncode, 0)
+                with open(self.runner_out) as f:
+                    argv = json.load(f)
+                self.assertEqual(argv[argv.index("--focus") + 1], ",".join(scopes))  # (resolved: each once)
+
+    def test_a_full_run_is_never_cut_for_its_focus_packs(self):
+        self.assertEqual(self.run_script("--focus", "census").returncode, 0)
+        with open(self.runner_out) as f:
+            self.assertEqual(json.load(f), ["--workers", "8"])
 
     def test_census_takes_options_after_it(self):
         p = self.run_script("--census", "--workers", "2")

@@ -2,11 +2,12 @@
 # A screenshot pack of the Ferrous UI for one round, from a source tree, in one command.
 #
 #   shoot_round.sh <round> [<source-dir>] [--out DIR] [--only AREA[,AREA...]] [--themes dark,light]
-#                  [--sessions S1,S2] [--workers N]   (parallel isolated app sessions; default 4, at most 4)
+#                  [--sessions S1,S2] [--workers N]   (parallel isolated app sessions; at most 8; default: half the
+#                  CPU threads, from 4 to 8)
 #                  [--pack-jobs N]   (pack.py's worker processes; default pack.py's own, 2 to 8 by the CPUs)
 #                  [--focus SCOPES | --focus-only SCOPES | --census]   (<round>/focus/<scope>/: the small pack of each
 #                  scope of focus.py in the comma-separated list, "census" for the census scopes; --focus-only shoots
-#                  just the union of their sessions, once; --census is --focus-only census)
+#                  just what their packs read, each state once; --census is --focus-only census)
 #
 # <source-dir>: the tree under test (default: the checkout that holds this script). --out DIR: where rounds go
 # (default $SHOT_OUT_ROOT, else $SHOT_WORK/rounds). $SHOT_WORK: the work folder (default
@@ -46,7 +47,11 @@ OUTROOT=${SHOT_OUT_ROOT:-$WORK/rounds}
 ONLY=""
 PARTIAL=""
 FOCUS_ONLY=""
-WORKERS=4
+# The sessions wait far more than they compute, though as they start 8 fill every CPU for a second or two. More than
+# 8 show in the recordings' timing: at 12, more frame gaps and latency outliers.
+MAX_WORKERS=8
+WORKERS=$(( $(nproc) / 2 ))
+WORKERS=$(( WORKERS < 4 ? 4 : WORKERS > MAX_WORKERS ? MAX_WORKERS : WORKERS ))
 RUNNER_ARGS=()
 PACK_ARGS=()
 while [ $# -gt 0 ]; do
@@ -58,7 +63,7 @@ while [ $# -gt 0 ]; do
         --out) OUTROOT=$2; shift 2 ;;
         --only) ONLY=$2; PARTIAL=1; RUNNER_ARGS+=(--only "$2"); shift 2 ;;
         --themes|--sessions) PARTIAL=1; RUNNER_ARGS+=("$1" "$2"); shift 2 ;;
-        --workers) WORKERS=$(( $2 > 4 ? 4 : $2 )); shift 2 ;;
+        --workers) WORKERS=$(( $2 > MAX_WORKERS ? MAX_WORKERS : $2 )); shift 2 ;;
         # fewer pack workers use less memory (see README.md); without it, pack.py picks its own count
         --pack-jobs)
             [[ $2 =~ ^[1-9][0-9]*$ ]] || { echo "--pack-jobs needs a whole number of 1 or more (got '$2')" >&2; exit 2; }
@@ -79,7 +84,7 @@ if [ -n "${SHOT_FOCUS:-}" ]; then  # every scope must exist (loudly, before buil
     echo "focus scopes: $SHOT_FOCUS (sessions: $FOCUS_SESSIONS)"
     if [ -n "$FOCUS_ONLY" ]; then
         PARTIAL=1
-        RUNNER_ARGS+=(--sessions "$FOCUS_SESSIONS")
+        RUNNER_ARGS+=(--sessions "$FOCUS_SESSIONS" --focus "$SHOT_FOCUS")
     fi
 fi
 # The icon A/B (SHOT_ICON_AB=1) needs variant B's folder: fail before building, never a sheet without its B row.
@@ -249,12 +254,15 @@ cat "$OUT"/worker*.log 2>/dev/null | grep -E "!!" || true
 
 # 4. Package.
 python3 "$H/motion_inventory.py" "$OUT" "$SRC"
+phase motion-inventory
 CONTRAST_STATUS=0
 python3 "$H/contrast.py" "$OUT" || CONTRAST_STATUS=$?
+phase contrast
 nice -n 10 python3 "$H/layout.py" "$OUT"
+phase layout
 PACK_STATUS=0
 SHOT_PARTIAL="$PARTIAL" nice -n 10 python3 "$H/pack.py" "$OUT" "$SRC" "${PACK_ARGS[@]}" || PACK_STATUS=$?
-phase package
+phase pack
 # publish the focus packs to <round>/focus/<scope>/ when the whole run passed (no failed check, measurement or
 # state): every pack copied aside first, then each renamed in. The round's packs of other scopes stay.
 if [ -n "${SHOT_FOCUS:-}" ] && [ "$PACK_STATUS" -eq 0 ] && [ "$CONTRAST_STATUS" -eq 0 ] && [ ! -s "$OUT/failures.txt" ]; then

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Runs the state table (states.py) against the app: one app session per (session, theme).
 
-Usage: runner.py [--only AREA[,AREA...]] [--sessions S1,S2] [--themes dark,light] [--list]
+Usage: runner.py [--only AREA[,AREA...]] [--sessions S1,S2] [--themes dark,light] [--focus SCOPES] [--list]
 
 Each STATES line is (session, area, state, steps, description). Steps are separated by
 " | "; the line ends with a grab named <area>_<state>_<theme>_<scale>x_<W>x<H>.png unless
 the state starts with "_" (setup) or the area is "motion" (a frame strip, see `strip`).
 With --only, a session runs its setup lines and the lines of the given areas only.
+With --focus, a session runs its lines up to the last one any of the scopes' packs reads (focus_select.py).
 Step verbs: see Runner.step_* below.
 """
 import argparse
@@ -14,12 +15,13 @@ import glob
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from shotlib import Session, KEY, SHIFT, CTRL, ALT, FIND  # noqa: E402
+from shotlib import Session, session_suffix, KEY, SHIFT, CTRL, ALT, FIND  # noqa: E402
 import states  # noqa: E402
 
 MODS = {"shift": SHIFT, "ctrl": CTRL, "alt": ALT}
@@ -29,6 +31,8 @@ class Runner:
     def __init__(self, s):
         self.s = s
         self.win = ""
+        self.verb_times = {}  # verb (macro NAME for macros) -> [count, seconds], top-level steps only
+        self._depth = 0
 
     # --- targets: NAME, NAME#k, NAME@fx,fy, NAME#k@fx,fy, xy:X,Y, menubar:I, menuitem:M:I
     def named_rect(self, name):
@@ -113,7 +117,17 @@ class Runner:
     def run_steps(self, text):
         for step in [t.strip() for t in text.split(" | ") if t.strip()]:
             verb, _, rest = step.partition(" ")
-            getattr(self, "step_" + verb.replace("-", "_"))(rest.strip())
+            t0 = time.time()
+            self._depth += 1
+            try:
+                getattr(self, "step_" + verb.replace("-", "_"))(rest.strip())
+            finally:
+                self._depth -= 1
+                if not self._depth:  # (a strip's action steps count as the strip's)
+                    key = "macro " + rest.split()[0] if verb == "macro" and rest.split() else verb
+                    c = self.verb_times.setdefault(key, [0, 0.0])
+                    c[0] += 1
+                    c[1] += time.time() - t0
 
     def step_wait(self, a):
         time.sleep(float(a))
@@ -434,14 +448,16 @@ class Runner:
                    for p in self.s.popups(self.win if win is None else win))
 
 
-def run_session(name, tag, lines, only):
+def run_session(name, tag, lines, only, cut=None):
     kw = dict(states.SESSIONS[name])
     kw.pop("themes", None)
     t_start = time.time()
     s = Session(name, tag, **kw)
     r = Runner(s)
     failures = []
-    timing = dict(session=name, theme=tag, startup=round(s.startup_s, 2), lines={})
+    timing = dict(session=name, theme=tag, startup=round(s.startup_s, 2), lines={}, line_s=[])
+    if only or cut:  # (part of the session: its total is not the session's time)
+        timing.update(part=cut or True)
     try:
         for (_, area, state, steps, desc) in lines:
             setup = state.startswith("_")
@@ -457,6 +473,7 @@ def run_session(name, tag, lines, only):
             r.line_desc = desc
             try:
                 r.run_steps(steps)
+                t_shot = time.time()
                 if not setup and area != "motion":
                     dialog_win = None
                     menu_state = ((area == "menu" and state not in states.VERIFY_OPEN_EXEMPT)
@@ -508,6 +525,9 @@ def run_session(name, tag, lines, only):
                             json.dump(dict(shot=f"{area}_{state}_{s.suffix}.png", theme=tag, scale=s.scale,
                                            measures=r.pending_measures), f, indent=1)
                         r.pending_measures = []
+                    c = r.verb_times.setdefault("(grab and its checks)", [0, 0.0])
+                    c[0] += 1
+                    c[1] += time.time() - t_shot
             except Exception as e:  # keep going: record what failed
                 failures.append(f"{name}/{tag} {area} {state}: {e}")
                 print(f"  !! {area}_{state}: {e}", flush=True)
@@ -518,12 +538,14 @@ def run_session(name, tag, lines, only):
                 except Exception:
                     pass
             timing["lines"][f"{area}/{state}"] = round(time.time() - t_line, 2)
+            timing["line_s"].append(round(time.time() - t_line, 2))
     finally:
         s.save_index(name)
         t_quit = time.time()
         s.quit()
         timing.update(quit=round(time.time() - t_quit, 2), total=round(time.time() - t_start, 2),
-                      grabs=round(getattr(s, "t_grab", 0), 2), layout=round(getattr(s, "t_layout", 0), 2), strip_save=round(getattr(s, "t_stripsave", 0), 2))
+                      grabs=round(getattr(s, "t_grab", 0), 2), layout=round(getattr(s, "t_layout", 0), 2), strip_save=round(getattr(s, "t_stripsave", 0), 2),
+                      verbs={k: [n, round(t, 2)] for k, (n, t) in sorted(r.verb_times.items(), key=lambda kv: -kv[1][1])})
         td = os.path.join(os.path.dirname(os.environ["SHOT_OUT"].rstrip("/")), "timings")
         os.makedirs(td, exist_ok=True)
         with open(os.path.join(td, f"{name}_{tag}.json"), "w") as f:
@@ -531,34 +553,140 @@ def run_session(name, tag, lines, only):
     return failures
 
 
-def plan(jobs, workers, est):
-    """Longest-processing-time-first assignment of (session, theme) jobs to workers."""
-    loads = [[0.0, []] for _ in range(workers)]
-    for j in sorted(jobs, key=lambda j: -est(j)):
-        w = min(loads, key=lambda l: l[0])
-        w[0] += est(j)
-        w[1].append(j)
-    return loads
+# Per (session, theme) seconds of the last whole run of each session in the work folder, for the schedule of the
+# next run, whatever its out folder (a new out folder has no rounds beside it to take them from).
+HISTORY = "session-times.json"
 
 
-def estimates(rd):
-    """Per (session, theme) seconds: this round's last timings, else the most recent other round's,
-    else defaults (early measurements)."""
-    defaults = dict(empty=8, main=35, playing=27, transport=25, statusbar=45, menus=27, dialogs=37, viewers=34,
-                    focus=14, roots=6, motion=60, narrow=9, hidpi=7, bigfont=60, icons=2, animoff=30, contrast=25)
-    defaults.update({"motion-ui": 45, "narrow-empty": 2, "narrow-bigfont": 15})
+def load_json(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def history_path():
+    from driver import WORK
+    return os.path.join(WORK, "run", HISTORY)
+
+
+def record_history(rd, jobs, path=None):
+    """Adds the times of the jobs just run (this round's timings: the total and each line's) to the work folder's
+    history. Only whole sessions: a part of one would schedule the next whole run on its shorter time."""
+    path = path or history_path()
+    try:
+        hist = load_json(path)
+    except (OSError, ValueError):
+        hist = {}
+    for name, tag, cut in jobs:
+        if cut:
+            continue
+        try:
+            t = load_json(os.path.join(rd, "timings", f"{name}_{tag}.json"))
+            if not t.get("part"):
+                hist[f"{name}:{tag}"] = dict(total=t["total"], lines=t.get("line_s", []))
+        except (OSError, ValueError, KeyError):
+            pass
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(hist, f, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def estimates(rd, history=None):
+    """A function of a job (session, theme, lines or None for all): its seconds, from this round's last timings of
+    the whole session, else the work folder's history (the last whole run of each session), else the most recent
+    other round's, else defaults (measured on a full capture). A part of a session is the whole less the lines after
+    it, where those were timed."""
+    defaults = dict(empty=7, main=86, playing=79, transport=36, statusbar=52, menus=20, dialogs=55, viewers=52,
+                    focus=20, roots=7, motion=88, narrow=18, hidpi=5, bigfont=96, icons=12, animoff=7, contrast=8,
+                    queue=36, density=12)
+    defaults.update({"motion-ui": 32, "narrow-empty": 2, "narrow-bigfont": 32, "wide-bigfont": 9, "tall-bigfont": 3,
+                     "firstplay-noart": 23, "firstrun-defaults": 2, "icon-noart24": 8})
+    light_motion = {"motion": 0.66, "motion-ui": 0.6}
     found = {}
-    dirs = [os.path.join(rd, "timings")] + sorted(glob.glob(os.path.join(os.path.dirname(rd), "*", "timings")),
-                                                  key=os.path.getmtime, reverse=True)
-    for td in dirs:
+
+    def take(td):
         for p in glob.glob(os.path.join(td, "*.json")):
             try:
-                t = json.load(open(p))
-                found.setdefault((t["session"], t["theme"]), t["total"])
-            except Exception:
+                t = load_json(p)
+                if not t.get("part"):
+                    found.setdefault((t["session"], t["theme"]), (float(t["total"]), t.get("line_s", [])))
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):  # (not a session's timings)
                 pass
-    light_motion = {"motion": 0.5, "motion-ui": 0.6}
-    return lambda j: found.get(j, defaults.get(j[0], 30) * (light_motion.get(j[0], 1) if j[1] == "light" else 1))
+
+    take(os.path.join(rd, "timings"))
+    try:
+        for k, v in load_json(history or history_path()).items():
+            name, _, tag = k.rpartition(":")
+            found.setdefault((name, tag), (float(v["total"]), v.get("lines", [])))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    for td in sorted(glob.glob(os.path.join(os.path.dirname(rd), "*", "timings")), key=os.path.getmtime, reverse=True):
+        take(td)
+
+    def est(job):
+        name, tag, cut = job
+        total, lines = found.get((name, tag), (
+            defaults.get(name, 30) * (light_motion.get(name, 1) if tag == "light" else 1), []))
+        if not cut:
+            return total
+        n = sum(1 for line in states.STATES if line[0] == name)
+        if len(lines) == n:
+            return total - sum(lines[cut:])
+        return total * min(1.0, cut / max(1, n))
+
+    return est
+
+
+def encode_job(job):
+    name, tag, cut = job
+    return f"{name}:{tag}" + (f":{cut}" if cut else "")
+
+
+def decode_job(text):
+    name, tag, *cut = text.split(":")
+    return name, tag, int(cut[0]) if cut else None
+
+
+def claim(folder, job):
+    """Takes a job of the shared queue; False when another worker has it."""
+    try:
+        os.close(os.open(os.path.join(folder, f"{job[0]}_{job[1]}"), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return False
+    return True
+
+
+def mark_done(folder, job):
+    with open(os.path.join(folder, f"{job[0]}_{job[1]}.done"), "w"):
+        pass
+
+
+def unfinished(folder, jobs):
+    """The jobs no worker finished: not started, or cut off (the worker died)."""
+    return [j for j in jobs if not os.path.exists(os.path.join(folder, f"{j[0]}_{j[1]}.done"))]
+
+
+def focus_jobs(spec, jobs):
+    """The jobs the focus scopes `spec` names (focus.resolve) need together, each cut after the last line any of
+    their packs reads; whole sessions, loudly, where that cannot be told."""
+    import focus
+    import focus_select
+    suffix = lambda tag, kw: session_suffix(tag, kw.get("scale", 1), kw.get("size", (1600, 1000)), kw.get("suffix_extra", ""))
+    names = focus.resolve(spec)
+    need, problems = focus_select.prefixes([focus.SCOPES[nm] for nm in names], [j[:2] for j in jobs], states,
+                                           suffix)
+    if problems:
+        print(f"!! focus {','.join(names)}: whole sessions are shot, as what they need cannot be told: "
+              + "; ".join(problems[:5]), flush=True)
+        return jobs
+    out = []
+    for name, tag, _ in jobs:
+        n, total = need.get((name, tag), 0), sum(1 for line in states.STATES if line[0] == name)
+        print(f"focus: {name}/{tag}: " + (f"{n} of {total} lines" if n else "not needed"), flush=True)
+        if n:
+            out.append((name, tag, n if n < total else None))
+    return out
 
 
 def main():
@@ -567,7 +695,9 @@ def main():
     ap.add_argument("--sessions", default="")
     ap.add_argument("--themes", default="")
     ap.add_argument("--workers", type=int, default=1)
-    ap.add_argument("--jobs", default="", help="internal: session:theme,... for one worker")
+    ap.add_argument("--focus", default="", help="shoot only what the packs of these focus scopes read (focus.resolve)")
+    ap.add_argument("--jobs", default="", help="internal: session:theme[:lines],... the queue of one worker")
+    ap.add_argument("--claims", default="", help="internal: the folder where workers claim the queue's jobs")
     ap.add_argument("--list", action="store_true")
     o = ap.parse_args()
     only = [x for x in o.only.split(",") if x]
@@ -582,7 +712,7 @@ def main():
         return
     rd = os.path.dirname(os.environ["SHOT_OUT"].rstrip("/"))
     if o.jobs:
-        jobs = [tuple(j.split(":")) for j in o.jobs.split(",")]
+        jobs = [decode_job(j) for j in o.jobs.split(",")]
     else:
         jobs = []
         for name in order:
@@ -594,43 +724,71 @@ def main():
             themes = states.SESSIONS[name].get("themes", ("dark", "light"))
             if o.themes:
                 themes = [t for t in themes if t in o.themes.split(",")]
-            jobs += [(name, t) for t in themes]
+            jobs += [(name, t, None) for t in themes]
+        # (--only and --themes pick for themselves; SHOT_FOCUS_WHOLE=1 shoots whole sessions, to check a cut)
+        if o.focus and not only and not o.themes and os.environ.get("SHOT_FOCUS_WHOLE") != "1":
+            jobs = focus_jobs(o.focus, jobs)
     if not o.jobs and o.workers > 1 and len(jobs) > 1:
         import subprocess
         est = estimates(rd)
-        loads = plan(jobs, min(o.workers, len(jobs)), est)
+        jobs.sort(key=lambda j: -est(j))  # longest first; a free worker takes the next
+        claims = os.path.join(rd, "claims")
+        shutil.rmtree(claims, ignore_errors=True)
+        os.makedirs(claims)
+        n_workers = min(o.workers, len(jobs))
+        total = sum(est(j) for j in jobs)
+        print(f"{n_workers} workers, {len(jobs)} sessions, ~{max(total / n_workers, est(jobs[0])):.0f} s: "
+              + " ".join(f"{a}/{b}" for a, b, _ in jobs), flush=True)
+        args = [sys.executable, os.path.abspath(__file__), "--jobs", ",".join(map(encode_job, jobs)), "--claims", claims]
+        if only:
+            args += ["--only", ",".join(only)]
         procs = []
         t0 = time.time()
-        for i, (load, js) in enumerate(loads):
-            # Per round and worker: concurrent rounds never share run dirs, sockets or caches.
-            env = dict(os.environ, SHOT_RUN_PREFIX=f"{os.path.basename(rd)}-w{i}")
-            args = [sys.executable, os.path.abspath(__file__), "--jobs", ",".join(f"{a}:{b}" for a, b in js)]
-            if only:
-                args += ["--only", ",".join(only)]
+        for i in range(n_workers):
+            # Per round and worker: run dirs and sockets. Per worker alone: the apps' caches (driver.app_caches).
+            env = dict(os.environ, SHOT_RUN_PREFIX=f"{os.path.basename(rd)}-w{i}", SHOT_CACHE_SLOT=f"w{i}")
             log = open(os.path.join(rd, f"worker{i}.log"), "w")
-            print(f"worker {i}: ~{load:.0f} s: {' '.join(a + '/' + b for a, b in js)}", flush=True)
             procs.append((subprocess.Popen(["nice", "-n", "10"] + args, env=env, stdout=log, stderr=subprocess.STDOUT), log))
         rc = 0
         for p, log in procs:
             rc |= p.wait()
             log.close()
         print(f"{len(procs)} workers done in {time.time() - t0:.0f} s (exit {rc})", flush=True)
+        lost = unfinished(claims, jobs)
+        record_failures(rd, [f"{name}/{tag}: session not finished: its worker ended (exit {rc}); see worker*.log"
+                             for name, tag, _ in lost])
+        for name, tag, _ in lost:
+            print(f"!! {name}/{tag}: not finished", flush=True)
+        shutil.rmtree(claims, ignore_errors=True)
+        if not only:
+            record_history(rd, [j for j in jobs if j not in lost])
         return
-    failures = []
-    for name, tag in jobs:
-        lines = [l for l in states.STATES if l[0] == name]
+    n_failed = 0
+    for job in jobs:
+        if o.claims and not claim(o.claims, job):
+            continue
+        name, tag, cut = job
+        lines = [l for l in states.STATES if l[0] == name][:cut]
         t0 = time.time()
         try:
-            failures += run_session(name, tag, lines, only)
+            failures = run_session(name, tag, lines, only, cut)
         except Exception as e:
-            failures.append(f"{name}/{tag}: session failed: {e}")
+            failures = [f"{name}/{tag}: session failed: {e}"]
             traceback.print_exc()
-        print(f"== {name}/{tag} done in {time.time() - t0:.0f} s", flush=True)
-    out = os.path.join(rd, "failures.txt")
-    with open(out, "a") as f:
+        record_failures(rd, failures)  # (at once: the job counts as finished only with its failures written)
+        n_failed += len(failures)
+        if o.claims:
+            mark_done(o.claims, job)
+        print(f"== {name}/{tag} done in {time.time() - t0:.0f} s" + (f" (to line {cut})" if cut else ""), flush=True)
+    print(f"{n_failed} failures (see {os.path.join(rd, 'failures.txt')})")
+    if not o.jobs and not only:  # (a worker's parent records its workers' jobs)
+        record_history(rd, jobs)
+
+
+def record_failures(rd, failures):
+    with open(os.path.join(rd, "failures.txt"), "a") as f:
         for x in failures:
             f.write(x + "\n")
-    print(f"{len(failures)} failures (see {out})")
 
 
 if __name__ == "__main__":
