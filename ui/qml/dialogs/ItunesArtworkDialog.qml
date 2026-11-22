@@ -441,6 +441,7 @@ Components.DialogWindow {
         Label {
             objectName: parent.titleObjectName
             width: parent.width
+            textFormat: Text.PlainText
             text: parent.title
             color: root.uiPalette.text
             elide: Text.ElideRight
@@ -451,6 +452,7 @@ Components.DialogWindow {
             objectName: parent.detailsObjectName
             width: parent.width
             visible: text.length > 0
+            textFormat: Text.PlainText
             text: parent.details
             color: parent.detailsColor
             font.features: root.uiPalette.tabularFigures
@@ -485,6 +487,7 @@ Components.DialogWindow {
     Label {
         id: lineMetrics
         visible: false
+        textFormat: Text.PlainText
         text: "X"
     }
 
@@ -577,6 +580,7 @@ Components.DialogWindow {
             Layout.topMargin: Kirigami.Units.largeSpacing
             Layout.bottomMargin: Kirigami.Units.largeSpacing
             visible: itunesArtworkResultsView.count > 0 && text.length > 0
+            textFormat: Text.PlainText
             text: root.uiBridge.itunesArtworkStatusText || ""
             color: root.uiPalette.textSecondary
             wrapMode: Text.Wrap
@@ -790,6 +794,7 @@ Components.DialogWindow {
                         objectName: "itunesArtworkFailureHeading"
                         Layout.fillWidth: true
                         visible: placeholder.failed
+                        textFormat: Text.PlainText
                         text: I18n.i18nc("@info", "Couldn\u2019t search iTunes")
                         font.weight: Font.DemiBold
                         color: root.uiPalette.text
@@ -804,6 +809,7 @@ Components.DialogWindow {
                         objectName: "itunesArtworkPlaceholderMessage"
                         Layout.fillWidth: true
                         visible: text.length > 0
+                        textFormat: Text.PlainText
                         text: placeholder.failed
                             ? (root.uiBridge.itunesArtworkErrorText || "")
                             : (root.uiBridge.itunesArtworkStatusText || "")

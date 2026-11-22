@@ -316,6 +316,7 @@ Item {
         anchors.centerIn: parent
         anchors.horizontalCenterOffset: -root.meterWidth / 2
         visible: root._analysingShown
+        textFormat: Text.PlainText
         text: I18n.i18nc("@info:status the visualization waits for its data", "Analysing…")
         font: root.uiPalette.baseFont
         color: root.plotColors.plotTextSecondary
@@ -356,6 +357,7 @@ Item {
 
                 Text {
                     objectName: "plotEndsEarlyText"
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@info %1 is a time in the track, such as 4:02",
                                      "The file ends at %1.", root.formatCut(root.cutSeconds))
                     font: root.uiPalette.baseFont
@@ -369,6 +371,7 @@ Item {
                 id: issuesLink
                 objectName: "plotEndsEarlyLink"
                 anchors.horizontalCenter: parent.horizontalCenter
+                textFormat: Text.PlainText
                 text: I18n.i18nc("@action:button", "Show in Recent Issues")
                 font.family: root.uiPalette.baseFont.family
                 font.pointSize: root.uiPalette.baseFont.pointSize

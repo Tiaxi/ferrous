@@ -81,6 +81,7 @@ Components.CompactDialogWindow {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             font.weight: Font.DemiBold
+            textFormat: Text.PlainText
             text: I18n.i18ncp("@info:status", "Ferrous quits once the tag editor has written %1 file.",
                 "Ferrous quits once the tag editor has written %1 files.", root.files.length)
         }
@@ -94,6 +95,7 @@ Components.CompactDialogWindow {
         visible: root.offerChoice
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
+        textFormat: Text.PlainText
         text: I18n.i18nc("@info", "Quit Anyway stops waiting and may lose changes not yet written.")
     }
 
@@ -105,6 +107,7 @@ Components.CompactDialogWindow {
         visible: root.files.length > 0
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
+        textFormat: Text.PlainText
         text: root.files.slice(0, root.shownFileCount).join("\n")
             + (root.files.length > root.shownFileCount
                 ? "\n" + I18n.i18ncp("@info more files than the list shows", "and %1 more", "and %1 more",
@@ -119,6 +122,7 @@ Components.CompactDialogWindow {
         visible: root.offerChoice
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
+        textFormat: Text.PlainText
         text: I18n.i18nc("@info", "This is taking longer than it should, perhaps on an unresponsive network "
             + "share. No file is left half-written.")
     }

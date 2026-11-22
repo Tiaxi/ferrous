@@ -42,6 +42,7 @@ Item {
         y: root.leadingSpace
         width: Math.min(implicitWidth, root.width)
         visible: root.heading.length > 0
+        textFormat: Text.PlainText
         text: root.heading
         font.weight: Font.DemiBold
         color: root.uiPalette.text

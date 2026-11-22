@@ -110,6 +110,7 @@ Item {
             objectName: "plotPlateLabel"
             visible: root.isLabel
             renderType: Text.CurveRendering
+            textFormat: Text.PlainText
             text: root.text
             font.family: root.uiPalette.baseFont.family
             font.pointSize: root.compact ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize

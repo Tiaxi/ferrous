@@ -211,6 +211,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     width: Math.min(implicitWidth, detailsButton.availableWidth
                         - (detailsButtonIcon.visible ? detailsButtonIcon.width + detailsButton.spacing : 0))
+                    textFormat: Text.PlainText
                     text: detailsButton.text
                     font: detailsButton.font
                     color: detailsButton.contentColor
@@ -568,6 +569,7 @@ Item {
             objectName: "albumArtErrorText"
             anchors.horizontalCenter: parent.horizontalCenter
             width: Math.min(implicitWidth, parent.width)
+            textFormat: Text.PlainText
             text: I18n.i18nc("@info", "Couldn't load this image.")
             color: root.plot.plotTextSecondary
             elide: Text.ElideMiddle
@@ -682,6 +684,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.bottomMargin: 2
                     visible: root.previewActive && text.length > 0
+                    textFormat: Text.PlainText
                     text: root.previewLabel
                     font.pointSize: root.infoLabelPointSize
                     color: root.plot.plotTextSecondary
@@ -703,6 +706,7 @@ Item {
                     objectName: "albumArtInfoTitle"
                     Layout.fillWidth: true
                     Layout.bottomMargin: Math.round(8 * root.infoScale)
+                    textFormat: Text.PlainText
                     text: root.sourceKind === "embedded"
                         ? I18n.i18nc("@info:title album art stored in the track's file", "Embedded Image")
                         : ((root.fileInfo && root.fileInfo.fileName)
@@ -791,6 +795,7 @@ Item {
                             Layout.preferredWidth: infoLayout.labelColumnWidth
                             Layout.maximumWidth: infoLayout.labelColumnWidth
                             Layout.alignment: Qt.AlignBaseline
+                            textFormat: Text.PlainText
                             text: modelData.name
                             font.pointSize: root.infoLabelPointSize
                             color: root.plot.plotTextSecondary
@@ -807,6 +812,7 @@ Item {
                             objectName: "albumArtInfoValue"
                             Layout.fillWidth: true
                             Layout.alignment: Qt.AlignBaseline
+                            textFormat: Text.PlainText
                             text: modelData.value
                             font.pointSize: root.infoPointSize
                             font.features: root.uiPalette.tabularFigures
@@ -855,6 +861,7 @@ Item {
                             objectName: "albumArtFolderLabel"
                             width: Math.min(implicitWidth, Math.max(0, copyPathButton.x - Kirigami.Units.smallSpacing))
                             height: folderHead.height
+                            textFormat: Text.PlainText
                             text: I18n.i18nc("@label the folder the image is in", "Folder")
                             font.pointSize: root.infoLabelPointSize
                             color: root.plot.plotTextSecondary

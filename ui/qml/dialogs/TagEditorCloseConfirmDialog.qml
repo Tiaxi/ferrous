@@ -89,6 +89,7 @@ Components.CompactDialogWindow {
         wrapMode: Text.WordWrap
         // The lead, semibold, as every dialog's first sentence is.
         font.weight: Font.DemiBold
+        textFormat: Text.PlainText
         text: root.forQuit
             ? I18n.i18nc("@info", "Save tag changes before quitting Ferrous?")
             : (root.forReload
@@ -102,6 +103,7 @@ Components.CompactDialogWindow {
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
         // What Discard closes: the tag editor, not this question.
+        textFormat: Text.PlainText
         text: root.forQuit
             ? I18n.i18nc("@info", "Save writes the current edits and quits. "
                 + "Discard drops every unsaved change and quits. Cancel keeps Ferrous open.")

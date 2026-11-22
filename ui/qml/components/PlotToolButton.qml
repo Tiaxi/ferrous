@@ -149,6 +149,7 @@ ToolButton {
             anchors.centerIn: parent
             visible: root.glyphText.length > 0
             renderType: Text.CurveRendering
+            textFormat: Text.PlainText
             text: root.glyphText
             font.family: root.uiPalette.baseFont.family
             font.pointSize: root.glyphPointSize

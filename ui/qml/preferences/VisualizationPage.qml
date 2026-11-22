@@ -88,6 +88,7 @@ Preferences.PreferencesPage {
         Label {
             id: dbRangeValueLabel
             objectName: "dbRangeValueLabel"
+            textFormat: Text.PlainText
             text: I18n.i18nc("@label:slider value in decibels", "%1 dB", Math.round(dbRangeSlider.value))
             font.features: root.uiPalette.tabularFigures
             Layout.minimumWidth: Math.ceil(dbRangeMetrics.advanceWidth)

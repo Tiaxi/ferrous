@@ -20,6 +20,7 @@ Label {
 
     height: root.uiPalette.toolButtonSize
     verticalAlignment: Text.AlignVCenter
+    textFormat: Text.PlainText
     text: I18n.i18nc("@info:status zoom of the view in percent", "Zoom %1%",
         Math.round(root.zoomLevel * 100))
     font.family: root.uiPalette.baseFont.family

@@ -258,6 +258,7 @@ Components.DialogWindow {
             id: summarySizer
             width: parent.width
             wrapMode: Text.Wrap
+            textFormat: Text.PlainText
             text: root.summaryText()
             font: summary.font
         }
@@ -265,6 +266,7 @@ Components.DialogWindow {
         // A file's line, elided to one.
         Label {
             id: nameLineSizer
+            textFormat: Text.PlainText
             text: " "
         }
 
@@ -293,6 +295,7 @@ Components.DialogWindow {
             id: emptyTitleSizer
             width: parent.width
             wrapMode: Text.Wrap
+            textFormat: Text.PlainText
             text: emptyTitle.text
             font: emptyTitle.font
         }
@@ -301,6 +304,7 @@ Components.DialogWindow {
             id: emptyTextSizer
             width: parent.width
             wrapMode: Text.Wrap
+            textFormat: Text.PlainText
             text: emptyText.text
         }
     }
@@ -325,6 +329,7 @@ Components.DialogWindow {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             font.weight: Font.DemiBold
+            textFormat: Text.PlainText
             text: root.summaryText()
             visible: root.rows.length > 0 || root.errorText.length > 0
             color: root.errorText.length > 0 ? root.uiPalette.negative : root.uiPalette.text
@@ -361,6 +366,7 @@ Components.DialogWindow {
                 // A heading for screen readers, as Kirigami's placeholder
                 // message gives its text.
                 Accessible.role: Accessible.Heading
+                textFormat: Text.PlainText
                 text: I18n.i18nc("@info", "No file is renamed")
                 font.pointSize: root.uiPalette.basePointSize * 1.125
                 font.weight: Font.DemiBold
@@ -372,6 +378,7 @@ Components.DialogWindow {
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
+                textFormat: Text.PlainText
                 text: I18n.i18nc("@info", "The selected files already have the names their tags give.")
                 color: root.uiPalette.textSecondary
             }
@@ -418,6 +425,7 @@ Components.DialogWindow {
                         objectName: "renamePreviewOldName"
                         width: root.oldNameColumnWidth
                         elide: Text.ElideMiddle
+                        textFormat: Text.PlainText
                         text: previewRow.modelData.oldName
                         color: previewRow.quietColor
                         Accessible.ignored: true
@@ -429,6 +437,7 @@ Components.DialogWindow {
                         width: root.arrowColumnWidth
                         visible: root.showsNewName(previewRow.modelData)
                         horizontalAlignment: Text.AlignHCenter
+                        textFormat: Text.PlainText
                         text: root.arrowText
                         color: previewRow.quietColor
                         Accessible.ignored: true
@@ -440,6 +449,7 @@ Components.DialogWindow {
                         x: root.oldNameColumnWidth + root.arrowColumnWidth
                         width: Math.max(0, parent.width - x)
                         elide: Text.ElideMiddle
+                        textFormat: Text.PlainText
                         text: root.newColumnText(previewRow.modelData)
                         color: previewRow.renamed ? root.uiPalette.text : previewRow.quietColor
                         Accessible.ignored: true
