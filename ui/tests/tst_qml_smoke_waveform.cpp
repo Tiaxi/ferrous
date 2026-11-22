@@ -4348,7 +4348,8 @@ void WaveformSmokeTest::gstreamerTrackChangesKeepTheTransportsTrack() {
     auto *time = window->findChild<QQuickItem *>(QStringLiteral("transportTime"));
     auto *playhead = window->findChild<QQuickItem *>(QStringLiteral("seekPlayhead"));
     auto *waveform = window->findChild<QQuickItem *>(QStringLiteral("seekWaveform"));
-    QVERIFY(transport && time && playhead && waveform);
+    auto *mark = window->findChild<QQuickItem *>(QStringLiteral("seekEndsEarlyMark"));
+    QVERIFY(transport && time && playhead && waveform && mark);
     const auto playing = [&bridge](const QString &path) {
         return bridge.playbackState() == QStringLiteral("Playing") && bridge.currentTrackPath() == path;
     };
@@ -4362,6 +4363,7 @@ void WaveformSmokeTest::gstreamerTrackChangesKeepTheTransportsTrack() {
     bridge.replaceWithPaths({cut, whole});
     QTRY_VERIFY_WITH_TIMEOUT(playing(cut) && bridge.waveformEndsEarly(), 10000);
     QTRY_VERIFY(playhead->isVisible());
+    QTRY_VERIFY(mark->isVisible());
 
     // Gapless.
     QMetaObject::Connection watching = connect(window, &QQuickWindow::frameSwapped, window, watch);
@@ -4369,6 +4371,8 @@ void WaveformSmokeTest::gstreamerTrackChangesKeepTheTransportsTrack() {
     QTRY_VERIFY_WITH_TIMEOUT(bridge.waveformComplete() && !bridge.waveformEndsEarly(), 10000);
     disconnect(watching);
     QVERIFY(!lookedStopped);
+    // The cut was the track before's.
+    QVERIFY(!mark->isVisible());
 
     bridge.stop();
     QTRY_COMPARE_WITH_TIMEOUT(bridge.playbackState(), QStringLiteral("Stopped"), 10000);
@@ -4385,6 +4389,8 @@ void WaveformSmokeTest::gstreamerTrackChangesKeepTheTransportsTrack() {
                              15000);
     disconnect(watching);
     QVERIFY(!lookedStopped);
+    // The same file's cut, once it is analysed again.
+    QTRY_VERIFY(mark->isVisible());
 }
 
 std::unique_ptr<QmlSmokeTest> makeWaveformSmokeTest(const QString &userDirectoriesParent) {

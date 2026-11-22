@@ -522,6 +522,8 @@ private slots:
     void transportStaysTheTrackThroughATrackChange();
     void seekEmptyLineRunsPastAnEarlyEndingWaveform_data();
     void seekEmptyLineRunsPastAnEarlyEndingWaveform();
+    void seekMarksWhereTheFileEnds_data();
+    void seekMarksWhereTheFileEnds();
     void seekPlayheadMovesAcrossAShortTrack_data();
     void seekPlayheadMovesAcrossAShortTrack();
     void seekPlayheadWaitsAtTheStartWithoutALength_data();
@@ -2071,6 +2073,74 @@ void TransportStatusTest::seekEmptyLineRunsPastAnEarlyEndingWaveform() {
     QColor wholeLine;
     QTRY_VERIFY2(lineRunsTo(bar.left() + 4, &wholeLine, &why), qPrintable(why));
     QVERIFY2(channelDistance(wholeLine, line) <= 2, qPrintable(wholeLine.name() + QLatin1Char(' ') + line.name()));
+}
+
+void TransportStatusTest::seekMarksWhereTheFileEnds_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("breeze dark") << true << 10.0;
+    QTest::newRow("breeze light") << false << 10.0;
+    QTest::newRow("breeze dark, 24 pt") << true << 24.0;
+}
+
+// A file known to end early has the status bar's warning sign on its
+// waveform at the cut, under the playhead, and the seek bar's description
+// says where it ends (the waveform only stopped, with nothing to tell why).
+void TransportStatusTest::seekMarksWhereTheFileEnds() {
+    QFETCH(bool, dark);
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QObject *bridge = harness.bridge;
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *mark = harness.item(QStringLiteral("seekEndsEarlyMark"));
+    QVERIFY(seek && mark);
+    bridge->setProperty("waveformPeaksPacked", fullScalePeaks());
+    bridge->setProperty("waveformCoverageSeconds", 137.0);
+    // A waveform still being analysed is no cut.
+    QVERIFY(!mark->isVisible());
+    bridge->setProperty("waveformEndsEarly", true);
+    QTRY_VERIFY(mark->isVisible());
+    const QRectF bar = sceneRect(seek);
+    const QRectF markRect = sceneRect(mark);
+    QVERIFY2(std::abs(markRect.center().x() - (bar.left() + 137.0 / 229.0 * std::floor(bar.width()))) <= 1.0,
+             qPrintable(describeRect(markRect)));
+    QVERIFY2(within(markRect, bar), qPrintable(describeRect(markRect)));
+    QCOMPARE(markRect.width(), std::round(16.0 * pointSize / 10.0));
+    // The gap is the waveform's height, with no slivers of it by the sign.
+    const QRectF wave = sceneRect(harness.item(QStringLiteral("seekWaveform")));
+    QCOMPARE(markRect.top(), wave.top());
+    QCOMPARE(markRect.height(), wave.height());
+    QCOMPARE(markRect.topLeft(), QPointF(std::round(markRect.left()), std::round(markRect.top())));
+    QQuickItem *glyph = harness.item(QStringLiteral("seekEndsEarlyGlyph"));
+    QVERIFY(glyph != nullptr);
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("status-warning.svg")));
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("negative")));
+    QVERIFY2(contrastRatio(harness.token("negative"), harness.transportChrome()) >= 3.0, "the mark on the chrome");
+    // Under the playhead, over the waveform and its unplayed cover.
+    QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
+    const QList<QQuickItem *> layers = playhead->parentItem()->childItems();
+    QVERIFY(layers.indexOf(harness.item(QStringLiteral("seekUnplayed"))) < layers.indexOf(mark));
+    QVERIFY(layers.indexOf(mark) < layers.indexOf(playhead));
+    QCOMPARE(accessibleText(seek, QAccessible::Description), QStringLiteral("1:17 of 3:49. The file ends at 2:17."));
+
+    // At the bar's very end it stays on the bar.
+    bridge->setProperty("waveformCoverageSeconds", 228.9);
+    QVERIFY(within(sceneRect(mark), bar));
+    // Paused keeps it. The next track's, without a cut, has neither.
+    bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QVERIFY(mark->isVisible());
+    bridge->setProperty("waveformEndsEarly", false);
+    QVERIFY(!mark->isVisible());
+    QTRY_COMPARE(accessibleText(seek, QAccessible::Description), QStringLiteral("1:17 of 3:49"));
+    // Without a length or peaks the cut has no place on the bar.
+    bridge->setProperty("waveformEndsEarly", true);
+    bridge->setProperty("durationSeconds", 0.0);
+    QVERIFY(!mark->isVisible());
+    bridge->setProperty("durationSeconds", 229.0);
+    bridge->setProperty("waveformPeaksPacked", QByteArray());
+    QVERIFY(!mark->isVisible());
 }
 
 // #541: a clip of a second or less has a length, so the playhead is drawn

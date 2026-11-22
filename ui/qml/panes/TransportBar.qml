@@ -149,6 +149,12 @@ ToolBar {
         const peaks = root.uiBridge.waveformPeaksPacked
         return !!peaks && (peaks.byteLength || peaks.length || 0) > 0
     }
+    // Where the file of the current track is known to end early, in
+    // seconds, or -1: the bridge tells it of the current track alone, and
+    // the bar has a place for it with that track's waveform and length.
+    readonly property real endsEarlySeconds: root.hasWaveform
+        && root.uiBridge.waveformEndsEarly === true && root.uiBridge.durationSeconds > 0
+        ? root.uiBridge.waveformCoverageSeconds : -1
     // A 1 px line, a whole number of device pixels thick.
     readonly property real devicePixelLine: Math.max(1, Math.round(root.windowDevicePixelRatio))
         / root.windowDevicePixelRatio
@@ -655,11 +661,17 @@ ToolBar {
             Accessible.name: I18n.i18nc("@label", "Seek")
             // The value's second, which a track's last half second would
             // otherwise give past its length.
-            Accessible.description: seekAllowed
-                ? I18n.i18nc("@info position of duration", "%1 of %2",
-                    FormatUtils.formatClockTime(Math.floor(value)),
-                    FormatUtils.formatClockTime(root.uiBridge.durationSeconds))
-                : I18n.i18nc("@info", "No track playing")
+            Accessible.description: !seekAllowed
+                ? I18n.i18nc("@info", "No track playing")
+                : root.endsEarlySeconds >= 0
+                    ? I18n.i18nc("@info position of duration, then where a damaged file ends",
+                        "%1 of %2. The file ends at %3.",
+                        FormatUtils.formatClockTime(Math.floor(value)),
+                        FormatUtils.formatClockTime(root.uiBridge.durationSeconds),
+                        FormatUtils.formatClockTime(root.endsEarlySeconds))
+                    : I18n.i18nc("@info position of duration", "%1 of %2",
+                        FormatUtils.formatClockTime(Math.floor(value)),
+                        FormatUtils.formatClockTime(root.uiBridge.durationSeconds))
 
             // The time the current gesture moved to, exactly, or NaN. The
             // position's Binding may write the value first when it ends.
@@ -869,6 +881,35 @@ ToolBar {
                         width: seekUnplayed.width - seekUnplayed.bandRight
                         height: parent.height
                         color: root.seekUnplayedCover
+                    }
+                }
+
+                // A file that ends early: the status bar's warning sign at
+                // the cut, which the waveform alone didn't explain, in a gap
+                // of the chrome as tall as the waveform, so that no slivers
+                // of it stand over and under the sign. Under the playhead,
+                // on whole pixels and within the bar.
+                Rectangle {
+                    objectName: "seekEndsEarlyMark"
+                    visible: root.endsEarlySeconds >= 0
+                    antialiasing: false
+                    width: root.smallGlyphSize
+                    height: waveformItem.height
+                    x: !visible ? 0 : Math.max(0, Math.min(Math.floor(parent.width - width),
+                        Math.round(seekSlider.barPixelOf(root.endsEarlySeconds)
+                            / seekSlider.windowDevicePixelRatio - width / 2)))
+                    y: waveformItem.y
+                    color: root.chromeColor
+
+                    Kirigami.Icon {
+                        objectName: "seekEndsEarlyGlyph"
+                        y: Math.round((parent.height - height) / 2)
+                        width: parent.width
+                        height: width
+                        roundToIconSize: false
+                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        isMask: true
+                        color: root.uiPalette.negative
                     }
                 }
 
