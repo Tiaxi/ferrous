@@ -92,7 +92,8 @@ Components.DialogWindow {
     // and File Name, to the view's edge (it stayed at 190 px beside an
     // unchanged Artist), or `holds` to scroll to where that would be less
     // than its `least`. A committed change is whole
-    // whatever its column's width: it wraps and its row grows. Where
+    // whatever its column's width: it wraps, and its row grows while that
+    // column is in view. Where
     // the view is wider, File Name and Folder, which `stretch`, take the
     // rest. Status takes no room until a
     // save or a rename failed for a row; a row with unsaved edits has a
@@ -1608,13 +1609,22 @@ Components.DialogWindow {
                     readonly property bool marked: tableRow.dirty || root.pendingEditRows[tableRow.index] === true
 
                     width: root.tableContentWidth
-                    // Its tallest cell's, as the row is made: the Row's own
-                    // implicit height comes with its polish, after the view
-                    // has placed the row.
+                    // Its tallest cell's of those whose text is in view
+                    // sideways, as the row is made: the Row's own implicit
+                    // height comes with its polish, after the view has
+                    // placed the row. A change scrolled out of view grows
+                    // it as it comes in (it left a tall, empty row: at 24 pt
+                    // from a 1000 px window, every row of a new title).
                     height: {
                         let tallest = root.tableRowHeight
+                        const left = tagEditorTable.contentX - rowCells.x
+                        const right = left + tagEditorTable.width
                         for (let i = 0; i < rowCells.children.length; ++i) {
-                            tallest = Math.max(tallest, rowCells.children[i].height)
+                            const cell = rowCells.children[i]
+                            if (cell.height > tallest && cell.x + cell.leftPadding + 1 < right
+                                    && cell.x + cell.width - cell.rightPadding > left + 1) {
+                                tallest = cell.height
+                            }
                         }
                         return tallest
                     }

@@ -5795,8 +5795,6 @@ void UiDialogsTest::editTagsShowsEachChangeWhole() {
         const qreal textWidth = cell->property("contentWidth").toReal();
         QVERIFY2(textWidth <= cell->width() - left - cell->property("rightPadding").toReal() + 0.5, qPrintable(at));
         QVERIFY2(cell->property("contentHeight").toReal() <= cell->height() + 0.5, qPrintable(at));
-        QQuickItem *row = rowAt(index);
-        QVERIFY2(cell->height() <= row->height() + 0.5, qPrintable(at));
 
         // In view sideways too: where it was, or with the column at its left.
         QRectF view = sceneRect(table);
@@ -5805,6 +5803,12 @@ void UiDialogsTest::editTagsShowsEachChangeWhole() {
             table->setProperty("contentX",
                                std::min(x, table->property("contentWidth").toReal() - table->width()));
         }
+        // Its row holds it whole once it is in view, and may then need
+        // scrolling to show all of it.
+        QTRY_VERIFY(!layoutPendingUnder(table));
+        QVERIFY((cell = cellAt(index, key)) != nullptr);
+        QQuickItem *row = rowAt(index);
+        QVERIFY2(cell->height() <= row->height() + 0.5, qPrintable(at));
         const QRectF drawn = sceneRect(cell);
         view.setTop(view.top() + rowHeight);
         QVERIFY2(drawn.top() >= view.top() - 0.5 && drawn.bottom() <= view.bottom() + 0.5
@@ -5847,6 +5851,27 @@ void UiDialogsTest::editTagsShowsEachChangeWhole() {
     QVERIFY(!QTest::currentTestFailed());
     QCOMPARE(main.editor.selectedRows().size(), selected.size());
     QVERIFY2(placed() == loaded, "the commit moved a column");
+
+    // A row is as tall as the tallest text in view: a change scrolled out
+    // of view leaves no empty room in it.
+    table->setProperty("contentX", 0);
+    const auto inView = [&](QQuickItem *cell) {
+        return cell != nullptr
+            && sceneRect(cell).left() + cell->property("leftPadding").toReal() + 1 < sceneRect(table).right();
+    };
+    for (int i = 0; i < retitledBatch().size(); ++i) {
+        QQuickItem *row = rowAt(i);
+        QVERIFY(row != nullptr);
+        qreal tallest = rowHeight;
+        for (const QString &key : keys) {
+            QQuickItem *cell = cellAt(i, key);
+            if (inView(cell)) {
+                tallest = std::max(tallest, cell->height());
+            }
+        }
+        QVERIFY2(std::abs(row->height() - tallest) <= 0.5,
+                 qPrintable(QStringLiteral("row %1 is %2 px for %3 px in view").arg(i).arg(row->height()).arg(tallest)));
+    }
 
     for (int i = 0; i < retitledBatch().size(); ++i) {
         QQuickItem *row = rowAt(i);
@@ -5902,7 +5927,8 @@ void UiDialogsTest::editTagsShowsEachChangeWhole() {
         table->forceActiveFocus();
         checkWhole(index, QStringLiteral("title"), committed + added);
         QVERIFY(!QTest::currentTestFailed());
-        QVERIFY(heightOf(index) > heights.at(index) || cellAt(index, QStringLiteral("title"))->property("lineCount").toInt() == 1);
+        QVERIFY(heightOf(index) > heights.at(index) || cellAt(index, QStringLiteral("title"))->property("lineCount").toInt() == 1
+                || !inView(cellAt(index, QStringLiteral("title"))));
         QCOMPARE(main.editor.selectedRows(), QVariantList{index});
 
         // The field's Revert: that row's title as its file has it.
