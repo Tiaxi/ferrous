@@ -1846,7 +1846,7 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnTheTypeScale() {
     // A preview: the footer at the column's bottom under a seam, its buttons
     // the padding in from its edges, Apply last and the default.
     surface->setProperty("previewActive", true);
-    surface->setProperty("previewLabel", QStringLiteral("iTunes Candidate"));
+    surface->setProperty("previewLabel", QStringLiteral("iTunes Artwork"));
     surface->setProperty("previewHasCandidate", true);
     surface->setProperty("previewCanApply", true);
     QQuickItem *footer = visibleItemNamed(window, QStringLiteral("albumArtPreviewFooter"));
@@ -1854,10 +1854,20 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnTheTypeScale() {
     QQuickItem *back = visibleItemNamed(window, QStringLiteral("albumArtPreviewBackButton"));
     QQuickItem *apply = visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"));
     QVERIFY(footer != nullptr && seam != nullptr && back != nullptr && apply != nullptr);
-    // The preview's label, a label, at the small size.
+    // Which image shows is the heading; its file's name, a label under it,
+    // at the small size in the secondary colour.
     QQuickItem *previewLabel = visibleItemNamed(window, QStringLiteral("albumArtPreviewLabel"));
     QVERIFY(previewLabel != nullptr);
-    QCOMPARE(qvariant_cast<QFont>(previewLabel->property("font")).pointSizeF(), small);
+    const auto headingFont = qvariant_cast<QFont>(previewLabel->property("font"));
+    QCOMPARE(headingFont.pointSizeF(), palette->property("basePointSize").toReal() * 1.2);
+    QCOMPARE(headingFont.weight(), QFont::DemiBold);
+    QCOMPARE(qvariant_cast<QFont>(title->property("font")).pointSizeF(), small);
+    QCOMPARE(qvariant_cast<QFont>(title->property("font")).weight(), QFont::Normal);
+    QObject *plot = qvariant_cast<QObject *>(palette->property("mediaPlot"));
+    QVERIFY(plot != nullptr);
+    QCOMPARE(colorOf(previewLabel, "color"), colorOf(plot, "plotText"));
+    QCOMPARE(colorOf(title, "color"), colorOf(plot, "plotTextSecondary"));
+    QCOMPARE(sceneRectOf(previewLabel).left(), sceneRectOf(title).left());
     const QRectF columnRect = sceneRectOf(column);
     QTRY_COMPARE(sceneRectOf(footer).bottom(), columnRect.bottom());
     QCOMPARE(sceneRectOf(seam), QRectF(columnRect.left(), sceneRectOf(footer).top(), columnRect.width(), 1));
@@ -2169,7 +2179,8 @@ bool clickPreviewButton(QQuickWindow *host, const QString &objectName) {
     return settled && clickVisibleButton(host, objectName);
 }
 
-// During a preview in `host`: its label is over the image's details and its
+// During a preview in `host`: which image shows heads the image's details,
+// its file's name under it in the secondary colour, and its
 // buttons in a footer at their bottom, under a seam, Back to Results before
 // Apply on one row, Apply the style's default button; the art
 // keeps 24 px clear of the details' seam, centred in the space left of it;
@@ -2202,7 +2213,8 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     // The label first, over the file's name; the buttons in a footer at
     // the column's bottom (they followed the details, crammed under them),
     // under a seam the column's width, the padding clear of the column's
-    // edges, Back to Results then Apply. The details end above the footer.
+    // edges, Back to Results then Apply, side by side or, in a view too
+    // narrow for that, stacked. The details end above the footer.
     QQuickItem *title = visibleItemNamed(host, QStringLiteral("albumArtInfoTitle"));
     QVERIFY2(title != nullptr, at.constData());
     QVERIFY2(rectOf(label).bottom() <= rectOf(title).top(), at.constData());
@@ -2213,9 +2225,9 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     QVERIFY2(footer != nullptr && footerSeam != nullptr, at.constData());
     QCOMPARE(rectOf(footer).bottom(), columnRect.bottom());
     QCOMPARE(rectOf(footerSeam), QRectF(columnRect.left(), rectOf(footer).top(), columnRect.width(), 1));
-    QTRY_VERIFY2(qAbs(rectOf(back).bottom() - (columnRect.bottom() - padding)) <= 0.5,
+    QTRY_VERIFY2(qAbs(rectOf(apply).bottom() - (columnRect.bottom() - padding)) <= 0.5,
                  qPrintable(QStringLiteral("%1: the column ends at %2, the buttons at %3")
-                                .arg(QString::fromUtf8(at)).arg(columnRect.bottom()).arg(rectOf(back).bottom())));
+                                .arg(QString::fromUtf8(at)).arg(columnRect.bottom()).arg(rectOf(apply).bottom())));
     QCOMPARE(rectOf(back).top() - rectOf(footerSeam).bottom(), padding);
     qreal detailsBottom = rectOf(title).bottom();
     for (const QString &name : {QStringLiteral("albumArtInfoRow"), QStringLiteral("albumArtCompareButton")}) {
@@ -2224,8 +2236,17 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
         }
     }
     QVERIFY2(detailsBottom <= rectOf(footerSeam).top(), at.constData());
-    QCOMPARE(rectOf(back).top(), rectOf(apply).top());
-    QVERIFY2(rectOf(back).right() <= rectOf(apply).left(), at.constData());
+    QQuickItem *buttons = visibleItemNamed(host, QStringLiteral("albumArtPreviewButtons"));
+    QVERIFY2(buttons != nullptr, at.constData());
+    if (buttons->property("oneRow").toBool()) {
+        QCOMPARE(rectOf(back).top(), rectOf(apply).top());
+        QVERIFY2(rectOf(back).right() <= rectOf(apply).left(), at.constData());
+    } else {
+        QVERIFY2(back->implicitWidth() + buttons->property("spacing").toReal() + apply->implicitWidth()
+                     + 2 * padding > std::floor(column->parentItem()->width() * 0.4),
+                 at.constData());
+        QVERIFY2(rectOf(back).bottom() <= rectOf(apply).top(), at.constData());
+    }
     QVERIFY2(columnRect.right() - rectOf(apply).right() <= 24.0, at.constData());
     // About 40 characters of the body font wide, 280 px with its seam at
     // the default font, up to half the view, or wider for the buttons; over
@@ -2234,7 +2255,9 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     const bool fullscreen = column->parentItem()->property("fullscreen").toBool();
     const qreal infoScale = fullscreen ? 1.2 : 1.0;
     const qreal widthScale = infoColumnWidthScale(fullscreen, column->parentItem()->width());
-    QFont font = label->property("font").value<QFont>();
+    QQuickItem *value = visibleItemsNamed(column, QStringLiteral("albumArtInfoValue")).value(0);
+    QVERIFY2(value != nullptr, at.constData());
+    QFont font = value->property("font").value<QFont>();
     font.setPointSizeF(font.pointSizeF() / infoScale);
     const qreal fortyCharacters = infoColumnFortyCharacters(font, fullscreen, column->parentItem()->width());
     const qreal halfTheView = std::floor(column->parentItem()->width() / 2);
@@ -2242,15 +2265,18 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
              qPrintable(QStringLiteral("%1: %2 px").arg(QString::fromUtf8(at)).arg(column->width())));
     QCOMPARE(rectOf(label).left() - columnRect.left(), padding);
     QCOMPARE(columnRect.right() - rectOf(apply).right(), padding);
-    // The file's name a step larger than the body size: 12 pt to its 10;
-    // over the whole screen, the details' 16 px, as the title strip's
-    // track title over it (at 18 px it outranked the title).
-    QQuickItem *value = visibleItemsNamed(column, QStringLiteral("albumArtInfoValue")).value(0);
-    QVERIFY2(value != nullptr, at.constData());
+    // The heading, which image shows, a step larger than the body size:
+    // 12 pt to its 10; over the whole screen, the details' 16 px, as the
+    // title strip's track title over it (at 18 px it outranked the title).
+    // The file's name is secondary under it (it headed both images' details,
+    // often "cover.jpg" for either).
     const qreal bodyPointSize = value->property("font").value<QFont>().pointSizeF() / infoScale;
-    QVERIFY2(qAbs(title->property("font").value<QFont>().pointSizeF() - bodyPointSize * 1.2)
-                 < 0.001,
-             at.constData());
+    const auto headingFont = label->property("font").value<QFont>();
+    QVERIFY2(qAbs(headingFont.pointSizeF() - bodyPointSize * 1.2) < 0.001, at.constData());
+    QCOMPARE(headingFont.weight(), QFont::DemiBold);
+    QVERIFY2(title->property("font").value<QFont>().pointSizeF() < bodyPointSize * infoScale, at.constData());
+    QCOMPARE(title->property("font").value<QFont>().weight(), QFont::Normal);
+    QVERIFY2(colorOf(label, "color") != colorOf(title, "color"), at.constData());
     // Apply is the style's default button, as a dialog's (it was a solid
     // accent fill, unlike any other default button); Back to Results is a
     // plain one. Both are the style's own, drawn in Breeze's complementary
@@ -3512,11 +3538,15 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
                                                                 : QStringLiteral("none"))));
                 QQuickItem *label = visibleItemNamed(host, QStringLiteral("albumArtPreviewLabel"));
                 QVERIFY2(label != nullptr, at.constData());
-                QCOMPARE(label->property("text").toString(), QStringLiteral("iTunes Candidate"));
+                QCOMPARE(label->property("text").toString(), QStringLiteral("iTunes Artwork"));
                 QCOMPARE(host->title(),
-                         QStringLiteral("Morning Tide Field — iTunes Candidate — Ferrous Album Art"));
+                         QStringLiteral("Morning Tide Field — iTunes Artwork — Ferrous Album Art"));
                 QQuickItem *apply = visibleItemNamed(host, QStringLiteral("albumArtPreviewApplyButton"));
                 QVERIFY2(apply != nullptr, at.constData());
+                QCOMPARE(apply->property("text").toString(), QStringLiteral("Apply iTunes Artwork"));
+                QQuickItem *compare = visibleItemNamed(host, QStringLiteral("albumArtCompareButton"));
+                QVERIFY2(compare != nullptr, at.constData());
+                QCOMPARE(compare->property("text").toString(), QStringLiteral("Show Current Album Art"));
                 QTRY_VERIFY2(apply->isEnabled(), at.constData());
                 checkPreviewControlsInTheDetails(host, prefix, at);
                 // I, the Image Details shortcut, keeps the details and with
@@ -3565,7 +3595,13 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             QTRY_VERIFY2(viewer->property("albumArtViewerShowsCurrentTrack").toBool(), at.constData());
             QCOMPARE(visibleItemNamed(host, QStringLiteral("albumArtPreviewLabel"))->property("text").toString(),
                      QStringLiteral("Current Album Art"));
-            QVERIFY(visibleItemNamed(host, QStringLiteral("albumArtPreviewApplyButton"))->isEnabled());
+            // The primary button says what it installs, the same with the
+            // current art on show ("Apply" read as applying that).
+            QQuickItem *applyFromCurrent = visibleItemNamed(host, QStringLiteral("albumArtPreviewApplyButton"));
+            QVERIFY(applyFromCurrent->isEnabled());
+            QCOMPARE(applyFromCurrent->property("text").toString(), QStringLiteral("Apply iTunes Artwork"));
+            QCOMPARE(visibleItemNamed(host, QStringLiteral("albumArtCompareButton"))->property("text").toString(),
+                     QStringLiteral("Show iTunes Artwork"));
             QTest::keyClick(host, Qt::Key_Right);
             QTRY_VERIFY2(!viewer->property("albumArtViewerShowsCurrentTrack").toBool(), at.constData());
 
@@ -3884,24 +3920,28 @@ void checkPreviewButtonsWholeInTheDetails(ItunesWindow &ui, int viewerMode, qrea
                             .arg(QString::fromLatin1(at)).arg(back->width()).arg(back->implicitWidth())
                             .arg(apply->width()).arg(apply->implicitWidth())));
     // About 40 characters of the body font wide, 279 px and its seam with
-    // the usual font, 1.2 times wider over the whole screen, or wider for
-    // the widest button: up to half the view, and up to three quarters for
-    // that button alone (at 24 pt over this 800 px screen, its caption at
-    // the details' size was cut short at half).
+    // the usual font, 1.2 times wider over the whole screen, up to half the
+    // view; or as wide as the buttons side by side, if two fifths of it
+    // hold them; or as the widest button, up to three quarters for that
+    // button alone (at 24 pt over this 800 px screen, its caption at the
+    // details' size was cut short at half).
     const qreal fortyCharacters = infoColumnFortyCharacters(bodyFont, viewerMode == 1, column->parentItem()->width());
     const qreal leastWidth = std::round(280 * widthScale) - 1;
     const qreal widestButton = std::ceil(qMax(back->implicitWidth(), apply->implicitWidth())) + 2 * padding;
     const qreal halfTheView = std::floor(column->parentItem()->width() / 2);
     const qreal threeQuarters = std::floor(column->parentItem()->width() * 0.75);
+    QQuickItem *buttons = visibleItemNamed(host, QStringLiteral("albumArtPreviewButtons"));
+    QVERIFY2(buttons != nullptr, at.constData());
+    const qreal twoFifths = std::floor(column->parentItem()->width() * 0.4);
+    const qreal sideBySide = std::ceil(back->implicitWidth() + buttons->property("spacing").toReal()
+                                       + apply->implicitWidth()) + 2 * padding;
     QCOMPARE(columnRect.width(),
-             qMax(qMax(leastWidth, qMin(halfTheView, fortyCharacters)), qMin(threeQuarters, widestButton)));
-    if (pointSize == 0) {
-        QCOMPARE(columnRect.width(), leastWidth);
-    }
+             qMax(qMax(qMax(leastWidth, qMin(halfTheView, fortyCharacters)),
+                       sideBySide <= twoFifths ? sideBySide : 0.0),
+                  qMin(threeQuarters, widestButton)));
     // The footer's buttons, under the details, inside the column.
     QQuickItem *footer = visibleItemNamed(host, QStringLiteral("albumArtPreviewFooter"));
-    QQuickItem *buttons = visibleItemNamed(host, QStringLiteral("albumArtPreviewButtons"));
-    QVERIFY2(footer != nullptr && buttons != nullptr, at.constData());
+    QVERIFY2(footer != nullptr, at.constData());
     QVERIFY2(isWithin(back, buttons) && isWithin(apply, buttons) && isWithin(footer, column), at.constData());
     QVERIFY2(sceneRectOf(footer).bottom() <= columnRect.bottom(), at.constData());
     QVERIFY2(sceneRectOf(footer).contains(sceneRectOf(back)) && sceneRectOf(footer).contains(sceneRectOf(apply)),
@@ -3916,14 +3956,12 @@ void checkPreviewButtonsWholeInTheDetails(ItunesWindow &ui, int viewerMode, qrea
         QVERIFY(columnRect.right() - padding - 0.5 <= sceneRectOf(apply).right());
     } else {
         // Stacked, Back to Results above Apply, each the column's width.
-        QVERIFY2(pointSize > 0, "the usual font fits them in a row");
+        QVERIFY2(sideBySide > twoFifths, "two fifths of the view hold them in a row");
+        QVERIFY2(pointSize > 0 || viewerMode == 1, "the usual font fits them in a row in the window");
         QVERIFY(columnRect.contains(sceneRectOf(back).adjusted(0, -0.5, 0, 0)));
         QVERIFY(sceneRectOf(back).bottom() <= sceneRectOf(apply).top());
         QCOMPARE(sceneRectOf(back).width(), sceneRectOf(apply).width());
         QCOMPARE(sceneRectOf(back).width(), columnRect.width() - 2 * padding);
-        // Stacked only where the column has no more room: at half the view,
-        // or past it as far as the wider button needs.
-        QCOMPARE(columnRect.width(), qMax(halfTheView, qMin(threeQuarters, widestButton)));
     }
     // In a screen-filling viewer of the 800 px test screen at 24 pt.
     if (pointSize >= 24.0 && viewerMode == 1) {
@@ -4440,7 +4478,7 @@ struct DetailsScheme {
 const DetailsScheme kDetailsBreezeDark{"#202326", "#141618", "#fcfcfc", "#a1a9b1", "#3daee9"};
 const DetailsScheme kDetailsBreezeLight{"#eff0f1", "#ffffff", "#232629", "#707d8a", "#3daee9"};
 
-// As createDetailsSurfaceWindow, in `scheme`, with Show iTunes Candidate,
+// As createDetailsSurfaceWindow, in `scheme`, with Show iTunes Artwork,
 // and over the whole screen if `fullscreen`.
 QObject *createThemedDetailsSurfaceWindow(QQmlApplicationEngine &engine, const QString &coverPath,
                                           const DetailsScheme &scheme, bool fullscreen,
@@ -4615,7 +4653,7 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
     }
     QCOMPARE(sceneRectOf(title).left() - sceneRectOf(column).left(), surface->property("infoPadding").toReal());
 
-    // The buttons: Copy Path's glyph and Show iTunes Candidate in the
+    // The buttons: Copy Path's glyph and Show iTunes Artwork in the
     // plot's colours, and the plot's focus ring for the keyboard, 3:1 on
     // the strip, outside a gap in the strip's colour.
     QQuickItem *copy = visibleItemNamed(window, QStringLiteral("albumArtCopyPathButton"));

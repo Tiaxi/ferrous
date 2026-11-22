@@ -214,7 +214,7 @@ QtObject {
         root.comparisonCandidateSource = ""
         root.comparisonCandidateInfoSource = ""
         root.comparisonModeAvailable = false
-        root.comparisonLabel = I18n.i18nc("@label", "Current Album Art")
+        root.comparisonLabel = I18n.i18nc("@title the album's own art, shown in a preview", "Current Album Art")
         root.albumArtInfoVisible = true
         root.albumArtViewResetToken += 1
         root.refreshAlbumArtFileInfo()
@@ -242,7 +242,7 @@ QtObject {
         root.comparisonCurrentSource = currentSource
         root.comparisonCurrentInfoSource = PathUtils.pathFromAnyUrl(currentSource)
         root.comparisonModeAvailable = currentSource.length > 0
-        root.comparisonLabel = I18n.i18nc("@label artwork found on iTunes", "iTunes Candidate")
+        root.comparisonLabel = I18n.i18nc("@title artwork found on iTunes, shown in a preview", "iTunes Artwork")
 
         root.albumArtInfoVisible = true
         root.albumArtViewResetToken += 1
@@ -258,12 +258,12 @@ QtObject {
             root.albumArtViewerSource = root.comparisonCandidateSource
             root.albumArtViewerInfoSource = root.comparisonCandidateInfoSource
             root.albumArtViewerShowsCurrentTrack = false
-            root.comparisonLabel = I18n.i18nc("@label artwork found on iTunes", "iTunes Candidate")
+            root.comparisonLabel = I18n.i18nc("@title artwork found on iTunes, shown in a preview", "iTunes Artwork")
         } else {
             root.albumArtViewerSource = root.comparisonCurrentSource
             root.albumArtViewerInfoSource = root.comparisonCurrentInfoSource
             root.albumArtViewerShowsCurrentTrack = true
-            root.comparisonLabel = I18n.i18nc("@label", "Current Album Art")
+            root.comparisonLabel = I18n.i18nc("@title the album's own art, shown in a preview", "Current Album Art")
         }
         root.albumArtInfoVisible = true
         root.albumArtViewResetToken += 1

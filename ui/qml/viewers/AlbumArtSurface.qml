@@ -73,7 +73,8 @@ Item {
     // the larger text over the whole screen.
     readonly property int detailsIconSize: root.uiPalette.scaledSize(
         Math.round(Kirigami.Units.iconSizes.small * root.infoScale))
-    // The file's name: the body size; during a preview, a step larger, 12 pt
+    // The details' heading, the file's name or, during a preview, which
+    // image shows: the body size; during a preview, a step larger, 12 pt
     // with the default 10 pt font; over the whole screen, the details' size,
     // as the title strip's track title over it (at 1.35 times, 18 px, it
     // outranked that title).
@@ -92,14 +93,17 @@ Item {
     // there is none, and Copy Path ends with the details.
     property real controlsAxisInset: -1
     // A preview from Replace from iTunes: what it shows, such as "iTunes
-    // Candidate", and Back to Results, which closeViewer does then. With a
-    // candidate, Apply calls applyPreview while previewCanApply.
+    // Artwork", and Back to Results, which closeViewer does then. With a
+    // candidate, Apply iTunes Artwork calls applyPreview while
+    // previewCanApply.
     property bool previewActive: false
     property string previewLabel: ""
     property bool previewHasCandidate: false
     property bool previewCanApply: false
     property var applyPreview: null
     readonly property alias imageStatus: albumArtImageFull.status
+    // Whether the details are headed by which image shows, over its file.
+    readonly property bool headedByImage: root.previewActive && root.previewLabel.length > 0
     // The art's pointer, which the area over it shows too: zoomed, an open
     // hand over the art, and a closed one while it is held to pan; the
     // arrow over the details and over the fitted art.
@@ -602,10 +606,11 @@ Item {
     // window). Over the whole screen it follows its text, 1.2 times larger:
     // 336 px, or 40 characters of that text (at 320 px a folder's path was
     // cut beside the screen's room to spare).
-    // During a preview, it is up to half the view, and wider still, up to
-    // three quarters, where one of its buttons alone needs more, as on a
-    // small screen with a large font: where they don't fit side by side the
-    // buttons stack, so neither is cut short.
+    // During a preview, it is as wide as its two buttons side by side want
+    // if two fifths of the view or its own width hold them; otherwise they
+    // stack, as a longer translation's do, and it is up to half the view,
+    // and wider still, up to three quarters, where one of them alone needs
+    // more, as on a small screen with a large font, so neither is cut short.
     Item {
         id: infoColumn
         objectName: "albumArtInfoColumn"
@@ -626,9 +631,13 @@ Item {
         anchors.bottom: parent.bottom
         readonly property real widestButton: Math.ceil(Math.max(previewBackButton.implicitWidth,
             previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 2 * root.infoPadding
+        readonly property real buttonsRow: !previewApplyButton.visible ? 0
+            : Math.ceil(previewBackButton.implicitWidth + previewButtons.spacing
+                + previewApplyButton.implicitWidth) + 2 * root.infoPadding
         width: root.previewActive
             ? Math.max(infoColumn.minimumWidth,
                 Math.min(Math.floor(root.width / 2), infoColumn.fortyCharacters),
+                infoColumn.buttonsRow <= Math.floor(root.width * 0.4) ? infoColumn.buttonsRow : 0,
                 Math.min(Math.floor(root.width * 0.75), infoColumn.widestButton))
             : Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width * 0.4), infoColumn.fortyCharacters))
 
@@ -682,18 +691,21 @@ Item {
                 anchors.topMargin: 12 + root.infoTopInset
                 spacing: 0
 
-                // During a preview, what it shows, such as "iTunes Candidate",
-                // over the file's name.
+                // During a preview, which image shows, such as "iTunes
+                // Artwork", is the heading, and its file's name is under it
+                // (the two images' files are often both "cover.jpg", which
+                // headed the details of either). A longer translation wraps.
                 Label {
                     objectName: "albumArtPreviewLabel"
                     Layout.fillWidth: true
-                    Layout.bottomMargin: 2
-                    visible: root.previewActive && text.length > 0
+                    Layout.bottomMargin: Math.round(Kirigami.Units.smallSpacing * root.infoScale)
+                    visible: root.headedByImage
                     textFormat: Text.PlainText
                     text: root.previewLabel
-                    font.pointSize: root.infoLabelPointSize
-                    color: root.plot.plotTextSecondary
-                    elide: Text.ElideRight
+                    font.pointSize: root.infoTitlePointSize
+                    font.weight: Font.DemiBold
+                    color: root.plot.plotText
+                    wrapMode: Text.WordWrap
                 }
 
                 // The labels' column: as wide as the widest label, and 80 px
@@ -716,9 +728,9 @@ Item {
                         ? I18n.i18nc("@info:title album art stored in the track's file", "Embedded Image")
                         : ((root.fileInfo && root.fileInfo.fileName)
                             || PathUtils.pathFromAnyUrl(root.viewerSource).replace(/^.*\//, ""))
-                    font.pointSize: root.infoTitlePointSize
-                    font.weight: Font.DemiBold
-                    color: root.plot.plotText
+                    font.pointSize: root.headedByImage ? root.infoLabelPointSize : root.infoTitlePointSize
+                    font.weight: root.headedByImage ? Font.Normal : Font.DemiBold
+                    color: root.headedByImage ? root.plot.plotTextSecondary : root.plot.plotText
                     elide: Text.ElideMiddle
                 }
 
@@ -951,7 +963,7 @@ Item {
                     icon.name: "view-refresh"
                     text: root.sourceKind === "itunes"
                         ? I18n.i18nc("@action:button", "Show Current Album Art")
-                        : I18n.i18nc("@action:button artwork found on iTunes", "Show iTunes Candidate")
+                        : I18n.i18nc("@action:button artwork found on iTunes", "Show iTunes Artwork")
                     toolTipText: I18n.i18nc("@info:tooltip", "Left or Right switches between the two images")
                     onClicked: root.switchComparisonImage()
                 }
@@ -961,9 +973,9 @@ Item {
         // The preview's footer, as a dialog's button row, at the bottom of
         // the details under a seam (following the details, the buttons
         // were crammed under them): at the end of a row, the default
-        // one, Apply, last. When they do not fit side by side, with a larger
-        // font or a longer translation, they stack, each the column's width,
-        // Back to Results first.
+        // one, Apply iTunes Artwork, last. When they do not fit side by
+        // side, with a larger font or a longer translation, they stack, each
+        // the column's width, Back to Results first.
         // Anchors and bindings place them, so they are in place the moment
         // Apply shows or hides: a layout would place them only at its next
         // polish, leaving Apply where it was laid out before, past the
@@ -1035,8 +1047,13 @@ Item {
                     // Breeze draws the button marked default as such.
                     Accessible.defaultButton: true
                     icon.name: "dialog-ok-apply"
-                    text: I18n.i18nc("@action:button", "Apply")
-                    toolTipText: I18n.i18nc("@info:tooltip", "Replace the album art with this candidate")
+                    // Named, as it applies that artwork also while the
+                    // current art shows to compare ("Apply" read as applying
+                    // the image on show).
+                    text: I18n.i18nc("@action:button artwork found on iTunes; keep it short",
+                                     "Apply iTunes Artwork")
+                    toolTipText: I18n.i18nc("@info:tooltip",
+                                            "Replace the album art with the iTunes artwork")
                     onClicked: root.applyPreview()
                 }
             }

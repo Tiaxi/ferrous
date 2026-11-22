@@ -37,7 +37,7 @@ ApplicationWindow {
         "@title:window the album art viewer; %1 is the application name", "%1 Album Art",
         root.appDisplayName)
     // A preview from Replace from iTunes names what it shows:
-    // "iTunes Candidate — Ferrous Album Art".
+    // "iTunes Artwork — Ferrous Album Art".
     readonly property string albumArtViewerTitleName: viewerController.albumArtPreviewActive
             && viewerController.comparisonLabel.length > 0
         ? I18n.i18nc("@title:window %1 is what the album art viewer shows; %2 is the viewer's name",
