@@ -793,7 +793,9 @@ void LevelMeterTest::meterAtRestShowsItsMarksAlone() {
             const int row = meterBottom - 1 - y;
             const bool onTick = row < scalePixels && onMarkTick(row, dpr, scaleHeight);
             tickRows += onTick ? 1 : 0;
-            for (int x = int(LevelMeterItem::kTrackLeft * dpr); x < rest.width(); ++x) {
+            // Framed, the track starts after the gap at the plot's side.
+            const double trackLeft = framed ? LevelMeterItem::kFramedGap : LevelMeterItem::kTrackLeft;
+            for (int x = int(trackLeft * dpr); x < rest.width(); ++x) {
                 const QString where = QStringLiteral("lane %1, row %2 (y %3), x %4").arg(lane).arg(row).arg(y).arg(x);
                 QVERIFY2(rest.pixelColor(x, y) == (onTick ? tick : trough),
                          qPrintable(where + QStringLiteral(": %1").arg(rest.pixelColor(x, y).name())));
@@ -952,8 +954,9 @@ void LevelMeterTest::topSeamCrossesTheColumnOnlyWhenSet() {
 }
 
 // The meter as part of the plot: its bar out to the column's right edge,
-// with no strip of the plot's floor beside it, or framed by its track, 2 px
-// in from either edge; the fill of one colour from its foot to its level;
+// with no strip of the plot's floor beside it, or framed by its track, after
+// a gap in the plot's background at the plot's side, which keeps it apart
+// from a trace that reaches the edge; the fill of one colour from its foot to its level;
 // its marks at -6, -12 and -24 dB, fewer in a short lane, a 2 px gap in the
 // ladder with a 1 px tick across the track in its upper row, on the fill
 // and above it, whatever the plot's scale; the peak tick a mark of its own
@@ -1001,8 +1004,13 @@ void LevelMeterTest::meterIsPartOfThePlot() {
                 const auto red = [&](double x, double y) { return color(x, y).red(); };
                 const QString where = QStringLiteral("%1 lanes at %2 dB, %3").arg(lanes).arg(level)
                                           .arg(framed ? QStringLiteral("framed") : QStringLiteral("out to the edge"));
+                const double trackLeft = framed ? LevelMeterItem::kFramedGap : LevelMeterItem::kTrackLeft;
                 const double barRight = framed ? width - LevelMeterItem::kFramedInset : width;
-                const double barLeft = framed ? LevelMeterItem::kFramedInset : LevelMeterItem::kBarLeft;
+                const double barLeft = framed ? trackLeft + LevelMeterItem::kFramedInset : LevelMeterItem::kBarLeft;
+                if (framed) {
+                    QCOMPARE(barRight - barLeft, LevelMeterItem::kFramedBarWidth);
+                    QVERIFY(trackLeft >= 2.0);
+                }
                 for (int lane = 0; lane < lanes; ++lane) {
                     const auto [top, bottom] = LevelMeterItem::laneRows(lane, lanes, 402);
                     const double height = bottom - top;
@@ -1014,7 +1022,17 @@ void LevelMeterTest::meterIsPartOfThePlot() {
                     const int rows = qRound(LevelMeterItem::meterPosition(level, scalePixels));
                     const int topRung = rungAtOrUnder(rows - 1, scale, scaleHeight);
                     const double rungY = meterBottom - (topRung + 0.5) / scale;
-                    for (double x = LevelMeterItem::kTrackLeft + 0.5; x < width; x += 1) {
+                    // The gap: the plot's background from the column's
+                    // left edge to the track, the meter's whole height.
+                    if (framed) {
+                        for (double x = 0.5; x < trackLeft; x += 1) {
+                            for (const double y : {top + 4, rungY, (top + bottom) / 2, bottom - 4}) {
+                                QVERIFY2(red(x, y) == 0x10,
+                                         qPrintable(where + QStringLiteral(": the gap at x %1, y %2").arg(x).arg(y)));
+                            }
+                        }
+                    }
+                    for (double x = trackLeft + 0.5; x < width; x += 1) {
                         for (const double y : {top + 1, bottom - 1}) {
                             QVERIFY2(red(x, y) == 0x10, qPrintable(where + QStringLiteral(": x %1, y %2").arg(x).arg(y)));
                         }
@@ -1037,7 +1055,7 @@ void LevelMeterTest::meterIsPartOfThePlot() {
                     for (const auto &[foot, gapTop] : gaps) {
                         const double tickY = meterBottom - gapTop + 0.5;
                         const double lowerY = meterBottom - foot - 0.5;
-                        for (double x = LevelMeterItem::kTrackLeft + 0.5; x < width; x += 1) {
+                        for (double x = trackLeft + 0.5; x < width; x += 1) {
                             QVERIFY2(red(x, tickY) == 0x90 && red(x, lowerY) == 0x30,
                                      qPrintable(where + QStringLiteral(": mark at %1 px, x %2: %3, %4")
                                                     .arg(foot).arg(x).arg(red(x, tickY)).arg(red(x, lowerY))));

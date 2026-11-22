@@ -736,13 +736,20 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         child = child->nextSibling();
     };
     // Across the track, and along the bar on it.
-    const auto track = [](double y, double height) { return QRectF(kTrackLeft, y, kTrackWidth, height); };
-    const auto bar = [this](double y, double height) {
-        return m_framed ? QRectF(kFramedInset, y, kFramedBarWidth, height) : QRectF(kBarLeft, y, kBarWidth, height);
+    const double trackLeft = m_framed ? kFramedGap : kTrackLeft;
+    const auto track = [trackLeft](double y, double height) {
+        return QRectF(trackLeft, y, kColumnWidth - trackLeft, height);
     };
+    const auto bar = [this](double y, double height) {
+        return m_framed ? QRectF(kFramedGap + kFramedInset, y, kFramedBarWidth, height)
+                        : QRectF(kBarLeft, y, kBarWidth, height);
+    };
+    // Framed, the plot's background runs to the column's edge, the gap's,
+    // with no seam beside it.
+    const double backgroundLeft = m_framed ? 0.0 : kTrackLeft;
     for (int lane = 0; lane < m_laneCount; ++lane) {
         const auto [top, bottom] = laneRows(lane, m_laneCount, height());
-        next(QRectF(kTrackLeft, top, std::max(0.0, width() - kTrackLeft), bottom - top), m_backgroundColor);
+        next(QRectF(backgroundLeft, top, std::max(0.0, width() - backgroundLeft), bottom - top), m_backgroundColor);
         const double meterTop = top + kInset;
         const double meterBottom = std::max(meterTop, bottom - kInset);
         next(track(meterTop, meterBottom - meterTop), m_troughColor);

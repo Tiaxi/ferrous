@@ -23,9 +23,12 @@
 // is a vertical meter from -60 to 0 dBFS, with its listed levels evenly
 // spaced (-6, -12, -24 and -48 dB at 4/5 to 1/5 of the height): an 11 px
 // track the lane's height, and on it a 10 px bar out to the column's right
-// edge, with the track showing 1 px left of it, or, `framed`, an 8 px bar
-// 2 px in from either edge of the column, the track framing it: the fill
-// from the bottom and a 3 px clip lamp at the top. The fill is a ladder,
+// edge, with the track showing 1 px left of it, or, `framed`, no seam but a
+// 3 px gap in the plot's background at the plot's side, then a 9 px track
+// with a 7 px bar on it, the track framing it 1 px either side (the
+// waveform met the track, and where it reached the edge the two read as one
+// shape): the fill from the bottom and a 3 px clip lamp at the top. The
+// fill is a ladder,
 // 3 px rungs on a 4 px pitch from the scale's foot, the track showing
 // between them, so it reads as an instrument rather than a solid bar (a
 // solid bar was louder than the data, and in the view's colours read as the
@@ -68,9 +71,9 @@ class LevelMeterItem : public QQuickItem {
     Q_PROPERTY(QColor tickColor MEMBER m_tickColor WRITE setTickColor NOTIFY colorsChanged)
     // The line across the column's top; none while transparent.
     Q_PROPERTY(QColor topSeamColor MEMBER m_topSeamColor WRITE setTopSeamColor NOTIFY colorsChanged)
-    // Whether the bar is framed by the track, kFramedInset in from either
-    // edge of the column, as on the waveform, where the bar in the plot's
-    // own colour otherwise read as the waveform's tail.
+    // Whether the bar is framed by the track, which then starts kFramedGap
+    // into the column, as on the waveform, where the bar in the plot's own
+    // colour otherwise read as the waveform's tail.
     Q_PROPERTY(bool framed READ framed WRITE setFramed NOTIFY framedChanged)
     // Whether something reads the levels, such as a tooltip: then
     // readoutChanged() tells it of new ones, a few times a second. It also
@@ -102,9 +105,11 @@ public:
     // the lamp.
     static constexpr double kBarLeft = 2.0;
     static constexpr double kBarWidth = kColumnWidth - kBarLeft;
-    // A framed bar: kFramedInset in from either edge of the column.
-    static constexpr double kFramedInset = 2.0;
-    static constexpr double kFramedBarWidth = kColumnWidth - 2 * kFramedInset;
+    // Framed, the column starts with a gap in the plot's background, and
+    // the bar is kFramedInset in from either edge of the track after it.
+    static constexpr double kFramedGap = 3.0;
+    static constexpr double kFramedInset = 1.0;
+    static constexpr double kFramedBarWidth = kColumnWidth - kFramedGap - 2 * kFramedInset;
     // The meter keeps 3 px clear above and below in its lane; its top 3 px
     // are the clip lamp, with a 1 px gap under it.
     static constexpr double kInset = 3.0;
