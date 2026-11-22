@@ -677,6 +677,8 @@ private slots:
     void editTagsWrapsChangesOfOnlyTheRowsInView();
     void editTagsGivesTheTagsRoomToTitleAndFileName_data();
     void editTagsGivesTheTagsRoomToTitleAndFileName();
+    void editTagsPinsWhatIdentifiesARowAsItScrolls_data();
+    void editTagsPinsWhatIdentifiesARowAsItScrolls();
     void editTagsTitleMeetsTheEdgeUnderAWideScrollBar();
     void editTagsDetailsHasAGlyphAsItsPeers_data();
     void editTagsDetailsHasAGlyphAsItsPeers();
@@ -5859,12 +5861,15 @@ void UiDialogsTest::editTagsShowsEachChangeWhole() {
         QVERIFY2(textWidth <= cell->width() - left - cell->property("rightPadding").toReal() + 0.5, qPrintable(at));
         QVERIFY2(cell->property("contentHeight").toReal() <= cell->height() + 0.5, qPrintable(at));
 
-        // In view sideways too: where it was, or with the column at its left.
+        // In view sideways too: where it was, or with the column at its
+        // left, beside # and File Name where they stay in view.
         QRectF view = sceneRect(table);
+        const qreal pinned = dialog->property("pinsColumns").toBool() && !evaluate(cell, QStringLiteral("pinned")).toBool()
+            ? dialog->property("pinnedWidth").toReal() : 0;
         if (sceneRect(cell).left() + left + textWidth > view.right()) {
             const qreal x = cell->mapRectToItem(content, QRectF(0, 0, cell->width(), cell->height())).left();
             table->setProperty("contentX",
-                               std::min(x, table->property("contentWidth").toReal() - table->width()));
+                               std::min(x - pinned, table->property("contentWidth").toReal() - table->width()));
         }
         // Its row holds it whole once it is in view, and may then need
         // scrolling to show all of it.
@@ -6114,6 +6119,132 @@ void UiDialogsTest::editTagsGivesTheTagsRoomToTitleAndFileName() {
     }
     QVERIFY(closeTagEditor(main));
 }
+
+void UiDialogsTest::editTagsPinsWhatIdentifiesARowAsItScrolls_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::addColumn<bool>("pins");
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000 << true;
+    QTest::newRow("24 pt, 1000 px") << 24.0 << 1000 << false;
+    QTest::newRow("24 pt, 1600 px") << 24.0 << 1600 << true;
+}
+
+// Where the table scrolls sideways, #, with the change mark, and File Name
+// stay at its left, header and all, with a 1 px seam after them, while the
+// other columns scroll under them: a change in Disc is checked beside its
+// file (it was checked with the file scrolled out of view). Not one pinned
+// pixel moves, and a selected row's fill runs on across the seam. Where
+// the two would take more than about half the view (at 24 pt from a
+// 1000 px window, they left 123 px to scroll the rest through), they
+// scroll with the rest.
+void UiDialogsTest::editTagsPinsWhatIdentifiesARowAsItScrolls() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    QFETCH(bool, pins);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfTheShotBatch());
+    QVERIFY(tags != nullptr);
+    tags->resize(width, tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), qreal(width));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    QVERIFY2(table->property("contentWidth").toReal() > table->width() + 0.5, "the table doesn't scroll");
+    QObject *dialog = object(main.window, QStringLiteral("tagEditorDialog"));
+    QCOMPARE(dialog->property("pinsColumns").toBool(), pins);
+    if (!pins) {
+        QVERIFY(itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRowSeam")).at(0)->isVisible() == false);
+        QVERIFY(closeTagEditor(main));
+        return;
+    }
+    QObject *palette = paletteOf(main.window);
+    main.editor.selectAllRows();
+    main.editor.setCell(0, QStringLiteral("discNo"), QStringLiteral("2"));
+    main.editor.setCell(0, QStringLiteral("title"), retitledBatch().at(6).second);
+    main.editor.notifyRowMutation();
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    const auto firstRow = [&]() -> QQuickItem * {
+        for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
+            if (row->isVisible() && row->property("index").toInt() == 0) {
+                return row;
+            }
+        }
+        return nullptr;
+    };
+    const QStringList pinned{QStringLiteral("tagEditorColumn_trackNo"), QStringLiteral("tagEditorColumn_fileName"),
+                             QStringLiteral("tagEditorCell_trackNo"), QStringLiteral("tagEditorCell_fileName"),
+                             QStringLiteral("tagEditorRowModifiedMark")};
+    const auto pinnedRects = [&]() {
+        QList<QRectF> rects;
+        for (const QString &name : pinned) {
+            QQuickItem *item = name.startsWith(QStringLiteral("tagEditorColumn_")) ? named(tags, name)
+                                                                                    : itemNamed(firstRow(), name);
+            rects << (item != nullptr ? sceneRect(item) : QRectF());
+        }
+        return rects;
+    };
+    const QList<QRectF> before = pinnedRects();
+    const qreal pinnedRight = sceneRect(named(tags, QStringLiteral("tagEditorColumn_fileName"))).right();
+    const QRect pinnedArea = QRectF(QPointF(sceneRect(table).left(), sceneRect(table).top()),
+                                    QPointF(pinnedRight, sceneRect(firstRow()).top()
+                                                             + dialog->property("tableRowHeight").toReal() - 1))
+                                 .toAlignedRect();
+    const QImage still = tags->grabWindow().copy(pinnedArea);
+
+    // Scrolled to the far end, and back to where Disc's change is in view
+    // beside its file, from the seam on.
+    const qreal end = table->property("contentWidth").toReal() - table->width();
+    QQuickItem *disc = itemNamed(firstRow(), QStringLiteral("tagEditorCell_discNo"));
+    QVERIFY(disc != nullptr);
+    const qreal discAt = std::min(end, sceneRect(disc).left() - pinnedRight);
+    table->setProperty("contentX", end);
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    // The pinned cells' places, and their pixels (the header and the
+    // row's first line, above the current row's frame: the row is one line
+    // tall once its new title is out of view).
+    const auto sameAsBefore = [&](const QList<QRectF> &now) {
+        for (qsizetype i = 0; i < now.size(); ++i) {
+            if (now.at(i).topLeft() != before.at(i).topLeft() || now.at(i).width() != before.at(i).width()) {
+                return false;
+            }
+        }
+        return true;
+    };
+    QVERIFY(sameAsBefore(pinnedRects()));
+    QCOMPARE(tags->grabWindow().copy(pinnedArea), still);
+    table->setProperty("contentX", discAt);
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    QVERIFY(sameAsBefore(pinnedRects()));
+    QVERIFY((disc = itemNamed(firstRow(), QStringLiteral("tagEditorCell_discNo"))) != nullptr);
+    QVERIFY2(sceneRect(disc).left() >= pinnedRight - 0.5 && sceneRect(disc).right() <= sceneRect(table).right(),
+             qPrintable(describeItem(disc)));
+    const QImage grabbed = tags->grabWindow();
+    QCOMPARE(grabbed.copy(pinnedArea), still);
+    // The seam, in the seam's colour, in the header and the row; the row's
+    // selection on both sides of it.
+    const QColor seam = palette->property("seam").value<QColor>();
+    const QRectF row = sceneRect(firstRow());
+    const int seamX = int(std::floor(pinnedRight)) - 1;
+    const int headerY = int(sceneRect(named(tags, QStringLiteral("tagEditorColumn_fileName"))).center().y());
+    for (const QPoint &at : {QPoint(seamX, headerY), QPoint(seamX, int(row.center().y()))}) {
+        QCOMPARE(hex(grabbed.pixelColor(at)), hex(seam));
+    }
+    const QColor beforeSeam = grabbed.pixelColor(QPoint(int(pinnedRight) - 3, int(row.bottom()) - 2));
+    const QColor afterSeam = grabbed.pixelColor(QPoint(int(pinnedRight) + 3, int(row.bottom()) - 2));
+    QCOMPARE(hex(beforeSeam), hex(afterSeam));
+    QVERIFY(hex(beforeSeam) != hex(palette->property("view").value<QColor>()));
+    // The new title, wrapped, is under the pinned columns now: out of
+    // view, it leaves its row one line tall.
+    QQuickItem *title = itemNamed(firstRow(), QStringLiteral("tagEditorCell_title"));
+    QVERIFY(title != nullptr && title->property("lineCount").toInt() > 1);
+    if (sceneRect(title).right() - title->property("rightPadding").toReal() <= pinnedRight + 1) {
+        QCOMPARE(firstRow()->height(), dialog->property("tableRowHeight").toReal());
+    }
+    QVERIFY(closeTagEditor(main));
+}
+
 
 void UiDialogsTest::editTagsWrapsChangesOfOnlyTheRowsInView() {
     const ScopedNotoSans font(10);

@@ -313,13 +313,27 @@ Components.DialogWindow {
         // that it is whole once scrolled to, clear of the vertical bar.
         if (over > 0) {
             const view = Math.floor(room - root.scrollBarClearance)
+            // # and File Name, which stay in view as the rest scroll, take
+            // no more than about half of it (at 24 pt from a 1000 px window
+            // they took four fifths, and Folder never showed whole), or,
+            // where their headers alone need more, stay unpinned.
+            const pinnedMost = Math.floor(view * root.pinnedShare)
+            const pins = widths[number] + root.columnNeed(root.tableColumns[name]) <= pinnedMost
+            if (pins) {
+                widths[name] = Math.min(widths[name], pinnedMost - widths[number])
+            }
+            const pinned = pins ? widths[number] + widths[name] : 0
             const title = root.tableColumns.findIndex(function(column) { return column.key === "title" })
             const beside = Math.floor(room - widths[number] - widths[name])
-            widths[title] = beside < root.uiPalette.scaledSize(root.tableColumns[title].least)
+            widths[title] = !pins && beside < root.uiPalette.scaledSize(root.tableColumns[title].least)
                 ? root.uiPalette.scaledSize(root.tableColumns[title].holds)
                 : beside
+            // Every other column whole, once scrolled to, in the view or
+            // beside the pinned columns.
             root.tableColumns.forEach(function(column, i) {
-                widths[i] = Math.min(widths[i], Math.max(root.columnNeed(column), view))
+                if (!pins || i !== title && i >= root.pinnedColumnCount) {
+                    widths[i] = Math.min(widths[i], Math.max(root.columnNeed(column), view - pinned))
+                }
             })
         }
         // The whole pixels the rounding left go to the last column that
@@ -350,6 +364,19 @@ Components.DialogWindow {
     function columnWidth(index) {
         return root.shownColumnWidths[index]
     }
+
+    // Where the table scrolls sideways, what identifies a row stays at its
+    // left: #, with the change mark, and File Name, the first two columns,
+    // with a 1 px seam after them, while the others scroll under them (a
+    // change in Disc was checked with its file scrolled out of view).
+    readonly property int pinnedColumnCount: 2
+    // The most of the view they take; more, and they scroll with the rest.
+    readonly property real pinnedShare: 0.55
+    readonly property bool pinsColumns: root.tableScrolls && root.shownColumnWidths[0] + root.shownColumnWidths[1]
+        <= Math.floor((tagEditorTable.width - 2 * root.tableInset - root.scrollBarClearance) * root.pinnedShare)
+    readonly property real pinnedShift: root.pinsColumns ? tagEditorTable.contentX : 0
+    // From the row's edge to the seam's far side.
+    readonly property real pinnedWidth: root.tableInset + root.shownColumnWidths[0] + root.shownColumnWidths[1]
 
     // The room above a cell's first line and under its last, in a row as
     // tall as one line as in one that wraps, so that all start on one line.
@@ -1539,6 +1566,29 @@ Components.DialogWindow {
                                 height: parent.height
                                 // Status, while no row has one.
                                 visible: width > 0
+                                readonly property bool pinned: headerCell.index < root.pinnedColumnCount
+                                z: headerCell.pinned ? 2 : 0
+                                transform: Translate { x: headerCell.pinned ? root.pinnedShift : 0 }
+
+                                // Under the pinned headers, from the table's
+                                // edge to the seam, the header's colour, over
+                                // those that scroll.
+                                Rectangle {
+                                    visible: headerCell.index === 0 && root.pinsColumns
+                                    z: -1
+                                    x: -root.tableInset
+                                    width: root.pinnedWidth
+                                    height: parent.height
+                                    color: root.uiPalette.view
+
+                                    Rectangle {
+                                        objectName: "tagEditorHeaderSeam"
+                                        anchors.right: parent.right
+                                        width: 1
+                                        height: parent.height
+                                        color: root.uiPalette.seam
+                                    }
+                                }
 
                                 Row {
                                     anchors.fill: parent
@@ -1675,14 +1725,17 @@ Components.DialogWindow {
                     // placed the row. A change scrolled out of view grows
                     // it as it comes in (it left a tall, empty row: at 24 pt
                     // from a 1000 px window, every row of a new title).
+                    // The pinned cells are always in view, and the others
+                    // only from the seam on: under the pinned ones, a
+                    // change is out of view too.
                     height: {
                         let tallest = root.tableRowHeight
-                        const left = tagEditorTable.contentX - rowCells.x
-                        const right = left + tagEditorTable.width
+                        const right = tagEditorTable.contentX - rowCells.x + tagEditorTable.width
+                        const left = tagEditorTable.contentX - rowCells.x + (root.pinsColumns ? root.pinnedWidth : 0)
                         for (let i = 0; i < rowCells.children.length; ++i) {
                             const cell = rowCells.children[i]
-                            if (cell.height > tallest && cell.x + cell.leftPadding + 1 < right
-                                    && cell.x + cell.width - cell.rightPadding > left + 1) {
+                            if (cell.height > tallest && (cell.pinned === true && root.pinsColumns || cell.x + cell.leftPadding + 1 < right
+                                    && cell.x + cell.width - cell.rightPadding > left + 1)) {
                                 tallest = cell.height
                             }
                         }
@@ -1735,6 +1788,9 @@ Components.DialogWindow {
                                 required property int index
                                 objectName: "tagEditorCell_" + modelData.key
                                 width: root.columnWidth(index)
+                                readonly property bool pinned: index < root.pinnedColumnCount
+                                z: tableCell.pinned ? 2 : 0
+                                transform: Translate { x: tableCell.pinned ? root.pinnedShift : 0 }
                                 // A committed change is whole: it wraps,
                                 // and the row grows by it. Its height is the
                                 // committed value's, also while another is
@@ -1771,6 +1827,43 @@ Components.DialogWindow {
                                 // that Format shows. The whole of any cell
                                 // is in its tooltip while it is cut short.
                                 elide: tableCell.changed && !tableCell.typed ? Text.ElideNone : Text.ElideRight
+
+                                // Under the pinned cells, from the row's edge
+                                // to the seam, the row as it is drawn there,
+                                // over the cells that scroll: its fill,
+                                // selection, hover and the current row's
+                                // frame, whose far side is past the seam, so
+                                // they run on across it.
+                                Item {
+                                    visible: tableCell.index === 0 && root.pinsColumns
+                                    z: -1
+                                    x: -root.tableInset
+                                    width: root.pinnedWidth
+                                    height: tableRow.height
+                                    clip: true
+
+                                    Item {
+                                        width: tableRow.width
+                                        height: parent.height
+
+                                        Components.RowBackground {
+                                            uiPalette: root.uiPalette
+                                            opaque: true
+                                            hovered: rowHover.hovered
+                                            selected: tableRow.selected
+                                            active: tagEditorTable.activeFocus
+                                            focused: tableRow.current
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        objectName: "tagEditorRowSeam"
+                                        anchors.right: parent.right
+                                        width: 1
+                                        height: parent.height
+                                        color: root.uiPalette.seam
+                                    }
+                                }
 
                                 // The committed change as it wraps, which is
                                 // how tall the cell is: only a changed cell
@@ -1816,7 +1909,7 @@ Components.DialogWindow {
                     Rectangle {
                         objectName: "tagEditorRowModifiedMark"
                         visible: tableRow.marked
-                        x: root.tableInset + Math.round((Kirigami.Units.largeSpacing - width) / 2)
+                        x: root.pinnedShift + root.tableInset + Math.round((Kirigami.Units.largeSpacing - width) / 2)
                         // On the first line, as the row's cells start.
                         y: Math.round((root.tableRowHeight - height) / 2)
                         width: root.modifiedMarkSize
@@ -1857,11 +1950,13 @@ Components.DialogWindow {
         return at >= 0 && at + step >= 0 && at + step < root.tabStops.length ? root.tabStops[at + step] : null
     }
 
-    // Scrolls the table sideways until `item`, in its header, is in view.
+    // Scrolls the table sideways until `item`, in its header, is in view,
+    // clear of the pinned columns.
     function showInTable(item) {
         const left = item.mapToItem(tagEditorTable, 0, 0).x
-        if (left < 0) {
-            tagEditorTable.contentX += left
+        const pinned = item.pinned !== true && root.pinsColumns ? root.pinnedWidth : 0
+        if (left < pinned) {
+            tagEditorTable.contentX += left - pinned
         } else if (left + item.width > tagEditorTable.width) {
             tagEditorTable.contentX += left + item.width - tagEditorTable.width
         }
