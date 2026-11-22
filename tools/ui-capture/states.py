@@ -91,6 +91,12 @@ TARGETS = {
                      "if(p.y>=q.y+2*it.height&&p.y+it.height<=q.y+v.height)o.push([p.y,it])}var c=it.children;"
                      "for(var i=0;i<c.length;i++)s.push(c[i]);}o.sort(function(a,b){return a[0]-b[0]});"
                      "return o.length?o[0][1]:null})()",
+    # The top search result that has a tooltip: one only where it adds to the row (toolTipAdds), where the app says so.
+    "tooltipResultRow": "(function(){var o=[];var s=[root.Overlay.overlay.parent];while(s.length){var it=s.shift();"
+                        "if(!it.visible||it.opacity===0)continue;if(typeof it.toolTipText==='function'&&it.isResult&&"
+                        "(typeof it.toolTipAdds!=='function'||it.toolTipAdds()))o.push([it.mapToItem(null,0,0).y,it]);"
+                        "var c=it.children;for(var i=0;i<c.length;i++)s.push(c[i]);}o.sort(function(a,b){return a[0]-b[0]});"
+                        "return o.length?o[0][1]:null})()",
 }
 
 TARGETS_PLAIN = TARGETS["plainQueueRow"]
@@ -6241,9 +6247,10 @@ STATES = [
     ("menus", "search", "help-hover", "hover globalSearchHelpButton 1.3", "Search palette: help button hovered"),
     ("menus", "search", "results", "away | type mer | wait 0.8", "Search palette: 'mer' with results"),
     ("menus", "search", "results-keyboard", "key Down | key Down | key Down | wait 0.4", "Search palette: keyboard selection down three rows"),
-    ("menus", "search", "result-hover", "hover globalSearchResultTitle#2 1.6", "Search palette: pointer over a result, its tooltip shown"),
+    # (a row whose tooltip adds to it: the first result's may say nothing more than the row, and then shows none)
+    ("menus", "search", "result-hover", "hover @tooltipResultRow@0.15,0.5 1.6", "Search palette: pointer over a result, its tooltip shown"),
     ("menus", "menu", "context-search-result", "rclick globalSearchResultTitle#2",
-     "Search result context menu (right click; it opens at the click point; the palette takes no Menu key)"),
+     "Search result context menu (right click; it opens at the click point; from the keyboard: context-search-result-keyboard)"),
     ("menus", "search", "results-many", "esc 1 | away | key Backspace | key Backspace | key Backspace | type l | wait 0.8",
      "Search palette: 'l' (many results, truncated groups)"),
     ("menus", "search", "no-results", "key Backspace | type zzqx | wait 0.8", "Search palette: no results"),
@@ -6383,7 +6390,7 @@ STATES = [
             f"Album art viewer, {mname}, file info pane"),
            ("viewers", "menu", f"context-albumart-viewer-{mname}",
             "js viewerController.toggleAlbumArtInfoVisible(function(){}) | " + ("window albumArtFullscreenWindow | " if mode else "") + ("key Menu | settle 0.8" if mode else "rclick xy:500,400"),
-            f"Album art viewer context menu ({mname}" + (", Menu key)" if mode else ", right click: the windowed viewer takes no Menu key)")),
+            f"Album art viewer context menu ({mname}" + (", Menu key)" if mode else ", right click; the Menu key and Shift+F10 open it too, at the art's centre)")),
            ("viewers", "_", f"_close-{mname}", ("window albumArtFullscreenWindow | " if mode else "") + "esc | js viewerController.closeAlbumArtViewer() | settle 1", "")]
     )
 ] + [
@@ -7005,9 +7012,10 @@ NOT_CAPTURED = [
     ("Context menus at the pointer", "Context menus are opened from the keyboard (the Menu key, or Shift+F10) wherever "
                                      "the view takes it: library, queue, the scrobble indicator and the fullscreen "
                                      "album art viewer; they open on the selected row or control. The windowed album "
-                                     "art viewer takes no Menu key: its right-click menu opens with popup() at the "
-                                     "pointer, which the probe's synthetic events do not move in the compositor, so "
-                                     "it shows at the window's top-left corner."),
+                                     "art viewer and the search palette take those keys as shortcuts, which the "
+                                     "probe's keys go past: the viewer's menu is shot from a right click (at the "
+                                     "click point; from the keys it opens at the art's centre), the palette's from a "
+                                     "right click and from a real Menu key."),
     ("Dialog windows' open and close animation", "Configure and About are real windows (DialogWindow): KWin animates "
                                                  "their opening and closing as a compositor effect, which the app's own "
                                                  "frame readback cannot see; their strips show the client window only "
@@ -7048,6 +7056,8 @@ STRIP_VIEW = {
     "preferences-open": (329, 191, 942, 618),
     "search-open": (370, 77, 860, 646), "search-close": (370, 77, 860, 646),
     "search-typing": (370, 77, 860, 646),
+    # the plot, both lanes and the time on the bottom one, not a thumbnail of the window (the pans' band: vi-moves-band)
+    "vi-pan-waveform": "spectrogramPane", "vi-pan-spectrogram": "spectrogramPane",
     "first-scan": (0, 75, 820, 470),
     "animoff-dialog-open": (420, 240, 760, 540),
     "animoff-search-open": (370, 77, 860, 646),
@@ -7210,7 +7220,12 @@ CUSTOM_SHEETS = [
     ("details-1to1", "Details at 1:1: the Last.fm glyph's centre line, the search field at 24 pt, the mode switch hovered "
      "without focus (3x, dark and light) and its plate during a click (3x)", "dark",
      [[("details", "statusbar-glyph", None, "Status bar, dark")],
-      [("details", "searchfield24pt", None, "Search field at 24 pt (1600x1000), dark", dict(variant="font24"))],
+      # (the field is as wide as the window at 24 pt, over the reviewers' 1568 px with the sheet's margins: its two
+      # ends, the glyph and the query, then the buttons; only its plain middle is left out)
+      [("details", "searchfield24pt", None, "Search field at 24 pt (1600x1000), dark: its left end",
+        dict(variant="font24", part=(0, 0, 0.42, 1))),
+       ("details", "searchfield24pt", None, "Its right end (the plain middle left out)",
+        dict(variant="font24", part=(0.75, 0, 0.25, 1)))],
       [("details", "modeswitch-hover", None, "Mode switch hovered without focus, dark"),
        ("details", "modeswitch-hover", None, "light", dict(theme="light"))],
       [dict(strip="mode-switch-lane", item="visualizationModeSwitch", times=[-17, 17, 34, 67, 150], zoom=3,
@@ -7430,8 +7445,10 @@ MOTION_FOCUS = {
     # visualization interaction: the perceived rows show the plot that moves (a 380 px stretch of its upper lane), not
     # the plates that fade beside it (recording coordinates: its crop starts at the transport's top)
     **{n: dict(rect=(741, 518, 380, 215), b_lines=1, band=360)
-       for n in ("vi-pan-waveform", "vi-follow-waveform", "vi-pan-spectrogram", "vi-follow-spectrogram", "vi-autoscroll",
-                 "vi-seek-plot", "vi-seek-bar")},
+       for n in ("vi-follow-waveform", "vi-follow-spectrogram", "vi-autoscroll", "vi-seek-plot", "vi-seek-bar")},
+    # (a pan's: also whether the crosshair is at one x in every lane of every frame)
+    **{n: dict(rect=(741, 518, 380, 215), b_lines=1, band=360, lanes="spectrogramPane")
+       for n in ("vi-pan-waveform", "vi-pan-spectrogram")},
     # the queue's first rows where the playing row moves (rows 1-3, the number and title columns); the first scan:
     # the status bar's right half (the scan label arriving and leaving)
     "queue-now-move": dict(rect="mainQueuePane:0,0.06,0.55,0.18", rows="all", b_lines=1),
@@ -7440,6 +7457,9 @@ MOTION_FOCUS = {
     "scan-injected": dict(rect="statusBar:0.4,0,0.6,1", rows="all", b_lines=1),
     "mute-toggle": dict(rows="all", b_lines=1),
     "seek-drag-box": dict(rows="all", b_lines=1),
+    # the field and the first rows under it, where each keystroke's result shows (the perceived rows); one 16.7 ms
+    # line, so the key frames, which have the moving footer, are not thumbnails
+    "search-typing": dict(rect=(402, 107, 300, 260), b_lines=1, band=400, max_frames=6),
     # the top-right corner; perceived rows for the reveal and the hide
     "viewer-strip-show-fullscreen": dict(rect=(1700, 0, 300, 110), rows="all", b_lines=1, max_frames=6),
     "viewer-autohide-fullscreen": dict(rect=(1700, 0, 300, 110), segment="last", rows="all", b_lines=1, zoom_graphs=True, band=360, max_frames=6),
@@ -7689,8 +7709,10 @@ _insert_after("dialogs", "keyboard-shortcuts-default-focus", [
     ("dialogs", "dialog", "keyboard-shortcuts-filter",
      "click keyboardShortcutsSearchField | wait 0.3 | window keyboardShortcutsDialog | type play | wait 0.6 | window | away",
      "Configure Keyboard Shortcuts: the list filtered by \u201cplay\u201d, typed in its search field"),
+    # (the pointer out of the dialog too: left on the search field, its tooltip covered the columns in the later
+    # states, which are compared with the one at rest)
     ("dialogs", "_", "_shortcuts-unfilter",
-     "window keyboardShortcutsDialog | key Backspace | key Backspace | key Backspace | key Backspace | wait 0.4 | window ", "")])
+     "window keyboardShortcutsDialog | leave | key Backspace | key Backspace | key Backspace | key Backspace | wait 0.4 | window ", "")])
 _insert_after("bigfont", "quit-save-failed", [  # (the next state's Escape closes it)
     ("bigfont", "dialog", "keyboard-shortcuts", "esc | macro opendialog keyboardShortcutsDialog | settle 1.2 | away",
      "Large font: Configure Keyboard Shortcuts")])
@@ -7782,7 +7804,7 @@ DLG_FACTS = {("dialogs", st) for st in (
            "about", "about-kde", "library-root-name-add", "library-root-name-rename", "confirm-remove-library-root",
            "confirm-clear-diagnostics", "quit-save-failed", "diagnostics", "recent-errors", "tag-editor", "tag-editor-auto-number",
            "tag-editor-rename-preview", "tag-editor-batch", "itunes-results-loading", "tag-editor-quit-wait", "tag-editor-status-details", "itunes-error", "itunes-empty",
-           "confirm-replace-cover", "preferences-library", "preferences-general", "preferences-lastfm")], ("narrow", f"preferences-{PREF_PAGES[1][1]}")}
+           "confirm-replace-cover", "preferences-library", "preferences-general", "preferences-lastfm")], ("narrow", f"preferences-{PREF_PAGES[1][1]}"), ("narrow", "tag-editor")}
 # the viewer's corner plate or strip as grabbed (shown, or auto-hidden after the pointer stopped): its fact
 # for the sheets' labels, recorded as the state's last step
 PLATE_FACTS = {("viewers", "albumart-windowed-info"): ("albumArtPopupControls", "corner plate"),

@@ -3,9 +3,10 @@
 
 A strip lays a ~100 ms change out as frozen frames: slow motion a reviewer cannot watch at speed. `analyse`
 measures the recording and draws ONE merged image per transition, at the reviewers' 1568 px width:
-- caption: latency (action to first change), each transition (first to last change; changes more than
+- caption: whether every lane's crosshair is at one x (the recordings MOTION_FOCUS "lanes" names);
+  latency (action to first change), each transition (first to last change; changes more than
   100 ms apart are separate transitions, e.g. a hover fade in and out, or a wait then an auto-hide) and the
-  recording, kept apart; blink per scope; text overlap; movement after the stated end;
+  recording, kept apart; blink per scope and per changed item; text overlap; movement after the stated end;
 - key frames (at most 12; the strip pages under strips/frames/ have the rest);
 - a graph: the animated items' opacity (the probe's per-frame item trace), the ink of each scope (text: the
   rects of the text items in the recording; other: images, icons, plots), luminance, the transitions, blink
@@ -14,6 +15,7 @@ measures the recording and draws ONE merged image per transition, at the reviewe
   45 ms before t): 5 moments across the main transition, then every 16.7 ms around its strongest change;
   small controls at 2x, or a crop given per strip (states.PERCEIVED_FOCUS).
 """
+import bisect
 import fnmatch
 import itertools
 import os
@@ -27,6 +29,10 @@ FONT = "/usr/share/fonts/google-noto/NotoSans-Regular.ttf"
 FONT_B = "/usr/share/fonts/google-noto/NotoSans-Bold.ttf"
 WINDOW_MS = 45.0
 BLINK_MAX_MS = 250.0  # a longer dip is a state of its own, not a blink
+# a blink is a dip and return to HALF or less; an item's opacity (which a cross-fade of two items cannot average
+# down, as it does their ink) also blinks by a dip of over DIP for over DIP_MS
+DIP, DIP_MS, HALF = 0.25, 30.0, 0.5
+EVEN = 0.005  # what rounding (8-bit pixels, the trace's three decimals) adds to a dip to exactly HALF
 GLANCE_S = 0.2  # assumed time a reviewer looks at one strip frame, for the slow-motion factor
 COLORS = [(255, 196, 64), (102, 204, 255), (255, 120, 120), (150, 230, 120), (210, 150, 255), (255, 160, 220),
           (120, 230, 220), (230, 230, 120)]
@@ -72,7 +78,9 @@ def read_trace(d, t_action):
     p = os.path.join(d, "opacity.tsv")
     if os.path.exists(p):
         t0 = None
-        for line in open(p, encoding="utf-8"):
+        with open(p, encoding="utf-8") as tsv:
+            lines = tsv.readlines()
+        for line in lines:
             f = line.rstrip("\n").split("\t")
             if f[0] == "#t0":
                 t0 = float(f[1])
@@ -100,7 +108,9 @@ def read_trace(d, t_action):
     p = os.path.join(d, "animations.tsv")
     if os.path.exists(p):
         t0 = None
-        for line in open(p, encoding="utf-8"):
+        with open(p, encoding="utf-8") as tsv:
+            lines = tsv.readlines()
+        for line in lines:
             f = line.rstrip("\n").split("\t")
             if f[0] == "#t0":
                 t0 = float(f[1])
@@ -235,20 +245,22 @@ def ink_series(arrs, mask):
 
 
 def blink_of(ink, spans, segs):
-    """Per transition: the longest dip of the ink below half its level before and after (at most BLINK_MAX_MS:
-    a longer low stretch is a state of its own, e.g. a menu held open). Returns (ms, per-frame mask)."""
+    """Per transition: the longest dip of the ink to HALF or less of the lower of its levels before and after (at
+    most BLINK_MAX_MS: a longer low stretch is a state of its own, e.g. a menu held open). Not by DIP: a designed
+    cross-fade of two texts takes their mixed ink down a third. Returns (ms, per-frame mask)."""
     bmask = [False] * len(spans)
     best = 0.0
     for s in segs:
         a, b = s["a"], s["b"]
-        lo = 0.5 * min(ink[max(0, a - 1)], ink[b])
-        if lo <= 0.5:
+        ref = min(ink[max(0, a - 1)], ink[b])
+        if HALF * ref <= 0.5:
             continue
+        lo = (HALF + EVEN) * ref
         k = a
         while k <= b:
-            if ink[k] < lo:
+            if ink[k] <= lo:
                 j = k
-                while j + 1 <= b and ink[j + 1] < lo:
+                while j + 1 <= b and ink[j + 1] <= lo:
                     j += 1
                 dur = spans[j][1] - spans[k][0]
                 if dur <= BLINK_MAX_MS:
@@ -259,6 +271,110 @@ def blink_of(ink, spans, segs):
             else:
                 k += 1
     return best, bmask
+
+
+def opacity_dips(pts):
+    """The dips of one item's traced opacity [(t, v)] that return: each to under 1 - DIP of the level it had and
+    back over it. Yields (the level before, the indices of the first point of the decline, the first under that
+    threshold, the first back over it and the one the return rises to). A fade-out, a fade-in and a low stretch
+    still low at the trace's end are none."""
+    n, i, top = len(pts), 1, 0
+    while i < n:
+        peak = pts[top][1]
+        if pts[i][1] >= peak:
+            top = i
+        elif peak > 0.1 and pts[i][1] < (1 - DIP) * peak:
+            j = i
+            while j < n and pts[j][1] < (1 - DIP) * peak:
+                j += 1
+            if j == n:
+                return
+            r = j
+            while r + 1 < n and pts[r + 1][1] > pts[r][1]:
+                r += 1
+            yield peak, top + 1, i, j, r
+            top, i = r, r
+        i += 1
+
+
+def edge_energy(a):
+    """How much is drawn in pixels (..., 3): the mean step between neighbours, which a dim scales as it does the
+    contrast and which the colour behind an item does not move."""
+    g = sum3(a)
+    return sum(float(np.abs(np.diff(g, axis=ax)).mean()) for ax in (0, 1) if g.shape[ax] > 1)
+
+
+def seen_dip(before, low, after):
+    """Whether the pixels of an item's rect show its traced dip: the frame in it is neither the one before nor
+    the one after, and it either draws less than both by over DIP or goes away and comes back as it was. An item
+    whose trace dips under something opaque (an incoming text behind the outgoing one), or an empty container,
+    shows none."""
+    off = lambda p, q: float((sum3(np.abs(p - q)) > 30).mean())
+    out, back = off(low, before), off(after, low)
+    if min(out, back) < 0.01:
+        return False
+    if off(after, before) < 0.25 * min(out, back):
+        return True
+    return edge_energy(low) < (1 - DIP) * min(edge_energy(before), edge_energy(after))
+
+
+def item_blinks(tracks, times, spans, ims, scale=1.0, off=(0, 0)):
+    """Blink per popup or other changed item, in its own rect, where a wide change box averages it away: the
+    item's traced opacity (every frame) dips by over DIP and returns at that place, for over DIP_MS or to HALF or
+    less, for at most BLINK_MAX_MS of recorded frames, and those frames show it (seen_dip). One per dip: of the
+    items that dip together in one place (a list, its rows, their texts) the largest. [dict(label, start, ms,
+    low = the lowest share of its level, items = how many dip with it, box in window coordinates)], by time."""
+    found = []
+    for key, tr in tracks.items():
+        pts, rects = tr["pts"], tr["rects"]
+        for peak, d, a, b, r in opacity_dips(pts):
+            if pts[a][0] < -1:
+                continue
+            ka, kb = bisect.bisect_left(times, pts[a][0]), bisect.bisect_left(times, pts[b][0])
+            before = bisect.bisect_left(times, pts[d][0]) - 1
+            if ka == kb or before < 0 or kb >= len(times):  # (no recorded frame of it, or none on either side)
+                continue
+            vals = [value_at(pts, times[k]) / peak for k in range(ka, kb)]
+            ms, low = spans[kb - 1][1] - spans[ka][0], min(vals)
+            if ms > BLINK_MAX_MS or (ms <= DIP_MS and low > HALF + EVEN):
+                continue
+            p, q = rects[d - 1], rects[r]
+            if overlap_area(p, q) <= 0.5 * max(1, min(p[2] * p[3], q[2] * q[3])):  # (a reused delegate, elsewhere)
+                continue
+            # (seen at the first, middle and last of its lowest frames: an incoming item traced at 0 until the hand-
+            # over ends is on screen well before, as a blend)
+            bottom = [ka + i for i, v in enumerate(vals) if v <= low + EVEN]
+            found.append(dict(key=key, label=short_name(key), start=times[ka], ms=ms, low=low, box=list(p),
+                              frames=(before, (bottom[0], bottom[len(bottom) // 2], bottom[-1]),
+                                      min(len(times) - 1, bisect.bisect_left(times, pts[r][0])))))
+    found.sort(key=lambda f: (-f["box"][2] * f["box"][3], f["key"].count("/"), f["key"]))
+    out, looked = [], {}
+    for f in found:
+        x, y, w, h = f["box"]
+        with_ = next((o for o in out if f["start"] < o["start"] + o["ms"] and o["start"] < f["start"] + f["ms"]
+                      and overlap_area(f["box"], o["box"]) > 0.5 * max(1, w * h)), None)
+        if with_:
+            with_["items"] += 1
+            continue
+        k = (tuple(f["box"]), f["frames"])
+        if k not in looked:
+            iw, ih = ims[0].size
+            # (a pixel or two around it: a plain item's only edges are its own)
+            x0, y0 = max(0, int((x - off[0]) * scale) - 2), max(0, int((y - off[1]) * scale) - 2)
+            x1, y1 = min(iw, int((x + w - off[0]) * scale) + 2), min(ih, int((y + h - off[1]) * scale) + 2)
+            first, lows, last = f["frames"]
+            cut = lambda n: np.asarray(ims[n].crop((x0, y0, x1, y1)), dtype=np.int16)
+            looked[k] = x1 - x0 >= 4 and y1 - y0 >= 4 and all(
+                seen_dip(cut(first), cut(n), cut(last)) for n in dict.fromkeys(lows))
+        if looked[k]:
+            out.append(dict(f, items=1))
+    return sorted(out, key=lambda f: f["start"])
+
+
+def item_blink_text(b):
+    """One item blink in words."""
+    return (f"{b['label']}" + (f" and {b['items'] - 1} items in it" if b["items"] > 1 else "")
+            + f" down to {100 * b['low']:.0f} % for {b['ms']} ms from +{b['start_ms']} ms")
 
 
 def text_overlap(tracks, segs):
@@ -297,6 +413,97 @@ def text_overlap(tracks, segs):
             runs.append((a, b, both))
         best = max(best, longest(runs))
     return best
+
+
+DASH, DASH_PERIOD = 4, 7  # the plots' crosshair line: 4 px drawn, 3 not (logical px)
+CROSS_SEEN, CROSS_FAINT = 8.0, 5.0  # how far over the noise such a line stands: seen, or just there where expected
+
+
+def dashed_columns(lane):
+    """How clearly each column of a lane's luminance (rows, cols) is a dashed vertical line of DASH on, the rest of
+    DASH_PERIOD off, at any phase and lighter or darker than the plot: the t statistic of the column against its
+    neighbours 2 px either side, drawn rows against the others. The plot's own verticals (a transient, the solid
+    playhead) have no such period and stay at the noise's few units."""
+    r = lane[:, 2:-2] - 0.5 * (lane[:, :-4] + lane[:, 4:])
+    n = r.shape[0]
+    whole = n - n % DASH_PERIOD  # (the rows summed by their place in the period)
+    by_place = r[:whole].reshape(-1, DASH_PERIOD, r.shape[1]).sum(axis=0)
+    by_place[:n - whole] += r[whole:]
+    drawn = np.zeros((DASH_PERIOD, DASH_PERIOD), dtype=np.float32)  # (the places drawn at each phase)
+    for phase in range(DASH_PERIOD):
+        drawn[phase, [(phase + k) % DASH_PERIOD for k in range(DASH)]] = 1.0
+    on = drawn @ by_place
+    n_on = (drawn @ np.bincount(np.arange(n) % DASH_PERIOD, minlength=DASH_PERIOD).astype(np.float32))[:, None]
+    off, n_off = by_place.sum(axis=0) - on, n - n_on
+    var = (np.einsum("ij,ij->j", r, r) - on * on / n_on - off * off / n_off) / max(1, n - 2)
+    t = np.abs(on / n_on - off / n_off) / np.sqrt(np.maximum(var, 1.0) * (1.0 / n_on + 1.0 / n_off))
+    return np.concatenate(([0, 0], t.max(axis=0), [0, 0]))
+
+
+def crosshair_lanes(ims, times, pane, lanes, at_=(0, 0)):
+    """Whether every lane of a plot shows its crosshair's vertical line at one x, in every recorded frame that
+    shows one: pane (x, y, w, h) in the recording's images, its lanes sharing its height equally; at_: where those
+    images start in the window. A frame where they differ by over a pixel, or where a lane lacks a line that another
+    shows plainly, is a split. dict(ok: None when nothing could be compared, lanes, frames: how many show one,
+    split: how many of those are split, first, last: the split frames' indices, start_ms, end_ms, apart_px: the
+    most, worst: dict(frame, xs: per lane in the window, None without one))."""
+    out = dict(ok=None, lanes=lanes, frames=0, split=0)
+    if lanes < 2:
+        return out
+    x, y, w, h = pane
+    lh = h / lanes
+    split = []
+    for k in range(len(ims)):
+        g = np.asarray(ims[k].crop((x, y, x + w, y + h)).convert("L"), dtype=np.float32)
+        scores = []
+        for i in range(lanes):  # (a lane's edge rows hold the seam)
+            scores.append(dashed_columns(g[int(i * lh) + 3:int((i + 1) * lh) - 3]))
+        tops = [float(s.max()) for s in scores]
+        strongest = max(range(lanes), key=lambda i: tops[i])
+        if tops[strongest] < CROSS_SEEN:
+            continue
+        x0 = int(scores[strongest].argmax())
+        xs = []
+        for s, top in zip(scores, tops):
+            faint = float(s[max(0, x0 - 1):x0 + 2].max()) >= CROSS_FAINT
+            xs.append(int(s.argmax()) if top >= CROSS_SEEN else x0 if faint else None)
+        seen = [v for v in xs if v is not None]
+        apart = max(seen) - min(seen)
+        missing = len(seen) < lanes
+        if missing and apart <= 1 and tops[strongest] < 2 * CROSS_SEEN:
+            continue  # (a crosshair still fading in, too faint to say that a lane lacks it)
+        out["frames"] += 1
+        if apart > 1 or missing:
+            split.append((apart, k, [None if v is None else v + x + at_[0] for v in xs]))
+    if out["frames"]:
+        out["ok"] = not split
+    if split:
+        apart, k, xs = max(split, key=lambda s: s[0])
+        out.update(split=len(split), first=split[0][1], last=split[-1][1], start_ms=round(times[split[0][1]]),
+                   end_ms=round(times[split[-1][1]]), apart_px=apart, worst=dict(frame=k, xs=xs))
+    return out
+
+
+def crosshair_text(c):
+    """crosshair_lanes in words."""
+    q = "All lanes' crosshair x agree in every frame:"
+    if c["ok"] is None:
+        why = "fewer than two lanes in the trace" if c["lanes"] < 2 else "no frame shows a crosshair"
+        return f"{q} NOT CHECKED ({why})"
+    if c["ok"]:
+        return f"{q} yes ({c['lanes']} lanes, the {c['frames']} frames that show one)"
+    return (f"{q} NO (FAIL): split in {c['split']} of the {c['frames']} frames that show one, "
+            f"f{c['first']:04d}-f{c['last']:04d}, +{c['start_ms']} to +{c['end_ms']} ms, up to {c['apart_px']} px apart "
+            f"(f{c['worst']['frame']:04d}: x " + " / ".join("none" if v is None else str(v) for v in c["worst"]["xs"])
+            + ", top lane first)")
+
+
+def traced_lanes(tracks, pane):
+    """How many lanes a plot pane (window coordinates) has: the distinct heights of its lane labels in the trace."""
+    x, y, w, h = pane
+    return len({tr["rects"][0][1] for k, tr in tracks.items()
+                if "plotLaneLabel/" in k and k.split("/")[-1].startswith("plotPlateLabel")
+                and x <= tr["rects"][0][0] < x + w and y <= tr["rects"][0][1] < y + h})
 
 
 def _ancestors(key, keys):
@@ -622,6 +829,12 @@ def measure(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
     lum = [float((a @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)).mean()) / 255.0 for a in arrs]
     for sc in scopes.values():
         sc["blink"], sc["bmask"] = blink_of(sc["ink"], spans, segs)
+    item_bl = item_blinks(tracks, times, spans, ims, scale, off)
+    cross = None
+    if fo.get("lanes"):  # (recorded at 1x: the dash's period is in the recording's pixels)
+        pane = resolve_rect(fo["lanes"], meta, ims[0].width, ims[0].height)
+        in_window = (pane[0] + off[0], pane[1] + off[1], pane[2], pane[3])
+        cross = crosshair_lanes(ims, times, pane, traced_lanes(tracks, in_window), off)
     overlap = text_overlap(tracks, segs)
     # the overlap per transition, and per now-playing line (states.ELEMENT_INK: only that line's text items, e.g.
     # the outgoing and incoming titles)
@@ -889,7 +1102,10 @@ def measure(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
                    recording_ms=round(rec_ms), recording_after_action_ms=round(end_rec), recorded_frames=n,
                    continuous=continuous, blink_text_ms=None if blink_t is None else round(blink_t),
                    blink_other_ms=None if blink_o is None else round(blink_o),
-                   blink_ms=round(max(blink_t or 0, blink_o or 0)), overlap_ms=round(overlap),
+                   blink_ms=round(max([blink_t or 0, blink_o or 0] + [b["ms"] for b in item_bl])),
+                   blink_items=[dict(label=b["label"], items=b["items"], start_ms=round(b["start"]), ms=round(b["ms"]),
+                                     low=round(b["low"], 2), box=b["box"]) for b in item_bl],
+                   overlap_ms=round(overlap),
                    overlap_by_transition=overlap_by_seg, overlap_by_line=overlap_by_el, lines_absent=lines_absent,
                    overlap_peak=peak_all, overlap_peak_by_line=peak_by_el, handover=hand, handover_by_transition=hand_by_seg, content_cuts=cuts,
                    text_items=n_text, scopes={k: dict(share=round(v["share"], 3), changed_share=round(v["changed_share"], 3))
@@ -905,6 +1121,8 @@ def measure(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
                    spacing_ms=round(spacing), slow_factor=round(slow),
                    animations=[dict(a, start=round(a["start"]), end=None if a["end"] is None else round(a["end"])) for a in anims])
     metrics["periodic_note"] = tick_note
+    if cross is not None:
+        metrics["crosshair"] = cross
     if travel_px is not None:
         metrics["travel_px"] = round(travel_px)
         metrics["plot_note"] = travel_note
@@ -953,7 +1171,7 @@ def fms(v):
 
 def caption(m, segs, continuous):
     """Latency (action to first change), each transition (first to last change) and the recording, kept apart."""
-    parts = []
+    parts = [crosshair_text(m["crosshair"]) + "."] if m.get("crosshair") else []
     if not segs:
         parts.append("No change after the action.")
     else:
@@ -987,6 +1205,11 @@ def caption(m, segs, continuous):
         bl.append(f"other content: {m['blink_other_ms']} ms")
     parts.append(("Blink — " + "; ".join(bl) + "; " if bl else "") + f"text overlap {m['overlap_ms']} ms"
                  + (f"; moves {m['moves_after_ms']} ms after the stated end" + tail_text(m) if m["moves_after_ms"] else "") + ".")
+    if m.get("blink_items"):
+        worst = sorted(m["blink_items"], key=lambda b: -b["ms"])
+        parts.append("Blink per changed item (its traced opacity, seen in its own rect): "
+                     + "; ".join(item_blink_text(b) for b in worst[:2])
+                     + (f"; {len(worst) - 2} more" if len(worst) > 2 else "") + ".")
     if m.get("plot_note"):
         parts.append(m["plot_note"])
     if m.get("elements"):
@@ -1176,7 +1399,8 @@ def merged(frames, ims, times, region, shown_idx, zoom, nearest, segs, main, sco
     el_cols = [(255, 140, 90), (120, 230, 140), (200, 160, 255), (255, 230, 120)]
     for i, e in enumerate(elements or []):
         legend.append((el_cols[i % len(el_cols)], f"ink of {e['label']} (own rect), dash-dot", True))
-    if any(any(sc["bmask"]) for sc in scopes.values()) or any(any(e["bmask"]) for e in (elements or [])):
+    if (metrics.get("blink_items") or any(any(sc["bmask"]) for sc in scopes.values())
+            or any(any(e["bmask"]) for e in (elements or []))):
         legend.append(((95, 32, 32), "shaded: blink", False))
     leg_cols = 3 if W >= 1000 else 2
     leg_rows = -(-len(legend) // leg_cols)
@@ -1312,6 +1536,10 @@ def merged(frames, ims, times, region, shown_idx, zoom, nearest, segs, main, sco
             for k, (a, b) in enumerate(spans):
                 if sc["bmask"][k] and b > t_lo and a < t_hi:
                     d.rectangle((X(max(a, t_lo)), gy0 + 1, X(min(b, t_hi)), gy1 - 1), fill=(95, 32, 32))
+        for bi_ in metrics.get("blink_items", []):
+            a, b = bi_["start_ms"], bi_["start_ms"] + bi_["ms"]
+            if b > t_lo and a < t_hi:
+                d.rectangle((X(max(a, t_lo)), gy0 + 1, X(min(b, t_hi)), gy1 - 1), fill=(95, 32, 32))
         span = t_hi - t_lo
         step = 25 if span < 300 else 50 if span < 700 else 200 if span < 2500 else 1000
         t = int(np.ceil(t_lo / step) * step)
