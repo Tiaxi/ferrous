@@ -63,6 +63,12 @@ Item {
     // How far down the controls' plate in the main window reaches, from the
     // top of the art: its margin and its height, which follows the font.
     readonly property real popupControlsBottom: albumArtPopupControls.y + albumArtPopupControls.height
+    // How far in from the art's right edge Close's centre is, on the plate
+    // or in the strip, whose axis Copy Path under it shares.
+    readonly property real closeAxisInset: !root.useWholeScreenViewerMode
+        ? albumArtPopupControls.anchors.rightMargin + albumArtPopupControls.padding
+            + root.uiPalette.toolButtonSize / 2
+        : (root.fullscreenWindow ? root.fullscreenWindow.strip.closeAxisInset : -1)
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
     // The controls as they fade: 1 shown, 0 hidden.
@@ -316,8 +322,9 @@ Item {
             anchors.top: parent.top
             anchors.right: parent.right
             anchors.margins: 5
-            implicitWidth: popupControls.implicitWidth + 4
-            implicitHeight: popupControls.implicitHeight + 4
+            readonly property real padding: 2
+            implicitWidth: popupControls.implicitWidth + 2 * padding
+            implicitHeight: popupControls.implicitHeight + 2 * padding
             opacity: root.fullscreenControlsLevel
             visible: root.fullscreenControlsVisible || root.fullscreenControlsLevel > 0
 
@@ -336,8 +343,8 @@ Item {
 
             Components.ViewerControls {
                 id: popupControls
-                x: 2
-                y: 2
+                x: albumArtPopupControls.padding
+                y: albumArtPopupControls.padding
                 uiPalette: root.uiPalette
                 closeButtonName: "albumArtPopupCloseButton"
                 plotColors: root.uiPalette.mediaPlot

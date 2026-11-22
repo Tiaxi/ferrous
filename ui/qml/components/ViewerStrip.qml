@@ -96,6 +96,8 @@ Rectangle {
             FormatUtils.clockText(root.positionText),
             FormatUtils.clockText(root.track.durationText))
 
+    // How far in from the strip's right edge Close's centre is.
+    readonly property real closeAxisInset: controls.anchors.rightMargin + root.uiPalette.toolButtonSize / 2
     // Its text's size, as a factor of the window's.
     readonly property real textScale: root.uiPalette.fullscreenTextScale
     readonly property real textPointSize: root.uiPalette.basePointSize * root.textScale

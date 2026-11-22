@@ -2258,6 +2258,7 @@ ApplicationWindow {
         infoTopInset: root.useWholeScreenViewerMode
             ? albumArtViewerShell.stripHeight
             : albumArtViewerShell.popupControlsBottom
+        controlsAxisInset: albumArtViewerShell.closeAxisInset
         previewActive: viewerController.albumArtPreviewActive
         previewLabel: viewerController.comparisonLabel
         previewHasCandidate: itunesArtworkDialog.previewShown && itunesArtworkDialog.previewIndex >= 0

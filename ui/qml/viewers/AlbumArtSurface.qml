@@ -87,6 +87,10 @@ Item {
     property var switchComparisonImage: function() {}
     // How far the details keep below the top, clear of controls over them.
     property real infoTopInset: 0
+    // How far in from the view's right edge the centre of the viewer's
+    // Close is, over the details, whose Copy Path shares its axis; -1 where
+    // there is none, and Copy Path ends with the details.
+    property real controlsAxisInset: -1
     // A preview from Replace from iTunes: what it shows, such as "iTunes
     // Candidate", and Back to Results, which closeViewer does then. With a
     // candidate, Apply calls applyPreview while previewCanApply.
@@ -577,8 +581,8 @@ Item {
     }
 
     // The details: the file's name, then label and value rows; then the
-    // folder's label on its own line, and its path on one line under it,
-    // elided in the middle, with Copy Path. The rows' labels share a column
+    // folder's label with Copy Path on its line, and the path under them
+    // across the column. The rows' labels share a column
     // as wide as the widest of them, up to two fifths of the row, so every
     // value starts at the same x and keeps the rest; a label wider than that
     // wraps between its words, and the column is never narrower than its
@@ -808,15 +812,16 @@ Item {
                     }
                 }
 
-                // The folder: its label on a line of its own, and under it
-                // the path across the column's whole width, with Copy Path
-                // at its end (in the grid, the path had the values' part of
-                // the row and broke onto a second line). A long path wraps
-                // after a slash, on the lines it needs up to eight, and what
-                // does not fit is elided (on three lines, a large font cut a
-                // typical path short over an empty column). During a
-                // preview, under the candidate's label and Apply, it takes
-                // up to three.
+                // The folder: its label with Copy Path on a line of their
+                // own, and under them the path across the column's whole
+                // width (in the grid, the path had the values' part of
+                // the row and broke onto a second line; with Copy Path at
+                // its first line's end, the button floated away from what
+                // it copies). A long path wraps after a slash, on the lines
+                // it needs up to eight, and what does not fit is elided (on
+                // three lines, a large font cut a typical path short over
+                // an empty column). During a preview, under the candidate's
+                // label and Apply, it takes up to three.
                 ColumnLayout {
                     id: folderRow
                     objectName: "albumArtFolderRow"
@@ -824,34 +829,62 @@ Item {
                     Layout.fillWidth: true
                     Layout.topMargin: root.infoRowTopMargin
                     Layout.bottomMargin: root.infoRowBottomMargin
-                    spacing: Math.round(2 * root.infoScale)
+                    // The label and the path as close as the button, which
+                    // is taller than the label's line, lets them be.
+                    spacing: Math.max(Math.round(2 * root.infoScale),
+                        Math.ceil((copyPathButton.implicitHeight - folderHead.implicitHeight) / 2))
 
-                    Label {
-                        id: folderLabel
-                        objectName: "albumArtFolderLabel"
+                    // The label, and Copy Path centred on it, on one axis
+                    // with the viewer's Close above, so that the column has
+                    // one line of buttons at its edge. The button reaches
+                    // out into the column's padding there; it and its glyph
+                    // are a step larger over the whole screen, as the
+                    // details' text is.
+                    Item {
+                        id: folderHead
+                        objectName: "albumArtFolderHead"
                         Layout.fillWidth: true
-                        text: I18n.i18nc("@label the folder the image is in", "Folder")
-                        font.pointSize: root.infoLabelPointSize
-                        color: root.plot.plotTextSecondary
-                        elide: Text.ElideRight
+                        implicitHeight: Math.ceil(folderLabel.implicitHeight)
+
+                        Label {
+                            id: folderLabel
+                            objectName: "albumArtFolderLabel"
+                            width: Math.min(implicitWidth, Math.max(0, copyPathButton.x - Kirigami.Units.smallSpacing))
+                            height: folderHead.height
+                            text: I18n.i18nc("@label the folder the image is in", "Folder")
+                            font.pointSize: root.infoLabelPointSize
+                            color: root.plot.plotTextSecondary
+                            elide: Text.ElideRight
+                        }
+
+                        Components.ViewerToolButton {
+                            id: copyPathButton
+                            objectName: "albumArtCopyPathButton"
+                            x: root.controlsAxisInset < 0 ? folderHead.width - width
+                                : Math.round(folderHead.width + root.infoPadding - root.controlsAxisInset - width / 2)
+                            y: Math.round((folderHead.height - height) / 2)
+                            implicitWidth: Math.round(root.uiPalette.toolButtonSize * root.infoScale)
+                            implicitHeight: Math.round(root.uiPalette.toolButtonSize * root.infoScale)
+                            icon.width: root.detailsIconSize
+                            icon.height: root.detailsIconSize
+                            uiPalette: root.uiPalette
+                            plotColors: root.plot
+                            text: I18n.i18nc("@action:button", "Copy Path")
+                            icon.name: "edit-copy"
+                            glyphColor: root.plot.plotTextSecondary
+                            Accessible.description: root.folderPath
+                            onClicked: root.copyText(root.folderPath)
+                        }
                     }
 
-                    // The path, and Copy Path at its end, centred on the
-                    // path's first line (not on the middle of its three
-                    // lines); taller than the line, it reaches up
-                    // beside the folder's label, whose one word is far to
-                    // its left. The button and its glyph are a step larger
-                    // over the whole screen, as the details' text is.
+                    // The path is sized by the row rather than by the
+                    // layout: its text follows its width, which a layout
+                    // would take from the text.
                     Item {
                         id: folderPathRow
                         objectName: "albumArtFolderPathRow"
-                        readonly property real spacing: 4
-                        // The height of one of the path's lines.
-                        readonly property real lineHeight: folderPathLabel.lineCount > 0
-                            ? folderPathLabel.contentHeight / folderPathLabel.lineCount
-                            : folderPathLabel.implicitHeight
                         Layout.fillWidth: true
-                        implicitHeight: Math.max(folderPathLabel.implicitHeight, copyPathButton.y + copyPathButton.height)
+                        implicitHeight: folderPathLabel.implicitHeight
 
                         Label {
                             id: folderPathLabel
@@ -861,8 +894,7 @@ Item {
                             readonly property string path: root.displayPath(root.folderPath)
                             readonly property bool elided: folderPathLabel.truncated
                             anchors.left: parent.left
-                            anchors.right: copyPathButton.left
-                            anchors.rightMargin: folderPathRow.spacing
+                            anchors.right: parent.right
                             // The lines break only between folders, never
                             // inside a folder's name that fits on a line.
                             // The tooltip, Copy Path and the accessible name
@@ -890,24 +922,6 @@ Item {
                                 id: folderPathMetrics
                                 font: folderPathLabel.font
                             }
-                        }
-
-                        Components.ViewerToolButton {
-                            id: copyPathButton
-                            objectName: "albumArtCopyPathButton"
-                            anchors.right: parent.right
-                            y: Math.round((folderPathRow.lineHeight - copyPathButton.height) / 2)
-                            implicitWidth: Math.round(root.uiPalette.toolButtonSize * root.infoScale)
-                            implicitHeight: Math.round(root.uiPalette.toolButtonSize * root.infoScale)
-                            icon.width: root.detailsIconSize
-                            icon.height: root.detailsIconSize
-                            uiPalette: root.uiPalette
-                            plotColors: root.plot
-                            text: I18n.i18nc("@action:button", "Copy Path")
-                            icon.name: "edit-copy"
-                            glyphColor: root.plot.plotTextSecondary
-                            Accessible.description: root.folderPath
-                            onClicked: root.copyText(root.folderPath)
                         }
                     }
                 }
