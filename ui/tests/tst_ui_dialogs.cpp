@@ -646,6 +646,7 @@ private slots:
     void recentIssuesDiagnosticsCaptionIsOnTheTextColumn_data();
     void recentIssuesDiagnosticsCaptionIsOnTheTextColumn();
     void libraryFolderMenuGivesEachItemItsOwnGlyph();
+    void visualizationStretchSaysWhatItFills();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesOpenWithTheirFocusShown();
@@ -8541,6 +8542,20 @@ void UiDialogsTest::libraryFolderMenuGivesEachItemItsOwnGlyph() {
     QVERIFY(reject(dialog));
 }
 
+// The stretch setting says the track fills the view: "to its full width"
+// could be read as the track's own width.
+void UiDialogsTest::visualizationStretchSaysWhatItFills() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *preferences = openPreferences(window, 1);
+    QVERIFY(preferences != nullptr);
+    QQuickItem *stretch = nullptr;
+    QTRY_VERIFY((stretch = named(windowOf(preferences), QStringLiteral("stretchShortTracksCheckBox"))) != nullptr);
+    QCOMPARE(stretch->property("text").toString(), QStringLiteral("Stretch tracks shorter than the view to fill it"));
+    QVERIFY(reject(preferences));
+}
+
 void UiDialogsTest::recentIssuesDiagnosticsCaptionIsOnTheTextColumn_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::newRow("10 pt") << 10.0;
@@ -8656,9 +8671,10 @@ void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont() {
     closeTheParentDialogs(main);
 }
 
-// General names what its media controls' setting sets, its box not saying it
-// again and named with the words it shows; the quit failure says what each
-// button does; and these dialogs contract "not" as the others do.
+// General names what its media controls' setting sets, its box saying where
+// Ferrous appears ("Show Ferrous" did not) and named with the words it
+// shows; the quit failure says what quitting loses; and these dialogs
+// contract "not" as the others do.
 void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
     DialogsWindow main;
     QQuickWindow *window = main.window;
@@ -8669,11 +8685,11 @@ void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
     QTRY_VERIFY((media = visibleNamed(windowOf(preferences), QStringLiteral("systemMediaControlsCheckBox"))) != nullptr);
     QCOMPARE(evaluate(media, QStringLiteral("Kirigami.FormData.label")).toString(), QStringLiteral("Media controls:"));
     const QString shown = media->property("text").toString();
-    QCOMPARE(shown, QStringLiteral("Show Ferrous and answer media keys"));
+    QCOMPARE(shown, QStringLiteral("Appear in media controls and answer media keys"));
     QAccessibleInterface *spoken = QAccessible::queryAccessibleInterface(media);
     QVERIFY(spoken != nullptr);
     const QString name = spoken->text(QAccessible::Name);
-    QCOMPARE(name, QStringLiteral("Media controls: Show Ferrous and answer media keys"));
+    QCOMPARE(name, QStringLiteral("Media controls: Appear in media controls and answer media keys"));
     QVERIFY(name.contains(shown));
     QVERIFY(reject(preferences));
 
