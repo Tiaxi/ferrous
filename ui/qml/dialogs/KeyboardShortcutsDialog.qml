@@ -159,31 +159,31 @@ Components.DialogWindow {
         switch (StandardKeys.keptKeyRole(key)) {
         case "activate":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it plays the selection in the library and the queue, and presses the default button of a dialog.", name)
+                "“%1” cannot be a shortcut: it plays the selection in the library and the queue, and presses the default button of a dialog.", name)
         case "delete":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it removes the selected tracks from the queue, and deletes text in text fields.", name)
+                "“%1” cannot be a shortcut: it removes the selected tracks from the queue, and deletes text in text fields.", name)
         case "focus":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it moves the keyboard focus between the controls.", name)
+                "“%1” cannot be a shortcut: it moves the keyboard focus between the controls.", name)
         case "cancel":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it closes menus, dialogs and the viewers.", name)
+                "“%1” cannot be a shortcut: it closes menus, dialogs and the viewers.", name)
         case "navigate":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it moves the selection in the lists and the cursor in text fields.", name)
+                "“%1” cannot be a shortcut: it moves the selection in the lists and the cursor in text fields.", name)
         case "contextMenu":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it opens the context menu.", name)
+                "“%1” cannot be a shortcut: it opens the context menu.", name)
         case "menuBar":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: KDE applications use it to show or hide the menu bar.", name)
+                "“%1” cannot be a shortcut: KDE applications use it to show or hide the menu bar.", name)
         }
         // The album art viewer's own key, where the viewers repeat the
         // action.
         if (key === "I" && root.viewerActions.indexOf(action) >= 0) {
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut of this action: the album art viewer uses it to show or hide the details.", name)
+                "“%1” cannot be a shortcut of this action: the album art viewer uses it to show or hide the details.", name)
         }
         return ""
     }
@@ -817,7 +817,7 @@ Components.DialogWindow {
                 Layout.bottomMargin: Kirigami.Units.smallSpacing
                 objectName: "keyboardShortcutsEditorTitle"
                 text: root.currentAction
-                    ? I18n.i18nc("@title:group %1 is an action", "Shortcuts for ‘%1’", root.nameOf(root.currentAction))
+                    ? I18n.i18nc("@title:group %1 is an action", "Shortcuts for “%1”", root.nameOf(root.currentAction))
                     : I18n.i18nc("@title:group", "Shortcuts")
                 font.weight: Font.DemiBold
                 elide: Text.ElideRight
@@ -927,7 +927,7 @@ Components.DialogWindow {
                 Layout.fillWidth: true
                 visible: typedKey.length > 0 && root.refusal.length === 0
                 text: I18n.i18nc("@info %1 is a key",
-                    "While the library or a text field has the keyboard focus, ‘%1’ types there instead.",
+                    "While the library or a text field has the keyboard focus, “%1” types there instead.",
                     StandardKeys.nativeText(typedKey))
                 wrapMode: Text.Wrap
                 color: root.uiPalette.textSecondary
@@ -951,16 +951,16 @@ Components.DialogWindow {
         windowRoot: root
         title: I18n.i18nc("@title:window", "Shortcut Conflict")
         message: root.pendingReassignment
-            ? I18n.i18nc("@info %1 is a key, or a list of them, %2 an action", "Reassign ‘%1’ to ‘%2’?",
+            ? I18n.i18nc("@info %1 is a key, or a list of them, %2 an action", "Reassign “%1” to “%2”?",
                 root.movedKeysText(root.pendingReassignment), root.nameOf(root.pendingReassignment.action))
             : ""
         details: root.pendingReassignment
             ? (root.pendingReassignment.moves.length === 1
                 ? I18n.i18nc("@info %1 is a key, %2 an action",
-                    "The ‘%1’ key combination is already assigned to the ‘%2’ action, which will no longer have it.",
+                    "The “%1” key combination is already assigned to the “%2” action, which will no longer have it.",
                     root.movedKeysText(root.pendingReassignment), root.movedFromText(root.pendingReassignment))
                 : I18n.i18nc("@info %1 is a list of keys, %2 of actions",
-                    "The ‘%1’ key combinations are already assigned to ‘%2’, which will no longer have them.",
+                    "The “%1” key combinations are already assigned to “%2”, which will no longer have them.",
                     root.movedKeysText(root.pendingReassignment), root.movedFromText(root.pendingReassignment)))
             : ""
         confirmText: I18n.i18nc("@action:button", "Reassign")

@@ -37,6 +37,7 @@ private slots:
     void editorHoldsStillAsANoteComesAndGoes();
     void keyColumnsHoldStillAsTheScrollBarComesAndGoes_data();
     void keyColumnsHoldStillAsTheScrollBarComesAndGoes();
+    void namesAndKeysAreQuotedAsInTheOtherDialogs();
 };
 
 namespace {
@@ -456,9 +457,9 @@ void KeyboardShortcutsSmokeTest::keysAnotherActionHasMoveOnlyWhenTheUserAgrees()
     QVERIFY(fixture.capture("keyboardShortcutsShortcutEditor", Qt::Key_Space));
     QTRY_VERIFY(reassign->isVisible());
     QCOMPARE(reassign->title(), QStringLiteral("Shortcut Conflict"));
-    QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign ‘Space’ to ‘Stop’?"));
+    QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign “Space” to “Stop”?"));
     QCOMPARE(reassign->property("details").toString(),
-             QStringLiteral("The ‘Space’ key combination is already assigned to the ‘Play/Pause’ action, "
+             QStringLiteral("The “Space” key combination is already assigned to the “Play/Pause” action, "
                             "which will no longer have it."));
     // Until the user agrees, the editor shows the keys as they were.
     QCOMPARE(fixture.editorText("keyboardShortcutsShortcutEditor"), QStringLiteral("Ctrl+Shift+Space"));
@@ -487,9 +488,9 @@ void KeyboardShortcutsSmokeTest::keysAnotherActionHasMoveOnlyWhenTheUserAgrees()
     QVERIFY(fixture.select(QStringLiteral("play_pause")));
     QVERIFY(clickVisibleButton(fixture.dialog, QStringLiteral("keyboardShortcutsDefaultRadio")));
     QTRY_VERIFY(reassign->isVisible());
-    QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign ‘Space’ to ‘Play/Pause’?"));
+    QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign “Space” to “Play/Pause”?"));
     QCOMPARE(reassign->property("details").toString(),
-             QStringLiteral("The ‘Space’ key combination is already assigned to the ‘Stop’ action, "
+             QStringLiteral("The “Space” key combination is already assigned to the “Stop” action, "
                             "which will no longer have it."));
     QVERIFY(clickVisibleButton(reassign, QStringLiteral("confirmDialogCancelButton")));
     QTRY_VERIFY(!reassign->isVisible());
@@ -559,7 +560,7 @@ void KeyboardShortcutsSmokeTest::keysTheWindowKeepsAreRefused() {
     QCOMPARE(fixture.shownBindings(QStringLiteral("stop")), QStringList{QStringLiteral("G")});
     QVERIFY(note->isVisible());
     QCOMPARE(note->property("text").toString(),
-             QStringLiteral("While the library or a text field has the keyboard focus, ‘G’ types there instead."));
+             QStringLiteral("While the library or a text field has the keyboard focus, “G” types there instead."));
 
     // The album art viewer's I, for an action the viewers repeat; a key
     // any other action may take.
@@ -964,6 +965,27 @@ void KeyboardShortcutsSmokeTest::keyColumnsHoldStillAsTheScrollBarComesAndGoes()
     QVERIFY(search->setProperty("text", QString()));
     QTRY_VERIFY(scrolls());
     QCOMPARE(columns(), atRest);
+}
+
+// Every name and key the dialog quotes has “ ”, as in the other dialogs
+// (it alone had ‘ ’): the editor's title and each reason for a refusal.
+// The note and the conflict's question are checked with what they say.
+void KeyboardShortcutsSmokeTest::namesAndKeysAreQuotedAsInTheOtherDialogs() {
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.select(QStringLiteral("play_pause")));
+    QCOMPARE(fixture.item("keyboardShortcutsEditorTitle")->property("text").toString(),
+             QStringLiteral("Shortcuts for “Play/Pause”"));
+    // One key of each role that is kept, and the album art viewer's.
+    for (const char *key : {"Return", "Del", "Tab", "Esc", "Home", "Shift+F10", "Ctrl+M", "I"}) {
+        QVariant refusal;
+        QVERIFY(QMetaObject::invokeMethod(fixture.dialog, "refusalFor", Q_RETURN_ARG(QVariant, refusal),
+                                          Q_ARG(QVariant, QVariant::fromValue(fixture.action("playPauseAction"))),
+                                          Q_ARG(QVariant, QString::fromLatin1(key))));
+        const QString said = refusal.toString();
+        QVERIFY2(said.startsWith(QChar(0x201C)) && said.contains(QChar(0x201D)), key);
+        QVERIFY2(!said.contains(QChar(0x2018)) && !said.contains(QChar(0x2019)), qPrintable(said));
+    }
 }
 
 std::unique_ptr<QmlSmokeTest> makeKeyboardShortcutsSmokeTest(const QString &userDirectoriesParent) {
