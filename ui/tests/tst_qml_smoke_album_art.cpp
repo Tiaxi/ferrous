@@ -2619,7 +2619,7 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     QVariantMap failed = rows[2].toMap();
     failed.insert(QStringLiteral("assetError"), QStringLiteral("The artwork could not be downloaded."));
     failed.insert(QStringLiteral("detailStatusText"),
-                  QStringLiteral("The full-size image could not be loaded."));
+                  QStringLiteral("The full-size image couldn\u2019t be loaded."));
     rows[2] = failed;
 
     QQmlApplicationEngine engine;

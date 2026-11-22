@@ -312,13 +312,13 @@ void TranslationTest::backendStartFailureIsTranslated() {
         const ScopedFailingBridgeStart failing(QStringLiteral("no threads in this test"));
         BridgeClient client;
         QCOMPARE(client.backendFailure(),
-                 pseudo(QStringLiteral("The playback engine could not start: no threads in this test. "
+                 pseudo(QStringLiteral("The playback engine couldn\u2019t start: no threads in this test. "
                                        "Restart Ferrous to try again.")));
     }
     const ScopedFailingBridgeStart failing{QString()};
     BridgeClient client;
     QCOMPARE(client.backendFailure(),
-             pseudo(QStringLiteral("The playback engine could not start. Restart Ferrous to try again.")));
+             pseudo(QStringLiteral("The playback engine couldn\u2019t start. Restart Ferrous to try again.")));
 }
 
 void TranslationTest::mainWindowShowsTranslatedText() {

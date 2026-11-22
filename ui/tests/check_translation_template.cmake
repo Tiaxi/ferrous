@@ -43,3 +43,23 @@ foreach(expected
         message(FATAL_ERROR "${template} lacks:\n${expected}")
     endif()
 endforeach()
+
+# Failure texts the UI owns say "couldn't", as their titles and leads do:
+# "could not" beside "Couldn't" read as two voices. A context may still say
+# it; texts built in the Rust backend are not in the template.
+# Semicolons and brackets would split or join CMake's list items.
+string(REPLACE ";" "<semicolon>" lines "${contents}")
+string(REPLACE "[" "<open>" lines "${lines}")
+string(REPLACE "]" "<close>" lines "${lines}")
+string(REPLACE "\n" ";" lines "${lines}")
+set(field "")
+foreach(line IN LISTS lines)
+    if(line MATCHES "^(msgctxt|msgid_plural|msgid|msgstr)")
+        set(field "${CMAKE_MATCH_1}")
+    elseif(NOT line MATCHES "^\"")
+        set(field "")
+    endif()
+    if(field MATCHES "^msgid" AND line MATCHES "[Cc]ould not")
+        message(FATAL_ERROR "${template} has a message that says \"could not\":\n${line}")
+    endif()
+endforeach()
