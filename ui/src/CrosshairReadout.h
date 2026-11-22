@@ -7,6 +7,7 @@
 #include <QColor>
 #include <QFont>
 #include <QFontMetrics>
+#include <QFontMetricsF>
 #include <QPainter>
 #include <QPen>
 #include <QRect>
@@ -25,11 +26,11 @@
 // near an edge clamps inside it.
 namespace CrosshairReadout {
 
-// Between a plate's edge and its text.
-constexpr int kPadding = 3;
 // Between the value's plate and the plot's right edge, and between the
-// time's plate and its bottom edge.
-constexpr int kEdgeMargin = 2;
+// time's plate and its bottom edge: the plot's plates' 5 px to their fill
+// (PlotLayer's plateInset), their 1 px edge outside it, which the rects here
+// hold (at 2 px, the readouts were nearly on the screen's edge).
+constexpr int kEdgeMargin = 4;
 // Between the value's plate and the time's, and a scale along the right edge.
 constexpr int kGap = 4;
 // Between the value's plate and the corner's controls beside it: a gap
@@ -72,6 +73,24 @@ struct Colors {
     bool hasEdge() const { return edge.alpha() > 0; }
 };
 
+// The application's font's size, in points.
+inline double applicationPoints() {
+    const QFont font;
+    return font.pointSizeF() > 0.0 ? font.pointSizeF() : font.pixelSize() * 0.75;
+}
+
+// How much larger than at the default 10 pt what goes with bound text is
+// drawn: UiPalette.fontScale.
+inline double fontScale() {
+    return std::max(1.0, applicationPoints() / 10.0);
+}
+
+// Between a plate's edge and its text at either side: a lane label's, 6 px
+// at the default font (UiPalette.scaledSize(6)), larger with a larger one.
+inline int padding() {
+    return std::max(6, static_cast<int>(std::lround(6.0 * fontScale())));
+}
+
 // The readout's text: the application's font at the small size of the
 // design (UiPalette.smallPointSize), as the plot's lane labels, so it grows
 // with a larger font: 12 px at the default 10 pt. It is sized in pixels, at
@@ -79,15 +98,8 @@ struct Colors {
 // the images it is drawn in agree whatever the device pixel ratio.
 inline QFont font() {
     QFont font;
-    const double points = font.pointSizeF() > 0.0 ? font.pointSizeF() : font.pixelSize() * 0.75;
-    font.setPixelSize(std::max(1, static_cast<int>(std::lround(points * 0.9 * 96.0 / 72.0))));
+    font.setPixelSize(std::max(1, static_cast<int>(std::lround(applicationPoints() * 0.9 * 96.0 / 72.0))));
     return font;
-}
-
-// The size of a plate for text `textWidth` wide.
-inline QSize plateSize(int textWidth, const QFontMetrics &metrics, const Colors &colors) {
-    const int edge = colors.hasEdge() ? 2 : 0;
-    return {textWidth + 2 * kPadding + edge, metrics.height() + 2 * kPadding + edge};
 }
 
 // How wide `text` can be with other digits in it: as wide as it is with each
@@ -135,6 +147,31 @@ private:
     bool m_measured{false};
 };
 
+// How tall a plate's fill is for text `textHeight` tall: as a lane label's
+// (PlotPlate.labelHeight), its capitals and the room around them, 20 px at
+// the default font; never less than the text's line.
+inline int plateHeight(int textHeight) {
+    QFont label = font();
+    label.setWeight(QFont::DemiBold);
+    // Measured once a font: a crosshair lays its plates out every frame.
+    thread_local WidestWidth capitals;
+    const int capitalHeight = capitals.get(label, 0.0, [&label](const QFontMetrics &) {
+        return static_cast<int>(std::ceil(QFontMetricsF(label).tightBoundingRect(QStringLiteral("E")).height()));
+    });
+    const int labelHeight = capitalHeight + 2 * static_cast<int>(std::lround(4.0 * fontScale()));
+    return std::max({20, labelHeight, textHeight});
+}
+
+// The size of a plate for text `textWidth` wide and `textHeight` tall.
+inline QSize plateSize(int textWidth, int textHeight, const Colors &colors) {
+    const int edge = colors.hasEdge() ? 2 : 0;
+    return {textWidth + 2 * padding() + edge, plateHeight(textHeight) + edge};
+}
+
+inline QSize plateSize(int textWidth, const QFontMetrics &metrics, const Colors &colors) {
+    return plateSize(textWidth, metrics.height(), colors);
+}
+
 // A scale along a plot's right edge: how far its labels reach from the
 // edge, and whether one is beside the bottom edge, where the time's plate
 // goes.
@@ -171,7 +208,8 @@ inline Rows rowsClearOf(const Rows &rows, const QRect &head, int plateHeight) {
 //   or left of the scale along it, and keeps out from under the corner's
 //   controls, kCornerGap from them (see ViewCorner). Where the lane is tall enough, it stays
 //   above the time's.
-// - The time's plate is centred on the vertical line at the bottom edge. It
+// - The time's plate is centred on the vertical line at the bottom edge,
+//   kEdgeMargin in from the plot's ends as from that edge. It
 //   stops left of the scale where one of its labels is beside it, right of
 //   `laneHead` (the lowest lane's label and buttons) where that reaches down
 //   beside it, and in a lane too short to have the value above it, left of
@@ -196,8 +234,8 @@ inline std::pair<QRect, QRect> plateRects(
     // The time's band along the bottom edge, between the lane head and the
     // scale; a time that doesn't fit in it is left out.
     int timeTop = height;
-    int timeLeft = 0;
-    int timeRight = width;
+    int timeLeft = kEdgeMargin;
+    int timeRight = width - kEdgeMargin;
     bool hasTime = !timePlate.isEmpty();
     if (hasTime) {
         timeTop = std::max(0, height - kEdgeMargin - timePlate.height());
@@ -257,7 +295,8 @@ inline std::pair<QRect, QRect> plateRects(
     return {value, time};
 }
 
-// Draws a plate at `rect` with `text` in `font`.
+// Draws a plate at `rect`, plateSize's for `text` in `font`, with the text
+// centred in it, as a lane label's is.
 inline void drawPlate(QPainter &painter, const QRect &rect, const QString &text,
                       const QFont &font, const Colors &colors) {
     // A plate left out has no rect, and draws nothing.
@@ -281,7 +320,9 @@ inline void drawPlate(QPainter &painter, const QRect &rect, const QString &text,
     painter.setFont(font);
     painter.setPen(colors.text);
     const QFontMetrics metrics(font);
-    painter.drawText(QPointF(fill.left() + kPadding, fill.top() + kPadding + metrics.ascent()), text);
+    painter.drawText(QPointF(fill.left() + std::floor((fill.width() - metrics.horizontalAdvance(text)) / 2.0),
+                             fill.top() + std::floor((fill.height() - metrics.height()) / 2.0) + metrics.ascent()),
+                     text);
     painter.restore();
 }
 
