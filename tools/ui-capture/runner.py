@@ -310,9 +310,23 @@ class Runner:
             self.settle_or(0.35)
 
     def step_menu(self, a):
+        """menu I: the menu bar's menu I, opened by a click, and that menu is what shows, or the state fails (a
+        state named for one menu once showed another, the one under the compositor's pointer)."""
         x, y = self.point(f"menubar:{a}")
         self.s.click(x, y)
         self.settle_or(0.6)
+        shown = ("(function(){var m=root.menuBar.menus,o=[];for(var i=0;i<m.length;i++){if(m[i].visible)o.push(i)}"
+                 "return o.join()})()")
+        end = time.time() + 1.0  # (a menu's window maps asynchronously)
+        while True:
+            got = str(self.s.ev(shown))
+            # (and KWin shows its window: a key sent before that goes to the main window, past the menu)
+            if got == str(int(a)) and self.popup_open(menu=True, win=""):
+                return
+            if time.time() > end:
+                raise RuntimeError(f"menu {a}: the menus shown are [{got}], not that one" if got != str(int(a))
+                                   else f"menu {a}: its window is not shown")
+            time.sleep(0.05)
 
     def step_queue(self, a):
         self.s.load_queue()

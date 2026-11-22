@@ -32,6 +32,7 @@
 #include <QQmlExpression>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QCursor>
 #include <QSocketNotifier>
 #include <QWheelEvent>
 #include <QWindow>
@@ -931,6 +932,9 @@ private:
             mouse(w, QEvent::MouseMove, p, Qt::NoButton, Qt::NoButton);
             QEnterEvent e(p, p, w->mapToGlobal(p));
             reply(id, "ok");
+        } else if (name == "cursor") {
+            // cursor: where Qt takes the pointer to be (on Wayland: where it last entered a window of the app).
+            reply(id, QString("%1 %2").arg(QCursor::pos().x()).arg(QCursor::pos().y()));
         } else if (name == "layout") {
             // layout <out.json>: layout findings and visible text of every visible window.
             reply(id, writeLayout(rest(line, 2)) ? "ok" : "ERROR write");

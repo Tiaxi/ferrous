@@ -4,7 +4,8 @@
 
 The probe's events go to the app's windows directly, past the compositor. KWin opens a window popup (a menu,
 since #642) only for a client that has had input from the compositor, so a session gives the app one real
-key press through this client first (Session.prime_input).
+key press through this client first (Session.prime_input), and one pointer enter: Qt on Wayland knows the
+pointer only from where it last entered a window, and takes (0, 0), the menu bar's first item, until it has.
 
 KWin offers the protocol only to a client whose executable a .desktop file names with
 X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input; driver.py writes one for this Python in the session's
@@ -15,7 +16,7 @@ import socket
 import struct
 
 # org_kde_kwin_fake_input requests (fake-input.xml in plasma-wayland-protocols)
-_AUTHENTICATE, _KEYBOARD_KEY = 0, 10
+_AUTHENTICATE, _POINTER_MOTION_ABSOLUTE, _KEYBOARD_KEY = 0, 9, 10
 KEY_LEFTSHIFT = 42
 
 
@@ -82,6 +83,11 @@ class KWinInput:
                 return
             if on_event:
                 on_event(obj, op, body)
+
+    def move(self, x, y):
+        """The pointer to (x, y) of the desktop, in logical px."""
+        self._send(self.fake, _POINTER_MOTION_ABSOLUTE, struct.pack("<ii", round(x * 256), round(y * 256)))
+        self._roundtrip()
 
     def key(self, code):
         """A key (evdev code) pressed and released."""

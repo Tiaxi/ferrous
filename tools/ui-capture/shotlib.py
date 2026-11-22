@@ -8,7 +8,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from driver import App, WORK, LIB  # noqa: E402
+from driver import App, WORK, LIB, kwin_output_size  # noqa: E402
 import popup_frames  # noqa: E402
 
 TEMPLATE_DB = f"{WORK}/run/template/library.sqlite3"
@@ -95,15 +95,33 @@ class Session:
         self.renderer = r
 
     def prime_input(self):
-        """One real key press through KWin (kwin_input.py) before any step: KWin opens a menu, a window of its own
-        since #642, only for a client that has had input from the compositor, and the probe's events go past it.
-        A lone Shift does nothing in the app, and unlike a pointer event it leaves no pointer position behind for
-        a menu to show hovered."""
+        """KWin's input set up before any step (kwin_input.py). One real key press: KWin opens a menu, a window of its
+        own since #642, only for a client that has had input from the compositor, and the probe's events go past
+        it; a lone Shift does nothing in the app. And one real pointer enter at away()'s spot, then out of the
+        window again: Qt on Wayland takes the pointer to be where it last entered a window, (0, 0) while it never
+        has, and hovers what is there when a menu's window closes. That was the menu bar's File item, and each
+        later click on the bar then opened File, in place of the menu the state names."""
         import kwin_input
         if not self.a.wait_for("root.active", timeout=10, interval=0.05):
             raise RuntimeError("the main window is not active: a key through KWin would not reach it")
+        frame = self.kwin_frame(str(self.ev("root.title")))
+        if not frame:
+            raise RuntimeError("KWin knows no frame of the main window: the pointer cannot be put in it")
+        fx, fy, fw, fh = frame
         inp = kwin_input.KWinInput(kwin_input.socket_path(os.path.join(self.a.iso, "runtime")))
         try:
+            ow, oh = kwin_output_size(self.size)
+            x, y = self.neutral_point()
+            inp.move(fx + (fw - self.size[0]) / 2 + x, fy + fh - self.size[1] + y)
+            # out again only once the app has the enter: KWin's seat gets a pointer with this client, and an app
+            # still binding it would miss an enter followed at once by the leave
+            end = time.time() + 5
+            while self.cmd("cursor") == "0 0":
+                if time.time() > end:
+                    raise RuntimeError("the pointer's enter through KWin never reached the app: its menus would "
+                                       "hover the item at 0, 0 as they close")
+                time.sleep(0.02)
+            inp.move(ow - 1, oh - 1)
             inp.key(kwin_input.KEY_LEFTSHIFT)
         finally:
             inp.close()
@@ -164,9 +182,12 @@ class Session:
             time.sleep(wait)
         return c
 
+    def neutral_point(self):
+        """A spot over the queue's empty header end: no hover state, no tooltip."""
+        return self.size[0] - 5, self.size[1] * 0.45
+
     def away(self):
-        # A spot over the queue's empty header end: no hover state, no tooltip.
-        self.move(self.size[0] - 5, self.size[1] * 0.45)
+        self.move(*self.neutral_point())
         time.sleep(0.15)  # hover tints fade out in 100 ms
 
     def key(self, name, mods=0, text=""):
