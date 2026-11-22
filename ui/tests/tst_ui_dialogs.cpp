@@ -628,6 +628,7 @@ private slots:
     void configureHelpStartsAtItsBoxsText_data();
     void configureHelpStartsAtItsBoxsText();
     void configureWidthsFollowTheFont();
+    void configureVisualizationFitsTheReviewScreenAt24pt();
     void configureStacksLibraryWherePathsDoNotFit_data();
     void configureStacksLibraryWherePathsDoNotFit();
     void configureKeepsTicksAndGroupsClearOfTheNextRow_data();
@@ -8378,6 +8379,65 @@ void UiDialogsTest::configureWidthsFollowTheFont() {
     }
 }
 
+// At 24 pt on the reviews' 2000 × 1400 screen, Configure's Visualization
+// page says its help in as few lines as that allows: the crosshair's takes
+// one, and Default zoom, the last setting, shows at least most of its row
+// without a scroll (that help took two, and in Breeze the row was 58 px
+// under the page's foot, 14 px now; 31 px and none in the tests' style).
+// The window keeps its size rules.
+void UiDialogsTest::configureVisualizationFitsTheReviewScreenAt24pt() {
+    QScreen *review = nullptr;
+    for (QScreen *screen : QGuiApplication::screens()) {
+        if (screen->name() == QLatin1String("Review")) {
+            review = screen;
+        }
+    }
+    if (review == nullptr) {
+        // main() adds it to the offscreen platform, which the tests run on.
+        QVERIFY(QGuiApplication::platformName() != QLatin1String("offscreen"));
+        QSKIP("needs the offscreen platform's review screen; see main()");
+    }
+    const ScopedNotoSans font(24);
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(main.window, QStringLiteral("preferencesDialog"));
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QVERIFY(prefs != nullptr);
+    const qreal gridUnit = evaluate(dialog, QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+    QVERIFY(gridUnit > 0);
+    prefs->setScreen(review);
+    prefs->setPosition(review->geometry().topLeft() + QPoint(qCeil(gridUnit), qCeil(gridUnit)));
+    QVERIFY(QMetaObject::invokeMethod(dialog, "openPage", Q_ARG(QVariant, 1)));
+    QVERIFY(waitForDialogWindow(dialog));
+    QCOMPARE(prefs->screen(), review);
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    QQuickItem *page = stack->childItems().at(1);
+    QTRY_VERIFY(page->isVisible() && !layoutPendingUnder(page));
+    // Its size rules: as wide as the room the screen leaves, a grid unit
+    // at each edge, and as tall as its tallest page wants within it.
+    QCOMPARE(prefs->width(), qCeil(review->geometry().width() - 2 * gridUnit));
+    QCOMPARE(prefs->height(), qCeil(std::min(dialog->property("defaultHeight").toReal(),
+                                             review->geometry().height() - 2 * gridUnit)));
+
+    QQuickItem *crosshair = visibleNamed(prefs, QStringLiteral("crosshairHelp"));
+    QQuickItem *crosshairLabel =
+        crosshair != nullptr ? itemsNamed(crosshair, QStringLiteral("formHelpTextLabel")).value(0) : nullptr;
+    QVERIFY(crosshairLabel != nullptr);
+    QCOMPARE(crosshairLabel->property("text").toString(),
+             QStringLiteral("In centered mode, right-click the spectrogram to seek to that point."));
+    QVERIFY2(crosshairLabel->property("lineCount").toInt() == 1, qPrintable(describeItem(crosshairLabel)));
+
+    QQuickItem *stretch = visibleNamed(prefs, QStringLiteral("stretchShortTracksCheckBox"));
+    QVERIFY(stretch != nullptr);
+    const qreal scroll = page->property("contentHeight").toReal() - page->height();
+    const QString where = QStringLiteral("the page scrolls %1 px to %2 in %3").arg(scroll)
+        .arg(describeItem(stretch), describeRect(sceneRect(page)));
+    QVERIFY2(scroll < stretch->height() / 2, qPrintable(where));
+    QVERIFY(reject(dialog));
+}
+
 namespace {
 
 // The name of the item with the keyboard in `window`, or of the named item
@@ -9040,7 +9100,8 @@ int main(int argc, char **argv) {
     qputenv("XDG_CACHE_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("cache"))));
     // A desktop's screen, rather than the offscreen platform's 800 × 600:
     // the dialogs in windows of their own size themselves within it. Beside
-    // it, a small one, for the dialogs on a screen with little room.
+    // it, a small one, for the dialogs on a screen with little room, and
+    // the reviews' 2000 × 1400 one.
     if (qgetenv("QT_QPA_PLATFORM") == QByteArrayLiteral("offscreen")) {
         const QString screens = fixtures.filePath(QStringLiteral("offscreen-screens.json"));
         QFile file(screens);
@@ -9048,6 +9109,8 @@ int main(int argc, char **argv) {
             || file.write(R"({"screens": [{"name": "Desktop", "x": 0, "y": 0, "width": 2560, "height": 1600,
                 "logicalDpi": 96, "logicalBaseDpi": 96, "dpr": 1},
                 {"name": "Small", "x": 2560, "y": 0, "width": 1000, "height": 720,
+                "logicalDpi": 96, "logicalBaseDpi": 96, "dpr": 1},
+                {"name": "Review", "x": 3560, "y": 0, "width": 2000, "height": 1400,
                 "logicalDpi": 96, "logicalBaseDpi": 96, "dpr": 1}]})") < 0) {
             return 1;
         }
