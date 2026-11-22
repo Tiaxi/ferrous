@@ -562,6 +562,8 @@ private slots:
     void configureKeepsTicksAndGroupsClearOfTheNextRow();
     void compactDialogsHoldTheirText_data();
     void compactDialogsHoldTheirText();
+    void compactDialogsSpaceParagraphsWithTheFont_data();
+    void compactDialogsSpaceParagraphsWithTheFont();
     void compactDialogStaysWithinASmallScreenAsItGrows();
     void shortcutsOpenTallEnoughToShowTheirList_data();
     void shortcutsOpenTallEnoughToShowTheirList();
@@ -7588,6 +7590,76 @@ void UiDialogsTest::recentIssuesAreAsWideAsTheyNeed() {
     QCOMPARE(popup->property("width").toReal(), cap);
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!popup->property("visible").toBool());
+}
+
+void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The compact dialogs' room between paragraphs grows with the font, 12 px
+// at 10 pt (at 24 pt 12 px between 44 px lines ran the blocks together),
+// their inset stays, and each still fits a 1000 px screen.
+void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(openTheParentDialogs(main));
+    const qreal spacing = std::round(12 * std::max(1.0, pointSize / 10));
+    // Each as full as it gets.
+    const auto fill = [&](const char *name, const char *property, const QVariant &value) {
+        QObject *dialog = object(window, QString::fromLatin1(name));
+        return dialog != nullptr && dialog->setProperty(property, value);
+    };
+    QVERIFY(fill("removeLibraryRootConfirmDialog", "message",
+                 QStringLiteral("Remove the library folder “Fixtures”?")));
+    QVERIFY(fill("removeLibraryRootConfirmDialog", "path", QStringLiteral("/fixture/music/library")));
+    QVERIFY(fill("removeLibraryRootConfirmDialog", "details",
+                 QStringLiteral("This removes its 180 tracks from the library. The files themselves stay on disk, "
+                                "and adding the folder again brings them back.")));
+    QVERIFY(fill("replaceCoverConfirmDialog", "message",
+                 QStringLiteral("Replace the album art of “Small Hours” by The Quiet Meridian?")));
+    QVERIFY(fill("keyboardShortcutsReassignDialog", "message",
+                 QStringLiteral("Reassign “Ctrl+F” to “Open Files…”?")));
+    QVERIFY(fill("quitSaveFailedDialog", "message",
+                 QStringLiteral("Settings could not be saved: failed to create temporary file in "
+                                "/fixture/configuration/ferrous-settings/read-only: Permission denied (os error 13)")));
+    QVERIFY(fill("replaceCoverConfirmDialog", "suggestion", QVariantMap{
+        {QStringLiteral("albumTitle"), QStringLiteral("Small Hours (Twentieth Anniversary Deluxe Edition, "
+                                                      "Remastered from the Original Tapes)")},
+        {QStringLiteral("artistName"), QStringLiteral("The Quiet Meridian")}}));
+    QObject *quitWait = object(window, QStringLiteral("tagEditorQuitWaitDialog"));
+    QVERIFY(quitWait != nullptr);
+    QStringList files;
+    for (int i = 1; i <= 7; ++i) {
+        files << QStringLiteral("0%1 - Morning Tide Field.flac").arg(i);
+    }
+    const QVariant editor = quitWait->property("tagEditorApi");
+    QVERIFY(quitWait->setProperty("tagEditorApi", QVariantMap{{QStringLiteral("operationFiles"), files}}));
+    QVERIFY(quitWait->setProperty("offerChoice", true));
+    const auto restoreEditor = qScopeGuard([&] { quitWait->setProperty("tagEditorApi", editor); });
+    for (const char *name : {"clearDiagnosticsConfirmDialog", "removeLibraryRootConfirmDialog",
+                             "replaceCoverConfirmDialog", "keyboardShortcutsReassignDialog", "quitSaveFailedDialog",
+                             "libraryRootNameDialog", "autoNumberDialog", "tagEditorCloseConfirmDialog",
+                             "tagEditorQuitWaitDialog"}) {
+        QObject *dialog = object(window, QString::fromLatin1(name));
+        QVERIFY2(dialog != nullptr, name);
+        QVERIFY2(QMetaObject::invokeMethod(dialog, "open"), name);
+        QVERIFY2(waitForDialogWindow(dialog), name);
+        auto *content = qvariant_cast<QQuickItem *>(dialog->property("body"));
+        QVERIFY2(content != nullptr, name);
+        QTRY_VERIFY2(!layoutPendingUnder(content), name);
+        QCOMPARE(content->property("spacing").toReal(), spacing);
+        QCOMPARE(dialog->property("contentPadding").toReal(), 18.0);
+        const int fitted = dialog->property("fittedHeight").toInt();
+        QVERIFY2(fitted <= 1000 - 2 * 18 - 28, qPrintable(QStringLiteral("%1: %2").arg(QLatin1String(name)).arg(fitted)));
+        QVERIFY2(QMetaObject::invokeMethod(dialog, "dismiss"), name);
+        QTRY_VERIFY2(!dialog->property("visible").toBool(), name);
+    }
+    closeTheParentDialogs(main);
 }
 
 int main(int argc, char **argv) {
