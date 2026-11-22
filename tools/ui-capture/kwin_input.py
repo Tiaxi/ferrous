@@ -18,6 +18,7 @@ import struct
 # org_kde_kwin_fake_input requests (fake-input.xml in plasma-wayland-protocols)
 _AUTHENTICATE, _POINTER_MOTION_ABSOLUTE, _KEYBOARD_KEY = 0, 9, 10
 KEY_LEFTSHIFT = 42
+KEYS = {"Menu": 127}  # (evdev's KEY_COMPOSE, the Menu key)
 
 
 def _string(s):

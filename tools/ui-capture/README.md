@@ -71,14 +71,32 @@ tools/ui-capture/shoot_round.sh r1                      # this checkout
 tools/ui-capture/shoot_round.sh r2 ~/src/ferrous-branch --out /tmp/ui-rounds
 ```
 
-A focus capture shoots only the sessions one scope of `focus.py` needs and packs only its images, into
-`<round>-focus/`; when it passes, it publishes them to `<round>/focus/`. Scopes: `nowplaying-plot`, `chrome`,
-`dialogs`, `app-icon`.
+A focus capture shoots the sessions that the named scopes of `focus.py` need, once (the union of theirs), and
+packs only their images, into `<round>-focus/`; when all of them pass, it publishes each to
+`<round>/focus/<scope>/`. A scope's folder is the whole of one reviewer task: `FOCUS.md`, `FOCUS-FACTS.md` and the
+images. The round's packs of other scopes stay.
 
 ```bash
-tools/ui-capture/shoot_round.sh r1 --focus-only dialogs   # about 5 minutes
-tools/ui-capture/shoot_round.sh r1 --focus dialogs        # the full capture, then the focus pack
+tools/ui-capture/shoot_round.sh r1 --census                      # the seven census packs, one run
+tools/ui-capture/shoot_round.sh r1 --focus-only dialogs          # one pack
+tools/ui-capture/shoot_round.sh r1 --focus-only viewers,dialogs  # several, one run
+tools/ui-capture/shoot_round.sh r1 --focus census                # the full capture, then the census packs
 ```
+
+`census` stands for the seven census scopes in either list, and `--census` is `--focus-only census`. The census
+grades the whole app surface by surface:
+
+| Scope | Areas |
+| --- | --- |
+| `nowplaying-plot` | now playing; the visualization pane |
+| `viz-interaction` | visualization interaction: zoom, the seek bar's view band, pan, autoscroll, follow, seek |
+| `chrome` | transport; queue; status bar |
+| `library-search` | library; search; menus |
+| `dialogs` | dialogs |
+| `viewers` | album art and visualization viewers |
+| `whole-app` | the app as one system: spacing, type, colour, states, motion, consistency, identity, KDE fit, accessibility |
+
+`app-icon` is a scope outside the census.
 
 While fixing one area: `--only AREA[,AREA]`, `--sessions S1,S2` or `--themes dark` re-shoot just those states
 into an existing round (wiping nothing) and rebuild its sheets and `INDEX.md`. `--workers N` sets the parallel
@@ -149,7 +167,7 @@ documents), then everything else as reference.
   recordings also get a whole-region perceived sheet and a smooth-pursuit simulation of a sliding label.
 - **`CORE-FACTS.md`**: the core images' measured facts as text (tile states, key colours, layout and contrast rows,
   motion metrics, geometry samples).
-- **`FOCUS.md`, `FOCUS-FACTS.md`** (in `<round>/focus/`): the focus pack's images (`F01_…png`) with what each shows
+- **`FOCUS.md`, `FOCUS-FACTS.md`** (in `<round>/focus/<scope>/`): that pack's images (`F01_…png`) with what each shows
   and what to look at; then, for exactly these images, the same facts as `CORE-FACTS.md` plus the scope's sampled
   facts (`facts.jsonl`: fills, edges, plate and glyph sizes, focus owners), floor regions and accessibility lines.
 - **`BUGS.md`**: a stub for non-visual bugs noticed while driving the app.
@@ -157,9 +175,15 @@ documents), then everything else as reference.
 ### Pack limits
 
 The pack is made for reviewers whose image input downscales anything over about 1568 px on the long side or
-1.15 MP. A focus pack holds at most 14 images (`pack.py` warns above that), and every image fits 1.15 MP: a 1:1
-image as drawn, or the pack fails; the others are fitted to 1.0 MP. The core set in `INDEX.md` is about 20 images
-under the same per-image limits.
+1.15 MP. Every image fits 1.15 MP: a 1:1 image as drawn, or the pack fails; the others are fitted to 1.0 MP.
+
+A focus pack holds at most 14 images, counting the contact sheets of "neither" frames that follow a recording which
+has them. Over 14, or with an image over 1.15 MP, `pack.py` fails (exit 3) and a focus-only run publishes nothing,
+so a pack cannot grow round by round: an image added to a full scope replaces another. Keep a scope that shows
+recordings under 14, so a "neither" sheet has room.
+
+The core set in `INDEX.md` is about 20 images under the same per-image limits. The full capture is for the
+automatic checks and whoever leads a review; a reviewer gets one focus pack.
 
 ## Privacy
 
@@ -198,6 +222,8 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
   default on Fedora); the work folder must not be under `/mnt`, which the namespace covers. Paths outside the work
   folder (such as the source tree) stay real. `SHOT_NEUTRAL=0` runs without; the pack then paints the paths out
   of the shots, but it cannot check recordings, so its privacy check fails when there are any (see Privacy).
+- **Middle-button and leave steps** (`mpress`, `mdmove`, `mrelease`, `mclick`, `leave`) are events the probe
+  gives the window, as the compositor would. The pointer's cursor is KWin's, so no grab or recording shows it.
 - **Offscreen and private only.** Each app runs in its own `dbus-run-session` with a private bus socket and its
   own XDG folders, so the single-instance handoff and MPRIS never reach a Ferrous you are running; the driver
   records the private bus's names at start, and the template scan refuses to run if a Ferrous or MPRIS name is
@@ -238,10 +264,10 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
 | `shotlib.py` | a session: grabs, recordings, KWin window captures, the shot index |
 | `runner.py` | runs the state table in parallel workers; its docstring lists the step syntax |
 | `states.py` | the state table, sessions, macros, sheets, the core set and the checks a state must pass |
-| `focus.py` | the focus scopes: sessions, sheets and images with what to look at |
+| `focus.py` | the focus scopes and the census: sessions, sheets and images with what to look at |
 | `popup_frames.py` | draws a main-window strip's menus into its frames |
 | `layout.py`, `contrast.py`, `motion_strip.py`, `motion_inventory.py` | the analysers |
-| `pack.py` | sheets, strips, privacy painting, `INDEX.md`, `CORE-FACTS.md`, the focus pack |
+| `pack.py` | sheets, strips, privacy painting, `INDEX.md`, `CORE-FACTS.md`, the focus packs |
 | `setup_db_round.py` | scans the fixture library into the template DB |
 | `make_*.py` | the fixture generators |
 | `shotprobe.cpp`, `iconprobe.cpp` | the probes |

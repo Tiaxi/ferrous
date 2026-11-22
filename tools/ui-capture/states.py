@@ -48,6 +48,8 @@ SESSIONS = {
     "queue": dict(),  # (the queue's row states, its focus with and without a scrollbar, an unreadable row)
     "icons": dict(db=False),  # (both themes, for the app-icon scope)
     "icon-noart24": dict(font_pt=24, suffix_extra="_font24"),  # (the 24 pt compact no-art mark, 152 px)
+    # zoom, the seek bar's view band, middle-drag pan, middle-click autoscroll and the way back to the playhead
+    "viz-interaction": dict(),
 }
 
 
@@ -347,13 +349,15 @@ def m_dlgtab(r, arg):
 def m_lastfmaccount(r, arg):
     """lastfmaccount: Configure's Last.fm page with an account, as a stand-in: the page reads all of it from its
     own uiBridge, which gets a proxy of the real bridge saying the build has Last.fm, connected as an invented user
-    with two scrobbles waiting (no network, no credentials; the app's own wording)."""
+    with two scrobbles waiting and twelve discarded as too old (#676; no network, no credentials; the app's own
+    wording)."""
     dw = r.s.dialog_window(timeout=1.0)
     if not dw:
         raise LookupError("lastfmaccount: no Configure window")
     js = ("(function(){var x=contentItem;while(x.parent)x=x.parent;var s=[x];while(s.length){var it=s.shift();if(!it)continue;"
           "if(it.objectName==='preferencesLastFmPage'){var real=it.uiBridge;var o={lastFmBuildConfigured:true,lastFmAuthState:2,"
-          "lastFmUsername:'harbour-listener',lastFmStatusText:'',lastFmPendingScrobbleCount:2};"
+          "lastFmUsername:'harbour-listener',lastFmStatusText:'',lastFmPendingScrobbleCount:2,"
+          "lastFmDroppedScrobbleCount:12};"
           "it.uiBridge=new Proxy(real,{get:function(t,k){if(k in o)return o[k];var v=t[k];"
           "return typeof v==='function'?v.bind(t):v}});return true}"
           "var c=it.children;for(var i=0;i<c.length;i++)s.push(c[i]);}return false})()")
@@ -6236,8 +6240,7 @@ STATES = [
      "Configure Keyboard Shortcuts: Follow Playhead's F, with its note"),
     ("dialogs", "dialog", "keyboard-shortcuts-reassign",
      "js (function(){var d=keyboardShortcutsDialog;d.selectAction('stop');"
-     "d.pendingReassignment={action:stopAction,owner:playPauseAction,slot:0,key:'Space'};return true})()"
-     " | macro open_child keyboardShortcutsDialog ConfirmDialog",
+     "d.giveBindings(stopAction,d.withKey(d.bindingsOf(stopAction),0,'Space'));return true})() | settle 1 | wait 0.6",
      "Shortcut Conflict: a key Play/Pause has, for Stop (over Configure Keyboard Shortcuts)"),
     ("dialogs", "dialog", "quit-save-failed",
      "esc 2 | js root.showQuitSaveFailedDialog('Settings could not be saved: Permission denied (os error 13)') | settle 0.9",
@@ -7368,6 +7371,11 @@ _HEADER_TRAVEL = ("the library's rows", "*libraryRowContent/libraryRowTitle*")  
 MOTION_FOCUS = {
     # the perceived rows follow the art: a box over its right edge before (x 1299) and after (x 1127)
     "albumart-info-toggle": dict(rect=(1000, 380, 380, 240), rows="all", b_lines=1, pursuit=("the art", "*albumArtImage")),
+    # visualization interaction: the perceived rows show the plot that moves, not the plates that fade beside it, and
+    # the seek bar's band (recording coordinates: its crop starts at the transport's top)
+    **{n: dict(rect=(361, 518, 1239, 431), b_lines=1, band=360, extra=[("the seek bar's band", (152, 4, 1240, 40))])
+       for n in ("vi-pan-waveform", "vi-follow-waveform", "vi-pan-spectrogram", "vi-follow-spectrogram", "vi-autoscroll",
+                 "vi-seek-plot", "vi-seek-bar")},
     # the queue's first rows where the playing row moves (rows 1-3, the number and title columns); the first scan:
     # the status bar's right half (the scan label arriving and leaving)
     "queue-now-move": dict(rect="mainQueuePane:0,0.06,0.55,0.18", rows="all", b_lines=1),
@@ -7588,6 +7596,124 @@ _insert_after("motion-ui", "preferences-open", [
     ("motion-ui", "motion", "preferences-page-switch", "settle 0.6 | strip 0.8 0.1 - dialog=Configure :: js preferencesDialog.openPage(1)",
      "Configure: switching from the first page to the second")])
 
+# Edit › Undo and Redo of a queue change (#698): a row removed with Delete, then undone
+_insert_after("menus", "help-playing", [
+    ("menus", "_", "_queue-remove", "esc | away | click @plainQueueRow@0.5,0.5 | wait 0.3 | key Delete | wait 0.8 | away", ""),
+    ("menus", "menu", "edit-undo", "menu 1", "Edit menu after a queue row was removed with Delete: Undo Remove from Queue"),
+    ("menus", "_", "_queue-undo", "esc | js undoQueueChangeAction.trigger() | wait 0.8 | away", ""),
+    ("menus", "menu", "edit-redo", "menu 1", "Edit menu after that removal was undone: Undo and Redo (Ctrl+Shift+Z)"),
+    ("menus", "_", "_queue-redo-close", "esc | away", "")])
+# Configure's library folder row with its menu, from the keyboard (#680)
+_insert_after("roots", "preferences-library-root-selected", [
+    ("roots", "dialog", "preferences-library-root-menu", "window preferencesDialog | key Menu | wait 0.7 | window ",
+     "Configure, Library: the selected folder's menu, from the keyboard (Menu key)"),
+    ("roots", "_", "_root-menu-close", "window preferencesDialog | key Escape | wait 0.4 | window ", "")])
+# the issues button with keyboard focus (#631), and the reason of a stopped engine (#621) in its tooltip
+_insert_after("statusbar", "issues-seen", [
+    ("statusbar", "statusbar", "issues-focus", "focus statusBarErrorsButton | wait 0.3", "Status bar: the issues button with keyboard focus"),
+    ("statusbar", "_", "_issues-unfocus", "unfocus", "")])
+_insert_after("statusbar", "backend-stopped", [
+    ("statusbar", "statusbar", "backend-stopped-hover", "hover statusBarBackendStoppedLabel 1.4",
+     "The stopped engine's label hovered: the reason in its tooltip (#621; the reason is injected)"),
+    ("statusbar", "_", "_backend-stopped-away", "away | wait 0.3", "")])
+# a viewer button held down from the keyboard (#674): Space on the focused info button
+_insert_after("viewers", "albumart-fullscreen-strip-focus", [
+    ("viewers", "viewer", "albumart-fullscreen-strip-key-pressed",
+     "window albumArtFullscreenWindow | macro fsitem focus albumArtFullscreenInfoButton | keydown Space | wait 0.2",
+     "Album art viewer, fullscreen: the focused info button held down with Space"),
+    # (the focus moved off first, which cancels the press, so the release does not toggle the info column)
+    ("viewers", "_", "_fs-keyup", "window albumArtFullscreenWindow | macro fsitem reset albumArtFullscreenViewFocus | "
+     "keyup Space | wait 0.3", "")])
+# a search result's menu from the keyboard (#632): the Menu key on the selected result
+_insert_after("menus", "context-search-result", [
+    ("menus", "menu", "context-search-result-keyboard", "esc 1 | away | key Down | kkey Menu | wait 0.9",
+     "Search result context menu from the keyboard (a real Menu key on the selected result)")])
+# Configure Keyboard Shortcuts (#700, #701): the list filtered from its search field (real keys), cleared again
+_insert_after("dialogs", "keyboard-shortcuts-default-focus", [
+    ("dialogs", "dialog", "keyboard-shortcuts-filter",
+     "click keyboardShortcutsSearchField | wait 0.3 | window keyboardShortcutsDialog | type play | wait 0.6 | window | away",
+     "Configure Keyboard Shortcuts: the list filtered by \u201cplay\u201d, typed in its search field"),
+    ("dialogs", "_", "_shortcuts-unfilter",
+     "window keyboardShortcutsDialog | key Backspace | key Backspace | key Backspace | key Backspace | wait 0.4 | window ", "")])
+_insert_after("bigfont", "quit-save-failed", [  # (the next state's Escape closes it)
+    ("bigfont", "dialog", "keyboard-shortcuts", "esc | macro opendialog keyboardShortcutsDialog | settle 1.2 | away",
+     "Large font: Configure Keyboard Shortcuts")])
+# Visualization interaction (the viz-interaction scope): a zoomed waveform and centred spectrogram, the seek bar's
+# band marking the view (#656), a middle-drag pan that leaves the view where it is put while playback goes on
+# (#654, #657), Follow Playhead (F) bringing it back, seeks from the plot (right click: the view stays) and from the
+# seek bar (the view comes back), and middle-click autoscroll by the pointer's distance, faster at the window's
+# edge and going on with the pointer outside the window (#659, #662). Whole-window grabs; the focus sheets crop
+# them. The probe's middle button (mpress, mdmove, mrelease, mclick) and `leave` go to the window as the
+# compositor's events would; the pointer's cursor is not in a grab.
+_VW = "mainWaveformSurface"
+_VS = "spectrogramPaneItem"
+_VI_CROP = "transportBar+spectrogramPane"  # (the strips: the seek bar above the pane)
+
+
+def _mdrag(target, x0, x1, y=0.5, n=6, dt=0.04, sep=" | "):
+    """middle-drag steps on `target` from x0 to x1 (fractions of it), in n moves dt s apart, then a release"""
+    xs = [x0 + (x1 - x0) * (k + 1) / n for k in range(n)]
+    return sep.join([f"mpress {target}@{x0},{y}", "wait 0.12"] + [f"mdmove {target}@{x:.3f},{y} {dt}" for x in xs]
+                    + [f"mrelease {target}@{x1},{y}"])
+
+
+STATES += [
+    ("viz-interaction", "_", "_play", f"queue | play Small_Hours 60 4 | js viewerController.setVisualizationMode(1) | ready 3 | away", ""),
+    ("viz-interaction", "main", "vi-waveform-zoomed",
+     f"wheel {_VW}@0.5,0.4 120 6 | wait 1.0 | away | wait 0.4",
+     "Waveform zoomed in 6 notches, following the playhead: the seek bar's band marks the part of the track shown"),
+    ("viz-interaction", "main", "vi-waveform-panned", _mdrag(_VW, 0.2, 0.8) + " | wait 0.4 | away | wait 0.3",
+     "A middle-drag of 60 % of the plot to the right: the view moved back in the track, detached from the playhead "
+     "(which is now past its right edge); the band on the seek bar moved with it"),
+    ("viz-interaction", "main", "vi-waveform-panned-held", "wait 3",
+     "The same 3 s later, still playing: the moved view stays where it was put"),
+    ("viz-interaction", "motion", "vi-follow-waveform", f"strip 1.2 0.1 {_VI_CROP} :: key F",
+     "View › Follow Playhead (F) after a middle-drag: the waveform's view back on the playhead, the band with it"),
+    ("viz-interaction", "main", "vi-waveform-followed", "wait 0.6 | away", "After Follow Playhead (F): the view on the playhead again"),
+    ("viz-interaction", "motion", "vi-pan-waveform",
+     f"strip 1.6 0.1 {_VI_CROP} :: " + _mdrag(_VW, 0.7, 0.3, n=10, dt=0.05, sep=" ; "),
+     "A middle-drag of 40 % of the zoomed waveform to the left: the time grabbed stays under the pointer, the band follows"),
+    ("viz-interaction", "motion", "vi-seek-plot", f"wait 0.3 | strip 1.2 0.1 {_VI_CROP} :: rclick {_VW}@0.25,0.5 0",
+     "A right click on the moved (detached) waveform seeks there: the view stays, the playhead comes into it"),
+    ("viz-interaction", "motion", "vi-seek-bar", f"wait 0.6 | strip 1.4 0.1 {_VI_CROP} :: click seekSlider@0.7,0.5",
+     "A click on the seek bar while the view is moved: the playhead jumps there and the view follows it again"),
+    # (autoscroll from early in the track and deep in: at 6 notches its fastest reaches the track's end in under a
+    # second, and the end would hide what happens after)
+    ("viz-interaction", "_", "_autoscroll-from",
+     f"wait 0.4 | click seekSlider@0.08,0.5 | wait 0.5 | wheel {_VW}@0.5,0.4 120 8 | wait 0.8 | away", ""),
+    ("viz-interaction", "main", "vi-autoscroll-near", f"wait 0.2 | mclick {_VW}@0.3,0.5 | move {_VW}@0.5,0.5 | wait 1.2",
+     "Autoscroll: the pointer a little right of the middle click: the view moving slowly forward"),
+    ("viz-interaction", "main", "vi-autoscroll-edge", "move xy:1598,760 | wait 0.8",
+     "Autoscroll with the pointer at the window's right edge: much faster, the band racing along the seek bar"),
+    ("viz-interaction", "main", "vi-autoscroll-outside", "leave | wait 0.8",
+     "Autoscroll after the pointer left the window: going on at the speed it had where it was last seen"),
+    ("viz-interaction", "main", "vi-autoscroll-stopped", f"move {_VW}@0.5,0.5 | mclick {_VW}@0.5,0.5 | wait 0.8 | away",
+     "Autoscroll stopped by a second middle click: the view stays where it got to"),
+    ("viz-interaction", "_", "_autoscroll-stop", "key F | wait 0.6 | away", ""),
+    ("viz-interaction", "motion", "vi-autoscroll",
+     f"strip 3.4 0.1 {_VI_CROP} :: mclick {_VW}@0.3,0.5 ; move {_VW}@0.5,0.5 ; wait 0.9 ; move xy:1598,760 ; wait 0.9 ; "
+     f"leave ; wait 0.9 ; move {_VW}@0.5,0.5 ; mclick {_VW}@0.5,0.5",
+     "Autoscroll from a middle click: the pointer a little right of the click (slow), at the window's edge (fast), "
+     "outside the window (going on), then a second middle click stopping it"),
+    ("viz-interaction", "_", "_to-spectrogram",
+     "wait 0.3 | key F | js resetZoomAction.trigger() | js viewerController.setVisualizationMode(0) | "
+     "js root.uiBridge.setSpectrogramDisplayMode(1) | click seekSlider@0.3,0.5 | ready 3 | away", ""),
+    ("viz-interaction", "main", "vi-spectrogram-zoomed", f"wheel {_VS}@0.5,0.4 120 6 | wait 1.5 | away | wait 0.4",
+     "The centred spectrogram zoomed in 6 notches, following the playhead: the band on the seek bar"),
+    ("viz-interaction", "main", "vi-spectrogram-panned", _mdrag(_VS, 0.2, 0.8) + " | away | wait 0.15",
+     "A middle-drag of the centred spectrogram 60 % to the right, just released: the view moved back in the track "
+     "while its columns are decoded where it is"),
+    ("viz-interaction", "main", "vi-spectrogram-panned-decoded", "wait 2.5",
+     "The same 2.5 s later, still playing: the moved view filled in and staying where it was put"),
+    ("viz-interaction", "motion", "vi-pan-spectrogram",
+     f"strip 2.4 0.1 {_VI_CROP} :: " + _mdrag(_VS, 0.7, 0.3, n=10, dt=0.05, sep=" ; ") + " ; wait 1.2",
+     "A middle-drag of the zoomed centred spectrogram 40 % to the left, then 1.2 s as its columns come"),
+    ("viz-interaction", "motion", "vi-follow-spectrogram", f"wait 0.4 | strip 1.2 0.1 {_VI_CROP} :: key F",
+     "Follow Playhead (F) after a middle-drag of the centred spectrogram: back on the playhead"),
+    ("viz-interaction", "main", "vi-rolling-zoomed", "wait 0.4 | js root.uiBridge.setSpectrogramDisplayMode(0) | wait 2 | away",
+     "The rolling spectrogram, still zoomed: its band on the seek bar"),
+]
+
 DLG_FACTS = {("dialogs", st) for st in (
     "about", "about-kde", "confirm-remove-library-root", "library-root-name-rename", "library-root-name-add", "diagnostics",
     "confirm-clear-diagnostics", "quit-save-failed", "tag-editor", "tag-editor-editing", "tag-editor-auto-number",
@@ -7595,7 +7721,8 @@ DLG_FACTS = {("dialogs", st) for st in (
     "itunes-empty", "itunes-error", "itunes-results", "confirm-replace-cover", "about-components", "preferences-lastfm-account")} \
     | {("dialogs", f"preferences-{slug}") for _t, slug in PREF_PAGES} \
     | {("statusbar", "recent-errors"), ("menus", "empty"), ("menus", "results"), ("menus", "no-results"),
-       ("bigfont", f"preferences-{PREF_PAGES[1][1]}-first"), ("bigfont", "confirm-clear-diagnostics"), ("bigfont", "tag-editor-close-confirm"), ("roots", "preferences-library-three-roots-hover"), ("bigfont", "preferences-visualization"), ("bigfont", "itunes-results"), *[("bigfont", st) for st in (
+       ("bigfont", f"preferences-{PREF_PAGES[1][1]}-first"), ("bigfont", "confirm-clear-diagnostics"), ("bigfont", "tag-editor-close-confirm"), ("bigfont", "keyboard-shortcuts"),
+       ("dialogs", "keyboard-shortcuts"), ("dialogs", "keyboard-shortcuts-filter"), ("dialogs", "keyboard-shortcuts-reassign"), ("roots", "preferences-library-three-roots-hover"), ("bigfont", "preferences-visualization"), ("bigfont", "itunes-results"), *[("bigfont", st) for st in (
            "about", "about-kde", "library-root-name-add", "library-root-name-rename", "confirm-remove-library-root",
            "confirm-clear-diagnostics", "quit-save-failed", "diagnostics", "recent-errors", "tag-editor", "tag-editor-auto-number",
            "tag-editor-rename-preview", "tag-editor-batch", "itunes-results-loading", "tag-editor-quit-wait", "tag-editor-status-details", "itunes-error", "itunes-empty",

@@ -126,6 +126,15 @@ class Session:
         finally:
             inp.close()
 
+    def kwin_key(self, name):
+        """A real key through the session's KWin, to the window that has the keyboard."""
+        import kwin_input
+        inp = kwin_input.KWinInput(kwin_input.socket_path(os.path.join(self.a.iso, "runtime")))
+        try:
+            inp.key(kwin_input.KEYS[name])
+        finally:
+            inp.close()
+
     # --- probe wrappers
     def cmd(self, c, timeout=20):
         return self.a.cmd(c, timeout)
@@ -437,11 +446,18 @@ class Session:
                     ux0, uy0 = min(f[0] for f in frames), min(f[1] for f in frames)
                     ux1, uy1 = max(f[0] + f[2] for f in frames), max(f[1] + f[3] for f in frames)
                     nested = (frames[0], (ux0, uy0, ux1 - ux0, uy1 - uy0), [w["title"] for w in others])
+            elif any(p["opened"] and "Menu" in p["cls"] and p.get("exposed", True)
+                     for p in self.popups(dialog_window["cls"])):
+                # a menu open in the dialog is a window of its own (#642), which a capture of the dialog's window
+                # leaves out: the screen inside the dialog's frame has both
+                frame = self.kwin_frame(dialog_window["title"])
+                if frame:
+                    nested = (frame, frame, [])
             got = None
             if nested:
                 got = self.kwin_capture_area(path, nested[1])
                 how = (f"with its KWin decoration, over {', '.join(nested[2])} (nested windows, captured together "
-                       "with their decorations)")
+                       "with their decorations)") if others else "with its KWin decoration and its open menu"
             if not got:
                 nested = None
                 got = self.kwin_capture(path, expect=(dialog_window["w"] * self.scale, dialog_window["h"] * self.scale),

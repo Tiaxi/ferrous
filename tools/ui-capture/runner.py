@@ -265,6 +265,25 @@ class Runner:
     def step_dmove(self, a):
         self._mouse("dmove", a)
 
+    # the middle button (a middle-drag pans a zoomed plot; a middle click starts autoscroll)
+    def step_mpress(self, a):
+        self._mouse("mpress", a)
+
+    def step_mrelease(self, a):
+        self._mouse("mrelease", a)
+
+    def step_mclick(self, a):
+        self._mouse("mclick", a)
+
+    def step_mdmove(self, a):
+        self._mouse("mdmove", a)
+
+    def step_leave(self, a):
+        """leave [WAIT]: the pointer leaves the window (a Leave with no position, as the compositor sends it)."""
+        self.s.cmd(f"leave{self.at()}")
+        if a:
+            time.sleep(float(a))
+
     def step_wheel(self, a):
         # wheel TARGET DELTA [COUNT]
         parts = a.split()
@@ -274,6 +293,22 @@ class Runner:
             time.sleep(0.25)
 
     def step_key(self, a):
+        self._key("key", a)
+
+    def step_kkey(self, a):
+        """kkey KEY: a real key through KWin (kwin_input.KEYS), for a shortcut that must take it from the focused
+        item: the probe's keys go to the window directly, past Qt's shortcut map, and the item gets them."""
+        self.s.kwin_key(a)
+        time.sleep(0.08)
+
+    def step_keydown(self, a):
+        """keydown KEY: a key held (its press alone) until keyup KEY."""
+        self._key("keydown", a)
+
+    def step_keyup(self, a):
+        self._key("keyup", a)
+
+    def _key(self, verb, a):
         parts = a.split()
         mods = 0
         for m in parts[1:]:
@@ -281,7 +316,7 @@ class Runner:
         code = KEY.get(parts[0])
         if code is None:
             code = ord(parts[0].upper())
-        self.s.cmd(f"key{self.at()} {code} {mods}")
+        self.s.cmd(f"{verb}{self.at()} {code} {mods}")
         time.sleep(0.08)
 
     def step_type(self, a):

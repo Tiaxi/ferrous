@@ -4,8 +4,9 @@
 #   shoot_round.sh <round> [<source-dir>] [--out DIR] [--only AREA[,AREA...]] [--themes dark,light]
 #                  [--sessions S1,S2] [--workers N]   (parallel isolated app sessions; default 4, at most 4)
 #                  [--pack-jobs N]   (pack.py's worker processes; default pack.py's own, 2 to 8 by the CPUs)
-#                  [--focus SCOPE | --focus-only SCOPE]   (<round>/focus/: the small pack for one scope of
-#                  focus.py; --focus-only shoots just the scope's sessions, for iteration)
+#                  [--focus SCOPES | --focus-only SCOPES | --census]   (<round>/focus/<scope>/: the small pack of each
+#                  scope of focus.py in the comma-separated list, "census" for the census scopes; --focus-only shoots
+#                  just the union of their sessions, once; --census is --focus-only census)
 #
 # <source-dir>: the tree under test (default: the checkout that holds this script). --out DIR: where rounds go
 # (default $SHOT_OUT_ROOT, else $SHOT_WORK/rounds). $SHOT_WORK: the work folder (default
@@ -20,12 +21,12 @@
 #    mount namespace where the work folder is at /mnt/ferrous (neutral_ns.sh; SHOT_NEUTRAL=0 runs without).
 # 4. Writes MOTION.md, CONTRAST.md, LAYOUT.md, then pack.py: review-sized contact sheets (cropped tiles, one theme
 #    per sheet), key-frame motion strips and INDEX.md with the core set first.
-# Output: <out>/<round>/. A full run wipes the round's previous images (BUGS.md is kept). --only/--sessions/--themes
-# make a partial run: it re-shoots just those states into the existing round (wiping nothing) and rebuilds the
-# sheets and INDEX.md. See README.md.
+# Output: <out>/<round>/, with the focus packs in <round>/focus/<scope>/. A full run wipes the round's previous
+# images (BUGS.md is kept). --only/--sessions/--themes make a partial run: it re-shoots just those states into the
+# existing round (wiping nothing) and rebuilds the sheets and INDEX.md. See README.md.
 set -euo pipefail
 
-usage() { sed -n '2,25p' "$0"; exit 2; }
+usage() { sed -n '2,/^set -euo/{/^#/p}' "$0"; exit 2; }
 [ $# -ge 1 ] || usage
 case $1 in -h|--help|-*) usage ;; esac
 H=$(dirname "$(realpath "$0")")
@@ -49,6 +50,9 @@ WORKERS=4
 RUNNER_ARGS=()
 PACK_ARGS=()
 while [ $# -gt 0 ]; do
+    if [ "$1" = --census ]; then  # (the one option without a value)
+        export SHOT_FOCUS=census SHOT_FOCUS_ONLY=1; FOCUS_ONLY=1; shift; continue
+    fi
     [ $# -ge 2 ] || { echo "option $1 needs a value" >&2; exit 2; }
     case $1 in
         --out) OUTROOT=$2; shift 2 ;;
@@ -59,7 +63,7 @@ while [ $# -gt 0 ]; do
         --pack-jobs)
             [[ $2 =~ ^[1-9][0-9]*$ ]] || { echo "--pack-jobs needs a whole number of 1 or more (got '$2')" >&2; exit 2; }
             PACK_ARGS=(--jobs "$2"); shift 2 ;;
-        # the focus pack (focus.py) after the whole pack; --focus-only also shoots only the scope's sessions
+        # the focus packs (focus.py) after the whole pack; --focus-only also shoots only the scopes' sessions
         --focus) export SHOT_FOCUS=$2; shift 2 ;;
         --focus-only) export SHOT_FOCUS=$2 SHOT_FOCUS_ONLY=1; FOCUS_ONLY=1; shift 2 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
@@ -67,9 +71,12 @@ while [ $# -gt 0 ]; do
 done
 OUTROOT=$(realpath -m "$OUTROOT")
 
-if [ -n "${SHOT_FOCUS:-}" ]; then  # the scope must exist (loudly, before building)
-    FOCUS_SESSIONS=$(python3 -c "import sys; sys.path.insert(0, sys.argv[1]); import focus; print(','.join(focus.SCOPES[sys.argv[2]]['sessions']))" \
-        "$H" "$SHOT_FOCUS") || { echo "!!! no focus scope '$SHOT_FOCUS' in focus.py" >&2; exit 2; }
+if [ -n "${SHOT_FOCUS:-}" ]; then  # every scope must exist (loudly, before building)
+    # focus.py SPEC prints the scopes (in order, each once; "census" expanded) and the union of their sessions
+    FOCUS_RESOLVED=$(python3 "$H/focus.py" "$SHOT_FOCUS") || { echo "!!! bad focus scope list '$SHOT_FOCUS'" >&2; exit 2; }
+    SHOT_FOCUS=$(sed -n 1p <<< "$FOCUS_RESOLVED")
+    FOCUS_SESSIONS=$(sed -n 2p <<< "$FOCUS_RESOLVED")
+    echo "focus scopes: $SHOT_FOCUS (sessions: $FOCUS_SESSIONS)"
     if [ -n "$FOCUS_ONLY" ]; then
         PARTIAL=1
         RUNNER_ARGS+=(--sessions "$FOCUS_SESSIONS")
@@ -92,8 +99,9 @@ if [ -n "${SHOT_BUILD_WRAPPER:-}" ]; then
     read -r -a WRAP <<< "$SHOT_BUILD_WRAPPER"
 fi
 # a focus-only run works in its own folder (<round>-focus: shots, strips, timings, its app and TMP dirs) and
-# publishes only <round>/focus/ (FOCUS.md, FOCUS-FACTS.md, the images) when it passes; the full run of the same round
-# packs <round>/ and leaves <round>/focus/ alone. So the two can be started together (see the run lock below).
+# publishes only <round>/focus/<scope>/ (FOCUS.md, FOCUS-FACTS.md, the images) of each of its scopes when it passes;
+# the full run of the same round packs <round>/ and leaves <round>/focus/ alone. So the two can be started together
+# (see the run lock below).
 OUTNAME=$ROUND
 [ -n "$FOCUS_ONLY" ] && OUTNAME=$ROUND-focus
 OUT=$OUTROOT/$OUTNAME
@@ -247,13 +255,24 @@ nice -n 10 python3 "$H/layout.py" "$OUT"
 PACK_STATUS=0
 SHOT_PARTIAL="$PARTIAL" nice -n 10 python3 "$H/pack.py" "$OUT" "$SRC" "${PACK_ARGS[@]}" || PACK_STATUS=$?
 phase package
-# publish the focus pack of a focus-only run to <round>/focus/ (whole or not at all), when it passed
+# publish the focus packs of a focus-only run to <round>/focus/<scope>/, when the whole run passed (every pack
+# whole, or none); the round's packs of other scopes stay
 if [ -n "$FOCUS_ONLY" ] && [ "$PACK_STATUS" -eq 0 ] && [ -d "$OUT/focus" ]; then
-    DEST=$OUTROOT/$ROUND/focus
-    mkdir -p "$OUTROOT/$ROUND"
-    rm -rf "$DEST.new" && cp -a "$OUT/focus" "$DEST.new" && rm -rf "$DEST" && mv "$DEST.new" "$DEST"
-    cp -p "$OUT/source.json" "$DEST/source.json"
-    echo "focus pack published: $DEST/FOCUS.md"
+    FDEST=$OUTROOT/$ROUND/focus
+    mkdir -p "$FDEST"
+    IFS=, read -r -a SCOPE_LIST <<< "$SHOT_FOCUS"
+    for SC in "${SCOPE_LIST[@]}"; do
+        [ -f "$OUT/focus/$SC/FOCUS.md" ] || { echo "!!! focus pack $SC was not written" >&2; PACK_STATUS=3; }
+    done
+    [ "$PACK_STATUS" -eq 0 ] || SCOPE_LIST=()
+    # (a pack of the flat layout before per-scope folders: its files go, its scope is unknown)
+    [ ${#SCOPE_LIST[@]} -eq 0 ] || rm -f "$FDEST/FOCUS.md" "$FDEST/FOCUS-FACTS.md" "$FDEST/source.json" "$FDEST"/F[0-9][0-9]_*.png
+    for SC in "${SCOPE_LIST[@]}"; do
+        DEST=$FDEST/$SC
+        rm -rf "$DEST.new" && cp -a "$OUT/focus/$SC" "$DEST.new" && cp -p "$OUT/source.json" "$DEST.new/source.json" \
+            && rm -rf "$DEST" && mv "$DEST.new" "$DEST"
+        echo "focus pack published: $DEST/FOCUS.md ($(ls "$DEST"/F[0-9][0-9]_*.png 2>/dev/null | wc -l) images)"
+    done
 fi
 if [ ! -f "$OUT/BUGS.md" ]; then
     printf '# Non-visual bugs noticed while driving the app (%s)\n\nNone recorded yet.\n' "$ROUND" > "$OUT/BUGS.md"
