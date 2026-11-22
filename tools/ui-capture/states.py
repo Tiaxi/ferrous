@@ -7210,7 +7210,12 @@ CUSTOM_SHEETS = [
     ("details-1to1", "Details at 1:1: the Last.fm glyph's centre line, the search field at 24 pt, the mode switch hovered "
      "without focus (3x, dark and light) and its plate during a click (3x)", "dark",
      [[("details", "statusbar-glyph", None, "Status bar, dark")],
-      [("details", "searchfield24pt", None, "Search field at 24 pt (1600x1000), dark", dict(variant="font24"))],
+      # (the field is as wide as the window at 24 pt, over the reviewers' 1568 px with the sheet's margins: its two
+      # ends, the glyph and the query, then the buttons; only its plain middle is left out)
+      [("details", "searchfield24pt", None, "Search field at 24 pt (1600x1000), dark: its left end",
+        dict(variant="font24", part=(0, 0, 0.42, 1))),
+       ("details", "searchfield24pt", None, "Its right end (the plain middle left out)",
+        dict(variant="font24", part=(0.75, 0, 0.25, 1)))],
       [("details", "modeswitch-hover", None, "Mode switch hovered without focus, dark"),
        ("details", "modeswitch-hover", None, "light", dict(theme="light"))],
       [dict(strip="mode-switch-lane", item="visualizationModeSwitch", times=[-17, 17, 34, 67, 150], zoom=3,
