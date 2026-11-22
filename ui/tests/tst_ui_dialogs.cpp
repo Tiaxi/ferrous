@@ -687,6 +687,8 @@ private slots:
     void editTagsGivesTheTagsRoomToTitleAndFileName();
     void editTagsFileNameWrapsBeforeItIsCut_data();
     void editTagsFileNameWrapsBeforeItIsCut();
+    void editTagsSetsChangedValuesInDemiBold_data();
+    void editTagsSetsChangedValuesInDemiBold();
     void editTagsPinsWhatIdentifiesARowAsItScrolls_data();
     void editTagsPinsWhatIdentifiesARowAsItScrolls();
     void editTagsTitleMeetsTheEdgeUnderAWideScrollBar();
@@ -6263,6 +6265,105 @@ void UiDialogsTest::editTagsFileNameWrapsBeforeItIsCut() {
         QCOMPARE(title->property("lineCount").toInt(), 2);
         QCOMPARE(row->height(), title->height());
     }
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsSetsChangedValuesInDemiBold_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000;
+    QTest::newRow("24 pt, 1000 px") << 24.0 << 1000;
+}
+
+// The table tells a changed value from a kept one at the value: a change
+// is DemiBold and a kept value regular, in one ink, as the form's labels
+// are (the cells were alike, and only the row's mark and the column's
+// header said a change was there). A value typed in turns DemiBold as it
+// is applied, and a DemiBold change still reads whole.
+void UiDialogsTest::editTagsSetsChangedValuesInDemiBold() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfTheShotBatch());
+    QVERIFY(tags != nullptr);
+    tags->resize(width, tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), qreal(width));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    const auto cellAt = [&](int index, const QString &key) -> QQuickItem * {
+        evaluate(table, QStringLiteral("positionViewAtIndex(%1, ListView.Contain)").arg(index));
+        if (!QTest::qWaitFor([&]() { return !layoutPendingUnder(table); })) {
+            return nullptr;
+        }
+        for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
+            if (row->isVisible() && row->property("index").toInt() == index) {
+                return itemNamed(row, QStringLiteral("tagEditorCell_") + key);
+            }
+        }
+        return nullptr;
+    };
+    const auto weightOf = [](QQuickItem *cell) { return cell->property("font").value<QFont>().weight(); };
+
+    // Rows 0 and 1 get new titles, and row 0 the widest track number its
+    // column holds; row 2 keeps its title.
+    main.editor.setCell(0, QStringLiteral("title"), retitledBatch().at(0).second);
+    main.editor.setCell(1, QStringLiteral("title"), retitledBatch().at(1).second);
+    main.editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("888"));
+    main.editor.setCell(1, QStringLiteral("discNo"), QStringLiteral("88"));
+    main.editor.notifyRowMutation();
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    QQuickItem *kept = cellAt(2, QStringLiteral("title"));
+    QVERIFY(kept != nullptr);
+    QCOMPARE(weightOf(kept), QFont::Normal);
+    const QColor ink = kept->property("color").value<QColor>();
+    for (const auto &[index, key] : QList<std::pair<int, QString>>{{0, QStringLiteral("title")},
+                                                                   {1, QStringLiteral("title")},
+                                                                   {0, QStringLiteral("trackNo")},
+                                                                   {1, QStringLiteral("discNo")}}) {
+        QQuickItem *cell = cellAt(index, key);
+        QVERIFY(cell != nullptr);
+        const QString at = QStringLiteral("row %1, %2: ").arg(index).arg(key) + describeItem(cell);
+        QVERIFY2(weightOf(cell) == QFont::DemiBold, qPrintable(at));
+        if (key == QStringLiteral("title")) {
+            QVERIFY2(cell->property("color").value<QColor>() == ink, qPrintable(at));
+        } else {
+            QVERIFY2(cell->property("lineCount").toInt() == 1, qPrintable(at));
+        }
+        QVERIFY2(!cell->property("truncated").toBool(), qPrintable(at));
+        QVERIFY2(cell->property("contentWidth").toReal()
+                     <= cell->width() - cell->property("leftPadding").toReal() - cell->property("rightPadding").toReal() + 0.5,
+                 qPrintable(at));
+        QVERIFY2(cell->property("contentHeight").toReal() <= cell->height() + 0.5, qPrintable(at));
+    }
+    // The kept values beside them, and every other row's, stay regular.
+    for (const QString &key : {QStringLiteral("fileName"), QStringLiteral("artist"), QStringLiteral("album")}) {
+        QQuickItem *cell = cellAt(0, key);
+        QVERIFY(cell != nullptr);
+        QVERIFY2(weightOf(cell) == QFont::Normal, qPrintable(describeItem(cell)));
+    }
+    QCOMPARE(weightOf(cellAt(2, QStringLiteral("trackNo"))), QFont::Normal);
+
+    // Typed into row 2's title, the value turns DemiBold as it is applied.
+    table->forceActiveFocus();
+    main.editor.setSelectedRows({2});
+    QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_title"));
+    QVERIFY(field != nullptr);
+    field->forceActiveFocus();
+    QTest::keyClick(tags, Qt::Key_End);
+    QTest::keyClick(tags, Qt::Key_Space);
+    QTest::keyClick(tags, 'x');
+    QTRY_COMPARE(cellAt(2, QStringLiteral("title"))->property("text").toString(), QStringLiteral("Brief Signal x"));
+    QTest::keyClick(tags, Qt::Key_Tab);
+    QTRY_COMPARE(weightOf(cellAt(2, QStringLiteral("title"))), QFont::DemiBold);
+    QCOMPARE(cellAt(2, QStringLiteral("title"))->property("color").value<QColor>(), ink);
+
+    // A revert gives the regular weight back.
+    main.editor.revertField(QStringLiteral("title"));
+    QTRY_COMPARE(weightOf(cellAt(0, QStringLiteral("title"))), QFont::Normal);
+    QCOMPARE(weightOf(cellAt(2, QStringLiteral("title"))), QFont::Normal);
     QVERIFY(closeTagEditor(main));
 }
 

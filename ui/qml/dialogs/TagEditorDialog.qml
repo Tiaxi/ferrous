@@ -1824,6 +1824,12 @@ Components.DialogWindow {
                                     ? root.cellText(modelData.key, { [modelData.key]: root.pendingEditText })
                                     : tableCell.committedText
                                 font.features: modelData.number ? root.uiPalette.tabularFigures : ({})
+                                // A change is DemiBold, as its field's
+                                // label is, and a kept value regular, in
+                                // one ink: a tint would read as selected.
+                                // What it wraps by is measured in its
+                                // font, so it still reads whole.
+                                font.weight: tableCell.changed ? Font.DemiBold : Font.Normal
                                 color: tableCell.failureCell
                                     ? root.uiPalette.negative
                                     : (modelData.number
