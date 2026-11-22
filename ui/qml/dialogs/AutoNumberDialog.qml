@@ -53,6 +53,10 @@ Components.CompactDialogWindow {
     // they are in; the description above it wraps.
     contentWidth: autoNumberForm.implicitWidth
     defaultWidth: Math.max(root.minimumWidth, root._neededWidth)
+    // The keyboard in the first field, its number selected, so that typing
+    // replaces it at once.
+    initialFocusItem: startingTrackField
+    onAboutToShow: startingTrackField.selectAll()
 
     footer: Components.DialogFooter {
 
@@ -111,6 +115,8 @@ Components.CompactDialogWindow {
             text: "1"
             inputMethodHints: Qt.ImhDigitsOnly
             validator: IntValidator { bottom: 1; top: root.maximumNumber }
+            // Enter numbers, as Enter in Add Library Folder's field adds.
+            onAccepted: root.apply()
         }
         Label {
             objectName: "autoNumberStartingTrackError"
@@ -158,6 +164,8 @@ Components.CompactDialogWindow {
             enabled: writeDiscCheck.checked
             inputMethodHints: Qt.ImhDigitsOnly
             validator: IntValidator { bottom: 1; top: root.maximumNumber }
+            // Enter numbers, as Enter in Add Library Folder's field adds.
+            onAccepted: root.apply()
         }
         Label {
             objectName: "autoNumberStartingDiscError"

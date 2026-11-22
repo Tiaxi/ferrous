@@ -51,6 +51,7 @@ private slots:
     void enterNumbersTracksAsSoonAsAutoNumberShows();
     void enterRenamesAsSoonAsThePreviewShows();
     void autoNumberRejectsStartsThatAreNotNumbers();
+    void autoNumberTakesTypingAsSoonAsItShows();
     void tagEditorRowsFollowTheKeyboard();
     void tagEditorCurrentRowFollowsTheSelection();
     void tagEditorShowsEveryValueOfMultiValueFields();
@@ -1286,7 +1287,10 @@ void TagEditorSmokeTest::enterNumbersTracksAsSoonAsAutoNumberShows() {
     QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorAutoNumberButton")));
     QVERIFY(dialog->property("visible").toBool());
     QCOMPARE(autoNumberWindow->transientParent(), fixture.tags());
-    QVERIFY(keyboardInPopupContent(dialog));
+    // In the first field, whose Enter numbers.
+    auto *track = autoNumberWindow->findChild<QQuickItem *>(QStringLiteral("autoNumberStartingTrackField"));
+    QVERIFY(track != nullptr);
+    QTRY_VERIFY(autoNumberWindow->isActive() && autoNumberWindow->activeFocusItem() == track);
     QTest::keyClick(autoNumberWindow, Qt::Key_Return);
     QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("trackNo")), QStringLiteral("1"));
     QCOMPARE(fixture.editor.m_tableModel.fieldValue(2, QStringLiteral("trackNo")), QStringLiteral("3"));
@@ -1306,6 +1310,47 @@ void TagEditorSmokeTest::enterNumbersTracksAsSoonAsAutoNumberShows() {
     QTRY_VERIFY(popupsSettled());
     QVERIFY(!dialog->property("visible").toBool());
     QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("trackNo")), QStringLiteral("7"));
+}
+
+// Auto Number opens with its first field focused and selected, so typing
+// replaces the number at once (the keyboard was on no field), and Enter in
+// either field numbers, as it did as the dialog opened.
+void TagEditorSmokeTest::autoNumberTakesTypingAsSoonAsItShows() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(3, false));
+    fixture.editor.selectAllRows();
+    auto *dialog = qobject_cast<QQuickWindow *>(
+        fixture.window->findChild<QObject *>(QStringLiteral("autoNumberDialog")));
+    QVERIFY(dialog != nullptr);
+    auto *track = dialog->findChild<QQuickItem *>(QStringLiteral("autoNumberStartingTrackField"));
+    auto *disc = dialog->findChild<QQuickItem *>(QStringLiteral("autoNumberStartingDiscField"));
+    QVERIFY(track != nullptr && disc != nullptr);
+
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorAutoNumberButton")));
+    QVERIFY(QTest::qWaitForWindowExposed(dialog));
+    QTRY_VERIFY(track->hasActiveFocus());
+    QCOMPARE(track->property("selectedText").toString(), QStringLiteral("1"));
+    QTest::keyClick(dialog, '5');
+    QCOMPARE(track->property("text").toString(), QStringLiteral("5"));
+    QTest::keyClick(dialog, Qt::Key_Return);
+    QTRY_VERIFY(!dialog->isVisible());
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("trackNo")), QStringLiteral("5"));
+
+    // Each time it opens, whatever had the keyboard as it closed.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorAutoNumberButton")));
+    QTRY_VERIFY(track->hasActiveFocus());
+    QCOMPARE(track->property("selectedText").toString(), QStringLiteral("5"));
+    auto *writeDisc = dialog->findChild<QObject *>(QStringLiteral("autoNumberWriteDiscCheck"));
+    QVERIFY(writeDisc != nullptr && writeDisc->setProperty("checked", true));
+    disc->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(dialog, Qt::Key_Return);
+    QTRY_VERIFY(!dialog->isVisible());
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorAutoNumberButton")));
+    QTRY_VERIFY(track->hasActiveFocus());
+    QTest::keyClick(dialog, Qt::Key_Escape);
+    QTRY_VERIFY(!dialog->isVisible());
 }
 
 void TagEditorSmokeTest::autoNumberRejectsStartsThatAreNotNumbers() {
