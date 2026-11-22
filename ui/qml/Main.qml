@@ -1431,9 +1431,12 @@ ApplicationWindow {
             MenuItem { action: showLevelMeterAction }
             MenuItem { action: showScaleAction }
             MenuSeparator {}
-            MenuItem { action: autoCenterSelectionAction }
+            // By what they act on: the plot, then the queue. Two items
+            // that follow read as one another's variants in one group.
             MenuItem { action: resetZoomAction }
             MenuItem { action: followPlayheadAction }
+            MenuSeparator {}
+            MenuItem { action: autoCenterSelectionAction }
         }
         Components.AppMenu {
             objectName: "playbackMenu"

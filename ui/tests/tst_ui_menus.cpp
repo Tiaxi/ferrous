@@ -1216,10 +1216,12 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  QStringLiteral("sep"),
                  QStringLiteral("check|Show Level Meter||"),
                  QStringLiteral("check|Show Frequency and Time Scale||"),
+                 // The plot's two, then the queue's.
                  QStringLiteral("sep"),
-                 QStringLiteral("check|Follow Current Track in Queue||"),
                  QStringLiteral("item|Reset Zoom|Ctrl+0|zoom-original"),
                  QStringLiteral("item|Follow Playhead|F|"),
+                 QStringLiteral("sep"),
+                 QStringLiteral("check|Follow Current Track in Queue||"),
              }));
     QCOMPARE(rowsOf(menuNamed(window, "playbackMenu")),
              (QStringList{
