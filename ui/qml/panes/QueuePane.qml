@@ -1382,33 +1382,57 @@ Rectangle {
                 property real pressX: 0
 
                 visible: modelData.header.visible
-                x: queueHeaderRow.x + modelData.header.x - root.columnGap / 2 - width / 2
+                // On whole pixels, for the frame's edges.
+                x: Math.round(queueHeaderRow.x + modelData.header.x - root.columnGap / 2 - width / 2)
                 width: Kirigami.Units.largeSpacing
                 height: parent.height
                 // An empty queue's columns have no labels to resize.
                 activeFocusOnTab: visible && root.uiBridge.queueLength > 0
 
                 Accessible.role: Accessible.Separator
-                Accessible.name: I18n.i18nc("@action %1 is a column title", "Resize the %1 column", modelData.label)
-                Accessible.description: I18n.i18nc("@info", "Left or Right to resize, Home for the default width")
+                readonly property string actionText: I18n.i18nc("@action %1 is a column title",
+                    "Resize the %1 column", modelData.label)
+                readonly property string keysText: I18n.i18nc("@info",
+                    "Left or Right to resize, Home for the default width")
+                Accessible.name: resizeHandle.actionText
+                Accessible.description: resizeHandle.keysText
                 Accessible.focusable: true
 
-                // A 1 px seam under the pointer; with keyboard focus, a
-                // 2 px line in the focus colour the header's full height,
-                // which reads as focus where a short tick did not.
+                // A 1 px seam under the pointer.
                 Rectangle {
                     objectName: "queueColumnHandleLine"
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    anchors.topMargin: resizeHandle.activeFocus ? 0 : Kirigami.Units.smallSpacing
-                    anchors.bottomMargin: resizeHandle.activeFocus ? 0 : Kirigami.Units.smallSpacing
-                    width: resizeHandle.activeFocus ? 2 : 1
-                    visible: resizeHandle.highlighted
-                    color: resizeHandle.activeFocus || resizeMouseArea.pressed
-                        ? root.uiPalette.focusRing
-                        : root.uiPalette.seam
+                    anchors.topMargin: Kirigami.Units.smallSpacing
+                    anchors.bottomMargin: Kirigami.Units.smallSpacing
+                    width: 1
+                    visible: resizeHandle.highlighted && !resizeHandle.activeFocus
+                    color: resizeMouseArea.pressed ? root.uiPalette.focusRing : root.uiPalette.seam
                 }
+
+                // With keyboard focus, the app's ring around the handle,
+                // the header's height over its hairline and within the gap
+                // between the columns (a 2 px line alone read as a hover).
+                Rectangle {
+                    objectName: "queueColumnHandleFocus"
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 1
+                    width: 2 * Math.round(root.columnGap * 3 / 8)
+                    radius: 3
+                    visible: resizeHandle.activeFocus
+                    color: "transparent"
+                    border.width: 2
+                    border.color: root.uiPalette.focusRing
+                }
+
+                // Keyboard focus says what the handle is, and its keys.
+                ToolTip.visible: resizeHandle.activeFocus && root.keyboardInUse
+                ToolTip.delay: Kirigami.Units.toolTipDelay
+                ToolTip.text: I18n.i18nc("@info:tooltip what a handle does, then its keys", "%1 · %2",
+                    resizeHandle.actionText, resizeHandle.keysText)
 
                 MouseArea {
                     id: resizeMouseArea
