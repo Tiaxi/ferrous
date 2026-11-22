@@ -247,7 +247,7 @@ class DialogsPack(unittest.TestCase):
     def test_the_visualization_page_and_edit_tags_from_a_1000_px_window_are_in_it(self):
         got = {(c[1], (c[4] if len(c) > 4 else {}).get("variant", "")) for c in self.tiles() if isinstance(c, tuple)}
         self.assertIn(("preferences-visualization", ""), got)
-        self.assertIn(("tag-editor", "1000x720"), got)
+        self.assertIn(("tag-editor-batch", "1000x720"), got)
         narrow = states.SESSIONS["narrow"]
         self.assertEqual(tuple(narrow["size"]), (1000, 720))
         self.assertIn(("narrow", "tag-editor"), states.DLG_FACTS)  # (the at-a-glance table's window and overflow)

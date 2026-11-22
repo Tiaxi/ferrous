@@ -345,12 +345,13 @@ SCOPES = {
             # the 10 pt sheets: seven (Configure on two, confirmations, Edit Tags, iTunes, the shortcuts on two); the
             # large font on seven (the dialogs at 24 pt at 1:1, cropped to regions where it is large; Recent Issues dark and light)
             ("dlg-configure-a", "Configure, 1:1: Library, three named folders, the third hovered (light, top 56 %); Last.fm "
-             "connected (a stand-in: no network; top 40 %); General (top 41 %)", "light",
+             "connected (a stand-in: no network; top 40 %); Last.fm unavailable (top 32 %)", "light",
              [[("dialog", "preferences-library-three-roots-hover", None, "Library: three named folders, the third hovered, light",
                 dict(theme="light", part=(0, 0, 1, 0.56), lh=16, gap=6))],
               [("dialog", "preferences-lastfm-account", None, "Last.fm, connected (stand-in), dark",
                 dict(theme="dark", part=(0, 0, 1, 0.4), lh=16, gap=6))],
-              [("dialog", "preferences-general", None, "General, dark", dict(theme="dark", part=(0, 0, 1, 0.41), lh=16, gap=6))]]),
+              [("dialog", "preferences-lastfm", None, "Last.fm in a build without it, dark",
+                dict(theme="dark", part=(0, 0, 1, 0.32), lh=16, gap=6))]]),
             # (the longest page whole; beside it the flat controls' states, which no other sheet has room for)
             ("dlg-configure-visualization", "Configure's Visualization page at 1:1; the small flat controls in other "
              "dialogs, each state; dark", "dark",
@@ -368,21 +369,20 @@ SCOPES = {
                                  ("recent-errors-link-pressed", "Pressed"))]
                + [("dialog", "recent-errors-link-focus", "popup", "Tab: the next link focused",
                    dict(part=(0, 0.66, 0.6, 0.2), lh=16, gap=6))]]]),
-            ("dlg-confirmations", "Confirmations as they open, 1:1, over their parents; the folder list's "
-             "menu in Configure (Menu key)", "dark",
-             [[("dialog", "confirm-clear-diagnostics", "inner", f"Delete diagnostics log, {th}", dict(theme=th, margin=16, lh=16, gap=6))
-               for th in ("dark", "light")],
-              [("dialog", "confirm-replace-cover", "inner", "Replace album art, dark", dict(margin=16, lh=16, gap=6)),
+            ("dlg-confirmations", "Confirmations as they open, 1:1, over their parents; the folder list's menu in "
+             "Configure (Menu key); Recent Issues whole", "dark",
+             [[("dialog", "confirm-clear-diagnostics", "inner", "Delete diagnostics log, dark", dict(margin=16, lh=16, gap=6)),
+               ("dialog", "confirm-replace-cover", "inner", "Replace album art, dark", dict(margin=16, lh=16, gap=6))],
+              [("dialog", "tag-editor-close-confirm", "inner", "Unsaved tag changes, dark", dict(margin=16, lh=16, gap=6)),
                ("dialog", "preferences-library-root-menu", (0.39, 0.09, 0.547, 0.295), "Configure: a folder's menu (Menu key), dark",
                 dict(lh=16, gap=6))],
-              [("dialog", "tag-editor-close-confirm", "inner", f"Unsaved tag changes, {th}", dict(theme=th, margin=16, lh=16, gap=6))
-               for th in ("dark", "light")],
               [("dialog", "quit-save-failed", None, "Couldn't save before quitting, dark", dict(lh=16, gap=6)),
                ("dialog", "confirm-remove-library-root", "inner", "Remove Library Folder, light",
-                dict(theme="light", margin=16, lh=16, gap=6))]]),
-            ("dlg-tag-editor", "Edit Tags, 1:1: from a 1000 px main window, whole; from a 1600 px one, its top "
+                dict(theme="light", margin=16, lh=16, gap=6))],
+              [("dialog", "recent-errors", "popup", "Recent Issues, whole, dark", dict(fit=(700, 250), lh=16, gap=6))]]),
+            ("dlg-tag-editor", "Edit Tags, 1:1: a twelve-file edit from a 1000 px main window; from a 1600 px one, its top "
              "left: an edit typed with real keys, then committed with Tab", "dark",
-             [[("dialog", "tag-editor", None, "At rest, from a 1000 px main window, dark",
+             [[("dialog", "tag-editor-batch", None, "Twelve files edited, not yet saved, from a 1000 px main window, dark",
                 dict(variant="1000x720", lh=16, gap=6))],
               [("dialog", "tag-editor-editing", None, "\u201c (Live)\u201d typed in the Title field", dict(part=(0, 0, 0.7, 0.38), lh=16, gap=6))],
               [("dialog", "tag-editor-modified", None, "The same edit committed with Tab", dict(part=(0, 0, 0.7, 0.38), lh=16, gap=6))]]),
@@ -446,12 +446,12 @@ SCOPES = {
                 dict(B24, items=["renamePreviewRenameButton", "renamePreviewCancelButton"]))],
               [("dialog", "tag-editor-rename-preview", "inner", "24 pt: the top-left 1230 x 205 px",
                 dict(B24, margin=4, box=(0, 0, 1230, 205)))]]),
-            ("dlg24-details", "At 24 pt, dark: Tag Editor Details after a failed save (fitted); an iTunes result "
-             "loading its artwork (1:1)", "dark",
-             [[("dialog", "tag-editor-status-details", "inner", "Tag Editor Details", dict(B24, margin=4, fit=(1520, 540)))],
-              [("dialog", "itunes-results-loading", None, "Replace from iTunes: the first result, its full-size image loading",
-                dict(B24, items=["itunesArtworkResultTitle", "itunesArtworkResultDetails", "itunesArtworkPreviewButton",
-                                 "itunesArtworkApplyButton"], first=True, margin=4, grow=(130, 0, 0, 0)))]]),
+            ("dlg-tag-editor-whole", "Edit Tags whole, dark, fitted: twelve files edited at 24 pt; 10 pt after a save "
+             "that failed for one file", "dark",
+             [[("dialog", "tag-editor-batch", None, "24 pt: twelve files edited, not yet saved",
+                dict(B24, fit=(1060, 556)))],
+              [("dialog", "tag-editor-save-failed", None, "10 pt: after a failed save",
+                dict(fit=(1060, 340), lh=16, gap=6))]]),
             ("dlg24-tag-tools", "At 24 pt, dark, 1:1: Auto Number; Configure Keyboard Shortcuts' editor", "dark",
              [[("dialog", "tag-editor-auto-number", "inner", "Auto Number", dict(B24, margin=4))],
               [("dialog", "keyboard-shortcuts", None, "Configure Keyboard Shortcuts: its lower left",
@@ -467,14 +467,14 @@ SCOPES = {
                                                "tagEditorOf_discNo"], grow=(0, 0, 150, 0)))]]),
         ],
         images=[
-            ("sheet", "dlg-configure-a", "light", "Configure 1:1: Library with three named folders (light); Last.fm; General",
+            ("sheet", "dlg-configure-a", "light", "Configure 1:1: Library with three named folders (light); Last.fm connected and unavailable",
              "the folder list's columns; the pages as drawn"),
             ("sheet", "dlg-configure-visualization", "dark", "Configure's Visualization page; revert glyphs and Recent "
              "Issues' links in each state, incl. Tab focus", "the groups, each help line under its control; the flat "
              "controls' states"),
-            ("sheet", "dlg-confirmations", "dark", "Confirmations, the quit failure, Remove Folder; Configure's folder menu",
+            ("sheet", "dlg-confirmations", "dark", "Confirmations, the quit failure, Remove Folder; Configure's folder menu; Recent Issues whole",
              "which button is the default and has focus; the wording"),
-            ("sheet", "dlg-tag-editor", "dark", "Edit Tags from a 1000 px main window; from 1600 px, one typed edit, committed",
+            ("sheet", "dlg-tag-editor", "dark", "Edit Tags: twelve files edited from a 1000 px main window; from 1600 px, one typed edit, committed",
              "what still identifies a row at 1000 px; the fields, the table, the mark"),
             ("sheet", "dlg-itunes-controls", "dark", "iTunes searching -> failed frames, Preview in them; results; "
              "Preview/Apply in each state", "the failed state as it arrives, what moves (Preview at the top right); the "
@@ -490,8 +490,8 @@ SCOPES = {
              "each window's size against what it holds; what leads in it"),
             ("sheet", "dlg24-rename", "dark", "Rename Files, twelve files: 10 pt whole; 24 pt in part, 1:1",
              "the preview's columns and arrows; the rows at 24 pt"),
-            ("sheet", "dlg24-details", "dark", "24 pt: Tag Editor Details; an iTunes result loading its artwork",
-             "the details' width and wrap; the loading line uncut"),
+            ("sheet", "dlg-tag-editor-whole", "dark", "Edit Tags whole: a twelve-file edit at 24 pt; after a failed save",
+             "whether the new values can be checked before Save; the failed row, the status and Details"),
             ("sheet", "dlg24-tag-tools", "dark", "24 pt: Auto Number; the shortcuts editor", "the check boxes' edge; the forms"),
             ("sheet", "dlg24-light", "light", "24 pt: Recent Issues dark and light; Edit Tags' Track and Disc placeholders",
              "the popup's width, the glyph; the placeholders uncut"),
@@ -507,7 +507,7 @@ SCOPES = {
                        "JPEG). If the track's folder shows an image as its cover, the art goes to a folder image: an image "
                        "with a recognised cover name (such as cover.jpg) is overwritten in its own format, otherwise a new "
                        "cover.<ext> is written and the folder's other images stay; no track file changes. If the folder has "
-                       "no cover image, the art is embedded as the front cover of every track in the folder with the "
+                       "no JPEG or PNG image, the art is embedded as the front cover of every track in the folder with the "
                        "track's album tag (their other embedded pictures kept), and nothing is written unless every one of "
                        "those tracks can take it")],
         notes=["Paths: the app runs in a private mount namespace where the capture's work folder is at /mnt/ferrous "
@@ -521,6 +521,8 @@ SCOPES = {
                "Details shows a real save with one folder not writable; Finishing Tag Changes is given two loaded files' "
                "names (a save here takes milliseconds) and its second stage. Searching and the stand-in results are "
                "injected (no network).",
+               "Keyboard focus and hover can be in two places: after the Tab in the typed edit (F04) focus is on "
+               "Artist while the pointer still rests over Title.",
                "Recordings are the app's own frames: KWin's window animations (a dialog window opening and closing) are not "
                "in them; a new window's first frame is drawn whole."],
         facts_strips=[("dialog-open-close", "dark", "A dialog (About) opening and closing"),
