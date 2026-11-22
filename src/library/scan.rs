@@ -17,6 +17,7 @@ use lofty::prelude::{Accessor, ItemKey};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use walkdir::WalkDir;
 
+use crate::edit_failure::{EditFailure, EditStep};
 use crate::file_edit_lock;
 use crate::file_identity::FileId;
 use crate::folder_cover::{CoverStamp, FolderImages};
@@ -1711,7 +1712,7 @@ impl DiskRenameJournal {
         temp_path: &Path,
         new_path: &Path,
         old_path: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<(), EditFailure> {
         #[cfg(test)]
         self.run_before_move(temp_path, new_path);
         if let Err(e) = finalize_staged_rename(temp_path, new_path, old_path) {
@@ -1734,7 +1735,7 @@ impl DiskRenameJournal {
         file: usize,
         old_path: &Path,
         new_path: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<(), EditFailure> {
         let temp_path = build_temp_rename_path(old_path);
         self.rename(file, old_path, &temp_path)
             .map_err(|e| rename_failure("stage rename", old_path, &temp_path, &e))?;
@@ -1831,18 +1832,20 @@ fn path_entry_exists(path: &Path) -> bool {
 
 /// Describes a failed rename of `from` to `to`, as `action` (such as
 /// "rename"), with a refusal when `to` was taken.
-fn rename_failure(action: &str, from: &Path, to: &Path, error: &std::io::Error) -> String {
-    if error.kind() == std::io::ErrorKind::AlreadyExists {
-        return format!(
+fn rename_failure(action: &str, from: &Path, to: &Path, error: &std::io::Error) -> EditFailure {
+    let message = if error.kind() == std::io::ErrorKind::AlreadyExists {
+        format!(
             "refusing to overwrite existing file {}",
             to.to_string_lossy()
-        );
-    }
-    format!(
-        "failed to {action} {} to {}: {error}",
-        from.to_string_lossy(),
-        to.to_string_lossy()
-    )
+        )
+    } else {
+        format!(
+            "failed to {action} {} to {}: {error}",
+            from.to_string_lossy(),
+            to.to_string_lossy()
+        )
+    };
+    EditFailure::io(EditStep::Rename, error, message)
 }
 
 /// Starts the names that renames stage files under.
@@ -1891,7 +1894,7 @@ fn finalize_staged_rename(
     temp_path: &Path,
     new_path: &Path,
     old_path: &Path,
-) -> Result<(), String> {
+) -> Result<(), EditFailure> {
     const RENAME_ATTEMPTS: usize = 8;
     const VISIBILITY_ATTEMPTS: usize = 8;
     for attempt in 0..RENAME_ATTEMPTS {
@@ -1927,7 +1930,8 @@ fn finalize_staged_rename(
         "rename from {} to {} did not finalize on disk",
         old_path.to_string_lossy(),
         new_path.to_string_lossy()
-    ))
+    )
+    .into())
 }
 
 fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
@@ -1978,7 +1982,7 @@ fn is_case_only_rename(current: &Path, target: &Path) -> bool {
 /// new paths and which reports the files that cannot be read to the user.
 pub(crate) fn rename_indexed_metadata_paths(
     renames: &[(PathBuf, PathBuf)],
-) -> Result<TrackRefresh, String> {
+) -> Result<TrackRefresh, EditFailure> {
     let mut conn = open_library_db().map_err(|e| format!("failed to open library db: {e}"))?;
     init_schema(&conn).map_err(|e| format!("failed to initialize library db schema: {e}"))?;
     rename_indexed_metadata_paths_in_conn(&mut conn, renames)
@@ -1987,7 +1991,7 @@ pub(crate) fn rename_indexed_metadata_paths(
 fn rename_indexed_metadata_paths_in_conn(
     conn: &mut Connection,
     renames: &[(PathBuf, PathBuf)],
-) -> Result<TrackRefresh, String> {
+) -> Result<TrackRefresh, EditFailure> {
     rename_with_journal(
         conn,
         renames,
@@ -2001,7 +2005,7 @@ fn rename_with_journal(
     renames: &[(PathBuf, PathBuf)],
     mut journal: DiskRenameJournal,
     covers: Option<&EmbeddedCoverCache>,
-) -> Result<TrackRefresh, String> {
+) -> Result<TrackRefresh, EditFailure> {
     // Take the write lock before any file moves. A deferred transaction that
     // reads first cannot wait for the lock when it then writes: SQLite fails
     // it at once with "database is locked" if another writer holds the lock.
@@ -2009,19 +2013,19 @@ fn rename_with_journal(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("failed to start rename transaction: {e}"))?;
     let updated = apply_disk_renames(renames, &mut journal)
-        .and_then(|()| update_renamed_track_rows(&tx, renames, covers));
+        .and_then(|()| Ok(update_renamed_track_rows(&tx, renames, covers)?));
     let committed = match updated {
         Ok(refreshed) => tx
             .commit()
             .map(|()| refreshed)
-            .map_err(|e| format!("failed to finalize rename transaction: {e}")),
+            .map_err(|e| format!("failed to finalize rename transaction: {e}").into()),
         Err(error) => {
             drop(tx);
             Err(error)
         }
     };
     // A failed transaction has rolled back by now; put the files back to match its rows.
-    committed.map_err(|error| journal.restore(error))
+    committed.map_err(|error: EditFailure| error.map_message(|message| journal.restore(message)))
 }
 
 /// Renames the files on disk, recording each rename in `journal`. Renames
@@ -2029,7 +2033,7 @@ fn rename_with_journal(
 fn apply_disk_renames(
     renames: &[(PathBuf, PathBuf)],
     journal: &mut DiskRenameJournal,
-) -> Result<(), String> {
+) -> Result<(), EditFailure> {
     let source_paths = renames
         .iter()
         .map(|(old_path, _)| old_path.clone())
@@ -2049,7 +2053,8 @@ fn apply_disk_renames(
                 return Err(format!(
                     "multiple files resolve to the same rename target {}",
                     new_path.to_string_lossy()
-                ));
+                )
+                .into());
             }
             if !old_path.exists() && path_entry_exists(new_path) {
                 continue;
@@ -2058,7 +2063,8 @@ fn apply_disk_renames(
                 return Err(format!(
                     "refusing to overwrite existing file {}",
                     new_path.to_string_lossy()
-                ));
+                )
+                .into());
             }
             let temp_path = build_temp_rename_path(old_path);
             journal
@@ -2073,7 +2079,8 @@ fn apply_disk_renames(
                 return Err(format!(
                     "refusing to overwrite existing file {}",
                     new_path.to_string_lossy()
-                ));
+                )
+                .into());
             }
             journal.finalize(index, &temp_path, new_path, old_path)?;
         }
@@ -2086,7 +2093,8 @@ fn apply_disk_renames(
                 return Err(format!(
                     "multiple files resolve to the same rename target {}",
                     new_path.to_string_lossy()
-                ));
+                )
+                .into());
             }
             if !old_path.exists() && path_entry_exists(new_path) {
                 continue;
@@ -2103,7 +2111,8 @@ fn apply_disk_renames(
                 return Err(format!(
                     "refusing to overwrite existing file {}",
                     new_path.to_string_lossy()
-                ));
+                )
+                .into());
             }
         }
     }
@@ -8118,7 +8127,8 @@ mod tests {
             &mut conn,
             &[(one.clone(), two.clone()), (two.clone(), one.clone())],
         )
-        .expect_err("injected failure");
+        .expect_err("injected failure")
+        .to_string();
 
         assert!(error.contains("injected failure"), "{error}");
         assert!(
@@ -8151,7 +8161,8 @@ mod tests {
                 (paths[2].clone(), taken.clone()),
             ],
         )
-        .expect_err("taken target");
+        .expect_err("taken target")
+        .to_string();
 
         assert!(
             error.starts_with("refusing to overwrite existing file"),
@@ -8265,7 +8276,8 @@ mod tests {
             ],
         ] {
             let error = rename_indexed_metadata_paths_in_conn(&mut conn, &renames)
-                .expect_err("case collision");
+                .expect_err("case collision")
+                .to_string();
 
             assert!(
                 error.starts_with(&format!(
@@ -8410,7 +8422,8 @@ mod tests {
 
         let error =
             rename_indexed_metadata_paths_in_conn(&mut conn, &[(paths[0].clone(), alias.clone())])
-                .expect_err("alias");
+                .expect_err("alias")
+                .to_string();
 
         assert!(
             error.starts_with(&format!(
@@ -8465,7 +8478,8 @@ mod tests {
 
                 let error =
                     rename_with_journal(&mut conn, &renames, journal, EmbeddedCoverCache::shared())
-                        .expect_err("target taken");
+                        .expect_err("target taken")
+                        .to_string();
 
                 assert!(
                     error.starts_with(&format!(
@@ -8521,7 +8535,8 @@ mod tests {
 
             let error =
                 rename_with_journal(&mut conn, &renames, journal, EmbeddedCoverCache::shared())
-                    .expect_err("injected failure");
+                    .expect_err("injected failure")
+                    .to_string();
 
             assert_eq!(
                 error,

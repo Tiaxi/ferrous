@@ -20,6 +20,7 @@ use lofty::picture::PictureInformation;
 use lofty::prelude::{SplitTag, TagExt};
 use lofty::tag::{ItemKey, Tag, TagItem, TagType};
 
+use crate::edit_failure::{EditFailure, EditStep};
 use crate::safe_save::rewrite_via_temp_copy;
 use crate::vorbis_comment_scan::skipped_comments;
 
@@ -46,8 +47,8 @@ use crate::vorbis_comment_scan::skipped_comments;
 /// Returns a message when the file cannot be read, the tag cannot be
 /// written without losing what it holds, or the file cannot be replaced.
 /// The file is unchanged then.
-pub(crate) fn save_tag(path: &Path, file_type: FileType, tag: &Tag) -> Result<(), String> {
-    let describe = |err: LoftyError| format!("failed to save tags for {}: {err}", path.display());
+pub(crate) fn save_tag(path: &Path, file_type: FileType, tag: &Tag) -> Result<(), EditFailure> {
+    let describe = |err: &LoftyError| format!("failed to save tags for {}: {err}", path.display());
     let mut tag = tag.clone();
     let write_options = if writes_id3v23(path, file_type, tag.tag_type())? {
         describe_pictures(&mut tag);
@@ -56,7 +57,7 @@ pub(crate) fn save_tag(path: &Path, file_type: FileType, tag: &Tag) -> Result<()
         WriteOptions::new()
     };
     // Edit before the file is touched, so a refused edit leaves it unchanged.
-    let native = read_native_tag(path, file_type, tag.tag_type()).map_err(describe)?;
+    let native = read_native_tag(path, file_type, tag.tag_type()).map_err(|err| describe(&err))?;
     // Checked for FLAC files without comments too: writing the new comments
     // replaces their picture blocks.
     if tag.tag_type() == TagType::VorbisComments {
@@ -65,7 +66,7 @@ pub(crate) fn save_tag(path: &Path, file_type: FileType, tag: &Tag) -> Result<()
             .map_err(refuse)?
             .save_refusal()
         {
-            return Err(refuse(refusal));
+            return Err(refuse(refusal).into());
         }
     }
     let edited = match native {
@@ -86,7 +87,7 @@ pub(crate) fn save_tag(path: &Path, file_type: FileType, tag: &Tag) -> Result<()
             Some(NativeTag::Ilst(edited)) => edited.save_to(file, write_options),
             None => tag.save_to(file, write_options),
         }
-        .map_err(describe)
+        .map_err(|err| EditFailure::lofty(EditStep::Write, &err, describe(&err)))
     })
 }
 
@@ -968,7 +969,7 @@ mod tests {
         let tagged = lofty::read_from_path(path).expect("read tags");
         let mut tag = tagged.primary_tag().cloned().expect("primary tag");
         tag.set_title(title.to_string());
-        save_tag(path, tagged.file_type(), &tag)
+        save_tag(path, tagged.file_type(), &tag).map_err(String::from)
     }
 
     #[test]
@@ -999,7 +1000,9 @@ mod tests {
             let tagged = lofty::read_from_path(&path).expect("read tags");
             let mut tag = tagged.primary_tag().cloned().expect("primary tag");
             tag.push_picture(picture(b"new"));
-            let error = save_tag(&path, tagged.file_type(), &tag).expect_err("cover save");
+            let error = save_tag(&path, tagged.file_type(), &tag)
+                .expect_err("cover save")
+                .to_string();
             assert!(error.contains("can't be read safely"), "{error}");
             assert_eq!(std::fs::read(&path).expect("read file"), before);
         }
@@ -1053,7 +1056,7 @@ mod tests {
             .cloned()
             .unwrap_or_else(|| Tag::new(tagged.primary_tag_type()));
         tag.set_title(title.to_string());
-        save_tag(path, tagged.file_type(), &tag)
+        save_tag(path, tagged.file_type(), &tag).map_err(String::from)
     }
 
     #[test]
@@ -1145,7 +1148,9 @@ mod tests {
         };
         let before = std::fs::read(&path).expect("read file");
 
-        let error = save_tag(&path, FileType::Flac, &tag).expect_err("truncated save");
+        let error = save_tag(&path, FileType::Flac, &tag)
+            .expect_err("truncated save")
+            .to_string();
 
         assert!(error.contains(&path.display().to_string()), "{error}");
         assert_eq!(std::fs::read(&path).expect("read file"), before);
@@ -1163,7 +1168,8 @@ mod tests {
         let before = std::fs::read(&path).expect("read file");
 
         let error = save_tag(&path, FileType::Flac, &Tag::new(TagType::VorbisComments))
-            .expect_err("malformed save");
+            .expect_err("malformed save")
+            .to_string();
 
         assert!(error.starts_with("failed to save tags for "), "{error}");
         assert_eq!(std::fs::read(&path).expect("read file"), before);
