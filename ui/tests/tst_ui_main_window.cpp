@@ -41,6 +41,7 @@
 #include <tuple>
 #include <initializer_list>
 
+#include "../src/DiagnosticsLogView.h"
 #include "../src/InputModality.h"
 #include "../src/LevelMeterItem.h"
 #include "../src/LibraryTreeModel.h"
@@ -1132,6 +1133,7 @@ void UiMainWindowTest::initTestCase() {
     qmlRegisterType<SpectrogramViewFollow>("FerrousUi", 1, 0, "SpectrogramViewFollow");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
+    qmlRegisterType<DiagnosticsLogView>("FerrousUi", 1, 0, "DiagnosticsLogView");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
     InputModality::registerQmlTypes();

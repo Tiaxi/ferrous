@@ -115,6 +115,9 @@ qt_add_library(ferrous_ui_core STATIC
     src/QueueRows.cpp
     src/CoverImageProvider.cpp
     src/DiagnosticsLog.cpp
+    src/DiagnosticsLogAccessible.cpp
+    src/DiagnosticsLogLayout.cpp
+    src/DiagnosticsLogView.cpp
     src/Localization.cpp
     src/DisplaySleepInhibitor.cpp
     src/GlobalSearchResultsModel.cpp
@@ -851,6 +854,18 @@ if(BUILD_TESTING)
     # Run alone, the binary takes about a minute.
     ferrous_add_sharded_test(ferrous_ui_main_window_tests 2 35)
     ferrous_add_default_platform_test(ferrous_ui_main_window_tests drawsOffscreenUnlessAPlatformIsChosen)
+
+    # Diagnostics' log view (#724): its cost, its selection and its copy.
+    ferrous_add_app_test(ferrous_diagnostics_log_view_tests
+        tests/tst_diagnostics_log_view.cpp
+    )
+    target_link_libraries(ferrous_diagnostics_log_view_tests PRIVATE ferrous_app_icon)
+    add_test(NAME ferrous_diagnostics_log_view_tests COMMAND ferrous_diagnostics_log_view_tests)
+    set_tests_properties(ferrous_diagnostics_log_view_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 120
+    )
+    ferrous_add_default_platform_test(ferrous_diagnostics_log_view_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The dialogs of #373, from the QML sources.
     ferrous_add_app_test(ferrous_ui_dialogs_tests

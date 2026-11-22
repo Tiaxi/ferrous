@@ -45,6 +45,7 @@
 #include <tuple>
 
 #include "../src/AboutComponents.h"
+#include "../src/DiagnosticsLogView.h"
 #include "../src/InputModality.h"
 #include "../src/LevelMeterItem.h"
 #include "../src/LibraryTreeModel.h"
@@ -664,6 +665,7 @@ void UiDialogsTest::initTestCase() {
     qmlRegisterType<SpectrogramViewFollow>("FerrousUi", 1, 0, "SpectrogramViewFollow");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
+    qmlRegisterType<DiagnosticsLogView>("FerrousUi", 1, 0, "DiagnosticsLogView");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
     InputModality::registerQmlTypes();
@@ -3826,8 +3828,8 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
     QVERIFY(waitForDialogWindow(diagnosticsDialog));
     QQuickWindow *diagnosticsWindow = windowOf(diagnosticsDialog);
     // "Loading the log…" reads at AA, like every placeholder.
-    QCOMPARE(hex(named(diagnosticsWindow, QStringLiteral("diagnosticsTextArea"))
-                     ->property("placeholderTextColor")
+    QCOMPARE(hex(named(diagnosticsWindow, QStringLiteral("diagnosticsLogPlaceholder"))
+                     ->property("color")
                      .value<QColor>()),
              hex(tokenOf(window, "placeholderText")));
 
@@ -3868,7 +3870,8 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
         lines << QStringLiteral("[library] warning: could not read /fixture/library/Artist/Album/%1 - A track "
                                 "with a title long enough to run past the log's right edge.flac: %2")
                      .arg(index)
-                     .arg(QString(160, QLatin1Char('x')));
+                     // Past the edge of the window's widest, at 24 pt, too.
+                     .arg(QString(260, QLatin1Char('x')));
     }
     QVERIFY(bridge->setProperty("diagnosticsText", lines.join(QLatin1Char('\n'))));
     QVERIFY(bridge->setProperty("diagnosticsLogPath", QStringLiteral("/fixture/state/diagnostics.log")));
@@ -3937,7 +3940,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
     // The log's text stands 8 px clear of the frame's sides and 6 px of
     // its top and bottom, inside its 1 px edge (at 5 px it sat nearly on
     // the frame).
-    QQuickItem *textArea = visibleNamed(diagnostics, QStringLiteral("diagnosticsTextArea"));
+    QQuickItem *textArea = visibleNamed(diagnostics, QStringLiteral("diagnosticsLogView"));
     QVERIFY(textArea != nullptr);
     QCOMPARE(textArea->property("leftPadding").toReal(), 8.0);
     QCOMPARE(textArea->property("rightPadding").toReal(), 8.0);
