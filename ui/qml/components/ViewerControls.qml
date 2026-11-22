@@ -37,6 +37,11 @@ Item {
     // the controls' 4 px either side: the visualization viewer's mode switch
     // in its title strip, a choice of two, beside the button that closes it.
     property bool closeDivided: false
+    // Close, unless the viewer has none here, as with its strip turned off.
+    property bool closeShown: true
+    // What a plate under the controls has around them: the readout's text
+    // and the dividers are 6 px in from a plate's edge, as on the plot's.
+    property real platePadding: 2
 
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
@@ -47,7 +52,8 @@ Item {
     readonly property bool issuesShown: root.unseenIssueCount > 0
     readonly property bool viewerControlsShown: viewerControlsRow.implicitWidth > 0
 
-    implicitWidth: closeButton.x + closeButton.width
+    implicitWidth: root.closeShown ? closeButton.x + closeButton.width
+                                   : viewerControlsRow.x + viewerControlsRow.implicitWidth
     implicitHeight: root.uiPalette.toolButtonSize
 
     // Quiet: only while the view is zoomed. On the album art viewer's
@@ -56,7 +62,7 @@ Item {
         id: readout
         objectName: "viewerZoomReadout"
         x: 0
-        leftPadding: 4
+        leftPadding: 6 - root.platePadding
         visible: root.readoutShown
         uiPalette: root.uiPalette
         plotColors: root.plotColors
@@ -83,6 +89,7 @@ Item {
     readonly property real _zoomEnd: root.resetShown ? resetButton.x + resetButton.width
                                                      : readout.x + readout.width
     readonly property bool _zoomDivided: root.dividers && root.readoutShown
+    readonly property real _dividerInset: 6 - root.platePadding
     readonly property real _afterZoom: !root.readoutShown ? 0
         : root._zoomEnd + root.spacing + (root._zoomDivided ? 1 + root.spacing : 0)
 
@@ -90,9 +97,9 @@ Item {
         objectName: "viewerControlsDivider"
         visible: root._zoomDivided
         x: root._zoomEnd + root.spacing
-        y: 4
+        y: root._dividerInset
         width: 1
-        height: Math.max(0, root.height - 8)
+        height: Math.max(0, root.height - 2 * root._dividerInset)
         color: root.plotColors ? root.plotColors.plotPlateEdge : root.uiPalette.seam
     }
 
@@ -128,21 +135,22 @@ Item {
         height: implicitHeight
     }
 
-    readonly property bool _closeDivided: root.closeDivided && root.viewerControlsShown
+    readonly property bool _closeDivided: root.closeShown && root.closeDivided && root.viewerControlsShown
 
     Rectangle {
         objectName: "viewerControlsCloseDivider"
         visible: root._closeDivided
         x: viewerControlsRow.x + viewerControlsRow.implicitWidth + root.spacing
-        y: 4
+        y: root._dividerInset
         width: 1
-        height: Math.max(0, root.height - 8)
+        height: Math.max(0, root.height - 2 * root._dividerInset)
         color: root.plotColors ? root.plotColors.plotPlateEdge : root.uiPalette.seam
     }
 
     Components.ViewerToolButton {
         id: closeButton
         objectName: root.closeButtonName
+        visible: root.closeShown
         x: viewerControlsRow.x + (root.viewerControlsShown ? viewerControlsRow.implicitWidth + root.spacing : 0)
             + (root._closeDivided ? 1 + root.spacing : 0)
         uiPalette: root.uiPalette

@@ -22,8 +22,8 @@ import "../logic/FormatUtils.js" as FormatUtils
 // Reset's glyph while the view is zoomed, the new issues while there are any, the
 // viewer's own buttons (declared inside the strip, from the left, each taking
 // the strip's `plotColors`) and Close: the album art's info toggle, or the
-// visualization's mode switch, which with its zoom moves here from the
-// plot's corner while the strip is on, so the strip is the viewer's one
+// visualization's mode switch, which with its zoom is here rather
+// than in the plot's corner while the strip is on, so the strip is the viewer's one
 // place for its controls (a plate of them under the strip's Close read as
 // a second cluster). The whole strip shows and hides with the viewer's
 // controls, fading as they do; it is drawn over the view, which never
