@@ -2219,6 +2219,7 @@ ApplicationWindow {
         positionText: playbackController.positionText
         infoVisible: viewerController.albumArtInfoVisible
         infoReveal: albumArtSurface.infoReveal
+        artCursorShape: albumArtSurface.pointerCursorShape
         infoWidth: albumArtSurface.infoWidth
         zoomLevel: albumArtSurface.zoom
         resetView: albumArtSurface.resetView

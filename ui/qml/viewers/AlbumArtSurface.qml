@@ -100,6 +100,13 @@ Item {
     property bool previewCanApply: false
     property var applyPreview: null
     readonly property alias imageStatus: albumArtImageFull.status
+    // The art's pointer, which the area over it shows too: zoomed, an open
+    // hand over the art, and a closed one while it is held to pan; the
+    // arrow over the details and over the fitted art.
+    readonly property int pointerCursorShape: root.zoom <= 1.0 ? Qt.ArrowCursor
+        : (albumArtPanArea.pressedButtons & Qt.LeftButton) ? Qt.ClosedHandCursor
+        : albumArtPanArea.containsMouse ? Qt.OpenHandCursor
+        : Qt.ArrowCursor
     readonly property bool zoomed: root.zoom > 1.0
     // How far the details are shown: 0 hidden, 1 shown. Showing or hiding
     // them glides it over 180 ms, InOutQuad (unless eased, the art jumped
@@ -460,7 +467,7 @@ Item {
             preventStealing: true
             property real lastX: 0
             property real lastY: 0
-            cursorShape: root.zoom > 1.0 ? Qt.OpenHandCursor : Qt.ArrowCursor
+            cursorShape: root.pointerCursorShape
 
             onPressed: function(mouse) {
                 if (mouse.button === Qt.RightButton) {
@@ -473,11 +480,6 @@ Item {
                 }
                 lastX = mouse.x
                 lastY = mouse.y
-                cursorShape = Qt.ClosedHandCursor
-            }
-
-            onReleased: {
-                cursorShape = root.zoom > 1.0 ? Qt.OpenHandCursor : Qt.ArrowCursor
             }
 
             onPositionChanged: function(mouse) {

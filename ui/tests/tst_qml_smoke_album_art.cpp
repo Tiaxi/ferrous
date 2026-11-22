@@ -57,6 +57,8 @@ private slots:
     void albumArtViewerShowsWhenItsImageCannotBeRead();
     void albumArtDetailsAreOnThePlotStripInEitherTheme_data();
     void albumArtDetailsAreOnThePlotStripInEitherTheme();
+    void albumArtPanShowsItsHand_data();
+    void albumArtPanShowsItsHand();
     void albumArtCopyPathIsOnTheFoldersLineUnderClose_data();
     void albumArtCopyPathIsOnTheFoldersLineUnderClose();
 };
@@ -4583,6 +4585,57 @@ void AlbumArtSmokeTest::albumArtCopyPathIsOnTheFoldersLineUnderClose() {
     QTRY_COMPARE(boxOf(path).width(), boxOf(row).width());
     QVERIFY2(boxOf(path).top() >= boxOf(copy).bottom() - 0.01, qPrintable(describe()));
     QVERIFY(!path->property("elided").toBool());
+    QVERIFY(ui.closeViewer(host));
+}
+
+void AlbumArtSmokeTest::albumArtPanShowsItsHand_data() {
+    QTest::addColumn<int>("viewerMode");
+    QTest::newRow("window") << 0;
+    QTest::newRow("whole screen") << 1;
+}
+
+// Zoomed art shows the open hand, a closed one while it is dragged, and
+// the open one again: the area over it that takes a press for the focus
+// passes the art's pointer on (its own arrow covered both hands). The
+// details and the fitted art show the arrow.
+void AlbumArtSmokeTest::albumArtPanShowsItsHand() {
+    QFETCH(int, viewerMode);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    AlbumArtWindow ui;
+    QVERIFY(ui.loaded());
+    QQuickWindow *host = ui.openViewer(QUrl::fromLocalFile(coverPath).toString(), viewerMode);
+    QVERIFY(host != nullptr);
+    const QPoint from(host->width() / 3, host->height() / 2);
+    QTest::mouseMove(host, from + QPoint(1, 1));
+    QTest::mouseMove(host, from);
+    QTRY_COMPARE(host->cursor().shape(), Qt::ArrowCursor);
+
+    ui.surface->setProperty("zoom", 4.0);
+    QTest::mouseMove(host, from + QPoint(2, 2));
+    QTRY_COMPARE(host->cursor().shape(), Qt::OpenHandCursor);
+    QTest::mousePress(host, Qt::LeftButton, Qt::NoModifier, from);
+    QTest::mouseMove(host, from - QPoint(40, 0));
+    QTRY_COMPARE(host->cursor().shape(), Qt::ClosedHandCursor);
+    QTest::mouseRelease(host, Qt::LeftButton, Qt::NoModifier, from - QPoint(40, 0));
+    QTRY_COMPARE(host->cursor().shape(), Qt::OpenHandCursor);
+
+    // The details over the art keep the arrow.
+    ui.viewer->setProperty("albumArtInfoVisible", true);
+    QTRY_COMPARE(ui.surface->property("infoReveal").toReal(), 1.0);
+    QQuickItem *column = itemNamed(ui.surface, QStringLiteral("albumArtInfoColumn"));
+    QVERIFY(column != nullptr);
+    const QPointF details = column->mapToScene(QPointF(column->width() / 2, column->height() - 20));
+    QTest::mouseMove(host, details.toPoint());
+    QTest::mouseMove(host, details.toPoint() + QPoint(1, 1));
+    QTRY_COMPARE(host->cursor().shape(), Qt::ArrowCursor);
+
+    // Fitted again, the arrow.
+    ui.surface->setProperty("zoom", 1.0);
+    QTest::mouseMove(host, from + QPoint(5, 5));
+    QTRY_COMPARE(host->cursor().shape(), Qt::ArrowCursor);
     QVERIFY(ui.closeViewer(host));
 }
 

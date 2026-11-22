@@ -36,6 +36,9 @@ Item {
     // The art's zoom, 1 when it fits, and what fits it again.
     property real zoomLevel: 1.0
     property var resetView: null
+    // The art's pointer, which the areas over it that take a press for the
+    // focus show, as they would show an arrow of their own.
+    property int artCursorShape: Qt.ArrowCursor
     // A preview from Replace from iTunes, whose label and buttons are in
     // the image's details (AlbumArtSurface), which show throughout it: the
     // Image Details button hides meanwhile, and Escape goes back to the
@@ -303,6 +306,7 @@ Item {
             MouseArea {
                 anchors.fill: parent
                 z: 1
+                cursorShape: root.artCursorShape
                 acceptedButtons: Qt.AllButtons
                 onPressed: function(mouse) {
                     albumArtPopupViewFocus.forceActiveFocus(Qt.MouseFocusReason)
@@ -476,6 +480,7 @@ Item {
                         MouseArea {
                             anchors.fill: parent
                             z: 1
+                            cursorShape: root.artCursorShape
                             acceptedButtons: Qt.AllButtons
                             onPressed: function(mouse) {
                                 albumArtFullscreenViewFocus.forceActiveFocus(Qt.MouseFocusReason)
