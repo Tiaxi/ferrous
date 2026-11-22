@@ -17,7 +17,6 @@ os.environ.setdefault("SHOT_OUT", os.path.join(_TMP, "round", "shots"))
 os.environ.setdefault("SHOT_APP", os.path.join(_TMP, "no-app"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import contrast  # noqa: E402
 import focus  # noqa: E402
 import focus_select  # noqa: E402
 import shotlib  # noqa: E402
@@ -90,7 +89,7 @@ class Selection(unittest.TestCase):
         scopes = [dict(dict(images=[], sheets=[], facts=[], floors=[]), **x)
                   for x in (scope if isinstance(scope, list) else [scope])]
         jobs = [("s", t) for t in themes]
-        return focus_select.prefixes(scopes, jobs, states_mod, {"row-text": "Queue title"}, suffix, source)
+        return focus_select.prefixes(scopes, jobs, states_mod, suffix, source)
 
     def cut(self, states_mod, scope, **kw):
         out, problems = self.need(states_mod, scope, **kw)
@@ -172,9 +171,11 @@ class Selection(unittest.TestCase):
         self.assertEqual(self.cut(t, dict(sheets=sheets)), 1)
         self.assertEqual(self.cut(t, dict(sheets=sheets, a11y_labels=["press"])), 2)
 
-    def test_contrast_rows_by_their_shown_names_on_lines_that_grab(self):
-        t = table(("contrast", "x", "macro measure row-text text it"), ("_", "_y", "macro measure row-text text it"))
-        self.assertEqual(self.cut(t, dict(contrast={"sheet-a": ["queue title"]})), 1)
+    def test_every_measure_on_a_line_that_grabs(self):
+        t = table(("contrast", "x", "macro measure row text it"), ("contrast", "y", "macro measure bar bar it"),
+                  ("_", "_z", "macro measure row text it"))
+        # (the scope quotes only the row, yet a failed bar measurement must still fail the run)
+        self.assertEqual(self.cut(t, dict(contrast={"sheet-a": ["row"]})), 2)
 
     def test_macros_in_a_strips_action(self):
         t = table(("motion", "move", "strip 1 0.1 - :: click x ; macro fixed"), ("_", "_i", "macro idle"))
@@ -205,18 +206,6 @@ class Selection(unittest.TestCase):
         self.assertFalse(focus_select.packs_apart([pair, one], t))  # (a pair's half's neither-frame sheet)
         self.assertTrue(focus_select.packs_apart([sheet, pair, three], t))
 
-    def test_what_a_focus_only_pack_builds(self):
-        t = table(STRIP_PAIRS=[("both", "one@dark", "two@light", "Both", ("dark",))],
-                  PERCEIVED_SHEETS=[("seen", "Seen", [("three", "dark", "Three")])], FRAMES11={"four": {}})
-        scope = dict(images=[("strip", "pair:both", "dark", "", ""), ("strip", "seen", "dark", "", ""),
-                             ("strip", "four-1to1", "dark", "", "")],
-                     sheets=[("cut", "Frames", "dark", [[dict(strip="five", item=None, times=[0])]])],
-                     facts_strips=[("six", "dark", "Six")])
-        analysed, shown = focus_select.pack_needs(scope, t)
-        # (five's frames are only cut into a sheet: it needs no analysis)
-        self.assertEqual(analysed, {"one", "two", "three", "four", "six"})
-        self.assertEqual(shown, {"pair:both", "seen", "four-1to1", "six"})
-
     def test_what_cannot_be_told_shoots_whole_sessions(self):
         t = table(("main", "a", "wait 1"))
         sheets = tile_sheet(("main", "a", None))
@@ -243,7 +232,7 @@ class Selection(unittest.TestCase):
 class RealTable(unittest.TestCase):
     def selected(self, names):
         jobs = [(s, t) for s in focus.sessions_of(names) for t in (states.SESSIONS[s].get("themes") or ("dark", "light"))]
-        out, problems = focus_select.prefixes([focus.SCOPES[nm] for nm in names], jobs, states, contrast.WHAT, suffix)
+        out, problems = focus_select.prefixes([focus.SCOPES[nm] for nm in names], jobs, states, suffix)
         self.assertEqual(problems, [], names)
         return jobs, out
 

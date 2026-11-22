@@ -229,12 +229,18 @@ def m_itunesfail(r, arg):
           f"itunesArtworkFailed true; status \u201c{st}\u201d; error text \u201c{err}\u201d ({r.s.suffix.replace('_', ' ')})")
 
 
+def session_tmp(r, leaf):
+    """A scratch folder of this session's own named `leaf` (dialogs show a path's last folder): sessions in both
+    themes and sizes run the same macro at the same time, and each writes, locks or deletes what is in it."""
+    return os.path.join(os.environ["TMPDIR"], os.path.basename(r.s.a.iso), leaf)
+
+
 def m_tagsavefail(r, arg):
     """tagsavefail: Tag Editor Details with real content: two fixture tracks copied into this run's own TMPDIR,
     one in a folder it cannot write to (the app writes atomically: a read-only file alone would still be replaced),
     opened in Edit Tags, a comment set on both, saved: one saved, one failed; the folder made writable again after."""
     import shutil
-    base = os.path.join(os.environ["TMPDIR"], "ferrous-tagsave")
+    base = session_tmp(r, "ferrous-tagsave")
     if os.path.isdir(base):
         for root_, dirs, _f in os.walk(base):
             for d_ in dirs:
@@ -291,7 +297,7 @@ def m_renamebatch(r, arg):
     both mixed, so the form shows their placeholders) (unsaved: the preview reads the table), all rows selected.
     Five keep their names, seven are renamed (long titles, one with a slash the rule turns into a space)."""
     import shutil
-    base = os.path.join(os.environ["TMPDIR"], "ferrous-renamebatch")
+    base = session_tmp(r, "ferrous-renamebatch")
     if os.path.isdir(base):
         shutil.rmtree(base)
     os.makedirs(base)
@@ -2015,7 +2021,7 @@ def m_unreadable(r, arg):
     not audio (FLAC by its name, random bytes inside), written to the run's own TMPDIR; playing it fails, and the
     playback error marks its row (warning glyph, dimmed text). Loud when the row is not marked within 15 s."""
     import random
-    d = os.path.join(os.environ["TMPDIR"], "ferrous-unreadable")
+    d = session_tmp(r, "ferrous-unreadable")
     os.makedirs(d, exist_ok=True)
     bad = os.path.join(d, "Paper Lantern.flac")
     rnd = random.Random(35)

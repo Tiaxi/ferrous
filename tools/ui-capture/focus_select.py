@@ -10,7 +10,7 @@ are looked up in all the run's sessions. What the pack reads of a scope (pack.wr
 - the shots of its sheets' tiles (tile_matches, which pack.py uses to pick them);
 - the recordings of its sheets, strips, pairs and facts_strips;
 - the facts of its key prefixes, of its lead and at-a-glance tables and of its plate tiles;
-- the floor regions, accessibility events and contrast rows it names;
+- the floor regions and accessibility events it names, and every contrast measure (CONTRAST.md stays whole);
 - with system_facts (pack.system_lead): the focus walk, every contrast row and, as each layout finding quotes its
   worst value in the round, every shot: so each line that grabs.
 
@@ -176,7 +176,7 @@ class Needs:
         self.tiles = set()  # (area, state, theme, variant, scale)
         self.recordings = set()  # (name, theme)
         self.traced = set()  # those of the images: lines must make them, or whole sessions are shot
-        self.floors, self.a11y, self.contrast = set(), set(), set()
+        self.floors, self.a11y = set(), set()
         self.every_floor = any(scope.get("floors") is None for scope in scopes)
         self.system = any(scope.get("system_facts") for scope in scopes)
         facts = {"card-"}  # (write_focus notes any card's details line without its "of M", whatever the scope)
@@ -219,7 +219,6 @@ class Needs:
             self.recordings |= {(nm, th) for nm, th, *_ in scope.get("facts_strips", [])}
             self.floors.update(scope.get("floors") or [])
             self.a11y.update(scope.get("a11y_labels") or [])
-            self.contrast.update(p for ps in (scope.get("contrast") or {}).values() for p in ps)
         self.facts = tuple(facts)
         self.recordings |= self.traced
 
@@ -231,15 +230,6 @@ def steps_of(text):
         yield verb, rest.strip()
         if verb == "strip":
             yield from steps_of(rest.partition("::")[2].replace(" ; ", " | "))
-
-
-def pack_needs(scope, states_mod):
-    """What a focus-only pack builds of a round: (the names of the recordings it analyses, those its images and
-    facts_strips read; the names of the strip images it shows or quotes, of which the pairs, perceived and frame
-    sheets are made)."""
-    analysed = {name for name, _ in Needs([scope], states_mod).traced}
-    quoted = {name for name, *_ in scope.get("facts_strips", [])}
-    return analysed | quoted, quoted | {name for kind, name, *_ in scope.get("images", []) if kind == "strip"}
 
 
 def packs_apart(scopes, states_mod):
@@ -263,10 +253,10 @@ def recorded(area, state, theme, states_mod):
     return not (area == "motion" and theme != "dark" and state not in states_mod.STRIP_BOTH_THEMES)
 
 
-def prefixes(scopes, jobs, states_mod, what, suffix_of, source=None):
+def prefixes(scopes, jobs, states_mod, suffix_of, source=None):
     """({(session, theme): lines to shoot}, problems) for the `scopes` packed together from the (session, theme)
-    `jobs`: a job without lines is not needed at all. With problems, the dict is empty: shoot whole sessions. `what` is contrast.WHAT (a measure's
-    label as CONTRAST.md names it), `suffix_of(theme, session's keywords)` the shots' file suffix."""
+    `jobs`: a job without lines is not needed at all. With problems, the dict is empty: shoot whole sessions.
+    `suffix_of(theme, session's keywords)` is the suffix of the session's shots."""
     if source is None:
         with open(os.path.splitext(states_mod.__file__)[0] + ".py", encoding="utf-8") as f:
             source = f.read()
@@ -293,9 +283,7 @@ def prefixes(scopes, jobs, states_mod, what, suffix_of, source=None):
             if name not in makers:
                 return True  # (it will fail as it does in a full capture)
             if grabs and name in ("measure", "measure_na"):
-                label = arg.split(" ", 1)[0]
-                if any(p in what.get(label, label).lower() for p in need.contrast):
-                    return True
+                return True
             for kind, *key in writers.of(makers[name]):
                 if kind == "fact" and any(may_start(key[0], p) for p in need.facts):
                     return True

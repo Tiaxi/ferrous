@@ -190,6 +190,15 @@ class Pairs(Case):
         self.assertEqual(rec["size"][0], 2 * pack.HALF_SIZE[0] + pack.PAD)
         self.assertTrue(os.path.exists(os.path.join(out, rec["file"])))
 
+    def test_a_pair_only_recordings_half_is_not_overwritten_by_its_whole_strip(self):
+        rd = os.path.join(self.d, "round")
+        rec = os.path.join(rd, "strips-raw", "move_light_1x_400x150")
+        record(rec, frames_of(), theme="light")
+        [job] = pack.strip_todo([], {rec}, os.path.join(rd, "pairtmp"))
+        _recs, half = pack.strip_job(job)
+        with Image.open(half["file"]) as him:
+            self.assertEqual(him.width, pack.HALF_SIZE[0])
+
     def test_without_a_pair_no_half_is_drawn(self):
         rec = os.path.join(self.d, "rec")
         record(rec, frames_of())

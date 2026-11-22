@@ -39,7 +39,7 @@ if len(sys.argv) > 2 and os.path.isdir(sys.argv[2]):  # the round's source: stat
     os.environ.setdefault("SHOT_SRC", sys.argv[2])
 import states as st  # noqa: E402
 from colours import unique_colours  # noqa: E402
-from focus_select import pack_needs, packs_apart, tile_matches  # noqa: E402
+from focus_select import packs_apart, tile_matches  # noqa: E402
 from framestore import FrameStore  # noqa: E402
 
 FONT = "/usr/share/fonts/google-noto/NotoSans-Regular.ttf"
@@ -1080,6 +1080,15 @@ def pair_halves(rd, pjobs):
     return found
 
 
+def strip_todo(raws, half_ds, pairtmp):
+    """strip_job's arguments: each recording of `raws`, its half too where a pair shows it, and the halves of
+    recordings with no strip of their own (e.g. another theme's: only their pair is published). A half and a whole
+    strip have the same file name, so the halves have their own folder."""
+    halves = os.path.join(pairtmp, "halves")
+    todo = [(d, out, halves if d in half_ds else None) for d, out in raws]
+    return todo + [(d, pairtmp, halves) for d in sorted(half_ds - {d for d, _ in raws})]
+
+
 def pair_job(args):
     """Two transitions of one theme side by side in one image (states.STRIP_PAIRS: e.g. both directions of the
     mode switch): each drawn as its own merged image at 777 px (strip_job's halves), next to each other under one
@@ -1655,22 +1664,19 @@ def main():
             raws.append((d, sdir))
     # --focus-only (SHOT_FOCUS_ONLY=1): only what the scope's images need (its recordings and pairs; no area,
     # pick or custom sheets): a fast iteration on one surface. A full run packs everything.
-    fo_need = fo_shown = None
+    fo_need = None
     if os.environ.get("SHOT_FOCUS_ONLY") == "1" and os.environ.get("SHOT_FOCUS"):
-        names_f = focus_scope_names()
-        fo_need, fo_shown = focus_strip_needs(names_f), focus_strips_shown(names_f)
+        fo_need = focus_strip_needs(focus_scope_names())
         raws = [r_ for r_ in raws if json.load(open(os.path.join(r_[0], "meta.json")))["name"] in fo_need]
         jobs = []
     # (most frames first: the order perceived_sheet takes a recording's metrics in, when variants share a name)
     raws.sort(key=lambda r: -len(glob.glob(os.path.join(r[0], "f*.png"))))
     pjobs = [(pn, a_, b_, th, title) for pn, a_, b_, title, themes in getattr(st, "STRIP_PAIRS", []) for th in themes
-             if fo_shown is None or f"pair:{pn}" in fo_shown]
+             if fo_need is None or (a_.partition("@")[0] in fo_need and b_.partition("@")[0] in fo_need)]
     halves_of = pair_halves(rd, pjobs)
     half_ds = {d for ds in halves_of.values() for d in ds}
     pairtmp = os.path.join(sdir, "pairtmp")
-    todo = [(d, out, pairtmp if d in half_ds else None) for d, out in raws]
-    # (a half of a recording with no strip of its own, e.g. another theme's: only its pair is published)
-    todo += [(d, pairtmp, pairtmp) for d in sorted(half_ds - {d for d, _ in raws})]
+    todo = strip_todo(raws, half_ds, pairtmp)
     # Costliest strips first (the frames' bytes), ahead of the sheets, so the pool doesn't end on one long job.
     cost = {j[0]: sum(f.stat().st_size for f in os.scandir(j[0]) if f.name.endswith(".png")) for j in todo}
     todo.sort(key=lambda j: (-cost[j[0]], j[0]))
@@ -1693,8 +1699,6 @@ def main():
     shutil.rmtree(pairtmp, ignore_errors=True)
     fjobs = [(d, sdir, getattr(st, "FRAMES11", {})[json.load(open(os.path.join(d, "meta.json")))["name"]]) for d, _ in raws
              if json.load(open(os.path.join(d, "meta.json")))["name"] in getattr(st, "FRAMES11", {})]
-    if fo_shown is not None:
-        fjobs = [fj for fj in fjobs if f"{strip_frames(fj[0])[2]['name']}-1to1" in fo_shown]
     for fj in fjobs:  # loudly: a missing item is a failed image (the core check then fails)
         try:
             strips += frames11_job(fj)
@@ -1702,8 +1706,6 @@ def main():
             print(f"pack: {ex}", file=sys.stderr)
     phase(f"frames11 ({len(fjobs)})")
     for nm, title, rows_ in getattr(st, "PERCEIVED_SHEETS", []):  # loudly: a missing recording fails the core check
-        if fo_shown is not None and nm not in fo_shown:
-            continue
         try:
             strips.append(perceived_sheet(rd, sdir, nm, title, rows_, strips))
         except LookupError as ex:
@@ -1727,7 +1729,7 @@ def main():
     phase("stack sheets")
     json.dump(sheets, open(os.path.join(sd, "sheets.json"), "w"), indent=1)
     json.dump(strips, open(os.path.join(sdir, "strips.json"), "w"), indent=1)
-    geo_s = geometry_samples(rd, strips, fo_need)
+    geo_s = geometry_samples(rd, strips)
     phase("geometry samples")
     write_motion_metrics(rd, strips, geo_s)
     phase("MOTION-METRICS.md")
@@ -1808,16 +1810,14 @@ def check_dialogs(rd, entries):
     return bad
 
 
-def geometry_samples(rd, strips, only=None):
+def geometry_samples(rd, strips):
     """states.GEOMETRY_SAMPLES: items' rects from a recording's trace at evenly spaced times after its first
     transition starts. Returns {(name, theme): (times, rows, note)}; rows are (label, cells or None when the item is
-    not in the trace). `only`: just these recordings (a focus-only pack's)."""
+    not in the trace)."""
     import numpy as np
     import motion_strip
     out = {}
     for name, (step, count, items) in getattr(st, "GEOMETRY_SAMPLES", {}).items():
-        if only is not None and name not in only:
-            continue
         for d in sorted(glob.glob(os.path.join(rd, "strips-raw", f"{name}_*"))):
             meta = json.load(open(os.path.join(d, "meta.json")))
             if meta.get("name") != name:
@@ -2505,14 +2505,16 @@ def focus_scope_names(spec=None):
 def focus_strip_needs(names):
     """The recordings the scopes' images and facts need (a pair's two halves), for a --focus-only pack."""
     import focus
-    return set().union(*(pack_needs(focus.SCOPES[n_], st)[0] for n_ in names))
-
-
-def focus_strips_shown(names):
-    """The strip images the scopes show or quote, of which a --focus-only pack makes its pairs, perceived and frame
-    sheets."""
-    import focus
-    return set().union(*(pack_needs(focus.SCOPES[n_], st)[1] for n_ in names))
+    pair_map = {f"pair:{nm}": (a_, b_) for nm, a_, b_, *_ in getattr(st, "STRIP_PAIRS", [])}
+    view_of = {f"{nm}-{sfx}": nm for nm, views in getattr(st, "EXTRA_VIEWS", {}).items() for sfx, _ in views}
+    need = set()
+    for sc_f in (focus.SCOPES[n_] for n_ in names):
+        for kind, nm, *_ in sc_f.get("images", []):
+            if kind == "strip":
+                # (another view of a recording, states.EXTRA_VIEWS, is made from that recording)
+                need |= {view_of.get(h.partition("@")[0], h.partition("@")[0]) for h in pair_map.get(nm, (nm,))}
+        need |= {nm for nm, *_ in sc_f.get("facts_strips", [])}
+    return need
 
 
 def focus_limits(scope_name, paths):

@@ -670,13 +670,12 @@ def unfinished(folder, jobs):
 def focus_jobs(spec, jobs):
     """The jobs the focus scopes `spec` names (focus.resolve) need together, each cut after the last line any of
     their packs reads; whole sessions, loudly, where that cannot be told."""
-    import contrast
     import focus
     import focus_select
     suffix = lambda tag, kw: session_suffix(tag, kw.get("scale", 1), kw.get("size", (1600, 1000)), kw.get("suffix_extra", ""))
     names = focus.resolve(spec)
     need, problems = focus_select.prefixes([focus.SCOPES[nm] for nm in names], [j[:2] for j in jobs], states,
-                                           contrast.WHAT, suffix)
+                                           suffix)
     if problems:
         print(f"!! focus {','.join(names)}: whole sessions are shot, as what they need cannot be told: "
               + "; ".join(problems[:5]), flush=True)
