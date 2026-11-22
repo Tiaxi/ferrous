@@ -2,8 +2,11 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QApplication>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
+#include <QStyle>
+#include <QStyleFactory>
 
 #include "../src/StandardKeys.h"
 
@@ -28,6 +31,8 @@ private slots:
     void shortcutsTheBridgeRefusesStayToChange();
     void captureWorksWithoutKdesGlobalShortcuts();
     void visualizationPageNamesResetZoomsKey();
+    void editorHasOneBaselineAndOneKeyButtonWidth_data();
+    void editorHasOneBaselineAndOneKeyButtonWidth();
 };
 
 namespace {
@@ -133,6 +138,14 @@ struct ShortcutsFixture {
         return StandardKeys::portableText(item(editorName)->property("keySequence"));
     }
 
+    // Gives the dialog the size it opens at on a large screen with the
+    // font at `pointSize`, 10 or 24, and lays it out; whether it took it.
+    bool showAtSizeFor(int pointSize) const {
+        const QSize size = pointSize > 10 ? QSize(1728, 1364) : QSize(720, 684);
+        dialog->resize(size);
+        return QTest::qWaitFor([&] { return dialog->size() == size; }) && !dialog->grabWindow().isNull();
+    }
+
     bool click(const char *buttonName) const {
         return clickVisibleButton(dialog, QString::fromLatin1(buttonName));
     }
@@ -153,6 +166,79 @@ QQuickItem *visibleItemIn(QQuickItem *root, const QString &objectName) {
         }
     }
     return nullptr;
+}
+
+// The widget style named, until the end of the scope; none keeps the test's.
+class ScopedWidgetStyle {
+public:
+    explicit ScopedWidgetStyle(const QString &name)
+        : m_previous(QApplication::style()->name()) {
+        if (!name.isEmpty()) {
+            QApplication::setStyle(name);
+        }
+    }
+    ~ScopedWidgetStyle() { QApplication::setStyle(m_previous); }
+    ScopedWidgetStyle(const ScopedWidgetStyle &) = delete;
+    ScopedWidgetStyle &operator=(const ScopedWidgetStyle &) = delete;
+
+private:
+    QString m_previous;
+};
+
+// The test data of the editor's layout: both font sizes, in the tests'
+// style and in Breeze.
+void addFontAndStyleRows() {
+    QTest::addColumn<int>("pointSize");
+    QTest::addColumn<QString>("widgetStyle");
+    for (const int pointSize : {10, 24}) {
+        QTest::addRow("%d pt", pointSize) << pointSize << QString();
+        QTest::addRow("%d pt, Breeze", pointSize) << pointSize << QStringLiteral("Breeze");
+    }
+}
+
+// The item at or under `root` that says `text`, if one shows.
+QQuickItem *visibleTextIn(QQuickItem *root, const QString &text) {
+    for (QQuickItem *child : root->childItems()) {
+        if (!child->isVisible()) {
+            continue;
+        }
+        if (child->inherits("QQuickText") && child->property("text").toString() == text) {
+            return child;
+        }
+        if (QQuickItem *found = visibleTextIn(child, text)) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+// A KeySequenceItem's shown button: the checkable one, which takes the key,
+// or the other, which clears it.
+QQuickItem *keyButtonIn(QQuickItem *editor, bool takesKey) {
+    for (QQuickItem *child : editor->childItems()) {
+        const QVariant checkable = child->property("checkable");
+        if (child->isVisible() && checkable.isValid() && checkable.toBool() == takesKey) {
+            return child;
+        }
+    }
+    return nullptr;
+}
+
+// The lowest row of `rect` with the ink of text, in `image`'s pixels: the
+// baseline of text without descenders. Breeze draws a button's caption
+// itself, so no item has its baseline. -1 for none.
+int inkBottom(const QImage &image, const QRectF &rect) {
+    const qreal dpr = image.devicePixelRatio();
+    const QRect area = QRectF(rect.topLeft() * dpr, rect.size() * dpr).toAlignedRect().intersected(image.rect());
+    const int ground = qGray(image.pixel(area.topLeft()));
+    for (int y = area.bottom(); y >= area.top(); --y) {
+        for (int x = area.left(); x <= area.right(); ++x) {
+            if (qAbs(qGray(image.pixel(x, y)) - ground) > 100) {
+                return y;
+            }
+        }
+    }
+    return -1;
 }
 
 QStringList bindingsOf(QObject *action) {
@@ -704,6 +790,63 @@ void KeyboardShortcutsSmokeTest::visualizationPageNamesResetZoomsKey() {
     QVERIFY(helpText().endsWith(QStringLiteral("centered spectrogram.")));
     QVERIFY(QMetaObject::invokeMethod(preferences, "close"));
     QTRY_VERIFY(!preferences->property("visible").toBool());
+}
+
+void KeyboardShortcutsSmokeTest::editorHasOneBaselineAndOneKeyButtonWidth_data() {
+    addFontAndStyleRows();
+}
+
+// Custom:, Shortcut: and the key on its button share a baseline (Custom:
+// was 5 px above the two beside it). The two key buttons are one width,
+// whatever keys they show, so the buttons that clear them share an x.
+void KeyboardShortcutsSmokeTest::editorHasOneBaselineAndOneKeyButtonWidth() {
+    QFETCH(int, pointSize);
+    QFETCH(QString, widgetStyle);
+    // Breeze's buttons are taller than its radio buttons, which set the
+    // radio's caption off the button's; Fusion's are as tall.
+    if (!widgetStyle.isEmpty() && !QStyleFactory::keys().contains(widgetStyle, Qt::CaseInsensitive)) {
+        QSKIP("The Breeze widget style is not installed.");
+    }
+    const ScopedWidgetStyle style(widgetStyle);
+    const ScopedApplicationFont font(pointSize);
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.select(QStringLiteral("open_files")));
+    QVERIFY(fixture.showAtSizeFor(pointSize));
+    QQuickItem *editor = fixture.item("keyboardShortcutsEditor");
+    QQuickItem *shortcut = fixture.item("keyboardShortcutsShortcutEditor");
+    QQuickItem *alternate = fixture.item("keyboardShortcutsAlternateEditor");
+    auto *customText = qvariant_cast<QQuickItem *>(
+        fixture.item("keyboardShortcutsCustomRadio")->property("contentItem"));
+    QQuickItem *label = visibleTextIn(editor, QStringLiteral("Shortcut:"));
+    QQuickItem *key = keyButtonIn(shortcut, true);
+    QVERIFY(customText != nullptr && label != nullptr && key != nullptr);
+
+    const QImage shown = fixture.dialog->grabWindow();
+    // Right of the radio's indicator, and of the key button's glyph.
+    const int custom = inkBottom(shown, sceneRect(customText).adjusted(customText->property("leftPadding").toReal(), 0, 0, 0));
+    const int named = inkBottom(shown, sceneRect(label));
+    const int drawn = inkBottom(shown, sceneRect(key).adjusted(key->width() * 0.4, 5, -6, -5));
+    QVERIFY(custom >= 0 && named >= 0 && drawn >= 0);
+    const QString baselines = QStringLiteral("Custom: %1, Shortcut: %2, key %3").arg(custom).arg(named).arg(drawn);
+    // Breeze rounds the caption it draws to pixels of its own.
+    QVERIFY2(custom == named && qAbs(drawn - named) <= 1, qPrintable(baselines));
+
+    const qreal editorX = sceneRect(shortcut).left();
+    for (const char *action : {"open_files", "stop"}) {
+        QVERIFY(fixture.select(QString::fromLatin1(action)));
+        QVERIFY(!fixture.dialog->grabWindow().isNull());
+        QQuickItem *first = keyButtonIn(shortcut, true);
+        QQuickItem *second = keyButtonIn(alternate, true);
+        QQuickItem *clearFirst = keyButtonIn(shortcut, false);
+        QQuickItem *clearSecond = keyButtonIn(alternate, false);
+        QVERIFY(first != nullptr && second != nullptr && clearFirst != nullptr && clearSecond != nullptr);
+        QCOMPARE(first->width(), second->width());
+        QVERIFY(first->width() >= std::max(first->implicitWidth(), second->implicitWidth()) - 0.5);
+        QCOMPARE(sceneRect(clearFirst).left(), sceneRect(clearSecond).left());
+        // The grid's columns follow its own cells, not the longer default.
+        QCOMPARE(sceneRect(shortcut).left(), editorX);
+    }
 }
 
 std::unique_ptr<QmlSmokeTest> makeKeyboardShortcutsSmokeTest(const QString &userDirectoriesParent) {

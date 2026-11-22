@@ -360,6 +360,26 @@ Components.DialogWindow {
     }
     onCurrentBindingsChanged: root.syncEditors()
 
+    // Gives the editors' key buttons one width, the wider one's, so that
+    // the buttons clearing them share an x. KeySequenceItem is a row with
+    // no property for its button's width: the button that takes the key is
+    // its checkable child.
+    function shareKeyButtonWidth(editors) {
+        const buttons = []
+        for (const editor of editors) {
+            for (const child of editor.children) {
+                if (child.checkable === true) {
+                    buttons.push(child)
+                }
+            }
+        }
+        for (const button of buttons) {
+            button.Layout.preferredWidth = Qt.binding(function() {
+                return buttons.reduce(function(widest, other) { return Math.max(widest, other.implicitWidth) }, 0)
+            })
+        }
+    }
+
     function matches(action, query) {
         if (query.length === 0) {
             return true
@@ -770,18 +790,17 @@ Components.DialogWindow {
             }
         }
 
-        // The selected action's keys: its defaults, or keys of its own.
-        GridLayout {
-            id: editorGrid
+        // The selected action's keys: its defaults, or keys of its own. The
+        // title and the default, which may be long, stand outside the grid,
+        // so that its columns follow its own cells alone.
+        ColumnLayout {
             objectName: "keyboardShortcutsEditor"
             Layout.fillWidth: true
+            Layout.fillHeight: false
             enabled: root.currentAction !== null
-            columns: 3
-            columnSpacing: Kirigami.Units.largeSpacing
-            rowSpacing: Kirigami.Units.smallSpacing
+            spacing: Kirigami.Units.smallSpacing
 
             Label {
-                Layout.columnSpan: 3
                 Layout.fillWidth: true
                 Layout.bottomMargin: Kirigami.Units.smallSpacing
                 objectName: "keyboardShortcutsEditorTitle"
@@ -797,7 +816,7 @@ Components.DialogWindow {
                 objectName: "keyboardShortcutsDefaultRadio"
                 // Each follows the action's keys, which a click changes.
                 autoExclusive: false
-                Layout.columnSpan: 3
+                Layout.maximumWidth: shortcutsContent.width
                 checked: root.currentAtDefaults && !root.customChosen
                 text: {
                     const defaults = root.currentAction ? root.currentAction.defaultKeyBindings : []
@@ -812,30 +831,34 @@ Components.DialogWindow {
                 }
             }
 
-            RadioButton {
-                id: customRadio
-                objectName: "keyboardShortcutsCustomRadio"
-                autoExclusive: false
-                Layout.alignment: Qt.AlignTop
-                checked: !root.currentAtDefaults || root.customChosen
-                text: I18n.i18nc("@option:radio", "Custom:")
-                onClicked: {
-                    root.chooseCustom()
-                    checked = Qt.binding(function() { return !root.currentAtDefaults || root.customChosen })
-                }
-            }
-
-            // The shortcut and the alternate, one key combination each.
+            // Custom, the shortcut and the alternate, one key combination
+            // each, in one grid: a row's texts share the middle of its key
+            // button, and so one baseline.
             GridLayout {
-                Layout.columnSpan: 2
-                Layout.fillWidth: true
-                columns: 2
+                Layout.fillWidth: false
+                columns: 3
                 columnSpacing: Kirigami.Units.largeSpacing
                 rowSpacing: Kirigami.Units.smallSpacing
 
+                RadioButton {
+                    id: customRadio
+                    objectName: "keyboardShortcutsCustomRadio"
+                    autoExclusive: false
+                    // Whole pixels above and below its caption, as the label
+                    // beside it has: a fraction set its baseline 1 px lower.
+                    Layout.preferredHeight: shortcutLabel.implicitHeight
+                        + 2 * Math.ceil((customRadio.implicitHeight - shortcutLabel.implicitHeight) / 2)
+                    checked: !root.currentAtDefaults || root.customChosen
+                    text: I18n.i18nc("@option:radio", "Custom:")
+                    onClicked: {
+                        root.chooseCustom()
+                        checked = Qt.binding(function() { return !root.currentAtDefaults || root.customChosen })
+                    }
+                }
                 Label {
+                    id: shortcutLabel
                     text: I18n.i18nc("@label:chooser", "Shortcut:")
-                    Layout.alignment: Qt.AlignRight
+                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                 }
                 KQuickControls.KeySequenceItem {
                     id: shortcutEditor
@@ -847,8 +870,10 @@ Components.DialogWindow {
                     onKeySequenceModified: root.takeKey(0, shortcutEditor)
                 }
                 Label {
+                    Layout.row: 1
+                    Layout.column: 1
                     text: I18n.i18nc("@label:chooser", "Alternate:")
-                    Layout.alignment: Qt.AlignRight
+                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                 }
                 KQuickControls.KeySequenceItem {
                     id: alternateEditor
@@ -859,6 +884,8 @@ Components.DialogWindow {
                     Accessible.name: I18n.i18nc("@label:chooser", "Alternate")
                     onKeySequenceModified: root.takeKey(1, alternateEditor)
                 }
+
+                Component.onCompleted: root.shareKeyButtonWidth([shortcutEditor, alternateEditor])
             }
         }
 
