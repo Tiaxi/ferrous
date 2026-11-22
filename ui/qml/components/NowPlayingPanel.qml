@@ -50,9 +50,13 @@ import "../logic/PathUtils.js" as PathUtils
 //   size in place all along (a cover scaled up from a square in the middle
 //   of the band read as a zoom, with empty flanks), fading in as the row
 //   goes, by the move's time (see idleOut), the lines and the library
-//   moving down with its foot, so nothing jumps; the lines fade in over
-//   the move's last part, once it is past its fastest, so no text slides
-//   over the moving rows nor pops in at its end. Going back to nothing
+//   moving down with its foot, so nothing jumps. Under the wide cover
+//   the move opens the lines' room first, over the moving seam, and then
+//   the rest of the cover (wideTextRoom), each line fading in once it has
+//   room, so the title reads in the move's first part, over the library and
+//   never under its seam; beside and under the narrow cover the lines fade
+//   in over the move's last part, once it is past its fastest, so no text
+//   slides over the moving rows nor pops in at its end. Going back to nothing
 //   loaded, as when the queue is cleared or runs out, is the same
 //   backwards (rather than the cover and lines going in one frame, leaving
 //   a mark alone in the band as it shrank): the track that showed stays,
@@ -205,14 +209,13 @@ Item {
     readonly property int moveDuration: Kirigami.Units.longDuration <= 0 ? 0
         : (root.wideRoom ? root.wideMoveDuration : Kirigami.Units.longDuration)
     readonly property int moveEasing: Easing.InOutQuad
-    // The lines come in late in the move, not with it (with it, they slid
-    // over the moving rows for some 190 ms): at 0 until the move is
-    // linesFromPresence of the way, past its fastest part, then fading in
-    // over longDuration, OutCubic, or what is left of the move where that
-    // is shorter, so they are whole when it ends: under the wide cover from
-    // some 250 ms of its 450 (from 90 %, at some 390 ms, they popped in
-    // over its last 60 ms). Read from the move's progress, so a move that
-    // turns back, or none, as with animations off, takes them with it.
+    // Beside and under the narrow cover the lines come in late in the move,
+    // not with it (with it, they slid over the moving rows): at 0 until
+    // the move is linesFromPresence of the way, past its fastest part, then
+    // fading in over longDuration, OutCubic, or what is left of the move
+    // where that is shorter, so they are whole when it ends. Read from the
+    // move's progress, so a move that turns back, or none, as with
+    // animations off, takes them with it.
     readonly property real linesFromPresence: 0.6
     readonly property real linesOpacity: {
         if (root.presence >= 1)
@@ -222,6 +225,39 @@ Item {
         const start = root._moveTime(root.linesFromPresence) * root.moveDuration
         const length = Math.max(1, Math.min(Kirigami.Units.longDuration, root.moveDuration - start))
         return root._eased((root._moveTime(root.presence) * root.moveDuration - start) / length)
+    }
+    // The height the move grows to, or shrinks from.
+    readonly property real movedHeight: root.idle ? root.heldLayoutHeight : root.layoutHeight
+    // The move's travel: the library's under the panel.
+    readonly property real moveTravel: Math.max(0, root.movedHeight - root.restHeight)
+    // Under the wide cover the move gives the lines their room first, over
+    // the moving seam (the title waited behind the cover's reveal: at
+    // +276 ms of 450 the band under a growing piece of the cover was still
+    // empty). Their room grows on a curve that eases out just where the
+    // band of the cover eases in from rest, so that band starts with no
+    // jolt and the two together are the move's one curve: whole by
+    // wideRoomSpan of the way, some 190 ms of the 450.
+    readonly property real wideRoomWhole: Math.max(0, root.movedHeight - root.seamHeight - root.coverSize)
+    readonly property real wideRoomSpan: root.moveTravel > 0
+        ? Math.min(1, 2 * root.wideRoomWhole / root.moveTravel) : 1
+    readonly property real wideTextRoom: {
+        if (root.presence >= 1 || root.wideRoomSpan <= 0)
+            return root.wideRoomWhole
+        const rest = 1 - Math.min(1, Math.max(0, root.presence) / root.wideRoomSpan)
+        return root.wideRoomWhole * (1 - rest * rest)
+    }
+    // A line under the wide cover fades in over shortDuration, OutCubic,
+    // from when there is room for it down to its foot, `room` px under
+    // the cover: never clipped by the seam nor over the library.
+    function _wideLineLevel(room) {
+        if (root.presence >= 1)
+            return 1
+        if (root.presence <= 0 || root.moveDuration <= 0 || root.wideRoomWhole <= 0)
+            return 0
+        const share = Math.min(1, room / root.wideRoomWhole)
+        const start = root._moveTime(root.wideRoomSpan * (1 - Math.sqrt(1 - share))) * root.moveDuration
+        const length = Math.max(1, Math.min(Kirigami.Units.shortDuration, root.moveDuration - start))
+        return root._eased((root.moveElapsed - start) / length)
     }
     // The compact row of nothing loaded and the cover hand over by the
     // move's time, not by how far it has come, so they take the same
@@ -1326,7 +1362,7 @@ Item {
     // The compact row with nothing loaded, the block with a track, and
     // between them while one grows into the other.
     implicitHeight: root._whileGrowing(root.restHeight
-        + ((root.idle ? root.heldLayoutHeight : root.layoutHeight) - root.restHeight) * root.presence)
+        + (root.movedHeight - root.restHeight) * root.presence)
     // While it grows or shrinks, what is past its foot does not show.
     clip: root.presence < 1
 
@@ -1856,6 +1892,18 @@ Item {
         }
     }
 
+    // How much of the cover's place shows: from the compact row's height
+    // to the square, in the wide layout all the move opens but the lines'
+    // room (wideTextRoom).
+    readonly property real coverBand: {
+        const rowBand = Math.min(root.coverSize, root.idleRowHeight)
+        if (root.presence >= 1)
+            return root.coverSize
+        if (!root.wideRoom)
+            return rowBand + Math.max(0, root.coverSize - root.idleRowHeight) * root.presence
+        return Math.min(root.coverSize, Math.max(rowBand,
+            root.idleRowHeight + root.moveTravel * root.presence - root.wideTextRoom))
+    }
     // The cover's place: the square, or, while the track's layout grows
     // from the compact row or shrinks back into it, a band of it from the
     // row's height up, which uncovers the cover from its top: the cover
@@ -1868,8 +1916,7 @@ Item {
         x: root.coverInset
         y: root.coverInset
         width: root.coverSize
-        height: root._whileGrowing(Math.min(root.coverSize, root.idleRowHeight)
-            + Math.max(0, root.coverSize - root.idleRowHeight) * root.presence)
+        height: root._whileGrowing(root.coverBand)
         visible: root.presence > 0 && root.coverSize > 0
         clip: coverArea.height < root.coverSize
 
@@ -1972,8 +2019,9 @@ Item {
         y: 0
         width: root.width
         height: root.height
-        // After the move from the compact row, not with it.
-        opacity: root.linesOpacity
+        // The narrow lines after the move from the compact row, not with
+        // it; the wide ones each once it has room (_wideLineLevel).
+        opacity: root.wideRoom ? 1 : root.linesOpacity
 
         // Wide: the text block under the cover.
         ColumnLayout {
@@ -1994,6 +2042,7 @@ Item {
                 id: wideTitle
                 lineKey: "title"
                 name: "Title"
+                opacity: root._wideLineLevel(root.wideTextTop + wideTitleProbe.implicitHeight)
                 text: root.shownLines.title
                 pointSize: root.wideTitlePointSize
                 weight: Font.DemiBold
@@ -2003,6 +2052,8 @@ Item {
                 id: wideArtistAlbum
                 lineKey: "artistAlbum"
                 name: "ArtistAlbum"
+                opacity: root._wideLineLevel(root.wideTextTop + wideTitleProbe.implicitHeight
+                                             + wideColumn.spacing + wideLineProbe.implicitHeight)
                 text: root.shownLines.artistAlbum
                 keepsRow: true
             }
@@ -2010,6 +2061,7 @@ Item {
                 id: wideDetails
                 lineKey: "details"
                 name: "Details"
+                opacity: root._wideLineLevel(root.wideTextTop + root.wideLinesHeight)
                 text: root.shownLines.details
                 pointSize: root.uiPalette.smallPointSize
                 color: root.uiPalette.textTertiary

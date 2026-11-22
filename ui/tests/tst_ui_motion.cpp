@@ -529,12 +529,11 @@ bool lineStill(QQuickItem *panel, const QString &name) {
         return false;
     }
     const QList<Window> windows = line.stillWindows();
-    // Up to the lines as one, which come in after the first track's move
-    // from the compact row (nowPlayingGrowsFromTheCompactRowOnTheFirstPlay).
-    QQuickItem *lines = panel->findChild<QQuickItem *>(QStringLiteral("nowPlayingLines"));
-    return lines != nullptr && windows.size() == 1 && qFuzzyIsNull(windows.first().first)
+    // Up to the line, which comes in with the first track's move from the
+    // compact row (nowPlayingGrowsFromTheCompactRowOnTheFirstPlay).
+    return windows.size() == 1 && qFuzzyIsNull(windows.first().first)
         && qFuzzyCompare(windows.first().second + 1.0, line.line()->width() + 1.0)
-        && qFuzzyCompare(opacityUpTo(line.line(), lines), 1.0);
+        && qFuzzyCompare(opacityUpTo(line.still(), line.line()), 1.0);
 }
 
 bool anyLineFades(QQuickItem *panel) {
@@ -1043,6 +1042,7 @@ private slots:
     void nowPlayingGoingIdleIsTheFirstPlayReversed_data();
     void nowPlayingGoingIdleIsTheFirstPlayReversed();
     void nowPlayingPlayDuringTheShrinkReversesIntoTheNextTrack();
+    void nowPlayingFirstPlayShowsTheTitleEarly();
     void nowPlayingFirstPlayBandIsNeverEmpty_data();
     void nowPlayingFirstPlayBandIsNeverEmpty();
     void nowPlayingLateCoverKeepsEveryLayerContinuous();
@@ -2824,7 +2824,9 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay_data() {
 // it, an empty band for some 60 to 140 ms) and the row's text is not drawn
 // across the art for long. The band uncovers the cover, which lies at its
 // full size at the band's top left in every frame: a reveal, not a zoom (a
-// square growing in the middle of the band, with empty flanks). The lines
+// square growing in the middle of the band, with empty flanks). Under the
+// wide cover the move opens the lines' room first and then the cover
+// (nowPlayingFirstPlayShowsTheTitleEarly); beside the narrow one the lines
 // come in late in the move rather than with it, and not as a pop at its
 // end: at 0 until it is 60 % of the way, then fading in over longDuration,
 // OutCubic, or what is left of the move, whole as it ends. Nothing jumps:
@@ -2925,9 +2927,9 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     const QStringList lines = narrow ? kNarrowLines : kWideLines;
     QQuickItem *linesItem = named(window, "nowPlayingLines");
     QVERIFY(linesItem != nullptr);
-    // The lines' opacity at `at` of the move: from where InOutQuad is 60 %
-    // of the way, over longDuration or the rest of the move, OutCubic
-    // (from 90 % they would pop in over the move's last 60 ms).
+    // The narrow lines' opacity at `at` of the move: from where InOutQuad
+    // is 60 % of the way, over longDuration or the rest of the move,
+    // OutCubic (from 90 % they would pop in over the move's last part).
     const double duration = growth->property("duration").toDouble();
     const auto timeAt = [](double presence) {
         return presence < 0.5 ? std::sqrt(presence / 2) : 1 - std::sqrt((1 - presence) / 2);
@@ -2935,13 +2937,6 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     const double fadeStart = timeAt(0.6) * duration;
     const double fadeLength = std::min<double>(units->longDuration(), duration - fadeStart);
     QVERIFY(fadeLength > 0);
-    // Under the wide cover, the fade starts past the move's middle and
-    // takes some 40 % of it, about 180 to 200 ms of its 450 at Kirigami's
-    // own durations, rather than its last 60 ms.
-    if (!narrow) {
-        QVERIFY2(fadeStart >= 0.5 * duration && fadeLength >= 0.4 * duration,
-                 qPrintable(QStringLiteral("from %1 for %2 of %3 ms").arg(fadeStart).arg(fadeLength).arg(duration)));
-    }
     const auto linesOpacityAt = [&](double presence) {
         const double rest = 1.0 - std::clamp((timeAt(presence) * duration - fadeStart) / fadeLength, 0.0, 1.0);
         return 1.0 - rest * rest * rest;
@@ -2954,7 +2949,14 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
         // On whole pixels.
         QVERIFY2(std::abs(panel->height() - grownHeight(panel, at, full)) <= 0.5, qPrintable(where));
         QCOMPARE(panel->height(), std::round(panel->height()));
-        QVERIFY2(std::abs(area->height() - (rowHeight + (side - rowHeight) * at)) <= 0.5, qPrintable(where));
+        if (narrow) {
+            QVERIFY2(std::abs(area->height() - (rowHeight + (side - rowHeight) * at)) <= 0.5, qPrintable(where));
+        } else {
+            // The band and the lines' room are the panel down to its seam.
+            const double room = panel->property("wideTextRoom").toDouble();
+            QVERIFY2(std::abs(area->height() + room + 1 - panel->height()) <= 1.5 && area->height() >= rowHeight - 0.5,
+                     qPrintable(where));
+        }
         const double elapsed = moveTimeAt(at) * duration;
         QVERIFY2(std::abs(cover->opacity() - coverOpacityAt(elapsed, units->shortDuration())) < 1e-6,
                  qPrintable(QStringLiteral("cover %1 at %2").arg(cover->opacity()).arg(where)));
@@ -2972,22 +2974,27 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
         // The band never shows neither.
         QVERIFY2(std::max(row->opacity(), cover->opacity()) >= 0.5,
                  qPrintable(QStringLiteral("row %1, cover %2 at %3").arg(row->opacity()).arg(cover->opacity()).arg(where)));
-        // The lines unfaded, the title under the cover's band or, beside
-        // the narrow cover, under the compact row while that shows; in, as
-        // one, only once the move is 60 % of the way, and never with
-        // "Nothing playing", so no two texts show at once.
-        QVERIFY2(std::abs(linesItem->opacity() - linesOpacityAt(at)) < 1e-6,
-                 qPrintable(QStringLiteral("%1 at %2").arg(linesItem->opacity()).arg(where)));
-        if (at <= 0.6) {
-            QCOMPARE(linesItem->opacity(), 0.0);
-        }
-        if (linesItem->opacity() > 0.0) {
-            QVERIFY2(!row->isVisible(), qPrintable(where));
-        }
-        // Under the wide cover, the lines mostly in by 90 % of the way.
-        if (!narrow && at >= 0.9) {
-            QVERIFY2(linesItem->opacity() >= 0.6,
-                     qPrintable(QStringLiteral("%1 at %2").arg(linesItem->opacity()).arg(where)));
+        // The lines, the title under the cover's band or, beside the narrow
+        // cover, under the compact row while that shows; never with
+        // "Nothing playing", so no two texts show at once. The narrow ones
+        // in as one, only once the move is 60 % of the way; the wide ones
+        // each once it has room, inside the panel, over the seam.
+        for (const QString &name : lines) {
+            const PanelLine line = panelLine(panel, name);
+            const double shown = linesItem->opacity() * line.line()->opacity();
+            if (narrow) {
+                QVERIFY2(std::abs(shown - linesOpacityAt(at)) < 1e-6,
+                         qPrintable(QStringLiteral("%1 at %2").arg(shown).arg(where)));
+                if (at <= 0.6) {
+                    QCOMPARE(shown, 0.0);
+                }
+            } else if (shown > 0.0) {
+                QVERIFY2(sceneRectOf(line.line()).bottom() <= sceneRectOf(panel).bottom(),
+                         qPrintable(QStringLiteral("%1 under the seam at %2").arg(name, where)));
+            }
+            if (shown > 0.0) {
+                QVERIFY2(!row->isVisible(), qPrintable(where));
+            }
         }
         for (const QString &name : lines) {
             // Still: one window over the whole line, unfaded under the
@@ -2997,7 +3004,7 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
             const QList<Window> windows = line.stillWindows();
             QVERIFY2(windows.size() == 1 && qFuzzyIsNull(windows.first().first)
                          && qFuzzyCompare(windows.first().second + 1.0, line.line()->width() + 1.0)
-                         && qFuzzyCompare(opacityUpTo(line.line(), linesItem), 1.0),
+                         && qFuzzyCompare(opacityUpTo(line.still(), line.line()), 1.0),
                      qPrintable(name + QLatin1Char(' ') + where));
         }
         const PanelLine title = panelLine(panel, lines.first());
@@ -3016,6 +3023,72 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     QVERIFY(grown(panel));
     QCOMPARE(linesItem->opacity(), 1.0);
     QVERIFY(panelIdle(panel, lines));
+}
+
+// The first Play under the wide cover names the track in the move's first
+// part, while the cover is still opening (the title was at nothing 276 ms
+// into the 450): at two fifths of it the title is nine tenths in, and by
+// three fifths every line. Each is drawn only where it has room, whole
+// over the seam and the library and under the band of the cover, never a
+// dip on the way, and the band never turns back nor starts with a jolt.
+void UiMotionTest::nowPlayingFirstPlayShowsTheTitleEarly() {
+    Covers covers;
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    QQuickItem *area = named(window, "nowPlayingCoverArea");
+    QQuickItem *header = named(window, "libraryHeader");
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
+    QVERIFY(area && header && seam && growth);
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
+    QTRY_VERIFY(libraryFollows(panel, header));
+    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
+    QVERIFY(QMetaObject::invokeMethod(growth, "pause"));
+    const int duration = growth->property("duration").toInt();
+    // 450 ms with Kirigami's own, unchanged.
+    QCOMPARE(duration, qRound(units->veryLongDuration() * 9.0 / 8.0));
+    QList<PanelLine> lines;
+    for (const QString &name : kWideLines) {
+        lines.push_back(panelLine(panel, name));
+    }
+    QList<double> before(lines.size(), 0.0);
+    double bandBefore = 0.0;
+    const QEasingCurve curve(QEasingCurve::InOutQuad);
+    for (int frame = 1;; ++frame) {
+        const double progress = std::min(1.0, frame * 1000.0 / 60.0 / duration);
+        const QString where = QStringLiteral("%1 ms").arg(progress * duration);
+        panel->setProperty("presence", curve.valueForProgress(progress));
+        QVERIFY2(QTest::qWaitFor([&]() { return libraryFollows(panel, header); }), qPrintable(where));
+        QVERIFY(QQuickTest::qWaitForPolish(window));
+        const double band = area->height();
+        QVERIFY2(band >= bandBefore, qPrintable(where));
+        if (frame == 2) {
+            QVERIFY2(band - bandBefore <= 4.0, qPrintable(QStringLiteral("the band's first step %1").arg(band - bandBefore)));
+        }
+        bandBefore = band;
+        for (qsizetype index = 0; index < lines.size(); ++index) {
+            QQuickItem *line = lines.at(index).line();
+            const double shown = opacityUpTo(line, panel);
+            QVERIFY2(shown >= before.at(index), qPrintable(where));
+            before[index] = shown;
+            if (shown > 0.0) {
+                QVERIFY2(sceneRectOf(line).bottom() <= sceneRectOf(seam).top() + 1.0
+                             && sceneRectOf(line).top() >= sceneRectOf(area).bottom(),
+                         qPrintable(QStringLiteral("line %1 from %2 to %3, the seam at %4, at %5")
+                                        .arg(index).arg(sceneRectOf(line).top()).arg(sceneRectOf(line).bottom())
+                                        .arg(sceneRectOf(seam).top()).arg(where)));
+            }
+            if ((index == 0 && progress >= 0.4) || progress >= 0.6) {
+                QVERIFY2(shown >= 0.9, qPrintable(QStringLiteral("line %1 at %2 at %3").arg(index).arg(shown).arg(where)));
+            }
+        }
+        if (progress >= 1.0) {
+            break;
+        }
+    }
+    QVERIFY(finish(growth));
 }
 
 void UiMotionTest::nowPlayingFirstPlayBandIsNeverEmpty_data() {
@@ -3538,7 +3611,7 @@ void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed() {
         frame.presence = panel->property("presence").toDouble();
         frame.cover = area->isVisible() && tile->isVisible() ? tile->opacity() : 0.0;
         frame.row = row->isVisible() ? row->opacity() : 0.0;
-        frame.lines = lines->isVisible() && title.line()->isVisible() ? lines->opacity() : 0.0;
+        frame.lines = lines->isVisible() && title.line()->isVisible() ? lines->opacity() * title.line()->opacity() : 0.0;
         // What the tile shows is the track that went: its cover, or the
         // stand-in for one, never the tile at rest.
         if (frame.cover > 0) {
