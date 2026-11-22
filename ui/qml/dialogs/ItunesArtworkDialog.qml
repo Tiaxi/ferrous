@@ -431,6 +431,9 @@ Components.DialogWindow {
     // 24 pt), and elides past that, with the whole of it in a tooltip.
     component ArtworkText: Column {
         property string title: ""
+        // Semibold for the dialog's lead, the current art's; a result's
+        // is regular.
+        property int titleWeight: Font.Normal
         property string details: ""
         property color detailsColor: root.uiPalette.textSecondary
         property string titleObjectName: ""
@@ -443,6 +446,7 @@ Components.DialogWindow {
             width: parent.width
             textFormat: Text.PlainText
             text: parent.title
+            font.weight: parent.titleWeight
             color: root.uiPalette.text
             elide: Text.ElideRight
         }
@@ -532,6 +536,10 @@ Components.DialogWindow {
                 id: currentArtworkText
                 x: 1 + root.textX
                 y: Math.round((parent.height - height) / 2)
+                // The lead in every state, as the other dialogs' first
+                // line: what there is, apart from what is offered (it had
+                // the weight of every result's title).
+                titleWeight: Font.DemiBold
                 width: Math.max(0, currentArtworkPreviewButton.x - root.textActionsGap - x)
                 titleObjectName: "itunesArtworkCurrentTitle"
                 detailsObjectName: "itunesArtworkCurrentDetails"
