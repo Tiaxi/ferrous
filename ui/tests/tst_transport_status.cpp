@@ -497,6 +497,8 @@ private slots:
     void seekFocusDrawsOneRingAroundTheBar();
     void volumeGlyphHasTheTransportsWeight_data();
     void volumeGlyphHasTheTransportsWeight();
+    void volumeGlyphsAreSmoothOutlines_data();
+    void volumeGlyphsAreSmoothOutlines();
     void transportGlyphsDrawOnOneScale_data();
     void transportGlyphsDrawOnOneScale();
     void transportButtonsDrawTheAppsFocusRing_data();
@@ -1389,6 +1391,90 @@ void TransportStatusTest::volumeGlyphHasTheTransportsWeight() {
     QTRY_VERIFY(muteGlyph->property("source").toString().endsWith(QStringLiteral("/volume-muted.svg")));
     QTRY_VERIFY((volumeInk = ink(muteGlyph)) > 0);
     QVERIFY2(volumeInk * 10 >= nextInk * 7, qPrintable(QStringLiteral("%1 / %2").arg(volumeInk).arg(nextInk)));
+}
+
+void TransportStatusTest::volumeGlyphsAreSmoothOutlines_data() {
+    QTest::addColumn<QString>("name");
+    QTest::addColumn<double>("ink");
+    // The ink of each, in pixels of its 16 px drawing, as heavy as Next.
+    QTest::newRow("volume") << QStringLiteral("volume.svg") << 96.0;
+    QTest::newRow("muted") << QStringLiteral("volume-muted.svg") << 80.0;
+}
+
+// The speaker and the muted speaker are outlines: at 16 px their straight
+// strokes are whole pixels and as heavy as before, and at any larger size,
+// a 24 pt font's 38 px or 2x, their diagonals and curves are smooth (a grid
+// of squares was a staircase of 2 to 4 px steps beside the other glyphs).
+void TransportStatusTest::volumeGlyphsAreSmoothOutlines() {
+    QFETCH(QString, name);
+    QFETCH(double, ink);
+    const auto coverage = [&name](int size) {
+        QImageReader reader(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/") + name);
+        reader.setScaledSize(QSize(size, size));
+        return reader.read().convertToFormat(QImage::Format_ARGB32);
+    };
+    const QImage one = coverage(16);
+    QCOMPARE(one.size(), QSize(16, 16));
+    const auto covered = [&one](int x, int y) { return qAlpha(one.pixel(x, y)) / 255.0; };
+    double total = 0;
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            total += covered(x, y);
+        }
+    }
+    QVERIFY2(std::abs(total - ink) <= 0.1 * ink, qPrintable(QStringLiteral("%1 px of ink").arg(total)));
+    // Whole pixels: the cone's back and the middle of each wave, with a
+    // clear column between the parts.
+    for (int y = 3; y <= 12; ++y) {
+        QVERIFY2(covered(7, y) >= 0.95 && covered(8, y) <= 0.05, qPrintable(QStringLiteral("back at %1").arg(y)));
+    }
+    if (name == QStringLiteral("volume.svg")) {
+        for (const int y : {7, 8}) {
+            for (const int x : {10, 11, 14, 15}) {
+                QVERIFY2(covered(x, y) >= 0.85, qPrintable(QStringLiteral("wave at %1,%2").arg(x).arg(y)));
+            }
+            QVERIFY2(covered(9, y) <= 0.1 && covered(12, y) <= 0.1, qPrintable(QStringLiteral("gap at %1").arg(y)));
+        }
+    }
+
+    for (const int size : {32, 38, 64}) {
+        const QImage large = coverage(size);
+        QCOMPARE(large.size(), QSize(size, size));
+        const double scale = size / 16.0;
+        // Along a diagonal, the cone's and the cross's, each row of pixels
+        // holds its own ink; a staircase repeats a row for each step.
+        const auto rowInk = [&](int y, int left, int right) {
+            double sum = 0;
+            for (int x = left; x < right; ++x) {
+                sum += qAlpha(large.pixel(x, y)) / 255.0;
+            }
+            return sum;
+        };
+        for (int y = int(std::ceil(2.4 * scale)); y + 1 < int(std::floor(4.6 * scale)); ++y) {
+            QVERIFY2(rowInk(y + 1, 0, size / 2) - rowInk(y, 0, size / 2) >= 0.5,
+                     qPrintable(QStringLiteral("the cone steps at row %1 of %2 px").arg(y).arg(size)));
+        }
+        // The wave's arc, or the cross's stroke, from its upper end toward
+        // the middle: its ink's middle moves in every row.
+        const bool waves = name == QStringLiteral("volume.svg");
+        const int left = int(std::ceil((waves ? 10.9 : 13.3) * scale));
+        const auto middle = [&](int y) {
+            double sum = 0;
+            double moment = 0;
+            for (int x = left; x < size; ++x) {
+                const double alpha = qAlpha(large.pixel(x, y)) / 255.0;
+                sum += alpha;
+                moment += alpha * x;
+            }
+            return sum > 0 ? moment / sum : 0.0;
+        };
+        const double from = (waves ? 3.4 : 6.2) * scale;
+        const double to = (waves ? 4.8 : 7.2) * scale;
+        for (int y = int(std::ceil(from)); y + 1 < int(std::floor(to)); ++y) {
+            QVERIFY2(std::abs(middle(y + 1) - middle(y)) >= 0.1,
+                     qPrintable(QStringLiteral("the stroke steps at row %1 of %2 px").arg(y).arg(size)));
+        }
+    }
 }
 
 void TransportStatusTest::transportGlyphsDrawOnOneScale_data() {
