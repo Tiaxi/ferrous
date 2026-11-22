@@ -230,7 +230,8 @@ class Session:
             out.append(dict(cls=m.group(1), title=m.group(2), name=m.group(3), visible=m.group(4) == "1",
                             w=int(m.group(5)), h=int(m.group(6)), active=m.group(11) in ("1", "true"),
                             parent=int(m.group(12)) if m.group(12) else -1, index=len(out),
-                            popup=int(m.group(10), 16) & 0xFF == 0x09))  # Qt::Popup: a menu's window
+                            # Qt::Popup, a menu's window, or Qt::ToolTip, a tooltip's: neither is a dialog
+                            popup=int(m.group(10), 16) & 0xFF in (0x09, 0x0D)))
         return out
 
     def dialog_windows(self):

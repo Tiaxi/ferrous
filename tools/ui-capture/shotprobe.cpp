@@ -654,8 +654,12 @@ private:
     }
     // A window popup: a menu (popupType: Popup.Window, #642) is a top-level window of type Qt::Popup beside the
     // window it opened from, which the compositor places and gives the input over it.
+    // So is a tooltip that may reach past its window (Edit Tags' Revert), of type Qt::ToolTip.
     static bool isPopupWindow(const QWindow *w) {
-        return (w->flags() & Qt::WindowType_Mask) == Qt::Popup;
+        return (w->flags() & Qt::WindowType_Mask) == Qt::Popup || isToolTipWindow(w);
+    }
+    static bool isToolTipWindow(const QWindow *w) {
+        return (w->flags() & Qt::WindowType_Mask) == Qt::ToolTip;
     }
     // The shown window popups opened from `w`, a submenu's after its menu's, each with its offset from w's top
     // left (logical px). `exposed`: only those the compositor shows already (a grab reads their pixels); a strip
@@ -681,7 +685,7 @@ private:
     QPair<QQuickWindow *, QPointF> pointerTarget(QQuickWindow *w, QPointF p) {
         const auto pops = popupWindowsOf(w);
         for (auto it = pops.crbegin(); it != pops.crend(); ++it) {
-            if (QRectF(it->second, it->first->size()).contains(p)) {
+            if (!isToolTipWindow(it->first) && QRectF(it->second, it->first->size()).contains(p)) {
                 return {it->first, p - QPointF(it->second)};
             }
         }

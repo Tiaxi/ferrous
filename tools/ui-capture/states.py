@@ -7143,7 +7143,7 @@ _DIALOG_EXPECT = {
     "library-root-name-add": ("Add Library Folder", "Without a name, the library shows the folder"),
     "confirm-clear-diagnostics": ("Delete Diagnostics Log", "Delete the diagnostics log?"),
     "quit-save-failed": ("Couldn’t Save Before Quitting", "could not be saved"),
-    "tag-editor-auto-number": ("Auto Number", "Number the selected rows"),
+    "tag-editor-auto-number": ("Auto Number", "Number tracks in the table"),
     "tag-editor-rename-preview": ("Rename Files", "will be renamed"),
     "tag-editor-status-details": ("Tag Editor Details", None),
     "tag-editor-quit-wait": ("Finishing Tag Changes", "Ferrous quits once the tag editor"),
