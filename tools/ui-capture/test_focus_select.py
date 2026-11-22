@@ -59,13 +59,16 @@ def m_events(r, arg):
 def m_measure(r, arg):
     r.pending_measures = [arg]
 
+def m_walk(r, arg):
+    open(f"a11y_{r.s.suffix}.jsonl", "a")
+
 def m_idle(r, arg):
     pass
 '''
 
 
 def table(*lines, **kw):
-    names = ("deep", "fixed", "unknown", "shot", "direct", "floor", "events", "measure", "idle")
+    names = ("deep", "fixed", "unknown", "shot", "direct", "floor", "events", "measure", "walk", "idle")
     return types.SimpleNamespace(
         STATES=[("s",) + line + ("",) for line in lines],
         SESSIONS=dict(s=kw.pop("session", {})),
@@ -84,9 +87,10 @@ def tile_sheet(*tiles):
 
 class Selection(unittest.TestCase):
     def need(self, states_mod, scope, themes=("dark",), source=SOURCE):
-        scope = dict(dict(images=[], sheets=[], facts=[], floors=[]), **scope)
+        scopes = [dict(dict(images=[], sheets=[], facts=[], floors=[]), **x)
+                  for x in (scope if isinstance(scope, list) else [scope])]
         jobs = [("s", t) for t in themes]
-        return focus_select.prefixes(scope, jobs, states_mod, {"row-text": "Queue title"}, suffix, source)
+        return focus_select.prefixes(scopes, jobs, states_mod, {"row-text": "Queue title"}, suffix, source)
 
     def cut(self, states_mod, scope, **kw):
         out, problems = self.need(states_mod, scope, **kw)
@@ -138,6 +142,24 @@ class Selection(unittest.TestCase):
         t = table(("_", "_s", "macro shot one"), ("_", "_d", "macro direct"), ("_", "_i", "macro idle"))
         self.assertEqual(self.cut(t, dict(sheets=tile_sheet(("details", "made-one", None)))), 1)
         self.assertEqual(self.cut(t, dict(sheets=tile_sheet(("closeup", "controls", None)))), 2)
+
+    def test_scopes_together_need_the_furthest_line_any_of_them_needs(self):
+        t = table(("main", "a", "x"), ("main", "b", "x"), ("main", "c", "x"), ("main", "d", "x"))
+        a, c = dict(sheets=tile_sheet(("main", "a", None))), dict(sheets=tile_sheet(("main", "c", None)))
+        self.assertEqual((self.cut(t, a), self.cut(t, c), self.cut(t, [a, c]), self.cut(t, [c, a, a])), (1, 3, 3, 3))
+
+    def test_one_scope_that_reads_every_floor_keeps_them_for_all(self):
+        t = table(("_", "_a", "macro floor left:left"), ("_", "_b", "macro floor right:right"))
+        self.assertEqual(self.cut(t, [dict(floors=["left"]), dict(floors=None)]), 2)
+
+    def test_system_facts_read_every_shot_and_the_walk(self):
+        sheets = tile_sheet(("main", "a", None))
+        t = table(("main", "a", "x"), ("main", "b", "x"), ("_", "_w", "macro walk"), ("_", "_i", "macro idle"))
+        self.assertEqual(self.cut(t, dict(sheets=sheets)), 1)
+        self.assertEqual(self.cut(t, dict(sheets=sheets, system_facts=True)), 3)
+        t = table(("main", "a", "x"), ("main", "b", "x"), ("_", "_i", "macro idle"))
+        # (b is in no tile, but its layout's values are in "worst in the round")
+        self.assertEqual(self.cut(t, dict(sheets=sheets, system_facts=True)), 2)
 
     def test_floors_named_or_all(self):
         t = table(("_", "_a", "macro floor left:left"), ("_", "_b", "macro floor right:right"), ("_", "_c", "macro floor restore"))
@@ -210,30 +232,62 @@ class Selection(unittest.TestCase):
 
 
 class RealTable(unittest.TestCase):
-    def test_every_scope_can_be_cut_and_keeps_what_it_shows(self):
-        for name, scope in focus.SCOPES.items():
-            jobs = [(s, t) for s in scope["sessions"] for t in (states.SESSIONS[s].get("themes") or ("dark", "light"))]
-            out, problems = focus_select.prefixes(scope, jobs, states, contrast.WHAT, suffix)
-            self.assertEqual(problems, [], name)
-            need = focus_select.Needs(scope, states)
-            for session, theme in jobs:
-                kw, n = states.SESSIONS[session], out.get((session, theme), 0)
-                sfx = suffix(theme, kw)
-                w, h = kw.get("size", (1600, 1000))
-                after = [l for l in states.STATES if l[0] == session][n:]
-                for _s, area, state, steps, _d in after:
-                    e = dict(area=area, state=state, theme=theme, scale=kw.get("scale", 1), size=f"{w}x{h}",
-                             file=f"{area}_{state}_{sfx}.png")
-                    if not state.startswith("_") and area != "motion":
-                        self.assertFalse(any(focus_select.tile_matches(e, *t) for t in need.tiles),
-                                         f"{name}: the tile {area}/{state} is after {session}/{theme}'s cut")
-                    if focus_select.recorded(area, state, theme, states) and "strip " in steps:
-                        self.assertNotIn((state, theme), need.recordings, f"{name}: {session}/{theme}")
+    def selected(self, names):
+        jobs = [(s, t) for s in focus.sessions_of(names) for t in (states.SESSIONS[s].get("themes") or ("dark", "light"))]
+        out, problems = focus_select.prefixes([focus.SCOPES[nm] for nm in names], jobs, states, contrast.WHAT, suffix)
+        self.assertEqual(problems, [], names)
+        return jobs, out
 
-    def test_each_scope_saves_at_least_one_line(self):
+    def check_kept(self, names):
+        """Nothing the scopes show is after a cut, and with system_facts no shot at all."""
+        jobs, out = self.selected(names)
+        need = focus_select.Needs([focus.SCOPES[nm] for nm in names], states)
+        for session, theme in jobs:
+            kw, n = states.SESSIONS[session], out.get((session, theme), 0)
+            sfx = suffix(theme, kw)
+            w, h = kw.get("size", (1600, 1000))
+            for _s, area, state, steps, _d in [l for l in states.STATES if l[0] == session][n:]:
+                e = dict(area=area, state=state, theme=theme, scale=kw.get("scale", 1), size=f"{w}x{h}",
+                         file=f"{area}_{state}_{sfx}.png")
+                where = f"{','.join(names)}: {area}/{state} is after {session}/{theme}'s cut"
+                if not state.startswith("_") and area != "motion":
+                    self.assertFalse(need.system, where)
+                    self.assertFalse(any(focus_select.tile_matches(e, *t) for t in need.tiles), where)
+                if focus_select.recorded(area, state, theme, states) and "strip " in steps:
+                    self.assertNotIn((state, theme), need.recordings, where)
+
+    def test_every_scope_alone_keeps_what_it_shows(self):
+        for name in focus.SCOPES:
+            self.check_kept([name])
+
+    def test_the_census_keeps_what_its_seven_packs_show(self):
+        self.assertEqual(len(focus.resolve("census")), 7)
+        self.check_kept(focus.resolve("census"))
+
+    def test_the_census_keeps_the_focus_walk(self):
+        _, out = self.selected(focus.resolve("census"))
+        lines = [l for l in states.STATES if l[0] == "focus"]
+        walk = [k for k, line in enumerate(lines, 1) if "macro tab " in line[3] or "macro launch_focus" in line[3]]
+        self.assertTrue(walk)
+        self.assertGreaterEqual(out[("focus", "dark")], walk[-1])
+
+    def test_the_union_is_no_shorter_than_any_of_its_scopes(self):
+        _, union = self.selected(focus.resolve("census"))
+        for name in focus.resolve("census"):
+            for job, n in self.selected([name])[1].items():
+                self.assertGreaterEqual(union.get(job, 0), n, (name, job))
+
+    def test_a_list_shoots_each_shared_state_once(self):
+        jobs, union = self.selected(["dialogs", "viewers"])
+        self.assertEqual(len(jobs), len(set(jobs)))
+        apart = sum(sum(self.selected([name])[1].values()) for name in ("dialogs", "viewers"))
+        self.assertLess(sum(union.values()), apart)
+
+    def test_a_scope_without_system_facts_is_cut(self):
         for name, scope in focus.SCOPES.items():
-            jobs = [(s, t) for s in scope["sessions"] for t in (states.SESSIONS[s].get("themes") or ("dark", "light"))]
-            out, _ = focus_select.prefixes(scope, jobs, states, contrast.WHAT, suffix)
+            if scope.get("system_facts"):
+                continue
+            jobs, out = self.selected([name])
             whole = sum(sum(1 for l in states.STATES if l[0] == s) for s, _ in jobs)
             self.assertLess(sum(out.values()), whole, name)
 

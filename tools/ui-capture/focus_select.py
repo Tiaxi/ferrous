@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""What a focus-only capture must shoot: for each session and theme, how many of its lines of the state table.
+"""What a focus-only capture must shoot for its scopes together: for each session and theme, how many of its lines
+of the state table, each shot once however many of the scopes show it.
 
 A session's lines share one app, so each depends on those before it. A focus capture therefore shoots a prefix: every
-line up to the last one that makes something the scope's pack reads, with exactly the history it has in a full
-capture, and none after it. What the pack reads of a scope (pack.write_focus) is:
+line up to the last one that makes something one of the packs reads, with exactly the history it has in a full
+capture, and none after it. A pack reads the round, whichever session of the run made a thing, so each scope's needs
+are looked up in all the run's sessions. What the pack reads of a scope (pack.write_focus) is:
 
 - the shots of its sheets' tiles (tile_matches, which pack.py uses to pick them);
 - the recordings of its sheets, strips, pairs and facts_strips;
 - the facts of its key prefixes, of its lead and at-a-glance tables and of its plate tiles;
-- the floor regions, accessibility events and contrast rows it names.
+- the floor regions, accessibility events and contrast rows it names;
+- with system_facts (pack.system_lead): the focus walk, every contrast row and, as each layout finding quotes its
+  worst value in the round, every shot: so each line that grabs.
 
 What each line makes is read from the state table and, for macros, from states.py's source: every writer of those is
-one of a few helpers (_fact, _save_shot, index.append, floors.jsonl, a11y-events, pending_measures), and a macro
-makes what the helpers' calls it can reach say, by their literal keys or prefixes; a key known only as the macro
-runs counts as any key. So a line counts as needed more often than it is, never less. Where that cannot be relied on
-(a writer this cannot read, an image it cannot trace to lines), prefixes() says why and the capture shoots whole
-sessions.
+one of a few helpers (_fact, _save_shot, index.append, floors.jsonl, a11y-events, a11y_, pending_measures), and a
+macro makes what the helpers' calls it can reach say, by their literal keys or prefixes; a key known only as the
+macro runs counts as any key. So a line counts as needed more often than it is, never less. Where that cannot be
+relied on (a writer this cannot read, an image it cannot trace to lines), prefixes() says why and the capture shoots
+whole sessions.
 """
 import ast
 import os
@@ -131,11 +135,11 @@ class Writers:
 
     def of(self, name):
         """What the module-level function `name` can write, itself or through what it refers to: ("fact", key),
-        ("shot", area key, state key), ("floor",), ("a11y-events",)."""
+        ("shot", area key, state key), ("floor",), ("a11y-events",), ("a11y-walk",)."""
         if name in self._of:
             return self._of[name]
         if name not in self.defs:  # (not this module's: nothing known of it)
-            self._of[name] = {("fact", ANY), ("shot", ANY, ANY), ("floor",), ("a11y-events",)}
+            self._of[name] = {("fact", ANY), ("shot", ANY, ANY), ("floor",), ("a11y-events",), ("a11y-walk",)}
             return self._of[name]
         out, seen, todo = set(), {name}, list(self.defs[name])
         while todo:
@@ -148,6 +152,8 @@ class Writers:
                     out.add(("floor",))
                 elif isinstance(n, ast.Constant) and n.value == "a11y-events":
                     out.add(("a11y-events",))
+                elif isinstance(n, ast.Constant) and n.value == "a11y_":  # (f"a11y_{suffix}.jsonl")
+                    out.add(("a11y-walk",))
                 elif isinstance(n, ast.Call):
                     if isinstance(n.func, ast.Name) and n.func.id == "_fact" and len(n.args) > 1:
                         out |= {("fact", k) for k in literal_keys(n.args[1])}
@@ -163,55 +169,59 @@ class Writers:
 
 
 class Needs:
-    """What a scope's pack reads (pack.write_focus and what it calls)."""
+    """What the packs of some scopes read (pack.write_focus and what it calls)."""
 
-    def __init__(self, scope, states_mod):
+    def __init__(self, scopes, states_mod):
         self.problems = []
         self.tiles = set()  # (area, state, theme, variant, scale)
         self.recordings = set()  # (name, theme)
         self.traced = set()  # those of the images: lines must make them, or whole sessions are shot
-        facts = scope.get("facts")
-        facts = [""] if facts is None else list(facts)  # (no list: every fact)
-        # (write_focus notes any card's details line without its "of M", whatever the scope's facts)
-        facts.append("card-")
-        if scope.get("fact_table"):
-            facts.append("dlg-")
-        if scope.get("lead_table"):
-            facts.append(scope["lead_table"]["prefix"])
-        for _name, _title, theme, rows in scope.get("sheets", []):
-            for row in rows:
-                for cell in row:
-                    column = [cell] if isinstance(cell, dict) or isinstance(cell[0], str) else cell
-                    for c in column:
-                        if isinstance(c, dict):
-                            self.recordings.add((c["strip"], c.get("theme", theme)))
-                            continue
-                        opts = (c[4] if len(c) > 4 else None) or {}
-                        self.tiles.add((c[0], c[1], opts.get("theme", theme), opts.get("variant", ""), opts.get("scale", 1)))
-                        if opts.get("plate"):
-                            facts.append(f"plate-{c[1]}-")
-        self.facts = tuple(set(facts))
+        self.floors, self.a11y, self.contrast = set(), set(), set()
+        self.every_floor = any(scope.get("floors") is None for scope in scopes)
+        self.system = any(scope.get("system_facts") for scope in scopes)
+        facts = {"card-"}  # (write_focus notes any card's details line without its "of M", whatever the scope)
         pairs = {f"pair:{nm}": (a, b) for nm, a, b, *_ in getattr(states_mod, "STRIP_PAIRS", [])}
         perceived = {nm: rows for nm, _title, rows in getattr(states_mod, "PERCEIVED_SHEETS", [])}
         views = {f"{nm}-{suffix}": nm for nm, vs in getattr(states_mod, "EXTRA_VIEWS", {}).items() for suffix, _ in vs}
         views.update({f"{nm}-1to1": nm for nm in getattr(states_mod, "FRAMES11", {})})
-        own = {name for name, *_ in scope.get("sheets", [])}
-        for kind, name, theme, *_ in scope["images"]:
-            if kind == "sheet":
-                if name not in own:
-                    self.problems.append(f"the image {name} is a sheet of the whole pack")
-                continue
-            if name in pairs:
-                found = [(n, t or theme) for n, _, t in (half.partition("@") for half in pairs[name])]
-            elif name in perceived:
-                found = [(row[0], row[1]) for row in perceived[name]]
-            else:
-                found = [(views.get(name, name), theme)]
-            self.traced.update(found)
-        self.recordings |= self.traced | {(nm, th) for nm, th, *_ in scope.get("facts_strips", [])}
-        self.floors = scope.get("floors")  # None: all
-        self.a11y = scope.get("a11y_labels") or []
-        self.contrast = {p for ps in (scope.get("contrast") or {}).values() for p in ps}
+        for scope in scopes:
+            facts.update(scope.get("facts", []))  # (write_focus: no list, no facts)
+            if scope.get("fact_table"):
+                facts.add("dlg-")
+            if scope.get("lead_table"):
+                facts.add(scope["lead_table"]["prefix"])
+            for _name, _title, theme, rows in scope.get("sheets", []):
+                for row in rows:
+                    for cell in row:
+                        column = [cell] if isinstance(cell, dict) or isinstance(cell[0], str) else cell
+                        for c in column:
+                            if isinstance(c, dict):
+                                self.recordings.add((c["strip"], c.get("theme", theme)))
+                                continue
+                            opts = (c[4] if len(c) > 4 else None) or {}
+                            self.tiles.add((c[0], c[1], opts.get("theme", theme), opts.get("variant", ""),
+                                            opts.get("scale", 1)))
+                            if opts.get("plate"):
+                                facts.add(f"plate-{c[1]}-")
+            own = {name for name, *_ in scope.get("sheets", [])}
+            for kind, name, theme, *_ in scope.get("images", []):
+                if kind == "sheet":
+                    if name not in own:
+                        self.problems.append(f"the image {name} is a sheet of the whole pack")
+                    continue
+                if name in pairs:
+                    found = [(n, t or theme) for n, _, t in (half.partition("@") for half in pairs[name])]
+                elif name in perceived:
+                    found = [(row[0], row[1]) for row in perceived[name]]
+                else:
+                    found = [(views.get(name, name), theme)]
+                self.traced.update(found)
+            self.recordings |= {(nm, th) for nm, th, *_ in scope.get("facts_strips", [])}
+            self.floors.update(scope.get("floors") or [])
+            self.a11y.update(scope.get("a11y_labels") or [])
+            self.contrast.update(p for ps in (scope.get("contrast") or {}).values() for p in ps)
+        self.facts = tuple(facts)
+        self.recordings |= self.traced
 
 
 def steps_of(text):
@@ -227,7 +237,7 @@ def pack_needs(scope, states_mod):
     """What a focus-only pack builds of a round: (the names of the recordings it analyses, those its images and
     facts_strips read; the names of the strip images it shows or quotes, of which the pairs, perceived and frame
     sheets are made)."""
-    analysed = {name for name, _ in Needs(scope, states_mod).traced}
+    analysed = {name for name, _ in Needs([scope], states_mod).traced}
     quoted = {name for name, *_ in scope.get("facts_strips", [])}
     return analysed | quoted, quoted | {name for kind, name, *_ in scope.get("images", []) if kind == "strip"}
 
@@ -237,15 +247,15 @@ def recorded(area, state, theme, states_mod):
     return not (area == "motion" and theme != "dark" and state not in states_mod.STRIP_BOTH_THEMES)
 
 
-def prefixes(scope, jobs, states_mod, what, suffix_of, source=None):
-    """({(session, theme): lines to shoot}, problems) for a scope's (session, theme) `jobs`: a job without lines is
-    not needed at all. With problems, the dict is empty: shoot whole sessions. `what` is contrast.WHAT (a measure's
+def prefixes(scopes, jobs, states_mod, what, suffix_of, source=None):
+    """({(session, theme): lines to shoot}, problems) for the `scopes` packed together from the (session, theme)
+    `jobs`: a job without lines is not needed at all. With problems, the dict is empty: shoot whole sessions. `what` is contrast.WHAT (a measure's
     label as CONTRAST.md names it), `suffix_of(theme, session's keywords)` the shots' file suffix."""
     if source is None:
         with open(os.path.splitext(states_mod.__file__)[0] + ".py", encoding="utf-8") as f:
             source = f.read()
     writers = Writers(source)
-    need = Needs(scope, states_mod)
+    need = Needs(scopes, states_mod)
     problems = writers.problems + need.problems
     makers = {name: fn.__name__ for name, fn in states_mod.MACROS.items()}
     out, made = {}, set()
@@ -276,16 +286,18 @@ def prefixes(scope, jobs, states_mod, what, suffix_of, source=None):
                 if kind == "shot" and shot(*key):
                     return True
                 if kind == "floor" and arg not in ("save", "restore"):
-                    if need.floors is None or arg.partition(":")[0] in need.floors:
+                    if need.every_floor or arg.partition(":")[0] in need.floors:
                         return True
                 if kind == "a11y-events" and need.a11y:
+                    return True
+                if kind == "a11y-walk" and need.system:
                     return True
             return False
 
         last = 0
         for n, (_session, area, state, steps, _desc) in enumerate([x for x in states_mod.STATES if x[0] == session], 1):
             grabs = not state.startswith("_") and area != "motion"
-            needed = grabs and shot((area, True), (state, True))
+            needed = grabs and (need.system or shot((area, True), (state, True)))
             for verb, rest in steps_of(steps):
                 if verb == "strip" and recorded(area, state, theme, states_mod):
                     for rec in need.recordings:
@@ -301,5 +313,5 @@ def prefixes(scope, jobs, states_mod, what, suffix_of, source=None):
             out[(session, theme)] = last
     problems += [f"no line records {name} ({theme})" for name, theme in sorted(need.traced - made)]
     if not out:
-        problems.append("no line makes anything the scope reads")
+        problems.append("no line makes anything the scopes read")
     return ({}, problems) if problems else (out, [])

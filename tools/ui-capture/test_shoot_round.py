@@ -33,7 +33,6 @@ SETUP_DB_PY = "import os\nos.makedirs(os.path.join(os.environ['SHOT_WORK'], 'run
 # rsync -a ... SRC/ DEST/: a plain copy of the stand-in tree; bc: a fixed elapsed time
 RSYNC_SH = '#!/bin/sh\nfor a; do src=$dst; dst=$a; done\ncp -a "$src." "$dst"\n'
 BC_SH = "#!/bin/sh\ncat >/dev/null\necho 0\n"
-RUNNER_PY = "import json, os, sys\njson.dump(sys.argv[1:], open(os.environ['RUNNER_ARGV_OUT'], 'w'))\n"
 PACK_PY = "import json, os, sys\njson.dump(sys.argv[1:], open(os.environ['PACK_ARGV_OUT'], 'w'))\n"
 # a pack.py that writes one pack per scope of SHOT_FOCUS, but not FOCUS_PACK_SKIP's, and exits FOCUS_PACK_EXIT
 FOCUS_PACK_PY = """import os, sys
@@ -80,7 +79,6 @@ class ShootRoundBase(unittest.TestCase):
         write(os.path.join(self.h, "setup_db_round.py"), SETUP_DB_PY)
         write(os.path.join(self.h, "pack.py"), PACK_PY)
         write(os.path.join(self.h, "runner.py"), RUNNER_PY)
-        write(os.path.join(self.h, "focus.py"), "SCOPES = dict(area=dict(sessions=['main', 'queue']))\n")
         write(os.path.join(self.h, "build_probes.sh"), "#!/bin/sh\nexit 0\n", 0o755)
         bindir = os.path.join(self.tmp, "bin")
         for tool in ("cmake", "gst-launch-1.0"):
@@ -126,13 +124,6 @@ class ShootRoundOptions(ShootRoundBase):
     def test_workers_are_capped_at_8(self):
         self.assertEqual(self.runner_argv("--workers", "3"), ["--workers", "3"])
         self.assertEqual(self.runner_argv("--workers", "30"), ["--workers", "8"])
-
-    def test_a_focus_only_run_shoots_what_the_scope_reads(self):
-        self.assertEqual(self.runner_argv("--focus-only", "area")[2:],
-                         ["--sessions", "main,queue", "--focus", "area"])
-
-    def test_a_full_run_with_a_focus_pack_shoots_everything(self):
-        self.assertEqual(self.runner_argv("--focus", "area"), ["--workers", "8"])
 
     def test_pack_jobs_reaches_pack(self):
         argv = self.pack_argv("--pack-jobs", "3")
@@ -184,6 +175,19 @@ class ShootRoundFocus(ShootRoundBase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(self.sessions_shot(), focus.sessions_of(focus.CENSUS))
         self.assertEqual(self.published(), sorted(focus.CENSUS))
+
+    def test_the_runner_shoots_only_what_the_named_scopes_read(self):
+        for given, scopes in (("census", focus.CENSUS), ("viewers, dialogs,viewers", ["viewers", "dialogs"])):
+            with self.subTest(scopes=given):
+                self.assertEqual(self.run_script("--focus-only", given).returncode, 0)
+                with open(self.runner_out) as f:
+                    argv = json.load(f)
+                self.assertEqual(argv[argv.index("--focus") + 1], ",".join(scopes))  # (resolved: each once)
+
+    def test_a_full_run_is_never_cut_for_its_focus_packs(self):
+        self.assertEqual(self.run_script("--focus", "census").returncode, 0)
+        with open(self.runner_out) as f:
+            self.assertEqual(json.load(f), ["--workers", "8"])
 
     def test_census_takes_options_after_it(self):
         p = self.run_script("--census", "--workers", "2")

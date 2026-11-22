@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Runs the state table (states.py) against the app: one app session per (session, theme).
 
-Usage: runner.py [--only AREA[,AREA...]] [--sessions S1,S2] [--themes dark,light] [--focus SCOPE] [--list]
+Usage: runner.py [--only AREA[,AREA...]] [--sessions S1,S2] [--themes dark,light] [--focus SCOPES] [--list]
 
 Each STATES line is (session, area, state, steps, description). Steps are separated by
 " | "; the line ends with a grab named <area>_<state>_<theme>_<scale>x_<W>x<H>.png unless
 the state starts with "_" (setup) or the area is "motion" (a frame strip, see `strip`).
 With --only, a session runs its setup lines and the lines of the given areas only.
-With --focus, a session runs its lines up to the last one the scope's pack reads (focus_select.py).
+With --focus, a session runs its lines up to the last one any of the scopes' packs reads (focus_select.py).
 Step verbs: see Runner.step_* below.
 """
 import argparse
@@ -667,22 +667,24 @@ def unfinished(folder, jobs):
     return [j for j in jobs if not os.path.exists(os.path.join(folder, f"{j[0]}_{j[1]}.done"))]
 
 
-def focus_jobs(scope_name, jobs):
-    """The jobs a focus scope needs, each cut after the last line its pack reads; whole sessions, loudly, where
-    that cannot be told."""
+def focus_jobs(spec, jobs):
+    """The jobs the focus scopes `spec` names (focus.resolve) need together, each cut after the last line any of
+    their packs reads; whole sessions, loudly, where that cannot be told."""
     import contrast
     import focus
     import focus_select
     suffix = lambda tag, kw: session_suffix(tag, kw.get("scale", 1), kw.get("size", (1600, 1000)), kw.get("suffix_extra", ""))
-    need, problems = focus_select.prefixes(focus.SCOPES[scope_name], [j[:2] for j in jobs], states, contrast.WHAT, suffix)
+    names = focus.resolve(spec)
+    need, problems = focus_select.prefixes([focus.SCOPES[nm] for nm in names], [j[:2] for j in jobs], states,
+                                           contrast.WHAT, suffix)
     if problems:
-        print(f"!! focus {scope_name}: whole sessions are shot, as what it needs cannot be told: "
+        print(f"!! focus {','.join(names)}: whole sessions are shot, as what they need cannot be told: "
               + "; ".join(problems[:5]), flush=True)
         return jobs
     out = []
     for name, tag, _ in jobs:
         n, total = need.get((name, tag), 0), sum(1 for line in states.STATES if line[0] == name)
-        print(f"focus {scope_name}: {name}/{tag}: " + (f"{n} of {total} lines" if n else "not needed"), flush=True)
+        print(f"focus: {name}/{tag}: " + (f"{n} of {total} lines" if n else "not needed"), flush=True)
         if n:
             out.append((name, tag, n if n < total else None))
     return out
@@ -694,7 +696,7 @@ def main():
     ap.add_argument("--sessions", default="")
     ap.add_argument("--themes", default="")
     ap.add_argument("--workers", type=int, default=1)
-    ap.add_argument("--focus", default="", help="shoot only what this focus scope's pack reads")
+    ap.add_argument("--focus", default="", help="shoot only what the packs of these focus scopes read (focus.resolve)")
     ap.add_argument("--jobs", default="", help="internal: session:theme[:lines],... the queue of one worker")
     ap.add_argument("--claims", default="", help="internal: the folder where workers claim the queue's jobs")
     ap.add_argument("--list", action="store_true")
