@@ -379,7 +379,7 @@ void TranslationTest::tagEditorTellsMixedValuesByAFlag() {
     QVERIFY(tags != nullptr);
     QQuickItem *title = findQuickItemByObjectName(tags->contentItem(), QStringLiteral("tagEditorField_title"));
     QVERIFY(title != nullptr);
-    QTRY_COMPARE(title->property("placeholderText").toString(), pseudo(QStringLiteral("Multiple values")));
+    QTRY_COMPARE(title->property("placeholderText").toString(), pseudo(QStringLiteral("Mixed")));
     QCOMPARE(title->property("text").toString(), QString());
 
     // The albums are the same, whatever their text: it is the field's value.

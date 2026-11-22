@@ -8,6 +8,7 @@ import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
 import "../logic/FormatUtils.js" as FormatUtils
+import "../logic/KeyUtils.js" as KeyUtils
 import "." as Dialogs
 
 // Edit Tags, in a window of its own: KWin draws its title bar, and it
@@ -44,16 +45,12 @@ Components.DialogWindow {
     // elided to "failed to …").
     readonly property string notSavedText: I18n.i18nc("@item tag editor row status: saving the file's tags failed", "Not saved")
     readonly property string notRenamedText: I18n.i18nc("@item tag editor row status: renaming the file failed", "Not renamed")
-    // Shown in a field whose rows hold different values, which saving keeps.
-    readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "Multiple values")
-    // The same, in a number field too narrow for it, as Track and Disc's
-    // with a large font ("Multiple values" elided in their 124 px fields at
-    // 24 pt; widening them took the table's room).
-    readonly property string keepShortText: I18n.i18nc("@info:placeholder short for Multiple values, in a narrow number field: the selected files keep their different values", "Mixed")
-    // Every field of the form says it in the same word: the short one in
-    // all of them once a number field needs it, not "Multiple values" and
-    // "Mixed" in one form.
-    readonly property bool keepShortInForm: trackPair.needsKeepShort || discPair.needsKeepShort
+    // Shown in a field whose rows hold different values, which saving
+    // keeps: one word, the same in every field. It is short enough for
+    // Track's and Disc's beside their Revert at any font ("Multiple values"
+    // didn't fit there, so the whole form changed its word to "Mixed" as
+    // one of them gained its Revert; widening them took the table's room).
+    readonly property string keepText: I18n.i18nc("@info:placeholder short, in fields as narrow as a track number's: the selected files keep their different values", "Mixed")
     readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
     readonly property bool busy: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
     // Bumped whenever the selection or the edits change, for the bindings
@@ -606,6 +603,12 @@ Components.DialogWindow {
     }
 
     function handleRowClick(row, modifiers) {
+        // The row takes the keyboard from a column's Revert, which would
+        // keep it, and Enter, as the focus scope's focused item.
+        const focused = root.activeFocusItem
+        if (focused && focused.inTableHeader === true) {
+            focused.focus = false
+        }
         tagEditorTable.forceActiveFocus()
         const ctrl = (modifiers & Qt.ControlModifier) !== 0
         const shift = (modifiers & Qt.ShiftModifier) !== 0
@@ -897,21 +900,50 @@ Components.DialogWindow {
         windowRoot: root
     }
 
+    // A Revert's tooltip, above its glyph with their right edges in line:
+    // under it, it covered the next field, or the first row. A window of
+    // its own, as over the top field it rises past the dialog's edge. On
+    // Wayland the compositor places such a window from its parent alone,
+    // at that item's bottom right corner, and not from x and y, so its
+    // parent is a point where its top left corner goes (see AppMenu.qml).
+    component RevertToolTip: Item {
+        id: toolTipPoint
+
+        required property Item button
+        property alias message: revertToolTip.message
+
+        x: toolTipPoint.button.width - Math.ceil(revertToolTip.implicitWidth) - width
+        y: -Kirigami.Units.smallSpacing - Math.ceil(revertToolTip.implicitHeight) - height
+        width: 1
+        height: 1
+
+        Components.PlainToolTip {
+            id: revertToolTip
+            objectName: "tagEditorRevertToolTip"
+            popupType: Popup.Window
+            x: toolTipPoint.width
+            y: toolTipPoint.height
+            delay: Kirigami.Units.toolTipDelay
+            visible: toolTipPoint.button.visible
+                && (toolTipPoint.button.hovered || toolTipPoint.button.visualFocus)
+            // The keyboard stays in the dialog. Qt makes a popup window's
+            // popup that window's focused item as it shows, and one that
+            // still is as it goes hands the keyboard back to what had it
+            // then: Tab or a click away from a Revert came back to it as
+            // its tooltip had faded. The tooltip's label is that item
+            // instead, so there is nothing to hand back.
+            onAboutToShow: revertToolTip.contentItem.focus = true
+        }
+    }
+
     // A text field of a tag: its label turns semibold and a revert button
     // shows while the edits change it.
     component TagField: TextField {
         id: fieldEditor
 
         required property var field
-        // A number field, which says that its files differ in the short
-        // words where the whole ones do not fit.
-        property bool compact: false
         // Its files hold different values, which saving keeps.
         property bool mixed: false
-        readonly property bool keepTextFits: fieldMetrics.advanceWidth(root.keepText)
-            <= fieldEditor.width - fieldEditor.leftPadding - fieldEditor.rightPadding
-        // Its files differ, and it is too narrow to say so whole.
-        readonly property bool needsKeepShort: fieldEditor.compact && fieldEditor.mixed && !fieldEditor.keepTextFits
         property bool touched: false
         // The text it shows for the tracks, before the user types.
         property string committedText: ""
@@ -931,6 +963,9 @@ Components.DialogWindow {
         }
         property var editRowsSnapshot: []
         readonly property bool changed: root.bulkFieldMarked(fieldEditor.field.key)
+        readonly property Item revert: revertButton
+        KeyNavigation.tab: root.tabStopFrom(fieldEditor, 1)
+        KeyNavigation.backtab: root.tabStopFrom(fieldEditor, -1)
 
         function captureEditRowsSnapshot() {
             editRowsSnapshot = root.tagEditorApi.selectedRows()
@@ -955,7 +990,7 @@ Components.DialogWindow {
         Layout.fillWidth: true
         selectByMouse: true
         persistentSelection: true
-        placeholderText: fieldEditor.mixed ? (root.keepShortInForm ? root.keepShortText : root.keepText) : ""
+        placeholderText: fieldEditor.mixed ? root.keepText : ""
         placeholderTextColor: root.uiPalette.placeholderText
         rightPadding: fieldEditor.changed
             ? revertButton.width + Kirigami.Units.smallSpacing
@@ -1004,6 +1039,15 @@ Components.DialogWindow {
             anchors.verticalCenter: parent.verticalCenter
             width: root.fieldRevertWidth
             height: width
+            KeyNavigation.tab: root.tabStopFrom(revertButton, 1)
+            KeyNavigation.backtab: root.tabStopFrom(revertButton, -1)
+            // Enter presses it, as Space does, rather than Save.
+            Keys.onPressed: function(event) {
+                if (KeyUtils.isEnter(event)) {
+                    event.accepted = true
+                    revertButton.clicked()
+                }
+            }
             visible: fieldEditor.changed
             enabled: !root.busy
             icon.name: "edit-undo"
@@ -1011,13 +1055,19 @@ Components.DialogWindow {
             icon.height: root.uiPalette.labelIconSize
             display: AbstractButton.IconOnly
             text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1", fieldEditor.field.label)
-            ToolTip.visible: hovered || visualFocus
-            ToolTip.delay: Kirigami.Units.toolTipDelay
-            ToolTip.text: root.revertToolTip(fieldEditor.field.key)
             onClicked: {
                 fieldEditor.touched = false
+                // It hides as it reverts: the keyboard goes to its field.
+                if (revertButton.activeFocus) {
+                    fieldEditor.forceActiveFocus(Qt.OtherFocusReason)
+                }
                 root.tagEditorApi.revertBulkField(fieldEditor.field.key)
                 fieldEditor.syncFromController()
+            }
+
+            RevertToolTip {
+                button: revertButton
+                message: root.revertToolTip(fieldEditor.field.key)
             }
         }
     }
@@ -1260,15 +1310,15 @@ Components.DialogWindow {
                 width: tagEditorFieldsScroll.availableWidth
                 spacing: Kirigami.Units.largeSpacing + 2
 
-                FieldRow { field: root.fieldAt("title") }
-                FieldRow { field: root.fieldAt("artist") }
-                FieldRow { field: root.fieldAt("album") }
-                FieldRow { field: root.fieldAt("albumArtist") }
-                FieldRow { field: root.fieldAt("genre") }
-                FieldRow { field: root.fieldAt("year") }
+                FieldRow { id: titleRow; field: root.fieldAt("title") }
+                FieldRow { id: artistRow; field: root.fieldAt("artist") }
+                FieldRow { id: albumRow; field: root.fieldAt("album") }
+                FieldRow { id: albumArtistRow; field: root.fieldAt("albumArtist") }
+                FieldRow { id: genreRow; field: root.fieldAt("genre") }
+                FieldRow { id: yearRow; field: root.fieldAt("year") }
                 NumberPair { id: trackPair; first: root.fieldAt("trackNo"); second: root.fieldAt("totalTracks") }
                 NumberPair { id: discPair; first: root.fieldAt("discNo"); second: root.fieldAt("totalDiscs") }
-                FieldRow { field: root.fieldAt("comment") }
+                FieldRow { id: commentRow; field: root.fieldAt("comment") }
             }
         }
 
@@ -1292,6 +1342,7 @@ Components.DialogWindow {
                 clip: true
                 focus: true
                 activeFocusOnTab: true
+                KeyNavigation.backtab: root.tabStopFrom(tagEditorTable, -1)
                 model: root.tagEditorApi.tableModel
                 currentIndex: -1
                 keyNavigationEnabled: false
@@ -1362,6 +1413,44 @@ Components.DialogWindow {
                                         anchors.verticalCenter: parent.verticalCenter
                                         visible: headerCell.changed
                                         enabled: !root.busy
+                                        readonly property bool inTableHeader: true
+                                        // It is the table's focused item only
+                                        // while it has the keyboard: the table,
+                                        // a focus scope, gave it back to it as
+                                        // Tab or a click came to the files.
+                                        // Another window's turn keeps it,
+                                        // when no item here has the keyboard
+                                        // (`active` holds for the window of
+                                        // a dialog over this one).
+                                        onActiveFocusChanged: {
+                                            if (columnRevert.activeFocus) {
+                                                root.showInTable(headerCell)
+                                            } else if (root.activeFocusItem !== null) {
+                                                columnRevert.focus = false
+                                            }
+                                        }
+                                        onVisibleChanged: {
+                                            if (!columnRevert.visible) {
+                                                columnRevert.focus = false
+                                            }
+                                        }
+                                        // Shift+Tab from the first goes back to
+                                        // the files, which Tab came from: the
+                                        // window's order skips a focus scope
+                                        // going back out of it.
+                                        Keys.onBacktabPressed: function(event) {
+                                            if (columnRevert.nextItemInFocusChain(false).inTableHeader === true) {
+                                                event.accepted = false
+                                            } else {
+                                                columnRevert.focus = false
+                                            }
+                                        }
+                                        Keys.onPressed: function(event) {
+                                            if (KeyUtils.isEnter(event)) {
+                                                event.accepted = true
+                                                columnRevert.clicked()
+                                            }
+                                        }
                                         width: root.uiPalette.labelIconSize + Kirigami.Units.smallSpacing
                                         height: width
                                         padding: 0
@@ -1371,10 +1460,12 @@ Components.DialogWindow {
                                         display: AbstractButton.IconOnly
                                         text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1 in Every File",
                                             headerCell.modelData.label)
-                                        ToolTip.visible: hovered || visualFocus
-                                        ToolTip.delay: Kirigami.Units.toolTipDelay
-                                        ToolTip.text: text
                                         onClicked: root.tagEditorApi.revertField(headerCell.modelData.key)
+
+                                        RevertToolTip {
+                                            button: columnRevert
+                                            message: columnRevert.text
+                                        }
                                     }
                                 }
                             }
@@ -1521,6 +1612,41 @@ Components.DialogWindow {
         }
     }
 
+    // The fields, in the form's order.
+    readonly property list<Item> fieldEditors: [titleRow.editor, artistRow.editor, albumRow.editor,
+        albumArtistRow.editor, genreRow.editor, yearRow.editor, trackPair.firstEditor, trackPair.secondEditor,
+        discPair.firstEditor, discPair.secondEditor, commentRow.editor]
+    // Where Tab goes, up to the files: field to field, past the Revert of
+    // an edited one (it took a press for each, and Space there undid the
+    // edit just typed), then the fields' Reverts in their order, then the
+    // files, whose columns' Reverts follow in the window's own order. The
+    // links pass over a Revert that doesn't show.
+    readonly property var tabStops: {
+        const fields = []
+        const reverts = []
+        for (let i = 0; i < root.fieldEditors.length; ++i) {
+            fields.push(root.fieldEditors[i])
+            reverts.push(root.fieldEditors[i].revert)
+        }
+        return fields.concat(reverts, [tagEditorTable])
+    }
+
+    // The stop `step` from `item` in tabStops, or null past either end.
+    function tabStopFrom(item, step) {
+        const at = root.tabStops.indexOf(item)
+        return at >= 0 && at + step >= 0 && at + step < root.tabStops.length ? root.tabStops[at + step] : null
+    }
+
+    // Scrolls the table sideways until `item`, in its header, is in view.
+    function showInTable(item) {
+        const left = item.mapToItem(tagEditorTable, 0, 0).x
+        if (left < 0) {
+            tagEditorTable.contentX += left
+        } else if (left + item.width > tagEditorTable.width) {
+            tagEditorTable.contentX += left + item.width - tagEditorTable.width
+        }
+    }
+
     // The labels' column: as wide as the longest label, semibold.
     readonly property real fieldLabelWidth: {
         let widest = 0
@@ -1561,6 +1687,7 @@ Components.DialogWindow {
     component FieldRow: ColumnLayout {
         id: fieldRow
         required property var field
+        property alias editor: rowEditor
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
@@ -1569,7 +1696,7 @@ Components.DialogWindow {
             spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
 
             FieldLabel { field: fieldRow.field }
-            TagField { field: fieldRow.field }
+            TagField { id: rowEditor; field: fieldRow.field }
         }
 
         Label {
@@ -1594,17 +1721,18 @@ Components.DialogWindow {
         id: pair
         required property var first
         required property var second
-        readonly property bool needsKeepShort: firstField.needsKeepShort || secondField.needsKeepShort
         // Its fields at their narrowest: "Mixed" whole beside the Revert
         // (at 24 pt it elided to "Mix…" once the Revert followed the font).
         readonly property real fieldLeastWidth: Math.ceil(firstField.leftPadding
-            + fieldMetrics.advanceWidth(root.keepShortText)
+            + fieldMetrics.advanceWidth(root.keepText)
             + root.fieldRevertWidth + Kirigami.Units.smallSpacing)
         // The pair at its narrowest: the label, the fields and "of".
         readonly property real leastWidth: Math.ceil(root.fieldLabelWidth + Kirigami.Units.largeSpacing
             + 3 * pair.spacing + ofLabel.implicitWidth + 2 * pair.fieldLeastWidth)
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
+        property alias firstEditor: firstField
+        property alias secondEditor: secondField
 
         FieldLabel {
             field: pair.first
@@ -1614,7 +1742,6 @@ Components.DialogWindow {
         TagField {
             id: firstField
             field: pair.first
-            compact: true
             Layout.fillWidth: true
             Layout.preferredWidth: Kirigami.Units.gridUnit * 3
         }
@@ -1631,7 +1758,6 @@ Components.DialogWindow {
         TagField {
             id: secondField
             field: pair.second
-            compact: true
             Layout.fillWidth: true
             Layout.preferredWidth: Kirigami.Units.gridUnit * 3
         }

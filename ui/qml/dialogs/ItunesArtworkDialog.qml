@@ -724,10 +724,11 @@ Components.DialogWindow {
             // above the middle of where the results would be, under a slot
             // with the busy indicator while it searches. The slot stays, so
             // the first line keeps its baseline as the search ends, and the
-            // lines after it grow downwards. Quiet, as the queue's empty
-            // state: the base font, with no glyph, for finding nothing is a
-            // routine outcome; searching is in the secondary colour, what it
-            // found in the text's. A search that failed says so in a
+            // lines after it grow downwards. Finding nothing is a routine
+            // outcome, and speaks as searching does: a glyph in the slot and
+            // a line in the secondary colour, with no heading or frame (a
+            // line in the text's colour under an empty slot, it outranked
+            // searching). A search that failed says so in a
             // semibold heading, with the system's words under it in the
             // secondary colour (otherwise it read as finding nothing),
             // and a warning glyph in the spinner's place. Built from its
@@ -753,9 +754,9 @@ Components.DialogWindow {
                 visible: itunesArtworkResultsView.count === 0
                     && (placeholder.searching || placeholderMessage.text.length > 0)
 
-                // The state's one glyph, or none: 32 px with the default
-                // font and larger with a larger one, as the text under it (a
-                // fixed 32 px stood over 24 pt text).
+                // The state's one glyph: 32 px with the default font and
+                // larger with a larger one, as the text under it (a fixed
+                // 32 px stood over 24 pt text).
                 Item {
                     id: glyphSlot
                     objectName: "itunesArtworkGlyphSlot"
@@ -780,6 +781,18 @@ Components.DialogWindow {
                         anchors.fill: parent
                         visible: placeholder.failed
                         source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        isMask: true
+                        color: root.uiPalette.textSecondary
+                        Accessible.ignored: true
+                    }
+
+                    // Nothing to show: the search's glyph, in the same
+                    // place, size and ink.
+                    Kirigami.Icon {
+                        objectName: "itunesArtworkNothingFoundIcon"
+                        anchors.fill: parent
+                        visible: !placeholder.searching && !placeholder.failed
+                        source: "edit-find"
                         isMask: true
                         color: root.uiPalette.textSecondary
                         Accessible.ignored: true
@@ -813,8 +826,7 @@ Components.DialogWindow {
                         text: placeholder.failed
                             ? (root.uiBridge.itunesArtworkErrorText || "")
                             : (root.uiBridge.itunesArtworkStatusText || "")
-                        color: placeholder.searching || placeholder.failed
-                            ? root.uiPalette.textSecondary : root.uiPalette.text
+                        color: root.uiPalette.textSecondary
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.Wrap
                     }
@@ -840,12 +852,15 @@ Components.DialogWindow {
         uiPalette: root.uiPalette
         windowRoot: root
         title: I18n.i18nc("@title:window", "Replace Album Art")
-        // Two short sentences, as the backend applies it: to the folder's
-        // cover image where the folder has one, otherwise embedded in the
-        // album's tracks (artwork::apply_artwork_to_track), rather than one
-        // sentence of 31 words.
-        details: I18n.i18nc("@info", "The new artwork replaces the album’s cover image file or, if it has none, "
-            + "the artwork embedded in its tracks. Ferrous keeps no copy of the current album art.")
+        // A short sentence for each case, as the backend applies it
+        // (artwork::apply_artwork_to_track), then what is lost. A folder
+        // that shows any image as its cover gets a cover file: the one with
+        // a cover's name is overwritten, and otherwise a new one is written
+        // beside the images that stay, so not every replaced image is lost
+        // ("replaces the album's cover image file" said it was). Without
+        // such an image, the album's tracks get it as their front cover.
+        details: I18n.i18nc("@info", "If the album’s folder has a cover image, the new album art is saved as its "
+            + "cover file. Otherwise it is embedded in the album’s tracks. Ferrous keeps no copy of what it overwrites.")
         confirmText: I18n.i18nc("@action:button", "Replace")
         // Breeze's swap: one image for the other. Its "document-replace", a
         // page with a red ×, read as Delete; red is the glyph of the

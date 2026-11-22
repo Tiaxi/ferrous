@@ -102,14 +102,12 @@ Components.CompactDialogWindow {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
-        // What Discard closes: the tag editor, not this question.
+        // Only what Discard loses, before closing as before quitting: the
+        // question says what follows, and Save is its own button (the body
+        // read the buttons out again).
         textFormat: Text.PlainText
-        text: root.forQuit
-            ? I18n.i18nc("@info", "Save writes the current edits and quits. "
-                + "Discard drops every unsaved change and quits. Cancel keeps Ferrous open.")
-            : (root.forReload
-                ? I18n.i18nc("@info", "Reloading drops every unsaved change. Cancel keeps editing.")
-                : I18n.i18nc("@info",
-                    "Save writes the current edits. Discard drops every unsaved change and closes the tag editor."))
+        text: root.forReload
+            ? I18n.i18nc("@info", "Reloading drops every unsaved change. Cancel keeps editing.")
+            : I18n.i18nc("@info", "Discard drops every unsaved change.")
     }
 }

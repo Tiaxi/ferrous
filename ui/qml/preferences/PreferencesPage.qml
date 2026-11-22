@@ -12,7 +12,8 @@ import "." as Preferences
 // one place as the pages change. A page taller than the dialog scrolls.
 // The form takes the page's width: its labels beside the fields while the
 // page has the room for both, above them when it has not, whatever the
-// font; help texts wrap to the fields' column. Its form keeps its height
+// font, and while its fields' column holds what the page needs to read;
+// help texts wrap to the fields' column. Its form keeps its height
 // while the page is out of view, so Configure can open tall enough for
 // every page.
 ScrollView {
@@ -72,6 +73,14 @@ ScrollView {
             narrow: Math.ceil(narrowest)
         }
     }
+    // What a page's fields need to be read in their column beside the
+    // labels, such as Library's paths, where that is more than they are
+    // laid out at: in less, the labels go above them. It widens no window.
+    property real fieldsReadingWidth: 0
+    // That column's width. Not from the form's, which a scroll bar that
+    // comes and goes with the layout narrows.
+    readonly property real fieldsColumnWidth: root.width - 2 * root.pageSideInset
+        - Math.ceil(root.labelColumnWidth) - Kirigami.Units.largeSpacing
     // The page's room besides the form: its insets, and a scroll bar.
     readonly property real chromeWidth: 2 * root.pageSideInset + root.ScrollBar.vertical.width
     // The page's width for the form's wide layout, and its narrowest: the
@@ -117,8 +126,9 @@ ScrollView {
             // As wide as the page: its wide layout spreads the fields'
             // column to the page's edge, for the help texts to wrap in.
             // It has that layout while the labels and the fields fit side
-            // by side, whatever the font.
+            // by side, whatever the font, and the fields can be read there.
             wideMode: root.formWidth >= root.formNeeds.wide
+                && root.fieldsColumnWidth >= root.fieldsReadingWidth
             labelColumnWidth: root.labelColumnWidth
             Layout.fillWidth: false
             Layout.preferredWidth: root.formWidth
