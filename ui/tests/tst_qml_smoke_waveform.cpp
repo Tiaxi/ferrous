@@ -21,6 +21,7 @@ private slots:
     void pointerOverTheViewBringsTheViewerControlsBack();
     void gstreamerStoppedTrackPlaysAgainWithItsOverview_data();
     void gstreamerStoppedTrackPlaysAgainWithItsOverview();
+    void gstreamerTrackChangesKeepTheTransportsTrack();
     void modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPicture_data();
     void modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPicture();
     void hiddenWaveformFetchesTheDetailItsFirstSwitchNeeds_data();
@@ -4279,6 +4280,111 @@ void WaveformSmokeTest::gstreamerStoppedTrackPlaysAgainWithItsOverview() {
     QTest::qWait(1000);
     QVERIFY(!analysing->isVisible());
     QVERIFY(!awaiting());
+}
+
+// Writes `seconds` of a tone as FLAC at `path`: whether it did.
+bool writeToneFlac(const QString &path, int seconds) {
+    const QByteArray launch = QStringLiteral(
+        "audiotestsrc num-buffers=%1 samplesperbuffer=4410 wave=sine ! audio/x-raw,format=S16LE,rate=44100,channels=2 "
+        "! flacenc ! filesink location=\"%2\"").arg(seconds * 10).arg(path).toUtf8();
+    GError *error = nullptr;
+    GstElement *pipeline = gst_parse_launch(launch.constData(), &error);
+    if (error != nullptr) {
+        g_error_free(error);
+    }
+    if (pipeline == nullptr) {
+        return false;
+    }
+    gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    GstBus *bus = gst_element_get_bus(pipeline);
+    GstMessage *message = gst_bus_timed_pop_filtered(
+        bus, 10 * GST_SECOND, static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+    const bool written = message != nullptr && GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS;
+    if (message != nullptr) {
+        gst_message_unref(message);
+    }
+    gst_object_unref(bus);
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(pipeline);
+    return written;
+}
+
+// Against the GStreamer backend, whose about-to-finish the mock has not:
+// a file that ends early hands over to the next gapless, and plays again
+// under Repeat One, with the transport never taking its stopped look.
+// Stopped, it keeps the track's length and waveform, with no playhead.
+void WaveformSmokeTest::gstreamerTrackChangesKeepTheTransportsTrack() {
+    QVERIFY(gst_init_check(nullptr, nullptr, nullptr));
+    for (const char *element : {"fakeaudiosink", "flacenc", "flacdec"}) {
+        GstElementFactory *factory = gst_element_factory_find(element);
+        QVERIFY2(factory != nullptr, element);
+        gst_object_unref(factory);
+    }
+    const QByteArray sink = qgetenv("FERROUS_GST_OUTPUT_SINK");
+    qputenv("FERROUS_GST_OUTPUT_SINK", "fakeaudiosink");
+    const auto restoreSink = qScopeGuard([&sink]() { qputenv("FERROUS_GST_OUTPUT_SINK", sink); });
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString root = QFileInfo(dir.path()).canonicalFilePath();
+    const QString cut = root + QStringLiteral("/cut.flac");
+    const QString whole = root + QStringLiteral("/whole.flac");
+    QVERIFY(writeToneFlac(cut, 5));
+    QVERIFY(writeToneFlac(whole, 3));
+    QFile cutFile(cut);
+    QVERIFY(cutFile.resize(cutFile.size() / 2));
+
+    BridgeClient bridge;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const auto finish = qScopeGuard([&bridge]() {
+        bridge.setRepeatMode(0);
+        bridge.stop();
+        bridge.clearQueue();
+    });
+    auto *transport = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
+    auto *time = window->findChild<QQuickItem *>(QStringLiteral("transportTime"));
+    auto *playhead = window->findChild<QQuickItem *>(QStringLiteral("seekPlayhead"));
+    auto *waveform = window->findChild<QQuickItem *>(QStringLiteral("seekWaveform"));
+    QVERIFY(transport && time && playhead && waveform);
+    const auto playing = [&bridge](const QString &path) {
+        return bridge.playbackState() == QStringLiteral("Playing") && bridge.currentTrackPath() == path;
+    };
+    // Whether the stopped look showed on the way.
+    bool lookedStopped = false;
+    const auto watch = [&]() {
+        lookedStopped = lookedStopped || transport->property("stoppedTrack").toBool() || !playhead->isVisible();
+    };
+
+    bridge.setRepeatMode(0);
+    bridge.replaceWithPaths({cut, whole});
+    QTRY_VERIFY_WITH_TIMEOUT(playing(cut) && bridge.waveformEndsEarly(), 10000);
+    QTRY_VERIFY(playhead->isVisible());
+
+    // Gapless.
+    QMetaObject::Connection watching = connect(window, &QQuickWindow::frameSwapped, window, watch);
+    QTRY_VERIFY_WITH_TIMEOUT(playing(whole), 15000);
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.waveformComplete() && !bridge.waveformEndsEarly(), 10000);
+    disconnect(watching);
+    QVERIFY(!lookedStopped);
+
+    bridge.stop();
+    QTRY_COMPARE_WITH_TIMEOUT(bridge.playbackState(), QStringLiteral("Stopped"), 10000);
+    QTRY_COMPARE(time->property("text").toString(), QStringLiteral("–:–– / 0:03"));
+    QVERIFY(waveform->isVisible() && !playhead->isVisible());
+
+    // Repeat One: the same file again.
+    bridge.setRepeatMode(1);
+    bridge.playAt(0);
+    QTRY_VERIFY_WITH_TIMEOUT(playing(cut) && bridge.waveformEndsEarly() && playhead->isVisible(), 10000);
+    const double serial = bridge.currentPlaySerial();
+    watching = connect(window, &QQuickWindow::frameSwapped, window, watch);
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.currentPlaySerial() != serial && playing(cut) && bridge.waveformEndsEarly(),
+                             15000);
+    disconnect(watching);
+    QVERIFY(!lookedStopped);
 }
 
 std::unique_ptr<QmlSmokeTest> makeWaveformSmokeTest(const QString &userDirectoriesParent) {

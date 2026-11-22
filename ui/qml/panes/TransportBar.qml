@@ -129,10 +129,21 @@ ToolBar {
         ? Window.window.devicePixelRatio
         : Screen.devicePixelRatio
 
-    // Whether the seek bar has a waveform to draw: peaks of the playing
-    // track, which the bridge sends as bytes.
+    readonly property bool stopped: root.uiBridge.playbackState === "Stopped"
+    // Stopped with a track loaded, which is not the empty transport (it
+    // was drawn as one): the bar has the track's waveform, all unplayed and
+    // with no playhead, and the time its length. The engine keeps a stopped
+    // track current until the queue is empty.
+    readonly property bool stoppedTrack: root.stopped && root.uiBridge.queueLength > 0
+        && (root.uiBridge.currentTrackPath || "").length > 0
+
+    // Whether the seek bar has a waveform to draw: peaks of the current
+    // track, which the bridge sends as bytes. Stopped, only what it holds
+    // of that track: the bridge keeps the peaks of the track before until
+    // the next one's come, and covers none of it until then.
     readonly property bool hasWaveform: {
-        if (root.uiBridge.playbackState === "Stopped") {
+        if (root.stopped && !(root.stoppedTrack
+                && (root.uiBridge.waveformCoverageSeconds > 0 || root.uiBridge.waveformComplete))) {
             return false
         }
         const peaks = root.uiBridge.waveformPeaksPacked
@@ -517,10 +528,10 @@ ToolBar {
             // as much as a long track.
             readonly property bool durationKnown: isFinite(root.uiBridge.durationSeconds)
                 && root.uiBridge.durationSeconds > 0
-            // A track is loaded, playing or paused: the bar shows its
-            // playhead, at the start until its length is known.
-            readonly property bool trackLoaded: root.uiBridge.playbackState !== "Stopped"
-            readonly property bool seekAllowed: durationKnown && trackLoaded
+            // A track plays or is paused: the bar shows its playhead, at
+            // the start until its length is known.
+            readonly property bool trackActive: !root.stopped
+            readonly property bool seekAllowed: durationKnown && trackActive
             // The bar: 28 px, with the ±12 px waveform in its middle and
             // the playhead across its height, 2 px past the waveform's
             // peaks on either side. A larger font scales the waveform as it
@@ -802,7 +813,7 @@ ToolBar {
                     // Only with peaks: it lets what is under it show, the
                     // empty line too.
                     visible: root.hasWaveform
-                    peaksData: root.uiBridge.playbackState === "Stopped"
+                    peaksData: root.stopped && !root.hasWaveform
                         ? ""
                         : root.uiBridge.waveformPeaksPacked
                     generatedSeconds: root.uiBridge.waveformCoverageSeconds
@@ -819,11 +830,12 @@ ToolBar {
                 // The unplayed part: the chrome over the waveform after the
                 // playhead's line, which leaves it at the unplayed opacity,
                 // and the band's colour where the band is, so the band is
-                // the same on either side of the playhead.
+                // the same on either side of the playhead. Stopped, all of
+                // the waveform is unplayed.
                 Item {
                     id: seekUnplayed
                     objectName: "seekUnplayed"
-                    visible: seekSlider.trackLoaded
+                    visible: seekSlider.trackActive || root.hasWaveform
                     x: seekSlider.playheadX
                     width: Math.max(0, parent.width - x)
                     y: waveformItem.y
@@ -892,7 +904,7 @@ ToolBar {
                 Rectangle {
                     id: seekPlayhead
                     objectName: "seekPlayhead"
-                    visible: seekSlider.trackLoaded
+                    visible: seekSlider.trackActive
                     antialiasing: false
                     y: root.snapped((parent.height - seekSlider.playheadHeight) / 2)
                     height: seekSlider.playheadHeight
@@ -1129,17 +1141,23 @@ ToolBar {
         }
 
         // "1:17 / 3:49": the position in the text colour, the length in the
-        // secondary one; "–:–– / –:––" in the secondary colour with nothing
-        // playing, which fills the box as a time does, so the volume keeps
-        // its distance from what is drawn ("–:––" alone left a hole of some
-        // 45 px before it).
+        // secondary one. Stopped, all of it in the secondary colour and no
+        // position, as there is no playhead: "–:–– / 3:49" with a track
+        // loaded, its length the queue's until the engine has it, and
+        // "–:–– / –:––" without, which fills the box as a time does, so the
+        // volume keeps its distance from what is drawn ("–:––" alone left a
+        // hole of some 45 px before it).
         Item {
             id: transportTime
             objectName: "transportTime"
-            readonly property bool empty: root.uiBridge.playbackState === "Stopped"
-            readonly property string lengthText: seekSlider.durationKnown
-                ? FormatUtils.clockText(root.uiBridge.durationText)
-                : I18n.i18nc("@info:status no time", "–:––")
+            readonly property string noTime: I18n.i18nc("@info:status no time", "–:––")
+            readonly property string lengthText: root.stopped && !root.stoppedTrack
+                ? transportTime.noTime
+                : seekSlider.durationKnown
+                    ? FormatUtils.clockText(root.uiBridge.durationText)
+                    : root.stoppedTrack && (root.uiBridge.playingQueueLengthText || "").length > 0
+                        ? root.uiBridge.playingQueueLengthText
+                        : transportTime.noTime
             readonly property string text: timePosition.text + timeLength.text
 
             Layout.leftMargin: root.seekToTimeGap
@@ -1176,9 +1194,9 @@ ToolBar {
                     id: timePosition
                     objectName: "transportTimePosition"
                     font.features: root.uiPalette.tabularFigures
-                    color: transportTime.empty ? root.uiPalette.textSecondary : root.uiPalette.text
-                    text: transportTime.empty
-                        ? I18n.i18nc("@info:status no time", "–:––")
+                    color: root.stopped ? root.uiPalette.textSecondary : root.uiPalette.text
+                    text: root.stopped
+                        ? transportTime.noTime
                         : FormatUtils.clockText(root.positionText)
                 }
 
@@ -1188,9 +1206,7 @@ ToolBar {
                     font.features: root.uiPalette.tabularFigures
                     color: root.uiPalette.textSecondary
                     text: I18n.i18nc("@info:status the track's length after its position", " / %1",
-                        transportTime.empty
-                            ? I18n.i18nc("@info:status no time", "–:––")
-                            : transportTime.lengthText)
+                        transportTime.lengthText)
                 }
             }
         }

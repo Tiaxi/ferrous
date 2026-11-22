@@ -131,6 +131,10 @@ ApplicationWindow {
         property var waveformPeaksPacked: ""
         property real waveformCoverageSeconds: 0
         property bool waveformComplete: false
+        property bool waveformEndsEarly: false
+        property string currentTrackPath: ""
+        property int queueLength: 0
+        property string playingQueueLengthText: ""
         property int repeatMode: 0
         property bool shuffleEnabled: false
         property string currentTrackFormatLabel: "FLAC"
@@ -510,6 +514,10 @@ private slots:
     void transportPressedReadsApartFromHover();
     void seekToolTipFadesInAtTheShortDuration();
     void seekWithoutATrackIsALineAndNoTime();
+    void seekStoppedWithATrackKeepsItsLengthAndWaveform_data();
+    void seekStoppedWithATrackKeepsItsLengthAndWaveform();
+    void seekStoppedShowsNoOtherTracksWaveform();
+    void transportStaysTheTrackThroughATrackChange();
     void seekEmptyLineRunsPastAnEarlyEndingWaveform_data();
     void seekEmptyLineRunsPastAnEarlyEndingWaveform();
     void seekPlayheadMovesAcrossAShortTrack_data();
@@ -1850,6 +1858,138 @@ void TransportStatusTest::seekWithoutATrackIsALineAndNoTime() {
     QCOMPARE(time->property("text").toString(), QStringLiteral("–:–– / –:––"));
     QVERIFY(sameColor(position->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(!seek->isEnabled());
+}
+
+void TransportStatusTest::seekStoppedWithATrackKeepsItsLengthAndWaveform_data() {
+    addThemeRows();
+}
+
+// Stopped with a track loaded is not the empty transport (it was drawn as
+// one): the track's length stays, in the secondary colour, and its waveform
+// in the unplayed tone, with no playhead and no amber. It does not seek, as
+// before.
+void TransportStatusTest::seekStoppedWithATrackKeepsItsLengthAndWaveform() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QObject *bridge = harness.bridge;
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/track.flac"));
+    bridge->setProperty("queueLength", 1);
+    bridge->setProperty("waveformPeaksPacked", fullScalePeaks());
+    bridge->setProperty("waveformCoverageSeconds", 229.0);
+    bridge->setProperty("waveformComplete", true);
+    QQuickItem *time = harness.item(QStringLiteral("transportTime"));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QVERIFY(time && seek && waveform && transport);
+    QTRY_VERIFY(waveform->isVisible());
+    const QRectF timeRect = sceneRect(time);
+
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QCOMPARE(time->property("text").toString(), QStringLiteral("–:–– / 3:49"));
+    for (const char *part : {"transportTimePosition", "transportTimeLength"}) {
+        QVERIFY(sameColor(harness.item(QString::fromLatin1(part))->property("color").value<QColor>(),
+                          harness.token("textSecondary")));
+    }
+    QCOMPARE(sceneRect(time), timeRect);
+    QVERIFY(waveform->isVisible());
+    QVERIFY(!harness.item(QStringLiteral("seekPlayhead"))->isVisible());
+    QVERIFY(!harness.item(QStringLiteral("seekEmptyLine"))->isVisible());
+    QVERIFY(!seek->isEnabled());
+
+    // As drawn: the unplayed tone from the bar's first pixel to its last,
+    // and nowhere the amber.
+    const QColor chrome = harness.transportChrome();
+    const QColor unplayed = mixed(chrome, transport->property("seekPlayedColor").value<QColor>(),
+                                  transport->property("seekUnplayedOpacity").toDouble());
+    const QRectF bar = sceneRect(seek);
+    qreal scale = 1;
+    const auto allUnplayed = [&]() {
+        const QImage image = grabbed(harness.window, &scale);
+        for (qreal x = bar.left() + 0.5; x < std::floor(bar.right()); x += 1.0) {
+            const QColor pixel = pixelAt(image, QPointF(x, std::floor(bar.center().y()) + 0.5), scale);
+            if (channelDistance(pixel, unplayed) > 3) {
+                return false;
+            }
+        }
+        return true;
+    };
+    QTRY_VERIFY(allUnplayed());
+
+    // Stopped with no length of its own yet, as after a start: the queue's
+    // length for it, and dashes when that has none either.
+    bridge->setProperty("durationSeconds", 0.0);
+    bridge->setProperty("durationText", QStringLiteral("00:00"));
+    bridge->setProperty("playingQueueLengthText", QStringLiteral("4:05"));
+    QCOMPARE(time->property("text").toString(), QStringLiteral("–:–– / 4:05"));
+    bridge->setProperty("playingQueueLengthText", QString());
+    QCOMPARE(time->property("text").toString(), QStringLiteral("–:–– / –:––"));
+
+    // No track, or an empty queue: the hairline and dashes.
+    bridge->setProperty("durationSeconds", 229.0);
+    bridge->setProperty("durationText", QStringLiteral("03:49"));
+    bridge->setProperty("playingQueueLengthText", QStringLiteral("3:49"));
+    for (const bool noPath : {false, true}) {
+        bridge->setProperty("queueLength", noPath ? 1 : 0);
+        bridge->setProperty("currentTrackPath", noPath ? QString() : QStringLiteral("/music/track.flac"));
+        QCOMPARE(time->property("text").toString(), QStringLiteral("–:–– / –:––"));
+        QVERIFY(!waveform->isVisible());
+        QVERIFY(harness.item(QStringLiteral("seekEmptyLine"))->isVisible());
+        QVERIFY(!harness.item(QStringLiteral("seekUnplayed"))->isVisible());
+    }
+}
+
+// A track made current while stopped has no waveform held: the bridge keeps
+// the peaks of the track before until the new one's come, with no coverage.
+void TransportStatusTest::seekStoppedShowsNoOtherTracksWaveform() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QObject *bridge = harness.bridge;
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/first.flac"));
+    bridge->setProperty("queueLength", 2);
+    bridge->setProperty("waveformPeaksPacked", fullScalePeaks());
+    bridge->setProperty("waveformCoverageSeconds", 137.0);
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
+    QQuickItem *emptyLine = harness.item(QStringLiteral("seekEmptyLine"));
+    QVERIFY(waveform && emptyLine);
+    // What was decoded of a track stopped early is held.
+    QVERIFY(waveform->isVisible());
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/second.flac"));
+    bridge->setProperty("waveformCoverageSeconds", 0.0);
+    bridge->setProperty("durationSeconds", 0.0);
+    QVERIFY(!waveform->isVisible());
+    QVERIFY(emptyLine->isVisible());
+}
+
+// Gapless and Repeat One never stop, so they never take the stopped look:
+// the playhead and the position stay, also for the moment without a length
+// and peaks.
+void TransportStatusTest::transportStaysTheTrackThroughATrackChange() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QObject *bridge = harness.bridge;
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/first.flac"));
+    bridge->setProperty("queueLength", 2);
+    QQuickItem *time = harness.item(QStringLiteral("transportTime"));
+    QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
+    QVERIFY(time && playhead);
+    // The next track, then the same again as Repeat One plays it.
+    for (int change = 0; change < 2; ++change) {
+        bridge->setProperty("currentTrackPath", QStringLiteral("/music/second.flac"));
+        bridge->setProperty("durationSeconds", 0.0);
+        bridge->setProperty("waveformCoverageSeconds", 0.0);
+        bridge->setProperty("playingQueueLengthText", QStringLiteral("4:05"));
+        harness.root->setProperty("positionText", QStringLiteral("00:00"));
+        QVERIFY(playhead->isVisible());
+        QCOMPARE(time->property("text").toString(), QStringLiteral("0:00 / –:––"));
+        QVERIFY(sameColor(harness.item(QStringLiteral("transportTimePosition"))->property("color").value<QColor>(),
+                          harness.token("text")));
+        bridge->setProperty("durationSeconds", 245.0);
+        bridge->setProperty("durationText", QStringLiteral("04:05"));
+        QCOMPARE(time->property("text").toString(), QStringLiteral("0:00 / 4:05"));
+    }
 }
 
 void TransportStatusTest::seekEmptyLineRunsPastAnEarlyEndingWaveform_data() {

@@ -1845,6 +1845,10 @@ int BridgeClient::playingQueueIndex() const {
     return m_playingQueueIndex;
 }
 
+QString BridgeClient::playingQueueLengthText() const {
+    return m_playingQueueLengthText;
+}
+
 QString BridgeClient::currentTrackPath() const {
     return m_currentTrackPath;
 }
@@ -5986,6 +5990,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_playingQueueIndex = playing;
         changed = true;
         trackIdentitySignalChanged = true;
+    }
+    const QueueRowData *playingRow = m_queueRowsModel.rowAt(playing);
+    const QString playingLengthText = playingRow != nullptr && !currentPath.isEmpty()
+        ? playingRow->lengthText
+        : QString{};
+    if (m_playingQueueLengthText != playingLengthText) {
+        m_playingQueueLengthText = playingLengthText;
+        changed = true;
+        snapshotSignalChanged = true;
     }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileUiEnabled) {

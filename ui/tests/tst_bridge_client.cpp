@@ -298,6 +298,7 @@ private slots:
     void rowCommandsCarryTheQueueRevision();
     void aLargeQueueEditDecodesOnlyTheChangedRows();
     void gaplessAndRepeatOneMoveOnlyThePlayingRow();
+    void playingQueueLengthFollowsTheCurrentRow();
     void snapshotWorkerDecodesPacketsInTheirOrder();
     void snapshotWorkerDropsPacketsOfAnEarlierGeneration();
     void droppedQueueRowsAreFreedOnTheWorker();
@@ -457,7 +458,6 @@ private slots:
     void coverImageProviderReadsTheFileOfAStampedId();
     void replacedCoverReloadsForANewStampButNotFromTheCache();
     void drawsOffscreenUnlessAPlatformIsChosen();
-
 private:
     QString m_userDirectoriesParent;
     // The current test's own user directories; see init().
@@ -5115,6 +5115,53 @@ void BridgeClientTest::gaplessAndRepeatOneMoveOnlyThePlayingRow() {
     QCOMPARE(rowSignals.resets.count(), 0);
     QCOMPARE(rowSignals.updates.count(), 0);
     QCOMPARE(rowSignals.removes.count(), 1);
+}
+
+// The current track's length from its queue row, which stays while it is
+// stopped, follows the row as its tags are read and the track as it
+// changes, gapless and Repeat One too, and goes with the queue.
+void BridgeClientTest::playingQueueLengthFollowsTheCurrentRow() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QStringList paths = numberedPaths(2);
+    auto queue = fullQueueSnapshot(1, paths);
+    queue.queue.tracks[0].lengthSeconds = 245.0f;
+    queue.queue.tracks[1].lengthSeconds = -1.0f;
+    QVERIFY(client.processBinarySnapshot(queue));
+    QCOMPARE(client.playingQueueLengthText(), QString());
+
+    auto stopped = playbackSnapshot(paths.at(0), 0.0, 1);
+    stopped.playback.state = 0;
+    stopped.playback.durationSeconds = 0.0;
+    stopped.playback.currentQueueIndex = -1;
+    client.m_pollSnapshotChanged = false;
+    QVERIFY(client.processBinarySnapshot(stopped));
+    QCOMPARE(client.playingQueueLengthText(), QStringLiteral("4:05"));
+    // The poll that took it tells the views.
+    QVERIFY(client.m_pollSnapshotChanged);
+
+    auto gapless = playbackSnapshot(paths.at(1), 0.0, 2);
+    gapless.playback.currentQueueIndex = 1;
+    QVERIFY(client.processBinarySnapshot(gapless));
+    QCOMPARE(client.playingQueueLengthText(), formatQueueDuration(-1.0));
+    // The row's tags are read.
+    auto read = fullQueueSnapshot(2, paths);
+    read.queue.tracks[0].lengthSeconds = 245.0f;
+    read.queue.tracks[1].lengthSeconds = 62.0f;
+    read.playback = gapless.playback;
+    QVERIFY(client.processBinarySnapshot(read));
+    QCOMPARE(client.playingQueueLengthText(), QStringLiteral("1:02"));
+    auto repeatOne = playbackSnapshot(paths.at(1), 0.0, 3);
+    repeatOne.playback.currentQueueIndex = 1;
+    QVERIFY(client.processBinarySnapshot(repeatOne));
+    QCOMPARE(client.playingQueueLengthText(), QStringLiteral("1:02"));
+
+    auto cleared = fullQueueSnapshot(3, {});
+    cleared.playback.present = true;
+    cleared.playback.state = 0;
+    cleared.playback.currentQueueIndex = -1;
+    QVERIFY(client.processBinarySnapshot(cleared));
+    QCOMPARE(client.playingQueueLengthText(), QString());
 }
 
 void BridgeClientTest::realBridgeQueueEditsArriveAsRowSignals() {
