@@ -29,6 +29,9 @@ Dialog {
     readonly property bool searching: !!root.controller.uiBridge.globalSearchBusy
     readonly property bool retained: !!root.controller.uiBridge.globalSearchModelRetained
     readonly property string queryText: queryField.text.trim()
+    // The query the rows were found by, which they show their matches of
+    // until the rows of a newer one replace them.
+    property string resultsQuery: ""
     readonly property string suggestion: root.controller.uiBridge.globalSearchSuggestion || ""
     // The result rows, from the model rather than the view: the view's
     // count notifies when the view next lays itself out, which the
@@ -90,16 +93,20 @@ Dialog {
     readonly property int fieldButtonSize: 2 * Math.floor(Math.min(root.uiPalette.scaledSize(28), root.fieldHeight - 16) / 2)
     readonly property real titleX: root.sideInset + root.leadSize + 12
     // A track's length at the right: 44 px, or as wide as "00:00" in its
-    // font, and 12 px clear of the context. The title takes up to 300 px
-    // of what is left beside it (more with a larger font, as the palette is
-    // wider), and the context the rest, so the three never meet, whatever
-    // the font and the width of the palette.
+    // font, and 12 px clear of the context. Of the room left beside it the
+    // title takes up to 380 px and the context the rest: in the 800 px
+    // palette, 276 px. The title grows past 300 px only into room the
+    // context can spare over those 276, and takes at most 60 % in a
+    // narrower palette. All follow the font, as the palette's width does,
+    // and the three never meet.
     readonly property real lengthWidth: Math.max(44, Math.ceil(lengthMetrics.advanceWidth))
     readonly property real columnGap: 12
     readonly property real titleWidth: {
         const lengthLeft = root.width - root.sideInset - Kirigami.Units.largeSpacing - root.lengthWidth - root.columnGap
         const room = lengthLeft - root.columnGap - root.titleX
-        return Math.max(0, Math.min(root.uiPalette.scaledSize(300), Math.round(room * 0.6)))
+        const least = Math.min(root.uiPalette.scaledSize(300), Math.round(room * 0.6))
+        const spared = room - root.uiPalette.scaledSize(276)
+        return Math.max(0, Math.min(root.uiPalette.scaledSize(380), Math.max(least, spared)))
     }
     readonly property real contextX: root.titleX + root.titleWidth + root.columnGap
     // Where the palette's top is: set when it opens, from where the
@@ -219,17 +226,22 @@ Dialog {
     function escaped(value) {
         return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     }
-    function highlighted(value) {
-        return root.controller.globalSearchModelApi.highlightText
-            ? root.controller.globalSearchModelApi.highlightText(String(value || ""), queryField.text)
-            : root.escaped(value)
+    // `value` cut where the matches of the results' query start and end.
+    function querySegments(value) {
+        const text = String(value || "")
+        return root.controller.globalSearchModelApi.highlightSegments
+            ? root.controller.globalSearchModelApi.highlightSegments(text, root.resultsQuery)
+            : [{ text: text, match: false }]
     }
+    // From the segments rather than by comparing markup: the model escapes
+    // a quote, so text with one always differed from escaped(), a match.
     function queryMatches(value) {
-        return !!value && root.highlighted(value) !== root.escaped(value)
+        return !!value && root.querySegments(value).some(function(segment) { return segment.match })
     }
-    // A result's details after its title: who and where it is from, and
-    // what else matched.
-    function rowContext(row, full) {
+    readonly property string contextSeparator: " · "
+    // A result's details after its title, in parts: who and where it is
+    // from, and what else matched.
+    function rowContextParts(row, full, oneFolder) {
         let parts = []
         if (row.rowType === "track") {
             const artistAlbum = [row.artist || "", row.album || ""].filter(function(value) { return value.length > 0 })
@@ -242,9 +254,37 @@ Dialog {
             if (count > 0) parts.push(I18n.i18ncp("@info:status", "%1 album", "%1 albums", count))
         }
         if (row.genre && (full || root.queryMatches(row.genre))) parts.push(row.genre)
-        if (row.rootLabel && (full || row.showRoot || root.queryMatches(row.rootLabel))) parts.push(row.rootLabel)
+        if (row.rootLabel && ((full && !oneFolder) || row.showRoot || root.queryMatches(row.rootLabel))) parts.push(row.rootLabel)
         if (row.matchDetail) parts.push(row.matchDetail)
-        return parts.filter(function(value) { return value.length > 0 }).join(" · ")
+        return parts.filter(function(value) { return value.length > 0 })
+    }
+    function rowContext(row, full) {
+        return root.rowContextParts(row, full).join(root.contextSeparator)
+    }
+    // What a result's tooltip says after the title: the whole context, but
+    // a folder's name only where it tells folders apart.
+    function toolTipContext(row) {
+        const oneFolder = (root.controller.uiBridge.libraryRootCount || 0) <= 1
+        return root.rowContextParts(row, true, oneFolder).join(root.contextSeparator)
+    }
+    // Why a row whose title has no match was found: its context as styled
+    // text, the matches in the text colour at the regular weight, the
+    // metadata escaped. "" for any other row. An artist's count of albums
+    // is counted, not searched, so it is no match.
+    function matchedContext(row) {
+        if (root.queryMatches(row.label)) return ""
+        const parts = root.rowContextParts(row, false)
+        const counted = row.rowType === "artist" && (row.count || 0) > 0 ? 1 : 0
+        const open = '<font color="' + root.uiPalette.text + '">'
+        let matched = false
+        const styled = parts.map(function(part, index) {
+            if (index < counted) return root.escaped(part)
+            return root.querySegments(part).map(function(segment) {
+                matched = matched || !!segment.match
+                return segment.match ? open + root.escaped(segment.text) + "</font>" : root.escaped(segment.text)
+            }).join("")
+        })
+        return matched ? styled.join(root.contextSeparator) : ""
     }
     // Translated once rather than in every row.
     readonly property var typeLabels: ({
@@ -280,19 +320,19 @@ Dialog {
     }
 
     // The title of a result in up to five runs, the matches semibold: the
-    // text of each, where it starts and how wide it may be. A run that does
-    // not fit is elided and the runs after it are left out.
+    // text of each, where it starts, how wide it may be and whether that
+    // cuts it. A run that does not fit is elided and the runs after it are
+    // left out.
     readonly property int maxTitleRuns: 5
     function titleRuns(label, allEmphasized) {
         const text = String(label || "")
-        const segments = allEmphasized || !root.controller.globalSearchModelApi.highlightSegments
-            ? [{ text: text, match: allEmphasized }]
-            : root.controller.globalSearchModelApi.highlightSegments(text, queryField.text)
+        const segments = allEmphasized ? [{ text: text, match: true }] : root.querySegments(text)
         return root.layOutRuns(segments, root.maxTitleRuns, root.titleWidth, regularMetrics, semiboldMetrics)
     }
-    // A result emphasises its match in its title only: its
-    // context, such as the artist an album was found by, stays whole and
-    // regular, so it never outweighs the title.
+    // A result's semibold matches are in its title only: its context, such
+    // as the artist an album was found by, stays whole and regular, so it
+    // never outweighs the title. Without a match in the title, the match
+    // in the context is in the text colour (matchedContext).
     // `segments` as at most `maxRuns` runs side by side in `room`: matches
     // past the last run but one stay regular in the last.
     function layOutRuns(segments, maxRuns, room, regular, semibold) {
@@ -306,7 +346,7 @@ Dialog {
             const metrics = segments[i].match ? semibold : regular
             const advance = metrics.advanceWidth(segments[i].text)
             runs.push({ text: segments[i].text, match: !!segments[i].match, x: Math.round(x),
-                        width: Math.min(advance, Math.max(0, room - x)) })
+                        width: Math.min(advance, Math.max(0, room - x)), cut: x + advance > room + 0.5 })
             x += advance
         }
         return runs
@@ -397,6 +437,7 @@ Dialog {
         target: root.controller.globalSearchModelApi
         ignoreUnknownSignals: true
         function onSearchRowsChanged() {
+            root.resultsQuery = queryField.text
             root.rowsRevision += 1
             resultsView.cancelFlick()
             if (!root.controller.selectAfterRowsChanged()) {
@@ -564,8 +605,39 @@ Dialog {
                 boundsBehavior: Flickable.StopAtBounds
                 flickDeceleration: root.snappyScrollFlickDeceleration
                 maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
-                opacity: root.searching ? 0.5 : 1
-                enabled: !root.searching
+                // The rows a running search is to replace take no keys,
+                // clicks or scrolling. The view stays enabled: a disabled
+                // Kirigami icon draws dimmed, so the glyphs dimmed on each
+                // keystroke.
+                interactive: !root.searching
+                // The busy indicator of a slow search: the rows it is to
+                // replace dim. A keystroke's search takes tens of
+                // milliseconds, and dimming for it flashed the list, so the
+                // indicator has a threshold, the animation's pause: it
+                // shows for a search still running 250 ms after its query,
+                // each query starting the pause again, and goes as the
+                // search ends.
+                readonly property string runningQuery: root.searching ? root.queryText : ""
+                onRunningQueryChanged: {
+                    if (resultsView.runningQuery.length === 0) {
+                        slowSearchDim.stop()
+                        resultsView.opacity = 1
+                    } else if (resultsView.opacity === 1) {
+                        slowSearchDim.restart()
+                    }
+                }
+                SequentialAnimation {
+                    id: slowSearchDim
+                    objectName: "globalSearchSlowSearchDim"
+                    PauseAnimation { duration: 250 }
+                    NumberAnimation {
+                        target: resultsView
+                        property: "opacity"
+                        to: 0.5
+                        duration: Kirigami.Units.shortDuration
+                        easing.type: Easing.OutCubic
+                    }
+                }
                 // The app's lane scrollbar, as the library's and the
                 // queue's (Breeze's own was another hand here):
                 // over the lane the rows' text keeps clear of, its thumb
@@ -574,11 +646,13 @@ Dialog {
                     id: resultScrollBar
                     objectName: "globalSearchScrollBar"
                     uiPalette: root.uiPalette
+                    interactive: !root.searching
                 }
                 // The lane the rows' text leaves for the scrollbar, when it
                 // shows.
                 readonly property real scrollbarLane: resultScrollBar.visible ? resultScrollBar.lane : 0
                 Keys.onPressed: function(event) {
+                    if (root.searching) return
                     if (root.handleResultKeys(event)) return
                     if (event.key === Qt.Key_Home || event.key === Qt.Key_End) {
                         root.controller.selectDisplayIndex(event.key === Qt.Key_Home
@@ -610,6 +684,7 @@ Dialog {
                         && (root.controller.uiBridge.playbackState || "Stopped") !== "Stopped"
                     readonly property var titleRuns: isResult ? root.titleRuns(model.label, isNow) : []
                     readonly property string context: isResult ? root.rowContext(model, false) : ""
+                    readonly property string matchedContext: isResult ? root.matchedContext(model) : ""
                     // The context's room: up to the length's column, or the
                     // row's end.
                     readonly property real contextWidth: Math.max(0, (lengthText.visible
@@ -617,7 +692,16 @@ Dialog {
                         : width - root.sideInset - resultsView.scrollbarLane) - root.contextX)
                     // Asked for only when the shared tooltip shows.
                     function toolTipText() {
-                        return model.label + "\n" + root.rowContext(model, true)
+                        return [model.label, root.toolTipContext(model)].filter(function(line) {
+                            return !!line
+                        }).join("\n")
+                    }
+                    // Whether the tooltip says what the row does not: the
+                    // row is elided, or there is more.
+                    function toolTipAdds() {
+                        return resultContext.truncated
+                            || resultRow.titleRuns.some(function(run) { return run.cut })
+                            || root.toolTipContext(model) !== resultRow.context
                     }
                     width: ListView.view.width
                     height: kind === "item" ? root.resultHeight : (kind === "" ? 0 : root.headingHeight)
@@ -834,16 +918,21 @@ Dialog {
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
                         color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
                     }
-                    // The context, whole and regular.
+                    // The context, whole and regular; where the title has
+                    // no match, its matches are in the text colour.
                     Text {
+                        id: resultContext
                         objectName: "globalSearchResultContext"
                         visible: resultRow.isResult
                         x: root.contextX
                         width: resultRow.contextWidth
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
-                        text: resultRow.context
-                        textFormat: Text.PlainText
+                        // Always styled and always escaped: a format that
+                        // followed the text changed after it, so a reused
+                        // row read its metadata as markup for a moment.
+                        text: resultRow.matchedContext || root.escaped(resultRow.context)
+                        textFormat: Text.StyledText
                         elide: Text.ElideRight
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
@@ -873,7 +962,11 @@ Dialog {
                         hoverEnabled: true
                         cursorShape: resultRow.isMore ? Qt.PointingHandCursor : Qt.ArrowCursor
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onPressed: function(mouse) {
+                            mouse.accepted = !root.searching
+                        }
                         onClicked: function(mouse) {
+                            if (root.searching) return
                             root.controller.selectDisplayIndex(resultRow.index)
                             if (resultRow.isMore && mouse.button === Qt.LeftButton) {
                                 root.controller.activateSelection()
@@ -1075,14 +1168,27 @@ Dialog {
         }
 
         // One tooltip for the result under the pointer, rather than one for
-        // each row.
+        // each row. It is under the row, where the style's place, above,
+        // covered the query field, and above it only where the window ends
+        // first. It fades out where it was, with what it said: with no row
+        // it moved over the field as it faded.
         ToolTip {
             id: resultToolTip
             objectName: "globalSearchResultToolTip"
-            parent: root.hoveredResultRow || resultsView
-            visible: !!root.hoveredResultRow && root.hoveredResultRow.hovered
+            readonly property int gap: 3
+            readonly property bool fitsUnder: {
+                const row = root.toolTipRow
+                if (!row || !root.parent) return true
+                const rowBottom = root.y + body.y + row.y - resultsView.contentY + row.height
+                return rowBottom + resultToolTip.gap + resultToolTip.implicitHeight
+                    + resultToolTip.bottomMargin <= root.parent.height
+            }
+            parent: root.toolTipRow || resultsView
+            y: resultToolTip.fitsUnder ? (root.toolTipRow || resultsView).height + resultToolTip.gap
+                                       : -resultToolTip.implicitHeight - resultToolTip.gap
+            visible: !!root.toolTipTarget
             delay: Kirigami.Units.toolTipDelay
-            text: root.hoveredResultRow ? root.hoveredResultRow.toolTipText() : ""
+            text: root.toolTipText
         }
 
         Popup {
@@ -1127,15 +1233,54 @@ Dialog {
         }
         Components.AppMenu {
             id: resultMenu
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Play"); icon.name: "media-playback-start"; onTriggered: root.controller.activateRow(root.contextRowData) }
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Add to Queue"); icon.name: "list-add"; onTriggered: root.controller.queueRow(root.contextRowData) }
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Show in Library"); icon.name: "go-jump"; onTriggered: root.controller.navigateSelectionToLibrary() }
+            objectName: "globalSearchResultMenu"
+            readonly property string rowType: root.contextRowData.rowType || "track"
+
+            // One of the app's context menus: what it acts on in the
+            // library's words and icons, with the footer's keys, and Show
+            // in Library with the folder, as in the queue's.
+            Components.KeyHintMenuItem {
+                text: resultMenu.rowType === "artist" ? I18n.i18nc("@action:inmenu", "Play Artist")
+                    : (resultMenu.rowType === "album" ? I18n.i18nc("@action:inmenu", "Play Album")
+                                                      : I18n.i18nc("@action:inmenu", "Play Track"))
+                icon.name: "media-playback-start"
+                keyHint: I18n.i18nc("@info:shortcut key name", "Enter")
+                onTriggered: root.controller.activateRow(root.contextRowData)
+            }
+            Components.KeyHintMenuItem {
+                text: resultMenu.rowType === "artist" ? I18n.i18nc("@action:inmenu", "Add Artist to Queue")
+                    : (resultMenu.rowType === "album" ? I18n.i18nc("@action:inmenu", "Add Album to Queue")
+                                                      : I18n.i18nc("@action:inmenu", "Add Track to Queue"))
+                icon.name: "media-playlist-append"
+                keyHint: I18n.i18nc("@info:shortcut key name", "Ctrl+Enter")
+                onTriggered: root.controller.queueRow(root.contextRowData)
+            }
             MenuSeparator {}
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Open Containing Folder"); icon.name: "document-open-folder"; onTriggered: root.controller.openRowInFileBrowser(root.contextRowData) }
+            Components.KeyHintMenuItem {
+                text: I18n.i18nc("@action:inmenu", "Show in Library")
+                icon.name: "go-jump"
+                keyHint: I18n.i18nc("@info:shortcut key name", "Alt+Enter")
+                onTriggered: root.controller.navigateSelectionToLibrary()
+            }
+            MenuItem {
+                text: I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                icon.name: "folder-open"
+                onTriggered: root.controller.openRowInFileBrowser(root.contextRowData)
+            }
         }
     }
-    // The result row under the pointer, whose tooltip shows.
+    // The result row under the pointer.
     property Item hoveredResultRow: null
+    // The row whose tooltip shows, none when it would add nothing or while
+    // a search is to replace the rows; and the last row that had one, with
+    // what it said, for the fade out.
+    readonly property Item toolTipTarget: root.hoveredResultRow && root.hoveredResultRow.hovered
+        && !root.searching && root.hoveredResultRow.toolTipAdds() ? root.hoveredResultRow : null
+    readonly property string toolTipTargetText: root.toolTipTarget ? root.toolTipTarget.toolTipText() : ""
+    property Item toolTipRow: null
+    property string toolTipText: ""
+    onToolTipTargetChanged: if (root.toolTipTarget) root.toolTipRow = root.toolTipTarget
+    onToolTipTargetTextChanged: if (root.toolTipTargetText.length > 0) root.toolTipText = root.toolTipTargetText
     // The lead glyphs of the rows without a cover.
     Component {
         id: artistGlyph

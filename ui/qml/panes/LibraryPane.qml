@@ -16,9 +16,10 @@ import "../logic/KeyUtils.js" as KeyUtils
 // album row shows its thumbnail after the chevron and its year at the right
 // end; a track row shows its playing or warning glyph in its album's chevron
 // column, its number under the album's thumbnail and its title where the
-// album's name starts. A library folder's row is a folder header: a folder
-// glyph where an album has its thumbnail, its name semibold, and its track
-// count at the right end.
+// album's name starts. A library folder's row is a folder header: its name
+// semibold, right after the chevron and so left of its artists', and its
+// track count at the right end. A folder glyph's slot put the name right of
+// its own artists'.
 //
 // What is playing is amber: the playing track's row, its glyph and its
 // title; a collapsed row that holds it, its name alone, with no glyph, so
@@ -44,14 +45,19 @@ Rectangle {
     readonly property bool keyboardInUse: InputModality.keyboard
 
     // The tree's geometry: the inset of the first chevron, the indent step,
-    // and the chevron, thumbnail and gaps after it. The chevrons and the
-    // state glyphs, and so the indent step, grow with a larger font.
+    // and the chevron, thumbnail and gaps after it. They grow with a larger
+    // font, all but the inset: the indent step is the chevron, and the
+    // thumbnail is 20 px with the default font, and at most as large as
+    // leaves 3 px of its row above and below it, 46 px at 24 pt, even, so
+    // it centres on whole pixels.
     readonly property int rowInset: 12
     readonly property int indentStep: root.chevronSize
     readonly property int chevronSize: root.uiPalette.scaledSize(16)
-    readonly property int chevronGap: 6
-    readonly property int thumbnailSize: 20
-    readonly property int thumbnailGap: 8
+    readonly property int chevronGap: root.uiPalette.scaledSize(6)
+    readonly property int thumbnailSize: 2 * Math.floor(Math.max(20,
+        Math.min(root.uiPalette.scaledSize(20), root.uiPalette.rowHeight - 6)) / 2)
+    readonly property int thumbnailGap: root.uiPalette.scaledSize(8)
+    readonly property int thumbnailRadius: Math.max(2, Math.round(root.thumbnailSize / 10))
     // An album without a cover, or whose cover failed to load: the
     // now-playing stand-in's mark, drawn for 20 px, on a tile of the plot's
     // floor with a 1 px edge, in the thumbnail's place, so its name lines
@@ -60,7 +66,11 @@ Rectangle {
     // that failed to load). A cover that has not loaded yet has the hover
     // tint for the moment it takes, so that rows coming into view do not
     // flash the mark before their covers.
-    readonly property url thumbnailPlaceholderMark: Qt.resolvedUrl("../assets/no-art-mark-20.svg")
+    // The 20 px mark is drawn on that tile's pixels, whose steps scale into
+    // a staircase, so a larger tile has the mark drawn in curves.
+    readonly property url thumbnailPlaceholderMark: root.thumbnailSize === 20
+        ? Qt.resolvedUrl("../assets/no-art-mark-20.svg")
+        : Qt.resolvedUrl("../assets/no-art-mark.svg")
     readonly property color thumbnailLoadingColor: root.uiPalette.hover
     // No fill of the thumbnail's own under the tile: the loading tint,
     // wholly transparent, so that the fill changes as a cover loads, which
@@ -76,8 +86,6 @@ Rectangle {
     // column it is centred in.
     readonly property string warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
     readonly property int warningGlyphSize: root.uiPalette.scaledSize(16)
-    // A library folder's glyph, in the thumbnail's column.
-    readonly property int folderGlyphSize: root.uiPalette.scaledSize(16)
 
     // Each library folder's track count, by its path.
     readonly property var rootTrackCounts: {
@@ -477,7 +485,7 @@ Rectangle {
                     readonly property real titleX: isTrackRow
                         ? stateX + root.chevronSize + root.chevronGap + root.thumbnailSize + root.thumbnailGap
                         : chevronX + root.chevronSize + root.chevronGap
-                            + (showsThumbnail || isRootRow ? root.thumbnailSize + root.thumbnailGap : 0)
+                            + (showsThumbnail ? root.thumbnailSize + root.thumbnailGap : 0)
 
                     function actionRowMap() {
                         return {
@@ -553,9 +561,9 @@ Rectangle {
                                 selected: libraryRow.rowSelected
                                 active: libraryAlbumView.activeFocus
                                 focused: libraryRow.rowCurrent
-                                // The ring stops at the scrollbar's lane
+                                // Every state ends at the scrollbar's lane
                                 // while it shows, clear of its thumb.
-                                focusRingLane: libraryScrollBar.visible ? libraryScrollBar.lane : 0
+                                scrollbarLane: libraryScrollBar.visible ? libraryScrollBar.lane : 0
                             }
 
                             Kirigami.Icon {
@@ -618,21 +626,6 @@ Rectangle {
                                 opacity: libraryRow.amberLeft
                             }
 
-                            // A library folder: the folder glyph in the thumbnail's
-                            // column, centred in it.
-                            Kirigami.Icon {
-                                objectName: "libraryRowFolderGlyph"
-                                visible: libraryRow.isRootRow
-                                x: Math.round(libraryRow.chevronX + root.chevronSize + root.chevronGap
-                                    + (root.thumbnailSize - width) / 2)
-                                y: Math.round((libraryRow.height - height) / 2)
-                                width: root.folderGlyphSize
-                                height: root.folderGlyphSize
-                                source: visible ? "folder" : ""
-                                isMask: true
-                                color: root.uiPalette.textSecondary
-                            }
-
                             Kirigami.ShadowedImage {
                                 id: rowThumbnail
                                 objectName: "libraryRowThumbnail"
@@ -644,7 +637,7 @@ Rectangle {
                                 y: Math.round((libraryRow.height - height) / 2)
                                 width: root.thumbnailSize
                                 height: root.thumbnailSize
-                                radius: 2
+                                radius: root.thumbnailRadius
                                 color: status === Image.Ready ? "transparent"
                                     : (rowThumbnail.missing ? root.thumbnailMissingColor
                                                             : root.thumbnailLoadingColor)
@@ -679,7 +672,8 @@ Rectangle {
                                     source: root.thumbnailPlaceholderMark
                                     sourceSize.width: root.thumbnailSize
                                     sourceSize.height: root.thumbnailSize
-                                    smooth: false
+                                    // Crisp on the grid it is drawn for.
+                                    smooth: root.thumbnailSize !== 20
                                     cache: true
                                     opacity: 0.85
                                 }
@@ -855,6 +849,11 @@ Rectangle {
                                 return I18n.i18nc("@action:inmenu", "Play Album")
                             case "track":
                                 return I18n.i18nc("@action:inmenu", "Play Track")
+                            // A library folder's row, or an album's
+                            // subfolder's.
+                            case "root":
+                            case "section":
+                                return I18n.i18nc("@action:inmenu", "Play Folder")
                             default:
                                 return I18n.i18nc("@action:inmenu", "Play")
                             }
@@ -879,6 +878,9 @@ Rectangle {
                                 return I18n.i18nc("@action:inmenu", "Add Album to Queue")
                             case "track":
                                 return I18n.i18nc("@action:inmenu", "Add Track to Queue")
+                            case "root":
+                            case "section":
+                                return I18n.i18nc("@action:inmenu", "Add Folder to Queue")
                             default:
                                 return I18n.i18nc("@action:inmenu", "Add to Queue")
                             }

@@ -1073,6 +1073,8 @@ private slots:
     void showInLibraryBringsThePlayingRowIntoView();
     void showInLibraryOpensTheCollapsedLibraryFolderOfTheTrack();
     void showInLibraryGivesWayToTheUserBrowsingTheLibrary();
+    void showInLibraryLandsOnTheRowGrid_data();
+    void showInLibraryLandsOnTheRowGrid();
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void nowPlayingCoverIsAKeyboardStop();
     void libraryFoldersAreFolderHeaders();
@@ -1081,6 +1083,8 @@ private slots:
     void libraryAlbumWithoutACoverShowsAPlaceholderTile();
     void libraryFocusRingStopsAtTheScrollBarLane();
     void libraryTreeChevronsGrowWithALargeFont();
+    void libraryThumbnailsFollowTheFont_data();
+    void libraryThumbnailsFollowTheFont();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
     void collapsedRowNameElidesBeforeTheYear();
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
@@ -1088,6 +1092,8 @@ private slots:
     void queueFocusRingStopsAtTheScrollBarLane_data();
     void queueFocusRingStopsAtTheScrollBarLane();
     void queueRowHoverIsTheListsTint();
+    void rowStatesShareOneRightEdge_data();
+    void rowStatesShareOneRightEdge();
     void transportIsWindowChromeInTheHeaderColours();
     void listsRingARowAsTheKeyboardComesIn();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
@@ -3527,6 +3533,65 @@ void UiMainWindowTest::showInLibraryOpensTheCollapsedLibraryFolderOfTheTrack() {
     QTRY_COMPARE(view->property("count").toInt(), 2);
 }
 
+void UiMainWindowTest::showInLibraryLandsOnTheRowGrid_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::addColumn<bool>("fromSearch");
+    QTest::newRow("the queue's, 10 pt") << 10.0 << false;
+    QTest::newRow("the queue's, 24 pt") << 24.0 << false;
+    QTest::newRow("the search's, 10 pt") << 10.0 << true;
+    QTest::newRow("the search's, 24 pt") << 24.0 << true;
+}
+
+// Show in Library, the queue's, which centres the row, and the search's,
+// which brings it into the view, lands on the row grid: the top row is
+// whole under the header (6 px of it was cut at 10 pt, and at 24 pt it was
+// cut through its letters), the revealed row whole in the view. The tree's
+// last row is the exception: to show it whole the view is at its end.
+void UiMainWindowTest::showInLibraryLandsOnTheRowGrid() {
+    QFETCH(qreal, points);
+    QFETCH(bool, fromSearch);
+    const ScopedApplicationFont font(points);
+    MainWindowFixture fixture(sized(1600, 1013));
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *view = named(window, "libraryView");
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(view != nullptr && controller != nullptr);
+    constexpr int count = 90;
+    fixture.libraryModel.setLibraryTreeFromBinary(manyArtistsTree(count));
+    QTRY_COMPARE(view->property("count").toInt(), count);
+    const qreal rowHeight = paletteOf(window)->property("rowHeight").toReal();
+    QVERIFY2(std::fmod(view->height(), rowHeight) >= 1.0, "the view holds whole rows, which proves nothing");
+
+    const auto reveal = [&](int index) {
+        const QString key = QStringLiteral("artist|Artist %1").arg(index, 2, 10, QLatin1Char('0'));
+        return fromSearch
+            ? QMetaObject::invokeMethod(controller, "requestRevealForSearchRow",
+                                        Q_ARG(QVariant, QVariant(QVariantMap{{QStringLiteral("artistKey"), key}})))
+            : QMetaObject::invokeMethod(controller, "requestBridgeReveal", Q_ARG(QVariant, QVariant(QStringList{})),
+                                        Q_ARG(QVariant, key));
+    };
+    const auto wholeInView = [&](int index) {
+        QQuickItem *row = viewRowAt(view, index);
+        return row != nullptr && sceneRect(row).top() >= sceneRect(view).top() - 0.5
+            && sceneRect(row).bottom() <= sceneRect(view).bottom() + 0.5;
+    };
+    // Down from the top, up again, near the end and one before the last.
+    for (const int index : {40, 12, 83, count - 2, 1}) {
+        QVERIFY(reveal(index));
+        QTRY_VERIFY2(wholeInView(index), qPrintable(QString::number(index)));
+        // After what the reveal runs once the view has laid out.
+        QCoreApplication::processEvents();
+        QVERIFY(wholeInView(index));
+        const qreal above = sceneRect(viewRowAt(view, index)).top() - sceneRect(view).top();
+        const qreal off = above - rowHeight * std::round(above / rowHeight);
+        QVERIFY2(std::abs(off) <= 0.5,
+                 qPrintable(QStringLiteral("row %1 is %2 px off the row grid").arg(index).arg(off)));
+    }
+    QVERIFY(reveal(count - 1));
+    QTRY_VERIFY(wholeInView(count - 1));
+}
+
 // Show in Library still waiting for its track's rows gives way to the user
 // browsing the library: the user closes the track's library folder and
 // opens an album in another, and when the rows come, the view stays where
@@ -3799,10 +3864,11 @@ qreal textEndIn(QQuickItem *row) {
 }
 
 // A library folder's row, as with more than one folder, is a folder header:
-// a folder glyph in the column where an album has its thumbnail, its name
-// semibold after it, where an album's starts, and its track count at the
-// right end in the tertiary colour, where an album's year is. An artist's
-// row under it is as any other.
+// its name semibold a gap after its chevron, with no glyph's slot before
+// it, so it starts left of its own artists' (a folder glyph's slot put it
+// right of them), and its track count at the right end in the tertiary
+// colour, where an album's year is. An artist's row under it is as any
+// other.
 void UiMainWindowTest::libraryFoldersAreFolderHeaders() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
@@ -3827,25 +3893,17 @@ void UiMainWindowTest::libraryFoldersAreFolderHeaders() {
                 && (album = libraryRow(window, QStringLiteral("album"))) != nullptr);
 
     QQuickItem *chevron = itemNamed(folder, QStringLiteral("libraryRowChevron"));
-    QQuickItem *glyph = itemNamed(folder, QStringLiteral("libraryRowFolderGlyph"));
     QQuickItem *title = itemNamed(folder, QStringLiteral("libraryRowTitle"));
     QQuickItem *count = itemNamed(folder, QStringLiteral("libraryRowCount"));
-    QQuickItem *albumThumbnail = itemNamed(album, QStringLiteral("libraryRowThumbnail"));
-    QVERIFY(shown(chevron) && shown(glyph) && title && shown(count) && albumThumbnail);
-    // The chevron at the content inset, then the glyph centred in the
-    // column a thumbnail has after a chevron, then the name where a
-    // thumbnail's name starts, two indent steps before an album's.
+    QVERIFY(shown(chevron) && title && shown(count));
+    QVERIFY(itemNamed(folder, QStringLiteral("libraryRowFolderGlyph")) == nullptr);
+    // The chevron at the content inset and the name a gap after it, one
+    // indent step before its artists'.
     QCOMPARE(xIn(folder, "libraryRowChevron"), 12.0);
-    QCOMPARE(glyph->property("source").toString(), QStringLiteral("folder"));
-    QVERIFY(glyph->property("valid").toBool());
-    QCOMPARE(glyph->width(), qreal(scaledSize(window, 16)));
     const qreal step = xIn(album, "libraryRowChevron") - xIn(artist, "libraryRowChevron");
     QCOMPARE(step, chevron->width());
-    const qreal thumbnailX = xIn(album, "libraryRowThumbnail") - 2 * step;
-    QCOMPARE(xIn(folder, "libraryRowFolderGlyph"), thumbnailX + (albumThumbnail->width() - glyph->width()) / 2);
-    QVERIFY(std::abs(glyph->y() + glyph->height() / 2 - folder->height() / 2) <= 0.5);
-    QCOMPARE(colorOf(glyph), tokenHex(window, "textSecondary"));
-    QCOMPARE(xIn(album, "libraryRowTitle") - xIn(folder, "libraryRowTitle"), 2 * step);
+    QCOMPARE(xIn(folder, "libraryRowTitle"), 12.0 + step + scaledSize(window, 6));
+    QCOMPARE(xIn(artist, "libraryRowTitle") - xIn(folder, "libraryRowTitle"), step);
     QCOMPARE(title->property("text").toString(), QStringLiteral("Shelf One"));
     QCOMPARE(title->property("font").value<QFont>().weight(), QFont::DemiBold);
     QCOMPARE(colorOf(title), tokenHex(window, "text"));
@@ -3860,8 +3918,7 @@ void UiMainWindowTest::libraryFoldersAreFolderHeaders() {
              paletteOf(window)->property("smallPointSize").toReal());
     QCOMPARE(title->x() + title->width(), count->x() - 8);
     QVERIFY(itemNamed(folder, QStringLiteral("libraryRowYear")) == nullptr);
-    // An artist's row: no glyph or count, its name as any other's.
-    QVERIFY(!shown(itemNamed(artist, QStringLiteral("libraryRowFolderGlyph"))));
+    // An artist's row: no count, its name as any other's.
     QVERIFY(itemNamed(artist, QStringLiteral("libraryRowCount")) == nullptr);
     QCOMPARE(itemNamed(artist, QStringLiteral("libraryRowTitle"))->property("font").value<QFont>().weight(),
              QFont::Normal);
@@ -3873,7 +3930,7 @@ void UiMainWindowTest::libraryFoldersAreFolderHeaders() {
     folder = libraryRow(window, QStringLiteral("root"));
     QVERIFY(folder != nullptr);
     QTRY_VERIFY2(nameMarksNow(window, folder, false).isEmpty(), qPrintable(nameMarksNow(window, folder, false)));
-    QVERIFY(shown(itemNamed(folder, QStringLiteral("libraryRowFolderGlyph"))));
+    QVERIFY(shown(itemNamed(folder, QStringLiteral("libraryRowCount"))));
 }
 
 void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
@@ -4151,6 +4208,70 @@ void UiMainWindowTest::libraryTreeChevronsGrowWithALargeFont() {
                  qPrintable(nameMarksNow(window, libraryRow(window, QStringLiteral("album")), false)));
 }
 
+void UiMainWindowTest::libraryThumbnailsFollowTheFont_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::newRow("8 pt") << 8.0;
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("14 pt") << 14.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// An album's thumbnail, the gaps before and after it, a track's number
+// column under it and the no-cover mark in it follow the font: 20, 6 and
+// 8 px with the default font or a smaller one, and at 24 pt 2.4 times
+// those, the thumbnail inside its row (it stayed 20 px in a 52 px row,
+// beside 32 px text).
+void UiMainWindowTest::libraryThumbnailsFollowTheFont() {
+    QFETCH(qreal, points);
+    const ScopedApplicationFont font(points);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    showTree(fixture.libraryModel, kAllExpanded);
+    QQuickItem *album = nullptr;
+    QQuickItem *track = nullptr;
+    QTRY_VERIFY((album = libraryRow(window, QStringLiteral("album"))) != nullptr
+                && (track = libraryRow(window, QStringLiteral("track"))) != nullptr);
+    QQuickItem *thumbnail = itemNamed(album, QStringLiteral("libraryRowThumbnail"));
+    QQuickItem *chevron = itemNamed(album, QStringLiteral("libraryRowChevron"));
+    QQuickItem *number = itemNamed(track, QStringLiteral("libraryRowNumber"));
+    QQuickItem *tile = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholder"));
+    QQuickItem *mark = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholderMark"));
+    QVERIFY(thumbnail && chevron && number && shown(tile) && shown(mark));
+    const qreal size = thumbnail->width();
+    QCOMPARE(thumbnail->height(), size);
+    if (points <= 10.0) {
+        QCOMPARE(size, 20.0);
+    } else {
+        QVERIFY2(size >= std::min<qreal>(scaledSize(window, 20), album->height() - 6) - 1 && size <= album->height() - 6,
+                 qPrintable(QStringLiteral("%1 in a %2 px row").arg(size).arg(album->height())));
+    }
+    if (points == 24.0) {
+        QVERIFY2(size >= 38 && size <= 46, qPrintable(QString::number(size)));
+    }
+    QCOMPARE(std::fmod(size, 2.0), 0.0);
+    const qreal radius = thumbnail->property("radius").toReal();
+    QCOMPARE(radius, std::max(2.0, std::round(size / 10)));
+    const qreal thumbnailX = xIn(album, "libraryRowThumbnail");
+    QCOMPARE(thumbnailX, xIn(album, "libraryRowChevron") + chevron->width() + scaledSize(window, 6));
+    const qreal nameX = thumbnailX + size + scaledSize(window, 8);
+    QCOMPARE(xIn(album, "libraryRowTitle"), nameX);
+    QCOMPARE(xIn(track, "libraryRowTitle"), nameX);
+    QCOMPARE(xIn(track, "libraryRowNumber"), thumbnailX);
+    QCOMPARE(number->width(), size);
+    QCOMPARE(sceneRect(tile), sceneRect(thumbnail));
+    QCOMPARE(tile->property("radius").toReal(), radius);
+    // The mark is drawn at its size: on its 20 px grid, crisp, and in
+    // smooth curves above it, where the grid's steps made a staircase.
+    const QString drawing = mark->property("source").toUrl().toString();
+    QVERIFY2(drawing.endsWith(size == 20.0 ? QStringLiteral("/no-art-mark-20.svg") : QStringLiteral("/no-art-mark.svg")),
+             qPrintable(drawing));
+    QTRY_COMPARE(mark->property("status").toInt(), 1); // Image.Ready
+    QCOMPARE(mark->size(), QSizeF(size, size));
+    QCOMPARE(QQmlProperty(mark, QStringLiteral("sourceSize.width")).read().toReal(), size);
+    QCOMPARE(mark->property("smooth").toBool(), size != 20.0);
+}
+
 void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
@@ -4320,17 +4441,15 @@ void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath()
 }
 
 // Why the selected row `index` of a list `view` does not show its focus
-// ring and tint as they stop at the scrollbar's lane, or "": while the
-// scrollbar shows, the ring stops at its 8 px lane, so the thumb never runs
-// over the ring, and the tint goes on under the lane to the pane's edge;
-// without a scrollbar, the ring runs to the edge. As drawn, on the row's
-// middle: the ring's right side just inside the lane, or at the edge; past
-// it, in the lane, the tint or the thumb, never the ring.
+// ring and tint as one rectangle beside the scrollbar, or "": while the
+// scrollbar shows, both end at its 8 px lane, with the thumb alone in it on
+// the view colour; without a scrollbar, both reach the edge. As drawn, on
+// the row's middle: the ring's right side just inside the lane, or at the
+// edge; past it, the view or the thumb, never the ring or the tint.
 QString focusRingProblem(QQuickWindow *window, QQuickItem *view, int index, bool scrolls) {
     QQuickItem *row = viewRowAt(view, index);
     QQuickItem *tint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTint")) : nullptr;
-    QQuickItem *laneTint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTintLane")) : nullptr;
-    if (!shown(tint) || laneTint == nullptr || QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() != 1.0
+    if (!shown(tint) || QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() != 1.0
         || colorOf(tint) != tokenHex(window, "selection")) {
         return QStringLiteral("no ringed, selected row %1").arg(index);
     }
@@ -4339,13 +4458,16 @@ QString focusRingProblem(QQuickWindow *window, QQuickItem *view, int index, bool
     if (sceneRect(tint).right() != edge - lane) {
         return QStringLiteral("the ring to %1, the edge %2").arg(sceneRect(tint).right()).arg(edge);
     }
-    if (shown(laneTint) != scrolls
-        || (scrolls && (sceneRect(laneTint).left() != edge - lane || sceneRect(laneTint).right() != edge
-                        || colorOf(laneTint) != tokenHex(window, "selection")))) {
-        return QStringLiteral("the lane's tint %1 at %2").arg(shown(laneTint)).arg(describeRect(sceneRect(laneTint)));
-    }
     const Drawn drawn(window);
     const qreal y = sceneRect(row).center().y();
+    if (scrolls) {
+        // Either side of the thumb.
+        for (const qreal x : {edge - lane + 0.5, edge - 0.5}) {
+            if (!near(drawn.at(x, y), tokenOf(window, "view"))) {
+                return QStringLiteral("%1 in the lane at %2 of %3").arg(drawn.at(x, y).name()).arg(x).arg(edge);
+            }
+        }
+    }
     const QColor ring = tokenOf(window, "focusRing");
     if (!near(drawn.at(edge - lane - 0.5, y), ring)) {
         return QStringLiteral("%1 where the ring ends").arg(drawn.at(edge - lane - 0.5, y).name());
@@ -4450,13 +4572,13 @@ void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane_data() {
     QTest::newRow("dark") << true;
 }
 
-// The queue's focus ring stops at the scrollbar's lane while the scrollbar
-// shows, as the library's does (focusRingProblem), so its thumb never runs
-// over the ring (it ran under the thumb). The selection tint runs to the
-// pane's right edge, with no scrollbar and with one, under the lane, and
-// the thumb, 4 px wide and 2 px from the edge, draws over it (the tints
-// stopped 8 px short of the edge). A short queue, with no scrollbar, keeps
-// the ring to the edge.
+// The queue's focus ring and selection tint are one rectangle that ends at
+// the scrollbar's lane while the scrollbar shows, as the library's is
+// (focusRingProblem): the thumb never runs over the ring (it ran under the
+// thumb), and no tint runs on past it (the tint went on under the thumb, a
+// tab on the ring's end). The thumb, 4 px wide and 2 px from the edge, is
+// alone in the lane. A short queue, with no scrollbar, keeps both to the
+// edge (they stopped 8 px short of it).
 void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane() {
     QFETCH(bool, dark);
     const auto restorePalette = useDarkPalette(dark);
@@ -4483,18 +4605,22 @@ void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane() {
         // first row's middle.
         QVERIFY(QMetaObject::invokeMethod(queue, "setSingleSelection", Q_ARG(QVariant, 1)));
         QTRY_VERIFY(rowTinted(queueView, 1));
-        // Without the keyboard: the tint alone, as drawn to the edge, under
-        // the thumb.
+        // Without the keyboard: the tint alone, as drawn to the same edge,
+        // the thumb past it.
         QQuickItem *tint = itemNamed(viewRowAt(queueView, 1), QStringLiteral("rowBackgroundTint"));
-        QCOMPARE(sceneRect(tint).right(), sceneRect(queueView).right());
+        const qreal lane = scrolls ? 8.0 : 0.0;
+        QCOMPARE(sceneRect(tint).right(), sceneRect(queueView).right() - lane);
         const QColor tintColor = tint->property("color").value<QColor>();
         const qreal right = sceneRect(queueView).right();
         const qreal y = sceneRect(tint).center().y();
         const auto tintProblem = [&]() -> QString {
             const Drawn drawn(window);
-            if (!near(drawn.at(right - 0.5, y), tintColor) || !near(drawn.at(right - 16, y), tintColor)) {
-                return QStringLiteral("%1 at the edge, %2 before it, the tint %3")
-                    .arg(drawn.at(right - 0.5, y).name(), drawn.at(right - 16, y).name(), tintColor.name());
+            if (!near(drawn.at(right - lane - 0.5, y), tintColor) || !near(drawn.at(right - 16, y), tintColor)) {
+                return QStringLiteral("%1 where the tint ends, %2 before it, the tint %3")
+                    .arg(drawn.at(right - lane - 0.5, y).name(), drawn.at(right - 16, y).name(), tintColor.name());
+            }
+            if (scrolls && !near(drawn.at(right - 0.5, y), tokenOf(window, "view"))) {
+                return QStringLiteral("%1 past the thumb").arg(drawn.at(right - 0.5, y).name());
             }
             if (near(drawn.at(right - 4, y), tintColor) == scrolls) {
                 return QStringLiteral("%1 where the thumb is").arg(drawn.at(right - 4, y).name());
@@ -4551,6 +4677,81 @@ void UiMainWindowTest::queueRowHoverIsTheListsTint() {
     QCOMPARE(colorOf(number), tokenHex(window, "textTertiarySelected"));
     QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
     QTRY_VERIFY(!hover->isVisible());
+}
+
+void UiMainWindowTest::rowStatesShareOneRightEdge_data() {
+    QTest::addColumn<bool>("queue");
+    QTest::addColumn<bool>("scrolls");
+    QTest::newRow("library, scrolling") << false << true;
+    QTest::newRow("library") << false << false;
+    QTest::newRow("queue, scrolling") << true << true;
+    QTest::newRow("queue") << true << false;
+}
+
+// A selected range, its current row's ring and a hovered row have one
+// straight right edge, in the library and in the queue: at the scrollbar's
+// lane while it shows, and at the pane's edge otherwise. The focused row
+// was a box with a tail under the thumb.
+void UiMainWindowTest::rowStatesShareOneRightEdge() {
+    QFETCH(bool, queue);
+    QFETCH(bool, scrolls);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const int count = scrolls ? 80 : 6;
+    QQuickItem *view = named(window, queue ? "playlistView" : "libraryView");
+    QVERIFY(view != nullptr);
+    if (queue) {
+        setQueue(bridgeOf(window), sampleQueueRows(count));
+    } else {
+        fixture.libraryModel.setLibraryTreeFromBinary(manyArtistsTree(count));
+    }
+    QTRY_COMPARE(view->property("count").toInt(), count);
+    tabInto(window, view);
+    QTest::keyClick(window, Qt::Key_Down);
+    QTest::keyClick(window, Qt::Key_Down, Qt::ShiftModifier);
+    QList<int> selected;
+    QTRY_VERIFY([&] {
+        selected.clear();
+        for (int index = 0; index < 5; ++index) {
+            if (rowTinted(view, index)) selected << index;
+        }
+        return selected.size() == 2;
+    }());
+    QCOMPARE(ringedRowsOf(view), QList<int>{selected.last()});
+
+    QQuickItem *hoveredRow = viewRowAt(view, 4);
+    QVERIFY(hoveredRow != nullptr && !selected.contains(4));
+    // Two moves: the pointer may have been there in the row before, in
+    // another window, and a move that goes nowhere is none.
+    QTest::mouseMove(window, sceneRect(hoveredRow).center().toPoint() - QPoint(8, 0));
+    QTest::mouseMove(window, sceneRect(hoveredRow).center().toPoint());
+    QQuickItem *hover = itemNamed(hoveredRow, QStringLiteral("rowBackgroundHover"));
+    QVERIFY(hover != nullptr);
+    QTRY_VERIFY(hover->isVisible() && hover->opacity() == 1.0);
+
+    const qreal edge = sceneRect(view).right();
+    const qreal end = edge - (scrolls ? 8.0 : 0.0);
+    QCOMPARE(sceneRect(hover).right(), end);
+    for (const int index : std::as_const(selected)) {
+        QCOMPARE(sceneRect(itemNamed(viewRowAt(view, index), QStringLiteral("rowBackgroundTint"))).right(), end);
+    }
+    if (!scrolls) {
+        return;
+    }
+    const auto laneProblem = [&]() -> QString {
+        const Drawn drawn(window);
+        for (const int index : {selected.first(), selected.last(), 4}) {
+            const qreal y = sceneRect(viewRowAt(view, index)).center().y();
+            for (const qreal x : {end + 0.5, edge - 0.5}) {
+                if (!near(drawn.at(x, y), tokenOf(window, "view"))) {
+                    return QStringLiteral("%1 in the lane beside row %2").arg(drawn.at(x, y).name()).arg(index);
+                }
+            }
+        }
+        return {};
+    };
+    QTRY_VERIFY2(laneProblem().isEmpty(), qPrintable(laneProblem()));
 }
 
 // The transport is window chrome in the theme's Header colour set, as

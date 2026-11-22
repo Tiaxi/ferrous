@@ -265,10 +265,11 @@ void appendUtf8(QByteArray &out, const QString &value) {
 
 const QString kTrackPath = QStringLiteral("/music/Artist A/Album A/02.flac");
 const QString kArtistKey = QStringLiteral("artist|Artist A");
+const QString kRootKey = QStringLiteral("root|/music");
 const QString kAlbumKey = QStringLiteral("album|Artist A|Album A");
 
 // An artist with an album of one track, in the bridge's tree format.
-QByteArray artistAlbumTrackTree() {
+QByteArray artistAlbumTrackTree(bool underFolder = false) {
     struct Row {
         quint8 rowType;
         quint16 depth;
@@ -280,11 +281,18 @@ QByteArray artistAlbumTrackTree() {
         QString path;
         QString trackPath;
     };
-    const QList<Row> rows{
+    QList<Row> rows{
         {1, 0, 0, 1, 0, QStringLiteral("Artist A (1)"), kArtistKey, QStringLiteral("/music/Artist A"), {}},
         {2, 1, 0, 1, 2005, QStringLiteral("Album A"), kAlbumKey, QStringLiteral("/music/Artist A/Album A"), {}},
         {4, 2, 2, 0, 0, QStringLiteral("Second"), QStringLiteral("track|") + kTrackPath, kTrackPath, kTrackPath},
     };
+    // Under a library folder's row, as with more than one folder.
+    if (underFolder) {
+        for (Row &row : rows) {
+            ++row.depth;
+        }
+        rows.prepend({0, 0, 0, 1, 0, QStringLiteral("Shelf"), kRootKey, QStringLiteral("/music"), {}});
+    }
     QByteArray out;
     appendLe<quint32>(out, static_cast<quint32>(rows.size()));
     for (const Row &row : rows) {
@@ -583,6 +591,7 @@ private slots:
     void menuBarTitleReadsWhenOpenOrHovered_data();
     void menuBarTitleReadsWhenOpenOrHovered();
     void menusReadInKdesWordsAndOrder();
+    void libraryFolderMenuNamesTheFolder();
     void menusAnswerThePointerAndTheKeyboard();
     void viewMenuFollowsThePlot();
     void queueAndPlaybackItemsActOnTheBackend();
@@ -666,6 +675,27 @@ void UiMenusTest::menusReadInKdesWordsAndOrder() {
                [&] { checkMenusHaveNoTransitionsOfTheirOwn(window); },
                [&] { checkHeadingsAreTextThatIsNotPicked(window); },
                [&] { checkMenusAreWindowsOfTheirOwn(window); }});
+}
+
+// A library folder's menu names it, as the other rows' menus name theirs
+// (it said "Play" and "Add to Queue").
+void UiMenusTest::libraryFolderMenuNamesTheFolder() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    bridgeOf(window)->setProperty("libraryRootCount", 2);
+    main.libraryModel.setExpandedKeys({kRootKey});
+    main.libraryModel.setLibraryTreeFromBinary(artistAlbumTrackTree(true));
+    QTRY_VERIFY(viewRow(window, "libraryView", 0) != nullptr);
+    rightClick(window, viewRow(window, "libraryView", 0));
+    QObject *menu = nullptr;
+    QTRY_VERIFY((menu = visibleMenu(window, QStringLiteral("libraryContextMenu"))) != nullptr
+                && menu->property("opened").toBool());
+    QCOMPARE(rowsOf(menu).mid(0, 2),
+             (QStringList{QStringLiteral("hint|Play Folder|Enter|media-playback-start"),
+                          QStringLiteral("item|Add Folder to Queue||media-playlist-append")}));
+    QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+    QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
 // The menus under the pointer and the keyboard, and the pages and dialogs
@@ -1192,7 +1222,7 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  QStringLiteral("sep"),
                  QStringLiteral("item|Add Library Folder…||folder-music"),
                  QStringLiteral("item|Play Whole Library||media-playback-start"),
-                 QStringLiteral("item|Queue Whole Library||media-playlist-append"),
+                 QStringLiteral("item|Add Whole Library to Queue||media-playlist-append"),
                  QStringLiteral("sep"),
                  QStringLiteral("item|Quit|%1|application-exit").arg(standardKey(QKeySequence::Quit)),
              }));
@@ -1216,10 +1246,12 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  QStringLiteral("sep"),
                  QStringLiteral("check|Show Level Meter||"),
                  QStringLiteral("check|Show Frequency and Time Scale||"),
+                 // The plot's two, then the queue's.
                  QStringLiteral("sep"),
-                 QStringLiteral("check|Follow Current Track in Queue||"),
                  QStringLiteral("item|Reset Zoom|Ctrl+0|zoom-original"),
                  QStringLiteral("item|Follow Playhead|F|"),
+                 QStringLiteral("sep"),
+                 QStringLiteral("check|Follow Current Track in Queue||"),
              }));
     QCOMPARE(rowsOf(menuNamed(window, "playbackMenu")),
              (QStringList{

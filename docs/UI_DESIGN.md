@@ -108,8 +108,8 @@ The `ui*` colours at the end of the file come from before these tokens. Don't us
 ## The one font rule
 
 Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs, viewers and the main window:
-- **A glyph beside text follows the font.** Button glyphs, page-list icons and dialog severity marks use `labelIconSize` (`Kirigami.Units.iconSizes.sizeForLabels`): 16 px at 10 pt, 32 px at 24 pt. A glyph that is deliberately smaller or larger than a label scales its 10 pt size with `scaledSize()` instead: for example the library's state, warning and folder marks, the queue's warning mark and the status bar's glyphs. The album art viewer's detail buttons scale their 16 px glyph with the viewer's own scale, which is larger in fullscreen. A 16 px glyph beside 32 px text becomes the smallest thing in its row.
-- **A pixel measure tuned at 10 pt goes through `scaledSize()`.** This includes widths that bound text, thumbnails, gutters, insets and caps. Exception: the album art viewer's gutter around the art stays 16 or 24 px at any font, because it frames the image, not text. `scaledSize()` leaves 10 pt unchanged and grows with a larger font. A fixed width at 24 pt cuts text beside empty room.
+- **A glyph beside text follows the font.** Button glyphs, page-list icons and dialog severity marks use `labelIconSize` (`Kirigami.Units.iconSizes.sizeForLabels`): 16 px at 10 pt, 32 px at 24 pt. A glyph that is deliberately smaller or larger than a label scales its 10 pt size with `scaledSize()` instead: for example the library's state and warning marks, the queue's warning mark and the status bar's glyphs. The album art viewer's detail buttons scale their 16 px glyph with the viewer's own scale, which is larger in fullscreen. A 16 px glyph beside 32 px text becomes the smallest thing in its row.
+- **A pixel measure tuned at 10 pt goes through `scaledSize()`.** This includes widths that bound text, thumbnails, gutters, insets and caps. Exception: the album art viewer's gutter around the art stays 16 or 24 px at any font, because it frames the image, not text. `scaledSize()` leaves 10 pt unchanged and grows with a larger font. A fixed width at 24 pt cuts text beside empty room. A cover in a list row grows with the row and stays inside it: the library's is 20 px at 10 pt and 46 px at 24 pt, where 20 px read as a bullet.
 - **A text measure is counted in characters.** A compact dialog is about 46 average characters wide, help text at most about 63, and the art details about 40. A fixed width holds fewer words at a larger font.
 - **Check at 24 pt.** Nothing may elide or wrap a lead sentence while there is room beside it, and no window may run wider than the screen.
 
@@ -117,14 +117,17 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 
 - **Each message dialog opens with a DemiBold lead sentence.** It says what happened or what is asked. The explanation, the path and the system's error follow in `textSecondary`. Weight, not size, ranks the lead, and one system everywhere keeps dialogs from reading as one grey block.
 - **The lead says what happened in words.** The system's error text, such as "Permission denied (os error 13)", goes on its own line below as a detail. It never repeats the window title.
-- **One term for one thing.** Use "Queue", never "Playlist". Use "Delete" for a delete. Use "full-size image", not "high-resolution artwork" in one place and "full-size" in another.
+- **One term for one thing.** Use "Queue", never "Playlist", and "Add … to Queue" for queueing, never "Queue" as a verb. Use "Delete" for a delete. Use "full-size image", not "high-resolution artwork" in one place and "full-size" in another.
+- **The library's and the search results' menus name what they act on:** "Play Album", "Add Album to Queue", with the keys that do the same in that view, and one icon per action in every menu. A bare "Play" and "Add to Queue" in one menu made it another family.
 - **Pass every visible string through `I18n.i18nc` in QML or `i18nc` in C++,** with a context marker, and `i18ncp` for counts. Follow [translations](DEVELOPMENT.md#translations). Use KDE HIG wording:
   - Title Case for buttons, menus and window titles;
   - "…" (one character) only on items that ask for more input;
   - typographic apostrophes (’).
 - **Paths break only between folder names, and error codes stay whole.** Show a message that can hold a path or an error with `MessageLabel`, or with `BreakableText.breakableMessage()`. A folder name stays on one line unless it is wider than the line, and "(os error 13)" never splits. The accessible name, the tooltip and copied text keep the original string. "…/2005 - Small" / "Hours" read as two folders.
 - **A path the user reads but doesn't edit is a `PathLabel`:** one line, elided in the middle, with the full path in its tooltip. A read-only text field looks editable.
-- **In list rows, weight marks state.** The playing title, a search match, a library folder's name and an unseen issue are DemiBold; the rest is regular. Bold used for anything else would compete with these.
+- **In list rows, weight marks state.** The playing title, a search match in a title, a library folder's name and an unseen issue are DemiBold; the rest is regular. Bold used for anything else would compete with these.
+- **A search result says why it matched.** Where the title has no match, the matched run of the context is in `text`, at the regular weight, so it explains the row without outweighing the title. Results found by their artist showed no match at all.
+- **A result's tooltip adds to its row.** It shows only where the row is elided or there is more to say, and under the row, so it never covers the query.
 
 ## Dialogs
 
@@ -150,7 +153,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
   - a button on a plot gets a 2 px ring 1 px outside it, with a 1 px gap in the plate's colour.
 
   Focus and selection change at once.
-- **The focus ring lane:** a list whose overlay scrollbar lies over the rows' right end sets `focusRingLane`. The ring stops short of the lane, and the selection tint continues under it. When the thumb ran over the ring, the focused row's end looked broken.
+- **The scrollbar lane:** while a list's overlay scrollbar shows, the library and the queue set `scrollbarLane`: hover, selection tint and ring all end at the lane, as one rectangle with one straight edge down a range, and the thumb is alone in the lane. Without a scrollbar they all reach the edge. When the thumb ran over the ring, the focused row's end looked broken, and when the tint went on alone under the lane, the ring had a tab on its end.
 - **Selected:** `selection` in a focused list, and `selectionInactive` without focus. A selected queue row under the pointer moves toward `selectionHovered`. Tertiary text on a selected row moves up (`textTertiaryOn`).
 - **Checked:** on the window's colours, a checked tool button gets the selection tint alone, with no ring. On a plot:
   - a state that is on, such as Mute or Solo, gets a solid `checkedFill`;
@@ -180,6 +183,7 @@ Durations are Kirigami's (`shortDuration` 100 ms, `longDuration` 200 ms, `veryLo
 | now playing, first play | the panel grows from the compact row over `veryLongDuration` × 9/8 (450 ms, InOutQuad) when wide, or over `longDuration` when narrow. The library moves with it, and the lines fade in from 60 % of the way |
 | spectrogram ↔ waveform | the chosen plot fades in over the other, `shortDuration`. Labels, switch and meter stay put |
 | search palette and scrim | fade together, `shortDuration`, OutCubic |
+| search results while a newer query runs | none: they keep their contrast and their query's bold runs. A search still running 250 ms after its query dims them, `shortDuration`, OutCubic, and they come back at once. The 250 ms is the busy indicator's threshold, an animation's pause: without it the list flashed on every keystroke |
 | tree expand and collapse | rows below slide over the children, `longDuration`, OutCubic |
 | queue reorder by drag | displaced rows slide, `shortDuration`, OutCubic. A keyboard reorder is instant |
 | viewer controls auto-hiding | after 5 s at rest, one shared level fades the strip, plates, mode switch, lane buttons and crosshair together, `shortDuration`, OutCubic. The controls stay while they have keyboard focus |
@@ -220,6 +224,8 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 | Row hover (light) | a hover tint stronger than the selection | the hovered row looked more selected than the selected one |
 | Inactive selection | a tint weaker than the hover | an unfocused selection read as less than a hover |
 | Queue focus ring | a ring running under the scrollbar | the thumb broke the ring's end |
+| Queue and library focus ring | the ring stopping at the lane with the tint running on under the thumb | the focused row was a box with a tail |
+| Library folder header | a folder glyph in the thumbnail's column | it put the folder's name right of its own artists'; the semibold name and the count mark the header |
 | Unreadable row | Breeze's `dialog-warning` drawn as a grey mask | it read as an eject arrow beside the amber ▶ |
 | Plot frame | gutters, rulers, rails, a border | the plot fills its pane |
 | Plot plates | the window's view colour as plates; bare outlined text | white stickers in light; text vanished on the waveform |
