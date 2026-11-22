@@ -475,6 +475,7 @@ private slots:
     void keyboardSelectsAndActs();
     void mouseSelectsAndActs();
     void menuKeyOpensTheSelectedResultsMenu();
+    void resultMenuNamesWhatItActsOn();
     void staleAndBusyResultsDoNotAct();
     void typingKeepsTheResultsInPlaceAsTheyAre();
     void onlyASlowSearchDimsTheResults();
@@ -1820,7 +1821,7 @@ void SearchPaletteTest::mouseSelectsAndActs() {
     QCOMPARE(menuSize.evaluate().toSizeF().toSize(), menuWindow->size());
     // Show in Library has the queue menu's icon.
     QQmlExpression showInLibraryIcon(qmlContext(harness.field()), harness.field(),
-                                     QStringLiteral("resultMenu.itemAt(2).text + '|' + resultMenu.itemAt(2).icon.name"));
+                                     QStringLiteral("resultMenu.itemAt(3).text + '|' + resultMenu.itemAt(3).icon.name"));
     QCOMPARE(showInLibraryIcon.evaluate().toString(), QStringLiteral("Show in Library|go-jump"));
     QTest::keyClick(harness.window, Qt::Key_Escape);
     settle();
@@ -1897,6 +1898,62 @@ void SearchPaletteTest::menuKeyOpensTheSelectedResultsMenu() {
     settle();
     QVERIFY(!menuOpened.evaluate().toBool());
     QVERIFY(harness.dialog->property("visible").toBool());
+}
+
+// The result's menu is one of the app's context menus: it names what it
+// acts on as the footer does, with the footer's keys, has the library's
+// icons, and groups Show in Library with the folder as the queue's does.
+void SearchPaletteTest::resultMenuNamesWhatItActsOn() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
+    QQmlExpression menuOpened(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.opened"));
+    QQmlExpression menuRows(qmlContext(harness.field()), harness.field(), QStringLiteral(R"JS((function() {
+        const rows = []
+        for (let i = 0; i < resultMenu.count; ++i) {
+            const item = resultMenu.itemAt(i)
+            rows.push(item.text === undefined ? "sep"
+                : item.text + "|" + (item.keyHint || "") + "|" + item.icon.name)
+        }
+        return rows.join("\n")
+    })())JS"));
+
+    const struct {
+        QString type;
+        QString play;
+        QString add;
+    } kinds[] = {
+        {QStringLiteral("artist"), QStringLiteral("Play Artist"), QStringLiteral("Add Artist to Queue")},
+        {QStringLiteral("album"), QStringLiteral("Play Album"), QStringLiteral("Add Album to Queue")},
+        {QStringLiteral("track"), QStringLiteral("Play Track"), QStringLiteral("Add Track to Queue")},
+    };
+    for (const auto &kind : kinds) {
+        const int index = harness.model.indexOfResult(kind.type, 0);
+        QVERIFY(QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, index)));
+        QTRY_VERIFY(harness.field()->hasActiveFocus());
+        QVERIFY(harness.hints().contains(QStringLiteral("Enter ") + kind.play));
+        QTest::keyClick(harness.window, Qt::Key_Menu);
+        settle();
+        QTRY_VERIFY(menuOpened.evaluate().toBool());
+        const QString rows = menuRows.evaluate().toString();
+        QVERIFY2(!menuRows.hasError(), qPrintable(menuRows.error().toString()));
+        QCOMPARE(rows.split(QLatin1Char('\n')),
+                 (QStringList{
+                     kind.play + QStringLiteral("|Enter|media-playback-start"),
+                     kind.add + QStringLiteral("|Ctrl+Enter|media-playlist-append"),
+                     QStringLiteral("sep"),
+                     QStringLiteral("Show in Library|Alt+Enter|go-jump"),
+                     QStringLiteral("Open Containing Folder||folder-open"),
+                 }));
+        QTest::keyClick(harness.window, Qt::Key_Escape);
+        settle();
+        QTRY_VERIFY(!menuOpened.evaluate().toBool());
+    }
 }
 
 // Results kept from an earlier query, or shown while a newer one runs, do

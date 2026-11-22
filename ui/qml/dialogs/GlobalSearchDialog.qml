@@ -1233,11 +1233,40 @@ Dialog {
         }
         Components.AppMenu {
             id: resultMenu
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Play"); icon.name: "media-playback-start"; onTriggered: root.controller.activateRow(root.contextRowData) }
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Add to Queue"); icon.name: "list-add"; onTriggered: root.controller.queueRow(root.contextRowData) }
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Show in Library"); icon.name: "go-jump"; onTriggered: root.controller.navigateSelectionToLibrary() }
+            objectName: "globalSearchResultMenu"
+            readonly property string rowType: root.contextRowData.rowType || "track"
+
+            // One of the app's context menus: what it acts on in the
+            // library's words and icons, with the footer's keys, and Show
+            // in Library with the folder, as in the queue's.
+            Components.KeyHintMenuItem {
+                text: resultMenu.rowType === "artist" ? I18n.i18nc("@action:inmenu", "Play Artist")
+                    : (resultMenu.rowType === "album" ? I18n.i18nc("@action:inmenu", "Play Album")
+                                                      : I18n.i18nc("@action:inmenu", "Play Track"))
+                icon.name: "media-playback-start"
+                keyHint: I18n.i18nc("@info:shortcut key name", "Enter")
+                onTriggered: root.controller.activateRow(root.contextRowData)
+            }
+            Components.KeyHintMenuItem {
+                text: resultMenu.rowType === "artist" ? I18n.i18nc("@action:inmenu", "Add Artist to Queue")
+                    : (resultMenu.rowType === "album" ? I18n.i18nc("@action:inmenu", "Add Album to Queue")
+                                                      : I18n.i18nc("@action:inmenu", "Add Track to Queue"))
+                icon.name: "media-playlist-append"
+                keyHint: I18n.i18nc("@info:shortcut key name", "Ctrl+Enter")
+                onTriggered: root.controller.queueRow(root.contextRowData)
+            }
             MenuSeparator {}
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Open Containing Folder"); icon.name: "document-open-folder"; onTriggered: root.controller.openRowInFileBrowser(root.contextRowData) }
+            Components.KeyHintMenuItem {
+                text: I18n.i18nc("@action:inmenu", "Show in Library")
+                icon.name: "go-jump"
+                keyHint: I18n.i18nc("@info:shortcut key name", "Alt+Enter")
+                onTriggered: root.controller.navigateSelectionToLibrary()
+            }
+            MenuItem {
+                text: I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                icon.name: "folder-open"
+                onTriggered: root.controller.openRowInFileBrowser(root.contextRowData)
+            }
         }
     }
     // The result row under the pointer.
