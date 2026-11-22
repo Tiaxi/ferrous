@@ -249,12 +249,15 @@ cat "$OUT"/worker*.log 2>/dev/null | grep -E "!!" || true
 
 # 4. Package.
 python3 "$H/motion_inventory.py" "$OUT" "$SRC"
+phase motion-inventory
 CONTRAST_STATUS=0
 python3 "$H/contrast.py" "$OUT" || CONTRAST_STATUS=$?
+phase contrast
 nice -n 10 python3 "$H/layout.py" "$OUT"
+phase layout
 PACK_STATUS=0
 SHOT_PARTIAL="$PARTIAL" nice -n 10 python3 "$H/pack.py" "$OUT" "$SRC" "${PACK_ARGS[@]}" || PACK_STATUS=$?
-phase package
+phase pack
 # publish the focus packs to <round>/focus/<scope>/ when the whole run passed (no failed check, measurement or
 # state): every pack copied aside first, then each renamed in. The round's packs of other scopes stay.
 if [ -n "${SHOT_FOCUS:-}" ] && [ "$PACK_STATUS" -eq 0 ] && [ "$CONTRAST_STATUS" -eq 0 ] && [ ! -s "$OUT/failures.txt" ]; then

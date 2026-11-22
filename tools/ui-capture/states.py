@@ -16,6 +16,7 @@ import time
 
 from driver import ICONPROBE
 from shotlib import FIND, KEY, LIB, LIB2, album_paths
+from colours import unique_colours
 
 KEY_TAB, KEY_ESC, KEY_SPACE = KEY["Tab"], KEY["Escape"], KEY["Space"]
 
@@ -948,7 +949,7 @@ def m_floorprobe(r, arg):
         # the run's middle rows (lane heads and the frequency labels' rows aside): its most frequent colour and
         # the spread (max channel difference from it) over those pixels
         band = a[int(a.shape[0] * 0.2):int(a.shape[0] * 0.8), x0:x1 + 1].reshape(-1, 3)
-        vals, counts = np.unique(band, axis=0, return_counts=True)
+        vals, counts = unique_colours(band)
         top = vals[counts.argmax()]
         rec.update(colour=_hexc(top), share=round(float(counts.max() / len(band)), 3), x0=int(x0), x1=int(x1),
                    spread=int(np.abs(band - top).max()),
@@ -1061,7 +1062,7 @@ def _hexs(c):
 def _colours(a, n=4, min_share=0.004):
     """The n most frequent exact colours of a pixel array (H, W, 3), with their shares."""
     import numpy as np
-    v, c = np.unique(a.reshape(-1, 3), axis=0, return_counts=True)
+    v, c = unique_colours(a)
     o = c.argsort()[::-1][:n]
     return [(tuple(int(x) for x in v[i]), float(c[i] / c.sum())) for i in o if c[i] / c.sum() >= min_share]
 
@@ -1875,7 +1876,7 @@ def m_dlgfacts(r, arg):
         if x1 - x0 < 2 or y1 - y0 < 2:
             return None
         px = a[y0:y1, x0:x1].reshape(-1, 3)
-        vals, cnt = np.unique(px, axis=0, return_counts=True)
+        vals, cnt = unique_colours(px)
         bg = tuple(int(v) for v in vals[cnt.argmax()])
         ink = max((tuple(int(v) for v in p_) for p_ in vals), key=lambda p_: _contrast(p_, bg))
         return bg, ink

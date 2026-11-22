@@ -25,6 +25,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor
@@ -37,6 +38,8 @@ os.environ.setdefault("SHOT_APP", "x")
 if len(sys.argv) > 2 and os.path.isdir(sys.argv[2]):  # the round's source: states read Configure's pages from it
     os.environ.setdefault("SHOT_SRC", sys.argv[2])
 import states as st  # noqa: E402
+from colours import unique_colours  # noqa: E402
+from framestore import FrameStore  # noqa: E402
 
 FONT = "/usr/share/fonts/google-noto/NotoSans-Regular.ttf"
 FONT_B = "/usr/share/fonts/google-noto/NotoSans-Bold.ttf"
@@ -58,6 +61,8 @@ GROUP_TITLES = dict(main="Main window", plot="Spectrogram/waveform pane", transp
                     **{"narrow-bigfont": "Narrow window 1000×720 at a large font (Noto Sans 24 pt)"})
 AREA_GROUP = dict(seek="transport", volume="transport")
 FULL_AREAS = {"main", "viewer", "icon", "iconab", "animoff", "scrobblering", "closeup", "onetoone"}
+STRIP_SIZE = (1200, 1568)  # a recording's merged image: its width and most height
+HALF_SIZE = ((REVIEW - PAD) // 2, REVIEW - 78)  # a pair's half: narrower, and room for the pair's title
 SKIP_AREAS = {"contrast"}  # measurement shots: in shots/ and CONTRAST.md, not on sheets
 
 
@@ -341,7 +346,7 @@ def floor_colours(rd, entries, theme):
         return es[0] if es else None
 
     def mode(a):
-        v, c = np.unique(a.reshape(-1, 3), axis=0, return_counts=True)
+        v, c = unique_colours(a)
         return tuple(int(x) for x in v[c.argmax()])
     e = shot("plot", "floor-empty")
     if e:
@@ -1060,24 +1065,26 @@ def action_time(marks, default):
     return ta
 
 
+def pair_halves(rd, pjobs):
+    """The recordings the pairs `pjobs` show: {pair job's index: (left dir, right dir)}; a pair with a half that was
+    not recorded has none (it is missing from the pack)."""
+    found = {}
+    for n, (pn, left, right, theme, _title) in enumerate(pjobs):
+        ds = []
+        for side in (left, right):
+            name, _, th_ = side.partition("@")  # ("name@theme": a half of another theme, e.g. dark beside light)
+            ds += sorted(glob.glob(os.path.join(rd, "strips-raw", f"{name}_{th_ or theme}_*")))[:1]
+        if len(ds) == 2:
+            found[n] = tuple(ds)
+    return found
+
+
 def pair_job(args):
     """Two transitions of one theme side by side in one image (states.STRIP_PAIRS: e.g. both directions of the
-    mode switch): each drawn as its own merged image at 777 px, next to each other under one title."""
-    rd, sdir, pname, left, right, theme, title = args
-    tmp = os.path.join(sdir, "pairtmp", pname + "_" + theme)
-    os.makedirs(tmp, exist_ok=True)
-    parts = []
-    for name in (left, right):
-        name, _, th_ = name.partition("@")  # ("name@theme": a half of another theme, e.g. dark beside light)
-        ds = sorted(glob.glob(os.path.join(rd, "strips-raw", f"{name}_{th_ or theme}_*")))
-        if not ds:
-            return []
-        # (drawn at the full size; the core gets a copy fitted to CORE_MP: narrower halves were too cramped)
-        r = strip_job((ds[0], tmp, (1568 - PAD) // 2, 1568 - 78))
-        if not r or not r[0].get("size"):
-            return []
-        parts.append(r[0])
-    ims = [Image.open(os.path.join(tmp, x["file"])).convert("RGB") for x in parts]
+    mode switch): each drawn as its own merged image at 777 px (strip_job's halves), next to each other under one
+    title."""
+    sdir, pname, theme, title, parts = args
+    ims = [Image.open(x["file"]).convert("RGB") for x in parts]
     ft = font(True, 24)
     W = sum(im.width for im in ims) + PAD
     tl = wrap(title, ft, W - 2 * PAD, ImageDraw.Draw(Image.new("RGB", (8, 8))))[:2]
@@ -1364,13 +1371,15 @@ def perceived_sheet(rd, sdir, name, title, rows, strips, tile_h=400, moments=5):
 
 
 def strip_job(args):
-    d, outdir = args[:2]
-    width = args[2] if len(args) > 2 else 1200  # a pair's halves are narrower
+    """One recording, measured once and drawn at each size the pack needs: (dir, out dir, half dir). Returns (its
+    strips' records, its half in a pair: dict(file, name, caption), or None without a half dir or a drawable one)."""
+    d, outdir, half_dir = args
     frames, marks, meta = strip_frames(d)
     if len(frames) < 2:
-        return []
+        return [], None
     t0 = action_time(marks, frames[0]["t"])
     ims = LazyFrames(d, frames)
+    half = None
     diffs = [None]
     for k in range(1, len(ims)):
         # > 2 levels: a 100 ms fade changes a tint by only a few levels per frame (e.g. a hover fade).
@@ -1474,14 +1483,22 @@ def strip_job(args):
     extra = []
     try:
         import motion_strip
-        motion_strip.W = width
-        motion_strip.MAX_H = args[3] if len(args) > 3 else 1568  # a pair's halves leave room for its title
         t_stop = next((t for t, m in marks if "stripstop" in m), None)
         focus = getattr(st, "MOTION_FOCUS", {}).get(meta["name"])
-        mstats, caption, mimg = motion_strip.analyse(frames, ims, t0, (x, y, w, h), sel, meta, d, zoom=up,
+        mstats, caption, draw = motion_strip.measure(frames, ims, t0, (x, y, w, h), sel, meta, d, zoom=up,
                                                      t_stop=t_stop, focus=focus, nearest=up > 1,
                                                      periodic=meta["name"] in getattr(st, "PERIODIC_UPDATES", ()),
                                                      elements=getattr(st, "ELEMENT_INK", {}).get(meta["name"]))
+        if half_dir:
+            try:  # (a half that cannot be drawn fails its pair, not the recording's own strip)
+                os.makedirs(half_dir, exist_ok=True)
+                hp = os.path.join(half_dir, base + ".png")
+                draw(*HALF_SIZE).save(hp, compress_level=1)  # (read back once, by pair_job)
+                half = dict(file=hp, name=meta["name"], caption=caption)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+        mimg = draw(*STRIP_SIZE)
         merged_file = base + ".png"
         mimg.save(os.path.join(outdir, merged_file), compress_level=3)
         # more images of this recording for other regions (states.EXTRA_VIEWS), each its own transition entry
@@ -1512,9 +1529,33 @@ def strip_job(args):
                     label, os.path.join(fdir, name), label_h)
         page_files.append("frames/" + name)
     size = list(Image.open(os.path.join(outdir, merged_file)).size) if merged_file else None
-    return [dict(file=merged_file or page_files[0], pages=page_files, name=meta["name"], theme=meta["theme"],
+    recs = [dict(file=merged_file or page_files[0], pages=page_files, name=meta["name"], theme=meta["theme"],
                  desc=meta["desc"], frames=len(frames), shown=len(sel), duration_ms=round(total), fps=round(fps),
                  crop=r, zoom=up, note=note, size=size, raw=f"strips-raw/{base}/", caption=caption, metrics=mstats)] + extra
+    return recs, half
+
+
+class PhaseTimer:
+    """Wall time of pack.py's steps, printed and written to <round>/timings/pack.tsv (step, seconds)."""
+
+    def __init__(self, rd):
+        import time
+        self._now = time.monotonic
+        self.path = os.path.join(rd, "timings", "pack.tsv")
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self.start = self.prev = self._now()
+        open(self.path, "w").close()
+
+    def __call__(self, step):
+        now = self._now()
+        with open(self.path, "a") as f:
+            f.write(f"{step}\t{now - self.prev:.2f}\n")
+        print(f"pack: {step} {now - self.prev:.1f} s", flush=True)
+        self.prev = now
+
+    def total(self):
+        self.prev = self.start
+        self("total")
 
 
 # ------------------------------------------------------------------ main
@@ -1526,8 +1567,10 @@ def main():
     ap.add_argument("--jobs", type=int, default=max(2, min(8, (os.cpu_count() or 4) // 2)))
     o = ap.parse_args()
     rd, src = os.path.abspath(o.round), os.path.abspath(o.src)
+    phase = PhaseTimer(rd)
     entries = load_entries(rd)
     privacy_fails = redact_round(rd, entries)  # before any sheet, strip or pack is made of them
+    phase("load+redact")
     geo = load_geometry(o.geometry)
     for e in entries:  # the shot's own geometry wins over a geometry pass
         if "popups" in e:
@@ -1613,12 +1656,36 @@ def main():
         fo_need = focus_strip_needs(focus_scope_names())
         raws = [r_ for r_ in raws if json.load(open(os.path.join(r_[0], "meta.json")))["name"] in fo_need]
         jobs = []
-    # Longest strips first (by frame count), so the pool doesn't end on one long job.
+    # (most frames first: the order perceived_sheet takes a recording's metrics in, when variants share a name)
     raws.sort(key=lambda r: -len(glob.glob(os.path.join(r[0], "f*.png"))))
+    pjobs = [(pn, a_, b_, th, title) for pn, a_, b_, title, themes in getattr(st, "STRIP_PAIRS", []) for th in themes
+             if fo_need is None or (a_.partition("@")[0] in fo_need and b_.partition("@")[0] in fo_need)]
+    halves_of = pair_halves(rd, pjobs)
+    half_ds = {d for ds in halves_of.values() for d in ds}
+    pairtmp = os.path.join(sdir, "pairtmp")
+    todo = [(d, out, pairtmp if d in half_ds else None) for d, out in raws]
+    # (a half of a recording with no strip of its own, e.g. another theme's: only its pair is published)
+    todo += [(d, pairtmp, pairtmp) for d in sorted(half_ds - {d for d, _ in raws})]
+    # Costliest strips first (the frames' bytes), ahead of the sheets, so the pool doesn't end on one long job.
+    cost = {j[0]: sum(f.stat().st_size for f in os.scandir(j[0]) if f.name.endswith(".png")) for j in todo}
+    todo.sort(key=lambda j: (-cost[j[0]], j[0]))
+    recs_of, halves = {}, {}
     with ProcessPoolExecutor(o.jobs) as ex:
+        strip_f = ex.map(strip_job, todo)
         sheet_f = ex.map(sheet_job, jobs)
-        strips = [s for r in ex.map(strip_job, raws) for s in r]
+        for (d, out, _half_dir), (recs, half) in zip(todo, strip_f):
+            recs_of[d] = recs
+            if half:
+                halves[d] = half
+        strips = [s for d, _ in raws for s in recs_of[d]]
         sheets = [s for r in sheet_f for s in r]
+        phase(f"sheets+strips ({len(jobs)} sheet jobs, {len(todo)} recordings)")
+        composed = [(sdir, pn, th, title, [halves[d] for d in halves_of[n]])
+                    for n, (pn, _a, _b, th, title) in enumerate(pjobs)
+                    if n in halves_of and all(d in halves for d in halves_of[n])]
+        pair_strips = [x for r in ex.map(pair_job, composed) for x in r]
+        phase(f"pairs ({len(composed)} of {len(pjobs)})")
+    shutil.rmtree(pairtmp, ignore_errors=True)
     fjobs = [(d, sdir, getattr(st, "FRAMES11", {})[json.load(open(os.path.join(d, "meta.json")))["name"]]) for d, _ in raws
              if json.load(open(os.path.join(d, "meta.json")))["name"] in getattr(st, "FRAMES11", {})]
     for fj in fjobs:  # loudly: a missing item is a failed image (the core check then fails)
@@ -1626,18 +1693,14 @@ def main():
             strips += frames11_job(fj)
         except (LookupError, RuntimeError) as ex:
             print(f"pack: {ex}", file=sys.stderr)
+    phase(f"frames11 ({len(fjobs)})")
     for nm, title, rows_ in getattr(st, "PERCEIVED_SHEETS", []):  # loudly: a missing recording fails the core check
         try:
             strips.append(perceived_sheet(rd, sdir, nm, title, rows_, strips))
         except LookupError as ex:
             print(f"pack: {ex}", file=sys.stderr)
-    pjobs = [(rd, sdir, pn, a_, b_, th, title) for pn, a_, b_, title, themes in getattr(st, "STRIP_PAIRS", []) for th in themes
-             if fo_need is None or (a_.partition("@")[0] in fo_need and b_.partition("@")[0] in fo_need)]
-    if pjobs:
-        with ProcessPoolExecutor(o.jobs) as ex:
-            strips += [x for r in ex.map(pair_job, pjobs) for x in r]
-        import shutil
-        shutil.rmtree(os.path.join(sdir, "pairtmp"), ignore_errors=True)
+    phase("perceived sheets")
+    strips += pair_strips
     strips.sort(key=lambda s: s["file"])
     for nm, title, theme, rows in ([] if fo_need is not None else getattr(st, "CUSTOM_SHEETS", [])):
         try:
@@ -1647,16 +1710,21 @@ def main():
             x = None
         if x:
             sheets.insert(0, x)
+    phase("custom sheets")
     for nm, area, state, title, *so in ([] if fo_need is not None else getattr(st, "STACK_SHEETS", [])):
         x = stack_sheet(rd, sd, entries, nm, area, state, title, so[0] if so else None)
         if x:
             sheets.insert(0, x)
+    phase("stack sheets")
     json.dump(sheets, open(os.path.join(sd, "sheets.json"), "w"), indent=1)
     json.dump(strips, open(os.path.join(sdir, "strips.json"), "w"), indent=1)
     geo_s = geometry_samples(rd, strips)
+    phase("geometry samples")
     write_motion_metrics(rd, strips, geo_s)
+    phase("MOTION-METRICS.md")
     bad = check_dialogs(rd, entries)
     bad = write_index(rd, src, entries, sheets, strips, dialog_failures=bad, geo_samples=geo_s)
+    phase("INDEX.md, core set, CORE-FACTS.md")
     if os.environ.get("SHOT_FOCUS"):  # the focus packs (focus.py), after the whole pack: focus-build/<scope>/ each
         try:
             names = focus_scope_names()
@@ -1664,6 +1732,7 @@ def main():
             names, bad = [], list(bad or []) + [f"focus: no scope {ex}"]
         for nm in names:
             bad = list(bad or []) + write_focus(rd, src, nm, entries, sheets, strips, geo_s)
+            phase(f"focus pack {nm}")
     print(f"pack: {len(sheets)} sheets, {len(strips)} strip images")
     # the documents a reviewer reads: the home folder written "~" (the layout findings quote elided paths),
     # then none may still hold it
@@ -1675,6 +1744,8 @@ def main():
         if home in open(mp, encoding="utf-8").read():
             privacy_fails.append(f"privacy: {os.path.relpath(mp, rd)} still names the home folder")
     bad = list(bad or []) + privacy_fails
+    phase("documents' privacy")
+    phase.total()
     if bad:  # loudly: dialog shots not of the dialogs their states name, core images missing, privacy
         print(f"pack: CHECKS FAILED for {len(bad)} item(s):", file=sys.stderr)
         for b_ in bad:
@@ -2022,7 +2093,7 @@ def _key_colours(rd, e, n=3):
         x, y, w, h = [int(v * e.get("scale", 1)) for v in e["subject"]]
         im = im.crop((x, y, x + w, y + h))
     a = np.asarray(im).reshape(-1, 3)
-    v, c = np.unique(a, axis=0, return_counts=True)
+    v, c = unique_colours(a)
     o = c.argsort()[::-1][:n]
     return ", ".join("#%02x%02x%02x %d %%" % (*v[i], round(100 * c[i] / len(a))) for i in o)
 
@@ -2115,29 +2186,12 @@ def strip_ends(rd, nm, th, watch):
     return out
 
 
-class LazyFrames:
-    """a recording's frames read when indexed, a few kept (LRU), instead of every frame in memory at once (a
+class LazyFrames(FrameStore):
+    """a recording's frames (strip_frames) read when indexed, instead of every frame in memory at once (a
     full-window recording at 1600x1000 is ~5 MB a frame; with strip jobs in parallel that ran the host out of memory
-    beside a build). ims[k], len(ims) and ims[k].size work as on a list."""
-    def __init__(self, d, frames, keep=6):
-        self.d, self.files, self.keep = d, [f["file"] for f in frames], keep
-        self.cache = collections.OrderedDict()
-
-    def __len__(self):
-        return len(self.files)
-
-    def __getitem__(self, k):
-        if k < 0:
-            k += len(self.files)
-        if k in self.cache:
-            self.cache.move_to_end(k)
-            return self.cache[k]
-        with Image.open(os.path.join(self.d, self.files[k])) as im:
-            v = im.convert("RGB")
-        self.cache[k] = v
-        while len(self.cache) > self.keep:
-            self.cache.popitem(last=False)
-        return v
+    beside a build): each decoded once and kept as shared tiles within a budget (framestore.py)."""
+    def __init__(self, d, frames):
+        super().__init__(d, [f["file"] for f in frames])
 
 
 def strip_facts(m):
@@ -2516,7 +2570,6 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
     """<round>/focus-build/<scope>/: only the scope's images (focus.SCOPES), FOCUS.md (ID, file, what it shows,
     what to look at) and FOCUS-FACTS.md (their measured facts as text); shoot_round.sh publishes it. Returns the
     failures (a missing or oversized image, or more images than the cap)."""
-    import shutil
     import focus
     if scope_name not in focus.SCOPES:
         return [f"focus: no scope {scope_name!r} (scopes: {', '.join(focus.SCOPES)})"]

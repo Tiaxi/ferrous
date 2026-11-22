@@ -29,6 +29,8 @@ class Runner:
     def __init__(self, s):
         self.s = s
         self.win = ""
+        self.verb_times = {}  # verb (macro NAME for macros) -> [count, seconds], top-level steps only
+        self._depth = 0
 
     # --- targets: NAME, NAME#k, NAME@fx,fy, NAME#k@fx,fy, xy:X,Y, menubar:I, menuitem:M:I
     def named_rect(self, name):
@@ -113,7 +115,17 @@ class Runner:
     def run_steps(self, text):
         for step in [t.strip() for t in text.split(" | ") if t.strip()]:
             verb, _, rest = step.partition(" ")
-            getattr(self, "step_" + verb.replace("-", "_"))(rest.strip())
+            t0 = time.time()
+            self._depth += 1
+            try:
+                getattr(self, "step_" + verb.replace("-", "_"))(rest.strip())
+            finally:
+                self._depth -= 1
+                if not self._depth:  # (a strip's action steps count as the strip's)
+                    key = "macro " + rest.split()[0] if verb == "macro" and rest.split() else verb
+                    c = self.verb_times.setdefault(key, [0, 0.0])
+                    c[0] += 1
+                    c[1] += time.time() - t0
 
     def step_wait(self, a):
         time.sleep(float(a))
@@ -457,6 +469,7 @@ def run_session(name, tag, lines, only):
             r.line_desc = desc
             try:
                 r.run_steps(steps)
+                t_shot = time.time()
                 if not setup and area != "motion":
                     dialog_win = None
                     menu_state = ((area == "menu" and state not in states.VERIFY_OPEN_EXEMPT)
@@ -508,6 +521,9 @@ def run_session(name, tag, lines, only):
                             json.dump(dict(shot=f"{area}_{state}_{s.suffix}.png", theme=tag, scale=s.scale,
                                            measures=r.pending_measures), f, indent=1)
                         r.pending_measures = []
+                    c = r.verb_times.setdefault("(grab and its checks)", [0, 0.0])
+                    c[0] += 1
+                    c[1] += time.time() - t_shot
             except Exception as e:  # keep going: record what failed
                 failures.append(f"{name}/{tag} {area} {state}: {e}")
                 print(f"  !! {area}_{state}: {e}", flush=True)
@@ -523,7 +539,8 @@ def run_session(name, tag, lines, only):
         t_quit = time.time()
         s.quit()
         timing.update(quit=round(time.time() - t_quit, 2), total=round(time.time() - t_start, 2),
-                      grabs=round(getattr(s, "t_grab", 0), 2), layout=round(getattr(s, "t_layout", 0), 2), strip_save=round(getattr(s, "t_stripsave", 0), 2))
+                      grabs=round(getattr(s, "t_grab", 0), 2), layout=round(getattr(s, "t_layout", 0), 2), strip_save=round(getattr(s, "t_stripsave", 0), 2),
+                      verbs={k: [n, round(t, 2)] for k, (n, t) in sorted(r.verb_times.items(), key=lambda kv: -kv[1][1])})
         td = os.path.join(os.path.dirname(os.environ["SHOT_OUT"].rstrip("/")), "timings")
         os.makedirs(td, exist_ok=True)
         with open(os.path.join(td, f"{name}_{tag}.json"), "w") as f:
@@ -541,23 +558,73 @@ def plan(jobs, workers, est):
     return loads
 
 
-def estimates(rd):
-    """Per (session, theme) seconds: this round's last timings, else the most recent other round's,
-    else defaults (early measurements)."""
-    defaults = dict(empty=8, main=35, playing=27, transport=25, statusbar=45, menus=27, dialogs=37, viewers=34,
-                    focus=14, roots=6, motion=60, narrow=9, hidpi=7, bigfont=60, icons=2, animoff=30, contrast=25)
-    defaults.update({"motion-ui": 45, "narrow-empty": 2, "narrow-bigfont": 15})
+# Per (session, theme) seconds of the last whole run of each session in the work folder, for the schedule of the
+# next run, whatever its out folder (a new out folder has no rounds beside it to take them from).
+HISTORY = "session-times.json"
+
+
+def load_json(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def history_path():
+    from driver import WORK
+    return os.path.join(WORK, "run", HISTORY)
+
+
+def record_history(rd, jobs, path=None):
+    """Adds the totals of the jobs just run (this round's timings) to the work folder's history. Only whole
+    sessions: a run with --only runs part of each, and would schedule the next whole run on its shorter times."""
+    path = path or history_path()
+    try:
+        hist = load_json(path)
+    except (OSError, ValueError):
+        hist = {}
+    for name, tag in jobs:
+        try:
+            t = load_json(os.path.join(rd, "timings", f"{name}_{tag}.json"))
+            hist[f"{name}:{tag}"] = t["total"]
+        except (OSError, ValueError, KeyError):
+            pass
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(hist, f, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def estimates(rd, history=None):
+    """Per (session, theme) seconds: this round's last timings, else the work folder's history (the last whole
+    run of each session), else the most recent other round's, else defaults (measured on a full capture)."""
+    defaults = dict(empty=7, main=86, playing=79, transport=36, statusbar=52, menus=20, dialogs=55, viewers=52,
+                    focus=20, roots=7, motion=88, narrow=18, hidpi=5, bigfont=96, icons=12, animoff=7, contrast=8,
+                    queue=36, density=12)
+    defaults.update({"motion-ui": 32, "narrow-empty": 2, "narrow-bigfont": 32, "wide-bigfont": 9, "tall-bigfont": 3,
+                     "firstplay-noart": 23, "firstrun-defaults": 2, "icon-noart24": 8})
     found = {}
-    dirs = [os.path.join(rd, "timings")] + sorted(glob.glob(os.path.join(os.path.dirname(rd), "*", "timings")),
-                                                  key=os.path.getmtime, reverse=True)
+    for p in glob.glob(os.path.join(rd, "timings", "*.json")):
+        try:
+            t = load_json(p)
+            found.setdefault((t["session"], t["theme"]), t["total"])
+        except Exception:
+            pass
+    try:
+        hist = load_json(history or history_path())
+        for k, v in hist.items():
+            name, _, tag = k.rpartition(":")
+            found.setdefault((name, tag), float(v))
+    except (OSError, ValueError, AttributeError):
+        pass
+    dirs = sorted(glob.glob(os.path.join(os.path.dirname(rd), "*", "timings")), key=os.path.getmtime, reverse=True)
     for td in dirs:
         for p in glob.glob(os.path.join(td, "*.json")):
             try:
-                t = json.load(open(p))
+                t = load_json(p)
                 found.setdefault((t["session"], t["theme"]), t["total"])
             except Exception:
                 pass
-    light_motion = {"motion": 0.5, "motion-ui": 0.6}
+    light_motion = {"motion": 0.66, "motion-ui": 0.6}
     return lambda j: found.get(j, defaults.get(j[0], 30) * (light_motion.get(j[0], 1) if j[1] == "light" else 1))
 
 
@@ -615,6 +682,8 @@ def main():
             rc |= p.wait()
             log.close()
         print(f"{len(procs)} workers done in {time.time() - t0:.0f} s (exit {rc})", flush=True)
+        if not only:
+            record_history(rd, jobs)
         return
     failures = []
     for name, tag in jobs:
@@ -631,6 +700,8 @@ def main():
         for x in failures:
             f.write(x + "\n")
     print(f"{len(failures)} failures (see {out})")
+    if not o.jobs and not only:  # (a worker's parent records its workers' jobs)
+        record_history(rd, jobs)
 
 
 if __name__ == "__main__":

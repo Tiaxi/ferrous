@@ -21,6 +21,8 @@ import os
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from colours import unique_colours
+
 FONT = "/usr/share/fonts/google-noto/NotoSans-Regular.ttf"
 FONT_B = "/usr/share/fonts/google-noto/NotoSans-Bold.ttf"
 WINDOW_MS = 45.0
@@ -209,14 +211,24 @@ def scope_masks(tracks, region, box, stp, shape, scale, off=(0, 0)):
     return m, ~m, n
 
 
+def sum3(d):
+    """d.sum(axis=-1) of pixels (..., 3), several times faster than numpy's reduction over so short an axis."""
+    return d[..., 0] + d[..., 1] + d[..., 2]
+
+
+def max3(d):
+    """d.max(axis=-1) of pixels (..., 3), several times faster than numpy's reduction over so short an axis."""
+    return np.maximum(np.maximum(d[..., 0], d[..., 1]), d[..., 2])
+
+
 def ink_series(arrs, mask):
     """Mean colour distance from the scope's background (its most frequent colour in the first frame)."""
     px0 = arrs[0][mask].astype(np.int32)
     if len(px0) == 0:
         return None
-    vals, counts = np.unique(px0, axis=0, return_counts=True)
+    vals, counts = unique_colours(px0)
     bg = vals[counts.argmax()].astype(np.float32)
-    return [float(np.abs(a[mask] - bg).sum(axis=1).mean()) for a in arrs]
+    return [float(sum3(np.abs(a[mask] - bg)).mean()) for a in arrs]
 
 
 def blink_of(ink, spans, segs):
@@ -400,17 +412,17 @@ def _tile_neither(F, S, E, T):
             Rs[dy:] = R[:H - dy]
         else:
             Rs[:H + dy] = R[-dy:]
-        dd = np.abs(F - Rs).sum(axis=2)
+        dd = sum3(np.abs(F - Rs))
         bad = np.isnan(dd)
         t = tiles(np.where(bad, 1.0, (dd > 30).astype(np.float32)))
         return np.where(tiles(bad.astype(np.float32)) > 0, np.inf, t)
-    chg = tiles((np.abs(E - S).sum(axis=2) > 30).astype(np.float32)) > 0.04
+    chg = tiles((sum3(np.abs(E - S)) > 30).astype(np.float32)) > 0.04
     if not chg.any():
         return 0.0
     r = np.minimum(off_share(S, 0), off_share(E, 0))
     D = E - S
-    al = np.clip(((F - S) * D).sum(axis=2) / ((D * D).sum(axis=2) + 1e-6), 0, 1)
-    r = np.minimum(r, tiles((np.abs(F - S - al[..., None] * D).sum(axis=2) > 30).astype(np.float32)))
+    al = np.clip(sum3((F - S) * D) / (sum3(D * D) + 1e-6), 0, 1)
+    r = np.minimum(r, tiles((sum3(np.abs(F - S - al[..., None] * D)) > 30).astype(np.float32)))
     plain = tiles(F.mean(axis=2) ** 2) - tiles(F.mean(axis=2)) ** 2 < 9
     for dy in range(-(H // 2), H // 2 + 1, max(1, T // 8)):  # (content sliding up to half the box)
         if dy == 0:
@@ -441,7 +453,7 @@ def content_cuts(full, times, spans, segs, box, stp=1, neither=True):
         E = full[kE][r0:r1, c0:c1].astype(np.float32)
         if S.size == 0 or S.shape != E.shape:
             continue
-        D = np.abs(E - S).sum(axis=2)
+        D = sum3(np.abs(E - S))
         M = D > 30
         if M.sum() < 20:
             out.append(dict(start_ms=round(sg["start"]), max_jump=0.0, at_ms=None, cut=False, neither=None, held_ms=0))
@@ -450,7 +462,7 @@ def content_cuts(full, times, spans, segs, box, stp=1, neither=True):
         for k in ks:
             if k == 0 or full[k].shape != full[k - 1].shape:
                 continue
-            st = np.abs(full[k][r0:r1, c0:c1].astype(np.float32) - full[k - 1][r0:r1, c0:c1]).sum(axis=2)
+            st = sum3(np.abs(full[k][r0:r1, c0:c1].astype(np.float32) - full[k - 1][r0:r1, c0:c1]))
             j = float(((st > 0.6 * D) & M).sum() / M.sum())
             if j > best:
                 best, kb = j, k
@@ -471,7 +483,7 @@ def content_cuts(full, times, spans, segs, box, stp=1, neither=True):
             rec["neither_ms"] = round(longest_run)
             k = kb
             while k + 1 < len(full) and full[k + 1].shape == full[k].shape and float(
-                    (np.abs(full[k + 1][r0:r1, c0:c1].astype(np.float32) - full[k][r0:r1, c0:c1]).sum(axis=2) > 30).mean()) < 0.02:
+                    (sum3(np.abs(full[k + 1][r0:r1, c0:c1].astype(np.float32) - full[k][r0:r1, c0:c1])) > 30).mean()) < 0.02:
                 k += 1
             rec["held_ms"] = round(spans[k][1] - times[kb])
         out.append(rec)
@@ -508,9 +520,18 @@ def handover(tracks, anims, window=None):
 
 def analyse(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, focus=None, nearest=False,
             periodic=False, elements=None):
+    """measure(), drawn at the size W and MAX_H give. Returns (metrics, caption, merged image)."""
+    metrics, cap, draw = measure(frames, ims, t0, region, shown_idx, meta, d, zoom=zoom, t_stop=t_stop, focus=focus,
+                                 nearest=nearest, periodic=periodic, elements=elements)
+    return metrics, cap, draw(W, MAX_H)
+
+
+def measure(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, focus=None, nearest=False,
+            periodic=False, elements=None):
     """frames: [{t,...}] (ms, absolute); ims: PIL images (the recording); t0: action time; region: (x, y, w, h)
     of the strip crop in those images; shown_idx: the key frames; zoom: their magnification; focus: an optional
-    (x, y, w, h) for the perceived rows (small controls). Returns (metrics, caption, merged image)."""
+    (x, y, w, h) for the perceived rows (small controls). Returns (metrics, caption, draw): draw(width, max_h) is
+    the merged image at that size (a pair's halves are narrower), with nothing measured again."""
     x, y, w, h = region
     scale = float(meta.get("scale", 1) or 1)
     stp = max(1, int((w * h / 150000) ** 0.5))  # metrics on a strided sample (at most ~150k pixels a frame)
@@ -521,7 +542,7 @@ def analyse(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
     spans = [(times[k], times[k + 1] if k + 1 < n else end_rec) for k in range(n)]
     dmax, dmean = [0.0], [0.0]
     for k in range(1, n):
-        dd = np.abs(full[k] - full[k - 1]).max(axis=2) if full[k].shape == full[0].shape else np.full(full[0].shape[:2], 255)
+        dd = max3(np.abs(full[k] - full[k - 1])) if full[k].shape == full[0].shape else np.full(full[0].shape[:2], 255)
         dmax.append(float(dd.max()))
         dmean.append(float(dd.mean()))
     changed = [k > 0 and dmax[k] > 2 for k in range(n)]
@@ -552,7 +573,7 @@ def analyse(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
             for s in ticks:
                 k = s["a"]
                 if k > 0 and full[k].shape == full[0].shape:
-                    tmask |= np.abs(full[k] - full[k - 1]).max(axis=2) > 2
+                    tmask |= max3(np.abs(full[k] - full[k - 1])) > 2
             if not tmask.any():
                 break
             seen_ticks += len(ticks)
@@ -561,7 +582,7 @@ def analyse(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
                     grown_all |= np.roll(np.roll(tmask, dy, axis=0), dx, axis=1)
             keep = ~grown_all
             trans = [k for k in trans if k > 0 and full[k].shape == full[0].shape
-                     and float((np.abs(full[k] - full[k - 1]).max(axis=2)[keep]).max(initial=0)) > 2]
+                     and float((max3(np.abs(full[k] - full[k - 1]))[keep]).max(initial=0)) > 2]
             segs = segments_of(trans, times)
         if seen_ticks:
             tick_note = (f"Periodic single-frame updates (e.g. the playing position; {seen_ticks} seen) are left "
@@ -578,7 +599,7 @@ def analyse(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
     dif = np.zeros(full[0].shape[:2], dtype=bool)
     for k in trans:
         if full[k].shape == full[0].shape:
-            dif |= np.abs(full[k] - full[k - 1]).max(axis=2) > 2
+            dif |= max3(np.abs(full[k] - full[k - 1])) > 2
     ys, xs = np.nonzero(dif)
     if len(xs):
         box = (max(0, xs.min() - 4), max(0, ys.min() - 4), min(dif.shape[1], xs.max() + 5), min(dif.shape[0], ys.max() + 5))
@@ -696,7 +717,7 @@ def analyse(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
                         md = np.zeros(full[0].shape[:2], dtype=bool)
                         for k in s["frames"]:
                             if times[k] > stated and k > 0 and full[k].shape == full[0].shape:
-                                md |= np.abs(full[k] - full[k - 1]).max(axis=2) > 2
+                                md |= max3(np.abs(full[k] - full[k - 1])) > 2
                         yy_, xx_ = np.nonzero(md)
                         if len(xx_):
                             bx = (int(xx_.min() * stp + x + off[0]), int(yy_.min() * stp + y + off[1]),
@@ -715,7 +736,7 @@ def analyse(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
         md = np.zeros(full[0].shape[:2], dtype=bool)
         for k in sg["frames"]:
             if k > 0 and full[k].shape == full[0].shape:
-                md |= np.abs(full[k] - full[k - 1]).max(axis=2) > 2
+                md |= max3(np.abs(full[k] - full[k - 1])) > 2
         yy_, xx_ = np.nonzero(md)
         if not len(xx_):
             return ""
@@ -777,8 +798,8 @@ def analyse(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
         pa_ = [np.asarray(im.crop((pr_[0], pr_[1], pr_[0] + pr_[2], pr_[1] + pr_[3]))).astype(np.int16) for im in ims]
         content = []
         for a_ in pa_:
-            v_, c_ = np.unique(a_.reshape(-1, 3), axis=0, return_counts=True)
-            content.append(float((np.abs(a_ - v_[c_.argmax()]).sum(axis=2) > 30).mean()))
+            v_, c_ = unique_colours(a_)
+            content.append(float((sum3(np.abs(a_ - v_[c_.argmax()])) > 30).mean()))
         pre = [k for k in range(n) if times[k] < 0]
         k0 = pre[-1] if pre else 0
         lo = 0.5 * min(content[k0], content[-1])
@@ -893,12 +914,15 @@ def analyse(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
         metrics["blink_ms"] = max(metrics["blink_ms"], metrics["blink_plot_ms"])
         metrics["plot_note"] = (metrics.get("plot_note", "") + " " + plot_note).strip()
     cap = caption(metrics, segs, continuous)
-    img = merged(frames, ims, times, region, shown_idx, zoom, nearest, segs, main, scopes, lum, tracks, anims, spans,
-                 metrics, meta, cap, dmean, focus, (box, stp, dif), full,
-                 row_segs=[sg for sg in segs if len(sg["frames"]) > 1][:3] if fo.get("rows") == "all" and segs else None, elements=elems, pa_max_h=pa_max_h,
-                 b_lines=b_lines, kf_band=kf_band, extra_focus=[(lb, resolve_rect(rc, meta, ims[0].width, ims[0].height)) for lb, rc in (fo.get("extra") or [])], zoom_graphs=fo.get("zoom_graphs"),
-                 max_frames=int(fo.get("max_frames", 12)), pursuit=fo.get("pursuit"))
-    return metrics, cap, img
+    def draw(width, max_h):
+        global W, MAX_H
+        W, MAX_H = width, max_h
+        return merged(frames, ims, times, region, shown_idx, zoom, nearest, segs, main, scopes, lum, tracks, anims, spans,
+                      metrics, meta, cap, dmean, focus, (box, stp, dif), full,
+                      row_segs=[sg for sg in segs if len(sg["frames"]) > 1][:3] if fo.get("rows") == "all" and segs else None, elements=elems, pa_max_h=pa_max_h,
+                      b_lines=b_lines, kf_band=kf_band, extra_focus=[(lb, resolve_rect(rc, meta, ims[0].width, ims[0].height)) for lb, rc in (fo.get("extra") or [])], zoom_graphs=fo.get("zoom_graphs"),
+                      max_frames=int(fo.get("max_frames", 12)), pursuit=fo.get("pursuit"))
+    return metrics, cap, draw
 
 
 def tail_text(m):
@@ -1066,7 +1090,7 @@ def focus_rect(region, main, dif_info, focus, ims, full, tile_w, tile_h, tracks=
     mag = np.zeros(full[0].shape[:2], dtype=np.float32)
     for k in (main["frames"] if main else []):
         if k > 0 and full[k].shape == full[0].shape:
-            mag += np.abs(full[k] - full[k - 1]).max(axis=2)
+            mag += max3(np.abs(full[k] - full[k - 1]))
     ys, xs = np.nonzero(mag > 2)
     if not len(xs):
         ys, xs = np.nonzero(dif)
