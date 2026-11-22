@@ -127,6 +127,16 @@ class OneMeasurement(Case):
             self.assertEqual(im.tobytes(), drawn.tobytes())
         self.assertNotEqual(half.width, full.width)
 
+    def test_ink_is_the_masked_pixels_mean_distance(self):
+        rng = np.random.default_rng(3)
+        arrs = [rng.integers(0, 256, size=(40, 90, 3)).astype(np.float32) for _ in range(4)]
+        arrs[0][:25] = (12, 34, 56)  # (the background: the most frequent colour)
+        for mask in (np.ones((40, 90), dtype=bool), rng.random((40, 90)) < 0.4):
+            bg = np.array([12, 34, 56], dtype=np.float32)
+            want = [float(np.abs(a[mask] - bg).sum(axis=1).mean()) for a in arrs]
+            self.assertEqual(motion_strip.ink_series(arrs, mask), want)
+        self.assertIsNone(motion_strip.ink_series(arrs, np.zeros((40, 90), dtype=bool)))
+
     def test_channel_reductions_equal_numpys(self):
         rng = np.random.default_rng(2)
         ints = rng.integers(0, 256, size=(50, 70, 3)).astype(np.int16)

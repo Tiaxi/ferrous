@@ -26,7 +26,7 @@ class UniqueColours(unittest.TestCase):
     def test_small_and_large_arrays_of_every_dtype(self):
         rng = np.random.default_rng(7)
         for dtype in (np.uint8, np.int16, np.int32, np.int64):
-            for shape in ((5, 7, 3), (600, 700, 3)):  # sorted keys, then a bincount
+            for shape in ((5, 7, 3), (600, 700, 3)):  # a tile, then a shot's size
                 # few colours, so counts tie and the order of ties matters
                 pal = rng.integers(0, 256, size=(9, 3))
                 a = pal[rng.integers(0, len(pal), size=shape[:-1])].astype(dtype)

@@ -223,12 +223,15 @@ def max3(d):
 
 def ink_series(arrs, mask):
     """Mean colour distance from the scope's background (its most frequent colour in the first frame)."""
-    px0 = arrs[0][mask].astype(np.int32)
+    # (a boolean index of rows of pixels is several times slower than the rows themselves or their positions)
+    at = None if mask.all() else np.flatnonzero(mask)
+    pick = lambda a: a.reshape(-1, 3) if at is None else a.reshape(-1, 3).take(at, axis=0)
+    px0 = pick(arrs[0]).astype(np.int32)
     if len(px0) == 0:
         return None
     vals, counts = unique_colours(px0)
     bg = vals[counts.argmax()].astype(np.float32)
-    return [float(sum3(np.abs(a[mask] - bg)).mean()) for a in arrs]
+    return [float(sum3(np.abs(pick(a) - bg)).mean()) for a in arrs]
 
 
 def blink_of(ink, spans, segs):

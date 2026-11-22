@@ -223,6 +223,15 @@ def steps_of(text):
             yield from steps_of(rest.partition("::")[2].replace(" ; ", " | "))
 
 
+def pack_needs(scope, states_mod):
+    """What a focus-only pack builds of a round: (the names of the recordings it analyses, those its images and
+    facts_strips read; the names of the strip images it shows or quotes, of which the pairs, perceived and frame
+    sheets are made)."""
+    analysed = {name for name, _ in Needs(scope, states_mod).traced}
+    quoted = {name for name, *_ in scope.get("facts_strips", [])}
+    return analysed | quoted, quoted | {name for kind, name, *_ in scope.get("images", []) if kind == "strip"}
+
+
 def recorded(area, state, theme, states_mod):
     """Whether a strip step of this line records in this theme (runner.run_session's no_record)."""
     return not (area == "motion" and theme != "dark" and state not in states_mod.STRIP_BOTH_THEMES)

@@ -174,6 +174,18 @@ class Selection(unittest.TestCase):
         for image in ("pair:both", "seen", "two-window"):
             self.assertEqual(self.cut(table(*lines, **kw), dict(images=[("strip", image, "dark", "", "")])), 2)
 
+    def test_what_a_focus_only_pack_builds(self):
+        t = table(STRIP_PAIRS=[("both", "one@dark", "two@light", "Both", ("dark",))],
+                  PERCEIVED_SHEETS=[("seen", "Seen", [("three", "dark", "Three")])], FRAMES11={"four": {}})
+        scope = dict(images=[("strip", "pair:both", "dark", "", ""), ("strip", "seen", "dark", "", ""),
+                             ("strip", "four-1to1", "dark", "", "")],
+                     sheets=[("cut", "Frames", "dark", [[dict(strip="five", item=None, times=[0])]])],
+                     facts_strips=[("six", "dark", "Six")])
+        analysed, shown = focus_select.pack_needs(scope, t)
+        # (five's frames are only cut into a sheet: it needs no analysis)
+        self.assertEqual(analysed, {"one", "two", "three", "four", "six"})
+        self.assertEqual(shown, {"pair:both", "seen", "four-1to1", "six"})
+
     def test_what_cannot_be_told_shoots_whole_sessions(self):
         t = table(("main", "a", "wait 1"))
         sheets = tile_sheet(("main", "a", None))

@@ -39,7 +39,7 @@ if len(sys.argv) > 2 and os.path.isdir(sys.argv[2]):  # the round's source: stat
     os.environ.setdefault("SHOT_SRC", sys.argv[2])
 import states as st  # noqa: E402
 from colours import unique_colours  # noqa: E402
-from focus_select import tile_matches  # noqa: E402
+from focus_select import pack_needs, tile_matches  # noqa: E402
 from framestore import FrameStore  # noqa: E402
 
 FONT = "/usr/share/fonts/google-noto/NotoSans-Regular.ttf"
@@ -1650,15 +1650,16 @@ def main():
             raws.append((d, sdir))
     # --focus-only (SHOT_FOCUS_ONLY=1): only what the scope's images need (its recordings and pairs; no area,
     # pick or custom sheets): a fast iteration on one surface. A full run packs everything.
-    fo_need = None
+    fo_need = fo_shown = None
     if os.environ.get("SHOT_FOCUS_ONLY") == "1" and os.environ.get("SHOT_FOCUS"):
-        fo_need = focus_strip_needs(focus_scope_names())
+        names_f = focus_scope_names()
+        fo_need, fo_shown = focus_strip_needs(names_f), focus_strips_shown(names_f)
         raws = [r_ for r_ in raws if json.load(open(os.path.join(r_[0], "meta.json")))["name"] in fo_need]
         jobs = []
     # (most frames first: the order perceived_sheet takes a recording's metrics in, when variants share a name)
     raws.sort(key=lambda r: -len(glob.glob(os.path.join(r[0], "f*.png"))))
     pjobs = [(pn, a_, b_, th, title) for pn, a_, b_, title, themes in getattr(st, "STRIP_PAIRS", []) for th in themes
-             if fo_need is None or (a_.partition("@")[0] in fo_need and b_.partition("@")[0] in fo_need)]
+             if fo_shown is None or f"pair:{pn}" in fo_shown]
     halves_of = pair_halves(rd, pjobs)
     half_ds = {d for ds in halves_of.values() for d in ds}
     pairtmp = os.path.join(sdir, "pairtmp")
@@ -1687,6 +1688,8 @@ def main():
     shutil.rmtree(pairtmp, ignore_errors=True)
     fjobs = [(d, sdir, getattr(st, "FRAMES11", {})[json.load(open(os.path.join(d, "meta.json")))["name"]]) for d, _ in raws
              if json.load(open(os.path.join(d, "meta.json")))["name"] in getattr(st, "FRAMES11", {})]
+    if fo_shown is not None:
+        fjobs = [fj for fj in fjobs if f"{strip_frames(fj[0])[2]['name']}-1to1" in fo_shown]
     for fj in fjobs:  # loudly: a missing item is a failed image (the core check then fails)
         try:
             strips += frames11_job(fj)
@@ -1694,6 +1697,8 @@ def main():
             print(f"pack: {ex}", file=sys.stderr)
     phase(f"frames11 ({len(fjobs)})")
     for nm, title, rows_ in getattr(st, "PERCEIVED_SHEETS", []):  # loudly: a missing recording fails the core check
+        if fo_shown is not None and nm not in fo_shown:
+            continue
         try:
             strips.append(perceived_sheet(rd, sdir, nm, title, rows_, strips))
         except LookupError as ex:
@@ -1717,7 +1722,7 @@ def main():
     phase("stack sheets")
     json.dump(sheets, open(os.path.join(sd, "sheets.json"), "w"), indent=1)
     json.dump(strips, open(os.path.join(sdir, "strips.json"), "w"), indent=1)
-    geo_s = geometry_samples(rd, strips)
+    geo_s = geometry_samples(rd, strips, fo_need)
     phase("geometry samples")
     write_motion_metrics(rd, strips, geo_s)
     phase("MOTION-METRICS.md")
@@ -1799,14 +1804,16 @@ def check_dialogs(rd, entries):
     return bad
 
 
-def geometry_samples(rd, strips):
+def geometry_samples(rd, strips, only=None):
     """states.GEOMETRY_SAMPLES: items' rects from a recording's trace at evenly spaced times after its first
     transition starts. Returns {(name, theme): (times, rows, note)}; rows are (label, cells or None when the item is
-    not in the trace)."""
+    not in the trace). `only`: just these recordings (a focus-only pack's)."""
     import numpy as np
     import motion_strip
     out = {}
     for name, (step, count, items) in getattr(st, "GEOMETRY_SAMPLES", {}).items():
+        if only is not None and name not in only:
+            continue
         for d in sorted(glob.glob(os.path.join(rd, "strips-raw", f"{name}_*"))):
             meta = json.load(open(os.path.join(d, "meta.json")))
             if meta.get("name") != name:
@@ -1816,6 +1823,7 @@ def geometry_samples(rd, strips):
             frames, marks, _ = strip_frames(d)
             t0 = action_time(marks, frames[0]["t"])
             tracks, _ = motion_strip.read_trace(d, t0)
+            grey = {}  # a frame as luminance, decoded once for every item measured in it
             start = m["segments"][0]["start_ms"] if m and m.get("segments") else 0
             times = [start + k * step for k in range(count)]
 
@@ -1843,7 +1851,10 @@ def geometry_samples(rd, strips):
                     for f_ in frames:
                         t_ = f_["t"] - t0
                         if start - 40 <= t_ <= start + 600:
-                            g = np.asarray(Image.open(os.path.join(d, f_["file"])).convert("L").crop(box), dtype=np.float32)
+                            if f_["file"] not in grey:
+                                with Image.open(os.path.join(d, f_["file"])) as gim:
+                                    grey[f_["file"]] = gim.convert("L")
+                            g = np.asarray(grey[f_["file"]].crop(box), dtype=np.float32)
                             vals.append(f"+{t_:.0f}: {g.mean():.1f}")
                     perframe.append(f"{label} (mean luminance 0-255 of its rect {rr[2]}x{rr[3]} at {rr[0]},{rr[1]}, every "
                                     f"rendered frame): " + ", ".join(vals))
@@ -2484,16 +2495,14 @@ def focus_scope_names(spec=None):
 def focus_strip_needs(names):
     """The recordings the scopes' images and facts need (a pair's two halves), for a --focus-only pack."""
     import focus
-    pair_map = {f"pair:{nm}": (a_, b_) for nm, a_, b_, *_ in getattr(st, "STRIP_PAIRS", [])}
-    view_of = {f"{nm}-{sfx}": nm for nm, views in getattr(st, "EXTRA_VIEWS", {}).items() for sfx, _ in views}
-    need = set()
-    for sc_f in (focus.SCOPES[n_] for n_ in names):
-        for kind, nm, *_ in sc_f.get("images", []):
-            if kind == "strip":
-                # (another view of a recording, states.EXTRA_VIEWS, is made from that recording)
-                need |= {view_of.get(h.partition("@")[0], h.partition("@")[0]) for h in pair_map.get(nm, (nm,))}
-        need |= {nm for nm, *_ in sc_f.get("facts_strips", [])}
-    return need
+    return set().union(*(pack_needs(focus.SCOPES[n_], st)[0] for n_ in names))
+
+
+def focus_strips_shown(names):
+    """The strip images the scopes show or quote, of which a --focus-only pack makes its pairs, perceived and frame
+    sheets."""
+    import focus
+    return set().union(*(pack_needs(focus.SCOPES[n_], st)[1] for n_ in names))
 
 
 def focus_limits(scope_name, paths):

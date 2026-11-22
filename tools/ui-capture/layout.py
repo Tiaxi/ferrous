@@ -90,7 +90,8 @@ def band_background(arr, rect, sc, ink):
     if x1 - x0 < 2 or y1 - y0 < 2:
         return None, 0
     sub = arr[y0:y1, x0:x1].reshape(-1, 3).astype(np.int32)
-    sub = sub[((sub - np.array(ink)) ** 2).sum(1) > 70 ** 2]
+    dr, dg, db = (sub[:, c] - int(ink[c]) for c in range(3))  # (per channel: a sum over an axis of 3 is slow)
+    sub = sub.take(np.flatnonzero(dr * dr + dg * dg + db * db > 70 ** 2), axis=0)
     if len(sub) == 0:
         return None, 0
     keys = (sub[:, 0] << 16) | (sub[:, 1] << 8) | sub[:, 2]
