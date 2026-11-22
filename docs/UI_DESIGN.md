@@ -60,7 +60,7 @@ The transport uses Breeze's Header colour set, as Breeze's toolbars and the menu
 | `hover` | hover on buttons and dialog lists: the least text-over-view tint that reaches 1.3:1 | reads as hover in any theme without looking like a selection |
 | `rowHover` / `hoveredRow` | hover on the library and queue rows: 1.44:1 dark, 1.31:1 light | 1.3:1 was too faint across a wide list. In light, a stronger tint outweighed the selection |
 | `pressed` | a pressed button: 1.65:1 on the view | a press must read as a clear step past the hover |
-| `hoverOn(bg)` / `pressedOn(bg)` | hover and pressed tints on another opaque background, such as the Header chrome or the popup's window colour | they keep the same steps on any surface |
+| `hoverOn(bg)` / `pressedOn(bg)` | hover and pressed tints on another opaque background, such as the Header chrome | they keep the same steps on any surface |
 | `selection` | a selected row in a focused list: the view mixed with the accent [#1f3e4e / #b5e0f7] | above the hover in both weight and hue |
 | `selectionInactive` | a selected row in a list without focus: the accent mix desaturated to 60 % | reads as a selection at rest, still above the hover |
 | `selectionHovered` / `selectionInactiveHovered` | a selected queue row under the pointer | a selected row responds to the pointer like any other row |
@@ -148,6 +148,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **Rest:** no fill. Flat tool buttons show their glyph only.
 - **Hover:** the hover tint for the surface (`hover`, `rowHover`, or `hoverOn(bg)`) fades in and out over `shortDuration`. On a viewer's strip and corner plate, hover is a wash of the plot's text colour: 14 % on dark (about 1.4:1), 12 % on light. At 6.5 %, hover looked the same as rest.
 - **Pressed:** `pressed` or `pressedOn(bg)`, a clear step past the hover. It shows on the first frame of the press, never faded in. A press that matches the hover reads as nothing.
+- **Flat actions in dialogs share Breeze's states,** Recent Issues' links too: the accent's outline alone on hover and the accent at 30 % within it when pressed, both at once. Grey fills for the links beside outlined buttons read as two kinds of control.
 - **Focus:** a focus ring appears only while the keyboard is in use:
   - a focused list row gets a 1 px `focusRing`, drawn as one rectangle with the selection tint when the row is also selected;
   - Ferrous's own tool buttons and link actions get a 2 px ring;

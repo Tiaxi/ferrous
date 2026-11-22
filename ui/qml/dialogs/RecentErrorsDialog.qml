@@ -503,44 +503,37 @@ Popup {
                                     rightPadding: Kirigami.Units.smallSpacing + 2
                                     // Link-coloured small text on a flat button: the style
                                     // draws the text of its own background, so both are
-                                    // drawn here.
-                                    // The tint under the text while hovered or pressed,
-                                    // the press a clear step past the hover, 1.65:1 on
-                                    // the popup's window colour, as the transport's
-                                    // (at 10% it read as the hover); the
-                                    // link is darker where the tint takes it under
-                                    // 4.5:1 on the window colour.
+                                    // drawn here, in the states Breeze gives the dialogs'
+                                    // other flat actions, Preview, Apply, the Reverts and
+                                    // this popup's own two: the accent's outline alone on
+                                    // hover (it was a grey fill of its own), and pressed,
+                                    // the accent at 30 % within it, at once, as theirs are.
+                                    // The link is darker or lighter where that fill takes
+                                    // it under 4.6:1 on the window colour, a margin over
+                                    // 4.5:1 that the fill's rounding to pixels cannot take
+                                    // away (at 4.5:1 it drew at 4.49:1 in Breeze Light).
                                     readonly property color tint: actionButton.down
-                                        ? root.uiPalette.pressedOn(root.uiPalette.chrome)
-                                        : (actionButton.hovered ? root.uiPalette.hover : "transparent")
+                                        ? ColorUtils.withAlpha(root.uiPalette.accent, 0.3)
+                                        : "transparent"
                                     contentItem: Label {
                                         textFormat: Text.PlainText
                                         text: actionButton.text
                                         font.pointSize: root.uiPalette.smallPointSize
                                         color: actionButton.tint.a > 0
-                                            ? root.uiPalette.linkOn(ColorUtils.drawnOver(actionButton.tint,
-                                                                                         root.uiPalette.chrome))
+                                            ? root.uiPalette.readableOn(root.uiPalette.link,
+                                                [ColorUtils.drawnOver(actionButton.tint, root.uiPalette.chrome)], 4.6)
                                             : root.uiPalette.link
                                         Accessible.ignored: true
                                     }
                                     background: Rectangle {
-                                        radius: 3
+                                        radius: Kirigami.Units.cornerRadius
                                         color: actionButton.tint
-                                        border.width: actionButton.visualFocus ? 2 : 0
-                                        border.color: root.uiPalette.focusRing
-
-                                        // The hover and the release fade; the press
-                                        // shows on its first frame. The button tells
-                                        // `pressed` before `down`, which the tint
-                                        // follows, so the fade is off by the time the
-                                        // tint turns.
-                                        Behavior on color {
-                                            enabled: Kirigami.Units.shortDuration > 0 && !actionButton.pressed
-                                            ColorAnimation {
-                                                duration: Kirigami.Units.shortDuration
-                                                easing.type: Easing.OutCubic
-                                            }
-                                        }
+                                        border.width: actionButton.visualFocus
+                                            ? 2
+                                            : (actionButton.down || actionButton.hovered ? 1 : 0)
+                                        border.color: actionButton.visualFocus
+                                            ? root.uiPalette.focusRing
+                                            : root.uiPalette.accent
                                     }
                                     onActiveFocusChanged: {
                                         if (activeFocus) {
