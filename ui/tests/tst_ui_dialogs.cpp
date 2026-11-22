@@ -553,6 +553,8 @@ private slots:
     void configureOpensTallEnoughForItsTallestPage();
     void configureMeasuresAPageThatGrowsOutOfView();
     void configureWidthsFollowTheFont();
+    void configureStacksLibraryWherePathsDoNotFit_data();
+    void configureStacksLibraryWherePathsDoNotFit();
     void configureKeepsTicksAndGroupsClearOfTheNextRow_data();
     void configureKeepsTicksAndGroupsClearOfTheNextRow();
     void compactDialogsHoldTheirText_data();
@@ -2535,6 +2537,101 @@ void UiDialogsTest::checkLibraryFoldersLabelSitsOnTheFirstFoldersBaseline(QQuick
     QTRY_VERIFY2(std::abs(baselineOf(label) - baselineOf(firstName)) <= 1.0,
                  qPrintable(QStringLiteral("the label's baseline at %1, the first folder's at %2")
                                 .arg(baselineOf(label)).arg(baselineOf(firstName))));
+    QVERIFY(reject(dialog));
+}
+
+void UiDialogsTest::configureStacksLibraryWherePathsDoNotFit_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Library puts its labels above its fields where the fields' column can't
+// hold a folder's name, path and count, as at 24 pt in a narrow window
+// (three named folders' paths read "/srv/…lbums" beside an empty labels'
+// column). As Configure opens on a screen with room, and wherever the
+// paths fit, the labels stay beside them, however long a path.
+void UiDialogsTest::configureStacksLibraryWherePathsDoNotFit() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(main.window);
+    const auto folder = [](const QString &path, const QString &name, int tracks) {
+        QVariantMap entry{{QStringLiteral("path"), path}, {QStringLiteral("trackCount"), tracks}};
+        if (!name.isEmpty()) {
+            entry.insert(QStringLiteral("name"), name);
+        }
+        return entry;
+    };
+    const QVariantList longPaths{
+        folder(QStringLiteral("/srv/media/collections/lossless/albums"), QStringLiteral("Albums"), 12480),
+        folder(QStringLiteral("/srv/media/collections/vinyl-transfers"), QStringLiteral("Vinyl"), 845),
+        folder(QStringLiteral("/srv/share/archive/live-recordings"), QStringLiteral("Live"), 3),
+        folder(QStringLiteral("/srv/media/incoming/downloads"), QString(), 57),
+    };
+    const QVariantList longest{folder(QStringLiteral("/srv/media/collections/lossless/albums/by-the-year-each-one-"
+                                                     "was-released/and-by-the-label-that-pressed-it"),
+                                      QStringLiteral("A Long Folder Name"), 12480)};
+    QVERIFY(bridge->setProperty("libraryRootEntries", longest));
+    QObject *dialog = openPreferences(main.window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    QQuickItem *page = stack->childItems().at(0);
+    QQuickItem *form = itemsNamed(page, QStringLiteral("preferencesForm")).value(0);
+    QQuickItem *frame = visibleNamed(prefs, QStringLiteral("libraryRootListFrame"));
+    QVERIFY(form != nullptr && frame != nullptr);
+
+    // As it opens, beside the labels, whatever the paths.
+    QTRY_VERIFY(!layoutPendingUnder(page));
+    QVERIFY(form->property("wideMode").toBool());
+    QVERIFY(sceneRect(frame).left() > sceneRect(form).left() + 1);
+    QVERIFY(bridge->setProperty("libraryRootEntries", longPaths));
+    QTRY_VERIFY(!layoutPendingUnder(page) && itemsNamed(page, QStringLiteral("libraryRootPath")).size() == 4);
+    QVERIFY(form->property("wideMode").toBool());
+    QVERIFY2(page->property("contentHeight").toReal() <= page->height() + 0.5, "the page scrolls");
+
+    // Narrower, where the paths no longer fit beside the labels but do in
+    // the form's width: 1364 px at 24 pt, as on a 1400 px screen.
+    const int narrow = pointSize > 10 ? 1364 : 780;
+    prefs->resize(narrow, prefs->height());
+    QTRY_COMPARE(prefs->width(), narrow);
+    QTRY_VERIFY(!form->property("wideMode").toBool());
+    QTRY_VERIFY(!layoutPendingUnder(page) && qAbs(sceneRect(frame).left() - sceneRect(form).left()) < 1);
+    // Watch's blank label leaves no empty line over it.
+    QQuickItem *watch = visibleNamed(prefs, QStringLiteral("libraryWatchCheckBox"));
+    QQuickItem *add = visibleNamed(prefs, QStringLiteral("libraryRootAddButton"));
+    QVERIFY(watch != nullptr && add != nullptr);
+    QTRY_VERIFY2(sceneRect(watch).top() - sceneRect(add).bottom() < 24, qPrintable(describeItem(watch)));
+    const QList<QQuickItem *> paths = itemsNamed(page, QStringLiteral("libraryRootPath"));
+    QCOMPARE(paths.size(), 4);
+    for (QQuickItem *path : paths) {
+        QTRY_VERIFY2(!path->property("truncated").toBool(), qPrintable(describeItem(path)));
+        QVERIFY2(qAbs(sceneRect(path).left() - sceneRect(paths.first()).left()) < 0.5,
+                 qPrintable(describeItem(path)));
+    }
+
+    // Paths that fit in the column keep the labels beside them.
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        folder(QStringLiteral("/srv/a"), QStringLiteral("A"), 3)}));
+    QTRY_VERIFY(form->property("wideMode").toBool());
+    QTRY_VERIFY(!layoutPendingUnder(page));
+    QVERIFY(!itemsNamed(page, QStringLiteral("libraryRootPath")).first()->property("truncated").toBool());
+
+    // Too narrow for either form: above the fields, inside the page, the
+    // path elided.
+    QVERIFY(bridge->setProperty("libraryRootEntries", longest));
+    prefs->resize(prefs->minimumWidth(), prefs->height());
+    QTRY_COMPARE(prefs->width(), prefs->minimumWidth());
+    QTRY_VERIFY(!form->property("wideMode").toBool());
+    QTRY_VERIFY(!layoutPendingUnder(page));
+    QTRY_VERIFY(sceneRect(frame).right() <= sceneRect(page).right() + 0.5);
+    QTRY_VERIFY(itemsNamed(page, QStringLiteral("libraryRootPath")).first()->property("truncated").toBool());
+    QQuickItem *count = visibleNamed(prefs, QStringLiteral("libraryRootTrackCount"));
+    QVERIFY(count != nullptr);
+    QVERIFY2(sceneRect(count).right() <= sceneRect(frame).right() + 0.5, qPrintable(describeItem(count)));
     QVERIFY(reject(dialog));
 }
 

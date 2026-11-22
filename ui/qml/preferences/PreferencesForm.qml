@@ -105,8 +105,9 @@ GridLayout {
             Layout.column: 0
             // With its field. While the page is out of view, every field
             // reads as hidden: the label keeps its place, as a field
-            // hidden only with its page keeps its own.
-            visible: label.text.length > 0 && label.item !== null
+            // hidden only with its page keeps its own. Above the fields, a
+            // blank label takes no line of its own.
+            visible: (root.wideMode ? label.text : label.text.trim()).length > 0 && label.item !== null
                 && (label.item.visible || !root.visible)
             enabled: label.buddy ? label.buddy.enabled : false
 
