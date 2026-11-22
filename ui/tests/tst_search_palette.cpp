@@ -1961,7 +1961,8 @@ void SearchPaletteTest::resultMenuNamesWhatItActsOn() {
                      kind.add + QStringLiteral("|Ctrl+Enter|media-playlist-append"),
                      QStringLiteral("sep"),
                      QStringLiteral("Show in Library|Alt+Enter|go-jump"),
-                     QStringLiteral("Open Containing Folder||folder-open"),
+                     kind.type == QStringLiteral("track") ? QStringLiteral("Open Containing Folder||folder-open")
+                                                          : QStringLiteral("Open Folder||folder-open"),
                  }));
         QTest::keyClick(harness.window, Qt::Key_Escape);
         settle();

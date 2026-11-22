@@ -1356,7 +1356,8 @@ Dialog {
                 onTriggered: root.controller.navigateSelectionToLibrary()
             }
             MenuItem {
-                text: I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                text: resultMenu.rowType === "track" ? I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                                                     : I18n.i18nc("@action:inmenu", "Open Folder")
                 icon.name: "folder-open"
                 onTriggered: root.controller.openRowInFileBrowser(root.contextRowData)
             }

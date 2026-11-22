@@ -599,6 +599,7 @@ private slots:
     void menuWindowsShowAtTheirFinalSize();
     void standardKeyActionTakesEveryBindingUnderAModalPopup();
     void standardKeysReadAndWriteTheListsTheSettingsKeep();
+    void openFolderNamesWhereItGoes();
 
 private:
     // The checks that the tests above run in turn in one window; each says
@@ -2018,7 +2019,7 @@ void UiMenusTest::checkLibraryContextMenuNamesWhatItActsOn(MainWindowFixture &ma
                  QStringLiteral("hint|Play Album|Enter|media-playback-start"),
                  QStringLiteral("item|Add Album to Queue||media-playlist-append"),
                  QStringLiteral("sep"),
-                 QStringLiteral("item|Open Containing Folder||folder-open"),
+                 QStringLiteral("item|Open Folder||folder-open"),
                  QStringLiteral("item|Edit Tags…||document-edit"),
                  QStringLiteral("sep"),
                  QStringLiteral("item|Collapse All||collapse-all"),
@@ -2193,6 +2194,40 @@ void UiMenusTest::checkAboutKdeLinksTakeTheKeyboard(QQuickWindow *window) {
     QVERIFY(dialog->property("visible").toBool());
     QMetaObject::invokeMethod(dialog, "close");
     QTRY_VERIFY(!dialog->property("visible").toBool());
+}
+
+// A library folder's, an artist's and an album's Open Folder opens that
+// folder; a track's Open Containing Folder the one it is in (all four said
+// Open Containing Folder, and three opened the row's own).
+void UiMenusTest::openFolderNamesWhereItGoes() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    bridgeOf(window)->setProperty("libraryRootCount", 2);
+    main.libraryModel.setExpandedKeys({kRootKey, kArtistKey, kAlbumKey});
+    main.libraryModel.setLibraryTreeFromBinary(artistAlbumTrackTree(true));
+    QTRY_VERIFY(viewRow(window, "libraryView", 3) != nullptr);
+    const QStringList names{QStringLiteral("Open Folder"), QStringLiteral("Open Folder"),
+                            QStringLiteral("Open Folder"), QStringLiteral("Open Containing Folder")};
+    for (int row = 0; row < names.size(); ++row) {
+        rightClick(window, viewRow(window, "libraryView", row));
+        QObject *menu = nullptr;
+        QTRY_VERIFY((menu = visibleMenu(window, QStringLiteral("libraryContextMenu"))) != nullptr
+                    && menu->property("opened").toBool());
+        QString shown;
+        for (QQuickItem *item : menuItems(menu)) {
+            if (item != nullptr && item->objectName() == QStringLiteral("libraryOpenFolderItem")) {
+                shown = withoutMnemonic(item->property("text").toString());
+                QCOMPARE(iconOf(item), QStringLiteral("folder-open"));
+                QVERIFY(item->isEnabled());
+            }
+        }
+        QCOMPARE(shown, names.at(row));
+        QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+        QTRY_VERIFY(!menu->property("visible").toBool());
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+    }
 }
 
 int main(int argc, char **argv) {

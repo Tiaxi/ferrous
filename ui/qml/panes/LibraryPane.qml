@@ -899,11 +899,15 @@ Rectangle {
 
                     MenuSeparator {}
 
-                    // A track's folder shows with the track selected; an
-                    // album's or an artist's is the folder itself.
+                    // A track's folder shows with the track selected; a
+                    // library folder's, an artist's, an album's or a
+                    // subfolder's is the folder itself, which is not the
+                    // one that contains it.
                     MenuItem {
                         objectName: "libraryOpenFolderItem"
-                        text: I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                        text: libraryContextMenu.rowType === "track"
+                            ? I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                            : I18n.i18nc("@action:inmenu", "Open Folder")
                         icon.name: "folder-open"
                         enabled: libraryContextMenu.rowType === "track"
                             ? (libraryContextMenu.rowMap.trackPath || "").length > 0
