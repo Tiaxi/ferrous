@@ -379,7 +379,7 @@ ApplicationWindow {
     QVERIFY(dialog != nullptr && confirm != nullptr);
     // Typographic apostrophes, as everywhere else.
     const QString details = confirm->property("details").toString();
-    QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("album\u2019s cover image")),
+    QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("album\u2019s folder")),
              qPrintable(details));
     // Replace from iTunes has a window of its own, which its question opens
     // in.
@@ -413,11 +413,16 @@ ApplicationWindow {
     QCOMPARE(confirm->property("message").toString(),
              QStringLiteral("Replace the album art of “Album A” by Artist A?"));
     QVERIFY(applied().isEmpty());
-    // What Replace does, in two short sentences (one sentence of 31 words
-    // was too long): the folder's cover image, or the tracks' embedded art.
-    QCOMPARE(confirm->property("details").toString(),
-             QStringLiteral("The new artwork replaces the album\u2019s cover image file or, if it has none, the artwork "
-                            "embedded in its tracks. Ferrous keeps no copy of the current album art."));
+    // What Replace does on disk, a short sentence for each case (one
+    // sentence of 31 words was too long): a cover file where the folder
+    // shows an image, which need not be the one that was shown, otherwise
+    // the tracks' embedded art. Only what is overwritten is lost, and the
+    // art is "album art" throughout, as in the question.
+    QCOMPARE(details,
+             QStringLiteral("If the album\u2019s folder has a cover image, the new album art is saved as its cover file. "
+                            "Otherwise it is embedded in the album\u2019s tracks. "
+                            "Ferrous keeps no copy of what it overwrites."));
+    QVERIFY2(!details.contains(QStringLiteral("artwork")), qPrintable(details));
     // A window of its own above Replace from iTunes', with Replace's icon
     // beside Cancel's.
     auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);

@@ -840,12 +840,15 @@ Components.DialogWindow {
         uiPalette: root.uiPalette
         windowRoot: root
         title: I18n.i18nc("@title:window", "Replace Album Art")
-        // Two short sentences, as the backend applies it: to the folder's
-        // cover image where the folder has one, otherwise embedded in the
-        // album's tracks (artwork::apply_artwork_to_track), rather than one
-        // sentence of 31 words.
-        details: I18n.i18nc("@info", "The new artwork replaces the album’s cover image file or, if it has none, "
-            + "the artwork embedded in its tracks. Ferrous keeps no copy of the current album art.")
+        // A short sentence for each case, as the backend applies it
+        // (artwork::apply_artwork_to_track), then what is lost. A folder
+        // that shows any image as its cover gets a cover file: the one with
+        // a cover's name is overwritten, and otherwise a new one is written
+        // beside the images that stay, so not every replaced image is lost
+        // ("replaces the album's cover image file" said it was). Without
+        // such an image, the album's tracks get it as their front cover.
+        details: I18n.i18nc("@info", "If the album’s folder has a cover image, the new album art is saved as its "
+            + "cover file. Otherwise it is embedded in the album’s tracks. Ferrous keeps no copy of what it overwrites.")
         confirmText: I18n.i18nc("@action:button", "Replace")
         // Breeze's swap: one image for the other. Its "document-replace", a
         // page with a red ×, read as Delete; red is the glyph of the
