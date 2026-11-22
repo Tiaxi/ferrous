@@ -252,6 +252,10 @@ private slots:
     void tagEditorLoadReportsUnreadableFiles();
     void tagEditorAutoNumberRestartsInEachFolder();
     void tagEditorReportsFailuresAsAProperty();
+    void tagEditorPutsACauseCodeInWords_data();
+    void tagEditorPutsACauseCodeInWords();
+    void tagEditorShowsTheCauseOfARealFailure_data();
+    void tagEditorShowsTheCauseOfARealFailure();
     void tagEditorKeepsExtraValuesUntilTheirFieldIsSaved();
     void tagEditorSelectionIsAModelRole();
     void tagEditorTellsWhetherARowHasAnError();
@@ -1434,6 +1438,159 @@ void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
     QVERIFY(succeeding.statusDetails().contains(QStringLiteral("error failed.flac")));
     QVERIFY(!succeeding.statusIsError());
     QCOMPARE(succeededReports.size(), 0);
+}
+
+// Each code the backend sends (its test of the same list is in
+// src/edit_failure.rs) has its words, after a save as after a rename, and
+// the error's words have no say: the same code gives the same cause beside
+// any of them, and no code gives none, whatever they say.
+void BridgeClientTest::tagEditorPutsACauseCodeInWords_data() {
+    QTest::addColumn<QString>("code");
+    QTest::addColumn<QString>("cause");
+    const auto row = [](const char *code, const QString &cause) {
+        QTest::newRow(code) << QString::fromLatin1(code) << cause;
+    };
+    row("folderNotWritable", QStringLiteral("You don’t have permission to write in this folder."));
+    row("fileNotWritable", QStringLiteral("You don’t have permission to change this file."));
+    row("fileNotReplaceable", QStringLiteral("You don’t have permission to replace this file."));
+    row("fileNotReadable", QStringLiteral("You don’t have permission to read this file."));
+    row("readOnlyFileSystem", QStringLiteral("The file system is read-only."));
+    row("noSpace", QStringLiteral("There isn’t enough free space on the disk."));
+    row("renameNotPermitted", QStringLiteral("Renaming stopped: you don’t have permission."));
+    row("renameReadOnlyFileSystem", QStringLiteral("Renaming stopped: a file system is read-only."));
+    row("renameNoSpace", QStringLiteral("Renaming stopped: there isn’t enough free space."));
+    row("aCodeOfALaterBackend", QString());
+    QTest::newRow("no code") << QString() << QString();
+}
+
+void BridgeClientTest::tagEditorPutsACauseCodeInWords() {
+    QFETCH(QString, code);
+    QFETCH(QString, cause);
+    for (const QString &error : {
+             QStringLiteral("failed to create temporary file in /fixture: Permission denied (os error 13)"),
+             QStringLiteral("failed to copy /fixture/0.flac: No space left on device (os error 28)"),
+             QStringLiteral("Lupa evätty"),
+         }) {
+        QJsonObject result{{QStringLiteral("path"), QStringLiteral("/fixture/Album 0/0.flac")},
+                           {QStringLiteral("ok"), false},
+                           {QStringLiteral("error"), error}};
+        if (!code.isEmpty()) {
+            result.insert(QStringLiteral("cause"), code);
+        }
+        const QByteArray response =
+            QJsonDocument(QJsonObject{{QStringLiteral("results"), QJsonArray{result}}}).toJson(QJsonDocument::Compact);
+        BridgeClient bridge;
+        isolateBridgeClient(bridge);
+        TagEditorController editor(&bridge);
+        QVERIFY(loadTagEditorRows(editor, tagEditorRows(1, 1),
+                                  {{TagEditorController::Operation::Save, response},
+                                   {TagEditorController::Operation::Rename, response}}));
+        const auto shownAsFailed = [&]() {
+            const QVariantMap item = editor.statusDetailSections().value(0).toMap().value(QStringLiteral("items"))
+                                         .toList().value(0).toMap();
+            QCOMPARE(item.value(QStringLiteral("cause")).toString(), cause);
+            QCOMPARE(item.contains(QStringLiteral("cause")), !cause.isEmpty());
+            // The system's text stays verbatim.
+            QCOMPARE(item.value(QStringLiteral("error")).toString(), error);
+            QCOMPARE(editor.m_tableModel.rowAt(0)->errorText, error);
+        };
+        editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+        QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+        QVERIFY(editor.save());
+        QTRY_COMPARE(saved.size(), 1);
+        shownAsFailed();
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        editor.setSelectedRows({0});
+        QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
+        QVERIFY(editor.renameSelectedFiles());
+        QTRY_COMPARE(renamed.size(), 1);
+        shownAsFailed();
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+    }
+}
+
+// The backend's codes as they reach the editor: real saves and renames of
+// files whose permissions, or the folder's, refuse them.
+void BridgeClientTest::tagEditorShowsTheCauseOfARealFailure_data() {
+    QTest::addColumn<int>("fileMode");
+    QTest::addColumn<int>("folderMode");
+    QTest::addColumn<bool>("rename");
+    QTest::addColumn<QString>("cause");
+    const int file = int(QFile::ReadOwner | QFile::WriteOwner);
+    const int folder = int(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    const int readOnlyFolder = int(QFile::ReadOwner | QFile::ExeOwner);
+    QTest::newRow("read-only file") << int(QFile::ReadOwner) << folder << false
+                                    << QStringLiteral("You don’t have permission to change this file.");
+    QTest::newRow("read-only folder") << file << readOnlyFolder << false
+                                      << QStringLiteral("You don’t have permission to write in this folder.");
+    QTest::newRow("unreadable file") << int(QFile::WriteOwner) << folder << false
+                                     << QStringLiteral("You don’t have permission to read this file.");
+    QTest::newRow("rename in a read-only folder") << file << readOnlyFolder << true
+                                                  << QStringLiteral("Renaming stopped: you don’t have permission.");
+}
+
+void BridgeClientTest::tagEditorShowsTheCauseOfARealFailure() {
+    QFETCH(int, fileMode);
+    QFETCH(int, folderMode);
+    QFETCH(bool, rename);
+    QFETCH(QString, cause);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString folder = dir.filePath(QStringLiteral("album"));
+    QVERIFY(QDir().mkpath(folder));
+    const QStringList paths{folder + QStringLiteral("/a.flac"), folder + QStringLiteral("/b.flac")};
+    for (qsizetype index = 0; index < paths.size(); ++index) {
+        QFile file(paths.at(index));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray flac = flacWithComments(
+            {QStringLiteral("TITLE=Song %1").arg(index + 1), QStringLiteral("TRACKNUMBER=%1").arg(index + 1)});
+        QCOMPARE(file.write(flac), qint64(flac.size()));
+    }
+    BridgeClient bridge;
+    isolateBridgeClient(bridge);
+    TagEditorController editor(&bridge);
+    QVERIFY(editor.openForPaths(paths));
+    QTRY_VERIFY(!editor.loading());
+    QCOMPARE(editor.m_tableModel.rowCount(), 2);
+
+    const auto restorePermissions = qScopeGuard([&] {
+        QFile::setPermissions(folder, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        for (const QString &path : paths) {
+            QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner);
+        }
+    });
+    for (const QString &path : paths) {
+        QVERIFY(QFile::setPermissions(path, QFileDevice::Permissions::fromInt(fileMode)));
+    }
+    QVERIFY(QFile::setPermissions(folder, QFileDevice::Permissions::fromInt(folderMode)));
+    const QFileInfo fileInfo(paths.first());
+    if (fileInfo.isReadable() && fileInfo.isWritable() && QFileInfo(folder).isWritable()) {
+        QSKIP("The user may write to any file, such as root.");
+    }
+
+    if (rename) {
+        editor.selectAllRows();
+        QSignalSpy renamed(&editor, &TagEditorController::renameFinished);
+        QVERIFY(editor.renameSelectedFiles());
+        QTRY_COMPARE(renamed.size(), 1);
+    } else {
+        editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
+        editor.setCell(1, QStringLiteral("title"), QStringLiteral("New"));
+        QSignalSpy saved(&editor, &TagEditorController::saveFinished);
+        QVERIFY(editor.save());
+        QTRY_COMPARE(saved.size(), 1);
+    }
+    const QVariantList items =
+        editor.statusDetailSections().value(0).toMap().value(QStringLiteral("items")).toList();
+    QCOMPARE(items.size(), 2);
+    for (const QVariant &item : items) {
+        QCOMPARE(item.toMap().value(QStringLiteral("cause")).toString(), cause);
+        QVERIFY(!item.toMap().value(QStringLiteral("error")).toString().isEmpty());
+    }
 }
 
 void BridgeClientTest::tagEditorKeepsExtraValuesUntilTheirFieldIsSaved() {

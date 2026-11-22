@@ -16,10 +16,12 @@ class BridgeClient;
 class QThreadPool;
 struct FerrousFfiRenameGate;
 
-// A file an action failed for, by name, and the error that stopped it.
+// A file an action failed for, by name, the error that stopped it, and the
+// backend's code for its cause, empty where it knows none.
 struct TagEditorFailure {
     QString name;
     QString error;
+    QString cause;
 };
 
 class TagEditorController final : public QObject {
@@ -35,9 +37,10 @@ class TagEditorController final : public QObject {
     Q_PROPERTY(QString statusDetails READ statusDetails NOTIFY statusChanged)
     // statusDetails' sections, for the Details window to set out, what
     // failed first: each a map of its `heading`, such as "Failed:", its
-    // `items`, for each file a map of its `name` and the `error` that
-    // stopped it, empty where none did, and `failed`, whether it lists the
-    // files that failed.
+    // `items`, for each file a map of its `name`, the `error` that stopped
+    // it, empty where none did, and that error's `cause` in plain words,
+    // only where it is known, and `failed`, whether it lists the files that
+    // failed.
     Q_PROPERTY(QVariantList statusDetailSections READ statusDetailSections NOTIFY statusChanged)
     // Whether the status reports something that failed.
     Q_PROPERTY(bool statusIsError READ statusIsError NOTIFY statusChanged)
