@@ -1448,14 +1448,29 @@ ApplicationWindow {
             objectName: "playbackMenu"
             title: I18n.i18nc("@title:menu", "&Playback")
             MenuItem { action: playPauseAction }
-            MenuItem { action: stopAction }
-            MenuItem { action: previousAction }
-            MenuItem { action: nextAction }
+            // Off where they cannot act, here only: the actions stay on
+            // for the transport and the shortcuts. Previous and Next as
+            // MPRIS has CanGoPrevious and CanGoNext.
+            Components.ConditionalMenuItem {
+                action: stopAction
+                canAct: uiBridge.playbackState !== "Stopped"
+            }
+            Components.ConditionalMenuItem {
+                action: previousAction
+                canAct: uiBridge.queueLength > 0
+            }
+            Components.ConditionalMenuItem {
+                action: nextAction
+                canAct: uiBridge.queueLength > 0
+            }
             MenuSeparator {}
             MenuItem { action: seekBackwardAction }
             MenuItem { action: seekForwardAction }
             MenuSeparator {}
             MenuItem { action: shuffleAction }
+            // A heading starts a group, as View's Visualization does:
+            // without the rule Shuffle read as the first of Repeat's.
+            MenuSeparator {}
             Components.MenuHeading {
                 objectName: "repeatHeading"
                 text: I18n.i18nc("@title:menu repeat modes", "Repeat")

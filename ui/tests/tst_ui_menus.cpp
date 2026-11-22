@@ -599,6 +599,10 @@ private slots:
     void menuWindowsShowAtTheirFinalSize();
     void standardKeyActionTakesEveryBindingUnderAModalPopup();
     void standardKeysReadAndWriteTheListsTheSettingsKeep();
+    void openFolderNamesWhereItGoes();
+    void playbackItemsAreOffWhereTheyCannotAct();
+    void playbackItemsKeepTheirStateAsTheActionsChange();
+    void everyMenuHeadingStartsItsGroup();
 
 private:
     // The checks that the tests above run in turn in one window; each says
@@ -1264,6 +1268,7 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  QStringLiteral("item|Seek Forward|Shift+Right|media-seek-forward"),
                  QStringLiteral("sep"),
                  QStringLiteral("check|Shuffle||"),
+                 QStringLiteral("sep"),
                  QStringLiteral("heading|Repeat"),
                  QStringLiteral("radio|Off||"),
                  QStringLiteral("radio|One Track||"),
@@ -1399,6 +1404,9 @@ void UiMenusTest::checkHeadingsAreSkippedByThePointerAndTheKeyboard(QQuickWindow
     QQuickItem *off = menuItemWithText(menu, QStringLiteral("Off"));
     QVERIFY(heading != nullptr && shuffle != nullptr && off != nullptr);
 
+    // A queue, for Next to be an item the keys reach.
+    bridge->setProperty("queueLength", 3);
+    const auto emptyQueue = qScopeGuard([bridge] { bridge->setProperty("queueLength", 0); });
     QMetaObject::invokeMethod(menu, "open");
     QTRY_VERIFY(menu->property("opened").toBool());
     QQuickWindow *menuWindow = heading->window();
@@ -2018,7 +2026,7 @@ void UiMenusTest::checkLibraryContextMenuNamesWhatItActsOn(MainWindowFixture &ma
                  QStringLiteral("hint|Play Album|Enter|media-playback-start"),
                  QStringLiteral("item|Add Album to Queue||media-playlist-append"),
                  QStringLiteral("sep"),
-                 QStringLiteral("item|Open Containing Folder||folder-open"),
+                 QStringLiteral("item|Open Folder||folder-open"),
                  QStringLiteral("item|Edit Tags…||document-edit"),
                  QStringLiteral("sep"),
                  QStringLiteral("item|Collapse All||collapse-all"),
@@ -2193,6 +2201,185 @@ void UiMenusTest::checkAboutKdeLinksTakeTheKeyboard(QQuickWindow *window) {
     QVERIFY(dialog->property("visible").toBool());
     QMetaObject::invokeMethod(dialog, "close");
     QTRY_VERIFY(!dialog->property("visible").toBool());
+}
+
+// A library folder's, an artist's and an album's Open Folder opens that
+// folder; a track's Open Containing Folder the one it is in (all four said
+// Open Containing Folder, and three opened the row's own).
+void UiMenusTest::openFolderNamesWhereItGoes() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    bridgeOf(window)->setProperty("libraryRootCount", 2);
+    main.libraryModel.setExpandedKeys({kRootKey, kArtistKey, kAlbumKey});
+    main.libraryModel.setLibraryTreeFromBinary(artistAlbumTrackTree(true));
+    QTRY_VERIFY(viewRow(window, "libraryView", 3) != nullptr);
+    const QStringList names{QStringLiteral("Open Folder"), QStringLiteral("Open Folder"),
+                            QStringLiteral("Open Folder"), QStringLiteral("Open Containing Folder")};
+    for (int row = 0; row < names.size(); ++row) {
+        rightClick(window, viewRow(window, "libraryView", row));
+        QObject *menu = nullptr;
+        QTRY_VERIFY((menu = visibleMenu(window, QStringLiteral("libraryContextMenu"))) != nullptr
+                    && menu->property("opened").toBool());
+        QString shown;
+        for (QQuickItem *item : menuItems(menu)) {
+            if (item != nullptr && item->objectName() == QStringLiteral("libraryOpenFolderItem")) {
+                shown = withoutMnemonic(item->property("text").toString());
+                QCOMPARE(iconOf(item), QStringLiteral("folder-open"));
+                QVERIFY(item->isEnabled());
+            }
+        }
+        QCOMPARE(shown, names.at(row));
+        QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+        QTRY_VERIFY(!menu->property("visible").toBool());
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+    }
+}
+
+// Playback's Stop is off while stopped, Previous and Next while the queue
+// is empty, also as that changes with the menu open (all three read as
+// able to act). Only the items: the actions stay on, and with them the
+// transport's buttons and the shortcuts, which act as before.
+void UiMenusTest::playbackItemsAreOffWhereTheyCannotAct() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *menu = menuNamed(window, "playbackMenu");
+    QVERIFY(menu != nullptr);
+    struct Command {
+        const char *action;
+        Qt::Key key;
+        Qt::KeyboardModifiers modifiers;
+        QString text;
+    };
+    const QList<Command> commands{
+        {"stopAction", Qt::Key_Space, Qt::ControlModifier | Qt::ShiftModifier, QStringLiteral("Stop")},
+        {"previousAction", Qt::Key_Left, Qt::ControlModifier, QStringLiteral("Previous")},
+        {"nextAction", Qt::Key_Right, Qt::ControlModifier, QStringLiteral("Next")},
+    };
+    const struct {
+        QString state;
+        int queue;
+        bool stop;
+        bool skip;
+    } states[] = {
+        {QStringLiteral("Stopped"), 0, false, false}, {QStringLiteral("Stopped"), 3, false, true},
+        {QStringLiteral("Playing"), 3, true, true},   {QStringLiteral("Paused"), 3, true, true},
+        {QStringLiteral("Playing"), 0, true, false},  {QStringLiteral("Stopped"), 0, false, false},
+    };
+    for (const bool open : {false, true}) {
+        if (open) {
+            QMetaObject::invokeMethod(menu, "open");
+            QTRY_VERIFY(menu->property("opened").toBool());
+        }
+        for (const auto &state : states) {
+            bridge->setProperty("queueLength", state.queue);
+            bridge->setProperty("playbackState", state.state);
+            const QByteArray at = QStringLiteral("%1, %2 queued, menu %3")
+                                      .arg(state.state).arg(state.queue).arg(open).toUtf8();
+            for (const Command &command : commands) {
+                QQuickItem *item = menuItemWithText(menu, command.text);
+                QVERIFY(item != nullptr);
+                const bool can = command.text == QStringLiteral("Stop") ? state.stop : state.skip;
+                // The item's own switch: a closed menu's items are in no
+                // window to be enabled in.
+                QVERIFY2(item->property("enabled").toBool() == can, (command.text.toUtf8() + ": " + at).constData());
+                QObject *action = child(window, command.action);
+                QVERIFY2(action->property("enabled").toBool(), at.constData());
+                // The transport's buttons of the same action.
+                int buttons = 0;
+                for (QQuickItem *button : window->findChildren<QQuickItem *>()) {
+                    if (button != item && !button->inherits("QQuickMenuItem")
+                        && qvariant_cast<QObject *>(button->property("action")) == action) {
+                        QVERIFY2(button->isEnabled(), at.constData());
+                        ++buttons;
+                    }
+                }
+                QVERIFY2(buttons > 0, command.action);
+            }
+        }
+    }
+
+    // With nothing to act on (the last state), a click on an item that is
+    // off does nothing.
+    QQuickItem *next = menuItemWithText(menu, QStringLiteral("Next"));
+    QVERIFY(next->window() != nullptr);
+    QSignalSpy picked(child(window, "nextAction"), SIGNAL(triggered(QObject *)));
+    QTest::mouseClick(next->window(), Qt::LeftButton, Qt::NoModifier, sceneRect(next).center().toPoint());
+    QCoreApplication::processEvents();
+    QCOMPARE(picked.count(), 0);
+    QMetaObject::invokeMethod(menu, "close");
+    QTRY_VERIFY(!menu->property("visible").toBool());
+    window->requestActivate();
+    QTRY_VERIFY(window->isActive());
+    window->contentItem()->forceActiveFocus();
+
+    // The keys and the transport's buttons trigger their actions whether
+    // the items are off or on: what they then do is the backend's, as it
+    // is MPRIS's, which calls the bridge and no action.
+    for (const int queued : {0, 3}) {
+        bridge->setProperty("queueLength", queued);
+        bridge->setProperty("playbackState", queued > 0 ? QStringLiteral("Playing") : QStringLiteral("Stopped"));
+        for (const Command &command : commands) {
+            QObject *action = child(window, command.action);
+            QSignalSpy triggered(action, SIGNAL(triggered(QObject *)));
+            QTest::keyClick(window, command.key, command.modifiers);
+            QTRY_COMPARE(triggered.count(), 1);
+            QQuickItem *button = nullptr;
+            for (QQuickItem *candidate : window->findChildren<QQuickItem *>()) {
+                if (!candidate->inherits("QQuickMenuItem") && candidate->isVisible()
+                    && qvariant_cast<QObject *>(candidate->property("action")) == action) {
+                    button = candidate;
+                }
+            }
+            QVERIFY(button != nullptr);
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(button).center().toPoint());
+            QTRY_COMPARE(triggered.count(), 2);
+        }
+    }
+}
+
+// The button copies its action's enabled whenever that changes: an item
+// that cannot act stays off as its action comes back, and one that can is
+// off with its action.
+void UiMenusTest::playbackItemsKeepTheirStateAsTheActionsChange() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *menu = menuNamed(window, "playbackMenu");
+    QQuickItem *next = menuItemWithText(menu, QStringLiteral("Next"));
+    QObject *action = child(window, "nextAction");
+    QVERIFY(next != nullptr && action != nullptr);
+    for (const int queued : {0, 3, 0}) {
+        bridge->setProperty("queueLength", queued);
+        for (const bool actionOn : {false, true}) {
+            QVERIFY(action->setProperty("enabled", actionOn));
+            QCOMPARE(next->property("enabled").toBool(), actionOn && queued > 0);
+        }
+    }
+}
+
+// A heading inside a menu starts a group, with a separator over it unless
+// it is first (Shuffle ran into Repeat's).
+void UiMenusTest::everyMenuHeadingStartsItsGroup() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    int headings = 0;
+    for (QObject *menu : menusOf(window)) {
+        const QStringList rows = rowsOf(menu);
+        for (qsizetype i = 0; i < rows.size(); ++i) {
+            if (!rows.at(i).startsWith(QStringLiteral("heading|"))) {
+                continue;
+            }
+            QVERIFY2(i == 0 || rows.at(i - 1) == QStringLiteral("sep"), qPrintable(rows.at(i)));
+            ++headings;
+        }
+    }
+    QCOMPARE(headings, 2);
 }
 
 int main(int argc, char **argv) {

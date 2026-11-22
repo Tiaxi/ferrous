@@ -85,7 +85,7 @@ Overlays drawn on a visualization take their colours from the plot under it, not
 - the `meter*` colours;
 - `checkedFill`, `checkedGlyph`, `segmentEdge` and `plotFocusRing`.
 
-`plotFloor` (#14062e, the colour map's quiet indigo) is the floor where the plot has nothing to draw. The no-cover stand-in uses it too.
+`plotFloor` (#14062e, the colour map's quiet indigo) is the floor where the plot has nothing to draw. The no-cover stand-in uses it too, and so does `NoCoverTile`, its form at a list's size in the library and the search: there the mark is one quiet colour (#8c82a3), because amber means "now" and a run of coloured marks outshone the rows.
 
 The `ui*` colours at the end of the file come from before these tokens. Don't use them in new code.
 
@@ -118,7 +118,8 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **Each message dialog opens with a DemiBold lead sentence.** It says what happened or what is asked. The explanation, the path and the system's error follow in `textSecondary`. Weight, not size, ranks the lead, and one system everywhere keeps dialogs from reading as one grey block.
 - **The lead says what happened in words.** The system's error text, such as "Permission denied (os error 13)", goes on its own line below as a detail. It never repeats the window title.
 - **One term for one thing.** Use "Queue", never "Playlist", and "Add … to Queue" for queueing, never "Queue" as a verb. Use "Delete" for a delete. Use "full-size image", not "high-resolution artwork" in one place and "full-size" in another.
-- **The library's and the search results' menus name what they act on:** "Play Album", "Add Album to Queue", with the keys that do the same in that view, and one icon per action in every menu. A bare "Play" and "Add to Queue" in one menu made it another family.
+- **The library's and the search results' menus name what they act on:** "Play Album", "Add Album to Queue", with the keys that do the same in that view, and one icon per action in every menu. A bare "Play" and "Add to Queue" in one menu made it another family. They name where they go as well: "Open Folder" on a row that is a folder (a library folder, an artist, an album), "Open Containing Folder" on a track.
+- **A heading inside a menu starts a group,** with a separator over it. Without one, Shuffle read as the first of Repeat's choices.
 - **Pass every visible string through `I18n.i18nc` in QML or `i18nc` in C++,** with a context marker, and `i18ncp` for counts. Follow [translations](DEVELOPMENT.md#translations). Use KDE HIG wording:
   - Title Case for buttons, menus and window titles;
   - "…" (one character) only on items that ask for more input;
@@ -127,7 +128,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **A path the user reads but doesn't edit is a `PathLabel`:** one line, elided in the middle, with the full path in its tooltip. A read-only text field looks editable.
 - **In list rows, weight marks state.** The playing title, a search match in a title, a library folder's name and an unseen issue are DemiBold; the rest is regular. Bold used for anything else would compete with these.
 - **A search result says why it matched.** Where the title has no match, the matched run of the context is in `text`, at the regular weight, so it explains the row without outweighing the title. Results found by their artist showed no match at all.
-- **A result's tooltip adds to its row.** It shows only where the row is elided or there is more to say, and under the row, so it never covers the query.
+- **A result's tooltip adds to its row.** It shows only where the row is elided or there is more to say. It goes outside the palette where the window has room, beside it or under it, so the results around the row stay readable; otherwise under or over its row. It never covers the query or the footer.
 
 ## Dialogs
 
@@ -153,7 +154,8 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
   - a button on a plot gets a 2 px ring 1 px outside it, with a 1 px gap in the plate's colour.
 
   Focus and selection change at once.
-- **The scrollbar lane:** while a list's overlay scrollbar shows, the library and the queue set `scrollbarLane`: hover, selection tint and ring all end at the lane, as one rectangle with one straight edge down a range, and the thumb is alone in the lane. Without a scrollbar they all reach the edge. When the thumb ran over the ring, the focused row's end looked broken, and when the tint went on alone under the lane, the ring had a tab on its end.
+- **The scrollbar lane:** while a list's overlay scrollbar shows, the library, the queue and the search results set `scrollbarLane`: hover, selection tint and ring all end at the lane, as one rectangle with one straight edge down a range, and the thumb is alone in the lane. Without a scrollbar they all reach the edge. When the thumb ran over the ring, the focused row's end looked broken, and when the tint went on alone under the lane, the ring had a tab on its end.
+- **Disabled:** a menu's command that can't act now is drawn disabled, in Breeze's own colours. Where its action must stay on for a button or a shortcut, as Stop's, only the menu's item goes off (`ConditionalMenuItem`).
 - **Selected:** `selection` in a focused list, and `selectionInactive` without focus. A selected queue row under the pointer moves toward `selectionHovered`. Tertiary text on a selected row moves up (`textTertiaryOn`).
 - **Checked:** on the window's colours, a checked tool button gets the selection tint alone, with no ring. On a plot:
   - a state that is on, such as Mute or Solo, gets a solid `checkedFill`;
@@ -237,6 +239,7 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 | Last.fm listening | an arc, a pie or a progress ring around the glyph | read as a busy spinner; the states looked alike at 1× |
 | Idle now playing | a 360 px empty square; a stock disc glyph | read as a dead slab; the glyph was unreadable at 16 px |
 | Now playing | per-track heights; the cover scaling up from a square on first play | the library jumped up to 26 px on a track change; the scaling read as a zoom |
+| No-cover mark in a list | the stand-in's amber and magenta; Breeze's album and track glyphs | the tree's brightest thing, in the "now" colour; blobs at 24 pt and an empty square at 10 pt |
 | No-cover tile | the album title or a glyph in the slot; a different layout | repeated the lines below it, read as a broken image, and moved the library |
 | Track change | old and new text cross-fading over the same span | the two titles read as superimposed |
 | First play | the idle row leaving before the cover arrived | the band was empty for up to 140 ms, a blink |

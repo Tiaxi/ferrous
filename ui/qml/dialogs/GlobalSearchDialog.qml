@@ -5,6 +5,7 @@ import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/ColorUtils.js" as ColorUtils
 
 // The search palette (#373): an 800 px palette 32 px under the transport,
 // over a dim that covers the whole window; wider with a larger font, as its
@@ -58,12 +59,29 @@ Dialog {
     readonly property var selectedAuxRow: root.auxIndex >= 0 && root.auxIndex < root.auxRows.length
         ? root.auxRows[root.auxIndex] : null
 
+    // The clear glyph at rest. Breeze's is a solid shape of three times
+    // the search and help glyphs' ink, so in their colour it was the
+    // heaviest mark in the field's row: their colour nearly half way to
+    // the view, and still 3:1 on it.
+    readonly property color clearGlyphRest: root.uiPalette.readableOn(
+        ColorUtils.mixColor(root.uiPalette.textSecondary, root.uiPalette.view, 0.45), [root.uiPalette.view], 3.1)
     // The amber of the playing glyph over a cover's scrim.
     readonly property color nowOnScrim: "#f2b035"
     // The palette's sizes at 1×: these with the default font, and taller
     // with a larger one, by its line.
     readonly property real fieldHeight: Math.max(44, Math.round(regularMetrics.height) + 20)
     readonly property real headingHeight: Math.max(28, Math.round(smallMetrics.height) + 8)
+    // Over a heading that follows a section, 8 px more, scaled: some twice
+    // the space above it as under it, so it starts its section (30 px both
+    // ways, less than two results' 32, the sections ran on as one list).
+    readonly property real sectionGap: root.uiPalette.scaledSize(8)
+    readonly property int headingBottomPadding: 4
+    // A result row's height: the list's height adds up the same ones.
+    function rowHeightAt(kind, index) {
+        if (kind === "item") return root.resultHeight
+        if (kind === "") return 0
+        return kind === "section" && index > 0 ? root.headingHeight + root.sectionGap : root.headingHeight
+    }
     readonly property real resultHeight: Math.max(32, Math.round(regularMetrics.height) + 12)
     // The footer's line of key hints, and the footer: 28 px, or as many
     // lines as the hints wrap to and 4 px above and below them.
@@ -239,6 +257,35 @@ Dialog {
         return !!value && root.querySegments(value).some(function(segment) { return segment.match })
     }
     readonly property string contextSeparator: " · "
+    // Where a result's tooltip of `tipWidth` by `tipHeight` goes, in the
+    // palette's coordinates, for a row at `rowTop`. Outside the palette
+    // where the window has the room, so the results around the row stay
+    // readable (under its row it covered the next two, the selected one
+    // among them): beside the palette, level with the row, or else under
+    // the palette. Otherwise under its row, or over it where the footer is
+    // nearer, or else over the palette. Never over the field or the
+    // footer: null where the window has no such place.
+    function toolTipPlace(rowTop, rowHeight, tipWidth, tipHeight, margin) {
+        const windowWidth = root.parent ? root.parent.width : root.width
+        const windowHeight = root.parent ? root.parent.height : root.height
+        const outsideGap = Kirigami.Units.smallSpacing
+        const rowGap = 3
+        if (root.x + root.width + outsideGap + tipWidth + margin <= windowWidth) {
+            const level = Math.round(root.y + rowTop + (rowHeight - tipHeight) / 2)
+            const inWindow = Math.max(margin, Math.min(windowHeight - margin - tipHeight, level))
+            return Qt.point(root.width + outsideGap, inWindow - root.y)
+        }
+        const centred = Math.round((root.width - tipWidth) / 2)
+        if (root.y + root.height + outsideGap + tipHeight + margin <= windowHeight) {
+            return Qt.point(centred, root.height + outsideGap)
+        }
+        const underRow = rowTop + rowHeight + rowGap
+        if (underRow + tipHeight <= root.height - root.footerHeight - 1) return Qt.point(centred, underRow)
+        const overRow = rowTop - rowGap - tipHeight
+        if (overRow >= root.fieldHeight + 1) return Qt.point(centred, overRow)
+        if (root.y - outsideGap - tipHeight >= margin) return Qt.point(centred, -outsideGap - tipHeight)
+        return null
+    }
     // A result's details after its title, in parts: who and where it is
     // from, and what else matched.
     function rowContextParts(row, full, oneFolder) {
@@ -506,7 +553,18 @@ Dialog {
                 icon.name: "edit-clear"
                 icon.width: root.glyphSize
                 icon.height: root.glyphSize
-                icon.color: root.uiPalette.textSecondary
+                // As the other glyphs under the pointer or with the focus.
+                property color glyphColor: clearButton.hovered || clearButton.visualFocus
+                    ? root.uiPalette.textSecondary : root.clearGlyphRest
+                icon.color: clearButton.glyphColor
+
+                Behavior on glyphColor {
+                    enabled: Kirigami.Units.shortDuration > 0
+                    ColorAnimation {
+                        duration: Kirigami.Units.shortDuration
+                        easing.type: Easing.OutCubic
+                    }
+                }
                 text: I18n.i18nc("@action:button clear the search field", "Clear")
                 Accessible.name: text
                 ToolTip.visible: hovered || visualFocus
@@ -565,7 +623,7 @@ Dialog {
                 let used = 0
                 for (let i = 0; root.rowsRevision >= 0 && i < root.rowCount; ++i) {
                     const kind = rows.rowDataAt(i).kind || ""
-                    const rowHeight = kind === "item" ? root.resultHeight : (kind === "" ? 0 : root.headingHeight)
+                    const rowHeight = root.rowHeightAt(kind, i)
                     if (used + rowHeight > room) {
                         return used
                     }
@@ -640,17 +698,21 @@ Dialog {
                 }
                 // The app's lane scrollbar, as the library's and the
                 // queue's (Breeze's own was another hand here):
-                // over the lane the rows' text keeps clear of, its thumb
-                // over their tints, which run to the edge.
+                // alone in the lane at the right, where their tints end
+                // while it shows (it cut a pale piece out of the selected
+                // row).
                 ScrollBar.vertical: Components.LaneScrollBar {
                     id: resultScrollBar
                     objectName: "globalSearchScrollBar"
                     uiPalette: root.uiPalette
                     interactive: !root.searching
                 }
-                // The lane the rows' text leaves for the scrollbar, when it
-                // shows.
+                // The lane the rows' tints leave for the scrollbar, when it
+                // shows. Their text leaves it always, so that the lengths
+                // and where the context is cut stay put as typing brings
+                // the scrollbar and takes it away.
                 readonly property real scrollbarLane: resultScrollBar.visible ? resultScrollBar.lane : 0
+                readonly property real reservedLane: resultScrollBar.lane
                 Keys.onPressed: function(event) {
                     if (root.searching) return
                     if (root.handleResultKeys(event)) return
@@ -689,7 +751,7 @@ Dialog {
                     // row's end.
                     readonly property real contextWidth: Math.max(0, (lengthText.visible
                         ? lengthText.x - root.columnGap
-                        : width - root.sideInset - resultsView.scrollbarLane) - root.contextX)
+                        : width - root.sideInset - resultsView.reservedLane) - root.contextX)
                     // Asked for only when the shared tooltip shows.
                     function toolTipText() {
                         return [model.label, root.toolTipContext(model)].filter(function(line) {
@@ -704,7 +766,7 @@ Dialog {
                             || root.toolTipContext(model) !== resultRow.context
                     }
                     width: ListView.view.width
-                    height: kind === "item" ? root.resultHeight : (kind === "" ? 0 : root.headingHeight)
+                    height: root.rowHeightAt(kind, index)
                     Accessible.role: isResult ? Accessible.ListItem : (isMore ? Accessible.Link : Accessible.StaticText)
                     Accessible.name: isResult
                         ? I18n.i18nc("@info accessible name of a search result: type, name, details",
@@ -732,6 +794,7 @@ Dialog {
                         selected: resultRow.selected
                         active: true
                         focused: false
+                        scrollbarLane: resultsView.scrollbarLane
                     }
 
                     // A section's heading.
@@ -741,7 +804,7 @@ Dialog {
                         x: root.titleX
                         width: parent.width - x - root.sideInset
                         height: parent.height
-                        bottomPadding: 5
+                        bottomPadding: root.headingBottomPadding
                         verticalAlignment: Text.AlignBottom
                         textFormat: Text.PlainText
                         text: visible ? (root.sectionTitles[resultRow.rowType] || "") : ""
@@ -757,7 +820,7 @@ Dialog {
                         objectName: resultRow.isMore ? "globalSearchMoreLink" : "globalSearchTruncatedNote"
                         visible: resultRow.isMore || resultRow.kind === "truncated"
                         x: root.titleX
-                        width: parent.width - x - root.sideInset - resultsView.scrollbarLane
+                        width: parent.width - x - root.sideInset - resultsView.reservedLane
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
                         textFormat: Text.PlainText
@@ -772,9 +835,10 @@ Dialog {
                         elide: Text.ElideRight
                     }
 
-                    // The lead: an artist's glyph, or the cover, with the
-                    // amber glyph over it while its track plays. The glyphs
-                    // are loaded only for the rows that show one, each with
+                    // The lead: an artist's glyph, or the cover or the
+                    // library's no-cover tile, with the amber glyph over it
+                    // while its track plays. The glyphs and the tile are
+                    // loaded only for the rows that show one, each with
                     // a source that never changes: a Kirigami icon looks its
                     // file up again on the GUI thread whenever its source
                     // changes, which recycled rows would do on every query.
@@ -785,11 +849,11 @@ Dialog {
                         sourceComponent: artistGlyph
                     }
                     Loader {
-                        x: root.sideInset + (root.leadSize - root.glyphSize) / 2
-                        y: Math.round((parent.height - root.glyphSize) / 2)
+                        x: root.sideInset
+                        y: Math.round((parent.height - root.leadSize) / 2)
                         active: resultRow.isResult && resultRow.rowType !== "artist"
-                            && (model.coverUrl || "").length === 0 && !resultRow.isNow
-                        sourceComponent: resultRow.rowType === "album" ? albumPlaceholder : trackPlaceholder
+                            && (model.coverUrl || "").length === 0
+                        sourceComponent: noCoverTile
                     }
                     Kirigami.ShadowedImage {
                         id: thumbnail
@@ -809,7 +873,7 @@ Dialog {
                     }
                     Rectangle {
                         objectName: "globalSearchNowScrim"
-                        visible: resultRow.isNow && thumbnail.visible
+                        visible: resultRow.isNow
                         x: thumbnail.x
                         y: thumbnail.y
                         width: root.leadSize
@@ -828,11 +892,11 @@ Dialog {
                             source: (root.controller.uiBridge.playbackState || "") === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                             isMask: true
-                            // Over the cover's dark scrim, the colour map's
-                            // bright amber in both themes (fixed, like the
-                            // plot's colours): the light theme's darker
-                            // amber is under 3:1 there.
-                            color: thumbnail.visible ? root.nowOnScrim : root.uiPalette.now
+                            // Over the dark scrim on the cover or the tile,
+                            // the colour map's bright amber in both themes
+                            // (fixed, like the plot's colours): the light
+                            // theme's darker amber is under 3:1 there.
+                            color: root.nowOnScrim
                         }
                     }
 
@@ -944,7 +1008,7 @@ Dialog {
                         id: lengthText
                         objectName: "globalSearchResultLength"
                         visible: resultRow.isResult && resultRow.rowType === "track"
-                        x: parent.width - root.sideInset - resultsView.scrollbarLane - width
+                        x: parent.width - root.sideInset - resultsView.reservedLane - width
                         // Wider for a length of an hour or more.
                         width: Math.max(root.lengthWidth, Math.ceil(implicitWidth))
                         height: parent.height
@@ -1040,7 +1104,7 @@ Dialog {
                     x: root.titleX
                     width: parent.width - x - root.sideInset
                     height: visible ? root.headingHeight : 0
-                    bottomPadding: 5
+                    bottomPadding: root.headingBottomPadding
                     verticalAlignment: Text.AlignBottom
                     textFormat: Text.PlainText
                     text: I18n.i18nc("@title:group search palette", "Recent Searches")
@@ -1177,25 +1241,68 @@ Dialog {
         }
 
         // One tooltip for the result under the pointer, rather than one for
-        // each row. It is under the row, where the style's place, above,
-        // covered the query field, and above it only where the window ends
-        // first. It fades out where it was, with what it said: with no row
-        // it moved over the field as it faded.
+        // each row, where toolTipPlace finds it room: the style's place,
+        // above the row, covered the query field. It keeps its place, and
+        // what it said, as it fades out: following the rows and the
+        // palette's height there, it moved over the field.
         Components.PlainToolTip {
             id: resultToolTip
             objectName: "globalSearchResultToolTip"
-            readonly property int gap: 3
-            readonly property bool fitsUnder: {
-                const row = root.toolTipRow
-                if (!row || !root.parent) return true
-                const rowBottom = root.y + body.y + row.y - resultsView.contentY + row.height
-                return rowBottom + resultToolTip.gap + resultToolTip.implicitHeight
-                    + resultToolTip.bottomMargin <= root.parent.height
+            readonly property var place: root.toolTipRow
+                ? root.toolTipPlace(body.y + root.toolTipRow.y - resultsView.contentY, root.toolTipRow.height,
+                                    resultToolTip.implicitWidth, resultToolTip.implicitHeight,
+                                    Math.max(0, resultToolTip.margins))
+                : null
+            readonly property bool placing: !!root.toolTipTarget && !!resultToolTip.place
+            // As wide as its longest line, up to 320 px, scaled, and to the
+            // room beside the palette where a line can be 160 px there. The
+            // style wraps at 252 px whatever the font: at 24 pt, nine lines
+            // that covered the list and fitted nowhere in a small window.
+            readonly property real textWidthLimit: {
+                const sides = resultToolTip.leftPadding + resultToolTip.rightPadding
+                const beside = (root.parent ? root.parent.width : root.width) - root.x - root.width
+                    - Kirigami.Units.smallSpacing - Math.max(0, resultToolTip.margins) - sides
+                const readable = root.uiPalette.scaledSize(160)
+                const room = beside >= readable ? beside : root.width - 2 * root.sideInset - sides
+                return Math.floor(Math.min(root.uiPalette.scaledSize(320), room))
             }
-            parent: root.toolTipRow || resultsView
-            y: resultToolTip.fitsUnder ? (root.toolTipRow || resultsView).height + resultToolTip.gap
-                                       : -resultToolTip.implicitHeight - resultToolTip.gap
-            visible: !!root.toolTipTarget
+            contentItem: Item {
+                implicitWidth: toolTipLabel.width
+                implicitHeight: toolTipLabel.implicitHeight
+                Label {
+                    id: toolTipLabel
+                    objectName: "globalSearchResultToolTipText"
+                    width: Math.min(Math.ceil(toolTipNaturalSize.implicitWidth), resultToolTip.textWidthLimit)
+                    textFormat: Text.PlainText
+                    text: resultToolTip.text
+                    wrapMode: Text.Wrap
+                    font: resultToolTip.font
+                    color: Kirigami.Theme.textColor
+                    Kirigami.Theme.colorSet: resultToolTip.Kirigami.Theme.colorSet
+                }
+                // The lines unwrapped, measured apart: the label's own width
+                // would follow from itself.
+                Text {
+                    id: toolTipNaturalSize
+                    visible: false
+                    textFormat: Text.PlainText
+                    text: resultToolTip.text
+                    font: resultToolTip.font
+                    renderType: toolTipLabel.renderType
+                }
+            }
+            parent: contentColumn
+            Binding on x {
+                when: resultToolTip.placing
+                value: resultToolTip.place ? resultToolTip.place.x : 0
+                restoreMode: Binding.RestoreNone
+            }
+            Binding on y {
+                when: resultToolTip.placing
+                value: resultToolTip.place ? resultToolTip.place.y : 0
+                restoreMode: Binding.RestoreNone
+            }
+            visible: resultToolTip.placing
             delay: Kirigami.Units.toolTipDelay
             message: root.toolTipText
         }
@@ -1273,7 +1380,8 @@ Dialog {
                 onTriggered: root.controller.navigateSelectionToLibrary()
             }
             MenuItem {
-                text: I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                text: resultMenu.rowType === "track" ? I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                                                     : I18n.i18nc("@action:inmenu", "Open Folder")
                 icon.name: "folder-open"
                 onTriggered: root.controller.openRowInFileBrowser(root.contextRowData)
             }
@@ -1291,7 +1399,11 @@ Dialog {
     property string toolTipText: ""
     onToolTipTargetChanged: if (root.toolTipTarget) root.toolTipRow = root.toolTipTarget
     onToolTipTargetTextChanged: if (root.toolTipTargetText.length > 0) root.toolTipText = root.toolTipTargetText
-    // The lead glyphs of the rows without a cover.
+    // The leads of the rows without a cover: an artist's glyph, and for an
+    // album or a track the library's tile, so the app has one way to say
+    // "no cover". (Breeze's album and track glyphs were no mark at a large
+    // font: their larger drawings, a green disc and a solid sheet, masked
+    // to a blob at 24 pt.)
     Component {
         id: artistGlyph
         Kirigami.Icon {
@@ -1304,25 +1416,13 @@ Dialog {
         }
     }
     Component {
-        id: albumPlaceholder
-        Kirigami.Icon {
+        id: noCoverTile
+        Components.NoCoverTile {
             objectName: "globalSearchCoverPlaceholder"
-            width: root.glyphSize
-            height: root.glyphSize
-            source: "media-optical-audio"
-            isMask: true
-            color: root.uiPalette.textSecondary
-        }
-    }
-    Component {
-        id: trackPlaceholder
-        Kirigami.Icon {
-            objectName: "globalSearchCoverPlaceholder"
-            width: root.glyphSize
-            height: root.glyphSize
-            source: "audio-x-generic"
-            isMask: true
-            color: root.uiPalette.textSecondary
+            uiPalette: root.uiPalette
+            size: root.leadSize
+            // A thumbnail's here.
+            radius: 2
         }
     }
 }

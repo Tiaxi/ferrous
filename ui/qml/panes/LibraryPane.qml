@@ -63,14 +63,12 @@ Rectangle {
     // floor with a 1 px edge, in the thumbnail's place, so its name lines
     // up with its neighbours' and the app has one way to say "no cover"
     // (the floor's swatch alone, at about 1:1 on the view, read as a cover
-    // that failed to load). A cover that has not loaded yet has the hover
+    // that failed to load). At a list's size the mark is one quiet colour,
+    // 5:1 on the floor: the stand-in's amber and magenta, repeated down a
+    // run of albums without covers, were the tree's brightest thing, and
+    // amber there is only what is playing. A cover that has not loaded yet has the hover
     // tint for the moment it takes, so that rows coming into view do not
     // flash the mark before their covers.
-    // The 20 px mark is drawn on that tile's pixels, whose steps scale into
-    // a staircase, so a larger tile has the mark drawn in curves.
-    readonly property url thumbnailPlaceholderMark: root.thumbnailSize === 20
-        ? Qt.resolvedUrl("../assets/no-art-mark-20.svg")
-        : Qt.resolvedUrl("../assets/no-art-mark.svg")
     readonly property color thumbnailLoadingColor: root.uiPalette.hover
     // No fill of the thumbnail's own under the tile: the loading tint,
     // wholly transparent, so that the fill changes as a cover loads, which
@@ -653,32 +651,15 @@ Rectangle {
                             }
 
                             // An album without a cover: the no-art tile in
-                            // the thumbnail's place. Its mark's source never
-                            // changes, as a recycled row's would on every
-                            // scroll, which would load it again.
-                            Rectangle {
+                            // the thumbnail's place.
+                            Components.NoCoverTile {
                                 objectName: "libraryRowCoverPlaceholder"
+                                uiPalette: root.uiPalette
+                                size: root.thumbnailSize
                                 visible: libraryRow.showsThumbnail && rowThumbnail.missing
                                 x: rowThumbnail.x
                                 y: rowThumbnail.y
-                                width: root.thumbnailSize
-                                height: root.thumbnailSize
                                 radius: rowThumbnail.radius
-                                color: root.uiPalette.plotFloor
-                                border.width: 1
-                                border.color: root.uiPalette.plotFloorEdge
-
-                                Image {
-                                    objectName: "libraryRowCoverPlaceholderMark"
-                                    anchors.fill: parent
-                                    source: root.thumbnailPlaceholderMark
-                                    sourceSize.width: root.thumbnailSize
-                                    sourceSize.height: root.thumbnailSize
-                                    // Crisp on the grid it is drawn for.
-                                    smooth: root.thumbnailSize !== 20
-                                    cache: true
-                                    opacity: 0.85
-                                }
                             }
 
                             Text {
@@ -897,11 +878,15 @@ Rectangle {
 
                     MenuSeparator {}
 
-                    // A track's folder shows with the track selected; an
-                    // album's or an artist's is the folder itself.
+                    // A track's folder shows with the track selected; a
+                    // library folder's, an artist's, an album's or a
+                    // subfolder's is the folder itself, which is not the
+                    // one that contains it.
                     MenuItem {
                         objectName: "libraryOpenFolderItem"
-                        text: I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                        text: libraryContextMenu.rowType === "track"
+                            ? I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                            : I18n.i18nc("@action:inmenu", "Open Folder")
                         icon.name: "folder-open"
                         enabled: libraryContextMenu.rowType === "track"
                             ? (libraryContextMenu.rowMap.trackPath || "").length > 0
