@@ -52,8 +52,9 @@ Item {
     // Opens Recent Issues.
     property var openIssues: function() {}
     // The shown plot's zoom, 1 at the default, and what resets it. While it
-    // is zoomed, a readout and Reset show it left of the mode switch in the
-    // main pane; a viewer has them in its own controls, in the same order.
+    // is zoomed, a readout and Reset are left of the mode switch in the
+    // main pane, and show with it; a viewer has them in its own controls,
+    // in the same order.
     property real zoomLevel: 1.0
     property var resetZoom: null
     // Whether a viewer shows the mode switch and the zoom in its own
@@ -142,6 +143,13 @@ Item {
             : minutes + ":" + secs
     }
 
+    // The corner is one row, which shows and hides together: the zoom's
+    // plate and the mode switch, while the pointer is on the pane or
+    // keyboard focus is on either.
+    readonly property bool cornerWanted: root.controlsAutoHide || root.beforeAudio || root.paneHovered
+        || root.hoveredLane >= 0 || modeSwitch.pointerHovered || modeSwitch.focusInside
+        || zoomPlate.focusInside
+
     // The mode switch comes first in the Tab order, then each lane's Mute
     // and Solo. It shows while the pointer is over the pane or keyboard
     // focus is on it, as Mute and Solo do: in rolling mode, its corner is
@@ -160,8 +168,7 @@ Item {
         // Not in a viewer, which has it in its own controls. It comes back
         // to the pane at the level of those; hidden, it takes no pointer.
         visible: !root.controlsInViewer && (root.controlsVisible || root.controlsLevel > 0)
-        revealed: root.controlsAutoHide || root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
-            || modeSwitch.pointerHovered || modeSwitch.focusInside
+        revealed: root.cornerWanted
         fadeLevel: root.controlsLevel
         plotColors: root.plotColors
         uiPalette: root.uiPalette
@@ -171,9 +178,11 @@ Item {
     }
 
     // The zoom, 4 px left of the mode switch, so that the corner's plates
-    // read as one row: shown whenever the plot is zoomed, not only with the
-    // switch, as nothing else shows it. It keeps its place while the switch
-    // hides.
+    // read as one row: while the plot is zoomed, it shows and hides with
+    // the switch (shown without it, it floated 68 px from the corner). At
+    // rest the seek bar's band is the zoom's cue, and the wheel zooms with
+    // the pointer on the pane, where the readout shows as it changes. It
+    // keeps its place and its Tab stop while it is hidden.
     Components.PlotZoomPlate {
         id: zoomPlate
         z: 2
@@ -181,6 +190,7 @@ Item {
         anchors.right: modeSwitch.left
         anchors.rightMargin: 4
         available: !root.controlsInViewer && (root.controlsVisible || root.controlsLevel > 0)
+        revealed: modeSwitch.revealed
         fadeLevel: root.controlsLevel
         plotColors: root.plotColors
         uiPalette: root.uiPalette

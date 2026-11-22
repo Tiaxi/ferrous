@@ -39,6 +39,7 @@ private slots:
     void viewersInTheMainWindowAreNamedInItsTitle();
     void viewerZoomShowsAReadoutAndAResetButton();
     void mainPaneZoomShowsAReadoutBesideTheModeSwitch();
+    void mainPaneCornerShowsAndHidesAsOneRow();
     void resetZoomResetsOnlyTheShownPlotsZoom();
     void resetZoomIsOffAtAShortTracksStretchedDefault();
     void followPlayheadBringsTheShownPlotBack();
@@ -2674,9 +2675,64 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
     }
 }
 
+// The corner is one row: at rest, zoomed and following, the zoom's plate
+// floated 68 px from the corner, beside the hidden switch's place. It
+// shows and hides with the switch, on the pointer over the pane and on
+// keyboard focus, and neither moves as it does.
+void TransportInputSmokeTest::mainPaneCornerShowsAndHidesAsOneRow() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QVERIFY(bridge && spectrogramSurface && layer);
+    setPlayingTrack(bridge);
+    QQuickItem *plate = itemNamed(layer, QStringLiteral("plotZoomPlate"));
+    QQuickItem *reset = itemNamed(layer, QStringLiteral("plotZoomResetButton"));
+    QQuickItem *modeSwitch = itemNamed(layer, QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(plate && reset && modeSwitch);
+    const QPoint away(8, window->height() - 8);
+    const QPoint onPane = layer->mapToScene(QPointF(layer->width() / 2, layer->height() / 2)).toPoint();
+
+    QTest::mouseMove(window, away);
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+    spectrogramSurface->setProperty("_widgetZoomLevel", 2.0);
+    QTRY_VERIFY(plate->isVisible());
+    QTRY_COMPARE(plate->opacity(), 0.0);
+
+    // The wheel's pointer is on the pane: the whole row, on one curve.
+    QTest::mouseMove(window, onPane);
+    qreal furthest = 0.0;
+    QElapsedTimer fading;
+    fading.start();
+    while ((plate->opacity() < 1.0 || modeSwitch->opacity() < 1.0) && fading.elapsed() < 5000) {
+        QTest::qWait(4);
+        furthest = std::max(furthest, std::abs(plate->opacity() - modeSwitch->opacity()));
+    }
+    QCOMPARE(plate->opacity(), 1.0);
+    QCOMPARE(modeSwitch->opacity(), 1.0);
+    QVERIFY2(furthest < 0.05, qPrintable(QString::number(furthest)));
+    const QRectF resetShown = sceneRectOf(reset);
+    const QRectF switchShown = sceneRectOf(modeSwitch);
+
+    QTest::mouseMove(window, away);
+    QTRY_COMPARE(plate->opacity(), 0.0);
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+    QCOMPARE(sceneRectOf(reset), resetShown);
+    QCOMPARE(sceneRectOf(modeSwitch), switchShown);
+
+    // Hidden, Reset is a Tab stop, which brings the row.
+    reset->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_COMPARE(plate->opacity(), 1.0);
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QCOMPARE(sceneRectOf(reset), resetShown);
+}
+
 // The main pane shows its zoom while it is zoomed (with the scale off,
 // nothing showed it): the viewers' readout and Reset, on a plate 4 px left
-// of the mode switch, there also while the switch hides. The plot keeps its
+// of the mode switch, in its place also while both hide. The plot keeps its
 // place and size; its overlays keep clear of the plate. A viewer shows the
 // same readout and Reset on its own plate, in the same order.
 void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
@@ -2700,9 +2756,9 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
     QQuickItem *reset = itemNamed(layer, QStringLiteral("plotZoomResetButton"));
     QQuickItem *modeSwitch = itemNamed(layer, QStringLiteral("visualizationModeSwitch"));
     QVERIFY(plate && readout && reset && modeSwitch);
-    // The mode switch hidden, as with the pointer away from the pane; the
+    // The corner's row hidden, as the pointer is away from the pane; the
     // pointer comes back below.
-    modeSwitch->setProperty("revealed", false);
+    QTest::mouseMove(window, QPoint(8, window->height() - 8));
     QTRY_COMPARE(modeSwitch->opacity(), 0.0);
 
     // Nothing at the default zoom.
@@ -2719,9 +2775,10 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
         } else {
             waveform->setZoomLevel(4.0);
         }
-        // At once, with the viewers' wording, in the plot's colours.
+        // In its place at once, shown as the switch is, with the viewers'
+        // wording, in the plot's colours.
         QVERIFY(plate->isVisible());
-        QCOMPARE(plate->opacity(), 1.0);
+        QTRY_COMPARE(plate->opacity(), modeSwitch->opacity());
         QVERIFY(readout->isVisible() && reset->isVisible());
         QCOMPARE(readout->property("text").toString(),
                  mode == 0 ? QStringLiteral("Zoom 244%") : QStringLiteral("Zoom 400%"));
@@ -2745,6 +2802,8 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
         QCOMPARE(corner.height(), cornerBefore.height());
 
         // Reset: the default zoom, and the plate goes.
+        QTest::mouseMove(window, centerInWindow(reset));
+        QTRY_COMPARE(plate->opacity(), 1.0);
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
                           reset->mapToScene(QPointF(reset->width() / 2, reset->height() / 2)).toPoint());
         if (mode == 0) {

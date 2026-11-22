@@ -4,11 +4,13 @@ import QtQuick 2.15
 import FerrousUi 1.0
 import "." as Components
 
-// The plot's zoom while it is zoomed, which nothing else shows with the
-// scale off: a readout and Reset, on a plate in the plot's colours, left of
+// The plot's zoom while it is zoomed, in figures, which nothing else has
+// with the scale off: a readout and Reset, on a plate in the plot's colours, left of
 // the mode switch in the main pane, as tall as the switch, with its 4 px of
 // plate around the buttons (PlotModeSwitch); a viewer's are in its own
-// controls (ViewerControls). Not zoomed, it is hidden and no Tab stop.
+// controls (ViewerControls). Set `revealed` as the switch's: faded out,
+// Reset stays a Tab stop, which reveals it. Not zoomed, it is hidden and
+// no Tab stop.
 Components.PlotPlate {
     id: root
     objectName: "plotZoomPlate"
@@ -27,6 +29,8 @@ Components.PlotPlate {
     Accessible.name: I18n.i18nc("@label", "Zoom")
 
     readonly property bool pointerHovered: zoomHover.hovered
+    // Whether keyboard focus is on Reset.
+    readonly property bool focusInside: resetButton.activeFocus
 
     HoverHandler {
         id: zoomHover
@@ -50,6 +54,7 @@ Components.PlotPlate {
     }
 
     Components.PlotToolButton {
+        id: resetButton
         objectName: "plotZoomResetButton"
         visible: root.resetView !== null
         plotColors: root.plotColors
