@@ -59,6 +59,9 @@ private slots:
     void spectrogramCrosshairTimeShowsOnTheLowestLane();
     void spectrogramCrosshairReadoutPlatesTakeThePlotColors();
     void spectrogramCrosshairReadoutShowsAfterEveryClick();
+    void spectrogramScaleEndsClearOfTheMeter_data();
+    void spectrogramScaleEndsClearOfTheMeter();
+    void spectrogramScaleFollowsTheMeterInThePane();
     void spectrogramGridOverlayGeneratesWhenEnabled();
     void spectrogramAtRestDrawsItsScaleFaintly_data();
     void spectrogramAtRestDrawsItsScaleFaintly();
@@ -2946,6 +2949,96 @@ Window {
     // Off the plot, none.
     QTest::mouseMove(window, QPoint(320, 300));
     QTRY_VERIFY(pane->crosshairReadout().isEmpty());
+}
+
+void SpectrogramSmokeTest::spectrogramScaleEndsClearOfTheMeter_data() {
+    QTest::addColumn<double>("scale");
+    QTest::newRow("1x") << 1.0;
+    QTest::newRow("2x") << 2.0;
+}
+
+// Beside the level meter the frequency scale is the plot's: its labels end
+// 8 px clear of the meter's seam and no tick reaches it (ticks that ended on
+// the seam read as the meter's own graduation), playing and at rest, and
+// the crosshair's readout keeps left of it. Without the meter, 6 px ticks
+// on the edge and the labels 10 px from it, as before.
+void SpectrogramSmokeTest::spectrogramScaleEndsClearOfTheMeter() {
+    QFETCH(double, scale);
+    SpectrogramItem item;
+    item.setSampleRateHz(48'000);
+    item.setAnalysisFftSize(4'096);
+    item.setGridEnabled(true);
+    const int width = qRound(600 * scale);
+    const int height = qRound(240 * scale);
+    constexpr int bins = 2'049;
+    item.feedPrecomputedChunk(QByteArray(bins * 10, '\x80'), bins, 0, 10, 0, 100, 48'000, 1'024,
+                              false, true, 1, false, 0, 0, 4'096);
+    SpectrogramOverlayLayout scaleShown;
+    SpectrogramOverlayLayout rest;
+    int scaleWidth = 0;
+    const auto layOut = [&]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_canvasScale = scale;
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.m_fftSize = item.m_precomputedFftSize;
+        item.m_sampleRateHz = item.m_precomputedSampleRateHz;
+        item.invalidateMapping();
+        item.ensureMapping(height);
+        item.updateFreqGridOverlayLocked(width, height);
+        item.updateRestGridOverlayLocked(width, height);
+        scaleShown = item.m_freqGrid;
+        rest = item.m_restGrid;
+        scaleWidth = item.m_freqScaleWidth;
+    };
+    layOut();
+    QVERIFY(scaleShown.images.size() >= 2);
+    QCOMPARE(scaleShown.lines.size(), scaleShown.images.size());
+    QCOMPARE(scaleShown.images.first().rect.right(), 590.0);
+    const SpectrogramOverlayLayout atEdge = scaleShown;
+
+    item.setScaleEndInset(8.0);
+    layOut();
+    QVERIFY(scaleShown.lines.isEmpty());
+    QCOMPARE(scaleShown.images.size(), atEdge.images.size());
+    double widest = 0.0;
+    for (qsizetype index = 0; index < scaleShown.images.size(); ++index) {
+        const QRectF label = scaleShown.images.at(index).rect;
+        QCOMPARE(label.right(), 592.0);
+        QCOMPARE(label.top(), atEdge.images.at(index).rect.top());
+        widest = std::max(widest, label.width());
+    }
+    QCOMPARE(double(scaleWidth), 8.0 + widest);
+    QVERIFY(!rest.images.isEmpty());
+    for (const SpectrogramOverlayImage &label : std::as_const(rest.images)) {
+        QCOMPARE(label.rect.right(), 592.0);
+    }
+    for (const QRect &line : std::as_const(rest.lines)) {
+        QCOMPARE(line.x() + line.width(), qRound(592 * scale));
+    }
+
+    item.setScaleEndInset(0.0);
+    layOut();
+    QCOMPARE(scaleShown.lines, atEdge.lines);
+    QCOMPARE(scaleShown.images.first().rect, atEdge.images.first().rect);
+}
+
+// The pane's lanes know of the meter's column as it shows and goes.
+void SpectrogramSmokeTest::spectrogramScaleFollowsTheMeterInThePane() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QVERIFY(bridge != nullptr && surface != nullptr);
+    for (const bool meter : {false, true, false}) {
+        QVERIFY(bridge->setProperty("showLevelMeter", meter));
+        const QList<QQuickItem *> panes = itemsNamed(surface, QStringLiteral("spectrogramPaneItem"));
+        QVERIFY(!panes.isEmpty());
+        for (QQuickItem *pane : panes) {
+            QTRY_COMPARE(qobject_cast<SpectrogramItem *>(pane)->scaleEndInset(), meter ? 8.0 : 0.0);
+        }
+    }
 }
 
 void SpectrogramSmokeTest::spectrogramAtRestDrawsItsScaleFaintly_data() {

@@ -455,6 +455,9 @@ Item {
                     readoutPlateEdgeColor: root.uiPalette.spectrogramPlot.plotPlateEdge
                     readoutTextColor: root.uiPalette.spectrogramPlot.plotText
                     gridEnabled: root.uiBridge.showSpectrogramScale
+                    // Beside the meter's column, the scale is the plot's,
+                    // clear of the meter's seam by 8 px.
+                    scaleEndInset: root.plotWidth < root.width ? 8 : 0
                     // At rest, the scale's lines where a session will put
                     // its ticks.
                     analysisFftSize: root.uiBridge.fftSize || 0

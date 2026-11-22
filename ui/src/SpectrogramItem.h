@@ -317,6 +317,10 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // and labels at rest keep under.
     Q_PROPERTY(int restLineCount READ restLineCount WRITE setRestLineCount NOTIFY restLineCountChanged)
     Q_PROPERTY(double restTopClearance READ restTopClearance WRITE setRestTopClearance NOTIFY restTopClearanceChanged)
+    // How far from the plot's right edge the frequency scale ends, beside
+    // a column there, such as the level meter's: its labels end there, with
+    // no ticks to the edge. 0 without one: its ticks are on the edge.
+    Q_PROPERTY(double scaleEndInset READ scaleEndInset WRITE setScaleEndInset NOTIFY scaleEndInsetChanged)
     // The readout's plates, in the plot's colours (UiPalette's PlotColors).
     // The floor, where the item has no column to draw: before any audio,
     // while a track is analysed, and the part of a rolling view not yet
@@ -428,6 +432,8 @@ public:
     void setRestLineCount(int value);
     double restTopClearance() const;
     void setRestTopClearance(double value);
+    double scaleEndInset() const;
+    void setScaleEndInset(double value);
     QColor floorColor() const;
     void setFloorColor(const QColor &value);
     QColor readoutPlateColor() const;
@@ -554,6 +560,7 @@ signals:
     void laneHeadBoundsChanged();
     void restLineCountChanged();
     void restTopClearanceChanged();
+    void scaleEndInsetChanged();
     void readoutColorsChanged();
     void floorColorChanged();
     void markerSecondsChanged();
@@ -920,6 +927,7 @@ private:
     // How far below the lane's top the frequency scale's labels start, in
     // logical pixels.
     int frequencyScaleTopClearanceLocked() const;
+    int frequencyScaleLabelGapLocked() const;
     // The lane at rest, without columns: faint lines across it, evenly
     // spaced, or with the scale shown at each of its ticks, where a session
     // at the analysis's settings and the lane's rate will put them, and
@@ -1458,6 +1466,7 @@ private:
     QRectF m_laneHeadBounds;
     int m_restLineCount{3};
     double m_restTopClearance{0.0};
+    double m_scaleEndInset{0.0};
     // UiPalette's spectrogramPlot plates, until QML sets them.
     // floorColor, under the state mutex.
     QColor m_floorColor{0, 0, 0};

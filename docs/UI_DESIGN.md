@@ -207,6 +207,7 @@ The settled rules for presentation only. For internals, see [visualization archi
 - **Media surfaces are always dark.** The album art viewer draws the art on black, with its details in `mediaPlot`'s strip colour, in both themes. A white surround outshone the art.
 - **A lane's head is one plate**, in the main pane and in both viewers: the label's cell, a 1 px divider, then Mute and Solo, as tall as the mode switch's plate. A pane's heads are one size, and their cells are as wide as its widest label, so M and S share an x in every lane. At rest the label alone shows, on a chip in the cell's place.
 - **Before any audio the lanes read as silence.** In the spectrogram, each lane has the same full-width lines, evenly spaced under the band the plates take, at the scale's ticks while that shows; in the waveform, each lane has its centre line, and the seam between lanes is the stronger line.
+- **The frequency scale is the plot's.** Beside the level meter it has no ticks, and its labels end 8 px clear of the meter's seam; without the meter its ticks are on the plot's edge.
 - **The plot's playhead is never amber.** Amber is a data colour in the colour map. The seek bar's playhead is the only amber playhead.
 - **One control surface per viewer.**
   - The viewers' corner plate and title strip use the same buttons (`ViewerControls`) in one order: zoom and Reset's glyph, new issues, the viewer's own buttons, Close. The plot's own mode switch and zoom plate are the main pane's alone.
