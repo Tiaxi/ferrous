@@ -1487,8 +1487,11 @@ Components.DialogWindow {
                                         icon.width: root.columnRevertGlyph
                                         icon.height: root.columnRevertGlyph
                                         display: AbstractButton.IconOnly
-                                        text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1 in Every File",
-                                            headerCell.modelData.label)
+                                        // By its field: the # column is Track's.
+                                        text: headerCell.editable
+                                            ? I18n.i18nc("@action:button %1 is a tag field", "Revert %1 in Every File",
+                                                root.fieldAt(headerCell.modelData.key).label)
+                                            : ""
                                         onClicked: root.tagEditorApi.revertField(headerCell.modelData.key)
 
                                         RevertToolTip {

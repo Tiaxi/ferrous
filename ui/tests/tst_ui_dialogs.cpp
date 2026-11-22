@@ -4380,6 +4380,12 @@ void UiDialogsTest::checkEditTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut(Dia
     QVERIFY(columnRevert != nullptr);
     QTRY_VERIFY(!layoutPending(columnRevert));
     QVERIFY(!columnRevert->isVisible());
+    // Named for its field, as the others, rather than by its header's
+    // glyph ("Revert # in Every File").
+    QQuickItem *trackRevert = named(tags, QStringLiteral("tagEditorColumnRevert_trackNo"));
+    QVERIFY(trackRevert != nullptr);
+    QCOMPARE(trackRevert->property("text").toString(), QStringLiteral("Revert Track in Every File"));
+    QCOMPARE(columnRevert->property("text").toString(), QStringLiteral("Revert Genre in Every File"));
 
     // Changed with no event processed since: shown, but not yet laid out.
     editor.applyBulkFieldToRows({0, 1, 2, 3, 4, 5, 6, 7}, QStringLiteral("genre"), QStringLiteral("Ambient"));
