@@ -62,7 +62,7 @@ Components.CompactDialogWindow {
             objectName: "quitSaveFailedHeading"
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
-            // Short enough for one line: what it can be is in the text
+            // Short enough for one line: what can be lost is in the text
             // below (the list in it left "saved." alone on a
             // second line). The lead, semibold, as every dialog's first
             // sentence is (the three lines read as one grey block). It says
@@ -70,7 +70,7 @@ Components.CompactDialogWindow {
             // saved" was there twice).
             font.weight: Font.DemiBold
             textFormat: Text.PlainText
-            text: I18n.i18nc("@info", "Some recent changes were not saved.")
+            text: I18n.i18nc("@info", "Some recent changes weren\u2019t saved.")
         }
 
         // A path in it breaks between its folders, and the error's code
@@ -89,11 +89,13 @@ Components.CompactDialogWindow {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
-        // It names what it speaks of, rather than "They", which could be
-        // read as the error above it. It suggests no cure: the error above
-        // says the cause, which is not always a full disk.
+        // What each button does, and what can be lost by its name, rather
+        // than "them", which could be read as the error above it (a
+        // sentence on unsaved changes first said "not saved" a third time).
+        // It suggests no cure: the error above says the cause, which is
+        // not always a full disk.
         textFormat: Text.PlainText
-        text: I18n.i18nc("@info", "Unsaved changes can include settings, queue changes and Last.fm scrobbles. "
-            + "Retry saves again. Quit Anyway loses them.")
+        text: I18n.i18nc("@info", "Retry saves again. Quit Anyway loses unsaved settings, queue changes and "
+            + "Last.fm scrobbles.")
     }
 }

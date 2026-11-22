@@ -159,31 +159,31 @@ Components.DialogWindow {
         switch (StandardKeys.keptKeyRole(key)) {
         case "activate":
             return I18n.i18nc("@info %1 is a key",
-                "“%1” cannot be a shortcut: it plays the selection in the library and the queue, and presses the default button of a dialog.", name)
+                "“%1” can’t be a shortcut: it plays the selection in the library and the queue, and presses the default button of a dialog.", name)
         case "delete":
             return I18n.i18nc("@info %1 is a key",
-                "“%1” cannot be a shortcut: it removes the selected tracks from the queue, and deletes text in text fields.", name)
+                "“%1” can’t be a shortcut: it removes the selected tracks from the queue, and deletes text in text fields.", name)
         case "focus":
             return I18n.i18nc("@info %1 is a key",
-                "“%1” cannot be a shortcut: it moves the keyboard focus between the controls.", name)
+                "“%1” can’t be a shortcut: it moves the keyboard focus between the controls.", name)
         case "cancel":
             return I18n.i18nc("@info %1 is a key",
-                "“%1” cannot be a shortcut: it closes menus, dialogs and the viewers.", name)
+                "“%1” can’t be a shortcut: it closes menus, dialogs and the viewers.", name)
         case "navigate":
             return I18n.i18nc("@info %1 is a key",
-                "“%1” cannot be a shortcut: it moves the selection in the lists and the cursor in text fields.", name)
+                "“%1” can’t be a shortcut: it moves the selection in the lists and the cursor in text fields.", name)
         case "contextMenu":
             return I18n.i18nc("@info %1 is a key",
-                "“%1” cannot be a shortcut: it opens the context menu.", name)
+                "“%1” can’t be a shortcut: it opens the context menu.", name)
         case "menuBar":
             return I18n.i18nc("@info %1 is a key",
-                "“%1” cannot be a shortcut: KDE applications use it to show or hide the menu bar.", name)
+                "“%1” can’t be a shortcut: KDE applications use it to show or hide the menu bar.", name)
         }
         // The album art viewer's own key, where the viewers repeat the
         // action.
         if (key === "I" && root.viewerActions.indexOf(action) >= 0) {
             return I18n.i18nc("@info %1 is a key",
-                "“%1” cannot be a shortcut of this action: the album art viewer uses it to show or hide the details.", name)
+                "“%1” can’t be a shortcut of this action: the album art viewer uses it to show or hide the details.", name)
         }
         return ""
     }
@@ -978,7 +978,7 @@ Components.DialogWindow {
                 wrapMode: Text.Wrap
                 color: root.uiPalette.negative
                 textFormat: Text.PlainText
-                text: I18n.i18nc("@info", "Ferrous could not take these shortcuts. Change some back, or cancel to keep the ones you had.")
+                text: I18n.i18nc("@info", "Ferrous couldn’t take these shortcuts. Change some back, or cancel to keep the ones you had.")
             }
         }
     }

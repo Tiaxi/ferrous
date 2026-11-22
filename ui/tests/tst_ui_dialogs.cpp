@@ -562,6 +562,7 @@ private slots:
     void configureKeepsTicksAndGroupsClearOfTheNextRow();
     void compactDialogsHoldTheirText_data();
     void compactDialogsHoldTheirText();
+    void dialogsWordTheirSettingsAndFailures();
     void compactDialogsSpaceParagraphsWithTheFont_data();
     void compactDialogsSpaceParagraphsWithTheFont();
     void compactDialogStaysWithinASmallScreenAsItGrows();
@@ -2009,7 +2010,7 @@ void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *win
 
     // General: the viewers, then Plasma's media controls, two groups apart
     // by the room between them, with no subheading: only a page of three or
-    // more groups heads them, and "Plasma:" names the second (a heading
+    // more groups heads them, and "Media controls:" names the second (a heading
     // over a single check box would repeat what its label names).
     dialog->setProperty("pageIndex", 2);
     QQuickItem *media = nullptr;
@@ -7660,6 +7661,58 @@ void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont() {
         QTRY_VERIFY2(!dialog->property("visible").toBool(), name);
     }
     closeTheParentDialogs(main);
+}
+
+// General names what its media controls' setting sets, its box not saying it
+// again and named with the words it shows; the quit failure says what each
+// button does; and these dialogs contract "not" as the others do.
+void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *preferences = openPreferences(window, 2);
+    QVERIFY(preferences != nullptr);
+    QQuickItem *media = nullptr;
+    QTRY_VERIFY((media = visibleNamed(windowOf(preferences), QStringLiteral("systemMediaControlsCheckBox"))) != nullptr);
+    QCOMPARE(evaluate(media, QStringLiteral("Kirigami.FormData.label")).toString(), QStringLiteral("Media controls:"));
+    const QString shown = media->property("text").toString();
+    QCOMPARE(shown, QStringLiteral("Show Ferrous and answer media keys"));
+    QAccessibleInterface *spoken = QAccessible::queryAccessibleInterface(media);
+    QVERIFY(spoken != nullptr);
+    const QString name = spoken->text(QAccessible::Name);
+    QCOMPARE(name, QStringLiteral("Media controls: Show Ferrous and answer media keys"));
+    QVERIFY(name.contains(shown));
+    QVERIFY(reject(preferences));
+
+    QObject *quit = object(window, QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(quit != nullptr);
+    const QString system = QStringLiteral("Settings could not be saved: Permission denied (os error 13)");
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, system)));
+    QVERIFY(waitForDialogWindow(quit));
+    const auto textOf = [quit](const char *item) {
+        QQuickItem *label = visibleNamed(windowOf(quit), QString::fromLatin1(item));
+        return label != nullptr ? label->property("text").toString() : QString();
+    };
+    QCOMPARE(textOf("quitSaveFailedHeading"), QStringLiteral("Some recent changes weren\u2019t saved."));
+    QCOMPARE(quit->property("message").toString(), system);
+    QCOMPARE(textOf("quitSaveFailedDetails"),
+             QStringLiteral("Retry saves again. Quit Anyway loses unsaved settings, queue changes and Last.fm "
+                            "scrobbles."));
+    QVERIFY(QMetaObject::invokeMethod(quit, "dismiss"));
+
+    QObject *shortcuts = object(window, QStringLiteral("keyboardShortcutsDialog"));
+    QVERIFY(shortcuts != nullptr);
+    for (const char *key : {"Return", "Del", "Tab", "Esc", "Up", "Menu", "Ctrl+M"}) {
+        QVariant refusal;
+        QVERIFY(QMetaObject::invokeMethod(shortcuts, "refusalFor", Q_RETURN_ARG(QVariant, refusal),
+                                          Q_ARG(QVariant, QVariantMap()), Q_ARG(QVariant, QString::fromLatin1(key))));
+        QVERIFY2(refusal.toString().contains(QStringLiteral("can\u2019t be a shortcut")),
+                 qPrintable(QString::fromLatin1(key) + QStringLiteral(": ") + refusal.toString()));
+    }
+    QQuickItem *failed = named(windowOf(shortcuts), QStringLiteral("keyboardShortcutsSaveFailed"));
+    QVERIFY(failed != nullptr);
+    QVERIFY2(failed->property("text").toString().startsWith(QStringLiteral("Ferrous couldn\u2019t take")),
+             qPrintable(failed->property("text").toString()));
 }
 
 int main(int argc, char **argv) {

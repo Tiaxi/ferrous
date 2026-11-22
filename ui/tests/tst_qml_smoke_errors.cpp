@@ -505,7 +505,7 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     const QString headingText = heading->property("text").toString();
     // It says so once, on one line, and not in the title's words again;
     // what the changes can be is in the text below.
-    QCOMPARE(headingText, QStringLiteral("Some recent changes were not saved."));
+    QCOMPARE(headingText, QStringLiteral("Some recent changes weren\u2019t saved."));
     QVERIFY(!headingText.contains(QStringLiteral("could not be saved")));
     QCOMPARE(heading->property("lineCount").toInt(), 1);
     // The lead, semibold, as every dialog's first sentence is; the error and
@@ -513,8 +513,8 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
     QCOMPARE(messageItem->property("font").value<QFont>().weight(), QFont::Normal);
     QCOMPARE(details->property("text").toString(),
-             QStringLiteral("Unsaved changes can include settings, queue changes and Last.fm scrobbles. "
-                            "Retry saves again. Quit Anyway loses them."));
+             QStringLiteral("Retry saves again. Quit Anyway loses unsaved settings, queue changes and Last.fm "
+                            "scrobbles."));
     // No cure that contradicts the cause above it, such as a denied
     // permission (it advised freeing disk space under one).
     QVERIFY(!details->property("text").toString().contains(QStringLiteral("disk space")));
