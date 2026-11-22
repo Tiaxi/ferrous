@@ -921,15 +921,18 @@ Components.DialogWindow {
         // that stay, so not every replaced image is lost ("replaces the
         // album's cover image file" said it was). Without such an image,
         // the tracks in that folder with the album's tag get it as their
-        // front cover, and no other folder's.
+        // front cover, and no other folder's. It says which file is
+        // overwritten ("becomes its cover file" left that open, beside a
+        // warning that something is lost).
         Label {
             objectName: "replaceCoverConsequence"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             color: root.uiPalette.textSecondary
             textFormat: Text.PlainText
-            text: I18n.i18nc("@info", "If the track’s folder has a JPEG or PNG image, the new album art becomes "
-                + "its cover file. Otherwise it is embedded in the album’s tracks in that folder.")
+            text: I18n.i18nc("@info", "If the track’s folder has JPEG or PNG images, Ferrous overwrites the one "
+                + "named as a cover, or adds a cover file beside them. Otherwise the album art is embedded in "
+                + "the album’s tracks in that folder.")
         }
 
         // What is lost, on its own line and in the text's colour (it ended

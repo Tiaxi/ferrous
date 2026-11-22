@@ -426,10 +426,13 @@ ApplicationWindow {
     // the embedded art of the album's tracks in that folder, which the
     // question names ("the album's tracks" read as the whole album's, in
     // every folder). Only what is overwritten is lost, and the art is
-    // "album art" throughout, as in the question.
+    // "album art" throughout, as in the question. It says which file is
+    // overwritten, and when one is added instead, as artwork's
+    // write_folder_cover does ("becomes its cover file" left that open).
     QCOMPARE(details,
-             QStringLiteral("If the track\u2019s folder has a JPEG or PNG image, the new album art becomes its cover file. "
-                            "Otherwise it is embedded in the album\u2019s tracks in that folder."));
+             QStringLiteral("If the track\u2019s folder has JPEG or PNG images, Ferrous overwrites the one named as "
+                            "a cover, or adds a cover file beside them. Otherwise the album art is embedded in the "
+                            "album\u2019s tracks in that folder."));
     QCOMPARE(warning->property("text").toString(), QStringLiteral("Ferrous keeps no copy of what it overwrites."));
     QVERIFY2(!details.contains(QStringLiteral("artwork")), qPrintable(details));
     // A window of its own above Replace from iTunes', with Replace's icon
