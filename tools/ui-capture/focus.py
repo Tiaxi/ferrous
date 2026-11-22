@@ -33,7 +33,7 @@ KEYS_CROP = dict(part=(0, 0.04, 1, 0.96), lh=16, gap=6)
 # fade-in starts over: a trial run drew one frame (+19 ms) of the text alone before the failure (+36 ms), as a
 # search started from rest does
 ITUNES_FAIL_WITH = ("dialog", "itunes-error", "itunesArtworkCurrentPreviewButton")
-ITUNES_FAIL_TIMES = [-10, 22, 150]
+ITUNES_FAIL_TIMES = [-10, 22, 38]
 
 _PANE = (0.2256, 0.544, 0.7744, 0.431)  # the pane's place in a 1600x1000 window (fractions)
 
@@ -340,7 +340,7 @@ SCOPES = {
     # with its title bar and a margin of its parent ("inner"); main-window popups (search, Recent Issues): "popup".
     "dialogs": dict(
         title="Dialogs",
-        sessions=["dialogs", "statusbar", "roots", "bigfont", "narrow", "motion-ui"],
+        sessions=["dialogs", "statusbar", "roots", "bigfont", "narrow", "narrow-bigfont", "motion-ui"],
         sheets=[
             # the 10 pt sheets: seven (Configure on two, confirmations, Edit Tags, iTunes, the shortcuts on two); the
             # large font on seven (the dialogs at 24 pt at 1:1, cropped to regions where it is large; Recent Issues dark and light)
@@ -390,11 +390,13 @@ SCOPES = {
             # the searching -> failed recording (a real failed search; its frames around all that changes and Preview)
             # with the results and the controls' states; the failed window as a whole is in shots/ (dialog_itunes-error_*)
             ("dlg-itunes-controls", "Replace from iTunes, dark: searching, then the real failed search, from the "
-             "recording; results (stand-ins, top 55 %); Preview and Apply in each state", "dark",
+             "recording; results (stand-ins), nothing found and failed, whole; Preview and Apply in each state", "dark",
              [[dict(strip="itunes-search-fails", item="changed", include=ITUNES_FAIL_WITH, times=ITUNES_FAIL_TIMES,
                     fit=(430, 300), zoom=1, pad=8, lh=16, gap=6,
                     label="Searching -> failed (ms after the action): all that changes, and Preview at the top right")],
-              [("dialog", "itunes-results", None, "Results, top 55 %", dict(part=(0, 0, 1, 0.55), lh=16, gap=6)),
+              [("dialog", "itunes-results", None, "Results, whole", dict(fit=(380, 262), lh=16, gap=6)),
+               ("dialog", "itunes-empty", None, "Nothing found, whole", dict(fit=(380, 262), lh=16, gap=6)),
+               ("dialog", "itunes-error", None, "Failed, whole", dict(fit=(380, 262), lh=16, gap=6)),
                [("dialog", st, (0.68, 0.27, 0.32, 0.1), lb, dict(lh=16, gap=6))
                 for st, lb in (("itunes-results", "Preview, Apply at rest"), ("itunes-apply-hover", "Apply hovered"),
                                ("itunes-preview-pressed", "Preview pressed"))]]]),
@@ -402,16 +404,11 @@ SCOPES = {
             # 1964x1392 and About, About KDE, Rename Files and Tag Editor Details wider; crops of the regions the fix
             # changed (the folder row and its glyph, the headers, the footers) in place of whole windows
             # (Configure and Diagnostics in one sheet: each a long line of text and a row of buttons at 24 pt)
-            ("dlg24-windows", "At 24 pt, dark: Configure's Library page (fitted); its footer, Diagnostics' top and "
-             "iTunes' count line (1:1)", "dark",
-             [[("dialog", "preferences-library", None, "Library page: heading, folder list, buttons",
-                dict(B24, part=(0.13, 0.025, 0.84, 0.215), fit=(1460, 400)))],
-              [[("dialog", "diagnostics", None, "Diagnostics: log file line and toolbar, left",
-                 dict(B24, part=(0, 0.035, 0.47, 0.082))),
-                ("dialog", "diagnostics", None, "The same, right", dict(B24, part=(0.53, 0.035, 0.47, 0.082)))],
-               [("dialog", "preferences-library", None, "Configure's footer, left", dict(B24, part=(0, 0.935, 0.1, 0.065))),
-                ("dialog", "preferences-library", None, "Configure's footer, right",
-                 dict(B24, part=(0.78, 0.935, 0.22, 0.065)))]],
+            ("dlg24-windows", "At 24 pt, dark: Configure's Library page from a 1000 px main window and Diagnostics, "
+             "whole (fitted); iTunes' count line (1:1)", "dark",
+             [[("dialog", "preferences-library", None, "Library, from a 1000 px main window, whole",
+                dict(B24, variant="1000x720_font24", fit=(700, 520))),
+               ("dialog", "diagnostics", None, "Diagnostics, whole", dict(B24, fit=(734, 520)))],
               [("dialog", "itunes-results", None, "Replace from iTunes: the count line (16-26 % down)",
                 dict(B24, part=(0, 0.16, 1, 0.1)))]]),
             # Settings › Configure Keyboard Shortcuts (#700, #701): at rest, refused and filtered at one crop
@@ -440,7 +437,7 @@ SCOPES = {
                ("dialog", "tag-editor-auto-number", "inner", "Auto Number", dict(margin=4, lh=16, gap=6))],
               [("dialog", "tag-editor-status-details", "inner", "Tag Editor Details, after a failed save",
                 dict(margin=4, lh=16, gap=6)),
-               ("dialog", "diagnostics", None, "Diagnostics, fitted", dict(fit=(500, 366), lh=16, gap=6))]]),
+               ("dialog", "diagnostics", None, "Diagnostics, fitted", dict(fit=(620, 454), lh=16, gap=6))]]),
             # Rename Files with the twelve-file batch (RENAME_BATCH): at 24 pt its window is about 1.4 MP, so it is
             # shown 1:1 in part, beside the whole of it at 10 pt
             ("dlg24-rename", "Rename Files, twelve files, 1:1, dark: 10 pt whole; 24 pt: its top rows and its buttons", "dark",
@@ -486,8 +483,8 @@ SCOPES = {
              "whether the list, the columns and the editor hold still as the note comes; the refusal's wording"),
             ("sheet", "dlg-shortcuts-edit", "dark", "The shortcuts filtered (the same crop); custom keys, a typed key's "
              "note, a conflict", "the columns' place against at rest; what the filter keeps; the editor; the conflict's choice"),
-            ("sheet", "dlg24-windows", "dark", "24 pt: Library page, Configure's footer; Diagnostics' line and toolbar; "
-             "iTunes' count line", "the folder glyph and full paths; the toolbar and footer uncut"),
+            ("sheet", "dlg24-windows", "dark", "24 pt: Library from a narrow window and Diagnostics, whole; iTunes' count "
+             "line", "the paths in the narrow window; the records' wrap; the toolbar and footer uncut"),
             ("sheet", "dlg24-small", "dark", "24 pt: Add Library Folder; Finishing Tag Changes", "the field, the wrap, the buttons"),
             ("sheet", "dlg-windows", "dark", "Whole windows at 10 pt: About, Auto Number, Tag Editor Details, Diagnostics",
              "each window's size against what it holds; what leads in it"),

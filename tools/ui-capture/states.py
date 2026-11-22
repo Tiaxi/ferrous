@@ -6271,7 +6271,7 @@ STATES = [
     ("dialogs", "dialog", "preferences-default-focus", "focusdefault",
      f"Preferences ({PREF_PAGES[-1][0]} page) with keyboard focus on its default button"),
     ("dialogs", "dialog", f"preferences-{PREF_PAGES[1][1]}-tabbed",
-     f"esc | macro openprefs {PREF_PAGES[1][0]} | settle 1 | key Tab | key Tab | wait 0.3",
+     f"esc | macro openprefs {PREF_PAGES[1][0]} | settle 1 | window preferencesDialog | key Tab | key Tab | wait 0.3 | window",
      f"Preferences: {PREF_PAGES[1][0]} page after two Tab presses"),
     ("dialogs", "dialog", "confirm-remove-library-root",
      "esc | macro openprefs Library | settle 1 | click libraryRootRow@0.5,0.5 | click libraryRootRemoveButton | "
