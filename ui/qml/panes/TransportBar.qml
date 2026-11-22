@@ -174,11 +174,13 @@ ToolBar {
     // The clear space around a 16 px glyph in its button.
     readonly property real smallGlyphInset: (root.buttonSize - root.smallGlyphSize) / 2
     // The right of the transport on one rhythm: the seek bar, 16 px, the
-    // time, 24 px, the volume glyph, 8 px, the volume slider, measured
-    // between what is drawn, not between the buttons' frames.
+    // time, 24 px, the volume glyph, measured between what is drawn, not
+    // between the buttons' frames; and the volume's groove 6 px from the
+    // mute button's frame, 3 px clear of its focus ring (8 px from the
+    // glyph, the groove met the hover's fill and went through the ring).
     readonly property real seekToTimeGap: 2 * Kirigami.Units.largeSpacing
     readonly property real timeToVolumeGap: 3 * Kirigami.Units.largeSpacing
-    readonly property real volumeGlyphToSliderGap: Kirigami.Units.largeSpacing
+    readonly property real muteButtonToSliderGap: 2 * root.buttonFocusRingOutset
 
     // A text of the transport's tooltips: the action and its shortcut.
     function actionToolTip(label, shortcutText) {
@@ -1268,8 +1270,7 @@ ToolBar {
             id: volumeSlider
             objectName: "volumeSlider"
             focusPolicy: Qt.TabFocus
-            // 8 px from the glyph to the groove.
-            Layout.leftMargin: Math.max(0, root.volumeGlyphToSliderGap - root.smallGlyphInset)
+            Layout.leftMargin: root.muteButtonToSliderGap
             Layout.alignment: Qt.AlignVCenter
             // 96 px, 72 px in a narrow window; a larger font widens the
             // groove with the thumb and the glyphs, up to half again

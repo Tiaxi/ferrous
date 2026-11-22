@@ -483,6 +483,8 @@ private slots:
     void transportLaysOutFlatButtonsSeekTimeAndVolume();
     void volumeGrooveGrowsWithTheThumb_data();
     void volumeGrooveGrowsWithTheThumb();
+    void muteButtonIsClearOfTheVolumeGroove_data();
+    void muteButtonIsClearOfTheVolumeGroove();
     void previousGlyphStartsOnTheContentEdge_data();
     void previousGlyphStartsOnTheContentEdge();
     void playPauseIsOneButtonThatShowsTheState();
@@ -665,7 +667,8 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     const QRectF volumeRect = sceneRect(volume);
     QQuickItem *groove = harness.item(QStringLiteral("volumeGroove"));
     QVERIFY(groove != nullptr);
-    QCOMPARE(sceneRect(groove).left() - muteGlyphRect.right(), 8.0);
+    // 6 px from the button's frame, clear of its ring.
+    QCOMPARE(sceneRect(groove).left() - muteGlyphRect.right(), 14.0);
     QCOMPARE(volumeRect.width(), 96.0);
     // Stopped, "–:–– / –:––" leaves the box as wide, and the volume where
     // it is; it fills the box as a time does, in the secondary colour and
@@ -2380,6 +2383,40 @@ void TransportStatusTest::volumeGrooveGrowsWithTheThumb() {
     auto *background = volume->property("background").value<QQuickItem *>();
     QVERIFY(background != nullptr);
     QCOMPARE(background->width(), expectedWidth);
+}
+
+void TransportStatusTest::muteButtonIsClearOfTheVolumeGroove_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The mute button's hover fill and its focus ring are clear of the volume's
+// groove, also of the thumb's ring at no volume (the fill butted against the
+// groove, which was drawn through the ring).
+void TransportStatusTest::muteButtonIsClearOfTheVolumeGroove() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *mute = harness.item(QStringLiteral("muteButton"));
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QQuickItem *groove = harness.item(QStringLiteral("volumeGroove"));
+    QQuickItem *thumb = harness.item(QStringLiteral("volumeThumb"));
+    QVERIFY(mute && volume && groove && thumb);
+    QQuickItem *ring = itemNamed(mute, QStringLiteral("transportButtonFocusRing"));
+    QQuickItem *fill = itemNamed(mute, QStringLiteral("transportButtonHover"));
+    QVERIFY(ring && fill);
+    mute->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(ring->isVisible());
+    QVERIFY2(sceneRect(groove).left() - sceneRect(ring).right() >= 3.0,
+             qPrintable(describeRect(sceneRect(ring)) + QLatin1Char(' ') + describeRect(sceneRect(groove))));
+    QVERIFY(sceneRect(groove).left() - sceneRect(fill).right() >= 6.0);
+    harness.bridge->setProperty("volume", 0.0);
+    volume->forceActiveFocus(Qt::TabFocusReason);
+    QQuickItem *thumbRing = harness.item(QStringLiteral("volumeFocusRing"));
+    QTRY_VERIFY(thumbRing->isVisible());
+    QVERIFY(sceneRect(thumbRing).left() >= sceneRect(fill).right());
 }
 
 void TransportStatusTest::previousGlyphStartsOnTheContentEdge_data() {
