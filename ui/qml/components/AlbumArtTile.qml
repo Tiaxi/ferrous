@@ -63,15 +63,16 @@ Rectangle {
     // 3rd harmonic's value (at 2.9:1, at 360 px it read as faint as the
     // floor's grain).
     property color standInFourthHarmonicColor: "#8049ac"
-    // The mark's strokes, by the tile's size, so they weigh alike at every
-    // size (drawn from one file they were 1.6 to 3.2 px): on the wide mark
-    // a stroke of 3.5 px at a 180 px tile, rising to 6.5 px at 360, the
-    // harmonics 0.8, 0.65 and 0.5 of it, as the app icon tapers them; on
-    // the small mark 4, 3.5 and 3 px (3 and 2.5 px read as hairlines at
-    // 152 px). The glide 1.3 times that stroke, the focal one, as in the
-    // app icon (at the harmonics' taper the curves read as near-equal
-    // stripes).
-    readonly property real standInStroke: Math.min(6.5, 3 + Math.max(0, root.layoutSize - 152) * 3.5 / 208)
+    // The mark's strokes, set in pixels so they weigh alike at every size
+    // (drawn from one file they were 1.6 to 3.2 px). On the wide mark, a
+    // trace drawn with the window's precision: the glide 5 px, 1.3 times
+    // the stroke the harmonics taper from, and these 3.4, 2.9 and 2.5 px
+    // (at 8.5 px the glide was the loudest amber in the window, heavier
+    // than anything else in a window of 1 px lines). On the small mark 4,
+    // 3.5 and 3 px (3 and 2.5 px read as hairlines at 152 px), the glide
+    // 1.3 times the 4, the focal one, as in the app icon (at the
+    // harmonics' taper the curves read as near-equal stripes).
+    readonly property real standInStroke: 3.9
     readonly property bool standInShown: !root.idle && root.coverPath.length === 0
     // The tile's size once in place: the now-playing panel keeps it while
     // the tile grows or shrinks, so that the mark is neither drawn again
@@ -148,9 +149,11 @@ Rectangle {
     // two hairlines). They start a quarter of the way in and, as in the
     // icon, run out to the tile's right edge, cut flush there: a crop of a
     // spectrogram, not a chart's series ending in round caps, nor ending in
-    // the tile's free air, as at three quarters of its width; the 4th
-    // leaves through the top edge, as in the icon, not on the right, under
-    // the corner.
+    // the tile's free air, as at three quarters of its width. All four
+    // leave by that edge on the wide tile, the 4th some 8 % down, and the
+    // group about centred in its height (with the 4th out through the top
+    // and the others out on the right, at 360 px the crop read as an
+    // accident).
     // Drawn as shapes, so their strokes keep the width set for the tile's
     // size (standInStroke) as the curves scale to it. Assistive technology
     // hears "No album art" from the keyboard stop over it.
@@ -163,22 +166,29 @@ Rectangle {
             // icon's 64-unit drawing at 18.4 units to the icon's one, from a
             // start 240 units in, the ink of its lower three traces 20 units
             // over the tile's middle, the small mark's three too, the 4th
-            // harmonic above them (at 12.3 units it ran out under
-            // the top right corner, where the icon's leaves through the top
-            // edge). The 4th is a true one, as in the icon: as far above the
+            // harmonic above them, a true one, as in the icon: as far above the
             // 3rd as the 3rd is above the 2nd at every point, flattening as
-            // they do, so that it leaves through the top edge some 82 % across
-            // at about 24 degrees, where the icon's does (at 16 units it
-            // rose 1.25 times its share and bent up at its end to leave 70 %
-            // across). The paths run on past the tile's right side, the 4th's
-            // past its top, and the clip cuts them there.
+            // they do (at 16 units it rose 1.25 times its share and bent up
+            // at its end). The wide tile draws the four a tenth flatter and
+            // lower (placed), so that the 4th too reaches the right edge
+            // inside the tile. The paths run on past the tile's right side,
+            // and the clip cuts them there.
             readonly property size box: Qt.size(1000, 1000)
             // The stroke the harmonics taper from.
             readonly property real baseStroke: root.standInCompact ? 4 : root.standInStroke
             readonly property real glideStroke: mark.baseStroke * 1.3
-            readonly property real harmonicStroke: root.standInCompact ? 3.5 : root.standInStroke * 0.8
-            readonly property real highHarmonicStroke: root.standInCompact ? 3 : root.standInStroke * 0.65
-            readonly property real fourthHarmonicStroke: mark.baseStroke * 0.5
+            readonly property real harmonicStroke: root.standInCompact ? 3.5 : root.standInStroke * 0.875
+            readonly property real highHarmonicStroke: root.standInCompact ? 3 : root.standInStroke * 0.75
+            readonly property real fourthHarmonicStroke: mark.baseStroke * 0.645
+            // The small tile's paths are the drawing's; the wide one's its
+            // points at `rise` of their height, `lift` units down, so the
+            // curves stay each other's multiples.
+            readonly property real rise: root.standInCompact ? 1 : 0.9
+            readonly property real lift: root.standInCompact ? 0 : 146
+            function placed(path) {
+                return path.replace(/(-?[0-9.]+) (-?[0-9.]+)/g, (point, x, y) =>
+                    x + " " + (mark.lift + mark.rise * Number(y)).toFixed(2))
+            }
             anchors.fill: parent
             clip: true
             preferredRendererType: Shape.CurveRenderer
@@ -196,7 +206,7 @@ Rectangle {
                 strokeColor: root.standInCompact ? "transparent" : root.standInFourthHarmonicColor
                 strokeWidth: mark.fourthHarmonicStroke
                 PathSvg {
-                    path: "M240.35 487.58 C245.70 478.03 251.05 468.86 256.39 460.01 C264.41 446.75 272.43 434.22 280.45 422.28 C293.82 402.38 307.18 384.13 320.55 367.07 C339.26 343.19 357.97 321.67 376.68 301.77 C400.74 276.19 424.80 253.31 448.86 232.24 C480.93 204.15 513.01 179.30 545.09 156.56 C582.51 130.03 619.94 106.40 657.36 84.69 C705.48 56.78 753.59 32.07 801.71 9.45 C831.30 -4.46 860.89 -17.56 890.48 -30.02"
+                    path: mark.placed("M240.35 487.58 C245.70 478.03 251.05 468.86 256.39 460.01 C264.41 446.75 272.43 434.22 280.45 422.28 C293.82 402.38 307.18 384.13 320.55 367.07 C339.26 343.19 357.97 321.67 376.68 301.77 C400.74 276.19 424.80 253.31 448.86 232.24 C480.93 204.15 513.01 179.30 545.09 156.56 C582.51 130.03 619.94 106.40 657.36 84.69 C705.48 56.78 753.59 32.07 801.71 9.45 C855.17 -15.65 908.63 -38.21 962.10 -58.97 C984.73 -67.77 1007.37 -76.21 1030.00 -84.41")
                 }
             }
             ShapePath {
@@ -207,7 +217,7 @@ Rectangle {
                 strokeColor: root.standInHighHarmonicColor
                 strokeWidth: mark.highHarmonicStroke
                 PathSvg {
-                    path: "M240.35 588.97 C245.70 581.81 251.05 574.93 256.39 568.30 C264.41 558.35 272.43 548.95 280.45 540.00 C293.82 525.08 307.18 511.38 320.55 498.59 C339.26 480.68 357.97 464.54 376.68 449.62 C400.74 430.43 424.80 413.27 448.86 397.47 C480.93 376.40 513.01 357.76 545.09 340.71 C582.51 320.81 619.94 303.08 657.36 286.81 C705.48 265.88 753.59 247.34 801.71 230.38 C855.17 211.53 908.63 194.63 962.10 179.06 C984.73 172.47 1007.37 166.12 1030.00 159.98"
+                    path: mark.placed("M240.35 588.97 C245.70 581.81 251.05 574.93 256.39 568.30 C264.41 558.35 272.43 548.95 280.45 540.00 C293.82 525.08 307.18 511.38 320.55 498.59 C339.26 480.68 357.97 464.54 376.68 449.62 C400.74 430.43 424.80 413.27 448.86 397.47 C480.93 376.40 513.01 357.76 545.09 340.71 C582.51 320.81 619.94 303.08 657.36 286.81 C705.48 265.88 753.59 247.34 801.71 230.38 C855.17 211.53 908.63 194.63 962.10 179.06 C984.73 172.47 1007.37 166.12 1030.00 159.98")
                 }
             }
             ShapePath {
@@ -218,7 +228,7 @@ Rectangle {
                 strokeColor: root.standInHarmonicColor
                 strokeWidth: mark.harmonicStroke
                 PathSvg {
-                    path: "M240.35 690.37 C245.70 685.59 251.05 681.00 256.39 676.58 C264.41 669.95 272.43 663.69 280.45 657.72 C293.82 647.77 307.18 638.64 320.55 630.11 C339.26 618.17 357.97 607.41 376.68 597.46 C400.74 584.67 424.80 573.23 448.86 562.70 C480.93 548.65 513.01 536.23 545.09 524.86 C582.51 511.59 619.94 499.77 657.36 488.92 C705.48 474.97 753.59 462.61 801.71 451.30 C855.17 438.74 908.63 427.47 962.10 417.09 C984.73 412.70 1007.37 408.46 1030.00 404.37"
+                    path: mark.placed("M240.35 690.37 C245.70 685.59 251.05 681.00 256.39 676.58 C264.41 669.95 272.43 663.69 280.45 657.72 C293.82 647.77 307.18 638.64 320.55 630.11 C339.26 618.17 357.97 607.41 376.68 597.46 C400.74 584.67 424.80 573.23 448.86 562.70 C480.93 548.65 513.01 536.23 545.09 524.86 C582.51 511.59 619.94 499.77 657.36 488.92 C705.48 474.97 753.59 462.61 801.71 451.30 C855.17 438.74 908.63 427.47 962.10 417.09 C984.73 412.70 1007.37 408.46 1030.00 404.37")
                 }
             }
             ShapePath {
@@ -229,7 +239,7 @@ Rectangle {
                 strokeColor: root.standInGlideColor
                 strokeWidth: mark.glideStroke
                 PathSvg {
-                    path: "M240.35 791.76 C245.70 789.37 251.05 787.08 256.39 784.87 C264.41 781.55 272.43 778.42 280.45 775.43 C293.82 770.46 307.18 765.90 320.55 761.63 C339.26 755.66 357.97 750.28 376.68 745.31 C400.74 738.91 424.80 733.19 448.86 727.92 C480.93 720.90 513.01 714.69 545.09 709.00 C582.51 702.37 619.94 696.46 657.36 691.04 C705.48 684.06 753.59 677.88 801.71 672.23 C855.17 665.95 908.63 660.31 962.10 655.12 C984.73 652.92 1007.37 650.81 1030.00 648.76"
+                    path: mark.placed("M240.35 791.76 C245.70 789.37 251.05 787.08 256.39 784.87 C264.41 781.55 272.43 778.42 280.45 775.43 C293.82 770.46 307.18 765.90 320.55 761.63 C339.26 755.66 357.97 750.28 376.68 745.31 C400.74 738.91 424.80 733.19 448.86 727.92 C480.93 720.90 513.01 714.69 545.09 709.00 C582.51 702.37 619.94 696.46 657.36 691.04 C705.48 684.06 753.59 677.88 801.71 672.23 C855.17 665.95 908.63 660.31 962.10 655.12 C984.73 652.92 1007.37 650.81 1030.00 648.76")
                 }
             }
         }

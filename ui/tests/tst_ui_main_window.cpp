@@ -867,28 +867,28 @@ QString standInProblem(QQuickWindow *window) {
     if (mark->opacity() != 1.0) {
         return QStringLiteral("the mark at %1").arg(mark->opacity());
     }
-    // Its strokes by the tile's size, not scaled with it: on the wide mark
-    // a stroke of 3 px at 152 px rising to 6.5 px at 360 (at 2 and 4 px they
-    // read faint), the harmonics tapering as the app icon's, 0.8 and 0.65 of
-    // it; on the small mark, the 96 and 152 px tiles', 4, 3.5 and 3 px
-    // (strokes of 3 and 2.5 px read as hairlines). The glide 1.3 times the
-    // stroke, the focal one, as in the app icon (at the harmonics' taper the
-    // curves read as near-equal stripes).
-    const qreal base = small ? 4.0 : std::min(6.5, 3.0 + std::max(0.0, side - 152.0) * 3.5 / 208.0);
+    // Its strokes in pixels, not scaled with the tile: on the wide mark a
+    // trace of the window's precision, the glide 5 px and no trace under
+    // 2.5 (the glide of 8.5 px was the window's loudest amber); on the small
+    // mark, the 96 and 152 px tiles', 4, 3.5 and 3 px (strokes of 3 and
+    // 2.5 px read as hairlines). The glide 1.3 times the stroke, the focal
+    // one, as in the app icon (at the harmonics' taper the curves read as
+    // near-equal stripes).
+    const qreal base = small ? 4.0 : 3.9;
     const qreal glide = mark->property("glideStroke").toReal();
-    if (std::abs(glide - 1.3 * base) > 0.01 || (side >= 360 && glide < 1.3 * 6.5)) {
+    if (std::abs(glide - 1.3 * base) > 0.01 || (!small && (glide < 4.8 || glide > 5.5))) {
         return QStringLiteral("the glide's stroke %1 px on a %2 px tile").arg(glide).arg(side);
     }
     const qreal high = mark->property("highHarmonicStroke").toReal();
     const qreal harmonic = mark->property("harmonicStroke").toReal();
-    if (std::abs(harmonic - (small ? 3.5 : 0.8 * base)) > 0.01 || std::abs(high - (small ? 3.0 : 0.65 * base)) > 0.01
+    if (std::abs(harmonic - (small ? 3.5 : 0.875 * base)) > 0.01 || std::abs(high - (small ? 3.0 : 0.75 * base)) > 0.01
         || glide < 1.45 * harmonic) {
         return QStringLiteral("the harmonics %1 and %2 px beside the glide's %3").arg(mark->property("harmonicStroke").toReal())
             .arg(high).arg(glide);
     }
-    // The wide mark's 4th harmonic half the stroke the harmonics taper from,
-    // as in the icon.
-    if (std::abs(mark->property("fourthHarmonicStroke").toReal() - 0.5 * base) > 0.01) {
+    // The wide mark's 4th harmonic the thinnest, and 2.5 px.
+    const qreal fourth = mark->property("fourthHarmonicStroke").toReal();
+    if (std::abs(fourth - 0.645 * base) > 0.01 || (!small && (fourth < 2.5 || fourth > high))) {
         return QStringLiteral("the 4th harmonic %1 px beside the glide's %2").arg(mark->property("fourthHarmonicStroke").toReal())
             .arg(glide);
     }
@@ -972,14 +972,11 @@ qreal standInMarkInk(QQuickWindow *window) {
 // flush there, as the app icon's traces run out to its tile's edge, or ""
 // (ending in round caps inside the mark, the series read as a line chart):
 // as grabbed, the column just inside the tile's right edge crosses each of
-// its three lower curves, and they start some 24 % in: the columns before a
-// fifth of the tile are floor, and a column at 30 % crosses them all, the
-// wide mark's four or the small mark's three. The wide mark's 4th harmonic
-// leaves through the top edge, as in the app icon, some 82 % across, where
-// the icon's true 4th harmonic does (at 90 % it grazed the edge into the
-// corner): one short run of ink in the row just inside the top edge,
-// between three quarters and nine tenths of the way across; the small mark
-// leaves that row floor.
+// every one of its curves, and they start some 24 % in: the columns before
+// a fifth of the tile are floor, and a column at 30 % crosses them all, the
+// wide mark's four or the small mark's three. None leaves through the top
+// edge, so the crop reads as meant (the wide mark's 4th alone did): the row
+// just inside it is floor.
 QString standInMarkRunsOut(QQuickWindow *window) {
     QQuickItem *cover = named(window, "nowPlayingCover");
     QQuickItem *mark = cover ? itemNamed(cover, QStringLiteral("albumArtStandInMark")) : nullptr;
@@ -1014,8 +1011,8 @@ QString standInMarkRunsOut(QQuickWindow *window) {
     };
     const bool small = cover->property("standInCompact").toBool();
     const int curves = small ? 3 : 4;
-    if (runs(right - 2) != 3) {
-        return QStringLiteral("%1 curves at the tile's right edge, not 3").arg(runs(right - 2));
+    if (runs(right - 2) != curves) {
+        return QStringLiteral("%1 curves at the tile's right edge, not %2").arg(runs(right - 2)).arg(curves);
     }
     // The row just inside the top edge.
     int first = -1;
@@ -1028,7 +1025,7 @@ QString standInMarkRunsOut(QQuickWindow *window) {
             last = x;
         }
     }
-    if (small ? topRuns != 0 : (topRuns != 1 || first < left + width * 3 / 4 || last > left + width * 9 / 10)) {
+    if (topRuns != 0) {
         return QStringLiteral("%1 runs in the top row, from %2 to %3 of %4 px").arg(topRuns).arg(first - left).arg(last - left).arg(width);
     }
     for (int x = left + 2; x < left + width / 5; ++x) {

@@ -247,6 +247,7 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 | Large-font now playing | the cover flush in the corner over lines at the inset; the title on the cover's foot | three left edges and some 60 px of nothing over the title; the header is one block at the inset, the title centred on the cover |
 | Now playing | per-track heights; the cover scaling up from a square on first play | the library jumped up to 26 px on a track change; the scaling read as a zoom |
 | No-cover mark in a list | the stand-in's amber and magenta; Breeze's album and track glyphs | the tree's brightest thing, in the "now" colour; blobs at 24 pt and an empty square at 10 pt |
+| No-cover mark at cover size | an 8.5 px glide; three traces leaving on the right and one through the top | the loudest amber in the window; the crop read as an accident |
 | No-cover tile | the album title or a glyph in the slot; a different layout | repeated the lines below it, read as a broken image, and moved the library |
 | Track change | old and new text cross-fading over the same span | the two titles read as superimposed |
 | First play | the idle row leaving before the cover arrived | the band was empty for up to 140 ms, a blink |
