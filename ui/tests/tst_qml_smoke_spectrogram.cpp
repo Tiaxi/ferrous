@@ -40,6 +40,8 @@ private slots:
     void crosshairReadoutPlatesFollowThePointerSmoothly();
     void spectrogramCrosshairTimeKeepsClearOfTheLaneHead();
     void shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch();
+    void laneHeadsAreOneSizeInAPane_data();
+    void laneHeadsAreOneSizeInAPane();
     void crosshairReadoutLeavesAPlateOutInNarrowPlots_data();
     void crosshairReadoutLeavesAPlateOutInNarrowPlots();
     void spectrogramCrosshairReadoutStaysReadableInNarrowLanes_data();
@@ -85,6 +87,52 @@ private slots:
 };
 
 namespace {
+
+// A plot layer alone, over a bridge of its own with a track playing.
+const QByteArray kPlotLayerHarness = QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Item {
+    id: harness
+    width: 640
+    height: 431
+
+    QtObject {
+        id: testBridge
+        objectName: "testBridge"
+        property bool showLevelMeter: false
+        property string currentTrackPath: "/fixture/track.flac"
+        property string playbackState: "Playing"
+        property int currentTrackChannels: 2
+        property bool connected: false
+        property bool waveformEndsEarly: false
+        property real waveformCoverageSeconds: 0
+        property real durationSeconds: 0
+        property var mutedChannels: []
+        property var soloedChannels: []
+        property int channelButtonsVisibility: 1
+        function toggleChannelMute(channel) {}
+        function soloChannel(channel) {}
+    }
+
+    Viewers.PlotLayer {
+        width: 640
+        height: 431
+        uiBridge: testBridge
+        uiPalette: Components.UiPalette { windowRoot: harness }
+    }
+}
+)QML");
+
+// The labels of `lanes` lanes, as the channel layouts name them.
+QStringList plotLaneLabels(int lanes) {
+    const QStringList positions{QStringLiteral("L"), QStringLiteral("R"), QStringLiteral("C"),
+                                QStringLiteral("LFE"), QStringLiteral("RL"), QStringLiteral("RR"),
+                                QStringLiteral("SL"), QStringLiteral("SR")};
+    return positions.mid(0, lanes);
+}
 
 // Waits for `done` with animation time passing 100 ms between looks, so
 // that fades end at once, and real time for timers, which Qt runs on it
@@ -1657,6 +1705,58 @@ void SpectrogramSmokeTest::crosshairReadoutPlatesFollowThePointerSmoothly() {
             if (!check(x, y, false)) return;
         }
     }
+}
+
+void SpectrogramSmokeTest::laneHeadsAreOneSizeInAPane_data() {
+    QTest::addColumn<int>("lanes");
+    QTest::newRow("stereo") << 2;
+    QTest::newRow("5.1") << 6;
+    QTest::newRow("7.1") << 8;
+}
+
+// A pane's lane heads are one size, at each height either side of where they
+// turn compact: the lanes' heights differ by a pixel with their rounding,
+// and lane by lane 5.1 at 431 px had a full head in L's 72 px lane over
+// five compact ones in lanes of 71.
+void SpectrogramSmokeTest::laneHeadsAreOneSizeInAPane() {
+    QFETCH(int, lanes);
+    QQmlApplicationEngine engine;
+    QString error;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kPlotLayerHarness, baseUrl, &error));
+    QVERIFY2(root != nullptr, qPrintable(error));
+    auto *layer = root->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QVERIFY(layer != nullptr);
+    QVERIFY(layer->setProperty("laneCount", lanes));
+    QVERIFY(layer->setProperty("laneLabels", plotLaneLabels(lanes)));
+    const int threshold = qRound(layer->property("compactLaneHeight").toReal());
+    QVERIFY(threshold > 0);
+    int compactPanes = 0;
+    int fullPanes = 0;
+    // Every height of the pane around where its lanes reach the threshold.
+    for (int height = lanes * (threshold - 2); height <= lanes * (threshold + 3); ++height) {
+        layer->setHeight(height);
+        QList<QQuickItem *> heads = itemsNamed(layer, QStringLiteral("plotLaneHead"));
+        QCOMPARE(heads.size(), lanes);
+        qreal shortest = height;
+        for (int lane = 0; lane < lanes; ++lane) {
+            // PlotLanes' lanes, a 1 px seam between them.
+            const int top = lane > 0 ? qRound(double(lane) * height / lanes) + 1 : 0;
+            const int bottom = lane + 1 < lanes ? qRound(double(lane + 1) * height / lanes) : height;
+            shortest = std::min<qreal>(shortest, bottom - top);
+        }
+        const bool compact = shortest < threshold;
+        for (QQuickItem *head : heads) {
+            QVERIFY2(head->property("compact").toBool() == compact,
+                     qPrintable(QStringLiteral("lane %1 of %2 in %3 px: compact %4")
+                                    .arg(head->property("channelIndex").toInt()).arg(lanes).arg(height)
+                                    .arg(head->property("compact").toBool())));
+            QCOMPARE(head->height(), heads.first()->height());
+        }
+        ++(compact ? compactPanes : fullPanes);
+    }
+    QVERIFY(compactPanes > 0 && fullPanes > 0);
 }
 
 void SpectrogramSmokeTest::crosshairReadoutLeavesAPlateOutInNarrowPlots_data() {

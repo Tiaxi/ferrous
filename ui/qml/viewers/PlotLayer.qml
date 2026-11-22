@@ -93,9 +93,21 @@ Item {
                                                     zoomPlate.visible ? zoomPlate.height : 0) + 1)
 
     // Lanes shorter than this, such as each of 5.1's in the main window,
-    // have compact heads: 72 px with the default font, where a
-    // 20 px label and its 28 px buttons would take most of the lane.
+    // have compact heads: 72 px with the default font, where a full
+    // head, as tall as the mode switch, would take half the lane.
     readonly property real compactLaneHeight: 4 * Kirigami.Units.gridUnit
+    // A pane's heads are one size: compact when its shortest lane is
+    // shorter than that (lane by lane, 5.1's 431 px gave L a 72 px lane
+    // and a full head over five compact ones). A function, so that a head
+    // made as the lane count changes is made at that count's size.
+    function headsCompact() {
+        for (let index = 0; index < root.laneCount; ++index) {
+            if (root.laneHeight(index) < root.compactLaneHeight) {
+                return true
+            }
+        }
+        return false
+    }
     // The plates' inset from the plot's corners: the lane heads' and the
     // mode switch's.
     readonly property int plateInset: 5
@@ -245,7 +257,7 @@ Item {
             uiPalette: root.uiPalette
             label: root.laneLabels[index] || ""
             channelIndex: index
-            compact: root.laneHeight(index) < root.compactLaneHeight
+            compact: root.headsCompact()
             muted: (root.uiBridge.mutedChannels || [])[index] === true
             soloed: (root.uiBridge.soloedChannels || [])[index] === true
             // Before any audio the lanes at rest are named, with nothing
