@@ -762,6 +762,7 @@ Components.DialogWindow {
                         spacing: 0
 
                         Kirigami.Icon {
+                            objectName: "keyboardShortcutsRowIcon"
                             Layout.preferredWidth: root.iconSize
                             Layout.preferredHeight: root.iconSize
                             Layout.rightMargin: root.iconSpacing
