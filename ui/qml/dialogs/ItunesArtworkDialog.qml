@@ -235,6 +235,45 @@ Components.DialogWindow {
         replaceCoverConfirmDialog.open()
     }
 
+    // Whether the target's cover, as targetArtworkSource() picks it, is a
+    // folder image under a name that holds a cover, by the backend's rule;
+    // undefined while the backend has not said.
+    function targetCoverNamed() {
+        const target = root.uiBridge.itunesArtworkTarget || ({})
+        const targetPath = target.trackPath || ""
+        if (targetPath.length > 0 && targetPath !== (root.uiBridge.currentTrackPath || "")) {
+            return target.coverNamed
+        }
+        return root.uiBridge.currentTrackCoverNamed
+    }
+
+    // What Replace does with the current art, as the backend applies it
+    // (artwork::apply_artwork_to_track), which picks the cover the art
+    // shows as Ferrous shows it (metadata: a folder's JPEG or PNG first):
+    // with art embedded in the tracks, it embeds the new art ("embed");
+    // with a folder image named as a cover, such as cover.jpg, it
+    // overwrites that file ("overwrite"); with another folder image, such
+    // as back.jpg, it adds a cover file beside it, which stays ("add").
+    // Empty when the dialog can't tell, as before the backend has said
+    // whether the image has a cover's name, or before its details came.
+    function replaceOutcomeCase() {
+        if ((root.currentArtworkSource || "").length === 0) {
+            return ""
+        }
+        const named = root.targetCoverNamed()
+        const embedded = (root.currentArtworkInfo || ({})).embeddedCover
+        if (embedded === true) {
+            return "embed"
+        }
+        if (named === true) {
+            return "overwrite"
+        }
+        if (named === false && embedded === false) {
+            return "add"
+        }
+        return ""
+    }
+
     function requestSuggestionApply(index) {
         const row = root.suggestionRowAt(index)
         if (root.suggestionRowReady(row)) {
@@ -428,8 +467,10 @@ Components.DialogWindow {
         }
     }
 
-    // One case of Replace Album Art: what the folder holds, then what
-    // Replace does there.
+    // One case of Replace Album Art, when the dialog can't tell which
+    // applies: the condition in the text's ink, then what Replace does,
+    // secondary, both regular, so the question stays the only semibold
+    // line, as in every other confirmation.
     component ReplaceCoverCase: ColumnLayout {
         id: replaceCoverCase
         property string lead: ""
@@ -441,7 +482,6 @@ Components.DialogWindow {
             objectName: replaceCoverCase.objectName + "Lead"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
-            font.weight: Font.DemiBold
             color: root.uiPalette.text
             textFormat: Text.PlainText
             text: replaceCoverCase.lead
@@ -940,49 +980,71 @@ Components.DialogWindow {
             }
         }
 
-        // Each case on a row of its own, as the backend applies it
-        // (artwork::apply_artwork_to_track): what the folder holds, in the
-        // text's ink and semibold, then what Replace does there, secondary,
-        // so the reader finds the case that applies without parsing one
-        // paragraph of conditions (it was one, read twice). All of it is in
-        // the folder of the track the art was searched for. A folder with a
-        // JPEG or PNG gets a cover file, as Ferrous shows any such image as
-        // the folder's cover (folder_cover), a back scan alone too, which
-        // nobody would call "a cover image": the one with a cover's name is
-        // overwritten, and otherwise a new one is written beside the images
-        // that stay, so not every replaced image is lost ("replaces the
-        // album's cover image file" said it was). Without such an image,
-        // the tracks in that folder with the album's tag get it as their
-        // front cover, and no other folder's. It says which file is
-        // overwritten ("becomes its cover file" left that open, beside a
-        // warning that something is lost).
+        // What Replace does, as the backend applies it: see
+        // replaceOutcomeCase(). One paragraph, secondary, says the outcome
+        // that applies, naming the file it overwrites or adds a cover file
+        // beside (two cases with semibold conditions made the reader work
+        // out which applied, and outranked the question). All of it is in
+        // the folder of the track the art was searched for, and embedding
+        // writes the tracks there with the album's tag, no other folder's.
+        readonly property string outcomeCase: root.replaceOutcomeCase()
+        readonly property string coverFileName: {
+            const path = PathUtils.pathFromAnyUrl(root.currentArtworkSource || "")
+            return path.substring(path.lastIndexOf("/") + 1)
+        }
+        readonly property string embedOutcome:
+            I18n.i18nc("@info", "Ferrous writes the new art into this album’s tracks in this folder.")
+
+        Label {
+            objectName: "replaceCoverOutcome"
+            Layout.fillWidth: true
+            visible: replaceCoverConfirmDialog.outcomeCase.length > 0
+            wrapMode: Text.Wrap
+            color: root.uiPalette.textSecondary
+            textFormat: Text.PlainText
+            text: replaceCoverConfirmDialog.outcomeCase === "overwrite"
+                ? I18n.i18nc("@info %1 is a file name, such as cover.jpg",
+                    "Ferrous overwrites %1, this folder’s cover image.", replaceCoverConfirmDialog.coverFileName)
+                : (replaceCoverConfirmDialog.outcomeCase === "add"
+                    ? I18n.i18nc("@info %1 is a file name, such as back.jpg",
+                        "Ferrous adds a cover file beside %1, which stays.", replaceCoverConfirmDialog.coverFileName)
+                    : replaceCoverConfirmDialog.embedOutcome)
+        }
+
+        // When the dialog can't tell, both cases, as conditions: a folder
+        // with a JPEG or PNG gets a cover file, the one with a cover's name
+        // overwritten or a new one beside the images that stay; otherwise
+        // the tracks get the art. 12 px apart with the default font, more
+        // with a larger one; a case's condition and outcome sit as close as
+        // a question and its path.
         ColumnLayout {
             objectName: "replaceCoverConsequence"
             Layout.fillWidth: true
-            // 6 px between the rows with the default font, more with a
-            // larger one; a row's lead and outcome sit as close as a
-            // question and its path.
-            spacing: root.uiPalette.scaledSize(Kirigami.Units.smallSpacing + Kirigami.Units.smallSpacing / 2)
+            visible: replaceCoverConfirmDialog.outcomeCase.length === 0
+            spacing: root.uiPalette.scaledSize(Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing)
 
             ReplaceCoverCase {
                 objectName: "replaceCoverFolderCase"
-                lead: I18n.i18nc("@info", "Folder has JPEG or PNG images")
-                outcome: I18n.i18nc("@info", "Overwrites the image named as a cover, or adds a cover file "
-                    + "beside them")
+                lead: I18n.i18nc("@info", "If the folder has a JPEG or PNG image")
+                outcome: I18n.i18nc("@info", "Ferrous overwrites its cover file, such as cover.jpg, or adds one "
+                    + "beside its images.")
             }
 
             ReplaceCoverCase {
                 objectName: "replaceCoverEmbedCase"
-                lead: I18n.i18nc("@info", "No JPEG or PNG images in the folder")
-                outcome: I18n.i18nc("@info", "Embeds the album art in this album’s tracks in that folder")
+                lead: I18n.i18nc("@info", "If it has none")
+                outcome: replaceCoverConfirmDialog.embedOutcome
             }
         }
 
-        // What is lost, on its own line and in the text's colour (it ended
-        // the paragraph above, the last thing read).
+        // What is lost, on its own line and in the text's colour, only when
+        // Replace may overwrite a file: embedding replaces the tracks' own
+        // art, which the question already says.
         Label {
             objectName: "replaceCoverWarning"
             Layout.fillWidth: true
+            visible: replaceCoverConfirmDialog.outcomeCase === "overwrite"
+                || replaceCoverConfirmDialog.outcomeCase.length === 0
             wrapMode: Text.Wrap
             color: root.uiPalette.text
             textFormat: Text.PlainText

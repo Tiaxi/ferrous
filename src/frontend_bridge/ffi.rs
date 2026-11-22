@@ -3244,6 +3244,17 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     // The tracks on the album, or 0 when unknown; see
     // `TrackMetadata::shown_track_total`.
     push_u32(&mut out, snapshot.metadata.shown_track_total().unwrap_or(0));
+    // Whether the cover is a folder image under a name that holds a cover,
+    // such as cover.jpg, which applying artwork overwrites; 0 for another
+    // folder image, which it adds a cover file beside, for embedded art
+    // and for none.
+    out.push(u8::from(
+        snapshot
+            .metadata
+            .cover_art_path
+            .as_deref()
+            .is_some_and(|path| crate::folder_cover::has_cover_name(std::path::Path::new(path))),
+    ));
     out
 }
 
@@ -5675,7 +5686,32 @@ mod tests {
         assert_eq!(read_string(&encoded, &mut offset), "/library/a.flac");
         // Then the tracks on the album.
         assert_eq!(read_u32(&encoded, &mut offset), 8);
+        // Then whether the cover has a cover's name: a.cover.png has not.
+        assert_eq!(encoded[offset], 0);
+        offset += 1;
         assert_eq!(offset, encoded.len());
+    }
+
+    // What artwork apply does to the folder's cover follows its name, which
+    // the UI's Replace Album Art says: it overwrites cover.jpg, and adds a
+    // cover file beside back.jpg.
+    #[test]
+    fn metadata_section_ends_with_whether_the_cover_has_a_cover_name() {
+        let mut snapshot = sample_snapshot();
+        for (path, named) in [
+            (Some("/music/Cover.JPG"), 1u8),
+            (Some("/music/folder.png"), 1),
+            (Some("/music/back.jpg"), 0),
+            (
+                Some("/cache/ferrous/embedded_covers/0123456789abcdef.png"),
+                0,
+            ),
+            (None, 0),
+        ] {
+            snapshot.metadata.cover_art_path = path.map(str::to_string);
+            let encoded = encode_metadata_section(&snapshot);
+            assert_eq!(encoded.last(), Some(&named), "{path:?}");
+        }
     }
 
     #[test]
@@ -5683,11 +5719,17 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.metadata.track_total = None;
         let encoded = encode_metadata_section(&snapshot);
-        assert_eq!(&encoded[encoded.len() - 4..], &0u32.to_le_bytes());
+        assert_eq!(
+            &encoded[encoded.len() - 5..encoded.len() - 1],
+            &0u32.to_le_bytes()
+        );
         // Nor is a total below the number sent.
         snapshot.metadata.track_total = Some(2);
         let encoded = encode_metadata_section(&snapshot);
-        assert_eq!(&encoded[encoded.len() - 4..], &0u32.to_le_bytes());
+        assert_eq!(
+            &encoded[encoded.len() - 5..encoded.len() - 1],
+            &0u32.to_le_bytes()
+        );
     }
 
     #[test]

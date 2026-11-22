@@ -433,11 +433,14 @@ ApplicationWindow {
         auto *label = confirm->findChild<QQuickItem *>(QString::fromLatin1(name));
         return label != nullptr ? label->property("text").toString() : QString();
     };
-    QCOMPARE(textOf("replaceCoverFolderCaseLead"), QStringLiteral("Folder has JPEG or PNG images"));
+    // This bridge doesn't say whether the cover has a cover's name, so the
+    // question gives both cases; see
+    // itunesReplaceStatesTheOutcomeThatApplies for each one alone.
+    QCOMPARE(textOf("replaceCoverFolderCaseLead"), QStringLiteral("If the folder has a JPEG or PNG image"));
     QCOMPARE(textOf("replaceCoverFolderCaseOutcome"),
-             QStringLiteral("Overwrites the image named as a cover, or adds a cover file beside them"));
-    QCOMPARE(textOf("replaceCoverEmbedCaseLead"), QStringLiteral("No JPEG or PNG images in the folder"));
-    QCOMPARE(details, QStringLiteral("Embeds the album art in this album\u2019s tracks in that folder"));
+             QStringLiteral("Ferrous overwrites its cover file, such as cover.jpg, or adds one beside its images."));
+    QCOMPARE(textOf("replaceCoverEmbedCaseLead"), QStringLiteral("If it has none"));
+    QCOMPARE(details, QStringLiteral("Ferrous writes the new art into this album\u2019s tracks in this folder."));
     QCOMPARE(warning->property("text").toString(), QStringLiteral("Ferrous keeps no copy of what it overwrites."));
     QVERIFY2(!details.contains(QStringLiteral("artwork")), qPrintable(details));
     // A window of its own above Replace from iTunes', with Replace's icon

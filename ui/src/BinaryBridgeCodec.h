@@ -415,6 +415,11 @@ struct DecodedMetadata {
     // The tracks on the track's album when the backend knows them surely,
     // or 0.
     int trackTotal{0};
+    // Whether coverPath is a folder image under a name that holds a cover,
+    // such as cover.jpg, by the backend's rule (folder_cover): applying
+    // artwork overwrites it. False for another folder image, which applying
+    // adds a cover file beside, for embedded art and for none.
+    bool coverNamed{false};
 };
 
 // The most tree rows a track is in: a library folder, an artist, an album

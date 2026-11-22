@@ -567,6 +567,8 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
     if (!reader.atEnd() && !reader.readUtf8(&out->libraryPath)) return false;
     quint32 trackTotal = 0;
     if (!reader.atEnd() && !reader.readU32(&trackTotal)) return false;
+    quint8 coverNamed = 0;
+    if (!reader.atEnd() && (!reader.readU8(&coverNamed) || coverNamed > 1)) return false;
     if (!reader.atEnd()) return false;
     out->present = true;
     out->sampleRateHz = static_cast<int>(sampleRateHz);
@@ -577,6 +579,7 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
     out->trackNumber = static_cast<int>(trackNumber);
     out->trackTotal = static_cast<int>(
         std::min(trackTotal, static_cast<quint32>(std::numeric_limits<int>::max())));
+    out->coverNamed = coverNamed != 0;
     return true;
 }
 

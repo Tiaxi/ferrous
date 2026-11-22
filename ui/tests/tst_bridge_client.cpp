@@ -364,6 +364,7 @@ private slots:
     void metadataTrackTotalDecodesAfterTheTreeKeys();
     void currentTrackLibraryPathFollowsTheMetadataOfTheCurrentTrack();
     void currentTrackTotalBelongsToTheCurrentTracksNumber();
+    void currentTrackCoverNamedFollowsTheMetadataCover();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void trackOnlySnapshotSetsTrackFlagOnly();
     void gaplessHandoffSetsIdentityFlagBeforeMetadata();
@@ -9499,8 +9500,16 @@ void BridgeClientTest::metadataTrackTotalDecodesAfterTheTreeKeys()
     QCOMPARE(decoded.metadata.trackTotal, 8);
     QCOMPARE(decoded.metadata.treeKeys, QStringList{QStringLiteral("root|/music")});
     QCOMPARE(decoded.metadata.libraryPath, QStringLiteral("/library/A/Album/02.flac"));
+    QVERIFY(!decoded.metadata.coverNamed);
     QVERIFY(!decode(payload.first(payload.size() - 1), &decoded));
-    QVERIFY(!decode(payload + QByteArray(1, '\0'), &decoded));
+    // Then whether the cover has a cover's name, such as cover.jpg: 0 or 1.
+    QVERIFY(decode(payload + QByteArray(1, '\1'), &decoded));
+    QVERIFY(decoded.metadata.coverNamed);
+    QCOMPARE(decoded.metadata.trackTotal, 8);
+    QVERIFY(decode(payload + QByteArray(1, '\0'), &decoded));
+    QVERIFY(!decoded.metadata.coverNamed);
+    QVERIFY(!decode(payload + QByteArray(1, '\2'), &decoded));
+    QVERIFY(!decode(payload + QByteArray(2, '\0'), &decoded));
 }
 
 // The library's path for the playing track, which differs from the track's
@@ -9533,6 +9542,65 @@ void BridgeClientTest::currentTrackLibraryPathFollowsTheMetadataOfTheCurrentTrac
     snapshot.metadata.libraryPath = QStringLiteral("/music/Album/02.flac");
     QVERIFY(client.processBinarySnapshot(snapshot));
     QCOMPARE(client.currentTrackLibraryPath(), snapshot.metadata.libraryPath);
+}
+
+// Whether the playing track's cover has a cover's name, which Replace
+// Album Art says the outcome by: the backend says it with the metadata's
+// cover, and the iTunes search keeps it with the cover it searched for.
+void BridgeClientTest::currentTrackCoverNamedFollowsTheMetadataCover()
+{
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/music/A/Album/01.flac");
+    snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    // Without a cover, nothing is said.
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(!client.currentTrackCoverNamed().isValid());
+    snapshot.metadata.coverPath = QStringLiteral("/music/A/Album/cover.jpg");
+    snapshot.metadata.coverNamed = true;
+    client.m_pollTrackMetadataChanged = false;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackCoverNamed(), QVariant(true));
+    QVERIFY(client.m_pollTrackMetadataChanged);
+    // The same cover path, renamed in place by the backend's word.
+    snapshot.metadata.coverNamed = false;
+    client.m_pollTrackMetadataChanged = false;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackCoverNamed(), QVariant(false));
+    QVERIFY(client.m_pollTrackMetadataChanged);
+    // The next track's cover is not known yet: the cover shown stays, and
+    // what was said of it.
+    snapshot.metadata.coverNamed = true;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    snapshot.playback.currentPath = QStringLiteral("/music/A/Album/02.flac");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(!client.currentTrackCoverPath().isEmpty());
+    QCOMPARE(client.currentTrackCoverNamed(), QVariant(true));
+    // Its own metadata, without art, says nothing.
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    snapshot.metadata.coverPath.clear();
+    snapshot.metadata.coverNamed = false;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.currentTrackCoverPath().isEmpty());
+    QVERIFY(!client.currentTrackCoverNamed().isValid());
+
+    // The search keeps the word with the cover it was for, and says none
+    // when there was none.
+    snapshot.metadata.coverPath = QStringLiteral("/music/A/Album/back.jpg");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    client.searchCurrentTrackArtworkSuggestions();
+    QCOMPARE(client.itunesArtworkTarget().value(QStringLiteral("coverNamed")), QVariant(false));
+    QCOMPARE(client.itunesArtworkTarget().value(QStringLiteral("coverPath")).toString(),
+             client.currentTrackCoverPath());
+    snapshot.metadata.coverPath.clear();
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    client.searchCurrentTrackArtworkSuggestions();
+    QVERIFY(!client.itunesArtworkTarget().contains(QStringLiteral("coverNamed")));
+    client.clearItunesArtworkSuggestions();
 }
 
 void BridgeClientTest::currentTrackTotalBelongsToTheCurrentTracksNumber()
