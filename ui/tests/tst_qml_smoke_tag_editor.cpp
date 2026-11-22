@@ -1972,7 +1972,11 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     // temporary folder's path, which the error names.
     QQuickItem *close = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton"));
     QVERIFY(close != nullptr);
-    const qreal gridUnit = details->property("contentPadding").toReal();
+    // The content's inset, and the grid unit the limit is counted in.
+    const qreal inset = details->property("contentPadding").toReal();
+    const qreal gridUnit = QQmlExpression(qmlContext(details), details, QStringLiteral("Kirigami.Units.gridUnit"))
+                               .evaluate().toReal();
+    QVERIFY(gridUnit > 0);
     QVariant scaledLimit;
     QVERIFY(QMetaObject::invokeMethod(qvariant_cast<QObject *>(details->property("uiPalette")), "scaledSize",
                                       Q_RETURN_ARG(QVariant, scaledLimit), Q_ARG(QVariant, QVariant(gridUnit * 29))));
@@ -1988,7 +1992,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
         .arg(textBottom).arg(sceneRectOf(close).top()).arg(detailsWindow->height()).arg(limit);
     if (pointSize == 0 || detailsWindow->height() < limit) {
         QVERIFY2(detailsWindow->height() < limit, qPrintable(where));
-        QVERIFY2(std::abs(sceneRectOf(close).top() - textBottom - gridUnit) <= 1.0, qPrintable(where));
+        QVERIFY2(std::abs(sceneRectOf(close).top() - textBottom - inset) <= 1.0, qPrintable(where));
         // With no scroll bar: the window was laid out hidden and small,
         // the bar shown, and the lines beside it took one more than the
         // window had room for, so it stayed.
@@ -1996,11 +2000,11 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
         QTRY_VERIFY2(!barShown.evaluate().toBool(), qPrintable(where));
     } else {
         QCOMPARE(detailsWindow->height(), int(limit));
-        QVERIFY2(textBottom > sceneRectOf(close).top() - gridUnit, qPrintable(where));
+        QVERIFY2(textBottom > sceneRectOf(close).top() - inset, qPrintable(where));
         QQmlExpression barShown(qmlContext(text), text, QStringLiteral("detailsView.ScrollBar.vertical.visible"));
         QTRY_VERIFY2(barShown.evaluate().toBool(), qPrintable(where));
     }
-    QCOMPARE(sceneRectOf(summary).top(), gridUnit);
+    QCOMPARE(sceneRectOf(summary).top(), inset);
 
     // Copy, from the keyboard or the context menu, copies the details as
     // they read, without the characters that only shape their lines.
@@ -2128,12 +2132,12 @@ void checkRenamePreviewOpensAsTallAsItsList(TagEditorWindow &fixture, QObject *p
         QQuickItem *cancel = visibleItemNamed(previewWindow, QStringLiteral("renamePreviewCancelButton"));
         QVERIFY(list != nullptr && cancel != nullptr);
         QTRY_COMPARE(list->property("count").toInt(), 4);
-        const qreal gridUnit = previewDialog->property("contentPadding").toReal();
+        const qreal inset = previewDialog->property("contentPadding").toReal();
         const qreal listBottom = sceneRectOf(list).top() + list->property("contentHeight").toReal();
         const QString where = QStringLiteral("opening %1: the list to %2, Cancel from %3 in a window %4 px tall")
             .arg(opening).arg(listBottom).arg(sceneRectOf(cancel).top()).arg(previewWindow->height());
-        QVERIFY2(previewWindow->height() < gridUnit * 29, qPrintable(where));
-        QVERIFY2(std::abs(sceneRectOf(cancel).top() - listBottom - gridUnit) <= 1.0, qPrintable(where));
+        QVERIFY2(previewWindow->height() < inset * 29, qPrintable(where));
+        QVERIFY2(std::abs(sceneRectOf(cancel).top() - listBottom - inset) <= 1.0, qPrintable(where));
         QVERIFY(clickVisibleButton(previewWindow, QStringLiteral("renamePreviewCancelButton")));
         QTRY_VERIFY(!previewDialog->property("visible").toBool());
     }
@@ -2179,7 +2183,11 @@ void checkRenamePreviewOpensAsWideAsItsLines(TagEditorWindow &fixture, QObject *
     QObject *palette = qvariant_cast<QObject *>(previewDialog->property("uiPalette"));
     QVERIFY(palette != nullptr);
     const qreal fontScale = palette->property("fontScale").toReal();
-    const qreal gridUnit = previewDialog->property("contentPadding").toReal();
+    // The content's inset, and the grid unit the limit is counted in.
+    const qreal inset = previewDialog->property("contentPadding").toReal();
+    const qreal gridUnit = QQmlExpression(qmlContext(previewDialog), previewDialog,
+                                          QStringLiteral("Kirigami.Units.gridUnit")).evaluate().toReal();
+    QVERIFY(gridUnit > 0);
     const qreal limit = std::max(42 * gridUnit, qreal(std::round(42 * gridUnit * fontScale)));
     QCOMPARE(previewDialog->property("maximumDefaultWidth").toReal(), limit);
     const qreal gutter = previewDialog->property("listGutter").toReal();
@@ -2232,7 +2240,7 @@ void checkRenamePreviewOpensAsWideAsItsLines(TagEditorWindow &fixture, QObject *
         for (const QString &sentence : summarySentences) {
             widest = std::max(widest, summaryMetrics.horizontalAdvance(sentence));
         }
-        const qreal fitted = std::max(std::ceil(2 * gridUnit + widest), footer->implicitWidth());
+        const qreal fitted = std::max(std::ceil(2 * inset + widest), footer->implicitWidth());
         const qreal defaultWidth = previewDialog->property("defaultWidth").toReal();
         const QString where = QStringLiteral("%1: widest line %2, default width %3, window %4, limit %5")
             .arg(at).arg(widest).arg(defaultWidth).arg(previewWindow->width()).arg(limit);

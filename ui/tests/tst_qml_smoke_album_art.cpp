@@ -3167,10 +3167,15 @@ void AlbumArtSmokeTest::itunesArtworkCountLineHoldsAtLargeFonts() {
     // BridgeClient's words for five (itunesArtworkFoundTextIsPlainWords).
     bridge->setProperty("itunesArtworkStatusText",
                         QStringLiteral("Found 5 suggestions. Full-size images download when you preview or apply one."));
-    // The width it opens at with a 24 pt font, its most.
-    QCOMPARE(opened.dialog->property("defaultWidth").toReal(), 1280.0);
-    opened.dialogWindow->resize(1280, opened.dialogWindow->height());
-    QTRY_COMPARE(opened.dialogWindow->width(), 1280);
+    // The width it opens at with a 24 pt font: its most, 1280 px, and as
+    // much as its inset has grown on each side.
+    const qreal gridUnit = evaluateOn(opened.content, QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+    QVERIFY(gridUnit > 0);
+    const int widest = qRound(1280 + 2 * (opened.dialog->property("contentPadding").toReal() - gridUnit));
+    QVERIFY2(widest > 1280, qPrintable(QString::number(widest)));
+    QCOMPARE(opened.dialog->property("defaultWidth").toReal(), qreal(widest));
+    opened.dialogWindow->resize(widest, opened.dialogWindow->height());
+    QTRY_COMPARE(opened.dialogWindow->width(), widest);
     QQuickItem *heading = itemNamed(opened.content, QStringLiteral("itunesArtworkResultsHeading"));
     QVERIFY(heading != nullptr);
     QTRY_VERIFY(heading->isVisible());
@@ -3222,6 +3227,11 @@ void AlbumArtSmokeTest::itunesArtworkActionsFollowTheTextFont() {
     OpenItunesArtworkDialog opened;
     QVERIFY(openItunesArtworkDialog(engine, dir, 2, nullptr, opened));
     QTRY_VERIFY(popupsSettled());
+    // At its opening width, which the offscreen screen is too narrow for
+    // at 24 pt.
+    opened.dialogWindow->setWidth(qCeil(opened.dialog->property("defaultWidth").toReal()));
+    QTRY_COMPARE(opened.content->width(),
+                 opened.dialogWindow->width() - 2 * opened.dialog->property("contentPadding").toReal());
     // Wide enough for its icon and its caption in the labels' font.
     const auto fitsCaption = [](QQuickItem *button, QQuickItem *label) {
         const QFontMetricsF metrics(qvariant_cast<QFont>(label->property("font")));
@@ -3325,7 +3335,8 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont_data() {
 // art's too, stay 64 px at 10 pt and grow to half as tall again as a
 // row's title and details with a larger font; the actions' glyphs are
 // Kirigami's size for labels, 16 px at 10 pt; and the dialog opens
-// 920 px wide at 10 pt and no wider than 1280 px with a larger font.
+// 920 px wide at 10 pt and no wider than 1280 px with a larger font, and
+// its inset's growth on each side.
 // At 24 pt, 64 px thumbnails stood under 92 px of text, 16 px glyphs
 // beside 32 px captions, in a 1964 px window.
 void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
@@ -3350,7 +3361,9 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
 
     const qreal defaultWidth = opened.dialog->property("defaultWidth").toReal();
     if (large) {
-        QCOMPARE(defaultWidth, 1280.0);
+        const qreal gridUnit = evaluateOn(opened.content, QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+        QVERIFY(gridUnit > 0);
+        QCOMPARE(defaultWidth, 1280 + 2 * (opened.dialog->property("contentPadding").toReal() - gridUnit));
     } else {
         QCOMPARE(defaultWidth, 920.0);
     }

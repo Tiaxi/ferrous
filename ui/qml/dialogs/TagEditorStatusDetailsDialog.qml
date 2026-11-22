@@ -27,7 +27,6 @@ Components.DialogWindow {
 
     required property var tagEditorApi
 
-    readonly property real contentPadding: Kirigami.Units.gridUnit
     readonly property real contentSpacing: Kirigami.Units.largeSpacing
     readonly property real itemIndent: root.uiPalette.scaledSize(16)
     // The details' scroll bar shows only while they are taller than the

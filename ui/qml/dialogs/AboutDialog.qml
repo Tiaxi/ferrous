@@ -42,8 +42,6 @@ Components.DialogWindow {
 
     objectName: "aboutDialog"
     title: I18n.i18nc("@title:window", "About Ferrous")
-    // The content's inset from the window's edges.
-    readonly property real contentPadding: Kirigami.Units.gridUnit
     // The pages' inset within their frame: 12 px with the default font,
     // and as much larger as a larger one (a fixed 8 px stayed under 32 px
     // text at 24 pt, which touched the frame).

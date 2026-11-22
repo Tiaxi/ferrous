@@ -50,15 +50,15 @@ Components.DialogWindow {
     property int _savedResultCount: 0
 
     title: I18n.i18nc("@title:window", "Replace from iTunes")
-    // The content's inset from the window's edges.
-    readonly property real contentPadding: Kirigami.Units.gridUnit
     // 920 px wide with the default font, and as much wider as a larger font
     // makes the text, up to 1280 px, within the screen: wider left a gulf
-    // between the titles and their actions (as at 1964 px at 24 pt); as
-    // tall as the current art and five results, which the list shows whole
-    // (a fixed 680 px left a framed empty band under them).
-    // The user may resize it.
+    // between the titles and their actions (as at 1964 px at 24 pt), and
+    // wider by as much as the inset grows with the font, which took the
+    // room from the text; as tall as the current art and five results,
+    // which the list shows whole (a fixed 680 px left a framed empty band
+    // under them). The user may resize it.
     defaultWidth: Math.min(root.uiPalette.scaledSize(920), 1280)
+        + 2 * (root.contentPadding - Kirigami.Units.gridUnit)
     defaultHeight: Math.ceil(2 * root.contentPadding + root.rowHeight + root.headingHeight
         + root.shownResultRows * root.rowHeight + 2 + itunesArtworkFooter.implicitHeight)
     // The current art's row whole, and a result under it.

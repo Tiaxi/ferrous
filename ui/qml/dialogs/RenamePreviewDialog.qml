@@ -80,7 +80,6 @@ Components.DialogWindow {
 
     objectName: "renamePreviewDialog"
     title: I18n.i18nc("@title:window", "Rename Files")
-    readonly property real contentPadding: Kirigami.Units.gridUnit
     // The content, which has the keyboard as it opens.
     readonly property Item body: renamePreviewContent
     minimumWidth: Kirigami.Units.gridUnit * 24

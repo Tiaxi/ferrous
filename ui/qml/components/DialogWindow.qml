@@ -40,6 +40,10 @@ ApplicationWindow {
     // width it opens at. Content is laid out only once its window shows,
     // so such a window lays its content out before it takes its size.
     property bool sizesToLaidOutContent: false
+    // The content's inset from the window's edges, and the buttons': a
+    // grid unit with the default font, and more with a larger one, up to
+    // 32 px (18 px around 24 pt text crowded the window's edge).
+    readonly property real contentPadding: Math.min(32, root.uiPalette.scaledSize(Kirigami.Units.gridUnit))
 
     // As the window shows: the moment to set up what it shows.
     signal aboutToShow()
