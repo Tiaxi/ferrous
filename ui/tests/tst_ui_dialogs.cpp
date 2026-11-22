@@ -552,6 +552,8 @@ private slots:
     void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
     void editTagsOpensNoWiderThanTheMainWindow();
     void editTagsFileColumnsGiveWayBeforeTheTags();
+    void editTagsDetailsHasAGlyphAsItsPeers_data();
+    void editTagsDetailsHasAGlyphAsItsPeers();
     void dialogsShareOneLook();
     void dialogsHoldTheirContentsWithALargeFont();
     void dialogsScaleWithKdesFont_data();
@@ -4915,6 +4917,39 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
                                          {});
     QTRY_COMPARE(columnWidth(QStringLiteral("status")), 120.0);
     QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(describeColumns()));
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsDetailsHasAGlyphAsItsPeers_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Details…, beside Reload's, Save's and Cancel's glyphs, has one too, of
+// their size at either font (it was the footer's one caption alone).
+void UiDialogsTest::editTagsDetailsHasAGlyphAsItsPeers() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    // A load that failed for a file gives the status its details.
+    QJsonObject response = QJsonDocument::fromJson(tagRows(2)).object();
+    response.insert(QStringLiteral("failures"),
+                    QJsonArray{QJsonObject{{QStringLiteral("path"), QStringLiteral("/fixture/Album/03 Song.flac")},
+                                           {QStringLiteral("error"), QStringLiteral("not audio")}}});
+    QQuickWindow *tags = openTagEditor(main, QJsonDocument(response).toJson(QJsonDocument::Compact));
+    QVERIFY(tags != nullptr);
+    QQuickItem *details = nullptr;
+    QTRY_VERIFY((details = visibleNamed(tags, QStringLiteral("tagEditorDetailsButton"))) != nullptr);
+    QQuickItem *reload = visibleNamed(tags, QStringLiteral("tagEditorReloadButton"));
+    QVERIFY(reload != nullptr);
+    QCOMPARE(evaluate(details, QStringLiteral("icon.name")).toString(), QStringLiteral("documentinfo"));
+    for (const QString &property : {QStringLiteral("icon.width"), QStringLiteral("icon.height")}) {
+        QCOMPARE(evaluate(details, property).toReal(), evaluate(reload, property).toReal());
+    }
+    QTRY_VERIFY(!layoutPending(details));
+    QVERIFY(details->width() >= details->implicitWidth() - 0.5);
     QVERIFY(closeTagEditor(main));
 }
 

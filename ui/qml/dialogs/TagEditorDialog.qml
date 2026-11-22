@@ -1128,6 +1128,9 @@ Components.DialogWindow {
             objectName: "tagEditorDetailsButton"
             Layout.bottomMargin: dialogButtons.bottomPadding
             visible: !root.busy && root.tagEditorApi.statusDetails.length > 0
+            icon.width: dialogButtons.glyphSize
+            icon.height: dialogButtons.glyphSize
+            icon.name: "documentinfo"
             text: I18n.i18nc("@action:button", "Details…")
             onClicked: tagEditorStatusDetailsDialog.open()
         }
