@@ -60,7 +60,7 @@ QtObject {
     readonly property color textTertiarySelected: root.readableOn(root.textSecondary,
         [root.selection, root.selectionInactive, root.selectionHovered, root.selectionInactiveHovered],
         root.rowFigureContrast)
-    // A field's placeholder, such as Edit Tags' "Multiple values", which
+    // A field's placeholder, such as Edit Tags' "Mixed", which
     // tells what saving does: the theme's own placeholder colour, its
     // inactive text, darkened or lightened where it is under 4.6:1 on the
     // view, a margin over 4.5:1. #a1a9b1 / #697582 (Breeze Light's own is

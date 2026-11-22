@@ -4766,7 +4766,7 @@ void UiDialogsTest::checkAutoNumberIsOneFormInReadingOrder(DialogsWindow &main) 
 }
 
 // A field whose files hold different values says so with its placeholder,
-// "Multiple values", which tells what saving does: in the palette's
+// "Mixed", which tells what saving does: in the palette's
 // placeholder colour, at least 4.5:1 on the field, where Breeze Light's own
 // was 4.2:1. The colour's contrast in both themes is tested with
 // the palette's tokens.
@@ -4779,7 +4779,7 @@ void UiDialogsTest::checkEditTagsMultipleValuesPlaceholderReads(DialogsWindow &m
     QVERIFY(editor.bulkValueMixed(QStringLiteral("title")));
     QQuickItem *title = nullptr;
     QTRY_VERIFY((title = visibleNamed(tags, QStringLiteral("tagEditorField_title"))) != nullptr);
-    QTRY_COMPARE(title->property("placeholderText").toString(), QStringLiteral("Multiple values"));
+    QTRY_COMPARE(title->property("placeholderText").toString(), QStringLiteral("Mixed"));
     const QColor placeholder = title->property("placeholderTextColor").value<QColor>();
     QCOMPARE(hex(placeholder), hex(tokenOf(window, "placeholderText")));
     QVERIFY2(contrastRatio(placeholder, tokenOf(window, "view")) >= 4.5,
@@ -4790,11 +4790,12 @@ void UiDialogsTest::checkEditTagsMultipleValuesPlaceholderReads(DialogsWindow &m
     QVERIFY(closeTagEditor(main));
 }
 
-// Track's field says that its files' numbers differ, whole: "Multiple
-// values" where it fits, as with the default font, and "Mixed" in the
-// narrower field of a larger font, as every field of the form then says;
-// the fields keep their width, which the table needs ("Multiple values"
-// elided in a 124 px field at 24 pt). Edited, with their Revert showing,
+// Track's field says that its files' numbers differ, whole, as every
+// field of the form does, in one word whatever the font and whichever
+// field has its Revert: "Mixed", short enough that the fields keep their
+// width, which the table needs ("Multiple values" elided in a 124 px field
+// at 24 pt, and at 10 pt gave way to "Mixed" in the whole form as Track
+// gained its Revert). Edited, with their Revert showing,
 // the fields still hold the word and their value whole, and Edit Tags is
 // no wider than its window ("Mixed" elided to "Mix…" once the Revert
 // followed the font).
@@ -4839,8 +4840,7 @@ void UiDialogsTest::checkEditTagsNumberPairsShowMultipleValuesWhole(DialogsWindo
                                  QStringLiteral("discNo"), QStringLiteral("totalDiscs")};
     // The fields with Edit Tags `width` wide, as it opens from a main window
     // that wide: every field whose files differ says it in the same word,
-    // the short one once a number field needs it, wide fields too (not
-    // "Multiple values" and "Mixed" in one form at 24 pt), whole between its
+    // edited or not and wide fields too, whole between its
     // paddings, as is a number field's value beside its Revert; a longer
     // text scrolls in its field.
     const auto checkFields = [&](int width, bool edited) {
@@ -4849,8 +4849,7 @@ void UiDialogsTest::checkEditTagsNumberPairsShowMultipleValuesWhole(DialogsWindo
         QTRY_VERIFY(!layoutPending(number));
         const QString where = QStringLiteral("%1 px%2").arg(tags->width()).arg(edited ? QStringLiteral(", edited") : QString());
         QVERIFY(editor.bulkValueMixed(QStringLiteral("trackNo")));
-        // The whole word with the default font, but for the Revert's room.
-        const QString expected = pointSize <= 10 && !edited ? QStringLiteral("Multiple values") : QStringLiteral("Mixed");
+        const QString expected = QStringLiteral("Mixed");
         QTRY_COMPARE(number->property("placeholderText").toString(), expected);
         int mixedFields = 0;
         int reverts = 0;

@@ -44,16 +44,12 @@ Components.DialogWindow {
     // elided to "failed to …").
     readonly property string notSavedText: I18n.i18nc("@item tag editor row status: saving the file's tags failed", "Not saved")
     readonly property string notRenamedText: I18n.i18nc("@item tag editor row status: renaming the file failed", "Not renamed")
-    // Shown in a field whose rows hold different values, which saving keeps.
-    readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "Multiple values")
-    // The same, in a number field too narrow for it, as Track and Disc's
-    // with a large font ("Multiple values" elided in their 124 px fields at
-    // 24 pt; widening them took the table's room).
-    readonly property string keepShortText: I18n.i18nc("@info:placeholder short for Multiple values, in a narrow number field: the selected files keep their different values", "Mixed")
-    // Every field of the form says it in the same word: the short one in
-    // all of them once a number field needs it, not "Multiple values" and
-    // "Mixed" in one form.
-    readonly property bool keepShortInForm: trackPair.needsKeepShort || discPair.needsKeepShort
+    // Shown in a field whose rows hold different values, which saving
+    // keeps: one word, the same in every field. It is short enough for
+    // Track's and Disc's beside their Revert at any font ("Multiple values"
+    // didn't fit there, so the whole form changed its word to "Mixed" as
+    // one of them gained its Revert; widening them took the table's room).
+    readonly property string keepText: I18n.i18nc("@info:placeholder short, in fields as narrow as a track number's: the selected files keep their different values", "Mixed")
     readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
     readonly property bool busy: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
     // Bumped whenever the selection or the edits change, for the bindings
@@ -939,15 +935,8 @@ Components.DialogWindow {
         id: fieldEditor
 
         required property var field
-        // A number field, which says that its files differ in the short
-        // words where the whole ones do not fit.
-        property bool compact: false
         // Its files hold different values, which saving keeps.
         property bool mixed: false
-        readonly property bool keepTextFits: fieldMetrics.advanceWidth(root.keepText)
-            <= fieldEditor.width - fieldEditor.leftPadding - fieldEditor.rightPadding
-        // Its files differ, and it is too narrow to say so whole.
-        readonly property bool needsKeepShort: fieldEditor.compact && fieldEditor.mixed && !fieldEditor.keepTextFits
         property bool touched: false
         // The text it shows for the tracks, before the user types.
         property string committedText: ""
@@ -991,7 +980,7 @@ Components.DialogWindow {
         Layout.fillWidth: true
         selectByMouse: true
         persistentSelection: true
-        placeholderText: fieldEditor.mixed ? (root.keepShortInForm ? root.keepShortText : root.keepText) : ""
+        placeholderText: fieldEditor.mixed ? root.keepText : ""
         placeholderTextColor: root.uiPalette.placeholderText
         rightPadding: fieldEditor.changed
             ? revertButton.width + Kirigami.Units.smallSpacing
@@ -1634,11 +1623,10 @@ Components.DialogWindow {
         id: pair
         required property var first
         required property var second
-        readonly property bool needsKeepShort: firstField.needsKeepShort || secondField.needsKeepShort
         // Its fields at their narrowest: "Mixed" whole beside the Revert
         // (at 24 pt it elided to "Mix…" once the Revert followed the font).
         readonly property real fieldLeastWidth: Math.ceil(firstField.leftPadding
-            + fieldMetrics.advanceWidth(root.keepShortText)
+            + fieldMetrics.advanceWidth(root.keepText)
             + root.fieldRevertWidth + Kirigami.Units.smallSpacing)
         // The pair at its narrowest: the label, the fields and "of".
         readonly property real leastWidth: Math.ceil(root.fieldLabelWidth + Kirigami.Units.largeSpacing
@@ -1654,7 +1642,6 @@ Components.DialogWindow {
         TagField {
             id: firstField
             field: pair.first
-            compact: true
             Layout.fillWidth: true
             Layout.preferredWidth: Kirigami.Units.gridUnit * 3
         }
@@ -1671,7 +1658,6 @@ Components.DialogWindow {
         TagField {
             id: secondField
             field: pair.second
-            compact: true
             Layout.fillWidth: true
             Layout.preferredWidth: Kirigami.Units.gridUnit * 3
         }
