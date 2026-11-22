@@ -127,18 +127,13 @@ const QColor kScaleTextColor(0xec, 0xec, 0xec);
 const QColor kScaleOutlineColor(0, 0, 0);
 // plotTick.
 const QColor kScaleTickColor(236, 236, 236, 191);
-// The lane at rest, before it has columns: a line across it at each of the
-// scale's ticks in white 20%, #433858 and 1.78:1 on the floor (at 11%,
-// 1.3:1, the never-played pane read as an empty slab, and the seam between
-// its lanes as one more of its lines), over the lane seam at rest, which is
-// darker than the floor, and while the scale shows, the scale's text in
-// plotTextSecondary.
+// The lane at rest, before it has columns: lines across all of it in
+// white 20%, #433858 and 1.78:1 on the floor (at 11%, 1.3:1, the
+// never-played pane read as an empty slab, and the seam between its lanes
+// as one more of its lines), over the lane seam at rest, which is darker
+// than the floor, evenly spaced, or while the scale shows, at its ticks,
+// with the scale's text in plotTextSecondary.
 const QColor kRestGridLineColor(255, 255, 255, 51);
-// A rest line in the band of a plate over the lane, its label or the mode
-// switch, within kRestQuietReach of its top or foot: white 10 %, some
-// 1.3:1, so that beside the plate it reads as the grid going on behind it
-// rather than a connector cut into it.
-const QColor kRestGridQuietLineColor(255, 255, 255, 26);
 const QColor kRestScaleTextColor(236, 236, 236, 184);
 // The playhead: a 1 px light core cased in 1 px of black 60% on each side.
 // The core is all but opaque, as the playhead has always been translucent:
@@ -295,8 +290,6 @@ struct SpectrogramPlacedOverlayImage {
 // What an overlay draws in a frame, in logical pixels.
 struct SpectrogramOverlayFrame {
     QVector<QRectF> lines;
-    // As SpectrogramOverlayLayout's lineColors.
-    QVector<QColor> lineColors;
     QVector<SpectrogramPlacedOverlayImage> images;
 };
 
@@ -554,10 +547,8 @@ struct SpectrogramSceneNode final : public QSGNode {
         for (int i = 0; i < layer.lines.size(); ++i) {
             QSGSimpleRectNode *line = layer.lines[i];
             const QRectF rect = i < frame.lines.size() ? frame.lines[i] : QRectF();
-            const QColor color = i < frame.lineColors.size() && frame.lineColors[i].isValid()
-                ? frame.lineColors[i] : lineColor;
-            if (line->color() != color) {
-                line->setColor(color);
+            if (line->color() != lineColor) {
+                line->setColor(lineColor);
             }
             if (line->rect() != rect) {
                 line->setRect(rect);
@@ -2894,20 +2885,38 @@ void SpectrogramItem::setLaneHeadBounds(const QRectF &value) {
     update();
 }
 
-QRectF SpectrogramItem::laneLabelBounds() const {
+int SpectrogramItem::restLineCount() const {
     QMutexLocker lock(&m_stateMutex);
-    return m_laneLabelBounds;
+    return m_restLineCount;
 }
 
-void SpectrogramItem::setLaneLabelBounds(const QRectF &value) {
+void SpectrogramItem::setRestLineCount(int value) {
+    value = std::max(0, value);
     {
         QMutexLocker lock(&m_stateMutex);
-        if (m_laneLabelBounds == value) {
+        if (m_restLineCount == value) {
             return;
         }
-        m_laneLabelBounds = value;
+        m_restLineCount = value;
     }
-    emit laneLabelBoundsChanged();
+    emit restLineCountChanged();
+    update();
+}
+
+double SpectrogramItem::restTopClearance() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_restTopClearance;
+}
+
+void SpectrogramItem::setRestTopClearance(double value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_restTopClearance == value) {
+            return;
+        }
+        m_restTopClearance = value;
+    }
+    emit restTopClearanceChanged();
     update();
 }
 
@@ -5410,14 +5419,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // `shown`, lines that start outside it are left out, and
             // so are images centred outside it.
             if (shown.isNull()) shown = pane;
-            for (qsizetype i = 0; i < layout.lines.size(); ++i) {
-                const QRect &line = layout.lines[i];
+            for (const QRect &line : layout.lines) {
                 const QRectF rect((line.x() - shift) / scale, line.y() / scale,
                     line.width() / scale, line.height() / scale);
                 if (rect.intersects(pane) && rect.left() >= shown.left()
                     && rect.left() <= shown.right()) {
                     frame.lines.push_back(rect);
-                    frame.lineColors.push_back(layout.lineColors.value(i));
                 }
             }
             for (const SpectrogramOverlayImage &image : layout.images) {
@@ -7197,66 +7204,45 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     // width and height are in device pixels.
     m_restGrid = SpectrogramOverlayLayout{};
     m_restGrid.size = QSize(width, height);
-    if (width <= 0 || height <= 0 || m_analysisFftSize <= 1 || m_sampleRateHz <= 0) {
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    const double scale = m_canvasScale;
+    const int lineWidth = deviceLineWidth(scale);
+    // Every line runs the lane's width, none cut for a plate: the plates
+    // are over the lane's top band, which has none (cut beside the plates,
+    // at a length of its own in each lane, and dimmer there, the first line
+    // read as a broken one).
+    if (!m_gridEnabled) {
+        // With nothing to label, evenly spaced: a silent lane (the ticks'
+        // rows left the band over the top one some 80 px to the others' 45).
+        m_restGrid.valid = true;
+        for (int line = 1; line <= m_restLineCount; ++line) {
+            const int y = static_cast<int>(
+                std::lround(static_cast<double>(height) * line / (m_restLineCount + 1)));
+            m_restGrid.lines.push_back(QRect(0, y, width, lineWidth));
+        }
+        return;
+    }
+    if (m_analysisFftSize <= 1 || m_sampleRateHz <= 0) {
         return;
     }
     m_restGrid.valid = true;
-    // The bins and rows a session at the analysis's settings will have at
-    // the lane's rate, for the ticks the scale will then show.
+    // With the scale shown, a line at each of its ticks, with its label:
+    // the bins and rows a session at the analysis's settings will have at
+    // the lane's rate, for the ticks the scale will then show. Each lane
+    // leaves out those beside the plates in any, so the lanes are alike.
     const int bins = shownFrequencyBins(m_analysisFftSize, m_sampleRateHz, m_frequencyCap);
     const double binHz = static_cast<double>(m_sampleRateHz) / static_cast<double>(m_analysisFftSize);
     const std::vector<int> rowBins = frequencyRowBins(height, bins, binHz, m_logScale, nullptr);
-    const double scale = m_canvasScale;
-    const int lineWidth = deviceLineWidth(scale);
-    // With the scale hidden there are no labels to keep clear of the lane's
-    // head and the mode switch: every tick has its line, so the lines are
-    // evenly spaced (with the top one left out, the lane's top band was some
-    // 80 px to the others' 45).
-    const int topClearance = m_gridEnabled ? frequencyScaleTopClearanceLocked() : 0;
-    // A line on a row beside a plate, the mode switch's in the corner or the
-    // lane's label, or within kPlateReach under or over it, ends, or
-    // starts, kPlateGap clear of it, rather than run along its edge, as the
-    // first line did along the switch's foot, 1 px under it. One rule for
-    // every lane: within 8 px rather than 4 (at 4 px, at 1600x1000, the
-    // first lane's top line, 4 px under its label, ran on while the
-    // second's, 3 px under its, was cut). Every tick keeps its line. The
-    // plates' rects are logical, with their 1 px edges.
-    constexpr double kPlateGap = 6.0;
-    constexpr double kPlateReach = 8.0;
-    // A line within kRestQuietReach of a plate's top or foot, in its band,
-    // is quieter (kRestGridQuietLineColor), its cuts kept.
-    constexpr double kRestQuietReach = 4.0;
-    const double logicalWidth = static_cast<double>(width) / scale;
-    const QRectF corner = m_reservedCorner.isEmpty()
-        ? QRectF()
-        : QRectF(logicalWidth - m_reservedCorner.width(), 0.0, m_reservedCorner.width(), m_reservedCorner.height());
-    const auto besidePlate = [&](const QRectF &plate, double row, double rowHeight) {
-        return !plate.isEmpty() && row + rowHeight > plate.top() - kPlateReach && row < plate.bottom() + kPlateReach;
-    };
+    // With the scale's 2 px under them, as the corner's lane leaves.
+    const int topClearance = std::max(
+        frequencyScaleTopClearanceLocked(), static_cast<int>(std::ceil(m_restTopClearance)) + 2);
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
              rowBins, bins, binHz, width, height, scale, topClearance)) {
-        // Across the lane, where the scale's tick is, with the scale hidden
-        // too: the pane at rest is an instrument waiting, not a hole. The
-        // label over it, where the scale's goes, only with the scale shown.
-        const double row = static_cast<double>(tick.pixelY) / scale;
-        const double rowHeight = static_cast<double>(lineWidth) / scale;
-        const int left = besidePlate(m_laneLabelBounds, row, rowHeight)
-            ? std::clamp(static_cast<int>(std::ceil((m_laneLabelBounds.right() + kPlateGap) * scale)), 0, width)
-            : 0;
-        const int right = besidePlate(corner, row, rowHeight)
-            ? std::clamp(static_cast<int>(std::floor((corner.left() - kPlateGap) * scale)), 0, width)
-            : width;
-        m_restGrid.lines.push_back(QRect(left, tick.pixelY, std::max(0, right - left), lineWidth));
-        const bool inPlateBand = std::ranges::any_of(
-            std::array{m_laneLabelBounds, corner}, [&](const QRectF &plate) {
-                return !plate.isEmpty() && row + rowHeight > plate.top() - kRestQuietReach
-                    && row < plate.bottom() + kRestQuietReach;
-            });
-        m_restGrid.lineColors.push_back(inPlateBand ? kRestGridQuietLineColor : QColor());
-        if (m_gridEnabled) {
-            m_restGrid.images.push_back(
-                {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});
-        }
+        m_restGrid.lines.push_back(QRect(0, tick.pixelY, width, lineWidth));
+        m_restGrid.images.push_back(
+            {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});
     }
     nameOverlayImagesLocked(m_restGrid);
 }

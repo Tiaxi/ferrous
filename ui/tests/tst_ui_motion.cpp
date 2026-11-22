@@ -5587,11 +5587,13 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
     QQuickItem *modeSwitch = itemNamed(layer, QStringLiteral("visualizationModeSwitch"));
     QVERIFY(modeSwitch != nullptr);
 
-    // Clear of the mode switch in the top right corner.
+    // Clear of the mode switch in the top right corner, and under the
+    // spectrogram's rest lines, the lowest of which is at most four fifths
+    // of the way down.
     const auto drawnInPane = [&]() {
         const QImage image = window->grabWindow();
         const qreal scale = image.width() / static_cast<qreal>(window->width());
-        const QPointF at = pane->mapToScene(QPointF(pane->width() * 0.25, pane->height() * 0.6)) * scale;
+        const QPointF at = pane->mapToScene(QPointF(pane->width() * 0.25, pane->height() * 0.9)) * scale;
         return image.pixelColor(at.toPoint());
     };
     // The mode's floor, as the pane says it, as the layer's colours say it,

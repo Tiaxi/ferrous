@@ -63,8 +63,8 @@ private slots:
     void spectrogramAtRestDrawsItsScaleFaintly_data();
     void spectrogramAtRestDrawsItsScaleFaintly();
     void spectrogramAtRestFollowsTheScaleSetting();
-    void spectrogramAtRestKeepsItsLinesClearOfThePlates_data();
-    void spectrogramAtRestKeepsItsLinesClearOfThePlates();
+    void spectrogramAtRestHasWholeRegularLines_data();
+    void spectrogramAtRestHasWholeRegularLines();
     void spectrogramAtRestDrawsLabelsOnlyWithTheScale();
     void spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty();
     void spectrogramRollingViewFillsUpToThePlayhead();
@@ -3025,18 +3025,18 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsItsScaleFaintly() {
     }
 }
 
-void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates_data() {
+void SpectrogramSmokeTest::spectrogramAtRestHasWholeRegularLines_data() {
     QTest::addColumn<double>("scale");
     QTest::newRow("1x") << 1.0;
     QTest::newRow("2x") << 2.0;
 }
 
-// A line at rest on a row beside a plate, the mode switch's corner or the
-// lane's label, or within 8 px under or over it, ends 6 px before the
-// corner and starts 6 px after the label (the first line ran along the
-// switch's foot), one rule for both lanes; every tick keeps its line, and a
-// line clear of both runs the lane's width.
-void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates() {
+// The lane at rest reads as silence: with the scale hidden, the lines it is
+// given, evenly spaced, each the lane's whole width, none cut for a plate in
+// the corner (cut beside the plates, at a length of its own per lane, the
+// first line read as a broken one). With the scale shown, its ticks' lines,
+// whole too, under the band the pane's plates take in any lane.
+void SpectrogramSmokeTest::spectrogramAtRestHasWholeRegularLines() {
     QFETCH(double, scale);
     SpectrogramItem item;
     item.setSampleRateHz(48'000);
@@ -3049,57 +3049,50 @@ void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates() {
         item.updateRestGridOverlayLocked(width, height);
         return item.m_restGrid;
     };
+    // A plate in the corner that reaches over the first line.
+    item.setReservedCorner(QSizeF(70, 64));
+    for (const int count : {3, 2, 1, 0}) {
+        item.setRestLineCount(count);
+        const SpectrogramOverlayLayout lines = layOut();
+        QVERIFY(lines.valid);
+        QVERIFY(lines.images.isEmpty());
+        QCOMPARE(lines.lines.size(), count);
+        for (int index = 0; index < count; ++index) {
+            const QRect line = lines.lines.at(index);
+            QCOMPARE(line.x(), 0);
+            QCOMPARE(line.width(), width);
+            QCOMPARE(line.y(), qRound(double(height) * (index + 1) / (count + 1)));
+        }
+    }
+
+    item.setReservedCorner(QSizeF());
+    item.setGridEnabled(true);
     const SpectrogramOverlayLayout plain = layOut();
-    QVERIFY(plain.lines.size() >= 3);
-    for (const QRect &line : plain.lines) {
+    QVERIFY(plain.lines.size() >= 2);
+    // A lane beside the corner's plate and one that only hears of it have
+    // the same lines.
+    item.setReservedCorner(QSizeF(70, 100));
+    item.setRestTopClearance(100.0);
+    const SpectrogramOverlayLayout besideCorner = layOut();
+    item.setReservedCorner(QSizeF());
+    const SpectrogramOverlayLayout clear = layOut();
+    QVERIFY(!clear.lines.isEmpty() && clear.lines.size() < plain.lines.size());
+    QCOMPARE(clear.images.size(), clear.lines.size());
+    QCOMPARE(clear.lines, besideCorner.lines);
+    QVERIFY(clear.images.last().rect.top() >= 102.0);
+    for (qsizetype index = 0; index < clear.lines.size(); ++index) {
+        const QRect line = clear.lines.at(index);
         QCOMPARE(line.x(), 0);
         QCOMPARE(line.width(), width);
+        QVERIFY(plain.lines.contains(line));
+        QVERIFY(clear.images.at(index).rect.top() >= 100.0);
     }
-    // Plates around the second line from the top, each past the 4 px the
-    // rule reached before and within its 8: the corner's foot 5 px over it,
-    // the label's top 6 px under it; the top line is beside the corner
-    // alone.
-    QList<int> rows;
-    for (const QRect &line : plain.lines) {
-        rows.push_back(line.y());
-    }
-    std::sort(rows.begin(), rows.end());
-    const double row = rows.at(1) / scale;
-    QVERIFY(row > 12);
-    constexpr double reach = 8.0;
-    const double cornerFoot = row - 5;
-    const double labelTop = row + 6;
-    item.setReservedCorner(QSizeF(70, cornerFoot));
-    item.setLaneLabelBounds(QRectF(4, labelTop, 20, 18));
-    const SpectrogramOverlayLayout clear = layOut();
-    QCOMPARE(clear.lines.size(), plain.lines.size());
-    int cornerOnly = 0;
-    int both = 0;
-    int neither = 0;
-    for (qsizetype i = 0; i < clear.lines.size(); ++i) {
-        const QRect line = clear.lines.at(i);
-        QCOMPARE(line.y(), plain.lines.at(i).y());
-        QCOMPARE(line.height(), plain.lines.at(i).height());
-        const double top = line.y() / scale;
-        const double bottom = (line.y() + line.height()) / scale;
-        const bool besideCorner = top < cornerFoot + reach;
-        const bool besideLabel = bottom > labelTop - reach && top < labelTop + 18 + reach;
-        QCOMPARE(line.x(), besideLabel ? qCeil((24 + 6) * scale) : 0);
-        QCOMPARE(line.x() + line.width(), besideCorner ? qFloor((600 - 70 - 6) * scale) : width);
-        cornerOnly += besideCorner && !besideLabel ? 1 : 0;
-        both += besideCorner && besideLabel ? 1 : 0;
-        neither += !besideCorner && !besideLabel ? 1 : 0;
-    }
-    QCOMPARE(cornerOnly, 1);
-    QCOMPARE(both, 1);
-    QVERIFY(neither >= 1);
 }
 
 // With the scale hidden (Preferences), the lane at rest keeps its lines,
-// without the labels: an instrument at rest rather than a hole. Without
-// labels to keep clear of the lane's head and the mode switch, it has a
-// line at every tick, the top one too, so they are evenly spaced (with the
-// top one left out the lane's top band was some 80 px to the others' 45).
+// without the labels: an instrument at rest rather than a hole, evenly
+// spaced (at the ticks, the band over the top line was some 80 px to the
+// others' 45).
 void SpectrogramSmokeTest::spectrogramAtRestFollowsTheScaleSetting() {
     SpectrogramItem item;
     item.setSampleRateHz(48'000);
@@ -3117,28 +3110,11 @@ void SpectrogramSmokeTest::spectrogramAtRestFollowsTheScaleSetting() {
     const SpectrogramOverlayLayout hidden = layOut();
     QVERIFY(hidden.valid);
     QVERIFY(hidden.images.isEmpty());
-    // Every line of the scale's, and the one at the top it leaves out.
-    for (const QRect &line : std::as_const(shown.lines)) {
-        QVERIFY(hidden.lines.contains(line));
-    }
-    QCOMPARE(hidden.lines.size(), shown.lines.size() + 1);
-    QVERIFY(hidden.lines.constLast().y() < shown.lines.constLast().y());
-    // Evenly spaced, within a pixel, and the band over the top one no
-    // taller than the bands between them.
     QList<int> rows;
     for (const QRect &line : std::as_const(hidden.lines)) {
         rows.push_back(line.y());
     }
-    std::sort(rows.begin(), rows.end());
-    QVERIFY(rows.size() >= 3);
-    int least = 240;
-    int most = 0;
-    for (qsizetype i = 1; i < rows.size(); ++i) {
-        least = std::min(least, rows.at(i) - rows.at(i - 1));
-        most = std::max(most, rows.at(i) - rows.at(i - 1));
-    }
-    QVERIFY2(most - least <= 1, qPrintable(QStringLiteral("bands %1 to %2 px").arg(least).arg(most)));
-    QVERIFY2(rows.first() <= most, qPrintable(QStringLiteral("top band %1 px").arg(rows.first())));
+    QCOMPARE(rows, (QList<int>{60, 120, 180}));
 }
 
 // As drawn: the lane at rest has its lines in white 11% on the floor with
@@ -3189,10 +3165,14 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsLabelsOnlyWithTheScale() {
     // No labels: nothing brighter than the lines.
     QCOMPARE(brightest(linesOnly), 51);
 
-    // The scale shown: its lines, all but the top one, and its labels.
+    // The scale shown: its ticks' lines, and its labels.
     item->setGridEnabled(true);
     QTRY_VERIFY(brightest(grab()) > 100);
-    QCOMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), line);
+    const int tickRow = [item]() {
+        QMutexLocker lock(&item->m_stateMutex);
+        return item->m_restGrid.lines.value(0).y();
+    }();
+    QCOMPARE(grab().pixelColor(100, tickRow), line);
 
     // Hidden again, the lines alone again.
     item->setGridEnabled(false);

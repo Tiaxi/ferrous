@@ -85,9 +85,27 @@ Item {
     property size reservedCorner: Qt.size(0, 0)
     // What the lowest lane's label and buttons take of it; see PlotLayer.
     property rect laneHeadBounds: Qt.rect(0, 0, 0, 0)
-    // What each lane's label and buttons take of it, by the lane's index;
-    // see PlotLayer's laneHeadBoundsByLane.
-    property var laneHeadBoundsByLane: []
+    // How far down into their lanes the heads reach, at most; see
+    // PlotLayer's laneHeadsFoot.
+    property real laneHeadsFoot: 0
+    // The band at the top of every lane that a plate takes in any of them,
+    // the heads' or the corner's: at rest the lanes are alike, all their
+    // lines under it.
+    readonly property real restTopClearance: Math.max(root.laneHeadsFoot, root.reservedCorner.height)
+    // The evenly spaced lines of each lane at rest, three where the first
+    // of three is clear of that band, fewer in shorter lanes; an even count
+    // where a lane has the pane's middle, as the mixed view's one has, so
+    // that none strikes through what is centred there ("Analysing…").
+    readonly property int restLineCount: {
+        const lane = Math.floor((root.height - (root.laneCount - 1)) / root.laneCount)
+        const middleLane = root.laneCount % 2 === 1
+        for (let lines = middleLane ? 4 : 3; lines > 0; lines -= middleLane ? 2 : 1) {
+            if (lane / (lines + 1) >= root.restTopClearance + 8) {
+                return lines
+            }
+        }
+        return 0
+    }
     // The lane a pan last began on, which tells when it ends: the hand is
     // the whole plot's, as the drag may go on over another lane.
     property SpectrogramItem _panLane: null
@@ -431,7 +449,8 @@ Item {
                     showCrosshairTime: index === spectrogramRepeater.count - 1
                     laneHeadBounds: index === spectrogramRepeater.count - 1
                         ? root.laneHeadBounds : Qt.rect(0, 0, 0, 0)
-                    laneLabelBounds: root.laneHeadBoundsByLane[index] || Qt.rect(0, 0, 0, 0)
+                    restLineCount: root.restLineCount
+                    restTopClearance: root.restTopClearance
                     readoutPlateColor: root.uiPalette.spectrogramPlot.plotPlate
                     readoutPlateEdgeColor: root.uiPalette.spectrogramPlot.plotPlateEdge
                     readoutTextColor: root.uiPalette.spectrogramPlot.plotText
