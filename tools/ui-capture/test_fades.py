@@ -128,6 +128,19 @@ class WhatIsMeasured(unittest.TestCase):
         self.assertEqual((m["window_dip"], m["mix_shortfall"]), (None, None))
 
 
+class Memory(unittest.TestCase):
+    def test_a_sampled_frame_keeps_none_of_the_whole_one(self):
+        # A slice of the whole float frame kept its 34 MB alive, and eight pack workers ran the machine out of memory.
+        whole = Image.new("RGB", (2000, 1400), (10, 20, 30))
+        pic = motion_strip.window_pictures([whole])[0]
+        owner = pic
+        while isinstance(getattr(owner, "base", None), np.ndarray):
+            owner = owner.base
+        self.assertEqual(pic.dtype, np.float32)
+        self.assertEqual(pic[0, 0].tolist(), [10.0, 20.0, 30.0])
+        self.assertLess(owner.nbytes, 3 * 10 ** 6)
+
+
 class InThePacks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

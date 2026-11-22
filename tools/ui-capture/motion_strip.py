@@ -279,10 +279,11 @@ def blink_of(ink, spans, segs):
 
 
 def window_pictures(ims):
-    """Each whole frame, sampled (at most ~150k pixels)."""
+    """Each whole frame, sampled (at most ~150k pixels) into an array of its own: a slice would keep all of the
+    whole frame's alive, for every frame of the recording."""
     w, h = ims[0].size
     stp = max(1, int((w * h / 150000) ** 0.5))
-    return [np.asarray(im.convert("RGB"), dtype=np.float32)[::stp, ::stp] for im in ims]
+    return [np.asarray(im.convert("RGB"))[::stp, ::stp].astype(np.float32) for im in ims]
 
 
 def blended_series(vals, spans, ts):
