@@ -196,6 +196,18 @@ Item {
             && root.isInside(root.focusedItem, root.viewerScope)
     }
 
+    // Sees a press on the view and where it moves, whatever takes it, for a
+    // drag to count as pointer activity. It is on the area over the view
+    // that has every press first: the view's items, which take it, keep it
+    // from handlers on what is under them.
+    component DragWatch: PointHandler {
+        acceptedButtons: Qt.AllButtons
+        onActiveChanged: fullscreenControlsAutoHide.pressTracked(
+            active, point.scenePosition, point.scenePressPosition)
+        onPointChanged: fullscreenControlsAutoHide.pressTracked(
+            active, point.scenePosition, point.scenePressPosition)
+    }
+
     // The viewer's mode switch, in the strip and on the corner plate: the
     // current mode checked, in the look of a choice that is on, as the
     // album art viewer's info toggle. The two are radio buttons to
@@ -410,6 +422,8 @@ Item {
                         spectrogramPopupViewFocus.forceActiveFocus(Qt.MouseFocusReason)
                         mouse.accepted = false
                     }
+
+                    DragWatch {}
                 }
             }
 
@@ -541,6 +555,8 @@ Item {
                                 spectrogramFullscreenViewFocus.forceActiveFocus(Qt.MouseFocusReason)
                                 mouse.accepted = false
                             }
+
+                            DragWatch {}
                         }
                     }
 

@@ -55,6 +55,8 @@ private slots:
     void viewerResetIsTheSameGlyphWindowedAndInTheStrip();
     void viewerToolbarIsOneVocabularyWindowedAndInTheStrip();
     void viewerStripIsOnOneTypeScale_data();
+    void viewerDragsCountAsPointerActivity_data();
+    void viewerDragsCountAsPointerActivity();
     void viewerStripIsOnOneTypeScale();
     void menuMnemonicsOpenTheMenusAndShowShortcuts();
 };
@@ -4603,6 +4605,147 @@ void TransportInputSmokeTest::viewerStripIsOnOneTypeScale() {
         QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "closeAlbumArtViewer" : "closeSpectrogramViewer"));
         QTRY_VERIFY(!viewer->property(albumArt ? "albumArtViewerOpen" : "spectrogramViewerOpen").toBool());
     }
+}
+
+void TransportInputSmokeTest::viewerDragsCountAsPointerActivity_data() {
+    // 0 the spectrogram, 1 the waveform, 2 the album art.
+    QTest::addColumn<int>("view");
+    QTest::addColumn<int>("displayMode");
+    QTest::addColumn<int>("fullscreenMode");
+    for (const int fullscreenMode : {0, 1}) {
+        const QByteArray where = fullscreenMode == 1 ? ", whole screen" : ", window";
+        QTest::newRow(("spectrogram, rolling" + where).constData()) << 0 << 0 << fullscreenMode;
+        QTest::newRow(("spectrogram, centred" + where).constData()) << 0 << 1 << fullscreenMode;
+        QTest::newRow(("waveform, rolling" + where).constData()) << 1 << 0 << fullscreenMode;
+        QTest::newRow(("waveform, centred" + where).constData()) << 1 << 1 << fullscreenMode;
+        QTest::newRow(("album art" + where).constData()) << 2 << 1 << fullscreenMode;
+    }
+}
+
+// A drag on the plot or the art is pointer activity, for as long as the
+// button is down: a pan longer than the hide delay, paused in it or not,
+// keeps its hand and its crosshair (the hover that counted as activity
+// stops while a button is down, so they left 5 s into a pan). Let go, the
+// controls hide after the delay again; a press that moves nothing does not
+// hold them.
+void TransportInputSmokeTest::viewerDragsCountAsPointerActivity() {
+    QFETCH(int, view);
+    QFETCH(int, displayMode);
+    QFETCH(int, fullscreenMode);
+    const bool albumArt = view == 2;
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(albumArt ? QStringLiteral("albumArtFullscreenControlsAutoHide")
+                                                              : QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    auto *art = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge && viewer && autoHide && art && spectrogram && waveformSurface);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("spectrogramDisplayMode", displayMode);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+    if (view == 1) {
+        viewer->setProperty("visualizationMode", 1);
+        QTRY_VERIFY(waveform->isVisible());
+    }
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "openAlbumArtViewer" : "openSpectrogramViewer"));
+    QQuickItem *surface = albumArt ? art : (view == 1 ? waveformSurface : spectrogram);
+    QQuickWindow *host = window;
+    if (fullscreenMode == 1) {
+        QTRY_VERIFY(surface->window() != nullptr && surface->window() != window);
+        host = surface->window();
+        QVERIFY(QTest::qWaitForWindowExposed(host));
+    } else {
+        QObject *popup = window->findChild<QObject *>(albumArt ? QStringLiteral("albumArtViewerPopup")
+                                                               : QStringLiteral("spectrogramViewerPopup"));
+        QTRY_VERIFY(popup->property("opened").toBool());
+    }
+    if (albumArt) {
+        QTRY_COMPARE(art->property("imageStatus").toInt(), 1);
+        art->setProperty("zoom", 4.0);
+    } else {
+        QTRY_VERIFY(spectrogram->property("viewerMode").toBool());
+        if (view == 1) {
+            waveform->setZoomLevel(4.0);
+        } else {
+            spectrogram->setProperty("_viewerZoomLevel", 4.0);
+        }
+    }
+    const QPoint from = sceneRectOf(surface).center().toPoint();
+    QTest::mouseMove(host, from + QPoint(1, 1));
+    QTest::mouseMove(host, from);
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    const Qt::MouseButton button = albumArt ? Qt::LeftButton : Qt::MiddleButton;
+    constexpr int delay = 120;
+
+    QTest::mousePress(host, button, Qt::NoModifier, from);
+    QPoint at = from;
+    at.rx() -= 40;
+    QTest::mouseMove(host, at);
+    autoHide->setProperty("hideDelay", delay);
+    const auto kept = [&]() -> QString {
+        if (!autoHide->property("controlsVisible").toBool() || autoHide->property("level").toDouble() < 1.0) {
+            return QStringLiteral("the controls left");
+        }
+        if (albumArt || view == 1) {
+            // The hand of the pan.
+            if (host->cursor().shape() != Qt::ClosedHandCursor) {
+                return QStringLiteral("the hand left: %1").arg(int(host->cursor().shape()));
+            }
+        } else if (host->cursor().shape() == Qt::BlankCursor) {
+            return QStringLiteral("the pointer left");
+        }
+        if (view == 1 && waveform->property("crosshairOpacity").toDouble() < 1.0) {
+            return QStringLiteral("the waveform's crosshair left");
+        }
+        if (view == 0) {
+            for (QQuickItem *lane : itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))) {
+                if (lane->property("crosshairOpacity").toDouble() < 1.0) {
+                    return QStringLiteral("the spectrogram's crosshair left");
+                }
+            }
+        }
+        return {};
+    };
+    // Dragging for longer than the delay, then resting in the drag as long.
+    for (int step = 0; step < 14; ++step) {
+        QTest::qWait(delay / 4);
+        if (step < 7) {
+            at.rx() -= 4;
+            QTest::mouseMove(host, at);
+        }
+        QVERIFY2(kept().isEmpty(), qPrintable(QStringLiteral("step %1: %2").arg(step).arg(kept())));
+    }
+    QTest::mouseRelease(host, button, Qt::NoModifier, at);
+    QVERIFY(autoHide->property("controlsVisible").toBool());
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+
+    // A press that moves nothing holds nothing.
+    autoHide->setProperty("hideDelay", 600000);
+    QTest::mouseMove(host, from + QPoint(7, 3));
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    QTest::mousePress(host, button, Qt::NoModifier, from + QPoint(7, 3));
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    QTest::mouseRelease(host, button, Qt::NoModifier, from + QPoint(7, 3));
+
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "closeAlbumArtViewer" : "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property(albumArt ? "albumArtViewerOpen" : "spectrogramViewerOpen").toBool());
 }
 
 std::unique_ptr<QmlSmokeTest> makeTransportInputSmokeTest(const QString &userDirectoriesParent) {

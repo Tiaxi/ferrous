@@ -169,6 +169,18 @@ Item {
         Qt.callLater(root.syncPresentation)
     }
 
+    // Sees a press on the art and where it moves, whatever takes it, for a
+    // drag to count as pointer activity. It is on the area over the art
+    // that has every press first: the art, which takes it, keeps it from
+    // handlers on what is under it.
+    component DragWatch: PointHandler {
+        acceptedButtons: Qt.AllButtons
+        onActiveChanged: fullscreenControlsAutoHide.pressTracked(
+            active, point.scenePosition, point.scenePressPosition)
+        onPointChanged: fullscreenControlsAutoHide.pressTracked(
+            active, point.scenePosition, point.scenePressPosition)
+    }
+
     // The info toggle: the tint while the details show, the ring only for
     // keyboard focus. Hidden during a preview, whose details always show,
     // it takes no room.
@@ -312,6 +324,8 @@ Item {
                     albumArtPopupViewFocus.forceActiveFocus(Qt.MouseFocusReason)
                     mouse.accepted = false
                 }
+
+                DragWatch {}
             }
         }
 
@@ -486,6 +500,8 @@ Item {
                                 albumArtFullscreenViewFocus.forceActiveFocus(Qt.MouseFocusReason)
                                 mouse.accepted = false
                             }
+
+                            DragWatch {}
                         }
                     }
 

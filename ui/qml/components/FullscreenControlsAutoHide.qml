@@ -10,7 +10,13 @@ QtObject {
     property int hideDelay: 5000
     // Keeps the controls shown, such as while one has keyboard focus.
     property bool held: false
-    readonly property bool controlsVisible: !root.active || root.held || state.controlsVisible
+    // A button down and moved on the view: a drag is pointer activity for
+    // as long as it lasts, paused in it or not (the hover that counts as
+    // activity stops while a button is down, and a pan longer than the delay
+    // lost its hand and its crosshair). A press that moves nothing is none.
+    property bool dragging: false
+    readonly property bool controlsVisible: !root.active || root.held || root.dragging
+        || state.controlsVisible
     // The controls as they fade, 1 shown and 0 hidden: every overlay that
     // hides with them, the title strip, the corner controls, the mode
     // switch, the lanes' Mute and Solo and the crosshair, takes its opacity
@@ -51,6 +57,21 @@ QtObject {
         hideTimer.restart()
     }
 
+    // Follows a press on the viewer, from a PointHandler's `active` and
+    // point: it drags once it has moved as far as a drag starts.
+    function pressTracked(pressed, position, pressPosition) {
+        if (!pressed || !root.active) {
+            root.dragging = false
+            return
+        }
+        const threshold = Application.styleHints.startDragDistance
+        if (root.dragging || Math.abs(position.x - pressPosition.x) >= threshold
+                || Math.abs(position.y - pressPosition.y) >= threshold) {
+            root.dragging = true
+            root.pointerMoved(position.x, position.y)
+        }
+    }
+
     // Shows the controls for a key press, as a pointer move does, so the
     // keyboard reaches them.
     function wake() {
@@ -76,7 +97,18 @@ QtObject {
             root.wake()
         }
     }
-    onActiveChanged: reset()
+    // Hidden no sooner than the delay after the drag ends.
+    onDraggingChanged: {
+        if (!root.dragging) {
+            root.wake()
+        }
+    }
+    onActiveChanged: {
+        if (!root.active) {
+            root.dragging = false
+        }
+        reset()
+    }
     onHideDelayChanged: reset()
     Component.onCompleted: reset()
 
