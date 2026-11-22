@@ -87,7 +87,10 @@ Components.DialogWindow {
     // typed over a short value, and 160 with no value yet to measure.
     // Folder, which may be `cut`, gives only what its values don't need at
     // first, then on down to its `least`. A table that scrolls has each of
-    // them at its least, for as many columns in view. Where
+    // them at its least, for as many columns in view, but Title, whose new
+    // values are checked there before Save: it has the room left beside #
+    // and File Name, up to its width or what its values need, and about
+    // `holds` or more (at 24 pt, 240 px cut 8 of 12 new titles). Where
     // the view is wider, File Name and Folder, which `stretch`, take the
     // rest. Status takes no room until a
     // save or a rename failed for a row; a row with unsaved edits has a
@@ -117,31 +120,32 @@ Components.DialogWindow {
     // a 6 px dot at the default font, clear of a three-digit number.
     readonly property int modifiedMarkSize: 2 * Math.round(root.uiPalette.scaledSize(6) / 2)
     readonly property real tableInset: Kirigami.Units.largeSpacing
-    // The room a column's header takes beside its label for the column's
-    // Revert, while it shows; its glyph is as large as a line of text
-    // holds, 14 px in a 20 px button with the default font.
+    // The room a column's header keeps beside its label for the column's
+    // Revert, up to the column's edge, whether it shows or not, so that
+    // marking a change moves no column; its glyph is as large as a line of
+    // text holds, 14 px in a 20 px button with the default font.
     readonly property real columnRevertGlyph: root.uiPalette.labelIconSize - 2
     readonly property real columnRevertRoom: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
-    // What a column needs whatever the room: its header whole, semibold and
-    // with its Revert while a row's value in it is changed, or its sample
-    // value, with the cell's padding, rather than a header elided to a
-    // letter. The narrow columns, as Disc, take the Revert's room only
-    // while they show it, as Status takes its own only with a failure; a
-    // tag that gives way always keeps it, so that an edit widens no column
-    // at its least and moves none after it.
+    // What a column needs whatever the room: its header whole, semibold
+    // and, in a column of a field, with its Revert in place of the padding
+    // at that end, or its sample value, with the cell's padding, rather
+    // than a header elided to a letter. The Revert's room is there before
+    // an edit needs it (#, Year and Disc took it as they were typed in,
+    // and moved every column up to 14 px).
     function columnNeed(column) {
         // The bindings that ask follow the fonts: advanceWidth() is a
         // function, which they cannot follow.
         columnHeaderMetrics.font
         columnValueMetrics.font
-        const header = columnHeaderMetrics.advanceWidth(column.label)
-            + (root.fieldAt(column.key) !== null && (column.give || root.columnMarked(column.key))
-                ? root.columnRevertRoom : 0)
+        const padding = Kirigami.Units.largeSpacing
+        const header = columnHeaderMetrics.advanceWidth(column.label) + padding
+            + (root.fieldAt(column.key) !== null ? root.columnRevertRoom : padding)
         const samples = column.samples || (column.sample ? [column.sample] : [])
         const value = samples.reduce(function(widest, sample) {
             return Math.max(widest, columnValueMetrics.advanceWidth(sample))
         }, 0)
-        return Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing
+        // The label lays out up to a pixel wider than its advance.
+        return Math.ceil(Math.max(header + 1, value + 2 * padding))
     }
     // Each column's width with room enough, or none for Status while no
     // row has a failure.
@@ -156,31 +160,34 @@ Components.DialogWindow {
     // and a large batch costs as little as a small one. Null until then.
     readonly property int measuredRowLimit: 200
     property var measuredRows: null
-    // What a column that `holds` its values needs for them, up to that.
-    readonly property var tableColumnContentWidths: {
+    // What the values of a column that `holds` them need, however much,
+    // or 0 with none to measure.
+    readonly property var tableColumnValueWidths: {
         // As in columnNeed, for the binding to follow the font.
         columnValueMetrics.font
         const rows = root.measuredRows
         return root.tableColumns.map(function(column) {
-            if (!column.holds) {
+            if (!column.holds || rows === null) {
                 return 0
-            }
-            const most = root.uiPalette.scaledSize(column.holds)
-            if (rows === null) {
-                return most
             }
             let widest = 0
             for (let i = 0; i < rows.length; ++i) {
                 widest = Math.max(widest, columnValueMetrics.advanceWidth(root.cellText(column.key, rows[i])))
             }
-            if (widest === 0) {
-                return most
-            }
             // A cell lays its text out up to a pixel or so wider than its
             // advance (349.5 px for 349 at 24 pt), and elided it.
-            return Math.min(most, Math.ceil(widest) + 2 + 2 * Kirigami.Units.largeSpacing)
+            return widest > 0 ? Math.ceil(widest) + 2 + 2 * Kirigami.Units.largeSpacing : 0
         })
     }
+    // That, up to what the column `holds`, which it is with none to measure.
+    readonly property var tableColumnContentWidths: root.tableColumns.map(function(column, index) {
+        if (!column.holds) {
+            return 0
+        }
+        const most = root.uiPalette.scaledSize(column.holds)
+        const values = root.tableColumnValueWidths[index]
+        return values > 0 ? Math.min(most, values) : most
+    })
     // The narrowest each column gives way to: its least width, what its
     // values need, or what its header or sample needs.
     readonly property var tableColumnLeastWidths: root.tableColumns.map(function(column, index) {
@@ -245,6 +252,16 @@ Components.DialogWindow {
                 }
             })
             over -= taken
+        }
+        // Still too wide, the table scrolls: Title as far as the view's
+        // edge, where its end elides, or, with less than about 160 px left
+        // there, 160 px to scroll to.
+        if (over > 0) {
+            const title = root.tableColumns.findIndex(function(column) { return column.key === "title" })
+            const beside = Math.floor(room - widths[number] - widths[name])
+            widths[title] = beside < root.uiPalette.scaledSize(150)
+                ? root.uiPalette.scaledSize(root.tableColumns[title].holds)
+                : Math.min(beside, Math.max(preferred[title], root.tableColumnValueWidths[title]))
         }
         // The whole pixels the rounding left go to the last column that
         // stretches, so Status ends at the table's inset.
@@ -1389,8 +1406,12 @@ Components.DialogWindow {
 
                                 Row {
                                     anchors.fill: parent
-                                    anchors.leftMargin: Kirigami.Units.largeSpacing
-                                    anchors.rightMargin: Kirigami.Units.largeSpacing
+                                    // The Revert's end has no padding: see
+                                    // columnNeed.
+                                    anchors.leftMargin: headerCell.editable && headerCell.modelData.number
+                                        ? 0 : Kirigami.Units.largeSpacing
+                                    anchors.rightMargin: headerCell.editable && !headerCell.modelData.number
+                                        ? 0 : Kirigami.Units.largeSpacing
                                     spacing: Kirigami.Units.smallSpacing
                                     layoutDirection: headerCell.modelData.number ? Qt.RightToLeft : Qt.LeftToRight
 
@@ -1568,18 +1589,18 @@ Components.DialogWindow {
                                 // A file name or folder keeps its start: the
                                 // track number and title, or the folder's
                                 // year and album, rather than an extension
-                                // that Format shows. The whole is in a
-                                // tooltip while it is cut short.
+                                // that Format shows. The whole of any cell
+                                // is in its tooltip while it is cut short.
                                 elide: Text.ElideRight
                                 // The # cell of a row with unsaved edits
                                 // says what its mark means, and the Status
                                 // cell of a row that failed, why.
                                 readonly property bool failureCell: modelData.key === "status"
                                     && tableRow.errorText.length > 0
-                                readonly property string toolTipText: modelData.path && tableCell.truncated
-                                    ? (modelData.key === "directory" ? tableRow.directory : tableCell.text)
-                                    : (tableCell.failureCell ? tableRow.errorText
-                                        : (modelData.key === "trackNo" && tableRow.marked ? root.modifiedText : ""))
+                                readonly property string toolTipText: tableCell.failureCell ? tableRow.errorText
+                                    : tableCell.truncated
+                                        ? (modelData.key === "directory" ? tableRow.directory : tableCell.text)
+                                        : (modelData.key === "trackNo" && tableRow.marked ? root.modifiedText : "")
                                 Accessible.description: tableCell.failureCell ? tableRow.errorText : ""
 
                                 HoverHandler {
