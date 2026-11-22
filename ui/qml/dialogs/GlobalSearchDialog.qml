@@ -698,17 +698,21 @@ Dialog {
                 }
                 // The app's lane scrollbar, as the library's and the
                 // queue's (Breeze's own was another hand here):
-                // over the lane the rows' text keeps clear of, its thumb
-                // over their tints, which run to the edge.
+                // alone in the lane at the right, where their tints end
+                // while it shows (it cut a pale piece out of the selected
+                // row).
                 ScrollBar.vertical: Components.LaneScrollBar {
                     id: resultScrollBar
                     objectName: "globalSearchScrollBar"
                     uiPalette: root.uiPalette
                     interactive: !root.searching
                 }
-                // The lane the rows' text leaves for the scrollbar, when it
-                // shows.
+                // The lane the rows' tints leave for the scrollbar, when it
+                // shows. Their text leaves it always, so that the lengths
+                // and where the context is cut stay put as typing brings
+                // the scrollbar and takes it away.
                 readonly property real scrollbarLane: resultScrollBar.visible ? resultScrollBar.lane : 0
+                readonly property real reservedLane: resultScrollBar.lane
                 Keys.onPressed: function(event) {
                     if (root.searching) return
                     if (root.handleResultKeys(event)) return
@@ -747,7 +751,7 @@ Dialog {
                     // row's end.
                     readonly property real contextWidth: Math.max(0, (lengthText.visible
                         ? lengthText.x - root.columnGap
-                        : width - root.sideInset - resultsView.scrollbarLane) - root.contextX)
+                        : width - root.sideInset - resultsView.reservedLane) - root.contextX)
                     // Asked for only when the shared tooltip shows.
                     function toolTipText() {
                         return [model.label, root.toolTipContext(model)].filter(function(line) {
@@ -790,6 +794,7 @@ Dialog {
                         selected: resultRow.selected
                         active: true
                         focused: false
+                        scrollbarLane: resultsView.scrollbarLane
                     }
 
                     // A section's heading.
@@ -815,7 +820,7 @@ Dialog {
                         objectName: resultRow.isMore ? "globalSearchMoreLink" : "globalSearchTruncatedNote"
                         visible: resultRow.isMore || resultRow.kind === "truncated"
                         x: root.titleX
-                        width: parent.width - x - root.sideInset - resultsView.scrollbarLane
+                        width: parent.width - x - root.sideInset - resultsView.reservedLane
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
                         textFormat: Text.PlainText
@@ -1002,7 +1007,7 @@ Dialog {
                         id: lengthText
                         objectName: "globalSearchResultLength"
                         visible: resultRow.isResult && resultRow.rowType === "track"
-                        x: parent.width - root.sideInset - resultsView.scrollbarLane - width
+                        x: parent.width - root.sideInset - resultsView.reservedLane - width
                         // Wider for a length of an hour or more.
                         width: Math.max(root.lengthWidth, Math.ceil(implicitWidth))
                         height: parent.height

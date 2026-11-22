@@ -505,6 +505,7 @@ private slots:
     void tooltipFadesWhereItWasAsTheRowsChange();
     void clearGlyphIsQuietUntilPointedAt_data();
     void clearGlyphIsQuietUntilPointedAt();
+    void tintsEndAtTheScrollbarsLaneAndTheTextStaysPut();
 };
 
 void SearchPaletteTest::initTestCase() {
@@ -963,7 +964,9 @@ void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
         if (type == QStringLiteral("track")) {
             QQuickItem *length = visibleChildNamed(row, QStringLiteral("globalSearchResultLength"));
             QVERIFY(length != nullptr);
-            QCOMPARE(sceneRect(length).right(), sceneRect(row).right() - 16);
+            // 16 px in, and clear of the scrollbar's lane whether it shows
+            // or not.
+            QCOMPARE(sceneRect(length).right(), sceneRect(row).right() - 16 - 8);
         }
         if (type == QStringLiteral("album")) {
             QVERIFY(contextText(row).startsWith(QStringLiteral("The Quiet Meridian · ")));
@@ -1527,8 +1530,8 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     QTRY_COMPARE(view->height(), whole);
     // The rest scroll under the app's lane scrollbar, as the library's and
     // the queue's (Breeze's own was another hand): 8 px at the
-    // view's right edge, its thumb over the rows' tints, which run to the
-    // edge, while the rows' text keeps clear of its lane.
+    // view's right edge, its thumb alone in that lane: the rows' tints end
+    // there and their text keeps clear of it.
     QQuickItem *scrollBar = harness.item(QStringLiteral("globalSearchScrollBar"));
     QVERIFY(scrollBar != nullptr);
     QTRY_VERIFY(scrollBar->isVisible());
@@ -1540,7 +1543,7 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     QVERIFY(selectedRow != nullptr);
     QQuickItem *selectedTint = visibleChildNamed(selectedRow, QStringLiteral("rowBackgroundTint"));
     QVERIFY(selectedTint != nullptr);
-    QCOMPARE(sceneRect(selectedTint).right(), sceneRect(view).right());
+    QCOMPARE(sceneRect(selectedTint).right(), sceneRect(scrollBar).left());
     QQuickItem *length = visibleChildNamed(selectedRow, QStringLiteral("globalSearchResultLength"));
     if (length != nullptr) {
         QVERIFY(sceneRect(length).right() <= sceneRect(scrollBar).left() - 16 + 0.5);
@@ -2977,6 +2980,85 @@ void SearchPaletteTest::clearGlyphIsQuietUntilPointedAt() {
     QTRY_VERIFY(channelDistance(drawnIn(), rest) <= 1);
     clear->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(channelDistance(drawnIn(), pointedAt) <= 1);
+}
+
+// Typing across the point where the results scroll, every frame: the
+// selection and hover tints end at the scrollbar's lane while it shows (the
+// thumb cut a pale piece out of the selected row) and at the edge without
+// it, and nothing moves sideways: the field, the lengths and the context's
+// room, which the lane took 8 px of as it appeared.
+void SearchPaletteTest::tintsEndAtTheScrollbarsLaneAndTheTextStaysPut() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    const QVector<Row> few = meridianRows(harness.coverUrl);
+    QVector<Row> many = few;
+    for (int i = 0; i < 24; ++i) {
+        Row extra = result(QStringLiteral("track"), QStringLiteral("Extra %1").arg(i), 5.0f);
+        extra.artist = QStringLiteral("The Quiet Meridian");
+        extra.lengthText = QStringLiteral("1:23");
+        extra.trackPath = QStringLiteral("/fixture/extra%1.flac").arg(i);
+        many << extra;
+    }
+    harness.search(QStringLiteral("m"), few);
+    QTRY_VERIFY(harness.view()->isVisible());
+    QQuickItem *view = harness.view();
+    QQuickItem *scrollBar = harness.item(QStringLiteral("globalSearchScrollBar"));
+    QVERIFY(scrollBar != nullptr && !scrollBar->isVisible());
+    QQuickItem *selected = harness.row(harness.selection());
+    QVERIFY(selected != nullptr);
+    QQuickItem *length = visibleChildNamed(selected, QStringLiteral("globalSearchResultLength"));
+    QVERIFY(length != nullptr);
+    const qreal lengthRight = sceneRect(length).right();
+    const qreal contextRight = contextBoxOf(selected).right();
+    const QRectF field = sceneRect(harness.field());
+
+    QStringList problems;
+    int withBar = 0;
+    int without = 0;
+    const auto check = [&] {
+        if (!view->isVisible()) return;
+        const bool bar = scrollBar->isVisible();
+        (bar ? withBar : without) += 1;
+        const qreal end = sceneRect(view).right() - (bar ? 8 : 0);
+        for (const char *name : {"rowBackgroundTint", "rowBackgroundHover"}) {
+            for (QQuickItem *tint : visibleNamed(view, QString::fromLatin1(name))) {
+                if (std::abs(sceneRect(tint).right() - end) > 0.5) {
+                    problems << QStringLiteral("%1 to %2, not %3").arg(QLatin1String(name)).arg(sceneRect(tint).right()).arg(end);
+                }
+            }
+        }
+        for (QQuickItem *text : visibleNamed(view, QStringLiteral("globalSearchResultLength"))) {
+            if (std::abs(sceneRect(text).right() - lengthRight) > 0.5) {
+                problems << QStringLiteral("a length to %1, not %2").arg(sceneRect(text).right()).arg(lengthRight);
+            }
+            const qreal context = contextBoxOf(text->parentItem()).right();
+            // A length of an hour or more is wider; these are not.
+            if (std::abs(context - contextRight) > 0.5) {
+                problems << QStringLiteral("a context to %1, not %2").arg(context).arg(contextRight);
+            }
+        }
+        if (sceneRect(harness.field()) != field) problems << QStringLiteral("the field moved");
+    };
+    FrameSampler sampler(harness.window, check);
+    // A pointer over another result, for the hover tint too.
+    QQuickItem *other = harness.row(harness.selection() + 1);
+    QVERIFY(other != nullptr);
+    QTest::mouseMove(harness.window, sceneCentre(other));
+    QTRY_VERIFY(visibleChildNamed(other, QStringLiteral("rowBackgroundHover")) != nullptr);
+    check();
+    harness.search(QStringLiteral("me"), many);
+    QTRY_VERIFY(scrollBar->isVisible());
+    QTest::qWait(50);
+    check();
+    harness.search(QStringLiteral("mer"), few);
+    QTRY_VERIFY(!scrollBar->isVisible());
+    QTest::qWait(50);
+    check();
+    sampler.stop();
+    QVERIFY2(problems.isEmpty(), qPrintable(problems.mid(0, 4).join(QStringLiteral("; "))));
+    QVERIFY(withBar > 0 && without > 0);
 }
 
 int main(int argc, char **argv) {
