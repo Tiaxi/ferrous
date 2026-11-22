@@ -6613,23 +6613,21 @@ double SpectrogramItem::viewSecondsAtLocked(double x) const {
 }
 
 void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
+    const QPointF pointer = event->position();
+    // A rolling view's middle-drag pans nothing and moves the crosshair too.
+    if (event->buttons().testFlag(Qt::MiddleButton)) {
+        moveDraggedCrosshair(pointer);
+    }
     if (!m_panPressed) {
         event->ignore();
         return;
     }
     event->accept();
     SpectrogramViewFollow *follow = m_viewFollow.data();
-    const QPointF pointer = event->position();
     double anchorSeconds = 0.0;
     bool startsPan = false;
     {
         QMutexLocker lock(&m_stateMutex);
-        // The crosshair keeps to the pointer, which holds the time it
-        // grabbed.
-        if (m_hoverActive) {
-            m_hoverPosition = pointer;
-            m_crosshairDirty = true;
-        }
         if (follow == nullptr || m_displayMode != 1) {
             return;
         }
@@ -6674,6 +6672,24 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
     }
     follow->detach(anchorSeconds, 0.5);
     followChanged();
+}
+
+void SpectrogramItem::moveDraggedCrosshair(QPointF pointer) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (!m_hoverActive || m_hoverPosition == pointer) {
+            return;
+        }
+        m_hoverPosition = pointer;
+        if (!m_crosshairEnabled) {
+            return;
+        }
+        m_crosshairDirty = true;
+    }
+    // The lane that has the button gets no hover while it is held: it tells
+    // the others, and the time under them, where the pointer is itself.
+    emit crosshairHoverChanged(pointer.x());
+    update();
 }
 
 void SpectrogramItem::mouseReleaseEvent(QMouseEvent *event) {

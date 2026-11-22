@@ -47,6 +47,8 @@ private slots:
     void autoscrollStopsAsTheViewComesBack_data();
     void autoscrollStopsAsTheViewComesBack();
     void autoscrollInAWindow();
+    void crosshairStaysWholeThroughAMiddleDrag_data();
+    void crosshairStaysWholeThroughAMiddleDrag();
 };
 
 namespace {
@@ -1754,6 +1756,190 @@ void SpectrogramFollowSmokeTest::autoscrollInAWindow() {
     QVERIFY(!item->m_autoscroll.active());
     QVERIFY(!item->detached());
     QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+}
+
+namespace {
+
+// A spectrogram surface in a window 600 px wide, of a track that is decoded.
+const char kSurfaceInAWindow[] = R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Window {
+    id: paletteRoot
+    width: 600
+    height: 240
+    visible: true
+
+    QtObject {
+        id: bridge
+        objectName: "surfaceBridge"
+        property string playbackState: "Paused"
+        property int spectrogramViewMode: 1
+        property int spectrogramDisplayMode: 1
+        property real dbRange: 90
+        property bool logScale: false
+        property bool spectrogramFrequencyCap: false
+        property bool showFps: false
+        property int sampleRateHz: 48000
+        property bool showSpectrogramCrosshair: true
+        property bool showSpectrogramScale: false
+        property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
+        property string currentTrackPath: "/fixture/track.flac"
+        property var currentTrackChannelLabels: []
+        signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
+        signal playbackChanged()
+        function isChannelSilent(channelIndex) { return false }
+        function setSpectrogramZoomLevel(level) {}
+        function registerSpectrogramItem(item, channelIndex) {}
+        function unregisterSpectrogramItem(item) {}
+        function setSpectrogramWidgetWidth(width) {}
+    }
+
+    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+
+    Viewers.SpectrogramSurface {
+        objectName: "surfaceInAWindow"
+        anchors.fill: parent
+        uiBridge: bridge
+        uiPalette: palette
+    }
+}
+)QML";
+
+struct SurfaceInAWindow {
+    QQmlApplicationEngine engine;
+    std::unique_ptr<QObject> root;
+    QQuickWindow *window = nullptr;
+    QQuickItem *surface = nullptr;
+    // From the top.
+    QList<SpectrogramItem *> lanes;
+
+    QString load(int channels, int displayMode) {
+        QString error;
+        root.reset(createQmlObjectFromSource(engine, QByteArray(kSurfaceInAWindow),
+            QUrl::fromLocalFile(
+                QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml")),
+            &error));
+        window = qobject_cast<QQuickWindow *>(root.get());
+        if (window == nullptr) return QStringLiteral("no window: ") + error;
+        surface = window->findChild<QQuickItem *>(QStringLiteral("surfaceInAWindow"));
+        QObject *bridge = window->findChild<QObject *>(QStringLiteral("surfaceBridge"));
+        if (surface == nullptr || bridge == nullptr) return QStringLiteral("no surface");
+        bridge->setProperty("spectrogramDisplayMode", displayMode);
+        QVariant descriptors;
+        QMetaObject::invokeMethod(surface, "descriptorsForChannelCount",
+            Q_RETURN_ARG(QVariant, descriptors), Q_ARG(QVariant, channels));
+        surface->setProperty("channelDescriptors", descriptors);
+        const bool made = QTest::qWaitFor([&]() {
+            lanes.clear();
+            collectQuickItems(surface, &lanes);
+            return lanes.size() == channels;
+        });
+        if (!made || !QTest::qWaitForWindowExposed(window)) return QStringLiteral("no lanes");
+        std::sort(lanes.begin(), lanes.end(), [](SpectrogramItem *a, SpectrogramItem *b) {
+            return a->mapToScene(QPointF()).y() < b->mapToScene(QPointF()).y();
+        });
+        for (SpectrogramItem *lane : std::as_const(lanes)) {
+            feedTrack(*lane);
+            setTestPosition(*lane, 60.0, 1);
+        }
+        return QString();
+    }
+};
+
+// Empty when each lane has laid its crosshair's line out at `x`, and the
+// lowest its time there too; else what the first that has not shows.
+QString crosshairNotAt(const SurfaceInAWindow &plot, int x) {
+    const double scale = plot.window->effectiveDevicePixelRatio();
+    const int column = static_cast<int>(std::floor(x * scale + 1e-9));
+    for (int index = 0; index < plot.lanes.size(); ++index) {
+        SpectrogramItem &lane = *plot.lanes[index];
+        QMutexLocker lock(&lane.m_stateMutex);
+        const QRect line = lane.m_crosshairVerticalLineRect;
+        if (line.isEmpty() || line.x() != column) {
+            return QStringLiteral("lane %1's line is at %2, not %3")
+                .arg(index).arg(line.x()).arg(column);
+        }
+        if (!lane.showCrosshairTime()) continue;
+        bool timed = false;
+        for (const SpectrogramOverlayImage &image : std::as_const(lane.m_crosshair.images)) {
+            timed = timed || (image.kind == SpectrogramOverlayImage::ReadoutPlate
+                && std::abs(image.rect.center().x() - x) <= 2.0);
+        }
+        if (!timed) return QStringLiteral("no time at %1").arg(x);
+    }
+    return QString();
+}
+
+} // namespace
+
+void SpectrogramFollowSmokeTest::crosshairStaysWholeThroughAMiddleDrag_data() {
+    QTest::addColumn<int>("channels");
+    QTest::addColumn<int>("displayMode");
+    QTest::addColumn<int>("fromLane");
+    QTest::newRow("stereo, centered") << 2 << 1 << 0;
+    QTest::newRow("stereo, centered, from the lowest") << 2 << 1 << 1;
+    QTest::newRow("stereo, rolling") << 2 << 0 << 0;
+    QTest::newRow("5.1, centered") << 6 << 1 << 0;
+    QTest::newRow("5.1, centered, from a middle lane") << 6 << 1 << 2;
+    QTest::newRow("5.1, rolling") << 6 << 0 << 0;
+}
+
+// Through a middle-drag every lane's line, and the time on the lowest, is at
+// the pointer on each of its moves: short of the drag distance, panning, in
+// rolling mode, which does not pan, in another lane than it began in, and
+// over a gapless or Repeat-One change of the track.
+void SpectrogramFollowSmokeTest::crosshairStaysWholeThroughAMiddleDrag() {
+    QFETCH(int, channels);
+    QFETCH(int, displayMode);
+    QFETCH(int, fromLane);
+    SurfaceInAWindow plot;
+    const QString error = plot.load(channels, displayMode);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = plot.window;
+    const auto middleOf = [&](int lane) {
+        SpectrogramItem *item = plot.lanes[lane];
+        return static_cast<int>(item->mapToScene(QPointF(0.0, item->height() / 2)).y());
+    };
+    const int y = middleOf(fromLane);
+    QTest::mouseMove(window, QPoint(400, y));
+    QTRY_COMPARE(crosshairNotAt(plot, 400), QString());
+
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, QPoint(400, y));
+    for (const int x : {397, 380, 331, 281, 232}) {
+        QTest::mouseMove(window, QPoint(x, y));
+        // Paused, so only the crosshair's own frame lays it out.
+        QTRY_COMPARE(crosshairNotAt(plot, x), QString());
+    }
+    QCOMPARE(plot.surface->property("detached").toBool(), displayMode == 1);
+
+    // Into another lane, still dragging.
+    const int other = fromLane == 0 ? channels - 1 : 0;
+    QTest::mouseMove(window, QPoint(200, middleOf(other)));
+    QTRY_COMPARE(crosshairNotAt(plot, 200), QString());
+
+    // The next track, gapless or the same again, with the button held; a
+    // chunk of the last one's session that comes late changes nothing.
+    for (const quint64 token : {quint64(2), quint64(3)}) {
+        for (SpectrogramItem *lane : std::as_const(plot.lanes)) {
+            feedTrack(*lane, token, token);
+            setTestPosition(*lane, 0.5, token);
+            lane->feedPrecomputedChunk(QByteArray(kBins * 8, '\x30'), kBins, 0, 8, 0, kColumns,
+                kRate, kHop, false, false, token - 1, false, token - 1);
+        }
+        const int x = token == 2 ? 170 : 140;
+        QTest::mouseMove(window, QPoint(x, y));
+        QTRY_COMPARE(crosshairNotAt(plot, x), QString());
+    }
+
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, QPoint(140, y));
+    QTRY_COMPARE(crosshairNotAt(plot, 140), QString());
+    QTest::mouseMove(window, QPoint(260, y));
+    QTRY_COMPARE(crosshairNotAt(plot, 260), QString());
 }
 
 std::unique_ptr<QmlSmokeTest> makeSpectrogramFollowSmokeTest(const QString &userDirectoriesParent) {

@@ -895,6 +895,9 @@ private:
     // The width of the widest frequency and level the readout shows, in its
     // font for the top frequency of the band (see CrosshairReadout::plateRects).
     int crosshairWidestValueWidthLocked();
+    // A middle-drag moved the pointer to `pointer`: the crosshair follows it
+    // in every lane, as in a hover.
+    void moveDraggedCrosshair(QPointF pointer);
     // The time in its own track of `continuousTime` on the view's
     // timeline, or NaN where it is in no track the view knows.
     double crosshairTrackTimeLocked(double continuousTime) const;
