@@ -583,6 +583,21 @@ def custom_sheet(rd, sd, entries, name, title, theme, rows):
                 x, y, w, h = e0["popups"][(opts or {}).get("popup", 0)]
                 box_ = (x - mg, y - mg, x + w + mg, y + h + mg)
             im = im.crop((max(0, int(box_[0])), max(0, int(box_[1])), min(im.width, int(box_[2])), min(im.height, int(box_[3]))))
+        elif crop == "focus":
+            # a box (opts "around": w, h; default 420x150) on the item with keyboard focus as the shot recorded it:
+            # a focus walk's stops at 1:1
+            if not es[0].get("focus"):
+                raise LookupError(f"custom sheet {name}: {area}/{state} recorded no focus item")
+            x, y, w, h = es[0]["focus"]
+            bw, bh = (opts or {}).get("around", (420, 150))
+            mg = (opts or {}).get("margin", 8)
+            # an item larger than the box (a list, the seek bar) shows its start, where its ring's corner is: every
+            # stop's tile keeps the box's size
+            x0 = x + w / 2 - bw / 2 if w + 2 * mg <= bw else x - mg
+            y0 = y + h / 2 - bh / 2 if h + 2 * mg <= bh else y - mg
+            x0 = int(min(max(0, x0), max(0, im.width - bw)))
+            y0 = int(min(max(0, y0), max(0, im.height - bh)))
+            im = im.crop((x0, y0, min(im.width, x0 + int(bw)), min(im.height, y0 + int(bh))))
         elif crop == "subject":
             x, y, w, h = es[0]["subject"]
             mg = (opts or {}).get("margin", 0)  # the window around the subject, its real colour, on every side
@@ -1595,14 +1610,7 @@ def main():
     # pick or custom sheets): a fast iteration on one surface. A full run packs everything.
     fo_need = None
     if os.environ.get("SHOT_FOCUS_ONLY") == "1" and os.environ.get("SHOT_FOCUS"):
-        import focus
-        sc_f = focus.SCOPES.get(os.environ["SHOT_FOCUS"], {})
-        pair_map = {f"pair:{nm}": (a_, b_) for nm, a_, b_, *_ in getattr(st, "STRIP_PAIRS", [])}
-        fo_need = set()
-        for kind, nm, *_ in sc_f.get("images", []):
-            if kind == "strip":
-                fo_need |= {h.partition("@")[0] for h in pair_map.get(nm, (nm,))}
-        fo_need |= {nm for nm, *_ in sc_f.get("facts_strips", [])}
+        fo_need = focus_strip_needs(focus_scope_names())
         raws = [r_ for r_ in raws if json.load(open(os.path.join(r_[0], "meta.json")))["name"] in fo_need]
         jobs = []
     # Longest strips first (by frame count), so the pool doesn't end on one long job.
@@ -1649,13 +1657,18 @@ def main():
     write_motion_metrics(rd, strips, geo_s)
     bad = check_dialogs(rd, entries)
     bad = write_index(rd, src, entries, sheets, strips, dialog_failures=bad, geo_samples=geo_s)
-    if os.environ.get("SHOT_FOCUS"):  # the focus pack (focus.py), after the whole pack
-        bad = list(bad or []) + write_focus(rd, src, os.environ["SHOT_FOCUS"], entries, sheets, strips, geo_s)
+    if os.environ.get("SHOT_FOCUS"):  # the focus packs (focus.py), after the whole pack: focus-build/<scope>/ each
+        try:
+            names = focus_scope_names()
+        except KeyError as ex:
+            names, bad = [], list(bad or []) + [f"focus: no scope {ex}"]
+        for nm in names:
+            bad = list(bad or []) + write_focus(rd, src, nm, entries, sheets, strips, geo_s)
     print(f"pack: {len(sheets)} sheets, {len(strips)} strip images")
     # the documents a reviewer reads: the home folder written "~" (the layout findings quote elided paths),
     # then none may still hold it
     home = os.path.expanduser("~")
-    for mp in glob.glob(os.path.join(rd, "*.md")) + glob.glob(os.path.join(rd, "focus", "*.md")):
+    for mp in round_docs(rd):
         txt = open(mp, encoding="utf-8").read()
         if home in txt.translate(_INVISIBLE):
             open(mp, "w", encoding="utf-8").write(txt.translate(_INVISIBLE).replace(home, "~"))
@@ -2018,7 +2031,9 @@ def _contrast_rows(rd):
     p = os.path.join(rd, "CONTRAST.md")
     rows = []
     if os.path.exists(p):
-        for ln in open(p, encoding="utf-8"):
+        with open(p, encoding="utf-8") as fh:
+            lines = fh.readlines()
+        for ln in lines:
             f = [x.strip() for x in ln.strip().strip("|").split("|")]
             if ln.startswith("| ") and len(f) >= 6 and f[1] in ("dark", "light"):
                 rows.append(dict(element=f[0], theme=f[1], fg=f[2], bg=f[3], ratio=f[4].strip("*"), verdict=f[5]))
@@ -2036,7 +2051,10 @@ def _layout_by_shot(rd):
 
 
 def _jsonl(p):
-    return [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()] if os.path.exists(p) else []
+    if not os.path.exists(p):
+        return []
+    with open(p, encoding="utf-8") as f:
+        return [json.loads(l) for l in f if l.strip()]
 
 
 def strip_ends(rd, nm, th, watch):
@@ -2399,9 +2417,105 @@ def _a11y_event_lines(rd, labels):
     return out
 
 
+def round_docs(rd):
+    """The round's documents a reviewer reads (each checked for home-folder paths): its own and every focus pack's."""
+    return glob.glob(os.path.join(rd, "*.md")) + glob.glob(os.path.join(rd, "focus-build", "**", "*.md"), recursive=True)
+
+
+def focus_scope_names(spec=None):
+    """The scopes of SHOT_FOCUS (or `spec`): a comma-separated list, "census" for the census scopes (focus.resolve)."""
+    import focus
+    return focus.resolve(os.environ.get("SHOT_FOCUS", "") if spec is None else spec)
+
+
+def focus_strip_needs(names):
+    """The recordings the scopes' images and facts need (a pair's two halves), for a --focus-only pack."""
+    import focus
+    pair_map = {f"pair:{nm}": (a_, b_) for nm, a_, b_, *_ in getattr(st, "STRIP_PAIRS", [])}
+    view_of = {f"{nm}-{sfx}": nm for nm, views in getattr(st, "EXTRA_VIEWS", {}).items() for sfx, _ in views}
+    need = set()
+    for sc_f in (focus.SCOPES[n_] for n_ in names):
+        for kind, nm, *_ in sc_f.get("images", []):
+            if kind == "strip":
+                # (another view of a recording, states.EXTRA_VIEWS, is made from that recording)
+                need |= {view_of.get(h.partition("@")[0], h.partition("@")[0]) for h in pair_map.get(nm, (nm,))}
+        need |= {nm for nm, *_ in sc_f.get("facts_strips", [])}
+    return need
+
+
+def focus_limits(scope_name, paths):
+    """The pack's hard limits, which keep packs from creeping upward round by round: at most FOCUS_MAX_IMAGES
+    images (the "neither"-frame contact sheets count) and every image within CORE_MP_HARD, read from the files
+    as published. Returns the failures."""
+    fails = []
+    if len(paths) > FOCUS_MAX_IMAGES:
+        fails.append(f"focus {scope_name}: {len(paths)} images, over the cap of {FOCUS_MAX_IMAGES} (the neither-frame "
+                     "sheets count): trim the scope in focus.py")
+    for p_ in paths:
+        with Image.open(p_) as im:
+            w_, h_ = im.size
+        if w_ * h_ > CORE_MP_HARD:
+            fails.append(f"focus {scope_name}: {os.path.basename(p_)} is {w_}x{h_} ({w_ * h_ / 1e6:.2f} MP), over "
+                         f"{CORE_MP_HARD / 1e6:.2f} MP")
+    return fails
+
+
+def system_lead(rd, items, ids):
+    """The whole-app pack's summary (a scope's `system_facts`), as FOCUS-FACTS lines: CONTRAST.md's verdicts and
+    the rows that do not pass, the layout checker's findings in exactly the pack's shots, and the focus walk's
+    order with what a screen reader is told at each stop."""
+    esc = lambda t: str(t or "").replace("|", "\\|").replace("\n", " ")
+    rows = _contrast_rows(rd)
+    L = ["## Contrast, summarised (CONTRAST.md: every measured element)\n"]
+    if rows:
+        for th in ("dark", "light"):
+            n = Counter(r_["verdict"] if r_["verdict"].startswith(("AA", "fails", "meets", "below")) else
+                        "not required (see CONTRAST.md)" for r_ in rows if r_["theme"] == th)
+            L.append(f"- {th}: " + (", ".join(f"{k} {v}" for k, v in n.most_common()) or "not measured"))
+        low = [r_ for r_ in rows if r_["verdict"].startswith(("fails", "below", "AA large only"))]
+        L += ["", "| element | theme | colours | ratio | verdict |", "|---|---|---|---|---|"]
+        L += [f"| {esc(r_['element'])} | {r_['theme']} | {r_['fg']} on {r_['bg']} | {r_['ratio']}:1 | {r_['verdict']} |"
+              for r_ in low] or ["| every measured element passes | | | | |"]
+    else:
+        L.append("- not measured in this round")
+    where = collections.defaultdict(set)  # shot -> the images that show it
+    for (_kind, x), id_ in zip(items, ids):
+        for t in x.get("tiles") or []:
+            where[t["file"]].add(id_)
+    L += ["", "## Layout, summarised (the layout checker in this pack's shots)\n",
+          "The app's own QML only; text contrast here is each visible text against its rendered background.\n",
+          "| issue | component | worst in the round | shots | images |", "|---|---|---|---|---|"]
+    p_, found = os.path.join(rd, "layout.json"), []
+    layout = {}
+    if os.path.exists(p_):
+        with open(p_, encoding="utf-8") as f_:
+            layout = json.load(f_)
+    for fd in layout.get("findings", []):
+        shots = {os.path.basename(o.get("shot", "")) for o in fd.get("occurrences", [])
+                 if o.get("in_shot", True)} & set(where)  # (not a window behind the one the shot is of)
+        if shots and fd.get("severity") != 5:
+            worst = fd.get("worst")
+            found.append((fd.get("severity", 9), -len(shots), f"| {fd['kind']} | {esc(fd.get('component') or fd.get('type'))} | "
+                          f"{f'{worst:.2f}' if isinstance(worst, float) else worst} | {len(shots)} | "
+                          f"{', '.join(sorted({i for s_ in shots for i in where[s_]}))} |"))
+    found.sort()
+    L += [f_[2] for f_ in found[:30]] or ["| none | | | | |"]
+    if len(found) > 30:
+        L.append(f"\n({len(found) - 30} more in the round's LAYOUT.md.)")
+    walk = _jsonl(os.path.join(rd, "a11y_dark_1x_1600x1000.jsonl"))
+    L += ["", "## Keyboard focus order (Tab from the window's start, dark, 10 pt)\n",
+          "What the accessibility interface gives a screen reader at each stop.\n",
+          "| stop | focused item | role | name |", "|---|---|---|---|"]
+    home = os.path.expanduser("~")
+    L += [f"| {r_['stop']} | `{esc(r_.get('item')).replace(home, '~')}` | {esc(r_.get('role')) or '**none**'} | "
+          f"{esc(r_.get('name')).replace(home, '~') or '**no accessible name**'} |" for r_ in walk] or ["| not walked | | | |"]
+    return L
+
+
 def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
-    """<round>/focus/: only the scope's images (focus.SCOPES), FOCUS.md (ID, file, what it shows, what to look
-    at) and FOCUS-FACTS.md (their measured facts as text). Returns the failures (a missing or oversized image)."""
+    """<round>/focus-build/<scope>/: only the scope's images (focus.SCOPES), FOCUS.md (ID, file, what it shows,
+    what to look at) and FOCUS-FACTS.md (their measured facts as text); shoot_round.sh publishes it. Returns the
+    failures (a missing or oversized image, or more images than the cap)."""
     import shutil
     import focus
     if scope_name not in focus.SCOPES:
@@ -2447,7 +2561,7 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
                     looks.append("what is drawn in each: a half-drawn plot, an empty lane, a wrong scale")
     items, fw = weigh(rd, items, label="focus")
     fails += fw
-    fd = os.path.join(rd, "focus")
+    fd = os.path.join(rd, "focus-build", scope_name)
     shutil.rmtree(fd, ignore_errors=True)
     os.makedirs(fd)
     ids, L = [], []
@@ -2474,7 +2588,8 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
             "evidence in the round's folder, not part of this pack.\n",
             *([f"- Not in this pack (optional, not made): {'; '.join(notes)}\n"] if notes else []),
             "| ID | file | what it shows | what to look at | size |", "|---|---|---|---|---|"]
-    open(os.path.join(fd, "FOCUS.md"), "w", encoding="utf-8").write("\n".join(head + L) + "\n")
+    with open(os.path.join(fd, "FOCUS.md"), "w", encoding="utf-8") as f_md:
+        f_md.write("\n".join(head + L) + "\n")
     notes_ = []
     for f_ in _jsonl(os.path.join(rd, "facts.jsonl")):  # "Track N" without "of M" in a card's details line
         mt = re.search(r"details line \u201c([^\u201d]*)\u201d", f_.get("text", ""))
@@ -2557,7 +2672,9 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
         if len(W_) > 30:
             T_.append(f"\n({len(W_) - 30} more in the long lines below.)")
         lead = T_ + [""] + (lead or [])
-    write_core_facts(rd, items, strips, geo_samples, entries, out="focus/FOCUS-FACTS.md", ids=ids, looks=looks, lead=lead,
+    if sc_.get("system_facts"):
+        lead = system_lead(rd, items, ids) + [""] + (lead or [])
+    write_core_facts(rd, items, strips, geo_samples, entries, out=f"focus-build/{scope_name}/FOCUS-FACTS.md", ids=ids, looks=looks, lead=lead,
                      fact_keys=sc_.get("facts", []), floor_labels=sc_.get("floors"),
                      title=f"# Focus facts: {sc_['title']}\n",
                      intro="What was measured in each focus image (IDs as in FOCUS.md), as text: tiles' states, key "
@@ -2569,8 +2686,7 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
                             + strip_facts((by_strip.get((nm, th)) or {}).get("metrics"))
                             for nm, th, lb, *o_ in sc_.get("facts_strips", [])] + extra_notes)
     print(f"pack: focus {scope_name}: {len(items)} images, {total / 1e6:.1f} MP in {fd}")
-    if len(items) > FOCUS_MAX_IMAGES:  # loudly, but not a failure: "neither" contact sheets depend on the recording
-        print(f"!!! pack: focus {scope_name} has {len(items)} images, over {FOCUS_MAX_IMAGES}: trim the scope in focus.py")
+    fails += focus_limits(scope_name, [os.path.join(fd, f_) for f_ in sorted(os.listdir(fd)) if f_.endswith(".png")])
     return fails
 
 

@@ -11,10 +11,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+import focus  # noqa: E402
+
 SCRIPT = os.path.join(HERE, "shoot_round.sh")
 
 # the helpers shoot_round.sh runs from its own folder; make_fixtures.py makes the folder it is given (the script
@@ -29,6 +34,28 @@ SETUP_DB_PY = "import os\nos.makedirs(os.path.join(os.environ['SHOT_WORK'], 'run
 RSYNC_SH = '#!/bin/sh\nfor a; do src=$dst; dst=$a; done\ncp -a "$src." "$dst"\n'
 BC_SH = "#!/bin/sh\ncat >/dev/null\necho 0\n"
 PACK_PY = "import json, os, sys\njson.dump(sys.argv[1:], open(os.environ['PACK_ARGV_OUT'], 'w'))\n"
+# a pack.py that writes one pack per scope of SHOT_FOCUS, but not FOCUS_PACK_SKIP's, and exits FOCUS_PACK_EXIT
+FOCUS_PACK_PY = """import os, sys
+for nm in os.environ["SHOT_FOCUS"].split(","):
+    if nm == os.environ.get("FOCUS_PACK_SKIP"):
+        continue
+    fd = os.path.join(sys.argv[1], "focus-build", nm)
+    os.makedirs(fd, exist_ok=True)
+    with open(os.path.join(fd, "FOCUS.md"), "w") as f:
+        f.write(nm + "\\n")
+    with open(os.path.join(fd, "F01_image.png"), "w"):
+        pass
+    if nm == os.environ.get("FOCUS_PACK_UNREADABLE"):
+        os.chmod(os.path.join(fd, "F01_image.png"), 0)
+sys.exit(int(os.environ.get("FOCUS_PACK_EXIT", "0")))
+"""
+RUNNER_PY = """import json, os, sys
+with open(os.environ["RUNNER_ARGV_OUT"], "w") as f:
+    json.dump(sys.argv[1:], f)
+if os.environ.get("RUNNER_FAILURE"):
+    with open(os.path.join(os.path.dirname(os.environ["SHOT_OUT"]), "failures.txt"), "w") as f:
+        f.write(os.environ["RUNNER_FAILURE"] + "\\n")
+"""
 
 
 def write(path, text, mode=0o644):
@@ -38,13 +65,14 @@ def write(path, text, mode=0o644):
     os.chmod(path, mode)
 
 
-class ShootRoundOptions(unittest.TestCase):
+class ShootRoundBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="shoot-round-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
         self.h = os.path.join(self.tmp, "harness")
         os.makedirs(self.h)
         shutil.copy2(SCRIPT, self.h)
+        shutil.copy2(os.path.join(HERE, "focus.py"), self.h)  # (the real scopes: it needs nothing else)
         for name in NOOP_PY:
             write(os.path.join(self.h, name), "")
         write(os.path.join(self.h, "make_fixtures.py"), MAKE_DIR_PY)
@@ -70,6 +98,8 @@ class ShootRoundOptions(unittest.TestCase):
         return subprocess.run(["bash", os.path.join(self.h, "shoot_round.sh"), "r1", self.src, *args],
                               env=self.env, cwd=self.tmp, capture_output=True, text=True, timeout=60)
 
+
+class ShootRoundOptions(ShootRoundBase):
     def pack_argv(self, *args):
         p = self.run_script(*args)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
@@ -92,6 +122,123 @@ class ShootRoundOptions(unittest.TestCase):
                 self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
                 self.assertIn("--pack-jobs", p.stderr)
                 self.assertFalse(os.path.exists(self.env["SHOT_WORK"]))  # refused before the work folder
+
+
+class ShootRoundFocus(ShootRoundBase):
+    def setUp(self):
+        super().setUp()
+        write(os.path.join(self.h, "pack.py"), FOCUS_PACK_PY)
+        write(os.path.join(self.h, "runner.py"), RUNNER_PY)
+        self.runner_out = os.path.join(self.tmp, "runner-argv.json")
+        self.env["RUNNER_ARGV_OUT"] = self.runner_out
+        self.round = os.path.join(self.env["SHOT_WORK"], "rounds", "r1")
+
+    def sessions_shot(self):
+        with open(self.runner_out) as f:
+            argv = json.load(f)
+        return argv[argv.index("--sessions") + 1].split(",") if "--sessions" in argv else None
+
+    def published(self):
+        fd = os.path.join(self.round, "focus")
+        return sorted(os.listdir(fd)) if os.path.isdir(fd) else []
+
+    def test_several_scopes_are_one_run_of_their_sessions_and_a_pack_each(self):
+        p = self.run_script("--focus-only", "dialogs,viewers")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.sessions_shot(), focus.sessions_of(["dialogs", "viewers"]))
+        self.assertEqual(self.published(), ["dialogs", "viewers"])
+        for name in ("dialogs", "viewers"):
+            self.assertEqual(sorted(os.listdir(os.path.join(self.round, "focus", name))),
+                             ["F01_image.png", "FOCUS.md", "source.json"])
+
+    def test_census_is_the_seven_census_packs_from_one_run(self):
+        p = self.run_script("--census")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.sessions_shot(), focus.sessions_of(focus.CENSUS))
+        self.assertEqual(self.published(), sorted(focus.CENSUS))
+
+    def test_census_takes_options_after_it(self):
+        p = self.run_script("--census", "--workers", "2")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.published(), sorted(focus.CENSUS))
+
+    def test_focus_after_a_full_run_shoots_everything_and_packs_in_the_round(self):
+        p = self.run_script("--focus", "dialogs,chrome")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIsNone(self.sessions_shot())
+        self.assertEqual(self.published(), ["chrome", "dialogs"])
+
+    def test_a_later_run_replaces_its_own_scopes_packs_only(self):
+        self.assertEqual(self.run_script("--focus-only", "dialogs,viewers").returncode, 0)
+        old = os.path.join(self.round, "focus", "dialogs", "F14_old.png")
+        kept = os.path.join(self.round, "focus", "viewers", "kept.txt")
+        write(old, "")
+        write(kept, "")
+        self.assertEqual(self.run_script("--focus-only", "dialogs").returncode, 0)
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(kept))
+
+    def test_a_flat_pack_of_the_earlier_layout_is_cleared_when_publishing(self):
+        fd = os.path.join(self.round, "focus")
+        for name in ("FOCUS.md", "FOCUS-FACTS.md", "source.json", "F01_old.png", "notes.txt"):
+            write(os.path.join(fd, name), "")
+        self.assertEqual(self.run_script("--focus-only", "dialogs").returncode, 0)
+        self.assertEqual(self.published(), ["dialogs", "notes.txt"])  # (a file it did not make stays)
+
+    def test_a_failed_pack_publishes_none(self):
+        self.env["FOCUS_PACK_EXIT"] = "3"  # e.g. one scope over the cap
+        p = self.run_script("--focus-only", "dialogs,viewers")
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
+        self.assertEqual(self.published(), [])
+
+    def test_a_pack_not_written_publishes_none(self):
+        self.env["FOCUS_PACK_SKIP"] = "viewers"
+        p = self.run_script("--focus-only", "dialogs,viewers")
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
+        self.assertEqual(self.published(), [])
+
+    def keep_an_earlier_pack(self):
+        kept = os.path.join(self.round, "focus", "dialogs", "earlier.txt")
+        write(kept, "")
+        return kept
+
+    def test_a_failed_state_keeps_the_earlier_packs(self):
+        self.env["RUNNER_FAILURE"] = "dialogs/dark dialog about: no window"
+        kept = self.keep_an_earlier_pack()
+        p = self.run_script("--focus-only", "dialogs,viewers")
+        self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+        self.assertEqual(self.published(), ["dialogs"])
+        self.assertTrue(os.path.exists(kept))
+
+    def test_a_failed_measurement_keeps_the_earlier_packs(self):
+        write(os.path.join(self.h, "contrast.py"), "import sys\nsys.exit(1)\n")
+        kept = self.keep_an_earlier_pack()
+        p = self.run_script("--focus-only", "dialogs,viewers")
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+        self.assertEqual(self.published(), ["dialogs"])
+        self.assertTrue(os.path.exists(kept))
+
+    def test_a_full_runs_failed_pack_keeps_the_earlier_packs(self):
+        self.env["FOCUS_PACK_EXIT"] = "3"
+        kept = self.keep_an_earlier_pack()
+        p = self.run_script("--focus", "dialogs")
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
+        self.assertTrue(os.path.exists(kept))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads any file")
+    def test_a_failed_copy_replaces_no_pack_and_claims_none(self):
+        self.env["FOCUS_PACK_UNREADABLE"] = "viewers"  # the second of the two
+        kept = self.keep_an_earlier_pack()
+        p = self.run_script("--focus-only", "dialogs,viewers")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertTrue(os.path.exists(kept))
+        self.assertNotIn("published", p.stdout)
+
+    def test_an_unknown_scope_fails_before_any_work(self):
+        p = self.run_script("--focus-only", "dialogs,no-such-scope")
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("no-such-scope", p.stderr)
+        self.assertFalse(os.path.exists(self.env["SHOT_WORK"]))
 
 
 if __name__ == "__main__":

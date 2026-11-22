@@ -32,6 +32,7 @@
 #include <QQmlExpression>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QCursor>
 #include <QSocketNotifier>
 #include <QWheelEvent>
 #include <QWindow>
@@ -879,7 +880,8 @@ private:
             // walk's main_popup_offset), and the image grows right and down for one that reaches past the window
             // (POPUP_BACKDROP outside it).
             QImage img = w->grabWindow();
-            const auto pops = w == mainWindow() ? popupWindowsOf(w) : QList<QPair<QQuickWindow *, QPoint>>();
+            // (and a fullscreen viewer's or any other window's own menus, but a menu's grab is of it alone)
+            const auto pops = isPopupWindow(w) ? QList<QPair<QQuickWindow *, QPoint>>() : popupWindowsOf(w);
             if (!pops.isEmpty()) {
                 const qreal dpr = w->devicePixelRatio();
                 img.setDevicePixelRatio(1);  // drawn in device pixels
@@ -907,16 +909,19 @@ private:
             reply(id, QString("%1 %2x%3%4%5").arg(ok ? "ok" : "ERROR save").arg(img.width()).arg(img.height())
                           .arg(pops.isEmpty() ? QString() : QString(" with %1 popup window(s)").arg(pops.size()))
                           .arg(walked ? "" : " (layout not written)"));
-        } else if (name == "click" || name == "rclick" || name == "dblclick" || name == "press" || name == "release") {
-            // (one target for the whole click: press and release reach the same window)
+        } else if (name == "click" || name == "rclick" || name == "dblclick" || name == "press" || name == "release"
+                   || name == "mclick" || name == "mpress" || name == "mrelease") {
+            // (one target for the whole click: press and release reach the same window; m*: the middle button)
             const auto [tw, p] = pointerAt(w, QPointF(a.value(2).toDouble(), a.value(3).toDouble()));
             w = tw;
-            const Qt::MouseButton b = name == "rclick" ? Qt::RightButton : Qt::LeftButton;
-            mouse(w, QEvent::MouseMove, p, Qt::NoButton, name == "release" ? Qt::MouseButtons(b) : Qt::MouseButtons(Qt::NoButton));
-            if (name != "release") {
+            const bool middle = name.startsWith('m');
+            const QString act = middle ? name.mid(1) : name;
+            const Qt::MouseButton b = name == "rclick" ? Qt::RightButton : middle ? Qt::MiddleButton : Qt::LeftButton;
+            mouse(w, QEvent::MouseMove, p, Qt::NoButton, act == "release" ? Qt::MouseButtons(b) : Qt::MouseButtons(Qt::NoButton));
+            if (act != "release") {
                 mouse(w, QEvent::MouseButtonPress, p, b, b);
             }
-            if (name != "press") {
+            if (act != "press") {
                 mouse(w, QEvent::MouseButtonRelease, p, b, Qt::NoButton);
             }
             if (name == "dblclick") {
@@ -931,6 +936,9 @@ private:
             mouse(w, QEvent::MouseMove, p, Qt::NoButton, Qt::NoButton);
             QEnterEvent e(p, p, w->mapToGlobal(p));
             reply(id, "ok");
+        } else if (name == "cursor") {
+            // cursor: where Qt takes the pointer to be (on Wayland: where it last entered a window of the app).
+            reply(id, QString("%1 %2").arg(QCursor::pos().x()).arg(QCursor::pos().y()));
         } else if (name == "layout") {
             // layout <out.json>: layout findings and visible text of every visible window.
             reply(id, writeLayout(rest(line, 2)) ? "ok" : "ERROR write");
@@ -1081,10 +1089,16 @@ private:
             r.setScaledSize(QSize(a.value(3).toInt(), a.value(3).toInt()));
             const QImage img = r.read();
             reply(id, img.isNull() ? "ERROR " + r.errorString() : (img.save(a.value(4)) ? "ok" : "ERROR save"));
-        } else if (name == "dmove") {
+        } else if (name == "dmove" || name == "mdmove") {
+            // a move with the left (dmove) or the middle (mdmove) button held
             const auto [tw, p] = pointerAt(w, QPointF(a.value(2).toDouble(), a.value(3).toDouble()));
             w = tw;
-            mouse(w, QEvent::MouseMove, p, Qt::NoButton, Qt::LeftButton);
+            mouse(w, QEvent::MouseMove, p, Qt::NoButton, name == "mdmove" ? Qt::MiddleButton : Qt::LeftButton);
+            reply(id, "ok");
+        } else if (name == "leave") {
+            // the pointer leaves the window, as the compositor tells it: a Leave with no position (no button held)
+            QEvent e(QEvent::Leave);
+            QCoreApplication::sendEvent(w, &e);
             reply(id, "ok");
         } else if (name == "mwheel") {
             // mwheel x y delta modifiers
@@ -1101,17 +1115,21 @@ private:
                           Qt::NoModifier, Qt::NoScrollPhase, false);
             QCoreApplication::sendEvent(w, &e);
             reply(id, "ok");
-        } else if (name == "key") {
-            // key <Qt::Key decimal> <modifier mask decimal> [text]
+        } else if (name == "key" || name == "keydown" || name == "keyup") {
+            // key <Qt::Key decimal> <modifier mask decimal> [text]; keydown, keyup: the press or the release alone
             const int key = a.value(2).toInt();
             const auto mods = Qt::KeyboardModifiers(a.value(3, "0").toInt());
             // the command line splits on spaces, so a typed space comes as "%20"
             const QString text = a.value(4) == QLatin1String("%20") ? QStringLiteral(" ") : a.value(4);
             w = keyTarget(w);
-            QKeyEvent p(QEvent::KeyPress, key, mods, text);
-            QCoreApplication::sendEvent(w, &p);
-            QKeyEvent r(QEvent::KeyRelease, key, mods, text);
-            QCoreApplication::sendEvent(w, &r);
+            if (name != "keyup") {
+                QKeyEvent p(QEvent::KeyPress, key, mods, text);
+                QCoreApplication::sendEvent(w, &p);
+            }
+            if (name != "keydown") {
+                QKeyEvent r(QEvent::KeyRelease, key, mods, text);
+                QCoreApplication::sendEvent(w, &r);
+            }
             reply(id, "ok");
         } else if (name == "netproxy") {
             // netproxy <host> <port>: Qt's application proxy (QNetworkAccessManager's default), so a request
