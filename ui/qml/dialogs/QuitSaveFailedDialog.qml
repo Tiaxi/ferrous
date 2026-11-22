@@ -69,6 +69,7 @@ Components.CompactDialogWindow {
             // what happened, not again what the title says ("could not be
             // saved" was there twice).
             font.weight: Font.DemiBold
+            textFormat: Text.PlainText
             text: I18n.i18nc("@info", "Some recent changes were not saved.")
         }
 
@@ -90,6 +91,7 @@ Components.CompactDialogWindow {
         color: root.uiPalette.textSecondary
         // It names what it speaks of, rather than "They", which could be
         // read as the error above it.
+        textFormat: Text.PlainText
         text: I18n.i18nc("@info", "Unsaved changes can include settings, queue changes and Last.fm scrobbles. "
             + "Retry saves again, for example after freeing disk space. Quit Anyway closes Ferrous and loses them.")
     }

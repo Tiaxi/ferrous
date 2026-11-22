@@ -2085,11 +2085,11 @@ Item {
         || (root.wideRoom ? root.shownDetailsText !== root.detailsText
                           : root.shownNarrowDetailsText !== root.narrowDetailsText)
 
-    ToolTip {
+    Components.PlainToolTip {
         parent: root.wideRoom ? liveText.wideItem : liveText.narrowItem
         visible: liveText.hovered && root.textTruncated
         delay: Kirigami.Units.toolTipDelay
-        text: root.wideRoom
+        message: root.wideRoom
             ? root._joined([root.titleText, root.artistAlbumText, root.folderText, root.detailsText,
                             root.fileFactsText], "\n")
             : root._joined([root.titleText, root.artistText, root.folderText, root.narrowAlbumText,

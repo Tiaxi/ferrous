@@ -353,6 +353,7 @@ AbstractButton {
                 objectName: "scrobbleIndicatorLabel"
                 anchors.verticalCenter: parent.verticalCenter
                 visible: text.length > 0
+                textFormat: Text.PlainText
                 text: root.labelText
                 font.pointSize: root.uiPalette.smallPointSize
                 font.features: root.uiPalette.tabularFigures

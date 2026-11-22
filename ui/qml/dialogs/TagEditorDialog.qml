@@ -980,6 +980,7 @@ Components.DialogWindow {
         objectName: "tagEditorLabel_" + field.key
         Layout.preferredWidth: root.fieldLabelWidth
         horizontalAlignment: Text.AlignRight
+        textFormat: Text.PlainText
         text: field.formLabel
         font.weight: changed ? Font.DemiBold : Font.Normal
         color: root.uiPalette.text
@@ -1117,6 +1118,7 @@ Components.DialogWindow {
             Layout.fillWidth: true
             Layout.bottomMargin: dialogButtons.bottomPadding
             Layout.leftMargin: Kirigami.Units.smallSpacing
+            textFormat: Text.PlainText
             text: root.statusLine()
             font.pointSize: root.uiPalette.smallPointSize
             color: root.statusHasFailure && !root.busy ? root.uiPalette.negative : root.uiPalette.textSecondary
@@ -1285,6 +1287,7 @@ Components.DialogWindow {
                                         anchors.verticalCenter: parent.verticalCenter
                                         width: Math.min(implicitWidth, parent.width
                                             - (columnRevert.visible ? columnRevert.width + parent.spacing : 0))
+                                        textFormat: Text.PlainText
                                         text: headerCell.modelData.label
                                         font.pointSize: root.uiPalette.smallPointSize
                                         font.weight: headerCell.changed ? Font.DemiBold : Font.Normal
@@ -1400,6 +1403,7 @@ Components.DialogWindow {
                                 visible: width > 0
                                 leftPadding: Kirigami.Units.largeSpacing
                                 rightPadding: Kirigami.Units.largeSpacing
+                                textFormat: Text.PlainText
                                 text: root.cellText(modelData.key, tableRow)
                                 font.features: modelData.number ? root.uiPalette.tabularFigures : ({})
                                 color: tableCell.failureCell
@@ -1512,6 +1516,7 @@ Components.DialogWindow {
             Layout.fillWidth: true
             Layout.leftMargin: root.fieldLabelWidth + Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
             visible: text.length > 0
+            textFormat: Text.PlainText
             text: root.extraValuesNotes[fieldRow.field.key] || ""
             wrapMode: Text.WordWrap
             font.pointSize: root.uiPalette.smallPointSize
@@ -1556,6 +1561,7 @@ Components.DialogWindow {
         Label {
             id: ofLabel
             objectName: "tagEditorOf_" + pair.first.key
+            textFormat: Text.PlainText
             text: I18n.i18nc("@label track or disc number of the total", "of")
             color: root.uiPalette.textSecondary
             Accessible.ignored: true

@@ -86,6 +86,7 @@ ToolButton {
             objectName: "viewerToolButtonLabel"
             anchors.centerIn: parent
             visible: root.display === AbstractButton.TextOnly
+            textFormat: Text.PlainText
             text: root.text
             font.family: root.uiPalette.baseFont.family
             font.pointSize: root.uiPalette.smallPointSize

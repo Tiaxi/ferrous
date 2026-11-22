@@ -65,6 +65,7 @@ Item {
         Label {
             id: titleLabel
             objectName: "regionHeaderTitle"
+            textFormat: Text.PlainText
             text: root.title
             font.family: root.uiPalette.baseFont.family
             font.pointSize: root.uiPalette.smallPointSize
@@ -85,6 +86,7 @@ Item {
         Label {
             id: totalsLabel
             objectName: "regionHeaderTotals"
+            textFormat: Text.PlainText
             text: root.shownTotals
             visible: root.totalsShown
             font.family: root.uiPalette.baseFont.family

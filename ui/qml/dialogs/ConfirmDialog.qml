@@ -65,6 +65,7 @@ Components.CompactDialogWindow {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             font.weight: Font.DemiBold
+            textFormat: Text.PlainText
             text: root.message
         }
 
@@ -83,6 +84,7 @@ Components.CompactDialogWindow {
         visible: root.details.length > 0
         wrapMode: Text.Wrap
         color: root.uiPalette.textSecondary
+        textFormat: Text.PlainText
         text: root.details
     }
 }

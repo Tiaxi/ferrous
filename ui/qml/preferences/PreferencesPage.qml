@@ -102,6 +102,7 @@ ScrollView {
             Layout.rightMargin: root.pageSideInset
             Layout.topMargin: root.pageTopInset
             Layout.bottomMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + 2
+            textFormat: Text.PlainText
             text: root.title
             // 15 px with the default 10 pt font.
             font.pointSize: root.uiPalette.basePointSize * 1.125

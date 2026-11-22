@@ -267,6 +267,8 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/NowPlayingPanel.qml
         qml/components/MessageLabel.qml
         qml/components/PathLabel.qml
+        qml/components/PlainInlineMessage.qml
+        qml/components/PlainToolTip.qml
         qml/components/PlotLaneHead.qml
         qml/components/PlotModeSwitch.qml
         qml/components/PlotPlate.qml
@@ -349,6 +351,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/logic/KeyUtils.js
         qml/logic/ListRows.js
         qml/logic/PathUtils.js
+        qml/logic/PlainText.js
         qml/logic/PlotLanes.js
         qml/logic/VisualizationModes.js
         qml/logic/WheelUtils.js
@@ -740,6 +743,7 @@ if(BUILD_TESTING)
         tests/tst_qml_smoke_tag_editor.cpp
         tests/tst_qml_smoke_scrobble.cpp
         tests/tst_qml_smoke_keyboard_shortcuts.cpp
+        tests/tst_qml_smoke_plain_text.cpp
     )
     target_link_libraries(ferrous_qml_smoke_tests PRIVATE ferrous_app_icon)
     # The smoke tests run by area, each area in a process of its own, so a
@@ -760,6 +764,7 @@ if(BUILD_TESTING)
         tag_editor 180
         scrobble 60
         keyboard_shortcuts 120
+        plain_text 120
     )
     # The areas that run in shards, as `<area> <shards> <cost>`, the cost
     # each shard's seconds when run alone, as ferrous_add_sharded_test takes

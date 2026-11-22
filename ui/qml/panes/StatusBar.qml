@@ -169,6 +169,7 @@ ToolBar {
 
     // A 12 px label of the status bar.
     component StatusLabel: Label {
+        textFormat: Text.PlainText
         font.pointSize: root.uiPalette.smallPointSize
         font.features: root.uiPalette.tabularFigures
         color: root.uiPalette.textSecondary

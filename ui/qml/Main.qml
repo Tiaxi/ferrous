@@ -14,6 +14,7 @@ import "dialogs" as Dialogs
 import "logic/ErrorUtils.js" as ErrorUtils
 import "logic/FormatUtils.js" as FormatUtils
 import "logic/PathUtils.js" as PathUtils
+import "logic/PlainText.js" as PlainText
 import "logic/WheelUtils.js" as WheelUtils
 import "panes" as Panes
 import "viewers" as Viewers
@@ -1624,6 +1625,13 @@ ApplicationWindow {
         }
     }
 
+    // ToolTip.text shows in one tooltip of the engine's, whose label the
+    // style leaves AutoText: it turns plain before any text reaches it.
+    Item {
+        visible: false
+        Component.onCompleted: PlainText.apply(ToolTip.toolTip.contentItem)
+    }
+
     footer: Panes.StatusBar {
         objectName: "statusBar"
         uiBridge: root.uiBridge
@@ -1638,13 +1646,13 @@ ApplicationWindow {
         anchors.fill: parent
         spacing: 0
 
-        Kirigami.InlineMessage {
+        Components.PlainInlineMessage {
             objectName: "backendStoppedMessage"
             Layout.fillWidth: true
             type: Kirigami.MessageType.Error
             showCloseButton: false
             visible: root.backendStopped
-            text: root.uiBridge.backendFailure || ""
+            message: root.uiBridge.backendFailure || ""
         }
 
         Panes.TransportBar {

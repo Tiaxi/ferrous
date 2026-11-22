@@ -83,6 +83,7 @@ Components.DialogWindow {
             spacing: Kirigami.Units.largeSpacing
 
             Label {
+                textFormat: Text.PlainText
                 text: I18n.i18nc("@label", "Log file:")
                 color: root.uiPalette.text
             }
@@ -220,6 +221,7 @@ Components.DialogWindow {
                 TextArea {
                     id: diagnosticsTextArea
                     objectName: "diagnosticsTextArea"
+                    textFormat: TextEdit.PlainText
                     text: root.diagnosticsText
                     // The bridge reads the log off the GUI thread.
                     placeholderText: (root.uiBridge.diagnosticsLoading || false)

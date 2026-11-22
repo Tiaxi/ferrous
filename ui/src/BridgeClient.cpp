@@ -877,7 +877,11 @@ void BridgeClient::startFileBrowserNameDetection() {
 
 void BridgeClient::applyDetectedFileBrowserName(const QString &name) {
     const QString trimmed = name.trimmed();
-    if (trimmed.isEmpty() || m_fileBrowserName == trimmed) {
+    // The name is from the desktop file's and goes into a menu item, whose
+    // label has to allow markup for its mnemonic's underline. A desktop
+    // file's ID has no < or &, which markup or an entity needs.
+    if (trimmed.isEmpty() || trimmed.contains(QLatin1Char('<')) || trimmed.contains(QLatin1Char('&'))
+        || m_fileBrowserName == trimmed) {
         return;
     }
     m_fileBrowserName = trimmed;

@@ -532,6 +532,7 @@ Rectangle {
                     opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_artist"
                     visible: root.artistColumnVisible
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Artist")
                     Layout.leftMargin: root.columnGap
                     Layout.preferredWidth: root.artistColumnWidth
@@ -546,6 +547,7 @@ Rectangle {
                     opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_album"
                     visible: root.albumColumnVisible
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Album")
                     Layout.leftMargin: root.columnGap
                     Layout.preferredWidth: root.albumColumnWidth
@@ -560,6 +562,7 @@ Rectangle {
                     opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_length"
                     elide: Text.ElideRight
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Length")
                     Layout.leftMargin: root.columnGap
                     Layout.preferredWidth: root.lengthColumnWidth
@@ -851,6 +854,7 @@ Rectangle {
                         font.features: root.uiPalette.tabularFigures
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignRight
+                        textFormat: Text.PlainText
                         text: root.playlistOrderText(index)
                         color: root.uiPalette.textTertiaryOn(playlistRow.rowSelected,
                             playlistRowMouseArea.containsMouse)
@@ -866,6 +870,7 @@ Rectangle {
                         font.pointSize: root.uiPalette.basePointSize
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignLeft
+                        textFormat: Text.PlainText
                         text: playlistRow.titleValue
                         readonly property color plainColor: playlistRow.unreadable
                             ? root.uiPalette.textSecondary : root.uiPalette.text
@@ -892,6 +897,7 @@ Rectangle {
                         font: root.uiPalette.baseFont
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignLeft
+                        textFormat: Text.PlainText
                         text: playlistRow.artistValue
                         color: playlistRow.columnTextColor
                     }
@@ -905,6 +911,7 @@ Rectangle {
                         font: root.uiPalette.baseFont
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignLeft
+                        textFormat: Text.PlainText
                         text: playlistRow.albumValue
                         color: playlistRow.columnTextColor
                     }
@@ -919,6 +926,7 @@ Rectangle {
                         font.features: root.uiPalette.tabularFigures
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignRight
+                        textFormat: Text.PlainText
                         text: playlistRow.lengthTextValue
                         color: root.uiPalette.textSecondary
                     }
@@ -1144,6 +1152,7 @@ Rectangle {
                     Layout.topMargin: Kirigami.Units.largeSpacing
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@info:placeholder", "Start with your music folder")
                     font.family: root.uiPalette.baseFont.family
                     font.pointSize: root.uiPalette.basePointSize * 15 / 13
@@ -1156,6 +1165,7 @@ Rectangle {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@info:placeholder",
                         "Ferrous reads the tags and watches the folder, so new music appears on its own.\nYou can also drop audio files here.")
                     font: root.uiPalette.baseFont
@@ -1191,6 +1201,7 @@ Rectangle {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@info:placeholder", "The queue is empty")
                     font.family: root.uiPalette.baseFont.family
                     font.pointSize: root.uiPalette.basePointSize * 15 / 13
@@ -1203,6 +1214,7 @@ Rectangle {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@info:placeholder",
                         "Double-click music in the library to play it, or drag it here.")
                     font: root.uiPalette.baseFont

@@ -152,6 +152,7 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             width: Math.min(implicitWidth,
                             Math.max(track.textRoom * 0.6, track.textRoom - track.contextNeed))
+            textFormat: Text.PlainText
             text: root.titleText
             visible: text.length > 0
             font.pointSize: root.textPointSize
@@ -165,6 +166,7 @@ Rectangle {
             objectName: "viewerStripContext"
             anchors.verticalCenter: parent.verticalCenter
             width: Math.min(implicitWidth, Math.max(0, track.textRoom - titleLabel.width))
+            textFormat: Text.PlainText
             text: root.artistAlbumText
             visible: text.length > 0 && root.titleText.length > 0
             font.pointSize: root.textPointSize
@@ -176,6 +178,7 @@ Rectangle {
             id: timeLabel
             objectName: "viewerStripTime"
             anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
             text: root.timeText
             visible: text.length > 0
             color: root.plotColors.plotTextSecondary

@@ -40,6 +40,7 @@ MenuItem {
             ? root.padding + Kirigami.Units.smallSpacing
             : root.width - root.padding - Kirigami.Units.smallSpacing - width
         y: root.topPadding + (root.availableHeight - height) / 2
+        textFormat: Text.PlainText
         text: root.keyHint
         font: root.font
         color: root.pressed ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
