@@ -84,9 +84,11 @@ Components.DialogWindow {
     // than their values or their header up to 160, scaled with the font (at
     // 160 whatever they held, they left File Name at 140, which cut three
     // of four names beside room to spare). A tag keeps 100 for what is
-    // typed over a short value, and 160 with no value yet to measure.
-    // Folder, which may be `cut`, gives only what its values don't need at
-    // first, then on down to its `least`. A table that scrolls has each of
+    // typed over a short value, and Title 160 with no value yet to
+    // measure. Artist, Album and Genre, which `fit`, are no wider than
+    // their least whatever the room (see tableColumnBaseWidths). Folder,
+    // which may be `cut`, gives only what its values don't need at first,
+    // then on down to its `least`. A table that scrolls has each of
     // them at its least and none wider than the view, but Title, whose new
     // values are checked there before Save: it has all the room beside #
     // and File Name, to the view's edge (it stayed at 190 px beside an
@@ -94,8 +96,9 @@ Components.DialogWindow {
     // than its `least`. A committed change is whole
     // whatever its column's width: it wraps, and its row grows while that
     // column is in view. Where
-    // the view is wider, File Name and Folder, which `stretch`, take the
-    // rest. Status takes no room until a
+    // the view is wider, Title, File Name and Folder, which `want` room,
+    // take it in turn, up to what they need, and then File Name and Folder,
+    // which `stretch`, take the rest. Status takes no room until a
     // save or a rename failed for a row; a row with unsaved edits has a
     // mark in the # column instead, whose room is always there, so that an
     // edit moves no column (a Status column that came with the first edit
@@ -105,15 +108,15 @@ Components.DialogWindow {
     // short).
     readonly property var tableColumns: [
         { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "000" },
-        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, holds: 220, stretch: true, path: true },
-        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 100, holds: 160 },
-        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 100, holds: 160 },
-        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 100, holds: 160 },
-        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 100, give: 2, least: 70 },
+        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, holds: 220, wants: 480, stretch: true, path: true },
+        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 100, holds: 160, wants: 400, wantsAtLeast: 240 },
+        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 100, holds: 160, fit: true },
+        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 100, holds: 160, fit: true },
+        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 100, give: 2, least: 70, holds: 160, fit: true },
         { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 52, sample: "0000" },
         { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 40, sample: "00" },
         { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 56, sample: "FLAC" },
-        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, holds: 156, cut: true, stretch: true, path: true },
+        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, holds: 156, wants: 320, cut: true, stretch: true, path: true },
         { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, samples: [root.modifiedText, root.notSavedText, root.notRenamedText], onlyWithStatus: true }
     ]
     // Whether a row has a status to read: a save or rename that failed for
@@ -173,9 +176,10 @@ Components.DialogWindow {
     // and a large batch costs as little as a small one. Null until then.
     readonly property int measuredRowLimit: 200
     property var measuredRows: null
-    // What the values of a column that `holds` them need, up to what it
-    // holds, which it is with none to measure.
-    readonly property var tableColumnContentWidths: {
+    // What the measured values of a column that `holds` them need, with
+    // the cell's padding, whatever its width; 0 with none, or none to
+    // measure.
+    readonly property var tableColumnMeasuredWidths: {
         // As in columnNeed, for the binding to follow the font.
         columnValueMetrics.font
         const rows = root.measuredRows || []
@@ -187,12 +191,42 @@ Components.DialogWindow {
             for (let i = 0; i < rows.length; ++i) {
                 widest = Math.max(widest, columnValueMetrics.advanceWidth(root.cellText(column.key, rows[i])))
             }
-            const most = root.uiPalette.scaledSize(column.holds)
             // A cell lays its text out up to a pixel or so wider than its
             // advance (349.5 px for 349 at 24 pt), and elided it.
-            return widest > 0 ? Math.min(most, Math.ceil(widest) + 2 + 2 * Kirigami.Units.largeSpacing) : most
+            return widest > 0 ? Math.ceil(widest) + 2 + 2 * Kirigami.Units.largeSpacing : 0
         })
     }
+    // What the values of a column that `holds` them need, up to what it
+    // holds, which it is with none to measure; a tag that `fit`s its
+    // values, measured and empty, needs none.
+    readonly property var tableColumnContentWidths: root.tableColumns.map(function(column, index) {
+        if (!column.holds) {
+            return 0
+        }
+        const measured = root.tableColumnMeasuredWidths[index]
+        const most = root.uiPalette.scaledSize(column.holds)
+        return measured > 0 ? Math.min(most, measured) : (column.fit && root.measuredRows !== null ? 0 : most)
+    })
+    // What each column has before the room is shared out: its width, or,
+    // for a tag that `fit`s its values (Artist, Album, Genre), what they
+    // need as the files loaded, within its least and what it holds, and
+    // Folder, which may be `cut`, its least. The room that frees goes to
+    // the columns that `want` it (at their widths, Artist and Album were
+    // half empty beside new titles three lines tall and file names cut
+    // short).
+    readonly property var tableColumnBaseWidths: root.tableColumns.map(function(column, index) {
+        return column.fit || column.cut ? root.tableColumnLeastWidths[index] : root.tableColumnWidths[index]
+    })
+    // How wide a column that `wants` room would be, given it: what its
+    // values need as the files loaded, or what it `wantsAtLeast`, up to
+    // what it `wants`; others, their base.
+    readonly property var tableColumnWantWidths: root.tableColumns.map(function(column, index) {
+        if (!column.wants) {
+            return root.tableColumnBaseWidths[index]
+        }
+        return Math.ceil(Math.min(root.uiPalette.scaledSize(column.wants), Math.max(
+            root.tableColumnMeasuredWidths[index], root.uiPalette.scaledSize(column.wantsAtLeast || 0))))
+    })
     // The narrowest each column gives way to: its least width, what its
     // values need, or what its header or sample needs.
     readonly property var tableColumnLeastWidths: root.tableColumns.map(function(column, index) {
@@ -204,15 +238,30 @@ Components.DialogWindow {
     })
     // The widths the columns are shown at in the table's width.
     readonly property var shownColumnWidths: {
-        const preferred = root.tableColumnWidths
+        const preferred = root.tableColumnBaseWidths
         const least = root.tableColumnLeastWidths.slice()
         const room = tagEditorTable.width - 2 * root.tableInset
         const total = preferred.reduce(function(sum, width) { return sum + width }, 0)
         const widths = preferred.slice()
         let over = total - room
         if (over <= 0) {
+            // The room to spare goes, in turn, to what each column that
+            // `wants` it needs for the values it had as the files loaded,
+            // up to that: Title, whose new values are checked here before
+            // Save, then File Name, which tells the rows apart, then
+            // Folder. Title wants room for two lines of a long title too,
+            // as what is typed over short ones is often longer (at 190 px
+            // a batch's new titles took three). Then the columns that
+            // stretch share what is left.
+            let spare = -over
+            for (const key of ["title", "fileName", "directory"]) {
+                const i = root.tableColumns.findIndex(function(column) { return column.key === key })
+                const taken = Math.max(0, Math.min(spare, root.tableColumnWantWidths[i] - widths[i]))
+                widths[i] += taken
+                spare -= taken
+            }
             const stretching = root.tableColumns.filter(function(column) { return column.stretch }).length
-            const extra = Math.floor(-over / stretching)
+            const extra = Math.floor(spare / stretching)
             root.tableColumns.forEach(function(column, i) {
                 if (column.stretch) {
                     widths[i] += extra
@@ -264,13 +313,27 @@ Components.DialogWindow {
         // that it is whole once scrolled to, clear of the vertical bar.
         if (over > 0) {
             const view = Math.floor(room - root.scrollBarClearance)
+            // # and File Name, which stay in view as the rest scroll, take
+            // no more than about half of it (at 24 pt from a 1000 px window
+            // they took four fifths, and Folder never showed whole), or,
+            // where their headers alone need more, stay unpinned.
+            const pinnedMost = Math.floor(view * root.pinnedShare)
+            const pins = widths[number] + root.columnNeed(root.tableColumns[name]) <= pinnedMost
+            if (pins) {
+                widths[name] = Math.min(widths[name], pinnedMost - widths[number])
+            }
+            const pinned = pins ? widths[number] + widths[name] : 0
             const title = root.tableColumns.findIndex(function(column) { return column.key === "title" })
             const beside = Math.floor(room - widths[number] - widths[name])
-            widths[title] = beside < root.uiPalette.scaledSize(root.tableColumns[title].least)
+            widths[title] = !pins && beside < root.uiPalette.scaledSize(root.tableColumns[title].least)
                 ? root.uiPalette.scaledSize(root.tableColumns[title].holds)
                 : beside
+            // Every other column whole, once scrolled to, in the view or
+            // beside the pinned columns.
             root.tableColumns.forEach(function(column, i) {
-                widths[i] = Math.min(widths[i], Math.max(root.columnNeed(column), view))
+                if (!pins || i !== title && i >= root.pinnedColumnCount) {
+                    widths[i] = Math.min(widths[i], Math.max(root.columnNeed(column), view - pinned))
+                }
             })
         }
         // The whole pixels the rounding left go to the last column that
@@ -301,6 +364,19 @@ Components.DialogWindow {
     function columnWidth(index) {
         return root.shownColumnWidths[index]
     }
+
+    // Where the table scrolls sideways, what identifies a row stays at its
+    // left: #, with the change mark, and File Name, the first two columns,
+    // with a 1 px seam after them, while the others scroll under them (a
+    // change in Disc was checked with its file scrolled out of view).
+    readonly property int pinnedColumnCount: 2
+    // The most of the view they take; more, and they scroll with the rest.
+    readonly property real pinnedShare: 0.55
+    readonly property bool pinsColumns: root.tableScrolls && root.shownColumnWidths[0] + root.shownColumnWidths[1]
+        <= Math.floor((tagEditorTable.width - 2 * root.tableInset - root.scrollBarClearance) * root.pinnedShare)
+    readonly property real pinnedShift: root.pinsColumns ? tagEditorTable.contentX : 0
+    // From the row's edge to the seam's far side.
+    readonly property real pinnedWidth: root.tableInset + root.shownColumnWidths[0] + root.shownColumnWidths[1]
 
     // The room above a cell's first line and under its last, in a row as
     // tall as one line as in one that wraps, so that all start on one line.
@@ -397,14 +473,25 @@ Components.DialogWindow {
     // field need.
     readonly property real fieldsLeastWidth: Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
     // The fields' width as shown: narrower, down to their least, where
-    // that spares the table its sideways scroll bar with every column at
-    // its least width or wider, as on a 1400 px screen; otherwise their
-    // width.
+    // that gives Title and File Name what they want (from a 1600 px main
+    // window, the batch's longest file name was cut by 47 px beside titles
+    // of two lines), or else spares the table its sideways scroll bar with
+    // every column at its least width or wider, as on a 1400 px screen;
+    // otherwise their width.
     readonly property real fieldsShownWidth: {
-        const tableLeast = 2 + 2 * root.tableInset
-            + root.tableColumnLeastWidths.reduce(function(sum, width) { return sum + width }, 0)
-        const spare = Math.floor(root.width - 2 * root.contentPadding - root.contentSpacing - tableLeast)
-        return spare < root.fieldsWidth && spare >= root.fieldsLeastWidth ? spare : root.fieldsWidth
+        const rest = root.width - 2 * root.contentPadding - root.contentSpacing - 2 - 2 * root.tableInset
+        let wanted = 0
+        root.tableColumns.forEach(function(column, i) {
+            wanted += column.key === "directory" ? root.tableColumnBaseWidths[i] : root.tableColumnWantWidths[i]
+        })
+        const least = root.tableColumnLeastWidths.reduce(function(sum, width) { return sum + width }, 0)
+        for (const table of [wanted, least]) {
+            const spare = Math.floor(rest - table)
+            if (spare < root.fieldsWidth && spare >= root.fieldsLeastWidth) {
+                return spare
+            }
+        }
+        return root.fieldsWidth
     }
     // What the window holds, across: the fields and every column of the
     // table at its width, clear of its scroll bar.
@@ -1479,6 +1566,29 @@ Components.DialogWindow {
                                 height: parent.height
                                 // Status, while no row has one.
                                 visible: width > 0
+                                readonly property bool pinned: headerCell.index < root.pinnedColumnCount
+                                z: headerCell.pinned ? 2 : 0
+                                transform: Translate { x: headerCell.pinned ? root.pinnedShift : 0 }
+
+                                // Under the pinned headers, from the table's
+                                // edge to the seam, the header's colour, over
+                                // those that scroll.
+                                Rectangle {
+                                    visible: headerCell.index === 0 && root.pinsColumns
+                                    z: -1
+                                    x: -root.tableInset
+                                    width: root.pinnedWidth
+                                    height: parent.height
+                                    color: root.uiPalette.view
+
+                                    Rectangle {
+                                        objectName: "tagEditorHeaderSeam"
+                                        anchors.right: parent.right
+                                        width: 1
+                                        height: parent.height
+                                        color: root.uiPalette.seam
+                                    }
+                                }
 
                                 Row {
                                     anchors.fill: parent
@@ -1615,14 +1725,17 @@ Components.DialogWindow {
                     // placed the row. A change scrolled out of view grows
                     // it as it comes in (it left a tall, empty row: at 24 pt
                     // from a 1000 px window, every row of a new title).
+                    // The pinned cells are always in view, and the others
+                    // only from the seam on: under the pinned ones, a
+                    // change is out of view too.
                     height: {
                         let tallest = root.tableRowHeight
-                        const left = tagEditorTable.contentX - rowCells.x
-                        const right = left + tagEditorTable.width
+                        const right = tagEditorTable.contentX - rowCells.x + tagEditorTable.width
+                        const left = tagEditorTable.contentX - rowCells.x + (root.pinsColumns ? root.pinnedWidth : 0)
                         for (let i = 0; i < rowCells.children.length; ++i) {
                             const cell = rowCells.children[i]
-                            if (cell.height > tallest && cell.x + cell.leftPadding + 1 < right
-                                    && cell.x + cell.width - cell.rightPadding > left + 1) {
+                            if (cell.height > tallest && (cell.pinned === true && root.pinsColumns || cell.x + cell.leftPadding + 1 < right
+                                    && cell.x + cell.width - cell.rightPadding > left + 1)) {
                                 tallest = cell.height
                             }
                         }
@@ -1675,6 +1788,9 @@ Components.DialogWindow {
                                 required property int index
                                 objectName: "tagEditorCell_" + modelData.key
                                 width: root.columnWidth(index)
+                                readonly property bool pinned: index < root.pinnedColumnCount
+                                z: tableCell.pinned ? 2 : 0
+                                transform: Translate { x: tableCell.pinned ? root.pinnedShift : 0 }
                                 // A committed change is whole: it wraps,
                                 // and the row grows by it. Its height is the
                                 // committed value's, also while another is
@@ -1711,6 +1827,43 @@ Components.DialogWindow {
                                 // that Format shows. The whole of any cell
                                 // is in its tooltip while it is cut short.
                                 elide: tableCell.changed && !tableCell.typed ? Text.ElideNone : Text.ElideRight
+
+                                // Under the pinned cells, from the row's edge
+                                // to the seam, the row as it is drawn there,
+                                // over the cells that scroll: its fill,
+                                // selection, hover and the current row's
+                                // frame, whose far side is past the seam, so
+                                // they run on across it.
+                                Item {
+                                    visible: tableCell.index === 0 && root.pinsColumns
+                                    z: -1
+                                    x: -root.tableInset
+                                    width: root.pinnedWidth
+                                    height: tableRow.height
+                                    clip: true
+
+                                    Item {
+                                        width: tableRow.width
+                                        height: parent.height
+
+                                        Components.RowBackground {
+                                            uiPalette: root.uiPalette
+                                            opaque: true
+                                            hovered: rowHover.hovered
+                                            selected: tableRow.selected
+                                            active: tagEditorTable.activeFocus
+                                            focused: tableRow.current
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        objectName: "tagEditorRowSeam"
+                                        anchors.right: parent.right
+                                        width: 1
+                                        height: parent.height
+                                        color: root.uiPalette.seam
+                                    }
+                                }
 
                                 // The committed change as it wraps, which is
                                 // how tall the cell is: only a changed cell
@@ -1756,7 +1909,7 @@ Components.DialogWindow {
                     Rectangle {
                         objectName: "tagEditorRowModifiedMark"
                         visible: tableRow.marked
-                        x: root.tableInset + Math.round((Kirigami.Units.largeSpacing - width) / 2)
+                        x: root.pinnedShift + root.tableInset + Math.round((Kirigami.Units.largeSpacing - width) / 2)
                         // On the first line, as the row's cells start.
                         y: Math.round((root.tableRowHeight - height) / 2)
                         width: root.modifiedMarkSize
@@ -1797,11 +1950,13 @@ Components.DialogWindow {
         return at >= 0 && at + step >= 0 && at + step < root.tabStops.length ? root.tabStops[at + step] : null
     }
 
-    // Scrolls the table sideways until `item`, in its header, is in view.
+    // Scrolls the table sideways until `item`, in its header, is in view,
+    // clear of the pinned columns.
     function showInTable(item) {
         const left = item.mapToItem(tagEditorTable, 0, 0).x
-        if (left < 0) {
-            tagEditorTable.contentX += left
+        const pinned = item.pinned !== true && root.pinsColumns ? root.pinnedWidth : 0
+        if (left < pinned) {
+            tagEditorTable.contentX += left - pinned
         } else if (left + item.width > tagEditorTable.width) {
             tagEditorTable.contentX += left + item.width - tagEditorTable.width
         }

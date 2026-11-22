@@ -32,17 +32,15 @@ Preferences.PreferencesPage {
 
     title: I18n.i18nc("@title preferences page", "Last.fm")
 
-    // Without Last.fm in the build, why, first: it was the Account line,
-    // under the setting it disables and a help about a rule the build
-    // hasn't.
+    // Without Last.fm in the build, the page is this one statement: it was
+    // the Account line, under the setting it disables and a help about a
+    // rule the build hasn't, and then a lone disabled check box under it.
     Label {
         objectName: "lastFmUnavailableLabel"
         visible: !root.buildConfigured
         Layout.fillWidth: true
         Layout.preferredWidth: Math.min(implicitWidth, Kirigami.Units.gridUnit * 24)
         Layout.maximumWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 24)
-        // 12 px to the setting, with the form's row spacing.
-        Layout.bottomMargin: Kirigami.Units.largeSpacing
         wrapMode: Text.Wrap
         textFormat: Text.PlainText
         text: I18n.i18nc("@info", "Last.fm isn’t available in this build.")
@@ -51,11 +49,12 @@ Preferences.PreferencesPage {
     CheckBox {
         id: scrobblingCheckBox
         objectName: "lastFmScrobblingCheckBox"
-        Kirigami.FormData.label: I18n.i18nc("@label", "Scrobbling:")
-        text: I18n.i18nc("@option:check", "Scrobble played tracks to Last.fm")
         // A build without Last.fm can't send a scrobble, as the line above
-        // says.
-        enabled: root.buildConfigured
+        // says: there is no setting to show. Its label is emptied with it,
+        // as Account's is.
+        visible: root.buildConfigured
+        Kirigami.FormData.label: root.buildConfigured ? I18n.i18nc("@label", "Scrobbling:") : ""
+        text: I18n.i18nc("@option:check", "Scrobble played tracks to Last.fm")
         checked: root.settings.value("lastFmScrobblingEnabled")
         onToggled: root.settings.setValue("lastFmScrobblingEnabled", checked)
     }
