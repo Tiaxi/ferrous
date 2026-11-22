@@ -503,6 +503,8 @@ private slots:
     void tooltipStaysOffTheOtherResults_data();
     void tooltipStaysOffTheOtherResults();
     void tooltipFadesWhereItWasAsTheRowsChange();
+    void clearGlyphIsQuietUntilPointedAt_data();
+    void clearGlyphIsQuietUntilPointedAt();
 };
 
 void SearchPaletteTest::initTestCase() {
@@ -2291,9 +2293,10 @@ void SearchPaletteTest::clearUsesTheBreezeIconAndNoTextGlyphs() {
     QQmlExpression helpIcon(qmlContext(help), help, QStringLiteral("icon.name"));
     QCOMPARE(helpIcon.evaluate().toString(), QStringLiteral("question"));
     QCOMPARE(clear->property("display").toInt(), 0); // AbstractButton.IconOnly
-    // Quiet glyphs, as the field's: the secondary text colour.
-    QQmlExpression clearColor(qmlContext(clear), clear, QStringLiteral("icon.color"));
-    QCOMPARE(hex(clearColor.evaluate().value<QColor>()), hex(harness.token("textSecondary")));
+    // Quiet glyphs: help's in the field's secondary text colour, the solid
+    // clear's under it (clearGlyphIsQuietUntilPointedAt).
+    QQmlExpression helpColor(qmlContext(help), help, QStringLiteral("icon.color"));
+    QCOMPARE(hex(helpColor.evaluate().value<QColor>()), hex(harness.token("textSecondary")));
     QCOMPARE(QAccessible::queryAccessibleInterface(clear)->text(QAccessible::Name), QStringLiteral("Clear"));
     // No text glyphs drawn as icons.
     visit(harness.palette(), [&](QQuickItem *item) {
@@ -2935,6 +2938,45 @@ void SearchPaletteTest::tooltipFadesWhereItWasAsTheRowsChange() {
         QVERIFY(!sceneRect(content->parentItem())
                      .intersects(sceneRect(harness.item(QStringLiteral("globalSearchQueryField")))));
     }
+}
+
+void SearchPaletteTest::clearGlyphIsQuietUntilPointedAt_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("dark") << true;
+    QTest::newRow("light") << false;
+}
+
+// Clear's solid glyph is quieter at rest than the line glyphs beside it,
+// and still 3:1 on the view (in their colour it was the field row's
+// heaviest mark); under the pointer and with the keyboard's focus it takes
+// their colour.
+void SearchPaletteTest::clearGlyphIsQuietUntilPointedAt() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl));
+    QQuickItem *clear = harness.item(QStringLiteral("globalSearchClearButton"));
+    QVERIFY(clear != nullptr && clear->isVisible());
+    QTest::mouseMove(harness.window, QPoint(2, 2));
+    QQmlExpression iconColor(qmlContext(clear), clear, QStringLiteral("icon.color"));
+    const auto drawnIn = [&iconColor] { return iconColor.evaluate().value<QColor>(); };
+    const QColor view = harness.token("view");
+    const QColor pointedAt = harness.token("textSecondary");
+    const double atRest = contrastRatio(drawnIn(), view);
+    QVERIFY2(atRest >= 3.0, qPrintable(describeContrast(QStringLiteral("clear"), drawnIn(), view)));
+    QVERIFY2(atRest <= 0.65 * contrastRatio(pointedAt, view),
+             qPrintable(describeContrast(QStringLiteral("clear"), drawnIn(), view)));
+    const QColor rest = drawnIn();
+    // Breeze's style turns hover effects off without a desktop session.
+    QVERIFY(clear->setProperty("hoverEnabled", true));
+    QTest::mouseMove(harness.window, sceneCentre(clear));
+    QTRY_VERIFY(channelDistance(drawnIn(), pointedAt) <= 1);
+    QTest::mouseMove(harness.window, QPoint(2, 2));
+    QTRY_VERIFY(channelDistance(drawnIn(), rest) <= 1);
+    clear->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(channelDistance(drawnIn(), pointedAt) <= 1);
 }
 
 int main(int argc, char **argv) {

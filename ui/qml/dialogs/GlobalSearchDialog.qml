@@ -5,6 +5,7 @@ import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/ColorUtils.js" as ColorUtils
 
 // The search palette (#373): an 800 px palette 32 px under the transport,
 // over a dim that covers the whole window; wider with a larger font, as its
@@ -58,6 +59,12 @@ Dialog {
     readonly property var selectedAuxRow: root.auxIndex >= 0 && root.auxIndex < root.auxRows.length
         ? root.auxRows[root.auxIndex] : null
 
+    // The clear glyph at rest. Breeze's is a solid shape of three times
+    // the search and help glyphs' ink, so in their colour it was the
+    // heaviest mark in the field's row: their colour nearly half way to
+    // the view, and still 3:1 on it.
+    readonly property color clearGlyphRest: root.uiPalette.readableOn(
+        ColorUtils.mixColor(root.uiPalette.textSecondary, root.uiPalette.view, 0.45), [root.uiPalette.view], 3.1)
     // The amber of the playing glyph over a cover's scrim.
     readonly property color nowOnScrim: "#f2b035"
     // The palette's sizes at 1×: these with the default font, and taller
@@ -546,7 +553,18 @@ Dialog {
                 icon.name: "edit-clear"
                 icon.width: root.glyphSize
                 icon.height: root.glyphSize
-                icon.color: root.uiPalette.textSecondary
+                // As the other glyphs under the pointer or with the focus.
+                property color glyphColor: clearButton.hovered || clearButton.visualFocus
+                    ? root.uiPalette.textSecondary : root.clearGlyphRest
+                icon.color: clearButton.glyphColor
+
+                Behavior on glyphColor {
+                    enabled: Kirigami.Units.shortDuration > 0
+                    ColorAnimation {
+                        duration: Kirigami.Units.shortDuration
+                        easing.type: Easing.OutCubic
+                    }
+                }
                 text: I18n.i18nc("@action:button clear the search field", "Clear")
                 Accessible.name: text
                 ToolTip.visible: hovered || visualFocus
