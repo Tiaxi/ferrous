@@ -462,7 +462,14 @@ Components.DialogWindow {
     defaultWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 40)
     defaultHeight: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 38)
     minimumWidth: Math.ceil(Kirigami.Units.gridUnit * 14 + 2 * root.keyColumnWidth + 2 * Kirigami.Units.gridUnit)
-    minimumHeight: Kirigami.Units.gridUnit * 24
+    readonly property real noteLineHeight: Math.ceil(keyMetrics.height)
+    readonly property real listMinimumHeight: Kirigami.Units.gridUnit * 8
+    // Room for the list at its least, the editor and the note's line,
+    // whatever the font: a longer note takes its room from the list.
+    minimumHeight: Math.ceil(Math.max(Kirigami.Units.gridUnit * 24,
+        2 * Kirigami.Units.gridUnit + searchField.implicitHeight + root.listMinimumHeight
+            + editorColumn.implicitHeight + root.noteLineHeight + 3 * shortcutsContent.spacing
+            + shortcutsFooter.implicitHeight))
 
     FontMetrics {
         id: keyMetrics
@@ -592,7 +599,7 @@ Components.DialogWindow {
             id: listFrame
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.minimumHeight: Kirigami.Units.gridUnit * 8
+            Layout.minimumHeight: root.listMinimumHeight
             color: root.uiPalette.view
             border.width: 1
             border.color: root.uiPalette.seam
@@ -663,8 +670,8 @@ Components.DialogWindow {
                     }
                     currentIndex = Math.max(0, Math.min(count - 1, currentIndex + step))
                 }
-                // The current row stays in view as a message under the
-                // list makes it shorter.
+                // The current row stays in view as the window, or a message
+                // of more than a line, makes the list shorter.
                 onHeightChanged: {
                     if (currentIndex >= 0) {
                         positionViewAtIndex(currentIndex, ListView.Contain)
@@ -794,6 +801,7 @@ Components.DialogWindow {
         // title and the default, which may be long, stand outside the grid,
         // so that its columns follow its own cells alone.
         ColumnLayout {
+            id: editorColumn
             objectName: "keyboardShortcutsEditor"
             Layout.fillWidth: true
             Layout.fillHeight: false
@@ -889,36 +897,45 @@ Components.DialogWindow {
             }
         }
 
-        // What keeps a key the user tried, or that the library and the
-        // text fields type a key this action has.
-        Label {
-            objectName: "keyboardShortcutsRefusal"
+        // What keeps a key the user tried, that the library and the text
+        // fields type a key this action has, or that the bridge refused
+        // the set, which stays to change or cancel. One line is kept for
+        // them, so the list and the editor stay put as one comes and goes;
+        // only a longer message makes the room larger.
+        ColumnLayout {
+            objectName: "keyboardShortcutsNotes"
             Layout.fillWidth: true
-            visible: root.refusal.length > 0
-            text: root.refusal
-            wrapMode: Text.Wrap
-            color: root.uiPalette.negative
-        }
-        Label {
-            readonly property string typedKey: root.typedKeyOf(root.currentBindings)
-            objectName: "keyboardShortcutsTypedKeyNote"
-            Layout.fillWidth: true
-            visible: typedKey.length > 0 && root.refusal.length === 0
-            text: I18n.i18nc("@info %1 is a key",
-                "While the library or a text field has the keyboard focus, ‘%1’ types there instead.",
-                StandardKeys.nativeText(typedKey))
-            wrapMode: Text.Wrap
-            color: root.uiPalette.textSecondary
-        }
+            Layout.fillHeight: false
+            Layout.preferredHeight: Math.max(root.noteLineHeight, implicitHeight)
+            spacing: Kirigami.Units.smallSpacing
 
-        // That the bridge refused the set, which stays to change or cancel.
-        Label {
-            objectName: "keyboardShortcutsSaveFailed"
-            Layout.fillWidth: true
-            visible: root.saveFailed
-            wrapMode: Text.Wrap
-            color: root.uiPalette.negative
-            text: I18n.i18nc("@info", "Ferrous could not take these shortcuts. Change some back, or cancel to keep the ones you had.")
+            Label {
+                objectName: "keyboardShortcutsRefusal"
+                Layout.fillWidth: true
+                visible: root.refusal.length > 0
+                text: root.refusal
+                wrapMode: Text.Wrap
+                color: root.uiPalette.negative
+            }
+            Label {
+                readonly property string typedKey: root.typedKeyOf(root.currentBindings)
+                objectName: "keyboardShortcutsTypedKeyNote"
+                Layout.fillWidth: true
+                visible: typedKey.length > 0 && root.refusal.length === 0
+                text: I18n.i18nc("@info %1 is a key",
+                    "While the library or a text field has the keyboard focus, ‘%1’ types there instead.",
+                    StandardKeys.nativeText(typedKey))
+                wrapMode: Text.Wrap
+                color: root.uiPalette.textSecondary
+            }
+            Label {
+                objectName: "keyboardShortcutsSaveFailed"
+                Layout.fillWidth: true
+                visible: root.saveFailed
+                wrapMode: Text.Wrap
+                color: root.uiPalette.negative
+                text: I18n.i18nc("@info", "Ferrous could not take these shortcuts. Change some back, or cancel to keep the ones you had.")
+            }
         }
     }
 

@@ -33,6 +33,8 @@ private slots:
     void visualizationPageNamesResetZoomsKey();
     void editorHasOneBaselineAndOneKeyButtonWidth_data();
     void editorHasOneBaselineAndOneKeyButtonWidth();
+    void editorHoldsStillAsANoteComesAndGoes_data();
+    void editorHoldsStillAsANoteComesAndGoes();
 };
 
 namespace {
@@ -143,7 +145,10 @@ struct ShortcutsFixture {
     bool showAtSizeFor(int pointSize) const {
         const QSize size = pointSize > 10 ? QSize(1728, 1364) : QSize(720, 684);
         dialog->resize(size);
-        return QTest::qWaitFor([&] { return dialog->size() == size; }) && !dialog->grabWindow().isNull();
+        // The window has the size at once, and what is in it once the
+        // platform has answered.
+        return QTest::qWaitFor([&] { return dialog->contentItem()->size() == QSizeF(size); })
+            && !dialog->grabWindow().isNull();
     }
 
     bool click(const char *buttonName) const {
@@ -847,6 +852,65 @@ void KeyboardShortcutsSmokeTest::editorHasOneBaselineAndOneKeyButtonWidth() {
         // The grid's columns follow its own cells, not the longer default.
         QCOMPARE(sceneRect(shortcut).left(), editorX);
     }
+}
+
+void KeyboardShortcutsSmokeTest::editorHoldsStillAsANoteComesAndGoes_data() {
+    addFontAndStyleRows();
+}
+
+// A note of one line, a refusal or the typed key's, takes the line kept for
+// it: the list and the editor stay where they were (they moved up 27 px
+// as the user went through the actions or typed a key the window keeps).
+// The dialog still holds it all at its minimum height.
+void KeyboardShortcutsSmokeTest::editorHoldsStillAsANoteComesAndGoes() {
+    QFETCH(int, pointSize);
+    QFETCH(QString, widgetStyle);
+    if (!widgetStyle.isEmpty() && !QStyleFactory::keys().contains(widgetStyle, Qt::CaseInsensitive)) {
+        QSKIP("The Breeze widget style is not installed.");
+    }
+    const ScopedWidgetStyle style(widgetStyle);
+    const ScopedApplicationFont font(pointSize);
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.select(QStringLiteral("open_files")));
+    QVERIFY(fixture.showAtSizeFor(pointSize));
+    QQuickItem *list = fixture.item("keyboardShortcutsList");
+    QQuickItem *title = fixture.item("keyboardShortcutsEditorTitle");
+    QQuickItem *key = fixture.item("keyboardShortcutsShortcutEditor");
+    QQuickItem *refusal = fixture.item("keyboardShortcutsRefusal");
+    QQuickItem *note = fixture.item("keyboardShortcutsTypedKeyNote");
+    QVERIFY(!refusal->isVisible() && !note->isVisible());
+    const auto where = [&] {
+        // A grab lays the window out.
+        fixture.dialog->grabWindow();
+        return QStringLiteral("list %1, title %2, key %3")
+            .arg(list->height()).arg(sceneRect(title).top()).arg(sceneRect(key).top());
+    };
+    const QString atRest = where();
+
+    QVERIFY(fixture.select(QStringLiteral("follow_playhead")));
+    QVERIFY(note->isVisible());
+    QCOMPARE(where(), atRest);
+    QCOMPARE(note->property("lineCount").toInt(), 1);
+
+    QVERIFY(fixture.capture("keyboardShortcutsShortcutEditor", Qt::Key_Escape));
+    QVERIFY(refusal->isVisible() && !note->isVisible());
+    QCOMPARE(where(), atRest);
+    QCOMPARE(refusal->property("lineCount").toInt(), 1);
+
+    QVERIFY(fixture.select(QStringLiteral("open_files")));
+    QVERIFY(!refusal->isVisible() && !note->isVisible());
+    QCOMPARE(where(), atRest);
+
+    // At its least height, the note's line is still over the buttons.
+    QVERIFY(fixture.select(QStringLiteral("follow_playhead")));
+    const QSize least(fixture.dialog->width(), fixture.dialog->minimumHeight());
+    fixture.dialog->resize(least);
+    QTRY_COMPARE(fixture.dialog->contentItem()->size(), QSizeF(least));
+    fixture.dialog->grabWindow();
+    const QRectF buttons = sceneRect(fixture.item("keyboardShortcutsButtons"));
+    QVERIFY2(sceneRect(note).bottom() <= buttons.top() + 0.5,
+             qPrintable(describeRect(sceneRect(note)) + QStringLiteral(" over ") + describeRect(buttons)));
 }
 
 std::unique_ptr<QmlSmokeTest> makeKeyboardShortcutsSmokeTest(const QString &userDirectoriesParent) {
