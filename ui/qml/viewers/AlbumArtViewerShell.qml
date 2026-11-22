@@ -29,6 +29,10 @@ Item {
     property string positionText: "00:00"
     // Whether the image's details show, for the info button.
     property bool infoVisible: false
+    // How far their column is shown and how wide it is once shown, which
+    // the windowed plate gives way to.
+    property real infoReveal: 0
+    property real infoWidth: 0
     // The art's zoom, 1 when it fits, and what fits it again.
     property real zoomLevel: 1.0
     property var resetView: null
@@ -333,8 +337,16 @@ Item {
                     point.scenePosition.x, point.scenePosition.y)
             }
 
+            // With the details' column under the whole of it, the plate is
+            // no box: the column is its colour, and holds the buttons (it
+            // drew a box inside the column). It fades as the column comes
+            // under it, and still takes the presses between its buttons.
+            // Wider than the column, it is over the art too, and stays.
             Components.PlotPlate {
+                readonly property bool overColumn:
+                    albumArtPopupControls.width + albumArtPopupControls.anchors.rightMargin <= root.infoWidth
                 anchors.fill: parent
+                fadeLevel: overColumn ? 1 - root.infoReveal : 1
                 plotColors: root.uiPalette.mediaPlot
                 uiPalette: root.uiPalette
                 takesPointer: true

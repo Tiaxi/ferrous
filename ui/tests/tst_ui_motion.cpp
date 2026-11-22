@@ -1096,6 +1096,8 @@ private slots:
     void firstLanesLabelRestsWhereTheOtherLanesDo_data();
     void firstLanesLabelRestsWhereTheOtherLanesDo();
     void albumArtDetailsToggleGlides();
+    void albumArtPlateGivesWayToTheDetailsColumn_data();
+    void albumArtPlateGivesWayToTheDetailsColumn();
 };
 
 void UiMotionTest::initTestCase() {
@@ -7277,6 +7279,83 @@ void UiMotionTest::albumArtDetailsToggleGlides() {
     }
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!surface->property("viewerOpen").toBool());
+}
+
+void UiMotionTest::albumArtPlateGivesWayToTheDetailsColumn_data() {
+    QTest::addColumn<int>("points");
+    QTest::addColumn<bool>("narrow");
+    QTest::newRow("10 pt") << 10 << false;
+    QTest::newRow("24 pt") << 24 << false;
+    QTest::newRow("24 pt, narrow") << 24 << true;
+}
+
+// Windowed, the album art viewer's plate draws no box inside the details'
+// column, which is its colour: its fill and edge go as the column comes
+// under it, and it is as it was with the column closed. Wider than the
+// column, zoomed with a large font in a narrow window, it keeps them, as it
+// is over the art too.
+void UiMotionTest::albumArtPlateGivesWayToTheDetailsColumn() {
+    QFETCH(int, points);
+    QFETCH(bool, narrow);
+    const ScopedApplicationFont font(points);
+    Covers covers;
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    units->setShortDuration(100);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("albumArtFullscreenControlsAutoHide"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QQuickItem *surface = named(window, "albumArtSurface");
+    QVERIFY(bridge && viewer && autoHide && popup && surface);
+    autoHide->setProperty("hideDelay", 600000);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    showTrack(bridge, QStringLiteral("/music/0.flac"), QStringLiteral("Track"), QStringLiteral("Album"),
+              covers.first);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QQuickItem *controls = itemNamed(popupItemOf(popup), QStringLiteral("albumArtPopupControls"));
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QVERIFY(controls && column);
+    QQuickItem *fill = itemNamed(controls, QStringLiteral("plotPlateFill"));
+    QQuickItem *edge = itemNamed(controls, QStringLiteral("plotPlateEdge"));
+    QQuickItem *close = itemNamed(controls, QStringLiteral("albumArtPopupCloseButton"));
+    QVERIFY(fill && edge && close);
+    QTRY_COMPARE(drawnOpacity(fill), 1.0);
+    QCOMPARE(drawnOpacity(edge), 1.0);
+
+    for (const bool zoomed : {false, true}) {
+        surface->setProperty("zoom", zoomed ? 2.0 : 1.0);
+        QTRY_COMPARE(itemNamed(controls, QStringLiteral("viewerZoomReadout"))->isVisible(), zoomed);
+        for (const bool shows : {true, false}) {
+            SteppedAnimationDriver driver;
+            QVERIFY(QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant())));
+            for (int ms = 0; ms <= 250; ms += 16) {
+                const double reveal = surface->property("infoReveal").toDouble();
+                // Whether the column at rest is under the whole plate.
+                const bool seated = column->width() >= surface->width() - controls->x();
+                const double expected = seated ? 1.0 - reveal : 1.0;
+                QVERIFY2(std::abs(drawnOpacity(fill) - expected) < 1e-5 && std::abs(drawnOpacity(edge) - expected) < 1e-5,
+                         qPrintable(QStringLiteral("zoomed %1, reveal %2: the plate at %3, not %4")
+                                        .arg(zoomed).arg(reveal).arg(drawnOpacity(fill)).arg(expected)));
+                // Its buttons stay whole, and it still takes the presses
+                // between them.
+                QCOMPARE(drawnOpacity(close), 1.0);
+                static_cast<void>(driver.step(16));
+            }
+            QCOMPARE(surface->property("infoReveal").toDouble(), shows ? 1.0 : 0.0);
+        }
+    }
+    surface->setProperty("zoom", 1.0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant())));
+    QTRY_COMPARE(surface->property("infoReveal").toDouble(), 1.0);
+    QTRY_COMPARE(drawnOpacity(fill), 0.0);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      controls->mapToScene(QPointF(1, controls->height() / 2)).toPoint());
+    QCoreApplication::processEvents();
+    QVERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!popup->property("visible").toBool());
 }
 
 #include "tst_ui_motion.moc"

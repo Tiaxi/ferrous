@@ -2218,6 +2218,8 @@ ApplicationWindow {
         uiBridge: root.uiBridge
         positionText: playbackController.positionText
         infoVisible: viewerController.albumArtInfoVisible
+        infoReveal: albumArtSurface.infoReveal
+        infoWidth: albumArtSurface.infoWidth
         zoomLevel: albumArtSurface.zoom
         resetView: albumArtSurface.resetView
         previewActive: viewerController.albumArtPreviewActive

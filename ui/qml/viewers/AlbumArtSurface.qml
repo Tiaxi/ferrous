@@ -126,6 +126,8 @@ Item {
     // The details' width with their seam, in whole pixels, times how far
     // they are shown.
     readonly property real infoReserve: Math.round(root.infoReveal * (infoColumn.width + 1))
+    // The details' width once shown, without their seam.
+    readonly property real infoWidth: infoColumn.width
     // The space the art fits in, across: the whole view, or while the
     // details show the space left of their seam less 16 px on each side,
     // during a preview 24 px, so the art never touches their seam (with no
