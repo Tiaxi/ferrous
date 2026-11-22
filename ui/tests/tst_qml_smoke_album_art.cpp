@@ -39,6 +39,8 @@ private slots:
     void itunesAppliedCoverGivesWayWhenTheSameTrackPlaysAgain();
     void itunesArtworkResultsAreAFlatList();
     void itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWithNothingFound();
+    void itunesArtworkHoldsStillBetweenItsStates_data();
+    void itunesArtworkHoldsStillBetweenItsStates();
     void itunesArtworkActionsFollowTheTextFont();
     void itunesArtworkCountLineHoldsAtLargeFonts();
     void itunesArtworkDialogOpensWithItsRowsWhole();
@@ -2470,8 +2472,9 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     // A row is in the list before it is whole (#627).
     QVERIFY(finishIncubation(engine));
     // Laid out in its window, three rows need no scroll bar.
-    QTRY_COMPARE(itemNamed(content, QStringLiteral("itunesArtworkResultsView"))->property("scrollbarLane").toReal(),
-                 0.0);
+    QQuickItem *resultsView = itemNamed(content, QStringLiteral("itunesArtworkResultsView"));
+    QVERIFY(resultsView != nullptr);
+    QTRY_VERIFY(resultsView->property("contentHeight").toReal() <= resultsView->height() + 0.5);
     std::sort(rowItems.begin(), rowItems.end(), [](QQuickItem *a, QQuickItem *b) {
         return sceneRectOf(a).top() < sceneRectOf(b).top();
     });
@@ -2718,13 +2721,17 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         QCOMPARE(font.weight(), QFont::Normal);
         QCOMPARE(font.pointSizeF(), QGuiApplication::font().pointSizeF());
         QCOMPARE(message->property("opacity").toReal(), 1.0);
-        // Where the results would be, 3 grid units above their middle.
+        // Where the results would be: the glyph's slot and one line 3 grid
+        // units above their middle, in every state.
         QVERIFY2(sceneRectOf(frame).contains(sceneRectOf(placeholder)), at.constData());
+        const qreal slot = busy->parentItem()->height();
+        const qreal oneLine = slot + placeholder->property("spacing").toReal()
+            + QFontMetricsF(message->property("font").value<QFont>()).height();
         const qreal raise = qMin(3 * dialog->property("contentPadding").toReal(),
-                                 (sceneRectOf(frame).height() - placeholder->height()) / 2);
-        QTRY_VERIFY2(qAbs(sceneRectOf(placeholder).center().y() - (sceneRectOf(frame).center().y() - raise)) <= 1.0,
+                                 (sceneRectOf(frame).height() - oneLine) / 2);
+        QTRY_VERIFY2(qAbs(sceneRectOf(placeholder).top() + oneLine / 2 - (sceneRectOf(frame).center().y() - raise)) <= 1.5,
                  qPrintable(QStringLiteral("%1: at %2, the frame's middle %3")
-                                .arg(QString::fromLatin1(at)).arg(sceneRectOf(placeholder).center().y())
+                                .arg(QString::fromLatin1(at)).arg(sceneRectOf(placeholder).top())
                                 .arg(sceneRectOf(frame).center().y())));
         QVERIFY2(raise > 0, at.constData());
         if (searching) {
@@ -2738,17 +2745,13 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         texts.removeAll(QString());
         QCOMPARE(texts.count(text), 1);
     };
-    // The current art's Preview: in the results' column while it searches,
-    // so nothing moves as the rows arrive; with no rows to line up with, on
-    // the content's right inset, as Close under it (it hung on the absent
-    // column, 117 px short of Close).
+    // The current art's Preview: in the results' column in every state, so
+    // nothing moves as the search ends (with no rows it went to the
+    // content's right inset, 109 px).
     QQuickItem *currentPreview = itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentPreviewButton"));
     QQuickItem *close = itemNamed(qobject_cast<QQuickWindow *>(dialog)->contentItem(),
                                   QStringLiteral("itunesArtworkCloseButton"));
     QVERIFY(currentPreview != nullptr && close != nullptr && close->isVisible());
-    const auto previewMeetsClose = [&]() {
-        return qAbs(sceneRectOf(currentPreview).right() - sceneRectOf(close).right()) < 0.5;
-    };
 
     checkState(State::Searching, QStringLiteral("Searching iTunes…"));
     const qreal columnX = sceneRectOf(currentPreview).left();
@@ -2758,7 +2761,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     bridge->setProperty("itunesArtworkLoading", false);
     bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
     checkState(State::NothingFound, QStringLiteral("No iTunes artwork suggestions found."));
-    QTRY_VERIFY2(previewMeetsClose(), qPrintable(describeRect(sceneRectOf(currentPreview))));
+    QCOMPARE(sceneRectOf(currentPreview).left(), columnX);
 
     // As BridgeClient tells a failed search (BridgeClientTest::
     // aFailedArtworkSearchSaysSoApartFromFindingNothing).
@@ -2766,9 +2769,9 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     bridge->setProperty("itunesArtworkErrorText", QStringLiteral("Connection refused"));
     bridge->setProperty("itunesArtworkFailed", true);
     checkState(State::Failed, QStringLiteral("Connection refused"));
-    QVERIFY2(previewMeetsClose(), qPrintable(describeRect(sceneRectOf(currentPreview))));
+    QCOMPARE(sceneRectOf(currentPreview).left(), columnX);
 
-    // Searching again, back in the column; the rows then arrive under it.
+    // Searching again, in the column still; the rows then arrive under it.
     bridge->setProperty("itunesArtworkFailed", false);
     bridge->setProperty("itunesArtworkErrorText", QString());
     bridge->setProperty("itunesArtworkLoading", true);
@@ -2782,6 +2785,85 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     QQuickItem *firstPreview = nullptr;
     QTRY_VERIFY((firstPreview = itemNamed(results, QStringLiteral("itunesArtworkPreviewButton"))) != nullptr);
     QTRY_COMPARE(sceneRectOf(firstPreview).left(), columnX);
+}
+
+void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Replace from iTunes holds still as a search ends: the current art's
+// Preview at one x while searching, with nothing found, when it failed and
+// over two results or seven, which scroll (it moved 109 px), and the first
+// line of the placeholder on one baseline, under a slot for the state's
+// glyph (nothing found was 22 px above searching).
+void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(
+        createItunesArtworkDialogWindow(engine, QUrl::fromLocalFile(savedCover(dir)).toString(), &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QVERIFY(QTest::qWaitForWindowExposed(qobject_cast<QQuickWindow *>(root.get())));
+    QObject *dialog = qvariant_cast<QObject *>(root->property("dialog"));
+    QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    QVERIFY(dialog != nullptr && bridge != nullptr);
+    bridge->setProperty("itunesArtworkLoading", true);
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("Searching iTunes…"));
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    auto *dialogWindow = qobject_cast<QQuickWindow *>(dialog);
+    QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
+    QQuickItem *preview = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkCurrentPreviewButton"));
+    QQuickItem *message = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkPlaceholderMessage"));
+    QQuickItem *heading = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkFailureHeading"));
+    QQuickItem *results = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkResultsView"));
+    QVERIFY(preview != nullptr && message != nullptr && heading != nullptr && results != nullptr);
+    const auto baselineOf = [](QQuickItem *label) { return sceneRectOf(label).top() + label->baselineOffset(); };
+    QTRY_VERIFY(message->isVisible() && message->width() > 0 && popupsSettled());
+    QVERIFY(finishIncubation(engine));
+    QVERIFY(dialogWindow->grabWindow().width() > 0);
+    const qreal previewX = sceneRectOf(preview).left();
+    const qreal baseline = baselineOf(message);
+
+    bridge->setProperty("itunesArtworkLoading", false);
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
+    QVERIFY(dialogWindow->grabWindow().width() > 0);
+    QCOMPARE(sceneRectOf(preview).left(), previewX);
+    QTRY_COMPARE(baselineOf(message), baseline);
+
+    bridge->setProperty("itunesArtworkErrorText", QStringLiteral("Connection refused"));
+    bridge->setProperty("itunesArtworkFailed", true);
+    QTRY_VERIFY(heading->isVisible());
+    QVERIFY(dialogWindow->grabWindow().width() > 0);
+    QCOMPARE(sceneRectOf(preview).left(), previewX);
+    QTRY_VERIFY2(qAbs(baselineOf(heading) - baseline) <= 1.0,
+                 qPrintable(QStringLiteral("heading %1, searching %2").arg(baselineOf(heading)).arg(baseline)));
+
+    bridge->setProperty("itunesArtworkFailed", false);
+    bridge->setProperty("itunesArtworkErrorText", QString());
+    for (const int count : {2, 7}) {
+        bridge->setProperty("itunesArtworkResults", itunesArtworkFixture(dir, count));
+        QTRY_COMPARE(results->property("count").toInt(), count);
+        QVERIFY(finishIncubation(engine));
+        QTRY_VERIFY(!visibleItemsNamed(results, QStringLiteral("itunesArtworkResultRow")).isEmpty());
+        QVERIFY(dialogWindow->grabWindow().width() > 0);
+        if (count == 7) {
+            QTRY_VERIFY(results->property("contentHeight").toReal() > results->height() + 0.5);
+        }
+        QCOMPARE(sceneRectOf(preview).left(), previewX);
+        for (QQuickItem *row : visibleItemsNamed(results, QStringLiteral("itunesArtworkResultRow"))) {
+            QQuickItem *rowPreview = itemNamed(row, QStringLiteral("itunesArtworkPreviewButton"));
+            QQuickItem *apply = itemNamed(row, QStringLiteral("itunesArtworkApplyButton"));
+            QVERIFY(rowPreview != nullptr && apply != nullptr);
+            QTRY_COMPARE(sceneRectOf(rowPreview).left(), previewX);
+            // Clear of the scroll bar's 8 px lane.
+            QVERIFY(sceneRectOf(apply).right() <= sceneRectOf(results).right() - 8);
+        }
+    }
 }
 
 namespace {
@@ -3032,7 +3114,6 @@ void AlbumArtSmokeTest::itunesArtworkListIsAsTallAsItsRows() {
                      qPrintable(where));
         }
         QTRY_COMPARE(view->property("contentHeight").toReal() > view->height() + 0.5, count > 5);
-        QTRY_COMPARE(view->property("scrollbarLane").toReal() > 0, count > 5);
     }
 }
 

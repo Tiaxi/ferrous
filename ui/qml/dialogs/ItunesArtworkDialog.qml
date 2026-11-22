@@ -540,25 +540,18 @@ Components.DialogWindow {
                         : root.imageDetailsText(root.currentArtworkInfo))
             }
 
-            // Where the results' Preview is, before Apply and clear of the
-            // scrollbar lane, while it searches and once it has rows, so
-            // nothing moves as they arrive. With no rows to line up with,
-            // when it found nothing or failed, on the content's right
-            // inset, as Close under it (rather than hang on the absent
-            // column, 117 px short of Close).
+            // In the column of the results' Preview, before Apply's, whether
+            // it has rows, searches, found nothing or failed: a button that
+            // stays where it is as the search ends (with no rows it went to
+            // the content's edge, 109 px, in one frame).
             Button {
                 id: currentArtworkPreviewButton
                 objectName: "itunesArtworkCurrentPreviewButton"
-                readonly property bool inResultsColumn: itunesArtworkResultsView.count > 0
-                    || root.uiBridge.itunesArtworkLoading === true
                 // No Alt shortcut: the rows repeat Preview and Apply, which would
                 // each take another letter, and a hidden button has none, so
                 // Apply's measure would differ from the rows' by the mnemonic.
                 Kirigami.MnemonicData.enabled: false
-                x: currentArtworkPreviewButton.inResultsColumn
-                    ? parent.width - 1 - itunesArtworkResultsView.scrollbarLane - root.sideInset
-                        - applyMetrics.implicitWidth - root.actionSpacing - width
-                    : parent.width - width
+                x: parent.width - 1 - root.sideInset - applyMetrics.implicitWidth - root.actionSpacing - width
                 y: Math.round((parent.height - height) / 2)
                 flat: true
                 display: AbstractButton.TextBesideIcon
@@ -612,9 +605,6 @@ Components.DialogWindow {
             ListView {
                 id: itunesArtworkResultsView
                 objectName: "itunesArtworkResultsView"
-                // The lane the rows leave for the scrollbar, when it shows.
-                readonly property real scrollbarLane: itunesArtworkScrollBar.visible
-                    ? itunesArtworkScrollBar.lane : 0
                 anchors.fill: parent
                 anchors.margins: 1
                 clip: true
@@ -669,11 +659,14 @@ Components.DialogWindow {
                             ? root.uiPalette.negative : root.uiPalette.textSecondary
                     }
 
-                    // Preview, then Apply, the row's main action, at its end.
+                    // Preview, then Apply, the row's main action, at its end:
+                    // on the rows' inset, which holds the scroll bar's lane
+                    // whether the bar shows or not, so a sixth result moves
+                    // no column.
                     Row {
                         id: suggestionActions
                         objectName: "itunesArtworkResultActions"
-                        x: parent.width - itunesArtworkResultsView.scrollbarLane - root.sideInset - width
+                        x: parent.width - root.sideInset - width
                         y: Math.round((parent.height - height) / 2)
                         spacing: root.actionSpacing
 
@@ -724,11 +717,13 @@ Components.DialogWindow {
             }
 
             // Searching, or nothing found: what the search says, a little
-            // above the middle of where the results would be, with a busy
-            // indicator above it while it searches. Quiet, as the queue's
-            // empty state: the base font, with no glyph, for finding nothing
-            // is a routine outcome; searching is in the secondary colour,
-            // what it found in the text's. A search that failed says so in a
+            // above the middle of where the results would be, under a slot
+            // with the busy indicator while it searches. The slot stays, so
+            // the first line keeps its baseline as the search ends, and the
+            // lines after it grow downwards. Quiet, as the queue's empty
+            // state: the base font, with no glyph, for finding nothing is a
+            // routine outcome; searching is in the secondary colour, what it
+            // found in the text's. A search that failed says so in a
             // semibold heading, with the system's words under it in the
             // secondary colour (otherwise it read as finding nothing),
             // and a warning glyph in the spinner's place. Built from its
@@ -740,41 +735,51 @@ Components.DialogWindow {
                 objectName: "itunesArtworkPlaceholder"
                 readonly property bool searching: root.uiBridge.itunesArtworkLoading === true
                 readonly property bool failed: !placeholder.searching && root.uiBridge.itunesArtworkFailed === true
-                anchors.centerIn: parent
+                // The slot and one line: what is placed, whatever follows
+                // the line (centred whole, finding nothing was 22 px above
+                // searching, and the failure's heading 11 px).
+                readonly property real firstLineBottom: glyphSlot.Layout.preferredHeight + placeholder.spacing
+                    + lineMetrics.implicitHeight
+                anchors.horizontalCenter: parent.horizontalCenter
                 // 3 grid units above the middle, room permitting.
-                anchors.verticalCenterOffset: -Math.min(3 * Kirigami.Units.gridUnit,
-                    Math.max(0, (parent.height - placeholder.height) / 2))
+                y: Math.round(Math.max(0, Math.min(parent.height - placeholder.height,
+                    (parent.height - placeholder.firstLineBottom) / 2 - 3 * Kirigami.Units.gridUnit)))
                 width: Math.min(parent.width - 4 * Kirigami.Units.gridUnit, root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 24))
                 spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                 visible: itunesArtworkResultsView.count === 0
                     && (placeholder.searching || placeholderMessage.text.length > 0)
 
-                // The style's spinner, 32 px with the default font and
-                // larger with a larger one, as the text under it (a fixed
-                // 32 px stood over 24 pt text): the state's one glyph.
-                BusyIndicator {
-                    objectName: "itunesArtworkBusyIndicator"
+                // The state's one glyph, or none: 32 px with the default
+                // font and larger with a larger one, as the text under it (a
+                // fixed 32 px stood over 24 pt text).
+                Item {
+                    id: glyphSlot
+                    objectName: "itunesArtworkGlyphSlot"
                     Layout.alignment: Qt.AlignHCenter
                     Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
                     Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
-                    running: placeholder.searching
-                    visible: running
-                }
 
-                // A failed search's glyph, in the spinner's place and size:
-                // the app's own warning mark, as the status bar and the
-                // queue draw it (Breeze's dialog-warning as a mask fills
-                // its "!", leaving a plain triangle).
-                Kirigami.Icon {
-                    objectName: "itunesArtworkFailureIcon"
-                    Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
-                    Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
-                    visible: placeholder.failed
-                    source: Qt.resolvedUrl("../assets/status-warning.svg")
-                    isMask: true
-                    color: root.uiPalette.textSecondary
-                    Accessible.ignored: true
+                    // The style's spinner.
+                    BusyIndicator {
+                        objectName: "itunesArtworkBusyIndicator"
+                        anchors.fill: parent
+                        running: placeholder.searching
+                        visible: running
+                    }
+
+                    // A failed search's glyph, in the spinner's place and
+                    // size: the app's own warning mark, as the status bar
+                    // and the queue draw it (Breeze's dialog-warning as a
+                    // mask fills its "!", leaving a plain triangle).
+                    Kirigami.Icon {
+                        objectName: "itunesArtworkFailureIcon"
+                        anchors.fill: parent
+                        visible: placeholder.failed
+                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        isMask: true
+                        color: root.uiPalette.textSecondary
+                        Accessible.ignored: true
+                    }
                 }
 
                 ColumnLayout {
