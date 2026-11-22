@@ -20,6 +20,9 @@ Components.CompactDialogWindow {
     // A start number's field fits four digits; its error wraps under it.
     readonly property real numberFieldWidth: root.uiPalette.gridUnit * 5
     readonly property real errorWidth: root.uiPalette.gridUnit * 14
+    // The room between the form's groups, 16 px with the default font,
+    // grows with it: at 24 pt, 16 px between 44 px lines merged them.
+    readonly property real groupSpacing: root.uiPalette.scaledSize(Kirigami.Units.largeSpacing * 2)
     // Breeze draws a check box's 16 px box in the middle of its 20 px
     // indicator, which leaves room for the focus frame: the check boxes,
     // box and text, move left by that room, so their boxes start where the
@@ -112,7 +115,7 @@ Components.CompactDialogWindow {
         }
     }
 
-    // One form in reading order, in three groups a FormGroupGap apart, the
+    // One form in reading order, in three groups a groupSpacing apart, the
     // form's own row spacing within them: the tracks' start and totals;
     // the discs' option, and the start and the reset at each disc that it
     // enables (the reset was in the last group, apart from the
@@ -162,6 +165,7 @@ Components.CompactDialogWindow {
 
         Components.FormGroupGap {
             uiPalette: root.uiPalette
+            implicitHeight: root.groupSpacing - 2 * rowSpacing
         }
 
         CheckBox {
@@ -206,6 +210,7 @@ Components.CompactDialogWindow {
 
         Components.FormGroupGap {
             uiPalette: root.uiPalette
+            implicitHeight: root.groupSpacing - 2 * rowSpacing
         }
 
         CheckBox {

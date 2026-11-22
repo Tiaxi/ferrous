@@ -35,7 +35,7 @@ Components.DialogWindow {
     // can't be; or why no new name could be worked out.
     function summarySentences() {
         if (root.errorText.length > 0) {
-            return [I18n.i18nc("@info", "The new names could not be worked out: %1", root.errorText)]
+            return [I18n.i18nc("@info", "The new names couldn’t be worked out: %1", root.errorText)]
         }
         const sentences = [I18n.i18ncp("@info", "%1 file will be renamed.", "%1 files will be renamed.",
             root.renameCount)]

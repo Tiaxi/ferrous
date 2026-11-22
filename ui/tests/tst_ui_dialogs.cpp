@@ -646,6 +646,9 @@ private slots:
     void editTagsDetailsFollowsItsFailure();
     void editTagsNumberRevertFollowsItsHeader_data();
     void editTagsNumberRevertFollowsItsHeader();
+    void editTagsWordsItsWarningsAlike();
+    void autoNumberGroupsStandApartAtAnyFont_data();
+    void autoNumberGroupsStandApartAtAnyFont();
     void editTagsRevertToolTipsStandAboveTheirGlyphs_data();
     void editTagsRevertToolTipsStandAboveTheirGlyphs();
     void dialogsShareOneLook();
@@ -4671,13 +4674,12 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
     QVERIFY(waitForDialogWindow(confirm));
     QQuickItem *lost = visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDetails"));
     QVERIFY(lost != nullptr);
-    QCOMPARE(lost->property("text").toString(), QStringLiteral("If you discard them, the changes are lost."));
+    QCOMPARE(lost->property("text").toString(), QStringLiteral("Discarded changes can’t be recovered."));
     const QVariant purpose = confirm->property("purpose");
     confirm->setProperty("purpose", QStringLiteral("quit"));
-    QCOMPARE(lost->property("text").toString(), QStringLiteral("If you discard them, the changes are lost."));
+    QCOMPARE(lost->property("text").toString(), QStringLiteral("Discarded changes can’t be recovered."));
     confirm->setProperty("purpose", QStringLiteral("reload"));
-    QCOMPARE(lost->property("text").toString(),
-             QStringLiteral("If you reload, the changes are lost."));
+    QCOMPARE(lost->property("text").toString(), QStringLiteral("Discarded changes can’t be recovered."));
     confirm->setProperty("purpose", purpose);
     click(windowOf(confirm), visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDiscardButton")));
     QTRY_VERIFY(!tags->isVisible());
@@ -4898,7 +4900,8 @@ void UiDialogsTest::checkAutoNumberIsOneFormInReadingOrder(DialogsWindow &main) 
     const QStringList groupStarts{QStringLiteral("autoNumberWriteDiscCheck"),
                                   QStringLiteral("autoNumberResetOnFolderCheck")};
     const qreal rowSpacing = evaluate(dialog, QStringLiteral("Kirigami.Units.smallSpacing")).toReal();
-    const qreal groupSpacing = evaluate(dialog, QStringLiteral("Kirigami.Units.largeSpacing * 2")).toReal();
+    const qreal groupSpacing =
+        evaluate(dialog, QStringLiteral("uiPalette.scaledSize(Kirigami.Units.largeSpacing * 2)")).toReal();
     QVERIFY(rowSpacing > 0 && groupSpacing > rowSpacing);
     qreal bottom = -1;
     QQuickItem *form = visibleNamed(numbers, QStringLiteral("autoNumberForm"));
@@ -6248,6 +6251,65 @@ void UiDialogsTest::editTagsNumberRevertFollowsItsHeader() {
         QVERIFY2(drawn(number).first >= dots + 1, qPrintable(describeItem(number)));
     }
     QVERIFY(marks > 0);
+    QVERIFY(closeTagEditor(main));
+}
+
+// Edit Tags' warnings take one form of the contractions, as its reasons a
+// file couldn't be saved do: what discarding loses, named noun first
+// ("If you discard them, the changes are lost." had the pronoun before
+// its noun), and why a preview of new names failed.
+void UiDialogsTest::editTagsWordsItsWarningsAlike() {
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QObject *confirm = object(main.window, QStringLiteral("tagEditorCloseConfirmDialog"));
+    QObject *preview = object(main.window, QStringLiteral("renamePreviewDialog"));
+    QVERIFY(confirm != nullptr && preview != nullptr);
+    QObject *details = confirm->findChild<QObject *>(QStringLiteral("tagEditorCloseConfirmDetails"));
+    QVERIFY(details != nullptr);
+    for (const char *purpose : {"close", "quit", "reload"}) {
+        confirm->setProperty("purpose", QString::fromLatin1(purpose));
+        QCOMPARE(details->property("text").toString(), QStringLiteral("Discarded changes can’t be recovered."));
+    }
+    preview->setProperty("errorText", QStringLiteral("no such folder"));
+    QCOMPARE(evaluate(preview, QStringLiteral("summarySentences()[0]")).toString(),
+             QStringLiteral("The new names couldn’t be worked out: no such folder"));
+}
+
+void UiDialogsTest::autoNumberGroupsStandApartAtAnyFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<qreal>("gap");
+    QTest::newRow("10 pt") << 10.0 << 16.0;
+    QTest::newRow("24 pt") << 24.0 << 38.0;
+}
+
+// The room between Auto Number's groups grows with the font, 16 px at
+// 10 pt (it stayed 16 px between 44 px lines at 24 pt, and the groups
+// nearly merged), and the dialog stays within a 1000 px screen's height.
+void UiDialogsTest::autoNumberGroupsStandApartAtAnyFont() {
+    QFETCH(qreal, pointSize);
+    QFETCH(qreal, gap);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(1600, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QVERIFY(openTagEditor(main, tagRows(4)) != nullptr);
+    QObject *dialog = object(main.window, QStringLiteral("autoNumberDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *numbers = windowOf(dialog);
+    const auto rectOf = [&](const char *name) {
+        QQuickItem *item = visibleNamed(numbers, QString::fromLatin1(name));
+        return item != nullptr ? sceneRect(item) : QRectF();
+    };
+    QTRY_VERIFY(!layoutPendingUnder(numbers->contentItem()));
+    for (const auto &[above, below] : {std::pair{"autoNumberWriteTotalsCheck", "autoNumberWriteDiscCheck"},
+                                       std::pair{"autoNumberResetOnDiscCheck", "autoNumberResetOnFolderCheck"}}) {
+        const qreal between = rectOf(below).top() - rectOf(above).bottom();
+        QVERIFY2(between >= gap - 0.01 && between < gap + 1,
+                 qPrintable(QStringLiteral("%1: %2 px, not %3").arg(QLatin1String(below)).arg(between).arg(gap)));
+    }
+    QVERIFY2(numbers->height() <= 1000, qPrintable(QString::number(numbers->height())));
+    QVERIFY(reject(dialog));
     QVERIFY(closeTagEditor(main));
 }
 

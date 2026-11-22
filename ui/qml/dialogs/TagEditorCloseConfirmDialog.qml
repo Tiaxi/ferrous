@@ -102,12 +102,11 @@ Components.CompactDialogWindow {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
-        // Only what Discard loses, before closing as before quitting: the
-        // question says what follows, and Save is its own button (the body
-        // read the buttons out again).
+        // Only what Discard loses, before closing, quitting or reloading:
+        // the question says what follows, and Save is its own button (the
+        // body read the buttons out again). The noun comes first ("If you
+        // discard them, the changes are lost." had the pronoun before it).
         textFormat: Text.PlainText
-        text: root.forReload
-            ? I18n.i18nc("@info", "If you reload, the changes are lost.")
-            : I18n.i18nc("@info", "If you discard them, the changes are lost.")
+        text: I18n.i18nc("@info", "Discarded changes can’t be recovered.")
     }
 }
