@@ -496,7 +496,7 @@ ApplicationWindow {
     // art is available" under "Current album art").
     QQuickItem *currentDetails = visibleItemNamed(dialogWindow, QStringLiteral("itunesArtworkCurrentDetails"));
     QVERIFY(currentDetails != nullptr);
-    QCOMPARE(currentDetails->property("text").toString(), QStringLiteral("This track has none."));
+    QCOMPARE(currentDetails->property("text").toString(), QStringLiteral("This track has no album art."));
     // Nor does a quick second click on Apply: the window hides at once.
     QQuickItem *apply = visibleItemNamed(dialogWindow, QStringLiteral("itunesArtworkApplyButton"));
     QVERIFY(apply != nullptr);

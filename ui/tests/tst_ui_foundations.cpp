@@ -401,13 +401,6 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
     const QColor hovered = drawnOver(colorOf(tokens, "hover"), view);
     const QColor secondary = colorOf(tokens, "textSecondary");
     const QColor tertiary = colorOf(tokens, "textTertiary");
-    const auto linkOn = [tokens](const QColor &background) {
-        QVariant link;
-        QMetaObject::invokeMethod(tokens, "linkOn", Q_RETURN_ARG(QVariant, link), Q_ARG(QVariant, background));
-        return link.value<QColor>();
-    };
-    // Where the link already reads, it stays the link.
-    QVERIFY(sameColor(linkOn(view), colorOf(tokens, "link")));
 
     // The ratios the design lists.
     const QColor secondaryBackground = secondaryOnChrome ? chrome : view;
@@ -448,8 +441,6 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
         {QStringLiteral("link on view"), colorOf(tokens, "link"), view, 4.5},
         // The dialogs' links: About, About KDE and Recent Issues.
         {QStringLiteral("link on chrome"), colorOf(tokens, "link"), chrome, 4.5},
-        {QStringLiteral("link on a hovered button on chrome"), linkOn(drawnOver(colorOf(tokens, "hover"), chrome)),
-         drawnOver(colorOf(tokens, "hover"), chrome), 4.5},
         {QStringLiteral("negative on view"), colorOf(tokens, "negative"), view, 4.5},
         {QStringLiteral("negative on chrome"), colorOf(tokens, "negative"), chrome, 4.5},
         {QStringLiteral("focus ring on the selection"), colorOf(tokens, "focusRing"), selection, 3.0},

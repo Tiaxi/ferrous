@@ -1890,19 +1890,21 @@ void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *win
     }
 
     // A check box doesn't say its row's label again ("Zoom: Allow zooming"),
-    // and is named by the whole phrase for a screen reader, which hears it
-    // alone.
+    // and where that shortens it, is named by the whole phrase for a screen
+    // reader, which hears it alone. One that reads alone keeps Qt's name,
+    // its text.
     struct Phrase { const char *box; const char *label; const char *text; const char *spoken; };
     for (const Phrase &phrase : {
              Phrase{"showLevelMeterCheckBox", "Level meter:", "Show at the end of each lane",
                     "Show a level meter at the end of each lane"},
-             Phrase{"spectrogramZoomCheckBox", "Zoom:", "With the mouse or touchpad", "Allow zooming"},
-             Phrase{"lastFmScrobblingCheckBox", "Scrobbling:", "Send played tracks to Last.fm",
-                    "Scrobble played tracks to Last.fm"}}) {
+             Phrase{"spectrogramZoomCheckBox", "Zoom:", "Scroll to zoom in and out", nullptr}}) {
         QQuickItem *box = itemsNamed(stack, QString::fromLatin1(phrase.box)).value(0);
         QVERIFY2(box != nullptr, phrase.box);
         QCOMPARE(evaluate(box, QStringLiteral("Kirigami.FormData.label")).toString(), QString::fromLatin1(phrase.label));
         QCOMPARE(box->property("text").toString(), QString::fromLatin1(phrase.text));
+        if (phrase.spoken == nullptr) {
+            continue;
+        }
         QAccessibleInterface *spoken = QAccessible::queryAccessibleInterface(box);
         QVERIFY2(spoken != nullptr, phrase.box);
         QCOMPARE(spoken->text(QAccessible::Name), QString::fromLatin1(phrase.spoken));

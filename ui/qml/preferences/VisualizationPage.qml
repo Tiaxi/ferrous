@@ -223,11 +223,9 @@ Preferences.PreferencesPage {
         id: zoomCheckBox
         objectName: "spectrogramZoomCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Zoom:")
-        // The wheel or two fingers zoom and the middle button moves the
-        // zoomed view, which the help says ("Zoom: Allow zooming" said
-        // itself twice).
-        text: I18n.i18nc("@option:check after the label Zoom", "With the mouse or touchpad")
-        Accessible.name: I18n.i18nc("@option:check accessible name", "Allow zooming")
+        // What it turns on ("Zoom: Allow zooming" said itself twice); the
+        // help has the rest.
+        text: I18n.i18nc("@option:check", "Scroll to zoom in and out")
         checked: root.settings.value("spectrogramZoomEnabled")
         onToggled: root.settings.setValue("spectrogramZoomEnabled", checked)
     }
@@ -237,8 +235,8 @@ Preferences.PreferencesPage {
         uiPalette: root.uiPalette
         indent: zoomCheckBox.contentItem.x
         text: root.resetZoomShortcut.length > 0
-            ? I18n.i18nc("@info %1 is the shortcut of View › Reset Zoom", "Scroll to zoom in or out, and drag with the middle button to move a zoomed waveform or centered spectrogram. %1 resets the zoom.", root.resetZoomShortcut)
-            : I18n.i18nc("@info", "Scroll to zoom in or out, and drag with the middle button to move a zoomed waveform or centered spectrogram.")
+            ? I18n.i18nc("@info %1 is the shortcut of View › Reset Zoom", "Drag with the middle button to move a zoomed waveform or centered spectrogram. %1 resets the zoom.", root.resetZoomShortcut)
+            : I18n.i18nc("@info", "Drag with the middle button to move a zoomed waveform or centered spectrogram.")
     }
 
     CheckBox {

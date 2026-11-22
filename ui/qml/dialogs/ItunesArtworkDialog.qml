@@ -547,7 +547,7 @@ Components.DialogWindow {
                 // Under the lead, which has said what it is: neither line
                 // says it again.
                 details: (root.currentArtworkSource || "").length === 0
-                    ? I18n.i18nc("@info after the title Current album art", "This track has none.")
+                    ? I18n.i18nc("@info after the title Current album art", "This track has no album art.")
                     : (Object.keys(root.currentArtworkInfo || {}).length === 0
                         ? I18n.i18nc("@info after the title Current album art", "Image details aren’t available.")
                         : root.imageDetailsText(root.currentArtworkInfo))
