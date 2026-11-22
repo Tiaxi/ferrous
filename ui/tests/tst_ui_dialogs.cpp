@@ -22,6 +22,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QQmlIncubationController>
 #include <QQmlContext>
 #include <QQmlExpression>
 #include <QQmlProperty>
@@ -443,8 +444,15 @@ QQuickWindow *openTagEditor(DialogsWindow &main, const QByteArray &rows) {
     return windowOf(dialog);
 }
 
-// Closes Edit Tags, edits and all, and waits until it hides.
+// Closes Edit Tags, edits and all, once the table has made the rows it
+// makes ahead of the view, and waits until it hides. (Closing empties the
+// table, and Qt warns as that cancels a row still being made: at 24 pt,
+// with rows tall enough to leave some to the view's cache.)
 bool closeTagEditor(DialogsWindow &main) {
+    QQmlIncubationController *incubation = main.engine.incubationController();
+    if (incubation != nullptr && !QTest::qWaitFor([incubation]() { return incubation->incubatingObjectCount() == 0; })) {
+        return false;
+    }
     main.editor.close();
     QObject *dialog = object(main.window, QStringLiteral("tagEditorDialog"));
     return QTest::qWaitFor([&]() { return !dialog->property("visible").toBool(); });
@@ -677,6 +685,8 @@ private slots:
     void editTagsWrapsChangesOfOnlyTheRowsInView();
     void editTagsGivesTheTagsRoomToTitleAndFileName_data();
     void editTagsGivesTheTagsRoomToTitleAndFileName();
+    void editTagsFileNameWrapsBeforeItIsCut_data();
+    void editTagsFileNameWrapsBeforeItIsCut();
     void editTagsPinsWhatIdentifiesARowAsItScrolls_data();
     void editTagsPinsWhatIdentifiesARowAsItScrolls();
     void editTagsTitleMeetsTheEdgeUnderAWideScrollBar();
@@ -5346,16 +5356,19 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
                                 .horizontalAdvance(QStringLiteral("Modified")),
                      qPrintable(at + describeColumns()));
         }
-        // The long file name and folder elide at the end, keeping the track
-        // number and the title, with the whole in a tooltip.
+        // The long file name wraps to a second line, and past it, as the
+        // folder, elides at the end, keeping the track number and the
+        // title, with the whole in a tooltip.
         QQuickItem *fileName = cellOf(QStringLiteral("fileName"));
         QQuickItem *folder = cellOf(QStringLiteral("directory"));
         QVERIFY(fileName != nullptr && folder != nullptr);
         QCOMPARE(fileName->property("elide").toInt(), int(Qt::ElideRight));
         QCOMPARE(folder->property("elide").toInt(), int(Qt::ElideRight));
-        QTRY_VERIFY2(fileName->property("truncated").toBool(), qPrintable(at + describeColumns()));
+        QTRY_VERIFY2(fileName->property("lineCount").toInt() == 2, qPrintable(at + describeColumns()));
         QCOMPARE(fileName->property("toolTipText").toString(),
-                 QStringLiteral("01 - A Track Title Long Enough To Be Cut Short Somewhere.flac"));
+                 fileName->property("truncated").toBool()
+                     ? QStringLiteral("01 - A Track Title Long Enough To Be Cut Short Somewhere.flac")
+                     : QString());
         if (folder->property("truncated").toBool()) {
             QVERIFY(folder->property("toolTipText").toString().startsWith(QStringLiteral("/fixture/")));
         }
@@ -5846,6 +5859,12 @@ void UiDialogsTest::editTagsShowsEachChangeWhole() {
         QQuickItem *row = rowAt(index);
         return row != nullptr ? row->height() : -1.0;
     };
+    // A row's height without changes: a line's, or its file name's as it
+    // wraps.
+    const auto unchangedHeightOf = [&](int index) {
+        QQuickItem *name = cellAt(index, QStringLiteral("fileName"));
+        return name != nullptr ? std::max(rowHeight, name->height()) : -1.0;
+    };
     // Where the first line of a cell's text is drawn, to its baseline.
     const auto firstBaseline = [](QQuickItem *cell) { return sceneRect(cell).top() + cell->baselineOffset(); };
     // Whether the change in the row's cell of `key` reads whole, in view.
@@ -5951,8 +5970,10 @@ void UiDialogsTest::editTagsShowsEachChangeWhole() {
             if (!cell->property("text").toString().isEmpty()) {
                 QVERIFY2(std::abs(firstBaseline(cell) - firstBaseline(titled)) <= 1.0, qPrintable(at));
             }
-            if (key != QStringLiteral("title") && key != QStringLiteral("discNo")
-                && !(i == 2 && key == QStringLiteral("album"))) {
+            if (key == QStringLiteral("fileName")) {
+                QVERIFY2(cell->property("lineCount").toInt() <= 2, qPrintable(at));
+            } else if (key != QStringLiteral("title") && key != QStringLiteral("discNo")
+                       && !(i == 2 && key == QStringLiteral("album"))) {
                 QCOMPARE(cell->property("lineCount").toInt(), 1);
             }
         }
@@ -6002,14 +6023,14 @@ void UiDialogsTest::editTagsShowsEachChangeWhole() {
         // The field's Revert: that row's title as its file has it.
         main.editor.revertBulkField(QStringLiteral("title"));
         QTRY_COMPARE(cellAt(index, QStringLiteral("title"))->property("text").toString(), QStringLiteral("Brief Signal"));
-        QTRY_COMPARE(heightOf(index), rowHeight);
+        QTRY_COMPARE(heightOf(index), unchangedHeightOf(index));
     }
 
-    // And the columns': every row one line again.
+    // And the columns': every row one line again, or its file name's two.
     main.editor.revertField(QStringLiteral("title"));
     main.editor.revertField(QStringLiteral("album"));
     for (int i = 0; i < retitledBatch().size(); ++i) {
-        QTRY_COMPARE(heightOf(i), rowHeight);
+        QTRY_COMPARE(heightOf(i), unchangedHeightOf(i));
         QCOMPARE(cellAt(i, QStringLiteral("title"))->property("text").toString(), QStringLiteral("Brief Signal"));
     }
     QVERIFY2(placed() == loaded, "the revert moved a column");
@@ -6116,6 +6137,131 @@ void UiDialogsTest::editTagsGivesTheTagsRoomToTitleAndFileName() {
         for (QQuickItem *cell : cellsOf(QStringLiteral("fileName"))) {
             QVERIFY2(!cell->property("truncated").toBool(), qPrintable(describeItem(cell) + describeColumns()));
         }
+    }
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsFileNameWrapsBeforeItIsCut_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000;
+    QTest::newRow("10 pt, 1600 px") << 10.0 << 1600;
+    QTest::newRow("24 pt, 1000 px") << 24.0 << 1000;
+    QTest::newRow("24 pt, 1600 px") << 24.0 << 1600;
+}
+
+// A file name too long for its column wraps to a second line before it is
+// cut, and its row grows by it as by a wrapped change: at 1000 px the
+// batch's first name read "01 - Overture for Strings and a ..." beside a
+// title that had made the row two lines tall. A name that fits keeps one
+// line and its row's height; one still too long for two lines is cut at
+// its end, whole in its tooltip.
+void UiDialogsTest::editTagsFileNameWrapsBeforeItIsCut() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QList<QStringList> files;
+    for (const auto &[fileName, title] : retitledBatch()) {
+        files.push_back({fileName, QStringLiteral("Brief Signal"), QStringLiteral("Orchid Static"),
+                         QStringLiteral("Loose Ends")});
+    }
+    const QString unbroken = QStringLiteral("13-") + QString(QLatin1Char('x')).repeated(160) + QStringLiteral(".flac");
+    files.push_back({unbroken, QStringLiteral("Brief Signal"), QStringLiteral("Orchid Static"),
+                     QStringLiteral("Loose Ends")});
+    QQuickWindow *tags = openTagEditor(main, tagRowsWith(files));
+    QVERIFY(tags != nullptr);
+    tags->resize(width, tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), qreal(width));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    QObject *dialog = object(main.window, QStringLiteral("tagEditorDialog"));
+    const qreal rowHeight = dialog->property("tableRowHeight").toReal();
+    const auto rowAt = [&](int index) -> QQuickItem * {
+        evaluate(table, QStringLiteral("positionViewAtIndex(%1, ListView.Contain)").arg(index));
+        if (!QTest::qWaitFor([&]() { return !layoutPendingUnder(table); })) {
+            return nullptr;
+        }
+        for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
+            if (row->isVisible() && row->property("index").toInt() == index) {
+                return row;
+            }
+        }
+        return nullptr;
+    };
+    const auto cellOf = [](QQuickItem *row, const QString &key) {
+        return itemNamed(row, QStringLiteral("tagEditorCell_") + key);
+    };
+    // Each name: two lines at most, as many as it needs, in a row as tall
+    // as its tallest cell; cut only past two, with its tooltip.
+    bool retitled = false;
+    const auto checkNames = [&]() {
+        for (int index = 0; index < files.size(); ++index) {
+            QQuickItem *row = rowAt(index);
+            QVERIFY(row != nullptr);
+            QQuickItem *name = cellOf(row, QStringLiteral("fileName"));
+            QVERIFY(name != nullptr);
+            const QString at = QStringLiteral("row %1: ").arg(index) + describeItem(name);
+            const qreal room = name->width() - name->property("leftPadding").toReal()
+                - name->property("rightPadding").toReal();
+            const qreal needs = QFontMetricsF(name->property("font").value<QFont>()).horizontalAdvance(files.at(index).at(0));
+            const int lines = name->property("lineCount").toInt();
+            QCOMPARE(name->property("text").toString(), files.at(index).at(0));
+            // (Within a pixel of its room, the layout may go either way.)
+            QVERIFY2(std::abs(needs - room) < 1 || lines == (needs <= room ? 1 : 2), qPrintable(at));
+            QVERIFY2(name->property("contentHeight").toReal() <= name->height() - name->property("topPadding").toReal() + 0.5,
+                     qPrintable(at));
+            QVERIFY2(name->height() <= row->height() + 0.5, qPrintable(at + describeItem(row)));
+            qreal tallest = rowHeight;
+            for (const QString &key : {QStringLiteral("trackNo"), QStringLiteral("fileName"), QStringLiteral("title"),
+                                       QStringLiteral("artist"), QStringLiteral("album")}) {
+                QQuickItem *cell = cellOf(row, key);
+                if (cell != nullptr && cell->isVisible()
+                    && sceneRect(cell).left() + cell->property("leftPadding").toReal() + 1 < sceneRect(table).right()) {
+                    tallest = std::max(tallest, cell->height());
+                }
+            }
+            QVERIFY2(std::abs(row->height() - tallest) <= 0.5, qPrintable(at + describeItem(row)));
+            if (index == files.size() - 1) {
+                QVERIFY2(name->property("truncated").toBool(), qPrintable(at));
+                QCOMPARE(name->property("toolTipText").toString(), unbroken);
+            } else if (lines == 1 && !retitled) {
+                QVERIFY2(row->height() == rowHeight, qPrintable(at + describeItem(row)));
+            }
+            if (!name->property("truncated").toBool()) {
+                QVERIFY2(name->property("toolTipText").toString().isEmpty(), qPrintable(at));
+            }
+            // It starts on the row's first line, as the other cells do.
+            QQuickItem *title = cellOf(row, QStringLiteral("title"));
+            QVERIFY2(std::abs(sceneRect(name).top() + name->baselineOffset()
+                              - (sceneRect(title).top() + title->baselineOffset())) <= 1.0,
+                     qPrintable(at + describeItem(title)));
+        }
+    };
+    checkNames();
+    QVERIFY(!QTest::currentTestFailed());
+
+    // Retitled, the batch's first name takes the second line its title
+    // made: "01 - Overture for Strings and a / Distant Thunderstorm.flac".
+    for (int i = 0; i < retitledBatch().size(); ++i) {
+        main.editor.setCell(i, QStringLiteral("title"), retitledBatch().at(i).second);
+    }
+    main.editor.notifyRowMutation();
+    retitled = true;
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    checkNames();
+    QVERIFY(!QTest::currentTestFailed());
+    if (pointSize <= 10 && width <= 1000) {
+        QQuickItem *row = rowAt(0);
+        QVERIFY(row != nullptr);
+        QQuickItem *name = cellOf(row, QStringLiteral("fileName"));
+        QQuickItem *title = cellOf(row, QStringLiteral("title"));
+        QCOMPARE(name->property("lineCount").toInt(), 2);
+        QVERIFY2(!name->property("truncated").toBool(), qPrintable(describeItem(name)));
+        QCOMPARE(title->property("lineCount").toInt(), 2);
+        QCOMPARE(row->height(), title->height());
     }
     QVERIFY(closeTagEditor(main));
 }
@@ -6236,11 +6382,14 @@ void UiDialogsTest::editTagsPinsWhatIdentifiesARowAsItScrolls() {
     QCOMPARE(hex(beforeSeam), hex(afterSeam));
     QVERIFY(hex(beforeSeam) != hex(palette->property("view").value<QColor>()));
     // The new title, wrapped, is under the pinned columns now: out of
-    // view, it leaves its row one line tall.
+    // view, it leaves its row one line tall, or as tall as its file name
+    // as that wraps.
     QQuickItem *title = itemNamed(firstRow(), QStringLiteral("tagEditorCell_title"));
     QVERIFY(title != nullptr && title->property("lineCount").toInt() > 1);
     if (sceneRect(title).right() - title->property("rightPadding").toReal() <= pinnedRight + 1) {
-        QCOMPARE(firstRow()->height(), dialog->property("tableRowHeight").toReal());
+        QQuickItem *name = itemNamed(firstRow(), QStringLiteral("tagEditorCell_fileName"));
+        QVERIFY(name != nullptr);
+        QCOMPARE(firstRow()->height(), std::max(dialog->property("tableRowHeight").toReal(), name->height()));
     }
     QVERIFY(closeTagEditor(main));
 }

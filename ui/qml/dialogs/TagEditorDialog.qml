@@ -381,6 +381,8 @@ Components.DialogWindow {
     // The room above a cell's first line and under its last, in a row as
     // tall as one line as in one that wraps, so that all start on one line.
     readonly property real cellLineInset: (root.tableRowHeight - columnValueMetrics.height) / 2
+    // The lines a file name takes before it is cut.
+    readonly property int fileNameLineLimit: 2
 
     FontMetrics {
         id: columnHeaderMetrics
@@ -1795,13 +1797,22 @@ Components.DialogWindow {
                                 // and the row grows by it. Its height is the
                                 // committed value's, also while another is
                                 // typed over it, which elides within that.
+                                // A file name wraps to two lines before it
+                                // is cut, and grows its row alike (cut on
+                                // one line, it lost the name's end beside a
+                                // title that had made the row two lines).
                                 readonly property bool changed: tableRow.changedFields.indexOf(modelData.key) >= 0
+                                readonly property bool wrapsName: modelData.key === "fileName"
+                                readonly property bool wraps: tableCell.changed || tableCell.wrapsName
+                                // Only a name wider than its cell can wrap.
+                                readonly property bool nameWraps: tableCell.wrapsName
+                                    && tableCell.implicitWidth > tableCell.width
                                 readonly property string committedText: root.cellText(modelData.key, tableRow)
                                 height: committedValue.item !== null && committedValue.item.lineCount > 1
                                     ? Math.ceil(committedValue.item.contentHeight + 2 * root.cellLineInset)
                                     : root.tableRowHeight
                                 visible: width > 0
-                                topPadding: tableCell.changed ? root.cellLineInset : 0
+                                topPadding: tableCell.wraps ? root.cellLineInset : 0
                                 leftPadding: modelData.number ? root.numberLeadingRoom : Kirigami.Units.largeSpacing
                                 rightPadding: modelData.number ? root.columnRevertRoom
                                     : Kirigami.Units.largeSpacing
@@ -1818,8 +1829,9 @@ Components.DialogWindow {
                                     : (modelData.number
                                         ? root.uiPalette.textTertiaryOn(tableRow.selected, rowHover.hovered)
                                         : root.uiPalette.text)
-                                verticalAlignment: tableCell.changed ? Text.AlignTop : Text.AlignVCenter
-                                wrapMode: tableCell.changed ? Text.Wrap : Text.NoWrap
+                                verticalAlignment: tableCell.wraps ? Text.AlignTop : Text.AlignVCenter
+                                wrapMode: tableCell.wraps ? Text.Wrap : Text.NoWrap
+                                maximumLineCount: tableCell.wrapsName ? root.fileNameLineLimit : undefined
                                 horizontalAlignment: modelData.number ? Text.AlignRight : Text.AlignLeft
                                 // A file name or folder keeps its start: the
                                 // track number and title, or the folder's
@@ -1865,12 +1877,12 @@ Components.DialogWindow {
                                     }
                                 }
 
-                                // The committed change as it wraps, which is
-                                // how tall the cell is: only a changed cell
-                                // in a row that has items has one.
+                                // The committed change or the file name as
+                                // it wraps, which is how tall the cell is:
+                                // only those cells have one.
                                 Loader {
                                     id: committedValue
-                                    active: tableCell.changed
+                                    active: tableCell.changed || tableCell.nameWraps
                                     visible: false
                                     sourceComponent: Label {
                                         width: tableCell.width - tableCell.leftPadding - tableCell.rightPadding
@@ -1878,6 +1890,7 @@ Components.DialogWindow {
                                         text: tableCell.committedText
                                         font: tableCell.font
                                         wrapMode: Text.Wrap
+                                        maximumLineCount: tableCell.maximumLineCount
                                     }
                                 }
                                 // The # cell of a row with unsaved edits
