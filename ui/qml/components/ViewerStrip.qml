@@ -19,7 +19,7 @@ import "../logic/FormatUtils.js" as FormatUtils
 // screen (UiPalette.fullscreenTextScale), as the album art's details under
 // it are (at the window's size they were a second scale); on the
 // right, 8 px in from the edge, flat 24 px tool buttons: a zoom readout and
-// Reset while the view is zoomed, the new issues while there are any, the
+// Reset's glyph while the view is zoomed, the new issues while there are any, the
 // viewer's own buttons (declared inside the strip, from the left, each taking
 // the strip's `plotColors`) and Close: the album art's info toggle, or the
 // visualization's mode switch, which with its zoom moves here from the

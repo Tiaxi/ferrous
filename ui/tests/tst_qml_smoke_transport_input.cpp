@@ -52,6 +52,7 @@ private slots:
     void viewerControlsStayWhileOneHasFocus();
     void fullscreenViewersCanKeepTheirTitleStripHidden();
     void fullscreenVisualizationStripHoldsTheModeSwitch();
+    void viewerResetIsTheSameGlyphWindowedAndInTheStrip();
     void menuMnemonicsOpenTheMenusAndShowShortcuts();
 };
 
@@ -3403,7 +3404,11 @@ void TransportInputSmokeTest::fullscreenVisualizationStripHoldsTheModeSwitch() {
     };
     // Where they show is the point, not after how long: at once.
     for (const auto &[button, text] : tips) {
-        QVERIFY(evaluateOn(button, QStringLiteral("ToolTip.delay = 0")).isValid());
+        // In the button's own file, whose imports have ToolTip: the file
+        // that declares a button need not.
+        QQuickItem *inButton = itemNamed(button, QStringLiteral("viewerToolButtonIcon"));
+        QVERIFY(inButton != nullptr);
+        QVERIFY(evaluateOn(inButton, QStringLiteral("root.ToolTip.delay = 0")).isValid());
     }
     for (const auto &[button, text] : tips) {
         QTest::mouseMove(fullscreen, centerInWindow(button));
@@ -4342,6 +4347,85 @@ void TransportInputSmokeTest::panShowsAClosedHandInThePaneAndTheViewers() {
         window->requestActivate();
         QVERIFY(QTest::qWaitForWindowActive(window));
         QTRY_VERIFY2(waveform->isVisible(), where.constData());
+    }
+}
+
+// Reset is one control in the viewers, windowed and in the title strip: the
+// zoom-original glyph in a button as wide as Close, named and explained by
+// its tooltip (the strip said "Reset" in a word beside the window's glyph).
+void TransportInputSmokeTest::viewerResetIsTheSameGlyphWindowedAndInTheStrip() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *art = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge && viewer && spectrogram && art);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    QAccessible::setActive(true);
+    const QScopeGuard stopAccessibility([]() { QAccessible::setActive(false); });
+
+    for (const bool albumArt : {false, true}) {
+        for (const int fullscreenMode : {0, 1}) {
+            const QString where = QStringLiteral("album art %1, fullscreen %2").arg(albumArt).arg(fullscreenMode);
+            bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+            QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "openAlbumArtViewer" : "openSpectrogramViewer"));
+            QQuickItem *view = albumArt ? art : spectrogram;
+            QQuickWindow *host = window;
+            if (fullscreenMode == 1) {
+                QTRY_VERIFY(view->window() != nullptr && view->window() != window);
+                host = view->window();
+                QVERIFY(QTest::qWaitForWindowExposed(host));
+            }
+            if (albumArt) {
+                art->setProperty("zoom", 2.0);
+            } else {
+                QTRY_VERIFY(spectrogram->property("viewerMode").toBool());
+                spectrogram->setProperty("_viewerZoomLevel", 2.0);
+            }
+            const QString closeName = albumArt
+                ? (fullscreenMode ? QStringLiteral("albumArtFullscreenCloseButton")
+                                  : QStringLiteral("albumArtPopupCloseButton"))
+                : (fullscreenMode ? QStringLiteral("spectrogramFullscreenCloseButton")
+                                  : QStringLiteral("spectrogramPopupCloseButton"));
+            QQuickItem *reset = nullptr;
+            QTRY_VERIFY2((reset = visibleItemNamed(host, QStringLiteral("viewerResetButton"))) != nullptr
+                             || (reset = visibleItemNamed(host, QStringLiteral("plotZoomResetButton"))) != nullptr,
+                         qPrintable(where));
+            QQuickItem *close = visibleItemNamed(host, closeName);
+            QVERIFY2(close != nullptr, qPrintable(where));
+            QVERIFY2(reset->property("display").toInt() == 0, qPrintable(where)); // AbstractButton.IconOnly
+            QCOMPARE(QQmlProperty(reset, QStringLiteral("icon.name")).read().toString(),
+                     QStringLiteral("zoom-original"));
+            QCOMPARE(reset->size(), close->size());
+            const QString tip = albumArt
+                ? (fullscreenMode ? QStringLiteral("Fit the Image to the Screen")
+                                  : QStringLiteral("Fit the Image to the Window"))
+                : QStringLiteral("Reset Zoom");
+            QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(reset);
+            QVERIFY(accessible != nullptr);
+            QCOMPARE(accessible->text(QAccessible::Name), tip);
+            // The tooltip is the button's toolTipText, or its name without one.
+            const QVariant toolTip = reset->property("toolTipText");
+            QCOMPARE(toolTip.isValid() ? toolTip.toString() : reset->property("text").toString(), tip);
+
+            if (albumArt) {
+                art->setProperty("zoom", 1.0);
+            } else {
+                spectrogram->setProperty("_viewerZoomLevel", 0.0);
+            }
+            QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "closeAlbumArtViewer" : "closeSpectrogramViewer"));
+            QTRY_VERIFY(!viewer->property(albumArt ? "albumArtViewerOpen" : "spectrogramViewerOpen").toBool());
+            window->requestActivate();
+            QVERIFY(QTest::qWaitForWindowActive(window));
+        }
     }
 }
 

@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
-import QtQuick.Controls 2.15
 import FerrousUi 1.0
 import "." as Components
 import "../logic/ColorUtils.js" as ColorUtils
 
 // The controls of a viewer, as flat 24 px tool buttons 4 px apart on the
 // window's colours, or with `plotColors` on the plot's: a quiet zoom readout
-// and Reset while the view is zoomed, a button to Recent Issues while there
+// and Reset's glyph while the view is zoomed, a button to Recent Issues while there
 // are new ones (the viewer covers the status bar), the viewer's own buttons
 // (declared inside, which take `plotColors` themselves) and Close.
 //
@@ -62,19 +61,21 @@ Item {
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         zoomLevel: root.zoomLevel
-        rightPadding: 4
+        rightPadding: 0
     }
 
+    // The plot's Reset Zoom (PlotZoomPlate), its glyph as far from the
+    // readout (as the word "Reset" in the strip, it was another control
+    // than the glyph in the window).
     Components.ViewerToolButton {
         id: resetButton
         objectName: "viewerResetButton"
-        x: readout.x + (root.readoutShown ? readout.width + root.spacing : 0)
+        x: readout.x + (root.readoutShown ? readout.width + 2 : 0)
         visible: root.resetShown
         uiPalette: root.uiPalette
         plotColors: root.plotColors
-        display: AbstractButton.TextOnly
-        text: I18n.i18nc("@action:button reset the view's zoom", "Reset")
-        toolTipText: root.resetToolTip
+        text: root.resetToolTip
+        icon.name: "zoom-original"
         onClicked: root.resetView()
     }
 
