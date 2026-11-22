@@ -149,6 +149,8 @@ Item {
     // Whether the centered view stays where a middle-drag moved it rather
     // than following the playhead.
     readonly property bool detached: sharedViewFollow.detached
+    // Whether autoscroll moves it.
+    readonly property bool autoscrolling: sharedViewFollow.autoscrolling
     // The view follows the playhead again, at once.
     function followPlayhead() {
         sharedViewFollow.followPlayhead()

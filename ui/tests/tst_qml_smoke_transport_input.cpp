@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "QmlSmokeTest.h"
+#include "TestMainWindow.h"
 
 // Playback controls, keyboard and wheel input, and the fullscreen viewers.
 class TransportInputSmokeTest : public QmlSmokeTest {
@@ -42,6 +43,10 @@ private slots:
     void mainPaneCornerShowsAndHidesAsOneRow();
     void resetZoomResetsOnlyTheShownPlotsZoom();
     void resetZoomIsOffAtAShortTracksStretchedDefault();
+    void movedViewSaysSoInTheCorner_data();
+    void movedViewSaysSoInTheCorner();
+    void movedViewSaysSoInTheViewers_data();
+    void movedViewSaysSoInTheViewers();
     void followPlayheadBringsTheShownPlotBack();
     void seekBarMarksTheZoomedViewOfTheShownPlot();
     void fTypesInTheLibraryAndFollowsThePlayheadElsewhere();
@@ -3674,6 +3679,311 @@ SpectrogramViewFollow *spectrogramFollow(QQuickWindow *window) {
 }
 
 } // namespace
+
+namespace {
+
+// An item's box in its window: a Text's boundingRect is its text's alone,
+// without the padding.
+QRectF boxOf(const QQuickItem *item) {
+    return item->mapRectToScene(QRectF(QPointF(), item->size()));
+}
+
+// A middle click on `plot` at `x`, which starts autoscroll.
+void middleClickPlot(QQuickItem *plot, double x) {
+    const QPointF at(x, 20.0);
+    QMouseEvent press(QEvent::MouseButtonPress, at, plot->mapToScene(at), plot->mapToScene(at),
+                      Qt::MiddleButton, Qt::MiddleButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(plot, &press);
+    QMouseEvent release(QEvent::MouseButtonRelease, at, plot->mapToScene(at), plot->mapToScene(at),
+                        Qt::MiddleButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(plot, &release);
+}
+
+} // namespace
+
+void TransportInputSmokeTest::movedViewSaysSoInTheCorner_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// A view the user moved looked like one that follows. The zoom's plate
+// says "Not following", and the corner's row stays at rest for as long.
+// The plate grows to the left; Reset and the switch keep their places.
+// Never while autoscroll runs, whose cursor alone says so (#655).
+void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *followAction = window->findChild<QObject *>(QStringLiteral("followPlayheadAction"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("visualizationSurface"));
+    QVERIFY(bridge && viewer && followAction && spectrogramSurface && waveformSurface && layer && surface);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("spectrogramDisplayMode", 1);
+    viewer->setProperty("visualizationMode", mode);
+    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+
+    QQuickItem *plot = waveform;
+    if (mode == 0) {
+        auto *pane = qobject_cast<SpectrogramItem *>(
+            itemNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem")));
+        QVERIFY(pane != nullptr);
+        constexpr int bins = 16;
+        constexpr int columns = 10'000;
+        pane->feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns, 0, columns,
+                                   48'000, 1'024, true, true, 1, false);
+        QTRY_VERIFY(pane->precomputedReady());
+        plot = pane;
+    }
+    const auto zoom = [&](double level) {
+        if (mode == 0) {
+            spectrogramSurface->setProperty("_widgetZoomLevel", level);
+        } else {
+            waveform->setZoomLevel(level);
+        }
+    };
+    const auto moveView = [&]() {
+        if (mode == 1) {
+            return detachWaveform(waveform);
+        }
+        SpectrogramViewFollow *follow = spectrogramFollow(window);
+        if (follow == nullptr) {
+            return false;
+        }
+        follow->detach(30.0, 0.5);
+        return follow->detached();
+    };
+    const auto moved = [surface]() { return surface->property("viewMoved").toBool(); };
+
+    QQuickItem *plate = itemNamed(layer, QStringLiteral("plotZoomPlate"));
+    QQuickItem *readout = itemNamed(layer, QStringLiteral("plotZoomReadout"));
+    QQuickItem *reset = itemNamed(layer, QStringLiteral("plotZoomResetButton"));
+    QQuickItem *notice = itemNamed(layer, QStringLiteral("plotFollowNotice"));
+    QQuickItem *modeSwitch = itemNamed(layer, QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(plate && readout && reset && notice && modeSwitch);
+    const QPoint away(8, window->height() - 8);
+    QTest::mouseMove(window, away);
+    zoom(4.0);
+
+    // Following: no row at rest, and nothing that says so.
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+    QTRY_COMPARE(plate->opacity(), 0.0);
+    QVERIFY(!notice->isVisible() && !moved());
+    window->grabWindow();
+    const QRectF resetAt = sceneRectOf(reset);
+    const QRectF switchAt = sceneRectOf(modeSwitch);
+    const QRectF plateAt = sceneRectOf(plate);
+
+    // Moved, the pointer still away: the whole row, with the notice in the
+    // readout's ink, grown to the left.
+    QVERIFY(moveView());
+    QTRY_VERIFY(moved() && notice->isVisible());
+    QTRY_COMPARE(plate->opacity(), 1.0);
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    window->grabWindow();
+    QQuickItem *text = itemNamed(notice, QStringLiteral("followNoticeText"));
+    QVERIFY(text != nullptr);
+    QCOMPARE(text->property("text").toString(), QStringLiteral("Not following"));
+    QCOMPARE(text->property("color").value<QColor>(), readout->property("color").value<QColor>());
+    QTRY_VERIFY(sceneRectOf(plate).left() < plateAt.left());
+    QCOMPARE(sceneRectOf(plate).right(), plateAt.right());
+    QCOMPARE(sceneRectOf(reset), resetAt);
+    QCOMPARE(sceneRectOf(modeSwitch), switchAt);
+    QVERIFY(sceneRectOf(notice).right() <= sceneRectOf(readout).left());
+    QVERIFY(sceneRectOf(plate).contains(sceneRectOf(notice)));
+    QQuickItem *divider = itemNamed(notice, QStringLiteral("followNoticeDivider"));
+    QVERIFY(divider != nullptr && divider->isVisible());
+    QCOMPARE(sceneRectOf(divider).left() - boxOf(text).right(), 6.0);
+    QVERIFY(surface->property("reservedCorner").toSizeF().width() > plate->width() + modeSwitch->width());
+
+    // Its tooltip names the way back and that action's shortcut as it is.
+    QObject *toolTip = notice->findChild<QObject *>(QStringLiteral("followNoticeToolTip"));
+    QVERIFY(toolTip != nullptr);
+    QCOMPARE(toolTip->property("message").toString(),
+             QStringLiteral("Follow Playhead (F) brings the view back to the playhead"));
+    followAction->setProperty("defaultKeyBindings", QStringList{QStringLiteral("J")});
+    QTRY_COMPARE(toolTip->property("message").toString(),
+                 QStringLiteral("Follow Playhead (J) brings the view back to the playhead"));
+    followAction->setProperty("defaultKeyBindings", QStringList());
+    QTRY_COMPARE(toolTip->property("message").toString(),
+                 QStringLiteral("Follow Playhead in the View menu brings the view back to the playhead"));
+    followAction->setProperty("defaultKeyBindings", QStringList{QStringLiteral("F")});
+    QTest::mouseMove(window, centerInWindow(text) + QPoint(1, 0));
+    QTest::mouseMove(window, centerInWindow(text));
+    QTRY_VERIFY(toolTip->property("visible").toBool());
+    QTest::mouseMove(window, away);
+
+    // Followed again with the pointer away, the notice fades out with the
+    // row rather than leave it to fade alone, and is gone with it.
+    QVERIFY(QMetaObject::invokeMethod(surface, "followPlayhead"));
+    QVERIFY(!moved());
+    if (plate->opacity() > 0.0) {
+        QVERIFY(notice->isVisible());
+    }
+    QTRY_COMPARE(plate->opacity(), 0.0);
+    QTRY_VERIFY(!notice->isVisible());
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+
+    // With the pointer on the pane, it goes at once.
+    QVERIFY(moveView());
+    QTest::mouseMove(window, layer->mapToScene(QPointF(layer->width() / 2, layer->height() / 2)).toPoint());
+    QTRY_VERIFY(notice->isVisible());
+    QVERIFY(QMetaObject::invokeMethod(surface, "followPlayhead"));
+    QVERIFY(!notice->isVisible());
+
+    // Autoscroll from a following view: never moved while it runs, not for
+    // one binding's evaluation, nor as Follow Playhead ends it.
+    QSignalSpy movedChanges(surface, SIGNAL(viewMovedChanged()));
+    middleClickPlot(plot, plot->width() / 2);
+    QVERIFY(surface->property("autoscrolling").toBool());
+    QVERIFY(surface->property("detached").toBool());
+    QVERIFY(!moved() && !notice->isVisible());
+    QVERIFY(QMetaObject::invokeMethod(surface, "followPlayhead"));
+    QTRY_VERIFY(!surface->property("autoscrolling").toBool());
+    QCOMPARE(movedChanges.count(), 0);
+    // The lane that autoscrolled stops as it is told, queued.
+    QTRY_VERIFY(QGuiApplication::overrideCursor() == nullptr);
+    // Stopped on the moved view, it may say so; from a moved view it goes.
+    middleClickPlot(plot, plot->width() / 2);
+    QVERIFY(surface->property("autoscrolling").toBool());
+    QVERIFY(!notice->isVisible());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!surface->property("autoscrolling").toBool());
+    QTRY_VERIFY(moved() && notice->isVisible());
+    middleClickPlot(plot, plot->width() / 2);
+    QVERIFY(surface->property("autoscrolling").toBool());
+    QVERIFY(!moved() && !notice->isVisible());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(notice->isVisible());
+
+    if (mode == 0) {
+        // At the default zoom: the notice alone, the switch where it was.
+        zoom(1.0);
+        QVERIFY(moveView());
+        QTest::mouseMove(window, away);
+        QTRY_VERIFY(notice->isVisible() && plate->isVisible());
+        QVERIFY(!readout->isVisible() && !reset->isVisible());
+        QVERIFY(!divider->isVisible());
+        QTRY_COMPARE(plate->opacity(), 1.0);
+        QCOMPARE(sceneRectOf(modeSwitch), switchAt);
+        window->grabWindow();
+        QCOMPARE(sceneRectOf(plate).right() + 4, sceneRectOf(modeSwitch).left());
+        // 6 px of plate either side of the text.
+        QCOMPARE(boxOf(text).left() + text->property("leftPadding").toDouble() - sceneRectOf(plate).left(), 6.0);
+        QCOMPARE(sceneRectOf(plate).right() - boxOf(text).right(), 6.0);
+    }
+
+    // Reset Zoom follows again.
+    QVERIFY(QMetaObject::invokeMethod(surface, "resetZoom"));
+    QTRY_VERIFY(!moved() && !notice->isVisible());
+}
+
+void TransportInputSmokeTest::movedViewSaysSoInTheViewers_data() {
+    QTest::addColumn<int>("fullscreenMode");
+    QTest::addColumn<bool>("strip");
+    QTest::addColumn<int>("points");
+    QTest::newRow("in the window") << 0 << true << 10;
+    QTest::newRow("whole screen") << 1 << true << 10;
+    QTest::newRow("whole screen without the strip") << 1 << false << 10;
+    // The offscreen screen is 800 px wide: the strip has no room for all.
+    QTest::newRow("whole screen, 24 pt") << 1 << true << 24;
+}
+
+// The viewers say the same in their own controls, which grow to the left
+// and hide as they did (#467).
+void TransportInputSmokeTest::movedViewSaysSoInTheViewers() {
+    QFETCH(int, fullscreenMode);
+    QFETCH(bool, strip);
+    QFETCH(int, points);
+    const ScopedApplicationFont font(points);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("visualizationSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge && viewer && autoHide && surface && waveformSurface);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+    bridge->setProperty("showFullscreenTitleStrip", strip);
+    bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+    autoHide->setProperty("hideDelay", 600'000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QQuickWindow *host = window;
+    if (fullscreenMode == 1) {
+        host = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+        QVERIFY(host != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(host));
+    }
+    QTRY_COMPARE(waveform->window(), host);
+    // Laid out there, for the drag and the click to have a width.
+    QTRY_COMPARE(waveform->width(), waveformSurface->property("plotWidth").toDouble());
+    QTRY_VERIFY(waveform->width() > 100.0);
+    QQuickItem *controls = nullptr;
+    QTRY_VERIFY((controls = visibleItemNamed(host, fullscreenMode == 0
+                     ? QStringLiteral("spectrogramPopupControls")
+                     : strip ? QStringLiteral("spectrogramFullscreenStrip")
+                             : QStringLiteral("spectrogramFullscreenCorner"))) != nullptr);
+    QQuickItem *notice = itemNamed(controls, QStringLiteral("viewerFollowNotice"));
+    QQuickItem *reset = itemNamed(controls, QStringLiteral("viewerResetButton"));
+    QQuickItem *readout = itemNamed(controls, QStringLiteral("viewerZoomReadout"));
+    QVERIFY(notice && reset && readout);
+    waveform->setZoomLevel(4.0);
+    QTRY_VERIFY(reset->isVisible());
+    QTRY_VERIFY(sceneRectOf(reset).right() <= host->width());
+    host->grabWindow();
+    QVERIFY(!notice->isVisible());
+    const QRectF resetAt = sceneRectOf(reset);
+
+    QVERIFY(detachWaveform(waveform));
+    QTRY_VERIFY(notice->isVisible());
+    QCOMPARE(sceneRectOf(reset), resetAt);
+    QVERIFY(sceneRectOf(notice).right() <= sceneRectOf(readout).left());
+    QVERIFY(sceneRectOf(controls).contains(sceneRectOf(notice)));
+    QCOMPARE(itemNamed(notice, QStringLiteral("followNoticeText"))->property("color").value<QColor>(),
+             readout->property("color").value<QColor>());
+
+    if (fullscreenMode == 1 && strip) {
+        // What the strip says of the track never runs under it.
+        host->grabWindow();
+        for (const char *name : {"viewerStripTitle", "viewerStripContext", "viewerStripTime"}) {
+            QQuickItem *label = itemNamed(controls, QString::fromLatin1(name));
+            QVERIFY(label != nullptr);
+            if (label->isVisible()) {
+                QVERIFY2(boxOf(label).right() <= sceneRectOf(notice).left(), name);
+            }
+        }
+    }
+
+    middleClickPlot(waveform, waveform->width() / 2);
+    QVERIFY(waveform->property("autoscrolling").toBool());
+    QVERIFY(!notice->isVisible());
+    QTest::keyClick(host, Qt::Key_Escape);
+    QTRY_VERIFY(notice->isVisible());
+
+    // The controls still hide at rest with it.
+    autoHide->setProperty("hideDelay", 50);
+    QVERIFY(QMetaObject::invokeMethod(autoHide, "wake"));
+    QTRY_VERIFY(!notice->isVisible());
+    QVERIFY(surface->property("viewMoved").toBool());
+}
 
 // View › Follow Playhead (F) brings the shown plot back to the playhead,
 // playing or paused, in the main window and in both viewers. It is

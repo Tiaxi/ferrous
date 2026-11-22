@@ -6,7 +6,8 @@ import "." as Components
 import "../logic/ColorUtils.js" as ColorUtils
 
 // The controls of a viewer, as flat 24 px tool buttons 4 px apart on the
-// window's colours, or with `plotColors` on the plot's: a quiet zoom readout
+// window's colours, or with `plotColors` on the plot's: "Not following" while
+// the visualization's view is moved away from the playhead, a quiet zoom readout
 // and Reset's glyph while the view is zoomed, a button to Recent Issues while there
 // are new ones (the viewer covers the status bar), the viewer's own buttons
 // (declared inside, which take `plotColors` themselves) and Close.
@@ -24,6 +25,10 @@ Item {
     // The view's zoom, 1 at the default; Reset calls resetView.
     property real zoomLevel: 1.0
     property var resetView: null
+    // Whether the view does not follow the playhead, as the plot's zoom
+    // plate says, and Follow Playhead's shortcut for that.
+    property bool noticeShown: false
+    property string followShortcut: ""
     property string resetToolTip: I18n.i18nc("@info:tooltip", "Reset Zoom")
     property var errorController: null
     // The readout's size: the small font's, or a title strip's own.
@@ -58,12 +63,27 @@ Item {
                                    : viewerControlsRow.x + viewerControlsRow.implicitWidth
     implicitHeight: root.uiPalette.toolButtonSize
 
+    // First, so that it grows the controls to the left.
+    Components.FollowNotice {
+        id: notice
+        objectName: "viewerFollowNotice"
+        x: 0
+        visible: root.noticeShown
+        uiPalette: root.uiPalette
+        plotColors: root.plotColors
+        pointSize: root.readoutPointSize
+        shortcut: root.followShortcut
+        divided: root.readoutShown
+        inset: root._dividerInset
+    }
+
     // Quiet: only while the view is zoomed. On the album art viewer's
     // corner plate, 6 px in from its edge, as the plot's zoom readout is.
     Components.ZoomReadout {
         id: readout
         objectName: "viewerZoomReadout"
-        x: 0
+        // Its text 6 px from the notice's divider, as from a plate's edge.
+        x: root.noticeShown ? notice.implicitWidth + root.platePadding : 0
         leftPadding: 6 - root.platePadding
         visible: root.readoutShown
         uiPalette: root.uiPalette
@@ -88,12 +108,15 @@ Item {
         onClicked: root.resetView()
     }
 
-    // Where the zoom ends, and what follows it starts.
+    // Where the view's part, the notice and the zoom, ends, and what
+    // follows it starts.
     readonly property real _zoomEnd: root.resetShown ? resetButton.x + resetButton.width
-                                                     : readout.x + readout.width
-    readonly property bool _zoomDivided: root.dividers && root.readoutShown
+        : root.readoutShown ? readout.x + readout.width
+        : notice.implicitWidth
+    readonly property bool _viewShown: root.readoutShown || root.noticeShown
+    readonly property bool _zoomDivided: root.dividers && root._viewShown
     readonly property real _dividerInset: 6 - root.platePadding
-    readonly property real _afterZoom: !root.readoutShown ? 0
+    readonly property real _afterZoom: !root._viewShown ? 0
         : root._zoomEnd + root.spacing + (root._zoomDivided ? 1 + root.spacing : 0)
 
     Rectangle {

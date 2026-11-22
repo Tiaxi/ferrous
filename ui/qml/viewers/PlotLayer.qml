@@ -57,6 +57,13 @@ Item {
     // in the same order.
     property real zoomLevel: 1.0
     property var resetZoom: null
+    // Whether the user moved the view away from the playhead and it stays
+    // there: the zoom's plate then says so, also at the default zoom, and
+    // the corner's row shows at rest too. Never while autoscroll runs
+    // (#655). Follow Playhead's shortcut is for its tooltip.
+    property bool viewMoved: false
+    property bool viewAutoscrolling: false
+    property string followShortcut: ""
     // Whether a viewer shows the mode switch and the zoom in its own
     // controls, on its corner plate or in its title strip: then they are
     // not on the plot, whose switch and zoom are the main pane's alone.
@@ -145,10 +152,25 @@ Item {
 
     // The corner is one row, which shows and hides together: the zoom's
     // plate and the mode switch, while the pointer is on the pane or
-    // keyboard focus is on either.
+    // keyboard focus is on either, and at rest while the view is moved.
     readonly property bool cornerWanted: root.controlsAutoHide || root.beforeAudio || root.paneHovered
         || root.hoveredLane >= 0 || modeSwitch.pointerHovered || modeSwitch.focusInside
         || zoomPlate.focusInside
+
+    // As a view follows again with nothing else showing the row, "Not
+    // following" fades out with it, rather than go and leave the row to
+    // fade without it. Autoscroll takes it at once.
+    property bool _noticeLeaving: false
+    onViewMovedChanged: root._noticeLeaving = !root.viewMoved && !root.viewAutoscrolling
+        && !root.cornerWanted && !root.controlsInViewer && modeSwitch.revealLevel > 0
+    onViewAutoscrollingChanged: {
+        if (root.viewAutoscrolling)
+            root._noticeLeaving = false
+    }
+    onCornerWantedChanged: {
+        if (root.cornerWanted)
+            root._noticeLeaving = false
+    }
 
     // The mode switch comes first in the Tab order, then each lane's Mute
     // and Solo. It shows while the pointer is over the pane or keyboard
@@ -168,7 +190,11 @@ Item {
         // Not in a viewer, which has it in its own controls. It comes back
         // to the pane at the level of those; hidden, it takes no pointer.
         visible: !root.controlsInViewer && (root.controlsVisible || root.controlsLevel > 0)
-        revealed: root.cornerWanted
+        revealed: root.cornerWanted || root.viewMoved
+        onRevealLevelChanged: {
+            if (modeSwitch.revealLevel <= 0)
+                root._noticeLeaving = false
+        }
         fadeLevel: root.controlsLevel
         plotColors: root.plotColors
         uiPalette: root.uiPalette
@@ -182,7 +208,8 @@ Item {
     // the switch (shown without it, it floated 68 px from the corner). At
     // rest the seek bar's band is the zoom's cue, and the wheel zooms with
     // the pointer on the pane, where the readout shows as it changes. It
-    // keeps its place and its Tab stop while it is hidden.
+    // keeps its place and its Tab stop while it is hidden. "Not following"
+    // grows it to the left, so Reset never moves from under the pointer.
     Components.PlotZoomPlate {
         id: zoomPlate
         z: 2
@@ -196,6 +223,8 @@ Item {
         uiPalette: root.uiPalette
         zoomLevel: root.zoomLevel
         resetView: root.resetZoom
+        noticeShown: root.viewMoved || root._noticeLeaving
+        followShortcut: root.followShortcut
         pointerActivity: root.pointerActivity
     }
 

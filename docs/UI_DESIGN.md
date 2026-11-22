@@ -205,7 +205,7 @@ The settled rules for presentation only. For internals, see [visualization archi
 - **Media surfaces are always dark.** The album art viewer draws the art on black, with its details in `mediaPlot`'s strip colour, in both themes. A white surround outshone the art.
 - **The plot's playhead is never amber.** Amber is a data colour in the colour map. The seek bar's playhead is the only amber playhead.
 - **One control surface per viewer.**
-  - The viewers' corner plate and title strip use the same buttons (`ViewerControls`) in one order: zoom and Reset's glyph, new issues, the viewer's own buttons, Close. The plot's own mode switch and zoom plate are the main pane's alone.
+  - The viewers' corner plate and title strip use the same buttons (`ViewerControls`) in one order: "Not following" (a moved view), zoom and Reset's glyph, new issues, the viewer's own buttons, Close. The plot's own mode switch and zoom plate are the main pane's alone: one row, which shows and hides together, and stays shown at rest only while the view is moved. What joins the row grows it to the left, so Reset and the switch never move from under the pointer.
   - In the window, they share one corner plate, divided by 1 px seams. Separate plates read as a row of stickers.
   - Over the whole screen, while the title strip is on, the strip holds them all, so no second cluster sits under it. With the strip turned off, the zoom and the modes are on a corner plate.
   - The strip is opaque, is drawn over the view, and never resizes the view.

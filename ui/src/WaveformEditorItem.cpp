@@ -1377,9 +1377,19 @@ void WaveformEditorItem::publishDetached() {
     // What moved the view, such as a zoom or a pan, moves the range in the
     // same frame.
     publishVisibleRange();
+    // Either side of detached, so that a view autoscroll moves is never
+    // told to be moved without it.
+    if (autoscrolling && !m_autoscrollingShown) {
+        m_autoscrollingShown = true;
+        emit autoscrollingChanged();
+    }
     if (m_detached != detached) {
         m_detached = detached;
         emit detachedChanged();
+    }
+    if (!autoscrolling && m_autoscrollingShown) {
+        m_autoscrollingShown = false;
+        emit autoscrollingChanged();
     }
     // A view brought back to the playhead, as by Follow Playhead, Reset
     // Zoom, a seek or a track change, ends autoscroll.

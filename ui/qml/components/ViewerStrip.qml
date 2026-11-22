@@ -49,6 +49,10 @@ Rectangle {
     // The view's zoom, 1 at the default; Reset calls resetView.
     property real zoomLevel: 1.0
     property var resetView: null
+    // Whether the view does not follow the playhead, and Follow Playhead's
+    // shortcut; see FollowNotice.
+    property bool noticeShown: false
+    property string followShortcut: ""
     property string resetToolTip: I18n.i18nc("@info:tooltip", "Reset Zoom")
     // The app's errors: new ones show as a button that opens Recent Issues,
     // as the viewer covers the status bar.
@@ -134,7 +138,9 @@ Rectangle {
 
     // Each text at its own width while they fit; short of room, the time
     // stays whole, the title keeps at least 60% of the rest, and the two
-    // others elide.
+    // others elide. Beside "Not following", which can leave the time too
+    // little room on a narrow screen with a large font, it is left out
+    // rather than run under the notice.
     Row {
         id: track
         objectName: "viewerStripTrack"
@@ -184,7 +190,7 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: root.timeText
-            visible: text.length > 0
+            visible: text.length > 0 && (!root.noticeShown || timeLabel.implicitWidth <= track.room)
             color: root.plotColors.plotTextSecondary
             font.pointSize: root.textPointSize
             font.features: root.uiPalette.tabularFigures
@@ -207,6 +213,8 @@ Rectangle {
         // small size it was 12 px in a 16 px strip).
         readoutPointSize: root.textPointSize
         resetView: root.resetView
+        noticeShown: root.noticeShown
+        followShortcut: root.followShortcut
         resetToolTip: root.resetToolTip
         errorController: root.errorController
         closeButtonName: root.closeButtonName
