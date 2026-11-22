@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The strike of paused scrobbling, over lastfm-paused.svg's letters: status-offline.svg's, from
+     corner to corner at 45 degrees, 2 px across each row (about 1.4 px thick), its edges through the
+     pixels' corners, so that at 1x each row has a whole pixel of it. A one-colour mask, drawn in
+     the text colour, which sets it apart from the letters. -->
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+<path fill="#000" d="M15 14 2 1 1 2 14 15Z"/>
+</svg>

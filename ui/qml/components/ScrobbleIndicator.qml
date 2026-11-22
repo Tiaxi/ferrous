@@ -53,8 +53,10 @@ import "../logic/KeyUtils.js" as KeyUtils
 // - Failed: "Scrobble failed" in the text colour and the glyph in the
 //   negative colour, without the bar: the status bar's one treatment of an
 //   error, as its new issues.
-// - Paused by the user: the glyph struck through, in the tertiary colour,
-//   without the bar.
+// - Paused by the user: the glyph struck through (#470), its letters in
+//   the tertiary colour and the strike over them in the text colour, in a
+//   clear casing, without the bar (in one colour the strike's clear space
+//   took so much of the letters that neither read at 1x).
 // - Otherwise (not eligible, skipped, signed out): nothing.
 // Clicking it pauses or resumes scrobbling; its menu has the settings.
 AbstractButton {
@@ -406,6 +408,18 @@ AbstractButton {
                     roundToIconSize: false
                     source: root.glyphSource
                     color: root.glyphColor
+                    isMask: true
+                }
+
+                // Paused: the strike, apart from the letters it crosses.
+                Kirigami.Icon {
+                    objectName: "scrobbleIndicatorStrike"
+                    visible: root.look === "paused"
+                    width: root.glyphSize
+                    height: width
+                    roundToIconSize: false
+                    source: Qt.resolvedUrl("../assets/lastfm-strike.svg")
+                    color: root.uiPalette.text
                     isMask: true
                 }
 

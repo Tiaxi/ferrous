@@ -550,6 +550,8 @@ private slots:
     void lastFmSlotCountsTheTimeLeftFromTheListenedTime();
     void lastFmSlotPausedLooksStruckThrough_data();
     void lastFmSlotPausedLooksStruckThrough();
+    void lastFmPausedKeepsBothLettersAndTheStrike_data();
+    void lastFmPausedKeepsBothLettersAndTheStrike();
     void lastFmSlotBarFillsItsTrough_data();
     void lastFmSlotBarFillsItsTrough();
     void lastFmSlotToolTipShowsOnKeyboardFocus();
@@ -3489,6 +3491,73 @@ void TransportStatusTest::lastFmSlotPausedLooksStruckThrough() {
     QVERIFY(paused[(side - 6) * side + side - 6]);
 }
 
+void TransportStatusTest::lastFmPausedKeepsBothLettersAndTheStrike_data() {
+    addThemeRows();
+}
+
+// Paused at 1x, with its strike (#470): both letters read under the strike,
+// which is a layer of its own in the text colour over the tertiary letters,
+// in a clear casing (in one colour, the strike and its clear space left
+// neither letter whole).
+void TransportStatusTest::lastFmPausedKeepsBothLettersAndTheStrike() {
+    QFETCH(bool, dark);
+    const auto coverage = [](const QString &name) {
+        QImageReader reader(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/") + name);
+        reader.setScaledSize(QSize(16, 16));
+        const QImage image = reader.read().convertToFormat(QImage::Format_ARGB32);
+        QList<double> covered(16 * 16, 0.0);
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                covered[y * 16 + x] = qAlpha(image.pixel(x, y)) / 255.0;
+            }
+        }
+        return covered;
+    };
+    const QList<double> whole = coverage(QStringLiteral("lastfm.svg"));
+    const QList<double> paused = coverage(QStringLiteral("lastfm-paused.svg"));
+    // Each letter keeps its ink but for the strike's casing: nearly all of
+    // it, and the pixels two from the strike's middle half or more.
+    for (const auto &[left, right] : {std::pair{1, 8}, std::pair{9, 15}}) {
+        double ink = 0;
+        double kept = 0;
+        for (int y = 0; y < 16; ++y) {
+            for (int x = left; x < right; ++x) {
+                const double before = whole[y * 16 + x];
+                const double after = paused[y * 16 + x];
+                if (std::abs(x - y) >= 2) {
+                    ink += before;
+                    kept += std::min(before, after);
+                }
+                if (std::abs(x - y) == 2 && before >= 0.9) {
+                    QVERIFY2(after >= 0.5, qPrintable(QStringLiteral("%1,%2 keeps %3").arg(x).arg(y).arg(after)));
+                }
+                if (x == y) {
+                    QVERIFY2(after <= 0.1, qPrintable(QStringLiteral("no casing at %1").arg(x)));
+                }
+            }
+        }
+        QVERIFY2(kept >= 0.9 * ink, qPrintable(QStringLiteral("%1 of %2 from column %3").arg(kept).arg(ink).arg(left)));
+    }
+
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QQuickItem *strike = harness.item(QStringLiteral("scrobbleIndicatorStrike"));
+    QQuickItem *glyph = harness.item(QStringLiteral("scrobbleIndicatorGlyph"));
+    QVERIFY(strike && glyph);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    QVERIFY(!strike->isVisible());
+    harness.bridge->setProperty("lastFmScrobblingPaused", true);
+    QTRY_VERIFY(strike->isVisible());
+    QCOMPARE(sceneRect(strike), sceneRect(glyph));
+    const QColor chrome = harness.token("chrome");
+    const QColor strikeColor = strike->property("color").value<QColor>();
+    const QColor letters = glyph->property("color").value<QColor>();
+    QVERIFY(sameColor(strikeColor, harness.token("text")));
+    QVERIFY(sameColor(letters, harness.token("textTertiary")));
+    QVERIFY2(contrastRatio(strikeColor, chrome) >= 1.5 * contrastRatio(letters, chrome),
+             qPrintable(describeContrast(QStringLiteral("strike"), strikeColor, chrome)));
+}
+
 void TransportStatusTest::lastFmSlotBarFillsItsTrough_data() {
     addThemeRows();
 }
@@ -4065,11 +4134,22 @@ void TransportStatusTest::lastFmGlyphsAreOneFamily() {
         }
         return covered;
     };
+    // Paused is two files, one glyph: its letters and the strike over them.
     const QStringList names{QStringLiteral("lastfm.svg"), QStringLiteral("lastfm-paused.svg"),
                             QStringLiteral("status-offline.svg")};
+    const auto glyphCoverage = [&coverage](const QString &name, int size) {
+        QList<double> covered = coverage(name, size);
+        if (name == QStringLiteral("lastfm-paused.svg")) {
+            const QList<double> strike = coverage(QStringLiteral("lastfm-strike.svg"), size);
+            for (qsizetype i = 0; i < std::min(covered.size(), strike.size()); ++i) {
+                covered[i] = std::max(covered[i], strike[i]);
+            }
+        }
+        return covered;
+    };
     QHash<QString, QList<double>> atOne;
     for (const QString &name : names) {
-        const QList<double> one = coverage(name, 16);
+        const QList<double> one = glyphCoverage(name, 16);
         QCOMPARE(one.size(), 16 * 16);
         atOne.insert(name, one);
         int whole = 0;
@@ -4097,7 +4177,7 @@ void TransportStatusTest::lastFmGlyphsAreOneFamily() {
                                 .arg(ink.top()).arg(ink.bottom())));
         // Sharp at 2x: the outline's edges still on whole pixels, so most
         // of its ink is whole.
-        const QList<double> two = coverage(name, 32);
+        const QList<double> two = glyphCoverage(name, 32);
         int wholeAtTwo = 0;
         int betweenAtTwo = 0;
         for (const double covered : two) {
@@ -4115,8 +4195,10 @@ void TransportStatusTest::lastFmGlyphsAreOneFamily() {
         }
     }
     // The strike of the other two: a whole pixel in each row along the
-    // diagonal, half a pixel on either side of it, then clear space, the
-    // same in both.
+    // diagonal, half a pixel on either side of it, the same in both; then
+    // clear space in offline's, while paused's is apart by its colour, and
+    // clear of the letters only under it and in a narrow casing.
+    atOne.insert(names[1], coverage(QStringLiteral("lastfm-strike.svg"), 16));
     for (const QString &name : {names[1], names[2]}) {
         const QList<double> struck = atOne.value(name);
         for (int i = 2; i <= 13; ++i) {
