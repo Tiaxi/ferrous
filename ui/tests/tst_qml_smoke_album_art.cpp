@@ -42,6 +42,8 @@ private slots:
     void itunesArtworkHoldsStillBetweenItsStates_data();
     void itunesArtworkHoldsStillBetweenItsStates();
     void itunesArtworkActionsFollowTheTextFont();
+    void itunesReplaceShowsWhatWasChosen_data();
+    void itunesReplaceShowsWhatWasChosen();
     void itunesArtworkCountLineHoldsAtLargeFonts();
     void itunesArtworkDialogOpensWithItsRowsWhole();
     void itunesArtworkListIsAsTallAsItsRows();
@@ -2378,7 +2380,7 @@ void applyItunesCandidateFromPreview(QQuickWindow *window, QObject *dialog, QObj
     // message, it showed one).
     {
         QQuickItem *message = visibleItemNamed(replaceQuestion(window), QStringLiteral("confirmDialogMessage"));
-        QQuickItem *details = visibleItemNamed(replaceQuestion(window), QStringLiteral("confirmDialogDetails"));
+        QQuickItem *details = visibleItemNamed(replaceQuestion(window), QStringLiteral("replaceCoverConsequence"));
         QVERIFY2(message != nullptr && details != nullptr, at.constData());
         const QString text = message->property("text").toString();
         QVERIFY2(text.startsWith(QStringLiteral("Replace the ")) && text.contains(QStringLiteral("album art")) && message->height() > 0,
@@ -2847,8 +2849,8 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             QTRY_VERIFY2(sceneRectOf(heading).bottom() <= sceneRectOf(message).top(), at.constData());
         }
         // A failed search has a warning glyph where the spinner is while
-        // searching: 32 px, a mask in the secondary colour, above the
-        // heading.
+        // searching: 32 px, a mask in the negative colour as every failure's
+        // glyph is, above the heading.
         QQuickItem *warning = itemNamed(content, QStringLiteral("itunesArtworkFailureIcon"));
         QVERIFY2(warning != nullptr, at.constData());
         QCOMPARE(warning->isVisible(), failed);
@@ -2859,7 +2861,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
                      qPrintable(warning->property("source").toString()));
             QVERIFY(warning->property("isMask").toBool());
             QCOMPARE(warning->property("color").value<QColor>().rgba(),
-                     palette->property("textSecondary").value<QColor>().rgba());
+                     palette->property("negative").value<QColor>().rgba());
             QTRY_COMPARE(sceneRectOf(warning).size(), QSizeF(32, 32));
             QCOMPARE(sceneRectOf(warning).top(), sceneRectOf(placeholder).top());
             QCOMPARE(sceneRectOf(warning).center().x(), sceneRectOf(placeholder).center().x());
@@ -4895,6 +4897,103 @@ void AlbumArtSmokeTest::albumArtStripSetsTheZoomOffAsItsPlateDoes() {
 
 std::unique_ptr<QmlSmokeTest> makeAlbumArtSmokeTest(const QString &userDirectoriesParent) {
     return std::make_unique<AlbumArtSmokeTest>(userDirectoriesParent);
+}
+
+void AlbumArtSmokeTest::itunesReplaceShowsWhatWasChosen_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Replace Album Art shows what was chosen, from the results and from a
+// preview: the suggestion's thumbnail, title and artist under the question,
+// from the row as it is, then the consequence and the warning on a line of
+// its own. The question named only the album, over the chosen row.
+void AlbumArtSmokeTest::itunesReplaceShowsWhatWasChosen() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
+    QVariantList rows = itunesArtworkFixture(dir, 3);
+    QCOMPARE(rows.size(), 3);
+    QVariantMap longTitled = rows.at(1).toMap();
+    longTitled.insert(QStringLiteral("albumTitle"),
+                      QStringLiteral("<b>Small Hours</b> (Twentieth Anniversary Deluxe Edition, Remastered from "
+                                     "the Original Tapes, with the Lost Evening Sessions)"));
+    rows[1] = longTitled;
+    ItunesWindow ui(coverUrl);
+    QVERIFY2(ui.loaded(), "Main.qml failed to show");
+    const QVariantMap target{
+        {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
+        {QStringLiteral("album"), QStringLiteral("Small Hours")},
+        {QStringLiteral("artist"), QStringLiteral("The Quiet Meridian")},
+        {QStringLiteral("coverPath"), coverUrl},
+    };
+    QVERIFY(openItunesArtworkDialog(ui.window, ui.dialog, ui.fake, rows, target));
+    QQuickWindow *question = replaceQuestion(ui.window);
+    QVERIFY(question != nullptr);
+    QObject *palette = qvariant_cast<QObject *>(ui.dialog->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    const auto checkShows = [&](int index) {
+        QTRY_VERIFY(question->property("opened").toBool());
+        QVERIFY(QTest::qWaitForWindowExposed(question));
+        const QVariantMap row = rows.at(index).toMap();
+        QQuickItem *message = visibleItemNamed(question, QStringLiteral("confirmDialogMessage"));
+        QQuickItem *thumbnail = visibleItemNamed(question, QStringLiteral("replaceCoverChosenThumbnail"));
+        QQuickItem *title = visibleItemNamed(question, QStringLiteral("replaceCoverChosenTitle"));
+        QQuickItem *artist = visibleItemNamed(question, QStringLiteral("replaceCoverChosenArtist"));
+        QQuickItem *consequence = visibleItemNamed(question, QStringLiteral("replaceCoverConsequence"));
+        QQuickItem *warning = visibleItemNamed(question, QStringLiteral("replaceCoverWarning"));
+        QVERIFY(message != nullptr && thumbnail != nullptr && title != nullptr && artist != nullptr
+                && consequence != nullptr && warning != nullptr);
+        QCOMPARE(thumbnail->property("source").toString(), row.value(QStringLiteral("previewSource")).toString());
+        // Drawn, not the placeholder.
+        QTRY_COMPARE(thumbnail->childItems().first()->property("status").toInt(), 1);
+        QTRY_COMPARE(thumbnail->width(), std::round(48 * std::max(1.0, pointSize / 10)));
+        QCOMPARE(thumbnail->height(), thumbnail->width());
+        QCOMPARE(title->property("text").toString(), row.value(QStringLiteral("albumTitle")).toString());
+        QCOMPARE(artist->property("text").toString(), row.value(QStringLiteral("artistName")).toString());
+        for (QQuickItem *line : {title, artist, consequence, warning}) {
+            QCOMPARE(line->property("textFormat").toInt(), int(Qt::PlainText));
+            QTRY_VERIFY2(!line->property("truncated").toBool() && sceneRectOf(line).right() <= question->width(),
+                         qPrintable(line->objectName()));
+        }
+        if (index == 1) {
+            QTRY_VERIFY(title->property("lineCount").toInt() > 1);
+        }
+        QTRY_VERIFY(sceneRectOf(message).bottom() < sceneRectOf(thumbnail).top());
+        QVERIFY(sceneRectOf(title).left() >= sceneRectOf(thumbnail).right() + 12 - 0.5);
+        QTRY_VERIFY(sceneRectOf(consequence).top()
+                    > std::max(sceneRectOf(thumbnail).bottom(), sceneRectOf(artist).bottom()));
+        QTRY_VERIFY(sceneRectOf(warning).top() > sceneRectOf(consequence).bottom());
+        QCOMPARE(sceneRectOf(warning).left(), sceneRectOf(consequence).left());
+        QCOMPARE(warning->property("color").value<QColor>().rgba(), palette->property("text").value<QColor>().rgba());
+        QCOMPARE(artist->property("color").value<QColor>().rgba(),
+                 palette->property("textSecondary").value<QColor>().rgba());
+        // The safe choice is still the default.
+        auto *cancel = qvariant_cast<QQuickItem *>(question->property("initialFocusItem"));
+        QVERIFY(cancel != nullptr);
+        QCOMPARE(cancel->objectName(), QStringLiteral("confirmDialogCancelButton"));
+        // Display only: nothing asked for, and nothing written.
+        QVERIFY(ui.fake->property("preparedItunesArtwork").toList().isEmpty());
+        QVERIFY(ui.applied().isEmpty());
+    };
+
+    QVERIFY(QMetaObject::invokeMethod(ui.dialog, "requestSuggestionApply", Q_ARG(QVariant, 1)));
+    checkShows(1);
+    QVERIFY(!QTest::currentTestFailed());
+    QVERIFY(QMetaObject::invokeMethod(question, "reject"));
+    QTRY_VERIFY(!question->isVisible());
+
+    // Apply iTunes Artwork, in a preview of another.
+    QVERIFY(QMetaObject::invokeMethod(ui.dialog, "requestSuggestionPreview", Q_ARG(QVariant, 2)));
+    QTRY_VERIFY(ui.dialog->property("previewCandidateReady").toBool());
+    QVERIFY(QMetaObject::invokeMethod(ui.dialog, "applyPreviewedSuggestion"));
+    checkShows(2);
+    QVERIFY(!QTest::currentTestFailed());
+    QVERIFY(QMetaObject::invokeMethod(question, "reject"));
+    QTRY_VERIFY(!question->isVisible());
 }
 
 #include "tst_qml_smoke_album_art.moc"

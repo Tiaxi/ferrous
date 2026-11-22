@@ -25,20 +25,36 @@ Preferences.PreferencesPage {
     // its height for Configure's.
     // Only a connected account has scrobbles to show.
     readonly property bool showsScrobbleProgress: root.authState === 2
-    // The account line already says when the build has no Last.fm.
+    // The first line already says when the build has no Last.fm.
     readonly property bool showsStatus: (root.uiBridge.lastFmStatusText || "").length > 0 && root.buildConfigured
     readonly property bool showsPending: (root.uiBridge.lastFmPendingScrobbleCount || 0) > 0
     readonly property bool showsDropped: (root.uiBridge.lastFmDroppedScrobbleCount || 0) > 0
 
     title: I18n.i18nc("@title preferences page", "Last.fm")
 
+    // Without Last.fm in the build, why, first: it was the Account line,
+    // under the setting it disables and a help about a rule the build
+    // hasn't.
+    Label {
+        objectName: "lastFmUnavailableLabel"
+        visible: !root.buildConfigured
+        Layout.fillWidth: true
+        Layout.preferredWidth: Math.min(implicitWidth, Kirigami.Units.gridUnit * 24)
+        Layout.maximumWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 24)
+        // 12 px to the setting, with the form's row spacing.
+        Layout.bottomMargin: Kirigami.Units.largeSpacing
+        wrapMode: Text.Wrap
+        textFormat: Text.PlainText
+        text: I18n.i18nc("@info", "Last.fm isn’t available in this build.")
+    }
+
     CheckBox {
         id: scrobblingCheckBox
         objectName: "lastFmScrobblingCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Scrobbling:")
         text: I18n.i18nc("@option:check", "Scrobble played tracks to Last.fm")
-        // A build without Last.fm can't send a scrobble, as the account's
-        // line says.
+        // A build without Last.fm can't send a scrobble, as the line above
+        // says.
         enabled: root.buildConfigured
         checked: root.settings.value("lastFmScrobblingEnabled")
         onToggled: root.settings.setValue("lastFmScrobblingEnabled", checked)
@@ -47,11 +63,9 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "lastFmScrobblingHelp"
         uiPalette: root.uiPalette
-        indent: scrobblingCheckBox.contentItem.x
-        // In a build without Last.fm it steps down with the setting, so the
-        // account's line, which says why, leads (in the secondary colour it
-        // outranked the disabled setting it explains).
-        color: root.buildConfigured ? root.uiPalette.textSecondary : root.uiPalette.textTertiary
+        checkBox: scrobblingCheckBox
+        // When the app would scrobble is nothing to a build that can't.
+        visible: root.buildConfigured
         // Without the status check box, it ends the scrobbling group.
         endsGroup: !root.showsScrobbleProgress
         text: I18n.i18nc("@info", "Tracks longer than 30 seconds are scrobbled when playback stops or the track "
@@ -72,7 +86,7 @@ Preferences.PreferencesPage {
     Components.FormGroupGap {
         objectName: "lastFmAccountGap"
         uiPalette: root.uiPalette
-        visible: root.showsScrobbleProgress
+        visible: root.showsScrobbleProgress && root.buildConfigured
     }
 
     // The line's measure grows with the font (it wrapped at 432 px at
@@ -80,19 +94,20 @@ Preferences.PreferencesPage {
     // it still wraps where the page is narrow.
     Label {
         objectName: "lastFmAccountLabel"
-        Kirigami.FormData.label: I18n.i18nc("@label", "Account:")
+        visible: root.buildConfigured
+        // Emptied with the row: a label keeps its place while the page is
+        // out of view, which would count a row that never shows.
+        Kirigami.FormData.label: root.buildConfigured ? I18n.i18nc("@label", "Account:") : ""
         Layout.fillWidth: true
         Layout.preferredWidth: Math.min(implicitWidth, Kirigami.Units.gridUnit * 24)
         Layout.maximumWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 24)
         wrapMode: Text.Wrap
         textFormat: Text.PlainText
-        text: !root.buildConfigured
-            ? I18n.i18nc("@info", "Last.fm isn’t available in this build.")
-            : (root.connected
-                ? I18n.i18nc("@info", "Connected as %1", root.uiBridge.lastFmUsername)
-                : (root.authState === 1
-                    ? I18n.i18nc("@info", "Allow Ferrous in the browser, then complete the connection.")
-                    : I18n.i18nc("@info", "Not connected")))
+        text: root.connected
+            ? I18n.i18nc("@info", "Connected as %1", root.uiBridge.lastFmUsername)
+            : (root.authState === 1
+                ? I18n.i18nc("@info", "Allow Ferrous in the browser, then complete the connection.")
+                : I18n.i18nc("@info", "Not connected"))
     }
 
     // Only the buttons that apply now, their glyphs at the size of the

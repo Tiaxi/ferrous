@@ -497,7 +497,7 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "libraryWatchHelp"
         uiPalette: root.uiPalette
-        indent: watchCheckBox.contentItem.x
+        checkBox: watchCheckBox
         text: I18n.i18nc("@info", "New, changed and removed files appear without a rescan, and the folders "
             + "are rescanned at startup. Folders that can’t be watched, such as network shares, "
             + "are rescanned every 30 minutes instead.")

@@ -378,7 +378,10 @@ ApplicationWindow {
     QObject *confirm = root->findChild<QObject *>(QStringLiteral("replaceCoverConfirmDialog"));
     QVERIFY(dialog != nullptr && confirm != nullptr);
     // Typographic apostrophes, as everywhere else.
-    const QString details = confirm->property("details").toString();
+    auto *consequence = confirm->findChild<QQuickItem *>(QStringLiteral("replaceCoverConsequence"));
+    auto *warning = confirm->findChild<QQuickItem *>(QStringLiteral("replaceCoverWarning"));
+    QVERIFY(consequence != nullptr && warning != nullptr);
+    const QString details = consequence->property("text").toString();
     QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("track\u2019s folder")),
              qPrintable(details));
     // Replace from iTunes has a window of its own, which its question opens
@@ -426,8 +429,8 @@ ApplicationWindow {
     // "album art" throughout, as in the question.
     QCOMPARE(details,
              QStringLiteral("If the track\u2019s folder has a JPEG or PNG image, the new album art becomes its cover file. "
-                            "Otherwise it is embedded in the album\u2019s tracks in that folder. "
-                            "Ferrous keeps no copy of what it overwrites."));
+                            "Otherwise it is embedded in the album\u2019s tracks in that folder."));
+    QCOMPARE(warning->property("text").toString(), QStringLiteral("Ferrous keeps no copy of what it overwrites."));
     QVERIFY2(!details.contains(QStringLiteral("artwork")), qPrintable(details));
     // A window of its own above Replace from iTunes', with Replace's icon
     // beside Cancel's.

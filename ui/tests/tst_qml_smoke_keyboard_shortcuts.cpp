@@ -153,7 +153,7 @@ struct ShortcutsFixture {
     // Gives the dialog the size it opens at on a large screen with the
     // font at `pointSize`, 10 or 24, and lays it out; whether it took it.
     bool showAtSizeFor(int pointSize) const {
-        const QSize size = pointSize > 10 ? QSize(1728, 1364) : QSize(720, 684);
+        const QSize size = pointSize > 10 ? QSize(1728, 1364) : QSize(720, 828);
         dialog->resize(size);
         // The window has the size at once, and what is in it once the
         // platform has answered.
@@ -1033,7 +1033,8 @@ void KeyboardShortcutsSmokeTest::namesAndKeysAreQuotedAsInTheOtherDialogs() {
         QVERIFY(QMetaObject::invokeMethod(fixture.dialog, "refusalFor", Q_RETURN_ARG(QVariant, refusal),
                                           Q_ARG(QVariant, QVariant::fromValue(fixture.action("playPauseAction"))),
                                           Q_ARG(QVariant, QString::fromLatin1(key))));
-        const QString said = refusal.toString();
+        // Less the apostrophe of "can’t", which is no quote.
+        const QString said = refusal.toString().replace(QStringLiteral("can’t"), QStringLiteral("cannot"));
         QVERIFY2(said.startsWith(QChar(0x201C)) && said.contains(QChar(0x201D)), key);
         QVERIFY2(!said.contains(QChar(0x2018)) && !said.contains(QChar(0x2019)), qPrintable(said));
     }

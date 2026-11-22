@@ -553,6 +553,8 @@ private slots:
     void configureOpensTallEnoughForItsTallestPage_data();
     void configureOpensTallEnoughForItsTallestPage();
     void configureMeasuresAPageThatGrowsOutOfView();
+    void configureHelpStartsAtItsBoxsText_data();
+    void configureHelpStartsAtItsBoxsText();
     void configureWidthsFollowTheFont();
     void configureStacksLibraryWherePathsDoNotFit_data();
     void configureStacksLibraryWherePathsDoNotFit();
@@ -560,7 +562,12 @@ private slots:
     void configureKeepsTicksAndGroupsClearOfTheNextRow();
     void compactDialogsHoldTheirText_data();
     void compactDialogsHoldTheirText();
+    void dialogsWordTheirSettingsAndFailures();
+    void compactDialogsSpaceParagraphsWithTheFont_data();
+    void compactDialogsSpaceParagraphsWithTheFont();
     void compactDialogStaysWithinASmallScreenAsItGrows();
+    void shortcutsOpenTallEnoughToShowTheirList_data();
+    void shortcutsOpenTallEnoughToShowTheirList();
     void breakableTextKeepsNamesAndErrorCodesWhole();
     void lastFmPageFollowsTheBuildAndTheAccount();
     void lastFmButtonsHaveGlyphsAtTheDialogsSize_data();
@@ -571,6 +578,8 @@ private slots:
     void aboutsPageInsetFollowsTheFont();
     void recentIssuesLayOutTheirRows();
     void recentIssuesHeaderFollowsALargeFont();
+    void recentIssuesAreAsWideAsTheyNeed_data();
+    void recentIssuesAreAsWideAsTheyNeed();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesOpenWithTheirFocusShown();
@@ -1596,8 +1605,11 @@ void UiDialogsTest::checkConfigureHelpTextAndSliderRange(QQuickWindow *window) {
     QQuickItem *watch = visibleNamed(prefs, QStringLiteral("libraryWatchCheckBox"));
     QQuickItem *helpLabel = itemsNamed(help, QStringLiteral("formHelpTextLabel")).value(0);
     QVERIFY(helpLabel != nullptr);
+    auto *watchText = qvariant_cast<QQuickItem *>(watch->property("contentItem"));
+    QVERIFY(watchText != nullptr);
+    // The content item holds the indicator's room as its padding.
     QCOMPARE(sceneRect(helpLabel).left(),
-             sceneRect(qvariant_cast<QQuickItem *>(watch->property("contentItem"))).left());
+             sceneRect(watchText).left() + watchText->property("leftPadding").toReal());
     // Wrapped at the words: Text.Wrap.
     QCOMPARE(helpLabel->property("wrapMode").toInt(), 4);
     QQuickItem *slider = nullptr;
@@ -1998,7 +2010,7 @@ void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *win
 
     // General: the viewers, then Plasma's media controls, two groups apart
     // by the room between them, with no subheading: only a page of three or
-    // more groups heads them, and "Plasma:" names the second (a heading
+    // more groups heads them, and "Media controls:" names the second (a heading
     // over a single check box would repeat what its label names).
     dialog->setProperty("pageIndex", 2);
     QQuickItem *media = nullptr;
@@ -3075,8 +3087,9 @@ void UiDialogsTest::checkLastFmPageShowsOnlyTheButtonsThatApply(QQuickWindow *wi
 }
 
 // In a build without Last.fm, scrobbling can't be turned on: the build
-// can't send a scrobble, and the account's line says why, rather than
-// offering a check box to tick. No button to connect either.
+// can't send a scrobble, and the page's first line says why, rather than
+// offering a check box to tick. No help on when it would send one, no
+// account and no button to connect either.
 void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", false));
@@ -3086,8 +3099,32 @@ void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *win
     QQuickItem *box = nullptr;
     QTRY_VERIFY((box = visibleNamed(prefs, QStringLiteral("lastFmScrobblingCheckBox"))) != nullptr);
     QVERIFY(!box->isEnabled());
-    QCOMPARE(visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))->property("text").toString(),
-             QStringLiteral("Last.fm isn\u2019t available in this build."));
+    QQuickItem *reason = visibleNamed(prefs, QStringLiteral("lastFmUnavailableLabel"));
+    QVERIFY(reason != nullptr);
+    QCOMPARE(reason->property("text").toString(), QStringLiteral("Last.fm isn\u2019t available in this build."));
+    QCOMPARE(hex(reason->property("color").value<QColor>()), hex(tokenOf(window, "text")));
+    // It leads, 12 px over the setting it explains, where the fields start.
+    QQuickItem *page = visibleNamed(prefs, QStringLiteral("preferencesPages"))->childItems().at(3);
+    QTRY_VERIFY(!layoutPendingUnder(page));
+    QVERIFY(sceneRect(box).top() - sceneRect(reason).bottom() <= 13.0);
+    QVERIFY(sceneRect(box).top() - sceneRect(reason).bottom() >= 11.0);
+    QCOMPARE(sceneRect(reason).left(), sceneRect(box).left());
+    // No empty Account, and no explanation of a rule this build hasn't.
+    QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmAccountLabel")) == nullptr);
+    QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp")) == nullptr);
+    QQuickItem *form = itemsNamed(page, QStringLiteral("preferencesForm")).value(0);
+    QVERIFY(form != nullptr);
+    for (QQuickItem *item : form->childItems()) {
+        QVERIFY(!item->property("formLabel").toBool() || !item->isVisible()
+                || !item->property("text").toString().contains(QStringLiteral("Account")));
+    }
+    // As tall out of view as in it, for Configure's height.
+    const qreal shownHeight = page->property("wholeHeight").toReal();
+    QVERIFY(dialog->setProperty("pageIndex", 0));
+    QTRY_VERIFY(!page->isVisible() && !layoutPendingUnder(page));
+    QCOMPARE(page->property("wholeHeight").toReal(), shownHeight);
+    QVERIFY(dialog->setProperty("pageIndex", 3));
+    QTRY_VERIFY(page->isVisible() && !layoutPendingUnder(page));
     for (const char *name : {"lastFmConnectButton", "lastFmCompleteButton", "lastFmReconnectButton",
                              "lastFmDisconnectButton"}) {
         QVERIFY2(visibleNamed(prefs, QString::fromLatin1(name)) == nullptr, name);
@@ -3097,20 +3134,14 @@ void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *win
     box->forceActiveFocus(Qt::TabFocusReason);
     QTest::keyClick(prefs, Qt::Key_Space);
     QCOMPARE(box->property("checked").toBool(), before);
-    // Its help steps down with it, under the line that says why, and still
-    // reads (in the secondary colour it outranked the setting it explains).
-    QQuickItem *help = visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp"));
-    QVERIFY(help != nullptr);
-    const QColor chrome = tokenOf(window, "chrome");
-    const QColor quiet = help->property("color").value<QColor>();
-    QCOMPARE(hex(quiet), hex(tokenOf(window, "textTertiary")));
-    QVERIFY2(contrastRatio(quiet, chrome) >= 4.5, qPrintable(describeContrast(QStringLiteral("help"), quiet, chrome)));
-    const QColor reason = visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))->property("color").value<QColor>();
-    QVERIFY(contrastRatio(quiet, chrome) < contrastRatio(reason, chrome));
     // A build with Last.fm lets it be turned on, and explains it as every
     // help does.
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
     QTRY_VERIFY(box->isEnabled());
+    QTRY_VERIFY(!reason->isVisible());
+    QQuickItem *help = nullptr;
+    QTRY_VERIFY((help = visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp"))) != nullptr);
+    QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmAccountLabel")) != nullptr);
     QCOMPARE(hex(help->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
     QVERIFY(reject(dialog));
 }
@@ -6507,9 +6538,9 @@ void UiDialogsTest::checkDialogGlyphsAndMeasuresFollowTheFont(DialogsWindow &mai
                  qPrintable(describeItem(path)));
     QVERIFY(reject(preferences));
 
-    // Recent Issues: 460 px scaled with the font, within the window, and
-    // its severity glyph as large as a line holds, centred on the
-    // category's lowercase.
+    // Recent Issues: 460 px, or with a larger font what it needs up to
+    // that scaled with it, within the window, and its severity glyph as
+    // large as a line holds, centred on the category's lowercase.
     report(window, 1, 0, kStaticPath, kEndsEarly);
     QVERIFY(openIssues(window));
     QObject *issues = object(window, QStringLiteral("recentErrorsDialog"));
@@ -6517,8 +6548,7 @@ void UiDialogsTest::checkDialogGlyphsAndMeasuresFollowTheFont(DialogsWindow &mai
     const qreal edgeMargin = issues->property("edgeMargin").toReal();
     const qreal issuesWidth = issues->property("width").toReal();
     if (large) {
-        QVERIFY2(issuesWidth >= std::min(scaled(460), window->width() - 2 * edgeMargin) - 0.5,
-                 qPrintable(QString::number(issuesWidth)));
+        QVERIFY2(issuesWidth > 460 && issuesWidth <= scaled(460) + 0.5, qPrintable(QString::number(issuesWidth)));
         QVERIFY2(issuesWidth <= window->width() - 2 * edgeMargin + 0.5, qPrintable(QString::number(issuesWidth)));
     } else {
         QCOMPARE(issuesWidth, 460.0);
@@ -7160,7 +7190,9 @@ void UiDialogsTest::configureWidthsFollowTheFont() {
             QVERIFY(bridge->setProperty("lastFmBuildConfigured", configured));
             QVERIFY(bridge->setProperty("lastFmAuthState", configured ? 1 : 0));
             QQuickItem *account = nullptr;
-            QTRY_VERIFY((account = visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))) != nullptr);
+            const QString line = configured ? QStringLiteral("lastFmAccountLabel")
+                                            : QStringLiteral("lastFmUnavailableLabel");
+            QTRY_VERIFY((account = visibleNamed(prefs, line)) != nullptr);
             QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
             if (pointSize <= 10) {
                 QVERIFY2(account->width() <= 24.0 * 18, qPrintable(describeItem(account)));
@@ -7354,6 +7386,333 @@ void UiDialogsTest::editTagsRevertsWorkFromTheKeyboard() {
     QTest::keyClick(tags, Qt::Key_Down);
     QCOMPARE(editor.selectedRows().size(), 1);
     QVERIFY(closeTagEditor(main));
+}
+
+namespace {
+
+// The x of the first pixel drawn in `rect` of `frame` over `ground`, from
+// the left or, mirrored, from the right; -1 with none.
+int drawnEdge(const QImage &frame, const QRectF &rect, const QColor &ground, bool mirrored) {
+    const QRect area = rect.toAlignedRect().intersected(frame.rect());
+    for (int i = 0; i < area.width(); ++i) {
+        const int x = mirrored ? area.right() - i : area.left() + i;
+        for (int y = area.top(); y <= area.bottom(); ++y) {
+            const QColor pixel = frame.pixelColor(x, y);
+            if (qAbs(pixel.red() - ground.red()) + qAbs(pixel.green() - ground.green())
+                    + qAbs(pixel.blue() - ground.blue()) > 150) {
+                return x;
+            }
+        }
+    }
+    return -1;
+}
+
+} // namespace
+
+void UiDialogsTest::configureHelpStartsAtItsBoxsText_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<bool>("mirrored");
+    QTest::newRow("10 pt") << 10.0 << false;
+    QTest::newRow("10 pt, mirrored") << 10.0 << true;
+    QTest::newRow("24 pt") << 24.0 << false;
+    QTest::newRow("24 pt, mirrored") << 24.0 << true;
+}
+
+// A help under a check box starts where the box's text is drawn, on every
+// page, at any font and mirrored. Measured in the drawing: the box's content
+// item starts at the indicator, 24 px before its text, so the items' x agreed
+// while the help hung under the indicator. Both say the same for the
+// measure, so that their first glyphs' bearings are the same.
+void UiDialogsTest::configureHelpStartsAtItsBoxsText() {
+    QFETCH(qreal, pointSize);
+    QFETCH(bool, mirrored);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
+    QVERIFY(bridge->setProperty("lastFmStatusText", QStringLiteral("Scrobble queue flushed.")));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    if (mirrored) {
+        evaluate(stack, QStringLiteral("LayoutMirroring.childrenInherit = true"));
+        evaluate(stack, QStringLiteral("LayoutMirroring.enabled = true"));
+    }
+    const QColor ground = tokenOf(window, "chrome");
+    const QString sample = QStringLiteral("HHHH");
+    int underBoxes = 0;
+    for (int index = 0; index < 4; ++index) {
+        QQuickItem *page = stack->childItems().at(index);
+        QVERIFY(dialog->setProperty("pageIndex", index));
+        QTRY_VERIFY(page->isVisible() && !layoutPendingUnder(page));
+        QQuickItem *form = itemsNamed(page, QStringLiteral("preferencesForm")).value(0);
+        QVERIFY(form != nullptr);
+        QQuickItem *above = nullptr;
+        const QList<QQuickItem *> rows = form->childItems();
+        for (QQuickItem *row : rows) {
+            if (row->property("formLabel").toBool() || !row->isVisible()) {
+                continue;
+            }
+            QQuickItem *control = above;
+            above = row;
+            if (!row->property("formHelpText").toBool()) {
+                continue;
+            }
+            const QString where = QStringLiteral("page %1, %2").arg(index).arg(row->objectName());
+            QQuickItem *help = itemsNamed(row, QStringLiteral("formHelpTextLabel")).value(0);
+            QVERIFY2(help != nullptr && control != nullptr, qPrintable(where));
+            if (!control->property("checkState").isValid()) {
+                // Under another control, on the fields' edge.
+                QCOMPARE(sceneRect(help).left(), sceneRect(row).left());
+                continue;
+            }
+            ++underBoxes;
+            auto *text = qvariant_cast<QQuickItem *>(control->property("contentItem"));
+            auto *indicator = qvariant_cast<QQuickItem *>(control->property("indicator"));
+            QVERIFY2(text != nullptr && indicator != nullptr, qPrintable(where));
+            QVERIFY(control->setProperty("text", sample));
+            QVERIFY(row->setProperty("text", sample));
+            indicator->setOpacity(0);
+            prefs->contentItem()->forceActiveFocus();
+            QTRY_VERIFY2(!layoutPendingUnder(page), qPrintable(where));
+            const QImage shown = prefs->grabWindow();
+            const int boxX = drawnEdge(shown, sceneRect(text), ground, mirrored);
+            const int helpX = drawnEdge(shown, sceneRect(help), ground, mirrored);
+            QVERIFY2(boxX >= 0 && helpX >= 0, qPrintable(where));
+            QVERIFY2(qAbs(boxX - helpX) <= 1,
+                     qPrintable(QStringLiteral("%1: the box's text at %2, the help at %3").arg(where).arg(boxX).arg(helpX)));
+        }
+    }
+    QCOMPARE(underBoxes, 6);
+    QVERIFY(reject(dialog));
+}
+
+void UiDialogsTest::shortcutsOpenTallEnoughToShowTheirList_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<bool>("smallScreen");
+    QTest::newRow("10 pt") << 10.0 << false;
+    QTest::newRow("10 pt, small screen") << 10.0 << true;
+    QTest::newRow("24 pt, small screen") << 24.0 << true;
+}
+
+// Configure Keyboard Shortcuts opens tall enough to show a list: 828 px at
+// 10 pt, about half again the rows of the 684 px it had, within a 1000 px
+// screen, and within a smaller one.
+void UiDialogsTest::shortcutsOpenTallEnoughToShowTheirList() {
+    QFETCH(qreal, pointSize);
+    QFETCH(bool, smallScreen);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("keyboardShortcutsDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(dialog->setProperty("keyConflictChecks", 0));
+    QQuickWindow *shortcuts = windowOf(dialog);
+    QVERIFY(shortcuts != nullptr);
+    if (smallScreen) {
+        for (QScreen *screen : QGuiApplication::screens()) {
+            if (screen->name() == QLatin1String("Small")) {
+                shortcuts->setScreen(screen);
+                shortcuts->setPosition(screen->geometry().topLeft() + QPoint(18, 18));
+            }
+        }
+        if (shortcuts->screen()->name() != QLatin1String("Small")) {
+            QSKIP("needs the offscreen platform's small screen; see main()");
+        }
+    }
+    QVERIFY(QMetaObject::invokeMethod(object(window, QStringLiteral("configureShortcutsAction")), "trigger"));
+    QVERIFY(waitForDialogWindow(dialog));
+    if (smallScreen) {
+        QVERIFY2(shortcuts->height() <= 720 - 2 * 18, qPrintable(QString::number(shortcuts->height())));
+    } else {
+        QCOMPARE(shortcuts->height(), 828);
+        // With a title bar, within the 1000 px screen of the reviews.
+        QVERIFY(shortcuts->height() <= 1000 - 2 * 18 - 28);
+        QQuickItem *list = visibleNamed(shortcuts, QStringLiteral("keyboardShortcutsList"));
+        QVERIFY(list != nullptr);
+        QTRY_VERIFY2(list->height() >= 342 + 140, qPrintable(describeItem(list)));
+    }
+    QVERIFY(reject(dialog));
+}
+
+void UiDialogsTest::recentIssuesAreAsWideAsTheyNeed_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Recent Issues is as wide as its content needs at a large font, from 460
+// px to that scaled with the font, which a long path gets, and holds the
+// width while it is open (it was about 1100 px for half as much content).
+void UiDialogsTest::recentIssuesAreAsWideAsTheyNeed() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const qreal cap = std::round(460 * std::max(1.0, pointSize / 10));
+    report(window, 2, 1, QString(), QStringLiteral("Couldn\u2019t read the disk"));
+    QVERIFY(openIssues(window));
+    QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
+    QVERIFY(popup != nullptr);
+    const qreal opened = popup->property("width").toReal();
+    QVERIFY2(opened >= 460, qPrintable(QString::number(opened)));
+    if (pointSize > 10) {
+        QVERIFY2(opened < cap - 100, qPrintable(QStringLiteral("%1 of %2").arg(opened).arg(cap)));
+    } else {
+        QCOMPARE(opened, 460.0);
+    }
+    // Wide enough: no line wraps or is cut.
+    for (const char *name : {"errorHistoryTitle", "errorHistoryCategory", "errorHistoryHeading"}) {
+        QQuickItem *label = visibleNamed(window, QString::fromLatin1(name));
+        QVERIFY2(label != nullptr, name);
+        QTRY_VERIFY2(label->property("lineCount").toInt() == 1 && !label->property("truncated").toBool(),
+                     qPrintable(describeItem(label)));
+    }
+    QQuickItem *clear = visibleNamed(window, QStringLiteral("errorHistoryClearButton"));
+    QVERIFY(clear != nullptr && clear->width() >= clear->implicitWidth() - 0.5);
+
+    // A longer one that arrives wraps in the width it opened at.
+    const QString folder = QStringLiteral("/music/The Quiet Meridian/2005 - Small Hours (Deluxe Edition)/Disc One/"
+                                          "04 - Static (Live at the Harbour Hall).flac");
+    report(window, 1, 1, folder, QStringLiteral("The file could not be opened: No such file or directory"));
+    QTRY_COMPARE(itemsNamed(window->contentItem(), QStringLiteral("errorHistoryRow")).size(), 2);
+    QCOMPARE(popup->property("width").toReal(), opened);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!popup->property("visible").toBool());
+
+    // Opened with it, the long path gets the cap.
+    QVERIFY(openIssues(window));
+    QCOMPARE(popup->property("width").toReal(), cap);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!popup->property("visible").toBool());
+}
+
+void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The compact dialogs' room between paragraphs grows with the font, 12 px
+// at 10 pt (at 24 pt 12 px between 44 px lines ran the blocks together),
+// their inset stays, and each still fits a 1000 px screen.
+void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(openTheParentDialogs(main));
+    const qreal spacing = std::round(12 * std::max(1.0, pointSize / 10));
+    // Each as full as it gets.
+    const auto fill = [&](const char *name, const char *property, const QVariant &value) {
+        QObject *dialog = object(window, QString::fromLatin1(name));
+        return dialog != nullptr && dialog->setProperty(property, value);
+    };
+    QVERIFY(fill("removeLibraryRootConfirmDialog", "message",
+                 QStringLiteral("Remove the library folder “Fixtures”?")));
+    QVERIFY(fill("removeLibraryRootConfirmDialog", "path", QStringLiteral("/fixture/music/library")));
+    QVERIFY(fill("removeLibraryRootConfirmDialog", "details",
+                 QStringLiteral("This removes its 180 tracks from the library. The files themselves stay on disk, "
+                                "and adding the folder again brings them back.")));
+    QVERIFY(fill("replaceCoverConfirmDialog", "message",
+                 QStringLiteral("Replace the album art of “Small Hours” by The Quiet Meridian?")));
+    QVERIFY(fill("keyboardShortcutsReassignDialog", "message",
+                 QStringLiteral("Reassign “Ctrl+F” to “Open Files…”?")));
+    QVERIFY(fill("quitSaveFailedDialog", "message",
+                 QStringLiteral("Settings could not be saved: failed to create temporary file in "
+                                "/fixture/configuration/ferrous-settings/read-only: Permission denied (os error 13)")));
+    QVERIFY(fill("replaceCoverConfirmDialog", "suggestion", QVariantMap{
+        {QStringLiteral("albumTitle"), QStringLiteral("Small Hours (Twentieth Anniversary Deluxe Edition, "
+                                                      "Remastered from the Original Tapes)")},
+        {QStringLiteral("artistName"), QStringLiteral("The Quiet Meridian")}}));
+    QObject *quitWait = object(window, QStringLiteral("tagEditorQuitWaitDialog"));
+    QVERIFY(quitWait != nullptr);
+    QStringList files;
+    for (int i = 1; i <= 7; ++i) {
+        files << QStringLiteral("0%1 - Morning Tide Field.flac").arg(i);
+    }
+    const QVariant editor = quitWait->property("tagEditorApi");
+    QVERIFY(quitWait->setProperty("tagEditorApi", QVariantMap{{QStringLiteral("operationFiles"), files}}));
+    QVERIFY(quitWait->setProperty("offerChoice", true));
+    const auto restoreEditor = qScopeGuard([&] { quitWait->setProperty("tagEditorApi", editor); });
+    for (const char *name : {"clearDiagnosticsConfirmDialog", "removeLibraryRootConfirmDialog",
+                             "replaceCoverConfirmDialog", "keyboardShortcutsReassignDialog", "quitSaveFailedDialog",
+                             "libraryRootNameDialog", "autoNumberDialog", "tagEditorCloseConfirmDialog",
+                             "tagEditorQuitWaitDialog"}) {
+        QObject *dialog = object(window, QString::fromLatin1(name));
+        QVERIFY2(dialog != nullptr, name);
+        QVERIFY2(QMetaObject::invokeMethod(dialog, "open"), name);
+        QVERIFY2(waitForDialogWindow(dialog), name);
+        auto *content = qvariant_cast<QQuickItem *>(dialog->property("body"));
+        QVERIFY2(content != nullptr, name);
+        QTRY_VERIFY2(!layoutPendingUnder(content), name);
+        QCOMPARE(content->property("spacing").toReal(), spacing);
+        QCOMPARE(dialog->property("contentPadding").toReal(), 18.0);
+        const int fitted = dialog->property("fittedHeight").toInt();
+        QVERIFY2(fitted <= 1000 - 2 * 18 - 28, qPrintable(QStringLiteral("%1: %2").arg(QLatin1String(name)).arg(fitted)));
+        QVERIFY2(QMetaObject::invokeMethod(dialog, "dismiss"), name);
+        QTRY_VERIFY2(!dialog->property("visible").toBool(), name);
+    }
+    closeTheParentDialogs(main);
+}
+
+// General names what its media controls' setting sets, its box not saying it
+// again and named with the words it shows; the quit failure says what each
+// button does; and these dialogs contract "not" as the others do.
+void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *preferences = openPreferences(window, 2);
+    QVERIFY(preferences != nullptr);
+    QQuickItem *media = nullptr;
+    QTRY_VERIFY((media = visibleNamed(windowOf(preferences), QStringLiteral("systemMediaControlsCheckBox"))) != nullptr);
+    QCOMPARE(evaluate(media, QStringLiteral("Kirigami.FormData.label")).toString(), QStringLiteral("Media controls:"));
+    const QString shown = media->property("text").toString();
+    QCOMPARE(shown, QStringLiteral("Show Ferrous and answer media keys"));
+    QAccessibleInterface *spoken = QAccessible::queryAccessibleInterface(media);
+    QVERIFY(spoken != nullptr);
+    const QString name = spoken->text(QAccessible::Name);
+    QCOMPARE(name, QStringLiteral("Media controls: Show Ferrous and answer media keys"));
+    QVERIFY(name.contains(shown));
+    QVERIFY(reject(preferences));
+
+    QObject *quit = object(window, QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(quit != nullptr);
+    const QString system = QStringLiteral("Settings could not be saved: Permission denied (os error 13)");
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, system)));
+    QVERIFY(waitForDialogWindow(quit));
+    const auto textOf = [quit](const char *item) {
+        QQuickItem *label = visibleNamed(windowOf(quit), QString::fromLatin1(item));
+        return label != nullptr ? label->property("text").toString() : QString();
+    };
+    QCOMPARE(textOf("quitSaveFailedHeading"), QStringLiteral("Some recent changes weren\u2019t saved."));
+    QCOMPARE(quit->property("message").toString(), system);
+    QCOMPARE(textOf("quitSaveFailedDetails"),
+             QStringLiteral("Retry saves again. Quit Anyway loses unsaved settings, queue changes and Last.fm "
+                            "scrobbles."));
+    QVERIFY(QMetaObject::invokeMethod(quit, "dismiss"));
+
+    QObject *shortcuts = object(window, QStringLiteral("keyboardShortcutsDialog"));
+    QVERIFY(shortcuts != nullptr);
+    for (const char *key : {"Return", "Del", "Tab", "Esc", "Up", "Menu", "Ctrl+M"}) {
+        QVariant refusal;
+        QVERIFY(QMetaObject::invokeMethod(shortcuts, "refusalFor", Q_RETURN_ARG(QVariant, refusal),
+                                          Q_ARG(QVariant, QVariantMap()), Q_ARG(QVariant, QString::fromLatin1(key))));
+        QVERIFY2(refusal.toString().contains(QStringLiteral("can\u2019t be a shortcut")),
+                 qPrintable(QString::fromLatin1(key) + QStringLiteral(": ") + refusal.toString()));
+    }
+    QQuickItem *failed = named(windowOf(shortcuts), QStringLiteral("keyboardShortcutsSaveFailed"));
+    QVERIFY(failed != nullptr);
+    QVERIFY2(failed->property("text").toString().startsWith(QStringLiteral("Ferrous couldn\u2019t take")),
+             qPrintable(failed->property("text").toString()));
 }
 
 int main(int argc, char **argv) {

@@ -128,7 +128,7 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "frequencyCapHelp"
         uiPalette: root.uiPalette
-        indent: frequencyCapCheckBox.contentItem.x
+        checkBox: frequencyCapCheckBox
         // The next group's subheading leaves the room to it.
         trailingSpace: 0
         text: I18n.i18nc("@info", "High-resolution tracks show up to 22.05 kHz for rates of the 44.1 kHz "
@@ -183,7 +183,7 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "crosshairHelp"
         uiPalette: root.uiPalette
-        indent: crosshairCheckBox.contentItem.x
+        checkBox: crosshairCheckBox
         text: I18n.i18nc("@info", "With the crosshair, right-clicking the spectrogram in centered mode "
             + "seeks to that position in the track.")
     }
@@ -233,7 +233,7 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "zoomHelp"
         uiPalette: root.uiPalette
-        indent: zoomCheckBox.contentItem.x
+        checkBox: zoomCheckBox
         text: root.resetZoomShortcut.length > 0
             ? I18n.i18nc("@info %1 is the shortcut of View › Reset Zoom", "Drag with the middle button to move a zoomed waveform or centered spectrogram. %1 resets the zoom.", root.resetZoomShortcut)
             : I18n.i18nc("@info", "Drag with the middle button to move a zoomed waveform or centered spectrogram.")
