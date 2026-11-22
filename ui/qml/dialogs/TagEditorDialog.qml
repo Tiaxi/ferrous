@@ -434,6 +434,10 @@ Components.DialogWindow {
     // field's label and Revert, its column's header, and the rows it
     // goes to.
     readonly property string pendingEditKey: root.pendingEditField ? root.pendingEditField.field.key : ""
+    // And those rows' cells show it, as their marks say they changed (the
+    // cell kept the old value until Tab): shown only, the tracks have it
+    // once it is applied.
+    readonly property string pendingEditText: root.pendingEditField ? root.pendingEditField.text : ""
     readonly property var pendingEditRows: {
         const rows = ({})
         const snapshot = root.pendingEditField ? root.pendingEditField.editRowsSnapshot : []
@@ -1581,7 +1585,11 @@ Components.DialogWindow {
                                 leftPadding: Kirigami.Units.largeSpacing
                                 rightPadding: Kirigami.Units.largeSpacing
                                 textFormat: Text.PlainText
-                                text: root.cellText(modelData.key, tableRow)
+                                readonly property bool typed: root.pendingEditKey === modelData.key
+                                    && root.pendingEditRows[tableRow.index] === true
+                                text: tableCell.typed
+                                    ? root.cellText(modelData.key, { [modelData.key]: root.pendingEditText })
+                                    : root.cellText(modelData.key, tableRow)
                                 font.features: modelData.number ? root.uiPalette.tabularFigures : ({})
                                 color: tableCell.failureCell
                                     ? root.uiPalette.negative

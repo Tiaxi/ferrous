@@ -28,6 +28,7 @@ private slots:
     void tagEditorCancelAsksBeforeDroppingEdits();
     void typedTextCanBeSavedBeforeTheFieldIsLeft();
     void typedTextMarksItsChangeAtOnce();
+    void typedTextShowsInItsRowsCells();
     void closingTheTagEditorKeepsTheFieldBeingTyped();
     void tagEditorStaysOpenWhileSavingAndShowsTheResult();
     void closingTheWindowWithTagEditsAsksAndCancelKeepsThem();
@@ -521,6 +522,68 @@ void TagEditorSmokeTest::typedTextMarksItsChangeAtOnce() {
     QCOMPARE(fixture.editor.m_tableModel.fieldValue(1, QStringLiteral("title")), QStringLiteral("y"));
     QVERIFY(marked());
     QCOMPARE(marks(), (QList<bool>{true, true, false}));
+}
+
+// While a field is typed in, the cells of the rows the text goes to show
+// it, as their marks say they changed (they kept the old value until Tab):
+// shown only, the model as it was until the text is applied. Typed back,
+// they show their own again. A number reads as the table's do.
+void TagEditorSmokeTest::typedTextShowsInItsRowsCells() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(3, false));
+    fixture.editor.selectRange(0, 1);
+    QQuickItem *content = fixture.tags()->contentItem();
+    // The cells of a column, by row.
+    const auto cells = [&](const QString &key) {
+        QStringList texts{QString(), QString(), QString()};
+        QList<QQuickItem *> items;
+        collectQuickItems(content, &items);
+        for (QQuickItem *row : std::as_const(items)) {
+            const int index = row->objectName() == QStringLiteral("tagEditorRow") ? row->property("index").toInt() : -1;
+            if (index < 0 || index >= texts.size()) {
+                continue;
+            }
+            if (QObject *cell = findQuickItemByObjectName(row, QStringLiteral("tagEditorCell_") + key)) {
+                texts[index] = cell->property("text").toString();
+            }
+        }
+        return texts;
+    };
+    const QString titleKey = QStringLiteral("title");
+    QTRY_VERIFY(!cells(titleKey).contains(QString()));
+    const QStringList loaded = cells(titleKey);
+
+    auto *title = qobject_cast<QQuickItem *>(findQuickItemByObjectName(content, QStringLiteral("tagEditorField_title")));
+    QVERIFY(title != nullptr);
+    title->forceActiveFocus();
+    QTRY_VERIFY(title->hasActiveFocus());
+    QTest::keyClick(fixture.tags(), 'x');
+    QTRY_COMPARE(cells(titleKey), (QStringList{QStringLiteral("x"), QStringLiteral("x"), loaded.at(2)}));
+    QTest::keyClick(fixture.tags(), 'y');
+    QTRY_COMPARE(cells(titleKey), (QStringList{QStringLiteral("xy"), QStringLiteral("xy"), loaded.at(2)}));
+    // Shown only.
+    QVERIFY(!fixture.editor.dirty());
+    QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, titleKey), loaded.at(0));
+    QTest::keyClick(fixture.tags(), Qt::Key_Backspace);
+    QTest::keyClick(fixture.tags(), Qt::Key_Backspace);
+    QTRY_COMPARE(cells(titleKey), loaded);
+
+    QTest::keyClick(fixture.tags(), 'z');
+    QTest::keyClick(fixture.tags(), Qt::Key_Return);
+    QTRY_VERIFY(fixture.editor.dirty());
+    QCOMPARE(cells(titleKey), (QStringList{QStringLiteral("z"), QStringLiteral("z"), loaded.at(2)}));
+
+    // A track number without the zeros it is padded with.
+    fixture.editor.setSelectedRows({2});
+    auto *number =
+        qobject_cast<QQuickItem *>(findQuickItemByObjectName(content, QStringLiteral("tagEditorField_trackNo")));
+    QVERIFY(number != nullptr);
+    number->forceActiveFocus();
+    QTRY_VERIFY(number->hasActiveFocus());
+    QTest::keyClick(fixture.tags(), Qt::Key_A, Qt::ControlModifier);
+    QTest::keyClick(fixture.tags(), '0');
+    QTest::keyClick(fixture.tags(), '7');
+    QTRY_COMPARE(cells(QStringLiteral("trackNo")).at(2), QStringLiteral("7"));
 }
 
 void TagEditorSmokeTest::closingTheTagEditorKeepsTheFieldBeingTyped() {
