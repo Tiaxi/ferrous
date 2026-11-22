@@ -645,6 +645,7 @@ private slots:
     void recentIssuesAreAsWideAsTheyNeed();
     void recentIssuesDiagnosticsCaptionIsOnTheTextColumn_data();
     void recentIssuesDiagnosticsCaptionIsOnTheTextColumn();
+    void libraryFolderMenuGivesEachItemItsOwnGlyph();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesOpenWithTheirFocusShown();
@@ -8497,6 +8498,47 @@ void UiDialogsTest::recentIssuesAreAsWideAsTheyNeed() {
     QCOMPARE(popup->property("width").toReal(), cap);
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!popup->property("visible").toBool());
+}
+
+// Every item of a library folder's menu has a glyph, and no two the same:
+// Rescan All Folders had none, a hole in the icon column, and Rescan's
+// would not tell the two apart. Breeze has the glyph, light and dark.
+void UiDialogsTest::libraryFolderMenuGivesEachItemItsOwnGlyph() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QObject *menu = nullptr;
+    QTRY_VERIFY((menu = object(window, QStringLiteral("libraryRootContextMenu"))) != nullptr);
+    QStringList glyphs;
+    QString rescanAll;
+    const int count = menu->property("count").toInt();
+    QVERIFY(count > 0);
+    for (int i = 0; i < count; ++i) {
+        QQuickItem *item = nullptr;
+        QVERIFY(QMetaObject::invokeMethod(menu, "itemAt", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, i)));
+        QVERIFY(item != nullptr);
+        if (QString::fromLatin1(item->metaObject()->className()).contains(QStringLiteral("Separator"))) {
+            continue;
+        }
+        const QString text = item->property("text").toString();
+        const QString glyph = evaluate(item, QStringLiteral("icon.name")).toString();
+        QVERIFY2(!glyph.isEmpty(), qPrintable(text));
+        QVERIFY2(!glyphs.contains(glyph), qPrintable(QStringLiteral("%1: %2 again").arg(text, glyph)));
+        glyphs.append(glyph);
+        if (item->objectName() == QStringLiteral("libraryRootRescanAllMenuItem")) {
+            rescanAll = glyph;
+        }
+    }
+    QCOMPARE(rescanAll, QStringLiteral("folder-sync"));
+    const QString iconTheme = QIcon::themeName();
+    const auto restoreTheme = qScopeGuard([&iconTheme] { QIcon::setThemeName(iconTheme); });
+    for (const QString &theme : {QStringLiteral("breeze"), QStringLiteral("breeze-dark")}) {
+        QIcon::setThemeName(theme);
+        QVERIFY2(QIcon::hasThemeIcon(QStringLiteral("folder-sync")), qPrintable(theme));
+    }
+    QVERIFY(reject(dialog));
 }
 
 void UiDialogsTest::recentIssuesDiagnosticsCaptionIsOnTheTextColumn_data() {
