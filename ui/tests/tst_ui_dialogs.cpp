@@ -575,6 +575,8 @@ private slots:
     void aboutsPageInsetFollowsTheFont();
     void recentIssuesLayOutTheirRows();
     void recentIssuesHeaderFollowsALargeFont();
+    void recentIssuesAreAsWideAsTheyNeed_data();
+    void recentIssuesAreAsWideAsTheyNeed();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesOpenWithTheirFocusShown();
@@ -6533,9 +6535,9 @@ void UiDialogsTest::checkDialogGlyphsAndMeasuresFollowTheFont(DialogsWindow &mai
                  qPrintable(describeItem(path)));
     QVERIFY(reject(preferences));
 
-    // Recent Issues: 460 px scaled with the font, within the window, and
-    // its severity glyph as large as a line holds, centred on the
-    // category's lowercase.
+    // Recent Issues: 460 px, or with a larger font what it needs up to
+    // that scaled with it, within the window, and its severity glyph as
+    // large as a line holds, centred on the category's lowercase.
     report(window, 1, 0, kStaticPath, kEndsEarly);
     QVERIFY(openIssues(window));
     QObject *issues = object(window, QStringLiteral("recentErrorsDialog"));
@@ -6543,8 +6545,7 @@ void UiDialogsTest::checkDialogGlyphsAndMeasuresFollowTheFont(DialogsWindow &mai
     const qreal edgeMargin = issues->property("edgeMargin").toReal();
     const qreal issuesWidth = issues->property("width").toReal();
     if (large) {
-        QVERIFY2(issuesWidth >= std::min(scaled(460), window->width() - 2 * edgeMargin) - 0.5,
-                 qPrintable(QString::number(issuesWidth)));
+        QVERIFY2(issuesWidth > 460 && issuesWidth <= scaled(460) + 0.5, qPrintable(QString::number(issuesWidth)));
         QVERIFY2(issuesWidth <= window->width() - 2 * edgeMargin + 0.5, qPrintable(QString::number(issuesWidth)));
     } else {
         QCOMPARE(issuesWidth, 460.0);
@@ -7534,6 +7535,59 @@ void UiDialogsTest::shortcutsOpenTallEnoughToShowTheirList() {
         QTRY_VERIFY2(list->height() >= 342 + 140, qPrintable(describeItem(list)));
     }
     QVERIFY(reject(dialog));
+}
+
+void UiDialogsTest::recentIssuesAreAsWideAsTheyNeed_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Recent Issues is as wide as its content needs at a large font, from 460
+// px to that scaled with the font, which a long path gets, and holds the
+// width while it is open (it was about 1100 px for half as much content).
+void UiDialogsTest::recentIssuesAreAsWideAsTheyNeed() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const qreal cap = std::round(460 * std::max(1.0, pointSize / 10));
+    report(window, 2, 1, QString(), QStringLiteral("Couldn\u2019t read the disk"));
+    QVERIFY(openIssues(window));
+    QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
+    QVERIFY(popup != nullptr);
+    const qreal opened = popup->property("width").toReal();
+    QVERIFY2(opened >= 460, qPrintable(QString::number(opened)));
+    if (pointSize > 10) {
+        QVERIFY2(opened < cap - 100, qPrintable(QStringLiteral("%1 of %2").arg(opened).arg(cap)));
+    } else {
+        QCOMPARE(opened, 460.0);
+    }
+    // Wide enough: no line wraps or is cut.
+    for (const char *name : {"errorHistoryTitle", "errorHistoryCategory", "errorHistoryHeading"}) {
+        QQuickItem *label = visibleNamed(window, QString::fromLatin1(name));
+        QVERIFY2(label != nullptr, name);
+        QTRY_VERIFY2(label->property("lineCount").toInt() == 1 && !label->property("truncated").toBool(),
+                     qPrintable(describeItem(label)));
+    }
+    QQuickItem *clear = visibleNamed(window, QStringLiteral("errorHistoryClearButton"));
+    QVERIFY(clear != nullptr && clear->width() >= clear->implicitWidth() - 0.5);
+
+    // A longer one that arrives wraps in the width it opened at.
+    const QString folder = QStringLiteral("/music/The Quiet Meridian/2005 - Small Hours (Deluxe Edition)/Disc One/"
+                                          "04 - Static (Live at the Harbour Hall).flac");
+    report(window, 1, 1, folder, QStringLiteral("The file could not be opened: No such file or directory"));
+    QTRY_COMPARE(itemsNamed(window->contentItem(), QStringLiteral("errorHistoryRow")).size(), 2);
+    QCOMPARE(popup->property("width").toReal(), opened);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!popup->property("visible").toBool());
+
+    // Opened with it, the long path gets the cap.
+    QVERIFY(openIssues(window));
+    QCOMPARE(popup->property("width").toReal(), cap);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!popup->property("visible").toBool());
 }
 
 int main(int argc, char **argv) {

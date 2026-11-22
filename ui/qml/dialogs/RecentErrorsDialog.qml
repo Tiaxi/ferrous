@@ -126,6 +126,34 @@ Popup {
         }
     }
 
+    // At its least: 460 px with the default font, which a larger one scales
+    // into the most it takes.
+    readonly property real leastWidth: 460
+    readonly property real headerWidth: Math.ceil(errorHistoryHeader.implicitWidth
+        + errorHistoryHeader.Layout.leftMargin + errorHistoryHeader.Layout.rightMargin)
+    // The width it opened at, which it holds while it is open: an issue
+    // that arrives wraps in it rather than moving the popup.
+    property real openedWidth: root.leastWidth
+    // Its rows exist from just before it shows, to be measured, until it
+    // has hidden.
+    property bool listed: false
+
+    // What it holds needs across, with each text on one line and the room
+    // of the list's scroll bar.
+    function contentNeeds() {
+        let rows = 0
+        for (let i = 0; i < historyList.count; ++i) {
+            const row = historyList.itemAt(i)
+            if (row) {
+                rows = Math.max(rows, row.naturalWidth)
+            }
+        }
+        const bar = historyView.ScrollBar.vertical
+        return Math.ceil(Math.max(rows + (bar ? bar.implicitWidth : 0),
+            diagnosticsButton.Layout.leftMargin + diagnosticsButton.implicitWidth
+                + errorHistoryHeader.Layout.rightMargin))
+    }
+
     function showNewest() {
         historyView.contentItem.contentY = 0
     }
@@ -153,13 +181,13 @@ Popup {
     focus: true
     // Above the viewer popups.
     z: 100
-    // 460 px with the default font, as much wider as a larger font makes
-    // the text (at 24 pt it kept 460 px, and its heading wrapped after four
-    // words), or as wide as the header needs, which puts its title, how
-    // many are new and Clear All on one line; within the window.
-    width: Math.min(Math.max(root.uiPalette.scaledSize(460), Math.ceil(errorHistoryHeader.implicitWidth
-            + errorHistoryHeader.Layout.leftMargin + errorHistoryHeader.Layout.rightMargin)),
-        root.hostWidth - 2 * root.edgeMargin)
+    // 460 px with the default font. A larger one gives it what its content
+    // needs, up to 460 px scaled with it, which a long path gets (it was
+    // always that, about 1100 px at 24 pt for half as much content; a fixed
+    // 460 px wrapped its heading after four words); or as wide as the
+    // header needs, which puts its title, how many are new and Clear All
+    // on one line; within the window.
+    width: Math.min(Math.max(root.openedWidth, root.headerWidth), root.hostWidth - 2 * root.edgeMargin)
     height: Math.min(root.implicitHeight, root.hostHeight - root.statusBarClearance - root.edgeMargin)
     x: Math.round(root.hostWidth - root.width - root.edgeMargin)
     y: Math.round(root.hostHeight - root.height - root.statusBarClearance)
@@ -175,9 +203,17 @@ Popup {
         root.errorController.dismissLatest()
         // Not visible yet: the refresh below would skip it.
         root.queuedSubjects = ({})
+        root.listed = true
+        root.openedWidth = Math.max(root.leastWidth,
+            Math.min(root.uiPalette.scaledSize(root.leastWidth), root.contentNeeds()))
         root.showNewest()
     }
-    onVisibleChanged: root.refreshQueuedSubjects()
+    onVisibleChanged: {
+        if (!root.visible) {
+            root.listed = false
+        }
+        root.refreshQueuedSubjects()
+    }
     // Over a viewer the keyboard would otherwise stay with the viewer.
     // Opened from the keyboard, the first action has it, with its focus
     // ring, as Tab would give it. Opened with the pointer, no control
@@ -344,7 +380,7 @@ Popup {
                     id: historyList
                     objectName: "errorHistoryList"
                     // Builds rows only while the popup is shown.
-                    model: root.visible ? root.errorController.entries : null
+                    model: root.listed ? root.errorController.entries : null
 
                     delegate: Item {
                         id: historyRow
@@ -370,6 +406,14 @@ Popup {
                         readonly property bool showsSubject: historyRow.subject.length > 0
                             && historyRow.message.indexOf(historyRow.subject.split("/").pop()) < 0
                         readonly property Item actionItem: actionButton
+                        // Across with each of its texts on one line.
+                        readonly property real naturalWidth: rowLayout.anchors.leftMargin + rowLayout.anchors.rightMargin
+                            + severityGlyph.implicitWidth + rowLayout.spacing
+                            + Math.max(categoryLabel.implicitWidth + categoryLine.spacing + timeLabel.implicitWidth,
+                                headingLabel.implicitWidth,
+                                historyRow.description.length > 0 ? messageLabel.implicitWidth : 0,
+                                historyRow.showsSubject ? subjectLabel.implicitWidth : 0,
+                                historyRow.action !== null ? actionButton.implicitWidth : 0)
 
                         width: historyColumn.width
                         implicitHeight: rowLayout.implicitHeight + Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + 2
@@ -397,6 +441,7 @@ Popup {
                             // 2 px under the line's top with the default font
                             // (it stayed 16 px at the top of a 24 pt line).
                             Kirigami.Icon {
+                                id: severityGlyph
                                 objectName: "errorHistoryGlyph"
                                 Layout.alignment: Qt.AlignTop
                                 Layout.topMargin: Math.round(categoryLabel.y + categoryLabel.baselineOffset
@@ -423,6 +468,7 @@ Popup {
                                 // notification's header line: the quietest
                                 // text of the entry.
                                 RowLayout {
+                                    id: categoryLine
                                     Layout.fillWidth: true
                                     spacing: Kirigami.Units.largeSpacing
 
@@ -444,6 +490,7 @@ Popup {
                                     }
 
                                     Label {
+                                        id: timeLabel
                                         objectName: "errorHistoryTime"
                                         textFormat: Text.PlainText
                                         text: historyRow.timeText
@@ -457,6 +504,7 @@ Popup {
                                 // The problem itself. A path or a system
                                 // error in it wraps as a message's does.
                                 Components.MessageLabel {
+                                    id: headingLabel
                                     objectName: "errorHistoryHeading"
                                     Layout.fillWidth: true
                                     message: historyRow.title
@@ -466,6 +514,7 @@ Popup {
                                 }
 
                                 Components.MessageLabel {
+                                    id: messageLabel
                                     objectName: "errorHistoryMessage"
                                     Layout.fillWidth: true
                                     visible: message.length > 0
@@ -476,6 +525,7 @@ Popup {
                                 }
 
                                 Label {
+                                    id: subjectLabel
                                     objectName: "errorHistorySubject"
                                     Layout.fillWidth: true
                                     visible: historyRow.showsSubject
