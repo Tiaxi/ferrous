@@ -1172,6 +1172,10 @@ Rectangle {
                     visible: root.addLibraryFolderAction !== null
                     action: root.addLibraryFolderAction
                     highlighted: true
+                    // The desktop style draws the default button from this,
+                    // as DialogButtons' primary one: `highlighted` alone
+                    // drew it as any other.
+                    Accessible.defaultButton: true
                 }
             }
 

@@ -1115,6 +1115,7 @@ private slots:
     void focusedColumnHandleHasAFrameAndSaysItsKeys_data();
     void focusedColumnHandleHasAFrameAndSaysItsKeys();
     void transportStartsAndEndsAtTheContentInset();
+    void firstRunsButtonIsThePrimaryOne();
     void viewersInTheWindowFadeAsTheStylesPopupsDo();
 };
 
@@ -5826,6 +5827,21 @@ void UiMainWindowTest::transportStartsAndEndsAtTheContentInset() {
     QTRY_COMPARE(sceneRect(previousGlyph).left(), 12.0);
     QCOMPARE(sceneRect(chevron).left(), sceneRect(previousGlyph).left());
     QCOMPARE(sceneRect(volume).right(), window->width() - 12.0);
+}
+
+// First run's one action is drawn as the default button, as OK is in
+// Configure: the desktop style draws that from the button's being marked
+// default (`highlighted` alone drew it as any button).
+void UiMainWindowTest::firstRunsButtonIsThePrimaryOne() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *button = named(window, "firstRunAddFolderButton");
+    QVERIFY(shown(button));
+    QVERIFY(evaluateOn(button, QStringLiteral("Accessible.defaultButton")).toBool());
+    auto *drawnBy = button->property("background").value<QQuickItem *>();
+    QVERIFY(drawnBy != nullptr);
+    QCOMPARE(drawnBy->property("activeControl").toString(), QStringLiteral("default"));
 }
 
 // The viewers in the main window open and close with the controls style's
