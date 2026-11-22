@@ -2671,12 +2671,12 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
                          && rect->property("border").value<QObject *>()->property("width").toReal() == 0.0,
                      qPrintable(rect->objectName()));
         }
-        // A quiet placeholder, as the queue's empty state: a centred line
-        // in the base font, regular, with no glyph; searching and the
-        // system's words in the secondary colour, what the search found in
-        // the text's.
+        // A quiet placeholder: a centred line in the base font, regular,
+        // in the secondary colour whether it searches, found nothing or
+        // failed, when it holds the system's words (nothing found was in
+        // the text's, brighter than searching).
         QCOMPARE(message->property("color").value<QColor>().rgba(),
-                 palette->property(searching || failed ? "textSecondary" : "text").value<QColor>().rgba());
+                 palette->property("textSecondary").value<QColor>().rgba());
         QCOMPARE(heading->isVisible(), failed);
         if (failed) {
             QCOMPARE(heading->property("text").toString(), QStringLiteral("Couldn\u2019t search iTunes"));
@@ -2689,7 +2689,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         }
         // A failed search has a warning glyph where the spinner is while
         // searching: 32 px, a mask in the secondary colour, above the
-        // heading; nothing found has none.
+        // heading.
         QQuickItem *warning = itemNamed(content, QStringLiteral("itunesArtworkFailureIcon"));
         QVERIFY2(warning != nullptr, at.constData());
         QCOMPARE(warning->isVisible(), failed);
@@ -2709,8 +2709,23 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         if (searching) {
             QCOMPARE(sceneRectOf(busy).top(), sceneRectOf(placeholder).top());
         }
+        // Finding nothing has the search's glyph there, as quiet as the
+        // line.
+        QQuickItem *found = itemNamed(content, QStringLiteral("itunesArtworkNothingFoundIcon"));
+        QVERIFY2(found != nullptr, at.constData());
+        QCOMPARE(found->isVisible(), !searching && !failed);
+        if (!searching && !failed) {
+            QCOMPARE(found->property("source").toString(), QStringLiteral("edit-find"));
+            QVERIFY(found->property("isMask").toBool());
+            QCOMPARE(found->property("color").value<QColor>().rgba(),
+                     palette->property("textSecondary").value<QColor>().rgba());
+            QTRY_COMPARE(sceneRectOf(found).size(), QSizeF(32, 32));
+            QCOMPARE(sceneRectOf(found).top(), sceneRectOf(placeholder).top());
+            QCOMPARE(sceneRectOf(found).center().x(), sceneRectOf(placeholder).center().x());
+            QVERIFY2(sceneRectOf(found).bottom() <= sceneRectOf(message).top(), at.constData());
+        }
         // The only glyph: the busy indicator's while searching, the
-        // warning's when the search failed.
+        // warning's when the search failed, the search's with nothing found.
         int glyphs = 0;
         const std::function<void(QQuickItem *)> countGlyphs = [&](QQuickItem *item) {
             if (!item->isVisible()) {
@@ -2724,7 +2739,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             }
         };
         countGlyphs(placeholder);
-        QCOMPARE(glyphs, searching || failed ? 1 : 0);
+        QCOMPARE(glyphs, 1);
         QCOMPARE(message->property("horizontalAlignment").toInt(), int(Qt::AlignHCenter));
         const QFont font = message->property("font").value<QFont>();
         QCOMPARE(font.weight(), QFont::Normal);
