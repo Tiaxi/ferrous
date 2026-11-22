@@ -628,7 +628,7 @@ Components.DialogWindow {
                     Accessible.role: Accessible.ColumnHeader
                 }
                 Label {
-                    Layout.preferredWidth: root.keyColumnWidth + actionList.scrollbarLane
+                    Layout.preferredWidth: root.keyColumnWidth + actionList.columnsLane
                     leftPadding: Kirigami.Units.largeSpacing
                     text: I18n.i18nc("@title:column", "Alternate")
                     elide: Text.ElideRight
@@ -659,6 +659,10 @@ Components.DialogWindow {
                 Accessible.role: Accessible.List
                 Accessible.name: I18n.i18nc("@label", "Actions")
                 readonly property real scrollbarLane: listScrollBar.visible ? listScrollBar.width : 0
+                // The columns keep the bar's lane whether it shows or not,
+                // so they stay put as a search shortens the list; the rows'
+                // tints take the lane while it is free.
+                readonly property real columnsLane: listScrollBar.implicitWidth
                 ScrollBar.vertical: ScrollBar {
                     id: listScrollBar
                     policy: ScrollBar.AsNeeded
@@ -775,7 +779,7 @@ Components.DialogWindow {
                         Label {
                             objectName: "keyboardShortcutsRowAlternate"
                             Layout.preferredWidth: root.keyColumnWidth
-                            Layout.rightMargin: actionList.scrollbarLane
+                            Layout.rightMargin: actionList.columnsLane
                             leftPadding: Kirigami.Units.largeSpacing
                             text: actionRow.bindings.slice(1).map(function(key) { return StandardKeys.nativeText(key) }).join(", ")
                             elide: Text.ElideRight

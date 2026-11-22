@@ -35,6 +35,8 @@ private slots:
     void editorHasOneBaselineAndOneKeyButtonWidth();
     void editorHoldsStillAsANoteComesAndGoes_data();
     void editorHoldsStillAsANoteComesAndGoes();
+    void keyColumnsHoldStillAsTheScrollBarComesAndGoes_data();
+    void keyColumnsHoldStillAsTheScrollBarComesAndGoes();
 };
 
 namespace {
@@ -911,6 +913,57 @@ void KeyboardShortcutsSmokeTest::editorHoldsStillAsANoteComesAndGoes() {
     const QRectF buttons = sceneRect(fixture.item("keyboardShortcutsButtons"));
     QVERIFY2(sceneRect(note).bottom() <= buttons.top() + 0.5,
              qPrintable(describeRect(sceneRect(note)) + QStringLiteral(" over ") + describeRect(buttons)));
+}
+
+void KeyboardShortcutsSmokeTest::keyColumnsHoldStillAsTheScrollBarComesAndGoes_data() {
+    QTest::addColumn<int>("pointSize");
+    QTest::newRow("10 pt") << 10;
+    QTest::newRow("24 pt") << 24;
+}
+
+// The key columns and their headings keep their x as a search takes the
+// scroll bar away and brings it back (they moved 21 px right as it went).
+// Without the bar, the current row's tint runs to the list's edge.
+void KeyboardShortcutsSmokeTest::keyColumnsHoldStillAsTheScrollBarComesAndGoes() {
+    QFETCH(int, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.showAtSizeFor(pointSize));
+    QQuickItem *list = fixture.item("keyboardShortcutsList");
+    QQuickItem *headings = fixture.item("keyboardShortcutsColumnHeadings");
+    const auto scrolls = [&] { return evaluateOn(list, QStringLiteral("listScrollBar.visible")).toBool(); };
+    const auto columns = [&]() -> QList<qreal> {
+        fixture.dialog->grabWindow();
+        QList<qreal> lefts;
+        for (const char *heading : {"Shortcut", "Alternate"}) {
+            if (QQuickItem *label = visibleTextIn(headings, QString::fromLatin1(heading))) {
+                lefts << sceneRect(label).left();
+            }
+        }
+        for (const char *cell : {"keyboardShortcutsRowShortcut", "keyboardShortcutsRowAlternate"}) {
+            if (QQuickItem *label = visibleItemIn(list, QString::fromLatin1(cell))) {
+                lefts << sceneRect(label).left();
+            }
+        }
+        return lefts;
+    };
+    QTRY_VERIFY(scrolls());
+    const QList<qreal> atRest = columns();
+    QCOMPARE(atRest.size(), 4);
+    QVERIFY(qAbs(atRest[0] - atRest[2]) <= 1 && qAbs(atRest[1] - atRest[3]) <= 1);
+
+    QQuickItem *search = fixture.item("keyboardShortcutsSearchField");
+    QVERIFY(search->setProperty("text", QStringLiteral("play")));
+    QTRY_VERIFY(!scrolls());
+    QCOMPARE(columns(), atRest);
+    QQuickItem *tint = visibleItemIn(list, QStringLiteral("rowBackgroundTint"));
+    QVERIFY(tint != nullptr);
+    QCOMPARE(sceneRect(tint).right(), sceneRect(list).right());
+
+    QVERIFY(search->setProperty("text", QString()));
+    QTRY_VERIFY(scrolls());
+    QCOMPARE(columns(), atRest);
 }
 
 std::unique_ptr<QmlSmokeTest> makeKeyboardShortcutsSmokeTest(const QString &userDirectoriesParent) {
