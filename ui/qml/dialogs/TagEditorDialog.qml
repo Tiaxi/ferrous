@@ -1005,6 +1005,10 @@ Components.DialogWindow {
 
         objectName: "tagEditorField_" + fieldEditor.field.key
         Layout.fillWidth: true
+        // Breeze outlines a field under the pointer as it does the focused
+        // one: while a field here has the keyboard, only that one is
+        // outlined (after a click, typing and Tab, two looked focused).
+        hoverEnabled: !root.formFieldFocused && !Kirigami.Settings.tabletMode
         selectByMouse: true
         persistentSelection: true
         placeholderText: fieldEditor.mixed ? root.keepText : ""
@@ -1637,6 +1641,9 @@ Components.DialogWindow {
     readonly property list<Item> fieldEditors: [titleRow.editor, artistRow.editor, albumRow.editor,
         albumArtistRow.editor, genreRow.editor, yearRow.editor, trackPair.firstEditor, trackPair.secondEditor,
         discPair.firstEditor, discPair.secondEditor, commentRow.editor]
+    readonly property bool formFieldFocused: root.fieldEditors.some(function(editor) {
+        return editor !== null && editor.activeFocus
+    })
     // Where Tab goes, up to the files: field to field, past the Revert of
     // an edited one (it took a press for each, and Space there undid the
     // edit just typed), then the fields' Reverts in their order, then the

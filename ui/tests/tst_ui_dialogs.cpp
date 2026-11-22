@@ -595,6 +595,7 @@ private slots:
     void editTagsRevertsWorkFromTheKeyboard();
     void editTagsKeepsWhatIdentifiesARowInView_data();
     void editTagsKeepsWhatIdentifiesARowInView();
+    void editTagsOutlinesOnlyTheFieldWithTheKeyboard();
     void editTagsTitlesCanBeCheckedBeforeSaving_data();
     void editTagsTitlesCanBeCheckedBeforeSaving();
     void editTagsDetailsHasAGlyphAsItsPeers_data();
@@ -5328,6 +5329,65 @@ void UiDialogsTest::editTagsKeepsWhatIdentifiesARowInView() {
     QTRY_VERIFY(!layoutPending(table));
     QCOMPARE(genre->width(), genreWidth);
     QCOMPARE(sceneRect(album).left(), albumX);
+    QVERIFY(closeTagEditor(main));
+}
+
+// One field of Edit Tags' form shows the style's blue outline while one is
+// being edited: the one with the keyboard. The field under the pointer
+// takes no hover outline then, as after a click, typing and Tab (Title and
+// Artist both looked focused); its Revert keeps its own hover. With no
+// field focused, hover is the style's as ever.
+void UiDialogsTest::editTagsOutlinesOnlyTheFieldWithTheKeyboard() {
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRows(3));
+    QVERIFY(tags != nullptr);
+    QQuickItem *title = nullptr;
+    QTRY_VERIFY((title = visibleNamed(tags, QStringLiteral("tagEditorField_title"))) != nullptr);
+    QQuickItem *artist = visibleNamed(tags, QStringLiteral("tagEditorField_artist"));
+    QQuickItem *album = visibleNamed(tags, QStringLiteral("tagEditorField_album"));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(artist != nullptr && album != nullptr && table != nullptr);
+    QTRY_VERIFY(!layoutPending(title));
+    // Whether the style draws a field's outline in the accent.
+    const auto outlined = [](QQuickItem *field) {
+        auto *frame = qvariant_cast<QObject *>(field->property("background"));
+        return frame != nullptr && (frame->property("hover").toBool() || frame->property("hasFocus").toBool());
+    };
+    const auto onlyOutlined = [&](QQuickItem *field) {
+        return outlined(title) == (field == title) && outlined(artist) == (field == artist)
+            && outlined(album) == (field == album);
+    };
+    const QPoint onTitle = sceneRect(title).center().toPoint();
+    QTest::mouseMove(tags, onTitle);
+    QTRY_VERIFY(onlyOutlined(title));
+
+    // Clicked, typed in and left with Tab, the pointer still on it.
+    QTest::mouseClick(tags, Qt::LeftButton, Qt::NoModifier, onTitle);
+    QTRY_VERIFY(title->hasActiveFocus());
+    QTest::keyClick(tags, 'x');
+    QTest::keyClick(tags, Qt::Key_Tab);
+    QTRY_VERIFY(artist->hasActiveFocus());
+    QTRY_VERIFY(onlyOutlined(artist));
+    QTest::mouseMove(tags, sceneRect(album).center().toPoint());
+    QTest::qWait(50);
+    QVERIFY(onlyOutlined(artist));
+
+    // The changed field's Revert still shows the pointer on it.
+    QQuickItem *revert = named(tags, QStringLiteral("tagEditorRevert_title"));
+    QVERIFY(revert != nullptr);
+    QTRY_VERIFY(revert->isVisible());
+    // The style's, which follows the platform's hover effects: the
+    // offscreen platform has none.
+    QVERIFY(revert->setProperty("hoverEnabled", true));
+    QTest::mouseMove(tags, sceneRect(revert).center().toPoint());
+    QTRY_VERIFY(revert->property("hovered").toBool());
+    QVERIFY(onlyOutlined(artist));
+
+    // No field focused: hover outlines the field under the pointer again.
+    table->forceActiveFocus();
+    QTest::mouseMove(tags, sceneRect(album).center().toPoint());
+    QTRY_VERIFY(onlyOutlined(album));
     QVERIFY(closeTagEditor(main));
 }
 
