@@ -80,11 +80,17 @@ Components.DialogWindow {
     // whole: the numbers and Format are as narrow as that allows. Where the
     // view is narrower than the columns together, the columns that may
     // `give` way do, before the table scrolls sideways: first File Name,
-    // Folder and Status, down to their `least` widths, then the tags, down
-    // to theirs,
-    // which keep Title, Artist and Album at 160 px or more, scaled with the
-    // font; the numbers and Format keep their widths. A table that scrolls
-    // has each of them at its least, for as many columns in view. Where
+    // Folder and Status, down to their least, then the tags, down to
+    // theirs; the numbers and Format keep their widths. A column's least is
+    // its `least` width, or more for its values, up to what it `holds`:
+    // File Name whole up to 220 px, and Title, Artist and Album no narrower
+    // than their values or their header up to 160, scaled with the font (at
+    // 160 whatever they held, they left File Name at 140, which cut three
+    // of four names beside room to spare). A tag keeps 100 for what is
+    // typed over a short value, and 160 with no value yet to measure.
+    // Folder, which may be `cut`, gives only what its values don't need at
+    // first, then on down to its `least`. A table that scrolls has each of
+    // them at its least, for as many columns in view. Where
     // the view is wider, File Name and Folder, which `stretch`, take the
     // rest. Status takes no room until a
     // save or a rename failed for a row; a row with unsaved edits has a
@@ -96,15 +102,15 @@ Components.DialogWindow {
     // short).
     readonly property var tableColumns: [
         { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
-        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, stretch: true, path: true },
-        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 160 },
-        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 160 },
-        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 160 },
+        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, holds: 220, stretch: true, path: true },
+        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 100, holds: 160 },
+        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 100, holds: 160 },
+        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 100, holds: 160 },
         { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 100, give: 2, least: 70 },
         { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 52, sample: "0000" },
         { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 40, sample: "00" },
         { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 56, sample: "FLAC" },
-        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, stretch: true, path: true },
+        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, holds: 156, cut: true, stretch: true, path: true },
         { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, samples: [root.modifiedText, root.notSavedText, root.notRenamedText], onlyWithStatus: true }
     ]
     // Whether a row has a status to read: a save or rename that failed for
@@ -148,17 +154,49 @@ Components.DialogWindow {
         }
         return Math.max(root.uiPalette.scaledSize(column.width), root.columnNeed(column))
     })
-    // The narrowest each column gives way to: its least width, or what its
-    // header or sample needs.
+    // The rows the columns are measured by: the first measuredRowLimit, as
+    // the files loaded or were loaded again, so that typing moves no column
+    // and a large batch costs as little as a small one. Null until then.
+    readonly property int measuredRowLimit: 200
+    property var measuredRows: null
+    // What a column that `holds` its values needs for them, up to that.
+    readonly property var tableColumnContentWidths: {
+        // As in columnNeed, for the binding to follow the font.
+        columnValueMetrics.font
+        const rows = root.measuredRows
+        return root.tableColumns.map(function(column) {
+            if (!column.holds) {
+                return 0
+            }
+            const most = root.uiPalette.scaledSize(column.holds)
+            if (rows === null) {
+                return most
+            }
+            let widest = 0
+            for (let i = 0; i < rows.length; ++i) {
+                widest = Math.max(widest, columnValueMetrics.advanceWidth(root.cellText(column.key, rows[i])))
+            }
+            if (widest === 0) {
+                return most
+            }
+            // A cell lays its text out up to a pixel or so wider than its
+            // advance (349.5 px for 349 at 24 pt), and elided it.
+            return Math.min(most, Math.ceil(widest) + 2 + 2 * Kirigami.Units.largeSpacing)
+        })
+    }
+    // The narrowest each column gives way to: its least width, what its
+    // values need, or what its header or sample needs.
     readonly property var tableColumnLeastWidths: root.tableColumns.map(function(column, index) {
         const preferred = root.tableColumnWidths[index]
-        const least = column.give ? root.uiPalette.scaledSize(column.least) : preferred
+        const least = column.give
+            ? Math.max(root.uiPalette.scaledSize(column.least), column.cut ? 0 : root.tableColumnContentWidths[index])
+            : preferred
         return Math.min(preferred, Math.max(least, root.columnNeed(column)))
     })
     // The widths the columns are shown at in the table's width.
     readonly property var shownColumnWidths: {
         const preferred = root.tableColumnWidths
-        const least = root.tableColumnLeastWidths
+        const least = root.tableColumnLeastWidths.slice()
         const room = tagEditorTable.width - 2 * root.tableInset
         const total = preferred.reduce(function(sum, width) { return sum + width }, 0)
         const widths = preferred.slice()
@@ -173,28 +211,40 @@ Components.DialogWindow {
             })
             over = 0
         }
-        const slackOf = function(group) {
+        // File Name holds its values within the view beside #, where its
+        // end elides, rather than past the view's edge, which cut it with
+        // no ellipsis.
+        const name = root.tableColumns.findIndex(function(column) { return column.key === "fileName" })
+        const number = root.tableColumns.findIndex(function(column) { return column.key === "trackNo" })
+        least[name] = Math.min(least[name],
+            Math.max(root.columnNeed(root.tableColumns[name]), room - preferred[number]))
+        const slackOf = function(group, floor) {
             let slack = 0
             root.tableColumns.forEach(function(column, i) {
                 if (column.give === group) {
-                    slack += widths[i] - least[i]
+                    slack += widths[i] - floor[i]
                 }
             })
             return slack
         }
-        // Each group down to its least before the next gives any: where
-        // that is still too wide, every column is at its least and the
-        // table scrolls (keeping their widths, they pushed what identifies
-        // a row out of view).
-        for (const group of [1, 2]) {
-            const slack = slackOf(group)
+        // The first group down to its values, then to its least, before the
+        // next gives any: where that is still too wide, every column is at
+        // its least and the table scrolls (keeping their widths, they pushed
+        // what identifies a row out of view).
+        const values = least.map(function(width, i) {
+            return root.tableColumns[i].cut
+                ? Math.min(preferred[i], Math.max(width, root.tableColumnContentWidths[i]))
+                : width
+        })
+        for (const [group, floor] of [[1, values], [1, least], [2, least]]) {
+            const slack = slackOf(group, floor)
             if (slack <= 0 || over <= 0) {
                 continue
             }
             const taken = Math.min(over, slack)
             root.tableColumns.forEach(function(column, i) {
                 if (column.give === group) {
-                    widths[i] = Math.max(least[i], Math.floor(widths[i] - taken * (widths[i] - least[i]) / slack))
+                    widths[i] = Math.max(floor[i], Math.floor(widths[i] - taken * (widths[i] - floor[i]) / slack))
                 }
             })
             over -= taken
@@ -705,6 +755,9 @@ Components.DialogWindow {
         }
 
         function onLoadingChanged() {
+            if (!root.tagEditorApi.loading) {
+                root.measuredRows = root.tagEditorApi.leadingRows(root.measuredRowLimit)
+            }
             if (root.tagEditorApi.loading && root.renamePreviewPending) {
                 root.renamePreviewPending = false
                 root.operationInFlight = false

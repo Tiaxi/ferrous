@@ -118,6 +118,9 @@ public:
         bool resetOnFolder,
         bool resetOnDiscChange);
     Q_INVOKABLE QStringList loadedPaths() const;
+    // The first `limit` rows, each a map of its values by role name, for
+    // the table to size its columns by.
+    Q_INVOKABLE QVariantList leadingRows(int limit) const;
 
 signals:
     void openChanged();

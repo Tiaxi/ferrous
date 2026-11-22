@@ -614,6 +614,7 @@ ApplicationWindow {
         function toggleRowSelected(row) {}
         function selectAllRows() {}
         function loadedPaths() { return [] }
+        function leadingRows(limit) { return [] }
         function bulkValue(field) { return "" }
         function bulkValueMixed(field) { return false }
         function extraValuesNote(field) { return "" }

@@ -1300,6 +1300,22 @@ QStringList TagEditorController::loadedPaths() const {
     return m_loadedPaths;
 }
 
+QVariantList TagEditorController::leadingRows(int limit) const {
+    const QHash<int, QByteArray> roles = m_tableModel.roleNames();
+    const int count = std::min(limit, m_tableModel.rowCount());
+    QVariantList rows;
+    rows.reserve(count);
+    for (int row = 0; row < count; ++row) {
+        const QModelIndex index = m_tableModel.index(row);
+        QVariantMap values;
+        for (auto role = roles.cbegin(); role != roles.cend(); ++role) {
+            values.insert(QString::fromUtf8(role.value()), m_tableModel.data(index, role.key()));
+        }
+        rows.push_back(values);
+    }
+    return rows;
+}
+
 QVector<int> TagEditorController::targetRows() const {
     QVector<int> rows;
     rows.reserve(m_selectedRows.size());
