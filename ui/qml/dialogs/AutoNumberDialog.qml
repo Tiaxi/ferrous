@@ -85,6 +85,7 @@ Components.CompactDialogWindow {
         Layout.alignment: Qt.AlignHCenter
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
+        textFormat: Text.PlainText
         text: I18n.i18nc("@label", "Number the selected rows, or all rows if none are selected, using the current table order.")
     }
 
@@ -120,6 +121,7 @@ Components.CompactDialogWindow {
             visible: !root.startingTrackValid
             wrapMode: Text.WordWrap
             color: root.uiPalette.negative
+            textFormat: Text.PlainText
             text: I18n.i18nc("@info", "Enter a starting track from 1 to %1.", root.maximumNumber)
         }
         // With the tracks (under the disc's start, it read as a
@@ -163,6 +165,7 @@ Components.CompactDialogWindow {
             visible: !root.startingDiscValid
             wrapMode: Text.WordWrap
             color: root.uiPalette.negative
+            textFormat: Text.PlainText
             text: I18n.i18nc("@info", "Enter a starting disc from 1 to %1.", root.maximumNumber)
         }
         CheckBox {

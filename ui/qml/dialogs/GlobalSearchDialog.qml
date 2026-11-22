@@ -659,6 +659,7 @@ Dialog {
                         height: parent.height
                         bottomPadding: 5
                         verticalAlignment: Text.AlignBottom
+                        textFormat: Text.PlainText
                         text: visible ? (root.sectionTitles[resultRow.rowType] || "") : ""
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
@@ -675,6 +676,7 @@ Dialog {
                         width: parent.width - x - root.sideInset - resultsView.scrollbarLane
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
+                        textFormat: Text.PlainText
                         text: visible ? root.moreText(resultRow.kind, resultRow.rowType, model.shownCount || 0, model.count || 0) : ""
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
@@ -859,6 +861,7 @@ Dialog {
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
                         horizontalAlignment: Text.AlignRight
+                        textFormat: Text.PlainText
                         text: visible ? (model.lengthText || "") : ""
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
@@ -907,6 +910,7 @@ Dialog {
                     height: root.resultHeight
                     verticalAlignment: Text.AlignVCenter
                     elide: Text.ElideRight
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@info", "No matches for “%1”", root.queryText)
                     font.family: root.uiPalette.baseFont.family
                     font.pointSize: root.uiPalette.basePointSize
@@ -921,6 +925,7 @@ Dialog {
                     height: root.hintHeight
                     verticalAlignment: Text.AlignVCenter
                     elide: Text.ElideRight
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@info", "Check the spelling, or try fewer words.")
                     font.family: root.uiPalette.baseFont.family
                     font.pointSize: root.uiPalette.smallPointSize
@@ -944,6 +949,7 @@ Dialog {
                     height: visible ? root.headingHeight : 0
                     bottomPadding: 5
                     verticalAlignment: Text.AlignBottom
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:group search palette", "Recent Searches")
                     font.family: root.uiPalette.baseFont.family
                     font.pointSize: root.uiPalette.smallPointSize
@@ -990,6 +996,7 @@ Dialog {
                             height: parent.height
                             verticalAlignment: Text.AlignVCenter
                             elide: Text.ElideRight
+                            textFormat: Text.PlainText
                             text: auxRow.modelData.kind === "recent"
                                 ? auxRow.modelData.text
                                 : I18n.i18nc("@action:button %1 is a search query", "Search ‘%1’ instead", auxRow.modelData.text)
@@ -1048,6 +1055,7 @@ Dialog {
                             objectName: "globalSearchKeyHintKey"
                             height: parent.height
                             verticalAlignment: Text.AlignVCenter
+                            textFormat: Text.PlainText
                             text: modelData.key
                             font.family: root.uiPalette.baseFont.family
                             font.pointSize: root.uiPalette.smallPointSize
@@ -1057,6 +1065,7 @@ Dialog {
                             objectName: "globalSearchKeyHintAction"
                             height: parent.height
                             verticalAlignment: Text.AlignVCenter
+                            textFormat: Text.PlainText
                             text: modelData.action
                             font.family: root.uiPalette.baseFont.family
                             font.pointSize: root.uiPalette.smallPointSize
@@ -1076,13 +1085,13 @@ Dialog {
 
         // One tooltip for the result under the pointer, rather than one for
         // each row.
-        ToolTip {
+        Components.PlainToolTip {
             id: resultToolTip
             objectName: "globalSearchResultToolTip"
             parent: root.hoveredResultRow || resultsView
             visible: !!root.hoveredResultRow && root.hoveredResultRow.hovered
             delay: Kirigami.Units.toolTipDelay
-            text: root.hoveredResultRow ? root.hoveredResultRow.toolTipText() : ""
+            message: root.hoveredResultRow ? root.hoveredResultRow.toolTipText() : ""
         }
 
         Popup {
@@ -1095,6 +1104,7 @@ Dialog {
             padding: 12
             contentItem: Label {
                 // The filter names are search syntax, the same in every language.
+                textFormat: Text.PlainText
                 text: I18n.i18nc("@info search help", "Use \"quotes\" for phrases. Combine words and filters to narrow results.")
                     + '\n\ntype:album · type:track · type:artist\n'
                     + 'title: · artist: · album: · albumartist: · genre: · year: · date:\n'

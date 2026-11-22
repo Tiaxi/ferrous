@@ -111,6 +111,7 @@ Components.DialogWindow {
     // A text field that only the clipboard sees.
     TextEdit {
         id: clipboardText
+        textFormat: TextEdit.PlainText
         visible: false
     }
 
@@ -181,6 +182,7 @@ Components.DialogWindow {
 
                 Label {
                     objectName: "aboutName"
+                    textFormat: Text.PlainText
                     text: "Ferrous"
                     font.pointSize: root.uiPalette.basePointSize * 1.125
                     font.weight: Font.DemiBold
@@ -190,6 +192,7 @@ Components.DialogWindow {
 
                 Label {
                     objectName: "aboutVersion"
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@info", "Version %1", root.version)
                     font.features: root.uiPalette.tabularFigures
                     color: root.uiPalette.textSecondary
@@ -319,6 +322,7 @@ Components.DialogWindow {
                             objectName: "aboutDescription"
                             width: parent.width
                             wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
                             text: I18n.i18nc("@info", "A music player for KDE Plasma with live spectrogram and waveform views.")
                         }
 
@@ -331,6 +335,7 @@ Components.DialogWindow {
                             wrapMode: Text.Wrap
                             font.pointSize: root.uiPalette.smallPointSize
                             color: root.uiPalette.textSecondary
+                            textFormat: Text.PlainText
                             text: I18n.i18nc("@info", "© 2026 The Ferrous authors · GNU GPL, version 3 or later")
                         }
 
@@ -382,6 +387,7 @@ Components.DialogWindow {
                                 Label {
                                     anchors.verticalCenter: parent.verticalCenter
                                     width: root.componentNameWidth
+                                    textFormat: Text.PlainText
                                     text: modelData.name
                                     elide: Text.ElideRight
                                 }
@@ -390,6 +396,7 @@ Components.DialogWindow {
                                     anchors.verticalCenter: parent.verticalCenter
                                     x: root.componentNameWidth + Kirigami.Units.largeSpacing
                                     width: Math.max(0, parent.width - x)
+                                    textFormat: Text.PlainText
                                     text: modelData.version
                                     elide: Text.ElideRight
                                     font.features: root.uiPalette.tabularFigures
@@ -410,6 +417,7 @@ Components.DialogWindow {
                             id: authorsText
                             width: parent.width
                             wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
                             text: I18n.i18nc("@info", "The Ferrous authors")
                         }
 
@@ -437,6 +445,7 @@ Components.DialogWindow {
                             id: licenseText
                             width: parent.width
                             wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
                             text: I18n.i18nc("@info", "Ferrous is free software: you can redistribute it and modify it under "
                                 + "the terms of the GNU General Public License, version 3 or any later version.")
                         }

@@ -41,6 +41,7 @@ ToolButton {
 
         Label {
             objectName: "textToolButtonCaption"
+            textFormat: Text.PlainText
             text: root.text
             color: root.enabled ? Kirigami.Theme.textColor : Kirigami.Theme.disabledTextColor
             Layout.alignment: Qt.AlignVCenter

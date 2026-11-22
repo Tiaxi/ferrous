@@ -292,6 +292,7 @@ Popup {
             Label {
                 id: errorHistoryTitle
                 objectName: "errorHistoryTitle"
+                textFormat: Text.PlainText
                 text: I18n.i18nc("@title", "Recent Issues")
                 font.weight: Font.DemiBold
                 color: root.uiPalette.text
@@ -301,6 +302,7 @@ Popup {
             Label {
                 objectName: "errorHistoryNewCount"
                 visible: root.unseenCount > 0
+                textFormat: Text.PlainText
                 text: I18n.i18ncp("@info how many issues are new", "%1 new", "%1 new", root.unseenCount)
                 font.pointSize: root.uiPalette.smallPointSize
                 font.features: root.uiPalette.tabularFigures
@@ -443,6 +445,7 @@ Popup {
 
                                     Label {
                                         objectName: "errorHistoryTime"
+                                        textFormat: Text.PlainText
                                         text: historyRow.timeText
                                         font.pointSize: root.uiPalette.smallPointSize
                                         font.features: root.uiPalette.tabularFigures
@@ -509,6 +512,7 @@ Popup {
                                         ? root.uiPalette.pressedOn(root.uiPalette.chrome)
                                         : (actionButton.hovered ? root.uiPalette.hover : "transparent")
                                     contentItem: Label {
+                                        textFormat: Text.PlainText
                                         text: actionButton.text
                                         font.pointSize: root.uiPalette.smallPointSize
                                         color: actionButton.tint.a > 0

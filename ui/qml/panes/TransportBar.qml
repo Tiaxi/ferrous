@@ -6,6 +6,7 @@ import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
+import "../components" as Components
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../logic/KeyUtils.js" as KeyUtils
@@ -1053,6 +1054,7 @@ ToolBar {
 
                 contentItem: Label {
                     objectName: "seekDragTime"
+                    textFormat: Text.PlainText
                     text: seekTimeBox.text
                     font.family: seekTimeBox.font.family
                     font.pointSize: seekTimeBox.font.pointSize
@@ -1130,6 +1132,7 @@ ToolBar {
                     objectName: "transportTimePosition"
                     font.features: root.uiPalette.tabularFigures
                     color: transportTime.empty ? root.uiPalette.textSecondary : root.uiPalette.text
+                    textFormat: Text.PlainText
                     text: transportTime.empty
                         ? I18n.i18nc("@info:status no time", "–:––")
                         : FormatUtils.clockText(root.positionText)
@@ -1140,6 +1143,7 @@ ToolBar {
                     objectName: "transportTimeLength"
                     font.features: root.uiPalette.tabularFigures
                     color: root.uiPalette.textSecondary
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@info:status the track's length after its position", " / %1",
                         transportTime.empty
                             ? I18n.i18nc("@info:status no time", "–:––")
@@ -1249,13 +1253,13 @@ ToolBar {
             // drag or a key that moves the slider before the hover's delay
             // ends left at the volume it had ("Volume 100%" with the thumb
             // at 40%). A press shows it at once.
-            ToolTip {
+            Components.PlainToolTip {
                 id: volumeToolTip
                 objectName: "volumeToolTip"
                 parent: volumeSlider
                 visible: volumeSlider.hovered || volumeSlider.visualFocus || volumeSlider.pressed
                 delay: volumeSlider.pressed ? 0 : Kirigami.Units.toolTipDelay
-                text: volumeSlider.toolTipText
+                message: volumeSlider.toolTipText
             }
 
             background: Item {

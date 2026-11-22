@@ -589,6 +589,7 @@ Components.DialogWindow {
                 Label {
                     Layout.fillWidth: true
                     Layout.leftMargin: root.rowLeftPadding
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Action")
                     elide: Text.ElideRight
                     Accessible.role: Accessible.ColumnHeader
@@ -596,6 +597,7 @@ Components.DialogWindow {
                 Label {
                     Layout.preferredWidth: root.keyColumnWidth
                     leftPadding: Kirigami.Units.largeSpacing
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Shortcut")
                     elide: Text.ElideRight
                     Accessible.role: Accessible.ColumnHeader
@@ -603,6 +605,7 @@ Components.DialogWindow {
                 Label {
                     Layout.preferredWidth: root.keyColumnWidth + actionList.scrollbarLane
                     leftPadding: Kirigami.Units.largeSpacing
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Alternate")
                     elide: Text.ElideRight
                     Accessible.role: Accessible.ColumnHeader
@@ -670,6 +673,7 @@ Components.DialogWindow {
                         width: parent.width - x - root.rowLeftPadding
                         anchors.bottom: parent.bottom
                         bottomPadding: Kirigami.Units.smallSpacing
+                        textFormat: Text.PlainText
                         text: parent.section
                         font.weight: Font.DemiBold
                         color: root.uiPalette.textSecondary
@@ -733,6 +737,7 @@ Components.DialogWindow {
                         Label {
                             objectName: "keyboardShortcutsRowName"
                             Layout.fillWidth: true
+                            textFormat: Text.PlainText
                             text: actionRow.text
                             elide: Text.ElideRight
                             Accessible.ignored: true
@@ -741,6 +746,7 @@ Components.DialogWindow {
                             objectName: "keyboardShortcutsRowShortcut"
                             Layout.preferredWidth: root.keyColumnWidth
                             leftPadding: Kirigami.Units.largeSpacing
+                            textFormat: Text.PlainText
                             text: actionRow.bindings.length > 0 ? StandardKeys.nativeText(actionRow.bindings[0]) : ""
                             elide: Text.ElideRight
                             Accessible.ignored: true
@@ -750,6 +756,7 @@ Components.DialogWindow {
                             Layout.preferredWidth: root.keyColumnWidth
                             Layout.rightMargin: actionList.scrollbarLane
                             leftPadding: Kirigami.Units.largeSpacing
+                            textFormat: Text.PlainText
                             text: actionRow.bindings.slice(1).map(function(key) { return StandardKeys.nativeText(key) }).join(", ")
                             elide: Text.ElideRight
                             Accessible.ignored: true
@@ -765,6 +772,7 @@ Components.DialogWindow {
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
                     color: root.uiPalette.textSecondary
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@info", "No action or shortcut matches the search.")
                 }
             }
@@ -785,6 +793,7 @@ Components.DialogWindow {
                 Layout.fillWidth: true
                 Layout.bottomMargin: Kirigami.Units.smallSpacing
                 objectName: "keyboardShortcutsEditorTitle"
+                textFormat: Text.PlainText
                 text: root.currentAction
                     ? I18n.i18nc("@title:group %1 is an action", "Shortcuts for ‘%1’", root.nameOf(root.currentAction))
                     : I18n.i18nc("@title:group", "Shortcuts")
@@ -834,6 +843,7 @@ Components.DialogWindow {
                 rowSpacing: Kirigami.Units.smallSpacing
 
                 Label {
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@label:chooser", "Shortcut:")
                     Layout.alignment: Qt.AlignRight
                 }
@@ -847,6 +857,7 @@ Components.DialogWindow {
                     onKeySequenceModified: root.takeKey(0, shortcutEditor)
                 }
                 Label {
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@label:chooser", "Alternate:")
                     Layout.alignment: Qt.AlignRight
                 }
@@ -868,6 +879,7 @@ Components.DialogWindow {
             objectName: "keyboardShortcutsRefusal"
             Layout.fillWidth: true
             visible: root.refusal.length > 0
+            textFormat: Text.PlainText
             text: root.refusal
             wrapMode: Text.Wrap
             color: root.uiPalette.negative
@@ -877,6 +889,7 @@ Components.DialogWindow {
             objectName: "keyboardShortcutsTypedKeyNote"
             Layout.fillWidth: true
             visible: typedKey.length > 0 && root.refusal.length === 0
+            textFormat: Text.PlainText
             text: I18n.i18nc("@info %1 is a key",
                 "While the library or a text field has the keyboard focus, ‘%1’ types there instead.",
                 StandardKeys.nativeText(typedKey))
@@ -891,6 +904,7 @@ Components.DialogWindow {
             visible: root.saveFailed
             wrapMode: Text.Wrap
             color: root.uiPalette.negative
+            textFormat: Text.PlainText
             text: I18n.i18nc("@info", "Ferrous could not take these shortcuts. Change some back, or cancel to keep the ones you had.")
         }
     }

@@ -54,6 +54,7 @@ Item {
     Label {
         id: label
         objectName: "formHelpTextLabel"
+        textFormat: Text.PlainText
         x: root.indent
         width: Math.max(0, root.width - root.indent)
         wrapMode: Text.Wrap

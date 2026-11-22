@@ -77,6 +77,7 @@ Preferences.PreferencesPage {
         Layout.fillWidth: true
         Layout.maximumWidth: Kirigami.Units.gridUnit * 24
         wrapMode: Text.Wrap
+        textFormat: Text.PlainText
         text: !root.buildConfigured
             ? I18n.i18nc("@info", "Last.fm isn’t available in this build.")
             : (root.connected

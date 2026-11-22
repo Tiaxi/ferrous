@@ -121,6 +121,7 @@ GridLayout {
             }
             Kirigami.MnemonicData.controlType: Kirigami.MnemonicData.FormLabel
             Kirigami.MnemonicData.label: label.item ? label.item.Kirigami.FormData.label : ""
+            textFormat: Text.AutoText
             text: label.Kirigami.MnemonicData.richTextLabel
             Accessible.name: label.Kirigami.MnemonicData.plainTextLabel
             wrapMode: Text.Wrap

@@ -140,6 +140,7 @@ Components.DialogWindow {
             id: summarySizer
             width: parent.width
             wrapMode: Text.Wrap
+            textFormat: Text.PlainText
             text: summary.text
             font: summary.font
         }
@@ -179,6 +180,7 @@ Components.DialogWindow {
             objectName: "tagEditorStatusDetailsSummary"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
+            textFormat: Text.PlainText
             text: root.tagEditorApi.statusText
             visible: text.length > 0
             font.weight: Font.DemiBold

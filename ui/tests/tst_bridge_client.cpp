@@ -430,6 +430,8 @@ private slots:
     void libraryChangesNotifyOnlyLibraryProperties();
     void testBinariesSetNoFileBrowserNameDetector();
     void detectedFileBrowserNameNotifiesOnlyWhenItChanges();
+    void aDetectedFileBrowserNameIsNeverMarkup_data();
+    void aDetectedFileBrowserNameIsNeverMarkup();
     void clientsFindTheFileBrowserNameWithTheDetectorSet();
     void libraryWatchingDecodesFromBinaryPayload();
     void libraryScanErrorsAreReportedAsLibraryErrors();
@@ -9752,6 +9754,25 @@ void BridgeClientTest::detectedFileBrowserNameNotifiesOnlyWhenItChanges() {
     QVERIFY(!client.m_snapshotNotifyTimer.isActive());
     QCOMPARE(client.fileBrowserName(), QStringLiteral("Dolphin"));
     QCOMPARE(changed.count(), 1);
+}
+
+void BridgeClientTest::aDetectedFileBrowserNameIsNeverMarkup_data() {
+    QTest::addColumn<QString>("detected");
+    QTest::addColumn<QString>("used");
+    const QString guessed = QStringLiteral("File Manager");
+    QTest::newRow("tag") << QStringLiteral("<b>Files</b>") << guessed;
+    QTest::newRow("tag behind a mnemonic") << QStringLiteral("&<b>Files") << guessed;
+    QTest::newRow("ampersand") << QStringLiteral("Files&Folders") << QStringLiteral("Files&Folders");
+}
+
+void BridgeClientTest::aDetectedFileBrowserNameIsNeverMarkup() {
+    QFETCH(QString, detected);
+    QFETCH(QString, used);
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_fileBrowserName = QStringLiteral("File Manager");
+    client.applyDetectedFileBrowserName(detected);
+    QCOMPARE(client.fileBrowserName(), used);
 }
 
 namespace {

@@ -390,6 +390,7 @@ Components.DialogWindow {
                         Label {
                             objectName: "preferencesPageListTitle"
                             Layout.fillWidth: true
+                            textFormat: Text.PlainText
                             text: pageRow.text
                             color: root.uiPalette.text
                             elide: Text.ElideRight

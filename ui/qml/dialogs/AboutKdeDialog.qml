@@ -142,6 +142,7 @@ Components.DialogWindow {
 
                 Label {
                     objectName: "aboutKdeName"
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title", "KDE")
                     font.pointSize: root.uiPalette.basePointSize * 1.125
                     font.weight: Font.DemiBold
@@ -151,6 +152,7 @@ Components.DialogWindow {
 
                 Label {
                     objectName: "aboutKdeMotto"
+                    textFormat: Text.PlainText
                     text: I18n.i18nc("@info KDE's motto", "Be Free!")
                     color: root.uiPalette.textSecondary
                 }

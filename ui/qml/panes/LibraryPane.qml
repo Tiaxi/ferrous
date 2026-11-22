@@ -693,6 +693,7 @@ Rectangle {
                                 height: libraryRow.height
                                 verticalAlignment: Text.AlignVCenter
                                 horizontalAlignment: Text.AlignRight
+                                textFormat: Text.PlainText
                                 text: libraryRow.trackNumberResolved > 0 ? String(libraryRow.trackNumberResolved) : ""
                                 font.family: root.uiPalette.baseFont.family
                                 font.pointSize: root.uiPalette.basePointSize
@@ -711,6 +712,7 @@ Rectangle {
                                 height: libraryRow.height
                                 verticalAlignment: Text.AlignVCenter
                                 elide: Text.ElideRight
+                                textFormat: Text.PlainText
                                 text: libraryRow.rowTitle
                                 font.family: root.uiPalette.baseFont.family
                                 font.pointSize: root.uiPalette.basePointSize
@@ -754,6 +756,7 @@ Rectangle {
                                 x: libraryRow.textEnd - root.yearInset - implicitWidth
                                 height: libraryRow.height
                                 verticalAlignment: Text.AlignVCenter
+                                textFormat: Text.PlainText
                                 text: !shown
                                     ? ""
                                     : (libraryRow.isRootRow
@@ -946,6 +949,7 @@ Rectangle {
                 height: root.uiPalette.rowHeight
                 verticalAlignment: Text.AlignVCenter
                 elide: Text.ElideRight
+                textFormat: Text.PlainText
                 text: libraryEmptyState.loading
                     ? I18n.i18nc("@info", "Loading library…")
                     : I18n.i18nc("@info", "No music found in the library folders")

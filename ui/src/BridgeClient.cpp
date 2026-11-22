@@ -877,7 +877,11 @@ void BridgeClient::startFileBrowserNameDetection() {
 
 void BridgeClient::applyDetectedFileBrowserName(const QString &name) {
     const QString trimmed = name.trimmed();
-    if (trimmed.isEmpty() || m_fileBrowserName == trimmed) {
+    // The name is whatever xdg-mime printed, made from a desktop file's
+    // name, and goes into a menu item, whose label has to allow markup for
+    // its mnemonic's underline: one with a <, which could start a tag, is
+    // not used.
+    if (trimmed.isEmpty() || trimmed.contains(QLatin1Char('<')) || m_fileBrowserName == trimmed) {
         return;
     }
     m_fileBrowserName = trimmed;

@@ -154,6 +154,7 @@ Preferences.PreferencesPage {
                 Label {
                     required property var modelData
                     visible: false
+                    textFormat: Text.PlainText
                     text: (modelData && modelData.name) || ""
                 }
             }
@@ -167,6 +168,7 @@ Preferences.PreferencesPage {
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
                 color: root.uiPalette.textSecondary
+                textFormat: Text.PlainText
                 text: I18n.i18nc("@info", "No library folders yet.")
             }
 
@@ -322,6 +324,7 @@ Preferences.PreferencesPage {
                                 // 24 pt, 10 px between names and paths was
                                 // too little).
                                 Layout.rightMargin: root.uiPalette.scaledSize(parent.spacing) - parent.spacing
+                                textFormat: Text.PlainText
                                 text: rootRow.rootName
                                 color: root.uiPalette.text
                                 elide: Text.ElideRight
@@ -338,6 +341,7 @@ Preferences.PreferencesPage {
 
                             Label {
                                 objectName: "libraryRootTrackCount"
+                                textFormat: Text.PlainText
                                 text: I18n.i18ncp("@info", "%1 track", "%1 tracks", rootRow.trackCount)
                                 font.pointSize: root.uiPalette.smallPointSize
                                 font.features: root.uiPalette.tabularFigures

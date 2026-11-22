@@ -24,6 +24,7 @@ MenuBarItem {
     contentItem: Label {
         objectName: "menuBarItemLabel"
         // The title with the mnemonic underlined while Alt is held.
+        textFormat: Text.AutoText
         text: root.Kirigami.MnemonicData.richTextLabel
         font: root.font
         color: root.enabled ? root.uiPalette.text : Kirigami.Theme.disabledTextColor

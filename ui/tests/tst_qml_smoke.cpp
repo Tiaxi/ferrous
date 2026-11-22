@@ -61,6 +61,7 @@ std::unique_ptr<QmlSmokeTest> makeErrorsSmokeTest(const QString &userDirectories
 std::unique_ptr<QmlSmokeTest> makeTagEditorSmokeTest(const QString &userDirectoriesParent);
 std::unique_ptr<QmlSmokeTest> makeScrobbleSmokeTest(const QString &userDirectoriesParent);
 std::unique_ptr<QmlSmokeTest> makeKeyboardShortcutsSmokeTest(const QString &userDirectoriesParent);
+std::unique_ptr<QmlSmokeTest> makePlainTextSmokeTest(const QString &userDirectoriesParent);
 
 namespace {
 
@@ -71,7 +72,7 @@ struct SmokeTestArea {
 
 // Every test class, by the area name that the CTest entries use. An area
 // may have several classes, which run in turn in its process.
-const std::array<SmokeTestArea, 17> kSmokeTestAreas{{
+const std::array<SmokeTestArea, 18> kSmokeTestAreas{{
     {"spectrogram", &makeSpectrogramSmokeTest},
     {"spectrogram", &makeSpectrogramPlaybackSmokeTest},
     {"spectrogram", &makeSpectrogramCanvasSmokeTest},
@@ -89,6 +90,7 @@ const std::array<SmokeTestArea, 17> kSmokeTestAreas{{
     {"tag_editor", &makeTagEditorSmokeTest},
     {"scrobble", &makeScrobbleSmokeTest},
     {"keyboard_shortcuts", &makeKeyboardShortcutsSmokeTest},
+    {"plain_text", &makePlainTextSmokeTest},
 }};
 
 // QTest's options that take a value.
