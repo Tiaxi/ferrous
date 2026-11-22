@@ -428,6 +428,35 @@ Components.DialogWindow {
         }
     }
 
+    // One case of Replace Album Art: what the folder holds, then what
+    // Replace does there.
+    component ReplaceCoverCase: ColumnLayout {
+        id: replaceCoverCase
+        property string lead: ""
+        property string outcome: ""
+        Layout.fillWidth: true
+        spacing: 2
+
+        Label {
+            objectName: replaceCoverCase.objectName + "Lead"
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            font.weight: Font.DemiBold
+            color: root.uiPalette.text
+            textFormat: Text.PlainText
+            text: replaceCoverCase.lead
+        }
+
+        Label {
+            objectName: replaceCoverCase.objectName + "Outcome"
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            color: root.uiPalette.textSecondary
+            textFormat: Text.PlainText
+            text: replaceCoverCase.outcome
+        }
+    }
+
     // A row's text: the title, elided, then the secondary line, which
     // wraps to a second line where it does not fit, as with a large font
     // (the artist and "Loading high-resolution artwork…" elided at
@@ -911,11 +940,14 @@ Components.DialogWindow {
             }
         }
 
-        // A short sentence for each case, as the backend applies it
-        // (artwork::apply_artwork_to_track). All of it is in the folder of
-        // the track the art was searched for. A folder with a JPEG or PNG
-        // gets a cover file, as Ferrous shows any such image as the
-        // folder's cover (folder_cover), a back scan alone too, which
+        // Each case on a row of its own, as the backend applies it
+        // (artwork::apply_artwork_to_track): what the folder holds, in the
+        // text's ink and semibold, then what Replace does there, secondary,
+        // so the reader finds the case that applies without parsing one
+        // paragraph of conditions (it was one, read twice). All of it is in
+        // the folder of the track the art was searched for. A folder with a
+        // JPEG or PNG gets a cover file, as Ferrous shows any such image as
+        // the folder's cover (folder_cover), a back scan alone too, which
         // nobody would call "a cover image": the one with a cover's name is
         // overwritten, and otherwise a new one is written beside the images
         // that stay, so not every replaced image is lost ("replaces the
@@ -924,15 +956,26 @@ Components.DialogWindow {
         // front cover, and no other folder's. It says which file is
         // overwritten ("becomes its cover file" left that open, beside a
         // warning that something is lost).
-        Label {
+        ColumnLayout {
             objectName: "replaceCoverConsequence"
             Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            color: root.uiPalette.textSecondary
-            textFormat: Text.PlainText
-            text: I18n.i18nc("@info", "If the track’s folder has JPEG or PNG images, Ferrous overwrites the one "
-                + "named as a cover, or adds a cover file beside them. Otherwise the album art is embedded in "
-                + "the album’s tracks in that folder.")
+            // 6 px between the rows with the default font, more with a
+            // larger one; a row's lead and outcome sit as close as a
+            // question and its path.
+            spacing: root.uiPalette.scaledSize(Kirigami.Units.smallSpacing + Kirigami.Units.smallSpacing / 2)
+
+            ReplaceCoverCase {
+                objectName: "replaceCoverFolderCase"
+                lead: I18n.i18nc("@info", "Folder has JPEG or PNG images")
+                outcome: I18n.i18nc("@info", "Overwrites the image named as a cover, or adds a cover file "
+                    + "beside them")
+            }
+
+            ReplaceCoverCase {
+                objectName: "replaceCoverEmbedCase"
+                lead: I18n.i18nc("@info", "No JPEG or PNG images in the folder")
+                outcome: I18n.i18nc("@info", "Embeds the album art in this album’s tracks in that folder")
+            }
         }
 
         // What is lost, on its own line and in the text's colour (it ended

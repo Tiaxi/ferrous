@@ -11,7 +11,9 @@
 #include <QTextLayout>
 #include <QTextOption>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <utility>
 
 // The album art viewer: its zoom and details, and the iTunes artwork
 // preview.
@@ -44,6 +46,8 @@ private slots:
     void itunesArtworkActionsFollowTheTextFont();
     void itunesReplaceShowsWhatWasChosen_data();
     void itunesReplaceShowsWhatWasChosen();
+    void itunesReplaceGivesEachCaseARow_data();
+    void itunesReplaceGivesEachCaseARow();
     void itunesArtworkCountLineHoldsAtLargeFonts();
     void itunesArtworkDialogOpensWithItsRowsWhole();
     void itunesArtworkListIsAsTallAsItsRows();
@@ -2380,7 +2384,8 @@ void applyItunesCandidateFromPreview(QQuickWindow *window, QObject *dialog, QObj
     // message, it showed one).
     {
         QQuickItem *message = visibleItemNamed(replaceQuestion(window), QStringLiteral("confirmDialogMessage"));
-        QQuickItem *details = visibleItemNamed(replaceQuestion(window), QStringLiteral("replaceCoverConsequence"));
+        QQuickItem *details =
+            visibleItemNamed(replaceQuestion(window), QStringLiteral("replaceCoverFolderCaseOutcome"));
         QVERIFY2(message != nullptr && details != nullptr, at.constData());
         const QString text = message->property("text").toString();
         QVERIFY2(text.startsWith(QStringLiteral("Replace the ")) && text.contains(QStringLiteral("album art")) && message->height() > 0,
@@ -3151,6 +3156,97 @@ private:
 // The line over the results that says how many there are is one line in
 // the dialog at 24 pt, as wide as it opens on a 1600 px screen ("it."
 // wrapped alone onto a second line).
+void AlbumArtSmokeTest::itunesReplaceGivesEachCaseARow_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Replace Album Art says what it does in each case on a row of its own:
+// what the folder holds, semibold in the text's ink, then what Replace does
+// there, secondary, 6 px from the next case with the default font. It was
+// one paragraph whose conditions the reader had to carry into the warning.
+// The warning stays under them in the text's ink, and all of it is whole.
+void AlbumArtSmokeTest::itunesReplaceGivesEachCaseARow() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
+    const QVariantList rows = itunesArtworkFixture(dir, 2);
+    ItunesWindow ui(coverUrl);
+    QVERIFY2(ui.loaded(), "Main.qml failed to show");
+    const QVariantMap target{
+        {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
+        {QStringLiteral("album"), QStringLiteral("Small Hours")},
+        {QStringLiteral("artist"), QStringLiteral("The Quiet Meridian")},
+        {QStringLiteral("coverPath"), coverUrl},
+    };
+    QVERIFY(openItunesArtworkDialog(ui.window, ui.dialog, ui.fake, rows, target));
+    QQuickWindow *question = replaceQuestion(ui.window);
+    QVERIFY(question != nullptr);
+    QObject *palette = qvariant_cast<QObject *>(ui.dialog->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(ui.dialog, "requestSuggestionApply", Q_ARG(QVariant, 0)));
+    QTRY_VERIFY(question->property("opened").toBool());
+    QVERIFY(QTest::qWaitForWindowExposed(question));
+
+    const QRgb ink = palette->property("text").value<QColor>().rgba();
+    const QRgb secondary = palette->property("textSecondary").value<QColor>().rgba();
+    const std::array<std::pair<QString, QString>, 2> cases{{
+        {QStringLiteral("Folder has JPEG or PNG images"),
+         QStringLiteral("Overwrites the image named as a cover, or adds a cover file beside them")},
+        {QStringLiteral("No JPEG or PNG images in the folder"),
+         QStringLiteral("Embeds the album art in this album’s tracks in that folder")},
+    }};
+    const std::array<QString, 2> names{QStringLiteral("replaceCoverFolderCase"),
+                                       QStringLiteral("replaceCoverEmbedCase")};
+    QQuickItem *warning = visibleItemNamed(question, QStringLiteral("replaceCoverWarning"));
+    QVERIFY(warning != nullptr);
+    QList<QQuickItem *> outcomes;
+    for (std::size_t i = 0; i < cases.size(); ++i) {
+        QQuickItem *lead = visibleItemNamed(question, names[i] + QStringLiteral("Lead"));
+        QQuickItem *outcome = visibleItemNamed(question, names[i] + QStringLiteral("Outcome"));
+        QVERIFY2(lead != nullptr && outcome != nullptr, qPrintable(names[i]));
+        QCOMPARE(lead->property("text").toString(), cases[i].first);
+        QCOMPARE(outcome->property("text").toString(), cases[i].second);
+        QCOMPARE(lead->property("font").value<QFont>().weight(), QFont::DemiBold);
+        QCOMPARE(outcome->property("font").value<QFont>().weight(), QFont::Normal);
+        QCOMPARE(lead->property("color").value<QColor>().rgba(), ink);
+        QCOMPARE(outcome->property("color").value<QColor>().rgba(), secondary);
+        QTRY_VERIFY(sceneRectOf(outcome).top() >= sceneRectOf(lead).bottom());
+        QCOMPARE(sceneRectOf(outcome).left(), sceneRectOf(lead).left());
+        QCOMPARE(sceneRectOf(lead).left(), sceneRectOf(warning).left());
+        for (QQuickItem *line : {lead, outcome}) {
+            QCOMPARE(line->property("textFormat").toInt(), int(Qt::PlainText));
+            QTRY_VERIFY2(!line->property("truncated").toBool() && sceneRectOf(line).right() <= question->width(),
+                         qPrintable(line->objectName()));
+        }
+        if (!outcomes.isEmpty()) {
+            // 6 px between the cases at 10 pt, more with a larger font.
+            QVariant scaled;
+            QVERIFY(QMetaObject::invokeMethod(palette, "scaledSize", Q_RETURN_ARG(QVariant, scaled),
+                                              Q_ARG(QVariant, 6)));
+            const qreal gap = sceneRectOf(lead).top() - sceneRectOf(outcomes.last()).bottom();
+            QCOMPARE(gap, scaled.toReal());
+            if (pointSize == 10.0) {
+                QCOMPARE(gap, 6.0);
+            }
+        }
+        outcomes.append(outcome);
+    }
+    QTRY_VERIFY(sceneRectOf(warning).top() > sceneRectOf(outcomes.last()).bottom());
+    QCOMPARE(warning->property("color").value<QColor>().rgba(), ink);
+    QCOMPARE(warning->property("font").value<QFont>().weight(), QFont::Normal);
+    // The window holds it all over its buttons.
+    QQuickItem *cancel = visibleItemNamed(question, QStringLiteral("confirmDialogCancelButton"));
+    QVERIFY(cancel != nullptr);
+    QTRY_VERIFY(sceneRectOf(warning).bottom() <= sceneRectOf(cancel).top());
+    QVERIFY(sceneRectOf(cancel).bottom() <= question->height());
+    QVERIFY(QMetaObject::invokeMethod(question, "reject"));
+    QTRY_VERIFY(!question->isVisible());
+}
+
 void AlbumArtSmokeTest::itunesArtworkCountLineHoldsAtLargeFonts() {
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
@@ -4944,9 +5040,10 @@ void AlbumArtSmokeTest::itunesReplaceShowsWhatWasChosen() {
         QQuickItem *title = visibleItemNamed(question, QStringLiteral("replaceCoverChosenTitle"));
         QQuickItem *artist = visibleItemNamed(question, QStringLiteral("replaceCoverChosenArtist"));
         QQuickItem *consequence = visibleItemNamed(question, QStringLiteral("replaceCoverConsequence"));
+        QQuickItem *outcome = visibleItemNamed(question, QStringLiteral("replaceCoverEmbedCaseOutcome"));
         QQuickItem *warning = visibleItemNamed(question, QStringLiteral("replaceCoverWarning"));
         QVERIFY(message != nullptr && thumbnail != nullptr && title != nullptr && artist != nullptr
-                && consequence != nullptr && warning != nullptr);
+                && consequence != nullptr && outcome != nullptr && warning != nullptr);
         QCOMPARE(thumbnail->property("source").toString(), row.value(QStringLiteral("previewSource")).toString());
         // Drawn, not the placeholder.
         QTRY_COMPARE(thumbnail->childItems().first()->property("status").toInt(), 1);
@@ -4954,7 +5051,7 @@ void AlbumArtSmokeTest::itunesReplaceShowsWhatWasChosen() {
         QCOMPARE(thumbnail->height(), thumbnail->width());
         QCOMPARE(title->property("text").toString(), row.value(QStringLiteral("albumTitle")).toString());
         QCOMPARE(artist->property("text").toString(), row.value(QStringLiteral("artistName")).toString());
-        for (QQuickItem *line : {title, artist, consequence, warning}) {
+        for (QQuickItem *line : {title, artist, outcome, warning}) {
             QCOMPARE(line->property("textFormat").toInt(), int(Qt::PlainText));
             QTRY_VERIFY2(!line->property("truncated").toBool() && sceneRectOf(line).right() <= question->width(),
                          qPrintable(line->objectName()));
@@ -4966,7 +5063,7 @@ void AlbumArtSmokeTest::itunesReplaceShowsWhatWasChosen() {
         QVERIFY(sceneRectOf(title).left() >= sceneRectOf(thumbnail).right() + 12 - 0.5);
         QTRY_VERIFY(sceneRectOf(consequence).top()
                     > std::max(sceneRectOf(thumbnail).bottom(), sceneRectOf(artist).bottom()));
-        QTRY_VERIFY(sceneRectOf(warning).top() > sceneRectOf(consequence).bottom());
+        QTRY_VERIFY(sceneRectOf(warning).top() > sceneRectOf(outcome).bottom());
         QCOMPARE(sceneRectOf(warning).left(), sceneRectOf(consequence).left());
         QCOMPARE(warning->property("color").value<QColor>().rgba(), palette->property("text").value<QColor>().rgba());
         QCOMPARE(artist->property("color").value<QColor>().rgba(),
