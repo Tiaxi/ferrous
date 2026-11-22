@@ -39,7 +39,7 @@ Components.DialogWindow {
     onAboutToShow: {
         root.uiBridge.reloadDiagnosticsFromDisk()
         syncDiagnosticsText()
-        diagnosticsTextArea.forceActiveFocus(Qt.PopupFocusReason)
+        diagnosticsLogView.forceActiveFocus(Qt.PopupFocusReason)
     }
 
     onClosed: diagnosticsText = ""
@@ -60,8 +60,11 @@ Components.DialogWindow {
     Connections {
         target: root.uiBridge
 
+        // Closed, it keeps no copy of the log: it takes it as it opens.
         function onDiagnosticsChanged() {
-            root.syncDiagnosticsText()
+            if (root.visible) {
+                root.syncDiagnosticsText()
+            }
         }
     }
 
@@ -171,9 +174,9 @@ Components.DialogWindow {
                     icon.name: "edit-copy"
                     text: I18n.i18nc("@action:button", "Copy All")
                     onClicked: {
-                        if ((diagnosticsTextArea.text || "").length > 0) {
-                            diagnosticsTextArea.selectAll()
-                            diagnosticsTextArea.copy()
+                        if (diagnosticsLogView.length > 0) {
+                            diagnosticsLogView.selectAll()
+                            diagnosticsLogView.copy()
                         }
                     }
                 }
@@ -195,9 +198,9 @@ Components.DialogWindow {
             }
         }
 
-        // The log on the view colour in a frame, its scroll bars inside the
-        // frame, as the tag editor's table (the horizontal one ran
-        // under the frame, outside it). The frame takes the focus colour
+        // The log on the view colour in a frame, its scroll bar inside the
+        // frame, as the tag editor's table. Its records wrap (#735), so it
+        // scrolls one way. The frame takes the focus colour
         // while the log has the focus, as a text area's.
         Rectangle {
             objectName: "diagnosticsLogFrame"
@@ -206,7 +209,7 @@ Components.DialogWindow {
             color: root.uiPalette.view
             radius: 3
             border.width: 1
-            border.color: diagnosticsTextArea.activeFocus
+            border.color: diagnosticsLogView.activeFocus
                 ? Kirigami.Theme.focusColor
                 : Kirigami.ColorUtils.linearInterpolation(
                     root.uiPalette.view, root.uiPalette.text, Kirigami.Theme.frameContrast)
@@ -217,82 +220,115 @@ Components.DialogWindow {
                 anchors.fill: parent
                 anchors.margins: 1
                 clip: true
+                // The scroll bar's lane is kept while there is none, so the
+                // records don't wrap again as it comes and goes.
+                leftPadding: mirrored ? ScrollBar.vertical.width : 0
+                rightPadding: mirrored ? 0 : ScrollBar.vertical.width
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-                TextArea {
-                    id: diagnosticsTextArea
-                    objectName: "diagnosticsTextArea"
-                    textFormat: TextEdit.PlainText
-                    text: root.diagnosticsText
-                    // The bridge reads the log off the GUI thread.
-                    placeholderText: (root.uiBridge.diagnosticsLoading || false)
-                        ? I18n.i18nc("@info:placeholder", "Loading the log\u2026")
-                        : ""
-                    placeholderTextColor: root.uiPalette.placeholderText
-                    readOnly: true
-                    selectByMouse: true
-                    wrapMode: TextEdit.NoWrap
-                    font: Kirigami.Theme.fixedWidthFont
-                    persistentSelection: true
-                    // The frame round the view is the log's; the text
-                    // stands 8 px clear of its sides and 6 px of its top
-                    // and bottom (at 5 px it was nearly on the frame).
-                    background: null
-                    leftPadding: Kirigami.Units.largeSpacing
-                    rightPadding: Kirigami.Units.largeSpacing
-                    topPadding: Kirigami.Units.smallSpacing + 2
-                    bottomPadding: Kirigami.Units.smallSpacing + 2
+                // Holds no text: it is as large as the log, and the view
+                // over it draws the part that shows (#724).
+                Flickable {
+                    id: diagnosticsFlickable
+                    contentWidth: width
+                    contentHeight: diagnosticsLogView.contentHeight
+                    boundsBehavior: Flickable.StopAtBounds
+                    flickableDirection: Flickable.VerticalFlick
 
-                    MouseArea {
-                        id: diagnosticsContextArea
-                        anchors.fill: parent
-                        acceptedButtons: Qt.RightButton
-                        propagateComposedEvents: true
-                        cursorShape: Qt.IBeamCursor
+                    DiagnosticsLogView {
+                        id: diagnosticsLogView
+                        objectName: "diagnosticsLogView"
+                        parent: diagnosticsFlickable
+                        width: diagnosticsFlickable.width
+                        height: diagnosticsFlickable.height
+                        contentY: diagnosticsFlickable.contentY
+                        focus: true
+                        Kirigami.Theme.colorSet: Kirigami.Theme.View
+                        Kirigami.Theme.inherit: false
+                        text: root.diagnosticsText
+                        // As a control has it: what the monospaced font
+                        // leaves open, such as its size, is the window's.
+                        font: diagnosticsLogPlaceholder.font
+                        color: Kirigami.Theme.textColor
+                        selectionColor: Kirigami.Theme.highlightColor
+                        selectedTextColor: Kirigami.Theme.highlightedTextColor
+                        // The frame round the view is the log's; the text
+                        // stands 8 px clear of its sides and 6 px of its top
+                        // and bottom (at 5 px it was nearly on the frame).
+                        leftPadding: Kirigami.Units.largeSpacing
+                        rightPadding: Kirigami.Units.largeSpacing
+                        topPadding: Kirigami.Units.smallSpacing + 2
+                        bottomPadding: Kirigami.Units.smallSpacing + 2
+                        Accessible.role: Accessible.EditableText
+                        // Qt Quick reads it out from text and cursorPosition.
+                        Accessible.name: I18n.i18nc("@label accessible name of the diagnostics log's text", "Log")
+                        Accessible.multiLine: true
+                        Accessible.focusable: true
 
-                        onPressed: function(mouse) {
-                            if (mouse.button !== Qt.RightButton) {
-                                mouse.accepted = false
-                            }
+                        onScrollRequested: function(y) {
+                            diagnosticsFlickable.contentY = y
+                        }
+                        Keys.onMenuPressed: diagnosticsContextMenu.popupAt(
+                            diagnosticsContextArea, diagnosticsLogView.leftPadding, diagnosticsLogView.topPadding)
+
+                        Label {
+                            id: diagnosticsLogPlaceholder
+                            objectName: "diagnosticsLogPlaceholder"
+                            x: diagnosticsLogView.leftPadding
+                            y: diagnosticsLogView.topPadding
+                            width: diagnosticsLogView.width - x - diagnosticsLogView.rightPadding
+                            visible: diagnosticsLogView.length === 0
+                            textFormat: Text.PlainText
+                            // The bridge reads the log off the GUI thread.
+                            text: (root.uiBridge.diagnosticsLoading || false)
+                                ? I18n.i18nc("@info:placeholder", "Loading the log\u2026")
+                                : ""
+                            font: Kirigami.Theme.fixedWidthFont
+                            color: root.uiPalette.placeholderText
+                            wrapMode: Text.Wrap
                         }
 
-                        onClicked: function(mouse) {
-                            if (mouse.button === Qt.RightButton) {
-                                diagnosticsTextArea.forceActiveFocus()
+                        MouseArea {
+                            id: diagnosticsContextArea
+                            anchors.fill: parent
+                            acceptedButtons: Qt.RightButton
+                            cursorShape: Qt.IBeamCursor
+
+                            onPressed: diagnosticsLogView.forceActiveFocus(Qt.MouseFocusReason)
+                            onClicked: function(mouse) {
                                 diagnosticsContextMenu.popupAt(diagnosticsContextArea, mouse.x, mouse.y)
-                            } else {
-                                mouse.accepted = false
-                            }
-                        }
-                    }
-
-                    Components.AppMenu {
-                        id: diagnosticsContextMenu
-
-                        MenuItem {
-                            text: I18n.i18nc("@action:inmenu", "Copy")
-                            enabled: (diagnosticsTextArea.selectedText || "").length > 0
-                            onTriggered: diagnosticsTextArea.copy()
-                        }
-
-                        MenuItem {
-                            text: I18n.i18nc("@action:inmenu", "Select All")
-                            enabled: (diagnosticsTextArea.text || "").length > 0
-                            onTriggered: diagnosticsTextArea.selectAll()
-                        }
-
-                        MenuItem {
-                            text: I18n.i18nc("@action:inmenu", "Copy All")
-                            enabled: (diagnosticsTextArea.text || "").length > 0
-                            onTriggered: {
-                                diagnosticsTextArea.selectAll()
-                                diagnosticsTextArea.copy()
                             }
                         }
 
-                        MenuItem {
-                            text: I18n.i18nc("@action:inmenu", "Copy Log Without Paths")
-                            enabled: (diagnosticsTextArea.text || "").length > 0
-                            onTriggered: root.uiBridge.copyDiagnosticsWithoutPaths()
+                        Components.AppMenu {
+                            id: diagnosticsContextMenu
+
+                            MenuItem {
+                                text: I18n.i18nc("@action:inmenu", "Copy")
+                                enabled: diagnosticsLogView.hasSelection
+                                onTriggered: diagnosticsLogView.copy()
+                            }
+
+                            MenuItem {
+                                text: I18n.i18nc("@action:inmenu", "Select All")
+                                enabled: diagnosticsLogView.length > 0
+                                onTriggered: diagnosticsLogView.selectAll()
+                            }
+
+                            MenuItem {
+                                text: I18n.i18nc("@action:inmenu", "Copy All")
+                                enabled: diagnosticsLogView.length > 0
+                                onTriggered: {
+                                    diagnosticsLogView.selectAll()
+                                    diagnosticsLogView.copy()
+                                }
+                            }
+
+                            MenuItem {
+                                text: I18n.i18nc("@action:inmenu", "Copy Log Without Paths")
+                                enabled: diagnosticsLogView.length > 0
+                                onTriggered: root.uiBridge.copyDiagnosticsWithoutPaths()
+                            }
                         }
                     }
                 }
