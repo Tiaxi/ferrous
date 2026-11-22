@@ -113,19 +113,20 @@ function issueTimeText(ms, nowMs) {
             Qt.formatDate(date, Qt.locale().dateFormat(1 /* Locale.ShortFormat */)), time)
 }
 
-// The glyph of an entry: Last.fm's waiting scrobbles and the library's
-// notices are quiet; anything else that went wrong is a warning in the
-// negative colour.
+// The glyph of an entry: Last.fm's waiting scrobbles have the offline
+// glyph; the rest the status bar's warning sign, quiet, in the secondary
+// colour, for the library's notices and in the negative colour for
+// anything else that went wrong.
 const GlyphWarning = 0
 const GlyphOffline = 1
-const GlyphInformation = 2
+const GlyphNotice = 2
 
 function issueGlyph(category, severity) {
     if (severity === SeverityWarning && category === CategoryLastFm) {
         return GlyphOffline
     }
     if (severity === SeverityWarning && category === CategoryLibrary) {
-        return GlyphInformation
+        return GlyphNotice
     }
     return GlyphWarning
 }

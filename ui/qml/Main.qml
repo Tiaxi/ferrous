@@ -252,6 +252,7 @@ ApplicationWindow {
         property var queueRows: []
         property int selectedQueueIndex: -1
         property int playingQueueIndex: -1
+        property string playingQueueLengthText: ""
         property string currentTrackPath: ""
         property real currentPlaySerial: 0
         property string currentTrackCoverPath: ""

@@ -54,7 +54,7 @@ const MAX_PENDING_SEARCH_RESULTS: usize = 2;
 const MAX_PENDING_SPECTROGRAM_BYTES: usize = 16 * 1024 * 1024;
 /// What the UI shows when the bridge thread ends without stopping normally.
 const BACKEND_STOPPED_MESSAGE: &str =
-    "The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.";
+    "The playback engine stopped unexpectedly. Restart Ferrous to continue.";
 
 /// A command is a u16 id, a u32 payload length, and the payload. Strings in
 /// it, and in every frame sent to the UI, are a u32 byte length and UTF-8;
@@ -781,9 +781,7 @@ fn run_ffi_relay_loop(shared: Arc<FfiShared>, event_rx: crossbeam_channel::Recei
             // Without the relay the UI hears nothing more from the bridge, so
             // stop the bridge too and show the UI why.
             let mut runtime = shared.lock_runtime();
-            runtime.fail(&format!(
-                "The Ferrous backend stopped after an {message}. Restart Ferrous to continue."
-            ));
+            runtime.fail(&super::engine_stopped_after(&message));
             let _ = runtime.command_tx.send(BridgeCommand::Shutdown);
             drop(runtime);
             shared.request_stop();
@@ -8114,6 +8112,22 @@ mod tests {
         );
         assert!(!runtime.send_command(parse_binary_command(&snapshot)));
         assert!(runtime.pop_binary_event().is_none());
+    }
+
+    // The status bar calls the bridge the playback engine, so the reasons
+    // its tooltip shows do as well.
+    #[test]
+    fn a_stopped_engine_is_named_an_engine() {
+        for message in [
+            BACKEND_STOPPED_MESSAGE.to_string(),
+            super::super::engine_stopped_after("internal error in the bridge thread"),
+        ] {
+            assert!(
+                message.starts_with("The playback engine stopped"),
+                "{message}"
+            );
+            assert!(!message.contains("backend"), "{message}");
+        }
     }
 
     #[test]

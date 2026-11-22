@@ -3116,13 +3116,17 @@ fn run_bridge_loop(
         Err(message) => {
             let _ = try_send_event(
                 event_tx,
-                BridgeEvent::Failed(format!(
-                    "The Ferrous backend stopped after an {message}. Restart Ferrous to continue."
-                )),
+                BridgeEvent::Failed(engine_stopped_after(&message)),
             );
             false
         }
     }
+}
+
+/// What the UI shows for a bridge that stopped after the panic `message`
+/// tells of: the status bar calls it the playback engine.
+fn engine_stopped_after(message: &str) -> String {
+    format!("The playback engine stopped after an {message}. Restart Ferrous to continue.")
 }
 
 /// Read the settings, before the workers start, and send the UI the window

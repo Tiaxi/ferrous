@@ -42,7 +42,8 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   tooltip says how far the play got. A seek never decides it: the
 //   countdown goes on while the track plays.
 // - Being sent: the bar full, from the moment the play reaches its
-//   scrobble point, while the send goes on in the background.
+//   scrobble point, while the send goes on in the background. Only then:
+//   listening stops short of full.
 // - Scrobbled: once Last.fm has accepted it, the glyph alone in the
 //   secondary colour, so that the routine success is no louder than the
 //   status bar's other words.
@@ -52,8 +53,10 @@ import "../logic/KeyUtils.js" as KeyUtils
 // - Failed: "Scrobble failed" in the text colour and the glyph in the
 //   negative colour, without the bar: the status bar's one treatment of an
 //   error, as its new issues.
-// - Paused by the user: the glyph struck through, in the tertiary colour,
-//   without the bar.
+// - Paused by the user: the glyph struck through (#470), its letters in
+//   the tertiary colour and the strike over them in the text colour, in a
+//   clear casing, without the bar (in one colour the strike's clear space
+//   took so much of the letters that neither read at 1x).
 // - Otherwise (not eligible, skipped, signed out): nothing.
 // Clicking it pauses or resumes scrobbling; its menu has the settings.
 AbstractButton {
@@ -135,6 +138,9 @@ AbstractButton {
     // it to its controls' height, so the slot is centred in the bar on whole
     // pixels and the glyph on the slot.
     property int blockHeight: 22
+    // From the slot's top up to the status bar's, which the keyboard's menu
+    // stays above: the status bar sets it.
+    property real roomToBarTop: 0
     // Last.fm accepted the scrobble.
     readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
     // The trough and the bar in it: while listening, and while the scrobble
@@ -166,10 +172,13 @@ AbstractButton {
         [root.uiPalette.chrome], 3.1)
     // While listening, the bar is never less than a short mark from the
     // left, so that listening that has just started reads apart from a
-    // scrobble, which has no bar (at 0% it was the trough alone).
+    // scrobble, which has no bar (at 0% it was the trough alone); and it
+    // stops as short a mark before the trough's end, so that only a decided
+    // scrobble fills it (the last of the listening looked like sending).
     readonly property int minimumBarLength: Math.max(3, Math.round(root.glyphSize * 3 / 16))
     readonly property real barLength: root.look === "listening"
-        ? Math.max(root.minimumBarLength, root.barWidth * root.barProgress)
+        ? Math.max(root.minimumBarLength,
+            Math.min(root.barWidth - root.minimumBarLength, root.barWidth * root.barProgress))
         : root.barWidth * root.barProgress
 
     // The slot's words, before the glyph.
@@ -252,8 +261,28 @@ AbstractButton {
         root.uiBridge.setLastFmScrobblingPaused(!root.paused)
     }
 
+    // From the keyboard the menu opens in the window, above the status bar
+    // and on the slot's right edge (under the slot, it was under the bar
+    // and out of the window). It is an item of the window then: Wayland's
+    // compositor places a window popup under its anchor wherever that is
+    // in the window.
     function openMenu() {
-        menu.popupAt(root, 0, root.height)
+        menu.popupType = Popup.Item
+        menu.popup(keyboardMenuAnchor, 0, 0)
+    }
+
+    function openMenuAt(x, y) {
+        menu.popupType = Popup.Window
+        menu.popupAt(root, x, y)
+    }
+
+    // Where that menu's top left is: it follows the menu's size, which
+    // Breeze gives it from its items as they show.
+    Item {
+        id: keyboardMenuAnchor
+        visible: false
+        x: root.width - menu.width
+        y: -root.roomToBarTop - menu.height - Kirigami.Units.smallSpacing
     }
 
     objectName: "scrobbleIndicator"
@@ -300,7 +329,7 @@ AbstractButton {
 
     TapHandler {
         acceptedButtons: Qt.RightButton
-        onTapped: function(eventPoint) { menu.popupAt(root, eventPoint.position.x, eventPoint.position.y) }
+        onTapped: function(eventPoint) { root.openMenuAt(eventPoint.position.x, eventPoint.position.y) }
     }
 
     Components.AppMenu {
@@ -380,6 +409,18 @@ AbstractButton {
                     roundToIconSize: false
                     source: root.glyphSource
                     color: root.glyphColor
+                    isMask: true
+                }
+
+                // Paused: the strike, apart from the letters it crosses.
+                Kirigami.Icon {
+                    objectName: "scrobbleIndicatorStrike"
+                    visible: root.look === "paused"
+                    width: root.glyphSize
+                    height: width
+                    roundToIconSize: false
+                    source: Qt.resolvedUrl("../assets/lastfm-strike.svg")
+                    color: root.uiPalette.text
                     isMask: true
                 }
 

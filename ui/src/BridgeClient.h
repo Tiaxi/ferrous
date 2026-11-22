@@ -69,6 +69,10 @@ class BridgeClient : public QObject {
     Q_PROPERTY(double queueRedoId READ queueRedoId NOTIFY queueUndoChanged)
     Q_PROPERTY(int queueRedoKind READ queueRedoKind NOTIFY queueUndoChanged)
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY trackIdentityChanged)
+    // The length its queue row gives the current track, as the row shows
+    // it, or empty without a row: for a track that is stopped, whose
+    // length the engine may not have.
+    Q_PROPERTY(QString playingQueueLengthText READ playingQueueLengthText NOTIFY snapshotChanged)
     Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY trackIdentityChanged)
     // Changes whenever a play starts: on every track change, also when the
     // same file plays again, and when a stopped track plays again. A seek, a
@@ -276,6 +280,7 @@ public:
     QObject *queueRows() const;
     int selectedQueueIndex() const;
     int playingQueueIndex() const;
+    QString playingQueueLengthText() const;
     QString currentTrackPath() const;
     // The track the title, artist, album, genre, year and number describe:
     // the current track, or while its own text is not known yet, the track
@@ -965,6 +970,7 @@ private:
     mutable bool m_queuePathFirstIndexStale{true};
     int m_selectedQueueIndex{-1};
     int m_playingQueueIndex{-1};
+    QString m_playingQueueLengthText;
     QString m_currentTrackPath;
     // Backend track token of the current track; it also changes when the
     // same file starts again, as with repeat-one.

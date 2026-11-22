@@ -2427,11 +2427,12 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     QPointingDevice *touchScreen = QTest::createTouchDevice();
     const QPoint touched = seek->mapToScene(QPointF(seek->width() * 0.2, y)).toPoint();
     QTest::touchEvent(window, touchScreen).press(0, touched, window);
-    QTest::touchEvent(window, touchScreen).move(0, touched + QPoint(20, 0), window);
     {
-        // Qt Quick hands a touch move on with the next frame it draws.
+        // Qt Quick hands a touch move on with the next frame it draws, which
+        // sending the move can already draw, when the press's is due.
         int frames = 0;
         const FrameSampler counting(window, [&frames]() { ++frames; });
+        QTest::touchEvent(window, touchScreen).move(0, touched + QPoint(20, 0), window);
         QTRY_VERIFY(frames > 0);
     }
     error = expectFade([&]() { QTest::touchEvent(window, touchScreen).release(0, touched + QPoint(20, 0), window); },

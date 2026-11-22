@@ -303,7 +303,7 @@ void TranslationTest::backendStopWithoutAReasonIsTranslated() {
     decoded.hasStopped = true;
     QVERIFY(!client.processBinarySnapshot(decoded));
     QCOMPARE(client.backendFailure(),
-             pseudo(QStringLiteral("The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.")));
+             pseudo(QStringLiteral("The playback engine stopped unexpectedly. Restart Ferrous to continue.")));
 }
 
 void TranslationTest::backendStartFailureIsTranslated() {

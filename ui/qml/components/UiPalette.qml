@@ -100,18 +100,20 @@ QtObject {
     readonly property color rowHover: root._tintOf(root.text, root.view, root.themeIsDark ? 1.44 : 1.31)
     // A hovered row of the library or the queue: rowHover on the view.
     readonly property color hoveredRow: ColorUtils.drawnOver(root.rowHover, root.view)
-    // The view mixed with the accent: 1.6:1 / 1.4:1 on the view, a clear
+    // The view mixed with the accent: 1.8:1 / 1.4:1 on the view, a clear
     // step past a hovered row in weight as well as in hue (at 22 %,
-    // #d4edfa, the light one was 1.2:1, under the hover).
-    // #1f3e4e / #b5e0f7.
+    // #d4edfa, the light one was 1.2:1, under the hover), and on dark past
+    // the selection of a list without focus too (at 26 %, #1f3e4e, the two
+    // were 1.04:1 apart, and nothing said which list takes Enter or
+    // Delete after a click). #21475b / #b5e0f7.
     readonly property color selection: ColorUtils.mixColor(
-        root.view, root.accent, root.themeIsDark ? 0.26 : 0.38)
+        root.view, root.accent, root.themeIsDark ? 0.32 : 0.38)
     // The selection of a list without keyboard focus: quieter than the
     // selection, yet further from the view than a hovered row: 1.52:1 /
     // 1.34:1 on the view, between rowHover's 1.45:1 / 1.31:1 and the
-    // selection's 1.6:1 / 1.4:1 (at 20 % and 27 %, #1c3442 and #cbe9f9,
+    // selection's 1.8:1 / 1.4:1 (at 20 % and 27 %, #1c3442 and #cbe9f9,
     // it was 1.40:1 / 1.27:1, under the hover). It differs
-    // from the selection by its colour more than by its weight: the view
+    // from the selection by its colour as well as by its weight: the view
     // mixed with 24 % / 33 % of the accent, then at 60 % of that mix's
     // saturation and the same luminance, so it keeps its step over the
     // hover and reads as a selection at rest rather than a second active
@@ -123,12 +125,21 @@ QtObject {
     // A selected queue row under the pointer: the text colour over the
     // selection, active or inactive, so a selected row answers the pointer
     // as the others do. See _selectionHoverShare: 4 % / 6 % in Breeze,
-    // #284555 / #acd5eb; 6 % on dark took the warning mark under 3:1. The
-    // column text and the amber are made readable on it.
+    // #2a4e61 / #acd5eb. The secondary and column text, the amber and the
+    // warning mark are made readable on it.
     readonly property color selectionHovered: ColorUtils.mixColor(
         root.selection, root.text, root._selectionHoverShare)
     readonly property color selectionInactiveHovered: ColorUtils.mixColor(
         root.selectionInactive, root.text, root._selectionHoverShare)
+    readonly property var _selectedRows: [root.selection, root.selectionInactive,
+                                          root.selectionHovered, root.selectionInactiveHovered]
+    // The secondary text on a selected row: lightened or darkened where it
+    // is under 4.5:1 on one, as on dark under the pointer.
+    // #b3bcc1 / #4f5a63.
+    readonly property color textSecondarySelected: root.readableOn(root.textSecondary, root._selectedRows, 4.5)
+    // An unreadable file's mark on a selected row: the negative colour, 3:1
+    // on each. #ef6c7b / #c4293b.
+    readonly property color negativeSelected: root.readableOn(root.negative, root._selectedRows, 3)
     // The 1 px ring on the focused row: the accent, lighter on dark and
     // darker on light, to stand out from the selection tint. #6cc5f2 / #1a74a8.
     readonly property color focusRing: root.themeIsDark
@@ -238,23 +249,19 @@ QtObject {
     }
 
     // The share of the text colour over the selection, active or inactive,
-    // under the pointer: the most, in whole percent up to 6 %, that leaves
-    // the text and the secondary text 4.5:1 on both and an unreadable row's
-    // warning mark, in the negative colour as the status bar's, 3:1, so the
-    // step never costs what the row says. One share for both, so they step
-    // alike. The column text and the playing amber are made readable on
-    // them in turn (`textColumn`, `now`).
+    // under the pointer: the most, in whole percent up to 4 % on dark and
+    // 6 % on light, that leaves the text 4.5:1 on both. Any more on dark
+    // brings the inactive one up to the active. One share for both, so they
+    // step alike. The other texts and the marks of a selected row are made
+    // readable on them in turn (`textSecondarySelected`, `textColumn`,
+    // `now`, `negativeSelected`).
     readonly property real _selectionHoverShare: {
-        const texts = [root.text, root.textSecondary]
         const selections = [root.selection, root.selectionInactive]
-        for (let percent = 6; percent > 0; --percent) {
+        for (let percent = root.themeIsDark ? 4 : 6; percent > 0; --percent) {
             let readable = true
             for (let s = 0; readable && s < selections.length; ++s) {
                 const candidate = ColorUtils.mixColor(selections[s], root.text, percent / 100)
-                readable = ColorUtils.contrastRatio(root.negative, candidate) >= 3
-                for (let i = 0; readable && i < texts.length; ++i) {
-                    readable = ColorUtils.contrastRatio(texts[i], candidate) >= 4.5
-                }
+                readable = ColorUtils.contrastRatio(root.text, candidate) >= 4.5
             }
             if (readable) {
                 return percent / 100

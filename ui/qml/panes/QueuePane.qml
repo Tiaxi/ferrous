@@ -475,13 +475,11 @@ Rectangle {
                 objectName: "queueRegionHeader"
                 anchors.fill: parent
                 uiPalette: root.uiPalette
-                // Over the Title column, or with no rows to align with, at
-                // the panes' 12 px inset, where "Library" is beside it
-                // (an empty queue's name stood alone at the Title
-                // column's 66 px).
-                leftInset: root.uiBridge.queueLength > 0
-                    ? queueHeaderRow.x + titleHeader.x
-                    : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+                // Over the Title column, with rows or without: it is that
+                // column's heading, and stays as tracks come (at the panes'
+                // 12 px inset while empty, it jumped 54 px on the first
+                // Play).
+                leftInset: queueHeaderRow.x + titleHeader.x
                 rightInset: Math.max(0, parent.width - (queueHeaderRow.x + titleHeader.x + titleHeader.width))
                 title: I18n.i18nc("@title queue region", "Queue")
                 totals: root.totalsText
@@ -787,8 +785,11 @@ Rectangle {
                     // icons in the shared palette's colours. They sit on
                     // whole pixels.
                     readonly property real cellY: Math.round((playlistRow.height - titleCell.implicitHeight) / 2)
+                    readonly property color secondaryTextColor: playlistRow.rowSelected
+                        ? root.uiPalette.textSecondarySelected
+                        : root.uiPalette.textSecondary
                     readonly property color columnTextColor: playlistRow.unreadable
-                        ? root.uiPalette.textSecondary
+                        ? playlistRow.secondaryTextColor
                         : root.uiPalette.textColumn
 
                     Item {
@@ -814,7 +815,9 @@ Rectangle {
                             isMask: true
                             color: playlistRow.isNow
                                 ? root.uiPalette.now
-                                : (playlistRow.showsWarning ? root.uiPalette.negative : root.uiPalette.textSecondary)
+                                : !playlistRow.showsWarning ? playlistRow.secondaryTextColor
+                                : playlistRow.rowSelected ? root.uiPalette.negativeSelected
+                                : root.uiPalette.negative
                             // The amber glyph fades in as the old row's
                             // fades out.
                             opacity: playlistRow.isNow ? playlistRow.amberIn : 1
@@ -873,7 +876,7 @@ Rectangle {
                         textFormat: Text.PlainText
                         text: playlistRow.titleValue
                         readonly property color plainColor: playlistRow.unreadable
-                            ? root.uiPalette.textSecondary : root.uiPalette.text
+                            ? playlistRow.secondaryTextColor : root.uiPalette.text
                         // The title's share of amber, taken in by the row
                         // that becomes now as the row that was now gives it
                         // up. It sets the weight and the colour together, so
@@ -928,7 +931,7 @@ Rectangle {
                         horizontalAlignment: Text.AlignRight
                         textFormat: Text.PlainText
                         text: playlistRow.lengthTextValue
-                        color: root.uiPalette.textSecondary
+                        color: playlistRow.secondaryTextColor
                     }
 
                     MouseArea {
@@ -1179,6 +1182,10 @@ Rectangle {
                     visible: root.addLibraryFolderAction !== null
                     action: root.addLibraryFolderAction
                     highlighted: true
+                    // The desktop style draws the default button from this,
+                    // as DialogButtons' primary one: `highlighted` alone
+                    // drew it as any other.
+                    Accessible.defaultButton: true
                 }
             }
 
@@ -1391,33 +1398,57 @@ Rectangle {
                 property real pressX: 0
 
                 visible: modelData.header.visible
-                x: queueHeaderRow.x + modelData.header.x - root.columnGap / 2 - width / 2
+                // On whole pixels, for the frame's edges.
+                x: Math.round(queueHeaderRow.x + modelData.header.x - root.columnGap / 2 - width / 2)
                 width: Kirigami.Units.largeSpacing
                 height: parent.height
                 // An empty queue's columns have no labels to resize.
                 activeFocusOnTab: visible && root.uiBridge.queueLength > 0
 
                 Accessible.role: Accessible.Separator
-                Accessible.name: I18n.i18nc("@action %1 is a column title", "Resize the %1 column", modelData.label)
-                Accessible.description: I18n.i18nc("@info", "Left or Right to resize, Home for the default width")
+                readonly property string actionText: I18n.i18nc("@action %1 is a column title",
+                    "Resize the %1 column", modelData.label)
+                readonly property string keysText: I18n.i18nc("@info",
+                    "Left or Right to resize, Home for the default width")
+                Accessible.name: resizeHandle.actionText
+                Accessible.description: resizeHandle.keysText
                 Accessible.focusable: true
 
-                // A 1 px seam under the pointer; with keyboard focus, a
-                // 2 px line in the focus colour the header's full height,
-                // which reads as focus where a short tick did not.
+                // A 1 px seam under the pointer.
                 Rectangle {
                     objectName: "queueColumnHandleLine"
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    anchors.topMargin: resizeHandle.activeFocus ? 0 : Kirigami.Units.smallSpacing
-                    anchors.bottomMargin: resizeHandle.activeFocus ? 0 : Kirigami.Units.smallSpacing
-                    width: resizeHandle.activeFocus ? 2 : 1
-                    visible: resizeHandle.highlighted
-                    color: resizeHandle.activeFocus || resizeMouseArea.pressed
-                        ? root.uiPalette.focusRing
-                        : root.uiPalette.seam
+                    anchors.topMargin: Kirigami.Units.smallSpacing
+                    anchors.bottomMargin: Kirigami.Units.smallSpacing
+                    width: 1
+                    visible: resizeHandle.highlighted && !resizeHandle.activeFocus
+                    color: resizeMouseArea.pressed ? root.uiPalette.focusRing : root.uiPalette.seam
                 }
+
+                // With keyboard focus, the app's ring around the handle,
+                // the header's height over its hairline and within the gap
+                // between the columns (a 2 px line alone read as a hover).
+                Rectangle {
+                    objectName: "queueColumnHandleFocus"
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 1
+                    width: 2 * Math.round(root.columnGap * 3 / 8)
+                    radius: 3
+                    visible: resizeHandle.activeFocus
+                    color: "transparent"
+                    border.width: 2
+                    border.color: root.uiPalette.focusRing
+                }
+
+                // Keyboard focus says what the handle is, and its keys.
+                ToolTip.visible: resizeHandle.activeFocus && root.keyboardInUse
+                ToolTip.delay: Kirigami.Units.toolTipDelay
+                ToolTip.text: I18n.i18nc("@info:tooltip what a handle does, then its keys", "%1 · %2",
+                    resizeHandle.actionText, resizeHandle.keysText)
 
                 MouseArea {
                     id: resizeMouseArea

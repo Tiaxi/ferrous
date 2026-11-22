@@ -130,15 +130,32 @@ ToolBar {
         ? Window.window.devicePixelRatio
         : Screen.devicePixelRatio
 
-    // Whether the seek bar has a waveform to draw: peaks of the playing
-    // track, which the bridge sends as bytes.
+    readonly property bool stopped: root.uiBridge.playbackState === "Stopped"
+    // Stopped with a track loaded, which is not the empty transport (it
+    // was drawn as one): the bar has the track's waveform, all unplayed and
+    // with no playhead, and the time its length. The engine keeps a stopped
+    // track current until the queue is empty.
+    readonly property bool stoppedTrack: root.stopped && root.uiBridge.queueLength > 0
+        && (root.uiBridge.currentTrackPath || "").length > 0
+
+    // Whether the seek bar has a waveform to draw: peaks of the current
+    // track, which the bridge sends as bytes. Stopped, only what it holds
+    // of that track: the bridge keeps the peaks of the track before until
+    // the next one's come, and covers none of it until then.
     readonly property bool hasWaveform: {
-        if (root.uiBridge.playbackState === "Stopped") {
+        if (root.stopped && !(root.stoppedTrack
+                && (root.uiBridge.waveformCoverageSeconds > 0 || root.uiBridge.waveformComplete))) {
             return false
         }
         const peaks = root.uiBridge.waveformPeaksPacked
         return !!peaks && (peaks.byteLength || peaks.length || 0) > 0
     }
+    // Where the file of the current track is known to end early, in
+    // seconds, or -1: the bridge tells it of the current track alone, and
+    // the bar has a place for it with that track's waveform and length.
+    readonly property real endsEarlySeconds: root.hasWaveform
+        && root.uiBridge.waveformEndsEarly === true && root.uiBridge.durationSeconds > 0
+        ? root.uiBridge.waveformCoverageSeconds : -1
     // A 1 px line, a whole number of device pixels thick.
     readonly property real devicePixelLine: Math.max(1, Math.round(root.windowDevicePixelRatio))
         / root.windowDevicePixelRatio
@@ -164,11 +181,13 @@ ToolBar {
     // The clear space around a 16 px glyph in its button.
     readonly property real smallGlyphInset: (root.buttonSize - root.smallGlyphSize) / 2
     // The right of the transport on one rhythm: the seek bar, 16 px, the
-    // time, 24 px, the volume glyph, 8 px, the volume slider, measured
-    // between what is drawn, not between the buttons' frames.
+    // time, 24 px, the volume glyph, measured between what is drawn, not
+    // between the buttons' frames; and the volume's groove 6 px from the
+    // mute button's frame, 3 px clear of its focus ring (8 px from the
+    // glyph, the groove met the hover's fill and went through the ring).
     readonly property real seekToTimeGap: 2 * Kirigami.Units.largeSpacing
     readonly property real timeToVolumeGap: 3 * Kirigami.Units.largeSpacing
-    readonly property real volumeGlyphToSliderGap: Kirigami.Units.largeSpacing
+    readonly property real muteButtonToSliderGap: 2 * root.buttonFocusRingOutset
 
     // A text of the transport's tooltips: the action and its shortcut.
     function actionToolTip(label, shortcutText) {
@@ -518,10 +537,10 @@ ToolBar {
             // as much as a long track.
             readonly property bool durationKnown: isFinite(root.uiBridge.durationSeconds)
                 && root.uiBridge.durationSeconds > 0
-            // A track is loaded, playing or paused: the bar shows its
-            // playhead, at the start until its length is known.
-            readonly property bool trackLoaded: root.uiBridge.playbackState !== "Stopped"
-            readonly property bool seekAllowed: durationKnown && trackLoaded
+            // A track plays or is paused: the bar shows its playhead, at
+            // the start until its length is known.
+            readonly property bool trackActive: !root.stopped
+            readonly property bool seekAllowed: durationKnown && trackActive
             // The bar: 28 px, with the ±12 px waveform in its middle and
             // the playhead across its height, 2 px past the waveform's
             // peaks on either side. A larger font scales the waveform as it
@@ -643,11 +662,17 @@ ToolBar {
             Accessible.name: I18n.i18nc("@label", "Seek")
             // The value's second, which a track's last half second would
             // otherwise give past its length.
-            Accessible.description: seekAllowed
-                ? I18n.i18nc("@info position of duration", "%1 of %2",
-                    FormatUtils.formatClockTime(Math.floor(value)),
-                    FormatUtils.formatClockTime(root.uiBridge.durationSeconds))
-                : I18n.i18nc("@info", "No track playing")
+            Accessible.description: !seekAllowed
+                ? I18n.i18nc("@info", "No track playing")
+                : root.endsEarlySeconds >= 0
+                    ? I18n.i18nc("@info position of duration, then where a damaged file ends",
+                        "%1 of %2. The file ends at %3.",
+                        FormatUtils.formatClockTime(Math.floor(value)),
+                        FormatUtils.formatClockTime(root.uiBridge.durationSeconds),
+                        FormatUtils.formatClockTime(root.endsEarlySeconds))
+                    : I18n.i18nc("@info position of duration", "%1 of %2",
+                        FormatUtils.formatClockTime(Math.floor(value)),
+                        FormatUtils.formatClockTime(root.uiBridge.durationSeconds))
 
             // The time the current gesture moved to, exactly, or NaN. The
             // position's Binding may write the value first when it ends.
@@ -730,8 +755,17 @@ ToolBar {
                 }
             }
             onPointerLifted: {
+                // Before the slider lets go, so the hover has the pointer
+                // as the gesture ends.
+                releasedOnBar = !heldByTouch && contains(heldPointerPosition)
+                handedToHover = true
                 if (pressed) {
                     takePointer()
+                }
+            }
+            onPointerHeldChanged: {
+                if (pointerHeld) {
+                    handedToHover = false
                 }
             }
             onAdjustingChanged: {
@@ -794,7 +828,7 @@ ToolBar {
                     // Only with peaks: it lets what is under it show, the
                     // empty line too.
                     visible: root.hasWaveform
-                    peaksData: root.uiBridge.playbackState === "Stopped"
+                    peaksData: root.stopped && !root.hasWaveform
                         ? ""
                         : root.uiBridge.waveformPeaksPacked
                     generatedSeconds: root.uiBridge.waveformCoverageSeconds
@@ -811,11 +845,12 @@ ToolBar {
                 // The unplayed part: the chrome over the waveform after the
                 // playhead's line, which leaves it at the unplayed opacity,
                 // and the band's colour where the band is, so the band is
-                // the same on either side of the playhead.
+                // the same on either side of the playhead. Stopped, all of
+                // the waveform is unplayed.
                 Item {
                     id: seekUnplayed
                     objectName: "seekUnplayed"
-                    visible: seekSlider.trackLoaded
+                    visible: seekSlider.trackActive || root.hasWaveform
                     x: seekSlider.playheadX
                     width: Math.max(0, parent.width - x)
                     y: waveformItem.y
@@ -847,6 +882,35 @@ ToolBar {
                         width: seekUnplayed.width - seekUnplayed.bandRight
                         height: parent.height
                         color: root.seekUnplayedCover
+                    }
+                }
+
+                // A file that ends early: the status bar's warning sign at
+                // the cut, which the waveform alone didn't explain, in a gap
+                // of the chrome as tall as the waveform, so that no slivers
+                // of it stand over and under the sign. Under the playhead,
+                // on whole pixels and within the bar.
+                Rectangle {
+                    objectName: "seekEndsEarlyMark"
+                    visible: root.endsEarlySeconds >= 0
+                    antialiasing: false
+                    width: root.smallGlyphSize
+                    height: waveformItem.height
+                    x: !visible ? 0 : Math.max(0, Math.min(Math.floor(parent.width - width),
+                        Math.round(seekSlider.barPixelOf(root.endsEarlySeconds)
+                            / seekSlider.windowDevicePixelRatio - width / 2)))
+                    y: waveformItem.y
+                    color: root.chromeColor
+
+                    Kirigami.Icon {
+                        objectName: "seekEndsEarlyGlyph"
+                        y: Math.round((parent.height - height) / 2)
+                        width: parent.width
+                        height: width
+                        roundToIconSize: false
+                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        isMask: true
+                        color: root.uiPalette.negative
                     }
                 }
 
@@ -884,7 +948,7 @@ ToolBar {
                 Rectangle {
                     id: seekPlayhead
                     objectName: "seekPlayhead"
-                    visible: seekSlider.trackLoaded
+                    visible: seekSlider.trackActive
                     antialiasing: false
                     y: root.snapped((parent.height - seekSlider.playheadHeight) / 2)
                     height: seekSlider.playheadHeight
@@ -940,26 +1004,39 @@ ToolBar {
                 objectName: "seekHover"
                 acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                 enabled: !seekPointer.touch
+                // The hover has caught up with the pointer.
+                onHoveredChanged: seekSlider.handedToHover = false
+                onPointChanged: seekSlider.handedToHover = false
             }
             WindowPointer {
                 id: seekPointer
                 window: seekSlider.Window.window
             }
 
-            // The time under the hovering pointer, shown while no gesture
-            // shows its own.
-            readonly property bool hoverTimeShown: seekHover.hovered && !adjusting && seekAllowed
+            // A drag hands the pointer over to the hover where it lifts. Qt
+            // sends no hover during a drag, so the handler still has the
+            // press's point, and that it is over the bar, until it catches
+            // up, at the next frame or move: until then the hover is the
+            // release's.
+            property bool handedToHover: false
+            property bool releasedOnBar: false
+            readonly property bool pointerOnBar: handedToHover ? releasedOnBar : seekHover.hovered
+            readonly property real pointerX: handedToHover
+                ? heldPointerPosition.x : seekHover.point.position.x
+            // The pointer has a time to show, which a gesture's goes before.
+            // It doesn't follow `adjusting`: as that ended at a release, what
+            // read both saw neither for a moment, and the box went out and
+            // faded in again.
+            readonly property bool hoverTimeShown: pointerOnBar && seekAllowed
             // Where the hovering pointer is, in the slider's coordinates, and
             // the second a click there would seek to, as a drag there shows
             // it. Hidden, they keep their last values, so the tooltip fades
-            // out where it was, with its time, and nothing hidden moves. Qt
-            // sends no hover during a drag, and brings the point up to date
-            // at the frame after it, before that frame draws.
+            // out where it was, with its time, and nothing hidden moves.
             property real hoverX: 0
             property int hoverSecond: 0
             Binding on hoverX {
                 when: seekSlider.hoverTimeShown
-                value: seekHover.point.position.x
+                value: seekSlider.pointerX
                 restoreMode: Binding.RestoreNone
             }
             Binding on hoverSecond {
@@ -969,7 +1046,7 @@ ToolBar {
                 // `durationKnown` and `hoverTimeShown` can still hold the
                 // last length's values when this updates.
                 value: isFinite(root.uiBridge.durationSeconds) && root.uiBridge.durationSeconds > 0
-                    ? Math.floor(seekSlider.secondsAtX(seekHover.point.position.x))
+                    ? Math.floor(seekSlider.secondsAtX(seekSlider.pointerX))
                     : seekSlider.hoverSecond
                 restoreMode: Binding.RestoreNone
             }
@@ -993,9 +1070,11 @@ ToolBar {
                 // rather than a gesture's: the hover line then shows, and
                 // fades out, with it.
                 property bool showsHover: false
+                // From the gesture's and the hover's own state, as the
+                // anchor's: a drag released off the bar showed none.
                 Binding on showsHover {
-                    when: seekTimeBox.shown
-                    value: !seekSlider.gestureHeld()
+                    value: seekSlider.gestureHeld() ? false
+                        : seekSlider.pointerOnBar ? true : seekTimeBox.showsHover
                     restoreMode: Binding.RestoreNone
                 }
                 // A hover's time comes after a moment, so a pointer that
@@ -1033,7 +1112,7 @@ ToolBar {
                 Binding on anchorX {
                     value: seekSlider.gestureHeld()
                         ? seekSlider.playheadX + seekSlider.playheadLineWidth / 2
-                        : seekHover.hovered ? seekSlider.hoverX : seekTimeBox.anchorX
+                        : seekSlider.pointerOnBar ? seekSlider.hoverX : seekTimeBox.anchorX
                     restoreMode: Binding.RestoreNone
                 }
                 // Centred on the line, within the bar at either end. Near
@@ -1067,7 +1146,7 @@ ToolBar {
                 // Its source is chosen as the anchor's is.
                 readonly property string shownText: !shown ? ""
                     : seekSlider.gestureHeld() ? FormatUtils.formatClockTime(seekSlider.valueSecond)
-                    : seekHover.hovered ? FormatUtils.formatClockTime(seekSlider.hoverSecond)
+                    : seekSlider.pointerOnBar ? FormatUtils.formatClockTime(seekSlider.hoverSecond)
                     : ""
                 onShownTextChanged: {
                     if (shownText.length > 0) {
@@ -1107,17 +1186,23 @@ ToolBar {
         }
 
         // "1:17 / 3:49": the position in the text colour, the length in the
-        // secondary one; "–:–– / –:––" in the secondary colour with nothing
-        // playing, which fills the box as a time does, so the volume keeps
-        // its distance from what is drawn ("–:––" alone left a hole of some
-        // 45 px before it).
+        // secondary one. Stopped, all of it in the secondary colour and no
+        // position, as there is no playhead: "–:–– / 3:49" with a track
+        // loaded, its length the queue's until the engine has it, and
+        // "–:–– / –:––" without, which fills the box as a time does, so the
+        // volume keeps its distance from what is drawn ("–:––" alone left a
+        // hole of some 45 px before it).
         Item {
             id: transportTime
             objectName: "transportTime"
-            readonly property bool empty: root.uiBridge.playbackState === "Stopped"
-            readonly property string lengthText: seekSlider.durationKnown
-                ? FormatUtils.clockText(root.uiBridge.durationText)
-                : I18n.i18nc("@info:status no time", "–:––")
+            readonly property string noTime: I18n.i18nc("@info:status no time", "–:––")
+            readonly property string lengthText: root.stopped && !root.stoppedTrack
+                ? transportTime.noTime
+                : seekSlider.durationKnown
+                    ? FormatUtils.clockText(root.uiBridge.durationText)
+                    : root.stoppedTrack && (root.uiBridge.playingQueueLengthText || "").length > 0
+                        ? root.uiBridge.playingQueueLengthText
+                        : transportTime.noTime
             readonly property string text: timePosition.text + timeLength.text
 
             Layout.leftMargin: root.seekToTimeGap
@@ -1154,10 +1239,10 @@ ToolBar {
                     id: timePosition
                     objectName: "transportTimePosition"
                     font.features: root.uiPalette.tabularFigures
-                    color: transportTime.empty ? root.uiPalette.textSecondary : root.uiPalette.text
+                    color: root.stopped ? root.uiPalette.textSecondary : root.uiPalette.text
                     textFormat: Text.PlainText
-                    text: transportTime.empty
-                        ? I18n.i18nc("@info:status no time", "–:––")
+                    text: root.stopped
+                        ? transportTime.noTime
                         : FormatUtils.clockText(root.positionText)
                 }
 
@@ -1168,9 +1253,7 @@ ToolBar {
                     color: root.uiPalette.textSecondary
                     textFormat: Text.PlainText
                     text: I18n.i18nc("@info:status the track's length after its position", " / %1",
-                        transportTime.empty
-                            ? I18n.i18nc("@info:status no time", "–:––")
-                            : transportTime.lengthText)
+                        transportTime.lengthText)
                 }
             }
         }
@@ -1232,8 +1315,7 @@ ToolBar {
             id: volumeSlider
             objectName: "volumeSlider"
             focusPolicy: Qt.TabFocus
-            // 8 px from the glyph to the groove.
-            Layout.leftMargin: Math.max(0, root.volumeGlyphToSliderGap - root.smallGlyphInset)
+            Layout.leftMargin: root.muteButtonToSliderGap
             Layout.alignment: Qt.AlignVCenter
             // 96 px, 72 px in a narrow window; a larger font widens the
             // groove with the thumb and the glyphs, up to half again

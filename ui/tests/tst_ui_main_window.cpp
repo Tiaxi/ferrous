@@ -1079,6 +1079,7 @@ private slots:
     void nowPlayingCoverIsAKeyboardStop();
     void libraryFoldersAreFolderHeaders();
     void regionHeadersNameTheRegionAndItsTotals();
+    void selectedRowsDrawTheirMarksForTheSelection();
     void libraryTreeHasOneIndentStep();
     void libraryAlbumWithoutACoverShowsAPlaceholderTile();
     void libraryFocusRingStopsAtTheScrollBarLane();
@@ -1100,8 +1101,8 @@ private slots:
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
-    void emptyQueueNamesItselfAtThePanesInset_data();
-    void emptyQueueNamesItselfAtThePanesInset();
+    void queueNameKeepsTheTitleColumnsPlace_data();
+    void queueNameKeepsTheTitleColumnsPlace();
     void narrowQueueDropsAlbumBeforeTitle();
     void queueColumnsGiveTheirSlackToTheTitle();
     void narrowWindowAtALargeFontFitsTheQueue();
@@ -1111,7 +1112,10 @@ private slots:
     void visualizationTakesNearlyHalfTheRightColumn();
     void firstRunShowsOneMessage();
     void tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles();
+    void focusedColumnHandleHasAFrameAndSaysItsKeys_data();
+    void focusedColumnHandleHasAFrameAndSaysItsKeys();
     void transportStartsAndEndsAtTheContentInset();
+    void firstRunsButtonIsThePrimaryOne();
     void viewersInTheWindowFadeAsTheStylesPopupsDo();
 };
 
@@ -3987,6 +3991,27 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     QVERIFY(!libraryTitle->property("truncated").toBool());
 }
 
+// A selected row of the queue draws its length in the selected row's
+// secondary colour, which keeps its contrast on the selection under the
+// pointer; an unselected one in the plain one.
+void UiMainWindowTest::selectedRowsDrawTheirMarksForTheSelection() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    setQueue(bridgeOf(window), sampleQueueRows(3));
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QQuickItem *view = named(window, "playlistView");
+    QVERIFY(controller && view);
+    QTRY_VERIFY(viewRowAt(view, 2) != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSingleSelection", Q_ARG(QVariant, 1)));
+    QTRY_VERIFY(rowTinted(view, 1));
+    const auto lengthColor = [view](int row) {
+        return colorOf(itemNamed(viewRowAt(view, row), QStringLiteral("queueCell_length")));
+    };
+    QCOMPARE(lengthColor(1), tokenHex(window, "textSecondarySelected"));
+    QCOMPARE(lengthColor(2), tokenHex(window, "textSecondary"));
+}
+
 // An album row without a cover keeps the 20 px place a cover's thumbnail
 // has, so its name lines up with its neighbours' (it left an empty 20 px
 // hole), with the now-playing stand-in's mark in it, drawn for 20 px, on a
@@ -5191,16 +5216,15 @@ void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     QQuickItem *line = itemNamed(handle, QStringLiteral("queueColumnHandleLine"));
     QVERIFY(line != nullptr && !line->isVisible());
     handle->forceActiveFocus(Qt::TabFocusReason);
-    QTRY_VERIFY(line->isVisible());
-    QCOMPARE(colorOf(line), tokenHex(window, "focusRing"));
-    // With focus, a 2 px line the header's full height, not a short tick.
-    QCOMPARE(line->width(), 2.0);
-    QCOMPARE(sceneRect(line).top(), sceneRect(queueHeader).top());
-    QCOMPARE(sceneRect(line).height(), sceneRect(queueHeader).height());
-    QCOMPARE(sceneRect(line).height(), sceneRect(handle).height());
+    // With focus, a frame the header's height, not a short tick.
+    QQuickItem *frame = itemNamed(handle, QStringLiteral("queueColumnHandleFocus"));
+    QVERIFY(frame != nullptr);
+    QTRY_VERIFY(frame->isVisible());
+    QCOMPARE(sceneRect(frame).top(), sceneRect(queueHeader).top());
+    QCOMPARE(sceneRect(frame).height(), sceneRect(queueHeader).height() - 1);
 }
 
-void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset_data() {
+void UiMainWindowTest::queueNameKeepsTheTitleColumnsPlace_data() {
     QTest::addColumn<int>("width");
     QTest::addColumn<int>("height");
     QTest::addColumn<qreal>("pointSize");
@@ -5208,11 +5232,10 @@ void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset_data() {
     QTest::newRow("1000x720, 24 pt") << 1000 << 720 << 24.0;
 }
 
-// An empty queue's name has no rows to align with: it sits at the panes'
-// 12 px inset, where "Library" is beside it (it stood alone at the Title
-// column's 66 px). With tracks, it is over the Title column, and back at
-// 12 px once they are gone.
-void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset() {
+// "Queue" is the Title column's heading, and stays at that column's x
+// whether the queue is empty or filled (at the panes' 12 px inset while
+// empty, it jumped 54 px on the first Play).
+void UiMainWindowTest::queueNameKeepsTheTitleColumnsPlace() {
     QFETCH(int, width);
     QFETCH(int, height);
     QFETCH(qreal, pointSize);
@@ -5234,16 +5257,19 @@ void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset() {
     const auto inset = [](QQuickItem *item, QQuickItem *pane) {
         return item->mapToScene(QPointF()).x() - pane->mapToScene(QPointF()).x();
     };
-    QTRY_COMPARE(inset(name, queue), 12.0);
+    QTRY_COMPARE(name->mapToScene(QPointF()).x(), title->mapToScene(QPointF()).x());
+    const qreal emptyInset = inset(name, queue);
+    QVERIFY2(emptyInset > 12.0, qPrintable(QString::number(emptyInset)));
     QCOMPARE(inset(libraryName, library), 12.0);
     QVERIFY(!name->property("truncated").toBool());
 
-    setQueue(bridge, sampleQueueRows(3));
+    setQueue(bridge, sampleQueueRows(50));
     QTRY_COMPARE(name->mapToScene(QPointF()).x(), title->mapToScene(QPointF()).x());
-    QVERIFY(inset(name, queue) > 12.0);
+    QCOMPARE(inset(name, queue), emptyInset);
 
     setQueue(bridge, {});
-    QTRY_COMPARE(inset(name, queue), 12.0);
+    QTRY_COMPARE(name->mapToScene(QPointF()).x(), title->mapToScene(QPointF()).x());
+    QCOMPARE(inset(name, queue), emptyInset);
 }
 
 void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
@@ -5725,6 +5751,61 @@ void UiMainWindowTest::tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles() {
     QTRY_VERIFY(library->hasActiveFocus());
 }
 
+void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// A focused column handle has a frame in the app's focus ring, the header's
+// height and within the gap between the columns, and its tooltip says what
+// it is and its keys (a bare 2 px line read as a hover and said neither).
+// The pointer's hover is the thin seam, with no frame.
+void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    setQueue(bridgeOf(window), sampleQueueRows(3));
+    QQuickItem *handle = named(window, "queueColumnHandle_length");
+    QQuickItem *header = named(window, "queueHeader");
+    QQuickItem *label = named(window, "queueHeader_length");
+    QVERIFY(handle && header && label);
+    QTRY_VERIFY(handle->activeFocusOnTab());
+    QQuickItem *frame = itemNamed(handle, QStringLiteral("queueColumnHandleFocus"));
+    QQuickItem *line = itemNamed(handle, QStringLiteral("queueColumnHandleLine"));
+    QVERIFY(frame && line);
+    QVERIFY(!frame->isVisible());
+
+    handle->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(frame->isVisible());
+    QVERIFY(!line->isVisible());
+    QCOMPARE(QQmlProperty(frame, QStringLiteral("border.width")).read().toReal(), 2.0);
+    QCOMPARE(hex(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>()),
+             tokenHex(window, "focusRing"));
+    QVERIFY2(frame->width() >= 8.0, qPrintable(QString::number(frame->width())));
+    QCOMPARE(sceneRect(frame).top(), sceneRect(header).top());
+    QVERIFY(sceneRect(frame).bottom() <= sceneRect(header).bottom());
+    QVERIFY(sceneRect(frame).height() >= sceneRect(header).height() - 1);
+    // It covers no label's text.
+    QVERIFY(sceneRect(frame).right() <= sceneRect(label).left());
+    QCOMPARE(sceneRect(frame).left(), std::round(sceneRect(frame).left()));
+    const QString says = evaluateOn(handle, QStringLiteral("ToolTip.text")).toString();
+    QCOMPARE(says, QStringLiteral("Resize the Length column · Left or Right to resize, Home for the default width"));
+    // After the desktop's tooltip delay, as the other tooltips' on focus.
+    QTRY_VERIFY(evaluateOn(handle, QStringLiteral("ToolTip.visible")).toBool());
+
+    named(window, "playlistView")->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(!frame->isVisible());
+    // Once it has faded out.
+    QTRY_VERIFY(!evaluateOn(handle, QStringLiteral("ToolTip.visible")).toBool());
+    QTest::mouseMove(window, handle->mapToScene(QPointF(handle->width() / 2, handle->height() / 2)).toPoint());
+    QTRY_VERIFY(line->isVisible());
+    QVERIFY(!frame->isVisible());
+    QCOMPARE(line->width(), 1.0);
+}
+
 // The transport's first glyph starts at the content's 12 px inset, where
 // the library's chevrons and the status bar's text do, and its volume ends
 // the same 12 px from the right edge: both measured to what is drawn (the
@@ -5746,6 +5827,21 @@ void UiMainWindowTest::transportStartsAndEndsAtTheContentInset() {
     QTRY_COMPARE(sceneRect(previousGlyph).left(), 12.0);
     QCOMPARE(sceneRect(chevron).left(), sceneRect(previousGlyph).left());
     QCOMPARE(sceneRect(volume).right(), window->width() - 12.0);
+}
+
+// First run's one action is drawn as the default button, as OK is in
+// Configure: the desktop style draws that from the button's being marked
+// default (`highlighted` alone drew it as any button).
+void UiMainWindowTest::firstRunsButtonIsThePrimaryOne() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *button = named(window, "firstRunAddFolderButton");
+    QVERIFY(shown(button));
+    QVERIFY(evaluateOn(button, QStringLiteral("Accessible.defaultButton")).toBool());
+    auto *drawnBy = button->property("background").value<QQuickItem *>();
+    QVERIFY(drawnBy != nullptr);
+    QCOMPARE(drawnBy->property("activeControl").toString(), QStringLiteral("default"));
 }
 
 // The viewers in the main window open and close with the controls style's
