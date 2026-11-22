@@ -9,6 +9,8 @@ A line: (session, area, state, steps, description).
 - Steps run in order, in one app per (session, theme); later lines see the state earlier ones left.
 """
 import contextlib
+import fcntl
+import functools
 import glob
 import json
 import re
@@ -229,18 +231,34 @@ def m_itunesfail(r, arg):
           f"itunesArtworkFailed true; status \u201c{st}\u201d; error text \u201c{err}\u201d ({r.s.suffix.replace('_', ' ')})")
 
 
-def session_tmp(r, leaf):
-    """A scratch folder of this session's own named `leaf` (dialogs show a path's last folder): sessions in both
-    themes and sizes run the same macro at the same time, and each writes, locks or deletes what is in it."""
-    return os.path.join(os.environ["TMPDIR"], os.path.basename(r.s.a.iso), leaf)
+# The fixture macros' folders are the run's, not a session's: dialogs show their whole paths, which must not change
+# with the worker that runs the session. Sessions in both themes and sizes run these macros at the same time, so a
+# macro that changes its files runs one at a time, and the others only ever replace a file whole.
+def one_at_a_time(macro):
+    """The macro, run by one session of the run at a time."""
+    @functools.wraps(macro)
+    def locked(r, arg):
+        with open(os.path.join(os.environ["TMPDIR"], f".{macro.__name__}.lock"), "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return macro(r, arg)
+    return locked
 
 
+def put_fixture(path, data):
+    """Writes a fixture file that another session may be reading: replaced whole, never seen missing or cut short."""
+    tmp = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.{os.getpid()}")
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
+@one_at_a_time
 def m_tagsavefail(r, arg):
     """tagsavefail: Tag Editor Details with real content: two fixture tracks copied into this run's own TMPDIR,
     one in a folder it cannot write to (the app writes atomically: a read-only file alone would still be replaced),
     opened in Edit Tags, a comment set on both, saved: one saved, one failed; the folder made writable again after."""
     import shutil
-    base = session_tmp(r, "ferrous-tagsave")
+    base = os.path.join(os.environ["TMPDIR"], "ferrous-tagsave")
     if os.path.isdir(base):
         for root_, dirs, _f in os.walk(base):
             for d_ in dirs:
@@ -296,16 +314,14 @@ def m_renamebatch(r, arg):
     RENAME_BATCH; each row given its track number (of 12), title and disc (1 for the first six, 2 after: Track and Disc
     both mixed, so the form shows their placeholders) (unsaved: the preview reads the table), all rows selected.
     Five keep their names, seven are renamed (long titles, one with a slash the rule turns into a space)."""
-    import shutil
-    base = session_tmp(r, "ferrous-renamebatch")
-    if os.path.isdir(base):
-        shutil.rmtree(base)
-    os.makedirs(base)
-    src = album_paths("Orchid Static/2019 - Loose Ends")[0]
+    base = os.path.join(os.environ["TMPDIR"], "ferrous-renamebatch")
+    os.makedirs(base, exist_ok=True)
+    with open(album_paths("Orchid Static/2019 - Loose Ends")[0], "rb") as f:
+        track = f.read()
     paths = []
     for name, _t in RENAME_BATCH:
         paths.append(os.path.join(base, name))
-        shutil.copyfile(src, paths[-1])
+        put_fixture(paths[-1], track)
     if str(r.s.ev(f"root.tagEditorApi.openForPaths({json.dumps(paths)}) && (tagEditorDialog.open(), true)")).lower() != "true":
         raise RuntimeError("renamebatch: Edit Tags did not open the twelve copies")
     if not r.s.a.wait_for("!root.tagEditorApi.loading && root.tagEditorApi.loadedPaths().length === 12", timeout=8, interval=0.05):
@@ -2021,12 +2037,11 @@ def m_unreadable(r, arg):
     not audio (FLAC by its name, random bytes inside), written to the run's own TMPDIR; playing it fails, and the
     playback error marks its row (warning glyph, dimmed text). Loud when the row is not marked within 15 s."""
     import random
-    d = session_tmp(r, "ferrous-unreadable")
+    d = os.path.join(os.environ["TMPDIR"], "ferrous-unreadable")
     os.makedirs(d, exist_ok=True)
     bad = os.path.join(d, "Paper Lantern.flac")
     rnd = random.Random(35)
-    with open(bad, "wb") as f:
-        f.write(b"fLaC" + bytes(rnd.getrandbits(8) for _ in range(48 * 1024)))
+    put_fixture(bad, b"fLaC" + bytes(rnd.getrandbits(8) for _ in range(48 * 1024)))
     paths = album_paths("Orchid Static/2019 - Loose Ends") + [bad]
     r.s.ev(f"root.uiBridge.replaceWithPaths({json.dumps(paths)})")
     if not r.s.a.wait_for(f"root.uiBridge.queueLength === {len(paths)}", timeout=15, interval=0.05):
