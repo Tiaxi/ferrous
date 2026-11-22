@@ -3582,40 +3582,40 @@ mod tests {
         );
     }
 
-    /// Drain all initial background-thread events (playback engine startup
-    /// snapshots, etc.) so that subsequent `handle_wake` calls in the test
-    /// are not polluted by late-arriving initialisation events.
+    /// Stop the bridge hearing from the workers the runtime started, all
+    /// but those in `keep`.
     ///
-    /// A single `drain_pending_updates` is insufficient because background
-    /// threads may not have sent their initial snapshot yet (thread
-    /// scheduling).  We loop with short sleeps until a full drain cycle
-    /// produces no new events, or bail after a generous timeout.
-    fn drain_initial_events(
-        runtime: &mut BridgeLoopRuntime,
-        event_tx: &Sender<BridgeEvent>,
-        event_rx: &Receiver<BridgeEvent>,
-    ) {
-        let deadline = Instant::now() + Duration::from_millis(2000);
-        // Keep draining until two consecutive quiet cycles (no new events)
-        // to handle slow CI where background threads haven't sent their
-        // initial snapshot yet on the first attempt.
-        let mut consecutive_quiet = 0u32;
-        while Instant::now() < deadline {
-            let _ = runtime.drain_pending_updates(event_tx);
-            let had_events = event_rx.try_recv().is_ok();
-            while event_rx.try_recv().is_ok() {}
-            if had_events {
-                consecutive_quiet = 0;
-            } else {
-                consecutive_quiet += 1;
-                if consecutive_quiet >= 2 {
-                    break;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(10));
+    /// The workers answer the commands the runtime sends them at startup,
+    /// and the playback polls of its loop, whenever they get to them: on a
+    /// busy machine, also after the test has set up the state they report
+    /// on. The test's own `handle_wake` or `drain_pending_updates` would
+    /// then apply the answer over that state; no quiet period ensures that
+    /// none is still to come. A test that needs a worker keeps it and waits
+    /// for the answer it needs. A worker answers in order, so its answers
+    /// to the startup commands come before that one.
+    fn cut_off_workers(runtime: &mut BridgeLoopRuntime, keep: &[Worker]) {
+        let cut = |worker| !keep.contains(&worker);
+        if cut(Worker::Playback) {
+            runtime.playback_rx = never();
         }
-        runtime.flags.pending_snapshot = SnapshotUrgency::None;
-        while event_rx.try_recv().is_ok() {}
+        if cut(Worker::Analysis) {
+            runtime.analysis_rx = never();
+        }
+        if cut(Worker::Metadata) {
+            runtime.metadata_rx = never();
+        }
+        if cut(Worker::Library) {
+            runtime.library_rx = never();
+        }
+        if cut(Worker::Search) {
+            runtime.search_results_rx = never();
+        }
+        if cut(Worker::ApplyAlbumArt) {
+            runtime.apply_album_art_rx = never();
+        }
+        if cut(Worker::LastFm) {
+            runtime.lastfm_rx = never();
+        }
     }
 
     #[test]
@@ -4279,15 +4279,8 @@ mod tests {
             },
             None,
         );
-        // The test sets the playback and Last.fm state itself. The workers'
-        // replies to the startup commands, which can come at any time, would
-        // replace that state or ask for a snapshot of their own.
-        runtime.playback_rx = never();
-        runtime.analysis_rx = never();
-        runtime.metadata_rx = never();
-        runtime.library_rx = never();
-        runtime.search_results_rx = never();
-        runtime.apply_album_art_rx = never();
+        // The test sets the playback and Last.fm state itself.
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, _event_rx) = event_channel();
         let track = p("/fixtures/indicator-urgency.flac");
         runtime.state.lastfm.enabled = true;
@@ -4383,17 +4376,16 @@ mod tests {
     fn quitting_while_lastfm_sends_a_scrobble_it_saved_does_not_wait_for_the_network() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = event_channel();
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let dir = crate::paths::test_root().join("quit-while-sending-a-saved-scrobble");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("fixture folder");
         let (transport, network) = crate::lastfm::test_support::BlockingTransport::new();
         let (lastfm, lastfm_events) =
             crate::lastfm::test_support::spawn_connected(transport, dir.join("lastfm_queue.json"));
-        runtime.lastfm = lastfm.clone();
         // The test hands the bridge Last.fm's events itself, in order.
-        runtime.lastfm_rx = never();
+        runtime.lastfm = lastfm.clone();
 
         lastfm.command(LastFmCommand::QueueScrobble(crate::lastfm::ScrobbleEntry {
             artist: "Artist".to_string(),
@@ -4441,8 +4433,8 @@ mod tests {
     fn quitting_while_lastfm_sends_a_scrobble_it_could_not_save_reports_the_loss() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = event_channel();
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let dir = crate::paths::test_root().join("quit-while-scrobbling");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("fixture folder");
@@ -4662,8 +4654,8 @@ mod tests {
     fn lastfm_problems_are_shown_once_each_as_lastfm_errors() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = event_channel();
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let state = LastFmRuntimeState {
             status_text: "Last.fm session expired.".to_string(),
             problems: vec![
@@ -4857,8 +4849,8 @@ mod tests {
         Vec<PathBuf>,
     ) {
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
-        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        cut_off_workers(&mut runtime, &[]);
+        let (event_tx, _) = bounded::<BridgeEvent>(64);
         let (engine_tx, engine_rx) = unbounded();
         runtime.playback = PlaybackEngine::from_command_sender(engine_tx);
         let album = vec![p("/library/Album/1.flac"), p("/library/Album/2.flac")];
@@ -4921,14 +4913,10 @@ mod tests {
         crate::metadata::write_numbered_test_wave(&track, 2, 8);
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
         // The tests set the playback state and send the library reports
-        // themselves. The workers' replies to the startup commands, which can
-        // come at any time, would replace that state: a playback snapshot
-        // naming no track makes the bridge forget the playing file's read.
-        runtime.playback_rx = never();
-        runtime.analysis_rx = never();
-        runtime.library_rx = never();
-        runtime.search_results_rx = never();
-        runtime.apply_album_art_rx = never();
+        // themselves, and wait for the metadata worker's reads: a playback
+        // snapshot naming no track would make the bridge forget the playing
+        // file's read.
+        cut_off_workers(&mut runtime, &[Worker::Metadata]);
         let (event_tx, _) = bounded::<BridgeEvent>(64);
         runtime.state.playback.current = Some(track.clone());
         (dir, track, runtime, event_tx)
@@ -6488,8 +6476,8 @@ mod tests {
     fn a_ui_that_asks_for_a_snapshot_gets_the_whole_queue() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         // The UI has the queue the bridge started with.
         assert!(runtime.emit_snapshot(&event_tx));
         runtime.handle_wake(
@@ -7683,8 +7671,8 @@ mod tests {
     fn renamed_current_track_survives_engine_events() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[Worker::Playback]);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let (old_path, new_path) = (p("/music/old name.flac"), p("/music/new name.flac"));
         runtime.handle_command(
             BridgeCommand::Queue(BridgeQueueCommand::Replace {
@@ -7781,8 +7769,8 @@ mod tests {
     fn a_volume_set_outside_the_app_is_shown_and_saved_unless_the_app_set_one_since() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let (engine_tx, engine_rx) = unbounded();
         runtime.playback = PlaybackEngine::from_command_sender(engine_tx);
         let set_volume = |runtime: &mut BridgeLoopRuntime, volume: f32| {
@@ -7849,8 +7837,8 @@ mod tests {
     fn a_gapless_track_change_keeps_a_queue_edit_in_the_snapshot() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let (playback_tx, playback_rx) = unbounded();
         runtime.playback_rx = playback_rx;
         // The UI has the queue the bridge started with.
@@ -7903,8 +7891,8 @@ mod tests {
     fn queue_files_whose_tags_could_not_be_read_are_logged_counted_per_batch() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = event_channel();
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let dir = crate::paths::test_root().join("queue-detail-failures");
         std::fs::create_dir_all(&dir).expect("fixture folder");
         let paths: Vec<PathBuf> = ["a.ac3", "b.ac3"]
@@ -7971,8 +7959,8 @@ mod tests {
     fn errors_and_save_answers_reach_a_relay_that_is_behind() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = event_channel();
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         // The relay falls behind: snapshots fill its backlog, and the bridge
         // holds back the next one.
         while runtime.emit_snapshot(&event_tx) {}
@@ -8012,8 +8000,8 @@ mod tests {
     fn metadata_event_emits_snapshot_immediately_while_stopped() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let track = p("/tmp/ferrous_reactive_stopped_metadata.flac");
         runtime.state.playback.current = Some(track.clone());
         runtime.state.playback.state = PlaybackState::Stopped;
@@ -8052,8 +8040,8 @@ mod tests {
         let track = dir.join("01.wav");
         crate::metadata::write_numbered_test_wave(&track, 1, 1);
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[Worker::Playback]);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded::<AnalysisEvent>();
         runtime.analysis_rx = analysis_rx;
         let pump_until =
@@ -8112,8 +8100,8 @@ mod tests {
     fn analysis_worker_failures_reach_the_ui_as_errors() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded::<AnalysisEvent>();
         runtime.analysis_rx = analysis_rx;
 
@@ -8140,8 +8128,8 @@ mod tests {
     fn analysis_wake_forwards_following_precomputed_chunks_from_drain_path() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
 
         let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded::<AnalysisEvent>();
         runtime.analysis_rx = analysis_rx;
@@ -8223,11 +8211,8 @@ mod tests {
     fn library_event_publishes_tree_after_worker_completion() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
-        // Isolate the fixture from late startup snapshots from the real library worker.
-        let (_library_tx, library_rx) = unbounded();
-        runtime.library_rx = library_rx;
 
         let root = p("/music");
         let snapshot = LibrarySnapshot {
@@ -8265,13 +8250,13 @@ mod tests {
             Ok(BridgeEvent::Snapshot(snapshot)) => *snapshot,
             other => panic!("expected library snapshot, got {other:?}"),
         };
-        // The library worker's own events may add the tracks of the
-        // process's test library.
-        assert!(snapshot
+        let paths: Vec<&Path> = snapshot
             .library
             .tracks
             .iter()
-            .any(|track| track.path == p("/music/Artist/Album/01 - Song.flac")));
+            .map(|track| track.path.as_path())
+            .collect();
+        assert_eq!(paths, [p("/music/Artist/Album/01 - Song.flac")]);
         assert!(snapshot.pre_built_tree_bytes.is_some());
         assert!(!snapshot
             .pre_built_tree_bytes
@@ -8283,8 +8268,8 @@ mod tests {
     fn playing_position_updates_wait_for_coarse_heartbeat() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         let track = p("/tmp/ferrous_playing_heartbeat.flac");
         runtime.state.playback.current = Some(track.clone());
         runtime.state.playback.state = PlaybackState::Playing;
@@ -8318,8 +8303,8 @@ mod tests {
     fn paused_or_stopped_playback_sets_no_timer_on_the_bridge() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         runtime.state.playback.current = Some(p("/tmp/ferrous_idle_bridge.flac"));
         // Saves and snapshots have timers of their own.
         runtime.flags.session_dirty = false;
@@ -9165,12 +9150,10 @@ mod tests {
     ) {
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
         // The library is the test's own. The library worker reads the
-        // database the tests share, and its reports, which can come at any
-        // time, would replace that library while the alias worker answers
-        // for it.
-        runtime.library_rx = never();
+        // database the tests share, and its reports would replace that
+        // library while the alias worker answers for it.
+        cut_off_workers(&mut runtime, &[]);
         let (event_tx, event_rx) = event_channel();
-        drain_initial_events(&mut runtime, &event_tx, &event_rx);
         runtime.state.library = Arc::new(LibrarySnapshot {
             roots: vec![library_root(&album.root)],
             tracks: crate::library::shared_tracks(vec![library_track(
