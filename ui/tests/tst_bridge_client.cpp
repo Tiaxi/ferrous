@@ -1225,7 +1225,9 @@ void BridgeClientTest::tagEditorShowsRefusedEditsAndKeepsTheFile() {
     // The same, in sections, for the Details window to set out.
     QCOMPARE(editor.statusDetailSections(),
              (QVariantList{QVariantMap{{QStringLiteral("heading"), QStringLiteral("Failed:")},
-                                       {QStringLiteral("items"), QStringList{QStringLiteral("song.flac: ") + error}},
+                                       {QStringLiteral("items"),
+                                        QVariantList{QVariantMap{{QStringLiteral("name"), QStringLiteral("song.flac")},
+                                                                 {QStringLiteral("error"), error}}}},
                                        {QStringLiteral("failed"), true}}}));
     QVERIFY(file.open(QIODevice::ReadOnly));
     QCOMPARE(file.readAll(), flac);
@@ -1383,6 +1385,32 @@ void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
     QCOMPARE(reported.size(), 2);
     QCOMPARE(reported.at(1).at(0).toString(),
              QStringLiteral("Renamed 0 files; 1 failed.\n0.flac: busy"));
+
+    // With files of both, what failed comes first, in plain text as in the
+    // sections, with each whole message (what failed came last); the error
+    // list hears of the failures in that order.
+    TagEditorController mixed(nullptr);
+    QVERIFY(loadTagEditorRows(
+        mixed, tagEditorRows(3, 3),
+        {{TagEditorController::Operation::Save,
+          QByteArray(R"({"results":[{"path":"/fixture/Album 0/2.flac","ok":false,"error":"busy"},)"
+                     R"({"path":"/fixture/Album 0/0.flac","ok":true},)"
+                     R"json({"path":"/fixture/Album 0/1.flac","ok":false,"error":"denied (os error 13)"}]})json")}}));
+    for (int index = 0; index < 3; ++index) {
+        mixed.setCell(index, QStringLiteral("title"), QStringLiteral("New"));
+    }
+    QSignalSpy mixedSaved(&mixed, &TagEditorController::saveFinished);
+    QSignalSpy mixedReports(&mixed, &TagEditorController::errorReported);
+    QVERIFY(mixed.save());
+    QTRY_COMPARE(mixedSaved.size(), 1);
+    QCOMPARE(mixed.statusDetails(),
+             QStringLiteral("Failed:\n  1.flac: denied (os error 13)\n  2.flac: busy\n\nSucceeded:\n  0.flac"));
+    const QVariantList sections = mixed.statusDetailSections();
+    QCOMPARE(sections.size(), 2);
+    QVERIFY(sections.first().toMap().value(QStringLiteral("failed")).toBool());
+    QCOMPARE(mixedReports.size(), 1);
+    QCOMPARE(mixedReports.first().first().toString(),
+             QStringLiteral("Saved 1 file; 2 failed.\n1.flac: denied (os error 13)\n2.flac: busy"));
 
     // A success whose wording mentions errors is not a failure.
     TagEditorController succeeding(nullptr);

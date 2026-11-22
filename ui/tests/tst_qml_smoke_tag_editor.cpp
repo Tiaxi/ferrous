@@ -61,6 +61,9 @@ private slots:
     void saveDetailsReadAsAReport();
     void renamePreviewLaysOutItsRows_data();
     void renamePreviewLaysOutItsRows();
+    void renamePreviewALongNameThatStaysCutsNoNewName_data();
+    void renamePreviewALongNameThatStaysCutsNoNewName();
+    void saveDetailsSetFailedFilesApart();
 };
 
 namespace {
@@ -745,7 +748,17 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     QTRY_VERIFY(fixture.quitAnywayOffered());
     QObject *message = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitMessage"));
     QVERIFY(message != nullptr);
-    QVERIFY(message->property("text").toString().contains(QStringLiteral("may be lost")));
+    // What quitting anyway costs comes straight after the status, and why
+    // it offers under the files, shorter, with every fact (the cost followed
+    // the example of a network share, in a paragraph of five lines at 24 pt).
+    auto *explanation = fixture.window->findChild<QQuickItem *>(QStringLiteral("tagEditorQuitWaitExplanation"));
+    QVERIFY(explanation != nullptr);
+    const QString consequence = message->property("text").toString();
+    const QString why = explanation->property("text").toString();
+    QCOMPARE(consequence, QStringLiteral("Quit Anyway stops waiting and may lose changes not yet written."));
+    QCOMPARE(why, QStringLiteral("This is taking longer than it should, perhaps on an unresponsive network share. "
+                                 "No file is left half-written."));
+    QVERIFY(consequence.size() + why.size() < 200);
     // As a confirmation reads: what it waits for semibold, the
     // files under its text rather than the spinner, the explanation in the
     // secondary colour, and Keep Waiting with a glyph, as Quit Anyway.
@@ -760,6 +773,13 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     // (it started under the spinner); the window wider by that indent, so
     // it keeps the lines it had.
     auto *messageItem = qobject_cast<QQuickItem *>(message);
+    auto *filesItem = qobject_cast<QQuickItem *>(files);
+    QTRY_VERIFY(sceneRectOf(messageItem).bottom() <= sceneRectOf(filesItem).top());
+    QVERIFY(sceneRectOf(status).bottom() <= sceneRectOf(messageItem).top());
+    QVERIFY(sceneRectOf(filesItem).bottom() <= sceneRectOf(explanation).top());
+    QTRY_COMPARE(sceneRectOf(explanation).left(), sceneRectOf(status).left());
+    QCOMPARE(explanation->property("color").value<QColor>().rgba(),
+             palette->property("textSecondary").value<QColor>().rgba());
     QTRY_COMPARE(sceneRectOf(messageItem).left(), sceneRectOf(status).left());
     QCOMPARE(messageItem->width(), status->width());
     QObject *quitWait = fixture.quitWait();
@@ -1643,9 +1663,10 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport_data() {
 // The details of a save that failed for one file read as a report (not a
 // plain text dump in a window 522 px tall for six lines): the
 // editor's summary, semibold, then each section's heading over its files,
-// what failed semibold in the negative colour, what succeeded quieter,
-// each file 16 px in, more with a larger font, the lines a long
-// error wraps to under its own start; the window as tall as all that.
+// what failed first, semibold in the negative colour, its file's name
+// semibold on a line of its own over the error, secondary, then what
+// succeeded quieter, each file 16 px in, more with a larger font, the lines
+// a long error wraps to under its own start; the window as tall as all that.
 // The save is a real one, into a folder the user may not write to.
 void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     QFETCH(qreal, pointSize);
@@ -1706,7 +1727,8 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     QCOMPARE(summary->property("font").value<QFont>().weight(), QFont::DemiBold);
     QCOMPARE(summary->property("color").value<QColor>(), palette->property("text").value<QColor>());
 
-    // Each heading semibold over its files, each file indented, trimmed.
+    // What failed first (after what succeeded, its file's name ran into the
+    // error on one line): the file's name, then the error under it.
     QQuickItem *text = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsText"));
     QVERIFY(text != nullptr);
     QCOMPARE(text->property("textFormat").toInt(), int(Qt::RichText));
@@ -1718,11 +1740,11 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
         blocks << block.text();
     }
-    QCOMPARE(blocks.size(), 4);
-    QCOMPARE(blocks.mid(0, 3), (QStringList{QStringLiteral("Succeeded:"), QStringLiteral("01 Brief Signal.flac"),
-                                            QStringLiteral("Failed:")}));
-    QVERIFY2(blocks[3].startsWith(QStringLiteral("03 Long Exhale.flac: ")), qPrintable(blocks[3]));
-    QVERIFY2(blocks[3].contains(QStringLiteral("ermission denied")), qPrintable(blocks[3]));
+    QCOMPARE(blocks.size(), 5);
+    QCOMPARE(blocks.mid(0, 2), (QStringList{QStringLiteral("Failed:"), QStringLiteral("03 Long Exhale.flac")}));
+    QVERIFY2(blocks[2].contains(QStringLiteral("ermission denied")), qPrintable(blocks[2]));
+    QVERIFY2(!blocks[2].contains(QStringLiteral("03 Long Exhale.flac: ")), qPrintable(blocks[2]));
+    QCOMPARE(blocks.mid(3), (QStringList{QStringLiteral("Succeeded:"), QStringLiteral("01 Brief Signal.flac")}));
     const qreal indent = std::max(16.0, std::round(16.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
     const auto blockAt = [&](int index) { return document->findBlockByNumber(index); };
     // The headings on the summary's edge: what succeeded regular, in the
@@ -1735,35 +1757,41 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     const auto weightOf = [&](int index) {
         return blockAt(index).begin().fragment().charFormat().fontWeight();
     };
-    for (int index : {0, 2}) {
+    for (int index : {0, 3}) {
         QCOMPARE(blockAt(index).blockFormat().leftMargin(), 0.0);
     }
-    QVERIFY(weightOf(0) < int(QFont::DemiBold));
-    QCOMPARE(colourOf(0), palette->property("textSecondary").value<QColor>().rgb());
-    QCOMPARE(weightOf(2), int(QFont::DemiBold));
-    QCOMPARE(colourOf(2), palette->property("negative").value<QColor>().rgb());
-    // The files in the text's colour, indented.
-    for (int index : {1, 3}) {
-        QVERIFY(weightOf(index) < int(QFont::DemiBold));
-        QCOMPARE(colourOf(index), palette->property("text").value<QColor>().rgb());
+    QVERIFY(weightOf(3) < int(QFont::DemiBold));
+    QCOMPARE(colourOf(3), palette->property("textSecondary").value<QColor>().rgb());
+    QCOMPARE(weightOf(0), int(QFont::DemiBold));
+    QCOMPARE(colourOf(0), palette->property("negative").value<QColor>().rgb());
+    // The files indented: the failed one's name semibold in the text's
+    // colour, the error under it secondary, the other's name regular.
+    for (int index : {1, 2, 4}) {
         QCOMPARE(blockAt(index).blockFormat().leftMargin(), indent);
     }
+    QCOMPARE(weightOf(1), int(QFont::DemiBold));
+    QCOMPARE(colourOf(1), palette->property("text").value<QColor>().rgb());
+    QVERIFY(weightOf(2) < int(QFont::DemiBold));
+    QCOMPARE(colourOf(2), palette->property("textSecondary").value<QColor>().rgb());
+    QVERIFY(weightOf(4) < int(QFont::DemiBold));
+    QCOMPARE(colourOf(4), palette->property("text").value<QColor>().rgb());
     // 12 px between the sections, more with a larger font, not a grid
     // unit, 18 px.
     const qreal sectionGap = std::max(12.0, std::round(12.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
     QCOMPARE(blockAt(0).blockFormat().topMargin(), 0.0);
-    QCOMPARE(blockAt(2).blockFormat().topMargin(), sectionGap);
+    QCOMPARE(blockAt(3).blockFormat().topMargin(), sectionGap);
     // The error wraps, and its lines start under the file's name, the
     // indent right of the heading.
-    const QTextLayout *errorLayout = blockAt(3).layout();
+    const QTextLayout *errorLayout = blockAt(2).layout();
     QVERIFY2(errorLayout->lineCount() > 1, qPrintable(QString::number(errorLayout->lineCount())));
     const auto lineLeft = [](const QTextBlock &block, int line) {
         return block.layout()->position().x() + block.layout()->lineAt(line).x();
     };
     for (int line = 0; line < errorLayout->lineCount(); ++line) {
-        QCOMPARE(lineLeft(blockAt(3), line), lineLeft(blockAt(2), 0) + indent);
+        QCOMPARE(lineLeft(blockAt(2), line), lineLeft(blockAt(0), 0) + indent);
     }
     QCOMPARE(lineLeft(blockAt(1), 0), lineLeft(blockAt(0), 0) + indent);
+    QCOMPARE(lineLeft(blockAt(4), 0), lineLeft(blockAt(0), 0) + indent);
     // As drawn too: each line of the long error, the first and those it
     // wraps to, starts its ink at the file's indent, with nothing drawn
     // between the headings' edge and it (a review read the wrapped line as
@@ -1781,7 +1809,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
         const QPointF position = block.layout()->position();
         const int top = int(std::ceil((documentOrigin.y() + position.y() + textLine.y()) * scale));
         const int bottom = int(std::floor((documentOrigin.y() + position.y() + textLine.y() + textLine.height()) * scale)) - 1;
-        const int from = int(std::floor((documentOrigin.x() + lineLeft(blockAt(2), 0)) * scale));
+        const int from = int(std::floor((documentOrigin.x() + lineLeft(blockAt(0), 0)) * scale));
         const int to = int(std::ceil((documentOrigin.x() + position.x() + textLine.x() + textLine.naturalTextWidth()) * scale));
         const QColor background(shown.pixel(from, (top + bottom) / 2));
         for (int x = from; x < std::min(to, shown.width()); ++x) {
@@ -1795,7 +1823,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
         }
         return -1.0;
     };
-    const qreal expectedInk = documentOrigin.x() + lineLeft(blockAt(2), 0) + indent;
+    const qreal expectedInk = documentOrigin.x() + lineLeft(blockAt(0), 0) + indent;
     // The lines in view: at 24 pt the details may scroll.
     QQuickItem *view = text->parentItem();
     while (view != nullptr && !view->clip()) {
@@ -1808,7 +1836,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
             > sceneRectOf(view).bottom()) {
             break;
         }
-        const qreal ink = inkLeft(blockAt(3), line);
+        const qreal ink = inkLeft(blockAt(2), line);
         QVERIFY2(ink >= expectedInk - 0.5 && ink <= expectedInk + 3,
                  qPrintable(QStringLiteral("line %1 of the error drawn from %2, the indent at %3")
                                 .arg(line).arg(ink).arg(expectedInk)));
@@ -1883,8 +1911,8 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     // (it broke in "ferrous-tagsave" at 24 pt). The narrowest
     // window spreads the path over lines; the selection goes as the text
     // is laid out anew, with no warning.
-    const QString failedItem = editor.statusDetailSections().last().toMap().value(QStringLiteral("items"))
-                                   .toList().value(0).toString().trimmed();
+    const QString failedItem = editor.statusDetailSections().first().toMap().value(QStringLiteral("items"))
+                                   .toList().value(0).toMap().value(QStringLiteral("error")).toString().trimmed();
     QVERIFY2(failedItem.contains(readOnlyFolder + QStringLiteral(": ")), qPrintable(failedItem));
     QVERIFY2(failedItem.endsWith(QStringLiteral("(os error 13)")), qPrintable(failedItem));
     const QFontMetricsF textMetrics(qvariant_cast<QFont>(text->property("font")));
@@ -1901,7 +1929,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
                                       QStringLiteral("root.lineWidth - root.itemIndent"));
     const auto breakProblem = [&]() -> QString {
         const qreal nameRoom = nameRoomExpression.evaluate().toReal();
-        const QTextBlock block = blockAt(3);
+        const QTextBlock block = blockAt(2);
         const QTextLayout *layout = block.layout();
         QStringList lines;
         for (int line = 0; line < layout->lineCount(); ++line) {
@@ -1991,9 +2019,9 @@ void checkRenamePreviewOpensAsTallAsItsList(TagEditorWindow &fixture, QObject *p
     }
 }
 
-// Rename Files opens as wide as its widest line: a file's line, with the
-// list's gutter, a renamed file's old name, arrow and new name in their
-// columns, a sentence of the summary, or the buttons, within its
+// Rename Files opens as wide as its widest line: a file's old name, arrow
+// and new name in their columns, with the list's gutter, a sentence of the
+// summary, or the buttons, within its
 // minimum and 42 grid units scaled with the font, where longer lines elide
 // in their middle; each time it opens, so long names widen it and short
 // ones bring it back (a fixed 756 px held 390 px of lines at 10 pt, and
@@ -2050,10 +2078,9 @@ void checkRenamePreviewOpensAsWideAsItsLines(TagEditorWindow &fixture, QObject *
         QVERIFY(list != nullptr && summary != nullptr && footer != nullptr);
         QTRY_COMPARE(list->property("count").toInt(), kFiles);
         QTRY_VERIFY(!visibleItemsNamed(list, QStringLiteral("renamePreviewNewName")).isEmpty());
-        // Its widest line, measured as the labels draw them: a renamed
-        // file's widest old name, the arrow's column and its widest new
-        // name, which start at one x in every row, or the line
-        // of the file that can't be renamed.
+        // Its widest line, measured as the labels draw them: the widest old
+        // name, the arrow's column and the widest new name, or that a file
+        // keeps its own, which start at one x in every row.
         const QFontMetricsF rowMetrics(qvariant_cast<QFont>(
             visibleItemsNamed(list, QStringLiteral("renamePreviewNewName")).first()->property("font")));
         const QVariantList rows = previewDialog->property("rows").toList();
@@ -2067,18 +2094,12 @@ void checkRenamePreviewOpensAsWideAsItsLines(TagEditorWindow &fixture, QObject *
         qreal widestNewName = 0;
         qreal widest = 0;
         for (const QVariant &row : rows) {
-            const QVariantMap fields = row.toMap();
-            if (fields.value(QStringLiteral("ok")).toBool()) {
-                widestOldName = std::max(widestOldName,
-                                         rowMetrics.horizontalAdvance(fields.value(QStringLiteral("oldName")).toString()));
-                widestNewName = std::max(widestNewName,
-                                         rowMetrics.horizontalAdvance(fields.value(QStringLiteral("newName")).toString()));
-                continue;
-            }
             QVariant text;
-            QVERIFY(QMetaObject::invokeMethod(previewDialog, "rowText", Q_RETURN_ARG(QVariant, text),
+            QVERIFY(QMetaObject::invokeMethod(previewDialog, "newColumnText", Q_RETURN_ARG(QVariant, text),
                                               Q_ARG(QVariant, row)));
-            widest = std::max(widest, std::ceil(rowMetrics.horizontalAdvance(text.toString())) + gutter);
+            widestOldName = std::max(widestOldName, rowMetrics.horizontalAdvance(
+                                         row.toMap().value(QStringLiteral("oldName")).toString()));
+            widestNewName = std::max(widestNewName, rowMetrics.horizontalAdvance(text.toString()));
         }
         widest = std::max(widest, std::ceil(widestOldName) + arrowColumn + std::ceil(widestNewName) + gutter);
         QVariant sentences;
@@ -2107,8 +2128,7 @@ void checkRenamePreviewOpensAsWideAsItsLines(TagEditorWindow &fixture, QObject *
             QVERIFY2(fitted < limit, qPrintable(where));
             QVERIFY2(previewWindow->width() <= std::max(previewWindow->minimumWidth(), qCeil(fitted)),
                      qPrintable(where));
-            QList<QQuickItem *> names = visibleItemsNamed(list, QStringLiteral("renamePreviewRowName"));
-            names += visibleItemsNamed(list, QStringLiteral("renamePreviewOldName"));
+            QList<QQuickItem *> names = visibleItemsNamed(list, QStringLiteral("renamePreviewOldName"));
             names += visibleItemsNamed(list, QStringLiteral("renamePreviewNewName"));
             for (QQuickItem *name : std::as_const(names)) {
                 QTRY_VERIFY2(!name->property("truncated").toBool(),
@@ -2124,10 +2144,11 @@ void checkRenamePreviewOpensAsWideAsItsLines(TagEditorWindow &fixture, QObject *
     }
 }
 
-// Rename Files shows a renamed file as columns: its old name and the arrow
-// muted, and its new name, which starts at one x in every row; a file that
-// keeps its name, or can't be renamed, is one line across the list. Screen
-// readers still read a renamed file's row as one line. Where the window
+// Rename Files shows every file in three columns, in the table's order: its
+// old name and the arrow muted, and its new name, which starts at one x in
+// every row; a file that keeps its name has no arrow and says so, muted, in
+// the new names' column, and one that can't be renamed is in the negative
+// colour. Screen readers still read a row as one line. Where the window
 // can't hold the names, the old names give way first, down to 40 % of the
 // list, and the new names keep their one x (the arrows stood at seven
 // places over 105 px, and the new names had no column).
@@ -2189,69 +2210,61 @@ void checkRenamePreviewShowsTheNewNamesInAColumn(TagEditorWindow &fixture, QObje
         QVERIFY(list != nullptr);
         QTRY_COMPARE(list->property("count").toInt(), kFiles);
         const qreal line = list->width() - gutter;
-        // Five renamed, two kept and one refused rows, all in view.
-        QTRY_COMPARE(visibleItemsNamed(list, QStringLiteral("renamePreviewRenamedRow")).size(), 5);
-        const QList<QQuickItem *> renamedRows = visibleItemsNamed(list, QStringLiteral("renamePreviewRenamedRow"));
-        const QList<QQuickItem *> lines = visibleItemsNamed(list, QStringLiteral("renamePreviewRowName"));
-        QCOMPARE(lines.size(), 3);
-        const QList<QQuickItem *> newNames = visibleItemsNamed(list, QStringLiteral("renamePreviewNewName"));
-        const QList<QQuickItem *> oldNames = visibleItemsNamed(list, QStringLiteral("renamePreviewOldName"));
-        const QList<QQuickItem *> arrows = visibleItemsNamed(list, QStringLiteral("renamePreviewArrow"));
-        QCOMPARE(newNames.size(), 5);
-        QCOMPARE(oldNames.size(), 5);
-        QCOMPARE(arrows.size(), 5);
-        const qreal newNameX = newNames.first()->mapToItem(list, QPointF()).x();
-        for (QQuickItem *name : newNames) {
-            QCOMPARE(name->mapToItem(list, QPointF()).x(), newNameX);
-            QCOMPARE(name->property("color").value<QColor>().rgba(), text);
-            QCOMPARE(name->property("elide").toInt(), int(Qt::ElideMiddle));
-        }
-        for (QQuickItem *name : oldNames) {
-            QCOMPARE(name->mapToItem(list, QPointF()).x(), 0.0);
-            QCOMPARE(name->property("color").value<QColor>().rgba(), secondary);
-            QCOMPARE(name->property("elide").toInt(), int(Qt::ElideMiddle));
-        }
-        for (QQuickItem *glyph : arrows) {
-            QCOMPARE(glyph->property("text").toString(), arrow);
-            QCOMPARE(glyph->property("color").value<QColor>().rgba(), secondary);
-            QVERIFY(glyph->mapToItem(list, QPointF(glyph->width(), 0)).x() <= newNameX);
-        }
-        // Kept and refused files: one line across the list.
-        int kept = 0;
-        for (QQuickItem *row : lines) {
-            QCOMPARE(row->width(), line);
-            const QRgb color = row->property("color").value<QColor>().rgba();
-            QVERIFY2(color == secondary || color == negative, qPrintable(at));
-            kept += color == secondary ? 1 : 0;
-        }
-        QCOMPARE(kept, 2);
-        // A screen reader reads a renamed row as the line it was.
+        // Five renamed, two kept and one refused, all in view, in the
+        // table's order, each in the three columns.
+        QTRY_COMPARE(visibleItemsNamed(list, QStringLiteral("renamePreviewFileRow")).size(), kFiles);
+        QList<QQuickItem *> fileRows = visibleItemsNamed(list, QStringLiteral("renamePreviewFileRow"));
+        std::sort(fileRows.begin(), fileRows.end(), [list](QQuickItem *a, QQuickItem *b) {
+            return a->mapToItem(list, QPointF()).y() < b->mapToItem(list, QPointF()).y();
+        });
         const QVariantList rows = previewDialog->property("rows").toList();
-        QStringList renamedTexts;
-        for (const QVariant &row : rows) {
-            const QVariantMap fields = row.toMap();
-            if (fields.value(QStringLiteral("ok")).toBool() && !fields.value(QStringLiteral("unchanged")).toBool()) {
-                QVariant rowText;
-                QVERIFY(QMetaObject::invokeMethod(previewDialog, "rowText", Q_RETURN_ARG(QVariant, rowText),
-                                                  Q_ARG(QVariant, row)));
-                renamedTexts.push_back(rowText.toString());
+        QCOMPARE(rows.size(), kFiles);
+        QList<QQuickItem *> oldNames;
+        QList<QQuickItem *> newNames;
+        const qreal newNameX = previewDialog->property("oldNameColumnWidth").toReal()
+            + previewDialog->property("arrowColumnWidth").toReal();
+        for (int i = 0; i < kFiles; ++i) {
+            QQuickItem *row = fileRows.at(i);
+            QQuickItem *oldName = itemNamed(row, QStringLiteral("renamePreviewOldName"));
+            QQuickItem *glyph = itemNamed(row, QStringLiteral("renamePreviewArrow"));
+            QQuickItem *newName = itemNamed(row, QStringLiteral("renamePreviewNewName"));
+            QVERIFY(oldName != nullptr && glyph != nullptr && newName != nullptr);
+            const QVariantMap fields = rows.at(i).toMap();
+            const bool refused = !fields.value(QStringLiteral("ok")).toBool();
+            const bool kept = fields.value(QStringLiteral("unchanged")).toBool();
+            const QRgb quiet = refused ? negative : secondary;
+            QCOMPARE(oldName->property("text").toString(), fields.value(QStringLiteral("oldName")).toString());
+            QCOMPARE(oldName->mapToItem(list, QPointF()).x(), 0.0);
+            QCOMPARE(oldName->property("color").value<QColor>().rgba(), quiet);
+            QCOMPARE(oldName->property("elide").toInt(), int(Qt::ElideMiddle));
+            QCOMPARE(glyph->isVisible(), !kept);
+            if (!kept) {
+                QCOMPARE(glyph->property("text").toString(), arrow);
+                QCOMPARE(glyph->property("color").value<QColor>().rgba(), quiet);
+                QVERIFY(glyph->mapToItem(list, QPointF(glyph->width(), 0)).x() <= newNameX);
             }
-        }
-        QStringList readTexts;
-        for (QQuickItem *row : renamedRows) {
+            QCOMPARE(newName->property("text").toString(),
+                     kept ? QStringLiteral("keeps its name") : fields.value(QStringLiteral("newName")).toString());
+            QCOMPARE(newName->mapToItem(list, QPointF()).x(), newNameX);
+            QCOMPARE(newName->property("color").value<QColor>().rgba(), kept || refused ? quiet : text);
+            QCOMPARE(newName->property("elide").toInt(), int(Qt::ElideMiddle));
+            QVERIFY2(newNameX + newName->width() <= line + 0.5, qPrintable(at));
+            // A screen reader reads the row as one line.
+            QVariant rowText;
+            QVERIFY(QMetaObject::invokeMethod(previewDialog, "rowText", Q_RETURN_ARG(QVariant, rowText),
+                                              Q_ARG(QVariant, rows.at(i))));
             QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(row);
             QVERIFY(accessible != nullptr);
-            readTexts.push_back(accessible->text(QAccessible::Name));
+            QCOMPARE(accessible->text(QAccessible::Name), rowText.toString());
+            QVERIFY(rowText.toString().contains(kept ? QStringLiteral("keeps its name") : arrow));
+            oldNames << oldName;
+            newNames << newName;
         }
-        std::sort(renamedTexts.begin(), renamedTexts.end());
-        std::sort(readTexts.begin(), readTexts.end());
-        QCOMPARE(readTexts, renamedTexts);
-        QVERIFY(renamedTexts.first().contains(arrow));
 
         const qreal oldColumn = previewDialog->property("oldNameColumnWidth").toReal();
         if (!longOpening) {
             // The window holds every name whole.
-            for (QQuickItem *name : oldNames + newNames + lines) {
+            for (QQuickItem *name : oldNames + newNames) {
                 QTRY_VERIFY2(!name->property("truncated").toBool(),
                              qPrintable(at + QStringLiteral(": ") + name->property("text").toString()));
             }
@@ -2300,6 +2313,106 @@ void TagEditorSmokeTest::renamePreviewLaysOutItsRows() {
         return;
     }
     checkRenamePreviewShowsTheNewNamesInAColumn(fixture, previewDialog, loadResponse, pointSize);
+}
+
+void TagEditorSmokeTest::renamePreviewALongNameThatStaysCutsNoNewName_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The long name of a file that keeps it elides in the first column, which
+// gives way to the new names: none of them is cut for it, and it runs under
+// no arrow (it ran across the arrows and the new names, as one line).
+void TagEditorSmokeTest::renamePreviewALongNameThatStaysCutsNoNewName() {
+    QFETCH(qreal, pointSize);
+    QFont font(QStringLiteral("Noto Sans"));
+    font.setPointSizeF(pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QGuiApplication::setFont(font);
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(3, false));
+    fixture.editor.selectAllRows();
+    const QString kept = QStringLiteral("01 - An Overture for Strings, Brass, Two Pianos and a Very Distant "
+                                        "Thunderstorm over the Northbound Harbour.flac");
+    const QString renamed = QStringLiteral("02 - Morning Tide.flac");
+    QJsonArray results;
+    for (const auto &[from, to] : {std::pair{kept, kept}, std::pair{QStringLiteral("track02.flac"), renamed},
+                                   std::pair{QStringLiteral("03 Short.flac"), QStringLiteral("03 Short.flac")}}) {
+        results.push_back(QJsonObject{{QStringLiteral("path"), QStringLiteral("/fixture/Album/") + from},
+                                      {QStringLiteral("newPath"), QStringLiteral("/fixture/Album/") + to},
+                                      {QStringLiteral("ok"), true}});
+    }
+    const QByteArray preview =
+        QJsonDocument(QJsonObject{{QStringLiteral("results"), results}}).toJson(QJsonDocument::Compact);
+    fixture.editor.m_executeOperation = [preview](TagEditorController::Operation, const QByteArray &,
+                                                  const TagEditorController::RenameGate &) { return preview; };
+    QObject *previewDialog = fixture.window->findChild<QObject *>(QStringLiteral("renamePreviewDialog"));
+    QVERIFY(previewDialog != nullptr);
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorRenameButton")));
+    QTRY_VERIFY(previewDialog->property("opened").toBool());
+    QQuickWindow *previewWindow = dialogWindowOf(previewDialog);
+    QVERIFY(QTest::qWaitForWindowExposed(previewWindow));
+    QHash<QString, QQuickItem *> byText;
+    QTRY_VERIFY(visibleItemsNamed(previewWindow->contentItem(), QStringLiteral("renamePreviewOldName")).size() == 3);
+    for (const char *column : {"renamePreviewOldName", "renamePreviewNewName"}) {
+        for (QQuickItem *item : visibleItemsNamed(previewWindow->contentItem(), QString::fromLatin1(column))) {
+            byText.insert(item->property("text").toString(), item);
+        }
+    }
+    QVERIFY(byText.contains(kept) && byText.contains(renamed) && byText.contains(QStringLiteral("keeps its name")));
+    QTRY_VERIFY(byText.value(kept)->property("truncated").toBool());
+    QTRY_VERIFY(!byText.value(renamed)->property("truncated").toBool());
+    QVERIFY(!byText.value(QStringLiteral("track02.flac"))->property("truncated").toBool());
+    QVERIFY(sceneRectOf(byText.value(kept)).right() <= sceneRectOf(byText.value(renamed)).left());
+    QVERIFY(clickVisibleButton(previewWindow, QStringLiteral("renamePreviewCancelButton")));
+    QTRY_VERIFY(!previewDialog->property("visible").toBool());
+}
+
+// Several failed files are 8 px apart, each error 2 px under its file's
+// name, and Copy keeps every message whole, in the order shown.
+void TagEditorSmokeTest::saveDetailsSetFailedFilesApart() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(3, true));
+    fixture.saves->setResponse(QByteArray(
+        R"({"results":[{"path":"/fixture/Album 000/01 Song.flac","ok":true},)"
+        R"json({"path":"/fixture/Album 000/02 Song.flac","ok":false,"error":"disk full (os error 28)"},)json"
+        R"json({"path":"/fixture/Album 000/03 Song.flac","ok":false,"error":"permission denied (os error 13)"}]})json"));
+    QSignalSpy saved(&fixture.editor, &TagEditorController::saveFinished);
+    QVERIFY(fixture.editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QObject *details = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorStatusDetailsDialog"));
+    QVERIFY(details != nullptr);
+    QTRY_VERIFY(clickVisibleButton(fixture.tags(), QStringLiteral("tagEditorDetailsButton")));
+    QTRY_VERIFY(details->property("opened").toBool());
+    QQuickWindow *detailsWindow = dialogWindowOf(details);
+    QVERIFY(QTest::qWaitForWindowExposed(detailsWindow));
+    QQuickItem *text = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsText"));
+    QVERIFY(text != nullptr);
+    auto *quickDocument = qvariant_cast<QQuickTextDocument *>(text->property("textDocument"));
+    QVERIFY(quickDocument != nullptr);
+    const QTextDocument *document = quickDocument->textDocument();
+    QStringList blocks;
+    QList<qreal> gaps;
+    for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
+        blocks << block.text().replace(QChar(0x00a0), QLatin1Char(' '));
+        gaps << block.blockFormat().topMargin();
+    }
+    QCOMPARE(blocks, (QStringList{QStringLiteral("Failed:"), QStringLiteral("02 Song.flac"),
+                                  QStringLiteral("disk full (os error 28)"), QStringLiteral("03 Song.flac"),
+                                  QStringLiteral("permission denied (os error 13)"), QStringLiteral("Succeeded:"),
+                                  QStringLiteral("01 Song.flac")}));
+    const qreal scale = qMax(1.0, evaluateOn(text, QStringLiteral("root.uiPalette.fontScale")).toReal());
+    QCOMPARE(gaps, (QList<qreal>{0, 0, qMax(2.0, std::round(2 * scale)), qMax(8.0, std::round(8 * scale)),
+                                 qMax(2.0, std::round(2 * scale)), qMax(12.0, std::round(12 * scale)), 0}));
+    text->forceActiveFocus(Qt::OtherFocusReason);
+    QVERIFY(QMetaObject::invokeMethod(text, "selectAll"));
+    QGuiApplication::clipboard()->clear();
+    evaluateOn(text, QStringLiteral("copy()"));
+    QTRY_COMPARE(QGuiApplication::clipboard()->text(), blocks.join(QLatin1Char('\n')));
+    QVERIFY(clickVisibleButton(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton")));
+    QTRY_VERIFY(!details->property("visible").toBool());
 }
 
 std::unique_ptr<QmlSmokeTest> makeTagEditorSmokeTest(const QString &userDirectoriesParent) {

@@ -16,6 +16,12 @@ class BridgeClient;
 class QThreadPool;
 struct FerrousFfiRenameGate;
 
+// A file an action failed for, by name, and the error that stopped it.
+struct TagEditorFailure {
+    QString name;
+    QString error;
+};
+
 class TagEditorController final : public QObject {
     Q_OBJECT
     Q_PROPERTY(QObject* tableModel READ tableModel CONSTANT)
@@ -27,9 +33,11 @@ class TagEditorController final : public QObject {
     Q_PROPERTY(bool hasRowErrors READ hasRowErrors NOTIFY rowErrorsChanged)
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusChanged)
     Q_PROPERTY(QString statusDetails READ statusDetails NOTIFY statusChanged)
-    // statusDetails' sections, for the Details window to set out: each a
-    // map of its `heading`, such as "Failed:", its `items`, one line for
-    // each file, and `failed`, whether it lists the files that failed.
+    // statusDetails' sections, for the Details window to set out, what
+    // failed first: each a map of its `heading`, such as "Failed:", its
+    // `items`, for each file a map of its `name` and the `error` that
+    // stopped it, empty where none did, and `failed`, whether it lists the
+    // files that failed.
     Q_PROPERTY(QVariantList statusDetailSections READ statusDetailSections NOTIFY statusChanged)
     // Whether the status reports something that failed.
     Q_PROPERTY(bool statusIsError READ statusIsError NOTIFY statusChanged)
@@ -144,7 +152,7 @@ private:
         QVector<TagEditorRowState> rows;
         QStringList resolvedPaths;
         QString errorText;
-        QStringList failureLines;
+        QVector<TagEditorFailure> failures;
     };
     static LoadResult parseLoadResponse(const QByteArray &response);
     void runLoad(const QByteArray &payload);
@@ -180,7 +188,7 @@ private:
     QVector<int> allRows() const;
     bool anyFieldChanged(const QVector<int> &rows, const QString &field) const;
     void revertRows(const QVector<int> &rows, const QString &field);
-    void reportFailures(const QString &status, const QStringList &failureLines);
+    void reportFailures(const QString &status, const QVector<TagEditorFailure> &failures);
     void setStatusText(const QString &text, const QVariantList &detailSections = {},
                        bool isError = false);
     void setSelection(QSet<int> rows);

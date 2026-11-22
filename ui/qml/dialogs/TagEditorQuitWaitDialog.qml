@@ -8,11 +8,13 @@ import FerrousUi 1.0
 import "../components" as Components
 
 // Shown while quitting waits for a tag save or rename to finish: what it
-// waits for, semibold, beside the spinner, the files under its text, and,
-// once it offers to quit anyway, why, in the secondary colour, as the
-// explanation of a confirmation is, on the files' left edge, so all but
-// the spinner start on one line (the explanation was on the window's
-// edge, under the spinner).
+// waits for, semibold, beside the spinner, and the files under its text.
+// Once it offers to quit anyway, what that costs comes straight after the
+// status, and why it offers, shorter, under the files (the cost followed an
+// example, in a paragraph of five lines at 24 pt). All of that is in the
+// secondary colour, as the explanation of a confirmation is, on the files'
+// left edge, so all but the spinner start on one line (the explanation was
+// on the window's edge, under the spinner).
 Components.CompactDialogWindow {
     id: root
 
@@ -84,6 +86,17 @@ Components.CompactDialogWindow {
         }
     }
 
+    // The consequence, beside the decision.
+    Label {
+        objectName: "tagEditorQuitWaitMessage"
+        Layout.fillWidth: true
+        Layout.leftMargin: root.textIndent
+        visible: root.offerChoice
+        wrapMode: Text.WordWrap
+        color: root.uiPalette.textSecondary
+        text: I18n.i18nc("@info", "Quit Anyway stops waiting and may lose changes not yet written.")
+    }
+
     Label {
         objectName: "tagEditorQuitWaitFiles"
         Layout.fillWidth: true
@@ -100,15 +113,13 @@ Components.CompactDialogWindow {
     }
 
     Label {
-        objectName: "tagEditorQuitWaitMessage"
+        objectName: "tagEditorQuitWaitExplanation"
         Layout.fillWidth: true
         Layout.leftMargin: root.textIndent
         visible: root.offerChoice
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
-        text: I18n.i18nc("@info", "This is taking longer than it should, for example on an unresponsive "
-            + "network share. Quit Anyway stops waiting, and the tag changes not yet "
-            + "written may be lost. Each file keeps its old tags or gets its new ones; "
-            + "none is left half-written.")
+        text: I18n.i18nc("@info", "This is taking longer than it should, perhaps on an unresponsive network "
+            + "share. No file is left half-written.")
     }
 }
