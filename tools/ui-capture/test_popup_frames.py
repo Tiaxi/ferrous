@@ -313,6 +313,12 @@ class ToolTipWindowTest(unittest.TestCase):
                    + row.format(cls="ToolTipWindow", title="", w=180, h=30, flags="80d", active=0, parent=1))
         session.cmd = lambda command: listing
         self.assertEqual([w["title"] for w in session.dialog_windows()], ["Edit Tags"])
+        dialog = session.dialog_windows()[0]
+        self.assertEqual([w["h"] for w in session.tooltip_windows(session.windows(), dialog)], [30])
+
+    def test_a_dialogs_shot_has_room_for_a_tooltip_over_its_top(self):
+        self.assertEqual(shotlib.Session.area_with_room_above((100, 200, 800, 400), 30), (100, 170, 800, 430))
+        self.assertEqual(shotlib.Session.area_with_room_above((100, 10, 800, 400), 30), (100, 0, 800, 410))
 
 
 if __name__ == "__main__":
