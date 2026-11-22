@@ -57,6 +57,8 @@ private slots:
     void albumArtViewerShowsWhenItsImageCannotBeRead();
     void albumArtDetailsAreOnThePlotStripInEitherTheme_data();
     void albumArtDetailsAreOnThePlotStripInEitherTheme();
+    void albumArtStripSetsTheZoomOffAsItsPlateDoes_data();
+    void albumArtStripSetsTheZoomOffAsItsPlateDoes();
     void albumArtPanShowsItsHand_data();
     void albumArtPanShowsItsHand();
     void albumArtCopyPathIsOnTheFoldersLineUnderClose_data();
@@ -4636,6 +4638,39 @@ void AlbumArtSmokeTest::albumArtPanShowsItsHand() {
     ui.surface->setProperty("zoom", 1.0);
     QTest::mouseMove(host, from + QPoint(5, 5));
     QTRY_COMPARE(host->cursor().shape(), Qt::ArrowCursor);
+    QVERIFY(ui.closeViewer(host));
+}
+
+void AlbumArtSmokeTest::albumArtStripSetsTheZoomOffAsItsPlateDoes_data() {
+    QTest::addColumn<int>("viewerMode");
+    QTest::newRow("window") << 0;
+    QTest::newRow("whole screen") << 1;
+}
+
+// The album art viewer's toolbar is one in both presentations: zoomed, a
+// divider sets the readout and Reset off from its buttons on the plate and
+// in the strip alike (the strip had none).
+void AlbumArtSmokeTest::albumArtStripSetsTheZoomOffAsItsPlateDoes() {
+    QFETCH(int, viewerMode);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    AlbumArtWindow ui;
+    QVERIFY(ui.loaded());
+    QQuickWindow *host = ui.openViewer(QUrl::fromLocalFile(coverPath).toString(), viewerMode);
+    QVERIFY(host != nullptr);
+    QVERIFY(visibleItemNamed(host, QStringLiteral("viewerControlsDivider")) == nullptr);
+    ui.surface->setProperty("zoom", 2.0);
+    QQuickItem *divider = nullptr;
+    QTRY_VERIFY((divider = visibleItemNamed(host, QStringLiteral("viewerControlsDivider"))) != nullptr);
+    QQuickItem *reset = visibleItemNamed(host, QStringLiteral("viewerResetButton"));
+    QQuickItem *info = visibleItemNamed(host, viewerMode == 1 ? QStringLiteral("albumArtFullscreenInfoButton")
+                                                              : QStringLiteral("albumArtPopupInfoButton"));
+    QVERIFY(reset != nullptr && info != nullptr);
+    QCOMPARE(sceneRectOf(divider).left() - sceneRectOf(reset).right(), 4.0);
+    QCOMPARE(sceneRectOf(info).left() - sceneRectOf(divider).right(), 4.0);
+    ui.surface->setProperty("zoom", 1.0);
     QVERIFY(ui.closeViewer(host));
 }
 

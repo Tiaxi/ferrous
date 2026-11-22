@@ -519,6 +519,8 @@ Item {
                         uiBridge: root.uiBridge
                         positionText: root.positionText
                         closeButtonName: "albumArtFullscreenCloseButton"
+                        // The zoom set off, as on the plate in the window.
+                        dividers: true
                         controlsVisible: root.fullscreenControlsVisible
                         controlsLevel: root.fullscreenControlsLevel
                         available: root.stripEnabled
