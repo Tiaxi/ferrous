@@ -3040,9 +3040,21 @@ void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *win
     box->forceActiveFocus(Qt::TabFocusReason);
     QTest::keyClick(prefs, Qt::Key_Space);
     QCOMPARE(box->property("checked").toBool(), before);
-    // A build with Last.fm lets it be turned on.
+    // Its help steps down with it, under the line that says why, and still
+    // reads (in the secondary colour it outranked the setting it explains).
+    QQuickItem *help = visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp"));
+    QVERIFY(help != nullptr);
+    const QColor chrome = tokenOf(window, "chrome");
+    const QColor quiet = help->property("color").value<QColor>();
+    QCOMPARE(hex(quiet), hex(tokenOf(window, "textTertiary")));
+    QVERIFY2(contrastRatio(quiet, chrome) >= 4.5, qPrintable(describeContrast(QStringLiteral("help"), quiet, chrome)));
+    const QColor reason = visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))->property("color").value<QColor>();
+    QVERIFY(contrastRatio(quiet, chrome) < contrastRatio(reason, chrome));
+    // A build with Last.fm lets it be turned on, and explains it as every
+    // help does.
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
     QTRY_VERIFY(box->isEnabled());
+    QCOMPARE(hex(help->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
     QVERIFY(reject(dialog));
 }
 

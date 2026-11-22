@@ -48,6 +48,10 @@ Preferences.PreferencesPage {
         objectName: "lastFmScrobblingHelp"
         uiPalette: root.uiPalette
         indent: scrobblingCheckBox.contentItem.x
+        // In a build without Last.fm it steps down with the setting, so the
+        // account's line, which says why, leads (in the secondary colour it
+        // outranked the disabled setting it explains).
+        color: root.buildConfigured ? root.uiPalette.textSecondary : root.uiPalette.textTertiary
         // Without the status check box, it ends the scrobbling group.
         endsGroup: !root.showsScrobbleProgress
         text: I18n.i18nc("@info", "Tracks longer than 30 seconds are scrobbled when playback stops or the track "
