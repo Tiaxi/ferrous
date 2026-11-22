@@ -783,7 +783,7 @@ void SearchPaletteTest::tooltipFollowsARowThatChangesKindUnderAStillPointer() {
 }
 
 // The lead at 16 px (a 24 px thumbnail with a 2 px radius, the artist
-// glyph, or a placeholder without a cover), the title at 52 px in a 300 px
+// glyph, or a placeholder without a cover), the title at 52 px in a 380 px
 // column, and the context at one x for every row, whatever its title.
 void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
     Harness harness;
@@ -807,7 +807,7 @@ void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
         const auto runs = visibleNamed(row, QStringLiteral("globalSearchResultTitle"));
         QVERIFY(!runs.isEmpty());
         QCOMPARE(sceneRect(runs.first()).left() - left, 52.0);
-        QVERIFY(sceneRect(runs.last()).right() - left <= 52.0 + 300.0 + 0.5);
+        QVERIFY(sceneRect(runs.last()).right() - left <= 52.0 + 380.0 + 0.5);
         const auto context = contextTexts(row);
         QVERIFY(!context.isEmpty());
         contextXs << contextBoxOf(row).left() - left;
@@ -839,7 +839,7 @@ void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
         }
     }
     QCOMPARE(contextXs.size(), 7);
-    QVERIFY(std::all_of(contextXs.cbegin(), contextXs.cend(), [](qreal x) { return x == 364.0; }));
+    QVERIFY(std::all_of(contextXs.cbegin(), contextXs.cend(), [](qreal x) { return x == 444.0; }));
     QCOMPARE(thumbnails, 5);
     QCOMPARE(placeholders, 1);
     QCOMPARE(artistGlyphs, 1);
@@ -914,7 +914,7 @@ void SearchPaletteTest::matchesAreEmphasisedInTheTitleOnly() {
     QVERIFY(emphasisedIn(row, titleRun).isEmpty());
     QCOMPARE(wholeContext(row), QStringLiteral("The Quiet Meridian · 2005"));
     context = visibleChildNamed(row, QStringLiteral("globalSearchResultContext"));
-    QCOMPARE(sceneRect(context).left() - sceneRect(harness.palette()).left(), 364.0);
+    QCOMPARE(sceneRect(context).left() - sceneRect(harness.palette()).left(), 444.0);
     QCOMPARE(context->property("font").value<QFont>().pointSizeF(), harness.tokens->property("smallPointSize").toReal());
     QCOMPARE(hex(colorOf(context)), hex(harness.token("textSecondary")));
 
@@ -2474,6 +2474,7 @@ void SearchPaletteTest::rowColumnsNeverMeet_data() {
     QTest::newRow("24 pt") << 24.0 << 1600;
     QTest::newRow("24 pt, 1000 px") << 24.0 << 1000;
     QTest::newRow("24 pt, narrow") << 24.0 << 560;
+    QTest::newRow("24 pt, 1920 px") << 24.0 << 1920;
 }
 
 // A track's length holds its text whole at the right, and the title and
@@ -2545,8 +2546,22 @@ void SearchPaletteTest::rowColumnsNeverMeet() {
     if (pointSize == 0.0 && windowWidth == 1600) {
         // The design's sizes with the usual font.
         QCOMPARE(harness.dialog->property("lengthWidth").toReal(), 44.0);
-        QCOMPARE(harness.dialog->property("titleWidth").toReal(), 300.0);
+        QCOMPARE(harness.dialog->property("titleWidth").toReal(), 380.0);
     }
+    if (pointSize == 24.0 && windowWidth == 1920) {
+        QCOMPARE(harness.dialog->property("titleWidth").toReal(), std::round(380.0 * 2.4));
+    }
+    // The title grows only into room the context can spare: the context
+    // keeps 276 px, scaled, or where it had less beside a title of up to
+    // 300 px, all of that.
+    const qreal scale = pointSize > 0 ? pointSize / 10.0 : 1.0;
+    const qreal title = harness.dialog->property("titleWidth").toReal();
+    const qreal room = frame.width() - 16 - 8 - harness.dialog->property("lengthWidth").toReal() - 2 * gap
+        - harness.dialog->property("titleX").toReal();
+    const qreal before = std::min(std::round(300.0 * scale), std::round(room * 0.6));
+    QVERIFY2(room - title >= std::min(room - before, std::round(276.0 * scale)) - 1,
+             qPrintable(QStringLiteral("a title of %1 leaves the context %2").arg(title).arg(room - title)));
+    QVERIFY(title >= before);
 }
 
 int main(int argc, char **argv) {
