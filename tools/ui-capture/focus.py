@@ -841,7 +841,7 @@ SCOPES.update({
     # The viewers: album art and the visualization, windowed and fullscreen
     "viewers": dict(
         title="The viewers: album art and the visualization, windowed and fullscreen",
-        sessions=["viewers", "bigfont", "narrow", "motion"],
+        sessions=["viewers", "bigfont", "narrow", "motion", "playing", "dialogs"],
         sheets=[
             ("vw-albumart", "The album art viewer, fitted: windowed with its info column; fullscreen at rest", "dark",
              [[("viewer", "albumart-windowed-info", None, "Windowed, with its info column", dict(fit=(740, 520), lh=16, gap=6)),
@@ -885,6 +885,20 @@ SCOPES.update({
              [[("viewer", st, None, lb, dict(variant="font24", fit=(580, 406), lh=16, gap=6)) for st, lb in row]
               for row in ((("spectrogram-windowed", "Spectrogram, windowed"), ("spectrogram-fullscreen", "Fullscreen")),
                           (("albumart-windowed", "Album art, windowed"), ("albumart-fullscreen", "Fullscreen")))]),
+            # the left corners, which the corner sheet has no room for, and 5.1, where the lane heads are a column
+            ("vw-rest-lanes", "The fullscreen viewers' left: with the controls hidden, and shown; 5.1's lane heads; dark",
+             "dark",
+             [[("viewer", "spectrogram-fullscreen-auto-hidden", None, "Auto-hidden, whole", dict(fit=(590, 413), lh=16, gap=6)),
+               ("viewer", "5.1-fullscreen", None, "5.1, fullscreen", dict(fit=(590, 413), lh=16, gap=6))],
+              [("viewer", st, (0, 0, 0.19, 0.075), lb, dict(lh=16, gap=6)) for st, lb in
+               (("spectrogram-fullscreen-auto-hidden", "Auto-hidden, 1:1"), ("spectrogram-fullscreen-title-strip", "Shown, 1:1"),
+                ("5.1-fullscreen", "5.1's first lane, 1:1"))]]),
+            ("vw-light-preview", "The viewers in light; the album art viewer's preview of an iTunes suggestion", "light",
+             [[("viewer", "waveform-fullscreen", None, "Waveform, fullscreen, light", dict(theme="light", fit=(590, 413), lh=16, gap=6)),
+               ("viewer", "itunes-preview", None, "iTunes preview, dark", dict(theme="dark", fit=(590, 413), lh=16, gap=6))],
+              [("viewer", "waveform-windowed", (0.75, 0, 0.25, 0.075), "Windowed corner, light",
+                dict(theme="light", lh=16, gap=6)),
+               ("viewer", "waveform-fullscreen", (0.78, 0, 0.22, 0.06), "Its strip, light", dict(theme="light", lh=16, gap=6))]]),
         ],
         images=[
             ("sheet", "vw-albumart", "dark", "The album art viewer windowed with its info, and fullscreen (fitted)",
@@ -900,6 +914,10 @@ SCOPES.update({
             ("sheet", "vw-spectrogram-controls", "dark", "The viewers' corners at 1:1: plate, strip, hidden",
              "hover, focus, the readout; what stays when the controls hide"),
             ("sheet", "vw-24pt", "dark", "The viewers at 24 pt (fitted)", "the strip, plate and info at a large font"),
+            ("sheet", "vw-rest-lanes", "dark", "Fullscreen: the left with the controls hidden and shown; 5.1's lane heads",
+             "where the first label rests; the heads as one column"),
+            ("sheet", "vw-light-preview", "light", "The viewers in light; the iTunes preview in the album art viewer",
+             "the plate and strip in light; the preview's column and footer"),
             ("strip", "viewer-open-windowed", "dark", "The spectrogram viewer opening, windowed", "the first frame; blink"),
             ("strip", "viewer-close-windowed", "dark", "The spectrogram viewer closing, windowed", "the last frames; blink"),
             ("strip", "viewer-autohide-fullscreen", "dark", "The fullscreen viewer's controls hiding", "the hide's fade; what stays"),
