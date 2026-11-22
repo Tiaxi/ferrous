@@ -644,6 +644,8 @@ private slots:
     void editTagsDetailsHasAGlyphAsItsPeers();
     void editTagsDetailsFollowsItsFailure_data();
     void editTagsDetailsFollowsItsFailure();
+    void editTagsNumberRevertFollowsItsHeader_data();
+    void editTagsNumberRevertFollowsItsHeader();
     void editTagsRevertToolTipsStandAboveTheirGlyphs_data();
     void editTagsRevertToolTipsStandAboveTheirGlyphs();
     void dialogsShareOneLook();
@@ -4724,10 +4726,10 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     // The numbers and Format: about the widths the reviews asked for, or
     // a few pixels wider for their headers, whole, and their widest values,
     // with the cells' 8 px padding; a field's also for its header's Revert,
-    // whose room is always there.
+    // whose room is always there, and in # after the digits too.
     const QFont valueFont = paletteOf(window)->property("baseFont").value<QFont>();
     const QList<std::tuple<QString, QString, qreal>> narrow{
-        {QStringLiteral("trackNo"), QStringLiteral("00"), 40}, {QStringLiteral("year"), QStringLiteral("0000"), 52},
+        {QStringLiteral("trackNo"), QStringLiteral("000"), 40}, {QStringLiteral("year"), QStringLiteral("0000"), 52},
         {QStringLiteral("discNo"), QStringLiteral("00"), 40}, {QStringLiteral("formatKind"), QStringLiteral("FLAC"), 56}};
     for (const auto &[key, sample, width] : narrow) {
         const QString at = key + QStringLiteral(": ") + describeColumns();
@@ -4735,9 +4737,11 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
                                        QStringLiteral("tagEditorColumnLabel")).at(0);
         const qreal header = label->implicitWidth() + 8
             + (key == QStringLiteral("formatKind") ? 8 : dialog->property("columnRevertRoom").toReal());
-        QVERIFY2(columnWidth(key) >= width && columnWidth(key) <= std::max(width, header) + 4, qPrintable(at));
+        const qreal after = key == QStringLiteral("trackNo") ? dialog->property("columnRevertRoom").toReal() : 8;
+        const qreal value = QFontMetricsF(valueFont).horizontalAdvance(sample) + 8 + after;
+        QVERIFY2(columnWidth(key) >= width && columnWidth(key) <= std::max({width, header, value}) + 4, qPrintable(at));
         QVERIFY2(!label->property("truncated").toBool(), qPrintable(at));
-        QVERIFY2(QFontMetricsF(valueFont).horizontalAdvance(sample) + 16 <= columnWidth(key), qPrintable(at));
+        QVERIFY2(value <= columnWidth(key), qPrintable(at));
     }
     // On a large screen, every column at its width at least, and no
     // sideways scrolling.
@@ -4811,17 +4815,27 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     for (const QString &key : {QStringLiteral("title"), QStringLiteral("artist"), QStringLiteral("album")}) {
         QVERIFY2(columnWidth(key) >= 160, qPrintable(key + QStringLiteral(": ") + describeColumns()));
     }
-    // The fixture's values whole: the artist, the album folder and the file
-    // names.
-    for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
-        for (QQuickItem *child : row->childItems()) {
-            for (QQuickItem *cell : child->childItems()) {
-                if (cell->objectName().startsWith(QStringLiteral("tagEditorCell_"))) {
-                    QVERIFY2(!cell->property("truncated").toBool(), qPrintable(describeItem(cell) + describeColumns()));
+    // The fixture's values whole: the artist and the file names; and, in
+    // the 1600 px a main window of that width gives it, the album's folder.
+    const auto checkValuesWhole = [&](bool folderToo) {
+        for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
+            for (QQuickItem *child : row->childItems()) {
+                for (QQuickItem *cell : child->childItems()) {
+                    if (cell->objectName().startsWith(QStringLiteral("tagEditorCell_"))
+                        && (folderToo || cell->objectName() != QStringLiteral("tagEditorCell_directory"))) {
+                        QVERIFY2(!cell->property("truncated").toBool(), qPrintable(describeItem(cell) + describeColumns()));
+                    }
                 }
             }
         }
-    }
+    };
+    checkValuesWhole(false);
+    QVERIFY(!QTest::currentTestFailed());
+    tags->resize(1600, tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), 1600.0);
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    checkValuesWhole(true);
+    QVERIFY(!QTest::currentTestFailed());
     QVERIFY(closeTagEditor(main));
 }
 
@@ -5346,7 +5360,7 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
     // Three digits, the widest a track number gets, stay clear of it.
     const qreal threeDigits = QFontMetricsF(number->property("font").value<QFont>())
                                   .horizontalAdvance(QStringLiteral("000"));
-    QVERIFY2(numberRect.right() - 8 - threeDigits >= markRect.right() + 2,
+    QVERIFY2(numberRect.right() - dialog->property("columnRevertRoom").toReal() - threeDigits >= markRect.right() + 2,
              qPrintable(QStringLiteral("%1 px of digits").arg(threeDigits)));
     QCOMPARE(number->property("toolTipText").toString(), QStringLiteral("Modified"));
     QCOMPARE(evaluate(mark->parentItem(), QStringLiteral("Accessible.description")).toString(),
@@ -5616,9 +5630,9 @@ void UiDialogsTest::editTagsTitlesCanBeCheckedBeforeSaving_data() {
 // The new titles can be checked before Save writes them: where the table
 // scrolls sideways anyway, Title has all the room beside # and File Name,
 // to the view's edge (it stayed 190 px beside an unchanged Artist), or
-// about 160 px to scroll to where there is less (at 24 pt it kept 240 px,
-// which cut 8 of 12 new titles). An unchanged cell that is cut gives its
-// whole value in its tooltip. An edit of no field moves a column:
+// about 160 px to scroll to where that room is less than its least, 100 px
+// scaled with the font. An unchanged cell that is cut gives its whole
+// value in its tooltip. An edit of no field moves a column:
 // #, Year and Disc keep the room of their header's Revert (they took it as
 // they were typed in, and every column moved up to 14 px).
 void UiDialogsTest::editTagsTitlesCanBeCheckedBeforeSaving() {
@@ -5649,7 +5663,7 @@ void UiDialogsTest::editTagsTitlesCanBeCheckedBeforeSaving() {
                                 ->property("tableInset").toReal();
         const qreal left = table->width() - 2 * inset - column(QStringLiteral("trackNo"))->width()
             - column(QStringLiteral("fileName"))->width();
-        const qreal expected = left < 150 * scale ? std::min(160 * scale, table->width() - 2 * inset) : left;
+        const qreal expected = left < 100 * scale ? std::min(160 * scale, table->width() - 2 * inset) : left;
         QVERIFY2(std::abs(title->width() - expected) <= 1.5,
                  qPrintable(QStringLiteral("Title %1, expected %2, room left %3").arg(title->width()).arg(expected).arg(left)));
     }
@@ -5807,6 +5821,10 @@ void UiDialogsTest::editTagsShowsEachChangeWhole() {
         table->setProperty("contentX", 0);
     };
 
+    if (width >= 1600 && table->property("contentWidth").toReal() > table->width() + 0.5) {
+        QQuickItem *title = named(tags, QStringLiteral("tagEditorColumn_title"));
+        QVERIFY2(sceneRect(title).right() <= sceneRect(table).right(), qPrintable(describeItem(title)));
+    }
     main.editor.selectAllRows();
     const QList<QVariant> selected = main.editor.selectedRows();
     const QString album = QStringLiteral("Loose Ends: Home Recordings, Rehearsals and the Harbour Hall Concert");
@@ -6135,6 +6153,101 @@ void UiDialogsTest::editTagsDetailsFollowsItsFailure() {
     QCOMPARE(sceneRect(save), saveAt);
     QCOMPARE(sceneRect(cancel), cancelAt);
     QCOMPARE(status->property("font").value<QFont>().pointSizeF(), palette->property("smallPointSize").toReal());
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsNumberRevertFollowsItsHeader_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000;
+    QTest::newRow("10 pt, 1600 px") << 10.0 << 1600;
+    QTest::newRow("24 pt, 1000 px") << 24.0 << 1000;
+    QTest::newRow("24 pt, 1600 px") << 24.0 << 1600;
+}
+
+// The # column's Revert reads as its column's, "# ↺" as "Title ↺", clear of
+// the change dots (before the #, over the dots, it read as reverting all),
+// and the digits end where the # does, with the Revert shown and without.
+void UiDialogsTest::editTagsNumberRevertFollowsItsHeader() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfTheBatch());
+    QVERIFY(tags != nullptr);
+    tags->resize(width, tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), qreal(width));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    // Where a label's text is drawn, across.
+    const auto drawn = [](QQuickItem *label) {
+        const qreal text = label->property("contentWidth").toReal();
+        const qreal left = label->property("horizontalAlignment").toInt() == Qt::AlignRight
+            ? label->width() - label->property("rightPadding").toReal() - text
+            : label->property("leftPadding").toReal();
+        return std::pair{sceneRect(label).left() + left, sceneRect(label).left() + left + text};
+    };
+    const auto labelOf = [&](const QString &key) {
+        return itemsNamed(named(tags, QStringLiteral("tagEditorColumn_") + key),
+                          QStringLiteral("tagEditorColumnLabel")).at(0);
+    };
+    const auto checkDigits = [&] {
+        QTRY_VERIFY(!layoutPendingUnder(table));
+        const qreal right = drawn(labelOf(QStringLiteral("trackNo"))).second;
+        int numbered = 0;
+        for (QQuickItem *cell : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorCell_trackNo"))) {
+            if (!cell->isVisible() || cell->property("text").toString().isEmpty()) {
+                continue;
+            }
+            ++numbered;
+            QVERIFY2(std::abs(drawn(cell).second - right) <= 1.0,
+                     qPrintable(describeItem(cell) + QStringLiteral(" # ends at %1").arg(right)));
+        }
+        QVERIFY(numbered > 0);
+    };
+    main.editor.selectAllRows();
+    main.editor.applyBulkField(QStringLiteral("trackNo"), QStringLiteral("10"));
+    main.editor.m_tableModel.applySaveResults(
+        {}, QSet<QString>(main.editor.loadedPaths().cbegin(), main.editor.loadedPaths().cend()));
+    main.editor.notifyRowMutation();
+    QTRY_VERIFY(!named(tags, QStringLiteral("tagEditorColumnRevert_trackNo"))->isVisible());
+    checkDigits();
+    QVERIFY(!QTest::currentTestFailed());
+    const qreal hashRight = drawn(labelOf(QStringLiteral("trackNo"))).second;
+
+    main.editor.applyBulkField(QStringLiteral("trackNo"), QStringLiteral("123"));
+    main.editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Cinder Lumen"));
+    QQuickItem *revert = nullptr;
+    QTRY_VERIFY((revert = visibleNamed(tags, QStringLiteral("tagEditorColumnRevert_trackNo"))) != nullptr);
+    QQuickItem *titleRevert = named(tags, QStringLiteral("tagEditorColumnRevert_title"));
+    QVERIFY(titleRevert != nullptr);
+    checkDigits();
+    QVERIFY(!QTest::currentTestFailed());
+    QQuickItem *hash = labelOf(QStringLiteral("trackNo"));
+    const QString at = describeItem(hash) + describeItem(revert);
+    QVERIFY2(sceneRect(revert).left() >= drawn(hash).second, qPrintable(at));
+    QVERIFY2(std::abs((sceneRect(revert).left() - drawn(hash).second)
+                      - (sceneRect(titleRevert).left() - drawn(labelOf(QStringLiteral("title"))).second)) <= 1.0,
+             qPrintable(at));
+    QVERIFY(std::abs(drawn(hash).second - hashRight) <= 1.0);
+    QVERIFY2(sceneRect(named(tags, QStringLiteral("tagEditorColumn_trackNo"))).adjusted(-0.5, -0.5, 0.5, 0.5)
+                 .contains(sceneRect(revert)), qPrintable(at));
+
+    int marks = 0;
+    for (QQuickItem *mark : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRowModifiedMark"))) {
+        if (!mark->isVisible()) {
+            continue;
+        }
+        ++marks;
+        const qreal dots = sceneRect(mark).right();
+        QVERIFY2(sceneRect(revert).left() > dots && drawn(hash).first > dots, qPrintable(at));
+        QQuickItem *number = itemNamed(mark->parentItem(), QStringLiteral("tagEditorCell_trackNo"));
+        QVERIFY(number != nullptr);
+        QCOMPARE(number->property("lineCount").toInt(), 1);
+        QVERIFY2(drawn(number).first >= dots + 1, qPrintable(describeItem(number)));
+    }
+    QVERIFY(marks > 0);
     QVERIFY(closeTagEditor(main));
 }
 

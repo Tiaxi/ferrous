@@ -90,8 +90,8 @@ Components.DialogWindow {
     // them at its least and none wider than the view, but Title, whose new
     // values are checked there before Save: it has all the room beside #
     // and File Name, to the view's edge (it stayed at 190 px beside an
-    // unchanged Artist), or `holds` to scroll to where there is less (at
-    // 24 pt, 240 px cut 8 of 12 new titles). A committed change is whole
+    // unchanged Artist), or `holds` to scroll to where that would be less
+    // than its `least`. A committed change is whole
     // whatever its column's width: it wraps and its row grows. Where
     // the view is wider, File Name and Folder, which `stretch`, take the
     // rest. Status takes no room until a
@@ -103,7 +103,7 @@ Components.DialogWindow {
     // too little room for them all, either the tags or the paths were cut
     // short).
     readonly property var tableColumns: [
-        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
+        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "000" },
         { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, holds: 220, stretch: true, path: true },
         { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 100, holds: 160 },
         { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 100, holds: 160 },
@@ -119,19 +119,26 @@ Components.DialogWindow {
     // it.
     readonly property bool rowStatusShown: root.tagEditorApi.hasRowErrors === true
     // The mark of a row with unsaved edits, in the # column's left padding:
-    // a 6 px dot at the default font, clear of a three-digit number.
+    // a 6 px dot at the default font, clear of a three-digit number, whose
+    // room the # column has beside its Revert's.
     readonly property int modifiedMarkSize: 2 * Math.round(root.uiPalette.scaledSize(6) / 2)
+    // The # column's padding before its numbers: 8 px, or what the mark,
+    // centred in those 8, takes as it outgrows them with the font.
+    readonly property real numberLeadingRoom: Math.max(Kirigami.Units.largeSpacing,
+        Math.ceil((Kirigami.Units.largeSpacing + root.modifiedMarkSize) / 2) + 1)
     readonly property real tableInset: Kirigami.Units.largeSpacing
-    // The room a column's header keeps beside its label for the column's
+    // The room a column's header keeps after its label for the column's
     // Revert, up to the column's edge, whether it shows or not, so that
-    // marking a change moves no column; its glyph is as large as a line of
+    // marking a change moves no column: "Title ↺", and "# ↺" alike, with
+    // the digits ending where the # does; its glyph is as large as a line of
     // text holds, 14 px in a 20 px button with the default font.
     readonly property real columnRevertGlyph: root.uiPalette.labelIconSize - 2
     readonly property real columnRevertRoom: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
     // What a column needs whatever the room: its header whole, semibold
     // and, in a column of a field, with its Revert in place of the padding
-    // at that end, or its sample value, with the cell's padding, rather
-    // than a header elided to a letter. The Revert's room is there before
+    // at that end, or its sample value, with the cell's padding, which in
+    // a column of numbers ends under the label, rather than a header
+    // elided to a letter. The Revert's room is there before
     // an edit needs it (#, Year and Disc took it as they were typed in,
     // and moved every column up to 14 px).
     function columnNeed(column) {
@@ -140,14 +147,17 @@ Components.DialogWindow {
         columnHeaderMetrics.font
         columnValueMetrics.font
         const padding = Kirigami.Units.largeSpacing
-        const header = columnHeaderMetrics.advanceWidth(column.label) + padding
+        const leading = column.number ? root.numberLeadingRoom : padding
+        const header = columnHeaderMetrics.advanceWidth(column.label) + leading
             + (root.fieldAt(column.key) !== null ? root.columnRevertRoom : padding)
         const samples = column.samples || (column.sample ? [column.sample] : [])
         const value = samples.reduce(function(widest, sample) {
             return Math.max(widest, columnValueMetrics.advanceWidth(sample))
         }, 0)
         // The label lays out up to a pixel wider than its advance.
-        return Math.ceil(Math.max(header + 1, value + 2 * padding))
+        return Math.ceil(Math.max(header + 1, column.number
+            ? value + 1 + leading + root.columnRevertRoom
+            : value + 2 * padding))
     }
     // Each column's width with room enough, or none for Status while no
     // row has a failure.
@@ -248,14 +258,14 @@ Components.DialogWindow {
             over -= taken
         }
         // Still too wide, the table scrolls: Title to the view's edge, or,
-        // with less than about 160 px left there, 160 px to scroll to; and
+        // with less than its least left there, 160 px to scroll to; and
         // no column wider than the view, which a change wraps within, so
         // that it is whole once scrolled to, clear of the vertical bar.
         if (over > 0) {
             const view = Math.floor(room - root.scrollBarClearance)
             const title = root.tableColumns.findIndex(function(column) { return column.key === "title" })
             const beside = Math.floor(room - widths[number] - widths[name])
-            widths[title] = beside < root.uiPalette.scaledSize(150)
+            widths[title] = beside < root.uiPalette.scaledSize(root.tableColumns[title].least)
                 ? root.uiPalette.scaledSize(root.tableColumns[title].holds)
                 : beside
             root.tableColumns.forEach(function(column, i) {
@@ -1473,18 +1483,21 @@ Components.DialogWindow {
                                     anchors.fill: parent
                                     // The Revert's end has no padding: see
                                     // columnNeed.
-                                    anchors.leftMargin: headerCell.editable && headerCell.modelData.number
-                                        ? 0 : Kirigami.Units.largeSpacing
-                                    anchors.rightMargin: headerCell.editable && !headerCell.modelData.number
-                                        ? 0 : Kirigami.Units.largeSpacing
+                                    anchors.leftMargin: headerCell.modelData.number
+                                        ? root.numberLeadingRoom : Kirigami.Units.largeSpacing
+                                    anchors.rightMargin: headerCell.editable ? 0 : Kirigami.Units.largeSpacing
                                     spacing: Kirigami.Units.smallSpacing
-                                    layoutDirection: headerCell.modelData.number ? Qt.RightToLeft : Qt.LeftToRight
 
                                     Label {
                                         objectName: "tagEditorColumnLabel"
                                         anchors.verticalCenter: parent.verticalCenter
-                                        width: Math.min(implicitWidth, parent.width
-                                            - (columnRevert.visible ? columnRevert.width + parent.spacing : 0))
+                                        // A number's label ends at the
+                                        // Revert's room, over its digits.
+                                        width: headerCell.modelData.number
+                                            ? parent.width - root.columnRevertRoom
+                                            : Math.min(implicitWidth, parent.width
+                                                - (columnRevert.visible ? columnRevert.width + parent.spacing : 0))
+                                        horizontalAlignment: headerCell.modelData.number ? Text.AlignRight : Text.AlignLeft
                                         textFormat: Text.PlainText
                                         text: headerCell.modelData.label
                                         font.pointSize: root.uiPalette.smallPointSize
@@ -1663,9 +1676,10 @@ Components.DialogWindow {
                                     : root.tableRowHeight
                                 visible: width > 0
                                 topPadding: tableCell.changed ? root.cellLineInset : 0
-                                leftPadding: Kirigami.Units.largeSpacing
-                                rightPadding: Kirigami.Units.largeSpacing
-                                    + (modelData.key === "title" && root.tableScrolls ? root.scrollBarClearance : 0)
+                                leftPadding: modelData.number ? root.numberLeadingRoom : Kirigami.Units.largeSpacing
+                                rightPadding: modelData.number ? root.columnRevertRoom
+                                    : Kirigami.Units.largeSpacing
+                                        + (modelData.key === "title" && root.tableScrolls ? root.scrollBarClearance : 0)
                                 textFormat: Text.PlainText
                                 readonly property bool typed: root.pendingEditKey === modelData.key
                                     && root.pendingEditRows[tableRow.index] === true
