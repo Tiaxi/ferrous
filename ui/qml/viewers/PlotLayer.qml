@@ -42,7 +42,8 @@ Item {
     property bool controlsAutoHide: false
     property var pointerActivity: null
     // What the viewer keeps clear along the top edge, under its title strip:
-    // the lane heads keep below it.
+    // the lane heads keep below it. Their labels do only while the controls
+    // show; hidden, each is where its lane alone puts it.
     property real topInset: 0
     // Whether the plot waits for the track's analysis.
     property bool analysing: false
@@ -204,7 +205,8 @@ Item {
 
     // What each lane's head takes of its lane, from the lane's top left,
     // by the lane's index; empty for a lane that shows none. The lines of
-    // a lane at rest keep clear of it.
+    // a lane at rest keep clear of it, where its label rests with a
+    // viewer's controls hidden too, so that they never move with those.
     readonly property var laneHeadBoundsByLane: {
         const bounds = []
         for (let index = 0; index < laneHeads.count; ++index) {
@@ -214,8 +216,9 @@ Item {
                 continue
             }
             const occupied = head.occupiedBounds
-            bounds.push(Qt.rect(head.x + occupied.x, head.y - root.laneTop(index) + occupied.y,
-                                occupied.width, occupied.height))
+            bounds.push(Qt.rect(head.x + occupied.x,
+                                head.y - head.stripShift - root.laneTop(index) + occupied.y,
+                                occupied.width, occupied.height + head.stripShift))
         }
         return bounds
     }
@@ -226,7 +229,11 @@ Item {
         model: root.laneCount
 
         delegate: Components.PlotLaneHead {
+            id: laneHead
             required property int index
+            // How much lower than in the other lanes the head is in this
+            // one, as a viewer's title strip reaches into it.
+            readonly property real stripShift: Math.max(0, root.topInset - root.laneTop(index))
             objectName: "plotLaneHead"
             z: 1
             x: root.plateInset
@@ -253,6 +260,26 @@ Item {
             pointerActivity: root.pointerActivity
             toggleMute: function() { root.uiBridge.toggleChannelMute(index) }
             toggleSolo: function() { root.uiBridge.soloChannel(index) }
+            // The label has two places where the strip reaches into the
+            // lane, under the strip and, with the controls hidden, as far
+            // into the lane as the others' (left under a strip that was
+            // gone, it was stranded 38 px down, in the state a listener sees
+            // most). It cross-fades between them on the controls' level, so
+            // nothing travels or jumps as the strip shows and hides.
+            labelLevel: laneHead.stripShift > 0 ? root.controlsLevel : 1
+
+            Components.PlotPlate {
+                objectName: "plotLaneRestLabel"
+                y: -laneHead.stripShift
+                visible: laneHead.stripShift > 0 && root.controlsLevel < 1
+                fadeLevel: 1 - root.controlsLevel
+                plotColors: root.plotColors
+                uiPalette: root.uiPalette
+                text: laneHead.label
+                compact: laneHead.compact
+                // The head's label is the one that is read.
+                Accessible.ignored: true
+            }
         }
     }
 

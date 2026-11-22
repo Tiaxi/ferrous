@@ -1093,6 +1093,8 @@ private slots:
     void albumArtViewerControlsFadeOnOneLevel();
     void viewerControlsHideAsAFadeAndShowQuicker_data();
     void viewerControlsHideAsAFadeAndShowQuicker();
+    void firstLanesLabelRestsWhereTheOtherLanesDo_data();
+    void firstLanesLabelRestsWhereTheOtherLanesDo();
 };
 
 void UiMotionTest::initTestCase() {
@@ -7103,6 +7105,124 @@ void UiMotionTest::viewerControlsHideAsAFadeAndShowQuicker() {
     QVERIFY(QMetaObject::invokeMethod(viewer, open == QByteArrayLiteral("openSpectrogramViewer")
                                                   ? "closeSpectrogramViewer" : "closeAlbumArtViewer"));
     QTRY_VERIFY(!autoHide->property("active").toBool());
+}
+
+void UiMotionTest::firstLanesLabelRestsWhereTheOtherLanesDo_data() {
+    QTest::addColumn<int>("plot");
+    QTest::addColumn<int>("displayMode");
+    QTest::addColumn<int>("channels");
+    QTest::newRow("spectrogram, rolling") << 0 << 0 << 2;
+    QTest::newRow("spectrogram, centred") << 0 << 1 << 2;
+    QTest::newRow("spectrogram, 5.1") << 0 << 1 << 6;
+    QTest::newRow("waveform, rolling") << 1 << 0 << 2;
+    QTest::newRow("waveform, centred") << 1 << 1 << 2;
+}
+
+// Over the whole screen, with the controls hidden, the first lane's label
+// is as far into its lane as the others' (it was left where the title strip
+// puts it, a hole over it). As the strip shows and hides nothing travels or
+// jumps: the label in either place holds still and the two cross-fade on
+// the controls' one level.
+void UiMotionTest::firstLanesLabelRestsWhereTheOtherLanesDo() {
+    QFETCH(int, plot);
+    QFETCH(int, displayMode);
+    QFETCH(int, channels);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    units->setShortDuration(100);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
+    QQuickItem *layer = named(window, "plotLayer");
+    QVERIFY(viewer && autoHide && spectrogram && layer);
+    autoHide->setProperty("hideDelay", 600000);
+    viewer->setProperty("visualizationMode", plot);
+    bridge->setProperty("viewerFullscreenMode", 1);
+    bridge->setProperty("showFullscreenTitleStrip", true);
+    bridge->setProperty("spectrogramDisplayMode", displayMode);
+    bridge->setProperty("spectrogramViewMode", 1);
+    bridge->setProperty("currentTrackChannels", channels);
+    playQueueRow(bridge, 0, QStringLiteral("Paused"));
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, channels),
+                                      Q_ARG(bool, true)));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(layer->window() != nullptr && layer->window() != window);
+    QVERIFY(QTest::qWaitForWindowExposed(layer->window()));
+    QTRY_COMPARE(layer->property("laneCount").toInt(), channels);
+    QTRY_VERIFY(layer->property("topInset").toDouble() > 0.0);
+    QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
+
+    // Every label's drawn plate, by its lane: its place in that lane and
+    // how opaque it is.
+    struct Drawn {
+        double fromLaneTop;
+        double opacity;
+    };
+    const auto labels = [&]() {
+        QList<QList<Drawn>> found(channels);
+        for (QQuickItem *text : itemsNamed(layer, QStringLiteral("plotPlateLabel"))) {
+            const double opacity = drawnOpacity(text);
+            if (opacity <= 1e-6 || text->property("text").toString().isEmpty()) {
+                continue;
+            }
+            const double top = text->mapToItem(layer, QPointF(0, 0)).y();
+            const int lane = std::clamp(int(top / (layer->height() / channels)), 0, channels - 1);
+            QVariant laneTop;
+            if (!QMetaObject::invokeMethod(layer, "laneTop", Q_RETURN_ARG(QVariant, laneTop),
+                                           Q_ARG(QVariant, lane))) {
+                continue;
+            }
+            found[lane].append({top - laneTop.toDouble(), opacity});
+        }
+        return found;
+    };
+    const QList<QList<Drawn>> shown = labels();
+    QCOMPARE(shown.at(0).size(), 1);
+    QCOMPARE(shown.at(1).size(), 1);
+    const double resting = shown.at(1).first().fromLaneTop;
+    const double underStrip = shown.at(0).first().fromLaneTop;
+    QVERIFY2(underStrip > layer->property("topInset").toDouble(), qPrintable(QString::number(underStrip)));
+
+    QObject *state = qvariant_cast<QObject *>(autoHide->property("state"));
+    QVERIFY(state != nullptr);
+    SteppedAnimationDriver driver;
+    for (const bool shows : {false, true}) {
+        state->setProperty("controlsVisible", shows);
+        int fading = 0;
+        for (int ms = 0; ms <= 400; ms += 16) {
+            const double level = autoHide->property("level").toDouble();
+            const QList<QList<Drawn>> now = labels();
+            double atRest = 0.0;
+            double below = 0.0;
+            for (const Drawn &drawn : now.at(0)) {
+                const QString where = QStringLiteral("at %1 ms, level %2: a label at %3")
+                                          .arg(ms).arg(level).arg(drawn.fromLaneTop);
+                if (std::abs(drawn.fromLaneTop - resting) < 0.01) {
+                    atRest += drawn.opacity;
+                } else if (std::abs(drawn.fromLaneTop - underStrip) < 0.01) {
+                    below += drawn.opacity;
+                } else {
+                    QFAIL(qPrintable(where + QStringLiteral(", in neither place")));
+                }
+            }
+            QVERIFY2(std::abs(below - level) < 1e-5 && std::abs(atRest - (1.0 - level)) < 1e-5,
+                     qPrintable(QStringLiteral("at %1 ms, level %2: %3 under the strip, %4 at rest")
+                                    .arg(ms).arg(level).arg(below).arg(atRest)));
+            for (int lane = 1; lane < channels; ++lane) {
+                QCOMPARE(now.at(lane).size(), 1);
+                QCOMPARE(now.at(lane).first().fromLaneTop, resting);
+            }
+            fading += level > 0.0 && level < 1.0;
+            static_cast<void>(driver.step(16));
+        }
+        QVERIFY(fading >= 3);
+    }
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(layer->window() == window);
+    // Back in the pane, the one label, whole.
+    static_cast<void>(driver.step(200));
+    QCOMPARE(labels().at(0).size(), 1);
 }
 
 #include "tst_ui_motion.moc"
