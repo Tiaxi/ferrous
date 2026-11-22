@@ -1857,12 +1857,16 @@ Components.DialogWindow {
                                 wrapMode: tableCell.wraps ? Text.Wrap : Text.NoWrap
                                 maximumLineCount: tableCell.wrapsName ? root.fileNameLineLimit : undefined
                                 horizontalAlignment: modelData.number ? Text.AlignRight : Text.AlignLeft
-                                // A file name or folder keeps its start: the
-                                // track number and title, or the folder's
-                                // year and album, rather than an extension
-                                // that Format shows. The whole of any cell
-                                // is in its tooltip while it is cut short.
-                                elide: tableCell.changed && !tableCell.typed ? Text.ElideNone : Text.ElideRight
+                                // A file name keeps its start: the track
+                                // number and title, rather than an
+                                // extension that Format shows. A folder
+                                // keeps its start and its end, where the
+                                // folders of a batch often differ (cut at
+                                // the end, each read "ferrous-ren…"). The
+                                // whole of any cell is in its tooltip while
+                                // it is cut short.
+                                elide: tableCell.changed && !tableCell.typed ? Text.ElideNone
+                                    : (modelData.key === "directory" ? Text.ElideMiddle : Text.ElideRight)
 
                                 // Under the pinned cells, from the row's edge
                                 // to the seam, the row as it is drawn there,

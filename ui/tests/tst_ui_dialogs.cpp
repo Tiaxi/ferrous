@@ -703,6 +703,8 @@ private slots:
     void editTagsSetsTypedValuesInDemiBold();
     void editTagsToolsButtonHasAGlyph_data();
     void editTagsToolsButtonHasAGlyph();
+    void editTagsFolderKeepsBothEnds_data();
+    void editTagsFolderKeepsBothEnds();
     void editTagsPinsWhatIdentifiesARowAsItScrolls_data();
     void editTagsPinsWhatIdentifiesARowAsItScrolls();
     void editTagsTitleMeetsTheEdgeUnderAWideScrollBar();
@@ -5372,14 +5374,14 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
                                 .horizontalAdvance(QStringLiteral("Modified")),
                      qPrintable(at + describeColumns()));
         }
-        // The long file name wraps to a second line, and past it, as the
-        // folder, elides at the end, keeping the track number and the
-        // title, with the whole in a tooltip.
+        // The long file name wraps to a second line, and past its last
+        // elides at the end, keeping the track number and the title; the
+        // folder elides in the middle. Either is whole in a tooltip.
         QQuickItem *fileName = cellOf(QStringLiteral("fileName"));
         QQuickItem *folder = cellOf(QStringLiteral("directory"));
         QVERIFY(fileName != nullptr && folder != nullptr);
         QCOMPARE(fileName->property("elide").toInt(), int(Qt::ElideRight));
-        QCOMPARE(folder->property("elide").toInt(), int(Qt::ElideRight));
+        QCOMPARE(folder->property("elide").toInt(), int(Qt::ElideMiddle));
         QTRY_VERIFY2(fileName->property("lineCount").toInt() == 2, qPrintable(at + describeColumns()));
         QCOMPARE(fileName->property("toolTipText").toString(),
                  fileName->property("truncated").toBool()
@@ -6639,6 +6641,60 @@ void UiDialogsTest::editTagsToolsButtonHasAGlyph() {
         QIcon::setThemeName(theme);
         QVERIFY2(QIcon::hasThemeIcon(glyph), qPrintable(theme));
     }
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsFolderKeepsBothEnds_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000;
+    QTest::newRow("10 pt, 1600 px") << 10.0 << 1600;
+    QTest::newRow("24 pt, 1600 px") << 24.0 << 1600;
+}
+
+// A folder too long for its column is cut in the middle, so its start and
+// its end both stay, where folders of one batch often differ: cut at the
+// end, every row of a batch read "ferrous-ren…". A file name is still cut
+// at its end, keeping the track number and title, and either reads whole
+// in its tooltip.
+void UiDialogsTest::editTagsFolderKeepsBothEnds() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    const QString directory = QStringLiteral("/fixture/Orchid Static - Loose Ends (Deluxe Edition, Disc 2)");
+    const QString fileName = QStringLiteral("01 - ") + QStringLiteral("Long Title ").repeated(30) + QStringLiteral(".flac");
+    const QString path = directory + QLatin1Char('/') + fileName;
+    const QByteArray rows = QJsonDocument(QJsonObject{
+        {QStringLiteral("resolvedPaths"), QJsonArray{path}},
+        {QStringLiteral("rows"), QJsonArray{QJsonObject{
+            {QStringLiteral("path"), path},
+            {QStringLiteral("fileName"), fileName},
+            {QStringLiteral("directory"), directory},
+            {QStringLiteral("formatKind"), QStringLiteral("FLAC")},
+            {QStringLiteral("title"), QStringLiteral("Brief Signal")},
+            {QStringLiteral("artist"), QStringLiteral("Orchid Static")},
+            {QStringLiteral("album"), QStringLiteral("Loose Ends")},
+        }}}}).toJson(QJsonDocument::Compact);
+    QQuickWindow *tags = openTagEditor(main, rows);
+    QVERIFY(tags != nullptr);
+    tags->resize(width, tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), qreal(width));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    QQuickItem *folder = visibleNamed(tags, QStringLiteral("tagEditorCell_directory"));
+    QQuickItem *name = visibleNamed(tags, QStringLiteral("tagEditorCell_fileName"));
+    QVERIFY(folder != nullptr && name != nullptr);
+    QCOMPARE(folder->property("text").toString(), QStringLiteral("Orchid Static - Loose Ends (Deluxe Edition, Disc 2)"));
+    QCOMPARE(folder->property("elide").toInt(), int(Qt::ElideMiddle));
+    QVERIFY2(folder->property("truncated").toBool(), qPrintable(describeItem(folder)));
+    QCOMPARE(folder->property("lineCount").toInt(), 1);
+    QCOMPARE(folder->property("toolTipText").toString(), directory);
+    QCOMPARE(name->property("elide").toInt(), int(Qt::ElideRight));
+    QVERIFY2(name->property("truncated").toBool(), qPrintable(describeItem(name)));
+    QCOMPARE(name->property("toolTipText").toString(), fileName);
     QVERIFY(closeTagEditor(main));
 }
 
