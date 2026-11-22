@@ -2,6 +2,7 @@
 
 #include "FlacFixture.h"
 #include "QmlSmokeTest.h"
+#include "TestColor.h"
 
 #include <QAccessible>
 #include <QJSValue>
@@ -64,6 +65,8 @@ private slots:
     void renamePreviewLaysOutItsRows();
     void renamePreviewALongNameThatStaysCutsNoNewName_data();
     void renamePreviewALongNameThatStaysCutsNoNewName();
+    void renamePreviewShowsANameThatStaysWhole_data();
+    void renamePreviewShowsANameThatStaysWhole();
     void saveDetailsSetFailedFilesApart();
 };
 
@@ -2291,10 +2294,16 @@ void checkRenamePreviewShowsTheNewNamesInAColumn(TagEditorWindow &fixture, QObje
             }
             QCOMPARE(newName->property("text").toString(),
                      kept ? QStringLiteral("keeps its name") : fields.value(QStringLiteral("newName")).toString());
-            QCOMPARE(newName->mapToItem(list, QPointF()).x(), newNameX);
-            QCOMPARE(newName->property("color").value<QColor>().rgba(), kept || refused ? quiet : text);
+            // A name that stays may go on past its column, in its line.
+            if (kept && longOpening) {
+                QVERIFY2(newName->mapToItem(list, QPointF()).x() >= newNameX, qPrintable(at));
+            } else {
+                QCOMPARE(newName->mapToItem(list, QPointF()).x(), newNameX);
+            }
+            QCOMPARE(newName->property("color").value<QColor>().rgba(),
+                     refused ? quiet : kept ? palette->property("textTertiary").value<QColor>().rgba() : text);
             QCOMPARE(newName->property("elide").toInt(), int(Qt::ElideMiddle));
-            QVERIFY2(newNameX + newName->width() <= line + 0.5, qPrintable(at));
+            QVERIFY2(newName->mapToItem(list, QPointF()).x() + newName->width() <= line + 0.5, qPrintable(at));
             // A screen reader reads the row as one line.
             QVariant rowText;
             QVERIFY(QMetaObject::invokeMethod(previewDialog, "rowText", Q_RETURN_ARG(QVariant, rowText),
@@ -2411,7 +2420,10 @@ void TagEditorSmokeTest::renamePreviewALongNameThatStaysCutsNoNewName() {
     QTRY_VERIFY(byText.value(kept)->property("truncated").toBool());
     QTRY_VERIFY(!byText.value(renamed)->property("truncated").toBool());
     QVERIFY(!byText.value(QStringLiteral("track02.flac"))->property("truncated").toBool());
-    QVERIFY(sceneRectOf(byText.value(kept)).right() <= sceneRectOf(byText.value(renamed)).left());
+    // Within its own line, before what that says.
+    QQuickItem *keeps = itemNamed(byText.value(kept)->parentItem(), QStringLiteral("renamePreviewNewName"));
+    QVERIFY(keeps != nullptr);
+    QVERIFY(sceneRectOf(byText.value(kept)).right() <= sceneRectOf(keeps).left());
     QVERIFY(clickVisibleButton(previewWindow, QStringLiteral("renamePreviewCancelButton")));
     QTRY_VERIFY(!previewDialog->property("visible").toBool());
 }
@@ -2463,6 +2475,88 @@ void TagEditorSmokeTest::saveDetailsSetFailedFilesApart() {
 
 std::unique_ptr<QmlSmokeTest> makeTagEditorSmokeTest(const QString &userDirectoriesParent) {
     return std::make_unique<TagEditorSmokeTest>(userDirectoriesParent);
+}
+
+void TagEditorSmokeTest::renamePreviewShowsANameThatStaysWhole_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// A file that keeps its name shows it whole where its line has room, past
+// the old names' column that a long new name narrows (it was cut in its
+// middle beside 350 px of nothing), and "keeps its name" follows it,
+// quieter than the names, readable and on their baseline. The renamed
+// files' columns stay where they are.
+void TagEditorSmokeTest::renamePreviewShowsANameThatStaysWhole() {
+    QFETCH(qreal, pointSize);
+    QFont font(QStringLiteral("Noto Sans"));
+    font.setPointSizeF(pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QGuiApplication::setFont(font);
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(3, false));
+    fixture.editor.selectAllRows();
+    const QString stays = QStringLiteral("01 - Overture for Strings and a Distant Summer Storm.flac");
+    const QString longNew = QStringLiteral(
+        "02 - Morning Tide Field (Live at the Harbour Hall, the Second Night of Two).flac");
+    const QString shortNew = QStringLiteral("03 - Static.flac");
+    QJsonArray results;
+    for (const auto &[from, to] : {std::pair{stays, stays}, std::pair{QStringLiteral("track02.flac"), longNew},
+                                   std::pair{QStringLiteral("track03.flac"), shortNew}}) {
+        results.push_back(QJsonObject{{QStringLiteral("path"), QStringLiteral("/fixture/Album/") + from},
+                                      {QStringLiteral("newPath"), QStringLiteral("/fixture/Album/") + to},
+                                      {QStringLiteral("ok"), true}});
+    }
+    const QByteArray preview =
+        QJsonDocument(QJsonObject{{QStringLiteral("results"), results}}).toJson(QJsonDocument::Compact);
+    fixture.editor.m_executeOperation = [preview](TagEditorController::Operation, const QByteArray &,
+                                                  const TagEditorController::RenameGate &) { return preview; };
+    QObject *previewDialog = fixture.window->findChild<QObject *>(QStringLiteral("renamePreviewDialog"));
+    QVERIFY(previewDialog != nullptr);
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorRenameButton")));
+    QTRY_VERIFY(previewDialog->property("opened").toBool());
+    QQuickWindow *previewWindow = dialogWindowOf(previewDialog);
+    QVERIFY(QTest::qWaitForWindowExposed(previewWindow));
+    QHash<QString, QQuickItem *> byText;
+    QTRY_VERIFY(visibleItemsNamed(previewWindow->contentItem(), QStringLiteral("renamePreviewOldName")).size() == 3);
+    for (const char *column : {"renamePreviewOldName", "renamePreviewNewName"}) {
+        for (QQuickItem *item : visibleItemsNamed(previewWindow->contentItem(), QString::fromLatin1(column))) {
+            byText.insert(item->property("text").toString(), item);
+        }
+    }
+    QQuickItem *staying = byText.value(stays);
+    QQuickItem *keeps = byText.value(QStringLiteral("keeps its name"));
+    QQuickItem *renamed = byText.value(longNew);
+    QQuickItem *other = byText.value(shortNew);
+    QVERIFY(staying != nullptr && keeps != nullptr && renamed != nullptr && other != nullptr);
+    // A line just long enough for the name that stays and what follows it.
+    const qreal arrowColumn = previewDialog->property("arrowColumnWidth").toReal();
+    const int lineWidth = qCeil(2 * previewDialog->property("contentPadding").toReal()
+                               + previewDialog->property("listGutter").toReal() + std::ceil(staying->implicitWidth())
+                               + arrowColumn + std::ceil(keeps->implicitWidth())) + 8;
+    previewWindow->resize(lineWidth, previewWindow->height());
+    QTRY_COMPARE(previewWindow->contentItem()->width(), qreal(lineWidth));
+    // Wider than the old names' column, which the long new name narrows.
+    const qreal column = previewDialog->property("oldNameColumnWidth").toReal();
+    QVERIFY2(staying->implicitWidth() > column + 1, qPrintable(QString::number(column)));
+    QTRY_VERIFY2(!staying->property("truncated").toBool(), qPrintable(describeRect(sceneRectOf(staying))));
+    QTRY_VERIFY(!keeps->property("truncated").toBool());
+    QTRY_VERIFY(qAbs(sceneRectOf(keeps).left() - sceneRectOf(staying).right() - arrowColumn) < 1);
+    // The renamed files' new names at the column's end, one x.
+    QCOMPARE(sceneRectOf(renamed).left(), sceneRectOf(other).left());
+    QVERIFY(qAbs(sceneRectOf(other).left() - sceneRectOf(staying).left() - column - arrowColumn) < 0.5);
+    // Quieter: the small font and the tertiary colour, 4.5:1 on the window.
+    QObject *palette = qvariant_cast<QObject *>(previewDialog->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    QCOMPARE(keeps->property("color").value<QColor>().rgba(), palette->property("textTertiary").value<QColor>().rgba());
+    QVERIFY(contrastRatio(keeps->property("color").value<QColor>(), palette->property("chrome").value<QColor>()) >= 4.5);
+    QVERIFY(keeps->property("font").value<QFont>().pointSizeF() < staying->property("font").value<QFont>().pointSizeF());
+    QTRY_VERIFY(qAbs(sceneRectOf(keeps).top() + keeps->baselineOffset()
+                     - sceneRectOf(staying).top() - staying->baselineOffset()) <= 1);
+    QVERIFY(clickVisibleButton(previewWindow, QStringLiteral("renamePreviewCancelButton")));
+    QTRY_VERIFY(!previewDialog->property("visible").toBool());
 }
 
 #include "tst_qml_smoke_tag_editor.moc"

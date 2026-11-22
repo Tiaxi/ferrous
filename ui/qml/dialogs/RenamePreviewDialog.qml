@@ -155,7 +155,8 @@ Components.DialogWindow {
     // too (the arrows stood at seven places, and the new names had no
     // column). A name that stays gives way further, to the renamed files'
     // column or a quarter of the list, so a long one cuts no new name (it
-    // ran across the arrows and the new names).
+    // ran across the arrows and the new names); in its own line it goes on
+    // past the column as far as there is room (see the row).
     readonly property real oldNameColumnWidth: {
         const line = previewList.width - root.listGutter
         const measured = root.measuredRows
@@ -403,9 +404,10 @@ Components.DialogWindow {
                 id: previewRow
                 required property var modelData
                 readonly property bool renamed: root.isRenamed(modelData)
-                // What recedes in the row: all of one that keeps its name,
-                // the old name and the arrow of one that is renamed. All
-                // of one that can't be is in the negative colour.
+                readonly property bool showsNewName: root.showsNewName(modelData)
+                // What recedes in the row: the old name and the arrow, and
+                // further that a file keeps its name, which is no name. All
+                // of one that can't be renamed is in the negative colour.
                 readonly property color quietColor: previewRow.modelData.ok
                     ? root.uiPalette.textSecondary : root.uiPalette.negative
                 width: ListView.view.width - root.listGutter
@@ -413,17 +415,23 @@ Components.DialogWindow {
 
                 // A file, in the three columns: its old name, the arrow where
                 // it has a new one, and that name, or that it keeps its own,
-                // which every row starts at one x.
+                // which every row starts at one x but one that stays and
+                // is longer than the column: it has the line for it whole,
+                // and "keeps its name" follows it (it was cut beside free
+                // room).
                 Item {
                     objectName: "renamePreviewFileRow"
                     Layout.fillWidth: true
-                    implicitHeight: newNameLabel.implicitHeight
+                    implicitHeight: oldNameLabel.implicitHeight
                     Accessible.role: Accessible.StaticText
                     Accessible.name: root.rowText(previewRow.modelData)
 
                     Label {
+                        id: oldNameLabel
                         objectName: "renamePreviewOldName"
-                        width: root.oldNameColumnWidth
+                        width: previewRow.showsNewName ? root.oldNameColumnWidth
+                            : Math.max(root.oldNameColumnWidth, Math.min(Math.ceil(implicitWidth),
+                                parent.width - root.arrowColumnWidth - Math.ceil(newNameLabel.implicitWidth)))
                         elide: Text.ElideMiddle
                         textFormat: Text.PlainText
                         text: previewRow.modelData.oldName
@@ -435,7 +443,7 @@ Components.DialogWindow {
                         objectName: "renamePreviewArrow"
                         x: root.oldNameColumnWidth
                         width: root.arrowColumnWidth
-                        visible: root.showsNewName(previewRow.modelData)
+                        visible: previewRow.showsNewName
                         horizontalAlignment: Text.AlignHCenter
                         textFormat: Text.PlainText
                         text: root.arrowText
@@ -446,12 +454,20 @@ Components.DialogWindow {
                     Label {
                         id: newNameLabel
                         objectName: "renamePreviewNewName"
-                        x: root.oldNameColumnWidth + root.arrowColumnWidth
+                        anchors.baseline: oldNameLabel.baseline
+                        x: oldNameLabel.width + root.arrowColumnWidth
                         width: Math.max(0, parent.width - x)
                         elide: Text.ElideMiddle
                         textFormat: Text.PlainText
                         text: root.newColumnText(previewRow.modelData)
-                        color: previewRow.renamed ? root.uiPalette.text : previewRow.quietColor
+                        // "keeps its name" is quieter than the names, in
+                        // the small font and the tertiary colour (in theirs,
+                        // it read as a file's).
+                        font.pointSize: previewRow.showsNewName
+                            ? root.uiPalette.basePointSize : root.uiPalette.smallPointSize
+                        color: previewRow.renamed ? root.uiPalette.text
+                            : previewRow.showsNewName || !previewRow.modelData.ok ? previewRow.quietColor
+                            : root.uiPalette.textTertiary
                         Accessible.ignored: true
                     }
                 }
