@@ -207,7 +207,7 @@ The settled rules for presentation only. For internals, see [visualization archi
   - The strip is opaque, is drawn over the view, and never resizes the view.
   - Under the strip, the first lane's label cross-fades with the controls between the strip's lower edge and the place the other lanes' labels have. Nothing travels.
 - **The album art info column** is about 40 characters wide: 280 px with its seam at 10 pt, up to 320 px in a wide window, and 336 px over the whole screen. Its text is on the viewer's type scale. The art fits and centres in the room to the left of the seam, with a 16 px gutter (24 px during a preview). It glides as the column opens and never touches the seam. Copy Path is on the "Folder" label's line, on one axis with Close above it, and the path has the column's width under them.
-- **Text on the viewers uses one type scale.** Over the whole screen, the strip and the details are both 1.2× the window's text, so the file name never outranks the track title.
+- **Text on the viewers uses one type scale.** Over the whole screen, the strip, its zoom readout and the details are all 1.2× the window's text, and the strip's gaps follow the font, so the file name never outranks the track title.
 
 ## Tried and rejected
 

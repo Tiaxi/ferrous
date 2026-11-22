@@ -54,6 +54,8 @@ private slots:
     void fullscreenVisualizationStripHoldsTheModeSwitch();
     void viewerResetIsTheSameGlyphWindowedAndInTheStrip();
     void viewerToolbarIsOneVocabularyWindowedAndInTheStrip();
+    void viewerStripIsOnOneTypeScale_data();
+    void viewerStripIsOnOneTypeScale();
     void menuMnemonicsOpenTheMenusAndShowShortcuts();
 };
 
@@ -4527,6 +4529,79 @@ void TransportInputSmokeTest::viewerToolbarIsOneVocabularyWindowedAndInTheStrip(
             QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
             QTRY_VERIFY(!spectrogram->property("viewerMode").toBool());
         }
+    }
+}
+
+void TransportInputSmokeTest::viewerStripIsOnOneTypeScale_data() {
+    QTest::addColumn<int>("points");
+    QTest::newRow("10 pt") << 10;
+    QTest::newRow("24 pt") << 24;
+}
+
+// The title strip has one type scale: its zoom readout is at the strip's
+// text size, 1.2 times the window's, as the time beside it (it was the
+// window's small size, 12 px in a 16 px strip), and the gaps between the
+// title, the album and the time follow the font (14 px beside 38 px type,
+// the album and the time ran together at 24 pt).
+void TransportInputSmokeTest::viewerStripIsOnOneTypeScale() {
+    QFETCH(int, points);
+    const ScopedApplicationFont font(points);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *art = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge && viewer && spectrogram && art);
+    setPlayingTrack(bridge);
+    // Short enough that none of them is elided in the test's screen.
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Tide"));
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Q"));
+    bridge->setProperty("currentTrackAlbum", QString());
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("viewerFullscreenMode", 1);
+    for (const bool albumArt : {false, true}) {
+        QQuickItem *view = albumArt ? art : spectrogram;
+        QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "openAlbumArtViewer" : "openSpectrogramViewer"));
+        QTRY_VERIFY(view->window() != nullptr && view->window() != window);
+        QQuickWindow *host = view->window();
+        QVERIFY(QTest::qWaitForWindowExposed(host));
+        if (albumArt) {
+            art->setProperty("zoom", 2.0);
+        } else {
+            QTRY_VERIFY(spectrogram->property("viewerMode").toBool());
+            spectrogram->setProperty("_viewerZoomLevel", 2.0);
+        }
+        QQuickItem *readout = nullptr;
+        QTRY_VERIFY((readout = visibleItemNamed(host, QStringLiteral("viewerZoomReadout"))) != nullptr);
+        QQuickItem *title = visibleItemNamed(host, QStringLiteral("viewerStripTitle"));
+        QQuickItem *context = visibleItemNamed(host, QStringLiteral("viewerStripContext"));
+        QQuickItem *time = visibleItemNamed(host, QStringLiteral("viewerStripTime"));
+        QVERIFY(title && context && time);
+        const qreal size = qvariant_cast<QFont>(time->property("font")).pointSizeF();
+        QVERIFY(qAbs(size - points * 1.2) < 0.01);
+        const qreal readoutSize = qvariant_cast<QFont>(readout->property("font")).pointSizeF();
+        QVERIFY2(qAbs(readoutSize - size) < 0.01, qPrintable(QStringLiteral("the readout at %1").arg(readoutSize)));
+        // 14 px at 10 pt, as much more as the font is larger.
+        const qreal gap = std::round(14.0 * points / 10.0);
+        const auto between = [](QQuickItem *left, QQuickItem *right) {
+            return right->mapToScene(QPointF(0, 0)).x() - left->mapToScene(QPointF(left->width(), 0)).x();
+        };
+        QTRY_VERIFY2(qAbs(between(title, context) - gap) < 0.01 && qAbs(between(context, time) - gap) < 0.01,
+                     qPrintable(QStringLiteral("gaps of %1 and %2").arg(between(title, context)).arg(between(context, time))));
+        if (albumArt) {
+            art->setProperty("zoom", 1.0);
+        } else {
+            spectrogram->setProperty("_viewerZoomLevel", 0.0);
+        }
+        QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "closeAlbumArtViewer" : "closeSpectrogramViewer"));
+        QTRY_VERIFY(!viewer->property(albumArt ? "albumArtViewerOpen" : "spectrogramViewerOpen").toBool());
     }
 }
 

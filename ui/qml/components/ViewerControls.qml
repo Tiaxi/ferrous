@@ -26,6 +26,8 @@ Item {
     property var resetView: null
     property string resetToolTip: I18n.i18nc("@info:tooltip", "Reset Zoom")
     property var errorController: null
+    // The readout's size: the small font's, or a title strip's own.
+    property real readoutPointSize: root.uiPalette.smallPointSize
     property string closeButtonName: "viewerCloseButton"
     // The viewer's own button before Close, if it has one.
     default property alias viewerControls: viewerControlsRow.data
@@ -67,6 +69,7 @@ Item {
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         zoomLevel: root.zoomLevel
+        pointSize: root.readoutPointSize
         rightPadding: 0
     }
 

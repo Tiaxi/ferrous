@@ -138,7 +138,7 @@ Rectangle {
     Row {
         id: track
         objectName: "viewerStripTrack"
-        readonly property real room: Math.max(0, controls.x - 12 - x)
+        readonly property real room: Math.max(0, controls.x - track.spacing - x)
         readonly property real textRoom: Math.max(0, track.room - (timeLabel.visible
             ? timeLabel.implicitWidth + track.spacing : 0) - (contextLabel.visible ? track.spacing : 0))
         readonly property real contextNeed: contextLabel.visible ? contextLabel.implicitWidth : 0
@@ -146,7 +146,9 @@ Rectangle {
         // the title sat too near the edge).
         x: 2 * Kirigami.Units.largeSpacing
         height: root.bandHeight
-        spacing: Math.round(12 * root.textScale)
+        // 14 px at the default font, and as much more as the font is larger
+        // (at 24 pt, 14 px beside 38 px type ran the album into the time).
+        spacing: root.uiPalette.scaledSize(Math.round(12 * root.textScale))
 
         Label {
             id: titleLabel
@@ -198,6 +200,9 @@ Rectangle {
         plotColors: root.plotColors
         closeViewer: root.closeViewer
         zoomLevel: root.zoomLevel
+        // On the strip's one type scale, as the time is (at the window's
+        // small size it was 12 px in a 16 px strip).
+        readoutPointSize: root.textPointSize
         resetView: root.resetView
         resetToolTip: root.resetToolTip
         errorController: root.errorController
