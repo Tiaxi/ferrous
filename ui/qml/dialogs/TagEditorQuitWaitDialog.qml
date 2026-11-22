@@ -83,8 +83,8 @@ Components.CompactDialogWindow {
             wrapMode: Text.WordWrap
             font.weight: Font.DemiBold
             textFormat: Text.PlainText
-            text: I18n.i18ncp("@info:status", "Ferrous quits once the tag editor has written %1 file.",
-                "Ferrous quits once the tag editor has written %1 files.", root.files.length)
+            text: I18n.i18ncp("@info:status", "Ferrous quits once it has written %1 file.",
+                "Ferrous quits once it has written %1 files.", root.files.length)
         }
     }
 

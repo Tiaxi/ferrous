@@ -644,7 +644,7 @@ TagEditorController::LoadResult TagEditorController::parseLoadResponse(const QBy
             failed.push_back({displayNameForPath(readString(failure, "path")), readString(failure, "error"), {}});
         }
     } else {
-        errorText = i18nc("@info:status", "failed to parse tag editor load response");
+        errorText = i18nc("@info:status", "failed to parse tag load response");
     }
     if (errorText.isEmpty() && !failed.isEmpty()) {
         errorText = partialResultText(
@@ -760,7 +760,7 @@ void TagEditorController::applySaveResult(const QByteArray &response) {
             }
         }
     } else {
-        status = i18nc("@info:status", "failed to parse tag editor save response");
+        status = i18nc("@info:status", "failed to parse tag save response");
     }
 
     const bool success = document.isObject() && status.isEmpty()
@@ -1391,8 +1391,9 @@ void TagEditorController::reportFailures(const QString &status, const QVector<Ta
         lines.push_back(fileLine(failure.name, failure.error));
     }
     if (failures.size() > kShownFailures) {
-        lines.push_back(i18ncp("@info", "…and %1 more; the tag editor lists them all.",
-                               "…and %1 more; the tag editor lists them all.",
+        lines.push_back(i18ncp("@info %1 is a count; Edit Tags is the window's title",
+                               "…and %1 more; Edit Tags lists them all.",
+                               "…and %1 more; Edit Tags lists them all.",
                                failures.size() - kShownFailures));
     }
     emit errorReported(lines.join(QLatin1Char('\n')));

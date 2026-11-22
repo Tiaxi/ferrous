@@ -274,7 +274,7 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 | iTunes search failed | one grey line, the same as "no results" | a network failure read as a routine empty result |
 | Edit Tags columns | File Name and Folder squeezed while tags kept room; tags giving way first | the file columns tell rows apart; Artist elided in every row |
 | Edit Tags status cell | the raw system error in the cell | cut to "failed to …", it explained nothing |
-| Tag Editor Details | the save results as a plain text dump | the screen that explains a failed save looked unfinished |
+| Tag Change Details | the save results as a plain text dump | the screen that explains a failed save looked unfinished |
 | Search footer | 4 px between a key and its action, as between pairs | "Ctrl+Enter Add to Queue" read as one phrase |
 | Recent Issues links | the pressed fill the same as hover | a press read as nothing |
 | Diagnostics | actions over two rows; "Clear…" for a delete | ragged edges, and two verbs for one action |

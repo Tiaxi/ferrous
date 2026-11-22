@@ -124,7 +124,7 @@ Components.DialogWindow {
     }
 
     objectName: "tagEditorStatusDetailsDialog"
-    title: I18n.i18nc("@title:window", "Tag Editor Details")
+    title: I18n.i18nc("@title:window", "Tag Change Details")
     minimumWidth: Kirigami.Units.gridUnit * 20
     minimumHeight: Kirigami.Units.gridUnit * 9
     // Its width and its limit below with the default font grow with a

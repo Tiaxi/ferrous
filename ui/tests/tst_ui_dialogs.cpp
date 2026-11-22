@@ -595,6 +595,7 @@ private slots:
     void editTagsRevertsWorkFromTheKeyboard();
     void editTagsKeepsWhatIdentifiesARowInView_data();
     void editTagsKeepsWhatIdentifiesARowInView();
+    void editTagsGoesByOneName();
     void editTagsOutlinesOnlyTheFieldWithTheKeyboard();
     void editTagsTitlesCanBeCheckedBeforeSaving_data();
     void editTagsTitlesCanBeCheckedBeforeSaving();
@@ -4544,10 +4545,13 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
     QVERIFY(waitForDialogWindow(confirm));
     QQuickItem *lost = visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDetails"));
     QVERIFY(lost != nullptr);
-    QCOMPARE(lost->property("text").toString(), QStringLiteral("Discard drops every unsaved change."));
+    QCOMPARE(lost->property("text").toString(), QStringLiteral("If you discard them, the changes are lost."));
     const QVariant purpose = confirm->property("purpose");
     confirm->setProperty("purpose", QStringLiteral("quit"));
-    QCOMPARE(lost->property("text").toString(), QStringLiteral("Discard drops every unsaved change."));
+    QCOMPARE(lost->property("text").toString(), QStringLiteral("If you discard them, the changes are lost."));
+    confirm->setProperty("purpose", QStringLiteral("reload"));
+    QCOMPARE(lost->property("text").toString(),
+             QStringLiteral("If you reload, the changes are lost."));
     confirm->setProperty("purpose", purpose);
     click(windowOf(confirm), visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDiscardButton")));
     QTRY_VERIFY(!tags->isVisible());
@@ -5335,6 +5339,38 @@ void UiDialogsTest::editTagsKeepsWhatIdentifiesARowInView() {
     QTRY_VERIFY(!layoutPending(table));
     QCOMPARE(genre->width(), genreWidth);
     QCOMPARE(sceneRect(album).left(), albumX);
+    QVERIFY(closeTagEditor(main));
+}
+
+// Edit Tags and what it reports go by one name: no "tag editor" beside
+// "Edit Tags" in a title, a question or a message.
+void UiDialogsTest::editTagsGoesByOneName() {
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QVERIFY(openTagEditor(main, tagRows(2)) != nullptr);
+    const auto textOf = [&](const QString &name) {
+        QObject *shown = object(main.window, name);
+        return shown != nullptr ? shown->property("text").toString() : QString();
+    };
+    QObject *details = object(main.window, QStringLiteral("tagEditorStatusDetailsDialog"));
+    QVERIFY(details != nullptr);
+    QVERIFY2(details->property("title").toString().startsWith(QStringLiteral("Tag Change Details")),
+             qPrintable(details->property("title").toString()));
+    QObject *confirm = object(main.window, QStringLiteral("tagEditorCloseConfirmDialog"));
+    QVERIFY(confirm != nullptr && confirm->setProperty("purpose", QStringLiteral("close")));
+    QCOMPARE(textOf(QStringLiteral("tagEditorCloseConfirmMessage")), QStringLiteral("Save tag changes before closing?"));
+    const QString waiting = textOf(QStringLiteral("tagEditorQuitWaitStatus"));
+    QVERIFY2(waiting.startsWith(QStringLiteral("Ferrous quits once it has written")), qPrintable(waiting));
+
+    QString reported;
+    QObject::connect(&main.editor, &TagEditorController::errorReported, main.window,
+                     [&reported](const QString &message) { reported = message; });
+    QVector<TagEditorFailure> failures;
+    for (int i = 0; i < 12; ++i) {
+        failures.push_back({QStringLiteral("%1.flac").arg(i), QStringLiteral("Permission denied"), {}});
+    }
+    main.editor.reportFailures(QStringLiteral("Saved 0 files; 12 failed."), failures);
+    QVERIFY2(reported.endsWith(QStringLiteral("Edit Tags lists them all.")), qPrintable(reported));
     QVERIFY(closeTagEditor(main));
 }
 

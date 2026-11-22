@@ -391,7 +391,7 @@ void TagEditorSmokeTest::tagEditorCancelAsksBeforeDroppingEdits() {
 
     // Cancel asks, as the close button and Escape do.
     QTRY_VERIFY(fixture.confirmShown());
-    QCOMPARE(fixture.confirmMessage(), QStringLiteral("Save changes before closing the tag editor?"));
+    QCOMPARE(fixture.confirmMessage(), QStringLiteral("Save tag changes before closing?"));
     // The question leads, semibold, as every dialog's first sentence is.
     QCOMPARE(fixture.window->findChild<QObject *>(QStringLiteral("tagEditorCloseConfirmMessage"))
                  ->property("font").value<QFont>().weight(),
@@ -1127,7 +1127,7 @@ void TagEditorSmokeTest::askingToCloseAfterAReloadQuestionOffersSaveAndDiscard()
     }
     QTRY_VERIFY(fixture.confirm->property("opened").toBool());
     QCOMPARE(fixture.confirmMessage(), quit ? QStringLiteral("Save tag changes before quitting Ferrous?")
-                                            : QStringLiteral("Save changes before closing the tag editor?"));
+                                            : QStringLiteral("Save tag changes before closing?"));
     fixture.settleDeletions();
     QQuickItem *saveButton = fixture.confirmButtonShown(saveName);
     QQuickItem *discardButton = fixture.confirmButtonShown(discardName);
