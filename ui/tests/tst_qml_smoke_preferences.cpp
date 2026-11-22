@@ -412,6 +412,9 @@ ApplicationWindow {
     QTRY_VERIFY(confirm->property("opened").toBool());
     QCOMPARE(confirm->property("message").toString(),
              QStringLiteral("Replace the album art of “Album A” by Artist A?"));
+    QQuickItem *artLine = visibleItemNamed(dialogWindow, QStringLiteral("itunesArtworkCurrentDetails"));
+    QVERIFY(artLine != nullptr);
+    QCOMPARE(artLine->property("text").toString(), QStringLiteral("Image details aren\u2019t available."));
     QVERIFY(applied().isEmpty());
     // What Replace does on disk, a short sentence for each case (one
     // sentence of 31 words was too long): a cover file where the track's
@@ -489,6 +492,11 @@ ApplicationWindow {
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
     QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
+    // Its current art's line doesn't say the lead again ("No current album
+    // art is available" under "Current album art").
+    QQuickItem *currentDetails = visibleItemNamed(dialogWindow, QStringLiteral("itunesArtworkCurrentDetails"));
+    QVERIFY(currentDetails != nullptr);
+    QCOMPARE(currentDetails->property("text").toString(), QStringLiteral("This track has none."));
     // Nor does a quick second click on Apply: the window hides at once.
     QQuickItem *apply = visibleItemNamed(dialogWindow, QStringLiteral("itunesArtworkApplyButton"));
     QVERIFY(apply != nullptr);

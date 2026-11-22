@@ -762,7 +762,9 @@ Components.DialogWindow {
                         hovered: actionRow.hovered
                         selected: actionRow.highlighted
                         active: actionList.activeFocus
-                        focused: actionRow.highlighted && actionList.activeFocus
+                        // The ring only while the keyboard is in use,
+                        // as in the app's other lists.
+                        focused: actionRow.highlighted && actionList.activeFocus && InputModality.keyboard
                     }
 
                     contentItem: RowLayout {

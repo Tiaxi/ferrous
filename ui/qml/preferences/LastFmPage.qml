@@ -98,47 +98,15 @@ Preferences.PreferencesPage {
                     : I18n.i18nc("@info", "Not connected")))
     }
 
-    Components.FormHelpText {
-        id: statusLabel
-        objectName: "lastFmStatusLabel"
-        uiPalette: root.uiPalette
-        // The scrobbles' lines go on from it, as one status.
-        trailingSpace: root.showsPending || root.showsDropped
-            ? 0
-            : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing - statusLabel.rowSpacing
-        visible: root.showsStatus
-        text: root.uiBridge.lastFmStatusText || ""
-    }
-
-    Components.FormHelpText {
-        id: pendingLabel
-        objectName: "lastFmPendingLabel"
-        uiPalette: root.uiPalette
-        // The dropped scrobbles' line goes on from it.
-        trailingSpace: root.showsDropped
-            ? 0
-            : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing - pendingLabel.rowSpacing
-        visible: root.showsPending
-        text: I18n.i18ncp("@info", "%1 scrobble waiting to be sent", "%1 scrobbles waiting to be sent",
-            root.uiBridge.lastFmPendingScrobbleCount || 0)
-    }
-
-    // Scrobbles older than Last.fm accepts, or the oldest past the queue's
-    // limit, are dropped unsent; this run's count. The diagnostics log says
-    // which.
-    Components.FormHelpText {
-        id: droppedLabel
-        objectName: "lastFmDroppedLabel"
-        uiPalette: root.uiPalette
-        visible: root.showsDropped
-        text: I18n.i18ncp("@info", "%1 old scrobble was discarded from the queue",
-            "%1 old scrobbles were discarded from the queue", root.uiBridge.lastFmDroppedScrobbleCount || 0)
-    }
-
     // Only the buttons that apply now, their glyphs at the size of the
-    // Library page's.
+    // Library page's. Straight under the account, before its status, whose
+    // lines come, go and wrap as tracks play and scrobbles are sent (under
+    // them, Disconnect moved with each).
     RowLayout {
         id: accountButtons
+        objectName: "lastFmAccountButtons"
+        Layout.topMargin: Kirigami.Units.smallSpacing
+        Layout.bottomMargin: Kirigami.Units.smallSpacing
         readonly property real glyphSize: root.uiPalette.labelIconSize
         spacing: Kirigami.Units.largeSpacing
         visible: root.buildConfigured
@@ -184,5 +152,42 @@ Preferences.PreferencesPage {
                 : I18n.i18nc("@action:button", "Cancel Connection")
             onClicked: root.uiBridge.disconnectLastFm()
         }
+    }
+
+    Components.FormHelpText {
+        id: statusLabel
+        objectName: "lastFmStatusLabel"
+        uiPalette: root.uiPalette
+        // The scrobbles' lines go on from it, as one status.
+        trailingSpace: root.showsPending || root.showsDropped
+            ? 0
+            : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing - statusLabel.rowSpacing
+        visible: root.showsStatus
+        text: root.uiBridge.lastFmStatusText || ""
+    }
+
+    Components.FormHelpText {
+        id: pendingLabel
+        objectName: "lastFmPendingLabel"
+        uiPalette: root.uiPalette
+        // The dropped scrobbles' line goes on from it.
+        trailingSpace: root.showsDropped
+            ? 0
+            : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing - pendingLabel.rowSpacing
+        visible: root.showsPending
+        text: I18n.i18ncp("@info", "%1 scrobble waiting to be sent", "%1 scrobbles waiting to be sent",
+            root.uiBridge.lastFmPendingScrobbleCount || 0)
+    }
+
+    // Scrobbles older than Last.fm accepts, or the oldest past the queue's
+    // limit, are dropped unsent; this run's count. The diagnostics log says
+    // which.
+    Components.FormHelpText {
+        id: droppedLabel
+        objectName: "lastFmDroppedLabel"
+        uiPalette: root.uiPalette
+        visible: root.showsDropped
+        text: I18n.i18ncp("@info", "%1 old scrobble was discarded from the queue",
+            "%1 old scrobbles were discarded from the queue", root.uiBridge.lastFmDroppedScrobbleCount || 0)
     }
 }

@@ -1000,6 +1000,17 @@ void KeyboardShortcutsSmokeTest::keyColumnsHoldStillAsTheScrollBarComesAndGoes()
     QCOMPARE(columns(), atRest);
     QQuickItem *tint = visibleItemIn(list, QStringLiteral("rowBackgroundTint"));
     QVERIFY(tint != nullptr);
+    // Its ring only while the keyboard is in use, as the other lists' (it
+    // showed after a click).
+    const auto ring = [&] {
+        QQuickItem *current = visibleItemIn(list, QStringLiteral("rowBackgroundTint"));
+        return current != nullptr ? QQmlProperty(current, QStringLiteral("border.width")).read().toReal() : -1.0;
+    };
+    QTest::mouseClick(fixture.dialog, Qt::LeftButton, Qt::NoModifier, sceneRect(tint).center().toPoint());
+    QTRY_VERIFY(list->hasActiveFocus());
+    QCOMPARE(ring(), 0.0);
+    QTest::keyClick(fixture.dialog, Qt::Key_Up);
+    QTRY_COMPARE(ring(), 1.0);
     QCOMPARE(sceneRect(tint).right(), sceneRect(list).right());
 
     QVERIFY(search->setProperty("text", QString()));

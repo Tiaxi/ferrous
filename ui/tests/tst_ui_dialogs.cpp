@@ -1124,8 +1124,19 @@ void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
     QTRY_VERIFY(list->hasActiveFocus());
     QQuickItem *stack = nullptr;
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    // Its ring is the folder list's beside it, only while the keyboard is in
+    // use (it showed after a click and as the window opened).
+    const auto ringOf = [&](int page) {
+        QQuickItem *row = visibleNamed(prefs, QStringLiteral("preferencesPage_%1").arg(page));
+        QQuickItem *tint = row != nullptr ? itemsNamed(row, QStringLiteral("rowBackgroundTint")).value(0) : nullptr;
+        return tint != nullptr ? QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() : -1.0;
+    };
+    click(prefs, visibleNamed(prefs, QStringLiteral("preferencesPage_0")));
+    QTRY_VERIFY(list->hasActiveFocus());
+    QCOMPARE(ringOf(0), 0.0);
     QTest::keyClick(prefs, Qt::Key_Down);
     QTRY_COMPARE(stack->property("currentIndex").toInt(), 1);
+    QTRY_COMPARE(ringOf(1), 1.0);
     QTest::keyClick(prefs, Qt::Key_Down);
     QTRY_COMPARE(stack->property("currentIndex").toInt(), 2);
     QTest::keyClick(prefs, Qt::Key_Up);
@@ -2982,6 +2993,22 @@ void UiDialogsTest::checkLastFmStatusCountsDroppedScrobbles(QQuickWindow *window
     QQuickItem *pending = nullptr;
     QTRY_VERIFY((pending = visibleNamed(prefs, QStringLiteral("lastFmPendingLabel"))) != nullptr);
     QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmDroppedLabel")) == nullptr);
+    // The account's buttons hold still as its status comes, goes and wraps:
+    // they are over it (under it, Disconnect moved with every line).
+    QQuickItem *stack = visibleNamed(prefs, QStringLiteral("preferencesPages"));
+    QQuickItem *buttons = visibleNamed(prefs, QStringLiteral("lastFmAccountButtons"));
+    QVERIFY(stack != nullptr && buttons != nullptr);
+    QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
+    const qreal buttonsTop = sceneRect(buttons).top();
+    QTRY_VERIFY(sceneRect(pending).top() >= sceneRect(buttons).bottom());
+    for (const QString &status : {QString(), QStringLiteral("Now playing: The Quiet Meridian - A Remarkably "
+                                                            "Long Track Title That Wraps Onto A Second Line"),
+                                  QStringLiteral("Last.fm scrobble queue flushed.")}) {
+        QVERIFY(bridge->setProperty("lastFmStatusText", status));
+        QCoreApplication::processEvents();
+        QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
+        QCOMPARE(sceneRect(buttons).top(), buttonsTop);
+    }
 
     QVERIFY(bridge->setProperty("lastFmDroppedScrobbleCount", 1));
     QQuickItem *dropped = nullptr;
