@@ -1468,6 +1468,9 @@ ApplicationWindow {
             MenuItem { action: seekForwardAction }
             MenuSeparator {}
             MenuItem { action: shuffleAction }
+            // A heading starts a group, as View's Visualization does:
+            // without the rule Shuffle read as the first of Repeat's.
+            MenuSeparator {}
             Components.MenuHeading {
                 objectName: "repeatHeading"
                 text: I18n.i18nc("@title:menu repeat modes", "Repeat")

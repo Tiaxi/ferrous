@@ -602,6 +602,7 @@ private slots:
     void openFolderNamesWhereItGoes();
     void playbackItemsAreOffWhereTheyCannotAct();
     void playbackItemsKeepTheirStateAsTheActionsChange();
+    void everyMenuHeadingStartsItsGroup();
 
 private:
     // The checks that the tests above run in turn in one window; each says
@@ -1267,6 +1268,7 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  QStringLiteral("item|Seek Forward|Shift+Right|media-seek-forward"),
                  QStringLiteral("sep"),
                  QStringLiteral("check|Shuffle||"),
+                 QStringLiteral("sep"),
                  QStringLiteral("heading|Repeat"),
                  QStringLiteral("radio|Off||"),
                  QStringLiteral("radio|One Track||"),
@@ -2358,6 +2360,26 @@ void UiMenusTest::playbackItemsKeepTheirStateAsTheActionsChange() {
             QCOMPARE(next->property("enabled").toBool(), actionOn && queued > 0);
         }
     }
+}
+
+// A heading inside a menu starts a group, with a separator over it unless
+// it is first (Shuffle ran into Repeat's).
+void UiMenusTest::everyMenuHeadingStartsItsGroup() {
+    MainWindowFixture main(wideWindow());
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    int headings = 0;
+    for (QObject *menu : menusOf(window)) {
+        const QStringList rows = rowsOf(menu);
+        for (qsizetype i = 0; i < rows.size(); ++i) {
+            if (!rows.at(i).startsWith(QStringLiteral("heading|"))) {
+                continue;
+            }
+            QVERIFY2(i == 0 || rows.at(i - 1) == QStringLiteral("sep"), qPrintable(rows.at(i)));
+            ++headings;
+        }
+    }
+    QCOMPARE(headings, 2);
 }
 
 int main(int argc, char **argv) {
