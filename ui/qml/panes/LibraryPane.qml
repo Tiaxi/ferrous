@@ -561,9 +561,9 @@ Rectangle {
                                 selected: libraryRow.rowSelected
                                 active: libraryAlbumView.activeFocus
                                 focused: libraryRow.rowCurrent
-                                // The ring stops at the scrollbar's lane
+                                // Every state ends at the scrollbar's lane
                                 // while it shows, clear of its thumb.
-                                focusRingLane: libraryScrollBar.visible ? libraryScrollBar.lane : 0
+                                scrollbarLane: libraryScrollBar.visible ? libraryScrollBar.lane : 0
                             }
 
                             Kirigami.Icon {

@@ -1019,9 +1019,9 @@ def m_rowdetail(r, arg):
         row = (pane[0], gy - 8, pane[2], gh + 16)
         zoom = (gx - 6, gy - 6, gw + 12, gh + 12)
     elif arg == "ring":
-        # the row background that draws the focus ring (RowBackground: focused, with a focusRingLane), shown
+        # the row background that draws the focus ring (RowBackground: focused, with a scrollbarLane), shown
         v = r.s.ev(f"(function(){{var s=[{FIND}('libraryView')];while(s.length){{var it=s.shift();if(!it||!it.visible)continue;"
-                   "if(it.focusRingLane!==undefined&&it.focused===true){var p=it.mapToItem(null,0,0);"
+                   "if(it.scrollbarLane!==undefined&&it.focused===true){var p=it.mapToItem(null,0,0);"
                    "if(p.y>=0&&p.y<root.height)return JSON.stringify([p.x,p.y,it.width,it.height])}"
                    "var c=it.children;for(var i=0;i<c.length;i++)s.push(c[i]);}return ''})()")
         if not v:
@@ -1968,13 +1968,13 @@ def m_queuegeom(r, arg):
           "var ch=v.contentItem.children;for(var i=0;i<ch.length;i++){var it=ch[i];"
           "if(!it||it.objectName!=='queueRow'||!it.visible)continue;var p=it.mapToItem(null,0,0);"
           "if(p.y<vp.y-0.5||p.y+it.height>vp.y+v.height+0.5)continue;var bg=null;var k=it.children;"
-          "for(var j=0;j<k.length;j++)if(k[j].focusRingLane!==undefined)bg=k[j];"
+          "for(var j=0;j<k.length;j++)if(k[j].scrollbarLane!==undefined)bg=k[j];"
           "var tint=bg?find(bg,'rowBackgroundTint'):null;var cells={};"
           "['indicator','order','title','artist','album','length'].forEach(function(n){var c=find(it,'queueCell_'+n);"
           "if(c&&c.visible&&c.width>0)cells[n]=rc(c)});"
           "rows.push({i:it.queueRowIndex,r:rc(it),now:it.isNow,cur:it.isCurrentQueueRow,sel:it.rowSelected,"
           "ring:it.rowCurrent,hov:bg?bg.hovered:false,unr:it.unreadable,tint:tint&&tint.visible?rc(tint):null,"
-          "bw:tint?tint.border.width:0,lane:bg?bg.ringLane:0,cells:cells})}"
+          "bw:tint?tint.border.width:0,lane:bg?bg.scrollbarLane:0,cells:cells})}"
           "var sb=" + FIND_ANY + "('queueScrollBar');var th=sb?find(sb,'laneScrollBarThumb'):null;"
           "return JSON.stringify({rows:rows,active:v.activeFocus,state:root.uiBridge.playbackState,"
           "sb:sb&&sb.visible?rc(sb):null,thumb:th&&sb&&sb.visible?rc(th):null,ringc:String(root.uiPalette.focusRing)})})()")

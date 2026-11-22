@@ -774,9 +774,9 @@ Rectangle {
                         selectedHover: true
                         active: playlistView.activeFocus
                         focused: playlistRow.rowCurrent
-                        // The ring stops at the scrollbar's lane while it
+                        // Every state ends at the scrollbar's lane while it
                         // shows, clear of its thumb, as the library's.
-                        focusRingLane: playlistVerticalScrollBar.visible ? playlistVerticalScrollBar.lane : 0
+                        scrollbarLane: playlistVerticalScrollBar.visible ? playlistVerticalScrollBar.lane : 0
                     }
 
                     // The cells are where the header's columns are, which

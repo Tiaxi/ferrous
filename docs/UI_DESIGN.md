@@ -153,7 +153,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
   - a button on a plot gets a 2 px ring 1 px outside it, with a 1 px gap in the plate's colour.
 
   Focus and selection change at once.
-- **The focus ring lane:** a list whose overlay scrollbar lies over the rows' right end sets `focusRingLane`. The ring stops short of the lane, and the selection tint continues under it. When the thumb ran over the ring, the focused row's end looked broken.
+- **The scrollbar lane:** while a list's overlay scrollbar shows, the library and the queue set `scrollbarLane`: hover, selection tint and ring all end at the lane, as one rectangle with one straight edge down a range, and the thumb is alone in the lane. Without a scrollbar they all reach the edge. When the thumb ran over the ring, the focused row's end looked broken, and when the tint went on alone under the lane, the ring had a tab on its end.
 - **Selected:** `selection` in a focused list, and `selectionInactive` without focus. A selected queue row under the pointer moves toward `selectionHovered`. Tertiary text on a selected row moves up (`textTertiaryOn`).
 - **Checked:** on the window's colours, a checked tool button gets the selection tint alone, with no ring. On a plot:
   - a state that is on, such as Mute or Solo, gets a solid `checkedFill`;
@@ -224,6 +224,7 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 | Row hover (light) | a hover tint stronger than the selection | the hovered row looked more selected than the selected one |
 | Inactive selection | a tint weaker than the hover | an unfocused selection read as less than a hover |
 | Queue focus ring | a ring running under the scrollbar | the thumb broke the ring's end |
+| Queue and library focus ring | the ring stopping at the lane with the tint running on under the thumb | the focused row was a box with a tail |
 | Library folder header | a folder glyph in the thumbnail's column | it put the folder's name right of its own artists'; the semibold name and the count mark the header |
 | Unreadable row | Breeze's `dialog-warning` drawn as a grey mask | it read as an eject arrow beside the amber ▶ |
 | Plot frame | gutters, rulers, rails, a border | the plot fills its pane |

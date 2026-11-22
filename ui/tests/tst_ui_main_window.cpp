@@ -1090,6 +1090,8 @@ private slots:
     void queueFocusRingStopsAtTheScrollBarLane_data();
     void queueFocusRingStopsAtTheScrollBarLane();
     void queueRowHoverIsTheListsTint();
+    void rowStatesShareOneRightEdge_data();
+    void rowStatesShareOneRightEdge();
     void transportIsWindowChromeInTheHeaderColours();
     void listsRingARowAsTheKeyboardComesIn();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
@@ -4378,17 +4380,15 @@ void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath()
 }
 
 // Why the selected row `index` of a list `view` does not show its focus
-// ring and tint as they stop at the scrollbar's lane, or "": while the
-// scrollbar shows, the ring stops at its 8 px lane, so the thumb never runs
-// over the ring, and the tint goes on under the lane to the pane's edge;
-// without a scrollbar, the ring runs to the edge. As drawn, on the row's
-// middle: the ring's right side just inside the lane, or at the edge; past
-// it, in the lane, the tint or the thumb, never the ring.
+// ring and tint as one rectangle beside the scrollbar, or "": while the
+// scrollbar shows, both end at its 8 px lane, with the thumb alone in it on
+// the view colour; without a scrollbar, both reach the edge. As drawn, on
+// the row's middle: the ring's right side just inside the lane, or at the
+// edge; past it, the view or the thumb, never the ring or the tint.
 QString focusRingProblem(QQuickWindow *window, QQuickItem *view, int index, bool scrolls) {
     QQuickItem *row = viewRowAt(view, index);
     QQuickItem *tint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTint")) : nullptr;
-    QQuickItem *laneTint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTintLane")) : nullptr;
-    if (!shown(tint) || laneTint == nullptr || QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() != 1.0
+    if (!shown(tint) || QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() != 1.0
         || colorOf(tint) != tokenHex(window, "selection")) {
         return QStringLiteral("no ringed, selected row %1").arg(index);
     }
@@ -4397,13 +4397,16 @@ QString focusRingProblem(QQuickWindow *window, QQuickItem *view, int index, bool
     if (sceneRect(tint).right() != edge - lane) {
         return QStringLiteral("the ring to %1, the edge %2").arg(sceneRect(tint).right()).arg(edge);
     }
-    if (shown(laneTint) != scrolls
-        || (scrolls && (sceneRect(laneTint).left() != edge - lane || sceneRect(laneTint).right() != edge
-                        || colorOf(laneTint) != tokenHex(window, "selection")))) {
-        return QStringLiteral("the lane's tint %1 at %2").arg(shown(laneTint)).arg(describeRect(sceneRect(laneTint)));
-    }
     const Drawn drawn(window);
     const qreal y = sceneRect(row).center().y();
+    if (scrolls) {
+        // Either side of the thumb.
+        for (const qreal x : {edge - lane + 0.5, edge - 0.5}) {
+            if (!near(drawn.at(x, y), tokenOf(window, "view"))) {
+                return QStringLiteral("%1 in the lane at %2 of %3").arg(drawn.at(x, y).name()).arg(x).arg(edge);
+            }
+        }
+    }
     const QColor ring = tokenOf(window, "focusRing");
     if (!near(drawn.at(edge - lane - 0.5, y), ring)) {
         return QStringLiteral("%1 where the ring ends").arg(drawn.at(edge - lane - 0.5, y).name());
@@ -4508,13 +4511,13 @@ void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane_data() {
     QTest::newRow("dark") << true;
 }
 
-// The queue's focus ring stops at the scrollbar's lane while the scrollbar
-// shows, as the library's does (focusRingProblem), so its thumb never runs
-// over the ring (it ran under the thumb). The selection tint runs to the
-// pane's right edge, with no scrollbar and with one, under the lane, and
-// the thumb, 4 px wide and 2 px from the edge, draws over it (the tints
-// stopped 8 px short of the edge). A short queue, with no scrollbar, keeps
-// the ring to the edge.
+// The queue's focus ring and selection tint are one rectangle that ends at
+// the scrollbar's lane while the scrollbar shows, as the library's is
+// (focusRingProblem): the thumb never runs over the ring (it ran under the
+// thumb), and no tint runs on past it (the tint went on under the thumb, a
+// tab on the ring's end). The thumb, 4 px wide and 2 px from the edge, is
+// alone in the lane. A short queue, with no scrollbar, keeps both to the
+// edge (they stopped 8 px short of it).
 void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane() {
     QFETCH(bool, dark);
     const auto restorePalette = useDarkPalette(dark);
@@ -4541,18 +4544,22 @@ void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane() {
         // first row's middle.
         QVERIFY(QMetaObject::invokeMethod(queue, "setSingleSelection", Q_ARG(QVariant, 1)));
         QTRY_VERIFY(rowTinted(queueView, 1));
-        // Without the keyboard: the tint alone, as drawn to the edge, under
-        // the thumb.
+        // Without the keyboard: the tint alone, as drawn to the same edge,
+        // the thumb past it.
         QQuickItem *tint = itemNamed(viewRowAt(queueView, 1), QStringLiteral("rowBackgroundTint"));
-        QCOMPARE(sceneRect(tint).right(), sceneRect(queueView).right());
+        const qreal lane = scrolls ? 8.0 : 0.0;
+        QCOMPARE(sceneRect(tint).right(), sceneRect(queueView).right() - lane);
         const QColor tintColor = tint->property("color").value<QColor>();
         const qreal right = sceneRect(queueView).right();
         const qreal y = sceneRect(tint).center().y();
         const auto tintProblem = [&]() -> QString {
             const Drawn drawn(window);
-            if (!near(drawn.at(right - 0.5, y), tintColor) || !near(drawn.at(right - 16, y), tintColor)) {
-                return QStringLiteral("%1 at the edge, %2 before it, the tint %3")
-                    .arg(drawn.at(right - 0.5, y).name(), drawn.at(right - 16, y).name(), tintColor.name());
+            if (!near(drawn.at(right - lane - 0.5, y), tintColor) || !near(drawn.at(right - 16, y), tintColor)) {
+                return QStringLiteral("%1 where the tint ends, %2 before it, the tint %3")
+                    .arg(drawn.at(right - lane - 0.5, y).name(), drawn.at(right - 16, y).name(), tintColor.name());
+            }
+            if (scrolls && !near(drawn.at(right - 0.5, y), tokenOf(window, "view"))) {
+                return QStringLiteral("%1 past the thumb").arg(drawn.at(right - 0.5, y).name());
             }
             if (near(drawn.at(right - 4, y), tintColor) == scrolls) {
                 return QStringLiteral("%1 where the thumb is").arg(drawn.at(right - 4, y).name());
@@ -4609,6 +4616,81 @@ void UiMainWindowTest::queueRowHoverIsTheListsTint() {
     QCOMPARE(colorOf(number), tokenHex(window, "textTertiarySelected"));
     QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
     QTRY_VERIFY(!hover->isVisible());
+}
+
+void UiMainWindowTest::rowStatesShareOneRightEdge_data() {
+    QTest::addColumn<bool>("queue");
+    QTest::addColumn<bool>("scrolls");
+    QTest::newRow("library, scrolling") << false << true;
+    QTest::newRow("library") << false << false;
+    QTest::newRow("queue, scrolling") << true << true;
+    QTest::newRow("queue") << true << false;
+}
+
+// A selected range, its current row's ring and a hovered row have one
+// straight right edge, in the library and in the queue: at the scrollbar's
+// lane while it shows, and at the pane's edge otherwise. The focused row
+// was a box with a tail under the thumb.
+void UiMainWindowTest::rowStatesShareOneRightEdge() {
+    QFETCH(bool, queue);
+    QFETCH(bool, scrolls);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const int count = scrolls ? 80 : 6;
+    QQuickItem *view = named(window, queue ? "playlistView" : "libraryView");
+    QVERIFY(view != nullptr);
+    if (queue) {
+        setQueue(bridgeOf(window), sampleQueueRows(count));
+    } else {
+        fixture.libraryModel.setLibraryTreeFromBinary(manyArtistsTree(count));
+    }
+    QTRY_COMPARE(view->property("count").toInt(), count);
+    tabInto(window, view);
+    QTest::keyClick(window, Qt::Key_Down);
+    QTest::keyClick(window, Qt::Key_Down, Qt::ShiftModifier);
+    QList<int> selected;
+    QTRY_VERIFY([&] {
+        selected.clear();
+        for (int index = 0; index < 5; ++index) {
+            if (rowTinted(view, index)) selected << index;
+        }
+        return selected.size() == 2;
+    }());
+    QCOMPARE(ringedRowsOf(view), QList<int>{selected.last()});
+
+    QQuickItem *hoveredRow = viewRowAt(view, 4);
+    QVERIFY(hoveredRow != nullptr && !selected.contains(4));
+    // Two moves: the pointer may have been there in the row before, in
+    // another window, and a move that goes nowhere is none.
+    QTest::mouseMove(window, sceneRect(hoveredRow).center().toPoint() - QPoint(8, 0));
+    QTest::mouseMove(window, sceneRect(hoveredRow).center().toPoint());
+    QQuickItem *hover = itemNamed(hoveredRow, QStringLiteral("rowBackgroundHover"));
+    QVERIFY(hover != nullptr);
+    QTRY_VERIFY(hover->isVisible() && hover->opacity() == 1.0);
+
+    const qreal edge = sceneRect(view).right();
+    const qreal end = edge - (scrolls ? 8.0 : 0.0);
+    QCOMPARE(sceneRect(hover).right(), end);
+    for (const int index : std::as_const(selected)) {
+        QCOMPARE(sceneRect(itemNamed(viewRowAt(view, index), QStringLiteral("rowBackgroundTint"))).right(), end);
+    }
+    if (!scrolls) {
+        return;
+    }
+    const auto laneProblem = [&]() -> QString {
+        const Drawn drawn(window);
+        for (const int index : {selected.first(), selected.last(), 4}) {
+            const qreal y = sceneRect(viewRowAt(view, index)).center().y();
+            for (const qreal x : {end + 0.5, edge - 0.5}) {
+                if (!near(drawn.at(x, y), tokenOf(window, "view"))) {
+                    return QStringLiteral("%1 in the lane beside row %2").arg(drawn.at(x, y).name()).arg(index);
+                }
+            }
+        }
+        return {};
+    };
+    QTRY_VERIFY2(laneProblem().isEmpty(), qPrintable(laneProblem()));
 }
 
 // The transport is window chrome in the theme's Header colour set, as
