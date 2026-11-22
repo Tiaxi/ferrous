@@ -563,6 +563,8 @@ private slots:
     void lastFmSlotGlyphReadsAtOneX();
     void lastFmBarReadsApartFromTheScanBar_data();
     void lastFmBarReadsApartFromTheScanBar();
+    void lastFmListeningNeverFillsTheBar_data();
+    void lastFmListeningNeverFillsTheBar();
     void lastFmGlyphsAreOneFamily();
     void statusBarNamesAStoppedEngineInPlainWords();
     void issuesButtonShowsNewSeenAndOpen_data();
@@ -3572,8 +3574,8 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
          {std::pair{0.0, 0}, std::pair{0.1, 1}, std::pair{0.25, 4}, std::pair{0.5, 8}, std::pair{0.9, 14}}) {
         bridge->setProperty("lastFmScrobbleListenedMs", int(done * 120000));
         QTRY_COMPARE(slot->property("barProgress").toDouble(), columns / 16.0);
-        // Never less than the 3 px mark.
-        const int drawnColumns = std::max(3, columns);
+        // Never less than the 3 px mark, nor within one of the end.
+        const int drawnColumns = std::clamp(columns, 3, 13);
         Drawn now;
         QTRY_VERIFY2((now = drawn(true), now.bar == 3 * drawnColumns),
                      qPrintable(QStringLiteral("%1 done drew %2 px of the bar").arg(done).arg(now.bar)));
@@ -3656,8 +3658,8 @@ void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
     harness.bridge->setProperty("lastFmScrobbleState", 1);
     QTRY_VERIFY(slot->isVisible() && bar->isVisible());
     Drawn listening;
-    QTRY_VERIFY((listening = drawn(), count(listening.bar, fill) == 14));
-    QCOMPARE(count(listening.bar, trough), 2);
+    QTRY_VERIFY((listening = drawn(), count(listening.bar, fill) == 13));
+    QCOMPARE(count(listening.bar, trough), 3);
     QVERIFY2(channelDistance(fill, trough) >= 48 && channelDistance(trough, chrome) >= 24,
              qPrintable(fill.name() + QStringLiteral(" on ") + trough.name() + QStringLiteral(" on ")
                         + chrome.name()));
@@ -4011,6 +4013,35 @@ void TransportStatusTest::lastFmBarReadsApartFromTheScanBar() {
         }
         QTRY_VERIFY(bar->isVisible() && trough->isVisible());
     }
+}
+
+void TransportStatusTest::lastFmListeningNeverFillsTheBar_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Only a decided scrobble fills the bar: listening stops a mark short of
+// its end, however close the scrobble point (a second short looked the same
+// as being sent). The bar fills with the decision, as before (#540).
+void TransportStatusTest::lastFmListeningNeverFillsTheBar() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *bar = harness.item(QStringLiteral("scrobbleIndicatorBar"));
+    QQuickItem *trough = harness.item(QStringLiteral("scrobbleIndicatorTrough"));
+    QVERIFY(slot && bar && trough);
+    const int mark = slot->property("minimumBarLength").toInt();
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    for (const int listened : {114000, 119000, 119999, 120000, 130000}) {
+        harness.bridge->setProperty("lastFmScrobbleListenedMs", listened);
+        QVERIFY2(bar->width() <= trough->width() - mark, qPrintable(QString::number(bar->width())));
+    }
+    harness.bridge->setProperty("lastFmScrobbleState", 2);
+    QCOMPARE(bar->width(), trough->width());
 }
 
 // The Last.fm slot's three glyphs are one family (the "as" was a grid of

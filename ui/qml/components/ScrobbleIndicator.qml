@@ -42,7 +42,8 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   tooltip says how far the play got. A seek never decides it: the
 //   countdown goes on while the track plays.
 // - Being sent: the bar full, from the moment the play reaches its
-//   scrobble point, while the send goes on in the background.
+//   scrobble point, while the send goes on in the background. Only then:
+//   listening stops short of full.
 // - Scrobbled: once Last.fm has accepted it, the glyph alone in the
 //   secondary colour, so that the routine success is no louder than the
 //   status bar's other words.
@@ -169,10 +170,13 @@ AbstractButton {
         [root.uiPalette.chrome], 3.1)
     // While listening, the bar is never less than a short mark from the
     // left, so that listening that has just started reads apart from a
-    // scrobble, which has no bar (at 0% it was the trough alone).
+    // scrobble, which has no bar (at 0% it was the trough alone); and it
+    // stops as short a mark before the trough's end, so that only a decided
+    // scrobble fills it (the last of the listening looked like sending).
     readonly property int minimumBarLength: Math.max(3, Math.round(root.glyphSize * 3 / 16))
     readonly property real barLength: root.look === "listening"
-        ? Math.max(root.minimumBarLength, root.barWidth * root.barProgress)
+        ? Math.max(root.minimumBarLength,
+            Math.min(root.barWidth - root.minimumBarLength, root.barWidth * root.barProgress))
         : root.barWidth * root.barProgress
 
     // The slot's words, before the glyph.
