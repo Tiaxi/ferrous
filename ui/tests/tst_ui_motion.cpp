@@ -33,6 +33,7 @@
 #include <Kirigami/Platform/Units>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -937,6 +938,43 @@ QString stillRunsApart(const QString &before, const QString &after, const QVaria
                          : QStringLiteral("%1 still, not %2").arg(kept.join(QLatin1Char('|')), still.join(QLatin1Char('|')));
 }
 
+// The mean of a picture's sRGB values as the compositor blends them, by
+// Rec. 709's weights, over `part` of it.
+double meanLuma(const QImage &picture, const QRect &part) {
+    double sum = 0.0;
+    int counted = 0;
+    for (int y = part.top(); y <= part.bottom(); y += 2) {
+        const auto *line = reinterpret_cast<const QRgb *>(picture.constScanLine(y));
+        for (int x = part.left(); x <= part.right(); x += 2) {
+            sum += 0.2126 * qRed(line[x]) + 0.7152 * qGreen(line[x]) + 0.0722 * qBlue(line[x]);
+            ++counted;
+        }
+    }
+    return sum / std::max(1, counted);
+}
+
+// The share of `frame`'s pixels further than rounding from `under` with
+// `over` on it at `opacity`, as one picture.
+double notTheMix(const QImage &frame, const QImage &under, const QImage &over, double opacity) {
+    constexpr double rounding = 3.0;
+    int off = 0;
+    int counted = 0;
+    for (int y = 0; y < frame.height(); y += 2) {
+        const auto *drawn = reinterpret_cast<const QRgb *>(frame.constScanLine(y));
+        const auto *below = reinterpret_cast<const QRgb *>(under.constScanLine(y));
+        const auto *above = reinterpret_cast<const QRgb *>(over.constScanLine(y));
+        for (int x = 0; x < frame.width(); x += 2) {
+            const auto differs = [&](int (*channel)(QRgb)) {
+                return std::abs(channel(drawn[x])
+                                - ((1.0 - opacity) * channel(below[x]) + opacity * channel(above[x]))) > rounding;
+            };
+            off += differs(qRed) || differs(qGreen) || differs(qBlue);
+            ++counted;
+        }
+    }
+    return static_cast<double>(off) / std::max(1, counted);
+}
+
 // Feeds each of the spectrogram's `lanes` its first 200 columns of a track
 // of 2,000, of `level`, as a session's first chunk.
 void feedFirstColumns(const QList<QQuickItem *> &lanes, char level) {
@@ -1095,6 +1133,8 @@ private slots:
     void albumArtDetailsRestAsTheViewerOpens_data();
     void albumArtDetailsRestAsTheViewerOpens();
     void windowedViewerClosesOverItsLastFrame();
+    void windowedViewersFadeAsOnePicture_data();
+    void windowedViewersFadeAsOnePicture();
     void albumArtViewerControlsFadeOnOneLevel_data();
     void albumArtViewerControlsFadeOnOneLevel();
     void viewerControlsHideAsAFadeAndShowQuicker_data();
@@ -7014,6 +7054,181 @@ void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
 
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!surface->isVisible());
+}
+
+void UiMotionTest::windowedViewersFadeAsOnePicture_data() {
+    QTest::addColumn<QString>("shows");
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<bool>("playing");
+    for (const bool dark : {true, false}) {
+        const char *theme = dark ? "dark" : "light";
+        QTest::addRow("rolling spectrogram, %s", theme) << QStringLiteral("rolling") << dark << false;
+        QTest::addRow("centred spectrogram, %s", theme) << QStringLiteral("centred") << dark << false;
+        QTest::addRow("waveform, %s", theme) << QStringLiteral("waveform") << dark << false;
+        QTest::addRow("album art, %s", theme) << QStringLiteral("art") << dark << false;
+    }
+    QTest::newRow("rolling spectrogram, playing") << QStringLiteral("rolling") << true << true;
+    QTest::newRow("centred spectrogram, playing") << QStringLiteral("centred") << true << true;
+}
+
+// A viewer in the window opens and closes as one picture: each frame of the
+// fade is the window under it and the viewer whole on that, mixed at the
+// viewer's one opacity, so the window is never darker than the darker of
+// the two (with the floors and what is on them each at the viewer's opacity
+// apart, the visualization's dipped to 79 % of that end, and the album
+// art's middle was 13 % under the mix). The layer that makes it one picture
+// is off at rest, open and closed.
+void UiMotionTest::windowedViewersFadeAsOnePicture() {
+    QFETCH(QString, shows);
+    QFETCH(bool, dark);
+    QFETCH(bool, playing);
+    const QPalette before = QGuiApplication::palette();
+    if (dark) {
+        QPalette palette = before;
+        palette.setColor(QPalette::Window, QColor(QStringLiteral("#202326")));
+        palette.setColor(QPalette::Base, QColor(QStringLiteral("#141618")));
+        palette.setColor(QPalette::Text, QColor(QStringLiteral("#fcfcfc")));
+        palette.setColor(QPalette::WindowText, QColor(QStringLiteral("#fcfcfc")));
+        QGuiApplication::setPalette(palette);
+    }
+    const auto restorePalette = qScopeGuard([&]() { QGuiApplication::setPalette(before); });
+    Covers covers;
+    Motion ui(true);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    units->setLongDuration(200);
+    units->setShortDuration(100);
+    const bool art = shows == QLatin1String("art");
+    const bool waveform = shows == QLatin1String("waveform");
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *popup = window->findChild<QObject *>(
+        art ? QStringLiteral("albumArtViewerPopup") : QStringLiteral("spectrogramViewerPopup"));
+    QObject *autoHide = window->findChild<QObject *>(
+        art ? QStringLiteral("albumArtFullscreenControlsAutoHide")
+            : QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QQuickItem *pane = named(window, "spectrogramPane");
+    QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
+    QVERIFY(viewer && popup && autoHide && pane && spectrogram);
+    autoHide->setProperty("hideDelay", 600000);
+
+    bridge->setProperty("viewerFullscreenMode", 0);
+    // The waveform mixed, which draws from the overview alone.
+    const int plotLanes = waveform ? 1 : 2;
+    bridge->setProperty("spectrogramViewMode", waveform ? 0 : 1);
+    bridge->setProperty("spectrogramDisplayMode", shows == QLatin1String("centred") ? 1 : 0);
+    viewer->setProperty("visualizationMode", waveform ? 1 : 0);
+    bridge->setProperty("durationSeconds", 40.0);
+    bridge->setProperty("currentTrackChannels", 2);
+    bridge->setProperty("waveformPeaksPacked", QByteArray(1000, '\x90'));
+    bridge->setProperty("waveformCoverageSeconds", 40.0);
+    bridge->setProperty("waveformComplete", true);
+    showTrack(bridge, queuePath(0), QStringLiteral("Track"), QStringLiteral("Album"), covers.first);
+    // Paused: the test alone moves the position, so a frame and the two
+    // pictures it mixes are of one moment.
+    bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, plotLanes),
+                                      Q_ARG(bool, true)));
+    QList<QQuickItem *> lanes;
+    QTRY_COMPARE((lanes = itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))).size(), plotLanes);
+    feedFirstColumns(lanes, '\x80');
+    double position = 2.0;
+    bridge->setProperty("positionSeconds", position);
+    if (art) {
+        QQuickItem *preload = named(window, "albumArtViewerPreloadImage");
+        QVERIFY(preload != nullptr);
+        QTRY_COMPARE(preload->property("status").toInt(), 1);
+    }
+    // The fades a new track and the mode start are over.
+    QTest::qWait(700);
+
+    const auto picture = [&]() {
+        // What the first frame settles, such as a kept frame's grab, is in
+        // the second.
+        window->grabWindow();
+        QCoreApplication::processEvents();
+        return window->grabWindow().convertToFormat(QImage::Format_RGB32);
+    };
+    const auto layered = [&]() {
+        QQuickItem *popupItem = popupItemOf(popup);
+        const std::function<bool(QQuickItem *)> any = [&](QQuickItem *item) {
+            auto *layer = qvariant_cast<QObject *>(item->property("layer"));
+            if (layer != nullptr && layer->property("enabled").toBool()) {
+                return true;
+            }
+            const QList<QQuickItem *> children = item->childItems();
+            return std::any_of(children.cbegin(), children.cend(), any);
+        };
+        return popupItem != nullptr && any(popupItem);
+    };
+
+    for (const bool opening : {true, false}) {
+        const char *way = opening ? "opening" : "closing";
+        const QImage from = picture();
+        const QRect whole = from.rect();
+        const double dpr = static_cast<double>(from.width()) / window->width();
+        const QRectF paneIn = sceneRect(pane);
+        const QRect plot = QRectF(paneIn.topLeft() * dpr, paneIn.size() * dpr).toRect() & whole;
+
+        struct Step {
+            double opacity;
+            double wholeLuma;
+            double plotLuma;
+        };
+        QList<Step> fade;
+        {
+            SteppedAnimationDriver driver;
+            const char *act = opening ? (art ? "openAlbumArtViewer" : "openSpectrogramViewer")
+                                      : (art ? "closeAlbumArtViewer" : "closeSpectrogramViewer");
+            QVERIFY(QMetaObject::invokeMethod(viewer, act));
+            for (int ms = 16; ms <= 256; ms += 16) {
+                static_cast<void>(driver.step(16));
+                if (playing) {
+                    position += 0.016;
+                    bridge->setProperty("positionSeconds", position);
+                }
+                const double opacity = popup->property("opacity").toDouble();
+                if (!popup->property("visible").toBool() || opacity <= 0.0 || opacity >= 1.0) {
+                    continue;
+                }
+                const QImage drawn = picture();
+                const bool asOneLayer = layered();
+                popup->setProperty("opacity", 0.0);
+                const QImage under = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+                popup->setProperty("opacity", 1.0);
+                QVERIFY2(!layered(), "a layer under the whole viewer");
+                const QImage over = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+                popup->setProperty("opacity", opacity);
+                const double off = notTheMix(drawn, under, over, opacity);
+                QVERIFY2(off < 0.002, qPrintable(QStringLiteral("%1 at %2 ms, opacity %3: %4 % of it is not the mix")
+                                                     .arg(way).arg(ms).arg(opacity).arg(100.0 * off)));
+                QVERIFY2(asOneLayer, qPrintable(QStringLiteral("%1 at %2 ms: not one layer").arg(way).arg(ms)));
+                fade.append({opacity, meanLuma(drawn, whole), meanLuma(drawn, plot)});
+            }
+        }
+        QVERIFY2(fade.size() >= 5, qPrintable(QString::number(fade.size())));
+        if (opening) {
+            QTRY_VERIFY(popup->property("opened").toBool());
+        } else {
+            QTRY_VERIFY(!popup->property("visible").toBool());
+        }
+        QVERIFY2(!layered(), "a layer at rest");
+        // The chrome's reveals are over.
+        QTest::qWait(200);
+        const QImage to = picture();
+        const std::array<std::tuple<QRect, double Step::*, const char *>, 2> parts{
+            {{whole, &Step::wholeLuma, "the window"}, {plot, &Step::plotLuma, "the plot"}}};
+        for (const auto &[part, luma, what] : parts) {
+            const double start = meanLuma(from, part);
+            const double end = meanLuma(to, part);
+            for (const Step &step : std::as_const(fade)) {
+                const double shown = opening ? step.opacity : 1.0 - step.opacity;
+                const double wanted = start + shown * (end - start);
+                QVERIFY2(std::abs(step.*luma - wanted) <= std::max(1.5, 0.03 * wanted),
+                         qPrintable(QStringLiteral("%1, %2 at %3: %4, the mix of the two ends %5")
+                                        .arg(way, what).arg(step.opacity).arg(step.*luma).arg(wanted)));
+            }
+        }
+    }
 }
 
 // The visualization viewer in the window fades out over its last frame as

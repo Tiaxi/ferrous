@@ -313,14 +313,18 @@ Item {
         padding: 0
         closePolicy: Popup.CloseOnEscape
         visible: root.viewerOpen && !root.useWholeScreenViewerMode
-        // The style's own transitions.
+        // The style's own transitions, of one picture: the content below.
         onClosed: {
             if (root.viewerOpen && !root.useWholeScreenViewerMode) {
                 root.closeViewer()
             }
         }
-        background: Rectangle {
-            color: root.uiPalette.plotColors(root.visualizationMode).plotBg
+        // Nothing of its own, as the album art viewer's: the view's floor is
+        // the one floor, in the content's layer (a second one here, fading
+        // apart from it, took the window down to 79 % of the darker of the
+        // two pictures the fade is between).
+        background: Item {
+            objectName: "spectrogramPopupBackground"
         }
 
         Components.ActionShortcuts {
@@ -334,6 +338,11 @@ Item {
             id: spectrogramPopupFocusScope
             anchors.fill: parent
             focus: true
+            // The floor, the plot and the plates fade as one picture on the
+            // window under them, as the plots do in the mode switch: without
+            // the layer each is at the popup's opacity alone, and the floor
+            // shows through all that is on it. Only while the popup fades.
+            layer.enabled: spectrogramViewer.opacity > 0 && spectrogramViewer.opacity < 1
 
             // Takes focus from the controls when the view is pressed.
             Item {

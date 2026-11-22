@@ -218,6 +218,11 @@ Item {
         // was before, so the popup does not close for it.
         contentItem: FocusScope {
             focus: true
+            // The floor, the art, its details and the plate fade as one
+            // picture on the window under them: each at the popup's opacity
+            // alone, the floor showed through the art, whose middle was 13 %
+            // darker than the mix of the fade's ends. Only while it fades.
+            layer.enabled: albumArtViewer.opacity > 0 && albumArtViewer.opacity < 1
             // Any key brings the controls back, so Tab reaches them.
             Keys.onPressed: function(event) {
                 fullscreenControlsAutoHide.wake()
@@ -294,11 +299,11 @@ Item {
 
         // Nothing of its own: the art's surface, which is in the popup while
         // it shows, fading in and out too, has the media surface's black
-        // floor, in both themes. A second floor here doubled it as the popup
-        // faded: its children fade one by one, not as one layer, so two
-        // floors at half opacity left a quarter of the window, and as the
-        // viewer opened the window went dark before the art came in, a
-        // blink of 33 ms.
+        // floor, in both themes, in the content's layer. A second floor here
+        // doubled it as the popup faded, outside that layer: two floors at
+        // half opacity left a quarter of the window, and as the viewer
+        // opened the window went dark before the art came in, a blink of
+        // 33 ms.
         background: Item {
             objectName: "albumArtPopupBackground"
         }
