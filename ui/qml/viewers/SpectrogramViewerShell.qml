@@ -6,6 +6,7 @@ import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/PlotLanes.js" as PlotLanes
 import "../logic/VisualizationModes.js" as VisualizationModes
 
 Item {
@@ -591,6 +592,7 @@ Item {
                         closeButtonName: "spectrogramFullscreenCloseButton"
                         controlsVisible: root.fullscreenControlsVisible
                         controlsLevel: root.fullscreenControlsLevel
+                        trackLevel: PlotLanes.stripTextLevel(root.fullscreenControlsLevel)
                         available: root.stripEnabled
                         pointerActivity: root.noteFullscreenPointerActivity
                         errorController: root.errorController

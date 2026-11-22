@@ -342,15 +342,18 @@ Item {
             // into the lane as the others' (left under a strip that was
             // gone, it was stranded 38 px down, in the state a listener sees
             // most). It cross-fades between them on the controls' level, so
-            // nothing travels or jumps as the strip shows and hides.
-            labelLevel: laneHead.stripShift > 0 ? root.controlsLevel : 1
+            // nothing travels or jumps as the strip shows and hides, while
+            // the strip's text is out of its place at rest (PlotLanes).
+            readonly property real underStrip: laneHead.stripShift > 0
+                ? PlotLanes.labelUnderStripLevel(root.controlsLevel) : 1
+            labelLevel: laneHead.underStrip
 
             Components.PlotPlate {
                 objectName: "plotLaneRestLabel"
                 y: laneHead.labelY - laneHead.stripShift
                 width: laneHead.cellWidth
-                visible: laneHead.stripShift > 0 && root.controlsLevel < 1
-                fadeLevel: 1 - root.controlsLevel
+                visible: laneHead.stripShift > 0 && laneHead.underStrip < 1
+                fadeLevel: 1 - laneHead.underStrip
                 plotColors: root.plotColors
                 uiPalette: root.uiPalette
                 text: laneHead.label

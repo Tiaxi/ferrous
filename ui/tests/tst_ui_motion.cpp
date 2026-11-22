@@ -7617,7 +7617,11 @@ void UiMotionTest::firstLanesLabelRestsWhereTheOtherLanesDo_data() {
 // is as far into its lane as the others' (it was left where the title strip
 // puts it, a hole over it). As the strip shows and hides nothing travels or
 // jumps: the label in either place holds still and the two cross-fade on
-// the controls' one level.
+// the controls' one level, which the label and the strip's track text take
+// in turn, as they share the top left corner: at no moment, hiding or
+// showing, do the label there and that text both show (the rest chip came
+// in under the title's first letters as both faded at once). One of the
+// label's places always shows, whole between them.
 void UiMotionTest::firstLanesLabelRestsWhereTheOtherLanesDo() {
     QFETCH(int, plot);
     QFETCH(int, displayMode);
@@ -7638,12 +7642,18 @@ void UiMotionTest::firstLanesLabelRestsWhereTheOtherLanesDo() {
     bridge->setProperty("spectrogramDisplayMode", displayMode);
     bridge->setProperty("spectrogramViewMode", 1);
     bridge->setProperty("currentTrackChannels", channels);
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Lantern Signal"));
     playQueueRow(bridge, 0, QStringLiteral("Paused"));
     QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, channels),
                                       Q_ARG(bool, true)));
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
     QTRY_VERIFY(layer->window() != nullptr && layer->window() != window);
     QVERIFY(QTest::qWaitForWindowExposed(layer->window()));
+    QQuickItem *strip = itemNamed(layer->window()->contentItem(), QStringLiteral("spectrogramFullscreenStrip"));
+    QVERIFY(strip != nullptr);
+    QQuickItem *title = itemNamed(strip, QStringLiteral("viewerStripTitle"));
+    QVERIFY(title != nullptr);
+    QTRY_VERIFY(title->isVisible());
     QTRY_COMPARE(layer->property("laneCount").toInt(), channels);
     QTRY_VERIFY(layer->property("topInset").toDouble() > 0.0);
     QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
@@ -7685,7 +7695,10 @@ void UiMotionTest::firstLanesLabelRestsWhereTheOtherLanesDo() {
     for (const bool shows : {false, true}) {
         state->setProperty("controlsVisible", shows);
         int fading = 0;
-        for (int ms = 0; ms <= 400; ms += 16) {
+        int textFading = 0;
+        int crossing = 0;
+        double lastBelow = shows ? 0.0 : 1.0;
+        for (int ms = 0; ms <= 400; ms += 8) {
             const double level = autoHide->property("level").toDouble();
             const QList<QList<Drawn>> now = labels();
             double atRest = 0.0;
@@ -7701,18 +7714,52 @@ void UiMotionTest::firstLanesLabelRestsWhereTheOtherLanesDo() {
                     QFAIL(qPrintable(where + QStringLiteral(", in neither place")));
                 }
             }
-            QVERIFY2(std::abs(below - level) < 1e-5 && std::abs(atRest - (1.0 - level)) < 1e-5,
-                     qPrintable(QStringLiteral("at %1 ms, level %2: %3 under the strip, %4 at rest")
-                                    .arg(ms).arg(level).arg(below).arg(atRest)));
+            const QString at = QStringLiteral("at %1 ms, level %2: %3 under the strip, %4 at rest")
+                                   .arg(ms).arg(level).arg(below).arg(atRest);
+            // Between its two places the label is whole, and goes one way.
+            QVERIFY2(std::abs(below + atRest - 1.0) < 1e-5, qPrintable(at));
+            QVERIFY2(shows ? below >= lastBelow - 1e-5 : below <= lastBelow + 1e-5, qPrintable(at));
+            lastBelow = below;
+            if (level <= 0.0 || level >= 1.0) {
+                QVERIFY2(std::abs(below - level) < 1e-5, qPrintable(at));
+            }
+            // The track's text as drawn: never with the label on its pixels.
+            const double text = drawnOpacity(title);
+            QVERIFY2(text <= 1e-6 || atRest <= 1e-6,
+                     qPrintable(QStringLiteral("%1, the strip's text at %2 with it").arg(at).arg(text)));
+            if (level >= 1.0) {
+                QVERIFY2(std::abs(text - 1.0) < 1e-5, qPrintable(at));
+            }
+            textFading += text > 0.0 && text < 1.0;
+            crossing += atRest > 0.0 && atRest < 1.0;
             for (int lane = 1; lane < channels; ++lane) {
                 QCOMPARE(now.at(lane).size(), 1);
                 QCOMPARE(now.at(lane).first().fromLaneTop, resting);
             }
             fading += level > 0.0 && level < 1.0;
-            static_cast<void>(driver.step(16));
+            static_cast<void>(driver.step(8));
         }
         QVERIFY(fading >= 3);
+        // A fade each, not a cut: hiding, over some 80 ms or more; showing,
+        // as quick as the controls come, with a step between.
+        QVERIFY2(textFading >= (shows ? 3 : 10), qPrintable(QString::number(textFading)));
+        QVERIFY2(crossing >= (shows ? 2 : 10), qPrintable(QString::number(crossing)));
     }
+    // With the strip turned off (#500) the label has the one place, at
+    // rest, whole as the controls hide and show.
+    bridge->setProperty("showFullscreenTitleStrip", false);
+    static_cast<void>(driver.step(200));
+    for (const bool shows : {false, true}) {
+        state->setProperty("controlsVisible", shows);
+        for (int ms = 0; ms <= 400; ms += 16) {
+            const QList<Drawn> first = labels().at(0);
+            QCOMPARE(first.size(), 1);
+            QVERIFY(std::abs(first.first().fromLaneTop - resting) < 0.01);
+            QVERIFY(std::abs(first.first().opacity - 1.0) < 1e-5);
+            static_cast<void>(driver.step(16));
+        }
+    }
+
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(layer->window() == window);
     // Back in the pane, the one label, whole.
