@@ -2131,6 +2131,11 @@ def _layout_by_shot(rd):
     return by
 
 
+def by_variant(f):
+    """A fact's place among a document's: not the order its session finished in, which the workers decide."""
+    return f.get("key", ""), f.get("theme", ""), f.get("suffix", "")
+
+
 def _jsonl(p):
     if not os.path.exists(p):
         return []
@@ -2397,7 +2402,7 @@ def write_core_facts(rd, core, strips, geo_samples, entries=(), out="CORE-FACTS.
               "| region | what | theme | colour (share of its pixels) | px of the pane | plotFloor | relation |", "|---|---|---|---|---|---|---|"]
         for f_ in sorted(floors, key=lambda f_: (FLOOR_ORDER.index(f_["label"])
                                                   if f_["label"] in FLOOR_ORDER else 9,
-                                                  f_["theme"])):
+                                                  f_["theme"], f_["label"], f_["suffix"])):
             if f_.get("colour"):
                 rel = "the same" if f_.get("equals_floor") else (f"{f_.get('vs_floor', 0):.2f}:1, max channel diff {f_.get('max_channel_diff')}")
                 L.append(f"| {f_['label']} | {f_['what']} | {f_['theme']} | {f_['colour']} ({f_['share'] * 100:.0f} %) | "
@@ -2408,7 +2413,7 @@ def write_core_facts(rd, core, strips, geo_samples, entries=(), out="CORE-FACTS.
                          f"{f_['floor_token']} | — |")
         L.append("")
     if facts:  # (the mode switch's plates: also in S05's tile descriptions)
-        L += ["## Other measured facts\n"] + [f"- {f_['text']}" for f_ in sorted(facts, key=lambda f_: (f_["key"], f_["theme"]))] + [""]
+        L += ["## Other measured facts\n"] + [f"- {f_['text']}" for f_ in sorted(facts, key=by_variant)] + [""]
     if extra:
         L += ["## Also measured (recordings not shown)\n"] + [f"- {t}" for t in extra] + [""]
     if a11y:
@@ -2652,7 +2657,7 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
     with open(os.path.join(fd, "FOCUS.md"), "w", encoding="utf-8") as f_md:
         f_md.write("\n".join(head + L) + "\n")
     notes_ = []
-    for f_ in _jsonl(os.path.join(rd, "facts.jsonl")):  # "Track N" without "of M" in a card's details line
+    for f_ in sorted(_jsonl(os.path.join(rd, "facts.jsonl")), key=by_variant):  # "Track N" without "of M" in a card's details line
         mt = re.search(r"details line \u201c([^\u201d]*)\u201d", f_.get("text", ""))
         if f_.get("key", "").startswith("card-") and mt and re.search(r"Track \d+(?! of)", mt.group(1)):
             notes_.append(f"{f_['key'][5:]} ({f_['suffix']}): \u201c{mt.group(1)}\u201d")

@@ -147,6 +147,24 @@ class OneMeasurement(Case):
                 np.testing.assert_array_equal(motion_strip.max3(view), view.max(axis=-1))
 
 
+class FactOrder(Case):
+    def test_the_documents_do_not_follow_the_order_sessions_finished_in(self):
+        facts = [dict(key="card-wide", theme="dark", suffix=f"dark_1x_{v}", text=f"card at {v}")
+                 for v in ("1000x720", "1600x1000", "1600x1000_font24")]
+        floors = [dict(label="left", theme="dark", suffix=f"dark_1x_{v}", what=v, region="marker", floor_token="#000")
+                  for v in ("1000x720", "1600x1000")]
+        docs = []
+        for step in (1, -1):
+            for name, rows in (("facts.jsonl", facts), ("floors.jsonl", floors)):
+                with open(os.path.join(self.d, name), "w") as f:
+                    f.writelines(json.dumps(row) + "\n" for row in rows[::step])
+            pack.write_core_facts(self.d, [], [], {})
+            with open(os.path.join(self.d, "CORE-FACTS.md"), encoding="utf-8") as f:
+                docs.append(f.read())
+        self.assertEqual(docs[0], docs[1])
+        self.assertIn("card at 1600x1000_font24", docs[0])
+
+
 class Pairs(Case):
     def test_a_strip_job_makes_the_half_and_the_pair_is_made_of_halves(self):
         rd = os.path.join(self.d, "round")
