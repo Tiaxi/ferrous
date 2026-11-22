@@ -137,6 +137,9 @@ private:
     qreal m_scale;
 };
 
+// The no-cover mark's one colour at a list's size (no-art-mark.svg).
+const QColor kNoCoverMark = QColor::fromRgb(0x8c, 0x82, 0xa3);
+
 // Whether two drawn colours are the same, give or take the rounding of
 // blending.
 bool near(const QColor &a, const QColor &b) {
@@ -1082,6 +1085,8 @@ private slots:
     void selectedRowsDrawTheirMarksForTheSelection();
     void libraryTreeHasOneIndentStep();
     void libraryAlbumWithoutACoverShowsAPlaceholderTile();
+    void libraryNoCoverMarkIsOneQuietColour_data();
+    void libraryNoCoverMarkIsOneQuietColour();
     void libraryFocusRingStopsAtTheScrollBarLane();
     void libraryTreeChevronsGrowWithALargeFont();
     void libraryThumbnailsFollowTheFont_data();
@@ -4064,8 +4069,8 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     QCOMPARE(mark->size(), QSizeF(20, 20));
     QVERIFY(mark->property("source").toUrl().toString().endsWith(QStringLiteral("/no-art-mark-20.svg")));
     QTRY_COMPARE(mark->property("status").toInt(), 1); // Image.Ready
-    // As drawn: the edge, the floor inside it, the glide's amber and the
-    // harmonic's magenta, on their pixels (no-art-mark-20.svg); both run
+    // As drawn: the edge, the floor inside it, the glide and the harmonic
+    // in the mark's colour, on their pixels (no-art-mark-20.svg); both run
     // out to the tile's inner edge, as the app icon's traces run out to
     // its tile's: the column inside the edge has them, crisp, on their
     // rows.
@@ -4074,8 +4079,7 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
         const Drawn drawn(window);
         const QPointF origin = sceneRect(thumbnail).topLeft();
         const auto at = [&](qreal x, qreal y) { return drawn.at(origin + QPointF(x, y)); };
-        const auto amber = [](const QColor &c) { return c.red() > 180 && c.green() > 120 && c.blue() < 90; };
-        const auto magenta = [](const QColor &c) { return c.red() > 160 && c.blue() > 120 && c.green() < 110; };
+        const auto marked = [](const QColor &c) { return channelDistance(c, kNoCoverMark) <= 3; };
         const struct {
             qreal x;
             qreal y;
@@ -4084,10 +4088,10 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
             {0.5, 10.5, [&](const QColor &c) { return channelDistance(c, edge) <= 3; }},
             {10.5, 19.5, [&](const QColor &c) { return channelDistance(c, edge) <= 3; }},
             {2.5, 2.5, [&](const QColor &c) { return channelDistance(c, floor) <= 3; }},
-            {13.5, 13.5, amber},
-            {15.5, 5.5, magenta},
-            {18.5, 12.5, amber},
-            {18.5, 3.5, magenta},
+            {13.5, 13.5, marked},
+            {15.5, 5.5, marked},
+            {18.5, 12.5, marked},
+            {18.5, 3.5, marked},
         };
         for (const auto &pixel : pixels) {
             if (!pixel.is(at(pixel.x, pixel.y))) {
@@ -4113,6 +4117,52 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     checkPlace();
     QVERIFY(!shown(glyph));
     QTRY_VERIFY(channelDistance(Drawn(window).at(sceneRect(thumbnail).center()), coverColor) <= 2);
+}
+
+void UiMainWindowTest::libraryNoCoverMarkIsOneQuietColour_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::newRow("10 pt, the stepped mark") << 10.0;
+    QTest::newRow("24 pt, the curved mark") << 24.0;
+}
+
+// At a list's size the no-cover mark is one quiet colour on its floor, at
+// full strength and at least 4.5:1 on it, in both drawings: no amber, which
+// is only what is playing, and no magenta (repeated down a run of albums
+// without covers, the two outshone everything in the tree). Every pixel
+// inside the tile's edge is the floor, the mark or a blend of them.
+void UiMainWindowTest::libraryNoCoverMarkIsOneQuietColour() {
+    QFETCH(qreal, points);
+    const ScopedApplicationFont font(points);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    showTree(fixture.libraryModel, kAllExpanded);
+    QQuickItem *album = nullptr;
+    QTRY_VERIFY((album = libraryRow(window, QStringLiteral("album"))) != nullptr);
+    QQuickItem *tile = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholder"));
+    QVERIFY(shown(tile));
+    const QColor floor = tokenOf(window, "plotFloor");
+    QVERIFY2(contrastRatio(kNoCoverMark, floor) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("mark"), kNoCoverMark, floor)));
+
+    const auto problem = [&]() -> QString {
+        const Drawn drawn(window);
+        const QRectF box = sceneRect(tile);
+        int marked = 0;
+        for (qreal y = 2.5; y < box.height() - 2; ++y) {
+            for (qreal x = 2.5; x < box.width() - 2; ++x) {
+                const QColor pixel = drawn.at(box.topLeft() + QPointF(x, y));
+                const double amount =
+                    std::clamp((pixel.greenF() - floor.greenF()) / double(kNoCoverMark.greenF() - floor.greenF()), 0.0, 1.0);
+                if (channelDistance(pixel, mixed(floor, kNoCoverMark, amount)) > 6) {
+                    return QStringLiteral("%1 at %2, %3").arg(pixel.name()).arg(x).arg(y);
+                }
+                marked += channelDistance(pixel, kNoCoverMark) <= 3 ? 1 : 0;
+            }
+        }
+        return marked >= box.width() / 2 ? QString() : QStringLiteral("%1 pixels of the mark").arg(marked);
+    };
+    QTRY_VERIFY2(problem().isEmpty(), qPrintable(problem()));
 }
 
 // The tree has one indent step, a chevron's width: the artist's chevron at

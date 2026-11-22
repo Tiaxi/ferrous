@@ -63,7 +63,10 @@ Rectangle {
     // floor with a 1 px edge, in the thumbnail's place, so its name lines
     // up with its neighbours' and the app has one way to say "no cover"
     // (the floor's swatch alone, at about 1:1 on the view, read as a cover
-    // that failed to load). A cover that has not loaded yet has the hover
+    // that failed to load). At a list's size the mark is one quiet colour,
+    // 5:1 on the floor: the stand-in's amber and magenta, repeated down a
+    // run of albums without covers, were the tree's brightest thing, and
+    // amber there is only what is playing. A cover that has not loaded yet has the hover
     // tint for the moment it takes, so that rows coming into view do not
     // flash the mark before their covers.
     // The 20 px mark is drawn on that tile's pixels, whose steps scale into
@@ -677,7 +680,6 @@ Rectangle {
                                     // Crisp on the grid it is drawn for.
                                     smooth: root.thumbnailSize !== 20
                                     cache: true
-                                    opacity: 0.85
                                 }
                             }
 

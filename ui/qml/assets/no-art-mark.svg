@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- The library's mark for an album without a cover on a tile larger than 20 px, as the tile is with a larger font: no-art-mark-20.svg's composition on its 20 units, as smooth curves, as the app icon's larger drawings have theirs (that one's steps, crisp on its own grid, scaled into a staircase). The glide in amber under its 3rd harmonic in magenta, each 2 units thick, with a round start only, both running out to the tile's inner edge on the right -->
+<!-- The library's mark for an album without a cover on a tile larger than 20 px, as the tile is with a larger font: no-art-mark-20.svg's composition on its 20 units, as smooth curves, as the app icon's larger drawings have theirs (that one's steps, crisp on its own grid, scaled into a staircase). The glide under its 3rd harmonic in that one's quiet colour, each 2 units thick, with a round start only, both running out to the tile's inner edge on the right -->
 <svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
   <g id="h3">
-    <circle fill="#e055b4" cx="3.7" cy="11.3" r="1"/>
-    <path fill="none" stroke="#e055b4" stroke-width="2" d="M3.7 11.3 C7 7.8 12.5 4.8 19.3 4"/>
+    <circle fill="#8c82a3" cx="3.7" cy="11.3" r="1"/>
+    <path fill="none" stroke="#8c82a3" stroke-width="2" d="M3.7 11.3 C7 7.8 12.5 4.8 19.3 4"/>
   </g>
   <g id="fundamental">
-    <circle fill="#f2b035" cx="3.7" cy="16" r="1"/>
-    <path fill="none" stroke="#f2b035" stroke-width="2" d="M3.7 16 C7.6 14.4 13 13.2 19.3 13"/>
+    <circle fill="#8c82a3" cx="3.7" cy="16" r="1"/>
+    <path fill="none" stroke="#8c82a3" stroke-width="2" d="M3.7 16 C7.6 14.4 13 13.2 19.3 13"/>
   </g>
 </svg>
