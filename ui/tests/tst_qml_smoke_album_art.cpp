@@ -57,6 +57,12 @@ private slots:
     void albumArtViewerShowsWhenItsImageCannotBeRead();
     void albumArtDetailsAreOnThePlotStripInEitherTheme_data();
     void albumArtDetailsAreOnThePlotStripInEitherTheme();
+    void albumArtStripSetsTheZoomOffAsItsPlateDoes_data();
+    void albumArtStripSetsTheZoomOffAsItsPlateDoes();
+    void albumArtPanShowsItsHand_data();
+    void albumArtPanShowsItsHand();
+    void albumArtCopyPathIsOnTheFoldersLineUnderClose_data();
+    void albumArtCopyPathIsOnTheFoldersLineUnderClose();
 };
 
 namespace {
@@ -1247,9 +1253,9 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
 
     // The folder: its label on a line of its own, and under it the path on
     // one line across the column's whole width, elided in the middle, with
-    // Copy Path at the line's end (in the grid the path had the values' part
-    // of the row and broke onto a second line). The whole path is in its
-    // tooltip.
+    // Copy Path at the label's line's end (in the grid the path had the
+    // values' part of the row and broke onto a second line). The whole path
+    // is in its tooltip.
     QQuickItem *folderLabel = itemNamed(column, QStringLiteral("albumArtFolderLabel"));
     QQuickItem *path = itemNamed(column, QStringLiteral("albumArtFolderPath"));
     QQuickItem *copy = itemNamed(column, QStringLiteral("albumArtCopyPathButton"));
@@ -1273,7 +1279,7 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     // over the path.
     QCOMPARE(boxOf(folderLabel).left(), boxOf(sourceLabel).left());
     QVERIFY2(boxOf(folderLabel).bottom() <= boxOf(path).top() + 0.01, "the folder's label is not on a line of its own");
-    // Copy Path, which reaches up beside it, is clear of its text.
+    // Copy Path, beside it, is clear of its text.
     QVERIFY(boxOf(folderLabel).left() + folderLabel->property("contentWidth").toReal() < boxOf(copy).left());
     QCOMPARE(folderLabel->property("lineCount").toInt(), 1);
     // The labels' column: 80 px at the default font (it was 76 px, the
@@ -1283,15 +1289,15 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     // The row follows the others at their rhythm.
     const qreal rhythm = surface->property("infoRowHeight").toReal();
     QCOMPARE(boxOf(folderRow).top() - boxOf(rows.last()).top(), rhythm);
-    // The path from the column's start, not the values', to Copy Path at the
-    // row's end, on the path's first line; a long one wraps after its slashes, on
+    // The path from the column's start, not the values', to the row's end,
+    // under Copy Path; a long one wraps after its slashes, on
     // the lines it needs up to eight, three during a preview, and what does
     // not fit is elided (on one line, elided in its middle, a typical one lost
     // its folders; on three, a large font cut it short).
     QCOMPARE(boxOf(path).left(), boxOf(folderRow).left());
     QVERIFY(boxOf(path).left() < boxOf(sourceValue).left());
     QCOMPARE(boxOf(copy).right(), boxOf(folderRow).right());
-    QCOMPARE(boxOf(copy).left() - boxOf(path).right(), 4.0);
+    QCOMPARE(boxOf(path).right(), boxOf(folderRow).right());
     QCOMPARE(path->property("path").toString(), folder);
     // Its lines break after a slash, where a zero-width space follows each;
     // in a name that fits on a line, the spaces are no-break spaces and a
@@ -1315,31 +1321,30 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QCOMPARE(path->property("maximumLineCount").toInt(), 8);
     QTRY_COMPARE(path->property("lineCount").toInt(), 3);
     QVERIFY(!path->property("elided").toBool());
-    // Copy Path's glyph is centred on the path's first line, not on its
-    // three lines' middle, the button clear of the folder's label's text;
+    // Copy Path's glyph is centred on the folder's label's line, the button
+    // clear of the label's text and of the path;
     // over the whole screen, the button and its glyph are a step larger, as
     // the details' text is: 24 and 16 px in a window, 29 and 19 px there.
     QQuickItem *copyGlyph = itemNamed(copy, QStringLiteral("viewerToolButtonIcon"));
     QVERIFY(copyGlyph != nullptr);
-    const auto checkCopyOnTheFirstLine = [&](qreal buttonSize, qreal glyphSize, const QString &where) {
+    const auto checkCopyOnTheLabelsLine = [&](qreal buttonSize, qreal glyphSize, const QString &where) {
         QTRY_VERIFY2(boxOf(copy).width() == buttonSize && boxOf(copy).height() == buttonSize,
                      qPrintable(QStringLiteral("%1: %2 x %3").arg(where).arg(boxOf(copy).width()).arg(boxOf(copy).height())));
         QCOMPARE(boxOf(copyGlyph).size(), QSizeF(glyphSize, glyphSize));
         QTRY_COMPARE(path->property("lineCount").toInt(), 3);
-        const qreal lineHeight = path->property("contentHeight").toReal() / 3;
-        const qreal firstLine = boxOf(path).top() + lineHeight / 2;
-        QVERIFY2(qAbs(boxOf(copyGlyph).center().y() - firstLine) <= 0.5,
-                 qPrintable(QStringLiteral("%1: the glyph's centre at %2, the first line's at %3")
-                                .arg(where).arg(boxOf(copyGlyph).center().y()).arg(firstLine)));
+        const qreal labelsLine = boxOf(folderLabel).center().y();
+        QTRY_VERIFY2(qAbs(boxOf(copyGlyph).center().y() - labelsLine) <= 0.51,
+                     qPrintable(QStringLiteral("%1: the glyph's centre at %2, the label's at %3")
+                                    .arg(where).arg(boxOf(copyGlyph).center().y()).arg(labelsLine)));
         QVERIFY2(boxOf(folderLabel).left() + folderLabel->property("contentWidth").toReal() < boxOf(copy).left(),
                  qPrintable(where + QStringLiteral(": over the folder's label")));
-        QVERIFY2(boxOf(copy).top() >= boxOf(folderLabel).top(), qPrintable(where));
-        QCOMPARE(boxOf(copy).right(), boxOf(folderRow).right());
-        QCOMPARE(boxOf(copy).left() - boxOf(path).right(), 4.0);
+        QTRY_COMPARE(boxOf(copy).right(), boxOf(folderRow).right());
+        QTRY_VERIFY2(boxOf(copy).bottom() <= boxOf(path).top() + 0.01, qPrintable(where + QStringLiteral(": over the path")));
+        QTRY_COMPARE(boxOf(path).right(), boxOf(folderRow).right());
     };
-    checkCopyOnTheFirstLine(24, 16, QStringLiteral("in a window"));
+    checkCopyOnTheLabelsLine(24, 16, QStringLiteral("in a window"));
     surface->setProperty("fullscreen", true);
-    checkCopyOnTheFirstLine(std::round(24 * 1.2), std::round(16 * 1.2), QStringLiteral("over the whole screen"));
+    checkCopyOnTheLabelsLine(std::round(24 * 1.2), std::round(16 * 1.2), QStringLiteral("over the whole screen"));
     surface->setProperty("fullscreen", false);
     QTRY_COMPARE(boxOf(copy).width(), 24.0);
     // Once the details are laid out again at their width in a window.
@@ -1365,7 +1370,7 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QCOMPARE(path->property("lineCount").toInt(), 1);
     // A typical path too long for a line is whole on two, broken after a
     // slash rather than in a folder's name.
-    const QString typical = QStringLiteral("/music/The Quiet Meridian/05 - Small Hours");
+    const QString typical = QStringLiteral("/music/The Quiet Meridian/2005 - Small Hours");
     surface->setProperty("fileInfo", QVariantMap{{QStringLiteral("path"), typical + QStringLiteral("/cover.jpg")},
                                                  {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
                                                  {QStringLiteral("width"), 1400},
@@ -1375,7 +1380,7 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QTRY_COMPARE(path->property("lineCount").toInt(), 2);
     QVERIFY(!path->property("elided").toBool());
     QVERIFY(pathMetrics.horizontalAdvance(QStringLiteral("/music/The Quiet Meridian/")) <= path->width());
-    QVERIFY(pathMetrics.horizontalAdvance(QStringLiteral("05 - Small Hours")) <= path->width());
+    QVERIFY(pathMetrics.horizontalAdvance(QStringLiteral("2005 - Small Hours")) <= path->width());
 
     // Over the whole screen, a path of three lines breaks between its
     // folders, not inside one's name ("…/2005 - Small" broke before
@@ -1400,7 +1405,7 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     };
     surface->setProperty("fullscreen", true);
     const QString fixtureFolder =
-        QStringLiteral("/mnt/ferrous/council/inventory/fixtures/library/The Quiet Meridian/2005 - Small Hours");
+        QStringLiteral("/mnt/ferrous/council/inventory/fixtures/library/The Quiet Meridian/2005 - Small Hours Deluxe");
     surface->setProperty("fileInfo", QVariantMap{{QStringLiteral("path"), fixtureFolder + QStringLiteral("/cover.jpg")},
                                                  {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
                                                  {QStringLiteral("width"), 1400},
@@ -1415,7 +1420,7 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     const QStringList lines = linesOf(path->property("text").toString());
     QTRY_COMPARE(path->property("lineCount").toInt(), lines.size());
     QVERIFY(!path->property("elided").toBool());
-    QVERIFY2(lines.size() == 3 && lines.last().endsWith(QStringLiteral("2005 - Small Hours")),
+    QVERIFY2(lines.size() == 3 && lines.last().endsWith(QStringLiteral("2005 - Small Hours Deluxe")),
              qPrintable(lines.join(QLatin1Char('|'))));
     for (qsizetype i = 0; i + 1 < lines.size(); ++i) {
         QVERIFY2(lines.at(i).endsWith(QLatin1Char('/')), qPrintable(lines.join(QLatin1Char('|'))));
@@ -1441,7 +1446,11 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     surface->setProperty("fileInfo", details);
     QTRY_COMPARE(path->property("path").toString(), folder);
 
-    // Copy Path puts the folder on the clipboard.
+    // Copy Path puts the folder on the clipboard. The path's tooltip, shown
+    // above it at once here, reaches over the button: off the path, it goes.
+    QTest::mouseMove(window, QPoint(8, window->height() - 8));
+    QTRY_VERIFY(visibleTextItems(window->contentItem(), folder).isEmpty());
+    QTRY_COMPARE(boxOf(folderRow).width(), column->width() - 2 * padding);
     QGuiApplication::clipboard()->clear();
     QCOMPARE(copy->property("text").toString(), QStringLiteral("Copy Path"));
     QCOMPARE(sceneRectOf(copy).size(), QSizeF(24, 24));
@@ -4520,6 +4529,149 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
     QQuickItem *gap = itemNamed(compare, QStringLiteral("albumArtDetailsButtonFocusGap"));
     QVERIFY(gap != nullptr && gap->isVisible());
     QCOMPARE(borderColorOf(gap), strip);
+}
+
+void AlbumArtSmokeTest::albumArtCopyPathIsOnTheFoldersLineUnderClose_data() {
+    QTest::addColumn<int>("viewerMode");
+    QTest::addColumn<int>("points");
+    QTest::newRow("window, 10 pt") << 0 << 10;
+    QTest::newRow("window, 24 pt") << 0 << 24;
+    QTest::newRow("whole screen, 10 pt") << 1 << 10;
+    QTest::newRow("whole screen, 24 pt") << 1 << 24;
+}
+
+// Copy Path is attached to what it copies: on the "Folder" label's line, on
+// one axis with Close above it, and the path has the column's width under
+// them, clear of the button (it floated at the path's first line's end,
+// 9 px off Close's axis).
+void AlbumArtSmokeTest::albumArtCopyPathIsOnTheFoldersLineUnderClose() {
+    QFETCH(int, viewerMode);
+    QFETCH(int, points);
+    const ScopedApplicationFont font(points);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    AlbumArtWindow ui;
+    QVERIFY(ui.loaded());
+    QQuickWindow *host = ui.openViewer(QUrl::fromLocalFile(coverPath).toString(), viewerMode);
+    QVERIFY(host != nullptr);
+    ui.viewer->setProperty("albumArtInfoVisible", true);
+    ui.viewer->setProperty("albumArtViewerFileInfo", QVariantMap{
+        {QStringLiteral("path"), QStringLiteral("/mnt/fixtures/library/The Quiet Meridian/2005 - Small Hours/cover.jpg")},
+        {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
+        {QStringLiteral("embeddedCover"), false},
+    });
+    QTRY_COMPARE(ui.surface->property("infoReveal").toReal(), 1.0);
+    QQuickItem *label = nullptr;
+    QTRY_VERIFY((label = visibleItemNamed(host, QStringLiteral("albumArtFolderLabel"))) != nullptr);
+    QQuickItem *copy = visibleItemNamed(host, QStringLiteral("albumArtCopyPathButton"));
+    QQuickItem *path = visibleItemNamed(host, QStringLiteral("albumArtFolderPath"));
+    QQuickItem *row = visibleItemNamed(host, QStringLiteral("albumArtFolderRow"));
+    QQuickItem *column = visibleItemNamed(host, QStringLiteral("albumArtInfoColumn"));
+    QQuickItem *close = visibleItemNamed(host, viewerMode == 1 ? QStringLiteral("albumArtFullscreenCloseButton")
+                                                               : QStringLiteral("albumArtPopupCloseButton"));
+    QVERIFY(copy && path && row && column && close);
+    const auto boxOf = [](QQuickItem *item) {
+        return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+    };
+    const auto describe = [&]() {
+        return QStringLiteral("Copy Path %1,%2, Close %3, the label %4")
+            .arg(boxOf(copy).center().x()).arg(boxOf(copy).center().y())
+            .arg(boxOf(close).center().x()).arg(boxOf(label).center().y());
+    };
+    QTRY_VERIFY2(qAbs(boxOf(copy).center().x() - boxOf(close).center().x()) <= 0.5, qPrintable(describe()));
+    QTRY_VERIFY2(qAbs(boxOf(copy).center().y() - boxOf(label).center().y()) <= 0.51, qPrintable(describe()));
+    QVERIFY2(boxOf(label).right() < boxOf(copy).left(), qPrintable(describe()));
+    QVERIFY2(boxOf(column).contains(boxOf(copy)), qPrintable(describe()));
+    QTRY_COMPARE(boxOf(path).width(), boxOf(row).width());
+    QVERIFY2(boxOf(path).top() >= boxOf(copy).bottom() - 0.01, qPrintable(describe()));
+    QVERIFY(!path->property("elided").toBool());
+    QVERIFY(ui.closeViewer(host));
+}
+
+void AlbumArtSmokeTest::albumArtPanShowsItsHand_data() {
+    QTest::addColumn<int>("viewerMode");
+    QTest::newRow("window") << 0;
+    QTest::newRow("whole screen") << 1;
+}
+
+// Zoomed art shows the open hand, a closed one while it is dragged, and
+// the open one again: the area over it that takes a press for the focus
+// passes the art's pointer on (its own arrow covered both hands). The
+// details and the fitted art show the arrow.
+void AlbumArtSmokeTest::albumArtPanShowsItsHand() {
+    QFETCH(int, viewerMode);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    AlbumArtWindow ui;
+    QVERIFY(ui.loaded());
+    QQuickWindow *host = ui.openViewer(QUrl::fromLocalFile(coverPath).toString(), viewerMode);
+    QVERIFY(host != nullptr);
+    const QPoint from(host->width() / 3, host->height() / 2);
+    QTest::mouseMove(host, from + QPoint(1, 1));
+    QTest::mouseMove(host, from);
+    QTRY_COMPARE(host->cursor().shape(), Qt::ArrowCursor);
+
+    ui.surface->setProperty("zoom", 4.0);
+    QTest::mouseMove(host, from + QPoint(2, 2));
+    QTRY_COMPARE(host->cursor().shape(), Qt::OpenHandCursor);
+    QTest::mousePress(host, Qt::LeftButton, Qt::NoModifier, from);
+    QTest::mouseMove(host, from - QPoint(40, 0));
+    QTRY_COMPARE(host->cursor().shape(), Qt::ClosedHandCursor);
+    QTest::mouseRelease(host, Qt::LeftButton, Qt::NoModifier, from - QPoint(40, 0));
+    QTRY_COMPARE(host->cursor().shape(), Qt::OpenHandCursor);
+
+    // The details over the art keep the arrow.
+    ui.viewer->setProperty("albumArtInfoVisible", true);
+    QTRY_COMPARE(ui.surface->property("infoReveal").toReal(), 1.0);
+    QQuickItem *column = itemNamed(ui.surface, QStringLiteral("albumArtInfoColumn"));
+    QVERIFY(column != nullptr);
+    const QPointF details = column->mapToScene(QPointF(column->width() / 2, column->height() - 20));
+    QTest::mouseMove(host, details.toPoint());
+    QTest::mouseMove(host, details.toPoint() + QPoint(1, 1));
+    QTRY_COMPARE(host->cursor().shape(), Qt::ArrowCursor);
+
+    // Fitted again, the arrow.
+    ui.surface->setProperty("zoom", 1.0);
+    QTest::mouseMove(host, from + QPoint(5, 5));
+    QTRY_COMPARE(host->cursor().shape(), Qt::ArrowCursor);
+    QVERIFY(ui.closeViewer(host));
+}
+
+void AlbumArtSmokeTest::albumArtStripSetsTheZoomOffAsItsPlateDoes_data() {
+    QTest::addColumn<int>("viewerMode");
+    QTest::newRow("window") << 0;
+    QTest::newRow("whole screen") << 1;
+}
+
+// The album art viewer's toolbar is one in both presentations: zoomed, a
+// divider sets the readout and Reset off from its buttons on the plate and
+// in the strip alike (the strip had none).
+void AlbumArtSmokeTest::albumArtStripSetsTheZoomOffAsItsPlateDoes() {
+    QFETCH(int, viewerMode);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    AlbumArtWindow ui;
+    QVERIFY(ui.loaded());
+    QQuickWindow *host = ui.openViewer(QUrl::fromLocalFile(coverPath).toString(), viewerMode);
+    QVERIFY(host != nullptr);
+    QVERIFY(visibleItemNamed(host, QStringLiteral("viewerControlsDivider")) == nullptr);
+    ui.surface->setProperty("zoom", 2.0);
+    QQuickItem *divider = nullptr;
+    QTRY_VERIFY((divider = visibleItemNamed(host, QStringLiteral("viewerControlsDivider"))) != nullptr);
+    QQuickItem *reset = visibleItemNamed(host, QStringLiteral("viewerResetButton"));
+    QQuickItem *info = visibleItemNamed(host, viewerMode == 1 ? QStringLiteral("albumArtFullscreenInfoButton")
+                                                              : QStringLiteral("albumArtPopupInfoButton"));
+    QVERIFY(reset != nullptr && info != nullptr);
+    QCOMPARE(sceneRectOf(divider).left() - sceneRectOf(reset).right(), 4.0);
+    QCOMPARE(sceneRectOf(info).left() - sceneRectOf(divider).right(), 4.0);
+    ui.surface->setProperty("zoom", 1.0);
+    QVERIFY(ui.closeViewer(host));
 }
 
 std::unique_ptr<QmlSmokeTest> makeAlbumArtSmokeTest(const QString &userDirectoriesParent) {

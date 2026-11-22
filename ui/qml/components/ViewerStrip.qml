@@ -19,11 +19,11 @@ import "../logic/FormatUtils.js" as FormatUtils
 // screen (UiPalette.fullscreenTextScale), as the album art's details under
 // it are (at the window's size they were a second scale); on the
 // right, 8 px in from the edge, flat 24 px tool buttons: a zoom readout and
-// Reset while the view is zoomed, the new issues while there are any, the
+// Reset's glyph while the view is zoomed, the new issues while there are any, the
 // viewer's own buttons (declared inside the strip, from the left, each taking
 // the strip's `plotColors`) and Close: the album art's info toggle, or the
-// visualization's mode switch, which with its zoom moves here from the
-// plot's corner while the strip is on, so the strip is the viewer's one
+// visualization's mode switch, which with its zoom is here rather
+// than in the plot's corner while the strip is on, so the strip is the viewer's one
 // place for its controls (a plate of them under the strip's Close read as
 // a second cluster). The whole strip shows and hides with the viewer's
 // controls, fading as they do; it is drawn over the view, which never
@@ -96,6 +96,8 @@ Rectangle {
             FormatUtils.clockText(root.positionText),
             FormatUtils.clockText(root.track.durationText))
 
+    // How far in from the strip's right edge Close's centre is.
+    readonly property real closeAxisInset: controls.anchors.rightMargin + root.uiPalette.toolButtonSize / 2
     // Its text's size, as a factor of the window's.
     readonly property real textScale: root.uiPalette.fullscreenTextScale
     readonly property real textPointSize: root.uiPalette.basePointSize * root.textScale
@@ -136,7 +138,7 @@ Rectangle {
     Row {
         id: track
         objectName: "viewerStripTrack"
-        readonly property real room: Math.max(0, controls.x - 12 - x)
+        readonly property real room: Math.max(0, controls.x - track.spacing - x)
         readonly property real textRoom: Math.max(0, track.room - (timeLabel.visible
             ? timeLabel.implicitWidth + track.spacing : 0) - (contextLabel.visible ? track.spacing : 0))
         readonly property real contextNeed: contextLabel.visible ? contextLabel.implicitWidth : 0
@@ -144,7 +146,9 @@ Rectangle {
         // the title sat too near the edge).
         x: 2 * Kirigami.Units.largeSpacing
         height: root.bandHeight
-        spacing: Math.round(12 * root.textScale)
+        // 14 px at the default font, and as much more as the font is larger
+        // (at 24 pt, 14 px beside 38 px type ran the album into the time).
+        spacing: root.uiPalette.scaledSize(Math.round(12 * root.textScale))
 
         Label {
             id: titleLabel
@@ -196,6 +200,9 @@ Rectangle {
         plotColors: root.plotColors
         closeViewer: root.closeViewer
         zoomLevel: root.zoomLevel
+        // On the strip's one type scale, as the time is (at the window's
+        // small size it was 12 px in a 16 px strip).
+        readoutPointSize: root.textPointSize
         resetView: root.resetView
         resetToolTip: root.resetToolTip
         errorController: root.errorController

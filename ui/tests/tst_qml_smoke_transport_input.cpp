@@ -52,6 +52,12 @@ private slots:
     void viewerControlsStayWhileOneHasFocus();
     void fullscreenViewersCanKeepTheirTitleStripHidden();
     void fullscreenVisualizationStripHoldsTheModeSwitch();
+    void viewerResetIsTheSameGlyphWindowedAndInTheStrip();
+    void viewerToolbarIsOneVocabularyWindowedAndInTheStrip();
+    void viewerStripIsOnOneTypeScale_data();
+    void viewerDragsCountAsPointerActivity_data();
+    void viewerDragsCountAsPointerActivity();
+    void viewerStripIsOnOneTypeScale();
     void menuMnemonicsOpenTheMenusAndShowShortcuts();
 };
 
@@ -799,8 +805,10 @@ void TransportInputSmokeTest::visualizationModeSwitchStaysClearOfTheCornerOverla
     autoHide->setProperty("hideDelay", 600000);
 
     const auto checkLayouts = [&](QQuickItem *controlsRoot, const QString &closeButtonName) {
-        QQuickItem *modeSwitchItem =
-            firstVisibleItemNamed(controlsRoot, QStringLiteral("visualizationModeSwitch"));
+        // The pane's is the plot's; the viewer's, in its corner plate.
+        QQuickItem *modeSwitchItem = firstVisibleItemNamed(
+            controlsRoot, closeButtonName.isEmpty() ? QStringLiteral("visualizationModeSwitch")
+                                                    : QStringLiteral("spectrogramPopupModeSwitch"));
         QVERIFY(modeSwitchItem != nullptr);
         QQuickItem *closeButton = closeButtonName.isEmpty()
             ? nullptr : firstVisibleItemNamed(controlsRoot, closeButtonName);
@@ -1736,7 +1744,7 @@ void TransportInputSmokeTest::visualizationModeSwitchLeavesTheCornerToTheView() 
     // In the viewer, a double-click there closes it, as it does elsewhere.
     QQuickItem *viewerSwitch = firstVisibleItemNamed(
         qvariant_cast<QQuickItem *>(popup->property("contentItem")),
-        QStringLiteral("visualizationModeSwitch"));
+        QStringLiteral("spectrogramPopupControls"));
     QVERIFY(viewerSwitch != nullptr);
     const QRectF viewerSwitchRect = sceneRectOf(viewerSwitch);
     const QPoint nearViewerSwitch(static_cast<int>(viewerSwitchRect.left()) - 12,
@@ -2251,7 +2259,11 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
         return sceneRectOf(laneHead).top() - laneHead->property("plateReach").toReal();
     };
     const auto controlsTop = [&](QQuickItem *in) {
+        // The plot's in the pane; in the window's viewer, its corner plate.
         QQuickItem *modeSwitch = firstVisibleItemNamed(in, QStringLiteral("visualizationModeSwitch"));
+        if (modeSwitch == nullptr) {
+            modeSwitch = firstVisibleItemNamed(in, QStringLiteral("spectrogramPopupControls"));
+        }
         QQuickItem *laneHead = firstVisibleItemNamed(in, QStringLiteral("plotLaneHead"));
         return std::make_pair(modeSwitch ? sceneRectOf(modeSwitch).top() : -1.0,
                               laneHead ? headPlatesTop(laneHead) : -1.0);
@@ -2494,16 +2506,14 @@ void TransportInputSmokeTest::viewerModeSwitchStaysWhileThePointerIsOnTheViewers
             spots = {itemNamed(controls, QStringLiteral("spectrogramPopupCloseButton"))};
         }
         QTRY_COMPARE(layer->window(), host);
-        // Over the whole screen, the switch is in the strip, and not on the
-        // plot.
-        const bool inStrip = fullscreenMode == 1;
-        QQuickItem *shownSwitch = inStrip ? itemNamed(controls, QStringLiteral("spectrogramStripModeSwitch")) : modeSwitch;
+        // The switch is in the viewer's controls, and not on the plot.
+        QQuickItem *shownSwitch = itemNamed(controls, fullscreenMode == 1
+                                                          ? QStringLiteral("spectrogramStripModeSwitch")
+                                                          : QStringLiteral("spectrogramPopupModeSwitch"));
         QVERIFY(shownSwitch != nullptr);
         // The pointer on the view reveals the switch.
         QTest::mouseMove(host, QPoint(host->width() / 2, host->height() / 2));
-        if (!inStrip) {
-            QTRY_COMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
-        }
+        QTRY_COMPARE(controls->opacity(), 1.0);
         for (QQuickItem *spot : spots) {
             QVERIFY2(spot != nullptr, where.constData());
             const QPoint at = fullscreenMode == 1 && spot == controls
@@ -2515,12 +2525,9 @@ void TransportInputSmokeTest::viewerModeSwitchStaysWhileThePointerIsOnTheViewers
             QTest::mouseMove(host, at);
             QTRY_VERIFY2(controls->property("hovered").toBool(), where.constData());
             (void)animations.step(300);
-            if (!inStrip) {
-                QVERIFY2(modeSwitch->property("revealed").toBool(), where.constData());
-                QCOMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
-            }
+            QCOMPARE(controls->opacity(), 1.0);
             QVERIFY(shownSwitch->isVisible());
-            QCOMPARE(modeSwitch->isVisible(), !inStrip);
+            QVERIFY(!modeSwitch->isVisible());
         }
         // Off the view and its controls, it stays while the viewer's
         // controls show, as their part, and goes with them, at their level.
@@ -2530,15 +2537,12 @@ void TransportInputSmokeTest::viewerModeSwitchStaysWhileThePointerIsOnTheViewers
             (void)animations.step(300);
         }
         QVERIFY(shownSwitch->isVisible());
-        if (!inStrip) {
-            QVERIFY2(modeSwitch->property("revealed").toBool(), where.constData());
-            QCOMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
-        }
+        QCOMPARE(controls->opacity(), 1.0);
         QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
         QVERIFY(autoHide != nullptr);
         autoHide->setProperty("hideDelay", 1);
         QTRY_VERIFY2(!shownSwitch->isVisible(), where.constData());
-        QCOMPARE((inStrip ? controls : modeSwitch)->opacity(), 0.0);
+        QCOMPARE(controls->opacity(), 0.0);
         autoHide->setProperty("hideDelay", 5000);
         QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
         QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
@@ -2575,10 +2579,9 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
     QTRY_COMPARE(spectrogramZoom(), 1.0);
 
     // One order everywhere: [Zoom ↺] [mode] [✕], in both viewers as in the
-    // main pane. In the window, the zoom is the plot's own plate, left of
-    // the mode switch, and the viewer's controls have Close and no zoom;
-    // over the whole screen, the zoom and the mode switch are in the title
-    // strip, before Close, and not on the plot.
+    // main pane. In a viewer, the zoom and the mode switch are its own
+    // controls', before Close, on the corner plate in the window and in the
+    // title strip over the whole screen, and not on the plot.
     auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
     QVERIFY(layer != nullptr);
     QQuickItem *readout = itemNamed(layer, QStringLiteral("plotZoomReadout"));
@@ -2613,9 +2616,10 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
                      fullscreenMode == 1 ? double(host->width()) : host->width() - 5.0);
 
         const bool inStrip = fullscreenMode == 1;
-        QQuickItem *shownReadout = inStrip ? itemNamed(controls, QStringLiteral("viewerZoomReadout")) : readout;
-        QQuickItem *shownReset = inStrip ? itemNamed(controls, QStringLiteral("viewerResetButton")) : reset;
-        QQuickItem *shownSwitch = inStrip ? itemNamed(controls, QStringLiteral("spectrogramStripModeSwitch")) : modeSwitch;
+        QQuickItem *shownReadout = itemNamed(controls, QStringLiteral("viewerZoomReadout"));
+        QQuickItem *shownReset = itemNamed(controls, QStringLiteral("viewerResetButton"));
+        QQuickItem *shownSwitch = itemNamed(controls, inStrip ? QStringLiteral("spectrogramStripModeSwitch")
+                                                              : QStringLiteral("spectrogramPopupModeSwitch"));
         QVERIFY(shownReadout != nullptr && shownReset != nullptr && shownSwitch != nullptr);
         for (const int mode : {0, 1}) {
             viewer->setProperty("visualizationMode", mode);
@@ -2632,40 +2636,21 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
             QTRY_VERIFY(shownReadout->isVisible() && shownReset->isVisible());
             QCOMPARE(shownReadout->property("text").toString(),
                      mode == 0 ? QStringLiteral("Zoom 200%") : QStringLiteral("Zoom 400%"));
-            if (inStrip) {
-                // None on the plot.
-                QVERIFY(!readout->isVisible() && !reset->isVisible() && !modeSwitch->isVisible());
-                // On the strip: the readout, Reset, the mode switch and
-                // Close, each group 4 px either side of a 1 px divider, as
-                // on the windowed viewer's corner plate, Close at the
-                // strip's 8 px inset.
+            // None on the plot.
+            QVERIFY(!readout->isVisible() && !reset->isVisible() && !zoomPlate->isVisible() && !modeSwitch->isVisible());
+            {
+                // The readout, Reset, the mode switch and Close, each group
+                // 4 px either side of a 1 px divider, Close at the strip's
+                // 8 px inset or 4 px inside the corner's plate.
                 QTRY_VERIFY(sceneRectOf(shownReadout).right() <= sceneRectOf(shownReset).left());
                 QCOMPARE(sceneRectOf(shownSwitch).left() - sceneRectOf(shownReset).right(), 9.0);
                 QCOMPARE(sceneRectOf(close).left() - sceneRectOf(shownSwitch).right(), 9.0);
-                QCOMPARE(sceneRectOf(close).right(), host->width() - 8.0);
+                QCOMPARE(sceneRectOf(close).right(), inStrip ? host->width() - 8.0 : sceneRectOf(controls).right() - 4.0);
                 for (QQuickItem *item : {shownReadout, shownReset, shownSwitch, close}) {
                     QVERIFY(sceneRectOf(controls).contains(sceneRectOf(item)));
                 }
                 QCOMPARE(visibleItemsNamed(controls, QStringLiteral("viewerControlsDivider")).size(), 1);
                 QCOMPARE(visibleItemsNamed(controls, QStringLiteral("viewerControlsCloseDivider")).size(), 1);
-            } else {
-                // None in the viewer's own controls.
-                const QList<QQuickItem *> ownReadouts = itemsNamed(controls, QStringLiteral("viewerZoomReadout"));
-                for (QQuickItem *own : ownReadouts) {
-                    QVERIFY(!own->isVisible());
-                }
-            }
-            // Laid out in the window: the readout, Reset, the mode switch
-            // right of them and Close right of that on the corner's one
-            // plate, the divider's 1 px apart.
-            if (!inStrip) {
-                QTRY_VERIFY(sceneRectOf(readout).right() <= sceneRectOf(reset).left()
-                            && sceneRectOf(zoomPlate).right() + 1 == sceneRectOf(modeSwitch).left());
-                QVERIFY2(sceneRectOf(modeSwitch).right() < sceneRectOf(close).left(),
-                         qPrintable(QStringLiteral("switch ends at %1, Close starts at %2")
-                                        .arg(sceneRectOf(modeSwitch).right()).arg(sceneRectOf(close).left())));
-                QCOMPARE(sceneRectOf(controls).top(), sceneRectOf(modeSwitch).top());
-                QVERIFY(sceneRectOf(zoomPlate).left() >= 0 && sceneRectOf(close).right() <= host->width());
             }
             // A double-click on the readout leaves the viewer open.
             QTest::mouseDClick(host, Qt::LeftButton, Qt::NoModifier, centerInWindow(shownReadout));
@@ -2693,7 +2678,7 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
 // nothing showed it): the viewers' readout and Reset, on a plate 4 px left
 // of the mode switch, there also while the switch hides. The plot keeps its
 // place and size; its overlays keep clear of the plate. A viewer shows the
-// same plate, in the same order.
+// same readout and Reset on its own plate, in the same order.
 void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2771,114 +2756,76 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
         QCOMPARE(surface->property("reservedCorner").toSizeF(), cornerBefore);
     }
 
-    // In a viewer, the same plate shows, left of the mode switch, and none
-    // in the viewer's controls.
+    // In a viewer, none of the plot's: the viewer's one plate has the same
+    // readout and Reset, then the modes, then Close.
     viewer->setProperty("visualizationMode", 0);
     bridge->setProperty("viewerFullscreenMode", 0);
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
     QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+    QTRY_VERIFY(spectrogramSurface->property("viewerMode").toBool());
     spectrogramSurface->setProperty("_viewerZoomLevel", 2.0);
     QQuickItem *controls = visibleItemNamed(window, QStringLiteral("spectrogramPopupControls"));
     QVERIFY(controls != nullptr);
-    QTRY_VERIFY(plate->isVisible());
-    QVERIFY(itemsNamed(controls, QStringLiteral("viewerZoomReadout")).isEmpty());
+    QTRY_VERIFY(!plate->isVisible() && !modeSwitch->isVisible());
 
     // One plate in the windowed viewer's corner (a row of three plates read
-    // as unlike controls): the zoom, the mode switch and the viewer's Close
-    // on the plot layer's one plate, each group 1 px apart with a divider
-    // there, the groups' own plates bare.
+    // as unlike controls), in the plot plate's fill and edge and as tall as
+    // it, with two dividers.
     QQuickItem *cornerPlate = itemNamed(controls, QStringLiteral("viewerCornerPlate"));
-    QQuickItem *joined = itemNamed(layer, QStringLiteral("plotCornerPlate"));
-    QVERIFY(cornerPlate != nullptr && joined != nullptr);
-    QTRY_COMPARE(sceneRectOf(plate).right() + 1, sceneRectOf(modeSwitch).left());
-    QCOMPARE(sceneRectOf(modeSwitch).right() + 1, sceneRectOf(cornerPlate).left());
-    QVERIFY(joined->isVisible());
-    QCOMPARE(sceneRectOf(joined).left(), sceneRectOf(plate).left());
-    QCOMPARE(sceneRectOf(joined).right(), sceneRectOf(cornerPlate).right());
-    for (QQuickItem *bare : {plate, modeSwitch, cornerPlate}) {
-        QVERIFY(bare->property("bare").toBool());
-        for (const char *part : {"plotPlateFill", "plotPlateEdge"}) {
-            QVERIFY(!itemNamed(bare, QString::fromLatin1(part))->isVisible());
-        }
+    QQuickItem *viewerReadout = itemNamed(controls, QStringLiteral("viewerZoomReadout"));
+    QQuickItem *viewerReset = itemNamed(controls, QStringLiteral("viewerResetButton"));
+    QQuickItem *viewerSwitch = itemNamed(controls, QStringLiteral("spectrogramPopupModeSwitch"));
+    QVERIFY(cornerPlate && viewerReadout && viewerReset && viewerSwitch);
+    QTRY_VERIFY(viewerReadout->isVisible() && viewerReset->isVisible());
+    QCOMPARE(sceneRectOf(cornerPlate), sceneRectOf(controls));
+    QCOMPARE(sceneRectOf(cornerPlate).height(), plate->height());
+    for (const char *part : {"plotPlateFill", "plotPlateEdge"}) {
+        QQuickItem *mine = itemNamed(plate, QString::fromLatin1(part));
+        QQuickItem *theirs = itemNamed(cornerPlate, QString::fromLatin1(part));
+        QVERIFY(mine != nullptr && theirs != nullptr && theirs->isVisible());
+        QCOMPARE(theirs->property("color").value<QColor>(), mine->property("color").value<QColor>());
+        QCOMPARE(theirs->property("radius").toDouble(), mine->property("radius").toDouble());
     }
     {
-        QList<QQuickItem *> dividers;
-        for (QQuickItem *divider : itemsNamed(joined, QStringLiteral("plotCornerDivider"))) {
-            if (divider->isVisible()) {
-                dividers << divider;
-            }
-        }
-        QCOMPARE(dividers.size(), 2);
-        QCOMPARE(sceneRectOf(dividers[0]).left(), sceneRectOf(plate).right());
-        QCOMPARE(sceneRectOf(dividers[1]).left(), sceneRectOf(modeSwitch).right());
-        for (QQuickItem *divider : dividers) {
+        QQuickItem *afterZoom = itemNamed(controls, QStringLiteral("viewerControlsDivider"));
+        QQuickItem *beforeClose = itemNamed(controls, QStringLiteral("viewerControlsCloseDivider"));
+        QVERIFY(afterZoom && beforeClose && afterZoom->isVisible() && beforeClose->isVisible());
+        QCOMPARE(sceneRectOf(afterZoom).left(), sceneRectOf(viewerReset).right() + 4);
+        QCOMPARE(sceneRectOf(beforeClose).left(), sceneRectOf(viewerSwitch).right() + 4);
+        for (QQuickItem *divider : {afterZoom, beforeClose}) {
             QCOMPARE(divider->width(), 1.0);
-            QCOMPARE(sceneRectOf(divider).top() - sceneRectOf(joined).top(), 6.0);
-            QCOMPARE(sceneRectOf(joined).bottom() - sceneRectOf(divider).bottom(), 6.0);
+            QCOMPARE(sceneRectOf(divider).top() - sceneRectOf(cornerPlate).top(), 6.0);
+            QCOMPARE(sceneRectOf(cornerPlate).bottom() - sceneRectOf(divider).bottom(), 6.0);
             QCOMPARE(divider->property("color").value<QColor>(),
-                     itemNamed(joined, QStringLiteral("plotPlateEdge"))->property("border").value<QObject *>()
+                     itemNamed(cornerPlate, QStringLiteral("plotPlateEdge"))->property("border").value<QObject *>()
                          ->property("color").value<QColor>());
-        }
-        // A focus ring, 3 px out from a mode button, stays clear of them.
-        for (int mode = 0; mode < 2; ++mode) {
-            QQuickItem *button = itemNamed(modeSwitch, QStringLiteral("visualizationModeButton%1").arg(mode));
-            QVERIFY(sceneRectOf(button).left() - 3 > sceneRectOf(dividers[0]).right());
-            QVERIFY(sceneRectOf(button).right() + 3 < sceneRectOf(dividers[1]).left());
         }
     }
     // The pointer between the groups is on the plate: the viewer's
     // controls stay and the plot's crosshair hides.
-    QTest::mouseMove(window, sceneRectOf(modeSwitch).topRight().toPoint() + QPoint(0, 2));
+    QTest::mouseMove(window, sceneRectOf(viewerSwitch).topRight().toPoint() + QPoint(2, -2));
     QTRY_VERIFY(layer->property("plateHovered").toBool());
     // Without a zoom, the plate starts at the mode switch, with one divider.
     spectrogramSurface->setProperty("_viewerZoomLevel", 1.0);
-    QTRY_VERIFY(!plate->isVisible());
-    QTRY_COMPARE(sceneRectOf(joined).left(), sceneRectOf(modeSwitch).left());
+    QTRY_VERIFY(!viewerReadout->isVisible());
+    QTRY_COMPARE(sceneRectOf(cornerPlate).left(), sceneRectOf(viewerSwitch).left() - 4);
+    QVERIFY(visibleItemNamed(window, QStringLiteral("viewerControlsDivider")) == nullptr);
     spectrogramSurface->setProperty("_viewerZoomLevel", 2.0);
-    QTRY_VERIFY(plate->isVisible());
-    QTRY_COMPARE(sceneRectOf(joined).left(), sceneRectOf(plate).left());
-    // The readout is plain text in the plot's secondary colour, and Reset
-    // and the modes glyph buttons, none in the accent at rest.
-    {
-        QQuickItem *readout = itemNamed(plate, QStringLiteral("plotZoomReadout"));
-        QQuickItem *reset = itemNamed(plate, QStringLiteral("plotZoomResetButton"));
-        QVERIFY(readout != nullptr && reset != nullptr);
-        QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
-        QObject *plot = qvariant_cast<QObject *>(palette->property("spectrogramPlot"));
-        QCOMPARE(readout->property("color").value<QColor>().rgba(),
-                 plot->property("plotTextSecondary").value<QColor>().rgba());
-        QCOMPARE(reset->property("display").toInt(), 0); // AbstractButton.IconOnly
-        QVERIFY(!reset->property("checked").toBool());
-        for (int mode = 0; mode < 2; ++mode) {
-            QQuickItem *button = itemNamed(modeSwitch, QStringLiteral("visualizationModeButton%1").arg(mode));
-            QVERIFY(button != nullptr && button->property("segment").toBool());
-            QQuickItem *fill = itemNamed(button, QStringLiteral("plotToolButtonChecked"));
-            QVERIFY(fill != nullptr);
-            QVERIFY(fill->property("color").value<QColor>().rgba()
-                    != palette->property("accent").value<QColor>().rgba());
-        }
-    }
-    // The one plate is the plot's plate, in its fill and edge, as tall as
-    // each group and on one top.
-    for (QQuickItem *other : {modeSwitch, cornerPlate, joined}) {
-        QCOMPARE(sceneRectOf(other).top(), sceneRectOf(plate).top());
-        QCOMPARE(sceneRectOf(other).height(), sceneRectOf(plate).height());
-        for (const char *part : {"plotPlateFill", "plotPlateEdge"}) {
-            QQuickItem *mine = itemNamed(plate, QString::fromLatin1(part));
-            QQuickItem *theirs = itemNamed(other, QString::fromLatin1(part));
-            QVERIFY(mine != nullptr && theirs != nullptr);
-            QCOMPARE(theirs->property("color").value<QColor>(), mine->property("color").value<QColor>());
-            QCOMPARE(theirs->property("radius").toDouble(), mine->property("radius").toDouble());
-            QCOMPARE(theirs->property("border").value<QObject *>()->property("color").value<QColor>(),
-                     mine->property("border").value<QObject *>()->property("color").value<QColor>());
-        }
-    }
+    QTRY_VERIFY(viewerReadout->isVisible());
+    // The readout is plain text in the plot's secondary colour, and Reset a
+    // glyph button, not in the accent at rest.
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QObject *plot = qvariant_cast<QObject *>(palette->property("spectrogramPlot"));
+    QCOMPARE(viewerReadout->property("color").value<QColor>().rgba(),
+             plot->property("plotTextSecondary").value<QColor>().rgba());
+    QCOMPARE(viewerReset->property("display").toInt(), 0); // AbstractButton.IconOnly
+    QVERIFY(!viewerReset->property("checked").toBool());
     // The readout 6 px in from the plate, and 6 px from Reset's glyph box.
-    QQuickItem *resetGlyph = itemNamed(reset, QStringLiteral("plotToolButtonIcon"));
+    QQuickItem *resetGlyph = itemNamed(viewerReset, QStringLiteral("viewerToolButtonIcon"));
     QVERIFY(resetGlyph != nullptr);
-    const double textLeft = sceneRectOf(readout).left() + readout->property("leftPadding").toDouble();
-    const double textRight = textLeft + readout->property("contentWidth").toDouble();
-    QCOMPARE(textLeft - sceneRectOf(plate).left(), 6.0);
+    const double textLeft = sceneRectOf(viewerReadout).left() + viewerReadout->property("leftPadding").toDouble();
+    const double textRight = textLeft + viewerReadout->property("contentWidth").toDouble();
+    QCOMPARE(textLeft - sceneRectOf(cornerPlate).left(), 6.0);
     QCOMPARE(sceneRectOf(resetGlyph).left() - textRight, 6.0);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
@@ -3305,7 +3252,7 @@ void TransportInputSmokeTest::viewerControlsStayWhileOneHasFocus() {
         // Over the whole screen, the mode switch is in the strip.
         QQuickItem *modeButton = visibleItemNamed(host, fullscreenMode == 1
             ? QStringLiteral("spectrogramStripModeButton1")
-            : QStringLiteral("visualizationModeButton1"));
+            : QStringLiteral("spectrogramPopupModeButton1"));
         QVERIFY(close != nullptr && modeButton != nullptr);
 
         double x = 10;
@@ -3375,7 +3322,7 @@ void TransportInputSmokeTest::fullscreenVisualizationStripHoldsTheModeSwitch() {
 
     // Nothing on the plot's corner.
     QTRY_VERIFY(!itemNamed(layer, QStringLiteral("visualizationModeSwitch"))->isVisible());
-    QVERIFY(!itemNamed(layer, QStringLiteral("plotCornerPlate"))->isVisible());
+    QVERIFY(visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenCorner")) == nullptr);
     QVERIFY(!itemNamed(layer, QStringLiteral("plotZoomPlate"))->isVisible());
 
     // [Spectrogram Waveform] | [Close], 8 px in from the screen's edge, on
@@ -3403,7 +3350,11 @@ void TransportInputSmokeTest::fullscreenVisualizationStripHoldsTheModeSwitch() {
     };
     // Where they show is the point, not after how long: at once.
     for (const auto &[button, text] : tips) {
-        QVERIFY(evaluateOn(button, QStringLiteral("ToolTip.delay = 0")).isValid());
+        // In the button's own file, whose imports have ToolTip: the file
+        // that declares a button need not.
+        QQuickItem *inButton = itemNamed(button, QStringLiteral("viewerToolButtonIcon"));
+        QVERIFY(inButton != nullptr);
+        QVERIFY(evaluateOn(inButton, QStringLiteral("root.ToolTip.delay = 0")).isValid());
     }
     for (const auto &[button, text] : tips) {
         QTest::mouseMove(fullscreen, centerInWindow(button));
@@ -3504,7 +3455,7 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
     QVERIFY(bridge->setProperty("showFullscreenTitleStrip", false));
 
     // The visualization: the pointer brings the controls back, without the
-    // strip, and the mode switch sits on the top edge.
+    // strip, and the mode switch sits on a plate at the top edge.
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
     QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
     QQuickWindow *fullscreen = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
@@ -3522,9 +3473,12 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
     QVERIFY(!strip->isVisible());
     QQuickItem *modeSwitch = nullptr;
     QTRY_VERIFY((modeSwitch = firstVisibleItemNamed(fullscreen->contentItem(),
-                                                    QStringLiteral("visualizationModeSwitch")))
+                                                    QStringLiteral("spectrogramFullscreenCornerModeSwitch")))
                 != nullptr);
-    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QQuickItem *corner = itemNamed(fullscreen->contentItem(), QStringLiteral("spectrogramFullscreenCorner"));
+    QVERIFY(corner != nullptr);
+    QTRY_COMPARE(corner->opacity(), 1.0);
+    QVERIFY(visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenCornerCloseButton")) == nullptr);
     QVERIFY(sceneRectOf(modeSwitch).top() >= 0.0);
     QVERIFY2(sceneRectOf(modeSwitch).top() < strip->height(), qPrintable(QString::number(sceneRectOf(modeSwitch).top())));
     // They still hide as the pointer rests.
@@ -3544,7 +3498,7 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
     QVERIFY(stripModeSwitch != nullptr);
     QTRY_VERIFY(stripModeSwitch->isVisible());
     QVERIFY(!modeSwitch->isVisible());
-    // Turned off once more, the switch is on the plot again.
+    // Turned off once more, the switch is on its plate again.
     QVERIFY(bridge->setProperty("showFullscreenTitleStrip", false));
     QTRY_VERIFY(modeSwitch->isVisible());
     QVERIFY(!strip->isVisible());
@@ -4343,6 +4297,455 @@ void TransportInputSmokeTest::panShowsAClosedHandInThePaneAndTheViewers() {
         QVERIFY(QTest::qWaitForWindowActive(window));
         QTRY_VERIFY2(waveform->isVisible(), where.constData());
     }
+}
+
+// Reset is one control in the viewers, windowed and in the title strip: the
+// zoom-original glyph in a button as wide as Close, named and explained by
+// its tooltip (the strip said "Reset" in a word beside the window's glyph).
+void TransportInputSmokeTest::viewerResetIsTheSameGlyphWindowedAndInTheStrip() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *art = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge && viewer && spectrogram && art);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    QAccessible::setActive(true);
+    const QScopeGuard stopAccessibility([]() { QAccessible::setActive(false); });
+
+    for (const bool albumArt : {false, true}) {
+        for (const int fullscreenMode : {0, 1}) {
+            const QString where = QStringLiteral("album art %1, fullscreen %2").arg(albumArt).arg(fullscreenMode);
+            bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+            QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "openAlbumArtViewer" : "openSpectrogramViewer"));
+            QQuickItem *view = albumArt ? art : spectrogram;
+            QQuickWindow *host = window;
+            if (fullscreenMode == 1) {
+                QTRY_VERIFY(view->window() != nullptr && view->window() != window);
+                host = view->window();
+                QVERIFY(QTest::qWaitForWindowExposed(host));
+            }
+            if (albumArt) {
+                art->setProperty("zoom", 2.0);
+            } else {
+                QTRY_VERIFY(spectrogram->property("viewerMode").toBool());
+                spectrogram->setProperty("_viewerZoomLevel", 2.0);
+            }
+            const QString closeName = albumArt
+                ? (fullscreenMode ? QStringLiteral("albumArtFullscreenCloseButton")
+                                  : QStringLiteral("albumArtPopupCloseButton"))
+                : (fullscreenMode ? QStringLiteral("spectrogramFullscreenCloseButton")
+                                  : QStringLiteral("spectrogramPopupCloseButton"));
+            QQuickItem *reset = nullptr;
+            QTRY_VERIFY2((reset = visibleItemNamed(host, QStringLiteral("viewerResetButton"))) != nullptr
+                             || (reset = visibleItemNamed(host, QStringLiteral("plotZoomResetButton"))) != nullptr,
+                         qPrintable(where));
+            QQuickItem *close = visibleItemNamed(host, closeName);
+            QVERIFY2(close != nullptr, qPrintable(where));
+            QVERIFY2(reset->property("display").toInt() == 0, qPrintable(where)); // AbstractButton.IconOnly
+            QCOMPARE(QQmlProperty(reset, QStringLiteral("icon.name")).read().toString(),
+                     QStringLiteral("zoom-original"));
+            QCOMPARE(reset->size(), close->size());
+            const QString tip = albumArt
+                ? (fullscreenMode ? QStringLiteral("Fit the Image to the Screen")
+                                  : QStringLiteral("Fit the Image to the Window"))
+                : QStringLiteral("Reset Zoom");
+            QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(reset);
+            QVERIFY(accessible != nullptr);
+            QCOMPARE(accessible->text(QAccessible::Name), tip);
+            // The tooltip is the button's toolTipText, or its name without one.
+            const QVariant toolTip = reset->property("toolTipText");
+            QCOMPARE(toolTip.isValid() ? toolTip.toString() : reset->property("text").toString(), tip);
+
+            if (albumArt) {
+                art->setProperty("zoom", 1.0);
+            } else {
+                spectrogram->setProperty("_viewerZoomLevel", 0.0);
+            }
+            QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "closeAlbumArtViewer" : "closeSpectrogramViewer"));
+            QTRY_VERIFY(!viewer->property(albumArt ? "albumArtViewerOpen" : "spectrogramViewerOpen").toBool());
+            window->requestActivate();
+            QVERIFY(QTest::qWaitForWindowActive(window));
+        }
+    }
+}
+
+// The visualization viewer has one toolbar, windowed, in the title strip,
+// and on the plot with the strip turned off: [zoom] [warning] [modes]
+// [close], the chosen mode the plot's text at 18 % in its edge (in the
+// window it was a slab of 35 to 44 %), the other's glyph whole (in the
+// window at 72 %), and the warning in one colour (in the window it was the
+// plot's text, right of the modes). A new warning moves neither the modes
+// nor Close. On both plots, rolling and centred.
+void TransportInputSmokeTest::viewerToolbarIsOneVocabularyWindowedAndInTheStrip() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QVERIFY(bridge && palette && viewer && autoHide && spectrogram && waveformSurface && layer);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    autoHide->setProperty("hideDelay", 600000);
+
+    // A shown button by its name, whichever component draws it.
+    const auto buttonNamed = [](QQuickWindow *host, const QString &text) -> QQuickItem * {
+        QList<QQuickItem *> items;
+        collectQuickItems(host->contentItem(), &items);
+        for (QQuickItem *item : items) {
+            if (item->isVisible() && item->property("checked").isValid() && item->property("text").toString() == text) {
+                return item;
+            }
+        }
+        return nullptr;
+    };
+    const auto partOf = [](QQuickItem *button, const QString &name) {
+        QQuickItem *part = itemNamed(button, QStringLiteral("viewerToolButton") + name);
+        return part != nullptr ? part : itemNamed(button, QStringLiteral("plotToolButton") + name);
+    };
+    // Where the modes and Close are from the window's right, by the case.
+    QHash<QString, QList<double>> withoutWarning;
+    for (const bool warning : {false, true}) {
+        if (warning) {
+            QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, QStringLiteral("It failed.")),
+                                              Q_ARG(int, 1), Q_ARG(int, 0),
+                                              Q_ARG(QString, QStringLiteral("/music/bad.flac"))));
+        }
+        struct Presentation {
+            int fullscreenMode;
+            bool strip;
+        };
+        for (const Presentation &shown : {Presentation{0, true}, Presentation{1, true}, Presentation{1, false}}) {
+            bridge->setProperty("viewerFullscreenMode", shown.fullscreenMode);
+            bridge->setProperty("showFullscreenTitleStrip", shown.strip);
+            const bool closeShown = shown.fullscreenMode == 0 || shown.strip;
+            QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+            QTRY_VERIFY(spectrogram->property("viewerMode").toBool());
+            QQuickWindow *host = window;
+            if (shown.fullscreenMode == 1) {
+                QTRY_VERIFY(spectrogram->window() != nullptr && spectrogram->window() != window);
+                host = spectrogram->window();
+                QVERIFY(QTest::qWaitForWindowExposed(host));
+            }
+            // Off every button, so none is drawn hovered.
+            QTest::mouseMove(host, QPoint(host->width() / 2, host->height() / 2));
+            QVERIFY(QMetaObject::invokeMethod(autoHide, "wake"));
+            for (const int displayMode : {0, 1}) {
+                bridge->setProperty("spectrogramDisplayMode", displayMode);
+                for (const int mode : {0, 1}) {
+                    viewer->setProperty("visualizationMode", mode);
+                    const QString where = QStringLiteral("fullscreen %1, strip %2, display %3, mode %4")
+                                              .arg(shown.fullscreenMode).arg(shown.strip).arg(displayMode).arg(mode);
+                    const QString chosenName = mode == 0 ? QStringLiteral("Spectrogram") : QStringLiteral("Waveform");
+                    const QString otherName = mode == 0 ? QStringLiteral("Waveform") : QStringLiteral("Spectrogram");
+                    QQuickItem *chosen = nullptr;
+                    QQuickItem *other = nullptr;
+                    QTRY_VERIFY2((chosen = buttonNamed(host, chosenName)) != nullptr
+                                     && (other = buttonNamed(host, otherName)) != nullptr
+                                     && chosen->property("checked").toBool(),
+                                 qPrintable(where));
+                    QObject *plot = qvariant_cast<QObject *>(
+                        palette->property(mode == 0 ? "spectrogramPlot" : "waveformPlot"));
+                    QVERIFY(plot != nullptr);
+
+                    QQuickItem *fill = partOf(chosen, QStringLiteral("Checked"));
+                    QQuickItem *edge = partOf(chosen, QStringLiteral("CheckedEdge"));
+                    QQuickItem *otherIcon = partOf(other, QStringLiteral("Icon"));
+                    QVERIFY2(fill && edge && otherIcon, qPrintable(where));
+                    const QColor text = plot->property("plotText").value<QColor>();
+                    const QColor fillColor = fill->property("color").value<QColor>();
+                    QVERIFY2(std::abs(fillColor.alphaF() - 0.18) < 0.01,
+                             qPrintable(QStringLiteral("%1: filled at %2").arg(where).arg(fillColor.alphaF())));
+                    QCOMPARE(fillColor.rgb(), text.rgb());
+                    QCOMPARE(QQmlProperty(edge, QStringLiteral("border.color")).read().value<QColor>().rgba(),
+                             colorOf(plot, "segmentEdge"));
+                    QCOMPARE(otherIcon->property("color").value<QColor>(), text);
+                    QVERIFY2(otherIcon->opacity() == 1.0,
+                             qPrintable(QStringLiteral("%1: the other glyph at %2").arg(where).arg(otherIcon->opacity())));
+
+                    // Zoomed: the readout and Reset come first.
+                    if (mode == 0) {
+                        spectrogram->setProperty("_viewerZoomLevel", 2.0);
+                    } else {
+                        waveform->setZoomLevel(4.0);
+                    }
+                    QQuickItem *reset = nullptr;
+                    QTRY_VERIFY2((reset = buttonNamed(host, QStringLiteral("Reset Zoom"))) != nullptr
+                                     && sceneRectOf(reset).right() < sceneRectOf(buttonNamed(host, QStringLiteral("Spectrogram"))).left(),
+                                 qPrintable(where));
+                    QQuickItem *close = closeShown
+                        ? visibleItemNamed(host, shown.fullscreenMode == 1
+                                                     ? QStringLiteral("spectrogramFullscreenCloseButton")
+                                                     : QStringLiteral("spectrogramPopupCloseButton"))
+                        : nullptr;
+                    QVERIFY2(!closeShown || close != nullptr, qPrintable(where));
+                    QList<double> places;
+                    for (QQuickItem *button : {buttonNamed(host, QStringLiteral("Spectrogram")),
+                                               buttonNamed(host, QStringLiteral("Waveform")), close}) {
+                        if (button != nullptr) {
+                            places.append(host->width() - sceneRectOf(button).left());
+                        }
+                    }
+                    if (!warning) {
+                        withoutWarning.insert(where, places);
+                    } else {
+                        QVERIFY2(places == withoutWarning.value(where), qPrintable(where + QStringLiteral(": moved")));
+                        if (closeShown) {
+                            QQuickItem *issues = visibleItemNamed(host, QStringLiteral("viewerIssuesButton"));
+                            QVERIFY2(issues != nullptr, qPrintable(where));
+                            QVERIFY2(sceneRectOf(reset).right() < sceneRectOf(issues).left()
+                                         && sceneRectOf(issues).right()
+                                             < sceneRectOf(buttonNamed(host, QStringLiteral("Spectrogram"))).left(),
+                                     qPrintable(where + QStringLiteral(": the warning is out of order")));
+                            // The negative where the plot is as dark as the window, the plot's text otherwise.
+                            const bool asTheWindow = (plot->property("plotBg").value<QColor>().lightnessF() < 0.45)
+                                == palette->property("themeIsDark").toBool();
+                            QCOMPARE(partOf(issues, QStringLiteral("Icon"))->property("color").value<QColor>(),
+                                     asTheWindow ? palette->property("negative").value<QColor>() : text);
+                        }
+                    }
+                    if (mode == 0) {
+                        spectrogram->setProperty("_viewerZoomLevel", 0.0);
+                    } else {
+                        waveform->setZoomLevel(1.0);
+                    }
+                }
+            }
+            viewer->setProperty("visualizationMode", 0);
+            QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+            QTRY_VERIFY(!spectrogram->property("viewerMode").toBool());
+        }
+    }
+}
+
+void TransportInputSmokeTest::viewerStripIsOnOneTypeScale_data() {
+    QTest::addColumn<int>("points");
+    QTest::newRow("10 pt") << 10;
+    QTest::newRow("24 pt") << 24;
+}
+
+// The title strip has one type scale: its zoom readout is at the strip's
+// text size, 1.2 times the window's, as the time beside it (it was the
+// window's small size, 12 px in a 16 px strip), and the gaps between the
+// title, the album and the time follow the font (14 px beside 38 px type,
+// the album and the time ran together at 24 pt).
+void TransportInputSmokeTest::viewerStripIsOnOneTypeScale() {
+    QFETCH(int, points);
+    const ScopedApplicationFont font(points);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *art = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge && viewer && spectrogram && art);
+    setPlayingTrack(bridge);
+    // Short enough that none of them is elided in the test's screen.
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Tide"));
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Q"));
+    bridge->setProperty("currentTrackAlbum", QString());
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("viewerFullscreenMode", 1);
+    for (const bool albumArt : {false, true}) {
+        QQuickItem *view = albumArt ? art : spectrogram;
+        QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "openAlbumArtViewer" : "openSpectrogramViewer"));
+        QTRY_VERIFY(view->window() != nullptr && view->window() != window);
+        QQuickWindow *host = view->window();
+        QVERIFY(QTest::qWaitForWindowExposed(host));
+        if (albumArt) {
+            art->setProperty("zoom", 2.0);
+        } else {
+            QTRY_VERIFY(spectrogram->property("viewerMode").toBool());
+            spectrogram->setProperty("_viewerZoomLevel", 2.0);
+        }
+        QQuickItem *readout = nullptr;
+        QTRY_VERIFY((readout = visibleItemNamed(host, QStringLiteral("viewerZoomReadout"))) != nullptr);
+        QQuickItem *title = visibleItemNamed(host, QStringLiteral("viewerStripTitle"));
+        QQuickItem *context = visibleItemNamed(host, QStringLiteral("viewerStripContext"));
+        QQuickItem *time = visibleItemNamed(host, QStringLiteral("viewerStripTime"));
+        QVERIFY(title && context && time);
+        const qreal size = qvariant_cast<QFont>(time->property("font")).pointSizeF();
+        QVERIFY(qAbs(size - points * 1.2) < 0.01);
+        const qreal readoutSize = qvariant_cast<QFont>(readout->property("font")).pointSizeF();
+        QVERIFY2(qAbs(readoutSize - size) < 0.01, qPrintable(QStringLiteral("the readout at %1").arg(readoutSize)));
+        // 14 px at 10 pt, as much more as the font is larger.
+        const qreal gap = std::round(14.0 * points / 10.0);
+        const auto between = [](QQuickItem *left, QQuickItem *right) {
+            return right->mapToScene(QPointF(0, 0)).x() - left->mapToScene(QPointF(left->width(), 0)).x();
+        };
+        QTRY_VERIFY2(qAbs(between(title, context) - gap) < 0.01 && qAbs(between(context, time) - gap) < 0.01,
+                     qPrintable(QStringLiteral("gaps of %1 and %2").arg(between(title, context)).arg(between(context, time))));
+        if (albumArt) {
+            art->setProperty("zoom", 1.0);
+        } else {
+            spectrogram->setProperty("_viewerZoomLevel", 0.0);
+        }
+        QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "closeAlbumArtViewer" : "closeSpectrogramViewer"));
+        QTRY_VERIFY(!viewer->property(albumArt ? "albumArtViewerOpen" : "spectrogramViewerOpen").toBool());
+    }
+}
+
+void TransportInputSmokeTest::viewerDragsCountAsPointerActivity_data() {
+    // 0 the spectrogram, 1 the waveform, 2 the album art.
+    QTest::addColumn<int>("view");
+    QTest::addColumn<int>("displayMode");
+    QTest::addColumn<int>("fullscreenMode");
+    for (const int fullscreenMode : {0, 1}) {
+        const QByteArray where = fullscreenMode == 1 ? ", whole screen" : ", window";
+        QTest::newRow(("spectrogram, rolling" + where).constData()) << 0 << 0 << fullscreenMode;
+        QTest::newRow(("spectrogram, centred" + where).constData()) << 0 << 1 << fullscreenMode;
+        QTest::newRow(("waveform, rolling" + where).constData()) << 1 << 0 << fullscreenMode;
+        QTest::newRow(("waveform, centred" + where).constData()) << 1 << 1 << fullscreenMode;
+        QTest::newRow(("album art" + where).constData()) << 2 << 1 << fullscreenMode;
+    }
+}
+
+// A drag on the plot or the art is pointer activity, for as long as the
+// button is down: a pan longer than the hide delay, paused in it or not,
+// keeps its hand and its crosshair (the hover that counted as activity
+// stops while a button is down, so they left 5 s into a pan). Let go, the
+// controls hide after the delay again; a press that moves nothing does not
+// hold them.
+void TransportInputSmokeTest::viewerDragsCountAsPointerActivity() {
+    QFETCH(int, view);
+    QFETCH(int, displayMode);
+    QFETCH(int, fullscreenMode);
+    const bool albumArt = view == 2;
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(albumArt ? QStringLiteral("albumArtFullscreenControlsAutoHide")
+                                                              : QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    auto *art = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge && viewer && autoHide && art && spectrogram && waveformSurface);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("spectrogramDisplayMode", displayMode);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+    if (view == 1) {
+        viewer->setProperty("visualizationMode", 1);
+        QTRY_VERIFY(waveform->isVisible());
+    }
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "openAlbumArtViewer" : "openSpectrogramViewer"));
+    QQuickItem *surface = albumArt ? art : (view == 1 ? waveformSurface : spectrogram);
+    QQuickWindow *host = window;
+    if (fullscreenMode == 1) {
+        QTRY_VERIFY(surface->window() != nullptr && surface->window() != window);
+        host = surface->window();
+        QVERIFY(QTest::qWaitForWindowExposed(host));
+    } else {
+        QObject *popup = window->findChild<QObject *>(albumArt ? QStringLiteral("albumArtViewerPopup")
+                                                               : QStringLiteral("spectrogramViewerPopup"));
+        QTRY_VERIFY(popup->property("opened").toBool());
+    }
+    if (albumArt) {
+        QTRY_COMPARE(art->property("imageStatus").toInt(), 1);
+        art->setProperty("zoom", 4.0);
+    } else {
+        QTRY_VERIFY(spectrogram->property("viewerMode").toBool());
+        if (view == 1) {
+            waveform->setZoomLevel(4.0);
+        } else {
+            spectrogram->setProperty("_viewerZoomLevel", 4.0);
+        }
+    }
+    const QPoint from = sceneRectOf(surface).center().toPoint();
+    QTest::mouseMove(host, from + QPoint(1, 1));
+    QTest::mouseMove(host, from);
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    const Qt::MouseButton button = albumArt ? Qt::LeftButton : Qt::MiddleButton;
+    constexpr int delay = 120;
+
+    QTest::mousePress(host, button, Qt::NoModifier, from);
+    QPoint at = from;
+    at.rx() -= 40;
+    QTest::mouseMove(host, at);
+    autoHide->setProperty("hideDelay", delay);
+    const auto kept = [&]() -> QString {
+        if (!autoHide->property("controlsVisible").toBool() || autoHide->property("level").toDouble() < 1.0) {
+            return QStringLiteral("the controls left");
+        }
+        if (albumArt || view == 1) {
+            // The hand of the pan.
+            if (host->cursor().shape() != Qt::ClosedHandCursor) {
+                return QStringLiteral("the hand left: %1").arg(int(host->cursor().shape()));
+            }
+        } else if (host->cursor().shape() == Qt::BlankCursor) {
+            return QStringLiteral("the pointer left");
+        }
+        if (view == 1 && waveform->property("crosshairOpacity").toDouble() < 1.0) {
+            return QStringLiteral("the waveform's crosshair left");
+        }
+        if (view == 0) {
+            for (QQuickItem *lane : itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))) {
+                if (lane->property("crosshairOpacity").toDouble() < 1.0) {
+                    return QStringLiteral("the spectrogram's crosshair left");
+                }
+            }
+        }
+        return {};
+    };
+    // Dragging for longer than the delay, then resting in the drag as long.
+    for (int step = 0; step < 14; ++step) {
+        QTest::qWait(delay / 4);
+        if (step < 7) {
+            at.rx() -= 4;
+            QTest::mouseMove(host, at);
+        }
+        QVERIFY2(kept().isEmpty(), qPrintable(QStringLiteral("step %1: %2").arg(step).arg(kept())));
+    }
+    QTest::mouseRelease(host, button, Qt::NoModifier, at);
+    QVERIFY(autoHide->property("controlsVisible").toBool());
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+
+    // A press that moves nothing holds nothing.
+    autoHide->setProperty("hideDelay", 600000);
+    QTest::mouseMove(host, from + QPoint(7, 3));
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    QTest::mousePress(host, button, Qt::NoModifier, from + QPoint(7, 3));
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    QTest::mouseRelease(host, button, Qt::NoModifier, from + QPoint(7, 3));
+
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "closeAlbumArtViewer" : "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property(albumArt ? "albumArtViewerOpen" : "spectrogramViewerOpen").toBool());
 }
 
 std::unique_ptr<QmlSmokeTest> makeTransportInputSmokeTest(const QString &userDirectoriesParent) {

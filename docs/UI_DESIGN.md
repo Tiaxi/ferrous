@@ -157,7 +157,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **Selected:** `selection` in a focused list, and `selectionInactive` without focus. A selected queue row under the pointer moves toward `selectionHovered`. Tertiary text on a selected row moves up (`textTertiaryOn`).
 - **Checked:** on the window's colours, a checked tool button gets the selection tint alone, with no ring. On a plot:
   - a state that is on, such as Mute or Solo, gets a solid `checkedFill`;
-  - the chosen segment of a choice, such as the mode switch, gets a neutral plate with a 1 px `segmentEdge`.
+  - the chosen segment of a choice, such as the mode switch, gets a neutral plate with a 1 px `segmentEdge`. On a viewer's strip and corner plate it is the plot's text colour at 18 %, as the info toggle, and the other glyphs are whole.
 
   A solid accent there read as keyboard focus and outshone the data.
 - **The now-playing marks:**
@@ -186,8 +186,8 @@ Durations are Kirigami's (`shortDuration` 100 ms, `longDuration` 200 ms, `veryLo
 | search results while a newer query runs | none: they keep their contrast and their query's bold runs. A search still running 250 ms after its query dims them, `shortDuration`, OutCubic, and they come back at once. The 250 ms is the busy indicator's threshold, an animation's pause: without it the list flashed on every keystroke |
 | tree expand and collapse | rows below slide over the children, `longDuration`, OutCubic |
 | queue reorder by drag | displaced rows slide, `shortDuration`, OutCubic. A keyboard reorder is instant |
-| viewer controls auto-hiding | after 5 s at rest, one shared level fades the strip, plates, mode switch, lane buttons and crosshair together, `shortDuration`, OutCubic. The controls stay while they have keyboard focus |
-| album art details | the column slides in and the art glides with it over 120 ms, OutCubic |
+| viewer controls auto-hiding | after 5 s at rest, one shared level fades the strip, plates, mode switch, lane buttons and crosshair together: out over `shortDuration` × 2.5 (250 ms), InOutQuad, and back in over `shortDuration`, OutCubic. A drag counts as activity for as long as it lasts. The controls stay while they have keyboard focus |
+| album art details | the column slides in and the art glides with it over `shortDuration` × 1.8 (180 ms), InOutQuad |
 | playhead, seek, spectrogram scrolling | never tweened |
 | meter or scale toggled | one step |
 
@@ -205,11 +205,13 @@ The settled rules for presentation only. For internals, see [visualization archi
 - **Media surfaces are always dark.** The album art viewer draws the art on black, with its details in `mediaPlot`'s strip colour, in both themes. A white surround outshone the art.
 - **The plot's playhead is never amber.** Amber is a data colour in the colour map. The seek bar's playhead is the only amber playhead.
 - **One control surface per viewer.**
-  - In the window, the visualization viewer's mode switch, the new-issues button and Close share one corner plate, divided by 1 px seams. Separate plates read as a row of stickers.
-  - Over the whole screen, while the title strip is on, the strip holds them all, so no second cluster sits under it. With the strip turned off, they stay on the plot.
+  - The viewers' corner plate and title strip use the same buttons (`ViewerControls`) in one order: zoom and Reset's glyph, new issues, the viewer's own buttons, Close. The plot's own mode switch and zoom plate are the main pane's alone.
+  - In the window, they share one corner plate, divided by 1 px seams. Separate plates read as a row of stickers.
+  - Over the whole screen, while the title strip is on, the strip holds them all, so no second cluster sits under it. With the strip turned off, the zoom and the modes are on a corner plate.
   - The strip is opaque, is drawn over the view, and never resizes the view.
-- **The album art info column** is about 40 characters wide: 280 px with its seam at 10 pt, up to 320 px in a wide window, and 336 px over the whole screen. Its text is on the viewer's type scale. The art fits and centres in the room to the left of the seam, with a 16 px gutter (24 px during a preview). It glides as the column opens and never touches the seam.
-- **Text on the viewers uses one type scale.** Over the whole screen, the strip and the details are both 1.2× the window's text, so the file name never outranks the track title.
+  - Under the strip, the first lane's label cross-fades with the controls between the strip's lower edge and the place the other lanes' labels have. Nothing travels.
+- **The album art info column** is about 40 characters wide: 280 px with its seam at 10 pt, up to 320 px in a wide window, and 336 px over the whole screen. Its text is on the viewer's type scale. The art fits and centres in the room to the left of the seam, with a 16 px gutter (24 px during a preview). It glides as the column opens and never touches the seam. In a window the corner plate's fill and edge fade out as the column comes under it, so it draws no box in a box. Copy Path is on the "Folder" label's line, on one axis with Close above it, and the path has the column's width under them.
+- **Text on the viewers uses one type scale.** Over the whole screen, the strip, its zoom readout and the details are all 1.2× the window's text, and the strip's gaps follow the font, so the file name never outranks the track title.
 
 ## Tried and rejected
 

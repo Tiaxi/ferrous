@@ -1,60 +1,56 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
-import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "." as Components
 
-// The controls of the visualization viewer in the main window, which has
-// no title strip: in the top right corner, in the plot's colours, right of
-// the plot's mode switch, on the one plate the plot layer draws under both
-// with `bare`, or on a plate of their own. The new issues while there are
-// any, and Close: 24 px tool buttons, 4 px apart with 3 px around, as the
-// mode switch's beside it, so a focus ring stays inside the plate and
-// clear of the other button. The zoom is on the plot, left of the mode
-// switch, as in the main pane and over the whole screen: [Zoom ↺] [mode]
-// [✕] everywhere.
-//
-// The items are placed by bindings rather than the plate's Row: a
-// positioner places an item that has just appeared only when the window
-// next draws, so Close would show where it was last, on a plate of the old
-// width, until then.
+// The visualization viewer's controls where it has no title strip: in the
+// window, and over the whole screen with the strip turned off. They are the
+// strip's own (ViewerControls), in the plot's colours on one plate in the
+// top right corner: [Zoom ↺] | [⚠] [modes] | [✕], the modes declared inside
+// it as they are inside the strip. So the viewer has one toolbar everywhere
+// (the corner's buttons were the plot's, with another checked fill, glyph
+// ink, warning colour and order than the strip's). Over the whole screen
+// without the strip, whose keys and double-click do what its Close does,
+// `closeShown` is false. The plate is as tall as the plot's, with 4 px
+// around the buttons, so its top and centre line are the lane heads'.
 Item {
     id: root
 
     required property var plotColors
     required property var uiPalette
     required property var closeViewer
+    property bool closeShown: true
     property bool controlsVisible: true
     // The controls as they fade (FullscreenControlsAutoHide's level); at
     // once without one.
     property real controlsLevel: root.controlsVisible ? 1 : 0
+    // Whether the plate may show at all.
+    property bool available: true
     property var pointerActivity: null
+    // The plot's zoom, 1 at the default; Reset calls resetView.
+    property real zoomLevel: 1.0
+    property var resetView: null
     property var errorController: null
     property string closeButtonName: "viewerCloseButton"
-    // Without a plate of its own, on one the plot layer draws under it and
-    // the mode switch.
-    property bool bare: false
+    // The viewer's own buttons, before Close.
+    default property alias viewerControls: controls.viewerControls
 
-    readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
-    // As the mode switch's: a focus ring stays 1 px inside the plate.
     readonly property real padding: 4
-    readonly property real spacing: 4
-    readonly property bool issuesShown: root.unseenIssueCount > 0
 
-    implicitWidth: closeButton.x + closeButton.width + root.padding
-    implicitHeight: root.uiPalette.toolButtonSize + 2 * root.padding
+    implicitWidth: controls.implicitWidth + 2 * root.padding
+    implicitHeight: controls.implicitHeight + 2 * root.padding
     // As the title strip of the viewer over the whole screen: shown at once,
     // so the key that brings the controls back can move focus to them; it
     // fades out on the strip's curve, and hidden it takes no pointer.
     opacity: root.controlsLevel
-    visible: root.controlsVisible || root.controlsLevel > 0
+    visible: root.available && (root.controlsVisible || root.controlsLevel > 0)
 
     Accessible.role: Accessible.Grouping
     Accessible.name: I18n.i18nc("@label", "Viewer")
 
     // Whether the pointer is on the plate, which counts as on the view.
-    readonly property bool hovered: cornerHover.hovered
+    readonly property bool hovered: root.visible && cornerHover.hovered
 
     HoverHandler {
         id: cornerHover
@@ -69,36 +65,27 @@ Item {
     Components.PlotPlate {
         objectName: "viewerCornerPlate"
         anchors.fill: parent
-        bare: root.bare
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         takesPointer: true
         Accessible.ignored: true
     }
 
-    Components.PlotToolButton {
-        id: issuesButton
-        objectName: "viewerIssuesButton"
+    Components.ViewerControls {
+        id: controls
+        objectName: "viewerCornerButtons"
         x: root.padding
         y: root.padding
-        visible: root.issuesShown
-        plotColors: root.plotColors
         uiPalette: root.uiPalette
-        text: I18n.i18nc("@info:tooltip %1 is the issue count", "%1: Show Recent Issues",
-            I18n.i18ncp("@action:button", "%1 new issue", "%1 new issues", root.unseenIssueCount))
-        icon.name: Qt.resolvedUrl("../assets/status-warning.svg")
-        onClicked: root.errorController.historyRequested()
-    }
-
-    Components.PlotToolButton {
-        id: closeButton
-        objectName: root.closeButtonName
-        x: issuesButton.x + (root.issuesShown ? issuesButton.width + root.spacing : 0)
-        y: root.padding
         plotColors: root.plotColors
-        uiPalette: root.uiPalette
-        text: I18n.i18nc("@action:button", "Close")
-        icon.name: "window-close"
-        onClicked: root.closeViewer()
+        platePadding: root.padding
+        closeViewer: root.closeViewer
+        closeShown: root.closeShown
+        closeButtonName: root.closeButtonName
+        zoomLevel: root.zoomLevel
+        resetView: root.resetView
+        errorController: root.errorController
+        dividers: true
+        closeDivided: true
     }
 }

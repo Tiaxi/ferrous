@@ -1830,12 +1830,10 @@ ApplicationWindow {
         // showed it.
         readonly property bool inViewer: visualizationSurface.parent !== spectrogramPane.hostItem
         // What the plot keeps clear of in its top right corner: the mode
-        // switch, and in the viewer in the main window its controls beside it.
-        readonly property size reservedCorner: Qt.size(
-            plotLayer.reservedCorner.width - plotLayer.meterWidth,
-            Math.max(plotLayer.reservedCorner.height,
-                     visualizationSurface.inViewer
-                         ? spectrogramViewerShell.reservedCorner.height : 0))
+        // switch in the pane, and in a viewer the plate of its own controls.
+        readonly property size reservedCorner: visualizationSurface.inViewer
+            ? spectrogramViewerShell.reservedCorner
+            : Qt.size(plotLayer.reservedCorner.width - plotLayer.meterWidth, plotLayer.reservedCorner.height)
         readonly property bool spectrogramShown: viewerController.visualizationMode === 0
 
         // The mode switch (#373 Motion): the plot that shows whole stays on
@@ -2131,8 +2129,6 @@ ApplicationWindow {
             controlsLevel: spectrogramViewerShell.fullscreenControlsLevel
             controlsAutoHide: visualizationSurface.inViewer
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
-            trailingInset: visualizationSurface.inViewer
-                ? spectrogramViewerShell.reservedCorner.width : 0
             topInset: spectrogramViewerShell.controlsTopInset
             laneCount: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.laneCount : waveformSurface.laneCount
@@ -2140,7 +2136,8 @@ ApplicationWindow {
                 ? spectrogramSurface.laneLabels : waveformSurface.laneLabels
             hoveredLane: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.hoveredLane : waveformSurface.hoveredLane
-            paneHovered: visualizationHover.hovered || spectrogramViewerShell.controlsHovered
+            paneHovered: visualizationHover.hovered
+            viewerPlateHovered: spectrogramViewerShell.cornerHovered
             pointerKnown: plotLayer.hoveredLane >= 0
             pointerPosition: plotLayer.mapFromItem(null, visualizationSurface.spectrogramShown
                 ? spectrogramSurface.pointerScenePosition : waveformSurface.pointerScenePosition)
@@ -2151,7 +2148,7 @@ ApplicationWindow {
             openIssues: function() { errorController.historyRequested() }
             zoomLevel: visualizationSurface.zoomLevel
             resetZoom: visualizationSurface.resetZoom
-            controlsInViewer: spectrogramViewerShell.controlsInStrip
+            controlsInViewer: visualizationSurface.inViewer
         }
     }
 
@@ -2174,7 +2171,7 @@ ApplicationWindow {
         errorController: errorController
         uiBridge: root.uiBridge
         positionText: playbackController.positionText
-        cornerRightMargin: (plotLayer.meterShown ? plotLayer.meterWidth : 0) + plotLayer.plateInset
+        meterWidth: plotLayer.meterWidth
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
         zoomLevel: visualizationSurface.zoomLevel
         resetZoom: visualizationSurface.resetZoom
@@ -2224,6 +2221,9 @@ ApplicationWindow {
         uiBridge: root.uiBridge
         positionText: playbackController.positionText
         infoVisible: viewerController.albumArtInfoVisible
+        infoReveal: albumArtSurface.infoReveal
+        artCursorShape: albumArtSurface.pointerCursorShape
+        infoWidth: albumArtSurface.infoWidth
         zoomLevel: albumArtSurface.zoom
         resetView: albumArtSurface.resetView
         previewActive: viewerController.albumArtPreviewActive
@@ -2264,6 +2264,7 @@ ApplicationWindow {
         infoTopInset: root.useWholeScreenViewerMode
             ? albumArtViewerShell.stripHeight
             : albumArtViewerShell.popupControlsBottom
+        controlsAxisInset: albumArtViewerShell.closeAxisInset
         previewActive: viewerController.albumArtPreviewActive
         previewLabel: viewerController.comparisonLabel
         previewHasCandidate: itunesArtworkDialog.previewShown && itunesArtworkDialog.previewIndex >= 0

@@ -36,6 +36,9 @@ Item {
     // In a viewer, buttons that show on the pointer show with the viewer's
     // controls, which the pointer's activity shows, on their level alone.
     property bool revealedWithControls: false
+    // How much of the label shows here: less where the plot layer fades it
+    // over to another place.
+    property real labelLevel: 1
     property bool compact: false
     property bool laneHovered: false
     property var toggleMute: function() {}
@@ -97,6 +100,7 @@ Item {
         uiPalette: root.uiPalette
         text: root.label
         compact: root.compact
+        fadeLevel: root.labelLevel
 
     }
 

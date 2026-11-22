@@ -1091,6 +1091,13 @@ private slots:
     void windowedViewerClosesOverItsLastFrame();
     void albumArtViewerControlsFadeOnOneLevel_data();
     void albumArtViewerControlsFadeOnOneLevel();
+    void viewerControlsHideAsAFadeAndShowQuicker_data();
+    void viewerControlsHideAsAFadeAndShowQuicker();
+    void firstLanesLabelRestsWhereTheOtherLanesDo_data();
+    void firstLanesLabelRestsWhereTheOtherLanesDo();
+    void albumArtDetailsToggleGlides();
+    void albumArtPlateGivesWayToTheDetailsColumn_data();
+    void albumArtPlateGivesWayToTheDetailsColumn();
 };
 
 void UiMotionTest::initTestCase() {
@@ -5747,15 +5754,12 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
                                                                        : QStringLiteral("spectrogramPopupControls"));
     QQuickItem *modeSwitch = itemNamed(host->contentItem(), QStringLiteral("visualizationModeSwitch"));
     QVERIFY(controls && modeSwitch);
-    // Over the whole screen, the mode switch is in the strip, which it fades
-    // with as its part; in the window, it is the plot's.
+    // The mode switch is in the viewer's controls, the strip or the corner
+    // plate, which it fades with as their part.
     QList<QQuickItem *> followers;
-    if (wholeScreen) {
-        QVERIFY(controls->isAncestorOf(itemNamed(controls, QStringLiteral("spectrogramStripModeSwitch"))));
-        QVERIFY(!modeSwitch->isVisible());
-    } else {
-        followers << modeSwitch;
-    }
+    QVERIFY(controls->isAncestorOf(itemNamed(controls, wholeScreen ? QStringLiteral("spectrogramStripModeSwitch")
+                                                                   : QStringLiteral("spectrogramPopupModeSwitch"))));
+    QTRY_VERIFY(!modeSwitch->isVisible());
     QTRY_COMPARE(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).size(), 2);
     followers.append(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")));
     // The pointer resting on the view, which reveals the mode switch.
@@ -5930,27 +5934,27 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
     QTRY_COMPARE(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).size(), 2);
     QQuickItem *laneButtons = itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).first();
     // Each plate's fill and a glyph on it. In the window, the mode switch
-    // and the viewer's controls are on the corner's one plate, which the
-    // plot layer draws.
+    // and the viewer's other controls are on the corner's one plate.
     // Over the whole screen, the mode switch is on the strip, with no plate
     // of its own.
-    QQuickItem *cornerPlate = wholeScreen ? nullptr : itemNamed(host->contentItem(), QStringLiteral("plotCornerPlate"));
+    QQuickItem *cornerPlate = wholeScreen ? nullptr : itemNamed(controls, QStringLiteral("viewerCornerPlate"));
     QList<QPair<QString, QQuickItem *>> drawn{
         {QStringLiteral("the mode switch's icon"),
-         wholeScreen ? itemNamed(itemNamed(controls, QStringLiteral("spectrogramStripModeButton0")),
-                                 QStringLiteral("viewerToolButtonIcon"))
-                     : itemNamed(modeSwitch, QStringLiteral("plotToolButtonIcon"))},
+         itemNamed(itemNamed(controls, wholeScreen ? QStringLiteral("spectrogramStripModeButton0")
+                                                   : QStringLiteral("spectrogramPopupModeButton0")),
+                   QStringLiteral("viewerToolButtonIcon"))},
         {QStringLiteral("the lane's plate"), itemNamed(laneButtons, QStringLiteral("plotPlateFill"))},
         {QStringLiteral("the lane's M"), itemNamed(laneButtons, QStringLiteral("plotToolButtonGlyph"))},
         {QStringLiteral("the viewer's controls"), controls},
         {QStringLiteral("the viewer's Close"),
          itemNamed(itemNamed(controls, wholeScreen ? QStringLiteral("spectrogramFullscreenCloseButton")
                                                    : QStringLiteral("spectrogramPopupCloseButton")),
-                   wholeScreen ? QStringLiteral("viewerToolButtonIcon") : QStringLiteral("plotToolButtonIcon"))},
+                   QStringLiteral("viewerToolButtonIcon"))},
     };
     if (!wholeScreen) {
         drawn.append({QStringLiteral("the mode switch's plate"), itemNamed(cornerPlate, QStringLiteral("plotPlateFill"))});
-        drawn.append({QStringLiteral("the corner plate's divider"), itemsNamed(cornerPlate, QStringLiteral("plotCornerDivider")).last()});
+        drawn.append({QStringLiteral("the corner plate's divider"),
+                      itemNamed(controls, QStringLiteral("viewerControlsCloseDivider"))});
     } else {
         drawn.append({QStringLiteral("the strip's divider before Close"),
                       itemNamed(controls, QStringLiteral("viewerControlsCloseDivider"))});
@@ -5961,9 +5965,7 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
     // The pointer resting on the first lane, away from every control.
     const QPoint onLane(host->width() / 2, host->height() / 4);
     QTest::mouseMove(host, onLane);
-    if (!wholeScreen) {
-        QTRY_COMPARE(modeSwitch->opacity(), 1.0);
-    }
+    QTRY_COMPARE(controls->opacity(), 1.0);
     QTRY_COMPARE(laneButtons->opacity(), 1.0);
 
     QString failure;
@@ -6533,7 +6535,7 @@ bool sendWheelAt(QQuickWindow *window, QPointF scenePosition, QPoint angleDelta)
 
 // Showing the album art's details eases the art aside, and hiding them eases
 // it back, rather than jumping some 170 px in one frame as they toggle. Over
-// the details' 120 ms the space they take grows from nothing to their
+// the details' 180 ms the space they take grows from nothing to their
 // width with their seam: they slide in over the view's edge whole, as wide
 // as they rest, and the art fits and centres in what they leave, frame by
 // frame. The art moves one way only, never most of the way at once, and
@@ -6656,7 +6658,7 @@ void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
     Motion ui;
     QVERIFY(ui.loaded());
     const auto [window, bridge, panel, handover, units] = ui.parts();
-    // A slide would take 600 ms.
+    // A slide would take 900 ms.
     units->setShortDuration(500);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QQuickItem *surface = named(window, "albumArtSurface");
@@ -6676,7 +6678,7 @@ void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
     };
     const auto reveal = [surface]() { return surface->property("infoReveal").toDouble(); };
     const int slide = surface->property("infoRevealDuration").toInt();
-    QCOMPARE(slide, 600);
+    QCOMPARE(slide, 900);
     QVERIFY(!viewer->property("albumArtInfoVisible").toBool());
 
     // Opened on the current art from Replace from iTunes, with its details,
@@ -6862,10 +6864,9 @@ void UiMotionTest::windowedViewerClosesOverItsLastFrame() {
     if (QTest::currentTestFailed()) {
         return;
     }
-    // Back in the viewer, the plot's mode switch fades in with the viewer's
-    // controls; once it has, nothing in the viewer moves. Grabbed before,
-    // the window would miss what the kept frame shows of it.
-    QQuickItem *modeSwitch = itemNamed(surface, QStringLiteral("visualizationModeSwitch"));
+    // Back in the viewer, the mode switch is in the viewer's controls; once
+    // they show whole, nothing in the viewer moves.
+    QQuickItem *modeSwitch = itemNamed(popupItem, QStringLiteral("spectrogramPopupModeSwitch"));
     QVERIFY(modeSwitch != nullptr);
     QTRY_COMPARE(drawnOpacity(modeSwitch), 1.0);
     window->update();
@@ -7035,6 +7036,326 @@ void UiMotionTest::albumArtViewerControlsFadeOnOneLevel() {
     QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+}
+
+void UiMotionTest::viewerControlsHideAsAFadeAndShowQuicker_data() {
+    QTest::addColumn<QString>("autoHideName");
+    QTest::addColumn<QByteArray>("open");
+    QTest::newRow("visualization") << QStringLiteral("spectrogramFullscreenControlsAutoHide")
+                                   << QByteArrayLiteral("openSpectrogramViewer");
+    QTest::newRow("album art") << QStringLiteral("albumArtFullscreenControlsAutoHide")
+                               << QByteArrayLiteral("openAlbumArtViewer");
+}
+
+// The controls leave as a fade, 250 ms InOutQuad, rather than in three
+// frames at the top of the screen (81 ms of OutCubic), and still come back
+// over 100 ms, OutCubic. Both follow Plasma's animation speed and are
+// instant with animations off.
+void UiMotionTest::viewerControlsHideAsAFadeAndShowQuicker() {
+    QFETCH(QString, autoHideName);
+    QFETCH(QByteArray, open);
+    Covers covers;
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    units->setShortDuration(100);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(autoHideName);
+    QVERIFY(bridge && viewer && autoHide);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    showTrack(bridge, QStringLiteral("/music/0.flac"), QStringLiteral("Track"), QStringLiteral("Album"),
+              covers.first);
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, open.constData()));
+    QTRY_VERIFY(autoHide->property("active").toBool());
+    QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
+    QObject *state = qvariant_cast<QObject *>(autoHide->property("state"));
+    QVERIFY(state != nullptr);
+    const auto level = [autoHide]() { return autoHide->property("level").toDouble(); };
+
+    struct Fade {
+        bool shows;
+        int duration;
+        QEasingCurve::Type curve;
+    };
+    {
+        SteppedAnimationDriver driver;
+        for (const Fade &fade : {Fade{false, 250, QEasingCurve::InOutQuad}, Fade{true, 100, QEasingCurve::OutCubic}}) {
+            // As the timer does as it runs out, and as the pointer does.
+            state->setProperty("controlsVisible", fade.shows);
+            QCOMPARE(autoHide->property("controlsVisible").toBool(), fade.shows);
+            const QEasingCurve curve(fade.curve);
+            for (int ms = 16; ms <= fade.duration + 32; ms += 16) {
+                static_cast<void>(driver.step(16));
+                const double gone = fade.shows ? level() : 1.0 - level();
+                // Within a frame of the curve.
+                const double least = curve.valueForProgress(std::clamp(double(ms - 17) / fade.duration, 0.0, 1.0));
+                const double most = curve.valueForProgress(std::clamp(double(ms + 17) / fade.duration, 0.0, 1.0));
+                QVERIFY2(gone >= least - 1e-6 && gone <= most + 1e-6,
+                         qPrintable(QStringLiteral("%1 at %2 ms: %3, not %4 to %5")
+                                        .arg(fade.shows ? QStringLiteral("showing") : QStringLiteral("hiding"))
+                                        .arg(ms).arg(gone).arg(least).arg(most)));
+            }
+            QCOMPARE(level(), fade.shows ? 1.0 : 0.0);
+        }
+    }
+
+    units->setShortDuration(0);
+    for (const bool shows : {false, true}) {
+        state->setProperty("controlsVisible", shows);
+        QCOMPARE(level(), shows ? 1.0 : 0.0);
+    }
+    QVERIFY(QMetaObject::invokeMethod(viewer, open == QByteArrayLiteral("openSpectrogramViewer")
+                                                  ? "closeSpectrogramViewer" : "closeAlbumArtViewer"));
+    QTRY_VERIFY(!autoHide->property("active").toBool());
+}
+
+void UiMotionTest::firstLanesLabelRestsWhereTheOtherLanesDo_data() {
+    QTest::addColumn<int>("plot");
+    QTest::addColumn<int>("displayMode");
+    QTest::addColumn<int>("channels");
+    QTest::newRow("spectrogram, rolling") << 0 << 0 << 2;
+    QTest::newRow("spectrogram, centred") << 0 << 1 << 2;
+    QTest::newRow("spectrogram, 5.1") << 0 << 1 << 6;
+    QTest::newRow("waveform, rolling") << 1 << 0 << 2;
+    QTest::newRow("waveform, centred") << 1 << 1 << 2;
+}
+
+// Over the whole screen, with the controls hidden, the first lane's label
+// is as far into its lane as the others' (it was left where the title strip
+// puts it, a hole over it). As the strip shows and hides nothing travels or
+// jumps: the label in either place holds still and the two cross-fade on
+// the controls' one level.
+void UiMotionTest::firstLanesLabelRestsWhereTheOtherLanesDo() {
+    QFETCH(int, plot);
+    QFETCH(int, displayMode);
+    QFETCH(int, channels);
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    units->setShortDuration(100);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
+    QQuickItem *layer = named(window, "plotLayer");
+    QVERIFY(viewer && autoHide && spectrogram && layer);
+    autoHide->setProperty("hideDelay", 600000);
+    viewer->setProperty("visualizationMode", plot);
+    bridge->setProperty("viewerFullscreenMode", 1);
+    bridge->setProperty("showFullscreenTitleStrip", true);
+    bridge->setProperty("spectrogramDisplayMode", displayMode);
+    bridge->setProperty("spectrogramViewMode", 1);
+    bridge->setProperty("currentTrackChannels", channels);
+    playQueueRow(bridge, 0, QStringLiteral("Paused"));
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, channels),
+                                      Q_ARG(bool, true)));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(layer->window() != nullptr && layer->window() != window);
+    QVERIFY(QTest::qWaitForWindowExposed(layer->window()));
+    QTRY_COMPARE(layer->property("laneCount").toInt(), channels);
+    QTRY_VERIFY(layer->property("topInset").toDouble() > 0.0);
+    QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
+
+    // Every label's drawn plate, by its lane: its place in that lane and
+    // how opaque it is.
+    struct Drawn {
+        double fromLaneTop;
+        double opacity;
+    };
+    const auto labels = [&]() {
+        QList<QList<Drawn>> found(channels);
+        for (QQuickItem *text : itemsNamed(layer, QStringLiteral("plotPlateLabel"))) {
+            const double opacity = drawnOpacity(text);
+            if (opacity <= 1e-6 || text->property("text").toString().isEmpty()) {
+                continue;
+            }
+            const double top = text->mapToItem(layer, QPointF(0, 0)).y();
+            const int lane = std::clamp(int(top / (layer->height() / channels)), 0, channels - 1);
+            QVariant laneTop;
+            if (!QMetaObject::invokeMethod(layer, "laneTop", Q_RETURN_ARG(QVariant, laneTop),
+                                           Q_ARG(QVariant, lane))) {
+                continue;
+            }
+            found[lane].append({top - laneTop.toDouble(), opacity});
+        }
+        return found;
+    };
+    const QList<QList<Drawn>> shown = labels();
+    QCOMPARE(shown.at(0).size(), 1);
+    QCOMPARE(shown.at(1).size(), 1);
+    const double resting = shown.at(1).first().fromLaneTop;
+    const double underStrip = shown.at(0).first().fromLaneTop;
+    QVERIFY2(underStrip > layer->property("topInset").toDouble(), qPrintable(QString::number(underStrip)));
+
+    QObject *state = qvariant_cast<QObject *>(autoHide->property("state"));
+    QVERIFY(state != nullptr);
+    SteppedAnimationDriver driver;
+    for (const bool shows : {false, true}) {
+        state->setProperty("controlsVisible", shows);
+        int fading = 0;
+        for (int ms = 0; ms <= 400; ms += 16) {
+            const double level = autoHide->property("level").toDouble();
+            const QList<QList<Drawn>> now = labels();
+            double atRest = 0.0;
+            double below = 0.0;
+            for (const Drawn &drawn : now.at(0)) {
+                const QString where = QStringLiteral("at %1 ms, level %2: a label at %3")
+                                          .arg(ms).arg(level).arg(drawn.fromLaneTop);
+                if (std::abs(drawn.fromLaneTop - resting) < 0.01) {
+                    atRest += drawn.opacity;
+                } else if (std::abs(drawn.fromLaneTop - underStrip) < 0.01) {
+                    below += drawn.opacity;
+                } else {
+                    QFAIL(qPrintable(where + QStringLiteral(", in neither place")));
+                }
+            }
+            QVERIFY2(std::abs(below - level) < 1e-5 && std::abs(atRest - (1.0 - level)) < 1e-5,
+                     qPrintable(QStringLiteral("at %1 ms, level %2: %3 under the strip, %4 at rest")
+                                    .arg(ms).arg(level).arg(below).arg(atRest)));
+            for (int lane = 1; lane < channels; ++lane) {
+                QCOMPARE(now.at(lane).size(), 1);
+                QCOMPARE(now.at(lane).first().fromLaneTop, resting);
+            }
+            fading += level > 0.0 && level < 1.0;
+            static_cast<void>(driver.step(16));
+        }
+        QVERIFY(fading >= 3);
+    }
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(layer->window() == window);
+    // Back in the pane, the one label, whole.
+    static_cast<void>(driver.step(200));
+    QCOMPARE(labels().at(0).size(), 1);
+}
+
+// The details' toggle is a glide, 180 ms InOutQuad, rather than a snap (the
+// art went 91 % of its way in 43 ms of 120 ms OutCubic, and the rest crept),
+// both ways, and instant with animations off.
+void UiMotionTest::albumArtDetailsToggleGlides() {
+    Covers covers;
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    units->setShortDuration(100);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QQuickItem *surface = named(window, "albumArtSurface");
+    QVERIFY(bridge && viewer && surface);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    showTrack(bridge, QStringLiteral("/music/0.flac"), QStringLiteral("Track"), QStringLiteral("Album"),
+              covers.first);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(surface->property("viewerOpen").toBool() && surface->isVisible());
+    QVERIFY(!viewer->property("albumArtInfoVisible").toBool());
+    const auto toggle = [&]() {
+        return QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant()));
+    };
+    constexpr int duration = 180;
+    const QEasingCurve curve(QEasingCurve::InOutQuad);
+    {
+        SteppedAnimationDriver driver;
+        for (const bool shows : {true, false}) {
+            QVERIFY(toggle());
+            double before = 0.0;
+            for (int ms = 16; ms <= duration + 32; ms += 16) {
+                static_cast<void>(driver.step(16));
+                const double reveal = surface->property("infoReveal").toDouble();
+                const double moved = shows ? reveal : 1.0 - reveal;
+                // Within a frame of the curve, and no frame a fifth of the way.
+                const double least = curve.valueForProgress(std::clamp(double(ms - 17) / duration, 0.0, 1.0));
+                const double most = curve.valueForProgress(std::clamp(double(ms + 17) / duration, 0.0, 1.0));
+                QVERIFY2(moved >= least - 1e-6 && moved <= most + 1e-6 && moved - before < 0.2,
+                         qPrintable(QStringLiteral("%1 at %2 ms: %3, after %4")
+                                        .arg(shows ? QStringLiteral("showing") : QStringLiteral("hiding"))
+                                        .arg(ms).arg(moved).arg(before)));
+                before = moved;
+            }
+            QCOMPARE(surface->property("infoReveal").toDouble(), shows ? 1.0 : 0.0);
+        }
+    }
+    units->setShortDuration(0);
+    for (const double at : {1.0, 0.0}) {
+        QVERIFY(toggle());
+        QCOMPARE(surface->property("infoReveal").toDouble(), at);
+    }
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!surface->property("viewerOpen").toBool());
+}
+
+void UiMotionTest::albumArtPlateGivesWayToTheDetailsColumn_data() {
+    QTest::addColumn<int>("points");
+    QTest::addColumn<bool>("narrow");
+    QTest::newRow("10 pt") << 10 << false;
+    QTest::newRow("24 pt") << 24 << false;
+    QTest::newRow("24 pt, narrow") << 24 << true;
+}
+
+// Windowed, the album art viewer's plate draws no box inside the details'
+// column, which is its colour: its fill and edge go as the column comes
+// under it, and it is as it was with the column closed. Wider than the
+// column, zoomed with a large font in a narrow window, it keeps them, as it
+// is over the art too.
+void UiMotionTest::albumArtPlateGivesWayToTheDetailsColumn() {
+    QFETCH(int, points);
+    QFETCH(bool, narrow);
+    const ScopedApplicationFont font(points);
+    Covers covers;
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    units->setShortDuration(100);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("albumArtFullscreenControlsAutoHide"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QQuickItem *surface = named(window, "albumArtSurface");
+    QVERIFY(bridge && viewer && autoHide && popup && surface);
+    autoHide->setProperty("hideDelay", 600000);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    showTrack(bridge, QStringLiteral("/music/0.flac"), QStringLiteral("Track"), QStringLiteral("Album"),
+              covers.first);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QQuickItem *controls = itemNamed(popupItemOf(popup), QStringLiteral("albumArtPopupControls"));
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QVERIFY(controls && column);
+    QQuickItem *fill = itemNamed(controls, QStringLiteral("plotPlateFill"));
+    QQuickItem *edge = itemNamed(controls, QStringLiteral("plotPlateEdge"));
+    QQuickItem *close = itemNamed(controls, QStringLiteral("albumArtPopupCloseButton"));
+    QVERIFY(fill && edge && close);
+    QTRY_COMPARE(drawnOpacity(fill), 1.0);
+    QCOMPARE(drawnOpacity(edge), 1.0);
+
+    for (const bool zoomed : {false, true}) {
+        surface->setProperty("zoom", zoomed ? 2.0 : 1.0);
+        QTRY_COMPARE(itemNamed(controls, QStringLiteral("viewerZoomReadout"))->isVisible(), zoomed);
+        for (const bool shows : {true, false}) {
+            SteppedAnimationDriver driver;
+            QVERIFY(QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant())));
+            for (int ms = 0; ms <= 250; ms += 16) {
+                const double reveal = surface->property("infoReveal").toDouble();
+                // Whether the column at rest is under the whole plate.
+                const bool seated = column->width() >= surface->width() - controls->x();
+                const double expected = seated ? 1.0 - reveal : 1.0;
+                QVERIFY2(std::abs(drawnOpacity(fill) - expected) < 1e-5 && std::abs(drawnOpacity(edge) - expected) < 1e-5,
+                         qPrintable(QStringLiteral("zoomed %1, reveal %2: the plate at %3, not %4")
+                                        .arg(zoomed).arg(reveal).arg(drawnOpacity(fill)).arg(expected)));
+                // Its buttons stay whole, and it still takes the presses
+                // between them.
+                QCOMPARE(drawnOpacity(close), 1.0);
+                static_cast<void>(driver.step(16));
+            }
+            QCOMPARE(surface->property("infoReveal").toDouble(), shows ? 1.0 : 0.0);
+        }
+    }
+    surface->setProperty("zoom", 1.0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant())));
+    QTRY_COMPARE(surface->property("infoReveal").toDouble(), 1.0);
+    QTRY_COMPARE(drawnOpacity(fill), 0.0);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      controls->mapToScene(QPointF(1, controls->height() / 2)).toPoint());
+    QCoreApplication::processEvents();
+    QVERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!popup->property("visible").toBool());
 }
 
 #include "tst_ui_motion.moc"
