@@ -400,6 +400,13 @@ void AccessibilityTest::albumArtSaysWhatItsFocusStopDoes() {
     QVERIFY(!viewer->property("albumArtViewerOpen").toBool());
     QVERIFY(QMetaObject::invokeMethod(menu, "close"));
     QTRY_VERIFY(openMenu() == nullptr);
+    // Enter presses it too, as the role promises.
+    stop->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(stop->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_VERIFY((menu = openMenu()) != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+    QTRY_VERIFY(openMenu() == nullptr);
 
     // A cover: a button that opens the viewer, its menu on the keys.
     QTemporaryDir directory;
@@ -418,6 +425,13 @@ void AccessibilityTest::albumArtSaysWhatItsFocusStopDoes() {
     actions->doAction(QAccessibleActionInterface::pressAction());
     QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
     QVERIFY(openMenu() == nullptr);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+    QTRY_VERIFY(window->isActive());
+    stop->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(stop->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Enter, Qt::KeypadModifier);
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }

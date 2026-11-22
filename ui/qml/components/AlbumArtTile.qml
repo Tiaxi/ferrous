@@ -7,6 +7,7 @@ import QtQuick.Shapes
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "." as Components
+import "../logic/KeyUtils.js" as KeyUtils
 
 // The playing track's cover, edge to edge: no inset, radius or frame. A
 // track without a cover has a stand-in in its place (with no tile for it,
@@ -330,7 +331,10 @@ Rectangle {
             : I18n.i18nc("@info read by screen readers, of a track without album art; Menu and Shift+F10 are keys",
                          "Opens a menu of album art actions. Press Menu or Shift+F10 to open it.")
         Accessible.focusable: true
-        Accessible.onPressAction: {
+        Accessible.onPressAction: focusTarget.press()
+
+        // Enter presses it, as its role says; Space stays Play or Pause.
+        function press() {
             if (root.idle) {
                 return
             }
@@ -345,6 +349,12 @@ Rectangle {
             if (event.key === Qt.Key_Menu
                     || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
                 root.openContextMenu(0, root.height)
+                event.accepted = true
+            } else if (KeyUtils.isEnter(event)) {
+                // Held down, it doesn't press again.
+                if (!event.isAutoRepeat) {
+                    focusTarget.press()
+                }
                 event.accepted = true
             }
         }

@@ -66,7 +66,7 @@ In **Recent Issues**, the arrow and Page keys scroll the list, and Tab reaches e
 
 ## Viewers
 
-Double-click the visualization or the album art to open its viewer, and press Escape to close it. In the album art viewer, a double-click zooms in or out, I shows the image's details, Left and Right switch between the current and suggested artwork, and Menu or Shift+F10 opens the context menu.
+Double-click the visualization or the album art to open its viewer, and press Escape to close it. With keyboard focus on the album art, Enter opens its viewer too, or, for a track without album art, its menu. In the album art viewer, a double-click zooms in or out, I shows the image's details, Left and Right switch between the current and suggested artwork, and Menu or Shift+F10 opens the context menu.
 
 A viewer over the whole screen fills it, with its buttons in a title strip over its top edge; one in the main window has them in its top right corner. The buttons hide while the pointer rests, the title strip with them, except those of the album art viewer in the main window; a key press brings them back, and Tab moves through them, then to the visualization's mode switch. They stay while one of them has keyboard focus. Space presses the focused button.
 
