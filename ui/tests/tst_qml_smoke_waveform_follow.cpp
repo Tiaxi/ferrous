@@ -40,6 +40,8 @@ private slots:
     void autoscrollStopsAsTheViewComesBack_data();
     void autoscrollStopsAsTheViewComesBack();
     void autoscrollInAWindow();
+    void grabbedTimeHoldsStillThroughAPan_data();
+    void grabbedTimeHoldsStillThroughAPan();
     void panShowsAClosedHand();
 };
 
@@ -1484,6 +1486,59 @@ Window {
     QTest::keyClick(window, Qt::Key_Escape);
     QVERIFY(!item->m_autoscroll.active());
     QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+}
+
+void WaveformFollowSmokeTest::grabbedTimeHoldsStillThroughAPan_data() {
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<double>("width");
+    QTest::addColumn<double>("pressX");
+    QTest::newRow("whole pixel") << 1.0 << kWidth << 300.0;
+    QTest::newRow("half pixel") << 1.0 << kWidth << 300.5;
+    QTest::newRow("late in a pixel") << 1.0 << kWidth << 300.9;
+    // A time halfway between two hundredths, which rounding could take
+    // either way from one move to the next.
+    QTest::newRow("halfway between hundredths") << 1.0 << kWidth << 308.2;
+    QTest::newRow("at 125 %") << 1.25 << 401.0 << 300.7;
+    QTest::newRow("at 200 %") << 2.0 << kWidth << 300.3;
+}
+
+// Through a pan the crosshair's time holds still on the time grabbed, at any
+// fraction of a pixel of the pointer, as playback goes on.
+void WaveformFollowSmokeTest::grabbedTimeHoldsStillThroughAPan() {
+    QFETCH(double, scale);
+    QFETCH(double, width);
+    QFETCH(double, pressX);
+    QQuickWindow window;
+    if (scale != 1.0 && !showOnScreen(window, scale)) {
+        QSKIP("no screen of that scale");
+    }
+    WaveformEditorItem item;
+    if (scale != 1.0) item.setParentItem(window.contentItem());
+    TestTime time;
+    playZoomed(item, time, 8.0, 30.0);
+    item.setWidth(width);
+    // What the crosshair reads at `x`: the time a click there seeks to.
+    const auto readout = [&](double x) {
+        const double seconds = rightClickAt(item, x);
+        const auto [start, end] = viewOf(item);
+        return WaveformEditorItem::formatCrosshairTime(seconds,
+            WaveformEditorItem::crosshairTimeDecimals((end - start) / (width * scale), 8.0));
+    };
+    const QString grabbed = readout(pressX);
+    sendMouse(item, QEvent::MouseButtonPress, pressX, Qt::MiddleButton, Qt::MiddleButton);
+    QList<double> moves;
+    for (double x = pressX - 20.3; x > 20.0; x -= 4.7) moves.append(x);
+    for (double x = 25.1; x < 380.0; x += 7.37) moves.append(x);
+    for (const double x : std::as_const(moves)) {
+        sendMouse(item, QEvent::MouseMove, x, Qt::NoButton, Qt::MiddleButton);
+        time.advance(0.001);
+        frame(item);
+        QVERIFY(item.detached());
+        const QString shown = readout(x);
+        QVERIFY2(shown == grabbed,
+                 qPrintable(QStringLiteral("%1 at %2, grabbed %3").arg(shown).arg(x).arg(grabbed)));
+    }
+    sendMouse(item, QEvent::MouseButtonRelease, moves.last(), Qt::MiddleButton, Qt::NoButton);
 }
 
 std::unique_ptr<QmlSmokeTest> makeWaveformFollowSmokeTest(const QString &userDirectoriesParent) {

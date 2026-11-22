@@ -109,8 +109,11 @@ struct TimeAxis {
     // The column at `x` logical pixels; a fraction of a pixel short of a
     // column's edge, as a time mapped there and back can be, is on it.
     int columnAt(double x) const {
-        return std::clamp(
-            static_cast<int>(std::floor(x * scale + kColumnEpsilon)), 0, columns() - 1);
+        return std::clamp(static_cast<int>(unboundedColumnAt(x, scale)), 0, columns() - 1);
+    }
+    // The same, also off the plot, where a drag can go.
+    static double unboundedColumnAt(double x, double scale) {
+        return std::floor(x * scale + kColumnEpsilon);
     }
     int columnOf(double time) const {
         return columnAt((time - start) / (end - start) * width);
@@ -3618,7 +3621,11 @@ QPainterPath WaveformEditorItem::buildSamplePath(const QPolygonF &samples) {
 QString WaveformEditorItem::formatCrosshairTime(double seconds, int decimals) {
     decimals = std::clamp(decimals, 1, 3);
     const qint64 unit = decimals == 1 ? 10 : (decimals == 2 ? 100 : 1000);
-    const qint64 ticks = std::llround(std::max(0.0, seconds) * static_cast<double>(unit));
+    // Halfway rounds up, also a rounding error short of it: a pan works out
+    // the one time it holds afresh, from another start, on each move.
+    constexpr double roundingError = 1e-6;
+    const qint64 ticks = std::llround(
+        std::max(0.0, seconds) * static_cast<double>(unit) + roundingError);
     const qint64 whole = ticks / unit;
     const qint64 hours = whole / 3600;
     const QString rest = QStringLiteral("%1.%2")
@@ -4247,11 +4254,15 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
             m_panOriginStart = visibleRangeLocked(nowNs).first;
             m_panOriginX = m_panPressPosition.x();
         }
-        // The time grabbed stays under the pointer. Held at an end of the
-        // track, the pan starts again from there, so that a move back
-        // moves the view at once.
-        const double desired = m_panOriginStart
-            - (pointer.x() - m_panOriginX) * span / canvasWidth;
+        // The time grabbed stays under the pointer: the view moves by the
+        // columns the crosshair moves by, not by the pointer's fractions of
+        // one, which the view would round otherwise than the crosshair.
+        // Held at an end of the track, the pan starts again from there, so
+        // that a move back moves the view at once.
+        const double scale = renderScaleLocked();
+        const double columnsMoved = TimeAxis::unboundedColumnAt(pointer.x(), scale)
+            - TimeAxis::unboundedColumnAt(m_panOriginX, scale);
+        const double desired = m_panOriginStart - columnsMoved / scale * span / canvasWidth;
         const double start = std::clamp(desired, 0.0, m_durationSeconds - span);
         if (start != desired) {
             m_panOriginStart = start;
