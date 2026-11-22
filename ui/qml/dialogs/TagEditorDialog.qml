@@ -381,8 +381,10 @@ Components.DialogWindow {
     // The room above a cell's first line and under its last, in a row as
     // tall as one line as in one that wraps, so that all start on one line.
     readonly property real cellLineInset: (root.tableRowHeight - columnValueMetrics.height) / 2
-    // The lines a file name takes before it is cut.
-    readonly property int fileNameLineLimit: 2
+    // The lines a file name takes before it is cut: three, as a title
+    // wrapped at 24 pt takes, so a long name keeps its extension (on two
+    // it read "and a Distant Thunderst…" beside a three-line title).
+    readonly property int fileNameLineLimit: 3
 
     FontMetrics {
         id: columnHeaderMetrics
@@ -1287,6 +1289,11 @@ Components.DialogWindow {
             Layout.leftMargin: dialogButtons.inset
             Layout.bottomMargin: dialogButtons.bottomPadding
             text: I18n.i18nc("@action:button", "Tools")
+            // A glyph, at Reload's size, as the footer's other actions
+            // have: without one, beside its arrow, it read as a combo box.
+            icon.name: "tools-wizard"
+            icon.width: dialogButtons.glyphSize
+            icon.height: dialogButtons.glyphSize
             enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
             // A menu button, which Breeze draws with its arrow.
             Accessible.role: Accessible.ButtonMenu
@@ -1524,8 +1531,17 @@ Components.DialogWindow {
                 boundsBehavior: Flickable.StopAtBounds
                 headerPositioning: ListView.OverlayHeader
                 pixelAligned: true
+                // From under the header to the rows' foot, as the
+                // Configure Keyboard Shortcuts list's bar runs: on the
+                // view, it ran through the header, its thumb level with
+                // the column names.
                 ScrollBar.vertical: ScrollBar {
                     id: tagEditorDownBar
+                    parent: tableFrame
+                    anchors.right: tagEditorTable.right
+                    anchors.top: tagEditorTable.top
+                    anchors.topMargin: root.tableRowHeight
+                    anchors.bottom: tagEditorTable.bottom
                 }
                 ScrollBar.horizontal: ScrollBar {
                     id: tagEditorAcrossBar
@@ -1795,7 +1811,7 @@ Components.DialogWindow {
                                 // and the row grows by it. Its height is the
                                 // committed value's, also while another is
                                 // typed over it, which elides within that.
-                                // A file name wraps to two lines before it
+                                // A file name wraps to three lines before it
                                 // is cut, and grows its row alike (cut on
                                 // one line, it lost the name's end beside a
                                 // title that had made the row two lines).
@@ -1826,8 +1842,12 @@ Components.DialogWindow {
                                 // label is, and a kept value regular, in
                                 // one ink: a tint would read as selected.
                                 // What it wraps by is measured in its
-                                // font, so it still reads whole.
-                                font.weight: tableCell.changed ? Font.DemiBold : Font.Normal
+                                // font, so it still reads whole. A value
+                                // being typed is DemiBold too, as the
+                                // row's mark and the heading show it at
+                                // once; it elides until it is committed,
+                                // so its row keeps its height.
+                                font.weight: tableCell.changed || tableCell.typed ? Font.DemiBold : Font.Normal
                                 color: tableCell.failureCell
                                     ? root.uiPalette.negative
                                     : (modelData.number
@@ -1837,12 +1857,16 @@ Components.DialogWindow {
                                 wrapMode: tableCell.wraps ? Text.Wrap : Text.NoWrap
                                 maximumLineCount: tableCell.wrapsName ? root.fileNameLineLimit : undefined
                                 horizontalAlignment: modelData.number ? Text.AlignRight : Text.AlignLeft
-                                // A file name or folder keeps its start: the
-                                // track number and title, or the folder's
-                                // year and album, rather than an extension
-                                // that Format shows. The whole of any cell
-                                // is in its tooltip while it is cut short.
-                                elide: tableCell.changed && !tableCell.typed ? Text.ElideNone : Text.ElideRight
+                                // A file name keeps its start: the track
+                                // number and title, rather than an
+                                // extension that Format shows. A folder
+                                // keeps its start and its end, where the
+                                // folders of a batch often differ (cut at
+                                // the end, each read "ferrous-ren…"). The
+                                // whole of any cell is in its tooltip while
+                                // it is cut short.
+                                elide: tableCell.changed && !tableCell.typed ? Text.ElideNone
+                                    : (modelData.key === "directory" ? Text.ElideMiddle : Text.ElideRight)
 
                                 // Under the pinned cells, from the row's edge
                                 // to the seam, the row as it is drawn there,
