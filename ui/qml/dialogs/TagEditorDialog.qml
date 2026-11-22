@@ -897,6 +897,42 @@ Components.DialogWindow {
         windowRoot: root
     }
 
+    // A Revert's tooltip, above its glyph with their right edges in line:
+    // under it, it covered the next field, or the first row. A window of
+    // its own, as over the top field it rises past the dialog's edge. On
+    // Wayland the compositor places such a window from its parent alone,
+    // at that item's bottom right corner, and not from x and y, so its
+    // parent is a point where its top left corner goes (see AppMenu.qml).
+    component RevertToolTip: Item {
+        id: toolTipPoint
+
+        required property Item button
+        property alias message: revertToolTip.message
+
+        x: toolTipPoint.button.width - Math.ceil(revertToolTip.implicitWidth) - width
+        y: -Kirigami.Units.smallSpacing - Math.ceil(revertToolTip.implicitHeight) - height
+        width: 1
+        height: 1
+
+        Components.PlainToolTip {
+            id: revertToolTip
+            objectName: "tagEditorRevertToolTip"
+            popupType: Popup.Window
+            x: toolTipPoint.width
+            y: toolTipPoint.height
+            delay: Kirigami.Units.toolTipDelay
+            visible: toolTipPoint.button.visible
+                && (toolTipPoint.button.hovered || toolTipPoint.button.visualFocus)
+            // The keyboard stays in the dialog. Qt makes a popup window's
+            // popup that window's focused item as it shows, and one that
+            // still is as it goes hands the keyboard back to what had it
+            // then: Tab or a click away from a Revert came back to it as
+            // its tooltip had faded. The tooltip's label is that item
+            // instead, so there is nothing to hand back.
+            onAboutToShow: revertToolTip.contentItem.focus = true
+        }
+    }
+
     // A text field of a tag: its label turns semibold and a revert button
     // shows while the edits change it.
     component TagField: TextField {
@@ -1011,13 +1047,15 @@ Components.DialogWindow {
             icon.height: root.uiPalette.labelIconSize
             display: AbstractButton.IconOnly
             text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1", fieldEditor.field.label)
-            ToolTip.visible: hovered || visualFocus
-            ToolTip.delay: Kirigami.Units.toolTipDelay
-            ToolTip.text: root.revertToolTip(fieldEditor.field.key)
             onClicked: {
                 fieldEditor.touched = false
                 root.tagEditorApi.revertBulkField(fieldEditor.field.key)
                 fieldEditor.syncFromController()
+            }
+
+            RevertToolTip {
+                button: revertButton
+                message: root.revertToolTip(fieldEditor.field.key)
             }
         }
     }
@@ -1371,10 +1409,12 @@ Components.DialogWindow {
                                         display: AbstractButton.IconOnly
                                         text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1 in Every File",
                                             headerCell.modelData.label)
-                                        ToolTip.visible: hovered || visualFocus
-                                        ToolTip.delay: Kirigami.Units.toolTipDelay
-                                        ToolTip.text: text
                                         onClicked: root.tagEditorApi.revertField(headerCell.modelData.key)
+
+                                        RevertToolTip {
+                                            button: columnRevert
+                                            message: columnRevert.text
+                                        }
                                     }
                                 }
                             }

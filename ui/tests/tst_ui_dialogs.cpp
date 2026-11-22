@@ -590,6 +590,8 @@ private slots:
     void editTagsKeepsWhatIdentifiesARowInView();
     void editTagsDetailsHasAGlyphAsItsPeers_data();
     void editTagsDetailsHasAGlyphAsItsPeers();
+    void editTagsRevertToolTipsStandAboveTheirGlyphs_data();
+    void editTagsRevertToolTipsStandAboveTheirGlyphs();
     void dialogsShareOneLook();
     void dialogsHoldTheirContentsWithALargeFont();
     void dialogsScaleWithKdesFont_data();
@@ -4174,7 +4176,9 @@ void UiDialogsTest::checkEditTagsMarksAChangedFieldAndColumnAndReverts(DialogsWi
     QTRY_COMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("genre")), QStringLiteral("Ambient"));
     QTRY_COMPARE(label->property("font").value<QFont>().weight(), QFont::DemiBold);
     QVERIFY(revert->isVisible());
-    QCOMPARE(evaluate(revert, QStringLiteral("ToolTip.text")).toString(), QStringLiteral("Revert to Classical"));
+    auto *revertTip = revert->findChild<QObject *>(QStringLiteral("tagEditorRevertToolTip"));
+    QVERIFY(revertTip != nullptr);
+    QTRY_COMPARE(revertTip->property("text").toString(), QStringLiteral("Revert to Classical"));
     QCOMPARE(columnLabel->property("font").value<QFont>().weight(), QFont::DemiBold);
     QCOMPARE(hex(columnLabel->property("color").value<QColor>()), hex(tokenOf(window, "text")));
     QVERIFY(columnRevert->isVisible());
@@ -5184,6 +5188,105 @@ void UiDialogsTest::editTagsDetailsHasAGlyphAsItsPeers() {
 // the system's words in its tooltip and for screen readers (they are in
 // Details… too); the column holds them whole at either font and width
 // (the system's text was elided to "failed to …").
+void UiDialogsTest::editTagsRevertToolTipsStandAboveTheirGlyphs_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// A Revert's tooltip is above its glyph, their right edges in line, also
+// the top field's and a column's, which rise past the dialog's edge (under
+// the glyph, the top field's covered Artist, and a column's the first row).
+void UiDialogsTest::editTagsRevertToolTipsStandAboveTheirGlyphs() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfAnAlbum(4));
+    QVERIFY(tags != nullptr);
+    // Room on the screen over the dialog.
+    tags->setPosition(300, 300);
+    main.editor.setSelectedRows({1});
+    main.editor.applyBulkFieldToRows({1}, QStringLiteral("title"), QStringLiteral("Rain Over Fields (Live)"));
+    main.editor.applyBulkFieldToRows({1}, QStringLiteral("artist"), QStringLiteral("The Lantern Trio"));
+    QTRY_VERIFY(visibleNamed(tags, QStringLiteral("tagEditorColumnRevert_title")) != nullptr);
+    const auto onScreen = [tags](QQuickItem *item) { return sceneRect(item).translated(tags->position()); };
+    const QList<std::pair<QString, QString>> reverts{
+        {QStringLiteral("tagEditorRevert_title"), QStringLiteral("tagEditorField_artist")},
+        {QStringLiteral("tagEditorRevert_artist"), QStringLiteral("tagEditorField_album")},
+        {QStringLiteral("tagEditorColumnRevert_title"), QStringLiteral("tagEditorRow")},
+    };
+    for (const auto &[name, under] : reverts) {
+        QQuickItem *revert = visibleNamed(tags, name);
+        QQuickItem *below = visibleNamed(tags, under);
+        QVERIFY2(revert != nullptr && below != nullptr, qPrintable(name));
+        QTRY_VERIFY(!layoutPending(revert));
+        // The focus Tab gives shows it, after its delay.
+        revert->forceActiveFocus(Qt::TabFocusReason);
+        auto *tip = revert->findChild<QObject *>(QStringLiteral("tagEditorRevertToolTip"));
+        QVERIFY2(tip != nullptr, qPrintable(name));
+        QTRY_VERIFY2(tip->property("opened").toBool(), qPrintable(name));
+        QQuickWindow *shownIn = qvariant_cast<QQuickItem *>(tip->property("contentItem"))->window();
+        QVERIFY2(shownIn != tags, qPrintable(name + QStringLiteral(": cut at the dialog's edge")));
+        const QRectF glyph = onScreen(revert);
+        const QRectF shown = QRectF(shownIn->geometry());
+        const QString at = QStringLiteral("%1: tooltip %2,%3 %4x%5 over a glyph at %6,%7")
+                               .arg(name).arg(shown.x()).arg(shown.y()).arg(shown.width()).arg(shown.height())
+                               .arg(glyph.x()).arg(glyph.y());
+        QVERIFY2(shown.bottom() <= glyph.top() + 1, qPrintable(at));
+        QVERIFY2(qAbs(shown.right() - glyph.right()) <= 1.5, qPrintable(at));
+        QVERIFY2(!shown.intersects(onScreen(below)), qPrintable(at));
+        // Whole, and the glyph keeps the keyboard.
+        QVERIFY2(shown.width() >= tip->property("implicitWidth").toReal() - 0.5
+                     && shown.height() >= tip->property("implicitHeight").toReal() - 0.5,
+                 qPrintable(at));
+        QVERIFY2(revert->hasActiveFocus(), qPrintable(name));
+        if (name == QLatin1String("tagEditorRevert_title")) {
+            QVERIFY2(shown.top() < tags->y(), qPrintable(at));
+        }
+        // To a field: the table is a focus scope, which would give the
+        // keyboard back to its column's Revert.
+        QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_comment"));
+        QVERIFY2(field != nullptr, qPrintable(name));
+        field->forceActiveFocus();
+        QTRY_VERIFY2(!tip->property("visible").toBool(), qPrintable(name));
+        // Gone, it leaves the keyboard where it went: a popup's window hands
+        // it back to what had it as the popup showed, once it has faded.
+        QVERIFY2(field->hasActiveFocus(),
+                 qPrintable(QStringLiteral("%1: the tooltip took the keyboard to %2")
+                                .arg(name, describe(tags->activeFocusItem()))));
+    }
+
+    // Shown by the pointer while one field has the keyboard, it leaves it
+    // with the field clicked next, and with the buttons' row.
+    QQuickItem *revert = visibleNamed(tags, QStringLiteral("tagEditorRevert_title"));
+    QQuickItem *album = visibleNamed(tags, QStringLiteral("tagEditorField_album"));
+    QQuickItem *comment = visibleNamed(tags, QStringLiteral("tagEditorField_comment"));
+    QQuickItem *tools = visibleNamed(tags, QStringLiteral("tagEditorToolsButton"));
+    QVERIFY(revert != nullptr && album != nullptr && comment != nullptr && tools != nullptr);
+    auto *tip = revert->findChild<QObject *>(QStringLiteral("tagEditorRevertToolTip"));
+    QVERIFY(tip != nullptr);
+    // As in a desktop's session, whose platform theme asks for hover
+    // effects; the offscreen platform has none.
+    QVERIFY(revert->setProperty("hoverEnabled", true));
+    for (QQuickItem *next : {album, tools}) {
+        comment->forceActiveFocus();
+        // In two moves: a window's first one only brings the pointer in.
+        QTest::mouseMove(tags, sceneRect(album).center().toPoint());
+        QTest::mouseMove(tags, sceneRect(revert).center().toPoint());
+        QTRY_VERIFY2(tip->property("opened").toBool(),
+                     qPrintable(QStringLiteral("hovered %1, shown %2, at %3, pressed on %4")
+                                    .arg(revert->property("hovered").toBool())
+                                    .arg(revert->isVisible())
+                                    .arg(describeItem(revert), describe(pressTargetAt(tags, sceneRect(revert).center())))));
+        next->forceActiveFocus(Qt::MouseFocusReason);
+        QTest::mouseMove(tags, sceneRect(album).center().toPoint());
+        QTRY_VERIFY(!tip->property("visible").toBool());
+        QVERIFY2(next->hasActiveFocus(), qPrintable(describe(tags->activeFocusItem())));
+    }
+    QVERIFY(closeTagEditor(main));
+}
+
 void UiDialogsTest::checkEditTagsStatusSaysWhatFailedWhole(DialogsWindow &main, qreal pointSize) {
     QQuickWindow *window = main.window;
     TagEditorController &editor = main.editor;
