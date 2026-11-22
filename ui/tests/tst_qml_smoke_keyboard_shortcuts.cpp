@@ -40,6 +40,7 @@ private slots:
     void keyColumnsHoldStillAsTheScrollBarComesAndGoes();
     void namesAndKeysAreQuotedAsInTheOtherDialogs();
     void reassignHasAGlyphAsCancelHas();
+    void columnHeadingsTakeTheTablesHeaderStyle();
 };
 
 namespace {
@@ -1010,6 +1011,29 @@ void KeyboardShortcutsSmokeTest::reassignHasAGlyphAsCancelHas() {
                      QQmlProperty::read(cancel, QString::fromLatin1(size)));
     }
     QVERIFY(QMetaObject::invokeMethod(reassign, "reject"));
+}
+
+// The column headings are the app's tables', as Edit Tags': small, in the
+// secondary colour (they were the rows' size and ink). The row keeps the
+// height of KDE's shortcuts dialog (#458).
+void KeyboardShortcutsSmokeTest::columnHeadingsTakeTheTablesHeaderStyle() {
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QObject *palette = qvariant_cast<QObject *>(fixture.window->property("uiPalette"));
+    QQuickItem *headings = fixture.item("keyboardShortcutsColumnHeadings");
+    QVERIFY(palette != nullptr && headings != nullptr);
+    for (const char *heading : {"Action", "Shortcut", "Alternate"}) {
+        QQuickItem *label = visibleTextIn(headings, QString::fromLatin1(heading));
+        QVERIFY2(label != nullptr, heading);
+        const QFont font = label->property("font").value<QFont>();
+        QCOMPARE(font.pointSizeF(), palette->property("smallPointSize").toReal());
+        QCOMPARE(font.weight(), QFont::Normal);
+        QCOMPARE(label->property("color").value<QColor>().rgba(),
+                 palette->property("textSecondary").value<QColor>().rgba());
+    }
+    QCOMPARE(headings->height(),
+             std::ceil(palette->property("rowHeight").toReal()
+                       + 2 * evaluateOn(headings, QStringLiteral("Kirigami.Units.smallSpacing")).toReal()));
 }
 
 std::unique_ptr<QmlSmokeTest> makeKeyboardShortcutsSmokeTest(const QString &userDirectoriesParent) {

@@ -613,29 +613,20 @@ Components.DialogWindow {
                 height: Math.ceil(root.uiPalette.rowHeight + 2 * Kirigami.Units.smallSpacing)
                 spacing: 0
 
-                Label {
+                ColumnHeading {
                     Layout.fillWidth: true
                     Layout.leftMargin: root.rowLeftPadding
-                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Action")
-                    elide: Text.ElideRight
-                    Accessible.role: Accessible.ColumnHeader
                 }
-                Label {
+                ColumnHeading {
                     Layout.preferredWidth: root.keyColumnWidth
                     leftPadding: Kirigami.Units.largeSpacing
-                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Shortcut")
-                    elide: Text.ElideRight
-                    Accessible.role: Accessible.ColumnHeader
                 }
-                Label {
+                ColumnHeading {
                     Layout.preferredWidth: root.keyColumnWidth + actionList.columnsLane
                     leftPadding: Kirigami.Units.largeSpacing
-                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Alternate")
-                    elide: Text.ElideRight
-                    Accessible.role: Accessible.ColumnHeader
                 }
             }
 
@@ -955,6 +946,16 @@ Components.DialogWindow {
                 text: I18n.i18nc("@info", "Ferrous could not take these shortcuts. Change some back, or cancel to keep the ones you had.")
             }
         }
+    }
+
+    // A column's heading, as those of the app's other tables, Edit Tags'
+    // and the queue's: small and secondary (it had the rows' size and ink).
+    component ColumnHeading: Label {
+        textFormat: Text.PlainText
+        font.pointSize: root.uiPalette.smallPointSize
+        color: root.uiPalette.textSecondary
+        elide: Text.ElideRight
+        Accessible.role: Accessible.ColumnHeader
     }
 
     // Asks before a key moves from another action, as KDE's editor does.
