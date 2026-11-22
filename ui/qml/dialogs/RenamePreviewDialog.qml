@@ -89,7 +89,7 @@ Components.DialogWindow {
     // arrow and new name in their columns, a sentence of the summary, the
     // message that nothing is renamed, or the buttons; no narrower than its minimum, and no
     // wider than 42 grid units, which grow with a larger font, within the
-    // screen, where a longer name elides in its middle (a fixed
+    // screen, where a longer name wraps in its column (a fixed
     // 756 px held 390 px of lines, and 1814 px at 24 pt, wider than Edit
     // Tags under it). Only the first rows are measured: more scroll, and a
     // list that long opens at its limit anyway.
@@ -103,29 +103,48 @@ Components.DialogWindow {
         rowMetrics.font
         return Math.ceil(rowMetrics.advanceWidth(root.arrowText)) + 2 * root.arrowClearance
     }
-    // The widest name in each column, as their labels draw them, and the
-    // widest old name of the files that get a new one.
+    // The widest name in each column, as their labels draw them, the widest
+    // old name of the files that get a new one, and the old names' column
+    // as the window opens: no wider than the names need that fit in it
+    // beside the new ones at the window's widest. A longer name wraps
+    // there, and is given the room for about two lines, or a quarter of the
+    // list, where it is the widest (at 24 pt a kept name opened the window
+    // at its 1814 px, with 180 px empty before the other rows' arrows).
     readonly property var measuredRows: {
         // The binding follows the font: advanceWidth() is a function, which
         // it cannot follow.
         rowMetrics.font
+        // A label lays its text out up to a pixel or so wider than its
+        // advance, and would wrap a word of it.
+        const widthOf = function(text) {
+            return Math.ceil(rowMetrics.advanceWidth(text)) + 2
+        }
         let renamedName = 0
         let oldName = 0
         let newName = 0
+        const oldWidths = []
         const measured = Math.min(root.rows.length, root.measuredRowLimit)
         for (let i = 0; i < measured; ++i) {
             const row = root.rows[i]
-            const width = rowMetrics.advanceWidth(row.oldName)
+            const width = widthOf(row.oldName)
+            oldWidths.push(width)
             oldName = Math.max(oldName, width)
             if (root.showsNewName(row)) {
                 renamedName = Math.max(renamedName, width)
             }
-            newName = Math.max(newName, rowMetrics.advanceWidth(root.newColumnText(row)))
+            newName = Math.max(newName, widthOf(root.newColumnText(row)))
         }
+        const widest = root.maximumDefaultWidth - 2 * root.contentPadding - root.listGutter
+        const room = widest - root.arrowColumnWidth - newName
+        const wrapped = Math.ceil(Math.max(0.25 * widest, 0.5 * oldName))
+        const openingOldName = oldWidths.reduce(function(column, width) {
+            return width <= room ? Math.max(column, width) : column
+        }, Math.max(renamedName, Math.min(oldName, room, wrapped)))
         return {
-            renamedName: Math.ceil(renamedName),
-            oldName: Math.ceil(oldName),
-            newName: Math.ceil(newName)
+            renamedName: renamedName,
+            oldName: oldName,
+            newName: newName,
+            openingOldName: openingOldName
         }
     }
     readonly property real widestContentLine: {
@@ -142,7 +161,7 @@ Components.DialogWindow {
         const measured = root.measuredRows
         if (root.rows.length > 0) {
             widest = Math.max(widest,
-                measured.oldName + root.arrowColumnWidth + measured.newName + root.listGutter)
+                measured.openingOldName + root.arrowColumnWidth + measured.newName + root.listGutter)
         }
         return widest
     }
@@ -151,19 +170,19 @@ Components.DialogWindow {
     // The old names' column, every row's: as wide as the widest, where the
     // window holds it; where it does not, it gives way to the new names,
     // which are what is checked before renaming. The renamed files' old
-    // names give way down to 40 % of the list, and then the new names elide
+    // names give way down to 40 % of the list, and then the new names wrap
     // too (the arrows stood at seven places, and the new names had no
     // column). A name that stays gives way further, to the renamed files'
-    // column or a quarter of the list, so a long one cuts no new name (it
-    // ran across the arrows and the new names); in its own line it goes on
-    // past the column as far as there is room (see the row).
-    readonly property real oldNameColumnWidth: {
-        const line = previewList.width - root.listGutter
+    // column or a quarter of the list, and wraps in the column, so a long
+    // one is whole and keeps "keeps its name" under the others (elided, it
+    // was cut; whole on one line, it pushed that out of the column).
+    function oldNameColumnIn(line) {
         const measured = root.measuredRows
         const least = Math.max(Math.floor(0.25 * line), Math.min(measured.renamedName, Math.floor(0.4 * line)))
         return Math.max(0, Math.min(measured.oldName,
             Math.max(least, line - root.arrowColumnWidth - measured.newName)))
     }
+    readonly property real oldNameColumnWidth: root.oldNameColumnIn(previewList.width - root.listGutter)
     readonly property real contentSpacing: 10
     // The room right of the rows for the list's scroll bar, and a refused
     // file's error's indent under its name.
@@ -188,11 +207,12 @@ Components.DialogWindow {
         }
         let height = Math.ceil(summarySizer.implicitHeight)
         if (root.rows.length > 0) {
-            // Each row a line, and its error under it where it has one.
-            height += root.contentSpacing + root.rows.length * Math.ceil(nameLineSizer.implicitHeight)
-                + (root.rows.length - 1) * root.listSpacing
-            for (let i = 0; i < errorSizers.count; ++i) {
-                const sizer = errorSizers.itemAt(i)
+            // As many rows as the tallest window shows as they wrap, each
+            // one past them a line.
+            height += root.contentSpacing + (root.rows.length - 1) * root.listSpacing
+                + (root.rows.length - rowSizers.count) * Math.ceil(nameLineSizer.implicitHeight)
+            for (let i = 0; i < rowSizers.count; ++i) {
+                const sizer = rowSizers.itemAt(i)
                 height += sizer ? Math.ceil(sizer.implicitHeight) : 0
             }
         }
@@ -252,8 +272,11 @@ Components.DialogWindow {
     // The content's text at the width the window opens at, in the content's
     // fonts and wrapping: they set its default height.
     Item {
+        id: openingSizers
         width: root.openingWidth - 2 * root.contentPadding
         visible: false
+        readonly property real line: openingSizers.width - root.listGutter
+        readonly property real oldNameColumn: root.oldNameColumnIn(openingSizers.line)
 
         Label {
             id: summarySizer
@@ -264,31 +287,49 @@ Components.DialogWindow {
             font: summary.font
         }
 
-        // A file's line, elided to one.
+        // A file's line, unwrapped.
         Label {
             id: nameLineSizer
             textFormat: Text.PlainText
             text: " "
         }
 
-        // The refused files' errors, as many as the tallest window shows.
+        // The first rows, their names wrapped in their columns and a
+        // refused file's error under them, as many as the tallest window
+        // shows.
         Repeater {
-            id: errorSizers
-            model: {
-                const errors = []
-                const room = Math.ceil(root.maximumHeight / Math.max(1, nameLineSizer.implicitHeight))
-                for (let i = 0; i < root.rows.length && errors.length < room; ++i) {
-                    if (!root.rows[i].ok) {
-                        errors.push(root.rows[i].error || "")
-                    }
+            id: rowSizers
+            model: root.rows.slice(0, Math.ceil(root.maximumHeight / Math.max(1, nameLineSizer.implicitHeight)))
+            delegate: Item {
+                id: rowSizer
+                required property var modelData
+                implicitHeight: Math.max(oldNameSizer.implicitHeight, newNameSizer.implicitHeight)
+                    + (rowSizer.modelData.ok ? 0 : Math.ceil(errorSizer.implicitHeight))
+
+                Label {
+                    id: oldNameSizer
+                    width: openingSizers.oldNameColumn
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    text: rowSizer.modelData.oldName
                 }
-                return errors
-            }
-            delegate: Components.MessageLabel {
-                required property string modelData
-                width: parent.width - root.listGutter - root.errorIndent
-                message: modelData
-                font.pointSize: root.uiPalette.smallPointSize
+
+                Label {
+                    id: newNameSizer
+                    width: Math.max(0, openingSizers.line - openingSizers.oldNameColumn - root.arrowColumnWidth)
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    text: root.newColumnText(rowSizer.modelData)
+                    font.pointSize: root.showsNewName(rowSizer.modelData)
+                        ? root.uiPalette.basePointSize : root.uiPalette.smallPointSize
+                }
+
+                Components.MessageLabel {
+                    id: errorSizer
+                    width: openingSizers.line - root.errorIndent
+                    message: rowSizer.modelData.error || ""
+                    font.pointSize: root.uiPalette.smallPointSize
+                }
             }
         }
 
@@ -415,24 +456,21 @@ Components.DialogWindow {
 
                 // A file, in the three columns: its old name, the arrow where
                 // it has a new one, and that name, or that it keeps its own,
-                // which every row starts at one x but one that stays and
-                // is longer than the column: it has the line for it whole,
-                // and "keeps its name" follows it (it was cut beside free
-                // room).
+                // which every row starts at one x. A name too long for its
+                // column wraps in it, so none is lost, and the arrow and
+                // the new name are on its first line.
                 Item {
                     objectName: "renamePreviewFileRow"
                     Layout.fillWidth: true
-                    implicitHeight: oldNameLabel.implicitHeight
+                    implicitHeight: Math.max(oldNameLabel.implicitHeight, newNameLabel.implicitHeight)
                     Accessible.role: Accessible.StaticText
                     Accessible.name: root.rowText(previewRow.modelData)
 
                     Label {
                         id: oldNameLabel
                         objectName: "renamePreviewOldName"
-                        width: previewRow.showsNewName ? root.oldNameColumnWidth
-                            : Math.max(root.oldNameColumnWidth, Math.min(Math.ceil(implicitWidth),
-                                parent.width - root.arrowColumnWidth - Math.ceil(newNameLabel.implicitWidth)))
-                        elide: Text.ElideMiddle
+                        width: root.oldNameColumnWidth
+                        wrapMode: Text.Wrap
                         textFormat: Text.PlainText
                         text: previewRow.modelData.oldName
                         color: previewRow.quietColor
@@ -455,9 +493,9 @@ Components.DialogWindow {
                         id: newNameLabel
                         objectName: "renamePreviewNewName"
                         anchors.baseline: oldNameLabel.baseline
-                        x: oldNameLabel.width + root.arrowColumnWidth
+                        x: root.oldNameColumnWidth + root.arrowColumnWidth
                         width: Math.max(0, parent.width - x)
-                        elide: Text.ElideMiddle
+                        wrapMode: Text.Wrap
                         textFormat: Text.PlainText
                         text: root.newColumnText(previewRow.modelData)
                         // "keeps its name" is quieter than the names, in
