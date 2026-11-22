@@ -475,13 +475,11 @@ Rectangle {
                 objectName: "queueRegionHeader"
                 anchors.fill: parent
                 uiPalette: root.uiPalette
-                // Over the Title column, or with no rows to align with, at
-                // the panes' 12 px inset, where "Library" is beside it
-                // (an empty queue's name stood alone at the Title
-                // column's 66 px).
-                leftInset: root.uiBridge.queueLength > 0
-                    ? queueHeaderRow.x + titleHeader.x
-                    : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+                // Over the Title column, with rows or without: it is that
+                // column's heading, and stays as tracks come (at the panes'
+                // 12 px inset while empty, it jumped 54 px on the first
+                // Play).
+                leftInset: queueHeaderRow.x + titleHeader.x
                 rightInset: Math.max(0, parent.width - (queueHeaderRow.x + titleHeader.x + titleHeader.width))
                 title: I18n.i18nc("@title queue region", "Queue")
                 totals: root.totalsText

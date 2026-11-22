@@ -1100,8 +1100,8 @@ private slots:
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
-    void emptyQueueNamesItselfAtThePanesInset_data();
-    void emptyQueueNamesItselfAtThePanesInset();
+    void queueNameKeepsTheTitleColumnsPlace_data();
+    void queueNameKeepsTheTitleColumnsPlace();
     void narrowQueueDropsAlbumBeforeTitle();
     void queueColumnsGiveTheirSlackToTheTitle();
     void narrowWindowAtALargeFontFitsTheQueue();
@@ -5200,7 +5200,7 @@ void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     QCOMPARE(sceneRect(line).height(), sceneRect(handle).height());
 }
 
-void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset_data() {
+void UiMainWindowTest::queueNameKeepsTheTitleColumnsPlace_data() {
     QTest::addColumn<int>("width");
     QTest::addColumn<int>("height");
     QTest::addColumn<qreal>("pointSize");
@@ -5208,11 +5208,10 @@ void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset_data() {
     QTest::newRow("1000x720, 24 pt") << 1000 << 720 << 24.0;
 }
 
-// An empty queue's name has no rows to align with: it sits at the panes'
-// 12 px inset, where "Library" is beside it (it stood alone at the Title
-// column's 66 px). With tracks, it is over the Title column, and back at
-// 12 px once they are gone.
-void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset() {
+// "Queue" is the Title column's heading, and stays at that column's x
+// whether the queue is empty or filled (at the panes' 12 px inset while
+// empty, it jumped 54 px on the first Play).
+void UiMainWindowTest::queueNameKeepsTheTitleColumnsPlace() {
     QFETCH(int, width);
     QFETCH(int, height);
     QFETCH(qreal, pointSize);
@@ -5234,16 +5233,19 @@ void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset() {
     const auto inset = [](QQuickItem *item, QQuickItem *pane) {
         return item->mapToScene(QPointF()).x() - pane->mapToScene(QPointF()).x();
     };
-    QTRY_COMPARE(inset(name, queue), 12.0);
+    QTRY_COMPARE(name->mapToScene(QPointF()).x(), title->mapToScene(QPointF()).x());
+    const qreal emptyInset = inset(name, queue);
+    QVERIFY2(emptyInset > 12.0, qPrintable(QString::number(emptyInset)));
     QCOMPARE(inset(libraryName, library), 12.0);
     QVERIFY(!name->property("truncated").toBool());
 
-    setQueue(bridge, sampleQueueRows(3));
+    setQueue(bridge, sampleQueueRows(50));
     QTRY_COMPARE(name->mapToScene(QPointF()).x(), title->mapToScene(QPointF()).x());
-    QVERIFY(inset(name, queue) > 12.0);
+    QCOMPARE(inset(name, queue), emptyInset);
 
     setQueue(bridge, {});
-    QTRY_COMPARE(inset(name, queue), 12.0);
+    QTRY_COMPARE(name->mapToScene(QPointF()).x(), title->mapToScene(QPointF()).x());
+    QCOMPARE(inset(name, queue), emptyInset);
 }
 
 void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
