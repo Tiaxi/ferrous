@@ -647,6 +647,7 @@ private slots:
     void recentIssuesDiagnosticsCaptionIsOnTheTextColumn();
     void libraryFolderMenuGivesEachItemItsOwnGlyph();
     void visualizationStretchSaysWhatItFills();
+    void diagnosticsCopiesAreNamedByTheirPaths();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesOpenWithTheirFocusShown();
@@ -4019,11 +4020,11 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
                      .value<QColor>()),
              hex(tokenOf(window, "placeholderText")));
 
-    // Copy Log Without Paths asks the bridge for the copy once there is a log.
+    // Copy Without Paths asks the bridge for the copy once there is a log.
     QObject *bridge = bridgeOf(window);
     QQuickItem *copyWithoutPaths = visibleNamed(diagnosticsWindow, QStringLiteral("diagnosticsCopyWithoutPathsButton"));
     QVERIFY(copyWithoutPaths != nullptr);
-    QCOMPARE(copyWithoutPaths->property("text").toString(), QStringLiteral("Copy Log Without Paths"));
+    QCOMPARE(copyWithoutPaths->property("text").toString(), QStringLiteral("Copy Without Paths"));
     QVERIFY(!copyWithoutPaths->isEnabled());
     bridge->setProperty("diagnosticsText", QStringLiteral("[app] info: Ferrous started."));
     QMetaObject::invokeMethod(bridge, "diagnosticsChanged");
@@ -4041,7 +4042,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow_data() {
 // Diagnostics has one verb for deleting its log and one row of actions under
 // the log's path (Clear… asked to delete the log, and the actions were over
 // two rows with two ragged right edges): Reload and Delete Log on the left,
-// Open Folder, Copy All and Copy Log Without Paths on the right, ending
+// Open Folder, Copy With Paths and Copy Without Paths on the right, ending
 // where the log's frame does. The log's scroll bar is inside its frame,
 // and its text clear of the frame.
 void UiDialogsTest::diagnosticsActionsShareOneRow() {
@@ -7888,7 +7889,8 @@ void UiDialogsTest::recentIssuesUseTheStatusBarsTriangle() {
 }
 
 // Delete Diagnostics Log sends a bug report to the copy made for sharing,
-// by its button's name: Copy All, which it named, copies every path (#547).
+// by its button's name: Copy With Paths, which it named, copies every path
+// (#547).
 void UiDialogsTest::deletingTheLogPointsBugReportsAtTheCopyWithoutPaths() {
     DialogsWindow main;
     QVERIFY2(main.window != nullptr, "Main.qml failed to show");
@@ -8556,6 +8558,35 @@ void UiDialogsTest::visualizationStretchSaysWhatItFills() {
     QVERIFY(reject(preferences));
 }
 
+// Diagnostics names its two copies on one axis, with paths and without,
+// in its buttons, in the log's menu and in Delete Log's explanation: "Copy
+// All" and "Copy Log Without Paths" named them on two.
+void UiDialogsTest::diagnosticsCopiesAreNamedByTheirPaths() {
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QObject *diagnostics = object(main.window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(diagnostics != nullptr && QMetaObject::invokeMethod(diagnostics, "open"));
+    QVERIFY(waitForDialogWindow(diagnostics));
+    QQuickWindow *log = windowOf(diagnostics);
+    const QString withPaths = QStringLiteral("Copy With Paths");
+    const QString withoutPaths = QStringLiteral("Copy Without Paths");
+    QQuickItem *withButton = visibleNamed(log, QStringLiteral("diagnosticsCopyAllButton"));
+    QQuickItem *withoutButton = visibleNamed(log, QStringLiteral("diagnosticsCopyWithoutPathsButton"));
+    QVERIFY(withButton != nullptr && withoutButton != nullptr);
+    QCOMPARE(withButton->property("text").toString(), withPaths);
+    QCOMPARE(withoutButton->property("text").toString(), withoutPaths);
+    QObject *withItem = object(main.window, QStringLiteral("diagnosticsCopyWithPathsMenuItem"));
+    QObject *withoutItem = object(main.window, QStringLiteral("diagnosticsCopyWithoutPathsMenuItem"));
+    QVERIFY(withItem != nullptr && withoutItem != nullptr);
+    QCOMPARE(withItem->property("text").toString(), withPaths);
+    QCOMPARE(withoutItem->property("text").toString(), withoutPaths);
+    QObject *confirm = object(main.window, QStringLiteral("clearDiagnosticsConfirmDialog"));
+    QVERIFY(confirm != nullptr);
+    const QString details = confirm->property("details").toString();
+    QVERIFY2(details.contains(QStringLiteral("use Copy Without Paths first")), qPrintable(details));
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "dismiss"));
+}
+
 void UiDialogsTest::recentIssuesDiagnosticsCaptionIsOnTheTextColumn_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::newRow("10 pt") << 10.0;
@@ -8705,8 +8736,7 @@ void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
     QCOMPARE(textOf("quitSaveFailedHeading"), QStringLiteral("Some recent changes weren\u2019t saved."));
     QCOMPARE(quit->property("message").toString(), system);
     QCOMPARE(textOf("quitSaveFailedDetails"),
-             QStringLiteral("Retry saves again. Quit Anyway loses unsaved settings, queue changes and Last.fm "
-                            "scrobbles."));
+             QStringLiteral("Quit Anyway loses unsaved settings, queue changes and Last.fm scrobbles."));
     QVERIFY(QMetaObject::invokeMethod(quit, "dismiss"));
 
     QObject *shortcuts = object(window, QStringLiteral("keyboardShortcutsDialog"));
