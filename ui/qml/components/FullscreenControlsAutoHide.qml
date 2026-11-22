@@ -11,19 +11,27 @@ QtObject {
     // Keeps the controls shown, such as while one has keyboard focus.
     property bool held: false
     readonly property bool controlsVisible: !root.active || root.held || state.controlsVisible
-    // The controls as they fade, 1 shown and 0 hidden, over shortDuration on
-    // OutCubic: every overlay that hides with them, the title strip, the
-    // corner controls, the mode switch, the lanes' Mute and Solo and the
-    // crosshair, takes its opacity from this one level, so none of them
-    // cuts while another fades. They take no pointer only once it is 0, and
-    // the pointer hides then too.
+    // The controls as they fade, 1 shown and 0 hidden: every overlay that
+    // hides with them, the title strip, the corner controls, the mode
+    // switch, the lanes' Mute and Solo and the crosshair, takes its opacity
+    // from this one level, so none of them cuts while another fades. They
+    // come at once, over shortDuration on OutCubic, as they answer the
+    // pointer; nobody asks for them to go, and they leave as a fade, 2.5
+    // times as long (250 ms), on InOutQuad (on the one quick curve both
+    // ways they were gone in three frames, a pop along the screen's top
+    // every time the pointer rested). They take no pointer only once it is
+    // 0, and the pointer hides then too.
     property real level: root.controlsVisible ? 1 : 0
     // Kirigami's durations are 0 with animations turned off.
     Behavior on level {
+        id: levelFade
         enabled: Kirigami.Units.shortDuration > 0
         NumberAnimation {
-            duration: Kirigami.Units.shortDuration
-            easing.type: Easing.OutCubic
+            // By where the fade goes: controlsVisible may not have told
+            // this binding yet as the fade starts.
+            readonly property bool shows: levelFade.targetValue > 0
+            duration: shows ? Kirigami.Units.shortDuration : Math.round(Kirigami.Units.shortDuration * 2.5)
+            easing.type: shows ? Easing.OutCubic : Easing.InOutQuad
         }
     }
 

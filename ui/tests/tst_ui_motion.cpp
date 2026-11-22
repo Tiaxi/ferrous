@@ -1091,6 +1091,8 @@ private slots:
     void windowedViewerClosesOverItsLastFrame();
     void albumArtViewerControlsFadeOnOneLevel_data();
     void albumArtViewerControlsFadeOnOneLevel();
+    void viewerControlsHideAsAFadeAndShowQuicker_data();
+    void viewerControlsHideAsAFadeAndShowQuicker();
 };
 
 void UiMotionTest::initTestCase() {
@@ -7029,6 +7031,78 @@ void UiMotionTest::albumArtViewerControlsFadeOnOneLevel() {
     QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+}
+
+void UiMotionTest::viewerControlsHideAsAFadeAndShowQuicker_data() {
+    QTest::addColumn<QString>("autoHideName");
+    QTest::addColumn<QByteArray>("open");
+    QTest::newRow("visualization") << QStringLiteral("spectrogramFullscreenControlsAutoHide")
+                                   << QByteArrayLiteral("openSpectrogramViewer");
+    QTest::newRow("album art") << QStringLiteral("albumArtFullscreenControlsAutoHide")
+                               << QByteArrayLiteral("openAlbumArtViewer");
+}
+
+// The controls leave as a fade, 250 ms InOutQuad, rather than in three
+// frames at the top of the screen (81 ms of OutCubic), and still come back
+// over 100 ms, OutCubic. Both follow Plasma's animation speed and are
+// instant with animations off.
+void UiMotionTest::viewerControlsHideAsAFadeAndShowQuicker() {
+    QFETCH(QString, autoHideName);
+    QFETCH(QByteArray, open);
+    Covers covers;
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    units->setShortDuration(100);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(autoHideName);
+    QVERIFY(bridge && viewer && autoHide);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    showTrack(bridge, QStringLiteral("/music/0.flac"), QStringLiteral("Track"), QStringLiteral("Album"),
+              covers.first);
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, open.constData()));
+    QTRY_VERIFY(autoHide->property("active").toBool());
+    QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
+    QObject *state = qvariant_cast<QObject *>(autoHide->property("state"));
+    QVERIFY(state != nullptr);
+    const auto level = [autoHide]() { return autoHide->property("level").toDouble(); };
+
+    struct Fade {
+        bool shows;
+        int duration;
+        QEasingCurve::Type curve;
+    };
+    {
+        SteppedAnimationDriver driver;
+        for (const Fade &fade : {Fade{false, 250, QEasingCurve::InOutQuad}, Fade{true, 100, QEasingCurve::OutCubic}}) {
+            // As the timer does as it runs out, and as the pointer does.
+            state->setProperty("controlsVisible", fade.shows);
+            QCOMPARE(autoHide->property("controlsVisible").toBool(), fade.shows);
+            const QEasingCurve curve(fade.curve);
+            for (int ms = 16; ms <= fade.duration + 32; ms += 16) {
+                static_cast<void>(driver.step(16));
+                const double gone = fade.shows ? level() : 1.0 - level();
+                // Within a frame of the curve.
+                const double least = curve.valueForProgress(std::clamp(double(ms - 17) / fade.duration, 0.0, 1.0));
+                const double most = curve.valueForProgress(std::clamp(double(ms + 17) / fade.duration, 0.0, 1.0));
+                QVERIFY2(gone >= least - 1e-6 && gone <= most + 1e-6,
+                         qPrintable(QStringLiteral("%1 at %2 ms: %3, not %4 to %5")
+                                        .arg(fade.shows ? QStringLiteral("showing") : QStringLiteral("hiding"))
+                                        .arg(ms).arg(gone).arg(least).arg(most)));
+            }
+            QCOMPARE(level(), fade.shows ? 1.0 : 0.0);
+        }
+    }
+
+    units->setShortDuration(0);
+    for (const bool shows : {false, true}) {
+        state->setProperty("controlsVisible", shows);
+        QCOMPARE(level(), shows ? 1.0 : 0.0);
+    }
+    QVERIFY(QMetaObject::invokeMethod(viewer, open == QByteArrayLiteral("openSpectrogramViewer")
+                                                  ? "closeSpectrogramViewer" : "closeAlbumArtViewer"));
+    QTRY_VERIFY(!autoHide->property("active").toBool());
 }
 
 #include "tst_ui_motion.moc"

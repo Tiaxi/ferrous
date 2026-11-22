@@ -182,7 +182,7 @@ Durations are Kirigami's (`shortDuration` 100 ms, `longDuration` 200 ms, `veryLo
 | search palette and scrim | fade together, `shortDuration`, OutCubic |
 | tree expand and collapse | rows below slide over the children, `longDuration`, OutCubic |
 | queue reorder by drag | displaced rows slide, `shortDuration`, OutCubic. A keyboard reorder is instant |
-| viewer controls auto-hiding | after 5 s at rest, one shared level fades the strip, plates, mode switch, lane buttons and crosshair together, `shortDuration`, OutCubic. The controls stay while they have keyboard focus |
+| viewer controls auto-hiding | after 5 s at rest, one shared level fades the strip, plates, mode switch, lane buttons and crosshair together: out over `shortDuration` × 2.5 (250 ms), InOutQuad, and back in over `shortDuration`, OutCubic. The controls stay while they have keyboard focus |
 | album art details | the column slides in and the art glides with it over 120 ms, OutCubic |
 | playhead, seek, spectrogram scrolling | never tweened |
 | meter or scale toggled | one step |
