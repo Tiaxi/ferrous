@@ -642,6 +642,8 @@ private slots:
     void editTagsTitleMeetsTheEdgeUnderAWideScrollBar();
     void editTagsDetailsHasAGlyphAsItsPeers_data();
     void editTagsDetailsHasAGlyphAsItsPeers();
+    void editTagsDetailsFollowsItsFailure_data();
+    void editTagsDetailsFollowsItsFailure();
     void editTagsRevertToolTipsStandAboveTheirGlyphs_data();
     void editTagsRevertToolTipsStandAboveTheirGlyphs();
     void dialogsShareOneLook();
@@ -6058,6 +6060,81 @@ void UiDialogsTest::editTagsDetailsHasAGlyphAsItsPeers() {
     }
     QTRY_VERIFY(!layoutPending(details));
     QVERIFY(details->width() >= details->implicitWidth() - 0.5);
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsDetailsFollowsItsFailure_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000;
+    QTest::newRow("10 pt, 1600 px") << 10.0 << 1600;
+    QTest::newRow("24 pt, 1000 px") << 24.0 << 1000;
+    QTest::newRow("24 pt, 1600 px") << 24.0 << 1600;
+}
+
+// Details… follows the failure it explains, 8 px after its text, which is
+// at the body size in the negative colour, with the footer's room before
+// Save and Cancel (it was beside Save, 975 px from the message in a 1600 px
+// window). A failure too long for the room elides with its tooltip. Save
+// and Cancel stay where they are as a failure appears and clears.
+void UiDialogsTest::editTagsDetailsFollowsItsFailure() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRows(2));
+    QVERIFY(tags != nullptr);
+    tags->resize(width, tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), qreal(width));
+    TagEditorController &editor = main.editor;
+    editor.setStatusText({});
+    QQuickItem *save = visibleNamed(tags, QStringLiteral("tagEditorSaveButton"));
+    QQuickItem *cancel = visibleNamed(tags, QStringLiteral("tagEditorCancelButton"));
+    QQuickItem *status = visibleNamed(tags, QStringLiteral("tagEditorStatusLabel"));
+    QQuickItem *details = named(tags, QStringLiteral("tagEditorDetailsButton"));
+    QQuickItem *reload = visibleNamed(tags, QStringLiteral("tagEditorReloadButton"));
+    QVERIFY(save && cancel && status && details && reload);
+    QTRY_VERIFY(!details->isVisible() && !layoutPending(save) && !layoutPending(status));
+    const QRectF saveAt = sceneRect(save);
+    const QRectF cancelAt = sceneRect(cancel);
+    QObject *palette = paletteOf(main.window);
+    const QVariantList why{QVariantMap{{QStringLiteral("heading"), QStringLiteral("Failed:")}}};
+    const QString message = QStringLiteral("Saved 1 file; 1 failed.");
+    const QString longMessage = QStringLiteral("Saved 1 file; 1 failed, as its folder is on a file system that "
+                                               "takes no writes, and so is every folder above it up to the top of "
+                                               "the disk it is on, which was mounted read-only as the session began.");
+    for (const QString &text : {message, longMessage}) {
+        editor.setStatusText(text, why, true);
+        QTRY_VERIFY(details->isVisible() && !layoutPending(details) && !layoutPending(status));
+        const QString at = describeItem(status) + describeItem(details);
+        QCOMPARE(status->property("text").toString(), text);
+        QCOMPARE(status->property("font").value<QFont>().pointSizeF(), palette->property("basePointSize").toReal());
+        QCOMPARE(hex(status->property("color").value<QColor>()), hex(palette->property("negative").value<QColor>()));
+        // The 8 px are from the drawn text, or from the ellipsis's room.
+        const bool cut = status->property("truncated").toBool();
+        const qreal drawnRight = sceneRect(status).left()
+            + (cut ? status->width() : status->property("contentWidth").toReal());
+        QVERIFY2(std::abs(sceneRect(details).left() - drawnRight - 8) <= 1.5, qPrintable(at));
+        QVERIFY2(details->width() >= details->implicitWidth() - 0.5, qPrintable(at));
+        QVERIFY2(sceneRect(status).left() >= sceneRect(reload).right(), qPrintable(at));
+        QVERIFY2(sceneRect(details).right() < saveAt.left(), qPrintable(at));
+        QCOMPARE(sceneRect(save), saveAt);
+        QCOMPARE(sceneRect(cancel), cancelAt);
+        if (text == longMessage) {
+            QVERIFY2(cut, qPrintable(at));
+            QObject *toolTip = object(main.window, QStringLiteral("tagEditorStatusToolTip"));
+            QVERIFY(toolTip != nullptr);
+            QCOMPARE(toolTip->property("message").toString(), text);
+        } else if (width >= 1600) {
+            QVERIFY2(!cut, qPrintable(at));
+        }
+    }
+    editor.setStatusText({});
+    QTRY_VERIFY(!details->isVisible() && !layoutPending(save) && !layoutPending(status));
+    QCOMPARE(sceneRect(save), saveAt);
+    QCOMPARE(sceneRect(cancel), cancelAt);
+    QCOMPARE(status->property("font").value<QFont>().pointSizeF(), palette->property("smallPointSize").toReal());
     QVERIFY(closeTagEditor(main));
 }
 

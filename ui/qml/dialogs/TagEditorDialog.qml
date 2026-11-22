@@ -1175,7 +1175,10 @@ Components.DialogWindow {
     }
 
     // Tools, Reload and the status share the row with the buttons, on
-    // their inset from the window's edges.
+    // their inset from the window's edges: a failure, Details… straight
+    // after it, which explains it (it stood beside Save, 975 px from it in
+    // a 1600 px window), then the room, and Save and Cancel at the end,
+    // where they stay.
     footer: RowLayout {
         id: tagEditorFooter
         spacing: Kirigami.Units.largeSpacing
@@ -1270,13 +1273,16 @@ Components.DialogWindow {
         Label {
             id: statusLabel
             objectName: "tagEditorStatusLabel"
+            readonly property bool failure: root.statusHasFailure && !root.busy
             Layout.fillWidth: true
+            // As wide as its text, for what follows it, and elided in less.
+            Layout.maximumWidth: Math.ceil(implicitWidth)
             Layout.bottomMargin: dialogButtons.bottomPadding
             Layout.leftMargin: Kirigami.Units.smallSpacing
             textFormat: Text.PlainText
             text: root.statusLine()
-            font.pointSize: root.uiPalette.smallPointSize
-            color: root.statusHasFailure && !root.busy ? root.uiPalette.negative : root.uiPalette.textSecondary
+            font.pointSize: statusLabel.failure ? root.uiPalette.basePointSize : root.uiPalette.smallPointSize
+            color: statusLabel.failure ? root.uiPalette.negative : root.uiPalette.textSecondary
             elide: Text.ElideRight
             Accessible.role: Accessible.StatusBar
 
@@ -1302,6 +1308,10 @@ Components.DialogWindow {
             icon.name: "documentinfo"
             text: I18n.i18nc("@action:button", "Details…")
             onClicked: tagEditorStatusDetailsDialog.open()
+        }
+
+        Item {
+            Layout.fillWidth: true
         }
 
         Components.DialogButtons {
