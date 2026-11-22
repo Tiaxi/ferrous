@@ -81,8 +81,10 @@ import "../logic/PathUtils.js" as PathUtils
 // level 1 under the wide cover and level 2 beside the narrow one, but the
 // base size in a large-font header with little room beside its cover
 // (headerTitleSmall), one size for every track of a layout; the
-// artist and the album are in the text colour, and the details, one line
-// in one colour, in the tertiary one. Details that do not fit leave out
+// artist is in the text colour, and so is the album where it shares the
+// wide layout's line, but a narrow album's own line is in the secondary
+// one; the details, one line in one colour, are in the tertiary one.
+// Details that do not fit leave out
 // what matters least rather than be cut off: the track total, then the
 // genre, then the year.
 //
@@ -2031,10 +2033,10 @@ Item {
                 text: root.shownLines.narrowAlbum
                 keepsTail: true
                 pointSize: root.uiPalette.smallPointSize
-                // Under the large-font header, a step below the artist and
-                // above the details, as the wide layout's lines are
-                // ranked.
-                color: root.largeHeader ? root.uiPalette.textSecondary : root.uiPalette.text
+                // In every narrow layout a step below the artist and above
+                // the details (at the artist's size, weight and colour,
+                // with no gap, the two read as one name that wrapped).
+                color: root.uiPalette.textSecondary
                 // Beside the cover in the compact layout, the year goes
                 // onto a second line with the album's end where it needs
                 // to; under the cover too, in the line a title on one line

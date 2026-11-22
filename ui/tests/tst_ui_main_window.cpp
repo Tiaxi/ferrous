@@ -1574,7 +1574,7 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     QCOMPARE(narrowTitle->property("font").value<QFont>().pointSizeF(),
              palette->property("basePointSize").toReal() * 1.2);
     QCOMPARE(colorOf(named(window, "nowPlayingNarrowArtist")), tokenHex(window, "text"));
-    QCOMPARE(colorOf(named(window, "nowPlayingNarrowAlbum")), tokenHex(window, "text"));
+    QCOMPARE(colorOf(named(window, "nowPlayingNarrowAlbum")), tokenHex(window, "textSecondary"));
     QCOMPARE(colorOf(named(window, "nowPlayingNarrowDetails")), tokenHex(window, "textTertiary"));
     // Beside the cover the long title wraps onto a second line, where it
     // is cut off (on one line, beside the cover at 24 pt, most of a title
@@ -2079,6 +2079,13 @@ void UiMainWindowTest::nowPlayingNarrowBlockIsOneHeightForEveryTrack() {
         QCOMPARE(panel->height(), side + 8 + 3 * details->height() + 2 * 4 + 12 + 1);
         QCOMPARE(panel->height(), panel->property("largeHeaderHeight").toReal() + 12 + 1);
     }
+    // Ranked in every arrangement: the artist primary, the album secondary
+    // (both primary, they read as one name that wrapped), the details
+    // tertiary.
+    QCOMPARE(colorOf(named(window, "nowPlayingNarrowArtist")), tokenHex(window, "text"));
+    QCOMPARE(colorOf(named(window, "nowPlayingNarrowAlbum")), tokenHex(window, "textSecondary"));
+    QCOMPARE(colorOf(details), tokenHex(window, "textTertiary"));
+    QVERIFY(tokenHex(window, "textSecondary") != tokenHex(window, "text"));
     // The lines stay in the block, 12 px or more over the seam.
     const auto linesInside = [&]() {
         return sceneRect(seam).top() - sceneRect(details).bottom() >= 11.0;
