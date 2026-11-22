@@ -1584,8 +1584,13 @@ void UiFoundationsTest::smallControlsScaleWithALargeFont() {
     if (pointSize == 10.0) {
         QCOMPARE(label->height(), 20.0);
     } else {
-        QVERIFY2(label->height() >= text->implicitHeight() + 6,
-                 qPrintable(QStringLiteral("%1 for %2").arg(label->height()).arg(text->implicitHeight())));
+        // A larger font's is its capitals and the room around them, in
+        // step with the font, not the text's line and more: a letter's
+        // chip is no tombstone.
+        const qreal capitals = QFontMetricsF(text->property("font").value<QFont>()).capHeight();
+        QVERIFY2(label->height() >= capitals + 12 && label->height() <= text->implicitHeight() + 4,
+                 qPrintable(QStringLiteral("%1 for capitals of %2 on a line of %3")
+                                .arg(label->height()).arg(capitals).arg(text->implicitHeight())));
     }
 }
 

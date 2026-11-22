@@ -1149,7 +1149,7 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     const QRectF plate = sceneRectOf(modeSwitch);
     QQuickItem *laneHead = nullptr;
     QTRY_VERIFY((laneHead = firstVisibleItemNamed(window->contentItem(), QStringLiteral("plotLaneHead"))) != nullptr);
-    QCOMPARE(plate.top(), sceneRectOf(laneHead).top() - laneHead->property("plateReach").toReal());
+    QCOMPARE(plate.top(), sceneRectOf(laneHead).top());
     QCOMPARE(pane.right() - plate.right(), plate.top() - pane.top());
     // No message on the plot; a stereo track's lanes, named, without
     // Mute and Solo.
@@ -2253,10 +2253,9 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QTRY_COMPARE(surface->property("laneCount").toInt(), 2);
 
     // The pane's: the mode switch and the first lane's head's plates 5 px
-    // from the top, the label centred on its buttons' plate, which reaches
-    // above it.
+    // from the top, the label centred in the head's plate.
     const auto headPlatesTop = [](QQuickItem *laneHead) {
-        return sceneRectOf(laneHead).top() - laneHead->property("plateReach").toReal();
+        return sceneRectOf(laneHead).top();
     };
     const auto controlsTop = [&](QQuickItem *in) {
         // The plot's in the pane; in the window's viewer, its corner plate.

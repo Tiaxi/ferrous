@@ -101,12 +101,39 @@ Item {
     // and a full head over five compact ones). A function, so that a head
     // made as the lane count changes is made at that count's size.
     function headsCompact() {
+        return root.shortestLane() < root.compactLaneHeight
+    }
+    function shortestLane() {
+        let least = root.height
         for (let index = 0; index < root.laneCount; ++index) {
-            if (root.laneHeight(index) < root.compactLaneHeight) {
-                return true
-            }
+            least = Math.min(least, root.laneHeight(index))
         }
-        return false
+        return least
+    }
+    // How far into its lane a head `headHeight` tall is: 5 px, as the mode
+    // switch, or in lanes too short for that, centred on them, so that its
+    // label never runs into the next lane.
+    function headInset(headHeight) {
+        const lane = root.shortestLane()
+        return lane >= root.plateInset + headHeight
+            ? root.plateInset : Math.floor((lane - headHeight) / 2)
+    }
+    // The widest of the lanes' labels, which every head's label cell is
+    // wide enough for, so that M and S are at one x in every lane.
+    readonly property real widestLabel: {
+        // Read the font, for the width to follow it.
+        laneLabelMetrics.font
+        let widest = 0
+        for (let index = 0; index < root.laneCount; ++index) {
+            widest = Math.max(widest, laneLabelMetrics.advanceWidth(root.laneLabels[index] || ""))
+        }
+        return widest
+    }
+    FontMetrics {
+        id: laneLabelMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.headsCompact() ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize
+        font.weight: Font.DemiBold
     }
     // The plates' inset from the plot's corners: the lane heads' and the
     // mode switch's.
@@ -247,11 +274,16 @@ Item {
             // one, as a viewer's title strip reaches into it.
             readonly property real stripShift: Math.max(0, root.topInset - root.laneTop(index))
             objectName: "plotLaneHead"
-            z: 1
+            // Over the other lanes' labels while its plate shows, which in
+            // lanes shorter than it lies on theirs.
+            z: buttonsRevealed ? 1.5 : 1
             x: root.plateInset
-            // The buttons' plate 5 px in, as the mode switch, and the label
-            // centred on it: the head's own top is the label's.
-            y: Math.max(root.laneTop(index), root.topInset) + root.plateInset + plateReach
+            laneRoom: root.shortestLane()
+            plateShift: Math.max(root.topInset - y, Math.min(0, root.height - y - height))
+            // The plate 5 px in, as the mode switch, whose height it has,
+            // and the label centred in it.
+            y: Math.max(root.laneTop(index), root.topInset) + root.headInset(height)
+            widestLabel: root.widestLabel
             visible: label.length > 0
             plotColors: root.plotColors
             uiPalette: root.uiPalette
@@ -282,7 +314,8 @@ Item {
 
             Components.PlotPlate {
                 objectName: "plotLaneRestLabel"
-                y: -laneHead.stripShift
+                y: laneHead.labelY - laneHead.stripShift
+                width: laneHead.cellWidth
                 visible: laneHead.stripShift > 0 && root.controlsLevel < 1
                 fadeLevel: 1 - root.controlsLevel
                 plotColors: root.plotColors

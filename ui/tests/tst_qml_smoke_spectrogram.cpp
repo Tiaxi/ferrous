@@ -40,6 +40,8 @@ private slots:
     void crosshairReadoutPlatesFollowThePointerSmoothly();
     void spectrogramCrosshairTimeKeepsClearOfTheLaneHead();
     void shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch();
+    void laneHeadIsOnePlate_data();
+    void laneHeadIsOnePlate();
     void laneHeadsAreOneSizeInAPane_data();
     void laneHeadsAreOneSizeInAPane();
     void crosshairReadoutLeavesAPlateOutInNarrowPlots_data();
@@ -1707,6 +1709,123 @@ void SpectrogramSmokeTest::crosshairReadoutPlatesFollowThePointerSmoothly() {
     }
 }
 
+void SpectrogramSmokeTest::laneHeadIsOnePlate_data() {
+    QTest::addColumn<int>("lanes");
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("height");
+    QTest::newRow("stereo") << 2 << 10.0 << 431;
+    QTest::newRow("5.1") << 6 << 10.0 << 431;
+    QTest::newRow("7.1") << 8 << 10.0 << 431;
+    QTest::newRow("5.1, tall lanes") << 6 << 10.0 << 960;
+    QTest::newRow("stereo, 24 pt") << 2 << 24.0 << 900;
+    QTest::newRow("5.1, 24 pt") << 6 << 24.0 << 431;
+    QTest::newRow("7.1, 24 pt, lanes shorter than the plate") << 8 << 24.0 << 205;
+}
+
+// A lane's head is one plate: the label's cell, a divider, then Mute and
+// Solo, of one height (a label's chip 20 px tall beside a plate of buttons
+// 32 px tall read as two stickers), the cell as wide in every lane, for the
+// widest label, so that M and S are at one x in them all. At rest the
+// label's chip has the cell's place and keeps it as the plate shows; at
+// 24 pt it is no taller than it is wide. The buttons are no smaller than
+// the compact ones were, 20 px with the default font.
+void SpectrogramSmokeTest::laneHeadIsOnePlate() {
+    QFETCH(int, lanes);
+    QFETCH(qreal, pointSize);
+    QFETCH(int, height);
+    const ScopedApplicationFont font(pointSize);
+    QQmlApplicationEngine engine;
+    QString error;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kPlotLayerHarness, baseUrl, &error));
+    QVERIFY2(root != nullptr, qPrintable(error));
+    QQuickWindow window;
+    window.resize(640, height);
+    auto *harness = qobject_cast<QQuickItem *>(root.data());
+    QVERIFY(harness != nullptr);
+    harness->setParentItem(window.contentItem());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *layer = harness->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QVERIFY(layer != nullptr);
+    layer->setHeight(height);
+    QVERIFY(layer->setProperty("laneCount", lanes));
+    QVERIFY(layer->setProperty("laneLabels", plotLaneLabels(lanes)));
+    const QList<QQuickItem *> heads = itemsNamed(layer, QStringLiteral("plotLaneHead"));
+    QCOMPARE(heads.size(), lanes);
+    const auto rectIn = [layer](QQuickItem *item) {
+        return item->mapRectToItem(layer, QRectF(0, 0, item->width(), item->height()));
+    };
+    const auto part = [](QQuickItem *head, const char *name) {
+        return itemsNamed(head, QString::fromLatin1(name)).value(0);
+    };
+    // At rest, then each lane's plate shown: nothing of the label moves.
+    QList<QRectF> chips;
+    QList<QRectF> letters;
+    QVERIFY(QTest::qWaitFor([&]() { return part(heads.first(), "plotLaneButtons")->opacity() == 0.0; }));
+    // A frame lays the plates' rows out.
+    QVERIFY(!window.grabWindow().isNull());
+    for (QQuickItem *head : heads) {
+        QQuickItem *chip = part(head, "plotLaneLabel");
+        QVERIFY(chip != nullptr && chip->isVisible() && chip->opacity() == 1.0);
+        QCOMPARE(chip->property("backgroundLevel").toReal(), 1.0);
+        chips.push_back(rectIn(chip));
+        letters.push_back(rectIn(part(head, "plotPlateLabel")));
+    }
+    for (int lane = 0; lane < lanes; ++lane) {
+        QCOMPARE(chips.at(lane).left(), chips.first().left());
+        QCOMPARE(chips.at(lane).width(), chips.first().width());
+        QVERIFY2(chips.at(lane).width() >= chips.at(lane).height(),
+                 qPrintable(QStringLiteral("a chip %1 by %2").arg(chips.at(lane).width()).arg(chips.at(lane).height())));
+        // Clear of the lane under it.
+        if (lane + 1 < lanes) {
+            QVERIFY2(chips.at(lane).bottom() <= chips.at(lane + 1).top(),
+                     qPrintable(QStringLiteral("lane %1's chip to %2").arg(lane).arg(chips.at(lane).bottom())));
+        }
+        QVERIFY(chips.at(lane).top() >= 0.0 && chips.at(lane).bottom() <= height);
+    }
+    QObject *bridge = harness->findChild<QObject *>(QStringLiteral("testBridge"));
+    QVERIFY(bridge != nullptr);
+    QVERIFY(bridge->setProperty("channelButtonsVisibility", 2));
+    const qreal lane = std::floor((height - (lanes - 1)) / double(lanes));
+    qreal muteLeft = -1;
+    for (int index = 0; index < lanes; ++index) {
+        QQuickItem *head = heads.at(index);
+        QQuickItem *plate = part(head, "plotLaneButtons");
+        QTRY_COMPARE(plate->opacity(), 1.0);
+        QVERIFY(!window.grabWindow().isNull());
+        QQuickItem *chip = part(head, "plotLaneLabel");
+        const QRectF plateRect = rectIn(plate);
+        const QRectF mute = rectIn(part(head, "plotLaneMuteButton"));
+        const QRectF solo = rectIn(part(head, "plotLaneSoloButton"));
+        const QRectF divider = rectIn(part(plate, "plotPlateDivider"));
+        // One plate: the label's cell in it, the chip's own fill and edge
+        // given way to it, and the buttons after the divider.
+        QCOMPARE(rectIn(chip), chips.at(index));
+        QCOMPARE(rectIn(part(head, "plotPlateLabel")), letters.at(index));
+        QCOMPARE(chip->property("backgroundLevel").toReal(), 0.0);
+        QCOMPARE(plateRect.left(), chips.at(index).left());
+        QCOMPARE(divider.width(), 1.0);
+        QCOMPARE(divider.left(), chips.at(index).right());
+        QVERIFY(mute.left() > divider.right() && solo.left() > mute.right() && solo.right() < plateRect.right());
+        QVERIFY(plateRect.contains(mute) && plateRect.contains(solo));
+        QCOMPARE(mute.center().y(), plateRect.center().y());
+        QCOMPARE(solo.center().y(), plateRect.center().y());
+        QCOMPARE(divider.center().y(), plateRect.center().y());
+        if (lane >= plateRect.height() + 5) {
+            QVERIFY2(std::abs(chips.at(index).center().y() - plateRect.center().y()) <= 0.5,
+                     qPrintable(QStringLiteral("chip centre %1, plate centre %2")
+                                    .arg(chips.at(index).center().y()).arg(plateRect.center().y())));
+        }
+        QVERIFY(plateRect.top() >= 0.0 && plateRect.bottom() <= std::max<qreal>(height, plateRect.height()));
+        QVERIFY2(mute.height() >= 20.0, qPrintable(QString::number(mute.height())));
+        QCOMPARE(plateRect.height(), mute.height() + 8);
+        muteLeft = index == 0 ? mute.left() : muteLeft;
+        QCOMPARE(mute.left(), muteLeft);
+    }
+}
+
 void SpectrogramSmokeTest::laneHeadsAreOneSizeInAPane_data() {
     QTest::addColumn<int>("lanes");
     QTest::newRow("stereo") << 2;
@@ -2432,7 +2551,9 @@ void SpectrogramSmokeTest::shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch
         QCOMPARE(head.text->property("font").value<QFont>().pointSizeF(), compactPoints);
         QVERIFY2(head.label->height() >= 16.0 && head.label->height() < fullLabelHeight,
                  qPrintable(QString::number(head.label->height())));
-        QCOMPARE(head.mute->height(), head.label->height() + 4);
+        // The buttons keep their targets, 20 px with the default font.
+        QVERIFY2(head.mute->height() >= 20.0 && head.mute->height() < palette->property("toolButtonSize").toReal() + 0.5,
+                 qPrintable(QString::number(head.mute->height())));
         // Mute and Solo hidden until the pointer is on the lane.
         QVERIFY(!head.buttons->property("revealed").toBool());
         // Their plate centred on the label, inside the lane.

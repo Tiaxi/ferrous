@@ -3270,6 +3270,19 @@ Window {
         return;
     }
 
+    // Moving on the label with its plate shown round it: the label's cell
+    // takes no hover from the plot under it, as the label does not (the
+    // plate's handler over the cell took it, and the crosshair's place with
+    // it).
+    QTRY_VERIFY(firstVisibleItemNamed(window->contentItem(), QStringLiteral("plotLaneButtons"))->opacity() == 1.0);
+    QVERIFY(!window->grabWindow().isNull());
+    const QPoint onLabel = center(label) + QPoint(2, 1);
+    QTest::mouseMove(window, onLabel);
+    QTest::qWait(50);
+    QVERIFY(waveform->m_hoverActive);
+    QVERIFY(hoverHandler->property("hovered").toBool());
+    QCOMPARE(waveform->mapToScene(waveform->m_hoverPosition).toPoint(), onLabel);
+
     // Where a button shows when the controls return, and then on it: the
     // pointer keeps the controls up, and the button still takes the click.
     QQuickItem *solo = firstVisibleItemNamed(

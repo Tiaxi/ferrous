@@ -11,7 +11,9 @@ import org.kde.kirigami 2.20 as Kirigami
 // `padding` around them. A plate that is not `revealed` fades
 // out but keeps its place and its Tab stops, so the keyboard can reveal it.
 // A `compact` label, for a short lane, is 16 px tall with 11 px text, both
-// larger with a larger font, rather than 20 px with 12 px text.
+// larger with a larger font, rather than 20 px with 12 px text. A larger
+// font's label is its capitals and the room around them tall (from the
+// text's line, a letter at 24 pt stood on a plate 28 by 48 px).
 Item {
     id: root
 
@@ -23,6 +25,9 @@ Item {
     // The smallest the plate is either way: a label's height, and the
     // narrowest it is.
     readonly property real minimumSize: root.compact ? 16 : 20
+    // A label's height, from the font alone.
+    readonly property real labelHeight: Math.max(root.minimumSize, Math.ceil(capitalMetrics.tightBoundingRect.height)
+        + 2 * Math.round((root.compact ? 3 : 4) * root.uiPalette.fontScale))
     property real padding: 2
     property real horizontalPadding: root.isLabel ? (root.compact ? 4 : 6) : root.padding
     property real verticalPadding: root.isLabel ? 0 : root.padding
@@ -39,11 +44,20 @@ Item {
     // viewer's controls as they hide: from 1 to 0.
     property real fadeLevel: 1
     default property alias contentData: content.data
+    // A cell at the plate's start for what lies over it, such as a lane's
+    // label, set off by a 1 px divider, 6 px in from the plate's edges as
+    // the viewers' are: the plate's items come after it. It is none of
+    // theirs, so it takes no pointer and no hover from the view under it.
+    property real leadingCell: 0
+    // How much of the plate's own fill and edge shows under its content:
+    // none of a label's on a plate it shares (PlotLaneHead).
+    property real backgroundLevel: 1
     // How far the plate is revealed, from 0 to 1, as it fades in or out.
     property real revealLevel: root.revealed ? 1 : 0
 
     implicitWidth: Math.max(root.minimumSize, content.implicitWidth + 2 * root.horizontalPadding)
-    implicitHeight: Math.max(root.minimumSize, content.implicitHeight + 2 * root.verticalPadding)
+    implicitHeight: root.isLabel ? root.labelHeight
+        : Math.max(root.minimumSize, content.implicitHeight + 2 * root.verticalPadding)
 
     opacity: root.revealLevel * root.fadeLevel
 
@@ -67,6 +81,7 @@ Item {
     Rectangle {
         objectName: "plotPlateEdge"
         visible: !root.bare
+        opacity: root.backgroundLevel
         x: -1
         y: -1
         width: parent.width + 2
@@ -80,9 +95,20 @@ Item {
     Rectangle {
         objectName: "plotPlateFill"
         visible: !root.bare
+        opacity: root.backgroundLevel
         anchors.fill: parent
         radius: root.radius
         color: root.plotColors.plotPlate
+    }
+
+    Rectangle {
+        objectName: "plotPlateDivider"
+        visible: root.leadingCell > 0
+        x: root.leadingCell
+        y: 6
+        width: 1
+        height: Math.max(0, parent.height - 2 * y)
+        color: root.plotColors.plotPlateEdge
     }
 
     MouseArea {
@@ -96,9 +122,20 @@ Item {
         onDoubleClicked: function(mouse) { mouse.accepted = true }
     }
 
+    TextMetrics {
+        id: capitalMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.compact ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize
+        font.weight: Font.DemiBold
+        text: "E"
+    }
+
     Row {
         id: content
         anchors.centerIn: parent
+        // After a leading cell and its divider, to the pixel: centring
+        // rounds the plate's half up, so the cell's is rounded down.
+        anchors.horizontalCenterOffset: root.leadingCell > 0 ? Math.floor((root.leadingCell + 1) / 2) : 0
         spacing: root.contentSpacing
 
         // Text, not a Label: the desktop style's Label has a hover handler,
@@ -116,10 +153,7 @@ Item {
             font.pointSize: root.compact ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize
             font.weight: Font.DemiBold
             color: root.plotColors.plotText
-            // 20 px: its line and 1 or 2 px above and below it, more with
-            // a larger font; compact, 16 px: its line and 1 px.
-            height: Math.max(root.minimumSize, Math.ceil(implicitHeight)
-                             + Math.round((root.compact ? 1 : 3) * root.uiPalette.fontScale))
+            height: root.labelHeight
             verticalAlignment: Text.AlignVCenter
             Accessible.ignored: true
         }

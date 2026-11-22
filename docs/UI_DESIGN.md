@@ -205,6 +205,7 @@ Rules:
 
 The settled rules for presentation only. For internals, see [visualization architecture](VISUALIZATION_ARCHITECTURE.md).
 - **Media surfaces are always dark.** The album art viewer draws the art on black, with its details in `mediaPlot`'s strip colour, in both themes. A white surround outshone the art.
+- **A lane's head is one plate**, in the main pane and in both viewers: the label's cell, a 1 px divider, then Mute and Solo, as tall as the mode switch's plate. A pane's heads are one size, and their cells are as wide as its widest label, so M and S share an x in every lane. At rest the label alone shows, on a chip in the cell's place.
 - **The plot's playhead is never amber.** Amber is a data colour in the colour map. The seek bar's playhead is the only amber playhead.
 - **One control surface per viewer.**
   - The viewers' corner plate and title strip use the same buttons (`ViewerControls`) in one order: zoom and Reset's glyph, new issues, the viewer's own buttons, Close. The plot's own mode switch and zoom plate are the main pane's alone.
@@ -233,6 +234,7 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 | Unreadable row | Breeze's `dialog-warning` drawn as a grey mask | it read as an eject arrow beside the amber ▶ |
 | Plot frame | gutters, rulers, rails, a border | the plot fills its pane |
 | Plot plates | the window's view colour as plates; bare outlined text | white stickers in light; text vanished on the waveform |
+| Lane heads | a label's chip beside a plate of its buttons; a size and a label width per lane | two stickers of two heights; two head sizes in one 5.1 pane, and M and S wandering 12 px |
 | Mode switch | the chosen segment in solid accent blue | read as keyboard focus, and outshone the data |
 | Level meter | a strip under the plot; a neutral grey column; a saturated colour-map ramp | crowded 5.1; read as the queue's scrollbar; louder than the amber "now" |
 | Never-played plot | pure black; a centred empty-state message | a black slab in the window; a second message beside the queue's first-run one |

@@ -4,10 +4,16 @@ import QtQuick 2.15
 import FerrousUi 1.0
 import "." as Components
 
-// A lane's label, and 8 px right of it its Mute and Solo buttons on one
-// plate. The buttons show while the pointer is on the lane or the plate, and
-// while keyboard focus is on either of them, and in a viewer with its
-// controls; hidden, they stay Tab stops, so the keyboard reveals them.
+// A lane's head: one plate, as the mode switch's and as tall, with the
+// lane's label in a cell of its own, a 1 px divider, and Mute and Solo (a
+// label's chip beside a taller plate of buttons read as two stickers). The
+// cell is as wide as the pane's widest label wants (`widestLabel`), so that
+// M and S are at one x in every lane (by each lane's label they wandered
+// 12 px from L to LFE). The plate shows while the pointer is on the lane or
+// the plate, and while keyboard focus is on either button, and in a viewer
+// with its controls; hidden, the buttons stay Tab stops, so the keyboard
+// reveals them. At rest the label alone shows, on a chip in the cell's
+// place, as wide, so nothing moves as Mute and Solo show.
 // A `compact` head, in a short lane, such as each of 5.1's in the main
 // window, has a 16 px label with 11 px text and 20 px buttons,
 // larger with a larger font, and its buttons show only on the pointer or
@@ -40,6 +46,13 @@ Item {
     // over to another place.
     property real labelLevel: 1
     property bool compact: false
+    // The height of the lane, which the label keeps within where that is
+    // shorter than it, and how far the plate is moved from the label's
+    // centre to stay in the plot, in lanes shorter than it.
+    property real laneRoom: Infinity
+    property real plateShift: 0
+    // The width of the widest label of the pane, in the labels' font.
+    property real widestLabel: labelMetrics.advanceWidth(root.label)
     property bool laneHovered: false
     property var toggleMute: function() {}
     property var toggleSolo: function() {}
@@ -50,11 +63,19 @@ Item {
     // own, which would take it from the plot under it and its crosshair.
     property point pointerPosition: Qt.point(0, 0)
     property bool pointerKnown: false
-    readonly property bool labelHovered: root.pointerKnown
-        && root.pointerPosition.x >= root.x && root.pointerPosition.x < root.x + labelPlate.width
-        && root.pointerPosition.y >= root.y && root.pointerPosition.y < root.y + labelPlate.height
-    // Whether the pointer is on the label's plate or the buttons': the
-    // plot's crosshair gives way there (PlotLayer's crosshairLevel).
+    readonly property bool labelHovered: {
+        if (!root.pointerKnown)
+            return false
+        const onPlate = buttons.visible && buttons.revealed
+        const plate = onPlate ? Qt.rect(0, buttons.y, buttons.width, buttons.height)
+                              : Qt.rect(0, labelPlate.y, labelPlate.width, labelPlate.height)
+        const x = root.pointerPosition.x - root.x
+        const y = root.pointerPosition.y - root.y
+        return x >= plate.x && x < plate.x + plate.width && y >= plate.y && y < plate.y + plate.height
+    }
+    // Whether the pointer is on the head's plate, or on the label's chip
+    // while that is all of it: the plot's crosshair gives way there
+    // (PlotLayer's crosshairLevel).
     readonly property bool plateHovered: root.labelHovered || buttonsHover.hovered
     // Whether the buttons show by their own rule; the viewer's controls
     // hiding fades them through `controlsLevel` instead, on its curve.
@@ -62,36 +83,46 @@ Item {
         || (root.buttonsVisibility === 1
             && ((root.revealedWithControls && !root.compact) || root.laneHovered
                 || buttonsHover.hovered || root.focusInside || root.muted || root.soloed))
-    // The buttons' size: the label's height and 2 px above and below it,
-    // compact; otherwise the design's small tool button.
+    // The buttons' size: compact, the small label's line and 5 px, 20 px
+    // with the default font; otherwise the design's small tool button.
     readonly property real buttonSize: root.compact
-        ? labelPlate.height + 4
+        ? Math.max(16, Math.ceil(labelMetrics.height) + Math.round(root.uiPalette.fontScale)) + 4
         : root.uiPalette.toolButtonSize
     readonly property real glyphPointSize: root.compact
         ? root.uiPalette.compactPointSize
         : root.uiPalette.smallPointSize
 
-    // The label's box; the buttons' plate, taller, is centred on it, so
-    // that the label's letters and M and S stand on one centre line (with
-    // the plates' tops on one line, they stood 6 px apart). It reaches
-    // `plateReach` above the label, which the plot layer insets the head
-    // by, so that the plate's top is on one line with the mode switch's,
-    // and its centre line with the label's is the switch's.
-    readonly property real plateReach: Math.max(0, -buttons.y)
-    implicitWidth: buttons.visible ? buttons.x + buttons.width : labelPlate.width
-    implicitHeight: labelPlate.height
+    // The plate's, around and between its buttons, as on the mode switch,
+    // so that a button's focus ring, 3 px out from it, keeps 1 px of the
+    // plate outside it and clears the divider.
+    readonly property int platePadding: 4
+    // The label's cell, up to the divider: the widest label and the room
+    // beside it, and at least a button's width, so a letter's chip is
+    // never taller than it is wide.
+    readonly property real cellWidth: Math.max(root.buttonSize, Math.ceil(root.widestLabel)
+        + 2 * root.uiPalette.scaledSize(root.compact ? 4 : 6))
+    readonly property real plateWidth: root.cellWidth + 1 + 3 * root.platePadding + 2 * root.buttonSize
+    // The label's chip, centred in the plate's height.
+    readonly property real labelY: Math.round((root.height - labelPlate.height) / 2)
+    // The sizes from the font and the pane alone, at once, rather than as
+    // the plate's row is laid out, for the plot's overlays to keep clear.
+    implicitWidth: buttons.visible ? root.plateWidth : root.cellWidth
+    implicitHeight: root.buttonSize + 2 * root.platePadding
     // What the head takes of its lane, from its own top left, with the
-    // plates' 1 px edges. The buttons count while they can show, so that it
-    // stays the same as they reveal and hide.
-    readonly property rect occupiedBounds: {
-        const top = (buttons.visible ? Math.min(0, buttons.y) : 0) - 1
-        const bottom = (buttons.visible
-            ? Math.max(labelPlate.height, buttons.y + buttons.height)
-            : labelPlate.height) + 1
-        return Qt.rect(-1, top, root.implicitWidth + 2, bottom - top)
-    }
+    // plates' 1 px edges. The plate counts while it can show, so that it
+    // stays the same as it reveals and hides.
+    readonly property rect occupiedBounds: buttons.visible
+        ? Qt.rect(-1, root.plateShift - 1, root.plateWidth + 2, root.height + 2)
+        : Qt.rect(-1, root.labelY - 1, root.cellWidth + 2, labelPlate.height + 2)
     width: implicitWidth
     height: implicitHeight
+
+    FontMetrics {
+        id: labelMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.glyphPointSize
+        font.weight: Font.DemiBold
+    }
 
     Components.PlotPlate {
         id: labelPlate
@@ -101,19 +132,26 @@ Item {
         text: root.label
         compact: root.compact
         fadeLevel: root.labelLevel
-
+        z: 1
+        y: root.labelY
+        width: root.cellWidth
+        height: Math.min(implicitHeight, root.laneRoom - 2)
+        // Its own fill and edge give way to the shared plate's as that
+        // comes in, the plate never thinner between them.
+        backgroundLevel: buttons.visible ? 1 - buttons.opacity * buttons.opacity : 1
     }
 
     Components.PlotPlate {
         id: buttons
         objectName: "plotLaneButtons"
-        x: labelPlate.width + 8
-        y: Math.round((labelPlate.height - buttons.height) / 2)
-        // 4 px around the buttons and between them, as on the mode switch,
-        // so a button's focus ring, 3 px out from it, keeps 1 px of the
-        // plate outside it.
-        padding: 4
-        contentSpacing: 4
+        y: root.plateShift
+        width: root.plateWidth
+        height: root.height
+        padding: root.platePadding
+        contentSpacing: root.platePadding
+        // The label's, whose hover stays the plot's under it: the plate's
+        // own handler is the buttons'.
+        leadingCell: root.cellWidth
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         visible: root.buttonsVisibility !== 0 && (root.controlsShown || root.controlsLevel > 0)

@@ -4574,8 +4574,9 @@ void AccessibilityTest::checkLaneButtonsAreCheckableToggles(QQuickWindow *window
     QVERIFY(heads[0]->setProperty("muted", false));
     QTRY_VERIFY2(problem(mute, false).isEmpty(), qPrintable(problem(mute, false)));
 
-    // The buttons' plate: as even as the mode switch's, as much of it
-    // around them as between them, its top on one line with the switch's,
+    // The head's plate: as even as the mode switch's, as much of it
+    // around the buttons as between them and after the label's divider,
+    // its top on one line with the switch's,
     // as far into the lane as the switch is into the plot, and a button's
     // focus ring inside it with 1 px of the plate outside it (at 2 px, the
     // ring ran past the plate's edge). The label is centred on it, so that L
@@ -4589,7 +4590,9 @@ void AccessibilityTest::checkLaneButtonsAreCheckableToggles(QQuickWindow *window
     QQuickItem *modeSwitch = itemsNamed(layer, QStringLiteral("visualizationModeSwitch")).value(0);
     QVERIFY(label != nullptr && firstSolo != nullptr && modeSwitch != nullptr);
     const QRectF plateRect = rectOf(plate);
-    const qreal inset = rectOf(mute).left() - plateRect.left();
+    QQuickItem *divider = itemsNamed(plate, QStringLiteral("plotPlateDivider")).value(0);
+    QVERIFY(divider != nullptr);
+    const qreal inset = rectOf(mute).left() - rectOf(divider).right();
     QCOMPARE(inset, modeSwitch->property("padding").toReal());
     QCOMPARE(rectOf(mute).top() - plateRect.top(), inset);
     QCOMPARE(rectOf(firstSolo).left() - rectOf(mute).right(), inset);
