@@ -488,8 +488,11 @@ private slots:
     void seekWaveformMeetsItsContrastAsDrawn();
     void seekViewBandMarksTheViewBehindTheWaveform_data();
     void seekViewBandMarksTheViewBehindTheWaveform();
+    void seekViewBandStaysFindableAtDeepZoom();
     void seekViewBandIsDecorationOnly();
     void seekHoverDrawsALineAndANativeToolTip();
+    void seekHoverLineLeavesThePlayheadWhole_data();
+    void seekHoverLineLeavesThePlayheadWhole();
     void seekFocusDrawsOneRingAroundTheBar_data();
     void seekFocusDrawsOneRingAroundTheBar();
     void volumeGlyphHasTheTransportsWeight_data();
@@ -1046,20 +1049,10 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     QVERIFY2(contrastRatio(drawnPlayed, view) >= 4.5,
              qPrintable(describeContrast(QStringLiteral("played on the band"), drawnPlayed, view)));
 
-    // A view past the track's end stops at the bar's end; one of less than
-    // a device pixel is a device pixel wide.
+    // A view past the track's end stops at the bar's end.
     transport->setProperty("viewStartSeconds", 200.0);
     transport->setProperty("viewEndSeconds", 260.0);
     QCOMPARE(sceneRect(band).right(), bar.left() + barPixels / ratio);
-    transport->setProperty("viewStartSeconds", 228.99);
-    transport->setProperty("viewEndSeconds", 229.5);
-    QCOMPARE(sceneRect(band).left(), bar.left() + (barPixels - 1) / ratio);
-    QCOMPARE(sceneRect(band).right(), bar.left() + barPixels / ratio);
-    transport->setProperty("viewStartSeconds", 50.0);
-    transport->setProperty("viewEndSeconds", 50.001);
-    QVERIFY(band->isVisible());
-    QCOMPARE(sceneRect(band).left(), barX(50.0));
-    QCOMPARE(sceneRect(band).width(), 1.0 / ratio);
 
     // None without a range, a length or a track.
     transport->setProperty("viewStartSeconds", std::numeric_limits<double>::quiet_NaN());
@@ -1076,6 +1069,67 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     QVERIFY(band->isVisible());
     harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QVERIFY(!band->isVisible());
+}
+
+// However deep the zoom, the band is 6 px wide or more: centred on the
+// view's range, on whole device pixels, and within the bar at either end.
+// The unplayed part's cover has the same edges.
+void TransportStatusTest::seekViewBandStaysFindableAtDeepZoom() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    harness.bridge->setProperty("waveformPeaksPacked", QByteArray(800, static_cast<char>(128)));
+    harness.bridge->setProperty("waveformComplete", true);
+    harness.bridge->setProperty("waveformCoverageSeconds", 229.0);
+    harness.root->setProperty("positionSeconds", 0.0);
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *band = harness.item(QStringLiteral("seekViewBand"));
+    QQuickItem *bandUnplayed = harness.item(QStringLiteral("seekViewBandUnplayed"));
+    QVERIFY(transport && seek && band && bandUnplayed);
+    const qreal ratio = harness.window->effectiveDevicePixelRatio();
+    const QRectF bar = sceneRect(seek);
+    const double barPixels = std::floor(bar.width() * ratio + 1e-6);
+    const double least = std::round(6.0 * ratio);
+    const auto showView = [&](double start, double end) {
+        transport->setProperty("viewStartSeconds", start);
+        transport->setProperty("viewEndSeconds", end);
+    };
+    // The band's left edge and width, in device pixels from the bar's left.
+    const auto drawn = [&]() {
+        const QRectF rect = sceneRect(band);
+        return QPointF((rect.left() - bar.left()) * ratio, rect.width() * ratio);
+    };
+
+    // Within the bar, centred on the range to within half a device pixel.
+    for (const double start : {20.0, 50.0, 50.07, 50.13, 100.0, 180.0}) {
+        for (const double span : {0.001, 0.2, 0.7}) {
+            showView(start, start + span);
+            QVERIFY(band->isVisible());
+            const QPointF shown = drawn();
+            QCOMPARE(shown.y(), least);
+            QVERIFY(std::abs(shown.x() - std::round(shown.x())) < 1e-6);
+            const double centre = (start + span / 2) / 229.0 * barPixels;
+            QVERIFY2(std::abs(shown.x() + least / 2 - centre) <= 0.5 + 1e-6,
+                     qPrintable(QStringLiteral("%1 at %2, not about %3").arg(least).arg(shown.x()).arg(centre)));
+        }
+    }
+    // Whole at either end, also for a view partly past it.
+    showView(0.0, 0.05);
+    QCOMPARE(drawn(), QPointF(0.0, least));
+    showView(-1.0, 0.05);
+    QCOMPARE(drawn(), QPointF(0.0, least));
+    showView(228.95, 229.0);
+    QCOMPARE(drawn(), QPointF(barPixels - least, least));
+    showView(228.99, 229.5);
+    QCOMPARE(drawn(), QPointF(barPixels - least, least));
+    // The unplayed part's cover is the band's, to both of its edges.
+    QCOMPARE(sceneRect(bandUnplayed).right(), sceneRect(band).right());
+    QCOMPARE(sceneRect(bandUnplayed).left(), sceneRect(band).left());
+
+    // One that is wide enough keeps its own edges.
+    showView(50.0, 60.0);
+    QCOMPARE(drawn().x(), std::round(50.0 / 229.0 * barPixels));
+    QCOMPARE(drawn().x() + drawn().y(), std::round(60.0 / 229.0 * barPixels));
 }
 
 // The band is decoration: it changes neither the seek bar's value nor what
@@ -1216,6 +1270,64 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
     QVERIFY2(std::abs(tipRect.center().x() - sceneRect(playheadLine).center().x()) <= 1.0,
              qPrintable(describeRect(tipRect)));
     QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at.toPoint());
+}
+
+void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole_data() {
+    addThemeRows();
+}
+
+// The hover's line never paints over the playhead or stands beside it as a
+// second one: it is under it, and shows only with a gap as wide as the
+// playhead's line between them. The time stays.
+void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    harness.root->setProperty("positionSeconds", 100.0);
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *hoverLine = harness.item(QStringLiteral("seekHoverLine"));
+    QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
+    QQuickItem *line = harness.item(QStringLiteral("seekPlayheadLine"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && hoverLine && playhead && line && tip);
+    const QList<QQuickItem *> layers = playhead->parentItem()->childItems();
+    QVERIFY(layers.indexOf(hoverLine) < layers.indexOf(playhead));
+
+    const QRectF bar = sceneRect(seek);
+    const int y = qRound(bar.center().y());
+    QTest::mouseMove(harness.window, QPoint(qRound(sceneRect(playhead).right() + 30), y));
+    QTRY_VERIFY(hoverLine->isVisible());
+    QTRY_VERIFY(tip->property("opened").toBool());
+
+    const QRectF head = sceneRect(playhead);
+    const qreal clearance = sceneRect(line).width();
+    const qreal ratio = harness.window->effectiveDevicePixelRatio();
+    for (int x = qFloor(head.left()) - 6; x <= qCeil(head.right()) + 6; ++x) {
+        QTest::mouseMove(harness.window, QPoint(x, y));
+        // On the device pixel under the pointer.
+        const qreal at = bar.left() + std::floor((x - bar.left()) * ratio + 1e-6) / ratio;
+        QTRY_VERIFY(std::abs(sceneRect(hoverLine).left() - at) < 1e-6);
+        const bool clear = at + hoverLine->width() <= head.left() - clearance + 1e-6
+            || at >= head.right() + clearance - 1e-6;
+        QVERIFY2(hoverLine->isVisible() == clear, qPrintable(QStringLiteral("at %1").arg(x)));
+        QVERIFY(tip->property("visible").toBool());
+    }
+
+    // As drawn with the pointer on it: amber, with the bar beside it.
+    QTest::mouseMove(harness.window, sceneRect(line).center().toPoint());
+    QTRY_VERIFY(!hoverLine->isVisible());
+    qreal scale = 1;
+    const QImage image = grabbed(harness.window, &scale);
+    QVERIFY(!image.isNull());
+    QVERIFY(channelDistance(pixelAt(image, QPointF(sceneRect(line).left() + 0.5, y), scale),
+                            harness.token("now")) <= 1);
+
+    // It comes back as playback takes the playhead on from under it, and
+    // goes as the playhead reaches it, as after a click there.
+    harness.root->setProperty("positionSeconds", 110.0);
+    QTRY_VERIFY(hoverLine->isVisible());
+    harness.root->setProperty("positionSeconds", 100.0);
+    QTRY_VERIFY(!hoverLine->isVisible());
 }
 
 void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar_data() {

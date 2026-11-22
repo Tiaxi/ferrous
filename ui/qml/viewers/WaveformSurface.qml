@@ -36,6 +36,12 @@ Item {
     property real markerSeconds: -1
     readonly property real markerX: waveform.markerX
     readonly property alias waveformItem: waveform
+    // The pointer hides once the overlays have faded out, and stays so.
+    // While a pan holds the plot it is a closed hand, as over the album
+    // art's.
+    readonly property int pointerCursorShape: !root.interactiveOverlaysVisible && root.interactiveOverlaysLevel <= 0
+        ? Qt.BlankCursor
+        : waveform.panning ? Qt.ClosedHandCursor : Qt.ArrowCursor
     readonly property var plotColors: root.uiPalette.waveformPlot
     // The lanes: one per channel in the per-channel view, one otherwise.
     readonly property int laneCount: waveform.viewMode === 1 ? Math.max(1, waveform.channelCount) : 1
@@ -172,9 +178,7 @@ Item {
         HoverHandler {
             id: waveformHover
             objectName: "waveformSurfaceHoverHandler"
-            // The pointer hides once the overlays have faded out.
-            cursorShape: root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0
-                ? Qt.ArrowCursor : Qt.BlankCursor
+            cursorShape: root.pointerCursorShape
             // A touch ends without a hover leave for the item.
             onHoveredChanged: {
                 if (!hovered) {

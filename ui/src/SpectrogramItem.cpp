@@ -2789,7 +2789,7 @@ void SpectrogramItem::setDisplayMode(int value) {
     }
     // A switch between rolling and centered follows the playhead.
     m_panPressed = false;
-    m_panning = false;
+    endPan();
     followPlayhead();
     emit displayModeChanged();
     if (redraw) {
@@ -6502,7 +6502,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
     if (event->button() == Qt::MiddleButton && m_zoomEnabled) {
         event->accept();
         m_panPressed = m_displayMode == 1;
-        m_panning = false;
+        endPan();
         m_panPressPosition = event->position();
         m_panStopsAutoscroll = m_autoscroll.takeStopPress(event->timestamp());
         return;
@@ -6613,23 +6613,21 @@ double SpectrogramItem::viewSecondsAtLocked(double x) const {
 }
 
 void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
+    const QPointF pointer = event->position();
+    // A rolling view's middle-drag pans nothing and moves the crosshair too.
+    if (event->buttons().testFlag(Qt::MiddleButton)) {
+        moveDraggedCrosshair(pointer);
+    }
     if (!m_panPressed) {
         event->ignore();
         return;
     }
     event->accept();
     SpectrogramViewFollow *follow = m_viewFollow.data();
-    const QPointF pointer = event->position();
     double anchorSeconds = 0.0;
     bool startsPan = false;
     {
         QMutexLocker lock(&m_stateMutex);
-        // The crosshair keeps to the pointer, which holds the time it
-        // grabbed.
-        if (m_hoverActive) {
-            m_hoverPosition = pointer;
-            m_crosshairDirty = true;
-        }
         if (follow == nullptr || m_displayMode != 1) {
             return;
         }
@@ -6671,9 +6669,28 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
         // Where it glides back from is reckoned from the view's width.
         reportFollowGeometry();
         follow->setPanning(true);
+        emit panningChanged();
     }
     follow->detach(anchorSeconds, 0.5);
     followChanged();
+}
+
+void SpectrogramItem::moveDraggedCrosshair(QPointF pointer) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (!m_hoverActive || m_hoverPosition == pointer) {
+            return;
+        }
+        m_hoverPosition = pointer;
+        if (!m_crosshairEnabled) {
+            return;
+        }
+        m_crosshairDirty = true;
+    }
+    // The lane that has the button gets no hover while it is held: it tells
+    // the others, and the time under them, where the pointer is itself.
+    emit crosshairHoverChanged(pointer.x());
+    update();
 }
 
 void SpectrogramItem::mouseReleaseEvent(QMouseEvent *event) {
@@ -6806,7 +6823,7 @@ void SpectrogramItem::mouseUngrabEvent() {
     if (!m_panning) {
         return;
     }
-    m_panning = false;
+    endPan();
     SpectrogramViewFollow *follow = m_viewFollow.data();
     if (follow == nullptr) {
         return;
@@ -6821,6 +6838,14 @@ void SpectrogramItem::mouseUngrabEvent() {
     // A playhead already past the re-attach point, or past the view, leaves
     // the view where it was put.
     follow->arm(position);
+}
+
+void SpectrogramItem::endPan() {
+    if (!m_panning) {
+        return;
+    }
+    m_panning = false;
+    emit panningChanged();
 }
 
 void SpectrogramItem::wheelEvent(QWheelEvent *event) {

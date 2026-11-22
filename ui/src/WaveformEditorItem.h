@@ -127,6 +127,9 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // seek other than the plot's own, a track change or a reset of the zoom.
     // A view gliding back to the playhead is not.
     Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
+    // Whether a middle-drag pans the view: from the drag distance to the
+    // release. The surface shows a closed hand meanwhile.
+    Q_PROPERTY(bool panning READ panning NOTIFY panningChanged)
     // The part of the track the view shows, in seconds, from its left edge
     // to its right: following the playhead, where a middle-drag panned it
     // or gliding back, at the zoom it shows. Taken at each frame of the
@@ -217,6 +220,7 @@ public:
     void setPlayheadVisible(bool value);
 
     bool detached() const { return m_detached; }
+    bool panning() const { return m_panning; }
     double visibleStartSeconds() const { return m_visibleStartSeconds; }
     double visibleEndSeconds() const { return m_visibleEndSeconds; }
 
@@ -259,6 +263,7 @@ signals:
     void markerSecondsChanged();
     void markerXChanged();
     void detachedChanged();
+    void panningChanged();
     void visibleRangeChanged();
     void seekRequested(double seconds);
 

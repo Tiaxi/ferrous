@@ -378,6 +378,9 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // moved it rather than following the playhead; see
     // SpectrogramViewFollow::detached.
     Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
+    // Whether a middle-drag on this lane pans the view: from the drag
+    // distance to the release. The surface shows a closed hand meanwhile.
+    Q_PROPERTY(bool panning READ panning NOTIFY panningChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -470,6 +473,7 @@ public:
 
     SpectrogramViewFollow *viewFollow() const { return m_viewFollow; }
     void setViewFollow(SpectrogramViewFollow *value);
+    bool panning() const { return m_panning; }
     bool detached() const { return m_viewFollow != nullptr && m_viewFollow->detached(); }
     // The view follows the playhead again, at once.
     Q_INVOKABLE void followPlayhead();
@@ -573,6 +577,7 @@ signals:
     void spectrogramWidthChanged(int width);
     void viewFollowChanged();
     void detachedChanged();
+    void panningChanged();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -895,6 +900,11 @@ private:
     // The width of the widest frequency and level the readout shows, in its
     // font for the top frequency of the band (see CrosshairReadout::plateRects).
     int crosshairWidestValueWidthLocked();
+    // A middle-drag moved the pointer to `pointer`: the crosshair follows it
+    // in every lane, as in a hover.
+    void moveDraggedCrosshair(QPointF pointer);
+    // Ends the pan, if one is under way, and tells panning.
+    void endPan();
     // The time in its own track of `continuousTime` on the view's
     // timeline, or NaN where it is in no track the view knows.
     double crosshairTrackTimeLocked(double continuousTime) const;

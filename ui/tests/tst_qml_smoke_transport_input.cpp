@@ -46,6 +46,7 @@ private slots:
     void fTypesInTheLibraryAndFollowsThePlayheadElsewhere();
     void usingThePlotTakesTheFocusFromTheLibrary();
     void viewerKeysWorkAfterAPressOnItsPlot();
+    void panShowsAClosedHandInThePaneAndTheViewers();
     void viewerControlsComeBackForTheKeyboard();
     void viewerKeysWorkFromEveryControl();
     void viewerControlsStayWhileOneHasFocus();
@@ -4271,6 +4272,76 @@ void TransportInputSmokeTest::viewerKeysWorkAfterAPressOnItsPlot() {
         waveform->resetZoom();
         window->requestActivate();
         QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+}
+
+// A pan's closed hand is the pointer the windows show, in the pane and in
+// both viewers, whose areas over the plot take the press for the focus; a
+// viewer's pointer still hides with its controls, over either plot.
+void TransportInputSmokeTest::panShowsAClosedHandInThePaneAndTheViewers() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QQuickItem *pane = itemNamed(window->contentItem(), QStringLiteral("spectrogramPane"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge && viewer && autoHide && pane && surface);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        surface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveform->isVisible() && waveform->width() > 100);
+
+    // -1 is the pane.
+    for (const int fullscreenMode : {-1, 0, 1}) {
+        const QByteArray where = QByteArray("fullscreen ") + QByteArray::number(fullscreenMode);
+        QQuickWindow *host = window;
+        if (fullscreenMode >= 0) {
+            autoHide->setProperty("hideDelay", 600000);
+            bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+            QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+            QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+            if (fullscreenMode == 1) {
+                host = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+                QVERIFY(host != nullptr);
+            }
+            QVERIFY(QTest::qWaitForWindowActive(host));
+            QTRY_VERIFY2(!pane->isAncestorOf(surface) && waveform->width() > 100, where.constData());
+        }
+        waveform->setZoomLevel(4.0);
+        const QPoint from = sceneRectOf(surface).center().toPoint();
+        QTest::mouseMove(host, from);
+        QTest::mousePress(host, Qt::MiddleButton, Qt::NoModifier, from);
+        QTest::mouseMove(host, from - QPoint(3, 0));
+        QVERIFY2(host->cursor().shape() == Qt::ArrowCursor, where.constData());
+        QTest::mouseMove(host, from - QPoint(60, 0));
+        QVERIFY2(host->cursor().shape() == Qt::ClosedHandCursor, where.constData());
+        QTest::mouseRelease(host, Qt::MiddleButton, Qt::NoModifier, from - QPoint(60, 0));
+        QVERIFY2(host->cursor().shape() == Qt::ArrowCursor, where.constData());
+        waveform->resetZoom();
+        if (fullscreenMode < 0) continue;
+
+        for (const int mode : {1, 0}) {
+            viewer->setProperty("visualizationMode", mode);
+            QVERIFY(QMetaObject::invokeMethod(autoHide, "wake"));
+            QTest::mouseMove(host, from + QPoint(5 + mode, 0));
+            autoHide->setProperty("hideDelay", 1);
+            QTRY_VERIFY2(host->cursor().shape() == Qt::BlankCursor, where.constData());
+            // The pointer moving brings it back.
+            autoHide->setProperty("hideDelay", 600000);
+            QTest::mouseMove(host, from + QPoint(40 + mode, 10));
+            QTRY_VERIFY2(host->cursor().shape() == Qt::ArrowCursor, where.constData());
+        }
+        viewer->setProperty("visualizationMode", 1);
+        QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+        QTRY_VERIFY2(pane->isAncestorOf(surface), where.constData());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        QTRY_VERIFY2(waveform->isVisible(), where.constData());
     }
 }
 

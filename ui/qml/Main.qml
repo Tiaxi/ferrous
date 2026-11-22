@@ -1963,6 +1963,12 @@ ApplicationWindow {
 
         readonly property bool zoomed: Math.abs(visualizationSurface.zoomLevel - 1.0) > 0.001
 
+        // The shown plot's pointer, for the areas over it that take a press
+        // for the focus, which would show an arrow of their own.
+        readonly property int pointerCursorShape: visualizationSurface.spectrogramShown
+            ? spectrogramSurface.pointerCursorShape
+            : waveformSurface.pointerCursorShape
+
         // The part of the track the shown plot's view covers, in seconds,
         // while it is zoomed, for the seek bar's band; NaN otherwise. The
         // plot is the one whose playhead shows: through a mode switch, the
@@ -2089,10 +2095,12 @@ ApplicationWindow {
         // the keyboard focus for the pane, then goes on to the plot, as the
         // viewers' press does; they have their own. Under the plot layer, so
         // that a click on one of its buttons leaves the focus to the button.
+        // Being over the plot, it shows the plot's pointer.
         MouseArea {
             anchors.fill: parent
             z: 1.5
             enabled: !visualizationSurface.inViewer
+            cursorShape: visualizationSurface.pointerCursorShape
             acceptedButtons: Qt.AllButtons
             onPressed: function(mouse) {
                 spectrogramPane.takePlotFocus()
