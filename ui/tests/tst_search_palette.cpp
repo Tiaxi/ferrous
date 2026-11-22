@@ -299,6 +299,14 @@ QStringList contextRunsIn(QQuickItem *row, const QColor &color) {
     return runs;
 }
 
+// A row's height at the default font, by its kind and its place: a heading
+// that follows a section has 8 px more.
+qreal rowHeightFor(const QString &kind, int index) {
+    if (kind == QStringLiteral("item")) return 32.0;
+    if (kind.isEmpty()) return 0.0;
+    return kind == QStringLiteral("section") && index > 0 ? 36.0 : 28.0;
+}
+
 QColor colorOf(QQuickItem *item) {
     return item->property("color").value<QColor>();
 }
@@ -490,6 +498,8 @@ private slots:
     void glyphsTargetsAndThumbnailsFollowTheFont();
     void rowColumnsNeverMeet_data();
     void rowColumnsNeverMeet();
+    void headingsStartTheirSections_data();
+    void headingsStartTheirSections();
 };
 
 void SearchPaletteTest::initTestCase() {
@@ -597,8 +607,8 @@ void SearchPaletteTest::paletteSitsUnderTheTransportOverADim() {
 }
 
 // Each type's results under its heading, in the order of the best match of
-// each; 28 px headings in 12 px semibold secondary text at the title
-// column, 32 px rows; the first result selected.
+// each; a 28 px heading, and 36 px ones after a section, in 12 px semibold
+// secondary text at the title column, 32 px rows; the first result selected.
 void SearchPaletteTest::sectionsFollowTheirBestMatch() {
     Harness harness;
     QString errorText;
@@ -618,7 +628,7 @@ void SearchPaletteTest::sectionsFollowTheirBestMatch() {
             QVERIFY(heading != nullptr);
             headings << heading->property("text").toString();
             headingRows << i;
-            QCOMPARE(rowItem->height(), 28.0);
+            QCOMPARE(rowItem->height(), i == 0 ? 28.0 : 36.0);
             const QFont font = heading->property("font").value<QFont>();
             QCOMPARE(font.weight(), QFont::DemiBold);
             QCOMPARE(font.pointSizeF(), harness.tokens->property("smallPointSize").toReal());
@@ -722,7 +732,7 @@ void SearchPaletteTest::rowsThatChangeKindRedrawInPlace() {
     QVERIFY(visibleChildNamed(albumRow, QStringLiteral("globalSearchResultLength")) == nullptr);
 
     QQuickItem *artistHeadingRow = harness.row(2);
-    QCOMPARE(artistHeadingRow->height(), 28.0);
+    QCOMPARE(artistHeadingRow->height(), 36.0);
     QQuickItem *artistHeading = visibleChildNamed(artistHeadingRow, QStringLiteral("globalSearchSectionHeading"));
     QVERIFY(artistHeading != nullptr);
     QCOMPARE(artistHeading->property("text").toString(), QStringLiteral("Artists"));
@@ -1493,7 +1503,7 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     qreal all = 0;
     for (int i = 0; i < harness.model.rowCount(); ++i) {
         const QString kind = harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString();
-        heights << (kind == QStringLiteral("item") ? 32.0 : (kind.isEmpty() ? 0.0 : 28.0));
+        heights << rowHeightFor(kind, i);
         all += heights.last();
     }
     QVERIFY2(all > 16 * 32.0, qPrintable(QString::number(all)));
@@ -1554,7 +1564,7 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     qreal few = 0;
     for (int i = 0; i < harness.model.rowCount(); ++i) {
         const QString kind = harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString();
-        few += kind == QStringLiteral("item") ? 32.0 : (kind.isEmpty() ? 0.0 : 28.0);
+        few += rowHeightFor(kind, i);
     }
     if (few + 6 <= room) {
         QTRY_COMPARE(view->height(), few + 6);
@@ -2437,7 +2447,7 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
              qPrintable(QString::number(harness.field()->height())));
 
     // Every row in view holds its texts, centred in it; each heading holds
-    // its text and the 5 px under it.
+    // its text and the 4 px under it.
     int rows = 0;
     int headings = 0;
     qreal titleLeft = -1;
@@ -2734,6 +2744,71 @@ void SearchPaletteTest::rowColumnsNeverMeet() {
     QVERIFY2(room - title >= std::min(room - before, std::round(276.0 * scale)) - 1,
              qPrintable(QStringLiteral("a title of %1 leaves the context %2").arg(title).arg(room - title)));
     QVERIFY(title >= before);
+}
+
+void SearchPaletteTest::headingsStartTheirSections_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("14 pt") << 14.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// A heading groups with its section: at least 1.7 times the space above its
+// text as under it, whether a result or a Show all link ends the section
+// before (the headings sat some 30 px from the rows either side, less than
+// the step between two results, so the sections ran on as one list). The
+// first has no section to part from.
+void SearchPaletteTest::headingsStartTheirSections() {
+    QFETCH(qreal, points);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(points);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText, 1600, 1600), qPrintable(errorText));
+    QVERIFY(harness.open());
+    // More albums than show: that section ends in a link.
+    auto rows = meridianRows(harness.coverUrl);
+    rows[1].score = 0.5f;
+    harness.search(QStringLiteral("meridian"), rows, {1, 9, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+
+    const auto textBox = [](QQuickItem *text) {
+        const QRectF box = sceneRect(text);
+        const qreal lines = text->property("contentHeight").toReal();
+        const qreal top = text->property("verticalAlignment").toInt() == int(Qt::AlignBottom)
+            ? box.bottom() - text->property("bottomPadding").toReal() - lines
+            : box.center().y() - lines / 2;
+        return QRectF(box.left(), top, box.width(), lines);
+    };
+    const auto mainText = [&](int index) -> QQuickItem * {
+        QQuickItem *row = harness.row(index);
+        if (row == nullptr) return nullptr;
+        for (const char *name : {"globalSearchResultTitle", "globalSearchMoreLink", "globalSearchSectionHeading"}) {
+            if (QQuickItem *text = visibleChildNamed(row, QString::fromLatin1(name))) return text;
+        }
+        return nullptr;
+    };
+    int parted = 0;
+    QStringList before;
+    for (int i = 1; i + 1 < harness.model.rowCount(); ++i) {
+        if (harness.model.rowDataAt(i).value(QStringLiteral("kind")) != QStringLiteral("section")) continue;
+        QQuickItem *previous = mainText(i - 1);
+        QQuickItem *heading = mainText(i);
+        QQuickItem *next = mainText(i + 1);
+        QVERIFY(previous != nullptr && heading != nullptr && next != nullptr);
+        before << harness.model.rowDataAt(i - 1).value(QStringLiteral("kind")).toString();
+        const qreal above = textBox(heading).top() - textBox(previous).bottom();
+        const qreal below = textBox(next).top() - textBox(heading).bottom();
+        QVERIFY2(above >= 1.7 * below,
+                 qPrintable(QStringLiteral("%1 px above row %2's heading, %3 under it").arg(above).arg(i).arg(below)));
+        QVERIFY(textBox(heading).top() >= sceneRect(harness.row(i)).top());
+        ++parted;
+    }
+    QCOMPARE(parted, 2);
+    QVERIFY(before.contains(QStringLiteral("more")) && before.contains(QStringLiteral("item")));
 }
 
 int main(int argc, char **argv) {

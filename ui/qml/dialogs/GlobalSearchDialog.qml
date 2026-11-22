@@ -64,6 +64,17 @@ Dialog {
     // with a larger one, by its line.
     readonly property real fieldHeight: Math.max(44, Math.round(regularMetrics.height) + 20)
     readonly property real headingHeight: Math.max(28, Math.round(smallMetrics.height) + 8)
+    // Over a heading that follows a section, 8 px more, scaled: some twice
+    // the space above it as under it, so it starts its section (30 px both
+    // ways, less than two results' 32, the sections ran on as one list).
+    readonly property real sectionGap: root.uiPalette.scaledSize(8)
+    readonly property int headingBottomPadding: 4
+    // A result row's height: the list's height adds up the same ones.
+    function rowHeightAt(kind, index) {
+        if (kind === "item") return root.resultHeight
+        if (kind === "") return 0
+        return kind === "section" && index > 0 ? root.headingHeight + root.sectionGap : root.headingHeight
+    }
     readonly property real resultHeight: Math.max(32, Math.round(regularMetrics.height) + 12)
     // The footer's line of key hints, and the footer: 28 px, or as many
     // lines as the hints wrap to and 4 px above and below them.
@@ -565,7 +576,7 @@ Dialog {
                 let used = 0
                 for (let i = 0; root.rowsRevision >= 0 && i < root.rowCount; ++i) {
                     const kind = rows.rowDataAt(i).kind || ""
-                    const rowHeight = kind === "item" ? root.resultHeight : (kind === "" ? 0 : root.headingHeight)
+                    const rowHeight = root.rowHeightAt(kind, i)
                     if (used + rowHeight > room) {
                         return used
                     }
@@ -704,7 +715,7 @@ Dialog {
                             || root.toolTipContext(model) !== resultRow.context
                     }
                     width: ListView.view.width
-                    height: kind === "item" ? root.resultHeight : (kind === "" ? 0 : root.headingHeight)
+                    height: root.rowHeightAt(kind, index)
                     Accessible.role: isResult ? Accessible.ListItem : (isMore ? Accessible.Link : Accessible.StaticText)
                     Accessible.name: isResult
                         ? I18n.i18nc("@info accessible name of a search result: type, name, details",
@@ -741,7 +752,7 @@ Dialog {
                         x: root.titleX
                         width: parent.width - x - root.sideInset
                         height: parent.height
-                        bottomPadding: 5
+                        bottomPadding: root.headingBottomPadding
                         verticalAlignment: Text.AlignBottom
                         textFormat: Text.PlainText
                         text: visible ? (root.sectionTitles[resultRow.rowType] || "") : ""
@@ -1040,7 +1051,7 @@ Dialog {
                     x: root.titleX
                     width: parent.width - x - root.sideInset
                     height: visible ? root.headingHeight : 0
-                    bottomPadding: 5
+                    bottomPadding: root.headingBottomPadding
                     verticalAlignment: Text.AlignBottom
                     textFormat: Text.PlainText
                     text: I18n.i18nc("@title:group search palette", "Recent Searches")
