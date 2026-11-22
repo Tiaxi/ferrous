@@ -8,6 +8,7 @@
 #include <QFont>
 #include <QFontMetrics>
 #include <QPainter>
+#include <QPen>
 #include <QRect>
 #include <QSize>
 #include <QSizeF>
@@ -37,6 +38,29 @@ constexpr int kGap = 4;
 // as it did ViewCorner::kLabelGap from it.
 constexpr int kCornerGap = 16;
 constexpr int kRadius = 3;
+
+// The lines' dashes: how long, in logical pixels, and how far apart.
+constexpr double kDash = 4.0;
+constexpr double kDashGap = 3.0;
+
+// What is between the dashes, over data as light as they are, such as the
+// waveform's fill or a bright harmonic, where they were lost (1.4:1): the
+// plot's floor at 60 %, so nothing on the floor itself, and the line no
+// thicker.
+inline QColor dashGapColor(const QColor &floor) {
+    QColor gap = floor;
+    gap.setAlphaF(static_cast<float>(floor.alphaF() * 0.6));
+    return gap;
+}
+
+// Sets `pen`'s pattern for the dashes, or with `gaps` for what is between
+// them, with `unit` of its widths to a logical pixel.
+inline void setDashes(QPen &pen, bool gaps, double unit = 1.0) {
+    const double on = (gaps ? kDashGap : kDash) * unit;
+    const double off = (gaps ? kDash : kDashGap) * unit;
+    pen.setDashPattern({on, off});
+    pen.setDashOffset(gaps ? on : 0.0);
+}
 
 // A plate's colours. A plate with an edge has it 1 px wide around its fill,
 // as PlotPlate draws one.

@@ -1545,13 +1545,18 @@ QVector<FrequencyScaleTick> frequencyScaleTicks(
 
 // The name of an overlay image's texture; a readout's plate is in `plate`.
 QString overlayImageKey(
-    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate) {
-    const QString colors = image.kind == SpectrogramOverlayImage::ReadoutPlate
-        ? QStringLiteral("%1|%2|%3|")
-              .arg(plate.fill.rgba(), 0, 16)
-              .arg(plate.text.rgba(), 0, 16)
-              .arg(plate.edge.rgba(), 0, 16)
-        : QString();
+    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate,
+    const QColor &floor) {
+    QString colors;
+    if (image.kind == SpectrogramOverlayImage::ReadoutPlate) {
+        colors = QStringLiteral("%1|%2|%3|")
+            .arg(plate.fill.rgba(), 0, 16)
+            .arg(plate.text.rgba(), 0, 16)
+            .arg(plate.edge.rgba(), 0, 16);
+    } else if (image.kind == SpectrogramOverlayImage::DashedColumn
+        || image.kind == SpectrogramOverlayImage::DashedRow) {
+        colors = QStringLiteral("%1|").arg(floor.rgba(), 0, 16);
+    }
     return QStringLiteral("%1|%2|%3|%4%5")
         .arg(static_cast<int>(image.kind))
         .arg(scale, 0, 'g', 17)
@@ -1578,7 +1583,8 @@ QSize overlayImagePixels(const SpectrogramOverlayImage &image, double scale) {
 // An overlay image at `scale` device pixels to a logical one; a readout's
 // plate is in `plate`.
 QImage renderOverlayImage(
-    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate) {
+    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate,
+    const QColor &floor) {
     const bool dashedColumn = image.kind == SpectrogramOverlayImage::DashedColumn;
     if (dashedColumn || image.kind == SpectrogramOverlayImage::DashedRow) {
         const int lineWidth = deviceLineWidth(scale);
@@ -1590,16 +1596,22 @@ QImage renderOverlayImage(
         QPen dashPen(kCrosshairLineColor);
         dashPen.setWidth(lineWidth);
         dashPen.setCapStyle(Qt::FlatCap);
-        // Dashes of 4 logical pixels, 3 apart.
-        dashPen.setDashPattern({4.0 * scale / lineWidth, 3.0 * scale / lineWidth});
-        painter.setPen(dashPen);
+        QPen gapPen = dashPen;
+        gapPen.setColor(CrosshairReadout::dashGapColor(floor));
+        CrosshairReadout::setDashes(dashPen, false, scale / lineWidth);
+        CrosshairReadout::setDashes(gapPen, true, scale / lineWidth);
         // A one-pixel pen draws the pixels at its coordinates, a wider one
         // the pixels around them.
         const double offset = lineWidth > 1 ? lineWidth * 0.5 : 0.0;
-        if (dashedColumn) {
-            painter.drawLine(QPointF(offset, 0.0), QPointF(offset, length));
-        } else {
-            painter.drawLine(QPointF(0.0, offset), QPointF(length, offset));
+        const QLineF along = dashedColumn
+            ? QLineF(offset, 0.0, offset, length)
+            : QLineF(0.0, offset, length, offset);
+        // Each pixel is a dash's or a gap's: where antialiasing is off, one
+        // both reach is the dash's.
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        for (const QPen &pen : {gapPen, dashPen}) {
+            painter.setPen(pen);
+            painter.drawLine(along);
         }
         return line;
     }
@@ -2925,6 +2937,8 @@ void SpectrogramItem::setFloorColor(const QColor &value) {
             return;
         }
         m_floorColor = value;
+        // It is between the crosshair's dashes, and names their textures.
+        m_crosshairDirty = true;
     }
     emit floorColorChanged();
     update();
@@ -5501,7 +5515,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 }
                 SpectrogramPlacedOverlayImage placed{image.key, rect, QImage()};
                 if (!node->overlayTextures.contains(placed.key)) {
-                    placed.image = renderOverlayImage(image, scale, m_readoutColors);
+                    placed.image = renderOverlayImage(image, scale, m_readoutColors, m_floorColor);
                 }
                 frame.images.push_back(std::move(placed));
             }
@@ -7250,7 +7264,7 @@ double SpectrogramItem::crosshairTrackTimeLocked(double continuousTime) const {
 
 void SpectrogramItem::nameOverlayImagesLocked(SpectrogramOverlayLayout &layout) const {
     for (SpectrogramOverlayImage &image : layout.images) {
-        image.key = overlayImageKey(image, m_canvasScale, m_readoutColors);
+        image.key = overlayImageKey(image, m_canvasScale, m_readoutColors, m_floorColor);
     }
 }
 
