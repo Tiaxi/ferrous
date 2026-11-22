@@ -536,6 +536,7 @@ private slots:
     void volumeMuteKeepsTheThumb();
     void volumeToolTipFollowsTheDrag();
     void statusBarShowsTheNeutralPlaybackState();
+    void statusBarModeGlyphsAreDrawnAtTheirSize();
     void statusBarShowsRepeatAndShuffleInWords();
     void statusBarShowsTheFormatGroupWithoutThePosition();
     void statusBarFormatShowsWhatFitsWhole();
@@ -2749,6 +2750,31 @@ void TransportStatusTest::statusBarShowsTheNeutralPlaybackState() {
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
     QTRY_COMPARE(sceneRect(label).left(), labelLeft);
     QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
+}
+
+// Breeze draws Repeat and Shuffle for 16 px: they are drawn at that, on
+// whole pixels (at 14 px their lines were soft and half as bright as the
+// words beside them).
+void TransportStatusTest::statusBarModeGlyphsAreDrawnAtTheirSize() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *repeat = harness.item(QStringLiteral("statusBarRepeatGlyph"));
+    QQuickItem *shuffle = harness.item(QStringLiteral("statusBarShuffleGlyph"));
+    QVERIFY(shuffle != nullptr);
+    QCOMPARE(shuffle->size(), QSizeF(16, 16));
+    QVERIFY(repeat != nullptr);
+    QCOMPARE(repeat->size(), QSizeF(16, 16));
+    harness.bridge->setProperty("shuffleEnabled", true);
+    for (const int mode : {1, 2}) {
+        harness.bridge->setProperty("repeatMode", mode);
+        qreal scale = 1;
+        grabbed(harness.window, &scale);
+        for (QQuickItem *glyph : {repeat, shuffle}) {
+            const QPointF at = sceneRect(glyph).topLeft();
+            QVERIFY2(std::abs(at.x() - std::round(at.x())) < 0.01 && std::abs(at.y() - std::round(at.y())) < 0.01,
+                     qPrintable(QStringLiteral("%1 at %2,%3").arg(glyph->objectName()).arg(at.x()).arg(at.y())));
+        }
+    }
 }
 
 void TransportStatusTest::statusBarShowsRepeatAndShuffleInWords() {

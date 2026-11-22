@@ -190,11 +190,15 @@ ToolBar {
         elide: Text.ElideRight
     }
 
+    // An error's glyph, and Repeat's and Shuffle's: 16 px, as the Last.fm
+    // slot's, the size Breeze draws the modes for (at 14 px their lines
+    // were soft).
+    readonly property int smallGlyphSize: Kirigami.Units.iconSizes.small
+    readonly property int errorGlyphSize: root.smallGlyphSize
+
     // A glyph of the status bar: a theme icon drawn in `color`, `size` at
     // the default font and larger with a larger one, at that size rather
     // than rounded down to a theme icon size.
-    // An error's glyph: 16 px, as the Last.fm slot's.
-    readonly property int errorGlyphSize: Kirigami.Units.iconSizes.small
 
     component StatusGlyph: Kirigami.Icon {
         property int size: 14
@@ -415,13 +419,17 @@ ToolBar {
                     anchors.verticalCenter: parent.verticalCenter
 
                     StatusGlyph {
+                        objectName: "statusBarRepeatGlyph"
                         anchors.verticalCenter: parent.verticalCenter
+                        size: root.smallGlyphSize
                         source: root.uiBridge.repeatMode === 1 ? "media-playlist-repeat-song" : "media-playlist-repeat"
                     }
 
                     StatusLabel {
                         objectName: "statusBarRepeatLabel"
                         anchors.verticalCenter: parent.verticalCenter
+                        // Whole pixels, for Shuffle's glyph after it.
+                        width: Math.ceil(implicitWidth)
                         text: root.uiBridge.repeatMode === 1
                             ? I18n.i18nc("@info:status", "Repeat One Track")
                             : I18n.i18nc("@info:status", "Repeat Whole Queue")
@@ -437,6 +445,7 @@ ToolBar {
                     StatusGlyph {
                         objectName: "statusBarShuffleGlyph"
                         anchors.verticalCenter: parent.verticalCenter
+                        size: root.smallGlyphSize
                         source: "media-playlist-shuffle"
                     }
 
