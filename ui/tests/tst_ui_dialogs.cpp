@@ -553,6 +553,8 @@ private slots:
     void configureOpensTallEnoughForItsTallestPage_data();
     void configureOpensTallEnoughForItsTallestPage();
     void configureMeasuresAPageThatGrowsOutOfView();
+    void configureHelpStartsAtItsBoxsText_data();
+    void configureHelpStartsAtItsBoxsText();
     void configureWidthsFollowTheFont();
     void configureStacksLibraryWherePathsDoNotFit_data();
     void configureStacksLibraryWherePathsDoNotFit();
@@ -1596,8 +1598,11 @@ void UiDialogsTest::checkConfigureHelpTextAndSliderRange(QQuickWindow *window) {
     QQuickItem *watch = visibleNamed(prefs, QStringLiteral("libraryWatchCheckBox"));
     QQuickItem *helpLabel = itemsNamed(help, QStringLiteral("formHelpTextLabel")).value(0);
     QVERIFY(helpLabel != nullptr);
+    auto *watchText = qvariant_cast<QQuickItem *>(watch->property("contentItem"));
+    QVERIFY(watchText != nullptr);
+    // The content item holds the indicator's room as its padding.
     QCOMPARE(sceneRect(helpLabel).left(),
-             sceneRect(qvariant_cast<QQuickItem *>(watch->property("contentItem"))).left());
+             sceneRect(watchText).left() + watchText->property("leftPadding").toReal());
     // Wrapped at the words: Text.Wrap.
     QCOMPARE(helpLabel->property("wrapMode").toInt(), 4);
     QQuickItem *slider = nullptr;
@@ -7354,6 +7359,109 @@ void UiDialogsTest::editTagsRevertsWorkFromTheKeyboard() {
     QTest::keyClick(tags, Qt::Key_Down);
     QCOMPARE(editor.selectedRows().size(), 1);
     QVERIFY(closeTagEditor(main));
+}
+
+namespace {
+
+// The x of the first pixel drawn in `rect` of `frame` over `ground`, from
+// the left or, mirrored, from the right; -1 with none.
+int drawnEdge(const QImage &frame, const QRectF &rect, const QColor &ground, bool mirrored) {
+    const QRect area = rect.toAlignedRect().intersected(frame.rect());
+    for (int i = 0; i < area.width(); ++i) {
+        const int x = mirrored ? area.right() - i : area.left() + i;
+        for (int y = area.top(); y <= area.bottom(); ++y) {
+            const QColor pixel = frame.pixelColor(x, y);
+            if (qAbs(pixel.red() - ground.red()) + qAbs(pixel.green() - ground.green())
+                    + qAbs(pixel.blue() - ground.blue()) > 150) {
+                return x;
+            }
+        }
+    }
+    return -1;
+}
+
+} // namespace
+
+void UiDialogsTest::configureHelpStartsAtItsBoxsText_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<bool>("mirrored");
+    QTest::newRow("10 pt") << 10.0 << false;
+    QTest::newRow("10 pt, mirrored") << 10.0 << true;
+    QTest::newRow("24 pt") << 24.0 << false;
+    QTest::newRow("24 pt, mirrored") << 24.0 << true;
+}
+
+// A help under a check box starts where the box's text is drawn, on every
+// page, at any font and mirrored. Measured in the drawing: the box's content
+// item starts at the indicator, 24 px before its text, so the items' x agreed
+// while the help hung under the indicator. Both say the same for the
+// measure, so that their first glyphs' bearings are the same.
+void UiDialogsTest::configureHelpStartsAtItsBoxsText() {
+    QFETCH(qreal, pointSize);
+    QFETCH(bool, mirrored);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
+    QVERIFY(bridge->setProperty("lastFmStatusText", QStringLiteral("Scrobble queue flushed.")));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    if (mirrored) {
+        evaluate(stack, QStringLiteral("LayoutMirroring.childrenInherit = true"));
+        evaluate(stack, QStringLiteral("LayoutMirroring.enabled = true"));
+    }
+    const QColor ground = tokenOf(window, "chrome");
+    const QString sample = QStringLiteral("HHHH");
+    int underBoxes = 0;
+    for (int index = 0; index < 4; ++index) {
+        QQuickItem *page = stack->childItems().at(index);
+        QVERIFY(dialog->setProperty("pageIndex", index));
+        QTRY_VERIFY(page->isVisible() && !layoutPendingUnder(page));
+        QQuickItem *form = itemsNamed(page, QStringLiteral("preferencesForm")).value(0);
+        QVERIFY(form != nullptr);
+        QQuickItem *above = nullptr;
+        const QList<QQuickItem *> rows = form->childItems();
+        for (QQuickItem *row : rows) {
+            if (row->property("formLabel").toBool() || !row->isVisible()) {
+                continue;
+            }
+            QQuickItem *control = above;
+            above = row;
+            if (!row->property("formHelpText").toBool()) {
+                continue;
+            }
+            const QString where = QStringLiteral("page %1, %2").arg(index).arg(row->objectName());
+            QQuickItem *help = itemsNamed(row, QStringLiteral("formHelpTextLabel")).value(0);
+            QVERIFY2(help != nullptr && control != nullptr, qPrintable(where));
+            if (!control->property("checkState").isValid()) {
+                // Under another control, on the fields' edge.
+                QCOMPARE(sceneRect(help).left(), sceneRect(row).left());
+                continue;
+            }
+            ++underBoxes;
+            auto *text = qvariant_cast<QQuickItem *>(control->property("contentItem"));
+            auto *indicator = qvariant_cast<QQuickItem *>(control->property("indicator"));
+            QVERIFY2(text != nullptr && indicator != nullptr, qPrintable(where));
+            QVERIFY(control->setProperty("text", sample));
+            QVERIFY(row->setProperty("text", sample));
+            indicator->setOpacity(0);
+            prefs->contentItem()->forceActiveFocus();
+            QTRY_VERIFY2(!layoutPendingUnder(page), qPrintable(where));
+            const QImage shown = prefs->grabWindow();
+            const int boxX = drawnEdge(shown, sceneRect(text), ground, mirrored);
+            const int helpX = drawnEdge(shown, sceneRect(help), ground, mirrored);
+            QVERIFY2(boxX >= 0 && helpX >= 0, qPrintable(where));
+            QVERIFY2(qAbs(boxX - helpX) <= 1,
+                     qPrintable(QStringLiteral("%1: the box's text at %2, the help at %3").arg(where).arg(boxX).arg(helpX)));
+        }
+    }
+    QCOMPARE(underBoxes, 6);
+    QVERIFY(reject(dialog));
 }
 
 int main(int argc, char **argv) {

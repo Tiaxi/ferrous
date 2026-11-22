@@ -64,7 +64,7 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "systemMediaControlsHelp"
         uiPalette: root.uiPalette
-        indent: mediaCheckBox.contentItem.x
+        checkBox: mediaCheckBox
         text: I18n.i18nc("@info", "Ferrous appears in Plasma’s media controls and answers the Play/Pause, "
             + "Previous, Next and Stop keys. The volume keys always set the system volume, not "
             + "Ferrous’s.")

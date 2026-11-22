@@ -47,7 +47,7 @@ Preferences.PreferencesPage {
     Components.FormHelpText {
         objectName: "lastFmScrobblingHelp"
         uiPalette: root.uiPalette
-        indent: scrobblingCheckBox.contentItem.x
+        checkBox: scrobblingCheckBox
         // In a build without Last.fm it steps down with the setting, so the
         // account's line, which says why, leads (in the secondary colour it
         // outranked the disabled setting it explains).

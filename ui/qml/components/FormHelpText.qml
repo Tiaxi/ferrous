@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Templates 2.15 as T
 import org.kde.kirigami 2.20 as Kirigami
 
 // The help text under a control of a form: the base font in the secondary
@@ -11,9 +12,10 @@ import org.kde.kirigami 2.20 as Kirigami
 // font. In the form's wide
 // layout it asks for no more than about 20 characters, so that a long help
 // text never turns the form to its narrow layout, with the labels above the
-// fields: the labels and the widest field decide that. Under a check box it
-// starts under the box's text: a form places its rows itself, so the
-// indent is inside. It is 4 px under its control, the form's row spacing,
+// fields: the labels and the widest field decide that. Under a check box,
+// `checkBox`, it starts where that box's text is drawn: a form places its
+// rows itself, so the indent is inside. It is 4 px under its control, the
+// form's row spacing,
 // and leaves 12 px to the next row, or 16 px when it ends a group of rows
 // (see FormGroupGap).
 Item {
@@ -23,8 +25,33 @@ Item {
     property alias text: label.text
     property alias color: label.color
     property alias font: label.font
-    // How far right of the field column the text starts.
+    // The check box it explains, if one: of the templates' type, as the
+    // style's AbstractButton is a type of its own, which no check box is.
+    property T.AbstractButton checkBox: null
+    readonly property bool mirrored: root.checkBox !== null && root.checkBox.mirrored
+    // How far into the field column the text starts: where the box's text
+    // is drawn. The box's content item is no measure of it by itself: it
+    // starts at the indicator and holds that one's room as its padding
+    // (its x alone left every help 24 px before its option's text).
     property real indent: 0
+
+    // Not a binding of the property's own: the page measures its rows as
+    // they are made, and the first read of one would have evaluated it
+    // there, which completes the box's style in the middle of the measure
+    // and changes what is measured (a binding loop).
+    Binding {
+        target: root
+        property: "indent"
+        value: {
+            const box = root.checkBox
+            if (!box || !box.contentItem) {
+                return 0
+            }
+            return root.mirrored
+                ? box.rightPadding + (box.contentItem.rightPadding || 0)
+                : box.leftPadding + (box.contentItem.leftPadding || 0)
+        }
+    }
     // Marks the help texts of a form for the pages that measure its fields.
     readonly property bool formHelpText: true
     // Whether the next row starts another group.
@@ -55,8 +82,10 @@ Item {
         id: label
         objectName: "formHelpTextLabel"
         textFormat: Text.PlainText
-        x: root.indent
+        x: root.mirrored ? 0 : root.indent
         width: Math.max(0, root.width - root.indent)
+        // Set, so that it follows a mirrored layout, as the box's text does.
+        horizontalAlignment: Text.AlignLeft
         wrapMode: Text.Wrap
         color: root.uiPalette.textSecondary
     }
