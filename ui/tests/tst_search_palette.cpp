@@ -500,6 +500,9 @@ private slots:
     void rowColumnsNeverMeet();
     void headingsStartTheirSections_data();
     void headingsStartTheirSections();
+    void tooltipStaysOffTheOtherResults_data();
+    void tooltipStaysOffTheOtherResults();
+    void tooltipFadesWhereItWasAsTheRowsChange();
 };
 
 void SearchPaletteTest::initTestCase() {
@@ -852,9 +855,9 @@ void SearchPaletteTest::tooltipShowsOnlyWhatARowDoesNot() {
     QVERIFY(shows(QStringLiteral("The Quiet Meridian")).contains(QStringLiteral("Shelf")));
 }
 
-// A result's tooltip is under its row, or over it where the window ends
-// first, and never over the query field (it opened over the field), also
-// as it fades out.
+// A result's tooltip is under its row or the palette, or over the row
+// where the footer is nearer, and never over the query field (it opened
+// over the field), also as it fades out.
 void SearchPaletteTest::tooltipKeepsClearOfTheField() {
     Harness harness;
     QString errorText;
@@ -884,7 +887,7 @@ void SearchPaletteTest::tooltipKeepsClearOfTheField() {
     for (QQuickItem *row : std::as_const(results)) {
         QTest::mouseMove(harness.window, sceneCentre(row));
         QTRY_VERIFY(toolTip->property("opened").toBool());
-        QTRY_COMPARE(toolTip->property("parent").value<QQuickItem *>(), row);
+        QTRY_COMPARE(harness.dialog->property("toolTipRow").value<QQuickItem *>(), row);
         const auto tip = [&] { return sceneRect(content->parentItem()); };
         QTRY_VERIFY2(tip().top() >= sceneRect(row).bottom() || tip().bottom() <= sceneRect(row).top(),
                      "the tooltip is over its row");
@@ -896,7 +899,7 @@ void SearchPaletteTest::tooltipKeepsClearOfTheField() {
 
     // Back on the first row, then off the list: it fades where it was.
     QTest::mouseMove(harness.window, sceneCentre(results.first()));
-    QTRY_COMPARE(toolTip->property("parent").value<QQuickItem *>(), results.first());
+    QTRY_COMPARE(harness.dialog->property("toolTipRow").value<QQuickItem *>(), results.first());
     QTRY_VERIFY(toolTip->property("opened").toBool());
     const QRectF shownAt = sceneRect(content->parentItem());
     QTest::mouseMove(harness.window, QPoint(2, 2));
@@ -2809,6 +2812,128 @@ void SearchPaletteTest::headingsStartTheirSections() {
     }
     QCOMPARE(parted, 2);
     QVERIFY(before.contains(QStringLiteral("more")) && before.contains(QStringLiteral("item")));
+}
+
+void SearchPaletteTest::tooltipStaysOffTheOtherResults_data() {
+    QTest::addColumn<int>("width");
+    QTest::addColumn<int>("height");
+    QTest::addColumn<qreal>("points");
+    QTest::addColumn<int>("extraTracks");
+    QTest::addColumn<QString>("place");
+    const QString beside = QStringLiteral("beside");
+    const QString below = QStringLiteral("below");
+    const QString inside = QStringLiteral("clear");
+    QTest::newRow("1600, many") << 1600 << 1000 << 10.0 << 22 << beside;
+    QTest::newRow("1600, few") << 1600 << 1000 << 10.0 << 0 << beside;
+    QTest::newRow("1000, few, room under the palette") << 1000 << 720 << 10.0 << 0 << below;
+    QTest::newRow("1000, many") << 1000 << 600 << 10.0 << 22 << inside;
+    QTest::newRow("1000 at 24 pt") << 1000 << 720 << 24.0 << 22 << inside;
+    QTest::newRow("1600 at 24 pt") << 1600 << 1000 << 24.0 << 22 << inside;
+    QTest::newRow("1280, wrapped beside") << 1280 << 800 << 10.0 << 22 << beside;
+}
+
+// A result's tooltip leaves the results around it readable where the
+// window has room outside the palette: beside it, level with the row, or
+// under it (it covered the next two results, often to add only the
+// genre). Without that room it is clear of its own row, the query field and
+// the footer.
+void SearchPaletteTest::tooltipStaysOffTheOtherResults() {
+    QFETCH(int, width);
+    QFETCH(int, height);
+    QFETCH(qreal, points);
+    QFETCH(int, extraTracks);
+    QFETCH(QString, place);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(points);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText, width, height), qPrintable(errorText));
+    QVERIFY(harness.open());
+    auto rows = meridianRows(harness.coverUrl);
+    for (int i = 0; i < extraTracks; ++i) {
+        Row extra = result(QStringLiteral("track"), QStringLiteral("Extra %1").arg(i), 5.0f);
+        extra.trackPath = QStringLiteral("/fixture/extra%1.flac").arg(i);
+        rows << extra;
+    }
+    for (Row &row : rows) row.genre = QStringLiteral("Ambient");
+    harness.search(QStringLiteral("meridian"), rows);
+    QTRY_VERIFY(harness.view()->isVisible());
+    QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("globalSearchResultToolTip"));
+    QVERIFY(toolTip != nullptr);
+    toolTip->setProperty("delay", 0);
+    auto *content = toolTip->property("contentItem").value<QQuickItem *>();
+    QVERIFY(content != nullptr);
+
+    const QRectF frame = sceneRect(harness.palette());
+    const QRectF view = sceneRect(harness.view());
+    const QRectF field = sceneRect(harness.item(QStringLiteral("globalSearchQueryField")));
+    const QRectF footer = sceneRect(harness.item(QStringLiteral("globalSearchFooter")));
+    int hovered = 0;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        if (harness.model.rowDataAt(i).value(QStringLiteral("kind")) != QStringLiteral("item")) continue;
+        QQuickItem *row = harness.row(i);
+        if (row == nullptr || sceneRect(row).bottom() > view.bottom() + 0.5) continue;
+        QTest::mouseMove(harness.window, sceneCentre(row));
+        QTRY_COMPARE(harness.dialog->property("toolTipRow").value<QQuickItem *>(), row);
+        QTRY_VERIFY(toolTip->property("opened").toBool());
+        QCoreApplication::processEvents();
+        const QRectF tip = sceneRect(content->parentItem());
+        const QRectF rowRect = sceneRect(row);
+        const QByteArray at = QStringLiteral("row %1: the tooltip at %2,%3 %4x%5")
+                                  .arg(i).arg(tip.left()).arg(tip.top()).arg(tip.width()).arg(tip.height()).toUtf8();
+        QVERIFY2(tip.top() >= 0 && tip.bottom() <= height && tip.left() >= 0 && tip.right() <= width, at.constData());
+        if (place == QStringLiteral("beside")) {
+            QVERIFY2(tip.left() >= frame.right(), at.constData());
+            QVERIFY2(std::abs(tip.center().y() - rowRect.center().y()) <= 1.0, at.constData());
+        } else if (place == QStringLiteral("below")) {
+            QVERIFY2(tip.top() >= frame.bottom(), at.constData());
+        }
+        QVERIFY2(!tip.intersects(rowRect.adjusted(1, 1, -1, -1)), at.constData());
+        QVERIFY2(!tip.intersects(field.adjusted(1, 1, -1, -1)), at.constData());
+        QVERIFY2(!tip.intersects(footer.adjusted(1, 1, -1, -1)), at.constData());
+        ++hovered;
+    }
+    QVERIFY(hovered >= 3);
+}
+
+// As the rows change under it and the palette shrinks, the tooltip fades
+// where it was, beside the palette and under it.
+void SearchPaletteTest::tooltipFadesWhereItWasAsTheRowsChange() {
+    for (const int width : {1600, 1000}) {
+        Harness harness;
+        QString errorText;
+        QVERIFY2(harness.load(kBreezeLight, &errorText, width, 720), qPrintable(errorText));
+        QVERIFY(harness.open());
+        auto rows = meridianRows(harness.coverUrl);
+        for (Row &row : rows) row.genre = QStringLiteral("Ambient");
+        harness.search(QStringLiteral("meridian"), rows);
+        QTRY_VERIFY(harness.view()->isVisible());
+        QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("globalSearchResultToolTip"));
+        QVERIFY(toolTip != nullptr);
+        toolTip->setProperty("delay", 0);
+        auto *content = toolTip->property("contentItem").value<QQuickItem *>();
+        QVERIFY(content != nullptr);
+        QQuickItem *row = harness.row(harness.model.indexOfResult(QStringLiteral("album"), 1));
+        QVERIFY(row != nullptr);
+        QTest::mouseMove(harness.window, sceneCentre(row));
+        QTRY_VERIFY(toolTip->property("opened").toBool());
+        const QPointF shownAt(toolTip->property("x").toReal(), toolTip->property("y").toReal());
+        const qreal height = harness.palette()->height();
+
+        // Typed on: the results, and with them the palette, shrink.
+        harness.bridge->setProperty("globalSearchBusy", true);
+        harness.field()->setProperty("text", QStringLiteral("meridian l"));
+        harness.model.presentSearchRows(rows.mid(0, 2), {1, 1, 0}, true);
+        QCoreApplication::processEvents();
+        QVERIFY(harness.palette()->height() < height);
+        QCOMPARE(QPointF(toolTip->property("x").toReal(), toolTip->property("y").toReal()), shownAt);
+        // And over nothing the window keeps clear, as drawn.
+        QVERIFY(!sceneRect(content->parentItem())
+                     .intersects(sceneRect(harness.item(QStringLiteral("globalSearchQueryField")))));
+    }
 }
 
 int main(int argc, char **argv) {

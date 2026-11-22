@@ -250,6 +250,35 @@ Dialog {
         return !!value && root.querySegments(value).some(function(segment) { return segment.match })
     }
     readonly property string contextSeparator: " · "
+    // Where a result's tooltip of `tipWidth` by `tipHeight` goes, in the
+    // palette's coordinates, for a row at `rowTop`. Outside the palette
+    // where the window has the room, so the results around the row stay
+    // readable (under its row it covered the next two, the selected one
+    // among them): beside the palette, level with the row, or else under
+    // the palette. Otherwise under its row, or over it where the footer is
+    // nearer, or else over the palette. Never over the field or the
+    // footer: null where the window has no such place.
+    function toolTipPlace(rowTop, rowHeight, tipWidth, tipHeight, margin) {
+        const windowWidth = root.parent ? root.parent.width : root.width
+        const windowHeight = root.parent ? root.parent.height : root.height
+        const outsideGap = Kirigami.Units.smallSpacing
+        const rowGap = 3
+        if (root.x + root.width + outsideGap + tipWidth + margin <= windowWidth) {
+            const level = Math.round(root.y + rowTop + (rowHeight - tipHeight) / 2)
+            const inWindow = Math.max(margin, Math.min(windowHeight - margin - tipHeight, level))
+            return Qt.point(root.width + outsideGap, inWindow - root.y)
+        }
+        const centred = Math.round((root.width - tipWidth) / 2)
+        if (root.y + root.height + outsideGap + tipHeight + margin <= windowHeight) {
+            return Qt.point(centred, root.height + outsideGap)
+        }
+        const underRow = rowTop + rowHeight + rowGap
+        if (underRow + tipHeight <= root.height - root.footerHeight - 1) return Qt.point(centred, underRow)
+        const overRow = rowTop - rowGap - tipHeight
+        if (overRow >= root.fieldHeight + 1) return Qt.point(centred, overRow)
+        if (root.y - outsideGap - tipHeight >= margin) return Qt.point(centred, -outsideGap - tipHeight)
+        return null
+    }
     // A result's details after its title, in parts: who and where it is
     // from, and what else matched.
     function rowContextParts(row, full, oneFolder) {
@@ -1188,25 +1217,68 @@ Dialog {
         }
 
         // One tooltip for the result under the pointer, rather than one for
-        // each row. It is under the row, where the style's place, above,
-        // covered the query field, and above it only where the window ends
-        // first. It fades out where it was, with what it said: with no row
-        // it moved over the field as it faded.
+        // each row, where toolTipPlace finds it room: the style's place,
+        // above the row, covered the query field. It keeps its place, and
+        // what it said, as it fades out: following the rows and the
+        // palette's height there, it moved over the field.
         Components.PlainToolTip {
             id: resultToolTip
             objectName: "globalSearchResultToolTip"
-            readonly property int gap: 3
-            readonly property bool fitsUnder: {
-                const row = root.toolTipRow
-                if (!row || !root.parent) return true
-                const rowBottom = root.y + body.y + row.y - resultsView.contentY + row.height
-                return rowBottom + resultToolTip.gap + resultToolTip.implicitHeight
-                    + resultToolTip.bottomMargin <= root.parent.height
+            readonly property var place: root.toolTipRow
+                ? root.toolTipPlace(body.y + root.toolTipRow.y - resultsView.contentY, root.toolTipRow.height,
+                                    resultToolTip.implicitWidth, resultToolTip.implicitHeight,
+                                    Math.max(0, resultToolTip.margins))
+                : null
+            readonly property bool placing: !!root.toolTipTarget && !!resultToolTip.place
+            // As wide as its longest line, up to 320 px, scaled, and to the
+            // room beside the palette where a line can be 160 px there. The
+            // style wraps at 252 px whatever the font: at 24 pt, nine lines
+            // that covered the list and fitted nowhere in a small window.
+            readonly property real textWidthLimit: {
+                const sides = resultToolTip.leftPadding + resultToolTip.rightPadding
+                const beside = (root.parent ? root.parent.width : root.width) - root.x - root.width
+                    - Kirigami.Units.smallSpacing - Math.max(0, resultToolTip.margins) - sides
+                const readable = root.uiPalette.scaledSize(160)
+                const room = beside >= readable ? beside : root.width - 2 * root.sideInset - sides
+                return Math.floor(Math.min(root.uiPalette.scaledSize(320), room))
             }
-            parent: root.toolTipRow || resultsView
-            y: resultToolTip.fitsUnder ? (root.toolTipRow || resultsView).height + resultToolTip.gap
-                                       : -resultToolTip.implicitHeight - resultToolTip.gap
-            visible: !!root.toolTipTarget
+            contentItem: Item {
+                implicitWidth: toolTipLabel.width
+                implicitHeight: toolTipLabel.implicitHeight
+                Label {
+                    id: toolTipLabel
+                    objectName: "globalSearchResultToolTipText"
+                    width: Math.min(Math.ceil(toolTipNaturalSize.implicitWidth), resultToolTip.textWidthLimit)
+                    textFormat: Text.PlainText
+                    text: resultToolTip.text
+                    wrapMode: Text.Wrap
+                    font: resultToolTip.font
+                    color: Kirigami.Theme.textColor
+                    Kirigami.Theme.colorSet: resultToolTip.Kirigami.Theme.colorSet
+                }
+                // The lines unwrapped, measured apart: the label's own width
+                // would follow from itself.
+                Text {
+                    id: toolTipNaturalSize
+                    visible: false
+                    textFormat: Text.PlainText
+                    text: resultToolTip.text
+                    font: resultToolTip.font
+                    renderType: toolTipLabel.renderType
+                }
+            }
+            parent: contentColumn
+            Binding on x {
+                when: resultToolTip.placing
+                value: resultToolTip.place ? resultToolTip.place.x : 0
+                restoreMode: Binding.RestoreNone
+            }
+            Binding on y {
+                when: resultToolTip.placing
+                value: resultToolTip.place ? resultToolTip.place.y : 0
+                restoreMode: Binding.RestoreNone
+            }
+            visible: resultToolTip.placing
             delay: Kirigami.Units.toolTipDelay
             message: root.toolTipText
         }
