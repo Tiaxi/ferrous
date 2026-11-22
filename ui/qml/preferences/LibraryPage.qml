@@ -429,6 +429,13 @@ Preferences.PreferencesPage {
         }
     }
 
+    // Watching is the library's setting, not one of the folders' actions
+    // (4 px under their buttons, it read as one).
+    Components.FormGroupGap {
+        objectName: "libraryWatchGap"
+        uiPalette: root.uiPalette
+    }
+
     CheckBox {
         id: watchCheckBox
         objectName: "libraryWatchCheckBox"

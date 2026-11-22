@@ -123,14 +123,19 @@ Preferences.PreferencesPage {
             "%1 old scrobbles were discarded from the queue", root.uiBridge.lastFmDroppedScrobbleCount || 0)
     }
 
-    // Only the buttons that apply now.
+    // Only the buttons that apply now, their glyphs at the size of the
+    // Library page's.
     RowLayout {
+        id: accountButtons
+        readonly property real glyphSize: root.uiPalette.labelIconSize
         spacing: Kirigami.Units.largeSpacing
         visible: root.buildConfigured
 
         Button {
             objectName: "lastFmConnectButton"
             visible: root.authState === 0 && !root.connected
+            icon.width: accountButtons.glyphSize
+            icon.height: accountButtons.glyphSize
             icon.name: "internet-services"
             text: I18n.i18nc("@action:button", "Connect…")
             onClicked: root.uiBridge.beginLastFmAuth()
@@ -139,6 +144,9 @@ Preferences.PreferencesPage {
         Button {
             objectName: "lastFmCompleteButton"
             visible: root.authState === 1
+            icon.width: accountButtons.glyphSize
+            icon.height: accountButtons.glyphSize
+            icon.name: "dialog-ok-apply"
             text: I18n.i18nc("@action:button", "Complete Connection")
             onClicked: root.uiBridge.completeLastFmAuth()
         }
@@ -146,6 +154,9 @@ Preferences.PreferencesPage {
         Button {
             objectName: "lastFmReconnectButton"
             visible: root.connected && root.authState !== 1
+            icon.width: accountButtons.glyphSize
+            icon.height: accountButtons.glyphSize
+            icon.name: "view-refresh"
             text: I18n.i18nc("@action:button", "Reconnect…")
             onClicked: root.uiBridge.beginLastFmAuth()
         }
@@ -153,6 +164,9 @@ Preferences.PreferencesPage {
         Button {
             objectName: "lastFmDisconnectButton"
             visible: root.connected || root.authState !== 0
+            icon.width: accountButtons.glyphSize
+            icon.height: accountButtons.glyphSize
+            icon.name: root.connected ? "network-disconnect" : "dialog-cancel"
             text: root.connected
                 ? I18n.i18nc("@action:button", "Disconnect")
                 : I18n.i18nc("@action:button", "Cancel Connection")

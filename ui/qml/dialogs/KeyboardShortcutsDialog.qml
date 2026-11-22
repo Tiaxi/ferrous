@@ -159,31 +159,31 @@ Components.DialogWindow {
         switch (StandardKeys.keptKeyRole(key)) {
         case "activate":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it plays the selection in the library and the queue, and presses the default button of a dialog.", name)
+                "“%1” cannot be a shortcut: it plays the selection in the library and the queue, and presses the default button of a dialog.", name)
         case "delete":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it removes the selected tracks from the queue, and deletes text in text fields.", name)
+                "“%1” cannot be a shortcut: it removes the selected tracks from the queue, and deletes text in text fields.", name)
         case "focus":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it moves the keyboard focus between the controls.", name)
+                "“%1” cannot be a shortcut: it moves the keyboard focus between the controls.", name)
         case "cancel":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it closes menus, dialogs and the viewers.", name)
+                "“%1” cannot be a shortcut: it closes menus, dialogs and the viewers.", name)
         case "navigate":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it moves the selection in the lists and the cursor in text fields.", name)
+                "“%1” cannot be a shortcut: it moves the selection in the lists and the cursor in text fields.", name)
         case "contextMenu":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: it opens the context menu.", name)
+                "“%1” cannot be a shortcut: it opens the context menu.", name)
         case "menuBar":
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut: KDE applications use it to show or hide the menu bar.", name)
+                "“%1” cannot be a shortcut: KDE applications use it to show or hide the menu bar.", name)
         }
         // The album art viewer's own key, where the viewers repeat the
         // action.
         if (key === "I" && root.viewerActions.indexOf(action) >= 0) {
             return I18n.i18nc("@info %1 is a key",
-                "‘%1’ cannot be a shortcut of this action: the album art viewer uses it to show or hide the details.", name)
+                "“%1” cannot be a shortcut of this action: the album art viewer uses it to show or hide the details.", name)
         }
         return ""
     }
@@ -360,6 +360,26 @@ Components.DialogWindow {
     }
     onCurrentBindingsChanged: root.syncEditors()
 
+    // Gives the editors' key buttons one width, the wider one's, so that
+    // the buttons clearing them share an x. KeySequenceItem is a row with
+    // no property for its button's width: the button that takes the key is
+    // its checkable child.
+    function shareKeyButtonWidth(editors) {
+        const buttons = []
+        for (const editor of editors) {
+            for (const child of editor.children) {
+                if (child.checkable === true) {
+                    buttons.push(child)
+                }
+            }
+        }
+        for (const button of buttons) {
+            button.Layout.preferredWidth = Qt.binding(function() {
+                return buttons.reduce(function(widest, other) { return Math.max(widest, other.implicitWidth) }, 0)
+            })
+        }
+    }
+
     function matches(action, query) {
         if (query.length === 0) {
             return true
@@ -442,7 +462,14 @@ Components.DialogWindow {
     defaultWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 40)
     defaultHeight: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 38)
     minimumWidth: Math.ceil(Kirigami.Units.gridUnit * 14 + 2 * root.keyColumnWidth + 2 * Kirigami.Units.gridUnit)
-    minimumHeight: Kirigami.Units.gridUnit * 24
+    readonly property real noteLineHeight: Math.ceil(keyMetrics.height)
+    readonly property real listMinimumHeight: Kirigami.Units.gridUnit * 8
+    // Room for the list at its least, the editor and the note's line,
+    // whatever the font: a longer note takes its room from the list.
+    minimumHeight: Math.ceil(Math.max(Kirigami.Units.gridUnit * 24,
+        2 * Kirigami.Units.gridUnit + searchField.implicitHeight + root.listMinimumHeight
+            + editorColumn.implicitHeight + root.noteLineHeight + 3 * shortcutsContent.spacing
+            + shortcutsFooter.implicitHeight))
 
     FontMetrics {
         id: keyMetrics
@@ -572,7 +599,7 @@ Components.DialogWindow {
             id: listFrame
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.minimumHeight: Kirigami.Units.gridUnit * 8
+            Layout.minimumHeight: root.listMinimumHeight
             color: root.uiPalette.view
             border.width: 1
             border.color: root.uiPalette.seam
@@ -601,7 +628,7 @@ Components.DialogWindow {
                     Accessible.role: Accessible.ColumnHeader
                 }
                 Label {
-                    Layout.preferredWidth: root.keyColumnWidth + actionList.scrollbarLane
+                    Layout.preferredWidth: root.keyColumnWidth + actionList.columnsLane
                     leftPadding: Kirigami.Units.largeSpacing
                     text: I18n.i18nc("@title:column", "Alternate")
                     elide: Text.ElideRight
@@ -632,6 +659,10 @@ Components.DialogWindow {
                 Accessible.role: Accessible.List
                 Accessible.name: I18n.i18nc("@label", "Actions")
                 readonly property real scrollbarLane: listScrollBar.visible ? listScrollBar.width : 0
+                // The columns keep the bar's lane whether it shows or not,
+                // so they stay put as a search shortens the list; the rows'
+                // tints take the lane while it is free.
+                readonly property real columnsLane: listScrollBar.implicitWidth
                 ScrollBar.vertical: ScrollBar {
                     id: listScrollBar
                     policy: ScrollBar.AsNeeded
@@ -643,8 +674,8 @@ Components.DialogWindow {
                     }
                     currentIndex = Math.max(0, Math.min(count - 1, currentIndex + step))
                 }
-                // The current row stays in view as a message under the
-                // list makes it shorter.
+                // The current row stays in view as the window, or a message
+                // of more than a line, makes the list shorter.
                 onHeightChanged: {
                     if (currentIndex >= 0) {
                         positionViewAtIndex(currentIndex, ListView.Contain)
@@ -748,7 +779,7 @@ Components.DialogWindow {
                         Label {
                             objectName: "keyboardShortcutsRowAlternate"
                             Layout.preferredWidth: root.keyColumnWidth
-                            Layout.rightMargin: actionList.scrollbarLane
+                            Layout.rightMargin: actionList.columnsLane
                             leftPadding: Kirigami.Units.largeSpacing
                             text: actionRow.bindings.slice(1).map(function(key) { return StandardKeys.nativeText(key) }).join(", ")
                             elide: Text.ElideRight
@@ -770,23 +801,23 @@ Components.DialogWindow {
             }
         }
 
-        // The selected action's keys: its defaults, or keys of its own.
-        GridLayout {
-            id: editorGrid
+        // The selected action's keys: its defaults, or keys of its own. The
+        // title and the default, which may be long, stand outside the grid,
+        // so that its columns follow its own cells alone.
+        ColumnLayout {
+            id: editorColumn
             objectName: "keyboardShortcutsEditor"
             Layout.fillWidth: true
+            Layout.fillHeight: false
             enabled: root.currentAction !== null
-            columns: 3
-            columnSpacing: Kirigami.Units.largeSpacing
-            rowSpacing: Kirigami.Units.smallSpacing
+            spacing: Kirigami.Units.smallSpacing
 
             Label {
-                Layout.columnSpan: 3
                 Layout.fillWidth: true
                 Layout.bottomMargin: Kirigami.Units.smallSpacing
                 objectName: "keyboardShortcutsEditorTitle"
                 text: root.currentAction
-                    ? I18n.i18nc("@title:group %1 is an action", "Shortcuts for ‘%1’", root.nameOf(root.currentAction))
+                    ? I18n.i18nc("@title:group %1 is an action", "Shortcuts for “%1”", root.nameOf(root.currentAction))
                     : I18n.i18nc("@title:group", "Shortcuts")
                 font.weight: Font.DemiBold
                 elide: Text.ElideRight
@@ -797,7 +828,7 @@ Components.DialogWindow {
                 objectName: "keyboardShortcutsDefaultRadio"
                 // Each follows the action's keys, which a click changes.
                 autoExclusive: false
-                Layout.columnSpan: 3
+                Layout.maximumWidth: shortcutsContent.width
                 checked: root.currentAtDefaults && !root.customChosen
                 text: {
                     const defaults = root.currentAction ? root.currentAction.defaultKeyBindings : []
@@ -812,30 +843,34 @@ Components.DialogWindow {
                 }
             }
 
-            RadioButton {
-                id: customRadio
-                objectName: "keyboardShortcutsCustomRadio"
-                autoExclusive: false
-                Layout.alignment: Qt.AlignTop
-                checked: !root.currentAtDefaults || root.customChosen
-                text: I18n.i18nc("@option:radio", "Custom:")
-                onClicked: {
-                    root.chooseCustom()
-                    checked = Qt.binding(function() { return !root.currentAtDefaults || root.customChosen })
-                }
-            }
-
-            // The shortcut and the alternate, one key combination each.
+            // Custom, the shortcut and the alternate, one key combination
+            // each, in one grid: a row's texts share the middle of its key
+            // button, and so one baseline.
             GridLayout {
-                Layout.columnSpan: 2
-                Layout.fillWidth: true
-                columns: 2
+                Layout.fillWidth: false
+                columns: 3
                 columnSpacing: Kirigami.Units.largeSpacing
                 rowSpacing: Kirigami.Units.smallSpacing
 
+                RadioButton {
+                    id: customRadio
+                    objectName: "keyboardShortcutsCustomRadio"
+                    autoExclusive: false
+                    // Whole pixels above and below its caption, as the label
+                    // beside it has: a fraction set its baseline 1 px lower.
+                    Layout.preferredHeight: shortcutLabel.implicitHeight
+                        + 2 * Math.ceil((customRadio.implicitHeight - shortcutLabel.implicitHeight) / 2)
+                    checked: !root.currentAtDefaults || root.customChosen
+                    text: I18n.i18nc("@option:radio", "Custom:")
+                    onClicked: {
+                        root.chooseCustom()
+                        checked = Qt.binding(function() { return !root.currentAtDefaults || root.customChosen })
+                    }
+                }
                 Label {
+                    id: shortcutLabel
                     text: I18n.i18nc("@label:chooser", "Shortcut:")
-                    Layout.alignment: Qt.AlignRight
+                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                 }
                 KQuickControls.KeySequenceItem {
                     id: shortcutEditor
@@ -847,8 +882,10 @@ Components.DialogWindow {
                     onKeySequenceModified: root.takeKey(0, shortcutEditor)
                 }
                 Label {
+                    Layout.row: 1
+                    Layout.column: 1
                     text: I18n.i18nc("@label:chooser", "Alternate:")
-                    Layout.alignment: Qt.AlignRight
+                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                 }
                 KQuickControls.KeySequenceItem {
                     id: alternateEditor
@@ -859,39 +896,50 @@ Components.DialogWindow {
                     Accessible.name: I18n.i18nc("@label:chooser", "Alternate")
                     onKeySequenceModified: root.takeKey(1, alternateEditor)
                 }
+
+                Component.onCompleted: root.shareKeyButtonWidth([shortcutEditor, alternateEditor])
             }
         }
 
-        // What keeps a key the user tried, or that the library and the
-        // text fields type a key this action has.
-        Label {
-            objectName: "keyboardShortcutsRefusal"
+        // What keeps a key the user tried, that the library and the text
+        // fields type a key this action has, or that the bridge refused
+        // the set, which stays to change or cancel. One line is kept for
+        // them, so the list and the editor stay put as one comes and goes;
+        // only a longer message makes the room larger.
+        ColumnLayout {
+            objectName: "keyboardShortcutsNotes"
             Layout.fillWidth: true
-            visible: root.refusal.length > 0
-            text: root.refusal
-            wrapMode: Text.Wrap
-            color: root.uiPalette.negative
-        }
-        Label {
-            readonly property string typedKey: root.typedKeyOf(root.currentBindings)
-            objectName: "keyboardShortcutsTypedKeyNote"
-            Layout.fillWidth: true
-            visible: typedKey.length > 0 && root.refusal.length === 0
-            text: I18n.i18nc("@info %1 is a key",
-                "While the library or a text field has the keyboard focus, ‘%1’ types there instead.",
-                StandardKeys.nativeText(typedKey))
-            wrapMode: Text.Wrap
-            color: root.uiPalette.textSecondary
-        }
+            Layout.fillHeight: false
+            Layout.preferredHeight: Math.max(root.noteLineHeight, implicitHeight)
+            spacing: Kirigami.Units.smallSpacing
 
-        // That the bridge refused the set, which stays to change or cancel.
-        Label {
-            objectName: "keyboardShortcutsSaveFailed"
-            Layout.fillWidth: true
-            visible: root.saveFailed
-            wrapMode: Text.Wrap
-            color: root.uiPalette.negative
-            text: I18n.i18nc("@info", "Ferrous could not take these shortcuts. Change some back, or cancel to keep the ones you had.")
+            Label {
+                objectName: "keyboardShortcutsRefusal"
+                Layout.fillWidth: true
+                visible: root.refusal.length > 0
+                text: root.refusal
+                wrapMode: Text.Wrap
+                color: root.uiPalette.negative
+            }
+            Label {
+                readonly property string typedKey: root.typedKeyOf(root.currentBindings)
+                objectName: "keyboardShortcutsTypedKeyNote"
+                Layout.fillWidth: true
+                visible: typedKey.length > 0 && root.refusal.length === 0
+                text: I18n.i18nc("@info %1 is a key",
+                    "While the library or a text field has the keyboard focus, “%1” types there instead.",
+                    StandardKeys.nativeText(typedKey))
+                wrapMode: Text.Wrap
+                color: root.uiPalette.textSecondary
+            }
+            Label {
+                objectName: "keyboardShortcutsSaveFailed"
+                Layout.fillWidth: true
+                visible: root.saveFailed
+                wrapMode: Text.Wrap
+                color: root.uiPalette.negative
+                text: I18n.i18nc("@info", "Ferrous could not take these shortcuts. Change some back, or cancel to keep the ones you had.")
+            }
         }
     }
 
@@ -903,19 +951,21 @@ Components.DialogWindow {
         windowRoot: root
         title: I18n.i18nc("@title:window", "Shortcut Conflict")
         message: root.pendingReassignment
-            ? I18n.i18nc("@info %1 is a key, or a list of them, %2 an action", "Reassign ‘%1’ to ‘%2’?",
+            ? I18n.i18nc("@info %1 is a key, or a list of them, %2 an action", "Reassign “%1” to “%2”?",
                 root.movedKeysText(root.pendingReassignment), root.nameOf(root.pendingReassignment.action))
             : ""
         details: root.pendingReassignment
             ? (root.pendingReassignment.moves.length === 1
                 ? I18n.i18nc("@info %1 is a key, %2 an action",
-                    "The ‘%1’ key combination is already assigned to the ‘%2’ action, which will no longer have it.",
+                    "The “%1” key combination is already assigned to the “%2” action, which will no longer have it.",
                     root.movedKeysText(root.pendingReassignment), root.movedFromText(root.pendingReassignment))
                 : I18n.i18nc("@info %1 is a list of keys, %2 of actions",
-                    "The ‘%1’ key combinations are already assigned to ‘%2’, which will no longer have them.",
+                    "The “%1” key combinations are already assigned to “%2”, which will no longer have them.",
                     root.movedKeysText(root.pendingReassignment), root.movedFromText(root.pendingReassignment)))
             : ""
         confirmText: I18n.i18nc("@action:button", "Reassign")
+        // Not Apply's: the change still waits for OK or Apply.
+        confirmIcon: "dialog-ok"
         onConfirmed: root.reassign()
         onRejected: root.pendingReassignment = null
     }

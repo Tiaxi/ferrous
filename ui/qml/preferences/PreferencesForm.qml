@@ -153,6 +153,9 @@ GridLayout {
                 }
                 return label.index > 0 ? Kirigami.Units.largeSpacing * 2 : 0
             }
+            // The room a field keeps under itself, its label keeps too, so
+            // the two stay on one middle however tall either is.
+            Layout.bottomMargin: root.wideMode && label.item ? label.item.Layout.bottomMargin : 0
 
             Component.onCompleted: {
                 if (label.item.Accessible.hasOwnProperty("labelledBy")) {

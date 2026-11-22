@@ -66,6 +66,8 @@ Preferences.PreferencesPage {
         Layout.preferredWidth: Kirigami.Units.gridUnit * 12
         Layout.minimumWidth: Kirigami.Units.gridUnit * 6 + dbRangeRow.spacing + dbRangeValueLabel.Layout.minimumWidth
         Layout.maximumWidth: Kirigami.Units.gridUnit * 18
+        // The ticks hang under the groove: 10 px from them to the next row.
+        Layout.bottomMargin: Kirigami.Units.smallSpacing + 2
         spacing: Kirigami.Units.largeSpacing
 
         Slider {
@@ -152,6 +154,16 @@ Preferences.PreferencesPage {
     }
 
     CheckBox {
+        objectName: "spectrogramFpsCheckBox"
+        text: I18n.i18nc("@option:check", "Frame rate")
+        checked: root.settings.value("showFps")
+        onToggled: root.settings.setValue("showFps", checked)
+    }
+
+    // The last of the Show group's three, which stay together, so that its
+    // help is under it (under Frame rate, it read as that one's; before
+    // Frame rate, it set that apart).
+    CheckBox {
         id: crosshairCheckBox
         objectName: "spectrogramCrosshairCheckBox"
         text: I18n.i18nc("@option:check", "Crosshair on hover")
@@ -159,15 +171,6 @@ Preferences.PreferencesPage {
         onToggled: root.settings.setValue("showSpectrogramCrosshair", checked)
     }
 
-    CheckBox {
-        objectName: "spectrogramFpsCheckBox"
-        text: I18n.i18nc("@option:check", "Frame rate")
-        checked: root.settings.value("showFps")
-        onToggled: root.settings.setValue("showFps", checked)
-    }
-
-    // After the Show group's three check boxes, which stay together
-    // (Frame rate stood apart under this help text).
     Components.FormHelpText {
         objectName: "crosshairHelp"
         uiPalette: root.uiPalette
