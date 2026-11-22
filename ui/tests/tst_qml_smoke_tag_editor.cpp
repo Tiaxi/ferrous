@@ -745,7 +745,17 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     QTRY_VERIFY(fixture.quitAnywayOffered());
     QObject *message = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitMessage"));
     QVERIFY(message != nullptr);
-    QVERIFY(message->property("text").toString().contains(QStringLiteral("may be lost")));
+    // What quitting anyway costs comes straight after the status, and why
+    // it offers under the files, shorter, with every fact (the cost followed
+    // the example of a network share, in a paragraph of five lines at 24 pt).
+    auto *explanation = fixture.window->findChild<QQuickItem *>(QStringLiteral("tagEditorQuitWaitExplanation"));
+    QVERIFY(explanation != nullptr);
+    const QString consequence = message->property("text").toString();
+    const QString why = explanation->property("text").toString();
+    QCOMPARE(consequence, QStringLiteral("Quit Anyway stops waiting and may lose changes not yet written."));
+    QCOMPARE(why, QStringLiteral("This is taking longer than it should, perhaps on an unresponsive network share. "
+                                 "No file is left half-written."));
+    QVERIFY(consequence.size() + why.size() < 200);
     // As a confirmation reads: what it waits for semibold, the
     // files under its text rather than the spinner, the explanation in the
     // secondary colour, and Keep Waiting with a glyph, as Quit Anyway.
@@ -760,6 +770,13 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     // (it started under the spinner); the window wider by that indent, so
     // it keeps the lines it had.
     auto *messageItem = qobject_cast<QQuickItem *>(message);
+    auto *filesItem = qobject_cast<QQuickItem *>(files);
+    QTRY_VERIFY(sceneRectOf(messageItem).bottom() <= sceneRectOf(filesItem).top());
+    QVERIFY(sceneRectOf(status).bottom() <= sceneRectOf(messageItem).top());
+    QVERIFY(sceneRectOf(filesItem).bottom() <= sceneRectOf(explanation).top());
+    QTRY_COMPARE(sceneRectOf(explanation).left(), sceneRectOf(status).left());
+    QCOMPARE(explanation->property("color").value<QColor>().rgba(),
+             palette->property("textSecondary").value<QColor>().rgba());
     QTRY_COMPARE(sceneRectOf(messageItem).left(), sceneRectOf(status).left());
     QCOMPARE(messageItem->width(), status->width());
     QObject *quitWait = fixture.quitWait();
