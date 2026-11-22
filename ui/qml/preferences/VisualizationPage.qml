@@ -242,7 +242,7 @@ Preferences.PreferencesPage {
     CheckBox {
         objectName: "stretchShortTracksCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Default zoom:")
-        text: I18n.i18nc("@option:check", "Stretch tracks shorter than the view to its full width")
+        text: I18n.i18nc("@option:check", "Stretch tracks shorter than the view to fill it")
         checked: root.settings.value("stretchShortTracks")
         onToggled: root.settings.setValue("stretchShortTracks", checked)
     }

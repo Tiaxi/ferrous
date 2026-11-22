@@ -172,7 +172,7 @@ Components.DialogWindow {
                     icon.width: dialogButtons.glyphSize
                     icon.height: dialogButtons.glyphSize
                     icon.name: "edit-copy"
-                    text: I18n.i18nc("@action:button", "Copy All")
+                    text: I18n.i18nc("@action:button", "Copy With Paths")
                     onClicked: {
                         if (diagnosticsLogView.length > 0) {
                             diagnosticsLogView.selectAll()
@@ -186,7 +186,7 @@ Components.DialogWindow {
                     icon.width: dialogButtons.glyphSize
                     icon.height: dialogButtons.glyphSize
                     icon.name: "edit-copy"
-                    text: I18n.i18nc("@action:button", "Copy Log Without Paths")
+                    text: I18n.i18nc("@action:button", "Copy Without Paths")
                     enabled: (root.diagnosticsText || "").length > 0
                     ToolTip.visible: hovered
                     ToolTip.delay: Kirigami.Units.toolTipDelay
@@ -316,7 +316,8 @@ Components.DialogWindow {
                             }
 
                             MenuItem {
-                                text: I18n.i18nc("@action:inmenu", "Copy All")
+                                objectName: "diagnosticsCopyWithPathsMenuItem"
+                                text: I18n.i18nc("@action:inmenu", "Copy With Paths")
                                 enabled: diagnosticsLogView.length > 0
                                 onTriggered: {
                                     diagnosticsLogView.selectAll()
@@ -325,7 +326,8 @@ Components.DialogWindow {
                             }
 
                             MenuItem {
-                                text: I18n.i18nc("@action:inmenu", "Copy Log Without Paths")
+                                objectName: "diagnosticsCopyWithoutPathsMenuItem"
+                                text: I18n.i18nc("@action:inmenu", "Copy Without Paths")
                                 enabled: diagnosticsLogView.length > 0
                                 onTriggered: root.uiBridge.copyDiagnosticsWithoutPaths()
                             }
@@ -344,10 +346,10 @@ Components.DialogWindow {
         windowRoot: root
         title: I18n.i18nc("@title:window", "Delete Diagnostics Log")
         message: I18n.i18nc("@info", "Delete the diagnostics log?")
-        // For a bug report, the copy made for sharing: Copy All, which it
-        // named, copies every path (#547).
+        // For a bug report, the copy made for sharing: Copy With Paths,
+        // which it named, copies every path (#547).
         details: I18n.i18nc("@info", "Ferrous deletes the log file and starts a new one. To keep what it holds "
-            + "for a bug report, use Copy Log Without Paths first.")
+            + "for a bug report, use Copy Without Paths first.")
         confirmText: I18n.i18nc("@action:button", "Delete Log")
         confirmIcon: "edit-delete"
         destructive: true

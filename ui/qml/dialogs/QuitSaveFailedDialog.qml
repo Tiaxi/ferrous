@@ -89,13 +89,13 @@ Components.CompactDialogWindow {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
-        // What each button does, and what can be lost by its name, rather
-        // than "them", which could be read as the error above it (a
-        // sentence on unsaved changes first said "not saved" a third time).
-        // It suggests no cure: the error above says the cause, which is
-        // not always a full disk.
+        // What quitting now loses, by its name, rather than "them", which
+        // could be read as the error above it (a sentence on unsaved
+        // changes first said "not saved" a third time). Retry says what it
+        // does itself ("Retry saves again." repeated it). It suggests no
+        // cure: the error above says the cause, which is not always a full
+        // disk.
         textFormat: Text.PlainText
-        text: I18n.i18nc("@info", "Retry saves again. Quit Anyway loses unsaved settings, queue changes and "
-            + "Last.fm scrobbles.")
+        text: I18n.i18nc("@info", "Quit Anyway loses unsaved settings, queue changes and Last.fm scrobbles.")
     }
 }

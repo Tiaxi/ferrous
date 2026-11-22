@@ -23,9 +23,11 @@ ToolButton {
     rightPadding: Kirigami.Units.smallSpacing + 2
     topPadding: Kirigami.Units.smallSpacing
     bottomPadding: Kirigami.Units.smallSpacing
+    // Between the icon and the caption.
+    spacing: Kirigami.Units.smallSpacing
 
     contentItem: RowLayout {
-        spacing: Kirigami.Units.smallSpacing
+        spacing: root.spacing
 
         Kirigami.Icon {
             objectName: "textToolButtonIcon"

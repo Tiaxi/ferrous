@@ -378,11 +378,11 @@ ApplicationWindow {
     QObject *confirm = root->findChild<QObject *>(QStringLiteral("replaceCoverConfirmDialog"));
     QVERIFY(dialog != nullptr && confirm != nullptr);
     // Typographic apostrophes, as everywhere else.
-    auto *consequence = confirm->findChild<QQuickItem *>(QStringLiteral("replaceCoverConsequence"));
+    auto *consequence = confirm->findChild<QQuickItem *>(QStringLiteral("replaceCoverEmbedCaseOutcome"));
     auto *warning = confirm->findChild<QQuickItem *>(QStringLiteral("replaceCoverWarning"));
     QVERIFY(consequence != nullptr && warning != nullptr);
     const QString details = consequence->property("text").toString();
-    QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("track\u2019s folder")),
+    QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("album\u2019s tracks")),
              qPrintable(details));
     // Replace from iTunes has a window of its own, which its question opens
     // in.
@@ -419,20 +419,25 @@ ApplicationWindow {
     QVERIFY(artLine != nullptr);
     QCOMPARE(artLine->property("text").toString(), QStringLiteral("Image details aren\u2019t available."));
     QVERIFY(applied().isEmpty());
-    // What Replace does on disk, a short sentence for each case (one
-    // sentence of 31 words was too long): a cover file where the track's
-    // folder has any JPEG or PNG, which Ferrous shows as its cover (a back
-    // scan alone counts, so "a cover image" was not true of it), otherwise
-    // the embedded art of the album's tracks in that folder, which the
-    // question names ("the album's tracks" read as the whole album's, in
-    // every folder). Only what is overwritten is lost, and the art is
-    // "album art" throughout, as in the question. It says which file is
-    // overwritten, and when one is added instead, as artwork's
-    // write_folder_cover does ("becomes its cover file" left that open).
-    QCOMPARE(details,
-             QStringLiteral("If the track\u2019s folder has JPEG or PNG images, Ferrous overwrites the one named as "
-                            "a cover, or adds a cover file beside them. Otherwise the album art is embedded in the "
-                            "album\u2019s tracks in that folder."));
+    // What Replace does on disk, a row for each case (one sentence of 31
+    // words was too long, then one paragraph of conditions): a cover file
+    // where the track's folder has any JPEG or PNG, which Ferrous shows as
+    // its cover (a back scan alone counts, so "a cover image" was not true
+    // of it), otherwise the embedded art of the album's tracks in that
+    // folder ("the album's tracks" read as the whole album's, in every
+    // folder). Only what is overwritten is lost, and the art is "album art"
+    // throughout, as in the question. It says which file is overwritten,
+    // and when one is added instead, as artwork's write_folder_cover does
+    // ("becomes its cover file" left that open).
+    const auto textOf = [confirm](const char *name) {
+        auto *label = confirm->findChild<QQuickItem *>(QString::fromLatin1(name));
+        return label != nullptr ? label->property("text").toString() : QString();
+    };
+    QCOMPARE(textOf("replaceCoverFolderCaseLead"), QStringLiteral("Folder has JPEG or PNG images"));
+    QCOMPARE(textOf("replaceCoverFolderCaseOutcome"),
+             QStringLiteral("Overwrites the image named as a cover, or adds a cover file beside them"));
+    QCOMPARE(textOf("replaceCoverEmbedCaseLead"), QStringLiteral("No JPEG or PNG images in the folder"));
+    QCOMPARE(details, QStringLiteral("Embeds the album art in this album\u2019s tracks in that folder"));
     QCOMPARE(warning->property("text").toString(), QStringLiteral("Ferrous keeps no copy of what it overwrites."));
     QVERIFY2(!details.contains(QStringLiteral("artwork")), qPrintable(details));
     // A window of its own above Replace from iTunes', with Replace's icon

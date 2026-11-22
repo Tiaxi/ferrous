@@ -35,6 +35,8 @@ Popup {
     // Clear of the window's edges: 6 px from the right, and above the
     // status bar.
     readonly property real edgeMargin: Kirigami.Units.smallSpacing + 2
+    // Between an entry's glyph and its text, and Open Diagnostics…' too.
+    readonly property real glyphTextGap: Kirigami.Units.largeSpacing + 2
     readonly property real statusBarClearance: root.uiPalette.rowHeight + Kirigami.Units.smallSpacing + 2
     // The files of the entries that are in the queue now, by path. It is
     // worked out again whenever the queue's rows change, whatever their
@@ -433,7 +435,7 @@ Popup {
                             anchors.topMargin: Kirigami.Units.largeSpacing
                             anchors.leftMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                             anchors.rightMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
-                            spacing: Kirigami.Units.largeSpacing + 2
+                            spacing: root.glyphTextGap
 
                             // The only mark between an error and a notice: as
                             // large as a line of text holds, and centred on the
@@ -610,11 +612,15 @@ Popup {
 
         // On the header's x, with the glyph of Help's Diagnostics…, as Clear
         // All has its own (they were the only dialog actions with none).
-        // Not ⓘ, which marks a notice in the list.
+        // Not ⓘ, which marks a notice in the list. Its glyph is on the
+        // entries' glyphs, the same size, and its caption on their text, as
+        // far from the glyph as theirs (at the button's own spacing it was
+        // a second text column, 6 px left of the headings).
         Components.TextToolButton {
             id: diagnosticsButton
             objectName: "errorHistoryDiagnosticsButton"
             Layout.leftMargin: errorHistoryHeader.Layout.leftMargin - diagnosticsButton.leftPadding
+            spacing: root.glyphTextGap
             flat: true
             text: I18n.i18nc("@action:button", "Open Diagnostics…")
             icon.name: "view-list-details"

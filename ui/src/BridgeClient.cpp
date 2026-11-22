@@ -902,9 +902,9 @@ bool BridgeClient::startInProcessBridge() {
         // As when the backend stops on its own: the user can't play anything.
         reason = reason.trimmed();
         setBackendFailure(reason.isEmpty()
-                ? i18nc("@info", "The playback engine could not start. "
+                ? i18nc("@info", "The playback engine couldn’t start. "
                                  "Restart Ferrous to try again.")
-                : i18nc("@info %1 is why, in English", "The playback engine could not start: %1. "
+                : i18nc("@info %1 is why, in English", "The playback engine couldn’t start: %1. "
                                                        "Restart Ferrous to try again.",
                         reason));
         return false;
@@ -1019,7 +1019,7 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
             i18nc("@info", "No full-size image is available."));
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "The full-size image could not be loaded."));
+            i18nc("@info", "The full-size image couldn’t be loaded."));
         updateItunesArtworkResult(candidateIndex, row);
         return;
     }
@@ -1031,7 +1031,7 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
             i18nc("@info", "Failed to prepare temporary artwork cache."));
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "The full-size image could not be loaded."));
+            i18nc("@info", "The full-size image couldn’t be loaded."));
         updateItunesArtworkResult(candidateIndex, row);
         return;
     }
@@ -1065,7 +1065,7 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
             row.insert(QStringLiteral("assetError"), message);
             row.insert(
                 QStringLiteral("detailStatusText"),
-                i18nc("@info", "The full-size image could not be loaded."));
+                i18nc("@info", "The full-size image couldn’t be loaded."));
             updateItunesArtworkResult(candidateIndex, row);
         };
 
@@ -1116,7 +1116,7 @@ void BridgeClient::applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult 
         row.insert(QStringLiteral("assetError"), result.errorMessage);
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "The full-size image could not be loaded."));
+            i18nc("@info", "The full-size image couldn’t be loaded."));
         updateItunesArtworkResult(result.candidateIndex, row);
         return;
     }
@@ -4405,7 +4405,7 @@ quint32 BridgeClient::saveStateBeforeQuit() {
             emit stateSaveFinished(
                 requestId,
                 false,
-                i18nc("@info", "Settings and the queue could not be saved: the playback engine has stopped."));
+                i18nc("@info", "Settings and the queue couldn’t be saved: the playback engine has stopped."));
         },
         Qt::QueuedConnection);
     return requestId;

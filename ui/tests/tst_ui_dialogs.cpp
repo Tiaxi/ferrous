@@ -643,6 +643,11 @@ private slots:
     void recentIssuesHeaderFollowsALargeFont();
     void recentIssuesAreAsWideAsTheyNeed_data();
     void recentIssuesAreAsWideAsTheyNeed();
+    void recentIssuesDiagnosticsCaptionIsOnTheTextColumn_data();
+    void recentIssuesDiagnosticsCaptionIsOnTheTextColumn();
+    void libraryFolderMenuGivesEachItemItsOwnGlyph();
+    void visualizationStretchSaysWhatItFills();
+    void diagnosticsCopiesAreNamedByTheirPaths();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesOpenWithTheirFocusShown();
@@ -4015,11 +4020,11 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
                      .value<QColor>()),
              hex(tokenOf(window, "placeholderText")));
 
-    // Copy Log Without Paths asks the bridge for the copy once there is a log.
+    // Copy Without Paths asks the bridge for the copy once there is a log.
     QObject *bridge = bridgeOf(window);
     QQuickItem *copyWithoutPaths = visibleNamed(diagnosticsWindow, QStringLiteral("diagnosticsCopyWithoutPathsButton"));
     QVERIFY(copyWithoutPaths != nullptr);
-    QCOMPARE(copyWithoutPaths->property("text").toString(), QStringLiteral("Copy Log Without Paths"));
+    QCOMPARE(copyWithoutPaths->property("text").toString(), QStringLiteral("Copy Without Paths"));
     QVERIFY(!copyWithoutPaths->isEnabled());
     bridge->setProperty("diagnosticsText", QStringLiteral("[app] info: Ferrous started."));
     QMetaObject::invokeMethod(bridge, "diagnosticsChanged");
@@ -4037,7 +4042,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow_data() {
 // Diagnostics has one verb for deleting its log and one row of actions under
 // the log's path (Clear… asked to delete the log, and the actions were over
 // two rows with two ragged right edges): Reload and Delete Log on the left,
-// Open Folder, Copy All and Copy Log Without Paths on the right, ending
+// Open Folder, Copy With Paths and Copy Without Paths on the right, ending
 // where the log's frame does. The log's scroll bar is inside its frame,
 // and its text clear of the frame.
 void UiDialogsTest::diagnosticsActionsShareOneRow() {
@@ -7898,7 +7903,8 @@ void UiDialogsTest::recentIssuesUseTheStatusBarsTriangle() {
 }
 
 // Delete Diagnostics Log sends a bug report to the copy made for sharing,
-// by its button's name: Copy All, which it named, copies every path (#547).
+// by its button's name: Copy With Paths, which it named, copies every path
+// (#547).
 void UiDialogsTest::deletingTheLogPointsBugReportsAtTheCopyWithoutPaths() {
     DialogsWindow main;
     QVERIFY2(main.window != nullptr, "Main.qml failed to show");
@@ -8511,6 +8517,135 @@ void UiDialogsTest::recentIssuesAreAsWideAsTheyNeed() {
     QTRY_VERIFY(!popup->property("visible").toBool());
 }
 
+// Every item of a library folder's menu has a glyph, and no two the same:
+// Rescan All Folders had none, a hole in the icon column, and Rescan's
+// would not tell the two apart. Breeze has the glyph, light and dark.
+void UiDialogsTest::libraryFolderMenuGivesEachItemItsOwnGlyph() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QObject *menu = nullptr;
+    QTRY_VERIFY((menu = object(window, QStringLiteral("libraryRootContextMenu"))) != nullptr);
+    QStringList glyphs;
+    QString rescanAll;
+    const int count = menu->property("count").toInt();
+    QVERIFY(count > 0);
+    for (int i = 0; i < count; ++i) {
+        QQuickItem *item = nullptr;
+        QVERIFY(QMetaObject::invokeMethod(menu, "itemAt", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, i)));
+        QVERIFY(item != nullptr);
+        if (QString::fromLatin1(item->metaObject()->className()).contains(QStringLiteral("Separator"))) {
+            continue;
+        }
+        const QString text = item->property("text").toString();
+        const QString glyph = evaluate(item, QStringLiteral("icon.name")).toString();
+        QVERIFY2(!glyph.isEmpty(), qPrintable(text));
+        QVERIFY2(!glyphs.contains(glyph), qPrintable(QStringLiteral("%1: %2 again").arg(text, glyph)));
+        glyphs.append(glyph);
+        if (item->objectName() == QStringLiteral("libraryRootRescanAllMenuItem")) {
+            rescanAll = glyph;
+        }
+    }
+    QCOMPARE(rescanAll, QStringLiteral("folder-sync"));
+    const QString iconTheme = QIcon::themeName();
+    const auto restoreTheme = qScopeGuard([&iconTheme] { QIcon::setThemeName(iconTheme); });
+    for (const QString &theme : {QStringLiteral("breeze"), QStringLiteral("breeze-dark")}) {
+        QIcon::setThemeName(theme);
+        QVERIFY2(QIcon::hasThemeIcon(QStringLiteral("folder-sync")), qPrintable(theme));
+    }
+    QVERIFY(reject(dialog));
+}
+
+// The stretch setting says the track fills the view: "to its full width"
+// could be read as the track's own width.
+void UiDialogsTest::visualizationStretchSaysWhatItFills() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *preferences = openPreferences(window, 1);
+    QVERIFY(preferences != nullptr);
+    QQuickItem *stretch = nullptr;
+    QTRY_VERIFY((stretch = named(windowOf(preferences), QStringLiteral("stretchShortTracksCheckBox"))) != nullptr);
+    QCOMPARE(stretch->property("text").toString(), QStringLiteral("Stretch tracks shorter than the view to fill it"));
+    QVERIFY(reject(preferences));
+}
+
+// Diagnostics names its two copies on one axis, with paths and without,
+// in its buttons, in the log's menu and in Delete Log's explanation: "Copy
+// All" and "Copy Log Without Paths" named them on two.
+void UiDialogsTest::diagnosticsCopiesAreNamedByTheirPaths() {
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QObject *diagnostics = object(main.window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(diagnostics != nullptr && QMetaObject::invokeMethod(diagnostics, "open"));
+    QVERIFY(waitForDialogWindow(diagnostics));
+    QQuickWindow *log = windowOf(diagnostics);
+    const QString withPaths = QStringLiteral("Copy With Paths");
+    const QString withoutPaths = QStringLiteral("Copy Without Paths");
+    QQuickItem *withButton = visibleNamed(log, QStringLiteral("diagnosticsCopyAllButton"));
+    QQuickItem *withoutButton = visibleNamed(log, QStringLiteral("diagnosticsCopyWithoutPathsButton"));
+    QVERIFY(withButton != nullptr && withoutButton != nullptr);
+    QCOMPARE(withButton->property("text").toString(), withPaths);
+    QCOMPARE(withoutButton->property("text").toString(), withoutPaths);
+    QObject *withItem = object(main.window, QStringLiteral("diagnosticsCopyWithPathsMenuItem"));
+    QObject *withoutItem = object(main.window, QStringLiteral("diagnosticsCopyWithoutPathsMenuItem"));
+    QVERIFY(withItem != nullptr && withoutItem != nullptr);
+    QCOMPARE(withItem->property("text").toString(), withPaths);
+    QCOMPARE(withoutItem->property("text").toString(), withoutPaths);
+    QObject *confirm = object(main.window, QStringLiteral("clearDiagnosticsConfirmDialog"));
+    QVERIFY(confirm != nullptr);
+    const QString details = confirm->property("details").toString();
+    QVERIFY2(details.contains(QStringLiteral("use Copy Without Paths first")), qPrintable(details));
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "dismiss"));
+}
+
+void UiDialogsTest::recentIssuesDiagnosticsCaptionIsOnTheTextColumn_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Open Diagnostics…' caption starts on the entries' text column, its glyph
+// on the header's x and the entries' glyphs': the caption sat 6 px left of
+// the headings, a second text column. The popup still holds it whole.
+void UiDialogsTest::recentIssuesDiagnosticsCaptionIsOnTheTextColumn() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    report(window, 1, 0, kStaticPath, kEndsEarly);
+    QVERIFY(openIssues(window));
+    QQuickItem *diagnostics = visibleNamed(window, QStringLiteral("errorHistoryDiagnosticsButton"));
+    QQuickItem *title = visibleNamed(window, QStringLiteral("errorHistoryTitle"));
+    QQuickItem *heading = visibleNamed(window, QStringLiteral("errorHistoryHeading"));
+    QQuickItem *entryGlyph = visibleNamed(window, QStringLiteral("errorHistoryGlyph"));
+    QVERIFY(diagnostics != nullptr && title != nullptr && heading != nullptr && entryGlyph != nullptr);
+    QQuickItem *glyph = itemsNamed(diagnostics, QStringLiteral("textToolButtonIcon")).first();
+    QQuickItem *caption = itemsNamed(diagnostics, QStringLiteral("textToolButtonCaption")).first();
+    QTRY_VERIFY(!layoutPending(diagnostics) && glyph->isVisible());
+    const QString where = QStringLiteral("glyph at %1, caption at %2; header at %3, entry glyph at %4, "
+                                         "heading at %5")
+        .arg(sceneRect(glyph).left()).arg(sceneRect(caption).left()).arg(sceneRect(title).left())
+        .arg(sceneRect(entryGlyph).left()).arg(sceneRect(heading).left());
+    QVERIFY2(qAbs(sceneRect(glyph).left() - sceneRect(title).left()) < 0.5, qPrintable(where));
+    QVERIFY2(qAbs(sceneRect(glyph).left() - sceneRect(entryGlyph).left()) < 0.5, qPrintable(where));
+    QVERIFY2(qAbs(sceneRect(caption).left() - sceneRect(heading).left()) < 0.5, qPrintable(where));
+    // Whole, inside the popup it widens.
+    QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
+    const qreal popupRight = popup->property("x").toReal() + popup->property("width").toReal();
+    QVERIFY(!caption->property("truncated").toBool());
+    QVERIFY2(sceneRect(caption).right() <= sceneRect(diagnostics).right() + 0.5
+                 && sceneRect(diagnostics).right() <= popupRight + 0.5,
+             qPrintable(QStringLiteral("caption to %1, button to %2, popup to %3")
+                            .arg(sceneRect(caption).right()).arg(sceneRect(diagnostics).right()).arg(popupRight)));
+    QVERIFY(diagnostics->width() >= diagnostics->implicitWidth() - 0.5);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!popup->property("visible").toBool());
+}
+
 void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::newRow("10 pt") << 10.0;
@@ -8582,9 +8717,10 @@ void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont() {
     closeTheParentDialogs(main);
 }
 
-// General names what its media controls' setting sets, its box not saying it
-// again and named with the words it shows; the quit failure says what each
-// button does; and these dialogs contract "not" as the others do.
+// General names what its media controls' setting sets, its box saying where
+// Ferrous appears ("Show Ferrous" did not) and named with the words it
+// shows; the quit failure says what quitting loses; and these dialogs
+// contract "not" as the others do.
 void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
     DialogsWindow main;
     QQuickWindow *window = main.window;
@@ -8595,11 +8731,11 @@ void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
     QTRY_VERIFY((media = visibleNamed(windowOf(preferences), QStringLiteral("systemMediaControlsCheckBox"))) != nullptr);
     QCOMPARE(evaluate(media, QStringLiteral("Kirigami.FormData.label")).toString(), QStringLiteral("Media controls:"));
     const QString shown = media->property("text").toString();
-    QCOMPARE(shown, QStringLiteral("Show Ferrous and answer media keys"));
+    QCOMPARE(shown, QStringLiteral("Appear in media controls and answer media keys"));
     QAccessibleInterface *spoken = QAccessible::queryAccessibleInterface(media);
     QVERIFY(spoken != nullptr);
     const QString name = spoken->text(QAccessible::Name);
-    QCOMPARE(name, QStringLiteral("Media controls: Show Ferrous and answer media keys"));
+    QCOMPARE(name, QStringLiteral("Media controls: Appear in media controls and answer media keys"));
     QVERIFY(name.contains(shown));
     QVERIFY(reject(preferences));
 
@@ -8615,8 +8751,7 @@ void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
     QCOMPARE(textOf("quitSaveFailedHeading"), QStringLiteral("Some recent changes weren\u2019t saved."));
     QCOMPARE(quit->property("message").toString(), system);
     QCOMPARE(textOf("quitSaveFailedDetails"),
-             QStringLiteral("Retry saves again. Quit Anyway loses unsaved settings, queue changes and Last.fm "
-                            "scrobbles."));
+             QStringLiteral("Quit Anyway loses unsaved settings, queue changes and Last.fm scrobbles."));
     QVERIFY(QMetaObject::invokeMethod(quit, "dismiss"));
 
     QObject *shortcuts = object(window, QStringLiteral("keyboardShortcutsDialog"));

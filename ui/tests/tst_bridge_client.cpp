@@ -8829,7 +8829,7 @@ void BridgeClientTest::aBackendThatCannotStartIsABackendFailure() {
         QVERIFY(!client.connected());
         // The state a backend that stops on its own leaves, with the reason.
         QCOMPARE(client.backendFailure(),
-                 QStringLiteral("The playback engine could not start: %1. "
+                 QStringLiteral("The playback engine couldn\u2019t start: %1. "
                                 "Restart Ferrous to try again.")
                      .arg(reason));
 
@@ -8853,7 +8853,7 @@ void BridgeClientTest::aBackendThatCannotStartIsABackendFailure() {
     BridgeClient client;
     QCOMPARE(client.m_ffiBridge, nullptr);
     QCOMPARE(client.backendFailure(),
-             QStringLiteral("The playback engine could not start. Restart Ferrous to try again."));
+             QStringLiteral("The playback engine couldn\u2019t start. Restart Ferrous to try again."));
 }
 
 void BridgeClientTest::quittingSendsNothingToTheStoppedBackend() {
@@ -9061,7 +9061,7 @@ void BridgeClientTest::saveBeforeQuitFailsWhenTheBackendHasStopped() {
     QVERIFY(requestId != 0);
     QVERIFY(!finished.at(0).at(1).toBool());
     QCOMPARE(finished.at(0).at(2).toString(),
-        QStringLiteral("Settings and the queue could not be saved: the playback engine has stopped."));
+        QStringLiteral("Settings and the queue couldn\u2019t be saved: the playback engine has stopped."));
 }
 
 // The status bar says "Playback engine stopped": its tooltip's default,
@@ -9083,7 +9083,7 @@ void BridgeClientTest::aStoppedEngineIsNamedAnEngine() {
     (void)client.saveStateBeforeQuit();
     QTRY_COMPARE(finished.count(), 1);
     QCOMPARE(finished.at(0).at(2).toString(),
-             QStringLiteral("Settings and the queue could not be saved: the playback engine has stopped."));
+             QStringLiteral("Settings and the queue couldn\u2019t be saved: the playback engine has stopped."));
 }
 
 void BridgeClientTest::analysisFrameTellsAFileThatEndsEarly() {

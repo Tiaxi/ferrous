@@ -513,8 +513,7 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
     QCOMPARE(messageItem->property("font").value<QFont>().weight(), QFont::Normal);
     QCOMPARE(details->property("text").toString(),
-             QStringLiteral("Retry saves again. Quit Anyway loses unsaved settings, queue changes and Last.fm "
-                            "scrobbles."));
+             QStringLiteral("Quit Anyway loses unsaved settings, queue changes and Last.fm scrobbles."));
     // No cure that contradicts the cause above it, such as a denied
     // permission (it advised freeing disk space under one).
     QVERIFY(!details->property("text").toString().contains(QStringLiteral("disk space")));

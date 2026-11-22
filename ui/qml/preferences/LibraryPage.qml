@@ -536,6 +536,9 @@ Preferences.PreferencesPage {
         MenuItem {
             objectName: "libraryRootRescanAllMenuItem"
             text: I18n.i18nc("@action:inmenu", "Rescan All Folders")
+            // A folder with sync arrows, not Rescan's: the two read apart,
+            // and the menu's glyph column has no hole.
+            icon.name: "folder-sync"
             onTriggered: root.uiBridge.rescanAllLibraryRoots()
         }
         MenuSeparator {}
