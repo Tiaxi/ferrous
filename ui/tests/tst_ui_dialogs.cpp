@@ -563,6 +563,8 @@ private slots:
     void compactDialogsHoldTheirText_data();
     void compactDialogsHoldTheirText();
     void compactDialogStaysWithinASmallScreenAsItGrows();
+    void shortcutsOpenTallEnoughToShowTheirList_data();
+    void shortcutsOpenTallEnoughToShowTheirList();
     void breakableTextKeepsNamesAndErrorCodesWhole();
     void lastFmPageFollowsTheBuildAndTheAccount();
     void lastFmButtonsHaveGlyphsAtTheDialogsSize_data();
@@ -7482,6 +7484,55 @@ void UiDialogsTest::configureHelpStartsAtItsBoxsText() {
         }
     }
     QCOMPARE(underBoxes, 6);
+    QVERIFY(reject(dialog));
+}
+
+void UiDialogsTest::shortcutsOpenTallEnoughToShowTheirList_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<bool>("smallScreen");
+    QTest::newRow("10 pt") << 10.0 << false;
+    QTest::newRow("10 pt, small screen") << 10.0 << true;
+    QTest::newRow("24 pt, small screen") << 24.0 << true;
+}
+
+// Configure Keyboard Shortcuts opens tall enough to show a list: 828 px at
+// 10 pt, about half again the rows of the 684 px it had, within a 1000 px
+// screen, and within a smaller one.
+void UiDialogsTest::shortcutsOpenTallEnoughToShowTheirList() {
+    QFETCH(qreal, pointSize);
+    QFETCH(bool, smallScreen);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("keyboardShortcutsDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(dialog->setProperty("keyConflictChecks", 0));
+    QQuickWindow *shortcuts = windowOf(dialog);
+    QVERIFY(shortcuts != nullptr);
+    if (smallScreen) {
+        for (QScreen *screen : QGuiApplication::screens()) {
+            if (screen->name() == QLatin1String("Small")) {
+                shortcuts->setScreen(screen);
+                shortcuts->setPosition(screen->geometry().topLeft() + QPoint(18, 18));
+            }
+        }
+        if (shortcuts->screen()->name() != QLatin1String("Small")) {
+            QSKIP("needs the offscreen platform's small screen; see main()");
+        }
+    }
+    QVERIFY(QMetaObject::invokeMethod(object(window, QStringLiteral("configureShortcutsAction")), "trigger"));
+    QVERIFY(waitForDialogWindow(dialog));
+    if (smallScreen) {
+        QVERIFY2(shortcuts->height() <= 720 - 2 * 18, qPrintable(QString::number(shortcuts->height())));
+    } else {
+        QCOMPARE(shortcuts->height(), 828);
+        // With a title bar, within the 1000 px screen of the reviews.
+        QVERIFY(shortcuts->height() <= 1000 - 2 * 18 - 28);
+        QQuickItem *list = visibleNamed(shortcuts, QStringLiteral("keyboardShortcutsList"));
+        QVERIFY(list != nullptr);
+        QTRY_VERIFY2(list->height() >= 342 + 140, qPrintable(describeItem(list)));
+    }
     QVERIFY(reject(dialog));
 }
 

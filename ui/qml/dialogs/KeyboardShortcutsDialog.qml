@@ -482,7 +482,9 @@ Components.DialogWindow {
     readonly property real rowLeftPadding: Kirigami.Units.largeSpacing
     readonly property real iconSpacing: Kirigami.Units.largeSpacing
     defaultWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 40)
-    defaultHeight: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 38)
+    // Tall for the list, the part that is browsed: 828 px at 10 pt, which a
+    // 1000 px screen holds (at 684 px, eight of its rows showed).
+    defaultHeight: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 46)
     minimumWidth: Math.ceil(Kirigami.Units.gridUnit * 14 + 2 * root.keyColumnWidth + 2 * Kirigami.Units.gridUnit)
     readonly property real noteLineHeight: Math.ceil(keyMetrics.height)
     readonly property real listMinimumHeight: Kirigami.Units.gridUnit * 8

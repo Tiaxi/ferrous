@@ -153,7 +153,7 @@ struct ShortcutsFixture {
     // Gives the dialog the size it opens at on a large screen with the
     // font at `pointSize`, 10 or 24, and lays it out; whether it took it.
     bool showAtSizeFor(int pointSize) const {
-        const QSize size = pointSize > 10 ? QSize(1728, 1364) : QSize(720, 684);
+        const QSize size = pointSize > 10 ? QSize(1728, 1364) : QSize(720, 828);
         dialog->resize(size);
         // The window has the size at once, and what is in it once the
         // platform has answered.
