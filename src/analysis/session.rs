@@ -1589,19 +1589,22 @@ fn run_spectrogram_session(
                         "[spect-worker] ContinueWithFile rejected path={}",
                         path.file_name().unwrap_or_default().to_string_lossy(),
                     );
+                    // The timeline ends with the file after all: the rows
+                    // of the interval it ends in, which the end of the file
+                    // left for the continuation, are its last column. They
+                    // are sent, with the file's end, before the report,
+                    // which can end the session's generation.
+                    if append_partial_interval(&mut session) {
+                        record_end_column(&mut session);
+                        session_emit_pending_chunk(&mut session, event_tx, columns_produced_out);
+                        session_emit_finalize_chunk(&session, event_tx);
+                    }
                     let _ = reports.send(SessionReport::ContinuationRejected {
                         generation: session.gen,
                         path: path.clone(),
                         stamp,
                         format,
                     });
-                    // The timeline ends with the file after all: the rows
-                    // of the interval it ends in, which the end of the file
-                    // left for the continuation, are its last column.
-                    if session_flush_chunk(&mut session, event_tx, columns_produced_out) {
-                        record_end_column(&mut session);
-                        session_emit_finalize_chunk(&session, event_tx);
-                    }
                     if track_token != session.track_token {
                         return None;
                     }
@@ -3420,20 +3423,25 @@ fn maybe_update_columns_estimate(
 }
 
 /// Send the session's columns at the end of its timeline, the rows of the
-/// interval its audio ends in as the last. Returns whether there were such
-/// rows.
+/// interval its audio ends in as the last.
 fn session_flush_chunk(
     session: &mut SpectrogramSessionState,
     event_tx: &dyn AnalysisEventOutput,
     columns_produced_out: &AtomicU64,
-) -> bool {
+) {
+    append_partial_interval(session);
+    session_emit_pending_chunk(session, event_tx, columns_produced_out);
+}
+
+/// Add the rows of the interval the session's audio ends in to its chunk
+/// as a column. Returns whether there were such rows.
+fn append_partial_interval(session: &mut SpectrogramSessionState) -> bool {
     // The left of a view ends where its right began: a partial interval
     // there is not the end of anything.
     if session
         .backfill
         .is_some_and(|backfill| backfill.resume.is_some())
     {
-        session_emit_pending_chunk(session, event_tx, columns_produced_out);
         return false;
     }
     // Drain any partial resampler window at track end.
@@ -3459,8 +3467,6 @@ fn session_flush_chunk(
         session.chunk_columns += 1;
         session.columns_produced += 1;
     }
-
-    session_emit_pending_chunk(session, event_tx, columns_produced_out);
     partial
 }
 
@@ -9484,8 +9490,9 @@ mod tests {
         // The end of a file whose continuation is pending leaves the
         // interval it ends in, two rows into a column, to the next file's
         // rows. A continuation that cannot be opened ends the timeline
-        // there after all: the rows are the file's last column, and its end
-        // comes after it.
+        // there after all: the rows are the file's last column, and the
+        // chunk with it carries the file's end. Both come before the report
+        // of the rejection, which can end the session's generation.
         let samples = noise_samples(0x9e37_79b9, (24 * 1_024 + 333) * 2);
         let path = write_wave_fixture("rejected-continuation", 2, &samples);
         let alone = continuous_reference(&path, 2, 1);
@@ -9497,21 +9504,56 @@ mod tests {
                 track_token: 30,
             })
             .unwrap();
-        let chunks = run_watched_session(
-            backfill_session_on(&path, 2, 0.0),
-            1,
-            (commands, command_rx),
-            &Arc::new(AtomicU64::new(1)),
-            |_| {},
-            move |chunks| {
-                chunks.last().is_some_and(|chunk| {
-                    chunk.complete && u64::from(chunk.total_columns_estimate) == end
-                })
-            },
+        let (events, event_rx) = unbounded();
+        // The worker waits at each report until the test takes it.
+        let (reports, report_rx) = crossbeam_channel::bounded(0);
+        let session = backfill_session_on(&path, 2, 0.0);
+        let worker = std::thread::spawn(move || {
+            stft_batch::with_thread_batcher(|batcher| {
+                *batcher = stft_batch::ColumnBatcher::new(1);
+            });
+            run_spectrogram_session(
+                QueuedCommand::alone(session),
+                &command_rx,
+                &events,
+                &AtomicU64::new(1),
+                &AtomicU64::new(0),
+                &PublishedTrackLength::default(),
+                &reports,
+            )
+        });
+        let report = report_rx.recv_timeout(OUTPUT_WAIT);
+        assert!(
+            matches!(report, Ok(SessionReport::Opened { .. })),
+            "{report:?}"
         );
+        let mut chunks = Vec::new();
+        while !chunks
+            .last()
+            .is_some_and(|chunk: &PrecomputedSpectrogramChunk| {
+                chunk.complete && u64::from(chunk.total_columns_estimate) == end
+            })
+        {
+            match wait_for_chunk(&event_rx, |_| true) {
+                Ok(chunk) => chunks.push(chunk),
+                Err(error) => panic!("no end before the rejection: {error:?}"),
+            }
+        }
+        let report = report_rx.recv_timeout(OUTPUT_WAIT);
+        assert!(
+            matches!(report, Ok(SessionReport::ContinuationRejected { .. })),
+            "{report:?}"
+        );
+        commands
+            .send(SpectrogramWorkerCommand::StopSession)
+            .unwrap();
+        worker.join().expect("worker");
         let columns = columns_of(&chunks);
         assert_eq!(columns.len(), alone.len(), "{:?}", spans_of(&chunks));
         assert!(columns == alone, "the columns of the file alone");
+        let last_column = chunks.iter().rfind(|chunk| chunk.column_count > 0).unwrap();
+        assert_eq!(u64::from(last_column.total_columns_estimate), end);
+        assert_eq!(u64::from(last_column.end_column), end);
         let last = chunks.last().unwrap();
         assert!(last.complete);
         assert_eq!(u64::from(last.total_columns_estimate), end);
