@@ -7150,7 +7150,7 @@ _DIALOG_EXPECT = {
     "tag-editor-auto-number": ("Auto Number", "Number tracks in the table"),
     "tag-editor-rename-preview": ("Rename Files", "will be renamed"),
     "tag-editor-status-details": ("Tag Change Details", None),
-    "tag-editor-quit-wait": ("Finishing Tag Changes", "Ferrous quits once the tag editor"),
+    "tag-editor-quit-wait": ("Finishing Tag Changes", "Ferrous quits once it has written"),
     "tag-editor-close-confirm": ("Unsaved Changes", "Save tag changes before closing?"),
     "confirm-replace-cover": ("Replace Album Art", "Replace the album art of"),  # (its heading, set by applySuggestion)
     "tag-editor-editing": ("Edit Tags", None),
