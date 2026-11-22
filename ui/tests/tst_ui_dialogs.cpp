@@ -3080,8 +3080,9 @@ void UiDialogsTest::checkLastFmPageShowsOnlyTheButtonsThatApply(QQuickWindow *wi
 }
 
 // In a build without Last.fm, scrobbling can't be turned on: the build
-// can't send a scrobble, and the account's line says why, rather than
-// offering a check box to tick. No button to connect either.
+// can't send a scrobble, and the page's first line says why, rather than
+// offering a check box to tick. No help on when it would send one, no
+// account and no button to connect either.
 void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", false));
@@ -3091,8 +3092,32 @@ void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *win
     QQuickItem *box = nullptr;
     QTRY_VERIFY((box = visibleNamed(prefs, QStringLiteral("lastFmScrobblingCheckBox"))) != nullptr);
     QVERIFY(!box->isEnabled());
-    QCOMPARE(visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))->property("text").toString(),
-             QStringLiteral("Last.fm isn\u2019t available in this build."));
+    QQuickItem *reason = visibleNamed(prefs, QStringLiteral("lastFmUnavailableLabel"));
+    QVERIFY(reason != nullptr);
+    QCOMPARE(reason->property("text").toString(), QStringLiteral("Last.fm isn\u2019t available in this build."));
+    QCOMPARE(hex(reason->property("color").value<QColor>()), hex(tokenOf(window, "text")));
+    // It leads, 12 px over the setting it explains, where the fields start.
+    QQuickItem *page = visibleNamed(prefs, QStringLiteral("preferencesPages"))->childItems().at(3);
+    QTRY_VERIFY(!layoutPendingUnder(page));
+    QVERIFY(sceneRect(box).top() - sceneRect(reason).bottom() <= 13.0);
+    QVERIFY(sceneRect(box).top() - sceneRect(reason).bottom() >= 11.0);
+    QCOMPARE(sceneRect(reason).left(), sceneRect(box).left());
+    // No empty Account, and no explanation of a rule this build hasn't.
+    QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmAccountLabel")) == nullptr);
+    QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp")) == nullptr);
+    QQuickItem *form = itemsNamed(page, QStringLiteral("preferencesForm")).value(0);
+    QVERIFY(form != nullptr);
+    for (QQuickItem *item : form->childItems()) {
+        QVERIFY(!item->property("formLabel").toBool() || !item->isVisible()
+                || !item->property("text").toString().contains(QStringLiteral("Account")));
+    }
+    // As tall out of view as in it, for Configure's height.
+    const qreal shownHeight = page->property("wholeHeight").toReal();
+    QVERIFY(dialog->setProperty("pageIndex", 0));
+    QTRY_VERIFY(!page->isVisible() && !layoutPendingUnder(page));
+    QCOMPARE(page->property("wholeHeight").toReal(), shownHeight);
+    QVERIFY(dialog->setProperty("pageIndex", 3));
+    QTRY_VERIFY(page->isVisible() && !layoutPendingUnder(page));
     for (const char *name : {"lastFmConnectButton", "lastFmCompleteButton", "lastFmReconnectButton",
                              "lastFmDisconnectButton"}) {
         QVERIFY2(visibleNamed(prefs, QString::fromLatin1(name)) == nullptr, name);
@@ -3102,20 +3127,14 @@ void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *win
     box->forceActiveFocus(Qt::TabFocusReason);
     QTest::keyClick(prefs, Qt::Key_Space);
     QCOMPARE(box->property("checked").toBool(), before);
-    // Its help steps down with it, under the line that says why, and still
-    // reads (in the secondary colour it outranked the setting it explains).
-    QQuickItem *help = visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp"));
-    QVERIFY(help != nullptr);
-    const QColor chrome = tokenOf(window, "chrome");
-    const QColor quiet = help->property("color").value<QColor>();
-    QCOMPARE(hex(quiet), hex(tokenOf(window, "textTertiary")));
-    QVERIFY2(contrastRatio(quiet, chrome) >= 4.5, qPrintable(describeContrast(QStringLiteral("help"), quiet, chrome)));
-    const QColor reason = visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))->property("color").value<QColor>();
-    QVERIFY(contrastRatio(quiet, chrome) < contrastRatio(reason, chrome));
     // A build with Last.fm lets it be turned on, and explains it as every
     // help does.
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
     QTRY_VERIFY(box->isEnabled());
+    QTRY_VERIFY(!reason->isVisible());
+    QQuickItem *help = nullptr;
+    QTRY_VERIFY((help = visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp"))) != nullptr);
+    QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmAccountLabel")) != nullptr);
     QCOMPARE(hex(help->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
     QVERIFY(reject(dialog));
 }
@@ -7165,7 +7184,9 @@ void UiDialogsTest::configureWidthsFollowTheFont() {
             QVERIFY(bridge->setProperty("lastFmBuildConfigured", configured));
             QVERIFY(bridge->setProperty("lastFmAuthState", configured ? 1 : 0));
             QQuickItem *account = nullptr;
-            QTRY_VERIFY((account = visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))) != nullptr);
+            const QString line = configured ? QStringLiteral("lastFmAccountLabel")
+                                            : QStringLiteral("lastFmUnavailableLabel");
+            QTRY_VERIFY((account = visibleNamed(prefs, line)) != nullptr);
             QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
             if (pointSize <= 10) {
                 QVERIFY2(account->width() <= 24.0 * 18, qPrintable(describeItem(account)));
