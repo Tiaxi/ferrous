@@ -44,14 +44,19 @@ Rectangle {
     readonly property bool keyboardInUse: InputModality.keyboard
 
     // The tree's geometry: the inset of the first chevron, the indent step,
-    // and the chevron, thumbnail and gaps after it. The chevrons and the
-    // state glyphs, and so the indent step, grow with a larger font.
+    // and the chevron, thumbnail and gaps after it. They grow with a larger
+    // font, all but the inset: the indent step is the chevron, and the
+    // thumbnail is 20 px with the default font, and at most as large as
+    // leaves 3 px of its row above and below it, 46 px at 24 pt, even, so
+    // it centres on whole pixels.
     readonly property int rowInset: 12
     readonly property int indentStep: root.chevronSize
     readonly property int chevronSize: root.uiPalette.scaledSize(16)
-    readonly property int chevronGap: 6
-    readonly property int thumbnailSize: 20
-    readonly property int thumbnailGap: 8
+    readonly property int chevronGap: root.uiPalette.scaledSize(6)
+    readonly property int thumbnailSize: 2 * Math.floor(Math.max(20,
+        Math.min(root.uiPalette.scaledSize(20), root.uiPalette.rowHeight - 6)) / 2)
+    readonly property int thumbnailGap: root.uiPalette.scaledSize(8)
+    readonly property int thumbnailRadius: Math.max(2, Math.round(root.thumbnailSize / 10))
     // An album without a cover, or whose cover failed to load: the
     // now-playing stand-in's mark, drawn for 20 px, on a tile of the plot's
     // floor with a 1 px edge, in the thumbnail's place, so its name lines
@@ -60,7 +65,11 @@ Rectangle {
     // that failed to load). A cover that has not loaded yet has the hover
     // tint for the moment it takes, so that rows coming into view do not
     // flash the mark before their covers.
-    readonly property url thumbnailPlaceholderMark: Qt.resolvedUrl("../assets/no-art-mark-20.svg")
+    // The 20 px mark is drawn on that tile's pixels, whose steps scale into
+    // a staircase, so a larger tile has the mark drawn in curves.
+    readonly property url thumbnailPlaceholderMark: root.thumbnailSize === 20
+        ? Qt.resolvedUrl("../assets/no-art-mark-20.svg")
+        : Qt.resolvedUrl("../assets/no-art-mark.svg")
     readonly property color thumbnailLoadingColor: root.uiPalette.hover
     // No fill of the thumbnail's own under the tile: the loading tint,
     // wholly transparent, so that the fill changes as a cover loads, which
@@ -644,7 +653,7 @@ Rectangle {
                                 y: Math.round((libraryRow.height - height) / 2)
                                 width: root.thumbnailSize
                                 height: root.thumbnailSize
-                                radius: 2
+                                radius: root.thumbnailRadius
                                 color: status === Image.Ready ? "transparent"
                                     : (rowThumbnail.missing ? root.thumbnailMissingColor
                                                             : root.thumbnailLoadingColor)
@@ -679,7 +688,8 @@ Rectangle {
                                     source: root.thumbnailPlaceholderMark
                                     sourceSize.width: root.thumbnailSize
                                     sourceSize.height: root.thumbnailSize
-                                    smooth: false
+                                    // Crisp on the grid it is drawn for.
+                                    smooth: root.thumbnailSize !== 20
                                     cache: true
                                     opacity: 0.85
                                 }

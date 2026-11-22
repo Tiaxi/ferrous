@@ -1081,6 +1081,8 @@ private slots:
     void libraryAlbumWithoutACoverShowsAPlaceholderTile();
     void libraryFocusRingStopsAtTheScrollBarLane();
     void libraryTreeChevronsGrowWithALargeFont();
+    void libraryThumbnailsFollowTheFont_data();
+    void libraryThumbnailsFollowTheFont();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
     void collapsedRowNameElidesBeforeTheYear();
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
@@ -4149,6 +4151,70 @@ void UiMainWindowTest::libraryTreeChevronsGrowWithALargeFont() {
     QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) == nullptr);
     QTRY_VERIFY2(nameMarksNow(window, libraryRow(window, QStringLiteral("album")), false).isEmpty(),
                  qPrintable(nameMarksNow(window, libraryRow(window, QStringLiteral("album")), false)));
+}
+
+void UiMainWindowTest::libraryThumbnailsFollowTheFont_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::newRow("8 pt") << 8.0;
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("14 pt") << 14.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// An album's thumbnail, the gaps before and after it, a track's number
+// column under it and the no-cover mark in it follow the font: 20, 6 and
+// 8 px with the default font or a smaller one, and at 24 pt 2.4 times
+// those, the thumbnail inside its row (it stayed 20 px in a 52 px row,
+// beside 32 px text).
+void UiMainWindowTest::libraryThumbnailsFollowTheFont() {
+    QFETCH(qreal, points);
+    const ScopedApplicationFont font(points);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    showTree(fixture.libraryModel, kAllExpanded);
+    QQuickItem *album = nullptr;
+    QQuickItem *track = nullptr;
+    QTRY_VERIFY((album = libraryRow(window, QStringLiteral("album"))) != nullptr
+                && (track = libraryRow(window, QStringLiteral("track"))) != nullptr);
+    QQuickItem *thumbnail = itemNamed(album, QStringLiteral("libraryRowThumbnail"));
+    QQuickItem *chevron = itemNamed(album, QStringLiteral("libraryRowChevron"));
+    QQuickItem *number = itemNamed(track, QStringLiteral("libraryRowNumber"));
+    QQuickItem *tile = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholder"));
+    QQuickItem *mark = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholderMark"));
+    QVERIFY(thumbnail && chevron && number && shown(tile) && shown(mark));
+    const qreal size = thumbnail->width();
+    QCOMPARE(thumbnail->height(), size);
+    if (points <= 10.0) {
+        QCOMPARE(size, 20.0);
+    } else {
+        QVERIFY2(size >= std::min<qreal>(scaledSize(window, 20), album->height() - 6) - 1 && size <= album->height() - 6,
+                 qPrintable(QStringLiteral("%1 in a %2 px row").arg(size).arg(album->height())));
+    }
+    if (points == 24.0) {
+        QVERIFY2(size >= 38 && size <= 46, qPrintable(QString::number(size)));
+    }
+    QCOMPARE(std::fmod(size, 2.0), 0.0);
+    const qreal radius = thumbnail->property("radius").toReal();
+    QCOMPARE(radius, std::max(2.0, std::round(size / 10)));
+    const qreal thumbnailX = xIn(album, "libraryRowThumbnail");
+    QCOMPARE(thumbnailX, xIn(album, "libraryRowChevron") + chevron->width() + scaledSize(window, 6));
+    const qreal nameX = thumbnailX + size + scaledSize(window, 8);
+    QCOMPARE(xIn(album, "libraryRowTitle"), nameX);
+    QCOMPARE(xIn(track, "libraryRowTitle"), nameX);
+    QCOMPARE(xIn(track, "libraryRowNumber"), thumbnailX);
+    QCOMPARE(number->width(), size);
+    QCOMPARE(sceneRect(tile), sceneRect(thumbnail));
+    QCOMPARE(tile->property("radius").toReal(), radius);
+    // The mark is drawn at its size: on its 20 px grid, crisp, and in
+    // smooth curves above it, where the grid's steps made a staircase.
+    const QString drawing = mark->property("source").toUrl().toString();
+    QVERIFY2(drawing.endsWith(size == 20.0 ? QStringLiteral("/no-art-mark-20.svg") : QStringLiteral("/no-art-mark.svg")),
+             qPrintable(drawing));
+    QTRY_COMPARE(mark->property("status").toInt(), 1); // Image.Ready
+    QCOMPARE(mark->size(), QSizeF(size, size));
+    QCOMPARE(QQmlProperty(mark, QStringLiteral("sourceSize.width")).read().toReal(), size);
+    QCOMPARE(mark->property("smooth").toBool(), size != 20.0);
 }
 
 void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors() {
