@@ -701,6 +701,8 @@ private slots:
     void editTagsSetsChangedValuesInDemiBold();
     void editTagsSetsTypedValuesInDemiBold_data();
     void editTagsSetsTypedValuesInDemiBold();
+    void editTagsToolsButtonHasAGlyph_data();
+    void editTagsToolsButtonHasAGlyph();
     void editTagsPinsWhatIdentifiesARowAsItScrolls_data();
     void editTagsPinsWhatIdentifiesARowAsItScrolls();
     void editTagsTitleMeetsTheEdgeUnderAWideScrollBar();
@@ -6596,6 +6598,47 @@ void UiDialogsTest::editTagsSetsTypedValuesInDemiBold() {
     }
     QTRY_COMPARE(weightOf(titleAt(2)), QFont::Normal);
     QCOMPARE(rowAt(2)->height(), rowHeight);
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsToolsButtonHasAGlyph_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Tools has a glyph, as Reload, Save and Cancel beside it have, at their
+// size and in both Breeze themes, and stays a menu button with Breeze's
+// arrow: without one, with its arrow, it read as a combo box.
+void UiDialogsTest::editTagsToolsButtonHasAGlyph() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(1000, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRows(2));
+    QVERIFY(tags != nullptr);
+    QQuickItem *tools = visibleNamed(tags, QStringLiteral("tagEditorToolsButton"));
+    QQuickItem *reload = visibleNamed(tags, QStringLiteral("tagEditorReloadButton"));
+    QVERIFY(tools != nullptr && reload != nullptr);
+    const QString glyph = evaluate(tools, QStringLiteral("icon.name")).toString();
+    QCOMPARE(glyph, QStringLiteral("tools-wizard"));
+    QVERIFY(glyph != evaluate(reload, QStringLiteral("icon.name")).toString());
+    for (const QString &side : {QStringLiteral("width"), QStringLiteral("height")}) {
+        const qreal size = evaluate(tools, QStringLiteral("icon.") + side).toReal();
+        QVERIFY2(size > 0, qPrintable(side));
+        QCOMPARE(size, evaluate(reload, QStringLiteral("icon.") + side).toReal());
+    }
+    QCOMPARE(evaluate(tools, QStringLiteral("display")).toInt(),
+             evaluate(reload, QStringLiteral("display")).toInt());
+    QCOMPARE(evaluate(tools, QStringLiteral("Accessible.role")).toInt(), int(QAccessible::ButtonMenu));
+    // It reads as one row with Reload: their heights alike.
+    QCOMPARE(tools->height(), reload->height());
+    const QString iconTheme = QIcon::themeName();
+    const auto restoreTheme = qScopeGuard([&iconTheme] { QIcon::setThemeName(iconTheme); });
+    for (const QString &theme : {QStringLiteral("breeze"), QStringLiteral("breeze-dark")}) {
+        QIcon::setThemeName(theme);
+        QVERIFY2(QIcon::hasThemeIcon(glyph), qPrintable(theme));
+    }
     QVERIFY(closeTagEditor(main));
 }
 

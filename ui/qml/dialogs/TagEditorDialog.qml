@@ -1289,6 +1289,11 @@ Components.DialogWindow {
             Layout.leftMargin: dialogButtons.inset
             Layout.bottomMargin: dialogButtons.bottomPadding
             text: I18n.i18nc("@action:button", "Tools")
+            // A glyph, at Reload's size, as the footer's other actions
+            // have: without one, beside its arrow, it read as a combo box.
+            icon.name: "tools-wizard"
+            icon.width: dialogButtons.glyphSize
+            icon.height: dialogButtons.glyphSize
             enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
             // A menu button, which Breeze draws with its arrow.
             Accessible.role: Accessible.ButtonMenu
