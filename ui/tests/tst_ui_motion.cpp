@@ -1047,6 +1047,8 @@ private slots:
     void nowPlayingGoingIdleIsTheFirstPlayReversed();
     void nowPlayingPlayDuringTheShrinkReversesIntoTheNextTrack();
     void nowPlayingFirstPlayShowsTheTitleEarly();
+    void nowPlayingNarrowFirstPlayClipsNoLine_data();
+    void nowPlayingNarrowFirstPlayClipsNoLine();
     void nowPlayingFirstPlayBandIsNeverEmpty_data();
     void nowPlayingFirstPlayBandIsNeverEmpty();
     void nowPlayingLateCoverKeepsEveryLayerContinuous();
@@ -2830,12 +2832,11 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay_data() {
 // full size at the band's top left in every frame: a reveal, not a zoom (a
 // square growing in the middle of the band, with empty flanks). Under the
 // wide cover the move opens the lines' room first and then the cover
-// (nowPlayingFirstPlayShowsTheTitleEarly); beside the narrow one the lines
-// come in late in the move rather than with it, and not as a pop at its
-// end: at 0 until it is 60 % of the way, then fading in over longDuration,
-// OutCubic, or what is left of the move, whole as it ends. Nothing jumps:
-// the header goes down frame by frame, one way, to where the full layout
-// puts it.
+// (nowPlayingFirstPlayShowsTheTitleEarly), and beside and under the narrow
+// one each line comes in once it has room over the seam
+// (nowPlayingNarrowFirstPlayClipsNoLine), whole as the move ends. Nothing
+// jumps: the header goes down frame by frame, one way, to where the full
+// layout puts it.
 void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     QFETCH(bool, narrow);
     Covers covers;
@@ -2931,20 +2932,7 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     const QStringList lines = narrow ? kNarrowLines : kWideLines;
     QQuickItem *linesItem = named(window, "nowPlayingLines");
     QVERIFY(linesItem != nullptr);
-    // The narrow lines' opacity at `at` of the move: from where InOutQuad
-    // is 60 % of the way, over longDuration or the rest of the move,
-    // OutCubic (from 90 % they would pop in over the move's last part).
     const double duration = growth->property("duration").toDouble();
-    const auto timeAt = [](double presence) {
-        return presence < 0.5 ? std::sqrt(presence / 2) : 1 - std::sqrt((1 - presence) / 2);
-    };
-    const double fadeStart = timeAt(0.6) * duration;
-    const double fadeLength = std::min<double>(units->longDuration(), duration - fadeStart);
-    QVERIFY(fadeLength > 0);
-    const auto linesOpacityAt = [&](double presence) {
-        const double rest = 1.0 - std::clamp((timeAt(presence) * duration - fadeStart) / fadeLength, 0.0, 1.0);
-        return 1.0 - rest * rest * rest;
-    };
     for (const double at : {0.0001, 0.0005, 0.001, 0.002, 0.005, 0.05, 0.1, 0.12, 0.15, 0.25, 0.5, 0.75, 0.8,
                             0.9, 0.93, 0.97}) {
         panel->setProperty("presence", at);
@@ -2980,23 +2968,14 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
                  qPrintable(QStringLiteral("row %1, cover %2 at %3").arg(row->opacity()).arg(cover->opacity()).arg(where)));
         // The lines, the title under the cover's band or, beside the narrow
         // cover, under the compact row while that shows; never with
-        // "Nothing playing", so no two texts show at once. The narrow ones
-        // in as one, only once the move is 60 % of the way; the wide ones
-        // each once it has room, inside the panel, over the seam.
+        // "Nothing playing", so no two texts show at once, and each once it
+        // has room, inside the panel, over the seam.
         for (const QString &name : lines) {
             const PanelLine line = panelLine(panel, name);
-            const double shown = linesItem->opacity() * line.line()->opacity();
-            if (narrow) {
-                QVERIFY2(std::abs(shown - linesOpacityAt(at)) < 1e-6,
-                         qPrintable(QStringLiteral("%1 at %2").arg(shown).arg(where)));
-                if (at <= 0.6) {
-                    QCOMPARE(shown, 0.0);
-                }
-            } else if (shown > 0.0) {
-                QVERIFY2(sceneRectOf(line.line()).bottom() <= sceneRectOf(panel).bottom(),
-                         qPrintable(QStringLiteral("%1 under the seam at %2").arg(name, where)));
-            }
+            const double shown = line.text().isEmpty() ? 0.0 : linesItem->opacity() * line.line()->opacity();
             if (shown > 0.0) {
+                QVERIFY2(sceneRectOf(line.stillText()).bottom() <= sceneRectOf(panel).bottom() + 0.5,
+                         qPrintable(QStringLiteral("%1 under the seam at %2").arg(name, where)));
                 QVERIFY2(!row->isVisible(), qPrintable(where));
             }
         }
@@ -3022,7 +3001,6 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
         }
     }
     // Whole as the move ends.
-    QCOMPARE(linesOpacityAt(1.0), 1.0);
     QVERIFY(QMetaObject::invokeMethod(growth, "resume"));
     QVERIFY(grown(panel));
     QCOMPARE(linesItem->opacity(), 1.0);
@@ -3086,6 +3064,64 @@ void UiMotionTest::nowPlayingFirstPlayShowsTheTitleEarly() {
             }
             if ((index == 0 && progress >= 0.4) || progress >= 0.6) {
                 QVERIFY2(shown >= 0.9, qPrintable(QStringLiteral("line %1 at %2 at %3").arg(index).arg(shown).arg(where)));
+            }
+        }
+        if (progress >= 1.0) {
+            break;
+        }
+    }
+    QVERIFY(finish(growth));
+}
+
+void UiMotionTest::nowPlayingNarrowFirstPlayClipsNoLine_data() {
+    QTest::addColumn<double>("points");
+    QTest::newRow("beside") << 10.0;
+    QTest::newRow("stacked, 18 pt") << 18.0;
+    QTest::newRow("header, 24 pt") << 24.0;
+}
+
+// The narrow first Play: each line fades in once the seam is past its foot,
+// so none is drawn under the seam, cut across its letters (in as one from
+// 60 % of the way, the large-font header's lines were), and the title,
+// first, reads by three quarters of the 200 ms.
+void UiMotionTest::nowPlayingNarrowFirstPlayClipsNoLine() {
+    QFETCH(double, points);
+    const ScopedApplicationFont font(points);
+    Covers covers;
+    Motion ui(true);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QQuickItem *header = named(window, "libraryHeader");
+    auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
+    QVERIFY(seam && header && growth);
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
+    QVERIFY(QMetaObject::invokeMethod(growth, "pause"));
+    const int duration = growth->property("duration").toInt();
+    QCOMPARE(duration, units->longDuration());
+    const QEasingCurve curve(QEasingCurve::InOutQuad);
+    for (int frame = 1;; ++frame) {
+        const double progress = std::min(1.0, frame * 1000.0 / 60.0 / duration);
+        const QString where = QStringLiteral("%1 ms").arg(progress * duration);
+        panel->setProperty("presence", curve.valueForProgress(progress));
+        QVERIFY2(QTest::qWaitFor([&]() { return libraryFollows(panel, header); }), qPrintable(where));
+        QVERIFY(QQuickTest::qWaitForPolish(window));
+        for (const QString &name : kNarrowLines) {
+            const PanelLine line = panelLine(panel, name);
+            if (line.text().isEmpty()) {
+                continue;
+            }
+            const double shown = opacityUpTo(line.line(), panel);
+            if (shown > 0.02) {
+                QVERIFY2(sceneRectOf(line.stillText()).bottom() <= sceneRectOf(seam).top() + 1.5,
+                         qPrintable(QStringLiteral("%1 at %2 to %3, the seam at %4, at %5").arg(name).arg(shown)
+                                        .arg(sceneRectOf(line.stillText()).bottom())
+                                        .arg(sceneRectOf(seam).top()).arg(where)));
+            }
+            if (name == kNarrowLines.first() && progress >= 0.75) {
+                QVERIFY2(shown >= 0.7, qPrintable(QStringLiteral("the title at %1 at %2").arg(shown).arg(where)));
             }
         }
         if (progress >= 1.0) {

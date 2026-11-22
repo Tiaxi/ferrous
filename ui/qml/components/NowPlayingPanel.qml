@@ -54,9 +54,10 @@ import "../logic/PathUtils.js" as PathUtils
 //   the move opens the lines' room first, over the moving seam, and then
 //   the rest of the cover (wideTextRoom), each line fading in once it has
 //   room, so the title reads in the move's first part, over the library and
-//   never under its seam; beside and under the narrow cover the lines fade
-//   in over the move's last part, once it is past its fastest, so no text
-//   slides over the moving rows nor pops in at its end. Going back to nothing
+//   never under its seam; beside and under the narrow cover each line
+//   fades in likewise once it has room over the seam, its title first
+//   (in as one late in the move, the header's lines were cut across their
+//   letters by the seam as they came in). Going back to nothing
 //   loaded, as when the queue is cleared or runs out, is the same move
 //   backwards, on its curve and time (rather than the cover and lines
 //   going in one frame, leaving a mark alone in the band as it shrank):
@@ -213,12 +214,22 @@ Item {
     readonly property int moveDuration: Kirigami.Units.longDuration <= 0 ? 0
         : (root.wideRoom ? root.wideMoveDuration : Kirigami.Units.longDuration)
     readonly property int moveEasing: Easing.InOutQuad
-    // Beside and under the narrow cover the lines come in late in the move,
-    // not with it (with it, they slid over the moving rows): at 0 until
-    // the move is linesFromPresence of the way, past its fastest part, then
-    // fading in over longDuration, OutCubic, or what is left of the move
-    // where that is shorter, so they are whole when it ends (_lineLevel).
-    readonly property real linesFromPresence: 0.6
+    // In the narrow layouts a line has room from the presence where the
+    // seam passes its foot, `foot` once in place: until then the foot moves
+    // up from under the compact row, or under the cover moves down with
+    // it. Never before the row is gone. (In as one from 60 % of the way,
+    // the header's lines were cut across their letters by the seam.)
+    function _narrowRoomPresence(foot) {
+        const from = root.moveFrom
+        const band = from.band >= 0 ? Math.min(root.coverSize, from.band)
+                                    : Math.min(root.coverSize, root.idleRowHeight)
+        const moves = (root.narrowStacked ? band - root.coverSize : from.shift * root.idleRowHeight)
+            / Math.max(1e-6, 1 - from.presence)
+        const met = root.moveTravel + moves > 0
+            ? (foot - root.idleRowHeight + moves) / (root.moveTravel + moves) : 1
+        return Math.min(1, Math.max(met, root._movePresence(
+            root.idleOut[1] * Kirigami.Units.shortDuration / Math.max(1, root.moveDuration))))
+    }
     // The height the move grows to, or shrinks from.
     readonly property real movedHeight: root.idle ? root.heldLayoutHeight : root.layoutHeight
     // The move's travel: the library's under the panel.
@@ -270,14 +281,14 @@ Item {
     readonly property real rowBackSeam: root.idleRowHeight + root.moveTravel * root._movePresence(
         root.idleOut[1] * Kirigami.Units.shortDuration / Math.max(1, root.moveDuration))
     // The opacity of the line `name`, whose text's foot is `foot` from the
-    // panel's top, and which under the wide cover needs `room` under that,
-    // -1 in the narrow layouts. Opening, under the wide cover it fades in
-    // over shortDuration, OutCubic, from when there is room for it, never
-    // clipped by the seam nor over the library; in the narrow ones from
-    // linesFromPresence. Closing, it fades out as the seam comes up to its
-    // foot. Read from the move's progress, so a move that turns back, or
-    // none, as with animations off, takes it with it.
-    function _lineLevel(name, foot, room) {
+    // panel's top and `placedFoot` once in place, and which under the wide
+    // cover needs `room` under that, -1 in the narrow layouts. Opening, it
+    // fades in over shortDuration, OutCubic, from when there is room for
+    // it, never clipped by the seam nor over the library. Closing, it fades
+    // out as the seam comes up to its foot. Read from the move's progress,
+    // so a move that turns back, or none, as with animations off, takes it
+    // with it.
+    function _lineLevel(name, foot, placedFoot, room) {
         if (root.presence >= 1)
             return 1
         if (root.presence <= 0 || root.moveDuration <= 0)
@@ -288,16 +299,16 @@ Item {
             const away = root.idleRowHeight + root.moveTravel * root.moveFrom.presence - gone
             return away > 0 ? from * Math.min(1, Math.max(0, root.moveSeam - gone) / away) : 0
         }
-        let start = root.linesFromPresence
-        let length = Kirigami.Units.longDuration
+        let start = 0
         if (room >= 0) {
             const opening = root.wideRoomWhole - root.moveFrom.room
             const share = opening > 0 ? Math.min(1, Math.max(0, room - root.moveFrom.room) / opening) : 0
             start = root.moveFrom.presence + root.wideRoomSpan * (1 - Math.sqrt(1 - share))
-            length = Kirigami.Units.shortDuration
+        } else {
+            start = root._narrowRoomPresence(placedFoot)
         }
         const startTime = root._moveTime(Math.max(start, root.moveFrom.presence)) * root.moveDuration
-        const time = Math.max(1, Math.min(length, root.moveDuration - startTime))
+        const time = Math.max(1, Math.min(Kirigami.Units.shortDuration, root.moveDuration - startTime))
         return from + (1 - from) * root._eased((root.moveElapsed - startTime) / time)
     }
     // The compact row of nothing loaded and the cover hand over by the
@@ -1229,6 +1240,9 @@ Item {
     readonly property int centredTextTop: Math.max(root.narrowTextTop, Math.round(Math.min(
         (root.besideCoverSize - (root.narrowReservedHeight - narrowTitleProbe.implicitHeight / 2)) / 2,
         root.besideCoverSize - root.narrowReservedHeight - root.besideLeastFoot)))
+    // The narrow lines' top once in place: under the cover, or beside it.
+    readonly property real narrowColumnTop: root.narrowStacked
+        ? root.coverSize + root.textInset : root.besideTextTop
     // Where the line under the cover starts down: under the cover's
     // place, and while the track's layout grows from the compact
     // row, or shrinks into it, never above the row's foot, so the lines do
@@ -1654,9 +1668,11 @@ Item {
         // panel's top; and so how much of it shows as the panel grows or
         // shrinks (_lineLevel).
         property real roomNeeded: -1
-        readonly property real foot: (line.parent ? line.parent.y : 0) + line.y
+        readonly property real footInColumn: line.y
             + stillText.y - line.overhang + stillText.height + stillText.tailLineHeight
-        opacity: root._lineLevel(line.name, line.foot, line.roomNeeded)
+        readonly property real foot: (line.parent ? line.parent.y : 0) + line.footInColumn
+        readonly property real placedFoot: root.narrowColumnTop + line.footInColumn
+        opacity: root._lineLevel(line.name, line.foot, line.placedFoot, line.roomNeeded)
 
         // The line's key in `trackLines`.
         required property string lineKey
