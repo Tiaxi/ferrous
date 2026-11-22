@@ -699,6 +699,8 @@ private slots:
     void editTagsDownBarStartsUnderTheHeader();
     void editTagsSetsChangedValuesInDemiBold_data();
     void editTagsSetsChangedValuesInDemiBold();
+    void editTagsSetsTypedValuesInDemiBold_data();
+    void editTagsSetsTypedValuesInDemiBold();
     void editTagsPinsWhatIdentifiesARowAsItScrolls_data();
     void editTagsPinsWhatIdentifiesARowAsItScrolls();
     void editTagsTitleMeetsTheEdgeUnderAWideScrollBar();
@@ -6523,6 +6525,77 @@ void UiDialogsTest::editTagsSetsChangedValuesInDemiBold() {
     main.editor.revertField(QStringLiteral("title"));
     QTRY_COMPARE(weightOf(cellAt(0, QStringLiteral("title"))), QFont::Normal);
     QCOMPARE(weightOf(cellAt(2, QStringLiteral("title"))), QFont::Normal);
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsSetsTypedValuesInDemiBold_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000;
+    QTest::newRow("24 pt, 1000 px") << 24.0 << 1000;
+}
+
+// A value being typed is DemiBold in the table at once, as the row's mark,
+// the column's heading and the field's label already show it changed: it
+// stayed regular until it was committed. Its row keeps its height while it
+// is typed, the value eliding within it, and other rows keep their weight.
+void UiDialogsTest::editTagsSetsTypedValuesInDemiBold() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfTheShotBatch());
+    QVERIFY(tags != nullptr);
+    tags->resize(width, tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), qreal(width));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    const auto rowAt = [&](int index) -> QQuickItem * {
+        for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
+            if (row->isVisible() && row->property("index").toInt() == index) {
+                return row;
+            }
+        }
+        return nullptr;
+    };
+    const auto titleAt = [&](int index) {
+        QQuickItem *row = rowAt(index);
+        return row != nullptr ? itemNamed(row, QStringLiteral("tagEditorCell_title")) : nullptr;
+    };
+    const auto weightOf = [](QQuickItem *cell) { return cell->property("font").value<QFont>().weight(); };
+    QVERIFY(titleAt(2) != nullptr && titleAt(3) != nullptr);
+    const qreal rowHeight = rowAt(2)->height();
+    QCOMPARE(weightOf(titleAt(2)), QFont::Normal);
+
+    table->forceActiveFocus();
+    main.editor.setSelectedRows({2});
+    QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_title"));
+    QVERIFY(field != nullptr);
+    field->forceActiveFocus();
+    QTest::keyClick(tags, Qt::Key_End);
+    for (const char c : QByteArray(" (Live at the Harbour Hall, Second Night, Encore)")) {
+        QTest::keyClick(tags, c);
+    }
+    QTRY_COMPARE(titleAt(2)->property("text").toString(),
+                 QStringLiteral("Brief Signal (Live at the Harbour Hall, Second Night, Encore)"));
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    // Typed, not yet committed: DemiBold, on its one line.
+    QQuickItem *typed = titleAt(2);
+    QVERIFY2(weightOf(typed) == QFont::DemiBold, qPrintable(describeItem(typed)));
+    QCOMPARE(typed->property("lineCount").toInt(), 1);
+    QVERIFY2(typed->property("truncated").toBool(), qPrintable(describeItem(typed)));
+    QCOMPARE(rowAt(2)->height(), rowHeight);
+    QCOMPARE(weightOf(titleAt(3)), QFont::Normal);
+
+    // Cleared again before it is committed, it is regular once more.
+    QTest::keyClick(tags, 'a', Qt::ControlModifier);
+    for (const char c : QByteArray("Brief Signal")) {
+        QTest::keyClick(tags, c);
+    }
+    QTRY_COMPARE(weightOf(titleAt(2)), QFont::Normal);
+    QCOMPARE(rowAt(2)->height(), rowHeight);
     QVERIFY(closeTagEditor(main));
 }
 

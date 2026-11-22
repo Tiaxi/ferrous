@@ -1837,8 +1837,12 @@ Components.DialogWindow {
                                 // label is, and a kept value regular, in
                                 // one ink: a tint would read as selected.
                                 // What it wraps by is measured in its
-                                // font, so it still reads whole.
-                                font.weight: tableCell.changed ? Font.DemiBold : Font.Normal
+                                // font, so it still reads whole. A value
+                                // being typed is DemiBold too, as the
+                                // row's mark and the heading show it at
+                                // once; it elides until it is committed,
+                                // so its row keeps its height.
+                                font.weight: tableCell.changed || tableCell.typed ? Font.DemiBold : Font.Normal
                                 color: tableCell.failureCell
                                     ? root.uiPalette.negative
                                     : (modelData.number
