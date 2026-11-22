@@ -379,7 +379,7 @@ ApplicationWindow {
     QVERIFY(dialog != nullptr && confirm != nullptr);
     // Typographic apostrophes, as everywhere else.
     const QString details = confirm->property("details").toString();
-    QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("album\u2019s folder")),
+    QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("track\u2019s folder")),
              qPrintable(details));
     // Replace from iTunes has a window of its own, which its question opens
     // in.
@@ -414,13 +414,16 @@ ApplicationWindow {
              QStringLiteral("Replace the album art of “Album A” by Artist A?"));
     QVERIFY(applied().isEmpty());
     // What Replace does on disk, a short sentence for each case (one
-    // sentence of 31 words was too long): a cover file where the folder
-    // shows an image, which need not be the one that was shown, otherwise
-    // the tracks' embedded art. Only what is overwritten is lost, and the
-    // art is "album art" throughout, as in the question.
+    // sentence of 31 words was too long): a cover file where the track's
+    // folder has any JPEG or PNG, which Ferrous shows as its cover (a back
+    // scan alone counts, so "a cover image" was not true of it), otherwise
+    // the embedded art of the album's tracks in that folder, which the
+    // question names ("the album's tracks" read as the whole album's, in
+    // every folder). Only what is overwritten is lost, and the art is
+    // "album art" throughout, as in the question.
     QCOMPARE(details,
-             QStringLiteral("If the album\u2019s folder has a cover image, the new album art is saved as its cover file. "
-                            "Otherwise it is embedded in the album\u2019s tracks. "
+             QStringLiteral("If the track\u2019s folder has a JPEG or PNG image, the new album art becomes its cover file. "
+                            "Otherwise it is embedded in the album\u2019s tracks in that folder. "
                             "Ferrous keeps no copy of what it overwrites."));
     QVERIFY2(!details.contains(QStringLiteral("artwork")), qPrintable(details));
     // A window of its own above Replace from iTunes', with Replace's icon
