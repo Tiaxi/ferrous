@@ -1922,11 +1922,13 @@ def write_motion_metrics(rd, strips, geo_samples=None):
          "auto-hide 5 s later), and the time between them is a hold or a wait, part of no transition. With content "
          "that keeps moving (playback), only frames that change clearly more than that motion count. **Recording**: "
          "the whole recording. **Blink**, per scope: the longest dip (at most 250 ms) of the scope's ink (mean colour "
-         "distance from its background) below 50 % of its level before and after the transition; scope *text* = "
+         "distance from its background) to 50 % or less of its level before and after the transition; scope *text* = "
          "the rects of the text items shown (item tree), *other* = the rest of the change box (cover art, icons, "
          "plots); — = the scope does not change. **Blink per element** (states.ELEMENT_INK; the now-playing title, artist "
          "line and details line): the same measure in each element's own rect, at full resolution, so a local dim is "
-         "not averaged away. **Overlap**: during a transition, two text items in the same place "
+         "not averaged away. **Blink per changed item**: an item (a popup, a list) whose traced opacity dips to 50 % or "
+         "less, or by over 25 % for over 30 ms, and returns in its place, where the frames show the dip in its own "
+         "rect; of items dipping together the largest. **Overlap**: during a transition, two text items in the same place "
          "both above 30 % opacity, one mid-fade (item tree). **After end**: movement after the stated end (the QML "
          "animations that started in the transition: start + duration). Each transition's merged image "
          "(`strips/<strip>.png`) has the key frames, the graph with the animations that ran, and the "
@@ -1936,8 +1938,8 @@ def write_motion_metrics(rd, strips, geo_samples=None):
          "and other popups (items on a popup layer), so a tooltip fading in after a transition is not read as the "
          "transition running long. **Neither** (plot recordings only): frames that are neither the start nor the end "
          "nor a blend of them.\n",
-         "| transition | theme | latency | transitions (start: duration) | recording | blink: text / other | blink per element (own rect) | text overlap | after stated end: the app's items | after stated end: tooltip/popup | neither | animations that ran | image |",
-         "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+         "| transition | theme | latency | transitions (start: duration) | recording | blink: text / other | blink per changed item | blink per element (own rect) | text overlap | after stated end: the app's items | after stated end: tooltip/popup | neither | animations that ran | image |",
+         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for (name, theme), s in seen.items():
         m = s["metrics"]
         anims = "; ".join(f"{a['target']}.{a['prop']} {a['frm']}→{a['to']} {a['duration']} ms {a['easing']} "
@@ -1947,15 +1949,20 @@ def write_motion_metrics(rd, strips, geo_samples=None):
         segs = ", ".join(f"+{g['start_ms']}: {g['duration_ms']} ms" for g in m["segments"]) or "none"
         bl = " / ".join("—" if v is None else f"{v} ms" for v in (m["blink_text_ms"], m["blink_other_ms"]))
         el = "; ".join(f"{e['label']} {e['blink_ms']} ms" for e in m.get("elements", [])) or "—"
+        items = m.get("blink_items")
+        ib = "—" if items is None else "; ".join(
+            f"{b['label'].replace('|', '/')} {b['ms']} ms (to {100 * b['low']:.0f} %) at +{b['start_ms']}"
+            for b in items) or "0 ms"
         L.append(f"| {name} | {theme} | {m['latency_ms']} ms | {segs}{' (content keeps moving)' if m['continuous'] else ''} | "
-                 f"{m['recording_ms']} ms | {bl} | {el} | {m['overlap_ms']} ms | {after_cell(m, 'app')} | "
+                 f"{m['recording_ms']} ms | {bl} | {ib} | {el} | {m['overlap_ms']} ms | {after_cell(m, 'app')} | "
                  f"{after_cell(m, 'overlay')} | {'—' if m.get('neither_ms') is None else str(m['neither_ms']) + ' ms'} | "
                  f"{anims or '—'} | `strips/{s['file']}` |")
     for (name, theme), (times, rows, note, *_pf) in sorted((geo_samples or {}).items()):
         L += ["", f"## {name} ({theme}): geometry every {times[1] - times[0]} ms\n",
               f"Each item's rect (window px: its top y and height) and opacity from the trace, sampled at evenly spaced "
               f"times ({note}); *library first row* is the topmost shown row title.\n"] + geometry_table(times, rows)
-    open(os.path.join(rd, "MOTION-METRICS.md"), "w").write("\n".join(L) + "\n")
+    with open(os.path.join(rd, "MOTION-METRICS.md"), "w") as f_mm:
+        f_mm.write("\n".join(L) + "\n")
 
 
 def toc(entries, sheets, strips, core):
@@ -2264,7 +2271,12 @@ def strip_facts(m):
           f"other {m['blink_other_ms']} ms" if m.get("blink_other_ms") is not None else "other —"]
     if m.get("blink_plot_ms") is not None:
         bl.append(f"plot content {m['blink_plot_ms']} ms")
+    if m.get("blink_items") is not None:
+        bl.append(f"changed items {max([b['ms'] for b in m['blink_items']], default=0)} ms")
     parts.append("blink " + " / ".join(bl))
+    if m.get("blink_items"):
+        import motion_strip
+        parts.append("ITEM BLINK: " + "; ".join(motion_strip.item_blink_text(b) for b in m["blink_items"]))
     el = [f"{e['label']} {e['blink_ms']} ms" for e in m.get("elements", []) if e.get("blink_ms")]
     if el:
         parts.append("element blinks: " + "; ".join(el))
