@@ -74,15 +74,19 @@ Components.DialogWindow {
     ]
     // The table's columns, each at its width with the default 10 pt font,
     // scaled with a larger one, or wider when its header or sample needs
-    // it. `sample` is the widest value a short column holds whole: the
-    // numbers and Format are as narrow as that allows. Where the view is
-    // narrower than the columns together, the columns that may `give` way
-    // do, before the table scrolls sideways: first File Name, Folder and
-    // Status, down to their `least` widths, then the tags, down to theirs,
+    // it. File Name is straight after #, as what tells the rows apart, in
+    // view where the table scrolls (from a 1000 px window, it was wholly
+    // out of view). `sample` is the widest value a short column holds
+    // whole: the numbers and Format are as narrow as that allows. Where the
+    // view is narrower than the columns together, the columns that may
+    // `give` way do, before the table scrolls sideways: first File Name,
+    // Folder and Status, down to their `least` widths, then the tags, down
+    // to theirs,
     // which keep Title, Artist and Album at 160 px or more, scaled with the
-    // font; the numbers and Format keep their widths. In a table that
-    // scrolls anyway none gives way. Where the view is wider, File Name and
-    // Folder, which `stretch`, take the rest. Status takes no room until a
+    // font; the numbers and Format keep their widths. A table that scrolls
+    // has each of them at its least, for as many columns in view. Where
+    // the view is wider, File Name and Folder, which `stretch`, take the
+    // rest. Status takes no room until a
     // save or a rename failed for a row; a row with unsaved edits has a
     // mark in the # column instead, whose room is always there, so that an
     // edit moves no column (a Status column that came with the first edit
@@ -92,13 +96,13 @@ Components.DialogWindow {
     // short).
     readonly property var tableColumns: [
         { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
+        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, stretch: true, path: true },
         { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 160 },
         { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 160 },
         { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 160 },
         { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 100, give: 2, least: 70 },
         { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 52, sample: "0000" },
         { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 40, sample: "00" },
-        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, stretch: true, path: true },
         { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 56, sample: "FLAC" },
         { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, stretch: true, path: true },
         { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, samples: [root.modifiedText, root.notSavedText, root.notRenamedText], onlyWithStatus: true }
@@ -119,14 +123,17 @@ Components.DialogWindow {
     // with its Revert while a row's value in it is changed, or its sample
     // value, with the cell's padding, rather than a header elided to a
     // letter. The narrow columns, as Disc, take the Revert's room only
-    // while they show it, as Status takes its own only with a failure.
+    // while they show it, as Status takes its own only with a failure; a
+    // tag that gives way always keeps it, so that an edit widens no column
+    // at its least and moves none after it.
     function columnNeed(column) {
         // The bindings that ask follow the fonts: advanceWidth() is a
         // function, which they cannot follow.
         columnHeaderMetrics.font
         columnValueMetrics.font
         const header = columnHeaderMetrics.advanceWidth(column.label)
-            + (root.fieldAt(column.key) !== null && root.columnMarked(column.key) ? root.columnRevertRoom : 0)
+            + (root.fieldAt(column.key) !== null && (column.give || root.columnMarked(column.key))
+                ? root.columnRevertRoom : 0)
         const samples = column.samples || (column.sample ? [column.sample] : [])
         const value = samples.reduce(function(widest, sample) {
             return Math.max(widest, columnValueMetrics.advanceWidth(sample))
@@ -175,12 +182,10 @@ Components.DialogWindow {
             })
             return slack
         }
-        // The columns give way only where that spares the scroll bar: in a
-        // table that scrolls anyway, as at a large font, they keep their
-        // widths.
-        if (slackOf(1) + slackOf(2) < over) {
-            over = 0
-        }
+        // Each group down to its least before the next gives any: where
+        // that is still too wide, every column is at its least and the
+        // table scrolls (keeping their widths, they pushed what identifies
+        // a row out of view).
         for (const group of [1, 2]) {
             const slack = slackOf(group)
             if (slack <= 0 || over <= 0) {
