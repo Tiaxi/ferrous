@@ -89,6 +89,9 @@ ScrollView {
     readonly property real minimumWidth: Math.ceil(root.chromeWidth + root.formNeeds.narrow)
     // The page's height with every row in view, whether or not it is.
     readonly property real wholeHeight: Math.ceil(pageContent.implicitHeight + root.topPadding + root.bottomPadding)
+    // Where the room under the title starts, unscrolled: for what a page
+    // shows in that room instead of a form.
+    readonly property real bodyTop: root.topPadding + pageTitle.y + pageTitle.height + pageTitle.Layout.bottomMargin
 
     FontMetrics {
         id: labelMetrics
@@ -105,6 +108,7 @@ ScrollView {
         spacing: 0
 
         Label {
+            id: pageTitle
             objectName: "preferencesPageTitle"
             Layout.fillWidth: true
             Layout.leftMargin: root.pageSideInset

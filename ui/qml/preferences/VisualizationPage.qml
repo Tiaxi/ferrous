@@ -184,8 +184,9 @@ Preferences.PreferencesPage {
         objectName: "crosshairHelp"
         uiPalette: root.uiPalette
         checkBox: crosshairCheckBox
-        text: I18n.i18nc("@info", "With the crosshair, right-clicking the spectrogram in centered mode "
-            + "seeks to that position in the track.")
+        // Under Crosshair, it is that box's: "with the crosshair" went
+        // without saying, and the line fits on one at 24 pt.
+        text: I18n.i18nc("@info", "In centered mode, right-click the spectrogram to seek to that point.")
     }
 
     CheckBox {
