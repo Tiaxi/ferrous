@@ -84,9 +84,11 @@ Components.DialogWindow {
     // than their values or their header up to 160, scaled with the font (at
     // 160 whatever they held, they left File Name at 140, which cut three
     // of four names beside room to spare). A tag keeps 100 for what is
-    // typed over a short value, and 160 with no value yet to measure.
-    // Folder, which may be `cut`, gives only what its values don't need at
-    // first, then on down to its `least`. A table that scrolls has each of
+    // typed over a short value, and Title 160 with no value yet to
+    // measure. Artist, Album and Genre, which `fit`, are no wider than
+    // their least whatever the room (see tableColumnBaseWidths). Folder,
+    // which may be `cut`, gives only what its values don't need at first,
+    // then on down to its `least`. A table that scrolls has each of
     // them at its least and none wider than the view, but Title, whose new
     // values are checked there before Save: it has all the room beside #
     // and File Name, to the view's edge (it stayed at 190 px beside an
@@ -94,8 +96,9 @@ Components.DialogWindow {
     // than its `least`. A committed change is whole
     // whatever its column's width: it wraps, and its row grows while that
     // column is in view. Where
-    // the view is wider, File Name and Folder, which `stretch`, take the
-    // rest. Status takes no room until a
+    // the view is wider, Title, File Name and Folder, which `want` room,
+    // take it in turn, up to what they need, and then File Name and Folder,
+    // which `stretch`, take the rest. Status takes no room until a
     // save or a rename failed for a row; a row with unsaved edits has a
     // mark in the # column instead, whose room is always there, so that an
     // edit moves no column (a Status column that came with the first edit
@@ -105,15 +108,15 @@ Components.DialogWindow {
     // short).
     readonly property var tableColumns: [
         { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "000" },
-        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, holds: 220, stretch: true, path: true },
-        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 100, holds: 160 },
-        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 100, holds: 160 },
-        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 100, holds: 160 },
-        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 100, give: 2, least: 70 },
+        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, holds: 220, wants: 480, stretch: true, path: true },
+        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 100, holds: 160, wants: 400, wantsAtLeast: 240 },
+        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 100, holds: 160, fit: true },
+        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 100, holds: 160, fit: true },
+        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 100, give: 2, least: 70, holds: 160, fit: true },
         { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 52, sample: "0000" },
         { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 40, sample: "00" },
         { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 56, sample: "FLAC" },
-        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, holds: 156, cut: true, stretch: true, path: true },
+        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, holds: 156, wants: 320, cut: true, stretch: true, path: true },
         { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, samples: [root.modifiedText, root.notSavedText, root.notRenamedText], onlyWithStatus: true }
     ]
     // Whether a row has a status to read: a save or rename that failed for
@@ -173,9 +176,10 @@ Components.DialogWindow {
     // and a large batch costs as little as a small one. Null until then.
     readonly property int measuredRowLimit: 200
     property var measuredRows: null
-    // What the values of a column that `holds` them need, up to what it
-    // holds, which it is with none to measure.
-    readonly property var tableColumnContentWidths: {
+    // What the measured values of a column that `holds` them need, with
+    // the cell's padding, whatever its width; 0 with none, or none to
+    // measure.
+    readonly property var tableColumnMeasuredWidths: {
         // As in columnNeed, for the binding to follow the font.
         columnValueMetrics.font
         const rows = root.measuredRows || []
@@ -187,12 +191,42 @@ Components.DialogWindow {
             for (let i = 0; i < rows.length; ++i) {
                 widest = Math.max(widest, columnValueMetrics.advanceWidth(root.cellText(column.key, rows[i])))
             }
-            const most = root.uiPalette.scaledSize(column.holds)
             // A cell lays its text out up to a pixel or so wider than its
             // advance (349.5 px for 349 at 24 pt), and elided it.
-            return widest > 0 ? Math.min(most, Math.ceil(widest) + 2 + 2 * Kirigami.Units.largeSpacing) : most
+            return widest > 0 ? Math.ceil(widest) + 2 + 2 * Kirigami.Units.largeSpacing : 0
         })
     }
+    // What the values of a column that `holds` them need, up to what it
+    // holds, which it is with none to measure; a tag that `fit`s its
+    // values, measured and empty, needs none.
+    readonly property var tableColumnContentWidths: root.tableColumns.map(function(column, index) {
+        if (!column.holds) {
+            return 0
+        }
+        const measured = root.tableColumnMeasuredWidths[index]
+        const most = root.uiPalette.scaledSize(column.holds)
+        return measured > 0 ? Math.min(most, measured) : (column.fit && root.measuredRows !== null ? 0 : most)
+    })
+    // What each column has before the room is shared out: its width, or,
+    // for a tag that `fit`s its values (Artist, Album, Genre), what they
+    // need as the files loaded, within its least and what it holds, and
+    // Folder, which may be `cut`, its least. The room that frees goes to
+    // the columns that `want` it (at their widths, Artist and Album were
+    // half empty beside new titles three lines tall and file names cut
+    // short).
+    readonly property var tableColumnBaseWidths: root.tableColumns.map(function(column, index) {
+        return column.fit || column.cut ? root.tableColumnLeastWidths[index] : root.tableColumnWidths[index]
+    })
+    // How wide a column that `wants` room would be, given it: what its
+    // values need as the files loaded, or what it `wantsAtLeast`, up to
+    // what it `wants`; others, their base.
+    readonly property var tableColumnWantWidths: root.tableColumns.map(function(column, index) {
+        if (!column.wants) {
+            return root.tableColumnBaseWidths[index]
+        }
+        return Math.ceil(Math.min(root.uiPalette.scaledSize(column.wants), Math.max(
+            root.tableColumnMeasuredWidths[index], root.uiPalette.scaledSize(column.wantsAtLeast || 0))))
+    })
     // The narrowest each column gives way to: its least width, what its
     // values need, or what its header or sample needs.
     readonly property var tableColumnLeastWidths: root.tableColumns.map(function(column, index) {
@@ -204,15 +238,30 @@ Components.DialogWindow {
     })
     // The widths the columns are shown at in the table's width.
     readonly property var shownColumnWidths: {
-        const preferred = root.tableColumnWidths
+        const preferred = root.tableColumnBaseWidths
         const least = root.tableColumnLeastWidths.slice()
         const room = tagEditorTable.width - 2 * root.tableInset
         const total = preferred.reduce(function(sum, width) { return sum + width }, 0)
         const widths = preferred.slice()
         let over = total - room
         if (over <= 0) {
+            // The room to spare goes, in turn, to what each column that
+            // `wants` it needs for the values it had as the files loaded,
+            // up to that: Title, whose new values are checked here before
+            // Save, then File Name, which tells the rows apart, then
+            // Folder. Title wants room for two lines of a long title too,
+            // as what is typed over short ones is often longer (at 190 px
+            // a batch's new titles took three). Then the columns that
+            // stretch share what is left.
+            let spare = -over
+            for (const key of ["title", "fileName", "directory"]) {
+                const i = root.tableColumns.findIndex(function(column) { return column.key === key })
+                const taken = Math.max(0, Math.min(spare, root.tableColumnWantWidths[i] - widths[i]))
+                widths[i] += taken
+                spare -= taken
+            }
             const stretching = root.tableColumns.filter(function(column) { return column.stretch }).length
-            const extra = Math.floor(-over / stretching)
+            const extra = Math.floor(spare / stretching)
             root.tableColumns.forEach(function(column, i) {
                 if (column.stretch) {
                     widths[i] += extra
@@ -397,14 +446,25 @@ Components.DialogWindow {
     // field need.
     readonly property real fieldsLeastWidth: Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
     // The fields' width as shown: narrower, down to their least, where
-    // that spares the table its sideways scroll bar with every column at
-    // its least width or wider, as on a 1400 px screen; otherwise their
-    // width.
+    // that gives Title and File Name what they want (from a 1600 px main
+    // window, the batch's longest file name was cut by 47 px beside titles
+    // of two lines), or else spares the table its sideways scroll bar with
+    // every column at its least width or wider, as on a 1400 px screen;
+    // otherwise their width.
     readonly property real fieldsShownWidth: {
-        const tableLeast = 2 + 2 * root.tableInset
-            + root.tableColumnLeastWidths.reduce(function(sum, width) { return sum + width }, 0)
-        const spare = Math.floor(root.width - 2 * root.contentPadding - root.contentSpacing - tableLeast)
-        return spare < root.fieldsWidth && spare >= root.fieldsLeastWidth ? spare : root.fieldsWidth
+        const rest = root.width - 2 * root.contentPadding - root.contentSpacing - 2 - 2 * root.tableInset
+        let wanted = 0
+        root.tableColumns.forEach(function(column, i) {
+            wanted += column.key === "directory" ? root.tableColumnBaseWidths[i] : root.tableColumnWantWidths[i]
+        })
+        const least = root.tableColumnLeastWidths.reduce(function(sum, width) { return sum + width }, 0)
+        for (const table of [wanted, least]) {
+            const spare = Math.floor(rest - table)
+            if (spare < root.fieldsWidth && spare >= root.fieldsLeastWidth) {
+                return spare
+            }
+        }
+        return root.fieldsWidth
     }
     // What the window holds, across: the fields and every column of the
     // table at its width, clear of its scroll bar.
