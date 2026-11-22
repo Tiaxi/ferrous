@@ -502,6 +502,8 @@ private slots:
     void seekReleaseOffTheBarHidesTheTimeBox();
     void seekHoverLineLeavesThePlayheadWhole_data();
     void seekHoverLineLeavesThePlayheadWhole();
+    void seekHoverLineWaitsForThePointerToMoveAfterASeek_data();
+    void seekHoverLineWaitsForThePointerToMoveAfterASeek();
     void seekFocusDrawsOneRingAroundTheBar_data();
     void seekFocusDrawsOneRingAroundTheBar();
     void volumeGlyphHasTheTransportsWeight_data();
@@ -1451,6 +1453,64 @@ void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole() {
     QTRY_VERIFY(hoverLine->isVisible());
     harness.root->setProperty("positionSeconds", 100.0);
     QTRY_VERIFY(!hoverLine->isVisible());
+}
+
+void TransportStatusTest::seekHoverLineWaitsForThePointerToMoveAfterASeek_data() {
+    QTest::addColumn<bool>("dragged");
+    QTest::newRow("click") << false;
+    QTest::newRow("drag") << true;
+}
+
+// A click leaves the pointer on the playhead, and as playback took that on
+// the hover's line came in beside it, a second playhead, with no pointer
+// moved. It waits for the pointer to move a pixel; the time stays.
+void TransportStatusTest::seekHoverLineWaitsForThePointerToMoveAfterASeek() {
+    QFETCH(bool, dragged);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *hoverLine = harness.item(QStringLiteral("seekHoverLine"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && hoverLine && tip);
+    const QRectF bar = sceneRect(seek);
+    const QPoint from(qRound(bar.left() + 0.3 * bar.width()), qRound(bar.center().y()));
+    const QPoint to = dragged ? from + QPoint(qRound(0.16 * bar.width()), 0) : from;
+
+    QTest::mouseMove(harness.window, from);
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, from);
+    if (dragged) {
+        QTest::mouseMove(harness.window, (from + to) / 2);
+        QTest::mouseMove(harness.window, to);
+    }
+    QTRY_VERIFY(tip->property("opened").toBool());
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, to);
+    QCOMPARE(seeksOf(harness).size(), 1);
+    const double landed = seeksOf(harness).first().toDouble();
+
+    bool lineShown = false;
+    bool boxHidden = false;
+    const FrameSampler sampler(harness.window, [&]() {
+        lineShown = lineShown || hoverLine->isVisible();
+        boxHidden = boxHidden || !tip->property("visible").toBool();
+    });
+    // Playback takes the playhead on from under the pointer, which rests.
+    for (int second = 0; second <= 8; ++second) {
+        harness.root->setProperty("positionSeconds", landed + second);
+        QVERIFY(!harness.window->grabWindow().isNull());
+        QTest::qWait(20);
+        QVERIFY2(!hoverLine->isVisible(), qPrintable(QStringLiteral("%1 s after").arg(second)));
+    }
+    QVERIFY(!lineShown);
+    QVERIFY(!boxHidden);
+
+    // A pixel's move brings it, at the pointer.
+    QTest::mouseMove(harness.window, to - QPoint(1, 0));
+    QTRY_VERIFY(hoverLine->isVisible());
+    QVERIFY(std::abs(sceneRect(hoverLine).left() - (to.x() - 1)) <= 1.0);
+    // And back where it was, it is an ordinary hover's.
+    QTest::mouseMove(harness.window, to);
+    QTRY_VERIFY(std::abs(sceneRect(hoverLine).left() - to.x()) <= 1.0);
+    QVERIFY(hoverLine->isVisible());
 }
 
 void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar_data() {
