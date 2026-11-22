@@ -1834,6 +1834,7 @@ Item {
             placeholderColor: root.placeholderColor
             hoverVeilColor: root.uiPalette.hover
             focusRingColor: root.uiPalette.focusRing
+            focusCasingColor: root.uiPalette.view
             // The sidebar's, which shows around the cover.
             backdropColor: root.uiPalette.view
             replaceFromItunesAction: root.replaceFromItunesAction

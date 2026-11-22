@@ -3725,8 +3725,9 @@ void UiMainWindowTest::nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist() 
 }
 
 // The cover is a keyboard stop while a track plays: Tab reaches it
-// after the transport and leaves it for the library, a 1 px ring shows its
-// focus only while the keyboard is in use, the Menu key and Shift+F10 open
+// after the transport and leaves it for the library, a 2 px ring with a
+// 1 px casing inside it shows its focus, over any art, only while the
+// keyboard is in use, the Menu key and Shift+F10 open
 // its context menu, and the pointer lays a faint veil on it.
 void UiMainWindowTest::nowPlayingCoverIsAKeyboardStop() {
     MainWindowFixture fixture(sized());
@@ -3757,12 +3758,40 @@ void UiMainWindowTest::nowPlayingCoverIsAKeyboardStop() {
                  qPrintable(QStringLiteral("Tab went to %1")
                                 .arg(window->activeFocusItem() ? window->activeFocusItem()->objectName()
                                                                : QStringLiteral("nothing"))));
-    // The ring: 1 px, inside the tile, in the focus ring's colour.
+    // The ring: 2 px, inside the tile, in the focus ring's colour, with
+    // 1 px of the view's inside it.
     QTRY_VERIFY(shown(ring));
-    QCOMPARE(QQmlProperty(ring, QStringLiteral("border.width")).read().toReal(), 1.0);
+    QCOMPARE(QQmlProperty(ring, QStringLiteral("border.width")).read().toReal(), 2.0);
     QCOMPARE(hex(QQmlProperty(ring, QStringLiteral("border.color")).read().value<QColor>()),
              tokenHex(window, "focusRing"));
     QCOMPARE(sceneRect(ring), sceneRect(cover));
+    QQuickItem *casing = named(window, "albumArtFocusCasing");
+    QVERIFY(shown(casing));
+    QCOMPARE(sceneRect(casing), sceneRect(cover).adjusted(2, 2, -2, -2));
+    QCOMPARE(QQmlProperty(casing, QStringLiteral("border.width")).read().toReal(), 1.0);
+    QCOMPARE(hex(QQmlProperty(casing, QStringLiteral("border.color")).read().value<QColor>()),
+             tokenHex(window, "view"));
+    // On art of the ring's own colour (a 1 px ring alone was 1.2:1 on such
+    // art): the casing parts the two by 3:1, as drawn.
+    const QColor ringColour = tokenOf(window, "focusRing");
+    QTemporaryDir artDir;
+    QImage sameAsRing(64, 64, QImage::Format_RGB32);
+    sameAsRing.fill(ringColour);
+    QVERIFY(sameAsRing.save(artDir.filePath(QStringLiteral("ring.png"))));
+    bridge->setProperty("currentTrackCoverPath",
+                        QUrl::fromLocalFile(artDir.filePath(QStringLiteral("ring.png"))).toString());
+    QVERIFY(settled(named(window, "nowPlayingPanel")));
+    const QRectF tile = sceneRect(cover);
+    QTRY_VERIFY2(near(Drawn(window).at(tile.center()), ringColour), qPrintable(hex(Drawn(window).at(tile.center()))));
+    {
+        const Drawn drawn(window);
+        const qreal y = tile.center().y();
+        QVERIFY(near(drawn.at(tile.left() + 0.5, y), ringColour));
+        QVERIFY(near(drawn.at(tile.left() + 1.5, y), ringColour));
+        const QColor line = drawn.at(tile.left() + 2.5, y);
+        QVERIFY(near(line, tokenOf(window, "view")));
+        QVERIFY2(contrastRatio(line, ringColour) >= 3.0, qPrintable(QString::number(contrastRatio(line, ringColour))));
+    }
     QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(library->hasActiveFocus());
     QVERIFY(!shown(ring));

@@ -24,8 +24,9 @@ import "." as Components
 // the track that went (a mark of its own there stood alone in an empty
 // band).
 //
-// The tile is a keyboard stop while a track plays: a 1 px ring shows its
-// focus while the keyboard is in use, and the Menu key or Shift+F10 opens
+// The tile is a keyboard stop while a track plays: a 2 px ring with a 1 px
+// casing inside it shows its focus while the keyboard is in use, over any
+// art, and the Menu key or Shift+F10 opens
 // its context menu. The pointer over a cover lays a faint veil on it, and
 // a double-click opens it in the viewer; the stand-in has neither, as
 // there is nothing to open.
@@ -80,6 +81,8 @@ Rectangle {
     // The veil the pointer lays on the tile, and the keyboard focus ring.
     property color hoverVeilColor: "transparent"
     property color focusRingColor: Kirigami.Theme.focusColor
+    // The line inside the ring, which sets it off from the art under it.
+    property color focusCasingColor: Kirigami.Theme.backgroundColor
     // What shows around a cover that does not fill the tile, or through
     // one that is partly transparent: the colour behind the tile, which the
     // now-playing panel passes. Each cover draws on it, so a cover at full
@@ -336,15 +339,26 @@ Rectangle {
             }
         }
 
-        // Keyboard focus: a 1 px ring inside the tile, which runs edge to
-        // edge.
+        // Keyboard focus: a 2 px ring inside the tile, which runs edge to
+        // edge, and 1 px of casing inside that, so it shows on any art (a
+        // 1 px ring alone was 1.2:1 on some).
         Rectangle {
+            id: focusRing
             objectName: "albumArtFocusRing"
             anchors.fill: parent
             visible: root.focusRingShown
             color: "transparent"
-            border.width: 1
+            border.width: 2
             border.color: root.focusRingColor
+
+            Rectangle {
+                objectName: "albumArtFocusCasing"
+                anchors.fill: parent
+                anchors.margins: focusRing.border.width
+                color: "transparent"
+                border.width: 1
+                border.color: root.focusCasingColor
+            }
         }
 
         MouseArea {

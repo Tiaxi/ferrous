@@ -151,6 +151,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **Focus:** a focus ring appears only while the keyboard is in use:
   - a focused list row gets a 1 px `focusRing`, drawn as one rectangle with the selection tint when the row is also selected;
   - Ferrous's own tool buttons and link actions get a 2 px ring;
+  - the album art gets a 2 px ring inside the tile, which runs edge to edge, with 1 px of the view's colour inside the ring, so it shows on any art;
   - a button on a plot gets a 2 px ring 1 px outside it, with a 1 px gap in the plate's colour.
 
   Focus and selection change at once.
