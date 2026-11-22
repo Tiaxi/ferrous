@@ -16,9 +16,10 @@ import "../logic/KeyUtils.js" as KeyUtils
 // album row shows its thumbnail after the chevron and its year at the right
 // end; a track row shows its playing or warning glyph in its album's chevron
 // column, its number under the album's thumbnail and its title where the
-// album's name starts. A library folder's row is a folder header: a folder
-// glyph where an album has its thumbnail, its name semibold, and its track
-// count at the right end.
+// album's name starts. A library folder's row is a folder header: its name
+// semibold, right after the chevron and so left of its artists', and its
+// track count at the right end. A folder glyph's slot put the name right of
+// its own artists'.
 //
 // What is playing is amber: the playing track's row, its glyph and its
 // title; a collapsed row that holds it, its name alone, with no glyph, so
@@ -85,8 +86,6 @@ Rectangle {
     // column it is centred in.
     readonly property string warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
     readonly property int warningGlyphSize: root.uiPalette.scaledSize(16)
-    // A library folder's glyph, in the thumbnail's column.
-    readonly property int folderGlyphSize: root.uiPalette.scaledSize(16)
 
     // Each library folder's track count, by its path.
     readonly property var rootTrackCounts: {
@@ -486,7 +485,7 @@ Rectangle {
                     readonly property real titleX: isTrackRow
                         ? stateX + root.chevronSize + root.chevronGap + root.thumbnailSize + root.thumbnailGap
                         : chevronX + root.chevronSize + root.chevronGap
-                            + (showsThumbnail || isRootRow ? root.thumbnailSize + root.thumbnailGap : 0)
+                            + (showsThumbnail ? root.thumbnailSize + root.thumbnailGap : 0)
 
                     function actionRowMap() {
                         return {
@@ -625,21 +624,6 @@ Rectangle {
                                 isMask: true
                                 color: root.uiPalette.now
                                 opacity: libraryRow.amberLeft
-                            }
-
-                            // A library folder: the folder glyph in the thumbnail's
-                            // column, centred in it.
-                            Kirigami.Icon {
-                                objectName: "libraryRowFolderGlyph"
-                                visible: libraryRow.isRootRow
-                                x: Math.round(libraryRow.chevronX + root.chevronSize + root.chevronGap
-                                    + (root.thumbnailSize - width) / 2)
-                                y: Math.round((libraryRow.height - height) / 2)
-                                width: root.folderGlyphSize
-                                height: root.folderGlyphSize
-                                source: visible ? "folder" : ""
-                                isMask: true
-                                color: root.uiPalette.textSecondary
                             }
 
                             Kirigami.ShadowedImage {

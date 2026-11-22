@@ -3801,10 +3801,11 @@ qreal textEndIn(QQuickItem *row) {
 }
 
 // A library folder's row, as with more than one folder, is a folder header:
-// a folder glyph in the column where an album has its thumbnail, its name
-// semibold after it, where an album's starts, and its track count at the
-// right end in the tertiary colour, where an album's year is. An artist's
-// row under it is as any other.
+// its name semibold a gap after its chevron, with no glyph's slot before
+// it, so it starts left of its own artists' (a folder glyph's slot put it
+// right of them), and its track count at the right end in the tertiary
+// colour, where an album's year is. An artist's row under it is as any
+// other.
 void UiMainWindowTest::libraryFoldersAreFolderHeaders() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
@@ -3829,25 +3830,17 @@ void UiMainWindowTest::libraryFoldersAreFolderHeaders() {
                 && (album = libraryRow(window, QStringLiteral("album"))) != nullptr);
 
     QQuickItem *chevron = itemNamed(folder, QStringLiteral("libraryRowChevron"));
-    QQuickItem *glyph = itemNamed(folder, QStringLiteral("libraryRowFolderGlyph"));
     QQuickItem *title = itemNamed(folder, QStringLiteral("libraryRowTitle"));
     QQuickItem *count = itemNamed(folder, QStringLiteral("libraryRowCount"));
-    QQuickItem *albumThumbnail = itemNamed(album, QStringLiteral("libraryRowThumbnail"));
-    QVERIFY(shown(chevron) && shown(glyph) && title && shown(count) && albumThumbnail);
-    // The chevron at the content inset, then the glyph centred in the
-    // column a thumbnail has after a chevron, then the name where a
-    // thumbnail's name starts, two indent steps before an album's.
+    QVERIFY(shown(chevron) && title && shown(count));
+    QVERIFY(itemNamed(folder, QStringLiteral("libraryRowFolderGlyph")) == nullptr);
+    // The chevron at the content inset and the name a gap after it, one
+    // indent step before its artists'.
     QCOMPARE(xIn(folder, "libraryRowChevron"), 12.0);
-    QCOMPARE(glyph->property("source").toString(), QStringLiteral("folder"));
-    QVERIFY(glyph->property("valid").toBool());
-    QCOMPARE(glyph->width(), qreal(scaledSize(window, 16)));
     const qreal step = xIn(album, "libraryRowChevron") - xIn(artist, "libraryRowChevron");
     QCOMPARE(step, chevron->width());
-    const qreal thumbnailX = xIn(album, "libraryRowThumbnail") - 2 * step;
-    QCOMPARE(xIn(folder, "libraryRowFolderGlyph"), thumbnailX + (albumThumbnail->width() - glyph->width()) / 2);
-    QVERIFY(std::abs(glyph->y() + glyph->height() / 2 - folder->height() / 2) <= 0.5);
-    QCOMPARE(colorOf(glyph), tokenHex(window, "textSecondary"));
-    QCOMPARE(xIn(album, "libraryRowTitle") - xIn(folder, "libraryRowTitle"), 2 * step);
+    QCOMPARE(xIn(folder, "libraryRowTitle"), 12.0 + step + scaledSize(window, 6));
+    QCOMPARE(xIn(artist, "libraryRowTitle") - xIn(folder, "libraryRowTitle"), step);
     QCOMPARE(title->property("text").toString(), QStringLiteral("Shelf One"));
     QCOMPARE(title->property("font").value<QFont>().weight(), QFont::DemiBold);
     QCOMPARE(colorOf(title), tokenHex(window, "text"));
@@ -3862,8 +3855,7 @@ void UiMainWindowTest::libraryFoldersAreFolderHeaders() {
              paletteOf(window)->property("smallPointSize").toReal());
     QCOMPARE(title->x() + title->width(), count->x() - 8);
     QVERIFY(itemNamed(folder, QStringLiteral("libraryRowYear")) == nullptr);
-    // An artist's row: no glyph or count, its name as any other's.
-    QVERIFY(!shown(itemNamed(artist, QStringLiteral("libraryRowFolderGlyph"))));
+    // An artist's row: no count, its name as any other's.
     QVERIFY(itemNamed(artist, QStringLiteral("libraryRowCount")) == nullptr);
     QCOMPARE(itemNamed(artist, QStringLiteral("libraryRowTitle"))->property("font").value<QFont>().weight(),
              QFont::Normal);
@@ -3875,7 +3867,7 @@ void UiMainWindowTest::libraryFoldersAreFolderHeaders() {
     folder = libraryRow(window, QStringLiteral("root"));
     QVERIFY(folder != nullptr);
     QTRY_VERIFY2(nameMarksNow(window, folder, false).isEmpty(), qPrintable(nameMarksNow(window, folder, false)));
-    QVERIFY(shown(itemNamed(folder, QStringLiteral("libraryRowFolderGlyph"))));
+    QVERIFY(shown(itemNamed(folder, QStringLiteral("libraryRowCount"))));
 }
 
 void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {

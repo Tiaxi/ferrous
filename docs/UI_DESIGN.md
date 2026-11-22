@@ -108,7 +108,7 @@ The `ui*` colours at the end of the file come from before these tokens. Don't us
 ## The one font rule
 
 Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs, viewers and the main window:
-- **A glyph beside text follows the font.** Button glyphs, page-list icons and dialog severity marks use `labelIconSize` (`Kirigami.Units.iconSizes.sizeForLabels`): 16 px at 10 pt, 32 px at 24 pt. A glyph that is deliberately smaller or larger than a label scales its 10 pt size with `scaledSize()` instead: for example the library's state, warning and folder marks, the queue's warning mark and the status bar's glyphs. The album art viewer's detail buttons scale their 16 px glyph with the viewer's own scale, which is larger in fullscreen. A 16 px glyph beside 32 px text becomes the smallest thing in its row.
+- **A glyph beside text follows the font.** Button glyphs, page-list icons and dialog severity marks use `labelIconSize` (`Kirigami.Units.iconSizes.sizeForLabels`): 16 px at 10 pt, 32 px at 24 pt. A glyph that is deliberately smaller or larger than a label scales its 10 pt size with `scaledSize()` instead: for example the library's state and warning marks, the queue's warning mark and the status bar's glyphs. The album art viewer's detail buttons scale their 16 px glyph with the viewer's own scale, which is larger in fullscreen. A 16 px glyph beside 32 px text becomes the smallest thing in its row.
 - **A pixel measure tuned at 10 pt goes through `scaledSize()`.** This includes widths that bound text, thumbnails, gutters, insets and caps. Exception: the album art viewer's gutter around the art stays 16 or 24 px at any font, because it frames the image, not text. `scaledSize()` leaves 10 pt unchanged and grows with a larger font. A fixed width at 24 pt cuts text beside empty room. A cover in a list row grows with the row and stays inside it: the library's is 20 px at 10 pt and 46 px at 24 pt, where 20 px read as a bullet.
 - **A text measure is counted in characters.** A compact dialog is about 46 average characters wide, help text at most about 63, and the art details about 40. A fixed width holds fewer words at a larger font.
 - **Check at 24 pt.** Nothing may elide or wrap a lead sentence while there is room beside it, and no window may run wider than the screen.
@@ -224,6 +224,7 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 | Row hover (light) | a hover tint stronger than the selection | the hovered row looked more selected than the selected one |
 | Inactive selection | a tint weaker than the hover | an unfocused selection read as less than a hover |
 | Queue focus ring | a ring running under the scrollbar | the thumb broke the ring's end |
+| Library folder header | a folder glyph in the thumbnail's column | it put the folder's name right of its own artists'; the semibold name and the count mark the header |
 | Unreadable row | Breeze's `dialog-warning` drawn as a grey mask | it read as an eject arrow beside the amber ▶ |
 | Plot frame | gutters, rulers, rails, a border | the plot fills its pane |
 | Plot plates | the window's view colour as plates; bare outlined text | white stickers in light; text vanished on the waveform |
