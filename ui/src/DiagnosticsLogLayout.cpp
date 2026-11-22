@@ -7,12 +7,21 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 
 namespace {
 
 constexpr char16_t kZeroWidthJoiner = 0x200d;
 // Qt Quick's text edit's tab stops.
 constexpr qreal kTabStop = 80;
+// How far a record's further rows stand in from its first.
+constexpr int kContinuationCells = 4;
+// Nothing wraps tighter, so that the widths an item passes through before
+// it has its own don't make a row of each character. The window's minimum
+// is several times this.
+constexpr int kFewestCells = 16;
+// What a sum of advances may be off by at the edge.
+constexpr qreal kRoundingSlack = 0.01;
 // A row is laid out in one line, however long.
 constexpr qreal kUnboundedWidth = 1 << 23;
 
@@ -45,15 +54,61 @@ QString asPlainTextEditHasIt(const QString &text) {
     return out;
 }
 
-// The code point at `index` of `text`, and the code units it has.
-char32_t codePointAt(QStringView text, qsizetype index, int *units) {
-    const QChar first = text.at(index);
-    if (first.isHighSurrogate() && index + 1 < text.size() && text.at(index + 1).isLowSurrogate()) {
-        *units = 2;
-        return QChar::surrogateToUcs4(first, text.at(index + 1));
+bool isSpace(char16_t c) {
+    return c == u' ' || c == u'\t' || c == 0x3000;
+}
+
+// Scripts that break between their characters.
+bool breaksBetweenCharacters(char16_t c) {
+    return (c >= 0x2e80 && c < 0xa000) || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff)
+        || (c >= 0xff00 && c <= 0xffef);
+}
+
+// Whether a row may start at `at`, which is not the start of one.
+bool mayBreakBefore(const char16_t *text, int at) {
+    const char16_t before = text[at - 1];
+    const char16_t after = text[at];
+    if (isSpace(after)) {
+        return false;
     }
-    *units = 1;
-    return first.unicode();
+    if (isSpace(before)) {
+        return true;
+    }
+    const char16_t twoBefore = at >= 2 ? text[at - 2] : u'\n';
+    if (before == u'/') {
+        // After a folder, not after what opens a path or a URL's slashes.
+        constexpr std::u16string_view opens = u"\n \t\"'([<=:/\u201c";
+        return after != u'/' && opens.find(twoBefore) == std::u16string_view::npos;
+    }
+    if (before == u'-') {
+        return after != u'-' && !(after >= u'0' && after <= u'9') && twoBefore != u'-' && !isSpace(twoBefore);
+    }
+    if (!breaksBetweenCharacters(before) && !breaksBetweenCharacters(after)) {
+        return false;
+    }
+    switch (QChar::category(char32_t(after))) {
+    case QChar::Punctuation_Close:
+    case QChar::Punctuation_FinalQuote:
+    case QChar::Punctuation_Other:
+    case QChar::Mark_NonSpacing:
+    case QChar::Mark_SpacingCombining:
+    case QChar::Mark_Enclosing:
+    case QChar::Other_Format:
+        return false;
+    default:
+        break;
+    }
+    const QChar::Category opening = QChar::category(char32_t(before));
+    return opening != QChar::Punctuation_Open && opening != QChar::Punctuation_InitialQuote
+        && before != kZeroWidthJoiner && !QChar::isLowSurrogate(after);
+}
+
+// Whether a name too long for its row may go on at `at`, as a setting's
+// after its = or between its words.
+bool mayBreakNameBefore(const char16_t *text, int at) {
+    const char16_t before = text[at - 1];
+    return (before == u'=' || before == u'_' || before == u'.' || before == u',') && text[at] != before
+        && !isSpace(text[at]);
 }
 
 QTextOption rowOption(bool designMetrics) {
@@ -78,8 +133,7 @@ void DiagnosticsLogLayout::setText(const QString &text) {
     if (text.isEmpty()) {
         m_text = QString();
         m_records = std::vector<Record>{Record{0, 0, true}};
-        m_rows = std::vector<Row>{Row{0, 0}};
-        m_widest = 0;
+        m_rows = std::vector<Row>{Row{0, 0, false}};
         return;
     }
     QString taken = text;
@@ -145,8 +199,9 @@ qreal DiagnosticsLogLayout::measure(const QString &text) const {
     QTextLine line = layout.createLine();
     line.setLineWidth(kUnboundedWidth);
     layout.endLayout();
-    // natural width leaves out spaces at the end.
-    return line.cursorToX(static_cast<int>(text.size()));
+    // The natural width leaves out spaces at the end, and the cursor after
+    // right-to-left text is at its left.
+    return std::max<qreal>(line.naturalTextWidth(), line.cursorToX(static_cast<int>(text.size())));
 }
 
 qreal DiagnosticsLogLayout::advance(char32_t character) const {
@@ -193,32 +248,95 @@ qreal DiagnosticsLogLayout::advance(char32_t character) const {
     return width;
 }
 
-qreal DiagnosticsLogLayout::recordWidth(const Record &record) const {
-    if (record.cells && m_fixedPitch) {
-        return record.length * m_cell;
-    }
-    const QStringView text = QStringView(m_text).mid(record.start, record.length);
-    qreal x = 0;
-    for (qsizetype i = 0; i < text.size();) {
-        int units = 1;
-        const char32_t c = codePointAt(text, i, &units);
-        if (c == U'\t') {
-            x = (std::floor(x / kTabStop) + 1) * kTabStop;
-        } else if (i == 0 || text.at(i - 1) != QChar(kZeroWidthJoiner)) {
-            x += advance(c);
+int DiagnosticsLogLayout::breakBefore(int from, int overflow, int end) const {
+    const char16_t *text = QStringView(m_text).utf16();
+    if (isSpace(text[overflow])) {
+        // The spaces stay at the end of their row, past the edge.
+        int next = overflow;
+        while (next < end && isSpace(text[next])) {
+            ++next;
         }
-        i += units;
+        return next;
     }
-    return x;
+    // Looked for in the second half of the row only: a long name then
+    // starts where it is, rather than leave most of the row empty, and a
+    // resize looks at less than half of the log.
+    const int nearest = from + (overflow - from) / 2;
+    for (int at = overflow; at > nearest; --at) {
+        if (mayBreakBefore(text, at)) {
+            return at;
+        }
+    }
+    for (int at = overflow; at > nearest; --at) {
+        if (mayBreakNameBefore(text, at)) {
+            return at;
+        }
+    }
+    int at = overflow;
+    while (at > from + 1 && QChar::category(char32_t(text[at])) == QChar::Mark_SpacingCombining) {
+        --at;
+    }
+    return at;
 }
 
-void DiagnosticsLogLayout::layOut() {
+int DiagnosticsLogLayout::cellBreak(int from, int end, qreal width) const {
+    const int cells = std::max(1, static_cast<int>((width + kRoundingSlack) / m_cell));
+    return end - from <= cells ? end : breakBefore(from, from + cells, end);
+}
+
+int DiagnosticsLogLayout::measuredBreak(int from, int end, qreal width) const {
+    const char16_t *text = QStringView(m_text).utf16();
+    const qreal edge = width + kRoundingSlack;
+    qreal x = 0;
+    for (int at = from; at < end;) {
+        const char16_t c = text[at];
+        int units = 1;
+        qreal next = x;
+        if (m_fixedPitch && isPrintableAscii(c)) {
+            next += m_cell;
+        } else if (c == u'\t') {
+            next = (std::floor(x / kTabStop) + 1) * kTabStop;
+        } else if (at > from && text[at - 1] == kZeroWidthJoiner) {
+            // Joined to the one before, in its room.
+            units = QChar::isHighSurrogate(c) && at + 1 < end ? 2 : 1;
+        } else if (QChar::isHighSurrogate(c) && at + 1 < end && QChar::isLowSurrogate(text[at + 1])) {
+            next += advance(QChar::surrogateToUcs4(c, text[at + 1]));
+            units = 2;
+        } else if (!m_advances.empty() && m_advances[c] >= 0) {
+            next += static_cast<qreal>(m_advances[c]);
+        } else {
+            next += advance(c);
+        }
+        if (next > edge && next > x && at > from) {
+            return breakBefore(from, at, end);
+        }
+        x = next;
+        at += units;
+    }
+    return end;
+}
+
+void DiagnosticsLogLayout::layOut(qreal width) {
     m_rows.clear();
     m_rows.reserve(m_records.size());
-    m_widest = 0;
+    const qreal firstWidth = std::max(width, kFewestCells * m_cell);
+    m_indent = kContinuationCells * m_cell;
+    const qreal furtherWidth = firstWidth - m_indent;
     for (const Record &record : m_records) {
-        m_rows.push_back({record.start, record.length});
-        m_widest = std::max(m_widest, recordWidth(record));
+        const int end = record.start + record.length;
+        const bool byCells = record.cells && m_fixedPitch;
+        int from = record.start;
+        bool continuation = false;
+        for (;;) {
+            const qreal room = continuation ? furtherWidth : firstWidth;
+            const int next = byCells ? cellBreak(from, end, room) : measuredBreak(from, end, room);
+            m_rows.push_back({from, next - from, continuation});
+            if (next >= end) {
+                break;
+            }
+            from = next;
+            continuation = true;
+        }
     }
 }
 

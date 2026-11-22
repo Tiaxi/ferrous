@@ -17,10 +17,11 @@
 #include "DiagnosticsLogLayout.h"
 
 // The diagnostics log, read-only text that selects and copies as a text
-// edit's does, however long it is. It is the size of its view and draws the
-// rows that show at contentX and contentY: the Flickable it lies over does
-// the scrolling, with content as large as contentWidth and contentHeight,
-// and follows scrollRequested.
+// edit's does, however long it is. Its records wrap to its width (#735),
+// which adds nothing to the text. It is the size of its view and draws the
+// rows that show at contentY: the Flickable it lies over does the
+// scrolling, with content as high as contentHeight, and follows
+// scrollRequested.
 //
 // Positions are those of text(), which is also what it copies.
 class DiagnosticsLogView : public QQuickItem {
@@ -35,10 +36,8 @@ class DiagnosticsLogView : public QQuickItem {
     Q_PROPERTY(qreal rightPadding READ rightPadding WRITE setRightPadding NOTIFY paddingChanged FINAL)
     Q_PROPERTY(qreal topPadding READ topPadding WRITE setTopPadding NOTIFY paddingChanged FINAL)
     Q_PROPERTY(qreal bottomPadding READ bottomPadding WRITE setBottomPadding NOTIFY paddingChanged FINAL)
-    Q_PROPERTY(qreal contentX READ contentX WRITE setContentX NOTIFY contentXChanged FINAL)
     Q_PROPERTY(qreal contentY READ contentY WRITE setContentY NOTIFY contentYChanged FINAL)
-    Q_PROPERTY(qreal contentWidth READ contentWidth NOTIFY contentSizeChanged FINAL)
-    Q_PROPERTY(qreal contentHeight READ contentHeight NOTIFY contentSizeChanged FINAL)
+    Q_PROPERTY(qreal contentHeight READ contentHeight NOTIFY contentHeightChanged FINAL)
     Q_PROPERTY(int cursorPosition READ cursorPosition NOTIFY selectionChanged FINAL)
     Q_PROPERTY(int selectionStart READ selectionStart NOTIFY selectionChanged FINAL)
     Q_PROPERTY(int selectionEnd READ selectionEnd NOTIFY selectionChanged FINAL)
@@ -73,11 +72,8 @@ public:
     qreal bottomPadding() const { return m_bottomPadding; }
     void setBottomPadding(qreal padding);
 
-    qreal contentX() const { return m_contentX; }
-    void setContentX(qreal x);
     qreal contentY() const { return m_contentY; }
     void setContentY(qreal y);
-    qreal contentWidth() const { return m_contentWidth; }
     qreal contentHeight() const { return m_contentHeight; }
 
     int cursorPosition() const { return m_caret; }
@@ -113,12 +109,11 @@ signals:
     void fontChanged();
     void colorsChanged();
     void paddingChanged();
-    void contentXChanged();
     void contentYChanged();
-    void contentSizeChanged();
+    void contentHeightChanged();
     void selectionChanged();
     void accessibleNameChanged();
-    void scrollRequested(qreal x, qreal y);
+    void scrollRequested(qreal y);
 
 protected:
     bool event(QEvent *event) override;
@@ -141,6 +136,13 @@ private:
         int start;
         int end;
     };
+    // What a resize keeps where it is: the first character of the top row,
+    // or the log's end.
+    struct Held {
+        int position = -1;
+        qreal intoRow = 0;
+        bool end = false;
+    };
     // A row that shows, as Qt lays it out with what of it is selected. The
     // serial tells the scene graph of another layout.
     struct ShownRow {
@@ -156,7 +158,8 @@ private:
     bool handlesKey(const QKeyEvent *event) const;
     bool selectForKey(const QKeyEvent *event);
     bool scrollForKey(const QKeyEvent *event);
-    void requestScroll(qreal x, qreal y);
+    void requestScroll(qreal y);
+    void holdPlace(qreal viewHeight);
     void reveal(int position);
     void setSelection(int anchor, int caret);
     void setPrimarySelection() const;
@@ -178,11 +181,12 @@ private:
     qreal m_rightPadding = 0;
     qreal m_topPadding = 0;
     qreal m_bottomPadding = 0;
-    qreal m_contentX = 0;
     qreal m_contentY = 0;
-    qreal m_contentWidth = 0;
     qreal m_contentHeight = 0;
     QString m_accessibleName;
+    // Kept through a drag of the window's edge, until the log scrolls, so
+    // that the steps don't add up to a drift.
+    Held m_held;
 
     bool m_fontDirty = true;
     bool m_layoutDirty = true;

@@ -18,6 +18,11 @@
 // advances, all of them in a few milliseconds, and Qt's text layout is only
 // asked for the rows that show.
 //
+// A record wraps to the width (#735) and goes on indented under its first
+// row. It breaks in a row's second half, after a space, a folder of a path
+// or an ideograph, failing those inside a name after its punctuation, and
+// failing that anywhere.
+//
 // An advance is the cell of the monospaced font for printable ASCII, and
 // for any other character is measured once, by itself.
 class DiagnosticsLogLayout {
@@ -25,6 +30,8 @@ public:
     struct Row {
         int start;
         int length;
+        // A row that goes on with the record of the one before.
+        bool continuation;
     };
     // The selected part of a row, from the row's start, and its colours.
     struct Highlight {
@@ -48,15 +55,15 @@ public:
     // `designMetrics` as the text's render type draws it.
     void setFont(const QFont &font, bool designMetrics);
 
-    // Places every row, for the text and the font it has.
-    void layOut();
+    // Places every row in `width`, for the text and the font it has.
+    void layOut(qreal width);
     int rowCount() const { return static_cast<int>(m_rows.size()); }
     Row row(int index) const { return m_rows[static_cast<std::size_t>(index)]; }
     // The row that shows `position`.
     int rowAt(int position) const;
     qreal rowHeight() const { return m_rowHeight; }
     qreal cellWidth() const { return m_cell; }
-    qreal widestRow() const { return m_widest; }
+    qreal indent(int row) const { return this->row(row).continuation ? m_indent : 0; }
 
     // Qt's layout of one row, its baseline on the rows' own, to draw it and
     // to place the pointer and the selection in it.
@@ -80,7 +87,9 @@ private:
 
     qreal measure(const QString &text) const;
     qreal advance(char32_t character) const;
-    qreal recordWidth(const Record &record) const;
+    int cellBreak(int from, int end, qreal width) const;
+    int measuredBreak(int from, int end, qreal width) const;
+    int breakBefore(int from, int overflow, int end) const;
 
     QString m_text;
     std::vector<Record> m_records;
@@ -91,7 +100,7 @@ private:
     qreal m_cell = 0;
     qreal m_ascent = 0;
     qreal m_rowHeight = 1;
-    qreal m_widest = 0;
+    qreal m_indent = 0;
     // The advances measured so far for the font: by code unit in the basic
     // plane, where a negative one is still to measure, and the rest by code
     // point.

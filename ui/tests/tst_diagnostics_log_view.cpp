@@ -11,6 +11,7 @@
 #include <QHash>
 #include <QPointer>
 #include <QQmlApplicationEngine>
+#include <QQmlExpression>
 #include <QQmlComponent>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -140,10 +141,26 @@ ApplicationWindow {
         view = root->findChild<DiagnosticsLogView *>();
         if (QQuickItem *scroll = itemNamed(window->contentItem(), QStringLiteral("diagnosticsScrollView"))) {
             flickable = scroll->property("contentItem").value<QQuickItem *>();
+            scrollBar = attachedBar(scroll, QStringLiteral("vertical"));
+            horizontalBar = attachedBar(scroll, QStringLiteral("horizontal"));
         }
     }
 
-    bool loaded() const { return bridge != nullptr && view != nullptr && flickable != nullptr; }
+    static QQuickItem *attachedBar(QQuickItem *scroll, const QString &which) {
+        QQmlExpression bar(qmlContext(scroll), scroll, QStringLiteral("ScrollBar.") + which);
+        return bar.evaluate().value<QQuickItem *>();
+    }
+
+    bool loaded() const {
+        return bridge != nullptr && view != nullptr && flickable != nullptr && scrollBar != nullptr
+            && horizontalBar != nullptr;
+    }
+
+    // The window at `width`, once the log is laid out in it.
+    bool resizeTo(int width) const {
+        window->setWidth(width);
+        return QTest::qWaitFor([&]() { return window->contentItem()->width() == width; }) && frame() && frame();
+    }
 
     void setLog(const QString &text) const {
         bridge->setProperty("diagnosticsText", text);
@@ -182,9 +199,12 @@ ApplicationWindow {
     QQuickWindow *window = nullptr;
     DiagnosticsLogView *view = nullptr;
     QQuickItem *flickable = nullptr;
+    QQuickItem *scrollBar = nullptr;
+    QQuickItem *horizontalBar = nullptr;
 };
 
-// Counts the frames whose rows were not all there to draw.
+// Counts the frames that had not all they draw: the rows in view, laid
+// out at the view's width, and the scroll bar of a log that scrolls.
 class FrameWatch {
 public:
     explicit FrameWatch(const Diagnostics &log)
@@ -194,6 +214,10 @@ public:
                   ++m_frames;
                   const DiagnosticsLogView &view = *log.view;
                   if (view.length() == 0 || view.width() <= 0 || view.height() <= 0) {
+                      return;
+                  }
+                  if (view.m_layoutDirty || (view.contentHeight() > view.height() && !log.scrollBar->isVisible())) {
+                      ++m_incomplete;
                       return;
                   }
                   const qreal height = view.m_layout.rowHeight();
@@ -247,6 +271,13 @@ private slots:
     void showsMarkupAsText();
     void selectionIsDrawnInTheThemesColours();
     void readsAsTextToAssistiveTechnology();
+    void aResizeShapesOnlyTheRowsThatShow();
+    void wrapsEachRecordToTheWidth_data();
+    void wrapsEachRecordToTheWidth();
+    void breaksWhereAPersonWould();
+    void aResizeKeepsThePlaceAndTheSelection();
+    void theScrollBarMovesNothing();
+    void selectsAcrossWrappedRows();
 };
 
 void DiagnosticsLogViewTest::initTestCase() {
@@ -281,6 +312,7 @@ void DiagnosticsLogViewTest::aFullLogShapesOnlyTheRowsThatShow() {
     const FrameWatch watch(log);
     QVERIFY(log.open());
     QCOMPARE(log.view->length(), lines.join(QLatin1Char('\n')).size());
+    // Once, and once more if the window's first showing sizes the view.
     QVERIFY(log.view->layoutPasses() >= 1 && log.view->layoutPasses() <= 2);
     QVERIFY2(log.view->shapedRows() <= 3 * log.rowsInView(), qPrintable(QString::number(log.view->shapedRows())));
 
@@ -603,8 +635,10 @@ void DiagnosticsLogViewTest::selectionIsDrawnInTheThemesColours() {
     for (const int position : {from - 1, from, 60 - 1, 61, 2 * 61 - 2, 2 * 61, to - 1, to, 3 * 61 + 2}) {
         const QRectF at = log.view->positionToRectangle(position);
         // Inside the character's cell.
-        const QRect cell = QRectF(log.view->mapToScene(at.topLeft() + QPointF(1, 0)),
-                                  QSizeF(log.view->m_layout.cellWidth() - 2, at.height()))
+        // The software renderer's grab is in device pixels and doesn't say so.
+        const qreal ratio = static_cast<qreal>(image.width()) / log.window->width();
+        const QRect cell = QRectF(log.view->mapToScene(at.topLeft() + QPointF(1, 0)) * ratio,
+                                  QSizeF(log.view->m_layout.cellWidth() - 2, at.height() - 1) * ratio)
                                .toRect();
         bool banded = false;
         for (int x = cell.left(); x <= cell.right() && !banded; ++x) {
@@ -672,6 +706,232 @@ void DiagnosticsLogViewTest::readsAsTextToAssistiveTechnology() {
         up = up->parent();
     }
     QCOMPARE(up, windowAccessible);
+}
+
+// #735: wrapped in the text edit, each step of a resize laid out the whole
+// log, 200 ms. A step now places the rows once and shapes a view's worth.
+void DiagnosticsLogViewTest::aResizeShapesOnlyTheRowsThatShow() {
+    Diagnostics log;
+    QVERIFY(log.loaded());
+    log.setLog(fullLog());
+    QVERIFY(log.open());
+    log.scrollTo(log.view->contentHeight() / 3);
+    QVERIFY(log.frame());
+    const FrameWatch watch(log);
+    for (int step = 1; step <= 10; ++step) {
+        const int passes = log.view->layoutPasses();
+        const int shaped = log.view->shapedRows();
+        log.window->setWidth(log.window->width() + (step <= 5 ? 29 : -13));
+        QTRY_COMPARE(log.view->layoutPasses(), passes + 1);
+        QVERIFY(log.frame());
+        QCOMPARE(log.view->layoutPasses(), passes + 1);
+        // The rows at the new width, at the place held, and at most those
+        // where the log was until it was scrolled there.
+        QVERIFY(log.view->shapedRows() - shaped <= 2 * (log.rowsInView() + 1));
+    }
+    QCOMPARE(watch.incomplete(), 0);
+}
+
+void DiagnosticsLogViewTest::wrapsEachRecordToTheWidth_data() {
+    QTest::addColumn<int>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::newRow("10 pt, narrow") << 10 << 0;
+    QTest::newRow("10 pt, wide") << 10 << 1700;
+    QTest::newRow("24 pt, narrow") << 24 << 0;
+    QTest::newRow("24 pt, wide") << 24 << 1700;
+}
+
+// Every row inside the width, each record's rows its text and nothing more,
+// the further ones indented, whatever its characters.
+void DiagnosticsLogViewTest::wrapsEachRecordToTheWidth() {
+    QFETCH(int, pointSize);
+    QFETCH(int, width);
+    Diagnostics log;
+    QVERIFY(log.loaded());
+    const QString text = QStringList{
+        record(1, 700),
+        QStringLiteral("[ui] short"),
+        QString(),
+        QStringLiteral("[library] one long name: ") + QString(400, QLatin1Char('x')),
+        QStringLiteral("[library] info: Scanning \"/fixture/")
+            + QString::fromUtf16(u"\u9759\u304b\u306a\u5b50\u5348\u7dda\u3001\u5317\u3078\u306e\u822a\u8def/")
+                  .repeated(30),
+        QStringLiteral("[library] ") + QString::fromUtf16(u"caf\u00e9 cafe\u0301 S\u00e4vel \u041c\u0438\u0440 ").repeated(30),
+        QStringLiteral("[library] ") + QString::fromUtf16(u"\U0001f3b5\U0001f3b6 ").repeated(60),
+        QStringLiteral("[library] ") + QString::fromUtf16(u"\u0645\u0648\u0633\u064a\u0642\u0649 ").repeated(50),
+        QStringLiteral("[tabs]") + QStringLiteral("\tcolumn").repeated(50),
+    }.join(QLatin1Char('\n'));
+    log.setLog(text);
+    QVERIFY(log.open());
+    QFont font = log.view->font();
+    font.setPointSize(pointSize);
+    log.view->setFont(font);
+    QVERIFY(log.resizeTo(width > 0 ? width : log.window->minimumWidth()));
+
+    const DiagnosticsLogLayout &layout = log.view->laidOut();
+    const qreal room = log.view->width() - log.view->leftPadding() - log.view->rightPadding();
+    QString rejoined;
+    int continuations = 0;
+    for (int index = 0; index < layout.rowCount(); ++index) {
+        const DiagnosticsLogLayout::Row row = layout.row(index);
+        const QString shown = text.mid(row.start, row.length);
+        if (row.continuation) {
+            ++continuations;
+            QVERIFY(row.length > 0);
+            QCOMPARE(layout.indent(index), 4 * layout.cellWidth());
+            QVERIFY2(!shown.startsWith(QLatin1Char(' ')), qPrintable(shown));
+            QVERIFY(!shown.front().isLowSurrogate() && shown.front().category() != QChar::Mark_NonSpacing);
+        } else {
+            QCOMPARE(layout.indent(index), 0.0);
+            if (index > 0) {
+                rejoined += QLatin1Char('\n');
+            }
+        }
+        rejoined += shown;
+
+        // Laid out by Qt, as it is drawn, less the spaces left past the edge.
+        QString visible = shown;
+        while (visible.endsWith(QLatin1Char(' ')) || visible.endsWith(QLatin1Char('\t'))) {
+            visible.chop(1);
+        }
+        if (visible.isEmpty()) {
+            continue;
+        }
+        const std::unique_ptr<QTextLayout> shaped = layout.shape(index);
+        QTextLayout drawn(visible, shaped->font());
+        drawn.setTextOption(shaped->textOption());
+        drawn.beginLayout();
+        QTextLine line = drawn.createLine();
+        line.setLineWidth(1 << 20);
+        drawn.endLayout();
+        // The cursor after right-to-left text is at its left, so not by it.
+        const qreal right = layout.indent(index) + line.naturalTextWidth();
+        QVERIFY2(right <= room + 1, qPrintable(QStringLiteral("%1 past %2: %3").arg(right).arg(room).arg(shown)));
+    }
+    QVERIFY(continuations > 8);
+    QCOMPARE(rejoined.toUtf8(), text.toUtf8());
+    QVERIFY(!log.horizontalBar->isVisible());
+
+    log.view->selectAll();
+    log.view->copy();
+    QCOMPARE(clipboardText().toUtf8(), text.toUtf8());
+}
+
+void DiagnosticsLogViewTest::breaksWhereAPersonWould() {
+    Diagnostics log;
+    QVERIFY(log.loaded());
+    log.setLog(QStringLiteral("x"));
+    QVERIFY(log.open());
+    DiagnosticsLogLayout &layout = log.view->m_layout;
+    const auto rowsOf = [&layout](const QString &text, int cells) {
+        layout.setText(text);
+        layout.layOut(cells * layout.cellWidth());
+        QStringList rows;
+        for (int index = 0; index < layout.rowCount(); ++index) {
+            rows << text.mid(layout.row(index).start, layout.row(index).length);
+        }
+        return rows;
+    };
+    // Between words, the space left on the row before.
+    QCOMPARE(rowsOf(QStringLiteral("alpha beta gamma delta"), 18),
+             QStringList({QStringLiteral("alpha beta gamma "), QStringLiteral("delta")}));
+    // Between a path's folders, and not after the slash that opens it.
+    QCOMPARE(rowsOf(QStringLiteral("at \"/fixture/library/album/track.flac\""), 24),
+             QStringList({QStringLiteral("at \"/fixture/library/"), QStringLiteral("album/track.flac\"")}));
+    QCOMPARE(rowsOf(QStringLiteral("file not found \"/fixture.flac\""), 20),
+             QStringList({QStringLiteral("file not found "), QStringLiteral("\"/fixture.flac\"")}));
+    // A setting too long for its row goes on after its =, not inside its value.
+    QCOMPARE(rowsOf(QStringLiteral("set: show_title_strip=false"), 24),
+             QStringList({QStringLiteral("set: show_title_strip="), QStringLiteral("false")}));
+    // A name longer than the row starts where it is.
+    QCOMPARE(rowsOf(QStringLiteral("a: abcdefghijklmnopqrstuvwxyz"), 16),
+             QStringList({QStringLiteral("a: abcdefghijklm"), QStringLiteral("nopqrstuvwxy"), QStringLiteral("z")}));
+}
+
+void DiagnosticsLogViewTest::aResizeKeepsThePlaceAndTheSelection() {
+    Diagnostics log;
+    QVERIFY(log.loaded());
+    const QString text = records(300, 500).join(QLatin1Char('\n'));
+    log.setLog(text);
+    QVERIFY(log.open());
+    const int width = log.window->width();
+    const int topRow = log.view->m_layout.rowAt(120 * 501);
+    const int top = log.view->m_layout.row(topRow).start;
+    const qreal y = log.view->topPadding() + topRow * log.view->m_layout.rowHeight();
+    log.scrollTo(y);
+    QVERIFY(log.frame());
+    log.view->select(top + 10, top + 2000);
+
+    for (const int at : {width - 90, width + 260, width + 33, width - 150, width}) {
+        QVERIFY(log.resizeTo(at));
+        // The character that was first in the view is in its first row.
+        const QRectF held = log.view->positionToRectangle(top);
+        QVERIFY2(held.top() <= 0.5 && held.bottom() >= 0.5, qPrintable(QString::number(held.top())));
+        QCOMPARE(log.view->selectedText(), text.mid(top + 10, 1990));
+    }
+    // No drift over the steps.
+    QCOMPARE(log.contentY(), y);
+
+    // At the end, it stays at the end.
+    log.scrollTo(log.view->contentHeight() - log.view->height());
+    QVERIFY(log.frame());
+    for (const int at : {width - 120, width + 200}) {
+        QVERIFY(log.resizeTo(at));
+        QVERIFY(qAbs(log.contentY() - (log.view->contentHeight() - log.view->height())) < 1);
+    }
+}
+
+// The bar's lane is there without the bar, so no record wraps again.
+void DiagnosticsLogViewTest::theScrollBarMovesNothing() {
+    Diagnostics log;
+    QVERIFY(log.loaded());
+    const QString first = record(0, 300);
+    log.setLog(first);
+    QVERIFY(log.open());
+    QTRY_VERIFY(!log.scrollBar->isVisible());
+    const qreal width = log.view->width();
+    const QRectF last = log.view->positionToRectangle(static_cast<int>(first.size()) - 1);
+    QVERIFY(width <= log.scrollBar->parentItem()->width() - log.scrollBar->width() + 0.5);
+
+    log.setLog(first + QLatin1Char('\n') + records(200, 300).join(QLatin1Char('\n')));
+    QTRY_VERIFY(log.scrollBar->isVisible());
+    QVERIFY(log.frame());
+    QCOMPARE(log.view->width(), width);
+    QCOMPARE(log.view->positionToRectangle(static_cast<int>(first.size()) - 1), last);
+    QVERIFY(!log.horizontalBar->isVisible());
+}
+
+void DiagnosticsLogViewTest::selectsAcrossWrappedRows() {
+    Diagnostics log;
+    QVERIFY(log.loaded());
+    const QString text = records(40, 600).join(QLatin1Char('\n'));
+    log.setLog(text);
+    QVERIFY(log.open());
+    const DiagnosticsLogLayout &layout = log.view->m_layout;
+    QVERIFY(layout.row(1).continuation && layout.row(2).continuation);
+
+    // A drag from a record's second row into the next record's third.
+    const int from = layout.row(1).start + 7;
+    const int nextRecord = layout.rowAt(601);
+    const int to = layout.row(nextRecord + 2).start + 9;
+    QTest::mousePress(log.window, Qt::LeftButton, Qt::NoModifier, log.inWindow(from));
+    QTest::mouseMove(log.window, log.inWindow(to));
+    QTest::mouseRelease(log.window, Qt::LeftButton, Qt::NoModifier, log.inWindow(to));
+    QCOMPARE(log.view->selectedText(), text.mid(from, to - from));
+    QTest::keyClick(log.window, Qt::Key_C, Qt::ControlModifier);
+    QCOMPARE(clipboardText(), text.mid(from, to - from));
+
+    // Shift+Down goes a row at a time and back, over rows of any length.
+    const int start = layout.row(0).start + layout.row(0).length - 1;
+    log.view->select(start, start);
+    for (int row = 1; row <= nextRecord + 2; ++row) {
+        QTest::keyClick(log.window, Qt::Key_Down, Qt::ShiftModifier);
+        QCOMPARE(layout.rowAt(log.view->cursorPosition()), row);
+    }
+    for (int row = nextRecord + 1; row >= 0; --row) {
+        QTest::keyClick(log.window, Qt::Key_Up, Qt::ShiftModifier);
+        QCOMPARE(layout.rowAt(log.view->cursorPosition()), row);
+    }
 }
 
 int main(int argc, char **argv) {

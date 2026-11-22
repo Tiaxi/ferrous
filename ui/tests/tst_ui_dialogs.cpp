@@ -3856,7 +3856,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow_data() {
 // the log's path (Clear… asked to delete the log, and the actions were over
 // two rows with two ragged right edges): Reload and Delete Log on the left,
 // Open Folder, Copy All and Copy Log Without Paths on the right, ending
-// where the log's frame does. The log's scroll bars are inside its frame,
+// where the log's frame does. The log's scroll bar is inside its frame,
 // and its text clear of the frame.
 void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QFETCH(qreal, pointSize);
@@ -3870,7 +3870,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
         lines << QStringLiteral("[library] warning: could not read /fixture/library/Artist/Album/%1 - A track "
                                 "with a title long enough to run past the log's right edge.flac: %2")
                      .arg(index)
-                     // Past the edge of the window's widest, at 24 pt, too.
+                     // Wider than the widest window, at 24 pt too.
                      .arg(QString(260, QLatin1Char('x')));
     }
     QVERIFY(bridge->setProperty("diagnosticsText", lines.join(QLatin1Char('\n'))));
@@ -3927,16 +3927,18 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QCOMPARE(sceneRect(buttons.constLast()).right(), sceneRect(frame).right());
     QCOMPARE(sceneRect(pathRow).right(), sceneRect(frame).right());
 
-    // The scroll bars, both shown by the long and many lines, are inside the
-    // log's frame.
-    for (const char *bar : {"ScrollBar.horizontal", "ScrollBar.vertical"}) {
-        auto *scrollBar = qobject_cast<QQuickItem *>(
-            qvariant_cast<QObject *>(evaluate(scrollView, QString::fromLatin1(bar))));
-        QVERIFY2(scrollBar != nullptr, bar);
-        QTRY_VERIFY2(scrollBar->isVisible() && scrollBar->width() > 0 && scrollBar->height() > 0, bar);
-        QVERIFY2(within(sceneRect(scrollBar), sceneRect(frame).adjusted(1, 1, -1, -1)),
-                 qPrintable(QString::fromLatin1(bar) + QStringLiteral(" ") + describeItem(scrollBar)));
-    }
+    // The scroll bar that the many lines show is inside the log's frame;
+    // the long ones wrap, so there is no other (#735).
+    auto *scrollBar = qobject_cast<QQuickItem *>(
+        qvariant_cast<QObject *>(evaluate(scrollView, QStringLiteral("ScrollBar.vertical"))));
+    QVERIFY(scrollBar != nullptr);
+    QTRY_VERIFY(scrollBar->isVisible() && scrollBar->width() > 0 && scrollBar->height() > 0);
+    QVERIFY2(within(sceneRect(scrollBar), sceneRect(frame).adjusted(1, 1, -1, -1)),
+             qPrintable(describeItem(scrollBar)));
+    auto *horizontal = qobject_cast<QQuickItem *>(
+        qvariant_cast<QObject *>(evaluate(scrollView, QStringLiteral("ScrollBar.horizontal"))));
+    QVERIFY(horizontal != nullptr);
+    QTRY_VERIFY(!horizontal->isVisible());
     // The log's text stands 8 px clear of the frame's sides and 6 px of
     // its top and bottom, inside its 1 px edge (at 5 px it sat nearly on
     // the frame).
@@ -3948,7 +3950,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QCOMPARE(textArea->property("bottomPadding").toReal(), 6.0);
     QObject *flickable = qvariant_cast<QObject *>(scrollView->property("contentItem"));
     QVERIFY(flickable != nullptr);
-    QVERIFY(flickable->setProperty("contentX", 0.0) && flickable->setProperty("contentY", 0.0));
+    QVERIFY(flickable->setProperty("contentY", 0.0));
     QRectF firstCharacter;
     QVERIFY(QMetaObject::invokeMethod(textArea, "positionToRectangle", Q_RETURN_ARG(QRectF, firstCharacter),
                                       Q_ARG(int, 0)));

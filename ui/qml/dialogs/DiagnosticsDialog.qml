@@ -198,9 +198,9 @@ Components.DialogWindow {
             }
         }
 
-        // The log on the view colour in a frame, its scroll bars inside the
-        // frame, as the tag editor's table (the horizontal one ran
-        // under the frame, outside it). The frame takes the focus colour
+        // The log on the view colour in a frame, its scroll bar inside the
+        // frame, as the tag editor's table. Its records wrap (#735), so it
+        // scrolls one way. The frame takes the focus colour
         // while the log has the focus, as a text area's.
         Rectangle {
             objectName: "diagnosticsLogFrame"
@@ -220,14 +220,20 @@ Components.DialogWindow {
                 anchors.fill: parent
                 anchors.margins: 1
                 clip: true
+                // The scroll bar's lane is kept while there is none, so the
+                // records don't wrap again as it comes and goes.
+                leftPadding: mirrored ? ScrollBar.vertical.width : 0
+                rightPadding: mirrored ? 0 : ScrollBar.vertical.width
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
                 // Holds no text: it is as large as the log, and the view
                 // over it draws the part that shows (#724).
                 Flickable {
                     id: diagnosticsFlickable
-                    contentWidth: diagnosticsLogView.contentWidth
+                    contentWidth: width
                     contentHeight: diagnosticsLogView.contentHeight
                     boundsBehavior: Flickable.StopAtBounds
+                    flickableDirection: Flickable.VerticalFlick
 
                     DiagnosticsLogView {
                         id: diagnosticsLogView
@@ -235,7 +241,6 @@ Components.DialogWindow {
                         parent: diagnosticsFlickable
                         width: diagnosticsFlickable.width
                         height: diagnosticsFlickable.height
-                        contentX: diagnosticsFlickable.contentX
                         contentY: diagnosticsFlickable.contentY
                         focus: true
                         Kirigami.Theme.colorSet: Kirigami.Theme.View
@@ -257,8 +262,7 @@ Components.DialogWindow {
                         Accessible.role: Accessible.EditableText
                         accessibleName: I18n.i18nc("@label accessible name of the diagnostics log's text", "Log")
 
-                        onScrollRequested: function(x, y) {
-                            diagnosticsFlickable.contentX = x
+                        onScrollRequested: function(y) {
                             diagnosticsFlickable.contentY = y
                         }
                         Keys.onMenuPressed: diagnosticsContextMenu.popupAt(

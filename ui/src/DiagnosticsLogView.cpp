@@ -89,6 +89,7 @@ void DiagnosticsLogView::setText(const QString &text) {
     const bool announces = QAccessible::isActive();
     const QString before = announces ? m_layout.text() : QString();
     endDrag();
+    m_held = {};
     m_layout.setText(text);
     // The layouts of the rows that showed are of the text before.
     m_shown.clear();
@@ -107,7 +108,7 @@ void DiagnosticsLogView::setText(const QString &text) {
         emit selectionChanged();
     }
     // New text opens at its start, as in a text edit.
-    requestScroll(0, 0);
+    requestScroll(0);
     if (announces) {
         QAccessibleTextUpdateEvent update(this, 0, before, m_layout.text());
         QAccessible::updateAccessibility(&update);
@@ -180,19 +181,12 @@ void DiagnosticsLogView::setBottomPadding(qreal padding) {
     }
 }
 
-void DiagnosticsLogView::setContentX(qreal x) {
-    if (m_contentX != x) {
-        m_contentX = x;
-        update();
-        emit contentXChanged();
-    }
-}
-
 void DiagnosticsLogView::setContentY(qreal y) {
     if (m_contentY == y) {
         return;
     }
     m_contentY = y;
+    m_held = {};
     polish();
     update();
     emit contentYChanged();
@@ -230,19 +224,28 @@ void DiagnosticsLogView::ensureLayout() {
         m_fontDirty = false;
         m_layout.setFont(m_font, renderType() != QSGTextNode::NativeRendering);
     }
-    m_layout.layOut();
+    m_layout.layOut(width() - m_leftPadding - m_rightPadding);
     if (length() > 0) {
         ++m_layoutPasses;
     }
     m_shown.clear();
     update();
 
-    const qreal contentWidth = m_leftPadding + m_layout.widestRow() + m_rightPadding;
+    // Scrolling forgets it, and the new height may itself scroll.
+    const Held held = m_held;
     const qreal contentHeight = m_topPadding + m_layout.rowCount() * m_layout.rowHeight() + m_bottomPadding;
-    if (m_contentWidth != contentWidth || m_contentHeight != contentHeight) {
-        m_contentWidth = contentWidth;
+    if (m_contentHeight != contentHeight) {
         m_contentHeight = contentHeight;
-        emit contentSizeChanged();
+        emit contentHeightChanged();
+    }
+    if (held.end || held.position >= 0) {
+        const qreal bottom = std::max(0.0, m_contentHeight - height());
+        const qreal y = held.end
+            ? bottom
+            : std::clamp(m_topPadding + m_layout.rowAt(held.position) * m_layout.rowHeight() + held.intoRow, 0.0,
+                         bottom);
+        requestScroll(y);
+        m_held = held;
     }
 }
 
@@ -251,9 +254,28 @@ DiagnosticsLogLayout &DiagnosticsLogView::laidOut() {
     return m_layout;
 }
 
+void DiagnosticsLogView::holdPlace(qreal viewHeight) {
+    // At the top, and until it has been laid out, there is nothing to hold.
+    if (m_held.end || m_held.position >= 0 || m_layoutDirty || m_contentY <= 0 || length() == 0) {
+        return;
+    }
+    if (m_contentY + viewHeight >= m_contentHeight - 1) {
+        m_held.end = true;
+        return;
+    }
+    const qreal rowHeight = m_layout.rowHeight();
+    const int top = static_cast<int>(
+        std::clamp<qreal>(std::floor((m_contentY - m_topPadding) / rowHeight), 0, m_layout.rowCount() - 1));
+    m_held.position = m_layout.row(top).start;
+    m_held.intoRow = m_contentY - m_topPadding - top * rowHeight;
+}
+
 void DiagnosticsLogView::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
     QQuickItem::geometryChange(newGeometry, oldGeometry);
-    if (newGeometry.size() != oldGeometry.size()) {
+    if (newGeometry.width() != oldGeometry.width()) {
+        holdPlace(oldGeometry.height());
+        invalidateLayout();
+    } else if (newGeometry.height() != oldGeometry.height()) {
         polish();
         update();
     }
@@ -269,7 +291,10 @@ void DiagnosticsLogView::itemChange(ItemChange change, const ItemChangeData &val
 }
 
 void DiagnosticsLogView::updatePolish() {
-    ensureLayout();
+    // Without a width there is nothing to wrap to.
+    if (width() > 0) {
+        ensureLayout();
+    }
     if (width() <= 0 || height() <= 0 || length() == 0) {
         m_shown.clear();
         update();
@@ -345,7 +370,7 @@ QSGNode *DiagnosticsLogView::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeDa
         // In doubles up to here: single precision is too coarse for a y
         // millions of pixels down a long log.
         QMatrix4x4 place;
-        place.translate(onPixel(m_leftPadding - m_contentX),
+        place.translate(onPixel(m_leftPadding + m_layout.indent(index)),
                         onPixel(m_topPadding + index * m_layout.rowHeight() - m_contentY));
         if (drawn->second.node->matrix() != place) {
             drawn->second.node->setMatrix(place);
@@ -433,7 +458,7 @@ qreal DiagnosticsLogView::xOf(int row, int position) const {
         return 0;
     }
     const DiagnosticsLogLayout::Row span = m_layout.row(row);
-    return layout->lineAt(0).cursorToX(std::clamp(position - span.start, 0, span.length));
+    return m_layout.indent(row) + layout->lineAt(0).cursorToX(std::clamp(position - span.start, 0, span.length));
 }
 
 int DiagnosticsLogView::positionInRow(int row, qreal x) const {
@@ -444,14 +469,14 @@ int DiagnosticsLogView::positionInRow(int row, qreal x) const {
     if (layout->lineCount() == 0) {
         return span.start;
     }
-    return span.start + std::clamp(layout->lineAt(0).xToCursor(x), 0, span.length);
+    return span.start + std::clamp(layout->lineAt(0).xToCursor(x - m_layout.indent(row)), 0, span.length);
 }
 
 QRectF DiagnosticsLogView::positionToRectangle(int position) {
     ensureLayout();
     position = std::clamp(position, 0, length());
     const int row = m_layout.rowAt(position);
-    return {m_leftPadding + xOf(row, position) - m_contentX,
+    return {m_leftPadding + xOf(row, position),
             m_topPadding + row * m_layout.rowHeight() - m_contentY, 1, m_layout.rowHeight()};
 }
 
@@ -461,11 +486,11 @@ int DiagnosticsLogView::positionAt(qreal x, qreal y) {
     if (row >= m_layout.rowCount()) {
         return length();
     }
-    return positionInRow(static_cast<int>(std::max<qreal>(0, row)), x + m_contentX - m_leftPadding);
+    return positionInRow(static_cast<int>(std::max<qreal>(0, row)), x - m_leftPadding);
 }
 
-void DiagnosticsLogView::requestScroll(qreal x, qreal y) {
-    emit scrollRequested(x, y);
+void DiagnosticsLogView::requestScroll(qreal y) {
+    emit scrollRequested(y);
 }
 
 void DiagnosticsLogView::reveal(int position) {
@@ -483,15 +508,8 @@ void DiagnosticsLogView::reveal(int position) {
     } else if (bottom > y + height()) {
         y = (row == m_layout.rowCount() - 1 ? m_contentHeight : bottom) - height();
     }
-    const qreal caretX = m_leftPadding + xOf(row, position);
-    qreal x = m_contentX;
-    if (caretX < x + m_leftPadding) {
-        x = std::max<qreal>(0, caretX - m_leftPadding);
-    } else if (caretX > x + width() - m_rightPadding) {
-        x = std::max<qreal>(0, caretX - width() + m_rightPadding);
-    }
-    if (x != m_contentX || y != m_contentY) {
-        requestScroll(x, y);
+    if (y != m_contentY) {
+        requestScroll(y);
     }
 }
 
@@ -594,7 +612,7 @@ void DiagnosticsLogView::mouseMoveEvent(QMouseEvent *event) {
         m_dragPoint = event->position();
         extendDragTo(m_dragPoint);
     }
-    if (m_dragPoint.y() < 0 || m_dragPoint.y() > height() || m_dragPoint.x() < 0 || m_dragPoint.x() > width()) {
+    if (m_dragPoint.y() < 0 || m_dragPoint.y() > height()) {
         if (!m_dragScroll.isActive()) {
             m_dragScroll.start(kDragScrollIntervalMs, this);
         }
@@ -622,16 +640,12 @@ void DiagnosticsLogView::timerEvent(QTimerEvent *event) {
         return;
     }
     // Faster the farther past the edge, up to a page a frame.
-    const auto step = [](qreal point, qreal size, qreal page) {
-        const qreal past = point < 0 ? point : std::max<qreal>(0, point - size);
-        return std::clamp(past / 2, -page, page);
-    };
-    const qreal y = std::clamp(m_contentY + step(m_dragPoint.y(), height(), height()), 0.0,
-                               std::max(0.0, m_contentHeight - height()));
-    const qreal x = std::clamp(m_contentX + step(m_dragPoint.x(), width(), width()), 0.0,
-                               std::max(0.0, m_contentWidth - width()));
-    if (x != m_contentX || y != m_contentY) {
-        requestScroll(x, y);
+    const qreal point = m_dragPoint.y();
+    const qreal past = point < 0 ? point : std::max<qreal>(0, point - height());
+    const qreal step = std::clamp(past / 2, -height(), height());
+    const qreal y = std::clamp(m_contentY + step, 0.0, std::max(0.0, m_contentHeight - height()));
+    if (y != m_contentY) {
+        requestScroll(y);
     }
     extendDragTo(m_dragPoint);
 }
@@ -662,8 +676,6 @@ bool DiagnosticsLogView::handlesKey(const QKeyEvent *event) const {
         return modifiers == Qt::NoModifier || modifiers == Qt::ControlModifier;
     case Qt::Key_Up:
     case Qt::Key_Down:
-    case Qt::Key_Left:
-    case Qt::Key_Right:
     case Qt::Key_PageUp:
     case Qt::Key_PageDown:
         return modifiers == Qt::NoModifier;
@@ -707,7 +719,14 @@ void DiagnosticsLogView::caretRowsAway(int rows) {
     } else if (to >= m_layout.rowCount()) {
         setSelection(m_anchor, length());
     } else {
-        setSelection(m_anchor, positionInRow(to, m_caretX));
+        int caret = positionInRow(to, m_caretX);
+        // The end of a wrapped row is the next one's start: short of it, as
+        // in a text edit, so that the caret stays in the row it went to.
+        const DiagnosticsLogLayout::Row row = m_layout.row(to);
+        if (to + 1 < m_layout.rowCount() && m_layout.row(to + 1).continuation && caret == row.start + row.length) {
+            caret = std::max(row.start, neighbour(caret, false, false));
+        }
+        setSelection(m_anchor, caret);
     }
 }
 
@@ -770,23 +789,17 @@ bool DiagnosticsLogView::scrollForKey(const QKeyEvent *event) {
     ensureLayout();
     const qreal line = m_layout.rowHeight();
     const qreal page = std::max(line, height() - line);
-    const qreal column = 4 * m_layout.cellWidth();
-    qreal x = m_contentX;
     qreal y = m_contentY;
     switch (event->key()) {
     case Qt::Key_Up: y -= line; break;
     case Qt::Key_Down: y += line; break;
-    case Qt::Key_Left: x -= column; break;
-    case Qt::Key_Right: x += column; break;
     case Qt::Key_PageUp: y -= page; break;
     case Qt::Key_PageDown: y += page; break;
     case Qt::Key_Home: y = 0; break;
     case Qt::Key_End: y = m_contentHeight; break;
     default: return false;
     }
-    x = std::clamp(x, 0.0, std::max(0.0, m_contentWidth - width()));
-    y = std::clamp(y, 0.0, std::max(0.0, m_contentHeight - height()));
-    requestScroll(x, y);
+    requestScroll(std::clamp(y, 0.0, std::max(0.0, m_contentHeight - height())));
     return true;
 }
 
