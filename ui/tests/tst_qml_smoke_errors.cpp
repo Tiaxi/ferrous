@@ -408,7 +408,7 @@ void ErrorsSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
 
     // What the bridge client reports when the relay finds the backend gone.
     const QString reason = QStringLiteral(
-        "The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.");
+        "The playback engine stopped unexpectedly. Restart Ferrous to continue.");
     QVERIFY(ui.bridge->setProperty("backendFailure", reason));
 
     QTRY_VERIFY(message->property("visible").toBool());

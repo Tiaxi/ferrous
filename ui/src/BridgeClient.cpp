@@ -4401,7 +4401,7 @@ quint32 BridgeClient::saveStateBeforeQuit() {
             emit stateSaveFinished(
                 requestId,
                 false,
-                i18nc("@info", "Settings and the queue could not be saved: the backend has stopped."));
+                i18nc("@info", "Settings and the queue could not be saved: the playback engine has stopped."));
         },
         Qt::QueuedConnection);
     return requestId;
@@ -5640,7 +5640,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         if (!m_bridgeShutdownRequested) {
             const QString reason = snapshot.errorMessage.trimmed();
             setBackendFailure(reason.isEmpty()
-                    ? i18nc("@info", "The Ferrous backend stopped unexpectedly. "
+                    ? i18nc("@info", "The playback engine stopped unexpectedly. "
                                      "Restart Ferrous to continue.")
                     : reason);
         }

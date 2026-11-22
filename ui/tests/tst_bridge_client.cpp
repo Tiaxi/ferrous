@@ -418,6 +418,7 @@ private slots:
     void theDynamicRangeKeepsTheBackendsWholeRange();
     void saveBeforeQuitReportsAFailedSaveAndSavesOnRetry();
     void saveBeforeQuitFailsWhenTheBackendHasStopped();
+    void aStoppedEngineIsNamedAnEngine();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void analysisFrameTellsAFileThatEndsEarly();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
@@ -8901,7 +8902,29 @@ void BridgeClientTest::saveBeforeQuitFailsWhenTheBackendHasStopped() {
     QVERIFY(requestId != 0);
     QVERIFY(!finished.at(0).at(1).toBool());
     QCOMPARE(finished.at(0).at(2).toString(),
-        QStringLiteral("Settings and the queue could not be saved: the backend has stopped."));
+        QStringLiteral("Settings and the queue could not be saved: the playback engine has stopped."));
+}
+
+// The status bar says "Playback engine stopped": its tooltip's default,
+// when the stop came without a reason, and the error of a save after it
+// call it an engine too (they said backend).
+void BridgeClientTest::aStoppedEngineIsNamedAnEngine() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    acceptCommands(client);
+    BinaryBridgeCodec::DecodedSnapshot stopped;
+    stopped.hasStopped = true;
+    // A stop the client didn't ask for.
+    client.m_bridgeShutdownRequested = false;
+    QVERIFY(!client.processBinarySnapshot(stopped));
+    client.m_bridgeShutdownRequested = true;
+    QCOMPARE(client.backendFailure(),
+             QStringLiteral("The playback engine stopped unexpectedly. Restart Ferrous to continue."));
+    QSignalSpy finished(&client, &BridgeClient::stateSaveFinished);
+    (void)client.saveStateBeforeQuit();
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(finished.at(0).at(2).toString(),
+             QStringLiteral("Settings and the queue could not be saved: the playback engine has stopped."));
 }
 
 void BridgeClientTest::analysisFrameTellsAFileThatEndsEarly() {
