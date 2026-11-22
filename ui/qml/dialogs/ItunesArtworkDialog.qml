@@ -222,6 +222,7 @@ Components.DialogWindow {
             return
         }
         replaceCoverConfirmDialog.suggestionIndex = index
+        replaceCoverConfirmDialog.suggestion = root.suggestionRowAt(index)
         // Over the viewer during its preview, else over this dialog.
         replaceCoverConfirmDialog.windowRoot = root.previewShown && root.previewHost && root.previewHost.Window.window
             ? root.previewHost.Window.window : root
@@ -398,6 +399,8 @@ Components.DialogWindow {
     // placeholder without one.
     component ArtworkThumbnail: Item {
         property alias source: thumbnailImage.source
+        // Decoded at the rows' size at any size it is drawn, so one image
+        // serves the row and the question's smaller thumbnail of it.
 
         width: root.thumbnailSize
         height: root.thumbnailSize
@@ -857,25 +860,88 @@ Components.DialogWindow {
         id: replaceCoverConfirmDialog
         objectName: "replaceCoverConfirmDialog"
         property int suggestionIndex: -1
+        // The suggestion's row, as it was resolved when the question asked.
+        property var suggestion: ({})
         // Over this dialog, or over the viewer during its preview: see
         // applySuggestion().
         uiPalette: root.uiPalette
         windowRoot: root
         title: I18n.i18nc("@title:window", "Replace Album Art")
+
+        // What was chosen, under the question, which covers the row it
+        // came from: that row's thumbnail, title and artist. Display only.
+        RowLayout {
+            objectName: "replaceCoverChosen"
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+
+            ArtworkThumbnail {
+                objectName: "replaceCoverChosenThumbnail"
+                readonly property int side: root.uiPalette.scaledSize(48)
+                Layout.preferredWidth: side
+                Layout.preferredHeight: side
+                source: replaceCoverConfirmDialog.suggestion.previewSource || ""
+                Accessible.ignored: true
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                Label {
+                    objectName: "replaceCoverChosenTitle"
+                    Layout.fillWidth: true
+                    visible: text.length > 0
+                    textFormat: Text.PlainText
+                    text: replaceCoverConfirmDialog.suggestion.albumTitle || ""
+                    color: root.uiPalette.text
+                    wrapMode: Text.Wrap
+                }
+
+                Label {
+                    objectName: "replaceCoverChosenArtist"
+                    Layout.fillWidth: true
+                    visible: text.length > 0
+                    textFormat: Text.PlainText
+                    text: replaceCoverConfirmDialog.suggestion.artistName || ""
+                    color: root.uiPalette.textSecondary
+                    wrapMode: Text.Wrap
+                }
+            }
+        }
+
         // A short sentence for each case, as the backend applies it
-        // (artwork::apply_artwork_to_track), then what is lost. All of it
-        // is in the folder of the track the art was searched for. A folder
-        // with a JPEG or PNG gets a cover file, as Ferrous shows any such
-        // image as the folder's cover (folder_cover), a back scan alone
-        // too, which nobody would call "a cover image": the one with a
-        // cover's name is overwritten, and otherwise a new one is written
-        // beside the images that stay, so not every replaced image is lost
-        // ("replaces the album's cover image file" said it was). Without
-        // such an image, the tracks in that folder with the album's tag get
-        // it as their front cover, and no other folder's.
-        details: I18n.i18nc("@info", "If the track’s folder has a JPEG or PNG image, the new album art becomes "
-            + "its cover file. Otherwise it is embedded in the album’s tracks in that folder. "
-            + "Ferrous keeps no copy of what it overwrites.")
+        // (artwork::apply_artwork_to_track). All of it is in the folder of
+        // the track the art was searched for. A folder with a JPEG or PNG
+        // gets a cover file, as Ferrous shows any such image as the
+        // folder's cover (folder_cover), a back scan alone too, which
+        // nobody would call "a cover image": the one with a cover's name is
+        // overwritten, and otherwise a new one is written beside the images
+        // that stay, so not every replaced image is lost ("replaces the
+        // album's cover image file" said it was). Without such an image,
+        // the tracks in that folder with the album's tag get it as their
+        // front cover, and no other folder's.
+        Label {
+            objectName: "replaceCoverConsequence"
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            color: root.uiPalette.textSecondary
+            textFormat: Text.PlainText
+            text: I18n.i18nc("@info", "If the track’s folder has a JPEG or PNG image, the new album art becomes "
+                + "its cover file. Otherwise it is embedded in the album’s tracks in that folder.")
+        }
+
+        // What is lost, on its own line and in the text's colour (it ended
+        // the paragraph above, the last thing read).
+        Label {
+            objectName: "replaceCoverWarning"
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            color: root.uiPalette.text
+            textFormat: Text.PlainText
+            text: I18n.i18nc("@info", "Ferrous keeps no copy of what it overwrites.")
+        }
+
         confirmText: I18n.i18nc("@action:button", "Replace")
         // Breeze's swap: one image for the other. Its "document-replace", a
         // page with a red ×, read as Delete; red is the glyph of the

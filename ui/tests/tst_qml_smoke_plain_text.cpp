@@ -565,6 +565,9 @@ void PlainTextSmokeTest::theDialogsShowMarkupLiterally() {
 
     confirm->setProperty("message", hostile(QStringLiteral("confirmmessage")));
     confirm->setProperty("details", hostile(QStringLiteral("confirmdetails")));
+    confirm->setProperty("suggestion", QVariantMap{
+        {QStringLiteral("albumTitle"), hostile(QStringLiteral("chosentitle"))},
+        {QStringLiteral("artistName"), hostile(QStringLiteral("chosenartist"))}});
     confirm->setProperty("path", QStringLiteral("/fixture/") + hostileName(QStringLiteral("confirmpath")));
 
     const QString wrong = ui.check({
@@ -572,7 +575,8 @@ void PlainTextSmokeTest::theDialogsShowMarkupLiterally() {
         QStringLiteral("lastfmuser"), QStringLiteral("lastfmstatus"), QStringLiteral("issuemessage"),
         QStringLiteral("itunesasset"),
         QStringLiteral("itunesstatus"), QStringLiteral("itunesalbum"), QStringLiteral("confirmmessage"),
-        QStringLiteral("confirmdetails"), QStringLiteral("confirmpath")});
+        QStringLiteral("confirmdetails"), QStringLiteral("confirmpath"),
+        QStringLiteral("chosentitle"), QStringLiteral("chosenartist")});
     QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
 }
 
