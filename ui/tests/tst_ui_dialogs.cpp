@@ -643,6 +643,8 @@ private slots:
     void recentIssuesHeaderFollowsALargeFont();
     void recentIssuesAreAsWideAsTheyNeed_data();
     void recentIssuesAreAsWideAsTheyNeed();
+    void recentIssuesDiagnosticsCaptionIsOnTheTextColumn_data();
+    void recentIssuesDiagnosticsCaptionIsOnTheTextColumn();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesOpenWithTheirFocusShown();
@@ -8493,6 +8495,51 @@ void UiDialogsTest::recentIssuesAreAsWideAsTheyNeed() {
     // Opened with it, the long path gets the cap.
     QVERIFY(openIssues(window));
     QCOMPARE(popup->property("width").toReal(), cap);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!popup->property("visible").toBool());
+}
+
+void UiDialogsTest::recentIssuesDiagnosticsCaptionIsOnTheTextColumn_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Open Diagnostics…' caption starts on the entries' text column, its glyph
+// on the header's x and the entries' glyphs': the caption sat 6 px left of
+// the headings, a second text column. The popup still holds it whole.
+void UiDialogsTest::recentIssuesDiagnosticsCaptionIsOnTheTextColumn() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    report(window, 1, 0, kStaticPath, kEndsEarly);
+    QVERIFY(openIssues(window));
+    QQuickItem *diagnostics = visibleNamed(window, QStringLiteral("errorHistoryDiagnosticsButton"));
+    QQuickItem *title = visibleNamed(window, QStringLiteral("errorHistoryTitle"));
+    QQuickItem *heading = visibleNamed(window, QStringLiteral("errorHistoryHeading"));
+    QQuickItem *entryGlyph = visibleNamed(window, QStringLiteral("errorHistoryGlyph"));
+    QVERIFY(diagnostics != nullptr && title != nullptr && heading != nullptr && entryGlyph != nullptr);
+    QQuickItem *glyph = itemsNamed(diagnostics, QStringLiteral("textToolButtonIcon")).first();
+    QQuickItem *caption = itemsNamed(diagnostics, QStringLiteral("textToolButtonCaption")).first();
+    QTRY_VERIFY(!layoutPending(diagnostics) && glyph->isVisible());
+    const QString where = QStringLiteral("glyph at %1, caption at %2; header at %3, entry glyph at %4, "
+                                         "heading at %5")
+        .arg(sceneRect(glyph).left()).arg(sceneRect(caption).left()).arg(sceneRect(title).left())
+        .arg(sceneRect(entryGlyph).left()).arg(sceneRect(heading).left());
+    QVERIFY2(qAbs(sceneRect(glyph).left() - sceneRect(title).left()) < 0.5, qPrintable(where));
+    QVERIFY2(qAbs(sceneRect(glyph).left() - sceneRect(entryGlyph).left()) < 0.5, qPrintable(where));
+    QVERIFY2(qAbs(sceneRect(caption).left() - sceneRect(heading).left()) < 0.5, qPrintable(where));
+    // Whole, inside the popup it widens.
+    QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
+    const qreal popupRight = popup->property("x").toReal() + popup->property("width").toReal();
+    QVERIFY(!caption->property("truncated").toBool());
+    QVERIFY2(sceneRect(caption).right() <= sceneRect(diagnostics).right() + 0.5
+                 && sceneRect(diagnostics).right() <= popupRight + 0.5,
+             qPrintable(QStringLiteral("caption to %1, button to %2, popup to %3")
+                            .arg(sceneRect(caption).right()).arg(sceneRect(diagnostics).right()).arg(popupRight)));
+    QVERIFY(diagnostics->width() >= diagnostics->implicitWidth() - 0.5);
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!popup->property("visible").toBool());
 }
