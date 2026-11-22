@@ -3658,13 +3658,13 @@ std::pair<QRect, QRect> WaveformEditorItem::crosshairLabelRects(
     const QSizeF &reservedCorner, const QRect &laneHead,
     int widestValueTextWidth, int widestTimeTextWidth, const CrosshairReadout::Colors &colors) {
     // The spectrogram's plates, with its edge when the colours have one.
-    const int around = 2 * CrosshairReadout::kPadding + (colors.hasEdge() ? 2 : 0);
+    const auto plate = [&](int textWidth) {
+        return CrosshairReadout::plateSize(textWidth, textHeight, colors);
+    };
     return CrosshairReadout::plateRects(
-        width, height, x, y,
-        QSize(valueTextWidth + around, textHeight + around),
-        QSize(timeTextWidth + around, textHeight + around),
+        width, height, x, y, plate(valueTextWidth), plate(timeTextWidth),
         reservedCorner, CrosshairReadout::RightScale(), laneHead,
-        widestValueTextWidth + around, widestTimeTextWidth + around);
+        plate(widestValueTextWidth).width(), plate(widestTimeTextWidth).width());
 }
 
 void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height,

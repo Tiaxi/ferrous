@@ -7487,6 +7487,9 @@ MOTION_FOCUS = {
     "albumart-autohide-fullscreen": dict(rect=(1500, 0, 500, 110), segment="last", rows="all", b_lines=1, zoom_graphs=True,
                                          band=360, max_frames=6),
     "seek-tooltip": dict(rows="all", b_lines=1),  # the time box fading in on hover, and out on leave
+    # a windowed viewer's popup cross-fades with the main window under it: against the mix of the two ends
+    **{n: dict(cross_fade=True) for n in ("viewer-open-windowed", "viewer-close-windowed",
+                                          "albumart-open-windowed", "albumart-close-windowed")},
     # the column: the sidebar as the app lays it out, from its top down 510 px
     "first-play-from-idle": dict(rect="sidebarPane:0,0,1,0.567", max_h=180, b_lines=1, band=400, pursuit=_HEADER_PURSUIT),
     "plates-reveal": dict(b_lines=1, band=360),

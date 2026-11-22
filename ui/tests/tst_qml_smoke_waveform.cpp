@@ -2606,14 +2606,21 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
     QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.24, 2.0), 1);
     QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.05, 4.0), 2);
     QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.0001, 64.0), 3);
+    // Padded as a lane's label, 6 px at either side of the text and 20 px
+    // tall at the default font (it had 3 px around the text).
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont defaultSize = applicationFont;
+    defaultSize.setPointSizeF(10.0);
+    QGuiApplication::setFont(defaultSize);
     // With the plates' 1 px edge, as the spectrogram's, each plate is 2 px
     // larger each way.
     {
         const CrosshairReadout::Colors edged{QColor(Qt::black), QColor(Qt::white), QColor(255, 255, 255, 36)};
         const auto [value, time] = WaveformEditorItem::crosshairLabelRects(
             1'183, 318, 563, 137, 42, 48, 12, QSizeF(), QRect(), 0, 0, edged);
-        QCOMPARE(value.size(), QSize(42 + 8, 12 + 8));
-        QCOMPARE(time.size(), QSize(48 + 8, 12 + 8));
+        QCOMPARE(value.size(), QSize(42 + 14, 22));
+        QCOMPARE(time.size(), QSize(48 + 14, 22));
     }
 
     constexpr int width = 1'183;
@@ -2628,13 +2635,14 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
             width, height, cursorX, cursorY,
             valueWidth, timeWidth, textHeight);
 
-    QCOMPARE(valueRect.right(), width - 3);
+    // Its fill 5 px from the edges, as the plates', with their edge's pixel.
+    QCOMPARE(valueRect.right(), width - 5);
     // Centred on the horizontal line.
     QCOMPARE(valueRect.y(), cursorY - valueRect.height() / 2);
     QCOMPARE(timeRect.x(), cursorX - timeRect.width() / 2);
-    QCOMPARE(timeRect.bottom(), height - 3);
-    QCOMPARE(valueRect.size(), QSize(valueWidth + 6, textHeight + 6));
-    QCOMPARE(timeRect.size(), QSize(timeWidth + 6, textHeight + 6));
+    QCOMPARE(timeRect.bottom(), height - 5);
+    QCOMPARE(valueRect.size(), QSize(valueWidth + 12, 20));
+    QCOMPARE(timeRect.size(), QSize(timeWidth + 12, 20));
 }
 
 void WaveformSmokeTest::waveformEditorCrosshairLabelsKeepApartInShortPlots() {
@@ -2663,7 +2671,7 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsKeepApartInShortPlots() {
     const auto [value, time] = WaveformEditorItem::crosshairLabelRects(
         width, 220, 599, 219, 42, 48, 12, reserved);
     QVERIFY(value.bottom() < time.top());
-    QCOMPARE(value.right(), width - 3);
+    QCOMPARE(value.right(), width - 5);
     // In a plot too short for that, the time stops at the level's left.
     const auto [shortValue, shortTime] = WaveformEditorItem::crosshairLabelRects(
         width, 30, 599, 29, 42, 48, 12, reserved);
@@ -2846,7 +2854,7 @@ void WaveformSmokeTest::waveformOverlaysKeepClearOfTheReservedCorner() {
     QCOMPARE(topValue.right(), corner.left() - 1 - CrosshairReadout::kCornerGap);
     const auto [lowValue, lowTime] = WaveformEditorItem::crosshairLabelRects(
         width, height, 100, 100, 42, 48, 12, reserved);
-    QCOMPARE(lowValue.right(), width - 3);
+    QCOMPARE(lowValue.right(), width - 5);
     QCOMPARE(lowTime, topTime);
 
     WaveformEditorItem item;

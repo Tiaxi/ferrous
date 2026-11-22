@@ -1608,19 +1608,19 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutClampsInsideTheLane() {
                          (where + ", scale label " + QTest::toString(label.rect)).constData());
             }
         } else {
-            QCOMPARE(value.right(), lane.width() - 2.0);
+            QCOMPARE(value.right(), double(lane.width() - CrosshairReadout::kEdgeMargin));
         }
         // On the axes: the time on the bottom edge, and where the lane
         // leaves room, each centred on its line. Only a scale label beside
         // the time keeps it from the right edge.
-        QCOMPARE(time.bottom(), lane.height() - 2.0);
+        QCOMPARE(time.bottom(), double(lane.height() - CrosshairReadout::kEdgeMargin));
         if (qstrcmp(pointer.where, "at the right edge") == 0) {
             bool labelBeside = false;
             for (const SpectrogramOverlayImage &label : item.m_freqGrid.images) {
                 labelBeside = labelBeside || label.rect.bottom() > time.top() - 4.0;
             }
             if (!scaleShown || !labelBeside) {
-                QCOMPARE(time.right(), static_cast<double>(lane.width()));
+                QCOMPARE(time.right(), static_cast<double>(lane.width() - CrosshairReadout::kEdgeMargin));
             }
         }
         if (qstrcmp(pointer.where, "mid-plot") == 0) {
@@ -1684,7 +1684,7 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutFitsShortLanes() {
         QVERIFY2(laneRect.contains(value) && laneRect.contains(time), where.constData());
         QVERIFY2(!value.intersects(time), where.constData());
         QVERIFY2(!time.intersects(laneHead) && !value.intersects(laneHead), where.constData());
-        QCOMPARE(time.bottom(), laneHeight - 2.0);
+        QCOMPARE(time.bottom(), double(laneHeight - CrosshairReadout::kEdgeMargin));
         for (const SpectrogramOverlayImage &label : item.m_freqGrid.images) {
             QVERIFY2(!label.rect.intersects(value) && !label.rect.intersects(time),
                      (where + ", scale label " + QTest::toString(label.rect)).constData());
@@ -1975,7 +1975,8 @@ void SpectrogramSmokeTest::crosshairReadoutLeavesAPlateOutInNarrowPlots() {
     const QRect lane(0, 0, width, height);
     const QRect scaleColumn(width - scale.width, 0, scale.width, height);
     // Right of the head, and left of the scale or the plot's right edge.
-    const int timeRoom = (scaleShown ? width - scale.width - CrosshairReadout::kGap : width)
+    const int timeRoom = (scaleShown ? width - scale.width - CrosshairReadout::kGap
+                                     : width - CrosshairReadout::kEdgeMargin)
         - (laneHead.right() + 1 + CrosshairReadout::kGap);
     const bool timeFits = timeRoom >= time.width();
     const int valueRight = scaleShown ? width - scale.width - CrosshairReadout::kGap
@@ -2143,7 +2144,7 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutStaysReadableInNarrowLanes
         200, 27, 199, 26, QSize(100, 22), QSize(40, 22), QSizeF(),
         CrosshairReadout::RightScale(), QRect(4, 3, 83, 24));
     QVERIFY(value.isNull());
-    QCOMPARE(time, QRect(160, 3, 40, 22));
+    QCOMPARE(time, QRect(156, 1, 40, 22));
     // At 120 px neither fits right of the head: both are left out.
     const auto [narrowValue, narrowTime] = CrosshairReadout::plateRects(
         120, 27, 60, 26, QSize(100, 22), QSize(40, 22), QSizeF(),
@@ -2235,7 +2236,9 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutKeepsItsPlatesAsTheLevelCh
 void SpectrogramSmokeTest::crosshairReadoutTextIsTheSmallTextOfTheDesign() {
     // The readout's text is the design's small text, as the lane labels':
     // 12 px at the default 10 pt font, never under 11 px, and larger with
-    // a larger font; its plates grow to hold it.
+    // a larger font; its plates are a lane label's, padded and as tall at
+    // either size, and as far in from the edge (they had 3 px around the
+    // text and were 2 px from the edge).
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
     const auto readoutAt = [](qreal points) {
@@ -2244,20 +2247,69 @@ void SpectrogramSmokeTest::crosshairReadoutTextIsTheSmallTextOfTheDesign() {
         QGuiApplication::setFont(font);
         return CrosshairReadout::font();
     };
+    const CrosshairReadout::Colors colors{Qt::black, Qt::white, Qt::transparent};
+    const CrosshairReadout::Colors edged{Qt::black, Qt::white, QColor(255, 255, 255, 36)};
+    const QString time = QStringLiteral("1:23.4");
+    // The plate for the time, checked against a lane label's in the font.
+    const auto plateAsTheLabels = [&](const QFont &readout, QSize &plate) {
+        QQmlEngine engine;
+        QString errorText;
+        const QUrl base = QUrl::fromLocalFile(
+            QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+        QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+
+ApplicationWindow {
+    id: window
+    font: Qt.application.font
+    property real labelHeight: label.labelHeight
+    property real labelPadding: tokens.scaledSize(6)
+
+    Components.UiPalette { id: tokens; windowRoot: window }
+    Components.PlotPlate {
+        id: label
+        uiPalette: tokens
+        plotColors: tokens.spectrogramPlot
+        text: "L"
+    }
+}
+)QML"), base, &errorText));
+        QVERIFY2(root != nullptr, qPrintable(errorText));
+        const QFontMetrics metrics(readout);
+        const int textWidth = metrics.horizontalAdvance(time);
+        plate = CrosshairReadout::plateSize(textWidth, metrics, colors);
+        const int padding = qRound(root->property("labelPadding").toReal());
+        QCOMPARE(plate.width(), textWidth + 2 * padding);
+        QVERIFY2(std::abs(plate.height() - root->property("labelHeight").toReal()) <= 1.0,
+                 qPrintable(QStringLiteral("%1 tall, a label %2")
+                                .arg(plate.height()).arg(root->property("labelHeight").toReal())));
+        // The fill 5 px from the plot's edges, as the plates' (plateInset).
+        const QSize withEdge = CrosshairReadout::plateSize(textWidth, metrics, edged);
+        const auto [value, below] = CrosshairReadout::plateRects(1200, 300, 600, 150, withEdge, withEdge);
+        QCOMPARE(1200 - (value.right() + 1) + 1, 5);
+        QCOMPARE(300 - (below.bottom() + 1) + 1, 5);
+        // On their axes: centred on their lines.
+        QCOMPARE(value.top(), 150 - withEdge.height() / 2);
+        QCOMPARE(below.left(), 600 - withEdge.width() / 2);
+    };
     const QFont atDefault = readoutAt(10.0);
     QCOMPARE(atDefault.pixelSize(), 12);
     QCOMPARE(atDefault.family(), QGuiApplication::font().family());
+    QSize defaultPlate;
+    plateAsTheLabels(atDefault, defaultPlate);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QCOMPARE(defaultPlate.height(), 20);
     const QFont atLarge = readoutAt(24.0);
     QCOMPARE(atLarge.pixelSize(), 29);
-    const CrosshairReadout::Colors colors{Qt::black, Qt::white, Qt::transparent};
-    const QFontMetrics defaultMetrics(atDefault);
-    const QFontMetrics largeMetrics(atLarge);
-    const QString time = QStringLiteral("1:23.4");
-    const QSize defaultPlate =
-        CrosshairReadout::plateSize(defaultMetrics.horizontalAdvance(time), defaultMetrics, colors);
-    const QSize largePlate =
-        CrosshairReadout::plateSize(largeMetrics.horizontalAdvance(time), largeMetrics, colors);
-    QCOMPARE(defaultPlate.height(), defaultMetrics.height() + 2 * CrosshairReadout::kPadding);
+    QSize largePlate;
+    plateAsTheLabels(atLarge, largePlate);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
     QVERIFY(largePlate.width() > defaultPlate.width() && largePlate.height() > defaultPlate.height());
     // A larger plate still goes in the plot's bottom-right corner, inside it.
     const auto [value, timeRect] =
@@ -2829,7 +2881,7 @@ void SpectrogramSmokeTest::spectrogramCrosshairTimeShowsOnTheLowestLane() {
     QCOMPARE(plates.size(), 1);
     QCOMPARE(plates[0].text, readoutTime(150.0 / kReadoutColumnsPerSecond));
     QVERIFY(std::abs(plates[0].rect.center().x() - 150.0) <= 1.0);
-    QCOMPARE(plates[0].rect.bottom(), lane.height() - 2.0);
+    QCOMPARE(plates[0].rect.bottom(), double(lane.height() - CrosshairReadout::kEdgeMargin));
     QCOMPARE(item.m_crosshairLaidOutReadout, plates[0].text);
 }
 

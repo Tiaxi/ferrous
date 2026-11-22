@@ -7,6 +7,8 @@ measures the recording and draws ONE merged image per transition, at the reviewe
   latency (action to first change), each transition (first to last change; changes more than
   100 ms apart are separate transitions, e.g. a hover fade in and out, or a wait then an auto-hide) and the
   recording, kept apart; blink per scope and per changed item; text overlap; movement after the stated end;
+  a whole-window dip under the darker end; for a cross-fade (MOTION_FOCUS "cross_fade") how far it falls under the
+  one-layer mix of its two ends;
 - key frames (at most 12; the strip pages under strips/frames/ have the rest);
 - a graph: the animated items' opacity (the probe's per-frame item trace), the ink of each scope (text: the
   rects of the text items in the recording; other: images, icons, plots), luminance, the transitions, blink
@@ -33,6 +35,9 @@ BLINK_MAX_MS = 250.0  # a longer dip is a state of its own, not a blink
 # down, as it does their ink) also blinks by a dip of over DIP for over DIP_MS
 DIP, DIP_MS, HALF = 0.25, 30.0, 0.5
 EVEN = 0.005  # what rounding (8-bit pixels, the trace's three decimals) adds to a dip to exactly HALF
+FADE_SLACK = 0.03  # a window under its darker end, or a cross-fade under the mix of its ends, by more is flagged
+FADE_LEVELS = 1.0  # and by more than this many of 255 levels, which is what rounding moves a mean by
+LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)  # of the sRGB values, as the compositor blends them
 GLANCE_S = 0.2  # assumed time a reviewer looks at one strip frame, for the slow-motion factor
 COLORS = [(255, 196, 64), (102, 204, 255), (255, 120, 120), (150, 230, 120), (210, 150, 255), (255, 160, 220),
           (120, 230, 220), (230, 230, 120)]
@@ -271,6 +276,94 @@ def blink_of(ink, spans, segs):
             else:
                 k += 1
     return best, bmask
+
+
+def window_pictures(ims):
+    """Each whole frame, sampled (at most ~150k pixels)."""
+    w, h = ims[0].size
+    stp = max(1, int((w * h / 150000) ** 0.5))
+    return [np.asarray(im.convert("RGB"), dtype=np.float32)[::stp, ::stp] for im in ims]
+
+
+def blended_series(vals, spans, ts):
+    """`vals` (one a frame) as the eye blends them: at each of `ts` the time-weighted mean over the WINDOW_MS
+    before it, the first frame's before the recording and the last one's after it."""
+    starts = np.array([s for s, _ in spans], dtype=np.float64)
+    v = np.asarray(vals, dtype=np.float64)
+    total = np.concatenate([[0.0], np.cumsum(v[:-1] * np.diff(starts))])
+
+    def integral(t):
+        k = np.maximum(0, np.searchsorted(starts, t, side="right") - 1)
+        return total[k] + (t - starts[k]) * v[k]
+    return (integral(ts) - integral(ts - WINDOW_MS)) / WINDOW_MS
+
+
+def window_dip(pics, spans, segs):
+    """How far the whole window's mean luminance, blended over WINDOW_MS, falls under the darker end of a
+    transition: a popup whose layers each fade apart takes the window darker than both its pictures, and no
+    item's opacity or ink shows it. The worst transition's dict(low = its share of the darker end, at_ms,
+    flag)."""
+    lum = [float((p @ LUMA).mean()) for p in pics]
+    worst = None
+    for s in segs:
+        a, b = s["a"], s["b"]
+        before = max(0, a - 1)
+        darker = min(lum[before], lum[b])
+        if darker <= 0:
+            continue
+        ts = np.arange(spans[a][0], spans[b][0] + WINDOW_MS + 1.0, 1.0)
+        # (its own two ends held either side of it: another transition's frames are none of its blend)
+        bl = blended_series(lum[before:b + 1], spans[before:b + 1], ts)
+        k = int(bl.argmin())
+        low = min(1.0, float(bl[k]) / darker)
+        if worst is None or low < worst["low"]:
+            worst = dict(low=round(low, 3), at_ms=round(float(ts[k])),
+                         flag=bool(low < 1.0 - FADE_SLACK and darker - float(bl[k]) > FADE_LEVELS))
+    return worst
+
+
+def mix_shortfall(pics, times, segs):
+    """A cross-fade's frames against the one-layer mix of its two ends: each fitted as start + a(end - start)
+    (least squares on every channel, so it needs no trace), and how far its mean luminance is under that mix's.
+    A popup whose floor and content fade apart is darker in its middle than any mix, which the dip misses where
+    one end is much brighter. The worst frame's dict(short = the share under, at_ms, blend = a, flag)."""
+    worst = None
+    for s in segs:
+        a, b = s["a"], s["b"]
+        first, last = pics[max(0, a - 1)], pics[b]
+        step = last - first
+        size = float((step * step).sum())
+        if size < 4.0 * step.size:  # (the ends are one picture: nothing cross-fades)
+            continue
+        lo, hi = float((first @ LUMA).mean()), float((last @ LUMA).mean())
+        for k in range(a, b + 1):
+            blend = float(np.clip(((pics[k] - first) * step).sum() / size, 0.0, 1.0))
+            mix = lo + blend * (hi - lo)
+            if mix <= 0:
+                continue
+            got = float((pics[k] @ LUMA).mean())
+            short = max(0.0, 1.0 - got / mix)
+            if worst is None or short > worst["short"]:
+                worst = dict(short=short, at_ms=round(times[k]), blend=round(blend, 2),
+                             flag=bool(short > FADE_SLACK and mix - got > FADE_LEVELS))
+    if worst:
+        worst["short"] = round(worst["short"], 3)
+    return worst
+
+
+def fade_texts(m):
+    """The whole window's dip and a cross-fade's shortfall, in words."""
+    out = []
+    d = m.get("window_dip")
+    if d and d["flag"]:
+        out.append(f"WINDOW DIP (FAIL): the whole window down to {100 * d['low']:.0f} % of the darker end at "
+                   f"+{d['at_ms']} ms (45 ms blend, sRGB values)")
+    c = m.get("mix_shortfall")
+    if c:
+        head = "UNDER THE ONE-LAYER MIX (FAIL)" if c["flag"] else "cross-fade against the one-layer mix"
+        out.append(f"{head}: up to {100 * c['short']:.0f} % under the mix of the two ends, at +{c['at_ms']} ms "
+                   f"({100 * c['blend']:.0f} % of the way)")
+    return out
 
 
 def opacity_dips(pts):
@@ -829,6 +922,12 @@ def measure(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
     lum = [float((a @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)).mean()) / 255.0 for a in arrs]
     for sc in scopes.values():
         sc["blink"], sc["bmask"] = blink_of(sc["ink"], spans, segs)
+    dip = short = None
+    if segs and not meta.get("crop") and all(im.size == ims[0].size for im in ims):  # (the whole window's only)
+        pics = window_pictures(ims)
+        dip = window_dip(pics, spans, segs)
+        if fo.get("cross_fade"):
+            short = mix_shortfall(pics, times, segs)
     item_bl = item_blinks(tracks, times, spans, ims, scale, off)
     cross = None
     if fo.get("lanes"):  # (recorded at 1x: the dash's period is in the recording's pixels)
@@ -1105,6 +1204,7 @@ def measure(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
                    blink_ms=round(max([blink_t or 0, blink_o or 0] + [b["ms"] for b in item_bl])),
                    blink_items=[dict(label=b["label"], items=b["items"], start_ms=round(b["start"]), ms=round(b["ms"]),
                                      low=round(b["low"], 2), box=b["box"]) for b in item_bl],
+                   window_dip=dip, mix_shortfall=short,
                    overlap_ms=round(overlap),
                    overlap_by_transition=overlap_by_seg, overlap_by_line=overlap_by_el, lines_absent=lines_absent,
                    overlap_peak=peak_all, overlap_peak_by_line=peak_by_el, handover=hand, handover_by_transition=hand_by_seg, content_cuts=cuts,
@@ -1210,6 +1310,7 @@ def caption(m, segs, continuous):
         parts.append("Blink per changed item (its traced opacity, seen in its own rect): "
                      + "; ".join(item_blink_text(b) for b in worst[:2])
                      + (f"; {len(worst) - 2} more" if len(worst) > 2 else "") + ".")
+    parts.extend(t + "." for t in fade_texts(m))
     if m.get("plot_note"):
         parts.append(m["plot_note"])
     if m.get("elements"):

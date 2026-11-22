@@ -45,6 +45,10 @@ Rectangle {
     property real controlsLevel: root.controlsVisible ? 1 : 0
     // Whether the strip may show at all.
     property bool available: true
+    // How much of the track's text shows besides the strip's own fade:
+    // less where what is under the strip at rest takes its place, as the
+    // visualization's first lane's label does (PlotLanes.stripTextLevel).
+    property real trackLevel: 1
     property var pointerActivity: null
     // The view's zoom, 1 at the default; Reset calls resetView.
     property real zoomLevel: 1.0
@@ -144,6 +148,7 @@ Rectangle {
     Row {
         id: track
         objectName: "viewerStripTrack"
+        opacity: root.trackLevel
         readonly property real room: Math.max(0, controls.x - track.spacing - x)
         readonly property real textRoom: Math.max(0, track.room - (timeLabel.visible
             ? timeLabel.implicitWidth + track.spacing : 0) - (contextLabel.visible ? track.spacing : 0))
