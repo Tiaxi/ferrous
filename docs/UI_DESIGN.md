@@ -151,6 +151,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **Focus:** a focus ring appears only while the keyboard is in use:
   - a focused list row gets a 1 px `focusRing`, drawn as one rectangle with the selection tint when the row is also selected;
   - Ferrous's own tool buttons and link actions get a 2 px ring;
+  - the album art gets a 2 px ring inside the tile, which runs edge to edge, with 1 px of the view's colour inside the ring, so it shows on any art;
   - a button on a plot gets a 2 px ring 1 px outside it, with a 1 px gap in the plate's colour.
 
   Focus and selection change at once.
@@ -182,7 +183,7 @@ Durations are Kirigami's (`shortDuration` 100 ms, `longDuration` 200 ms, `veryLo
 | amber on a track change | queue: the old row fades out as the new one fades in, so two rows are never both fully amber. Tree: the new row is amber at once and the old one fades. Both over `shortDuration` |
 | now playing, next track on the same album | the lines that change fade over `shortDuration`. Words and numbers that stay the same stay still |
 | now playing, another album or cover | the cover and lines fade together over `longDuration`. Old lines leave in the first 40 % while new ones come in over the whole fade |
-| now playing, first play | the panel grows from the compact row over `veryLongDuration` × 9/8 (450 ms, InOutQuad) when wide, or over `longDuration` when narrow. The library moves with it, and the lines fade in from 60 % of the way |
+| now playing, first play | the panel grows from the compact row over `veryLongDuration` × 9/8 (450 ms, InOutQuad) when wide, or over `longDuration` when narrow. The library moves with it. When wide, the move opens the lines' room first and then the cover. Wide or narrow, each line fades in over `shortDuration` once it has room over the seam, so the title reads in the first part and no line is cut |
 | spectrogram ↔ waveform | the chosen plot fades in over the other, `shortDuration`. Labels, switch and meter stay put |
 | search palette and scrim | fade together, `shortDuration`, OutCubic |
 | search results while a newer query runs | none: they keep their contrast and their query's bold runs. A search still running 250 ms after its query dims them, `shortDuration`, OutCubic, and they come back at once. The 250 ms is the busy indicator's threshold, an animation's pause: without it the list flashed on every keystroke |
@@ -197,7 +198,7 @@ Rules:
 - **No blink.** While content hands over, the outgoing and incoming layers together keep at least half a line's ink at every point. A layer that is leaving may fade to nothing, as long as its replacement is there. Cross-fades overlap rather than run in sequence, and no surface fades out before the one replacing it has arrived. The album art viewer keeps its image, and the visualization viewer its last frame, through the close fade. A popup draws one floor, never two layers at half opacity.
 - **No jump of the thing being looked at.** Geometry eases rather than switching in one frame: the art glides as the info column appears, and the library slides as now playing grows. Layouts that change per track keep one height. A track without a cover gets a stand-in in the cover's place, not a different layout.
 - **Details are already at rest when a viewer opens.** Only toggling the info column in an open viewer animates it. A viewer that opens with the column shown has it in place from the first frame. When the column slid in on open, Copy Path was briefly out of reach.
-- **Going back to "Nothing playing" plays the first play backwards,** as when playback stops because the queue was cleared or ran out. The track that showed stays while the panel shrinks into the compact row, and its lines fade out as they faded in.
+- **Going back to "Nothing playing" is the first play's move backwards,** on its curve and time, as when playback stops because the queue was cleared or ran out. The track that showed stays while the panel shrinks into the compact row: the seam closes the lines' room first, each line gone as the seam reaches it, and then takes the cover's foot up with it.
 - **Interruptions continue from what shows.** A new change mid-fade starts from each layer's current opacity, and a reversal reverses from where it is.
 - **Test motion on a stepped clock, not by counting frames.** `ui/tests/tst_ui_motion.cpp` installs a `SteppedAnimationDriver` that advances animation time 16 ms at a time. Tests check opacities and positions along the whole fade (no blink, no overlap, no jump), check that nothing is left running, and cover the instant path with animations off. Real-time frame counting fails on a slow machine.
 
@@ -205,6 +206,10 @@ Rules:
 
 The settled rules for presentation only. For internals, see [visualization architecture](VISUALIZATION_ARCHITECTURE.md).
 - **Media surfaces are always dark.** The album art viewer draws the art on black, with its details in `mediaPlot`'s strip colour, in both themes. A white surround outshone the art.
+- **A lane's head is one plate**, in the main pane and in both viewers: the label's cell, a 1 px divider, then Mute and Solo, as tall as the mode switch's plate. A pane's heads are one size, and their cells are as wide as its widest label, so M and S share an x in every lane. At rest the label alone shows, on a chip in the cell's place.
+- **Before any audio the lanes read as silence.** In the spectrogram, each lane has the same full-width lines, evenly spaced under the band the plates take, at the scale's ticks while that shows; in the waveform, each lane has its centre line, and the seam between lanes is the stronger line.
+- **The frequency scale is the plot's.** Beside the level meter it has no ticks, and its labels end 8 px clear of the meter's seam; without the meter its ticks are on the plot's edge.
+- **The waveform and the level meter are two shapes:** on the waveform the meter's column starts with a 3 px gap in the plot's background.
 - **The plot's playhead is never amber.** Amber is a data colour in the colour map. The seek bar's playhead is the only amber playhead.
 - **One control surface per viewer.**
   - The viewers' corner plate and title strip use the same buttons (`ViewerControls`) in one order: "Not following" (a moved view), zoom and Reset's glyph, new issues, the viewer's own buttons, Close. The plot's own mode switch and zoom plate are the main pane's alone: one row, which shows and hides together, and stays shown at rest only while the view is moved. What joins the row grows it to the left, so Reset and the switch never move from under the pointer.
@@ -233,16 +238,20 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 | Unreadable row | Breeze's `dialog-warning` drawn as a grey mask | it read as an eject arrow beside the amber ▶ |
 | Plot frame | gutters, rulers, rails, a border | the plot fills its pane |
 | Plot plates | the window's view colour as plates; bare outlined text | white stickers in light; text vanished on the waveform |
+| Lane heads | a label's chip beside a plate of its buttons; a size and a label width per lane | two stickers of two heights; two head sizes in one 5.1 pane, and M and S wandering 12 px |
 | Mode switch | the chosen segment in solid accent blue | read as keyboard focus, and outshone the data |
 | Level meter | a strip under the plot; a neutral grey column; a saturated colour-map ramp | crowded 5.1; read as the queue's scrollbar; louder than the amber "now" |
-| Never-played plot | pure black; a centred empty-state message | a black slab in the window; a second message beside the queue's first-run one |
+| Never-played plot | pure black; a centred empty-state message; lines cut short for the plates; lines at half of full scale in the waveform | a black slab in the window; a second message beside the queue's first-run one; a broken first line in each lane; eight empty rows of a table |
 | Last.fm listening | an arc, a pie or a progress ring around the glyph | read as a busy spinner; the states looked alike at 1× |
 | Idle now playing | a 360 px empty square; a stock disc glyph | read as a dead slab; the glyph was unreadable at 16 px |
+| Large-font now playing | the cover flush in the corner over lines at the inset; the title on the cover's foot | three left edges and some 60 px of nothing over the title; the header is one block at the inset, the title centred on the cover |
 | Now playing | per-track heights; the cover scaling up from a square on first play | the library jumped up to 26 px on a track change; the scaling read as a zoom |
 | No-cover mark in a list | the stand-in's amber and magenta; Breeze's album and track glyphs | the tree's brightest thing, in the "now" colour; blobs at 24 pt and an empty square at 10 pt |
+| No-cover mark at cover size | an 8.5 px glide; three traces leaving on the right and one through the top | the loudest amber in the window; the crop read as an accident |
 | No-cover tile | the album title or a glyph in the slot; a different layout | repeated the lines below it, read as a broken image, and moved the library |
 | Track change | old and new text cross-fading over the same span | the two titles read as superimposed |
 | First play | the idle row leaving before the cover arrived | the band was empty for up to 140 ms, a blink |
+| Stop → idle | the lines out by time alone while the cover shrank | a blank band trailed the cover for some 150 ms |
 | Stop → idle | the cover and lines cut in one frame | a hard cut, not the reverse of first play |
 | Album art viewer | the window's light view colour around the art | a white surround competed with the art |
 | Album art viewer close | the image cut at once while the black floor faded | a blink on close |

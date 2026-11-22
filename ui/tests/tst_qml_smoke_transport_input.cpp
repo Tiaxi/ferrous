@@ -1155,7 +1155,7 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     const QRectF plate = sceneRectOf(modeSwitch);
     QQuickItem *laneHead = nullptr;
     QTRY_VERIFY((laneHead = firstVisibleItemNamed(window->contentItem(), QStringLiteral("plotLaneHead"))) != nullptr);
-    QCOMPARE(plate.top(), sceneRectOf(laneHead).top() - laneHead->property("plateReach").toReal());
+    QCOMPARE(plate.top(), sceneRectOf(laneHead).top());
     QCOMPARE(pane.right() - plate.right(), plate.top() - pane.top());
     // No message on the plot; a stereo track's lanes, named, without
     // Mute and Solo.
@@ -1213,21 +1213,16 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// The never-played pane's rest lines keep clear of the plates over it: a
-// line on a row beside the mode switch, or within 8 px under or over it,
-// ends 6 px before the switch, and one beside a lane's label starts 6 px
-// after it, rather than run along a plate's edge (per channel the first line
-// ran along the switch's foot, 1 px under it). One rule for both lanes (at
-// 1600x1000 the first lane's top line, 4 px under its label, ran on, while
-// the second's, 3 px under its, was cut): per channel at 1600x1000 each
-// lane's top line starts after its label; at 1000x720 no line is within 4 to
-// 8 px of a plate, so nothing there changed. Every tick keeps its line. The
-// seam between the lanes at rest is a 3 px groove in the plot's deep violet,
-// centred on the 1 px seam and drawn over the lanes, whose heights stay;
-// playing, the seam is 1 px again. A line in a plate's band, within 4 px of
-// its top or foot, is white 10 % rather than 20 %, its cuts kept, and every
-// them), at the default font, mixed and per channel at 1600x1000 and
-// 1000x720, and per channel at 24 pt, in turn in one window.
+// The never-played pane reads as silent lanes: each has the same lines, at
+// the same rows from its top, evenly spaced, each the lane's whole width,
+// under the plates over the pane, which none is cut or dimmed for (each
+// lane's first line was dimmer and cut short to a length of its own, beside
+// whole ones, and read as broken): three, or fewer where the first of three
+// would be beside a plate. The seam between the lanes at rest is a 3 px
+// groove in the plot's deep violet, centred on the 1 px seam and drawn over
+// the lanes, whose heights stay; playing, the seam is 1 px again. At the
+// default font, mixed and per channel at 1600x1000 and 1000x720, and per
+// channel at 24 pt, in turn in one window.
 void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
     QFETCH(qreal, pointSize);
     const ScopedApplicationFont font(pointSize);
@@ -1273,17 +1268,6 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
             }
             return lines;
         };
-        // Each line's colour, in the order of linesOf: white 20 %, or 10 %.
-        const auto lineColorsOf = [&](SpectrogramItem *pane) {
-            QList<QColor> colors;
-            QMutexLocker lock(&pane->m_stateMutex);
-            for (qsizetype i = 0; i < pane->m_restGrid.lines.size(); ++i) {
-                const QColor own = pane->m_restGrid.lineColors.value(i);
-                colors.push_back(own.isValid() ? own : QColor(255, 255, 255, 51));
-            }
-            return colors;
-        };
-        int quiet = 0;
         // Laid out for the window's size, and drawn.
         for (SpectrogramItem *pane : panes()) {
             QTRY_VERIFY(!linesOf(pane).isEmpty());
@@ -1294,86 +1278,55 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
         QVERIFY(modeSwitch != nullptr);
         QTRY_COMPARE(modeSwitch->opacity(), 1.0);
         // The plates with their 1 px edges.
-        const QRectF switchPlate = sceneRectOf(modeSwitch).adjusted(-1, -1, 1, 1);
-        QList<QRectF> labels;
+        QList<QRectF> plates{sceneRectOf(modeSwitch).adjusted(-1, -1, 1, 1)};
         for (QQuickItem *label : visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneLabel"))) {
-            labels.push_back(sceneRectOf(label).adjusted(-1, -1, 1, 1));
+            plates.push_back(sceneRectOf(label).adjusted(-1, -1, 1, 1));
         }
-        int shortened = 0;
-        // The lanes whose top line starts after their label.
-        int topLinesAfterALabel = 0;
+        QList<QList<double>> rowsByLane;
         for (SpectrogramItem *pane : panes()) {
-            QTRY_VERIFY(!linesOf(pane).isEmpty());
             const QRectF lane = sceneRectOf(pane);
             const QList<QRectF> lines = linesOf(pane);
-            const QList<QColor> colors = lineColorsOf(pane);
-            QCOMPARE(colors.size(), lines.size());
-            // Every tick keeps its line, most of the lane wide.
-            QVERIFY2(lines.size() >= (pointSize > 0 ? 2 : 3), qPrintable(QString::number(lines.size())));
-            double topLine = lane.bottom();
+            QVERIFY(!lines.isEmpty() && lines.size() <= (viewMode == 0 ? 4 : 3));
+            QList<double> rows;
             for (const QRectF &line : lines) {
-                topLine = std::min(topLine, line.top());
+                QCOMPARE(line.left(), lane.left());
+                QCOMPARE(line.right(), lane.right());
+                for (const QRectF &plate : std::as_const(plates)) {
+                    const bool inLane = plate.top() >= lane.top() - 4 && plate.top() < lane.bottom();
+                    QVERIFY2(!inLane || line.top() >= plate.bottom() + 6,
+                             qPrintable(QStringLiteral("a line at y %1 beside a plate to %2")
+                                            .arg(line.top()).arg(plate.bottom())));
+                }
+                rows.push_back(line.top() - lane.top());
             }
-            for (qsizetype index = 0; index < lines.size(); ++index) {
-                const QRectF &line = lines.at(index);
-                QVERIFY2(line.width() >= lane.width() / 2,
-                         qPrintable(QStringLiteral("a line %1 px of %2").arg(line.width()).arg(lane.width())));
-                const auto within = [&](const QRectF &plate, double reach) {
-                    return line.bottom() > plate.top() - reach && line.top() < plate.bottom() + reach
-                        && plate.left() < lane.right() && plate.right() > lane.left();
-                };
-                const auto beside = [&](const QRectF &plate) { return within(plate, 8); };
-                // In a plate's band: the switch's, or its own lane's label's.
-                bool inBand = within(switchPlate, 4);
-                for (const QRectF &label : std::as_const(labels)) {
-                    inBand = inBand || (within(label, 4) && label.top() >= lane.top() - 4 && label.top() < lane.bottom());
-                }
-                QVERIFY2(colors.at(index) == (inBand ? QColor(255, 255, 255, 26) : QColor(255, 255, 255, 51)),
-                         qPrintable(QStringLiteral("a line at y %1, alpha %2").arg(line.top()).arg(colors.at(index).alpha())));
-                quiet += inBand ? 1 : 0;
-                if (windowSize == QSize(1000, 720) && pointSize <= 0) {
-                    for (const QRectF &plate : QList<QRectF>{switchPlate} + labels) {
-                        QVERIFY2(within(plate, 8) == within(plate, 4),
-                                 qPrintable(QStringLiteral("a line at y %1, 4 to 8 px from a plate %2 to %3")
-                                                .arg(line.top()).arg(plate.top()).arg(plate.bottom())));
-                    }
-                }
-                if (beside(switchPlate)) {
-                    QVERIFY2(line.right() <= switchPlate.left() - 6 + 0.01,
-                             qPrintable(QStringLiteral("a line at y %1 ends at %2, the switch from %3 (to y %4)")
-                                            .arg(line.top()).arg(line.right()).arg(switchPlate.left()).arg(switchPlate.bottom())));
-                    ++shortened;
-                } else {
-                    QVERIFY2(line.right() == lane.right(),
-                             qPrintable(QStringLiteral("a line at y %1 to %2 ends at %3, the switch %4,%5 %6x%7, corner %8x%9, lane %10 to %11")
-                                            .arg(line.top()).arg(line.bottom()).arg(line.right()).arg(switchPlate.left()).arg(switchPlate.top())
-                                            .arg(switchPlate.width()).arg(switchPlate.height()).arg(pane->reservedCorner().width())
-                                            .arg(pane->reservedCorner().height()).arg(lane.top()).arg(lane.bottom())));
-                }
-                bool besideLabel = false;
-                for (const QRectF &label : std::as_const(labels)) {
-                    if (beside(label) && label.top() >= lane.top() - 4 && label.top() < lane.bottom()) {
-                        besideLabel = true;
-                        QVERIFY2(line.left() >= label.right() + 6 - 0.01,
-                                 qPrintable(QStringLiteral("a line at y %1 starts at %2, the label to %3")
-                                                .arg(line.top()).arg(line.left()).arg(label.right())));
-                        topLinesAfterALabel += line.top() == topLine ? 1 : 0;
-                    }
-                }
-                if (!besideLabel) {
-                    QCOMPARE(line.left(), lane.left());
+            // Evenly spaced, the lane's foot and top the bands' ends.
+            for (qsizetype index = 0; index < rows.size(); ++index) {
+                QVERIFY2(std::abs(rows.at(index) - lane.height() * (index + 1) / (rows.size() + 1)) <= 1.0,
+                         qPrintable(QStringLiteral("line %1 of %2 at %3 in %4 px")
+                                        .arg(index).arg(rows.size()).arg(rows.at(index)).arg(lane.height())));
+            }
+            if (windowSize == QSize(1600, 1000) && pointSize <= 0) {
+                QCOMPARE(rows.size(), viewMode == 0 ? 4 : 3);
+            }
+            // Mixed, none at the pane's middle, where "Analysing…" is
+            // centred (the middle one of three struck through it).
+            if (viewMode == 0) {
+                for (const QRectF &line : lines) {
+                    QVERIFY2(std::abs(line.center().y() - lane.center().y()) >= 12.0,
+                             qPrintable(QStringLiteral("a line at y %1 in the middle").arg(line.top())));
                 }
             }
+            rowsByLane.push_back(rows);
         }
-        // Per channel at 1600x1000, the first line is under the switch's foot,
-        // and each lane's top line under its label, the first lane's too.
-        if (viewMode == 1 && windowSize == QSize(1600, 1000) && pointSize <= 0) {
-            QVERIFY(shortened > 0);
-            QCOMPARE(topLinesAfterALabel, laneCount);
-        }
-        // Per channel, a line in the plates' band, quieter.
-        if (viewMode == 1) {
-            QVERIFY(quiet > 0);
+        // Each lane alike.
+        for (const QList<double> &rows : std::as_const(rowsByLane)) {
+            QCOMPARE(rows.size(), rowsByLane.first().size());
+            for (qsizetype index = 0; index < rows.size(); ++index) {
+                // The lanes' own heights differ by up to 2 px (PlotLanes).
+                QVERIFY2(std::abs(rows.at(index) - rowsByLane.first().at(index)) <= 2.0,
+                         qPrintable(QStringLiteral("line %1 at %2 and at %3 in a lane")
+                                        .arg(index).arg(rowsByLane.first().at(index)).arg(rows.at(index))));
+            }
         }
 
         // The groove between the lanes at rest, per channel.
@@ -1518,18 +1471,12 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
             return (std::max(luminance(a), luminance(b)) + 0.05) / (std::min(luminance(a), luminance(b)) + 0.05);
         };
         const QColor floor = palette->property("plotFloor").value<QColor>();
-        // A line of the lane's own colour, and one in a plate's band, which
-        // is quieter.
         QRect line;
-        QRect quietLine;
         {
             SpectrogramItem *pane = panes().at(0);
             QMutexLocker lock(&pane->m_stateMutex);
             QVERIFY(!pane->m_restGrid.lines.isEmpty());
-            for (qsizetype i = 0; i < pane->m_restGrid.lines.size(); ++i) {
-                (pane->m_restGrid.lineColors.value(i).isValid() ? quietLine : line) = pane->m_restGrid.lines.at(i);
-            }
-            QVERIFY(!line.isNull());
+            line = pane->m_restGrid.lines.constFirst();
         }
         QTest::qWait(50);
         const QImage image = window->grabWindow();
@@ -1540,14 +1487,6 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
         const double lineContrast = contrast(drawnLine, floor);
         QVERIFY2(lineContrast >= 1.72 && lineContrast <= 1.84,
                  qPrintable(QStringLiteral("rest line %1, %2:1 on the floor").arg(drawnLine.name()).arg(lineContrast)));
-        if (!quietLine.isNull()) {
-            const QColor drawnQuiet = image.pixelColor(int(origin.x()) + quietLine.center().x(),
-                                                       int(origin.y()) + quietLine.top());
-            const double quietContrast = contrast(drawnQuiet, floor);
-            QVERIFY2(quietContrast >= 1.2 && quietContrast <= 1.4,
-                     qPrintable(QStringLiteral("quiet rest line %1, %2:1 on the floor")
-                                    .arg(drawnQuiet.name()).arg(quietContrast)));
-        }
         const QColor drawnSeam = image.pixelColor(int((pane.center().x()) * scale), int((upper.bottom() + 0.5) * scale));
         QCOMPARE(drawnSeam.rgb(), palette->property("plotRestLaneSeam").value<QColor>().rgb());
         QVERIFY2(luminance(drawnSeam) < luminance(floor), qPrintable(drawnSeam.name()));
@@ -1566,10 +1505,15 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QCOMPARE(waveformSurface->property("laneCount").toInt(), 2);
     QCOMPARE(waveformSurface->property("laneLabels").toStringList(),
              (QStringList{QStringLiteral("L"), QStringLiteral("R")}));
-    // Each lane with its rest lines at half of full scale over and under
-    // its centre, 1 px, faint, about 1.3:1 on the view.
-    const auto restLines = [&]() { return visibleItemsNamed(waveformSurface, QStringLiteral("waveformRestLine")); };
-    QTRY_COMPARE(restLines().size(), 4);
+    // Each lane a silent one: one line at its centre, faint, about 1.3:1
+    // on the view, and the seam between the lanes the stronger line, 3 px
+    // (with lines at half of full scale in each lane, stronger than the
+    // seam, two lanes read as eight empty rows of a table).
+    QVERIFY(visibleItemsNamed(waveformSurface, QStringLiteral("waveformRestLine")).isEmpty());
+    auto *editor = waveformSurface->findChild<WaveformEditorItem *>(QStringLiteral("waveformEditorItem"));
+    QVERIFY(editor != nullptr);
+    const auto restSeams = [&]() { return visibleItemsNamed(waveformSurface, QStringLiteral("waveformRestSeam")); };
+    QTRY_COMPARE(restSeams().size(), 1);
     {
         const QColor view = palette->property("view").value<QColor>();
         const QColor line = palette->property("waveformRestLine").value<QColor>();
@@ -1582,19 +1526,34 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
         const double ratio = (std::max(luminance(view), luminance(line)) + 0.05)
             / (std::min(luminance(view), luminance(line)) + 0.05);
         QVERIFY2(ratio >= 1.25 && ratio <= 1.45, qPrintable(QString::number(ratio)));
+        QCOMPARE(editor->centerLineColor(), line);
+        const QColor seam = palette->property("seam").value<QColor>();
+        QCOMPARE(editor->laneSeamColor(), seam);
+        const double seamRatio = (std::max(luminance(view), luminance(seam)) + 0.05)
+            / (std::min(luminance(view), luminance(seam)) + 0.05);
+        QVERIFY2(seamRatio > ratio, qPrintable(QStringLiteral("seam %1, line %2").arg(seamRatio).arg(ratio)));
         const QRectF plot = sceneRectOf(waveformSurface);
-        const double laneHeight = plot.height() / 2;
-        for (int lane = 0; lane < 2; ++lane) {
-            const double centre = plot.top() + std::floor(lane * laneHeight + laneHeight / 2);
-            const double quarter = (laneHeight / 2 - 1) / 2;
-            QList<double> wanted{std::round(centre - quarter), std::round(centre + quarter)};
-            for (QQuickItem *rest : restLines()) {
-                QCOMPARE(rest->height(), 1.0);
-                QCOMPARE(rest->property("color").value<QColor>(), line);
-                wanted.removeIf([&](double y) { return std::abs(sceneRectOf(rest).top() - y) <= 1.0; });
+        const QRectF groove = sceneRectOf(restSeams().first());
+        QCOMPARE(groove.height(), 3.0);
+        QCOMPARE(groove.width(), plot.width());
+        QVERIFY(std::abs(groove.center().y() - plot.center().y()) <= 1.0);
+        // As drawn down the plot's middle column: in each lane one line, at
+        // its centre, and the seam's three rows.
+        QTRY_COMPARE(waveformSurface->opacity(), 1.0);
+        QTest::qWait(100);
+        const QImage image = window->grabWindow();
+        const double scale = double(image.width()) / window->width();
+        QList<int> inked;
+        for (int y = qRound(plot.top()) + 1; y < qRound(plot.bottom()) - 1; ++y) {
+            const QColor pixel = image.pixelColor(int(plot.center().x() * scale), int((y + 0.5) * scale));
+            if (std::abs(pixel.red() - view.red()) + std::abs(pixel.green() - view.green())
+                    + std::abs(pixel.blue() - view.blue()) > 6) {
+                inked.push_back(y);
             }
-            QVERIFY2(wanted.isEmpty(), qPrintable(QStringLiteral("lane %1 lacks a line at %2").arg(lane).arg(wanted.value(0))));
         }
+        QVERIFY2(inked.size() == 5 && std::abs(inked.first() - (plot.top() + plot.height() / 4)) <= 1.5
+                     && std::abs(inked.last() - (plot.top() + plot.height() * 3 / 4)) <= 1.5,
+                 qPrintable(QStringLiteral("%1 rows drawn").arg(inked.size())));
     }
     viewer->setProperty("visualizationMode", 0);
     QTRY_VERIFY(spectrogram->isVisible() && spectrogram->opacity() == 1.0);
@@ -1611,10 +1570,11 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QCOMPARE(sceneRectOf(panes().at(1)), lower);
     QTRY_VERIFY(!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneButtons")).isEmpty()
                 || bridge->property("channelButtonsVisibility").toInt() == 0);
-    // The waveform's rest lines gone with the first track.
+    // The waveform's lanes at rest gone with the first track.
     viewer->setProperty("visualizationMode", 1);
     QTRY_VERIFY(waveformSurface->isVisible());
-    QTRY_VERIFY(restLines().isEmpty());
+    QTRY_VERIFY(restSeams().isEmpty());
+    QVERIFY(editor->centerLineColor() != palette->property("waveformRestLine").value<QColor>());
 }
 
 // The crosshair and its readout give way to the plot's plates: on a lane's
@@ -2259,10 +2219,9 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QTRY_COMPARE(surface->property("laneCount").toInt(), 2);
 
     // The pane's: the mode switch and the first lane's head's plates 5 px
-    // from the top, the label centred on its buttons' plate, which reaches
-    // above it.
+    // from the top, the label centred in the head's plate.
     const auto headPlatesTop = [](QQuickItem *laneHead) {
-        return sceneRectOf(laneHead).top() - laneHead->property("plateReach").toReal();
+        return sceneRectOf(laneHead).top();
     };
     const auto controlsTop = [&](QQuickItem *in) {
         // The plot's in the pane; in the window's viewer, its corner plate.

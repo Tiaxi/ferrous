@@ -128,8 +128,11 @@ Item {
         backgroundColor: root.plotColors.plotBg
         waveformColor: root.uiPalette.paneWave
         mutedWaveformColor: ColorUtils.mixColor(root.uiPalette.paneWave, root.plotColors.plotBg, 0.65)
-        centerLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.08)
-        laneSeamColor: root.plotColors.plotLaneSeam
+        // Before any audio each lane is a silent one: its centre line, and
+        // the seam between lanes the stronger line.
+        centerLineColor: root.atRest ? root.uiPalette.waveformRestLine
+                                     : ColorUtils.withAlpha(root.uiPalette.text, 0.08)
+        laneSeamColor: root.atRest ? root.uiPalette.seam : root.plotColors.plotLaneSeam
         // The crosshair's readout on the plot's plates, as the
         // spectrogram's, and its dashes in the plot's text.
         readoutPlateColor: root.plotColors.plotPlate
@@ -146,28 +149,22 @@ Item {
             }
         }
 
-        // Before any audio, each lane's rest lines at half of full scale
-        // over and under its centre line, which the item draws, so the
-        // pane waits as an instrument, as the spectrogram's does with its
-        // rest lines. Gone with the first track, whose lanes they are in.
+        // Before any audio, the seam between lanes is 3 px, centred on its
+        // own, as the spectrogram's groove is, so that it is the stronger
+        // line and the pane reads as silent channels (with lines at half
+        // of full scale in each lane, stronger than the seam and the centre
+        // line, two lanes read as eight empty rows of a table). Gone with
+        // the first track.
         Repeater {
-            model: root.atRest ? root.laneCount * 2 : 0
+            model: root.atRest ? Math.max(0, root.laneCount - 1) : 0
 
             delegate: Rectangle {
                 required property int index
-                // The item's lane: the centre line between its top and
-                // foot, its full scale a pixel inside them.
-                readonly property int lane: Math.floor(index / 2)
-                readonly property real laneTop: lane * waveform.height / root.laneCount
-                readonly property real laneBottom: (lane + 1) * waveform.height / root.laneCount
-                readonly property real centre: Math.floor((laneTop + laneBottom) / 2)
-                readonly property real fullScale: (laneBottom - laneTop) / 2 - 1
-                objectName: "waveformRestLine"
-                x: 0
-                y: Math.round(centre + (index % 2 === 0 ? -1 : 1) * fullScale / 2)
+                objectName: "waveformRestSeam"
+                y: Math.round((index + 1) * waveform.height / root.laneCount) - 1
                 width: waveform.width
-                height: 1
-                color: root.uiPalette.waveformRestLine
+                height: 3
+                color: root.uiPalette.seam
             }
         }
 
