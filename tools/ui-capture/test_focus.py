@@ -26,6 +26,7 @@ from PIL import Image  # noqa: E402
 import focus  # noqa: E402
 import pack  # noqa: E402
 import runner  # noqa: E402
+import shotlib  # noqa: E402
 import states  # noqa: E402
 
 # the images of these areas are saved by macros, under state names of their own
@@ -284,6 +285,40 @@ class PointerSteps(unittest.TestCase):
         sent = []
         runner.Runner(mock.Mock(cmd=lambda c, **kw: sent.append(c))).run_steps("keydown Space | keyup Space")
         self.assertEqual(sent, ["keydown 32 0", "keyup 32 0"])
+
+    def test_kkey_is_a_real_key_through_kwin(self):
+        s = mock.Mock()
+        runner.Runner(s).run_steps("kkey Menu")
+        s.kwin_key.assert_called_once_with("Menu")
+
+
+class DialogMenuGrab(unittest.TestCase):
+    """A menu open in a dialog is a window of its own (#642), which a capture of the dialog's window leaves out."""
+
+    def grab(self, popups):
+        s = shotlib.Session.__new__(shotlib.Session)
+        s.suffix, s.tag, s.scale, s.size, s.renderer, s.index = "dark_1x_64x48", "dark", 1, (64, 48), "test", []
+        s.settle_opacity = lambda win="", timeout=1.2: None
+        s.layout_path = lambda file: None
+        s.windows = lambda: []
+        s.popups = lambda win="": popups
+        s.kwin_frame = lambda title: (10.0, 20.0, 600.0, 400.0)
+        s.kwin_capture_area = mock.Mock(return_value=(600, 400))
+        s.kwin_capture = mock.Mock(return_value=(600, 400))
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.grab("dialog", "folder-menu", "", dialog_window=dict(cls="Dialog", title="Configure", w=600, h=370, parent=0))
+        return s
+
+    def test_with_a_menu_the_screen_inside_the_dialogs_frame_is_captured(self):
+        s = self.grab([dict(opened=True, cls="AppMenu_QMLTYPE_1")])
+        self.assertEqual(s.kwin_capture_area.call_args[0][1], (10.0, 20.0, 600.0, 400.0))
+        s.kwin_capture.assert_not_called()
+        self.assertIn("open menu", s.index[-1]["desc"])
+
+    def test_without_one_the_dialogs_window_is_captured(self):
+        s = self.grab([])
+        s.kwin_capture_area.assert_not_called()
+        s.kwin_capture.assert_called_once()
 
 
 if __name__ == "__main__":
