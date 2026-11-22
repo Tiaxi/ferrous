@@ -192,8 +192,14 @@ struct SpectrogramBackdrop {
     std::shared_ptr<const SpectrogramProjection> projection;
     // Which it is, for the scene node's texture of it.
     quint64 serial{0};
+    // The reserve's pixels [coveredFirst, coveredEnd) have data, without a
+    // gap: it can be the view's whole picture over those.
+    int coveredFirst{0};
+    int coveredEnd{0};
 
     bool isNull() const { return image.isNull(); }
+    double coveredLeftSeconds() const { return leftSeconds + coveredFirst / pixelsPerSecond; }
+    double coveredRightSeconds() const { return leftSeconds + coveredEnd / pixelsPerSecond; }
     double rightSeconds() const {
         return pixelsPerSecond > 0.0 ? leftSeconds + pixels / pixelsPerSecond : leftSeconds;
     }
@@ -212,6 +218,12 @@ struct SpectrogramRasterJob {
     int tileWidth{0};
     // Whether to make those copies: a reserve is uploaded whole.
     bool makeTiles{true};
+    // A reserve's pixel holds the loudest of this many columns,
+    // sampleStride apart, as a column of zoom 1 does of its time, rather
+    // than of all that fall on it: the more a pixel holds, the brighter
+    // the noise in it. 0 for a canvas's pixel.
+    int sampleColumns{0};
+    int sampleStride{1};
     // Older data drawn under the pixels that have no column: the image of
     // the reserve it replaces, the `underlayPixels` of it from its left,
     // and their seconds (see SpectrogramBackdrop).
@@ -263,6 +275,9 @@ struct SpectrogramRasterResult {
     int drawPixels{0};
     // The job's slots, which tell the columns it had to draw without.
     std::vector<int> columnSlots;
+    // Of a reserve: its longest run of pixels that have data.
+    int coveredFirst{0};
+    int coveredEnd{0};
 };
 
 // What a spectrogram's scene node did in its last frame: the canvas
@@ -728,6 +743,11 @@ private:
         std::chrono::steady_clock::time_point now);
     void renumberRingForRollingHistoryLocked();
     void updateCanvasFillReadinessLocked();
+    // Whether a centered zoom out's older picture stands in for the whole
+    // of `view`, as far as the track goes, and has to stay: until the ring
+    // holds all of the view, which then replaces it in one frame.
+    bool zoomOutWaitsForViewLocked(const CenteredView &view, const CenteredColumns &columns,
+        double columnsPerSecond) const;
     // Whether the ring holds every column of the current track from
     // firstColumn to lastColumn.
     bool ringHoldsColumnsLocked(qint64 firstColumn, qint64 lastColumn) const;
@@ -1178,6 +1198,9 @@ private:
     double m_reserveZoomPixelsPerSecond{0.0};
     double m_reserveRequestedLeft{0.0};
     double m_reserveRequestedRight{-1.0};
+    // A centered reserve was asked for seconds the ring had no columns of
+    // yet, up to this one: drawn again once it has, or infinity for none.
+    double m_reserveShortUntilSeconds{std::numeric_limits<double>::infinity()};
     quint64 m_backdropValidity{0};
     // What the zoom being waited for was asked of: the clock's epoch and
     // the data's track then, carried over a gapless or Repeat-One
