@@ -824,7 +824,9 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     const QString consequence = message->property("text").toString();
     const QString why = explanation->property("text").toString();
     QCOMPARE(consequence, QStringLiteral("Quit Anyway stops waiting and may lose changes not yet written."));
-    QCOMPARE(why, QStringLiteral("This is taking longer than it should, perhaps on an unresponsive network share. "
+    // What is slow, and that waiting is safe, with no guess at why (a
+    // network share was one).
+    QCOMPARE(why, QStringLiteral("Writing the tag changes is taking longer than expected. "
                                  "No file is left half-written."));
     QVERIFY(consequence.size() + why.size() < 200);
     // As a confirmation reads: what it waits for semibold, the

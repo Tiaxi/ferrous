@@ -112,8 +112,8 @@ Components.CompactDialogWindow {
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
         textFormat: Text.PlainText
-        text: I18n.i18nc("@info", "This is taking longer than it should, perhaps on an unresponsive network "
-            + "share. No file is left half-written.")
+        text: I18n.i18nc("@info", "Writing the tag changes is taking longer than expected. No file is left "
+            + "half-written.")
     }
 
     // The consequence, beside the decision.
