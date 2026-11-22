@@ -7449,6 +7449,9 @@ MOTION_FOCUS = {
     "scan-injected": dict(rect="statusBar:0.4,0,0.6,1", rows="all", b_lines=1),
     "mute-toggle": dict(rows="all", b_lines=1),
     "seek-drag-box": dict(rows="all", b_lines=1),
+    # the field and the first rows under it, where each keystroke's result shows (the perceived rows); one 16.7 ms
+    # line, so the key frames, which have the moving footer, are not thumbnails
+    "search-typing": dict(rect=(402, 107, 300, 260), b_lines=1, band=400, max_frames=6),
     # the top-right corner; perceived rows for the reveal and the hide
     "viewer-strip-show-fullscreen": dict(rect=(1700, 0, 300, 110), rows="all", b_lines=1, max_frames=6),
     "viewer-autohide-fullscreen": dict(rect=(1700, 0, 300, 110), segment="last", rows="all", b_lines=1, zoom_graphs=True, band=360, max_frames=6),

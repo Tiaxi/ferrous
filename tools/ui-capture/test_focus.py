@@ -304,6 +304,34 @@ class VizInteractionPack(unittest.TestCase):
             self.assertIn("- The recording (vi-pan): the pan's facts", f.read())
 
 
+class LibrarySearchPack(unittest.TestCase):
+    sc = focus.SCOPES["library-search"]
+
+    def test_the_typing_strip_is_shown_and_not_listed_as_not_shown(self):
+        self.assertIn(("strip", "search-typing"), [i[:2] for i in self.sc["images"]])
+        self.assertNotIn("search-typing", [f[0] for f in self.sc["facts_strips"]])
+        self.assertLess(len(self.sc["images"]), pack.FOCUS_MAX_IMAGES)  # (room for a pair's "neither" frames)
+
+    def test_the_typing_strips_real_speed_rows_show_the_field_and_the_rows_under_it(self):
+        fx, fy, fw, fh = states.STRIP_VIEW["search-typing"]
+        fo = states.MOTION_FOCUS["search-typing"]
+        x, y, w, h = fo["rect"]
+        self.assertLess(y, 120)  # the query's line (y 120-137 at 1600x1000)
+        self.assertGreater(y + h, 300)  # several rows below it
+        self.assertTrue(fx <= x and x + w <= fx + fw and fy <= y and y + h <= fy + fh)
+        self.assertEqual(fo["b_lines"], 1)  # (room for the key frames)
+
+    def test_a_focused_row_beside_the_scrollbar_stays_in_both_themes_with_the_panes_right_edge(self):
+        rows = next(r for nm, _title, _th, r in self.sc["sheets"] if nm == "lib-density")
+        edge = {}
+        for c in cells([x for row in rows for x in row]):
+            if c[1] == "density-scrolled":
+                x, _y, w, _h = c[4]["part"]
+                edge[c[4].get("theme", "dark")] = (c[2], x + w)
+        self.assertEqual(edge, dict(dark=("subject", 1), light=("subject", 1)))
+        self.assertIn(("sheet", "lib-density"), [i[:2] for i in self.sc["images"]])
+
+
 class ChangeCrop(unittest.TestCase):
     """A recording's frames cut around all that changes after the action, with an item of a dialog shot's layout."""
 
