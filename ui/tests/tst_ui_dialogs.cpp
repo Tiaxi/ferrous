@@ -552,6 +552,7 @@ private slots:
     void configureOpensTallEnoughForItsTallestPage_data();
     void configureOpensTallEnoughForItsTallestPage();
     void configureMeasuresAPageThatGrowsOutOfView();
+    void configureWidthsFollowTheFont();
     void configureKeepsTicksAndGroupsClearOfTheNextRow_data();
     void configureKeepsTicksAndGroupsClearOfTheNextRow();
     void compactDialogsHoldTheirText_data();
@@ -6449,6 +6450,67 @@ void UiDialogsTest::editTagsFileNameElidesWithinANarrowView() {
     QVERIFY(fileName != nullptr);
     QTRY_VERIFY2(sceneRect(fileName).right() <= sceneRect(table).right(), qPrintable(describeItem(fileName)));
     QVERIFY(closeTagEditor(main));
+}
+
+// Configure's widths follow a larger font: the Visualization combo boxes
+// keep one width, the widest's need and 9 grid units at least (at 24 pt they were
+// 208, 158, 170 and 173 px), the slider gets no narrower as its value's
+// text grows (270 px became 208), and the Last.fm account's line wraps only
+// for want of room (it wrapped at 432 px beside twice that free). With the
+// default font nothing changes.
+void UiDialogsTest::configureWidthsFollowTheFont() {
+    qreal sliderAtDefault = 0;
+    for (const qreal pointSize : {10.0, 24.0}) {
+        const ScopedNotoSans font(pointSize);
+        DialogsWindow main;
+        QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+        QObject *dialog = openPreferences(main.window, 1);
+        QVERIFY(dialog != nullptr);
+        QQuickWindow *prefs = windowOf(dialog);
+        QQuickItem *stack = nullptr;
+        QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+        QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(1)));
+        QList<QQuickItem *> combos;
+        qreal widest = 9 * 18;
+        for (const char *name : {"spectrogramViewComboBox", "spectrogramFftComboBox", "spectrogramDisplayComboBox",
+                                 "channelButtonsComboBox"}) {
+            QQuickItem *combo = visibleNamed(prefs, QString::fromLatin1(name));
+            QVERIFY2(combo != nullptr, name);
+            widest = std::max(widest, combo->implicitWidth());
+            combos << combo;
+        }
+        for (QQuickItem *combo : combos) {
+            QVERIFY2(std::abs(combo->width() - widest) <= 1.0, qPrintable(describeItem(combo)));
+            if (pointSize <= 10) {
+                QCOMPARE(combo->width(), 9.0 * 18);
+            }
+        }
+        QQuickItem *slider = visibleNamed(prefs, QStringLiteral("dbRangeSlider"));
+        QQuickItem *row = visibleNamed(prefs, QStringLiteral("dbRangeRow"));
+        QVERIFY(slider != nullptr && row != nullptr);
+        if (pointSize <= 10) {
+            sliderAtDefault = slider->width();
+            QCOMPARE(row->width(), 18.0 * 18);
+        } else {
+            QVERIFY2(slider->width() >= sliderAtDefault,
+                     qPrintable(QStringLiteral("%1 of %2").arg(slider->width()).arg(sliderAtDefault)));
+        }
+
+        QObject *bridge = bridgeOf(main.window);
+        QVERIFY(dialog->setProperty("pageIndex", 3));
+        for (const bool configured : {false, true}) {
+            QVERIFY(bridge->setProperty("lastFmBuildConfigured", configured));
+            QVERIFY(bridge->setProperty("lastFmAuthState", configured ? 1 : 0));
+            QQuickItem *account = nullptr;
+            QTRY_VERIFY((account = visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))) != nullptr);
+            QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
+            if (pointSize <= 10) {
+                QVERIFY2(account->width() <= 24.0 * 18, qPrintable(describeItem(account)));
+            }
+            QTRY_VERIFY2(account->property("lineCount").toInt() == 1, qPrintable(describeItem(account)));
+        }
+        QVERIFY(reject(dialog));
+    }
 }
 
 int main(int argc, char **argv) {
