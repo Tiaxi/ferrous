@@ -2,11 +2,12 @@
 # A screenshot pack of the Ferrous UI for one round, from a source tree, in one command.
 #
 #   shoot_round.sh <round> [<source-dir>] [--out DIR] [--only AREA[,AREA...]] [--themes dark,light]
-#                  [--sessions S1,S2] [--workers N]   (parallel isolated app sessions; default 4, at most 4)
+#                  [--sessions S1,S2] [--workers N]   (parallel isolated app sessions; at most 8; default: half the
+#                  CPU threads, from 4 to 8)
 #                  [--pack-jobs N]   (pack.py's worker processes; default pack.py's own, 2 to 8 by the CPUs)
 #                  [--focus SCOPES | --focus-only SCOPES | --census]   (<round>/focus/<scope>/: the small pack of each
 #                  scope of focus.py in the comma-separated list, "census" for the census scopes; --focus-only shoots
-#                  just the union of their sessions, once; --census is --focus-only census)
+#                  just what their packs read, each state once; --census is --focus-only census)
 #
 # <source-dir>: the tree under test (default: the checkout that holds this script). --out DIR: where rounds go
 # (default $SHOT_OUT_ROOT, else $SHOT_WORK/rounds). $SHOT_WORK: the work folder (default
@@ -46,7 +47,11 @@ OUTROOT=${SHOT_OUT_ROOT:-$WORK/rounds}
 ONLY=""
 PARTIAL=""
 FOCUS_ONLY=""
-WORKERS=4
+# The sessions wait far more than they compute (8 use about a third of 16 threads). More than 8 start to show in the
+# recordings' timing: at 12, more frame gaps and latency outliers.
+MAX_WORKERS=8
+WORKERS=$(( $(nproc) / 2 ))
+WORKERS=$(( WORKERS < 4 ? 4 : WORKERS > MAX_WORKERS ? MAX_WORKERS : WORKERS ))
 RUNNER_ARGS=()
 PACK_ARGS=()
 while [ $# -gt 0 ]; do
@@ -58,7 +63,7 @@ while [ $# -gt 0 ]; do
         --out) OUTROOT=$2; shift 2 ;;
         --only) ONLY=$2; PARTIAL=1; RUNNER_ARGS+=(--only "$2"); shift 2 ;;
         --themes|--sessions) PARTIAL=1; RUNNER_ARGS+=("$1" "$2"); shift 2 ;;
-        --workers) WORKERS=$(( $2 > 12 ? 12 : $2 )); shift 2 ;;
+        --workers) WORKERS=$(( $2 > MAX_WORKERS ? MAX_WORKERS : $2 )); shift 2 ;;
         # fewer pack workers use less memory (see README.md); without it, pack.py picks its own count
         --pack-jobs)
             [[ $2 =~ ^[1-9][0-9]*$ ]] || { echo "--pack-jobs needs a whole number of 1 or more (got '$2')" >&2; exit 2; }
