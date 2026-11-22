@@ -360,10 +360,11 @@ Components.DialogWindow {
     }
     onCurrentBindingsChanged: root.syncEditors()
 
-    // Gives the editors' key buttons one width, the wider one's, so that
-    // the buttons clearing them share an x. KeySequenceItem is a row with
-    // no property for its button's width: the button that takes the key is
-    // its checkable child.
+    // Gives the editors' key buttons one width, keyButtonWidth at least or
+    // the wider one's, so that the buttons clearing them share an x and
+    // keep it from action to action (at their keys' widths, they moved
+    // with each). KeySequenceItem is a row with no property for its
+    // button's width: the button that takes the key is its checkable child.
     function shareKeyButtonWidth(editors) {
         const buttons = []
         for (const editor of editors) {
@@ -375,7 +376,9 @@ Components.DialogWindow {
         }
         for (const button of buttons) {
             button.Layout.preferredWidth = Qt.binding(function() {
-                return buttons.reduce(function(widest, other) { return Math.max(widest, other.implicitWidth) }, 0)
+                return buttons.reduce(function(widest, other) {
+                    return Math.max(widest, other.implicitWidth)
+                }, root.keyButtonWidth)
             })
         }
     }
@@ -472,6 +475,10 @@ Components.DialogWindow {
     readonly property real keyColumnWidth: Math.ceil(Math.max(Kirigami.Units.gridUnit * 9,
         keyMetrics.advanceWidth("Ctrl+Shift+Backspace") + 2 * Kirigami.Units.largeSpacing))
     readonly property real iconSize: root.uiPalette.labelIconSize
+    // The editors' key buttons: a key column, and the glyph and its room
+    // beside the key (a column alone left Redo's Alt+Shift+Backspace's
+    // button 40 px wider at 24 pt, and Clear moved with it).
+    readonly property real keyButtonWidth: root.keyColumnWidth + root.iconSize + 2 * Kirigami.Units.largeSpacing
     readonly property real rowLeftPadding: Kirigami.Units.largeSpacing
     readonly property real iconSpacing: Kirigami.Units.largeSpacing
     defaultWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 40)

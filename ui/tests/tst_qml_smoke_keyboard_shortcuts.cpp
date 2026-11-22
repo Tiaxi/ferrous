@@ -862,6 +862,39 @@ void KeyboardShortcutsSmokeTest::editorHasOneBaselineAndOneKeyButtonWidth() {
         // The grid's columns follow its own cells, not the longer default.
         QCOMPARE(sceneRect(shortcut).left(), editorX);
     }
+
+    // A key column wide at least, so the buttons and the ones that clear
+    // them keep one x from action to action (they were as wide as the
+    // action's key, about 82, 102 and 110 px at 10 pt), while one takes a
+    // key as well.
+    const qreal column = fixture.dialog->property("keyColumnWidth").toReal();
+    QVERIFY(column > 0);
+    qreal width = -1;
+    qreal clearX = -1;
+    QStringList moved;
+    for (const QString &action : fixture.rows()) {
+        QVERIFY(fixture.select(action));
+        QVERIFY(!fixture.dialog->grabWindow().isNull());
+        QQuickItem *first = keyButtonIn(shortcut, true);
+        QQuickItem *clear = keyButtonIn(shortcut, false);
+        QVERIFY(first != nullptr && clear != nullptr);
+        if (width < 0) {
+            width = first->width();
+            clearX = sceneRect(clear).left();
+            QVERIFY2(width >= column, qPrintable(QStringLiteral("%1 px, the column %2").arg(width).arg(column)));
+        } else if (first->width() != width || sceneRect(clear).left() != clearX) {
+            moved << QStringLiteral("%1: %2 px, clear at %3").arg(action).arg(first->width()).arg(sceneRect(clear).left());
+        }
+    }
+    QVERIFY2(moved.isEmpty(), qPrintable(QStringLiteral("%1 px, clear at %2, but ").arg(width).arg(clearX)
+                                         + moved.join(QStringLiteral("; "))));
+    // The wider buttons still fit the dialog at its narrowest.
+    QQuickItem *clearLast = keyButtonIn(shortcut, false);
+    QVERIFY(clearLast != nullptr);
+    QVERIFY(sceneRect(clearLast).right() <= fixture.dialog->minimumWidth());
+    QVERIFY(QMetaObject::invokeMethod(shortcut, "startCapturing"));
+    QVERIFY(!fixture.dialog->grabWindow().isNull());
+    QCOMPARE(keyButtonIn(shortcut, true)->width(), width);
 }
 
 void KeyboardShortcutsSmokeTest::editorHoldsStillAsANoteComesAndGoes_data() {
