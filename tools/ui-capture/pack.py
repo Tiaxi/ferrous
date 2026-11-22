@@ -2380,7 +2380,7 @@ FLOOR_ORDER = ["unfilled", "pre-start", "silence", "post-end", "ends-early-cente
 
 
 def write_core_facts(rd, core, strips, geo_samples, entries=(), out="CORE-FACTS.md", ids=None, looks=None,
-                     fact_keys=None, title=None, intro=None, floor_labels=None, a11y=None, extra=None, contrast_map=None,
+                     fact_keys=None, fact_skip=(), title=None, intro=None, floor_labels=None, a11y=None, extra=None, contrast_map=None,
                      lead=None):
     """CORE-FACTS.md, the core images' measured facts as text (a reviewer keeps notes from text when the images
     leave its context): per sheet its tiles' states, sizes, key colours, layout findings and contrast rows; per
@@ -2395,7 +2395,8 @@ def write_core_facts(rd, core, strips, geo_samples, entries=(), out="CORE-FACTS.
     pairs = {f"pair:{nm}": (a_, b_) for nm, a_, b_, *_ in getattr(st, "STRIP_PAIRS", [])}
     # (the focus pack's FOCUS-FACTS.md: its own IDs, what to look at, only its facts and floor regions)
     if fact_keys is not None:
-        facts = [f_ for f_ in facts if any(f_["key"].startswith(k) for k in fact_keys)]
+        facts = [f_ for f_ in facts if any(f_["key"].startswith(k) for k in fact_keys)
+                 and not any(f_["key"].startswith(k) for k in fact_skip)]
     if floor_labels is not None:
         floors = [f_ for f_ in floors if f_["label"] in floor_labels]
     L = [title or "# Core facts: what was measured in each core image\n",
@@ -2832,7 +2833,7 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
     if sc_.get("system_facts"):
         lead = system_lead(rd, items, ids) + [""] + (lead or [])
     write_core_facts(rd, items, strips, geo_samples, entries, out=f"focus-build/{scope_name}/FOCUS-FACTS.md", ids=ids, looks=looks, lead=lead,
-                     fact_keys=sc_.get("facts", []), floor_labels=sc_.get("floors"),
+                     fact_keys=sc_.get("facts", []), fact_skip=sc_.get("facts_skip", ()), floor_labels=sc_.get("floors"),
                      title=f"# Focus facts: {sc_['title']}\n",
                      intro="What was measured in each focus image (IDs as in FOCUS.md), as text: tiles' states, key "
                            "colours, layout findings and contrast rows; recordings' motion metrics; then the sampled "

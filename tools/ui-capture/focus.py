@@ -26,14 +26,14 @@ _R560 = (1 - 520 / 1239, 0, 520 / 1239, 1)  # the pane's right 520 px: the meter
 B24 = dict(variant="1600x1000_font24", lh=16, gap=6)
 # Configure Keyboard Shortcuts below its title bar: at rest, filtered and refused at this one crop, so that what
 # moves between them (the columns, the list's end, the editor) can be compared
-KEYS_CROP = dict(part=(0, 0.04, 1, 0.96), lh=16, gap=6)
+KEYS_CROP = dict(part=(0, 0.04, 1, 0.96), fit=(640, 740), lh=16, gap=6)  # (828 px tall: two at 1:1 are over 1.15 MP)
 # the iTunes searching -> failed frames: cropped to what changes in the recording and the current album art's
 # Preview, which must hold still at the top right as the search ends. The search starts about 3 ms after the action;
 # the busy indicator's running goes false -> true as the real bridge is given (it was the stand-in's), so its
 # fade-in starts over: a trial run drew one frame (+19 ms) of the text alone before the failure (+36 ms), as a
 # search started from rest does
 ITUNES_FAIL_WITH = ("dialog", "itunes-error", "itunesArtworkCurrentPreviewButton")
-ITUNES_FAIL_TIMES = [-10, 22, 38]
+ITUNES_FAIL_TIMES = [-10, 22, 150]  # (the last: settled, whatever the run's latency)
 
 _PANE = (0.2256, 0.544, 0.7744, 0.431)  # the pane's place in a 1600x1000 window (fractions)
 
@@ -372,14 +372,13 @@ SCOPES = {
             ("dlg-confirmations", "Confirmations as they open, 1:1, over their parents; the folder list's menu in "
              "Configure (Menu key); Recent Issues whole", "dark",
              [[("dialog", "confirm-clear-diagnostics", "inner", "Delete diagnostics log, dark", dict(margin=16, lh=16, gap=6)),
-               ("dialog", "confirm-replace-cover", "inner", "Replace album art, dark", dict(margin=16, lh=16, gap=6))],
-              [("dialog", "tag-editor-close-confirm", "inner", "Unsaved tag changes, dark", dict(margin=16, lh=16, gap=6)),
-               ("dialog", "preferences-library-root-menu", (0.39, 0.09, 0.547, 0.295), "Configure: a folder's menu (Menu key), dark",
-                dict(lh=16, gap=6))],
+               ("dialog", "tag-editor-close-confirm", "inner", "Unsaved tag changes, dark", dict(margin=16, lh=16, gap=6))],
               [("dialog", "quit-save-failed", None, "Couldn't save before quitting, dark", dict(lh=16, gap=6)),
                ("dialog", "confirm-remove-library-root", "inner", "Remove Library Folder, light",
                 dict(theme="light", margin=16, lh=16, gap=6))],
-              [("dialog", "recent-errors", "popup", "Recent Issues, whole, dark", dict(fit=(700, 250), lh=16, gap=6))]]),
+              [("dialog", "recent-errors", "popup", "Recent Issues, whole, dark", dict(lh=16, gap=6)),
+               ("dialog", "preferences-library-root-menu", (0.39, 0.09, 0.547, 0.295), "Configure: a folder's menu (Menu key), dark",
+                dict(lh=16, gap=6))]]),
             ("dlg-tag-editor", "Edit Tags, 1:1: a twelve-file edit from a 1000 px main window; from a 1600 px one, its top "
              "left: an edit typed with real keys, then committed with Tab", "dark",
              [[("dialog", "tag-editor-batch", None, "Twelve files edited, not yet saved, from a 1000 px main window, dark",
@@ -390,13 +389,14 @@ SCOPES = {
             # the searching -> failed recording (a real failed search; its frames around all that changes and Preview)
             # with the results and the controls' states; the failed window as a whole is in shots/ (dialog_itunes-error_*)
             ("dlg-itunes-controls", "Replace from iTunes, dark: searching, then the real failed search, from the "
-             "recording; results (stand-ins), nothing found and failed, whole; Preview and Apply in each state", "dark",
+             "recording; results (stand-ins) and nothing found, whole; the replace question; Preview and Apply in each state", "dark",
              [[dict(strip="itunes-search-fails", item="changed", include=ITUNES_FAIL_WITH, times=ITUNES_FAIL_TIMES,
                     fit=(430, 300), zoom=1, pad=8, lh=16, gap=6,
                     label="Searching -> failed (ms after the action): all that changes, and Preview at the top right")],
-              [("dialog", "itunes-results", None, "Results, whole", dict(fit=(380, 262), lh=16, gap=6)),
-               ("dialog", "itunes-empty", None, "Nothing found, whole", dict(fit=(380, 262), lh=16, gap=6)),
-               ("dialog", "itunes-error", None, "Failed, whole", dict(fit=(380, 262), lh=16, gap=6)),
+              [("dialog", "itunes-results", None, "Results, whole", dict(fit=(360, 248), lh=16, gap=6)),
+               ("dialog", "itunes-empty", None, "Nothing found, whole", dict(fit=(360, 248), lh=16, gap=6)),
+               ("dialog", "confirm-replace-cover", "inner", "Replace album art, with the choice (1:1)",
+                dict(margin=4, lh=16, gap=6)),
                [("dialog", st, (0.68, 0.27, 0.32, 0.1), lb, dict(lh=16, gap=6))
                 for st, lb in (("itunes-results", "Preview, Apply at rest"), ("itunes-apply-hover", "Apply hovered"),
                                ("itunes-preview-pressed", "Preview pressed"))]]]),
@@ -421,13 +421,13 @@ SCOPES = {
              [[("dialog", "keyboard-shortcuts-filter", None, "Filtered by \u201cplay\u201d, light",
                 dict(KEYS_CROP, theme="light")),
                [("dialog", "keyboard-shortcuts-custom", None, "Stop: keys of its own, not yet applied",
-                 dict(part=(0, 0.64, 1, 0.27), lh=16, gap=6)),
+                 dict(part=(0, 0.69, 1, 0.235), lh=16, gap=6)),
                 ("dialog", "keyboard-shortcuts-typed-key", None, "Follow Playhead: F, with its note",
-                 dict(part=(0, 0.64, 1, 0.27), lh=16, gap=6)),
+                 dict(part=(0, 0.69, 1, 0.235), lh=16, gap=6)),
                 ("dialog", "keyboard-shortcuts-reassign", "inner", "Shortcut Conflict", dict(margin=8, lh=16, gap=6))]]]),
             # the small 24 pt windows together: the folder dialogs and the quit ones
             ("dlg24-small", "At 24 pt, dark, 1:1: Add Library Folder; Finishing Tag Changes", "dark",
-             [[("dialog", "library-root-name-add", None, "Add Library Folder", B24)],
+             [[("dialog", "library-root-name-add", None, "Add Library Folder, below its title bar", dict(B24, part=(0, 0.11, 1, 0.89)))],
               [("dialog", "tag-editor-quit-wait", "inner", "Finishing Tag Changes", dict(B24, margin=4))]]),
             # the small windows whole at 10 pt, so their size can be judged against what they hold (About at 24 pt,
             # which had a sheet of its own, is in shots/)
@@ -446,16 +446,18 @@ SCOPES = {
                 dict(B24, items=["renamePreviewRenameButton", "renamePreviewCancelButton"]))],
               [("dialog", "tag-editor-rename-preview", "inner", "24 pt: the top-left 1230 x 205 px",
                 dict(B24, margin=4, box=(0, 0, 1230, 205)))]]),
-            ("dlg-tag-editor-whole", "Edit Tags whole, dark, fitted: twelve files edited at 24 pt; 10 pt after a save "
-             "that failed for one file", "dark",
-             [[("dialog", "tag-editor-batch", None, "24 pt: twelve files edited, not yet saved",
-                dict(B24, fit=(1060, 556)))],
-              [("dialog", "tag-editor-save-failed", None, "10 pt: after a failed save",
-                dict(fit=(1060, 340), lh=16, gap=6))]]),
-            ("dlg24-tag-tools", "At 24 pt, dark, 1:1: Auto Number; Configure Keyboard Shortcuts' editor", "dark",
-             [[("dialog", "tag-editor-auto-number", "inner", "Auto Number", dict(B24, margin=4))],
-              [("dialog", "keyboard-shortcuts", None, "Configure Keyboard Shortcuts: its lower left",
-                dict(B24, part=(0, 0.72, 0.565, 0.28)))]]),
+            ("dlg-tag-editor-whole", "Edit Tags, 1:1, dark: twelve files edited, whole, from a 1600 px main window; the "
+             "footer after a save that failed for one file", "dark",
+             [[("dialog", "tag-editor-batch", None, "Twelve files edited, not yet saved", dict(lh=16, gap=6))],
+              [("dialog", "tag-editor-save-failed", None, "After a failed save: the footer, left",
+                dict(part=(0, 0.84, 0.46, 0.16), lh=16, gap=6)),
+               ("dialog", "tag-editor-save-failed", None, "The same, right",
+                dict(part=(0.54, 0.84, 0.46, 0.16), lh=16, gap=6))]]),
+            ("dlg-general-batch24", "Configure's General page whole, 1:1; at 24 pt, Edit Tags with twelve files edited "
+             "(fitted); dark", "dark",
+             [[("dialog", "preferences-general", None, "Configure: General", dict(lh=16, gap=6))],
+              [("dialog", "tag-editor-batch", None, "24 pt: twelve files edited, not yet saved",
+                dict(B24, fit=(620, 325)))]]),
             # 24 pt, light: Recent Issues dark above light (the whole popup: its width, the severity glyph)
             ("dlg24-light", "At 24 pt, 1:1: Recent Issues, dark above light (the whole popup over the status bar); Edit "
              "Tags' Track and Disc, both mixed (dark)", "light",
@@ -472,7 +474,7 @@ SCOPES = {
             ("sheet", "dlg-configure-visualization", "dark", "Configure's Visualization page; revert glyphs and Recent "
              "Issues' links in each state, incl. Tab focus", "the groups, each help line under its control; the flat "
              "controls' states"),
-            ("sheet", "dlg-confirmations", "dark", "Confirmations, the quit failure, Remove Folder; Configure's folder menu; Recent Issues whole",
+            ("sheet", "dlg-confirmations", "dark", "Confirmations, the quit failure, Remove Folder; Recent Issues whole; Configure's folder menu",
              "which button is the default and has focus; the wording"),
             ("sheet", "dlg-tag-editor", "dark", "Edit Tags: twelve files edited from a 1000 px main window; from 1600 px, one typed edit, committed",
              "what still identifies a row at 1000 px; the fields, the table, the mark"),
@@ -490,14 +492,16 @@ SCOPES = {
              "each window's size against what it holds; what leads in it"),
             ("sheet", "dlg24-rename", "dark", "Rename Files, twelve files: 10 pt whole; 24 pt in part, 1:1",
              "the preview's columns and arrows; the rows at 24 pt"),
-            ("sheet", "dlg-tag-editor-whole", "dark", "Edit Tags whole: a twelve-file edit at 24 pt; after a failed save",
-             "whether the new values can be checked before Save; the failed row, the status and Details"),
-            ("sheet", "dlg24-tag-tools", "dark", "24 pt: Auto Number; the shortcuts editor", "the check boxes' edge; the forms"),
+            ("sheet", "dlg-tag-editor-whole", "dark", "Edit Tags whole: a twelve-file edit; the footer after a failed save",
+             "whether the new values can be checked before Save; the status and Details"),
+            ("sheet", "dlg-general-batch24", "dark", "Configure's General page whole; 24 pt: Edit Tags' twelve-file edit",
+             "the page's groups and their help; the changed values at a large font"),
             ("sheet", "dlg24-light", "light", "24 pt: Recent Issues dark and light; Edit Tags' Track and Disc placeholders",
              "the popup's width, the glyph; the placeholders uncut"),
         ],
         facts=["dlg-", "screen-", "itunes-failed-", "tagsave-", "renamebatch-", "recent-issues-opened",
                "fill-about", "fill-itunes", "fill-recent-errors", "fill-tag-editor", "fill-preferences"],
+        facts_skip=["dlg-empty", "dlg-results", "dlg-no-results"],  # (the search palette's, out of the dialogs' scope)
         fact_table=True,  # one row per image at the top of FOCUS-FACTS
         # what Replace Album Art does, stated from the backend; the pack fails if these phrases leave the code
         source_notes=[("src/artwork/mod.rs",

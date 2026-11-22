@@ -268,6 +268,11 @@ class DialogsPack(unittest.TestCase):
         self.assertEqual([(c["item"], c["include"][2]) for c in frames],
                          [("changed", "itunesArtworkCurrentPreviewButton")])
 
+    def test_the_search_palettes_facts_are_left_out(self):
+        for key in ("dlg-empty", "dlg-results", "dlg-no-results"):
+            self.assertIn(key, self.sc["facts_skip"])
+        self.assertFalse([k for k in self.sc["facts_skip"] if "dlg-itunes-empty-dark".startswith(k)])
+
     def test_rename_files_is_at_1_to_1(self):
         self.assertFalse([c for c in self.tiles("dlg24-rename") if c[4].get("fit")])
 
