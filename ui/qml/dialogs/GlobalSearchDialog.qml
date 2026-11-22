@@ -241,7 +241,7 @@ Dialog {
     readonly property string contextSeparator: " · "
     // A result's details after its title, in parts: who and where it is
     // from, and what else matched.
-    function rowContextParts(row, full) {
+    function rowContextParts(row, full, oneFolder) {
         let parts = []
         if (row.rowType === "track") {
             const artistAlbum = [row.artist || "", row.album || ""].filter(function(value) { return value.length > 0 })
@@ -254,12 +254,18 @@ Dialog {
             if (count > 0) parts.push(I18n.i18ncp("@info:status", "%1 album", "%1 albums", count))
         }
         if (row.genre && (full || root.queryMatches(row.genre))) parts.push(row.genre)
-        if (row.rootLabel && (full || row.showRoot || root.queryMatches(row.rootLabel))) parts.push(row.rootLabel)
+        if (row.rootLabel && ((full && !oneFolder) || row.showRoot || root.queryMatches(row.rootLabel))) parts.push(row.rootLabel)
         if (row.matchDetail) parts.push(row.matchDetail)
         return parts.filter(function(value) { return value.length > 0 })
     }
     function rowContext(row, full) {
         return root.rowContextParts(row, full).join(root.contextSeparator)
+    }
+    // What a result's tooltip says after the title: the whole context, but
+    // a folder's name only where it tells folders apart.
+    function toolTipContext(row) {
+        const oneFolder = (root.controller.uiBridge.libraryRootCount || 0) <= 1
+        return root.rowContextParts(row, true, oneFolder).join(root.contextSeparator)
     }
     // Why a row whose title has no match was found: its context as styled
     // text, the matches in the text colour at the regular weight, the
@@ -314,8 +320,9 @@ Dialog {
     }
 
     // The title of a result in up to five runs, the matches semibold: the
-    // text of each, where it starts and how wide it may be. A run that does
-    // not fit is elided and the runs after it are left out.
+    // text of each, where it starts, how wide it may be and whether that
+    // cuts it. A run that does not fit is elided and the runs after it are
+    // left out.
     readonly property int maxTitleRuns: 5
     function titleRuns(label, allEmphasized) {
         const text = String(label || "")
@@ -339,7 +346,7 @@ Dialog {
             const metrics = segments[i].match ? semibold : regular
             const advance = metrics.advanceWidth(segments[i].text)
             runs.push({ text: segments[i].text, match: !!segments[i].match, x: Math.round(x),
-                        width: Math.min(advance, Math.max(0, room - x)) })
+                        width: Math.min(advance, Math.max(0, room - x)), cut: x + advance > room + 0.5 })
             x += advance
         }
         return runs
@@ -685,7 +692,16 @@ Dialog {
                         : width - root.sideInset - resultsView.scrollbarLane) - root.contextX)
                     // Asked for only when the shared tooltip shows.
                     function toolTipText() {
-                        return model.label + "\n" + root.rowContext(model, true)
+                        return [model.label, root.toolTipContext(model)].filter(function(line) {
+                            return !!line
+                        }).join("\n")
+                    }
+                    // Whether the tooltip says what the row does not: the
+                    // row is elided, or there is more.
+                    function toolTipAdds() {
+                        return resultContext.truncated
+                            || resultRow.titleRuns.some(function(run) { return run.cut })
+                            || root.toolTipContext(model) !== resultRow.context
                     }
                     width: ListView.view.width
                     height: kind === "item" ? root.resultHeight : (kind === "" ? 0 : root.headingHeight)
@@ -905,6 +921,7 @@ Dialog {
                     // The context, whole and regular; where the title has
                     // no match, its matches are in the text colour.
                     Text {
+                        id: resultContext
                         objectName: "globalSearchResultContext"
                         visible: resultRow.isResult
                         x: root.contextX
@@ -1151,14 +1168,27 @@ Dialog {
         }
 
         // One tooltip for the result under the pointer, rather than one for
-        // each row.
+        // each row. It is under the row, where the style's place, above,
+        // covered the query field, and above it only where the window ends
+        // first. It fades out where it was, with what it said: with no row
+        // it moved over the field as it faded.
         ToolTip {
             id: resultToolTip
             objectName: "globalSearchResultToolTip"
-            parent: root.hoveredResultRow || resultsView
-            visible: !!root.hoveredResultRow && root.hoveredResultRow.hovered && !root.searching
+            readonly property int gap: 3
+            readonly property bool fitsUnder: {
+                const row = root.toolTipRow
+                if (!row || !root.parent) return true
+                const rowBottom = root.y + body.y + row.y - resultsView.contentY + row.height
+                return rowBottom + resultToolTip.gap + resultToolTip.implicitHeight
+                    + resultToolTip.bottomMargin <= root.parent.height
+            }
+            parent: root.toolTipRow || resultsView
+            y: resultToolTip.fitsUnder ? (root.toolTipRow || resultsView).height + resultToolTip.gap
+                                       : -resultToolTip.implicitHeight - resultToolTip.gap
+            visible: !!root.toolTipTarget
             delay: Kirigami.Units.toolTipDelay
-            text: root.hoveredResultRow ? root.hoveredResultRow.toolTipText() : ""
+            text: root.toolTipText
         }
 
         Popup {
@@ -1210,8 +1240,18 @@ Dialog {
             MenuItem { text: I18n.i18nc("@action:inmenu", "Open Containing Folder"); icon.name: "document-open-folder"; onTriggered: root.controller.openRowInFileBrowser(root.contextRowData) }
         }
     }
-    // The result row under the pointer, whose tooltip shows.
+    // The result row under the pointer.
     property Item hoveredResultRow: null
+    // The row whose tooltip shows, none when it would add nothing or while
+    // a search is to replace the rows; and the last row that had one, with
+    // what it said, for the fade out.
+    readonly property Item toolTipTarget: root.hoveredResultRow && root.hoveredResultRow.hovered
+        && !root.searching && root.hoveredResultRow.toolTipAdds() ? root.hoveredResultRow : null
+    readonly property string toolTipTargetText: root.toolTipTarget ? root.toolTipTarget.toolTipText() : ""
+    property Item toolTipRow: null
+    property string toolTipText: ""
+    onToolTipTargetChanged: if (root.toolTipTarget) root.toolTipRow = root.toolTipTarget
+    onToolTipTargetTextChanged: if (root.toolTipTargetText.length > 0) root.toolTipText = root.toolTipTargetText
     // The lead glyphs of the rows without a cover.
     Component {
         id: artistGlyph

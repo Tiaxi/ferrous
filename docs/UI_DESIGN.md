@@ -126,6 +126,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **A path the user reads but doesn't edit is a `PathLabel`:** one line, elided in the middle, with the full path in its tooltip. A read-only text field looks editable.
 - **In list rows, weight marks state.** The playing title, a search match in a title, a library folder's name and an unseen issue are DemiBold; the rest is regular. Bold used for anything else would compete with these.
 - **A search result says why it matched.** Where the title has no match, the matched run of the context is in `text`, at the regular weight, so it explains the row without outweighing the title. Results found by their artist showed no match at all.
+- **A result's tooltip adds to its row.** It shows only where the row is elided or there is more to say, and under the row, so it never covers the query.
 
 ## Dialogs
 

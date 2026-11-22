@@ -104,6 +104,7 @@ ApplicationWindow {
         property bool globalSearchCanExpand: true
         property var globalSearchTotals: [0, 0, 0]
         property string globalSearchSuggestion: ""
+        property int libraryRootCount: 1
         property string currentTrackPath: ""
         property string playbackState: "Stopped"
         property var queries: []
@@ -456,6 +457,8 @@ private slots:
     void sectionsFollowTheirBestMatch();
     void rowsThatChangeKindRedrawInPlace();
     void tooltipFollowsARowThatChangesKindUnderAStillPointer();
+    void tooltipShowsOnlyWhatARowDoesNot();
+    void tooltipKeepsClearOfTheField();
     void rowsShareTheirColumnsAndThumbnails();
     void matchesAreEmphasisedInTheTitleOnly();
     void contextSaysWhyARowMatched();
@@ -780,6 +783,118 @@ void SearchPaletteTest::tooltipFollowsARowThatChangesKindUnderAStillPointer() {
     QCOMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), row);
     QTest::mouseMove(harness.window, QPoint(2, 2));
     QTRY_COMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), nullptr);
+}
+
+// A result has a tooltip only where it adds to the row: the row is
+// elided, or there is more to say (its genre, its folder where there are
+// several). It repeated the row.
+void SearchPaletteTest::tooltipShowsOnlyWhatARowDoesNot() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeLight, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    auto rows = meridianRows(harness.coverUrl);
+    for (Row &row : rows) row.rootLabel = QStringLiteral("Shelf");
+    rows[1].genre = QStringLiteral("Ambient");
+    rows[3].label = QStringLiteral("A Remarkably Long Track Title That Will Certainly Not Fit In Its Column, "
+                                   "However Wide the Palette Makes It");
+    rows[4].album = QStringLiteral("An Album Whose Name Runs On Well Past the Room Its Column Has for It");
+    harness.search(QStringLiteral("meridian"), rows, {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("globalSearchResultToolTip"));
+    QVERIFY(toolTip != nullptr);
+    toolTip->setProperty("delay", 0);
+    const auto shows = [&](const QString &label) {
+        for (int i = 0; i < harness.model.rowCount(); ++i) {
+            if (harness.model.rowDataAt(i).value(QStringLiteral("label")) != label) continue;
+            QQuickItem *row = harness.row(i);
+            if (row == nullptr) return QStringLiteral("no row");
+            QTest::mouseMove(harness.window, sceneCentre(row));
+            if (!QTest::qWaitFor([&] {
+                    return harness.dialog->property("hoveredResultRow").value<QQuickItem *>() == row;
+                })) {
+                return QStringLiteral("no hover");
+            }
+            QTest::qWait(50);
+            // At rest: open, or gone once its fade has ended.
+            if (!QTest::qWaitFor([&] {
+                    return toolTip->property("opened").toBool() || !toolTip->property("visible").toBool();
+                })) {
+                return QStringLiteral("no rest");
+            }
+            return toolTip->property("opened").toBool() ? toolTip->property("text").toString() : QString();
+        }
+        return QStringLiteral("no result");
+    };
+
+    // All of the row shows, and one folder's name says nothing.
+    QCOMPARE(shows(QStringLiteral("The Quiet Meridian")), QString());
+    QCOMPARE(shows(QStringLiteral("Morning Tide Field")), QString());
+    // More to say.
+    QVERIFY(shows(QStringLiteral("Small Hours")).contains(QStringLiteral("Ambient")));
+    QVERIFY(!shows(QStringLiteral("Small Hours")).contains(QStringLiteral("Shelf")));
+    // The elided title and the elided context.
+    QVERIFY(shows(rows[3].label).contains(rows[3].label));
+    QVERIFY(shows(rows[4].label).contains(rows[4].album));
+    // The folder, where there are several.
+    harness.bridge->setProperty("libraryRootCount", 2);
+    QVERIFY(shows(QStringLiteral("The Quiet Meridian")).contains(QStringLiteral("Shelf")));
+}
+
+// A result's tooltip is under its row, or over it where the window ends
+// first, and never over the query field (it opened over the field), also
+// as it fades out.
+void SearchPaletteTest::tooltipKeepsClearOfTheField() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeLight, &errorText, 1000, 560), qPrintable(errorText));
+    QVERIFY(harness.open());
+    auto rows = meridianRows(harness.coverUrl);
+    for (Row &row : rows) row.genre = QStringLiteral("Ambient");
+    harness.search(QStringLiteral("meridian"), rows, {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("globalSearchResultToolTip"));
+    QVERIFY(toolTip != nullptr);
+    toolTip->setProperty("delay", 0);
+    auto *content = toolTip->property("contentItem").value<QQuickItem *>();
+    QVERIFY(content != nullptr);
+    const QRectF field = sceneRect(harness.item(QStringLiteral("globalSearchQueryField")));
+    const QRectF view = sceneRect(harness.view());
+    QList<QQuickItem *> results;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        QQuickItem *row = harness.row(i);
+        if (harness.model.rowDataAt(i).value(QStringLiteral("kind")) == QStringLiteral("item") && row != nullptr
+            && sceneRect(row).bottom() <= view.bottom() + 0.5) {
+            results << row;
+        }
+    }
+    QVERIFY(results.size() >= 3);
+    bool below = false;
+    for (QQuickItem *row : std::as_const(results)) {
+        QTest::mouseMove(harness.window, sceneCentre(row));
+        QTRY_VERIFY(toolTip->property("opened").toBool());
+        QTRY_COMPARE(toolTip->property("parent").value<QQuickItem *>(), row);
+        const auto tip = [&] { return sceneRect(content->parentItem()); };
+        QTRY_VERIFY2(tip().top() >= sceneRect(row).bottom() || tip().bottom() <= sceneRect(row).top(),
+                     "the tooltip is over its row");
+        QVERIFY2(tip().top() >= field.bottom(), "the tooltip is over the field");
+        QVERIFY(tip().bottom() <= harness.window->height());
+        if (row == results.first()) below = tip().top() >= sceneRect(row).bottom();
+    }
+    QVERIFY(below);
+
+    // Back on the first row, then off the list: it fades where it was.
+    QTest::mouseMove(harness.window, sceneCentre(results.first()));
+    QTRY_COMPARE(toolTip->property("parent").value<QQuickItem *>(), results.first());
+    QTRY_VERIFY(toolTip->property("opened").toBool());
+    const QRectF shownAt = sceneRect(content->parentItem());
+    QTest::mouseMove(harness.window, QPoint(2, 2));
+    QTRY_COMPARE(harness.dialog->property("hoveredResultRow").value<QQuickItem *>(), nullptr);
+    while (toolTip->property("visible").toBool() && content->parentItem()->opacity() > 0.2) {
+        QVERIFY2(std::abs(sceneRect(content->parentItem()).top() - shownAt.top()) < 12, "the fading tooltip moved");
+        QVERIFY2(sceneRect(content->parentItem()).top() >= field.bottom(), "the fading tooltip is over the field");
+        QTest::qWait(8);
+    }
 }
 
 // The lead at 16 px (a 24 px thumbnail with a 2 px radius, the artist
