@@ -2298,6 +2298,34 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     QQuickItem *image = visibleItemNamed(host, QStringLiteral("albumArtImage"));
     QQuickItem *seam = visibleItemNamed(host, QStringLiteral("albumArtInfoSeam"));
     QVERIFY2(image != nullptr && seam != nullptr, at.constData());
+    // One seam colour, as drawn, where the column's seam meets the footer's
+    // and, over the whole screen, the strip's rule (it was #242424 between
+    // their #333333).
+    QList<std::pair<QString, QPointF>> rules{
+        {QStringLiteral("the footer's seam"), rectOf(footerSeam).center()}};
+    QQuickItem *strip = visibleItemNamed(host, QStringLiteral("albumArtFullscreenStrip"));
+    if (fullscreen && strip != nullptr && qFuzzyCompare(strip->opacity(), 1.0)) {
+        QQuickItem *rule = visibleItemNamed(host, QStringLiteral("viewerStripHairline"));
+        QVERIFY2(rule != nullptr, at.constData());
+        rules.append({QStringLiteral("the strip's rule"), QPointF(rectOf(column).center().x(), rectOf(rule).center().y())});
+    }
+    const auto unlike = [&]() -> QString {
+        const QImage drawn = host->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const double dpr = static_cast<double>(drawn.width()) / host->width();
+        const auto pixel = [&](const QPointF &point) {
+            return drawn.pixelColor(int(point.x() * dpr), int(point.y() * dpr));
+        };
+        const QColor seamColor = pixel(rectOf(seam).center());
+        for (const auto &[what, point] : std::as_const(rules)) {
+            const QColor other = pixel(point);
+            if (std::abs(seamColor.red() - other.red()) > 1 || std::abs(seamColor.green() - other.green()) > 1
+                || std::abs(seamColor.blue() - other.blue()) > 1) {
+                return QStringLiteral("the column's seam %1, %2 %3").arg(seamColor.name(), what, other.name());
+            }
+        }
+        return {};
+    };
+    QTRY_VERIFY2(unlike().isEmpty(), qPrintable(QString::fromUtf8(at) + QStringLiteral(": ") + unlike()));
     const auto paintedArt = [image]() {
         const QSizeF painted(image->property("paintedWidth").toReal(),
                              image->property("paintedHeight").toReal());

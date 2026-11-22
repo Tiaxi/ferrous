@@ -588,8 +588,11 @@ Item {
         x: infoColumn.x - 1
         width: 1
         height: parent.height
-        // The plates' edge on the floor, solid, over any art.
-        color: Qt.tint(root.plot.plotBg, root.plot.plotPlateEdge)
+        // The one seam colour, solid, over any art: as the footer's seam and
+        // the strip's rule, which it meets, the plates' edge on the details'
+        // strip colour (on the floor's black it was #242424 between their
+        // #333333, and nearly went against the black).
+        color: Qt.tint(root.plot.plotStrip, root.plot.plotPlateEdge)
     }
 
     // The details: the file's name, then label and value rows; then the
