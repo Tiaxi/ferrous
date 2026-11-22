@@ -225,7 +225,7 @@ SCOPES = {
                             (("slider-hover", "Volume hovered"), ("slider-focus", "Volume focused"), ("dragging", "Volume dragged")))]),
             # the drag frame by frame (the merged strip of so wide and flat a recording shows it a few pixels high)
             ("focus-transport-drag", "The seek bar dragged, frame by frame at 1:1: its time box appearing, following, "
-             "leaving; dark above light", "dark",
+             "then the hover's after the release; dark above light", "dark",
              [[dict(strip="seek-drag-box", theme=th, item=(470, 0, 360, 80), times=ts, zoom=1, pad=0, lh=16, gap=6,
                     label=f"{th}: about " + ", ".join(f"{t:+d} ms" for t in ts))]
               for th in ("dark", "light") for ts in ([-20, 60, 280, 440], [700, 820, 1200, 2000])]),
@@ -284,7 +284,7 @@ SCOPES = {
              "the time box against the bar's ends; the drag; the focus rings; the muted glyph"),
             ("sheet", "focus-transport-sizes", "dark", "The transport at 24 pt and in the narrow window", "what crowds or elides"),
             ("sheet", "focus-transport-drag", "dark", "The seek bar dragged, frame by frame: the time box, both themes",
-             "the box's fade and its place over the playhead"),
+             "the box's fade and its place over the playhead; the handover to the hover's box on release"),
             ("sheet", "focus-statusbar", "dark", "The status bar's indicators per state, both themes, 1:1",
              "the indicators' order, spacing and weight; the warning and error states"),
             ("sheet", "focus-statusbar-lastfm", "dark", "Last.fm's indicator in every state, both themes, 1:1",
@@ -817,7 +817,7 @@ SCOPES.update({
                 ("albumart-fullscreen-strip-key-pressed", "Info held with Space"))],
               [("menu", "context-albumart-viewer-windowed", "popup", "Menu, windowed", dict(popup=1, margin=24, lh=16, gap=6)),
                ("viewer", "albumart-fullscreen", (0, 0, 0.3, 0.04), "The strip's title", dict(lh=16, gap=6))],
-              [("menu", "context-albumart-viewer-fullscreen", (0.49, 0.485, 0.14, 0.045), "Menu, fullscreen (Menu key)", dict(lh=16, gap=6))]]),
+              [("menu", "context-albumart-viewer-fullscreen", (0.49, 0.48, 0.14, 0.055), "Menu, fullscreen (Menu key)", dict(lh=16, gap=6))]]),
             ("vw-info", "The album art viewer's info column at 1:1", "dark",
              [[("viewer", "albumart-windowed-info", (0.77, 0, 0.23, 0.33), "Windowed, dark", dict(lh=16, gap=6)),
                ("viewer", "albumart-fullscreen-info", (0.78, 0, 0.22, 0.27), "Fullscreen, dark", dict(lh=16, gap=6))],

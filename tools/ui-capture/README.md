@@ -222,8 +222,10 @@ pack like a path left in a shot (exit 3; a focus-only run then publishes nothing
   default on Fedora); the work folder must not be under `/mnt`, which the namespace covers. Paths outside the work
   folder (such as the source tree) stay real. `SHOT_NEUTRAL=0` runs without; the pack then paints the paths out
   of the shots, but it cannot check recordings, so its privacy check fails when there are any (see Privacy).
-- **Middle-button and leave steps** (`mpress`, `mdmove`, `mrelease`, `mclick`, `leave`) are events the probe
-  gives the window, as the compositor would. The pointer's cursor is KWin's, so no grab or recording shows it.
+- **The probe's input goes to the app's windows**: the middle button (`mpress`, `mdmove`, `mrelease`, `mclick`),
+  the pointer leaving the window (`leave`), keys, held keys (`keydown`, `keyup`). Such a key is past Qt's shortcut
+  map, so the focused item gets it: where a shortcut must take it first (the search palette's Menu key), use
+  `kkey`, a real key through KWin. The pointer's cursor is KWin's, so no grab or recording shows it.
 - **Offscreen and private only.** Each app runs in its own `dbus-run-session` with a private bus socket and its
   own XDG folders, so the single-instance handoff and MPRIS never reach a Ferrous you are running; the driver
   records the private bus's names at start, and the template scan refuses to run if a Ferrous or MPRIS name is
