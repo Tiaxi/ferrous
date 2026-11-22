@@ -242,6 +242,8 @@ private slots:
     void plotToolButtonDrawsCheckedAndFocusApart_data();
     void plotToolButtonDrawsCheckedAndFocusApart();
     void plotToolButtonIsAnAccessibleCheckableButton();
+    void activeSelectionIsUnmistakableInDark_data();
+    void activeSelectionIsUnmistakableInDark();
 };
 
 void UiFoundationsTest::initTestCase() {
@@ -302,7 +304,7 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         {"hairline", QStringLiteral("#26292c"), QStringLiteral("#ebedef")},
         {"chromeLine", QStringLiteral("#383b40"), QStringLiteral("#c9cdd1")},
         // Light: 38 %, 1.4:1 on the view, past a hovered row.
-        {"selection", QStringLiteral("#1f3e4e"), QStringLiteral("#b5e0f7")},
+        {"selection", QStringLiteral("#21475b"), QStringLiteral("#b5e0f7")},
         {"focusRing", QStringLiteral("#6cc5f2"), QStringLiteral("#1a74a8")},
         {"link", QStringLiteral("#3daee9"), QStringLiteral("#1b73a1")},
         {"negative", QStringLiteral("#ed5a6a"), QStringLiteral("#c4293b")},
@@ -913,7 +915,9 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
         const double figureContrast = tokens->property("rowFigureContrast").toDouble();
         QVERIFY2(contrastRatio(number.value<QColor>(), selected) >= figureContrast,
                  qPrintable(describeContrast(QStringLiteral("selected number"), number.value<QColor>(), selected)));
-        QVERIFY(contrastRatio(number.value<QColor>(), selected) < contrastRatio(colorOf(tokens, "text"), selected) - 4);
+        // A step under the text, by their own contrast: on dark's stronger
+        // selection both are nearer it.
+        QVERIFY(contrastRatio(colorOf(tokens, "text"), selected) >= 1.5 * contrastRatio(number.value<QColor>(), selected));
     }
 }
 
@@ -965,9 +969,9 @@ void UiFoundationsTest::selectedQueueRowAnswersHover_data() {
 // A selected queue row under the pointer steps its selection tint toward
 // the text colour, with the hover tint's own fade, active or not; the
 // library's does not (hover changed nothing on a selected row). The step is
-// the most text, in whole percent up to 6 %, that the text and the secondary
-// text keep 4.5:1 on, and the warning mark 3:1: 4 % on dark, where 5 % took
-// the mark under it, and 6 % on light. It is visible yet under the hover's
+// the most text, in whole percent up to 4 % on dark and 6 % on light, that
+// the text keeps 4.5:1 on; the row's other texts and its mark are made
+// readable on it. It is visible yet under the hover's
 // from the view, and every text a selected row draws, the column text and
 // the playing amber made readable on it, stays 4.5:1 on it.
 void UiFoundationsTest::selectedQueueRowAnswersHover() {
@@ -994,7 +998,7 @@ void UiFoundationsTest::selectedQueueRowAnswersHover() {
                                       Q_ARG(QVariant, QVariant(true)), Q_ARG(QVariant, QVariant(true))));
     const QList<std::pair<QString, QColor>> texts{
         {QStringLiteral("text"), text},
-        {QStringLiteral("secondary"), colorOf(tokens, "textSecondary")},
+        {QStringLiteral("secondary"), colorOf(tokens, "textSecondarySelected")},
         {QStringLiteral("column"), colorOf(tokens, "textColumn")},
         {QStringLiteral("now"), colorOf(tokens, "now")},
         {QStringLiteral("selected number"), number.value<QColor>()},
@@ -1023,18 +1027,6 @@ void UiFoundationsTest::selectedQueueRowAnswersHover() {
             QVERIFY2(contrastRatio(number.value<QColor>(), under) >= figureContrast,
                      qPrintable(describeContrast(QStringLiteral("selected number"), number.value<QColor>(), under)));
         }
-    }
-
-    // Under 6 %, a percent more would cost the text or the secondary text
-    // its 4.5:1, or the mark its 3:1, on one of them.
-    if (share < 0.06) {
-        bool costs = false;
-        for (const char *selectionToken : {"selection", "selectionInactive"}) {
-            const QColor more = mixed(colorOf(tokens, selectionToken), text, share + 0.01);
-            costs = costs || contrastRatio(colorOf(tokens, "negative"), more) < 3.0
-                || contrastRatio(text, more) < 4.5 || contrastRatio(colorOf(tokens, "textSecondary"), more) < 4.5;
-        }
-        QVERIFY(costs);
     }
 
     // The hover's fade in animation time, to its end.
@@ -1096,11 +1088,13 @@ void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground() {
     QObject *tokens = root->property("tokens").value<QObject *>();
     QVERIFY(tokens != nullptr);
     const QColor negative = colorOf(tokens, "negative");
+    const QColor negativeSelected = colorOf(tokens, "negativeSelected");
     for (const char *background :
          {"view", "hoveredRow", "selection", "selectionInactive", "selectionHovered", "selectionInactiveHovered"}) {
         const QColor under = colorOf(tokens, background);
-        QVERIFY2(contrastRatio(negative, under) >= 3.0,
-                 qPrintable(describeContrast(QLatin1String(background), negative, under)));
+        const QColor mark = QByteArray(background).startsWith("selection") ? negativeSelected : negative;
+        QVERIFY2(contrastRatio(mark, under) >= 3.0,
+                 qPrintable(describeContrast(QLatin1String(background), mark, under)));
     }
 }
 
@@ -2081,6 +2075,53 @@ void UiFoundationsTest::plotToolButtonIsAnAccessibleCheckableButton() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, button->mapToScene(QPointF(12, 12)).toPoint());
     QTRY_VERIFY(button->property("checked").toBool());
     QVERIFY(accessible->state().checked);
+}
+
+void UiFoundationsTest::activeSelectionIsUnmistakableInDark_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// On dark, the selection of the list with the keyboard is unmistakable
+// against another list's (they were 1.04:1 and 6 ΔE apart), and still under
+// the pointer, with every text and mark of a selected row keeping its
+// contrast on it. Light is as it was.
+void UiFoundationsTest::activeSelectionIsUnmistakableInDark() {
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, QString()), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QVERIFY(tokens != nullptr);
+    const QColor active = colorOf(tokens, "selection");
+    const QColor inactive = colorOf(tokens, "selectionInactive");
+    const QColor inactiveHovered = colorOf(tokens, "selectionInactiveHovered");
+    if (dark) {
+        QVERIFY2(contrastRatio(active, inactive) >= 1.17 && labDistance(active, inactive) >= 9.0,
+                 qPrintable(describeContrast(QStringLiteral("active on inactive"), active, inactive)
+                            + QStringLiteral(", %1 ΔE").arg(labDistance(active, inactive))));
+        // Another list's under the pointer is still the less selected.
+        QVERIFY2(contrastRatio(active, colorOf(tokens, "view")) > contrastRatio(inactiveHovered, colorOf(tokens, "view"))
+                     && labDistance(active, inactiveHovered) >= 7.5,
+                 qPrintable(inactiveHovered.name()));
+    } else {
+        QVERIFY(sameColor(active, fromHex(QStringLiteral("#b5e0f7"))));
+        QVERIFY(sameColor(colorOf(tokens, "textSecondarySelected"), colorOf(tokens, "textSecondary")));
+        QVERIFY(sameColor(colorOf(tokens, "negativeSelected"), colorOf(tokens, "negative")));
+    }
+    const QList<std::pair<const char *, double>> drawn{
+        {"text", 4.5}, {"textColumn", 4.5}, {"textSecondarySelected", 4.5}, {"now", 4.5},
+        {"textTertiarySelected", 5.4}, {"negativeSelected", 3.0}, {"focusRing", 3.0}};
+    for (const char *under : {"selection", "selectionInactive", "selectionHovered", "selectionInactiveHovered"}) {
+        for (const auto &[token, minimum] : drawn) {
+            QVERIFY2(contrastRatio(colorOf(tokens, token), colorOf(tokens, under)) >= minimum,
+                     qPrintable(describeContrast(QLatin1String(token) + QStringLiteral(" on ") + QLatin1String(under),
+                                                 colorOf(tokens, token), colorOf(tokens, under))));
+        }
+    }
 }
 
 int main(int argc, char **argv) {

@@ -1079,6 +1079,7 @@ private slots:
     void nowPlayingCoverIsAKeyboardStop();
     void libraryFoldersAreFolderHeaders();
     void regionHeadersNameTheRegionAndItsTotals();
+    void selectedRowsDrawTheirMarksForTheSelection();
     void libraryTreeHasOneIndentStep();
     void libraryAlbumWithoutACoverShowsAPlaceholderTile();
     void libraryFocusRingStopsAtTheScrollBarLane();
@@ -3985,6 +3986,27 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     window->resize(1000, 720);
     QTRY_COMPARE(libraryTotals->property("text").toString(), QStringLiteral("176 tracks"));
     QVERIFY(!libraryTitle->property("truncated").toBool());
+}
+
+// A selected row of the queue draws its length in the selected row's
+// secondary colour, which keeps its contrast on the selection under the
+// pointer; an unselected one in the plain one.
+void UiMainWindowTest::selectedRowsDrawTheirMarksForTheSelection() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    setQueue(bridgeOf(window), sampleQueueRows(3));
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QQuickItem *view = named(window, "playlistView");
+    QVERIFY(controller && view);
+    QTRY_VERIFY(viewRowAt(view, 2) != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSingleSelection", Q_ARG(QVariant, 1)));
+    QTRY_VERIFY(rowTinted(view, 1));
+    const auto lengthColor = [view](int row) {
+        return colorOf(itemNamed(viewRowAt(view, row), QStringLiteral("queueCell_length")));
+    };
+    QCOMPARE(lengthColor(1), tokenHex(window, "textSecondarySelected"));
+    QCOMPARE(lengthColor(2), tokenHex(window, "textSecondary"));
 }
 
 // An album row without a cover keeps the 20 px place a cover's thumbnail

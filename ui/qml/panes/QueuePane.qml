@@ -782,8 +782,11 @@ Rectangle {
                     // icons in the shared palette's colours. They sit on
                     // whole pixels.
                     readonly property real cellY: Math.round((playlistRow.height - titleCell.implicitHeight) / 2)
+                    readonly property color secondaryTextColor: playlistRow.rowSelected
+                        ? root.uiPalette.textSecondarySelected
+                        : root.uiPalette.textSecondary
                     readonly property color columnTextColor: playlistRow.unreadable
-                        ? root.uiPalette.textSecondary
+                        ? playlistRow.secondaryTextColor
                         : root.uiPalette.textColumn
 
                     Item {
@@ -809,7 +812,9 @@ Rectangle {
                             isMask: true
                             color: playlistRow.isNow
                                 ? root.uiPalette.now
-                                : (playlistRow.showsWarning ? root.uiPalette.negative : root.uiPalette.textSecondary)
+                                : !playlistRow.showsWarning ? playlistRow.secondaryTextColor
+                                : playlistRow.rowSelected ? root.uiPalette.negativeSelected
+                                : root.uiPalette.negative
                             // The amber glyph fades in as the old row's
                             // fades out.
                             opacity: playlistRow.isNow ? playlistRow.amberIn : 1
@@ -866,7 +871,7 @@ Rectangle {
                         horizontalAlignment: Text.AlignLeft
                         text: playlistRow.titleValue
                         readonly property color plainColor: playlistRow.unreadable
-                            ? root.uiPalette.textSecondary : root.uiPalette.text
+                            ? playlistRow.secondaryTextColor : root.uiPalette.text
                         // The title's share of amber, taken in by the row
                         // that becomes now as the row that was now gives it
                         // up. It sets the weight and the colour together, so
@@ -918,7 +923,7 @@ Rectangle {
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignRight
                         text: playlistRow.lengthTextValue
-                        color: root.uiPalette.textSecondary
+                        color: playlistRow.secondaryTextColor
                     }
 
                     MouseArea {

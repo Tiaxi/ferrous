@@ -600,7 +600,9 @@ Rectangle {
                                 isMask: true
                                 color: libraryRow.isNow
                                     ? root.uiPalette.now
-                                    : (libraryRow.showsWarning ? root.uiPalette.negative : root.uiPalette.textSecondary)
+                                    : !libraryRow.showsWarning ? root.uiPalette.textSecondary
+                                    : libraryRow.rowSelected ? root.uiPalette.negativeSelected
+                                    : root.uiPalette.negative
 
                                 ToolTip.visible: stateHover.hovered && libraryRow.unreadableReason.length > 0
                                 ToolTip.delay: Kirigami.Units.toolTipDelay
