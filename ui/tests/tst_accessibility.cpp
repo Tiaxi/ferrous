@@ -241,6 +241,7 @@ private slots:
     void cleanup();
     void cleanupTestCase();
     void controlsAreNamedForAssistiveTechnology();
+    void albumArtSaysWhatItsFocusStopDoes();
     void slidersAnnounceWholeSecondsAndPercents();
     void arrowKeysStepTheVolumeFromItsValue();
     void bridgeEchoesWaitForTheVolumeGesture();
@@ -354,6 +355,71 @@ void AccessibilityTest::controlsAreNamedForAssistiveTechnology() {
                [&] { checkKeyboardMovesOfTheSeekSliderSeek(window); },
                [&] { checkScrobbleIndicatorIsNamedAndWorksByKeyboard(window); },
                [&] { checkEveryPreferencesPageIsReachableByTab(window); }});
+}
+
+// The album art's focus stop tells assistive technology what it does, and
+// does it when pressed (#732): a cover is a button that opens the album art
+// viewer, as a double-click does, and a track without one has a button that
+// opens its menu, as Menu and Shift+F10 do; each names those keys.
+void AccessibilityTest::albumArtSaysWhatItsFocusStopDoes() {
+    MainWindowFixture main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(bridge != nullptr && viewer != nullptr);
+    QVERIFY(bridge->setProperty("currentTrackTitle", QStringLiteral("Shore")));
+    QVERIFY(bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/track.flac")));
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
+    QQuickItem *stop = nullptr;
+    QTRY_VERIFY((stop = visibleItemNamed(window, QStringLiteral("albumArtFocusTarget"))) != nullptr);
+    QTRY_VERIFY(stop->isEnabled());
+
+    // No album art: a button with a menu.
+    QAccessibleInterface *iface = inAccessibleTree(window, stop);
+    QVERIFY(iface != nullptr);
+    QCOMPARE(iface->role(), QAccessible::ButtonMenu);
+    QCOMPARE(iface->text(QAccessible::Name), QStringLiteral("No album art"));
+    QCOMPARE(iface->text(QAccessible::Description),
+             QStringLiteral("Opens a menu of album art actions. Press Menu or Shift+F10 to open it."));
+    QVERIFY(iface->state().focusable);
+    QAccessibleActionInterface *actions = iface->actionInterface();
+    QVERIFY(actions != nullptr);
+    QVERIFY(actions->actionNames().contains(QAccessibleActionInterface::pressAction()));
+    const auto openMenu = [&]() -> QObject * {
+        for (QObject *menu : window->findChildren<QObject *>(QStringLiteral("albumArtMenu"))) {
+            if (menu->property("opened").toBool()) {
+                return menu;
+            }
+        }
+        return nullptr;
+    };
+    actions->doAction(QAccessibleActionInterface::pressAction());
+    QObject *menu = nullptr;
+    QTRY_VERIFY((menu = openMenu()) != nullptr);
+    QVERIFY(!viewer->property("albumArtViewerOpen").toBool());
+    QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+    QTRY_VERIFY(openMenu() == nullptr);
+
+    // A cover: a button that opens the viewer, its menu on the keys.
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QImage cover(64, 64, QImage::Format_RGB32);
+    cover.fill(QColor(200, 120, 40));
+    const QString coverPath = directory.filePath(QStringLiteral("cover.png"));
+    QVERIFY(cover.save(coverPath));
+    QVERIFY(bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString()));
+    QTRY_COMPARE(iface->role(), QAccessible::Button);
+    QCOMPARE(iface->text(QAccessible::Name), QStringLiteral("Album art"));
+    QCOMPARE(iface->text(QAccessible::Description),
+             QStringLiteral("Opens the album art viewer. Press Menu or Shift+F10 for more actions."));
+    actions = iface->actionInterface();
+    QVERIFY(actions->actionNames().contains(QAccessibleActionInterface::pressAction()));
+    actions->doAction(QAccessibleActionInterface::pressAction());
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QVERIFY(openMenu() == nullptr);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
 
 // What the transport's clicks and keys leave the keyboard on.

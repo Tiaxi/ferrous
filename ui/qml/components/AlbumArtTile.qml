@@ -29,7 +29,9 @@ import "." as Components
 // art, and the Menu key or Shift+F10 opens
 // its context menu. The pointer over a cover lays a faint veil on it, and
 // a double-click opens it in the viewer; the stand-in has neither, as
-// there is nothing to open.
+// there is nothing to open. Assistive technology hears the same: a cover
+// is a button that opens the viewer, and the stand-in a button with a menu,
+// each saying which keys open its menu, and its press does that (#732).
 Rectangle {
     id: root
 
@@ -308,11 +310,26 @@ Rectangle {
         anchors.fill: parent
         enabled: !root.idle
         activeFocusOnTab: true
-        Accessible.role: Accessible.Graphic
+        Accessible.role: root.hasCover ? Accessible.Button : Accessible.ButtonMenu
         Accessible.name: root.hasCover
             ? I18n.i18nc("@info", "Album art")
             : I18n.i18nc("@info", "No album art")
+        Accessible.description: root.hasCover
+            ? I18n.i18nc("@info read by screen readers, of the playing track's album art; Menu and Shift+F10 are keys",
+                         "Opens the album art viewer. Press Menu or Shift+F10 for more actions.")
+            : I18n.i18nc("@info read by screen readers, of a track without album art; Menu and Shift+F10 are keys",
+                         "Opens a menu of album art actions. Press Menu or Shift+F10 to open it.")
         Accessible.focusable: true
+        Accessible.onPressAction: {
+            if (root.idle) {
+                return
+            }
+            if (root.hasCover) {
+                root.openAlbumArtViewer()
+            } else {
+                root.openContextMenu(0, root.height)
+            }
+        }
 
         Keys.onPressed: function(event) {
             if (event.key === Qt.Key_Menu
