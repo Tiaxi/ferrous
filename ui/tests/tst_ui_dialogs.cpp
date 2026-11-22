@@ -837,15 +837,16 @@ void UiDialogsTest::checkConfigurePageList(QQuickWindow *window) {
         QCOMPARE(row->width(), list->width());
         click(prefs, row);
         QTRY_COMPARE(stack->property("currentIndex").toInt(), i);
-        // The page's title, 15 px semibold, on the content edge.
+        // The page's title, 17 px semibold, on the content edge.
         QQuickItem *page = stack->childItems().at(i);
         QQuickItem *title = itemsNamed(page, QStringLiteral("preferencesPageTitle")).value(0);
         QVERIFY(title != nullptr);
         QCOMPARE(title->property("text").toString(), pages[i]);
         const QFont font = title->property("font").value<QFont>();
         QCOMPARE(font.weight(), QFont::DemiBold);
-        // 15 px with the default 10 pt font.
-        QCOMPARE(font.pointSizeF(), paletteOf(window)->property("basePointSize").toReal() * 1.125);
+        // 17 px with the default 10 pt font: clearly over the groups'
+        // semibold 13 px (at 15 px the two ranks were 2 px apart).
+        QCOMPARE(font.pointSizeF(), paletteOf(window)->property("basePointSize").toReal() * 1.3);
         QCOMPARE(sceneRect(title).left(), sceneRect(page).left() + page->property("pageSideInset").toReal());
         QQuickItem *tint = itemsNamed(row, QStringLiteral("rowBackgroundTint")).value(0);
         QVERIFY(tint != nullptr && tint->isVisible());
@@ -1948,7 +1949,10 @@ void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *win
     // The first starts the form, under the page's title.
     QQuickItem *visualizationTitle = itemsNamed(stack->childItems().at(1), QStringLiteral("preferencesPageTitle")).value(0);
     QVERIFY(visualizationTitle != nullptr);
-    QVERIFY(gapIs(visualizationTitle, analysis, 14));
+    QVERIFY(visualizationTitle->property("font").value<QFont>().pointSizeF()
+            >= analysis->property("font").value<QFont>().pointSizeF() * 1.25);
+    // 12 px under the larger title, so the rows start about where they did.
+    QVERIFY(gapIs(visualizationTitle, analysis, 12));
     QVERIFY(gapIs(analysis, named("spectrogramViewComboBox"), 8));
     QVERIFY(gapIs(capHelp, display, 16));
     QVERIFY(gapIs(display, named("spectrogramDisplayComboBox"), 8));

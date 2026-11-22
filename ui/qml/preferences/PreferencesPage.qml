@@ -110,11 +110,14 @@ ScrollView {
             Layout.leftMargin: root.pageSideInset
             Layout.rightMargin: root.pageSideInset
             Layout.topMargin: root.pageTopInset
-            Layout.bottomMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + 2
+            // 12 px, which keeps the rows about where the smaller title had
+            // them, and every page whole in the window as it opens.
+            Layout.bottomMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
             textFormat: Text.PlainText
             text: root.title
-            // 15 px with the default 10 pt font.
-            font.pointSize: root.uiPalette.basePointSize * 1.125
+            // 17 px with the default 10 pt font, over the groups' semibold
+            // 13 px (at 15 px, only their x told the two ranks apart).
+            font.pointSize: root.uiPalette.basePointSize * 1.3
             font.weight: Font.DemiBold
             color: root.uiPalette.text
             elide: Text.ElideRight

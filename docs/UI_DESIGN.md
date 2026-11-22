@@ -141,6 +141,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **Configure has one grouping rule.** Only a page with three or more groups (Visualization) gives them DemiBold subheadings (`FormGroupGap.heading`). Two-group pages separate them with the form label and a `FormGroupGap`, 16 px. Help text (`FormHelpText`) sits under its control in `textSecondary`, or in `textTertiary` while the build can't offer what it explains, so that it never outranks the line that says why. Three grouping styles in one dialog read as assembled work.
 - **Lists that compare entries share columns.** In Configure, every library folder's path starts at one x, and Rename Files shows its rows as old | → | new. The things being compared need one left edge.
 - **Empty and failed states keep their place.** "Nothing found" is quiet, secondary text. A failure gets a warning glyph in the spinner's slot and the system's words under it, so a network failure doesn't read as a routine empty result.
+- **Configure's page title outranks its groups.** It is 1.3 times the text, DemiBold, over subheadings of the text's size. At 1.125 times, only their x told the two ranks apart.
 - **About keeps KDE's About layout,** with its tabs standing on the frame of their pages.
 
 ## States
