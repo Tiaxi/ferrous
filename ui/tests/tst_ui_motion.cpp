@@ -1095,6 +1095,7 @@ private slots:
     void viewerControlsHideAsAFadeAndShowQuicker();
     void firstLanesLabelRestsWhereTheOtherLanesDo_data();
     void firstLanesLabelRestsWhereTheOtherLanesDo();
+    void albumArtDetailsToggleGlides();
 };
 
 void UiMotionTest::initTestCase() {
@@ -6532,7 +6533,7 @@ bool sendWheelAt(QQuickWindow *window, QPointF scenePosition, QPoint angleDelta)
 
 // Showing the album art's details eases the art aside, and hiding them eases
 // it back, rather than jumping some 170 px in one frame as they toggle. Over
-// the details' 120 ms the space they take grows from nothing to their
+// the details' 180 ms the space they take grows from nothing to their
 // width with their seam: they slide in over the view's edge whole, as wide
 // as they rest, and the art fits and centres in what they leave, frame by
 // frame. The art moves one way only, never most of the way at once, and
@@ -6655,7 +6656,7 @@ void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
     Motion ui;
     QVERIFY(ui.loaded());
     const auto [window, bridge, panel, handover, units] = ui.parts();
-    // A slide would take 600 ms.
+    // A slide would take 900 ms.
     units->setShortDuration(500);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QQuickItem *surface = named(window, "albumArtSurface");
@@ -6675,7 +6676,7 @@ void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
     };
     const auto reveal = [surface]() { return surface->property("infoReveal").toDouble(); };
     const int slide = surface->property("infoRevealDuration").toInt();
-    QCOMPARE(slide, 600);
+    QCOMPARE(slide, 900);
     QVERIFY(!viewer->property("albumArtInfoVisible").toBool());
 
     // Opened on the current art from Replace from iTunes, with its details,
@@ -7223,6 +7224,59 @@ void UiMotionTest::firstLanesLabelRestsWhereTheOtherLanesDo() {
     // Back in the pane, the one label, whole.
     static_cast<void>(driver.step(200));
     QCOMPARE(labels().at(0).size(), 1);
+}
+
+// The details' toggle is a glide, 180 ms InOutQuad, rather than a snap (the
+// art went 91 % of its way in 43 ms of 120 ms OutCubic, and the rest crept),
+// both ways, and instant with animations off.
+void UiMotionTest::albumArtDetailsToggleGlides() {
+    Covers covers;
+    Motion ui;
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    units->setShortDuration(100);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QQuickItem *surface = named(window, "albumArtSurface");
+    QVERIFY(bridge && viewer && surface);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    showTrack(bridge, QStringLiteral("/music/0.flac"), QStringLiteral("Track"), QStringLiteral("Album"),
+              covers.first);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(surface->property("viewerOpen").toBool() && surface->isVisible());
+    QVERIFY(!viewer->property("albumArtInfoVisible").toBool());
+    const auto toggle = [&]() {
+        return QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant()));
+    };
+    constexpr int duration = 180;
+    const QEasingCurve curve(QEasingCurve::InOutQuad);
+    {
+        SteppedAnimationDriver driver;
+        for (const bool shows : {true, false}) {
+            QVERIFY(toggle());
+            double before = 0.0;
+            for (int ms = 16; ms <= duration + 32; ms += 16) {
+                static_cast<void>(driver.step(16));
+                const double reveal = surface->property("infoReveal").toDouble();
+                const double moved = shows ? reveal : 1.0 - reveal;
+                // Within a frame of the curve, and no frame a fifth of the way.
+                const double least = curve.valueForProgress(std::clamp(double(ms - 17) / duration, 0.0, 1.0));
+                const double most = curve.valueForProgress(std::clamp(double(ms + 17) / duration, 0.0, 1.0));
+                QVERIFY2(moved >= least - 1e-6 && moved <= most + 1e-6 && moved - before < 0.2,
+                         qPrintable(QStringLiteral("%1 at %2 ms: %3, after %4")
+                                        .arg(shows ? QStringLiteral("showing") : QStringLiteral("hiding"))
+                                        .arg(ms).arg(moved).arg(before)));
+                before = moved;
+            }
+            QCOMPARE(surface->property("infoReveal").toDouble(), shows ? 1.0 : 0.0);
+        }
+    }
+    units->setShortDuration(0);
+    for (const double at : {1.0, 0.0}) {
+        QVERIFY(toggle());
+        QCOMPARE(surface->property("infoReveal").toDouble(), at);
+    }
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!surface->property("viewerOpen").toBool());
 }
 
 #include "tst_ui_motion.moc"
