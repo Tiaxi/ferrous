@@ -91,6 +91,12 @@ TARGETS = {
                      "if(p.y>=q.y+2*it.height&&p.y+it.height<=q.y+v.height)o.push([p.y,it])}var c=it.children;"
                      "for(var i=0;i<c.length;i++)s.push(c[i]);}o.sort(function(a,b){return a[0]-b[0]});"
                      "return o.length?o[0][1]:null})()",
+    # The top search result that has a tooltip: one only where it adds to the row (toolTipAdds), where the app says so.
+    "tooltipResultRow": "(function(){var o=[];var s=[root.Overlay.overlay.parent];while(s.length){var it=s.shift();"
+                        "if(!it.visible||it.opacity===0)continue;if(typeof it.toolTipText==='function'&&it.isResult&&"
+                        "(typeof it.toolTipAdds!=='function'||it.toolTipAdds()))o.push([it.mapToItem(null,0,0).y,it]);"
+                        "var c=it.children;for(var i=0;i<c.length;i++)s.push(c[i]);}o.sort(function(a,b){return a[0]-b[0]});"
+                        "return o.length?o[0][1]:null})()",
 }
 
 TARGETS_PLAIN = TARGETS["plainQueueRow"]
@@ -6241,7 +6247,8 @@ STATES = [
     ("menus", "search", "help-hover", "hover globalSearchHelpButton 1.3", "Search palette: help button hovered"),
     ("menus", "search", "results", "away | type mer | wait 0.8", "Search palette: 'mer' with results"),
     ("menus", "search", "results-keyboard", "key Down | key Down | key Down | wait 0.4", "Search palette: keyboard selection down three rows"),
-    ("menus", "search", "result-hover", "hover globalSearchResultTitle#2 1.6", "Search palette: pointer over a result, its tooltip shown"),
+    # (a row whose tooltip adds to it: the first result's may say nothing more than the row, and then shows none)
+    ("menus", "search", "result-hover", "hover @tooltipResultRow@0.15,0.5 1.6", "Search palette: pointer over a result, its tooltip shown"),
     ("menus", "menu", "context-search-result", "rclick globalSearchResultTitle#2",
      "Search result context menu (right click; it opens at the click point; from the keyboard: context-search-result-keyboard)"),
     ("menus", "search", "results-many", "esc 1 | away | key Backspace | key Backspace | key Backspace | type l | wait 0.8",

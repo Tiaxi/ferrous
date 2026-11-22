@@ -771,7 +771,8 @@ SCOPES.update({
                 dict(margin=4, part=(0, 0, 1, 0.5), lh=16, gap=6))]]),
             ("search-more", "The search palette at 1:1: many results, hover, help, non-ASCII; light", "light",
              [[("search", "results-many", "popup", "Many results (\u201cl\u201d): the groups cut", dict(margin=4, lh=16, gap=6))],
-              [("search", "result-hover", "popup", "A result hovered: its tooltip (the top)", dict(margin=4, part=(0, 0, 1, 0.3), lh=16, gap=6))],
+              # (down to under the hovered row, where its tooltip shows so as to leave the field clear)
+              [("search", "result-hover", "popup", "A result hovered: its tooltip (the top)", dict(margin=4, part=(0, 0, 1, 0.41), lh=16, gap=6))],
               [("search", "help-hover", (0.24, 0.076, 0.555, 0.115), "Help hovered: its tooltip", dict(lh=16, gap=6))],
               [("search", "results-unicode", "popup", "\u201c\u00f8rn\u201d (the top)", dict(margin=4, part=(0, 0, 1, 0.3), lh=16, gap=6))]]),
             ("search-24pt", "The search palette at 24 pt, 1:1; dark", "dark",

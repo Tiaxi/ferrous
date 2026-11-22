@@ -387,6 +387,26 @@ class ChangeCrop(unittest.TestCase):
             self.sheet("noSuchButton")
 
 
+class SearchTooltipState(unittest.TestCase):
+    def test_the_tooltip_state_hovers_a_row_that_has_a_tooltip(self):
+        steps = next(s for _se, _a, st, s, _d in states.STATES if st == "result-hover")
+        self.assertEqual(steps.split()[:2], ["hover", "@tooltipResultRow@0.15,0.5"])
+        js = states.TARGETS["tooltipResultRow"]
+        self.assertIn("typeof it.toolTipAdds!=='function'||it.toolTipAdds()", js)  # (an app without it: any row)
+        self.assertIn("it.isResult", js)
+
+    def test_the_packs_crop_reaches_a_tooltip_under_the_first_rows(self):
+        sheet = next(r for nm, _t, _th, r in focus.SCOPES["library-search"]["sheets"] if nm == "search-more")
+        x, y, w, h = next(c[4]["part"] for c in cells([c for row in sheet for c in row]) if c[1] == "result-hover")
+        self.assertEqual((x, y, w), (0, 0, 1))
+        # (the 581 px palette: a row ending 169 px down, the tooltip's two lines 3 px under it)
+        self.assertGreaterEqual(h * 581, 169 + 3 + 52)
+
+    def test_the_target_is_resolved_by_its_name(self):
+        s = mock.Mock(**{"ev.return_value": "400 240 800 32"})
+        self.assertEqual(runner.Runner(s).point("@tooltipResultRow@0.15,0.5"), (520.0, 256.0))
+
+
 class Captions(unittest.TestCase):
     """What is said of the Menu key: the windowed album art viewer and the search palette take it, as shortcuts."""
 
