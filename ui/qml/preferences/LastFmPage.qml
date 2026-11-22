@@ -36,7 +36,10 @@ Preferences.PreferencesPage {
         id: scrobblingCheckBox
         objectName: "lastFmScrobblingCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Scrobbling:")
-        text: I18n.i18nc("@option:check", "Scrobble played tracks to Last.fm")
+        // The label has the term; a screen reader hears the whole phrase,
+        // the box alone.
+        text: I18n.i18nc("@option:check after the label Scrobbling", "Send played tracks to Last.fm")
+        Accessible.name: I18n.i18nc("@option:check accessible name", "Scrobble played tracks to Last.fm")
         // A build without Last.fm can't send a scrobble, as the account's
         // line says.
         enabled: root.buildConfigured

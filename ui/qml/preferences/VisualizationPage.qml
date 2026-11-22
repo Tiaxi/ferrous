@@ -191,7 +191,10 @@ Preferences.PreferencesPage {
     CheckBox {
         objectName: "showLevelMeterCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Level meter:")
-        text: I18n.i18nc("@option:check", "Show a level meter at the end of each lane")
+        // The label has said what it shows; a screen reader hears the whole
+        // phrase, the box alone.
+        text: I18n.i18nc("@option:check after the label Level meter", "Show at the end of each lane")
+        Accessible.name: I18n.i18nc("@option:check accessible name", "Show a level meter at the end of each lane")
         checked: root.settings.value("showLevelMeter")
         onToggled: root.settings.setValue("showLevelMeter", checked)
     }
@@ -220,7 +223,11 @@ Preferences.PreferencesPage {
         id: zoomCheckBox
         objectName: "spectrogramZoomCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Zoom:")
-        text: I18n.i18nc("@option:check", "Allow zooming")
+        // The wheel or two fingers zoom and the middle button moves the
+        // zoomed view, which the help says ("Zoom: Allow zooming" said
+        // itself twice).
+        text: I18n.i18nc("@option:check after the label Zoom", "With the mouse or touchpad")
+        Accessible.name: I18n.i18nc("@option:check accessible name", "Allow zooming")
         checked: root.settings.value("spectrogramZoomEnabled")
         onToggled: root.settings.setValue("spectrogramZoomEnabled", checked)
     }
