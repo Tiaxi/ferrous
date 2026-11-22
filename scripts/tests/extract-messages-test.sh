@@ -116,6 +116,12 @@ if ! command -v git >/dev/null 2>&1 || ! command -v xgettext >/dev/null 2>&1; th
     exit 0
 fi
 checkout="${WORK_DIR}/checkout"
+# The work dir is in the build directory, and a repository left there makes
+# tools that clean up worktrees, such as T3 Code's, keep the whole worktree.
+remove_checkout() {
+    rm -rf -- "${checkout}"
+}
+trap remove_checkout EXIT
 mkdir -p "${checkout}"
 # Keep the user's and the system's git configuration out of the checkout.
 git_env=(env HOME="${WORK_DIR}" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null)
@@ -133,5 +139,8 @@ grep -qF 'msgid "Example Window"' "${root}/pot/ferrous.pot" \
     || fail "the template lacks the C++ string"
 grep -qF 'msgid "Example Label"' "${root}/pot/ferrous.pot" \
     || fail "the template lacks the QML string"
+remove_checkout
+[[ -z "$(find "${WORK_DIR}" -name .git -print -quit)" ]] \
+    || fail "the test left a git repository in its work dir"
 
 echo "extract-messages tests passed"
