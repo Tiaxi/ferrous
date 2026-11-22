@@ -265,7 +265,7 @@ private slots:
     void copiesWhatATextEditCopies();
     void copyActionsCopyTheLogsText();
     void selectsByMouse();
-    void selectsByKeyboard();
+    void selectsAllByKeyboard();
     void scrollsByKeysAndWheel();
     void opensAndReloadsAtTheTop();
     void showsMarkupAsText();
@@ -502,33 +502,12 @@ void DiagnosticsLogViewTest::selectsByMouse() {
     QCOMPARE(log.contentY(), stopped);
 }
 
-void DiagnosticsLogViewTest::selectsByKeyboard() {
+void DiagnosticsLogViewTest::selectsAllByKeyboard() {
     Diagnostics log;
     QVERIFY(log.loaded());
     const QString text = records(300, 70).join(QLatin1Char('\n'));
     log.setLog(text);
     QVERIFY(log.open());
-    const int perRecord = 71;
-
-    QTest::keyClick(log.window, Qt::Key_Right, Qt::ShiftModifier);
-    QTest::keyClick(log.window, Qt::Key_Right, Qt::ShiftModifier);
-    QCOMPARE(log.view->selectedText(), text.left(2));
-    QTest::keyClick(log.window, Qt::Key_Left, Qt::ShiftModifier);
-    QCOMPARE(log.view->selectedText(), text.left(1));
-    QTest::keyClick(log.window, Qt::Key_Down, Qt::ShiftModifier);
-    QCOMPARE(log.view->selectedText(), text.left(perRecord + 1));
-    QTest::keyClick(log.window, Qt::Key_Up, Qt::ShiftModifier);
-    QCOMPARE(log.view->selectedText(), text.left(1));
-    QTest::keyClick(log.window, Qt::Key_End, Qt::ShiftModifier);
-    QCOMPARE(log.view->selectedText(), text.left(perRecord - 1));
-    // On over the newline, as one character.
-    QTest::keyClick(log.window, Qt::Key_Right, Qt::ShiftModifier);
-    QCOMPARE(log.view->selectedText(), text.left(perRecord));
-    QTest::keyClick(log.window, Qt::Key_End, Qt::ControlModifier | Qt::ShiftModifier);
-    QCOMPARE(log.view->selectedText(), text);
-    QTRY_COMPARE(log.contentY(), log.view->contentHeight() - log.view->height());
-
-    log.view->select(0, 0);
     QTest::keyClick(log.window, Qt::Key_A, Qt::ControlModifier);
     QCOMPARE(log.view->selectedText(), text);
     QCOMPARE(log.view->cursorPosition(), text.size());
@@ -679,11 +658,10 @@ void DiagnosticsLogViewTest::readsAsTextToAssistiveTechnology() {
              QStringLiteral("[app] first record\n"));
     QCOMPARE(reader->textAfterOffset(25, QAccessible::LineBoundary, &start, &end), QStringLiteral("[ui] third"));
     QCOMPARE(reader->textAtOffset(8, QAccessible::WordBoundary, &start, &end), QStringLiteral("first"));
-    reader->setSelection(0, 6, 11);
-    QCOMPARE(log.view->selectedText(), QStringLiteral("first"));
-    QCOMPARE(reader->selectionCount(), 1);
-    QVERIFY(reader->characterRect(7).width() > 1);
-    QCOMPARE(reader->offsetAtPoint(reader->characterRect(7).topLeft() + QPoint(1, 2)), 7);
+    log.view->select(6, 11);
+    QCOMPARE(reader->cursorPosition(), 11);
+    reader->setCursorPosition(25);
+    QCOMPARE(log.view->cursorPosition(), 25);
 
     // In the window's tree, from either end.
     QAccessibleInterface *windowAccessible = QAccessible::queryAccessibleInterface(log.window);
@@ -920,18 +898,6 @@ void DiagnosticsLogViewTest::selectsAcrossWrappedRows() {
     QCOMPARE(log.view->selectedText(), text.mid(from, to - from));
     QTest::keyClick(log.window, Qt::Key_C, Qt::ControlModifier);
     QCOMPARE(clipboardText(), text.mid(from, to - from));
-
-    // Shift+Down goes a row at a time and back, over rows of any length.
-    const int start = layout.row(0).start + layout.row(0).length - 1;
-    log.view->select(start, start);
-    for (int row = 1; row <= nextRecord + 2; ++row) {
-        QTest::keyClick(log.window, Qt::Key_Down, Qt::ShiftModifier);
-        QCOMPARE(layout.rowAt(log.view->cursorPosition()), row);
-    }
-    for (int row = nextRecord + 1; row >= 0; --row) {
-        QTest::keyClick(log.window, Qt::Key_Up, Qt::ShiftModifier);
-        QCOMPARE(layout.rowAt(log.view->cursorPosition()), row);
-    }
 }
 
 int main(int argc, char **argv) {

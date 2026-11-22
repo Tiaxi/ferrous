@@ -260,7 +260,10 @@ Components.DialogWindow {
                         topPadding: Kirigami.Units.smallSpacing + 2
                         bottomPadding: Kirigami.Units.smallSpacing + 2
                         Accessible.role: Accessible.EditableText
-                        accessibleName: I18n.i18nc("@label accessible name of the diagnostics log's text", "Log")
+                        // Qt Quick reads it out from text and cursorPosition.
+                        Accessible.name: I18n.i18nc("@label accessible name of the diagnostics log's text", "Log")
+                        Accessible.multiLine: true
+                        Accessible.focusable: true
 
                         onScrollRequested: function(y) {
                             diagnosticsFlickable.contentY = y

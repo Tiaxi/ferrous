@@ -38,13 +38,13 @@ class DiagnosticsLogView : public QQuickItem {
     Q_PROPERTY(qreal bottomPadding READ bottomPadding WRITE setBottomPadding NOTIFY paddingChanged FINAL)
     Q_PROPERTY(qreal contentY READ contentY WRITE setContentY NOTIFY contentYChanged FINAL)
     Q_PROPERTY(qreal contentHeight READ contentHeight NOTIFY contentHeightChanged FINAL)
-    Q_PROPERTY(int cursorPosition READ cursorPosition NOTIFY selectionChanged FINAL)
+    Q_PROPERTY(int cursorPosition READ cursorPosition WRITE moveCaretTo NOTIFY selectionChanged FINAL)
     Q_PROPERTY(int selectionStart READ selectionStart NOTIFY selectionChanged FINAL)
     Q_PROPERTY(int selectionEnd READ selectionEnd NOTIFY selectionChanged FINAL)
     // For bindings: selectedText would copy up to the whole log for each.
     Q_PROPERTY(bool hasSelection READ hasSelection NOTIFY selectionChanged FINAL)
     Q_PROPERTY(QString selectedText READ selectedText NOTIFY selectionChanged FINAL)
-    Q_PROPERTY(QString accessibleName READ accessibleName WRITE setAccessibleName NOTIFY accessibleNameChanged FINAL)
+    Q_PROPERTY(bool readOnly READ readOnly CONSTANT FINAL)
 
 public:
     explicit DiagnosticsLogView(QQuickItem *parent = nullptr);
@@ -82,8 +82,7 @@ public:
     bool hasSelection() const { return m_anchor != m_caret; }
     QString selectedText() const;
 
-    QString accessibleName() const { return m_accessibleName; }
-    void setAccessibleName(const QString &name);
+    bool readOnly() const { return true; }
 
     Q_INVOKABLE void select(int start, int end);
     Q_INVOKABLE void selectAll();
@@ -93,8 +92,7 @@ public:
     Q_INVOKABLE QRectF positionToRectangle(int position);
     Q_INVOKABLE int positionAt(qreal x, qreal y);
 
-    // For assistive technology.
-    void revealPosition(int position);
+    // For assistive technology, which sets cursorPosition.
     void moveCaretTo(int position);
     DiagnosticsLogLayout &laidOut();
 
@@ -112,7 +110,6 @@ signals:
     void contentYChanged();
     void contentHeightChanged();
     void selectionChanged();
-    void accessibleNameChanged();
     void scrollRequested(qreal y);
 
 protected:
@@ -156,7 +153,6 @@ private:
     void invalidateDrawing();
     void ensureLayout();
     bool handlesKey(const QKeyEvent *event) const;
-    bool selectForKey(const QKeyEvent *event);
     bool scrollForKey(const QKeyEvent *event);
     void requestScroll(qreal y);
     void holdPlace(qreal viewHeight);
@@ -168,8 +164,6 @@ private:
     void endDrag();
     qreal xOf(int row, int position) const;
     int positionInRow(int row, qreal x) const;
-    int neighbour(int position, bool forward, bool byWord) const;
-    void caretRowsAway(int rows);
 
     DiagnosticsLogLayout m_layout;
     QString m_source;
@@ -183,7 +177,6 @@ private:
     qreal m_bottomPadding = 0;
     qreal m_contentY = 0;
     qreal m_contentHeight = 0;
-    QString m_accessibleName;
     // Kept through a drag of the window's edge, until the log scrolls, so
     // that the steps don't add up to a drift.
     Held m_held;
@@ -196,8 +189,6 @@ private:
 
     int m_anchor = 0;
     int m_caret = 0;
-    // The x that Shift+Up and Shift+Down keep to over shorter rows.
-    qreal m_caretX = -1;
     SelectBy m_selectBy = SelectBy::Character;
     Span m_dragOrigin{0, 0};
     bool m_dragging = false;

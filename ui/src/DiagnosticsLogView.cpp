@@ -22,8 +22,6 @@
 #include <algorithm>
 #include <cmath>
 
-#include "DiagnosticsLogAccessible.h"
-
 namespace {
 
 // A frame's time, while a drag holds the pointer past an edge.
@@ -72,7 +70,6 @@ private:
 
 DiagnosticsLogView::DiagnosticsLogView(QQuickItem *parent)
     : QQuickItem(parent) {
-    DiagnosticsLogAccessible::install();
     setFlag(ItemHasContents);
     setClip(true);
     setAcceptedMouseButtons(Qt::LeftButton);
@@ -102,7 +99,6 @@ void DiagnosticsLogView::setText(const QString &text) {
     const bool selectionMoved = m_anchor != 0 || m_caret != 0;
     m_anchor = 0;
     m_caret = 0;
-    m_caretX = -1;
     emit textChanged();
     if (selectionMoved) {
         emit selectionChanged();
@@ -193,13 +189,6 @@ void DiagnosticsLogView::setContentY(qreal y) {
     // A wheel turned during a drag takes the selection with it.
     if (m_dragging && !m_dragScroll.isActive()) {
         extendDragTo(m_dragPoint);
-    }
-}
-
-void DiagnosticsLogView::setAccessibleName(const QString &name) {
-    if (m_accessibleName != name) {
-        m_accessibleName = name;
-        emit accessibleNameChanged();
     }
 }
 
@@ -421,7 +410,6 @@ void DiagnosticsLogView::setSelection(int anchor, int caret) {
 }
 
 void DiagnosticsLogView::select(int start, int end) {
-    m_caretX = -1;
     setSelection(start, end);
 }
 
@@ -513,10 +501,6 @@ void DiagnosticsLogView::reveal(int position) {
     }
 }
 
-void DiagnosticsLogView::revealPosition(int position) {
-    reveal(std::clamp(position, 0, length()));
-}
-
 DiagnosticsLogView::Span DiagnosticsLogView::unitAt(int position, SelectBy by) const {
     if (by == SelectBy::Character) {
         return {position, position};
@@ -567,7 +551,6 @@ void DiagnosticsLogView::mousePressEvent(QMouseEvent *event) {
     }
     forceActiveFocus(Qt::MouseFocusReason);
     setKeepMouseGrab(true);
-    m_caretX = -1;
     m_dragging = true;
     m_dragPoint = event->position();
     const int position = positionAt(m_dragPoint.x(), m_dragPoint.y());
@@ -650,23 +633,8 @@ void DiagnosticsLogView::timerEvent(QTimerEvent *event) {
     extendDragTo(m_dragPoint);
 }
 
-namespace {
-
-constexpr QKeySequence::StandardKey kSelectingKeys[] = {
-    QKeySequence::SelectNextChar,     QKeySequence::SelectPreviousChar,   QKeySequence::SelectNextWord,
-    QKeySequence::SelectPreviousWord, QKeySequence::SelectNextLine,       QKeySequence::SelectPreviousLine,
-    QKeySequence::SelectNextPage,     QKeySequence::SelectPreviousPage,   QKeySequence::SelectStartOfLine,
-    QKeySequence::SelectEndOfLine,    QKeySequence::SelectStartOfDocument, QKeySequence::SelectEndOfDocument,
-};
-
-} // namespace
-
 bool DiagnosticsLogView::handlesKey(const QKeyEvent *event) const {
     if (event->matches(QKeySequence::Copy) || event->matches(QKeySequence::SelectAll)) {
-        return true;
-    }
-    if (std::any_of(std::begin(kSelectingKeys), std::end(kSelectingKeys),
-                    [event](QKeySequence::StandardKey key) { return event->matches(key); })) {
         return true;
     }
     const Qt::KeyboardModifiers modifiers = event->modifiers() & ~Qt::KeypadModifier;
@@ -691,98 +659,6 @@ bool DiagnosticsLogView::event(QEvent *event) {
         return true;
     }
     return QQuickItem::event(event);
-}
-
-int DiagnosticsLogView::neighbour(int position, bool forward, bool byWord) const {
-    const int record = m_layout.recordAt(position);
-    const int start = m_layout.recordStart(record);
-    if (forward && position >= m_layout.recordEnd(record)) {
-        return std::min(position + 1, length());
-    }
-    if (!forward && position <= start) {
-        return std::max(position - 1, 0);
-    }
-    const QTextLayout layout(m_layout.recordText(record).toString(), m_font);
-    const auto mode = byWord ? QTextLayout::SkipWords : QTextLayout::SkipCharacters;
-    const int at = position - start;
-    return start + (forward ? layout.nextCursorPosition(at, mode) : layout.previousCursorPosition(at, mode));
-}
-
-void DiagnosticsLogView::caretRowsAway(int rows) {
-    const int from = m_layout.rowAt(m_caret);
-    if (m_caretX < 0) {
-        m_caretX = xOf(from, m_caret);
-    }
-    const int to = from + rows;
-    if (to < 0) {
-        setSelection(m_anchor, 0);
-    } else if (to >= m_layout.rowCount()) {
-        setSelection(m_anchor, length());
-    } else {
-        int caret = positionInRow(to, m_caretX);
-        // The end of a wrapped row is the next one's start: short of it, as
-        // in a text edit, so that the caret stays in the row it went to.
-        const DiagnosticsLogLayout::Row row = m_layout.row(to);
-        if (to + 1 < m_layout.rowCount() && m_layout.row(to + 1).continuation && caret == row.start + row.length) {
-            caret = std::max(row.start, neighbour(caret, false, false));
-        }
-        setSelection(m_anchor, caret);
-    }
-}
-
-bool DiagnosticsLogView::selectForKey(const QKeyEvent *event) {
-    if (std::none_of(std::begin(kSelectingKeys), std::end(kSelectingKeys),
-                     [event](QKeySequence::StandardKey key) { return event->matches(key); })) {
-        return false;
-    }
-    ensureLayout();
-    const qreal rowHeight = m_layout.rowHeight();
-    if (!hasSelection()) {
-        // A caret that is scrolled away doesn't show: the selection starts
-        // from what does.
-        const qreal top = m_topPadding + m_layout.rowAt(m_caret) * rowHeight;
-        if (top + rowHeight <= m_contentY || top >= m_contentY + height()) {
-            const int first = static_cast<int>(std::clamp<qreal>(std::ceil((m_contentY - m_topPadding) / rowHeight),
-                                                                 0, m_layout.rowCount() - 1));
-            setSelection(m_layout.row(first).start, m_layout.row(first).start);
-            m_caretX = -1;
-        }
-    }
-    const int page = std::max(1, static_cast<int>(height() / rowHeight) - 1);
-    if (event->matches(QKeySequence::SelectNextLine)) {
-        caretRowsAway(1);
-    } else if (event->matches(QKeySequence::SelectPreviousLine)) {
-        caretRowsAway(-1);
-    } else if (event->matches(QKeySequence::SelectNextPage)) {
-        caretRowsAway(page);
-    } else if (event->matches(QKeySequence::SelectPreviousPage)) {
-        caretRowsAway(-page);
-    } else {
-        int caret = m_caret;
-        const int record = m_layout.recordAt(caret);
-        if (event->matches(QKeySequence::SelectNextChar)) {
-            caret = neighbour(caret, true, false);
-        } else if (event->matches(QKeySequence::SelectPreviousChar)) {
-            caret = neighbour(caret, false, false);
-        } else if (event->matches(QKeySequence::SelectNextWord)) {
-            caret = neighbour(caret, true, true);
-        } else if (event->matches(QKeySequence::SelectPreviousWord)) {
-            caret = neighbour(caret, false, true);
-        } else if (event->matches(QKeySequence::SelectStartOfLine)) {
-            caret = m_layout.recordStart(record);
-        } else if (event->matches(QKeySequence::SelectEndOfLine)) {
-            caret = m_layout.recordEnd(record);
-        } else if (event->matches(QKeySequence::SelectStartOfDocument)) {
-            caret = 0;
-        } else {
-            caret = length();
-        }
-        m_caretX = -1;
-        setSelection(m_anchor, caret);
-    }
-    reveal(m_caret);
-    setPrimarySelection();
-    return true;
 }
 
 bool DiagnosticsLogView::scrollForKey(const QKeyEvent *event) {
@@ -812,7 +688,7 @@ void DiagnosticsLogView::keyPressEvent(QKeyEvent *event) {
         copy();
     } else if (event->matches(QKeySequence::SelectAll)) {
         selectAll();
-    } else if (!selectForKey(event)) {
+    } else {
         scrollForKey(event);
     }
     event->accept();

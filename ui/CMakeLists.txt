@@ -115,7 +115,6 @@ qt_add_library(ferrous_ui_core STATIC
     src/QueueRows.cpp
     src/CoverImageProvider.cpp
     src/DiagnosticsLog.cpp
-    src/DiagnosticsLogAccessible.cpp
     src/DiagnosticsLogLayout.cpp
     src/DiagnosticsLogView.cpp
     src/Localization.cpp
