@@ -40,6 +40,45 @@ QString fileLine(const QString &name, const QString &error) {
     return error.isEmpty() ? name : QStringLiteral("%1: %2").arg(name, error);
 }
 
+// A failed save's or rename's cause in plain words, from the code the
+// backend sends beside the error (FailureCause in src/edit_failure.rs);
+// empty without a code or for one not known here. The error's own words are
+// never read for it. A batch's rename gives every file the error of the one
+// that failed (#741), so its causes name no file or folder.
+QString failureCauseText(const QString &code) {
+    if (code == QLatin1String("folderNotWritable")) {
+        return i18nc("@info why a file could not be saved", "You don’t have permission to write in this folder.");
+    }
+    if (code == QLatin1String("fileNotWritable")) {
+        return i18nc("@info why a file could not be saved", "You don’t have permission to change this file.");
+    }
+    if (code == QLatin1String("fileNotReplaceable")) {
+        return i18nc("@info why a file could not be saved", "You don’t have permission to replace this file.");
+    }
+    if (code == QLatin1String("fileNotReadable")) {
+        return i18nc("@info why a file could not be saved", "You don’t have permission to read this file.");
+    }
+    if (code == QLatin1String("readOnlyFileSystem")) {
+        return i18nc("@info why a file could not be saved", "The file system is read-only.");
+    }
+    if (code == QLatin1String("noSpace")) {
+        return i18nc("@info why a file could not be saved", "There isn’t enough free space on the disk.");
+    }
+    if (code == QLatin1String("renameNotPermitted")) {
+        return i18nc("@info why a batch of files could not be renamed; names no file or folder",
+                     "Renaming stopped: you don’t have permission.");
+    }
+    if (code == QLatin1String("renameReadOnlyFileSystem")) {
+        return i18nc("@info why a batch of files could not be renamed; names no file or folder",
+                     "Renaming stopped: a file system is read-only.");
+    }
+    if (code == QLatin1String("renameNoSpace")) {
+        return i18nc("@info why a batch of files could not be renamed; names no file or folder",
+                     "Renaming stopped: there isn’t enough free space.");
+    }
+    return {};
+}
+
 // The failures in the order of their lines.
 void sortFailures(QVector<TagEditorFailure> &failures) {
     std::sort(failures.begin(), failures.end(), [](const TagEditorFailure &a, const TagEditorFailure &b) {
@@ -50,18 +89,22 @@ void sortFailures(QVector<TagEditorFailure> &failures) {
 // The details of an action: a section of the files it failed for, which
 // comes first, as whoever opens the details wants that, and one of the
 // files it did; each a heading, its files, each by name with the error
-// apart, and whether it lists failures, which the Details window sets
-// apart.
+// apart and, where it is known, its cause in plain words, and whether it
+// lists failures, which the Details window sets apart.
 QVariantList buildActionDetails(const QStringList &successLines, const QVector<TagEditorFailure> &failures) {
-    const auto item = [](const QString &name, const QString &error) {
-        return QVariantMap{{QStringLiteral("name"), name}, {QStringLiteral("error"), error}};
+    const auto item = [](const QString &name, const QString &error, const QString &cause) {
+        QVariantMap values{{QStringLiteral("name"), name}, {QStringLiteral("error"), error}};
+        if (const QString text = failureCauseText(cause); !text.isEmpty()) {
+            values.insert(QStringLiteral("cause"), text);
+        }
+        return values;
     };
     QVariantList sections;
     if (!failures.isEmpty()) {
         QVariantList items;
         items.reserve(failures.size());
         for (const TagEditorFailure &failure : failures) {
-            items.push_back(item(failure.name, failure.error));
+            items.push_back(item(failure.name, failure.error, failure.cause));
         }
         sections.push_back(QVariantMap{{QStringLiteral("heading"), i18nc("@title list of files", "Failed:")},
                                        {QStringLiteral("items"), items},
@@ -71,7 +114,7 @@ QVariantList buildActionDetails(const QStringList &successLines, const QVector<T
         QVariantList items;
         items.reserve(successLines.size());
         for (const QString &line : successLines) {
-            items.push_back(item(line, QString()));
+            items.push_back(item(line, QString(), QString()));
         }
         sections.push_back(QVariantMap{{QStringLiteral("heading"), i18nc("@title list of files", "Succeeded:")},
                                        {QStringLiteral("items"), items},
@@ -598,7 +641,7 @@ TagEditorController::LoadResult TagEditorController::parseLoadResponse(const QBy
         const QJsonArray failures = root.value(QStringLiteral("failures")).toArray();
         for (const QJsonValue &value : failures) {
             const QJsonObject failure = value.toObject();
-            failed.push_back({displayNameForPath(readString(failure, "path")), readString(failure, "error")});
+            failed.push_back({displayNameForPath(readString(failure, "path")), readString(failure, "error"), {}});
         }
     } else {
         errorText = i18nc("@info:status", "failed to parse tag editor load response");
@@ -713,7 +756,7 @@ void TagEditorController::applySaveResult(const QByteArray &response) {
                 const QString targetName = targetPath.isEmpty() ? QString() : displayNameForPath(targetPath);
                 failures.push_back({targetName.isEmpty() ? oldName
                                                          : QStringLiteral("%1 -> %2").arg(oldName, targetName),
-                                    error});
+                                    error, readString(item, "cause")});
             }
         }
     } else {
@@ -936,7 +979,7 @@ void TagEditorController::applyRenameResult(const QByteArray &response) {
             } else {
                 const QString error = item.value(QStringLiteral("error")).toString();
                 errorsByPath.insert(path, error);
-                failures.push_back({displayNameForPath(path), error});
+                failures.push_back({displayNameForPath(path), error, readString(item, "cause")});
             }
         }
     } else {

@@ -47,6 +47,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::edit_failure::{EditFailure, EditStep};
 use crate::file_identity::{self, FileId};
 use crate::no_replace::rename_no_replace;
 
@@ -71,12 +72,13 @@ const ACCESS_ACL: &CStr = c"system.posix_acl_access";
 ///
 /// # Errors
 ///
-/// Returns a message naming the failed step: when the original is not
-/// writable, its directory does not allow new files, or `edit`, the copy,
+/// Returns a message naming the failed step, with the step and the system's
+/// error where they tell a cause (see [`EditFailure`]): when the original is
+/// not writable, its directory does not allow new files, or `edit`, the copy,
 /// carrying over its metadata, the flush, or the rename fails.
-pub(crate) fn rewrite_via_temp_copy<F>(path: &Path, edit: F) -> Result<(), String>
+pub(crate) fn rewrite_via_temp_copy<F>(path: &Path, edit: F) -> Result<(), EditFailure>
 where
-    F: FnOnce(&mut File) -> Result<(), String>,
+    F: FnOnce(&mut File) -> Result<(), EditFailure>,
 {
     let Writable {
         target,
@@ -85,11 +87,12 @@ where
     } = Writable::open(path)?;
     let mut temp = TempSibling::create_private(&target)?;
     io::copy(&mut original, &mut temp.file).map_err(|err| {
-        format!(
+        let message = format!(
             "failed to copy {} to {}: {err}",
             target.display(),
             temp.path.display()
-        )
+        );
+        EditFailure::io(EditStep::Write, &err, message)
     })?;
     drop(original);
     temp.file
@@ -116,7 +119,7 @@ pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     drop(original);
     let mut temp = TempSibling::create_private(&target)?;
     temp.write_all(bytes)?;
-    temp.commit(&target, Some(&metadata))
+    temp.commit(&target, Some(&metadata)).map_err(String::from)
 }
 
 /// Create the file `path` holding `bytes`. Nothing that has the name
@@ -278,7 +281,9 @@ impl std::fmt::Display for WriteFileError {
 /// Returns the message the rewrite would fail with for those steps.
 pub(crate) fn check_rewritable(path: &Path) -> Result<(), String> {
     let writable = Writable::open(path)?;
-    TempSibling::create_private(&writable.target).map(drop)
+    TempSibling::create_private(&writable.target)
+        .map(drop)
+        .map_err(String::from)
 }
 
 /// The calls that carry metadata over whose outcome depends on the file
@@ -315,7 +320,7 @@ struct Writable {
 }
 
 impl Writable {
-    fn open(path: &Path) -> Result<Self, String> {
+    fn open(path: &Path) -> Result<Self, EditFailure> {
         let target = fs::canonicalize(path)
             .map_err(|err| format!("failed to resolve {}: {err}", path.display()))?;
         // Opening for writing keeps the permission check an in-place write
@@ -325,7 +330,10 @@ impl Writable {
             .read(true)
             .write(true)
             .open(&target)
-            .map_err(|err| format!("failed to open {} for writing: {err}", target.display()))?;
+            .map_err(|err| {
+                let message = format!("failed to open {} for writing: {err}", target.display());
+                EditFailure::io(EditStep::OpenToWrite, &err, message)
+            })?;
         let metadata = KeptMetadata::read(&original, &target, &System)?;
         Ok(Self {
             target,
@@ -534,26 +542,27 @@ struct TempSibling {
 
 impl TempSibling {
     /// Create a file with the permissions any new file gets.
-    fn create(target: &Path) -> Result<Self, String> {
+    fn create(target: &Path) -> Result<Self, EditFailure> {
         // The mode new files get from `File::create`, before the umask.
         Self::create_with_mode(target, 0o666)
     }
 
     /// Create a file only its owner can open, for a copy of an existing file
     /// that may be private.
-    fn create_private(target: &Path) -> Result<Self, String> {
+    fn create_private(target: &Path) -> Result<Self, EditFailure> {
         Self::create_with_mode(target, 0o600)
     }
 
-    fn create_with_mode(target: &Path, mode: u32) -> Result<Self, String> {
+    fn create_with_mode(target: &Path, mode: u32) -> Result<Self, EditFailure> {
         let parent = target
             .parent()
             .ok_or_else(|| format!("missing parent directory for {}", target.display()))?;
         Self::open(parent, target, mode).map_err(|err| {
-            format!(
+            let message = format!(
                 "failed to create temporary file in {}: {err}",
                 parent.display()
-            )
+            );
+            EditFailure::io(EditStep::CreateTemporary, &err, message)
         })
     }
 
@@ -594,7 +603,7 @@ impl TempSibling {
 
     /// Flush the file and rename it to `target`, with the metadata of the
     /// file it replaces if given.
-    fn commit(mut self, target: &Path, replaced: Option<&KeptMetadata>) -> Result<(), String> {
+    fn commit(mut self, target: &Path, replaced: Option<&KeptMetadata>) -> Result<(), EditFailure> {
         let replacement = replaced
             .map(|replaced| {
                 replaced.apply(&self.file, target, &System)?;
@@ -610,16 +619,24 @@ impl TempSibling {
             file_identity::replaced(target, old, new);
         }
         result.map_err(|(step, err)| match step {
-            WriteStep::Flush => format!("failed to flush {}: {err}", self.path.display()),
-            WriteStep::Replace => format!(
-                "failed to replace {} with {}: {err}",
-                target.display(),
-                self.path.display()
-            ),
+            WriteStep::Flush => {
+                let message = format!("failed to flush {}: {err}", self.path.display());
+                EditFailure::io(EditStep::Write, &err, message)
+            }
+            WriteStep::Replace => {
+                let message = format!(
+                    "failed to replace {} with {}: {err}",
+                    target.display(),
+                    self.path.display()
+                );
+                EditFailure::io(EditStep::Replace, &err, message)
+            }
+            // The file is replaced by then, so no cause says it was not saved.
             _ => format!(
                 "failed to flush directory {}: {err}",
                 target.parent().unwrap_or(target).display()
-            ),
+            )
+            .into(),
         })
     }
 
@@ -655,6 +672,7 @@ impl Drop for TempSibling {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edit_failure::FailureCause;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::io::{Read, Write};
@@ -688,10 +706,10 @@ mod tests {
         names
     }
 
-    fn replace_contents(file: &mut File, bytes: &[u8]) -> Result<(), String> {
+    fn replace_contents(file: &mut File, bytes: &[u8]) -> Result<(), EditFailure> {
         file.set_len(0).map_err(|err| err.to_string())?;
         file.rewind().map_err(|err| err.to_string())?;
-        file.write_all(bytes).map_err(|err| err.to_string())
+        file.write_all(bytes).map_err(|err| err.to_string().into())
     }
 
     #[test]
@@ -1210,7 +1228,7 @@ mod tests {
         assert_ne!(replaced, rewritten);
         assert_eq!(watched.current(), replaced);
         // A failed rewrite replaces nothing.
-        rewrite_via_temp_copy(&path, |_| Err("disk full".to_string())).expect_err("fails");
+        rewrite_via_temp_copy(&path, |_| Err("disk full".to_string().into())).expect_err("fails");
         assert_eq!(watched.current(), replaced);
         fs::remove_dir_all(dir).expect("remove test dir");
     }
@@ -1229,6 +1247,54 @@ mod tests {
     }
 
     #[test]
+    fn a_full_disk_while_editing_keeps_its_cause() {
+        let dir = test_dir("full");
+        let path = dir.join("song.flac");
+        fs::write(&path, b"original").expect("write original");
+        let mut full = OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("open /dev/full");
+
+        let failure = rewrite_via_temp_copy(&path, |_| {
+            full.write_all(b"edited")
+                .map_err(|err| EditFailure::io(EditStep::Write, &err, err.to_string()))
+        })
+        .expect_err("no space");
+
+        assert_eq!(failure.cause(), Some(FailureCause::NoSpace));
+        assert_eq!(fs::read(&path).expect("read original"), b"original");
+        assert_eq!(dir_entries(&dir), vec!["song.flac".to_string()]);
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn a_refused_replace_is_the_permission_to_replace_the_file() {
+        let dir = test_dir("refused-replace");
+        let path = dir.join("song.flac");
+        fs::write(&path, b"original").expect("write original");
+        let writable = fs::metadata(&dir).expect("metadata").permissions();
+
+        // The copy exists by the time the folder stops taking renames.
+        let result = rewrite_via_temp_copy(&path, |file| {
+            replace_contents(file, b"edited")?;
+            fs::set_permissions(&dir, Permissions::from_mode(0o555)).expect("chmod");
+            Ok(())
+        });
+        fs::set_permissions(&dir, writable).expect("restore folder");
+
+        // Root may replace it whatever the permissions say.
+        if let Err(failure) = result {
+            assert_eq!(failure.cause(), Some(FailureCause::FileNotReplaceable));
+            assert!(failure
+                .to_string()
+                .starts_with(&format!("failed to replace {}", path.display())));
+            assert_eq!(fs::read(&path).expect("read original"), b"original");
+        }
+        fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
     fn failed_edit_keeps_the_original_and_removes_the_copy() {
         let dir = test_dir("failure");
         let path = dir.join("song.mp3");
@@ -1236,9 +1302,10 @@ mod tests {
 
         let error = rewrite_via_temp_copy(&path, |file| {
             replace_contents(file, b"partial")?;
-            Err("disk full".to_string())
+            Err("disk full".to_string().into())
         })
-        .expect_err("edit failure is reported");
+        .expect_err("edit failure is reported")
+        .to_string();
 
         assert_eq!(error, "disk full");
         assert_eq!(fs::read(&path).expect("read original"), b"original");
@@ -1373,7 +1440,8 @@ mod tests {
             edited = true;
             Ok(())
         })
-        .expect_err("read-only file is rejected");
+        .expect_err("read-only file is rejected")
+        .to_string();
 
         assert!(error.contains("for writing"), "{error}");
         assert!(!edited);
