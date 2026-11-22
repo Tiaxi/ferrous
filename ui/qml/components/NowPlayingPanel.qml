@@ -22,8 +22,8 @@ import "../logic/PathUtils.js" as PathUtils
 //   with the whole text in the tooltip, and a line the track has no text
 //   for keeps its row, empty.
 // - Narrow (a sidebar under narrowWidth): the cover at the panel's top
-//   left corner, as the wide one is, at every font size (not inset 12 px,
-//   at the top of the title's capitals), with four short lines beside it,
+//   left corner, as the wide one is (not inset 12 px, at the top of the
+//   title's capitals), with four short lines beside it,
 //   12 px after it, the cover as high as the block, flush with the seam,
 //   where the lines keep a dozen characters beside it, the lines centred
 //   on it (centredTextTop), and 96 px otherwise (besideCoverSize), the
@@ -34,9 +34,10 @@ import "../logic/PathUtils.js" as PathUtils
 //   lines are 4 px apart. Beside the cover in a wide sidebar (the compact
 //   layout) the block keeps six lines' room. With a font too large for
 //   four lines beside the 96 px cover, as 24 pt, in either sidebar, it is
-//   a header row instead: the cover as high as two lines of the title,
-//   the title beside it, and the artist, the album and the details under
-//   it on the whole width (see largeHeader). A sidebar too short for the
+//   a header row instead, one block at the 12 px inset: the cover as high
+//   as two lines of the title, the title centred beside it, and the
+//   artist, the album and the details under it on the whole width, all on
+//   the cover's left edge (see largeHeader). A sidebar too short for the
 //   wide layout to leave the library about six rows, as with a large font
 //   or a short window, takes it too, with the lines beside the cover
 //   however far past it they run, as its room beside it is wide.
@@ -138,7 +139,10 @@ Item {
     // in the 408 px one of a 1600 px window. From the fonts and the width
     // alone, so every title of a layout is one size (a long title that
     // stepped down a size on its own ranked over the artist by weight alone
-    // on that track).
+    // on that track). The room is the sidebar's, less the two insets: the
+    // header's own inset before the cover takes no title's size (counted,
+    // it put the 408 px sidebar's titles at the base size too, barely over
+    // the artist's).
     readonly property bool headerTitleSmall: root._roomBeside(root.headingHeaderCoverSize)
         < 12 * narrowTitleMetrics.averageCharacterWidth
     // The size of the narrow layout's title: the base size in a large-font
@@ -162,6 +166,14 @@ Item {
     function _roomBeside(side) {
         return root.width - side - 2 * root.textInset
     }
+    // The same beside the large-font header's cover, which is at the inset.
+    function _roomBesideHeader(side) {
+        return root.width - root.textInset - side - root.footGap - root.textInset
+    }
+    // Where the cover is in from the panel's corner: at the inset in the
+    // large-font header, on its lines' left edge, and at the corner
+    // elsewhere.
+    readonly property int coverInset: root.largeHeader ? root.textInset : 0
 
     readonly property bool hasTrack: {
         const hasMetadata = root._trimmed(root.uiBridge.currentTrackTitle).length > 0
@@ -414,6 +426,22 @@ Item {
     function _isFolderLine(text) {
         return text.startsWith(root.folderMark)
     }
+    // The mark that starts the narrow details where they are a file's
+    // facts (fileFactsText): a word joiner, which has no width, so what
+    // stays still of them is measured as drawn (#537).
+    readonly property string factsMark: "\u2060"
+    function _isFactsLine(text) {
+        return text.startsWith(root.factsMark)
+    }
+    // How far a file without tags' two lines move towards the middle of
+    // the three rows the large-font header keeps, each by half a row, so
+    // the block has no hole at its foot: the folder down and the facts up.
+    readonly property real fileLinesShift: root.largeHeader
+        ? Math.round((narrowLineProbe.implicitHeight + root.stackedLineGap) / 2) : 0
+    function _fileLineShift(text) {
+        return root._isFolderLine(text) ? root.fileLinesShift
+            : root._isFactsLine(text) ? -root.fileLinesShift : 0
+    }
     function _folderLine(tagText) {
         return root.folderText.length > 0 ? root.folderMark + root.folderText : tagText
     }
@@ -468,7 +496,8 @@ Item {
         details: root.untagged ? root.fileFactsText : root.shownDetailsText,
         artist: root._folderLine(root.artistText),
         narrowAlbum: root.narrowAlbumText,
-        narrowDetails: root.untagged ? root.fileFactsText : root.shownNarrowDetailsText
+        narrowDetails: root.fileFactsText.length > 0 ? root.factsMark + root.fileFactsText
+            : root.untagged ? "" : root.shownNarrowDetailsText
     })
 
     // A track change fades, line by line: a line that differs for the next
@@ -1093,7 +1122,7 @@ Item {
     // The top of the lines beside the narrow cover; beside the large-font
     // header's cover, at its top (besideTextTop).
     readonly property int narrowTextTop: 10
-    readonly property int besideTextTop: root.largeHeader ? 0
+    readonly property int besideTextTop: root.largeHeader ? root.coverInset
         : root.narrowBeside ? root.centredTextTop : root.narrowTextTop
     // The top of the lines beside a cover that fills the block, one for
     // every track, from the room they keep (narrowReservedHeight): a
@@ -1134,25 +1163,30 @@ Item {
     // the wide layout that takes this one for its height alone alike
     // (at 24 pt the narrow sidebar stood a 96 px cover alone on a row,
     // some 264 px of it empty beside it, and the compact one cut the artist
-    // off beside a 152 px cover): the cover at the top left, as high as
-    // two lines of the title (headerCoverSize), and beside it, 12 px after
-    // it, the title, on up to two lines, which end on the cover's foot, a
-    // title on one line too; then, footGap under the cover, at the panel's
-    // inset and on its whole width, the artist, "Album (Year)", the album
-    // cut off before its year, in textSecondary, and the details, a line
-    // each, elided, stackedLineGap apart. The block is one height for
-    // every track (largeHeaderHeight): a line a track has no text for
-    // keeps its row, so a track change does not move the library; but a
-    // file without tags shows no album, and its details, the file's facts,
-    // follow its folder (fileFactsText). Where the title would have under
-    // narrowLineMinimum beside the cover, the lines go under it instead
-    // (narrowStacked).
+    // off beside a 152 px cover): one block on one left edge, the panel's
+    // inset. The cover, as high as two lines of the title (headerCoverSize),
+    // at the inset from the top too, and beside it, footGap after it as the
+    // lines are under it (12 px after the inset cover, "A Remarkably" was
+    // past the 408 px sidebar's first line, and a long title showed two
+    // words), the title, on up to two lines and centred on it either way
+    // (flush in the corner with the title on its foot, the header had three
+    // left edges and some 60 px of nothing over the title); then, footGap
+    // under the cover, on its left edge and to the panel's inset, the
+    // artist, "Album (Year)", the album cut off before its year, in
+    // textSecondary, and the details, a line each, elided, stackedLineGap
+    // apart. The block is one height for every track (largeHeaderHeight): a
+    // line a track has no text for keeps its row, so a track change does
+    // not move the library, and a file without tags has its folder and its
+    // facts in the middle of the three rows (fileLinesShift). Where the
+    // title would have under narrowLineMinimum beside the cover, the lines
+    // go under it instead (narrowStacked).
     readonly property bool largeHeader: !root.wideRoom && root.largeFont
         && (!root.narrow || root.narrowLinesTall)
-        && root._roomBeside(root.headerCoverSize) >= root.narrowLineMinimum
+        && root._roomBesideHeader(root.headerCoverSize) >= root.narrowLineMinimum
     readonly property int footGap: 8
+    readonly property int titleGapBeside: root.largeHeader ? root.footGap : root.textInset
     readonly property real footLineWidth: Math.max(0, root.width - 2 * root.textInset)
-    readonly property real largeHeaderHeight: root.headerCoverSize + root.footGap
+    readonly property real largeHeaderHeight: root.textInset + root.headerCoverSize + root.footGap
         + 3 * narrowLineProbe.implicitHeight + 2 * root.stackedLineGap
     // The lines go under the cover, on the whole width, where the room
     // beside it is under narrowLineMinimum, or where, in a narrow sidebar,
@@ -1166,7 +1200,8 @@ Item {
     // under it the cover stood alone on a row, with its width empty beside
     // it.
     readonly property bool narrowStacked: !root.wideRoom && !root.largeHeader
-        && (root._roomBeside(root.largeFont && !root.narrow ? root.headerCoverSize : root.narrowCoverSize)
+        && ((root.largeFont && !root.narrow ? root._roomBesideHeader(root.headerCoverSize)
+                                            : root._roomBeside(root.narrowCoverSize))
                 < root.narrowLineMinimum
             || (root.narrow && root.narrowLinesTall))
     // The compact layout: the narrow one in a sidebar wide enough for the
@@ -1323,8 +1358,10 @@ Item {
     // Text wraps them. A word only the ellipsis cuts is cut as any line's
     // last word is. Where Text would elide the last line after a space,
     // "Title That …", the panel elides it instead, without the space, the
-    // lines before it ending in "\n", and `elided` is set; otherwise Text
-    // elides it. `text` as it is where
+    // lines before it ending in "\n", and `elided` is set; a title's
+    // second line it elides itself either way, as Text can cut some px
+    // short there and leave the space ("Long Track …" where "Long Track T…"
+    // fitted); otherwise Text elides it. `text` as it is where
     // nothing of this applies, and where a word wider than the line has no
     // such break, which Text then breaks anywhere.
     function _laidOut(text, width, lines, lastWidth, breaksLongWords, metrics) {
@@ -1370,7 +1407,10 @@ Item {
         // fitting the last.
         if (laid.length < lines - 1 || fits(rest, lastWidth))
             return broken ? brokenText : whole
-        return root._elidedWithoutSpace(rest, laid, lastWidth, metrics) || (broken ? brokenText : whole)
+        const trimmed = root._elidedWithoutSpace(rest, laid, lastWidth, metrics)
+        if (trimmed !== null || !breaksLongWords)
+            return trimmed || whole
+        return { text: laid.concat([metrics.elidedText(rest, Qt.ElideRight, lastWidth)]).join("\n"), elided: true }
     }
 
     // `text`, elided on the right to `width` in the font of `metrics` after
@@ -1418,10 +1458,12 @@ Item {
         required property var owner
         required property string wholeText
         // A file's folder rather than a tag (see folderText): without its
-        // mark, in textSecondary.
+        // mark, in textSecondary. A file's facts are without theirs.
         readonly property bool folderLine: root._isFolderLine(lineText.wholeText)
         readonly property string shownText: lineText.folderLine
-            ? lineText.wholeText.slice(root.folderMark.length) : lineText.wholeText
+            ? lineText.wholeText.slice(root.folderMark.length)
+            : root._isFactsLine(lineText.wholeText)
+                ? lineText.wholeText.slice(root.factsMark.length) : lineText.wholeText
         readonly property var parts: lineText.owner.keepsTail
             ? root._albumAndYear(lineText.shownText) : [lineText.shownText, ""]
         readonly property string tail: lineText.parts[1]
@@ -1450,12 +1492,14 @@ Item {
         readonly property bool elided: lineText.laidOut.elided || lineText.truncated
         text: lineText.laidOut.text
         width: owner.width
-        // On the foot of the line's seat, where it has one (see FadingLine's
-        // seatHeight): each text by its own height, so a layer that fades
-        // out stays where it showed. By the height of the laid-out text:
-        // reading implicitHeight here would lay it out from within this
-        // binding, a binding loop.
-        y: owner.seatHeight > 0 ? Math.max(0, Math.floor(owner.seatHeight - lineText.contentHeight)) : 0
+        // In the middle of the line's seat, where it has one (see
+        // FadingLine's seatHeight), and a file's own lines in the middle of
+        // the header's rows: each text by its own height and mark, so a
+        // layer that fades out stays where it showed. By the height of the
+        // laid-out text: reading implicitHeight here would lay it out from
+        // within this binding, a binding loop.
+        y: owner.overhang + root._fileLineShift(lineText.wholeText) + (owner.seatHeight > 0
+            ? Math.max(0, Math.floor((owner.seatHeight - lineText.contentHeight) / 2)) : 0)
         elide: Text.ElideRight
         maximumLineCount: owner.maximumLineCount
         wrapMode: owner.maximumLineCount <= 1 ? Text.NoWrap : Text.Wrap
@@ -1541,10 +1585,14 @@ Item {
         // Whether a word wider than the line breaks with a hyphen rather
         // than anywhere (see _laidOut).
         property bool breaksLongWords: false
-        // The height of the box at whose foot each text of the line sits,
-        // or 0 for its top: the large-font header's title seats a single
-        // line on the cover's foot.
+        // The height of the box each text of the line is centred in, or 0
+        // for its top: the large-font header's title is centred on the
+        // cover.
         property real seatHeight: 0
+        // How far over and under its row a text of the line may be drawn
+        // (fileLinesShift), which the windows it draws through take in.
+        readonly property real overhang: line.lineKey === "artist" || line.lineKey === "narrowDetails"
+            ? root.fileLinesShift : 0
         readonly property bool wraps: line.maximumLineCount > 1
         readonly property bool truncated: stillText.elided
         // The lines the playing track's text takes.
@@ -1690,8 +1738,9 @@ Item {
         // The playing track's text, whole while nothing fades; while the
         // line fades it draws through stillWindows and changingWindows.
         Item {
+            y: -line.overhang
             width: line.fading ? 0 : line.width
-            height: line.height
+            height: line.height + 2 * line.overhang
             clip: line.fading
 
             LineText {
@@ -1716,8 +1765,9 @@ Item {
 
                 objectName: "nowPlayingStill" + line.name
                 x: stillWindow.modelData[0]
+                y: -line.overhang
                 width: stillWindow.modelData[1] - stillWindow.modelData[0]
-                height: line.height
+                height: line.height + 2 * line.overhang
                 clip: true
 
                 LineText {
@@ -1755,8 +1805,9 @@ Item {
 
                         objectName: "nowPlayingOutgoing" + line.name + "Part"
                         x: part.modelData.x
+                        y: -line.overhang
                         width: part.modelData.width
-                        height: line.height
+                        height: line.height + 2 * line.overhang
                         clip: true
                         opacity: part.modelData.from * root.linesOutLevel
 
@@ -1789,8 +1840,9 @@ Item {
 
                     objectName: "nowPlayingIncoming" + line.name + "Window"
                     x: changingWindow.modelData[0]
+                    y: -line.overhang
                     width: changingWindow.modelData[1] - changingWindow.modelData[0]
-                    height: line.height
+                    height: line.height + 2 * line.overhang
                     clip: true
 
                     LineText {
@@ -1813,8 +1865,8 @@ Item {
     Item {
         id: coverArea
         objectName: "nowPlayingCoverArea"
-        x: 0
-        y: 0
+        x: root.coverInset
+        y: root.coverInset
         width: root.coverSize
         height: root._whileGrowing(Math.min(root.coverSize, root.idleRowHeight)
             + Math.max(0, root.coverSize - root.idleRowHeight) * root.presence)
@@ -1975,7 +2027,8 @@ Item {
             visible: !root.wideRoom && (!root.idle || root.holdsTrack)
             // Beside the cover or under it; in the large-font header, the
             // title beside it and the rest under it.
-            x: root.narrowStacked ? root.textInset : root.narrowLayoutCoverSize + root.textInset
+            x: root.narrowStacked ? root.textInset
+                : root.coverInset + root.narrowLayoutCoverSize + root.titleGapBeside
             // Under the cover's place, with which it moves while that grows;
             // beside it, from under the compact row up into place, so its
             // text does not show where the row's does.
@@ -1999,11 +2052,10 @@ Item {
                 weight: Font.DemiBold
                 maximumLineCount: 2
                 breaksLongWords: true
-                // In the large-font header, a title on one line on the
-                // cover's foot, where a title on two ends, so the header
-                // reads as one stack down to the lines under it (at the
-                // cover's top it left some 54 px empty beside the cover's
-                // lower half).
+                // In the large-font header, centred on the cover, on one
+                // line or two, so the header reads as one block (on the
+                // cover's foot it hung, with some 60 px empty over it; at
+                // its top it left some 54 px empty under it).
                 seatHeight: root.largeHeader ? root.headerCoverSize : 0
                 width: narrowColumn.width
                 // In the large-font header, the cover's height and footGap
@@ -2057,12 +2109,11 @@ Item {
                 // leaves when the artist takes one; elsewhere one line, the
                 // album cut off before its year.
                 maximumLineCount: root.narrowLinesWrap ? 2 : 1
-                // Under the large-font header, at the panel's inset. Its row
-                // is kept, but for a file without tags, whose details,
-                // the file's facts, follow its folder.
+                // Under the large-font header, at the panel's inset, its row
+                // kept for every track, so nothing under it moves.
                 x: root.largeHeader ? root.textInset - narrowColumn.x : 0
                 width: root.largeHeader ? root.footLineWidth : narrowColumn.width
-                keepsRow: root.largeHeader && !root._isFolderLine(root.shownLines.artist)
+                keepsRow: root.largeHeader
 
                 HoverHandler {
                     id: albumHover

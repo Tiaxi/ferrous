@@ -244,6 +244,7 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 | Never-played plot | pure black; a centred empty-state message; lines cut short for the plates; lines at half of full scale in the waveform | a black slab in the window; a second message beside the queue's first-run one; a broken first line in each lane; eight empty rows of a table |
 | Last.fm listening | an arc, a pie or a progress ring around the glyph | read as a busy spinner; the states looked alike at 1× |
 | Idle now playing | a 360 px empty square; a stock disc glyph | read as a dead slab; the glyph was unreadable at 16 px |
+| Large-font now playing | the cover flush in the corner over lines at the inset; the title on the cover's foot | three left edges and some 60 px of nothing over the title; the header is one block at the inset, the title centred on the cover |
 | Now playing | per-track heights; the cover scaling up from a square on first play | the library jumped up to 26 px on a track change; the scaling read as a zoom |
 | No-cover mark in a list | the stand-in's amber and magenta; Breeze's album and track glyphs | the tree's brightest thing, in the "now" colour; blobs at 24 pt and an empty square at 10 pt |
 | No-cover tile | the album title or a glyph in the slot; a different layout | repeated the lines below it, read as a broken image, and moved the library |
