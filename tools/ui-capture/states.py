@@ -6243,7 +6243,7 @@ STATES = [
     ("menus", "search", "results-keyboard", "key Down | key Down | key Down | wait 0.4", "Search palette: keyboard selection down three rows"),
     ("menus", "search", "result-hover", "hover globalSearchResultTitle#2 1.6", "Search palette: pointer over a result, its tooltip shown"),
     ("menus", "menu", "context-search-result", "rclick globalSearchResultTitle#2",
-     "Search result context menu (right click; it opens at the click point; the palette takes no Menu key)"),
+     "Search result context menu (right click; it opens at the click point; from the keyboard: context-search-result-keyboard)"),
     ("menus", "search", "results-many", "esc 1 | away | key Backspace | key Backspace | key Backspace | type l | wait 0.8",
      "Search palette: 'l' (many results, truncated groups)"),
     ("menus", "search", "no-results", "key Backspace | type zzqx | wait 0.8", "Search palette: no results"),
@@ -6383,7 +6383,7 @@ STATES = [
             f"Album art viewer, {mname}, file info pane"),
            ("viewers", "menu", f"context-albumart-viewer-{mname}",
             "js viewerController.toggleAlbumArtInfoVisible(function(){}) | " + ("window albumArtFullscreenWindow | " if mode else "") + ("key Menu | settle 0.8" if mode else "rclick xy:500,400"),
-            f"Album art viewer context menu ({mname}" + (", Menu key)" if mode else ", right click: the windowed viewer takes no Menu key)")),
+            f"Album art viewer context menu ({mname}" + (", Menu key)" if mode else ", right click; the Menu key and Shift+F10 open it too, at the art's centre)")),
            ("viewers", "_", f"_close-{mname}", ("window albumArtFullscreenWindow | " if mode else "") + "esc | js viewerController.closeAlbumArtViewer() | settle 1", "")]
     )
 ] + [
@@ -7005,9 +7005,10 @@ NOT_CAPTURED = [
     ("Context menus at the pointer", "Context menus are opened from the keyboard (the Menu key, or Shift+F10) wherever "
                                      "the view takes it: library, queue, the scrobble indicator and the fullscreen "
                                      "album art viewer; they open on the selected row or control. The windowed album "
-                                     "art viewer takes no Menu key: its right-click menu opens with popup() at the "
-                                     "pointer, which the probe's synthetic events do not move in the compositor, so "
-                                     "it shows at the window's top-left corner."),
+                                     "art viewer and the search palette take those keys as shortcuts, which the "
+                                     "probe's keys go past: the viewer's menu is shot from a right click (at the "
+                                     "click point; from the keys it opens at the art's centre), the palette's from a "
+                                     "right click and from a real Menu key."),
     ("Dialog windows' open and close animation", "Configure and About are real windows (DialogWindow): KWin animates "
                                                  "their opening and closing as a compositor effect, which the app's own "
                                                  "frame readback cannot see; their strips show the client window only "

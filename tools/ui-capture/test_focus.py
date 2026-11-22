@@ -387,6 +387,18 @@ class ChangeCrop(unittest.TestCase):
             self.sheet("noSuchButton")
 
 
+class Captions(unittest.TestCase):
+    """What is said of the Menu key: the windowed album art viewer and the search palette take it, as shortcuts."""
+
+    def test_no_state_or_note_says_a_view_takes_no_menu_key(self):
+        said = [d for *_, d in states.STATES] + [" ".join(note) for note in states.NOT_CAPTURED]
+        self.assertFalse([t for t in said if "no Menu key" in t])
+
+    def test_the_windowed_viewers_caption_says_both_keys_open_its_menu(self):
+        desc = next(d for _se, _a, st, _s, d in states.STATES if st == "context-albumart-viewer-windowed")
+        self.assertIn("the Menu key and Shift+F10 open it too", desc)
+
+
 class SystemFacts(unittest.TestCase):
     def test_contrast_layout_and_focus_order_are_summarised_for_the_packs_shots(self):
         rd = tempfile.mkdtemp(prefix="round-", dir=_TMP)
