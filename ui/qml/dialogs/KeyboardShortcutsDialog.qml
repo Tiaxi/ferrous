@@ -380,6 +380,21 @@ Components.DialogWindow {
         }
     }
 
+    // Gives the glyphs of the editors' buttons the font's size, as
+    // Defaults' has (they stayed 16 px beside 24 pt captions): of the same
+    // children as above, those that are buttons, through a button's own
+    // icon.width and icon.height.
+    function sizeKeyButtonGlyphs(editors) {
+        for (const editor of editors) {
+            for (const child of editor.children) {
+                if (child.checkable !== undefined) {
+                    child.icon.width = Qt.binding(function() { return root.iconSize })
+                    child.icon.height = Qt.binding(function() { return root.iconSize })
+                }
+            }
+        }
+    }
+
     function matches(action, query) {
         if (query.length === 0) {
             return true
@@ -613,29 +628,20 @@ Components.DialogWindow {
                 height: Math.ceil(root.uiPalette.rowHeight + 2 * Kirigami.Units.smallSpacing)
                 spacing: 0
 
-                Label {
+                ColumnHeading {
                     Layout.fillWidth: true
                     Layout.leftMargin: root.rowLeftPadding
-                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Action")
-                    elide: Text.ElideRight
-                    Accessible.role: Accessible.ColumnHeader
                 }
-                Label {
+                ColumnHeading {
                     Layout.preferredWidth: root.keyColumnWidth
                     leftPadding: Kirigami.Units.largeSpacing
-                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Shortcut")
-                    elide: Text.ElideRight
-                    Accessible.role: Accessible.ColumnHeader
                 }
-                Label {
+                ColumnHeading {
                     Layout.preferredWidth: root.keyColumnWidth + actionList.columnsLane
                     leftPadding: Kirigami.Units.largeSpacing
-                    textFormat: Text.PlainText
                     text: I18n.i18nc("@title:column", "Alternate")
-                    elide: Text.ElideRight
-                    Accessible.role: Accessible.ColumnHeader
                 }
             }
 
@@ -756,6 +762,7 @@ Components.DialogWindow {
                         spacing: 0
 
                         Kirigami.Icon {
+                            objectName: "keyboardShortcutsRowIcon"
                             Layout.preferredWidth: root.iconSize
                             Layout.preferredHeight: root.iconSize
                             Layout.rightMargin: root.iconSpacing
@@ -908,7 +915,15 @@ Components.DialogWindow {
                     onKeySequenceModified: root.takeKey(1, alternateEditor)
                 }
 
-                Component.onCompleted: root.shareKeyButtonWidth([shortcutEditor, alternateEditor])
+                Component.onCompleted: {
+                    const editors = [shortcutEditor, alternateEditor]
+                    root.shareKeyButtonWidth(editors)
+                    root.sizeKeyButtonGlyphs(editors)
+                    // Laid out with the glyphs' sizes before the window
+                    // shows: the rows took the buttons' new height only as
+                    // it did, which changed the window's minimum with it.
+                    editorColumn.ensurePolished()
+                }
             }
         }
 
@@ -955,6 +970,16 @@ Components.DialogWindow {
                 text: I18n.i18nc("@info", "Ferrous could not take these shortcuts. Change some back, or cancel to keep the ones you had.")
             }
         }
+    }
+
+    // A column's heading, as those of the app's other tables, Edit Tags'
+    // and the queue's: small and secondary (it had the rows' size and ink).
+    component ColumnHeading: Label {
+        textFormat: Text.PlainText
+        font.pointSize: root.uiPalette.smallPointSize
+        color: root.uiPalette.textSecondary
+        elide: Text.ElideRight
+        Accessible.role: Accessible.ColumnHeader
     }
 
     // Asks before a key moves from another action, as KDE's editor does.

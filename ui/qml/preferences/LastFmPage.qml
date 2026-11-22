@@ -71,11 +71,15 @@ Preferences.PreferencesPage {
         visible: root.showsScrobbleProgress
     }
 
+    // The line's measure grows with the font (it wrapped at 432 px at
+    // 24 pt, beside twice that free). What the form needs for it does not:
+    // it still wraps where the page is narrow.
     Label {
         objectName: "lastFmAccountLabel"
         Kirigami.FormData.label: I18n.i18nc("@label", "Account:")
         Layout.fillWidth: true
-        Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+        Layout.preferredWidth: Math.min(implicitWidth, Kirigami.Units.gridUnit * 24)
+        Layout.maximumWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 24)
         wrapMode: Text.Wrap
         textFormat: Text.PlainText
         text: !root.buildConfigured

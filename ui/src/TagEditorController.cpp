@@ -6,6 +6,7 @@
 #include "FerrousBridgeFfi.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <utility>
 #include <KLocalizedString>
@@ -17,6 +18,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QRegularExpression>
 #include <QtGlobal>
 
 namespace {
@@ -40,6 +42,52 @@ QString fileLine(const QString &name, const QString &error) {
     return error.isEmpty() ? name : QStringLiteral("%1: %2").arg(name, error);
 }
 
+// Why a file failed, in plain words, where the backend's message says so;
+// empty where it doesn't, and nothing is guessed. The backend sends only
+// its message, in English: the system's error code at its end, which no
+// locale changes, says what went wrong, and the step it starts with, of
+// src/safe_save.rs and the renames, what it was. Only creating the
+// temporary copy fails for the folder's own permissions.
+QString failureCause(const QString &error) {
+    static const QRegularExpression systemCode(QStringLiteral(R"(\(os error (\d+)\)$)"));
+    const QRegularExpressionMatch match = systemCode.match(error);
+    if (!match.hasMatch()) {
+        return {};
+    }
+    const int code = match.captured(1).toInt();
+    if (code == EROFS) {
+        return i18nc("@info why a file could not be changed", "The file system is read-only.");
+    }
+    if (code == ENOSPC) {
+        // An extended attribute's own room can run out on a disk with space.
+        return error.startsWith(QLatin1String("failed to keep "))
+            ? QString()
+            : i18nc("@info why a file could not be saved", "There isn’t enough free space on the disk.");
+    }
+    if (code != EACCES && code != EPERM) {
+        return {};
+    }
+    if (error.startsWith(QLatin1String("failed to create temporary file in "))) {
+        return i18nc("@info why a file could not be saved", "You don’t have permission to write in this folder.");
+    }
+    if (error.startsWith(QLatin1String("failed to open ")) && error.contains(QLatin1String(" for writing: "))) {
+        return i18nc("@info why a file could not be saved", "You don’t have permission to change this file.");
+    }
+    if (error.startsWith(QLatin1String("failed to replace "))) {
+        return i18nc("@info why a file could not be saved", "You don’t have permission to replace this file.");
+    }
+    if (error.startsWith(QLatin1String("failed to read tag data for "))) {
+        return i18nc("@info why a file's tags could not be read", "You don’t have permission to read this file.");
+    }
+    if (error.startsWith(QLatin1String("failed to rename "))
+        || error.startsWith(QLatin1String("failed to stage rename "))) {
+        // The files of a rename fail together, with the one message of the
+        // file that failed: neither this file nor its folder is named.
+        return i18nc("@info why files could not be renamed", "Renaming stopped: you don’t have permission.");
+    }
+    return {};
+}
+
 // The failures in the order of their lines.
 void sortFailures(QVector<TagEditorFailure> &failures) {
     std::sort(failures.begin(), failures.end(), [](const TagEditorFailure &a, const TagEditorFailure &b) {
@@ -50,11 +98,15 @@ void sortFailures(QVector<TagEditorFailure> &failures) {
 // The details of an action: a section of the files it failed for, which
 // comes first, as whoever opens the details wants that, and one of the
 // files it did; each a heading, its files, each by name with the error
-// apart, and whether it lists failures, which the Details window sets
-// apart.
+// apart and, where it is known, its cause in plain words, and whether it
+// lists failures, which the Details window sets apart.
 QVariantList buildActionDetails(const QStringList &successLines, const QVector<TagEditorFailure> &failures) {
     const auto item = [](const QString &name, const QString &error) {
-        return QVariantMap{{QStringLiteral("name"), name}, {QStringLiteral("error"), error}};
+        QVariantMap values{{QStringLiteral("name"), name}, {QStringLiteral("error"), error}};
+        if (const QString cause = failureCause(error); !cause.isEmpty()) {
+            values.insert(QStringLiteral("cause"), cause);
+        }
+        return values;
     };
     QVariantList sections;
     if (!failures.isEmpty()) {
@@ -1298,6 +1350,22 @@ void TagEditorController::autoNumber(
 
 QStringList TagEditorController::loadedPaths() const {
     return m_loadedPaths;
+}
+
+QVariantList TagEditorController::leadingRows(int limit) const {
+    const QHash<int, QByteArray> roles = m_tableModel.roleNames();
+    const int count = std::min(limit, m_tableModel.rowCount());
+    QVariantList rows;
+    rows.reserve(count);
+    for (int row = 0; row < count; ++row) {
+        const QModelIndex index = m_tableModel.index(row);
+        QVariantMap values;
+        for (auto role = roles.cbegin(); role != roles.cend(); ++role) {
+            values.insert(QString::fromUtf8(role.value()), m_tableModel.data(index, role.key()));
+        }
+        rows.push_back(values);
+    }
+    return rows;
 }
 
 QVector<int> TagEditorController::targetRows() const {

@@ -614,6 +614,7 @@ ApplicationWindow {
         function toggleRowSelected(row) {}
         function selectAllRows() {}
         function loadedPaths() { return [] }
+        function leadingRows(limit) { return [] }
         function bulkValue(field) { return "" }
         function bulkValueMixed(field) { return false }
         function extraValuesNote(field) { return "" }
@@ -798,7 +799,10 @@ ApplicationWindow {
         shortcutId: "add_library_folder"
         overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Add Library Fol&der…")
-        icon.name: "folder-music"
+        // The symbolic one, a note at every size: from 32 px "folder-music"
+        // is the places' coloured folder, a solid block under the shortcuts
+        // list's mask at 24 pt.
+        icon.name: "folder-music-symbolic"
         onTriggered: root.promptAddLibraryRoot("add-library-root")
     }
     Components.ShortcutAction {

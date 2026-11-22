@@ -34,12 +34,17 @@ private slots:
     void visualizationPageNamesResetZoomsKey();
     void editorHasOneBaselineAndOneKeyButtonWidth_data();
     void editorHasOneBaselineAndOneKeyButtonWidth();
+    void editorGlyphsFollowTheFont_data();
+    void editorGlyphsFollowTheFont();
     void editorHoldsStillAsANoteComesAndGoes_data();
     void editorHoldsStillAsANoteComesAndGoes();
     void keyColumnsHoldStillAsTheScrollBarComesAndGoes_data();
     void keyColumnsHoldStillAsTheScrollBarComesAndGoes();
     void namesAndKeysAreQuotedAsInTheOtherDialogs();
     void reassignHasAGlyphAsCancelHas();
+    void addLibraryFolderKeepsItsGlyphAtEverySize_data();
+    void addLibraryFolderKeepsItsGlyphAtEverySize();
+    void columnHeadingsTakeTheTablesHeaderStyle();
 };
 
 namespace {
@@ -1010,6 +1015,114 @@ void KeyboardShortcutsSmokeTest::reassignHasAGlyphAsCancelHas() {
                      QQmlProperty::read(cancel, QString::fromLatin1(size)));
     }
     QVERIFY(QMetaObject::invokeMethod(reassign, "reject"));
+}
+
+// The column headings are the app's tables', as Edit Tags': small, in the
+// secondary colour (they were the rows' size and ink). The row keeps the
+// height of KDE's shortcuts dialog (#458).
+void KeyboardShortcutsSmokeTest::columnHeadingsTakeTheTablesHeaderStyle() {
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QObject *palette = qvariant_cast<QObject *>(fixture.window->property("uiPalette"));
+    QQuickItem *headings = fixture.item("keyboardShortcutsColumnHeadings");
+    QVERIFY(palette != nullptr && headings != nullptr);
+    for (const char *heading : {"Action", "Shortcut", "Alternate"}) {
+        QQuickItem *label = visibleTextIn(headings, QString::fromLatin1(heading));
+        QVERIFY2(label != nullptr, heading);
+        const QFont font = label->property("font").value<QFont>();
+        QCOMPARE(font.pointSizeF(), palette->property("smallPointSize").toReal());
+        QCOMPARE(font.weight(), QFont::Normal);
+        QCOMPARE(label->property("color").value<QColor>().rgba(),
+                 palette->property("textSecondary").value<QColor>().rgba());
+    }
+    QCOMPARE(headings->height(),
+             std::ceil(palette->property("rowHeight").toReal()
+                       + 2 * evaluateOn(headings, QStringLiteral("Kirigami.Units.smallSpacing")).toReal()));
+}
+
+void KeyboardShortcutsSmokeTest::editorGlyphsFollowTheFont_data() {
+    addFontAndStyleRows();
+}
+
+// The glyphs of the editors' buttons, the capture and the clear, are as
+// large as Defaults' (they stayed 16 px beside 24 pt captions), and the
+// buttons stay as tall as they were.
+void KeyboardShortcutsSmokeTest::editorGlyphsFollowTheFont() {
+    QFETCH(int, pointSize);
+    QFETCH(QString, widgetStyle);
+    if (!widgetStyle.isEmpty() && !QStyleFactory::keys().contains(widgetStyle, Qt::CaseInsensitive)) {
+        QSKIP("The Breeze widget style is not installed.");
+    }
+    const ScopedWidgetStyle style(widgetStyle);
+    const ScopedApplicationFont font(pointSize);
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.showAtSizeFor(pointSize));
+    QQuickItem *defaults = visibleItemNamed(fixture.dialog, QStringLiteral("keyboardShortcutsDefaultsButton"));
+    QVERIFY(defaults != nullptr);
+    for (const char *editor : {"keyboardShortcutsShortcutEditor", "keyboardShortcutsAlternateEditor"}) {
+        for (const bool takesKey : {true, false}) {
+            QQuickItem *button = keyButtonIn(fixture.item(editor), takesKey);
+            QVERIFY2(button != nullptr, editor);
+            for (const char *side : {"icon.width", "icon.height"}) {
+                QTRY_COMPARE(QQmlProperty::read(button, QString::fromLatin1(side)).toReal(),
+                             QQmlProperty::read(defaults, QString::fromLatin1(side)).toReal());
+            }
+            QVERIFY2(button->implicitHeight() <= defaults->implicitHeight() + 0.5, editor);
+        }
+    }
+}
+
+void KeyboardShortcutsSmokeTest::addLibraryFolderKeepsItsGlyphAtEverySize_data() {
+    addFontAndStyleRows();
+}
+
+// Add Library Folder's glyph is the same music note at every font size
+// (from 32 px folder-music is the places' coloured folder, which the list's
+// mask made a solid block at 24 pt), and the one the File menu has for it.
+void KeyboardShortcutsSmokeTest::addLibraryFolderKeepsItsGlyphAtEverySize() {
+    QFETCH(int, pointSize);
+    QFETCH(QString, widgetStyle);
+    if (!widgetStyle.isEmpty() && !QStyleFactory::keys().contains(widgetStyle, Qt::CaseInsensitive)) {
+        QSKIP("The Breeze widget style is not installed.");
+    }
+    const ScopedWidgetStyle style(widgetStyle);
+    const ScopedApplicationFont font(pointSize);
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.showAtSizeFor(pointSize));
+    QQuickItem *row = visibleItemIn(fixture.item("keyboardShortcutsList"),
+                                    QStringLiteral("keyboardShortcutsRow_add_library_folder"));
+    QVERIFY(row != nullptr);
+    QQuickItem *icon = visibleItemIn(row, QStringLiteral("keyboardShortcutsRowIcon"));
+    QVERIFY(icon != nullptr);
+    QCOMPARE(icon->property("source").toString(),
+             QQmlProperty::read(fixture.action("addLibraryFolderAction"), QStringLiteral("icon.name")).toString());
+
+    // The share of the glyph's square that has ink: a note's is under half,
+    // a folder's, filled, over it.
+    const auto inked = [&] {
+        const QImage shown = fixture.dialog->grabWindow();
+        const qreal dpr = shown.devicePixelRatio();
+        const QRectF square = sceneRect(icon);
+        const QRect area = QRectF(square.topLeft() * dpr, square.size() * dpr).toRect().intersected(shown.rect());
+        if (area.isEmpty() || area.left() < 2) {
+            return 0.0;
+        }
+        const QColor ground(shown.pixel(area.left() - 2, area.center().y()));
+        int inked = 0;
+        for (int y = area.top(); y <= area.bottom(); ++y) {
+            for (int x = area.left(); x <= area.right(); ++x) {
+                const QColor pixel(shown.pixel(x, y));
+                inked += qAbs(pixel.red() - ground.red()) + qAbs(pixel.green() - ground.green())
+                        + qAbs(pixel.blue() - ground.blue()) > 150;
+            }
+        }
+        return double(inked) / (area.width() * area.height());
+    };
+    QTRY_VERIFY(inked() > 0.05);
+    const double share = inked();
+    QVERIFY2(share < 0.5, qPrintable(QString::number(share)));
 }
 
 std::unique_ptr<QmlSmokeTest> makeKeyboardShortcutsSmokeTest(const QString &userDirectoriesParent) {

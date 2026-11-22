@@ -18,8 +18,11 @@ Preferences.PreferencesPage {
     // View › Reset Zoom's shortcut as the user reads it; empty for none.
     property string resetZoomShortcut: ""
 
-    // A combo box's width in the form, or what its longest option needs.
-    readonly property real comboWidth: Kirigami.Units.gridUnit * 9
+    // The combo boxes' one width in the form: 9 grid units, or what the
+    // widest of them needs for its options, as at a large font (each took
+    // its own there, four ragged widths in one column).
+    readonly property real comboWidth: Math.ceil(Math.max(Kirigami.Units.gridUnit * 9, viewComboBox.implicitWidth,
+        fftComboBox.implicitWidth, displayComboBox.implicitWidth, channelButtonsComboBox.implicitWidth))
 
     title: I18n.i18nc("@title preferences page", "Visualization")
 
@@ -31,9 +34,10 @@ Preferences.PreferencesPage {
     }
 
     Components.DialogComboBox {
+        id: viewComboBox
         objectName: "spectrogramViewComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Channels:")
-        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
+        Layout.preferredWidth: root.comboWidth
         model: [
             I18n.i18nc("@item:inlistbox spectrogram view", "Downmix"),
             I18n.i18nc("@item:inlistbox spectrogram view", "Per channel")
@@ -43,9 +47,10 @@ Preferences.PreferencesPage {
     }
 
     Components.DialogComboBox {
+        id: fftComboBox
         objectName: "spectrogramFftComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "FFT window:")
-        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
+        Layout.preferredWidth: root.comboWidth
         model: root.spectrogramFftChoices
         currentIndex: {
             const index = root.spectrogramFftChoices.indexOf(root.settings.value("fftSize"))
@@ -56,8 +61,10 @@ Preferences.PreferencesPage {
         }
     }
 
-    // The slider takes the column's width up to 18 grid units, and gives
-    // way before its value does, which always shows.
+    // The slider takes the column's width up to 18 grid units, scaled with
+    // the font, so that its value's larger text takes none of its track
+    // (270 px at 10 pt, it was 208 at 24 pt), and gives way before its
+    // value does, which always shows.
     RowLayout {
         id: dbRangeRow
         objectName: "dbRangeRow"
@@ -65,7 +72,7 @@ Preferences.PreferencesPage {
         Layout.fillWidth: true
         Layout.preferredWidth: Kirigami.Units.gridUnit * 12
         Layout.minimumWidth: Kirigami.Units.gridUnit * 6 + dbRangeRow.spacing + dbRangeValueLabel.Layout.minimumWidth
-        Layout.maximumWidth: Kirigami.Units.gridUnit * 18
+        Layout.maximumWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 18)
         // The ticks hang under the groove: 10 px from them to the next row.
         Layout.bottomMargin: Kirigami.Units.smallSpacing + 2
         spacing: Kirigami.Units.largeSpacing
@@ -135,9 +142,10 @@ Preferences.PreferencesPage {
     }
 
     Components.DialogComboBox {
+        id: displayComboBox
         objectName: "spectrogramDisplayComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Scrolling:")
-        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
+        Layout.preferredWidth: root.comboWidth
         model: [
             I18n.i18nc("@item:inlistbox spectrogram display", "Rolling"),
             I18n.i18nc("@item:inlistbox spectrogram display", "Centered")
@@ -195,9 +203,10 @@ Preferences.PreferencesPage {
     }
 
     Components.DialogComboBox {
+        id: channelButtonsComboBox
         objectName: "channelButtonsComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Mute and solo buttons:")
-        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
+        Layout.preferredWidth: root.comboWidth
         model: [
             I18n.i18nc("@item:inlistbox channel buttons", "Never"),
             I18n.i18nc("@item:inlistbox channel buttons", "On hover"),
