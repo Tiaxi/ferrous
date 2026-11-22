@@ -308,8 +308,10 @@ Components.DialogWindow {
         windowRoot: root
         title: I18n.i18nc("@title:window", "Delete Diagnostics Log")
         message: I18n.i18nc("@info", "Delete the diagnostics log?")
-        details: I18n.i18nc("@info", "Ferrous deletes the log file and starts a new one. Use Copy All first to keep "
-            + "what it holds, for example for a bug report.")
+        // For a bug report, the copy made for sharing: Copy All, which it
+        // named, copies every path (#547).
+        details: I18n.i18nc("@info", "Ferrous deletes the log file and starts a new one. To keep what it holds "
+            + "for a bug report, use Copy Log Without Paths first.")
         confirmText: I18n.i18nc("@action:button", "Delete Log")
         confirmIcon: "edit-delete"
         destructive: true

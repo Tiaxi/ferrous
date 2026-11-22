@@ -547,6 +547,7 @@ private slots:
     void recentIssuesOpenWithTheirFocusShown();
     void diagnosticsActionsShareOneRow_data();
     void diagnosticsActionsShareOneRow();
+    void deletingTheLogPointsBugReportsAtTheCopyWithoutPaths();
     void recentIssuesAreSeenWhenThePopupCloses();
     void thePanesEndsEarlyLinkOpensItsIssue();
     void recentIssuesFollowAQueueReplacedWithOneOfTheSameLength();
@@ -6256,6 +6257,25 @@ void UiDialogsTest::recentIssuesUseTheStatusBarsTriangle() {
         QCOMPARE(hex(glyph->property("color").value<QColor>()), hex(tokenOf(window, token)));
     }
     QTest::keyClick(window, Qt::Key_Escape);
+}
+
+// Delete Diagnostics Log sends a bug report to the copy made for sharing,
+// by its button's name: Copy All, which it named, copies every path (#547).
+void UiDialogsTest::deletingTheLogPointsBugReportsAtTheCopyWithoutPaths() {
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QObject *diagnostics = object(main.window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(diagnostics != nullptr && QMetaObject::invokeMethod(diagnostics, "open"));
+    QVERIFY(waitForDialogWindow(diagnostics));
+    QQuickWindow *log = windowOf(diagnostics);
+    QQuickItem *all = visibleNamed(log, QStringLiteral("diagnosticsCopyAllButton"));
+    QQuickItem *withoutPaths = visibleNamed(log, QStringLiteral("diagnosticsCopyWithoutPathsButton"));
+    QObject *confirm = object(main.window, QStringLiteral("clearDiagnosticsConfirmDialog"));
+    QVERIFY(all != nullptr && withoutPaths != nullptr && confirm != nullptr);
+    const QString details = confirm->property("details").toString();
+    QVERIFY2(details.contains(withoutPaths->property("text").toString()), qPrintable(details));
+    QVERIFY2(details.contains(QStringLiteral("bug report")), qPrintable(details));
+    QVERIFY2(!details.contains(all->property("text").toString()), qPrintable(details));
 }
 
 int main(int argc, char **argv) {
