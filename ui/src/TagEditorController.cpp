@@ -35,35 +35,65 @@ QString partialResultText(const QString &done, qsizetype failed) {
                  done, i18ncp("@info:status", "%1 failed", "%1 failed", failed));
 }
 
-// The details of an action: a section of the files it did, and one of the
-// files it failed for, each a heading and a line for each file, and whether
-// it lists failures, which the Details window sets apart.
-QVariantList buildActionDetails(const QStringList &successLines, const QStringList &failureLines) {
+// A file's line in plain text: its name and, where it failed, why.
+QString fileLine(const QString &name, const QString &error) {
+    return error.isEmpty() ? name : QStringLiteral("%1: %2").arg(name, error);
+}
+
+// The failures in the order of their lines.
+void sortFailures(QVector<TagEditorFailure> &failures) {
+    std::sort(failures.begin(), failures.end(), [](const TagEditorFailure &a, const TagEditorFailure &b) {
+        return fileLine(a.name, a.error) < fileLine(b.name, b.error);
+    });
+}
+
+// The details of an action: a section of the files it failed for, which
+// comes first, as whoever opens the details wants that, and one of the
+// files it did; each a heading, its files, each by name with the error
+// apart, and whether it lists failures, which the Details window sets
+// apart.
+QVariantList buildActionDetails(const QStringList &successLines, const QVector<TagEditorFailure> &failures) {
+    const auto item = [](const QString &name, const QString &error) {
+        return QVariantMap{{QStringLiteral("name"), name}, {QStringLiteral("error"), error}};
+    };
     QVariantList sections;
-    if (!successLines.isEmpty()) {
-        sections.push_back(QVariantMap{{QStringLiteral("heading"), i18nc("@title list of files", "Succeeded:")},
-                                       {QStringLiteral("items"), successLines},
-                                       {QStringLiteral("failed"), false}});
-    }
-    if (!failureLines.isEmpty()) {
+    if (!failures.isEmpty()) {
+        QVariantList items;
+        items.reserve(failures.size());
+        for (const TagEditorFailure &failure : failures) {
+            items.push_back(item(failure.name, failure.error));
+        }
         sections.push_back(QVariantMap{{QStringLiteral("heading"), i18nc("@title list of files", "Failed:")},
-                                       {QStringLiteral("items"), failureLines},
+                                       {QStringLiteral("items"), items},
                                        {QStringLiteral("failed"), true}});
+    }
+    if (!successLines.isEmpty()) {
+        QVariantList items;
+        items.reserve(successLines.size());
+        for (const QString &line : successLines) {
+            items.push_back(item(line, QString()));
+        }
+        sections.push_back(QVariantMap{{QStringLiteral("heading"), i18nc("@title list of files", "Succeeded:")},
+                                       {QStringLiteral("items"), items},
+                                       {QStringLiteral("failed"), false}});
     }
     return sections;
 }
 
-// The details as plain text: each heading over its lines, indented, and a
-// blank line between sections.
+// The details as plain text: each heading over its files' lines, indented,
+// and a blank line between sections.
 QString actionDetailsText(const QVariantList &sections) {
     QStringList texts;
     texts.reserve(sections.size());
     for (const QVariant &section : sections) {
         const QVariantMap map = section.toMap();
         QStringList lines{map.value(QStringLiteral("heading")).toString()};
-        const QStringList items = map.value(QStringLiteral("items")).toStringList();
-        for (const QString &item : items) {
-            lines.push_back(QStringLiteral("  ") + item);
+        const QVariantList items = map.value(QStringLiteral("items")).toList();
+        for (const QVariant &item : items) {
+            const QVariantMap file = item.toMap();
+            lines.push_back(QStringLiteral("  ")
+                            + fileLine(file.value(QStringLiteral("name")).toString(),
+                                       file.value(QStringLiteral("error")).toString()));
         }
         texts.push_back(lines.join(QLatin1Char('\n')));
     }
@@ -546,7 +576,7 @@ TagEditorController::LoadResult TagEditorController::parseLoadResponse(const QBy
     QVector<TagEditorRowState> &rows = result.rows;
     QStringList &resolvedPaths = result.resolvedPaths;
     QString &errorText = result.errorText;
-    QStringList &failureLines = result.failureLines;
+    QVector<TagEditorFailure> &failed = result.failures;
     const QJsonDocument document = QJsonDocument::fromJson(response);
     if (document.isObject()) {
         const QJsonObject root = document.object();
@@ -568,19 +598,17 @@ TagEditorController::LoadResult TagEditorController::parseLoadResponse(const QBy
         const QJsonArray failures = root.value(QStringLiteral("failures")).toArray();
         for (const QJsonValue &value : failures) {
             const QJsonObject failure = value.toObject();
-            failureLines.push_back(QStringLiteral("%1: %2").arg(
-                displayNameForPath(readString(failure, "path")),
-                readString(failure, "error")));
+            failed.push_back({displayNameForPath(readString(failure, "path")), readString(failure, "error")});
         }
     } else {
         errorText = i18nc("@info:status", "failed to parse tag editor load response");
     }
-    if (errorText.isEmpty() && !failureLines.isEmpty()) {
+    if (errorText.isEmpty() && !failed.isEmpty()) {
         errorText = partialResultText(
             i18ncp("@info:status", "Loaded %1 file", "Loaded %1 files", rows.size()),
-            failureLines.size());
+            failed.size());
     }
-    failureLines.sort();
+    sortFailures(failed);
     return result;
 }
 
@@ -596,9 +624,9 @@ void TagEditorController::applyLoadResult(LoadResult result) {
     if (wasOpen != m_open) {
         emit openChanged();
     }
-    setStatusText(errorText, buildActionDetails({}, result.failureLines), !errorText.isEmpty());
+    setStatusText(errorText, buildActionDetails({}, result.failures), !errorText.isEmpty());
     if (!errorText.isEmpty()) {
-        reportFailures(errorText, result.failureLines);
+        reportFailures(errorText, result.failures);
     }
 
     m_loading = false;
@@ -654,7 +682,7 @@ void TagEditorController::applySaveResult(const QByteArray &response) {
     QSet<QString> successPaths;
     QString status;
     QStringList successLines;
-    QStringList failureLines;
+    QVector<TagEditorFailure> failures;
 
     const QJsonDocument document = QJsonDocument::fromJson(response);
     if (document.isObject()) {
@@ -683,10 +711,9 @@ void TagEditorController::applySaveResult(const QByteArray &response) {
                 const QString targetPath = item.value(QStringLiteral("newPath")).toString();
                 const QString oldName = displayNameForPath(path);
                 const QString targetName = targetPath.isEmpty() ? QString() : displayNameForPath(targetPath);
-                failureLines.push_back(
-                    targetName.isEmpty()
-                        ? QStringLiteral("%1: %2").arg(oldName, error)
-                        : QStringLiteral("%1 -> %2: %3").arg(oldName, targetName, error));
+                failures.push_back({targetName.isEmpty() ? oldName
+                                                         : QStringLiteral("%1 -> %2").arg(oldName, targetName),
+                                    error});
             }
         }
     } else {
@@ -711,10 +738,10 @@ void TagEditorController::applySaveResult(const QByteArray &response) {
         }
     }
     successLines.sort();
-    failureLines.sort();
-    setStatusText(status, buildActionDetails(successLines, failureLines), !success);
+    sortFailures(failures);
+    setStatusText(status, buildActionDetails(successLines, failures), !success);
     if (!success) {
-        reportFailures(status, failureLines);
+        reportFailures(status, failures);
     }
 
     m_operationFiles.clear();
@@ -879,7 +906,7 @@ void TagEditorController::applyRenameResult(const QByteArray &response) {
     QHash<QString, QString> errorsByPath;
     QString status;
     QStringList renamedLines;
-    QStringList failureLines;
+    QVector<TagEditorFailure> failures;
     if (document.isObject()) {
         const QJsonObject object = document.object();
         status = object.value(QStringLiteral("error")).toString();
@@ -909,8 +936,7 @@ void TagEditorController::applyRenameResult(const QByteArray &response) {
             } else {
                 const QString error = item.value(QStringLiteral("error")).toString();
                 errorsByPath.insert(path, error);
-                failureLines.push_back(
-                    QStringLiteral("%1: %2").arg(displayNameForPath(path), error));
+                failures.push_back({displayNameForPath(path), error});
             }
         }
     } else {
@@ -931,10 +957,10 @@ void TagEditorController::applyRenameResult(const QByteArray &response) {
         }
     }
     renamedLines.sort();
-    failureLines.sort();
-    setStatusText(status, buildActionDetails(renamedLines, failureLines), failed);
+    sortFailures(failures);
+    setStatusText(status, buildActionDetails(renamedLines, failures), failed);
     if (failed) {
-        reportFailures(status, failureLines);
+        reportFailures(status, failures);
     }
     emit bulkSummaryChanged();
     m_operationFiles.clear();
@@ -1298,15 +1324,17 @@ QVector<int> TagEditorController::allRows() const {
     return rows;
 }
 
-void TagEditorController::reportFailures(const QString &status, const QStringList &failureLines) {
+void TagEditorController::reportFailures(const QString &status, const QVector<TagEditorFailure> &failures) {
     // The tag editor lists every failure; the error list shows the first.
     constexpr qsizetype kShownFailures = 10;
     QStringList lines{status};
-    lines.append(failureLines.mid(0, kShownFailures));
-    if (failureLines.size() > kShownFailures) {
+    for (const TagEditorFailure &failure : failures.mid(0, kShownFailures)) {
+        lines.push_back(fileLine(failure.name, failure.error));
+    }
+    if (failures.size() > kShownFailures) {
         lines.push_back(i18ncp("@info", "…and %1 more; the tag editor lists them all.",
                                "…and %1 more; the tag editor lists them all.",
-                               failureLines.size() - kShownFailures));
+                               failures.size() - kShownFailures));
     }
     emit errorReported(lines.join(QLatin1Char('\n')));
 }

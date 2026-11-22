@@ -63,6 +63,7 @@ private slots:
     void renamePreviewLaysOutItsRows();
     void renamePreviewALongNameThatStaysCutsNoNewName_data();
     void renamePreviewALongNameThatStaysCutsNoNewName();
+    void saveDetailsSetFailedFilesApart();
 };
 
 namespace {
@@ -1662,9 +1663,10 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport_data() {
 // The details of a save that failed for one file read as a report (not a
 // plain text dump in a window 522 px tall for six lines): the
 // editor's summary, semibold, then each section's heading over its files,
-// what failed semibold in the negative colour, what succeeded quieter,
-// each file 16 px in, more with a larger font, the lines a long
-// error wraps to under its own start; the window as tall as all that.
+// what failed first, semibold in the negative colour, its file's name
+// semibold on a line of its own over the error, secondary, then what
+// succeeded quieter, each file 16 px in, more with a larger font, the lines
+// a long error wraps to under its own start; the window as tall as all that.
 // The save is a real one, into a folder the user may not write to.
 void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     QFETCH(qreal, pointSize);
@@ -1725,7 +1727,8 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     QCOMPARE(summary->property("font").value<QFont>().weight(), QFont::DemiBold);
     QCOMPARE(summary->property("color").value<QColor>(), palette->property("text").value<QColor>());
 
-    // Each heading semibold over its files, each file indented, trimmed.
+    // What failed first (after what succeeded, its file's name ran into the
+    // error on one line): the file's name, then the error under it.
     QQuickItem *text = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsText"));
     QVERIFY(text != nullptr);
     QCOMPARE(text->property("textFormat").toInt(), int(Qt::RichText));
@@ -1737,11 +1740,11 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
         blocks << block.text();
     }
-    QCOMPARE(blocks.size(), 4);
-    QCOMPARE(blocks.mid(0, 3), (QStringList{QStringLiteral("Succeeded:"), QStringLiteral("01 Brief Signal.flac"),
-                                            QStringLiteral("Failed:")}));
-    QVERIFY2(blocks[3].startsWith(QStringLiteral("03 Long Exhale.flac: ")), qPrintable(blocks[3]));
-    QVERIFY2(blocks[3].contains(QStringLiteral("ermission denied")), qPrintable(blocks[3]));
+    QCOMPARE(blocks.size(), 5);
+    QCOMPARE(blocks.mid(0, 2), (QStringList{QStringLiteral("Failed:"), QStringLiteral("03 Long Exhale.flac")}));
+    QVERIFY2(blocks[2].contains(QStringLiteral("ermission denied")), qPrintable(blocks[2]));
+    QVERIFY2(!blocks[2].contains(QStringLiteral("03 Long Exhale.flac: ")), qPrintable(blocks[2]));
+    QCOMPARE(blocks.mid(3), (QStringList{QStringLiteral("Succeeded:"), QStringLiteral("01 Brief Signal.flac")}));
     const qreal indent = std::max(16.0, std::round(16.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
     const auto blockAt = [&](int index) { return document->findBlockByNumber(index); };
     // The headings on the summary's edge: what succeeded regular, in the
@@ -1754,35 +1757,41 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     const auto weightOf = [&](int index) {
         return blockAt(index).begin().fragment().charFormat().fontWeight();
     };
-    for (int index : {0, 2}) {
+    for (int index : {0, 3}) {
         QCOMPARE(blockAt(index).blockFormat().leftMargin(), 0.0);
     }
-    QVERIFY(weightOf(0) < int(QFont::DemiBold));
-    QCOMPARE(colourOf(0), palette->property("textSecondary").value<QColor>().rgb());
-    QCOMPARE(weightOf(2), int(QFont::DemiBold));
-    QCOMPARE(colourOf(2), palette->property("negative").value<QColor>().rgb());
-    // The files in the text's colour, indented.
-    for (int index : {1, 3}) {
-        QVERIFY(weightOf(index) < int(QFont::DemiBold));
-        QCOMPARE(colourOf(index), palette->property("text").value<QColor>().rgb());
+    QVERIFY(weightOf(3) < int(QFont::DemiBold));
+    QCOMPARE(colourOf(3), palette->property("textSecondary").value<QColor>().rgb());
+    QCOMPARE(weightOf(0), int(QFont::DemiBold));
+    QCOMPARE(colourOf(0), palette->property("negative").value<QColor>().rgb());
+    // The files indented: the failed one's name semibold in the text's
+    // colour, the error under it secondary, the other's name regular.
+    for (int index : {1, 2, 4}) {
         QCOMPARE(blockAt(index).blockFormat().leftMargin(), indent);
     }
+    QCOMPARE(weightOf(1), int(QFont::DemiBold));
+    QCOMPARE(colourOf(1), palette->property("text").value<QColor>().rgb());
+    QVERIFY(weightOf(2) < int(QFont::DemiBold));
+    QCOMPARE(colourOf(2), palette->property("textSecondary").value<QColor>().rgb());
+    QVERIFY(weightOf(4) < int(QFont::DemiBold));
+    QCOMPARE(colourOf(4), palette->property("text").value<QColor>().rgb());
     // 12 px between the sections, more with a larger font, not a grid
     // unit, 18 px.
     const qreal sectionGap = std::max(12.0, std::round(12.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
     QCOMPARE(blockAt(0).blockFormat().topMargin(), 0.0);
-    QCOMPARE(blockAt(2).blockFormat().topMargin(), sectionGap);
+    QCOMPARE(blockAt(3).blockFormat().topMargin(), sectionGap);
     // The error wraps, and its lines start under the file's name, the
     // indent right of the heading.
-    const QTextLayout *errorLayout = blockAt(3).layout();
+    const QTextLayout *errorLayout = blockAt(2).layout();
     QVERIFY2(errorLayout->lineCount() > 1, qPrintable(QString::number(errorLayout->lineCount())));
     const auto lineLeft = [](const QTextBlock &block, int line) {
         return block.layout()->position().x() + block.layout()->lineAt(line).x();
     };
     for (int line = 0; line < errorLayout->lineCount(); ++line) {
-        QCOMPARE(lineLeft(blockAt(3), line), lineLeft(blockAt(2), 0) + indent);
+        QCOMPARE(lineLeft(blockAt(2), line), lineLeft(blockAt(0), 0) + indent);
     }
     QCOMPARE(lineLeft(blockAt(1), 0), lineLeft(blockAt(0), 0) + indent);
+    QCOMPARE(lineLeft(blockAt(4), 0), lineLeft(blockAt(0), 0) + indent);
     // As drawn too: each line of the long error, the first and those it
     // wraps to, starts its ink at the file's indent, with nothing drawn
     // between the headings' edge and it (a review read the wrapped line as
@@ -1800,7 +1809,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
         const QPointF position = block.layout()->position();
         const int top = int(std::ceil((documentOrigin.y() + position.y() + textLine.y()) * scale));
         const int bottom = int(std::floor((documentOrigin.y() + position.y() + textLine.y() + textLine.height()) * scale)) - 1;
-        const int from = int(std::floor((documentOrigin.x() + lineLeft(blockAt(2), 0)) * scale));
+        const int from = int(std::floor((documentOrigin.x() + lineLeft(blockAt(0), 0)) * scale));
         const int to = int(std::ceil((documentOrigin.x() + position.x() + textLine.x() + textLine.naturalTextWidth()) * scale));
         const QColor background(shown.pixel(from, (top + bottom) / 2));
         for (int x = from; x < std::min(to, shown.width()); ++x) {
@@ -1814,7 +1823,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
         }
         return -1.0;
     };
-    const qreal expectedInk = documentOrigin.x() + lineLeft(blockAt(2), 0) + indent;
+    const qreal expectedInk = documentOrigin.x() + lineLeft(blockAt(0), 0) + indent;
     // The lines in view: at 24 pt the details may scroll.
     QQuickItem *view = text->parentItem();
     while (view != nullptr && !view->clip()) {
@@ -1827,7 +1836,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
             > sceneRectOf(view).bottom()) {
             break;
         }
-        const qreal ink = inkLeft(blockAt(3), line);
+        const qreal ink = inkLeft(blockAt(2), line);
         QVERIFY2(ink >= expectedInk - 0.5 && ink <= expectedInk + 3,
                  qPrintable(QStringLiteral("line %1 of the error drawn from %2, the indent at %3")
                                 .arg(line).arg(ink).arg(expectedInk)));
@@ -1902,8 +1911,8 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     // (it broke in "ferrous-tagsave" at 24 pt). The narrowest
     // window spreads the path over lines; the selection goes as the text
     // is laid out anew, with no warning.
-    const QString failedItem = editor.statusDetailSections().last().toMap().value(QStringLiteral("items"))
-                                   .toList().value(0).toString().trimmed();
+    const QString failedItem = editor.statusDetailSections().first().toMap().value(QStringLiteral("items"))
+                                   .toList().value(0).toMap().value(QStringLiteral("error")).toString().trimmed();
     QVERIFY2(failedItem.contains(readOnlyFolder + QStringLiteral(": ")), qPrintable(failedItem));
     QVERIFY2(failedItem.endsWith(QStringLiteral("(os error 13)")), qPrintable(failedItem));
     const QFontMetricsF textMetrics(qvariant_cast<QFont>(text->property("font")));
@@ -1920,7 +1929,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
                                       QStringLiteral("root.lineWidth - root.itemIndent"));
     const auto breakProblem = [&]() -> QString {
         const qreal nameRoom = nameRoomExpression.evaluate().toReal();
-        const QTextBlock block = blockAt(3);
+        const QTextBlock block = blockAt(2);
         const QTextLayout *layout = block.layout();
         QStringList lines;
         for (int line = 0; line < layout->lineCount(); ++line) {
@@ -2359,6 +2368,51 @@ void TagEditorSmokeTest::renamePreviewALongNameThatStaysCutsNoNewName() {
     QVERIFY(sceneRectOf(byText.value(kept)).right() <= sceneRectOf(byText.value(renamed)).left());
     QVERIFY(clickVisibleButton(previewWindow, QStringLiteral("renamePreviewCancelButton")));
     QTRY_VERIFY(!previewDialog->property("visible").toBool());
+}
+
+// Several failed files are 8 px apart, each error 2 px under its file's
+// name, and Copy keeps every message whole, in the order shown.
+void TagEditorSmokeTest::saveDetailsSetFailedFilesApart() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(3, true));
+    fixture.saves->setResponse(QByteArray(
+        R"({"results":[{"path":"/fixture/Album 000/01 Song.flac","ok":true},)"
+        R"json({"path":"/fixture/Album 000/02 Song.flac","ok":false,"error":"disk full (os error 28)"},)json"
+        R"json({"path":"/fixture/Album 000/03 Song.flac","ok":false,"error":"permission denied (os error 13)"}]})json"));
+    QSignalSpy saved(&fixture.editor, &TagEditorController::saveFinished);
+    QVERIFY(fixture.editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QObject *details = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorStatusDetailsDialog"));
+    QVERIFY(details != nullptr);
+    QTRY_VERIFY(clickVisibleButton(fixture.tags(), QStringLiteral("tagEditorDetailsButton")));
+    QTRY_VERIFY(details->property("opened").toBool());
+    QQuickWindow *detailsWindow = dialogWindowOf(details);
+    QVERIFY(QTest::qWaitForWindowExposed(detailsWindow));
+    QQuickItem *text = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsText"));
+    QVERIFY(text != nullptr);
+    auto *quickDocument = qvariant_cast<QQuickTextDocument *>(text->property("textDocument"));
+    QVERIFY(quickDocument != nullptr);
+    const QTextDocument *document = quickDocument->textDocument();
+    QStringList blocks;
+    QList<qreal> gaps;
+    for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
+        blocks << block.text().replace(QChar(0x00a0), QLatin1Char(' '));
+        gaps << block.blockFormat().topMargin();
+    }
+    QCOMPARE(blocks, (QStringList{QStringLiteral("Failed:"), QStringLiteral("02 Song.flac"),
+                                  QStringLiteral("disk full (os error 28)"), QStringLiteral("03 Song.flac"),
+                                  QStringLiteral("permission denied (os error 13)"), QStringLiteral("Succeeded:"),
+                                  QStringLiteral("01 Song.flac")}));
+    const qreal scale = qMax(1.0, evaluateOn(text, QStringLiteral("root.uiPalette.fontScale")).toReal());
+    QCOMPARE(gaps, (QList<qreal>{0, 0, qMax(2.0, std::round(2 * scale)), qMax(8.0, std::round(8 * scale)),
+                                 qMax(2.0, std::round(2 * scale)), qMax(12.0, std::round(12 * scale)), 0}));
+    text->forceActiveFocus(Qt::OtherFocusReason);
+    QVERIFY(QMetaObject::invokeMethod(text, "selectAll"));
+    QGuiApplication::clipboard()->clear();
+    evaluateOn(text, QStringLiteral("copy()"));
+    QTRY_COMPARE(QGuiApplication::clipboard()->text(), blocks.join(QLatin1Char('\n')));
+    QVERIFY(clickVisibleButton(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton")));
+    QTRY_VERIFY(!details->property("visible").toBool());
 }
 
 std::unique_ptr<QmlSmokeTest> makeTagEditorSmokeTest(const QString &userDirectoriesParent) {
