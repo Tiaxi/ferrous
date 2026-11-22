@@ -361,8 +361,12 @@ TextItemScan scanTextItems(const QString &source, const QString &file) {
         {QStringLiteral("MessageDialog"), QString()},
         {QStringLiteral("PlaceholderMessage"), QString()},
         {QStringLiteral("PromptDialog"), QString()}};
+    // These hold their text back, so their users set a message instead.
+    static const QSet<QString> plainComponents{
+        QStringLiteral("PlainToolTip"), QStringLiteral("PlainInlineMessage")};
     static const QRegularExpression token(
-        QStringLiteral("[{}]|(?<![\\w.])textFormat\\s*:\\s*([\\w.]+)|(?<![\\w.])contentItem\\s*:"));
+        QStringLiteral("[{}]|(?<![\\w.])textFormat\\s*:\\s*([\\w.]+)"
+                       "|(?<![\\w.])contentItem\\s*:|(?<![\\w.])text\\s*:"));
     static const QRegularExpression type(
         QStringLiteral("(?:^|(?<=[\\s:;{\\[,]))(?:[A-Za-z_]\\w*\\.)*([A-Z]\\w*)(?:\\s+on\\s+[\\w.]+)?\\s*\\z"));
 
@@ -371,6 +375,7 @@ TextItemScan scanTextItems(const QString &source, const QString &file) {
         int line{0};
         bool hasFormat{false};
         bool hasContent{false};
+        bool hasText{false};
     };
     TextItemScan scan;
     const QString code = codeOf(source);
@@ -396,12 +401,17 @@ TextItemScan scanTextItems(const QString &source, const QString &file) {
                 && !(object.type == QLatin1String("ToolTip") && object.hasContent)) {
                 scan.problems << where + QStringLiteral(" renders markup; use a plain component instead");
             }
+            if (plainComponents.contains(object.type) && object.hasText) {
+                scan.problems << where + QStringLiteral(" takes a message, not a text");
+            }
         } else if (match.capturedStart(1) >= 0) {
             open.last().hasFormat = true;
             const QString format = match.captured(1);
             if (format != QLatin1String("Text.PlainText") && format != QLatin1String("TextEdit.PlainText")) {
                 scan.otherFormats << format;
             }
+        } else if (match.captured().startsWith(QLatin1String("text"))) {
+            open.last().hasText = true;
         } else {
             open.last().hasContent = true;
         }
@@ -751,6 +761,7 @@ void PlainTextSmokeTest::plainToolTipsReadAsTheStyles_data() {
     QTest::addColumn<QString>("text");
     QTest::newRow("ampersand") << QStringLiteral("Salt & Stone");
     QTest::newRow("ampersand in a word") << QStringLiteral("R&B Classics of 1994");
+    QTest::newRow("ampersand in the last word but one") << QStringLiteral("Rock&Roll Party");
     QTest::newRow("quotes") << QStringLiteral("It's the \"Harbour\" < 3 > 2");
     QTest::newRow("lines") << QStringLiteral("Title\nArtist\nAlbum");
     QTest::newRow("long") << QStringLiteral("/fixture/a folder with a long name/and one in it/with a longer name still.flac");
@@ -807,6 +818,7 @@ ApplicationWindow {
         }
     }
     QCOMPARE(read.size(), 3);
+    QCOMPARE(read[1][0].toString(), text);
     QCOMPARE(read[1], read[0]);
     QCOMPARE(read[2], read[0]);
 }
@@ -854,6 +866,9 @@ void PlainTextSmokeTest::theFormatCheckFindsAnUnsafeItem_data() {
     QTest::newRow("format in a comment") << QStringLiteral("Text {\n // textFormat: Text.PlainText\n}") << false;
     QTest::newRow("tooltip") << QStringLiteral("ToolTip { text: name }") << false;
     QTest::newRow("inline message") << QStringLiteral("Kirigami.InlineMessage { text: name }") << false;
+    QTest::newRow("plain tooltip given a text") << QStringLiteral("Components.PlainToolTip { text: name }") << false;
+    QTest::newRow("plain message given a text") << QStringLiteral("PlainInlineMessage {\n text: name\n}") << false;
+    QTest::newRow("plain tooltip given a message") << QStringLiteral("Components.PlainToolTip { message: name }") << true;
     QTest::newRow("plain") << QStringLiteral("Label { text: \"{\" + name; textFormat: Text.PlainText }") << true;
     QTest::newRow("after a regular expression")
         << QStringLiteral("Item { property var a: /[{/]/; Text { textFormat: Text.PlainText } }") << true;

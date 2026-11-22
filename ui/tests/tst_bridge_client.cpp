@@ -9758,18 +9758,21 @@ void BridgeClientTest::detectedFileBrowserNameNotifiesOnlyWhenItChanges() {
 
 void BridgeClientTest::aDetectedFileBrowserNameIsNeverMarkup_data() {
     QTest::addColumn<QString>("detected");
-    QTest::newRow("tag") << QStringLiteral("<b>Files</b>");
-    QTest::newRow("entity") << QStringLiteral("&lt;b>Files");
-    QTest::newRow("tag behind a mnemonic") << QStringLiteral("&<b>Files");
+    QTest::addColumn<QString>("used");
+    const QString guessed = QStringLiteral("File Manager");
+    QTest::newRow("tag") << QStringLiteral("<b>Files</b>") << guessed;
+    QTest::newRow("tag behind a mnemonic") << QStringLiteral("&<b>Files") << guessed;
+    QTest::newRow("ampersand") << QStringLiteral("Files&Folders") << QStringLiteral("Files&Folders");
 }
 
 void BridgeClientTest::aDetectedFileBrowserNameIsNeverMarkup() {
     QFETCH(QString, detected);
+    QFETCH(QString, used);
     BridgeClient client;
     isolateBridgeClient(client);
     client.m_fileBrowserName = QStringLiteral("File Manager");
     client.applyDetectedFileBrowserName(detected);
-    QCOMPARE(client.fileBrowserName(), QStringLiteral("File Manager"));
+    QCOMPARE(client.fileBrowserName(), used);
 }
 
 namespace {
