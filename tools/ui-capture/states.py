@@ -7600,11 +7600,11 @@ _insert_after("dialogs", "itunes-results", [
      "Replace from iTunes: a result's Preview pressed (held)"),
     ("dialogs", "_", "_itunes-unpress", "release itunesArtworkResultsHeading | wait 0.3 | away", "")])
 _insert_after("dialogs", "tag-editor-modified", [
-    ("dialogs", "dialog", "tag-editor-revert-hover", "hover tagEditorRevert_title 0.6", "Edit Tags: the Title field's revert glyph hovered"),
+    ("dialogs", "dialog", "tag-editor-revert-hover", "hover tagEditorRevert_title 1.0", "Edit Tags: the Title field's revert glyph hovered"),
     ("dialogs", "dialog", "tag-editor-revert-pressed", "press tagEditorRevert_title | wait 0.3",
      "Edit Tags: the Title field's revert glyph pressed (held)"),
     ("dialogs", "_", "_revert-unpress", "release tagEditorLabel_title | wait 0.3", ""),
-    ("dialogs", "dialog", "tag-editor-column-revert-hover", "hover tagEditorColumnRevert_title 0.6",
+    ("dialogs", "dialog", "tag-editor-column-revert-hover", "hover tagEditorColumnRevert_title 1.0",
      "Edit Tags: the Title column's revert glyph hovered")])
 _insert_after("statusbar", "recent-errors", [
     ("statusbar", "dialog", "recent-errors-link-hover", "hover errorHistoryActionButton 0.6", "Recent Issues: an action link hovered"),
