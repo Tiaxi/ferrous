@@ -66,6 +66,7 @@
 #include "TestMessages.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
+#include "TestShard.h"
 
 namespace {
 
@@ -8731,11 +8732,11 @@ void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
     QTRY_VERIFY((media = visibleNamed(windowOf(preferences), QStringLiteral("systemMediaControlsCheckBox"))) != nullptr);
     QCOMPARE(evaluate(media, QStringLiteral("Kirigami.FormData.label")).toString(), QStringLiteral("Media controls:"));
     const QString shown = media->property("text").toString();
-    QCOMPARE(shown, QStringLiteral("Appear in media controls and answer media keys"));
+    QCOMPARE(shown, QStringLiteral("Show Ferrous in Plasma and answer media keys"));
     QAccessibleInterface *spoken = QAccessible::queryAccessibleInterface(media);
     QVERIFY(spoken != nullptr);
     const QString name = spoken->text(QAccessible::Name);
-    QCOMPARE(name, QStringLiteral("Media controls: Appear in media controls and answer media keys"));
+    QCOMPARE(name, QStringLiteral("Media controls: Show Ferrous in Plasma and answer media keys"));
     QVERIFY(name.contains(shown));
     QVERIFY(reject(preferences));
 
@@ -8806,7 +8807,7 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     returnFocusFromClosedPopups();
     UiDialogsTest test;
-    return QTest::qExec(&test, argc, argv);
+    return qExecShard(&test, argc, argv);
 }
 
 #include "tst_ui_dialogs.moc"

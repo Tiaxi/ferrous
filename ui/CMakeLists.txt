@@ -875,11 +875,9 @@ if(BUILD_TESTING)
         ferrous_app_icon
         Qt6::QuickTest
     )
-    add_test(NAME ferrous_ui_dialogs_tests COMMAND ferrous_ui_dialogs_tests)
-    set_tests_properties(ferrous_ui_dialogs_tests PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-        TIMEOUT 180
-    )
+    # Run alone, the binary takes about two and a half minutes, near one
+    # test's 180 s under the load of a parallel run.
+    ferrous_add_sharded_test(ferrous_ui_dialogs_tests 4 40)
     ferrous_add_default_platform_test(ferrous_ui_dialogs_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The motion of the main window (#373), in a session of its own: no
@@ -1156,7 +1154,6 @@ if(BUILD_TESTING)
     foreach(test_and_cost IN ITEMS
             ferrous_qml_smoke_album_art:18
             ferrous_qml_smoke_tag_editor:36
-            ferrous_ui_dialogs_tests:40
             ferrous_qml_smoke_waveform:27
             ferrous_qml_smoke_errors:18
             ferrous_qml_smoke_spectrogram:14
