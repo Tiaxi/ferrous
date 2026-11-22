@@ -1740,11 +1740,14 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
         blocks << block.text();
     }
-    QCOMPARE(blocks.size(), 5);
+    QCOMPARE(blocks.size(), 6);
     QCOMPARE(blocks.mid(0, 2), (QStringList{QStringLiteral("Failed:"), QStringLiteral("03 Long Exhale.flac")}));
-    QVERIFY2(blocks[2].contains(QStringLiteral("ermission denied")), qPrintable(blocks[2]));
-    QVERIFY2(!blocks[2].contains(QStringLiteral("03 Long Exhale.flac: ")), qPrintable(blocks[2]));
-    QCOMPARE(blocks.mid(3), (QStringList{QStringLiteral("Succeeded:"), QStringLiteral("01 Brief Signal.flac")}));
+    // Why, in plain words, then the system's text as it gave it (the only
+    // explanation was the system's, which read as a log).
+    QCOMPARE(blocks[2], QStringLiteral("You don’t have permission to write in this folder."));
+    QVERIFY2(blocks[3].contains(QStringLiteral("ermission denied")), qPrintable(blocks[3]));
+    QVERIFY2(!blocks[3].contains(QStringLiteral("03 Long Exhale.flac: ")), qPrintable(blocks[3]));
+    QCOMPARE(blocks.mid(4), (QStringList{QStringLiteral("Succeeded:"), QStringLiteral("01 Brief Signal.flac")}));
     const qreal indent = std::max(16.0, std::round(16.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
     const auto blockAt = [&](int index) { return document->findBlockByNumber(index); };
     // The headings on the summary's edge: what succeeded regular, in the
@@ -1757,41 +1760,44 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     const auto weightOf = [&](int index) {
         return blockAt(index).begin().fragment().charFormat().fontWeight();
     };
-    for (int index : {0, 3}) {
+    for (int index : {0, 4}) {
         QCOMPARE(blockAt(index).blockFormat().leftMargin(), 0.0);
     }
-    QVERIFY(weightOf(3) < int(QFont::DemiBold));
-    QCOMPARE(colourOf(3), palette->property("textSecondary").value<QColor>().rgb());
+    QVERIFY(weightOf(4) < int(QFont::DemiBold));
+    QCOMPARE(colourOf(4), palette->property("textSecondary").value<QColor>().rgb());
     QCOMPARE(weightOf(0), int(QFont::DemiBold));
     QCOMPARE(colourOf(0), palette->property("negative").value<QColor>().rgb());
     // The files indented: the failed one's name semibold in the text's
-    // colour, the error under it secondary, the other's name regular.
-    for (int index : {1, 2, 4}) {
+    // colour, why under it, regular in the same colour, the system's text
+    // under that secondary, the other's name regular.
+    for (int index : {1, 2, 3, 5}) {
         QCOMPARE(blockAt(index).blockFormat().leftMargin(), indent);
     }
     QCOMPARE(weightOf(1), int(QFont::DemiBold));
     QCOMPARE(colourOf(1), palette->property("text").value<QColor>().rgb());
     QVERIFY(weightOf(2) < int(QFont::DemiBold));
-    QCOMPARE(colourOf(2), palette->property("textSecondary").value<QColor>().rgb());
-    QVERIFY(weightOf(4) < int(QFont::DemiBold));
-    QCOMPARE(colourOf(4), palette->property("text").value<QColor>().rgb());
+    QCOMPARE(colourOf(2), palette->property("text").value<QColor>().rgb());
+    QVERIFY(weightOf(3) < int(QFont::DemiBold));
+    QCOMPARE(colourOf(3), palette->property("textSecondary").value<QColor>().rgb());
+    QVERIFY(weightOf(5) < int(QFont::DemiBold));
+    QCOMPARE(colourOf(5), palette->property("text").value<QColor>().rgb());
     // 12 px between the sections, more with a larger font, not a grid
     // unit, 18 px.
     const qreal sectionGap = std::max(12.0, std::round(12.0 * std::max(1.0, palette->property("basePointSize").toReal() / 10.0)));
     QCOMPARE(blockAt(0).blockFormat().topMargin(), 0.0);
-    QCOMPARE(blockAt(3).blockFormat().topMargin(), sectionGap);
+    QCOMPARE(blockAt(4).blockFormat().topMargin(), sectionGap);
     // The error wraps, and its lines start under the file's name, the
     // indent right of the heading.
-    const QTextLayout *errorLayout = blockAt(2).layout();
+    const QTextLayout *errorLayout = blockAt(3).layout();
     QVERIFY2(errorLayout->lineCount() > 1, qPrintable(QString::number(errorLayout->lineCount())));
     const auto lineLeft = [](const QTextBlock &block, int line) {
         return block.layout()->position().x() + block.layout()->lineAt(line).x();
     };
     for (int line = 0; line < errorLayout->lineCount(); ++line) {
-        QCOMPARE(lineLeft(blockAt(2), line), lineLeft(blockAt(0), 0) + indent);
+        QCOMPARE(lineLeft(blockAt(3), line), lineLeft(blockAt(0), 0) + indent);
     }
     QCOMPARE(lineLeft(blockAt(1), 0), lineLeft(blockAt(0), 0) + indent);
-    QCOMPARE(lineLeft(blockAt(4), 0), lineLeft(blockAt(0), 0) + indent);
+    QCOMPARE(lineLeft(blockAt(5), 0), lineLeft(blockAt(0), 0) + indent);
     // As drawn too: each line of the long error, the first and those it
     // wraps to, starts its ink at the file's indent, with nothing drawn
     // between the headings' edge and it (a review read the wrapped line as
@@ -1836,7 +1842,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
             > sceneRectOf(view).bottom()) {
             break;
         }
-        const qreal ink = inkLeft(blockAt(2), line);
+        const qreal ink = inkLeft(blockAt(3), line);
         QVERIFY2(ink >= expectedInk - 0.5 && ink <= expectedInk + 3,
                  qPrintable(QStringLiteral("line %1 of the error drawn from %2, the indent at %3")
                                 .arg(line).arg(ink).arg(expectedInk)));
@@ -1929,7 +1935,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
                                       QStringLiteral("root.lineWidth - root.itemIndent"));
     const auto breakProblem = [&]() -> QString {
         const qreal nameRoom = nameRoomExpression.evaluate().toReal();
-        const QTextBlock block = blockAt(2);
+        const QTextBlock block = blockAt(3);
         const QTextLayout *layout = block.layout();
         QStringList lines;
         for (int line = 0; line < layout->lineCount(); ++line) {
@@ -2399,12 +2405,16 @@ void TagEditorSmokeTest::saveDetailsSetFailedFilesApart() {
         blocks << block.text().replace(QChar(0x00a0), QLatin1Char(' '));
         gaps << block.blockFormat().topMargin();
     }
+    // The cause under the name where it is known (no room, by its code),
+    // and no line where it is not (a permission of no known step).
     QCOMPARE(blocks, (QStringList{QStringLiteral("Failed:"), QStringLiteral("02 Song.flac"),
+                                  QStringLiteral("There isn’t enough free space on the disk."),
                                   QStringLiteral("disk full (os error 28)"), QStringLiteral("03 Song.flac"),
                                   QStringLiteral("permission denied (os error 13)"), QStringLiteral("Succeeded:"),
                                   QStringLiteral("01 Song.flac")}));
     const qreal scale = qMax(1.0, evaluateOn(text, QStringLiteral("root.uiPalette.fontScale")).toReal());
-    QCOMPARE(gaps, (QList<qreal>{0, 0, qMax(2.0, std::round(2 * scale)), qMax(8.0, std::round(8 * scale)),
+    QCOMPARE(gaps, (QList<qreal>{0, 0, qMax(2.0, std::round(2 * scale)), qMax(2.0, std::round(2 * scale)),
+                                 qMax(8.0, std::round(8 * scale)),
                                  qMax(2.0, std::round(2 * scale)), qMax(12.0, std::round(12 * scale)), 0}));
     text->forceActiveFocus(Qt::OtherFocusReason);
     QVERIFY(QMetaObject::invokeMethod(text, "selectAll"));
