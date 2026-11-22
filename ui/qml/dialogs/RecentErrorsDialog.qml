@@ -401,11 +401,11 @@ Popup {
                                     - categoryMetrics.xHeight / 2 - implicitHeight / 2)
                                 implicitWidth: root.uiPalette.labelIconSize
                                 implicitHeight: root.uiPalette.labelIconSize
+                                // The status bar's triangle for each, in
+                                // its two colours (a notice had an ⓘ).
                                 source: historyRow.glyph === ErrorUtils.GlyphOffline
                                     ? Qt.resolvedUrl("../assets/status-offline.svg")
-                                    : (historyRow.glyph === ErrorUtils.GlyphInformation
-                                        ? "help-about"
-                                        : Qt.resolvedUrl("../assets/status-warning.svg"))
+                                    : Qt.resolvedUrl("../assets/status-warning.svg")
                                 isMask: true
                                 color: historyRow.glyph === ErrorUtils.GlyphWarning
                                     ? root.uiPalette.negative

@@ -568,7 +568,7 @@ private slots:
     void autoNumberCheckBoxesStartOnTheFieldsEdge_data();
     void autoNumberCheckBoxesStartOnTheFieldsEdge();
     void dialogListNumbersReadAsDrawn();
-
+    void recentIssuesUseTheStatusBarsTriangle();
 private:
     // The checks that the tests above run in turn in one window; each says
     // what it checks where it is defined.
@@ -6216,6 +6216,46 @@ void UiDialogsTest::dialogListNumbersReadAsDrawn() {
     rowCheck(QStringLiteral("selected, the table unfocused"));
     QVERIFY2(failures.isEmpty(), qPrintable(failures.join(QLatin1Char('\n'))));
     main.editor.close();
+}
+
+// One warning vocabulary: Recent Issues marks warnings and errors with the
+// status bar's triangle in its two colours, the secondary for the library's
+// notices and the negative for what went wrong (the notices had an ⓘ of
+// their own, for issues the bar marks with the triangle). Scrobbles that
+// wait keep the offline glyph of the Last.fm slot.
+void UiDialogsTest::recentIssuesUseTheStatusBarsTriangle() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    // Category, severity, glyph, colour.
+    const QList<std::tuple<int, int, QString, const char *>> issues{
+        {2, 0, QStringLiteral("status-warning.svg"), "textSecondary"},
+        {2, 1, QStringLiteral("status-warning.svg"), "negative"},
+        {1, 0, QStringLiteral("status-warning.svg"), "negative"},
+        {1, 1, QStringLiteral("status-warning.svg"), "negative"},
+        {5, 0, QStringLiteral("status-offline.svg"), "textSecondary"},
+    };
+    for (qsizetype i = 0; i < issues.size(); ++i) {
+        report(window, std::get<0>(issues[i]), std::get<1>(issues[i]), QString(),
+               QStringLiteral("Something went wrong, %1").arg(i));
+    }
+    QVERIFY(openIssues(window));
+    QList<QQuickItem *> rows;
+    QTRY_COMPARE((rows = itemsNamed(window->contentItem(), QStringLiteral("errorHistoryRow"))).size(), issues.size());
+    for (qsizetype i = 0; i < issues.size(); ++i) {
+        const auto &[category, severity, file, token] = issues[i];
+        QQuickItem *glyph = nullptr;
+        for (QQuickItem *row : std::as_const(rows)) {
+            if (row->property("message").toString().endsWith(QString::number(i))) {
+                glyph = itemsNamed(row, QStringLiteral("errorHistoryGlyph")).value(0);
+            }
+        }
+        QVERIFY(glyph != nullptr);
+        QVERIFY2(glyph->property("source").toString().endsWith(file),
+                 qPrintable(QStringLiteral("%1/%2: %3").arg(category).arg(severity).arg(glyph->property("source").toString())));
+        QCOMPARE(hex(glyph->property("color").value<QColor>()), hex(tokenOf(window, token)));
+    }
+    QTest::keyClick(window, Qt::Key_Escape);
 }
 
 int main(int argc, char **argv) {
