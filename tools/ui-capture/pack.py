@@ -1975,7 +1975,12 @@ def write_motion_metrics(rd, strips, geo_samples=None):
          "line and details line): the same measure in each element's own rect, at full resolution, so a local dim is "
          "not averaged away. **Blink per changed item**: an item (a popup, a list) whose traced opacity dips to 50 % or "
          "less, or by over 25 % for over 30 ms, and returns in its place, where the frames show the dip in its own "
-         "rect; of items dipping together the largest. **Overlap**: during a transition, two text items in the same place "
+         "rect; of items dipping together the largest. **Whole window under the darker end**: the lowest of the "
+         "window's mean luminance (of the sRGB values as the compositor blends them, 45 ms blend) as a share of the "
+         "darker of a transition's two ends; under 97 % is a DIP. **Under the one-layer mix** (cross-fades, "
+         "states.MOTION_FOCUS cross_fade): each frame fitted as a mix of the two ends at one opacity, and the most "
+         "its luminance falls under that mix's; over 3 % FAILS (layers that fade apart). "
+         "**Overlap**: during a transition, two text items in the same place "
          "both above 30 % opacity, one mid-fade (item tree). **After end**: movement after the stated end (the QML "
          "animations that started in the transition: start + duration). Each transition's merged image "
          "(`strips/<strip>.png`) has the key frames, the graph with the animations that ran, and the "
@@ -1985,8 +1990,8 @@ def write_motion_metrics(rd, strips, geo_samples=None):
          "and other popups (items on a popup layer), so a tooltip fading in after a transition is not read as the "
          "transition running long. **Neither** (plot recordings only): frames that are neither the start nor the end "
          "nor a blend of them.\n",
-         "| transition | theme | latency | transitions (start: duration) | recording | blink: text / other | blink per changed item | blink per element (own rect) | text overlap | after stated end: the app's items | after stated end: tooltip/popup | neither | animations that ran | image |",
-         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+         "| transition | theme | latency | transitions (start: duration) | recording | blink: text / other | blink per changed item | blink per element (own rect) | whole window under the darker end | under the one-layer mix | text overlap | after stated end: the app's items | after stated end: tooltip/popup | neither | animations that ran | image |",
+         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for (name, theme), s in seen.items():
         m = s["metrics"]
         anims = "; ".join(f"{a['target']}.{a['prop']} {a['frm']}→{a['to']} {a['duration']} ms {a['easing']} "
@@ -2000,8 +2005,11 @@ def write_motion_metrics(rd, strips, geo_samples=None):
         ib = "—" if items is None else "; ".join(
             f"{b['label'].replace('|', '/')} {b['ms']} ms (to {100 * b['low']:.0f} %) at +{b['start_ms']}"
             for b in items) or "0 ms"
+        dip, mix = m.get("window_dip"), m.get("mix_shortfall")
+        wd = "—" if not dip else f"{100 * dip['low']:.0f} %" + (f" DIP at +{dip['at_ms']}" if dip["flag"] else "")
+        ms_ = "—" if not mix else f"{100 * mix['short']:.0f} %" + (f" FAIL at +{mix['at_ms']}" if mix["flag"] else "")
         L.append(f"| {name} | {theme} | {m['latency_ms']} ms | {segs}{' (content keeps moving)' if m['continuous'] else ''} | "
-                 f"{m['recording_ms']} ms | {bl} | {ib} | {el} | {m['overlap_ms']} ms | {after_cell(m, 'app')} | "
+                 f"{m['recording_ms']} ms | {bl} | {ib} | {el} | {wd} | {ms_} | {m['overlap_ms']} ms | {after_cell(m, 'app')} | "
                  f"{after_cell(m, 'overlay')} | {'—' if m.get('neither_ms') is None else str(m['neither_ms']) + ' ms'} | "
                  f"{anims or '—'} | `strips/{s['file']}` |")
     for (name, theme), (times, rows, note, *_pf) in sorted((geo_samples or {}).items()):
@@ -2328,6 +2336,9 @@ def strip_facts(m):
     if m.get("blink_items"):
         import motion_strip
         parts.append("ITEM BLINK: " + "; ".join(motion_strip.item_blink_text(b) for b in m["blink_items"]))
+    if m.get("window_dip") or m.get("mix_shortfall"):
+        import motion_strip
+        parts.extend(motion_strip.fade_texts(m))
     el = [f"{e['label']} {e['blink_ms']} ms" for e in m.get("elements", []) if e.get("blink_ms")]
     if el:
         parts.append("element blinks: " + "; ".join(el))
@@ -3091,7 +3102,8 @@ def _write_index_rest(rd, rnd, src, rev, dirty, entries, sheets, strips, core, c
         docs.append("`CONTRAST.md` — WCAG contrast ratios sampled from the rendered pixels, both themes.")
     if os.path.exists(os.path.join(rd, "MOTION-METRICS.md")):
         docs.append("`MOTION-METRICS.md` — per transition: latency, each transition's duration, the recording, blink "
-                    "per scope (text, other), text overlap, movement after the stated end, the QML animations that ran.")
+                    "per scope (text, other), text overlap, the whole window under its darker end, cross-fades under the "
+                    "one-layer mix of their ends, movement after the stated end, the QML animations that ran.")
     n_a11y, n_unnamed = write_focus_a11y(rd)
     if n_a11y:
         docs.append(f"`FOCUS-A11Y.md` — the focus walk's accessibility transcript: role, name, value and states at each of "
