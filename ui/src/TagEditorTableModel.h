@@ -71,6 +71,7 @@ public:
         SelectedRole,
         ExtraValuesRole,
         RenameFailedRole,
+        ChangedFieldsRole,
     };
 
     explicit TagEditorTableModel(QObject *parent = nullptr);

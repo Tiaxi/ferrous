@@ -3908,17 +3908,17 @@ ApplicationWindow {
         ListElement {
             fileName: "a.flac"; directory: "/music"; formatKind: "FLAC"; title: "A"
             artist: "X"; album: "Y"; genre: ""; year: ""; trackNo: "1"; discNo: ""
-            dirty: false; selected: true; errorText: ""; renameFailed: false; extraValues: ""
+            dirty: false; selected: true; errorText: ""; renameFailed: false; extraValues: ""; changedFields: ""
         }
         ListElement {
             fileName: "b.flac"; directory: "/music"; formatKind: "FLAC"; title: "B"
             artist: "X"; album: "Y"; genre: ""; year: ""; trackNo: "2"; discNo: ""
-            dirty: false; selected: false; errorText: ""; renameFailed: false; extraValues: ""
+            dirty: false; selected: false; errorText: ""; renameFailed: false; extraValues: ""; changedFields: ""
         }
         ListElement {
             fileName: "c.flac"; directory: "/music"; formatKind: "FLAC"; title: "C"
             artist: "X"; album: "Y"; genre: ""; year: ""; trackNo: "3"; discNo: ""
-            dirty: false; selected: false; errorText: ""; renameFailed: false; extraValues: ""
+            dirty: false; selected: false; errorText: ""; renameFailed: false; extraValues: ""; changedFields: ""
         }
     }
 

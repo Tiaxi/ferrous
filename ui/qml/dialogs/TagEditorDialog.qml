@@ -87,10 +87,13 @@ Components.DialogWindow {
     // typed over a short value, and 160 with no value yet to measure.
     // Folder, which may be `cut`, gives only what its values don't need at
     // first, then on down to its `least`. A table that scrolls has each of
-    // them at its least, for as many columns in view, but Title, whose new
-    // values are checked there before Save: it has the room left beside #
-    // and File Name, up to its width or what its values need, and about
-    // `holds` or more (at 24 pt, 240 px cut 8 of 12 new titles). Where
+    // them at its least and none wider than the view, but Title, whose new
+    // values are checked there before Save: it has all the room beside #
+    // and File Name, to the view's edge (it stayed at 190 px beside an
+    // unchanged Artist), or `holds` to scroll to where that would be less
+    // than its `least`. A committed change is whole
+    // whatever its column's width: it wraps, and its row grows while that
+    // column is in view. Where
     // the view is wider, File Name and Folder, which `stretch`, take the
     // rest. Status takes no room until a
     // save or a rename failed for a row; a row with unsaved edits has a
@@ -101,7 +104,7 @@ Components.DialogWindow {
     // too little room for them all, either the tags or the paths were cut
     // short).
     readonly property var tableColumns: [
-        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
+        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "000" },
         { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, holds: 220, stretch: true, path: true },
         { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 100, holds: 160 },
         { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 100, holds: 160 },
@@ -117,19 +120,26 @@ Components.DialogWindow {
     // it.
     readonly property bool rowStatusShown: root.tagEditorApi.hasRowErrors === true
     // The mark of a row with unsaved edits, in the # column's left padding:
-    // a 6 px dot at the default font, clear of a three-digit number.
+    // a 6 px dot at the default font, clear of a three-digit number, whose
+    // room the # column has beside its Revert's.
     readonly property int modifiedMarkSize: 2 * Math.round(root.uiPalette.scaledSize(6) / 2)
+    // The # column's padding before its numbers: 8 px, or what the mark,
+    // centred in those 8, takes as it outgrows them with the font.
+    readonly property real numberLeadingRoom: Math.max(Kirigami.Units.largeSpacing,
+        Math.ceil((Kirigami.Units.largeSpacing + root.modifiedMarkSize) / 2) + 1)
     readonly property real tableInset: Kirigami.Units.largeSpacing
-    // The room a column's header keeps beside its label for the column's
+    // The room a column's header keeps after its label for the column's
     // Revert, up to the column's edge, whether it shows or not, so that
-    // marking a change moves no column; its glyph is as large as a line of
+    // marking a change moves no column: "Title ↺", and "# ↺" alike, with
+    // the digits ending where the # does; its glyph is as large as a line of
     // text holds, 14 px in a 20 px button with the default font.
     readonly property real columnRevertGlyph: root.uiPalette.labelIconSize - 2
     readonly property real columnRevertRoom: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
     // What a column needs whatever the room: its header whole, semibold
     // and, in a column of a field, with its Revert in place of the padding
-    // at that end, or its sample value, with the cell's padding, rather
-    // than a header elided to a letter. The Revert's room is there before
+    // at that end, or its sample value, with the cell's padding, which in
+    // a column of numbers ends under the label, rather than a header
+    // elided to a letter. The Revert's room is there before
     // an edit needs it (#, Year and Disc took it as they were typed in,
     // and moved every column up to 14 px).
     function columnNeed(column) {
@@ -138,14 +148,17 @@ Components.DialogWindow {
         columnHeaderMetrics.font
         columnValueMetrics.font
         const padding = Kirigami.Units.largeSpacing
-        const header = columnHeaderMetrics.advanceWidth(column.label) + padding
+        const leading = column.number ? root.numberLeadingRoom : padding
+        const header = columnHeaderMetrics.advanceWidth(column.label) + leading
             + (root.fieldAt(column.key) !== null ? root.columnRevertRoom : padding)
         const samples = column.samples || (column.sample ? [column.sample] : [])
         const value = samples.reduce(function(widest, sample) {
             return Math.max(widest, columnValueMetrics.advanceWidth(sample))
         }, 0)
         // The label lays out up to a pixel wider than its advance.
-        return Math.ceil(Math.max(header + 1, value + 2 * padding))
+        return Math.ceil(Math.max(header + 1, column.number
+            ? value + 1 + leading + root.columnRevertRoom
+            : value + 2 * padding))
     }
     // Each column's width with room enough, or none for Status while no
     // row has a failure.
@@ -160,34 +173,26 @@ Components.DialogWindow {
     // and a large batch costs as little as a small one. Null until then.
     readonly property int measuredRowLimit: 200
     property var measuredRows: null
-    // What the values of a column that `holds` them need, however much,
-    // or 0 with none to measure.
-    readonly property var tableColumnValueWidths: {
+    // What the values of a column that `holds` them need, up to what it
+    // holds, which it is with none to measure.
+    readonly property var tableColumnContentWidths: {
         // As in columnNeed, for the binding to follow the font.
         columnValueMetrics.font
-        const rows = root.measuredRows
+        const rows = root.measuredRows || []
         return root.tableColumns.map(function(column) {
-            if (!column.holds || rows === null) {
+            if (!column.holds) {
                 return 0
             }
             let widest = 0
             for (let i = 0; i < rows.length; ++i) {
                 widest = Math.max(widest, columnValueMetrics.advanceWidth(root.cellText(column.key, rows[i])))
             }
+            const most = root.uiPalette.scaledSize(column.holds)
             // A cell lays its text out up to a pixel or so wider than its
             // advance (349.5 px for 349 at 24 pt), and elided it.
-            return widest > 0 ? Math.ceil(widest) + 2 + 2 * Kirigami.Units.largeSpacing : 0
+            return widest > 0 ? Math.min(most, Math.ceil(widest) + 2 + 2 * Kirigami.Units.largeSpacing) : most
         })
     }
-    // That, up to what the column `holds`, which it is with none to measure.
-    readonly property var tableColumnContentWidths: root.tableColumns.map(function(column, index) {
-        if (!column.holds) {
-            return 0
-        }
-        const most = root.uiPalette.scaledSize(column.holds)
-        const values = root.tableColumnValueWidths[index]
-        return values > 0 ? Math.min(most, values) : most
-    })
     // The narrowest each column gives way to: its least width, what its
     // values need, or what its header or sample needs.
     readonly property var tableColumnLeastWidths: root.tableColumns.map(function(column, index) {
@@ -253,15 +258,20 @@ Components.DialogWindow {
             })
             over -= taken
         }
-        // Still too wide, the table scrolls: Title as far as the view's
-        // edge, where its end elides, or, with less than about 160 px left
-        // there, 160 px to scroll to.
+        // Still too wide, the table scrolls: Title to the view's edge, or,
+        // with less than its least left there, 160 px to scroll to; and
+        // no column wider than the view, which a change wraps within, so
+        // that it is whole once scrolled to, clear of the vertical bar.
         if (over > 0) {
+            const view = Math.floor(room - root.scrollBarClearance)
             const title = root.tableColumns.findIndex(function(column) { return column.key === "title" })
             const beside = Math.floor(room - widths[number] - widths[name])
-            widths[title] = beside < root.uiPalette.scaledSize(150)
+            widths[title] = beside < root.uiPalette.scaledSize(root.tableColumns[title].least)
                 ? root.uiPalette.scaledSize(root.tableColumns[title].holds)
-                : Math.min(beside, Math.max(preferred[title], root.tableColumnValueWidths[title]))
+                : beside
+            root.tableColumns.forEach(function(column, i) {
+                widths[i] = Math.min(widths[i], Math.max(root.columnNeed(column), view))
+            })
         }
         // The whole pixels the rounding left go to the last column that
         // stretches, so Status ends at the table's inset.
@@ -276,6 +286,13 @@ Components.DialogWindow {
         }
         return widths
     }
+    // How far the vertical bar reaches past the table's inset and a cell's
+    // padding: 5 px with Breeze's. Title's text keeps that clear at the
+    // view's edge, rather than the column ending short of it, which let
+    // slivers of the next show beside the bar.
+    readonly property real scrollBarClearance: Math.max(0,
+        tagEditorDownBar.implicitWidth - root.tableInset - Kirigami.Units.largeSpacing)
+    readonly property bool tableScrolls: root.tableContentWidth > tagEditorTable.width
     // The rows' width: the view's, or the columns' where they are wider
     // still, when the table scrolls sideways.
     readonly property real tableContentWidth: Math.max(tagEditorTable.width,
@@ -284,6 +301,10 @@ Components.DialogWindow {
     function columnWidth(index) {
         return root.shownColumnWidths[index]
     }
+
+    // The room above a cell's first line and under its last, in a row as
+    // tall as one line as in one that wraps, so that all start on one line.
+    readonly property real cellLineInset: (root.tableRowHeight - columnValueMetrics.height) / 2
 
     FontMetrics {
         id: columnHeaderMetrics
@@ -663,9 +684,20 @@ Components.DialogWindow {
         tagEditorTable.positionViewAtIndex(target, ListView.Contain)
     }
 
+    // A page of the table: the rows in view under its header, as many as
+    // their heights leave, less the one kept in view.
+    function rowsPerPage() {
+        const table = tagEditorTable
+        const first = table.indexAt(1, table.contentY + root.tableRowHeight + 1)
+        const last = table.indexAt(1, table.contentY + table.height - 1)
+        return first >= 0 && last >= 0
+            ? Math.max(1, last - first - 1)
+            : Math.max(1, Math.floor(table.height / root.tableRowHeight) - 2)
+    }
+
     function handleTableKey(event) {
         const current = Math.max(0, tagEditorTable.currentIndex)
-        const page = Math.max(1, Math.floor(tagEditorTable.height / root.tableRowHeight) - 2)
+        const page = root.rowsPerPage()
         const extend = (event.modifiers & Qt.ShiftModifier) !== 0
         switch (event.key) {
         case Qt.Key_Up: root.moveCurrentRow(tagEditorTable.currentIndex < 0 ? 0 : current - 1, extend); break
@@ -1154,7 +1186,10 @@ Components.DialogWindow {
     }
 
     // Tools, Reload and the status share the row with the buttons, on
-    // their inset from the window's edges.
+    // their inset from the window's edges: a failure, Details… straight
+    // after it, which explains it (it stood beside Save, 975 px from it in
+    // a 1600 px window), then the room, and Save and Cancel at the end,
+    // where they stay.
     footer: RowLayout {
         id: tagEditorFooter
         spacing: Kirigami.Units.largeSpacing
@@ -1249,13 +1284,16 @@ Components.DialogWindow {
         Label {
             id: statusLabel
             objectName: "tagEditorStatusLabel"
+            readonly property bool failure: root.statusHasFailure && !root.busy
             Layout.fillWidth: true
+            // As wide as its text, for what follows it, and elided in less.
+            Layout.maximumWidth: Math.ceil(implicitWidth)
             Layout.bottomMargin: dialogButtons.bottomPadding
             Layout.leftMargin: Kirigami.Units.smallSpacing
             textFormat: Text.PlainText
             text: root.statusLine()
-            font.pointSize: root.uiPalette.smallPointSize
-            color: root.statusHasFailure && !root.busy ? root.uiPalette.negative : root.uiPalette.textSecondary
+            font.pointSize: statusLabel.failure ? root.uiPalette.basePointSize : root.uiPalette.smallPointSize
+            color: statusLabel.failure ? root.uiPalette.negative : root.uiPalette.textSecondary
             elide: Text.ElideRight
             Accessible.role: Accessible.StatusBar
 
@@ -1281,6 +1319,10 @@ Components.DialogWindow {
             icon.name: "documentinfo"
             text: I18n.i18nc("@action:button", "Details…")
             onClicked: tagEditorStatusDetailsDialog.open()
+        }
+
+        Item {
+            Layout.fillWidth: true
         }
 
         Components.DialogButtons {
@@ -1362,6 +1404,7 @@ Components.DialogWindow {
 
         // The files, on the view colour, with the queue's header.
         Rectangle {
+            id: tableFrame
             Layout.fillWidth: true
             Layout.fillHeight: true
             color: root.uiPalette.view
@@ -1377,6 +1420,10 @@ Components.DialogWindow {
                 objectName: "tagEditorTable"
                 anchors.fill: parent
                 anchors.margins: 1
+                // The rows end over the horizontal bar, which would cover
+                // the last line of a change that wraps. Whether it shows
+                // follows from the widths alone.
+                anchors.bottomMargin: 1 + (root.tableScrolls ? tagEditorAcrossBar.height : 0)
                 clip: true
                 focus: true
                 activeFocusOnTab: true
@@ -1390,8 +1437,16 @@ Components.DialogWindow {
                 boundsBehavior: Flickable.StopAtBounds
                 headerPositioning: ListView.OverlayHeader
                 pixelAligned: true
-                ScrollBar.vertical: ScrollBar {}
-                ScrollBar.horizontal: ScrollBar {}
+                ScrollBar.vertical: ScrollBar {
+                    id: tagEditorDownBar
+                }
+                ScrollBar.horizontal: ScrollBar {
+                    id: tagEditorAcrossBar
+                    parent: tableFrame
+                    anchors.left: tagEditorTable.left
+                    anchors.right: tagEditorTable.right
+                    anchors.top: tagEditorTable.bottom
+                }
                 Accessible.role: Accessible.Table
                 Accessible.name: I18n.i18nc("@label", "Files")
 
@@ -1429,18 +1484,21 @@ Components.DialogWindow {
                                     anchors.fill: parent
                                     // The Revert's end has no padding: see
                                     // columnNeed.
-                                    anchors.leftMargin: headerCell.editable && headerCell.modelData.number
-                                        ? 0 : Kirigami.Units.largeSpacing
-                                    anchors.rightMargin: headerCell.editable && !headerCell.modelData.number
-                                        ? 0 : Kirigami.Units.largeSpacing
+                                    anchors.leftMargin: headerCell.modelData.number
+                                        ? root.numberLeadingRoom : Kirigami.Units.largeSpacing
+                                    anchors.rightMargin: headerCell.editable ? 0 : Kirigami.Units.largeSpacing
                                     spacing: Kirigami.Units.smallSpacing
-                                    layoutDirection: headerCell.modelData.number ? Qt.RightToLeft : Qt.LeftToRight
 
                                     Label {
                                         objectName: "tagEditorColumnLabel"
                                         anchors.verticalCenter: parent.verticalCenter
-                                        width: Math.min(implicitWidth, parent.width
-                                            - (columnRevert.visible ? columnRevert.width + parent.spacing : 0))
+                                        // A number's label ends at the
+                                        // Revert's room, over its digits.
+                                        width: headerCell.modelData.number
+                                            ? parent.width - root.columnRevertRoom
+                                            : Math.min(implicitWidth, parent.width
+                                                - (columnRevert.visible ? columnRevert.width + parent.spacing : 0))
+                                        horizontalAlignment: headerCell.modelData.number ? Text.AlignRight : Text.AlignLeft
                                         textFormat: Text.PlainText
                                         text: headerCell.modelData.label
                                         font.pointSize: root.uiPalette.smallPointSize
@@ -1545,12 +1603,31 @@ Components.DialogWindow {
                     required property string errorText
                     required property bool renameFailed
                     required property var extraValues
+                    required property var changedFields
                     readonly property bool current: ListView.isCurrentItem && tagEditorTable.activeFocus
                     // Unsaved edits, typed text included.
                     readonly property bool marked: tableRow.dirty || root.pendingEditRows[tableRow.index] === true
 
                     width: root.tableContentWidth
-                    height: root.tableRowHeight
+                    // Its tallest cell's of those whose text is in view
+                    // sideways, as the row is made: the Row's own implicit
+                    // height comes with its polish, after the view has
+                    // placed the row. A change scrolled out of view grows
+                    // it as it comes in (it left a tall, empty row: at 24 pt
+                    // from a 1000 px window, every row of a new title).
+                    height: {
+                        let tallest = root.tableRowHeight
+                        const left = tagEditorTable.contentX - rowCells.x
+                        const right = left + tagEditorTable.width
+                        for (let i = 0; i < rowCells.children.length; ++i) {
+                            const cell = rowCells.children[i]
+                            if (cell.height > tallest && cell.x + cell.leftPadding + 1 < right
+                                    && cell.x + cell.width - cell.rightPadding > left + 1) {
+                                tallest = cell.height
+                            }
+                        }
+                        return tallest
+                    }
                     Accessible.role: Accessible.Row
                     Accessible.name: tableRow.fileName
                     Accessible.description: tableRow.marked ? root.modifiedText : ""
@@ -1584,7 +1661,9 @@ Components.DialogWindow {
                     }
 
                     Row {
-                        anchors.fill: parent
+                        id: rowCells
+                        anchors.left: parent.left
+                        anchors.right: parent.right
                         anchors.leftMargin: root.tableInset
                         anchors.rightMargin: root.tableInset
 
@@ -1596,30 +1675,58 @@ Components.DialogWindow {
                                 required property int index
                                 objectName: "tagEditorCell_" + modelData.key
                                 width: root.columnWidth(index)
-                                height: parent.height
+                                // A committed change is whole: it wraps,
+                                // and the row grows by it. Its height is the
+                                // committed value's, also while another is
+                                // typed over it, which elides within that.
+                                readonly property bool changed: tableRow.changedFields.indexOf(modelData.key) >= 0
+                                readonly property string committedText: root.cellText(modelData.key, tableRow)
+                                height: committedValue.item !== null && committedValue.item.lineCount > 1
+                                    ? Math.ceil(committedValue.item.contentHeight + 2 * root.cellLineInset)
+                                    : root.tableRowHeight
                                 visible: width > 0
-                                leftPadding: Kirigami.Units.largeSpacing
-                                rightPadding: Kirigami.Units.largeSpacing
+                                topPadding: tableCell.changed ? root.cellLineInset : 0
+                                leftPadding: modelData.number ? root.numberLeadingRoom : Kirigami.Units.largeSpacing
+                                rightPadding: modelData.number ? root.columnRevertRoom
+                                    : Kirigami.Units.largeSpacing
+                                        + (modelData.key === "title" && root.tableScrolls ? root.scrollBarClearance : 0)
                                 textFormat: Text.PlainText
                                 readonly property bool typed: root.pendingEditKey === modelData.key
                                     && root.pendingEditRows[tableRow.index] === true
                                 text: tableCell.typed
                                     ? root.cellText(modelData.key, { [modelData.key]: root.pendingEditText })
-                                    : root.cellText(modelData.key, tableRow)
+                                    : tableCell.committedText
                                 font.features: modelData.number ? root.uiPalette.tabularFigures : ({})
                                 color: tableCell.failureCell
                                     ? root.uiPalette.negative
                                     : (modelData.number
                                         ? root.uiPalette.textTertiaryOn(tableRow.selected, rowHover.hovered)
                                         : root.uiPalette.text)
-                                verticalAlignment: Text.AlignVCenter
+                                verticalAlignment: tableCell.changed ? Text.AlignTop : Text.AlignVCenter
+                                wrapMode: tableCell.changed ? Text.Wrap : Text.NoWrap
                                 horizontalAlignment: modelData.number ? Text.AlignRight : Text.AlignLeft
                                 // A file name or folder keeps its start: the
                                 // track number and title, or the folder's
                                 // year and album, rather than an extension
                                 // that Format shows. The whole of any cell
                                 // is in its tooltip while it is cut short.
-                                elide: Text.ElideRight
+                                elide: tableCell.changed && !tableCell.typed ? Text.ElideNone : Text.ElideRight
+
+                                // The committed change as it wraps, which is
+                                // how tall the cell is: only a changed cell
+                                // in a row that has items has one.
+                                Loader {
+                                    id: committedValue
+                                    active: tableCell.changed
+                                    visible: false
+                                    sourceComponent: Label {
+                                        width: tableCell.width - tableCell.leftPadding - tableCell.rightPadding
+                                        textFormat: Text.PlainText
+                                        text: tableCell.committedText
+                                        font: tableCell.font
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
                                 // The # cell of a row with unsaved edits
                                 // says what its mark means, and the Status
                                 // cell of a row that failed, why.
@@ -1650,7 +1757,8 @@ Components.DialogWindow {
                         objectName: "tagEditorRowModifiedMark"
                         visible: tableRow.marked
                         x: root.tableInset + Math.round((Kirigami.Units.largeSpacing - width) / 2)
-                        y: Math.round((parent.height - height) / 2)
+                        // On the first line, as the row's cells start.
+                        y: Math.round((root.tableRowHeight - height) / 2)
                         width: root.modifiedMarkSize
                         height: width
                         radius: width / 2

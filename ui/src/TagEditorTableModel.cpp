@@ -91,6 +91,7 @@ QHash<int, QByteArray> TagEditorTableModel::roleNames() const {
         {SelectedRole, "selected"},
         {ExtraValuesRole, "extraValues"},
         {RenameFailedRole, "renameFailed"},
+        {ChangedFieldsRole, "changedFields"},
     };
 }
 
@@ -381,6 +382,8 @@ QVariant TagEditorTableModel::fieldData(const TagEditorRowState &row, int role) 
         return row.renameFailed;
     case SelectedRole:
         return row.selected;
+    case ChangedFieldsRole:
+        return changedFields(row);
     case ExtraValuesRole: {
         QVariantMap shown;
         for (auto it = row.extraValues.cbegin(); it != row.extraValues.cend(); ++it) {
