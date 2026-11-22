@@ -4774,11 +4774,24 @@ void UiDialogsTest::checkAutoNumberIsOneFormInReadingOrder(DialogsWindow &main) 
     }
     QCOMPARE(evaluate(visibleNamed(numbers, QStringLiteral("autoNumberResetOnDiscCheck")), QStringLiteral("text")).toString(),
              QStringLiteral("Reset track numbers at each new disc"));
+    // It opens on a lead, semibold in the text's colour, and which rows it
+    // numbers under it, secondary, on one left edge.
+    QQuickItem *lead = visibleNamed(numbers, QStringLiteral("autoNumberLead"));
+    QVERIFY(lead != nullptr);
+    QCOMPARE(lead->property("text").toString(), QStringLiteral("Number tracks in the table’s order."));
+    QCOMPARE(lead->property("font").value<QFont>().weight(), QFont::DemiBold);
+    QCOMPARE(hex(lead->property("color").value<QColor>()), hex(tokenOf(window, "text")));
     // The description starts where the form's labels do and is no wider.
     QQuickItem *description = visibleNamed(numbers, QStringLiteral("autoNumberDescription"));
     QVERIFY(description != nullptr);
     QCOMPARE(sceneRect(description).left(), sceneRect(form).left() + (form->width() - form->implicitWidth()) / 2);
     QVERIFY(sceneRect(description).width() <= form->implicitWidth() + 0.5);
+    QCOMPARE(sceneRect(lead).left(), sceneRect(description).left());
+    QVERIFY(sceneRect(lead).bottom() <= sceneRect(description).top());
+    QCOMPARE(description->property("text").toString(),
+             QStringLiteral("Applies to the selected rows, or all rows if none are selected."));
+    QCOMPARE(description->property("font").value<QFont>().weight(), QFont::Normal);
+    QCOMPARE(hex(description->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
     // Write disc numbers enables the disc's start and its reset.
     QQuickItem *writeDisc = visibleNamed(numbers, QStringLiteral("autoNumberWriteDiscCheck"));
     QVERIFY(!visibleNamed(numbers, QStringLiteral("autoNumberStartingDiscField"))->isEnabled());

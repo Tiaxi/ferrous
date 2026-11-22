@@ -50,7 +50,7 @@ Components.CompactDialogWindow {
     objectName: "autoNumberDialog"
     title: I18n.i18nc("@title:window", "Auto Number")
     // As wide as its form, whose check boxes do not wrap, in the font
-    // they are in; the description above it wraps.
+    // they are in; the lead and the scope above it wrap.
     contentWidth: autoNumberForm.implicitWidth
     defaultWidth: Math.max(root.minimumWidth, root._neededWidth)
     // The keyboard in the first field, its number selected, so that typing
@@ -80,17 +80,36 @@ Components.CompactDialogWindow {
         }
     }
 
-    // The description starts where the form does, and is no wider, so the
-    // dialog has one left edge however wide the user makes it.
-    Label {
-        objectName: "autoNumberDescription"
+    // The lead, semibold as every dialog's first sentence is, and under it
+    // which rows it numbers, secondary, as a confirmation's question and
+    // what it acts on (the whole of it, secondary, opened the window on
+    // its quietest text). They start where the form does, and are no
+    // wider, so the dialog has one left edge however wide the user makes it.
+    ColumnLayout {
         Layout.fillWidth: true
         Layout.maximumWidth: autoNumberForm.implicitWidth
         Layout.alignment: Qt.AlignHCenter
-        wrapMode: Text.WordWrap
-        color: root.uiPalette.textSecondary
-        textFormat: Text.PlainText
-        text: I18n.i18nc("@label", "Number the selected rows, or all rows if none are selected, using the current table order.")
+        spacing: 2
+
+        Label {
+            objectName: "autoNumberLead"
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            font.weight: Font.DemiBold
+            color: root.uiPalette.text
+            textFormat: Text.PlainText
+            text: I18n.i18nc("@info", "Number tracks in the table’s order.")
+        }
+
+        Label {
+            objectName: "autoNumberDescription"
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            color: root.uiPalette.textSecondary
+            textFormat: Text.PlainText
+            text: I18n.i18nc("@info the rows that Auto Number numbers",
+                "Applies to the selected rows, or all rows if none are selected.")
+        }
     }
 
     // One form in reading order, in three groups a FormGroupGap apart, the
