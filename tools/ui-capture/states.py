@@ -6211,7 +6211,7 @@ STATES = [
     ("statusbar", "statusbar", "backend-disconnected", 'macro fakebridge statusBar {"connected":false}',
      "Status bar while the backend is not connected (injected; status bar only)"),
     ("statusbar", "statusbar", "backend-stopped",
-     'macro fakebridge statusBar {"backendFailure":"The playback backend stopped unexpectedly (exit code 101)."}',
+     'macro fakebridge statusBar {"backendFailure":"The playback engine stopped unexpectedly (exit code 101)."}',
      "Status bar after the backend stopped (injected; status bar only, the main-window message is not shown)"),
     ("statusbar", "_", "_bridge-reset", "macro fakebridge statusBar reset", ""),
     # a scan's label arriving, counting and leaving in the status bar: the scan state injected step by step (a real
