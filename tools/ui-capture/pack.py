@@ -2294,7 +2294,11 @@ def strip_facts(m):
               + (f", opacities settle at +{g['settle_ms']} ms" if g.get("settle_ms") is not None else "")
               for g in m["handover_by_transition"]]
         hv = ["per transition " + "; ".join(hv) + (f" (the longest animation {h_['anim_longest']})" if h_.get("anim_longest") else "")]
-    parts = [f"latency {m['latency_ms']} ms"] + ([f"visual handover: {', '.join(hv)}"] if hv else []) + [
+    first = []
+    if m.get("crosshair"):  # (first: the fact a pan is read for)
+        import motion_strip
+        first = [motion_strip.crosshair_text(m["crosshair"])]
+    parts = first + [f"latency {m['latency_ms']} ms"] + ([f"visual handover: {', '.join(hv)}"] if hv else []) + [
         f"pixel transition {m['duration_ms']} ms ({m['frames_60']} frames at 60 fps; every changed pixel, playback content "
         "and tooltips included)"]
     if len(segs) > 1:
@@ -2420,6 +2424,9 @@ def write_core_facts(rd, core, strips, geo_samples, entries=(), out="CORE-FACTS.
                     + (f"; … {len(rows) - 14} more rows" if len(rows) > 14 else ""))
             if x.get("group") == "closeups" and floors:
                 L.append("- The plot's empty regions, sampled: see *Plot empty regions* below.")
+            if x.get("recording"):  # (a focus sheet of one recording's frames: that recording's metrics)
+                nm_ = x["recording"]
+                L.append(f"- The recording ({nm_}): " + strip_facts((by_name.get((nm_, x["theme"])) or {}).get("metrics")))
             L.append("")
         else:
             i_m += 1
@@ -2568,7 +2575,9 @@ def focus_strip_needs(names):
     view_of = {f"{nm}-{sfx}": nm for nm, views in getattr(st, "EXTRA_VIEWS", {}).items() for sfx, _ in views}
     need = set()
     for sc_f in (focus.SCOPES[n_] for n_ in names):
-        for kind, nm, *_ in sc_f.get("images", []):
+        for kind, nm, _th, _show, _look, *opt_ in sc_f.get("images", []):
+            if opt_ and opt_[0].get("recording"):  # (a sheet of a recording's frames, which carries its facts)
+                need.add(opt_[0]["recording"])
             if kind == "strip":
                 # (another view of a recording, states.EXTRA_VIEWS, is made from that recording)
                 need |= {view_of.get(h.partition("@")[0], h.partition("@")[0]) for h in pair_map.get(nm, (nm,))}
@@ -2681,6 +2690,11 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
                 continue
             fails.append(f"focus image {kind} {nm} ({theme}) is missing from the round")
             continue
+        rec_ = opt_[0].get("recording") if opt_ else None
+        if rec_:  # (a sheet of a recording's frames, with that recording's facts under it)
+            if (rec_, theme) not in by_strip:
+                fails.append(f"focus sheet {nm}: the recording {rec_} ({theme}) was not measured")
+            x = dict(x, recording=rec_)
         items.append((kind, x)); shows.append(show); looks.append(look)
         if kind == "strip":  # any neither frames: their contact sheet next
             for half in (pairs.get(nm) or (nm,)):

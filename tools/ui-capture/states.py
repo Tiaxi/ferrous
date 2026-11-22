@@ -7048,6 +7048,8 @@ STRIP_VIEW = {
     "preferences-open": (329, 191, 942, 618),
     "search-open": (370, 77, 860, 646), "search-close": (370, 77, 860, 646),
     "search-typing": (370, 77, 860, 646),
+    # the plot, both lanes and the time on the bottom one, not a thumbnail of the window (the pans' band: vi-moves-band)
+    "vi-pan-waveform": "spectrogramPane", "vi-pan-spectrogram": "spectrogramPane",
     "first-scan": (0, 75, 820, 470),
     "animoff-dialog-open": (420, 240, 760, 540),
     "animoff-search-open": (370, 77, 860, 646),
@@ -7435,8 +7437,10 @@ MOTION_FOCUS = {
     # visualization interaction: the perceived rows show the plot that moves (a 380 px stretch of its upper lane), not
     # the plates that fade beside it (recording coordinates: its crop starts at the transport's top)
     **{n: dict(rect=(741, 518, 380, 215), b_lines=1, band=360)
-       for n in ("vi-pan-waveform", "vi-follow-waveform", "vi-pan-spectrogram", "vi-follow-spectrogram", "vi-autoscroll",
-                 "vi-seek-plot", "vi-seek-bar")},
+       for n in ("vi-follow-waveform", "vi-follow-spectrogram", "vi-autoscroll", "vi-seek-plot", "vi-seek-bar")},
+    # (a pan's: also whether the crosshair is at one x in every lane of every frame)
+    **{n: dict(rect=(741, 518, 380, 215), b_lines=1, band=360, lanes="spectrogramPane")
+       for n in ("vi-pan-waveform", "vi-pan-spectrogram")},
     # the queue's first rows where the playing row moves (rows 1-3, the number and title columns); the first scan:
     # the status bar's right half (the scan label arriving and leaving)
     "queue-now-move": dict(rect="mainQueuePane:0,0.06,0.55,0.18", rows="all", b_lines=1),

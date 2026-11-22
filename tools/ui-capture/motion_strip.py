@@ -3,7 +3,8 @@
 
 A strip lays a ~100 ms change out as frozen frames: slow motion a reviewer cannot watch at speed. `analyse`
 measures the recording and draws ONE merged image per transition, at the reviewers' 1568 px width:
-- caption: latency (action to first change), each transition (first to last change; changes more than
+- caption: whether every lane's crosshair is at one x (the recordings MOTION_FOCUS "lanes" names);
+  latency (action to first change), each transition (first to last change; changes more than
   100 ms apart are separate transitions, e.g. a hover fade in and out, or a wait then an auto-hide) and the
   recording, kept apart; blink per scope and per changed item; text overlap; movement after the stated end;
 - key frames (at most 12; the strip pages under strips/frames/ have the rest);
@@ -414,6 +415,97 @@ def text_overlap(tracks, segs):
     return best
 
 
+DASH, DASH_PERIOD = 4, 7  # the plots' crosshair line: 4 px drawn, 3 not (logical px)
+CROSS_SEEN, CROSS_FAINT = 8.0, 5.0  # how far over the noise such a line stands: seen, or just there where expected
+
+
+def dashed_columns(lane):
+    """How clearly each column of a lane's luminance (rows, cols) is a dashed vertical line of DASH on, the rest of
+    DASH_PERIOD off, at any phase and lighter or darker than the plot: the t statistic of the column against its
+    neighbours 2 px either side, drawn rows against the others. The plot's own verticals (a transient, the solid
+    playhead) have no such period and stay at the noise's few units."""
+    r = lane[:, 2:-2] - 0.5 * (lane[:, :-4] + lane[:, 4:])
+    n = r.shape[0]
+    whole = n - n % DASH_PERIOD  # (the rows summed by their place in the period)
+    by_place = r[:whole].reshape(-1, DASH_PERIOD, r.shape[1]).sum(axis=0)
+    by_place[:n - whole] += r[whole:]
+    drawn = np.zeros((DASH_PERIOD, DASH_PERIOD), dtype=np.float32)  # (the places drawn at each phase)
+    for phase in range(DASH_PERIOD):
+        drawn[phase, [(phase + k) % DASH_PERIOD for k in range(DASH)]] = 1.0
+    on = drawn @ by_place
+    n_on = (drawn @ np.bincount(np.arange(n) % DASH_PERIOD, minlength=DASH_PERIOD).astype(np.float32))[:, None]
+    off, n_off = by_place.sum(axis=0) - on, n - n_on
+    var = (np.einsum("ij,ij->j", r, r) - on * on / n_on - off * off / n_off) / max(1, n - 2)
+    t = np.abs(on / n_on - off / n_off) / np.sqrt(np.maximum(var, 1.0) * (1.0 / n_on + 1.0 / n_off))
+    return np.concatenate(([0, 0], t.max(axis=0), [0, 0]))
+
+
+def crosshair_lanes(ims, times, pane, lanes, at_=(0, 0)):
+    """Whether every lane of a plot shows its crosshair's vertical line at one x, in every recorded frame that
+    shows one: pane (x, y, w, h) in the recording's images, its lanes sharing its height equally; at_: where those
+    images start in the window. A frame where they differ by over a pixel, or where a lane lacks a line that another
+    shows plainly, is a split. dict(ok: None when nothing could be compared, lanes, frames: how many show one,
+    split: how many of those are split, first, last: the split frames' indices, start_ms, end_ms, apart_px: the
+    most, worst: dict(frame, xs: per lane in the window, None without one))."""
+    out = dict(ok=None, lanes=lanes, frames=0, split=0)
+    if lanes < 2:
+        return out
+    x, y, w, h = pane
+    lh = h / lanes
+    split = []
+    for k in range(len(ims)):
+        g = np.asarray(ims[k].crop((x, y, x + w, y + h)).convert("L"), dtype=np.float32)
+        scores = []
+        for i in range(lanes):  # (a lane's edge rows hold the seam)
+            scores.append(dashed_columns(g[int(i * lh) + 3:int((i + 1) * lh) - 3]))
+        tops = [float(s.max()) for s in scores]
+        strongest = max(range(lanes), key=lambda i: tops[i])
+        if tops[strongest] < CROSS_SEEN:
+            continue
+        x0 = int(scores[strongest].argmax())
+        xs = []
+        for s, top in zip(scores, tops):
+            faint = float(s[max(0, x0 - 1):x0 + 2].max()) >= CROSS_FAINT
+            xs.append(int(s.argmax()) if top >= CROSS_SEEN else x0 if faint else None)
+        seen = [v for v in xs if v is not None]
+        apart = max(seen) - min(seen)
+        missing = len(seen) < lanes
+        if missing and apart <= 1 and tops[strongest] < 2 * CROSS_SEEN:
+            continue  # (a crosshair still fading in, too faint to say that a lane lacks it)
+        out["frames"] += 1
+        if apart > 1 or missing:
+            split.append((apart, k, [None if v is None else v + x + at_[0] for v in xs]))
+    if out["frames"]:
+        out["ok"] = not split
+    if split:
+        apart, k, xs = max(split, key=lambda s: s[0])
+        out.update(split=len(split), first=split[0][1], last=split[-1][1], start_ms=round(times[split[0][1]]),
+                   end_ms=round(times[split[-1][1]]), apart_px=apart, worst=dict(frame=k, xs=xs))
+    return out
+
+
+def crosshair_text(c):
+    """crosshair_lanes in words."""
+    q = "All lanes' crosshair x agree in every frame:"
+    if c["ok"] is None:
+        why = "fewer than two lanes in the trace" if c["lanes"] < 2 else "no frame shows a crosshair"
+        return f"{q} NOT CHECKED ({why})"
+    if c["ok"]:
+        return f"{q} yes ({c['lanes']} lanes, the {c['frames']} frames that show one)"
+    return (f"{q} NO (FAIL): split in {c['split']} of the {c['frames']} frames that show one, "
+            f"f{c['first']:04d}-f{c['last']:04d}, +{c['start_ms']} to +{c['end_ms']} ms, up to {c['apart_px']} px apart "
+            f"(f{c['worst']['frame']:04d}: x " + " / ".join("none" if v is None else str(v) for v in c["worst"]["xs"])
+            + ", top lane first)")
+
+
+def traced_lanes(tracks, pane):
+    """How many lanes a plot pane (window coordinates) has: the distinct heights of its lane labels in the trace."""
+    x, y, w, h = pane
+    return len({tr["rects"][0][1] for k, tr in tracks.items()
+                if "plotLaneLabel/" in k and k.split("/")[-1].startswith("plotPlateLabel")
+                and x <= tr["rects"][0][0] < x + w and y <= tr["rects"][0][1] < y + h})
+
+
 def _ancestors(key, keys):
     """the tracked ancestors of an item (by the trace's path keys: an ancestor's last segment in the item's path,
     the segments before it agreeing), grouped per ancestor path: [[key, ...], ...] (several instances of one path:
@@ -738,6 +830,11 @@ def measure(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
     for sc in scopes.values():
         sc["blink"], sc["bmask"] = blink_of(sc["ink"], spans, segs)
     item_bl = item_blinks(tracks, times, spans, ims, scale, off)
+    cross = None
+    if fo.get("lanes"):  # (recorded at 1x: the dash's period is in the recording's pixels)
+        pane = resolve_rect(fo["lanes"], meta, ims[0].width, ims[0].height)
+        in_window = (pane[0] + off[0], pane[1] + off[1], pane[2], pane[3])
+        cross = crosshair_lanes(ims, times, pane, traced_lanes(tracks, in_window), off)
     overlap = text_overlap(tracks, segs)
     # the overlap per transition, and per now-playing line (states.ELEMENT_INK: only that line's text items, e.g.
     # the outgoing and incoming titles)
@@ -1024,6 +1121,8 @@ def measure(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
                    spacing_ms=round(spacing), slow_factor=round(slow),
                    animations=[dict(a, start=round(a["start"]), end=None if a["end"] is None else round(a["end"])) for a in anims])
     metrics["periodic_note"] = tick_note
+    if cross is not None:
+        metrics["crosshair"] = cross
     if travel_px is not None:
         metrics["travel_px"] = round(travel_px)
         metrics["plot_note"] = travel_note
@@ -1072,7 +1171,7 @@ def fms(v):
 
 def caption(m, segs, continuous):
     """Latency (action to first change), each transition (first to last change) and the recording, kept apart."""
-    parts = []
+    parts = [crosshair_text(m["crosshair"]) + "."] if m.get("crosshair") else []
     if not segs:
         parts.append("No change after the action.")
     else:

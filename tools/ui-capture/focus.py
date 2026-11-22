@@ -633,6 +633,16 @@ _VI_MOVES = [("vi-pan-waveform", "Middle-drag", [-20, 300, 700]), ("vi-follow-wa
              ("vi-seek-plot", "Right click on the plot: the view stays", [-20, 150]),
              ("vi-seek-bar", "Click on the seek bar: the view follows", [-20, 150])]
 _VI_TIMES = [-20, 300, 700, 1100, 1500, 1900, 2300, 2700, 3100]
+# a pan's frames at 1:1: the stretch of the plot the drag crosses (from 70 % to 30 % of it, the time box around each
+# end), through both lanes to the time on the bottom edge (the top 2 % left out, to fit 1.15 MP)
+_VI_PAN = "spectrogramPane:0.275,0.02,0.45,0.98"
+
+
+def _vi_pan(name, what):
+    return (f"{name}-frames", f"A middle-drag of the zoomed {what}, 1:1: both lanes and the time, in four frames", "dark",
+            [[dict(strip=name, item=_VI_PAN, times=ts, zoom=1, pad=0, lh=16, gap=4, label=lb)]
+             for ts, lb in (([80, 300], "Pressed, then dragged left (ms after the press; the drag ends at about +680 ms)"),
+                            ([500, 1100], "Dragged further, then released"))])
 
 
 def _vi_band(st, lb, th="dark"):
@@ -681,6 +691,8 @@ SCOPES.update({
              # (the recording's crop starts at the transport's top: item is in its coordinates)
              [[dict(strip="vi-autoscroll", item=(152, 4, 1240, 40), times=[t], zoom=1, pad=0, lh=16, gap=4,
                     label=f"{t:+d} ms after the middle click")] for t in _VI_TIMES]),
+            _vi_pan("vi-pan-waveform", "waveform"),
+            _vi_pan("vi-pan-spectrogram", "centred spectrogram"),
         ],
         images=[
             ("sheet", "vi-band", "dark", "The seek bar's view band in every state of the zoomed view, 1:1",
@@ -693,12 +705,14 @@ SCOPES.update({
              "slow near the click, faster at the edge, going on outside the window, then stopping"),
             ("sheet", "vi-moves-band", "dark", "The band through a drag, F and the two seeks, frame by frame, 1:1",
              "the band moving with the drag; coming back on F and a seek-bar click; staying for a seek on the plot"),
-            ("strip", "vi-pan-waveform", "dark", "A middle-drag of the zoomed waveform, the seek bar with it",
-             "the time grabbed staying under the pointer; the band following; no jump at the release"),
+            ("sheet", "vi-pan-waveform-frames", "dark", "A middle-drag of the zoomed waveform: both lanes and the time, 1:1",
+             "one crosshair through both lanes (its fact below); the time grabbed staying under the pointer, its label "
+             "holding still; no jump at the release", dict(recording="vi-pan-waveform")),
             ("strip", "vi-follow-waveform", "dark", "Follow Playhead (F) after a drag: the view back on the playhead",
              "how the view returns (a cut or a glide); the band with it"),
-            ("strip", "vi-pan-spectrogram", "dark", "A middle-drag of the zoomed centred spectrogram, then 1.2 s",
-             "the moved view's columns filling in; the old canvas as the backdrop meanwhile"),
+            ("sheet", "vi-pan-spectrogram-frames", "dark", "A middle-drag of the zoomed centred spectrogram: both lanes "
+             "and the time, 1:1", "one crosshair through both lanes (its fact below); the label's time holding still; "
+             "the moved view's columns filling in", dict(recording="vi-pan-spectrogram")),
             ("strip", "vi-autoscroll", "dark", "Autoscroll: slow, fast at the edge, outside the window, stopped",
              "the speed rising with the distance; no stall when the pointer leaves"),
             ("strip", "vi-seek-plot", "dark", "A right click on the moved waveform: a seek that keeps the view",
@@ -713,6 +727,8 @@ SCOPES.update({
                       ("zoom-notch-lane", "dark", "One wheel notch on a lane"), ("zoom-reset-lane", "dark", "Reset Zoom on a lane")],
         notes=["The pointer's cursor is not in the grabs or recordings (KWin draws it). Autoscroll shows a horizontal "
                "resize cursor while it runs.",
+               "Each pan's facts begin with whether all lanes' crosshair x agree in every frame: each lane's dashed "
+               "line found in every recorded frame's pixels, not only in the four frames shown.",
                "\u201cOutside the window\u201d is the window told the pointer left (a Leave event, as KWin sends it), after a "
                "last move at its right edge: the app keeps the speed it had there (#662)."],
         floors=[],

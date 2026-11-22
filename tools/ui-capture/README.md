@@ -185,7 +185,8 @@ documents), then everything else as reference.
   frames with real timestamps; a graph of the animated items' opacity, ink per scope (text and other) and the
   runtime animation timeline; and measured flags: blink (a dip and return within 250 ms: of the ink per scope to
   half or less; of a changed item's opacity, such as a popup's or a list's, to half or less or by over a quarter for
-  over 30 ms, where the frames show it in that item's own rect, so a wide change box cannot average it away), text overlap
+  over 30 ms, where the frames show it in that item's own rect, so a wide change box cannot average it away); for
+  a pan, whether all lanes' crosshair x agree in every frame (each lane's dashed line found in the pixels); text overlap
   (two texts in one place, one mid-fade), movement after the stated end, and frames that are neither the start nor
   the end nor a blend of them. Key frames are far slower than real time, so each image also has **real-speed rows**,
   labelled as a simulation: each cell is the time-weighted mean of the frames on screen in the 45 ms before it (the

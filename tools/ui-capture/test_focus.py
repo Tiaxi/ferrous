@@ -272,6 +272,38 @@ class DialogsPack(unittest.TestCase):
         self.assertFalse([c for c in self.tiles("dlg24-rename") if c[4].get("fit")])
 
 
+class VizInteractionPack(unittest.TestCase):
+    sc = focus.SCOPES["viz-interaction"]
+
+    def test_each_pan_is_a_1_to_1_sheet_of_both_lanes_with_the_recordings_facts(self):
+        sheets = {nm: rows for nm, _title, _th, rows in self.sc["sheets"]}
+        for rec in ("vi-pan-waveform", "vi-pan-spectrogram"):
+            with self.subTest(recording=rec):
+                image = next(i for i in self.sc["images"] if i[1] == f"{rec}-frames")
+                self.assertEqual((image[0], image[5]["recording"]), ("sheet", rec))
+                self.assertIn(rec, pack.focus_strip_needs(["viz-interaction"]))  # (measured in a focus-only pack too)
+                self.assertEqual(states.STRIP_VIEW[rec], "spectrogramPane")
+                self.assertEqual(states.MOTION_FOCUS[rec]["lanes"], "spectrogramPane")
+                for c in cells(sheets[f"{rec}-frames"]):
+                    name, _, frac = c["item"].partition(":")
+                    x, y, w, h = map(float, frac.split(","))
+                    self.assertEqual((name, c["zoom"], c.get("fit")), ("spectrogramPane", 1, None))
+                    self.assertLess(x, 0.3 - 20 / 1239)  # (the drag's two ends, 70 % and 30 %, with the time box)
+                    self.assertGreater(x + w, 0.7 + 20 / 1239)
+                    self.assertLess(y, 0.1)  # both lanes, down to the time on the bottom edge
+                    self.assertAlmostEqual(y + h, 1.0)
+
+    def test_a_sheet_of_a_recordings_frames_carries_its_facts(self):
+        rd = tempfile.mkdtemp(prefix="round-", dir=_TMP)
+        x = dict(file="pan.png", title="A pan", size=[600, 400], mp=240000, theme="dark", group="pan", tiles=[],
+                 one_to_one=True, recording="vi-pan")
+        strips = [dict(name="vi-pan", theme="dark", metrics=dict(stand_in=True))]
+        with mock.patch.object(pack, "strip_facts", lambda m: "the pan's facts"):
+            pack.write_core_facts(rd, [("sheet", x)], strips, [], out="FACTS.md", ids=["F06"])
+        with open(os.path.join(rd, "FACTS.md")) as f:
+            self.assertIn("- The recording (vi-pan): the pan's facts", f.read())
+
+
 class ChangeCrop(unittest.TestCase):
     """A recording's frames cut around all that changes after the action, with an item of a dialog shot's layout."""
 
