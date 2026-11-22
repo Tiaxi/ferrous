@@ -959,8 +959,20 @@ Item {
                     objectName: "albumArtCompareButton"
                     visible: root.comparisonModeAvailable
                     Layout.topMargin: Math.round(12 * root.infoScale)
+                    // Its glyph on the column's text edge (13 px in from it,
+                    // it read as a stray indent): flat, its hover and ring
+                    // reach out into the column's padding, as Copy Path's do.
+                    Layout.leftMargin: -leftPadding
+                    // Its box the size the glyph is drawn at, which a larger
+                    // one centres it in, off that edge (7 px in at 24 pt).
+                    icon.width: Kirigami.Units.iconSizes.roundedIconSize(root.detailsIconSize)
+                    icon.height: Kirigami.Units.iconSizes.roundedIconSize(root.detailsIconSize)
                     flat: true
-                    icon.name: "view-refresh"
+                    // Two views and arrows between them, drawn for 16 px in
+                    // both Breeze themes: a switch (view-refresh said reload,
+                    // exchange-positions is drawn for 22 px and smudged, and
+                    // document-swap's one sheet said replace, as Apply does).
+                    icon.name: "swap-panels"
                     text: root.sourceKind === "itunes"
                         ? I18n.i18nc("@action:button", "Show Current Album Art")
                         : I18n.i18nc("@action:button artwork found on iTunes", "Show iTunes Artwork")

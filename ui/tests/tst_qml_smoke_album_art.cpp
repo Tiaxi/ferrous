@@ -4689,6 +4689,21 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
                             .arg(sceneRectOf(compare).left()).arg(sceneRectOf(compare).right())
                             .arg(sceneRectOf(compareLabel).left()).arg(sceneRectOf(compareLabel).right())));
     QVERIFY(compare->width() >= compareLabel->implicitWidth() + compareGlyph->width());
+    // It starts on the column's text edge, its glyph's box as large as the
+    // glyph is drawn (13 px in from the edge, it read as a stray indent),
+    // and the glyph says switch, not reload.
+    QVERIFY2(std::abs(sceneRectOf(compareGlyph).left() - sceneRectOf(title).left()) <= 0.5,
+             qPrintable(QStringLiteral("the glyph at %1, the text at %2")
+                            .arg(sceneRectOf(compareGlyph).left()).arg(sceneRectOf(title).left())));
+    QCOMPARE(compareGlyph->property("paintedWidth").toReal(), compareGlyph->width());
+    QCOMPARE(QQmlExpression(qmlContext(compare), compare, QStringLiteral("icon.name")).evaluate().toString(),
+             QStringLiteral("swap-panels"));
+    for (const QString &theme : {QStringLiteral("breeze"), QStringLiteral("breeze-dark")}) {
+        const QString file = QStandardPaths::locate(
+            QStandardPaths::GenericDataLocation,
+            QStringLiteral("icons/%1/actions/16/swap-panels.svg").arg(theme));
+        QVERIFY2(!file.isEmpty(), qPrintable(QStringLiteral("%1 draws no 16 px swap-panels").arg(theme)));
+    }
     QQuickItem *gap = itemNamed(compare, QStringLiteral("albumArtDetailsButtonFocusGap"));
     QVERIFY(gap != nullptr && gap->isVisible());
     QCOMPARE(borderColorOf(gap), strip);
