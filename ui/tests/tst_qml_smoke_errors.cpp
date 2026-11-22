@@ -514,8 +514,10 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     QCOMPARE(messageItem->property("font").value<QFont>().weight(), QFont::Normal);
     QCOMPARE(details->property("text").toString(),
              QStringLiteral("Unsaved changes can include settings, queue changes and Last.fm scrobbles. "
-                            "Retry saves again, for example after freeing disk space. Quit Anyway closes "
-                            "Ferrous and loses them."));
+                            "Retry saves again. Quit Anyway loses them."));
+    // No cure that contradicts the cause above it, such as a denied
+    // permission (it advised freeing disk space under one).
+    QVERIFY(!details->property("text").toString().contains(QStringLiteral("disk space")));
     QVERIFY(sceneRectOf(details).top() >= sceneRectOf(messageItem).bottom());
     QVERIFY2(!headingText.contains(QStringLiteral("os error")), qPrintable(headingText));
     QVERIFY(sceneRectOf(messageItem).top() >= sceneRectOf(heading).bottom());

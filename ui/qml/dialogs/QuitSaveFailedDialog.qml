@@ -89,8 +89,9 @@ Components.CompactDialogWindow {
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
         // It names what it speaks of, rather than "They", which could be
-        // read as the error above it.
+        // read as the error above it. It suggests no cure: the error above
+        // says the cause, which is not always a full disk.
         text: I18n.i18nc("@info", "Unsaved changes can include settings, queue changes and Last.fm scrobbles. "
-            + "Retry saves again, for example after freeing disk space. Quit Anyway closes Ferrous and loses them.")
+            + "Retry saves again. Quit Anyway loses them.")
     }
 }
