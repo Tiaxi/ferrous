@@ -4520,13 +4520,19 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QVERIFY(tags->isVisible());
     QVERIFY(editor.dirty());
-    // Escape asks too; Discard closes, the tag editor, as the question
-    // says ("Discard closes the dialog" read as the question).
+    // Escape asks too; Discard closes the tag editor, as the question
+    // says, and the body says only what it loses ("Save writes the current
+    // edits." read the button out again), before quitting too.
     QVERIFY(QTest::qWaitForWindowActive(tags));
     QTest::keyClick(tags, Qt::Key_Escape);
     QVERIFY(waitForDialogWindow(confirm));
-    QCOMPARE(visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDetails"))->property("text").toString(),
-             QStringLiteral("Save writes the current edits. Discard drops every unsaved change and closes the tag editor."));
+    QQuickItem *lost = visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDetails"));
+    QVERIFY(lost != nullptr);
+    QCOMPARE(lost->property("text").toString(), QStringLiteral("Discard drops every unsaved change."));
+    const QVariant purpose = confirm->property("purpose");
+    confirm->setProperty("purpose", QStringLiteral("quit"));
+    QCOMPARE(lost->property("text").toString(), QStringLiteral("Discard drops every unsaved change."));
+    confirm->setProperty("purpose", purpose);
     click(windowOf(confirm), visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDiscardButton")));
     QTRY_VERIFY(!tags->isVisible());
     QVERIFY(!editor.isOpen());
