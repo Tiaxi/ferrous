@@ -36,6 +36,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <optional>
 #include <tuple>
 #include <utility>
 
@@ -5342,14 +5343,14 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
         QVERIFY2(failure.isEmpty(), qPrintable(QString::fromLatin1(where) + QStringLiteral(": ") + failure));
     };
 
-    // The time from the click to the first frame that showed the
-    // spectrogram, in ms, or -1.
-    QElapsedTimer sinceClick;
-    qint64 firstShownMs = -1;
+    // Whether the next frame drawn after `nextFrameAfter` (while it is 0
+    // or more) showed the spectrogram, once it has been drawn.
+    int nextFrameAfter = -1;
+    std::optional<bool> nextFrameShowed;
     FrameSampler shownConnection(window, [&]() {
-        if (sinceClick.isValid() && firstShownMs < 0 && spectrogram->isVisible()
-            && spectrogram->opacity() > 0.0) {
-            firstShownMs = sinceClick.elapsed();
+        if (nextFrameAfter >= 0 && frames > nextFrameAfter) {
+            nextFrameShowed = spectrogram->isVisible() && spectrogram->opacity() > 0.0;
+            nextFrameAfter = -1;
         }
     });
     // Waits for `count` more frames.
@@ -5421,10 +5422,11 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
 
         // Back to the spectrogram: it comes in at the click, whole, with
         // nothing to wait for: its view is drawn, and the fade starts with
-        // the click.
+        // the click. The fade runs on the test's time, a frame at a time, so
+        // that how fast the machine draws changes nothing of what a frame
+        // shows.
         QVERIFY(spectrogram->property("viewFilled").toBool());
-        firstShownMs = -1;
-        sinceClick.start();
+        SteppedAnimationDriver driver;
         QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
         QVERIFY(spectrogram->isEnabled());
         if (animated) {
@@ -5435,12 +5437,21 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
             QVERIFY(!waveform->isVisible());
             QCOMPARE(spectrogram->opacity(), 1.0);
         }
-        window->update();
-        QVERIFY(QTest::qWaitFor([&]() { return firstShownMs >= 0; }, 2000));
-        // Frames, not a session's columns (some 250 ms), away: the bound
-        // leaves room for a loaded test machine's software rendering.
-        QVERIFY2(firstShownMs < 125, qPrintable(QStringLiteral("shown %1 ms after the click").arg(firstShownMs)));
-        sinceClick.invalidate();
+        // The first frame of the fade (none with animations off) shows it:
+        // the frame drawn next. Frames, not a session's columns (some
+        // 250 ms), away: the test sends no columns after the click, so a
+        // spectrogram that waited for them would not show in it.
+        if (animated) {
+            QVERIFY(driver.step(16));
+        }
+        nextFrameAfter = frames;
+        nextFrameShowed.reset();
+        QVERIFY(waitFrames(1));
+        QVERIFY(nextFrameShowed.has_value());
+        QVERIFY2(*nextFrameShowed, qPrintable(QStringLiteral("the fade's first frame showed no spectrogram: "
+                                                             "visible %1, at %2")
+                                                  .arg(spectrogram->isVisible())
+                                                  .arg(spectrogram->opacity())));
         check("the spectrogram's view");
         if (animated) {
             if (round == 0) {
@@ -5454,6 +5465,8 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
                 }
                 QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
             }
+            // The rest of the fade, a frame drawn at each step.
+            QVERIFY(framesToEnd(driver, window, fade, [&]() { QVERIFY(waitFrames(1)); }));
             QTRY_VERIFY(!waveform->isVisible());
         }
         QCOMPARE(spectrogram->opacity(), 1.0);
