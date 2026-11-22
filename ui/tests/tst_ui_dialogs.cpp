@@ -742,7 +742,7 @@ private:
     void checkEditTagsStatusSaysWhatFailedWhole(DialogsWindow &main, qreal pointSize);
     void checkDialogsUseOneCharacterEllipsesAndNoTextGlyphs(QQuickWindow *window);
     void checkDialogsPutTheirButtonsInKdesOrder(QQuickWindow *window);
-    void checkDialogsPutTheirButtonsOnTheContentInset(QQuickWindow *window);
+    void checkDialogsPutTheirButtonsOnTheContentInset(QQuickWindow *window, qreal pointSize);
     void checkDialogButtonGlyphsFollowTheFont(QQuickWindow *window, qreal pointSize);
     void checkDialogsShareOneHeadingStyle(QQuickWindow *window);
     void checkDialogsHoldTheirContents(DialogsWindow &main);
@@ -6805,7 +6805,7 @@ void UiDialogsTest::dialogsShareOneLook() {
     QVERIFY(!QTest::currentTestFailed());
     QVERIFY(openTheParentDialogs(main));
     runInTurn({[&] { checkDialogsPutTheirButtonsInKdesOrder(window); },
-               [&] { checkDialogsPutTheirButtonsOnTheContentInset(window); },
+               [&] { checkDialogsPutTheirButtonsOnTheContentInset(window, 0); },
                [&] { checkDialogButtonGlyphsFollowTheFont(window, 0); },
                [&] { checkDialogsShareOneHeadingStyle(window); }});
     closeTheParentDialogs(main);
@@ -6845,15 +6845,28 @@ void UiDialogsTest::checkDialogsPutTheirButtonsInKdesOrder(QQuickWindow *window)
     }
 }
 
-// A dialog's buttons sit on its content's inset, a grid unit from the
-// window's sides and bottom, as the content is from its sides and top (the
-// compact dialogs' buttons were 9 px from the edges, their content 19 px).
+// A dialog's buttons sit on its content's inset, as far from the window's
+// sides and bottom as the content is from its sides and top (the compact
+// dialogs' buttons were 9 px from the edges, their content 19 px).
 // Buttons that share the row, such as Configure's Defaults, start on the
-// inset too, on the same line.
-void UiDialogsTest::checkDialogsPutTheirButtonsOnTheContentInset(QQuickWindow *window) {
-    // A grid unit: the compact dialogs' content inset.
-    const qreal inset = object(window, QStringLiteral("quitSaveFailedDialog"))->property("contentPadding").toReal();
-    QVERIFY(inset > 0);
+// inset too, on the same line. The inset is a grid unit with the default
+// font and follows a larger one, up to 32 px at 24 pt (it stayed 18 px
+// around 24 pt text, which crowded the window's edge).
+void UiDialogsTest::checkDialogsPutTheirButtonsOnTheContentInset(QQuickWindow *window, qreal pointSize) {
+    const qreal gridUnit = evaluate(object(window, QStringLiteral("quitSaveFailedDialog")),
+                                    QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+    QVERIFY(gridUnit > 0);
+    const qreal inset = pointSize >= 24 ? 32.0 : gridUnit;
+    // Every dialog in a window of its own has the one inset.
+    for (const char *name : {"quitSaveFailedDialog", "libraryRootNameDialog", "removeLibraryRootConfirmDialog",
+                             "tagEditorCloseConfirmDialog", "tagEditorQuitWaitDialog", "autoNumberDialog",
+                             "renamePreviewDialog", "tagEditorStatusDetailsDialog", "clearDiagnosticsConfirmDialog",
+                             "itunesArtworkDialog", "aboutDialog", "aboutKdeDialog", "diagnosticsDialog",
+                             "keyboardShortcutsDialog", "preferencesDialog", "tagEditorDialog"}) {
+        QObject *dialog = object(window, QString::fromLatin1(name));
+        QVERIFY2(dialog != nullptr, name);
+        QCOMPARE(dialog->property("contentPadding").toReal(), inset);
+    }
     // The dialogs with buttons on the left of the row too.
     const QStringList leftButtons{QStringLiteral("aboutDialog"), QStringLiteral("preferencesDialog"),
                                   QStringLiteral("tagEditorDialog")};
@@ -7124,8 +7137,8 @@ QList<bool> formModes(QObject *preferences, QQuickItem *stack) {
 
 } // namespace
 
-// The dialogs at 24 pt: Configure's lists, the buttons' glyphs, and About,
-// Configure and Edit Tags whole. The last check widens Configure.
+// The dialogs at 24 pt: Configure's lists, the buttons' glyphs and inset,
+// and About, Configure and Edit Tags whole. The last check widens Configure.
 void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     const ScopedApplicationFont font(24);
     DialogsWindow main;
@@ -7139,6 +7152,7 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
                [&] {
                    QVERIFY(openTheParentDialogs(main));
                    checkDialogButtonGlyphsFollowTheFont(window, 24);
+                   checkDialogsPutTheirButtonsOnTheContentInset(window, 24);
                    closeTheParentDialogs(main);
                },
                [&] { checkDialogsHoldTheirContents(main); }});
@@ -8505,7 +8519,8 @@ void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont_data() {
 
 // The compact dialogs' room between paragraphs grows with the font, 12 px
 // at 10 pt (at 24 pt 12 px between 44 px lines ran the blocks together),
-// their inset stays, and each still fits a 1000 px screen.
+// as does their inset, 18 px at 10 pt and 32 px at 24 pt, and each still
+// fits a 1000 px screen.
 void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont() {
     QFETCH(qreal, pointSize);
     const ScopedNotoSans font(pointSize);
@@ -8558,7 +8573,7 @@ void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont() {
         QVERIFY2(content != nullptr, name);
         QTRY_VERIFY2(!layoutPendingUnder(content), name);
         QCOMPARE(content->property("spacing").toReal(), spacing);
-        QCOMPARE(dialog->property("contentPadding").toReal(), 18.0);
+        QCOMPARE(dialog->property("contentPadding").toReal(), pointSize >= 24 ? 32.0 : 18.0);
         const int fitted = dialog->property("fittedHeight").toInt();
         QVERIFY2(fitted <= 1000 - 2 * 18 - 28, qPrintable(QStringLiteral("%1: %2").arg(QLatin1String(name)).arg(fitted)));
         QVERIFY2(QMetaObject::invokeMethod(dialog, "dismiss"), name);

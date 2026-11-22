@@ -595,10 +595,10 @@ Components.DialogWindow {
     ColumnLayout {
         id: shortcutsContent
         anchors.fill: parent
-        anchors.leftMargin: Kirigami.Units.gridUnit
-        anchors.rightMargin: Kirigami.Units.gridUnit
-        anchors.topMargin: Kirigami.Units.gridUnit
-        anchors.bottomMargin: Kirigami.Units.gridUnit
+        anchors.leftMargin: root.contentPadding
+        anchors.rightMargin: root.contentPadding
+        anchors.topMargin: root.contentPadding
+        anchors.bottomMargin: root.contentPadding
         spacing: Kirigami.Units.largeSpacing
 
         // Enter presses the default button, as in KDE's dialogs.

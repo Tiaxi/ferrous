@@ -453,8 +453,6 @@ Components.DialogWindow {
     asksBeforeClosing: true
     onCloseRequested: root.requestClose()
 
-    // The content's inset from the window's edges.
-    readonly property real contentPadding: Kirigami.Units.gridUnit
     readonly property real contentSpacing: Kirigami.Units.gridUnit - 2
     // The table's width up to the end of a column: its frame, its insets
     // and the columns before it.

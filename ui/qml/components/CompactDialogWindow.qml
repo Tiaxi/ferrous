@@ -23,10 +23,8 @@ DialogWindow {
 
     default property alias content: body.data
     readonly property alias body: body
-    readonly property real contentPadding: Kirigami.Units.gridUnit
     // Between paragraphs: 12 px with the default font, and more with a
     // larger one (12 px between 44 px lines ran them together at 24 pt).
-    // The inset stays.
     readonly property real contentSpacing: root.uiPalette.scaledSize(Kirigami.Units.largeSpacing
         + Kirigami.Units.smallSpacing)
     // Where the keyboard goes as it opens.

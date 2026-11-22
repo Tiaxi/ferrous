@@ -24,11 +24,9 @@ Components.DialogWindow {
     objectName: "aboutKdeDialog"
     title: I18n.i18nc("@title:window", "About KDE")
 
-    // About Ferrous's geometry: the content's inset from the window's
-    // edges, the page's inset and its gap under the heading, where About
-    // Ferrous has its tabs and the gap under them, and the room between
-    // the page's last line and the buttons.
-    readonly property real contentPadding: Kirigami.Units.gridUnit
+    // About Ferrous's geometry: the page's inset and its gap under the
+    // heading, where About Ferrous has its tabs and the gap under them,
+    // and the room between the page's last line and the buttons.
     readonly property real pageInset: root.uiPalette.scaledSize(Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing)
     readonly property real iconSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
     readonly property real headingInset: Math.max(0, Math.round(root.pageInset - root.iconSize / 12))

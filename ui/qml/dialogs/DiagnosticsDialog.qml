@@ -70,11 +70,11 @@ Components.DialogWindow {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.leftMargin: Kirigami.Units.gridUnit
-        anchors.rightMargin: Kirigami.Units.gridUnit
-        anchors.topMargin: Kirigami.Units.gridUnit
+        anchors.leftMargin: root.contentPadding
+        anchors.rightMargin: root.contentPadding
+        anchors.topMargin: root.contentPadding
         // The buttons have no room of their own above them.
-        anchors.bottomMargin: Kirigami.Units.gridUnit
+        anchors.bottomMargin: root.contentPadding
         spacing: Kirigami.Units.largeSpacing
 
         // The log's path on a line of its own, and under it every action in
