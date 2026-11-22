@@ -35,15 +35,41 @@ Preferences.PreferencesPage {
     // Without Last.fm in the build, the page is this one statement: it was
     // the Account line, under the setting it disables and a help about a
     // rule the build hasn't, and then a lone disabled check box under it.
-    Label {
-        objectName: "lastFmUnavailableLabel"
+    // Centred in the room under the title, under the page's own glyph (one
+    // line at the top left stood over the empty page). Over the page, not
+    // in its form, which keeps its height for Configure's. Built from its
+    // parts, as the iTunes dialog's empty state is: PlaceholderMessage's
+    // selectable text would take Ctrl+C and Ctrl+A from the Edit menu.
+    property Item unavailablePlaceholder: ColumnLayout {
+        objectName: "lastFmUnavailable"
+        parent: root
         visible: !root.buildConfigured
-        Layout.fillWidth: true
-        Layout.preferredWidth: Math.min(implicitWidth, Kirigami.Units.gridUnit * 24)
-        Layout.maximumWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 24)
-        wrapMode: Text.Wrap
-        textFormat: Text.PlainText
-        text: I18n.i18nc("@info", "Last.fm isn’t available in this build.")
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: Math.round(Math.max(root.bodyTop, root.bodyTop + (root.height - root.bodyTop - height) / 2))
+        width: Math.min(root.width - 2 * root.pageSideInset, root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 24))
+        spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+
+        // 48 px with the default font, and larger with a larger one, as
+        // the line under it.
+        Kirigami.Icon {
+            objectName: "lastFmUnavailableIcon"
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+            Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+            source: Qt.resolvedUrl("../assets/lastfm.svg")
+            isMask: true
+            color: root.uiPalette.textSecondary
+            Accessible.ignored: true
+        }
+
+        Label {
+            objectName: "lastFmUnavailableLabel"
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.Wrap
+            textFormat: Text.PlainText
+            text: I18n.i18nc("@info", "Last.fm isn’t available in this build.")
+        }
     }
 
     CheckBox {

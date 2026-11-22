@@ -3190,7 +3190,10 @@ void UiDialogsTest::checkLastFmPageShowsOnlyTheButtonsThatApply(QQuickWindow *wi
 // In a build without Last.fm, scrobbling can't be turned on: the build
 // can't send a scrobble, and the page is one statement of why, with no
 // check box to tick (a lone disabled one stood under it). No help on when
-// it would send one, no account and no button to connect either.
+// it would send one, no account and no button to connect either. The
+// statement is centred in the room under the title, 12 px under the page's
+// own glyph, 48 px in the secondary ink (one line at the top left stood
+// over the empty page).
 void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", false));
@@ -3203,6 +3206,31 @@ void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *win
     QCOMPARE(hex(reason->property("color").value<QColor>()), hex(tokenOf(window, "text")));
     QQuickItem *page = visibleNamed(prefs, QStringLiteral("preferencesPages"))->childItems().at(3);
     QTRY_VERIFY(!layoutPendingUnder(page));
+    QQuickItem *glyph = visibleNamed(prefs, QStringLiteral("lastFmUnavailableIcon"));
+    QVERIFY(glyph != nullptr);
+    QCOMPARE(glyph->property("source").toUrl().fileName(), QStringLiteral("lastfm.svg"));
+    QCOMPARE(glyph->size(), QSizeF(48, 48));
+    QVERIFY(glyph->property("isMask").toBool());
+    QCOMPARE(hex(glyph->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
+    const QRectF glyphRect = sceneRect(glyph);
+    const QRectF reasonRect = sceneRect(reason);
+    const QRectF pageRect = sceneRect(page);
+    QVERIFY2(qAbs(reasonRect.top() - glyphRect.bottom() - 12) < 0.5,
+             qPrintable(describeItem(glyph) + QStringLiteral(" over ") + describeItem(reason)));
+    QCOMPARE(reason->property("lineCount").toInt(), 1);
+    QCOMPARE(reason->property("horizontalAlignment").toInt(), int(Qt::AlignHCenter));
+    // The glyph and the line's text on the page's middle, across and in the
+    // room under the title.
+    QQuickItem *title = itemsNamed(page, QStringLiteral("preferencesPageTitle")).value(0);
+    QVERIFY(title != nullptr);
+    const qreal across = pageRect.center().x();
+    QVERIFY2(qAbs(glyphRect.center().x() - across) <= 1 && qAbs(reasonRect.center().x() - across) <= 1,
+             qPrintable(describeItem(reason) + QStringLiteral(" in ") + describeRect(pageRect)));
+    // The title's 12 px under it count to it.
+    const qreal roomTop = sceneRect(title).bottom() + 12;
+    QVERIFY2(qAbs((glyphRect.top() - roomTop) - (pageRect.bottom() - reasonRect.bottom())) <= 1,
+             qPrintable(describeItem(glyph) + QStringLiteral(" and ") + describeItem(reason)
+                        + QStringLiteral(" in ") + describeRect(pageRect)));
     QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmScrobblingCheckBox")) == nullptr);
     QQuickItem *box = named(prefs, QStringLiteral("lastFmScrobblingCheckBox"));
     QVERIFY(box != nullptr);
