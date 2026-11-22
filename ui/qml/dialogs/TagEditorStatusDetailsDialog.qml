@@ -16,12 +16,9 @@ import "../logic/BreakableText.js" as BreakableText
 // the heading's x past the first). The heading of what failed is semibold,
 // in the negative colour; that of what succeeded is regular, secondary, so
 // the summary leads (all three were semibold). A failed file's name is on a
-// line of its own, semibold in the text's colour, with why under it, in
-// plain words in the same colour where that is known, and the system's
-// text under that, secondary, as it gave it (the name ran straight into
-// the error, in one ink, after what succeeded; then the error was all that
-// said why, and read as a log). It opens as tall as they are, up to a
-// limit.
+// line of its own, semibold in the text's colour, with the error under it,
+// secondary (the name ran straight into the error, in one ink, after what
+// succeeded). It opens as tall as they are, up to a limit.
 Components.DialogWindow {
     id: root
 
@@ -50,8 +47,7 @@ Components.DialogWindow {
 
     // TagEditorController.statusDetailSections as rich text: each heading
     // a paragraph, each file's name one of its own and, where it failed,
-    // its cause if known and the error under it, 2 px apart, all indented;
-    // 8 px between failed
+    // the error under it, 2 px apart, both indented; 8 px between failed
     // files and 12 px before each section after the first (not a grid
     // unit, 18 px). A path in an error breaks between its folders, those
     // that fit on a line `width` wide whole, and an error's code stays
@@ -68,7 +64,6 @@ Components.DialogWindow {
         const errorGap = root.uiPalette.scaledSize(2)
         const textColor = root.cssColor(root.uiPalette.text)
         const errorStyle = "font-weight:400; color:" + root.cssColor(root.uiPalette.textSecondary)
-        const causeStyle = "font-weight:400; color:" + textColor
         let html = ""
         for (let i = 0; i < sections.length; ++i) {
             const section = sections[i] || {}
@@ -83,10 +78,6 @@ Components.DialogWindow {
                 const file = items[j] || {}
                 html += root.paragraph(BreakableText.breakableMessage(String(file.name || "").trim(), fits),
                     failed && j > 0 ? fileGap : 0, indent, nameStyle)
-                const cause = String(file.cause || "")
-                if (cause.length > 0) {
-                    html += root.paragraph(cause, errorGap, indent, causeStyle)
-                }
                 const error = String(file.error || "").trim()
                 if (error.length > 0) {
                     html += root.paragraph(BreakableText.breakableMessage(error, fits), errorGap, indent, errorStyle)

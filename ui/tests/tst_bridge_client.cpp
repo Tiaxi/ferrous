@@ -252,9 +252,6 @@ private slots:
     void tagEditorLoadReportsUnreadableFiles();
     void tagEditorAutoNumberRestartsInEachFolder();
     void tagEditorReportsFailuresAsAProperty();
-    void tagEditorTellsWhyAFileFailedWhereItIsKnown_data();
-    void tagEditorTellsWhyAFileFailedWhereItIsKnown();
-    void tagEditorTellsARealReadOnlyFileFromItsFolder();
     void tagEditorKeepsExtraValuesUntilTheirFieldIsSaved();
     void tagEditorSelectionIsAModelRole();
     void tagEditorTellsWhetherARowHasAnError();
@@ -1437,108 +1434,6 @@ void BridgeClientTest::tagEditorReportsFailuresAsAProperty() {
     QVERIFY(succeeding.statusDetails().contains(QStringLiteral("error failed.flac")));
     QVERIFY(!succeeding.statusIsError());
     QCOMPARE(succeededReports.size(), 0);
-}
-
-// A failure's cause is given in plain words where the system's error code
-// tells it, and only there; the folder is named only where it is the
-// folder that can't be written.
-void BridgeClientTest::tagEditorTellsWhyAFileFailedWhereItIsKnown_data() {
-    QTest::addColumn<QString>("error");
-    QTest::addColumn<QString>("cause");
-    const QString folder = QStringLiteral("You don’t have permission to write in this folder.");
-    const QString file = QStringLiteral("You don’t have permission to change this file.");
-    const QString replace = QStringLiteral("You don’t have permission to replace this file.");
-    const QString read = QStringLiteral("You don’t have permission to read this file.");
-    const QString rename = QStringLiteral("Renaming stopped: you don’t have permission.");
-    const QString readOnly = QStringLiteral("The file system is read-only.");
-    const QString noSpace = QStringLiteral("There isn’t enough free space on the disk.");
-    QTest::newRow("folder, EACCES")
-        << QStringLiteral("failed to create temporary file in /m/Album: Permission denied (os error 13)") << folder;
-    QTest::newRow("folder, EPERM")
-        << QStringLiteral("failed to create temporary file in /m/Album: Operation not permitted (os error 1)") << folder;
-    QTest::newRow("file")
-        << QStringLiteral("failed to open /m/a.flac for writing: Permission denied (os error 13)") << file;
-    QTest::newRow("replacing")
-        << QStringLiteral("failed to replace /m/a.flac with /m/.a.tmp: Operation not permitted (os error 1)") << replace;
-    QTest::newRow("reading")
-        << QStringLiteral("failed to read tag data for /m/a.flac: Permission denied (os error 13)") << read;
-    QTest::newRow("renaming")
-        << QStringLiteral("failed to rename /m/a.flac to /m/b.flac: Permission denied (os error 13)") << rename;
-    QTest::newRow("renaming in stages")
-        << QStringLiteral("failed to stage rename /m/a.flac to /m/.t: Permission denied (os error 13)") << rename;
-    QTest::newRow("translated system text")
-        << QStringLiteral("failed to create temporary file in /m: Lupa evätty (os error 13)") << folder;
-    QTest::newRow("read-only")
-        << QStringLiteral("failed to open /m/a.flac for writing: Read-only file system (os error 30)") << readOnly;
-    QTest::newRow("no space")
-        << QStringLiteral("failed to copy /m/a.flac to /m/.a.tmp: No space left on device (os error 28)") << noSpace;
-    // Nothing is guessed: not a permission of the user's, not the disk's
-    // space, or no code to tell by.
-    QTest::newRow("an attribute refused")
-        << QStringLiteral("failed to keep extended attribute user.x of /m/a.flac: Operation not permitted (os error 1)")
-        << QString();
-    QTest::newRow("no room for an attribute")
-        << QStringLiteral("failed to keep extended attribute user.x of /m/a.flac: No space left on device (os error 28)")
-        << QString();
-    QTest::newRow("another code")
-        << QStringLiteral("failed to flush /m/.a.tmp: Input/output error (os error 5)") << QString();
-    QTest::newRow("no code")
-        << QStringLiteral("failed to save tags for /m/a.flac: permission denied") << QString();
-    QTest::newRow("a code within the message")
-        << QStringLiteral("no writable tag type available for /m/(os error 13)/a.flac") << QString();
-}
-
-void BridgeClientTest::tagEditorTellsWhyAFileFailedWhereItIsKnown() {
-    QFETCH(QString, error);
-    QFETCH(QString, cause);
-    const QJsonObject result{{QStringLiteral("path"), QStringLiteral("/fixture/Album 0/0.flac")},
-                             {QStringLiteral("ok"), false},
-                             {QStringLiteral("error"), error}};
-    TagEditorController editor(nullptr);
-    QVERIFY(loadTagEditorRows(
-        editor, tagEditorRows(1, 1),
-        {{TagEditorController::Operation::Save,
-          QJsonDocument(QJsonObject{{QStringLiteral("results"), QJsonArray{result}}}).toJson(QJsonDocument::Compact)}}));
-    editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
-    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
-    QVERIFY(editor.save());
-    QTRY_COMPARE(saved.size(), 1);
-    const QVariantMap item = editor.statusDetailSections().first().toMap().value(QStringLiteral("items"))
-                                 .toList().first().toMap();
-    QCOMPARE(item.value(QStringLiteral("cause")).toString(), cause);
-    QCOMPARE(item.contains(QStringLiteral("cause")), !cause.isEmpty());
-    // The system's text stays verbatim.
-    QCOMPARE(item.value(QStringLiteral("error")).toString(), error);
-}
-
-// The backend's own words for a file that may not be changed are the ones
-// the cause is told by: a real save, of a read-only file in a folder that
-// may be written to.
-void BridgeClientTest::tagEditorTellsARealReadOnlyFileFromItsFolder() {
-    QTemporaryDir dir;
-    QVERIFY(dir.isValid());
-    const QString path = dir.filePath(QStringLiteral("song.flac"));
-    QFile file(path);
-    QVERIFY(file.open(QIODevice::WriteOnly));
-    const QByteArray flac = flacWithComments({QStringLiteral("TITLE=Old")});
-    QCOMPARE(file.write(flac), qint64(flac.size()));
-    file.close();
-    QVERIFY(file.setPermissions(QFile::ReadOwner));
-    const auto restorePermissions = qScopeGuard([&] { file.setPermissions(QFile::ReadOwner | QFile::WriteOwner); });
-    if (QFileInfo(path).isWritable()) {
-        QSKIP("The user may write to any file, such as root.");
-    }
-    TagEditorController editor(nullptr);
-    QVERIFY(editor.openForPaths({path}));
-    QTRY_VERIFY(!editor.loading());
-    editor.setCell(0, QStringLiteral("title"), QStringLiteral("New"));
-    QSignalSpy saved(&editor, &TagEditorController::saveFinished);
-    QVERIFY(editor.save());
-    QTRY_COMPARE(saved.size(), 1);
-    const QVariantMap item = editor.statusDetailSections().first().toMap().value(QStringLiteral("items"))
-                                 .toList().first().toMap();
-    QCOMPARE(item.value(QStringLiteral("cause")).toString(),
-             QStringLiteral("You don’t have permission to change this file."));
 }
 
 void BridgeClientTest::tagEditorKeepsExtraValuesUntilTheirFieldIsSaved() {
