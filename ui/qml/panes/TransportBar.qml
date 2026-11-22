@@ -849,9 +849,39 @@ ToolBar {
                     }
                 }
 
+                // A 1 px line at the hovering pointer, which comes and goes
+                // with the time box over it: at the box's opacity while the
+                // box shows, or fades out, the hover's time, where that last
+                // was. A gesture shows its time at the playhead with no line.
+                // It is under the playhead and shows only with a gap as wide
+                // as the playhead's line between them: on or beside it, as
+                // after a click, the playhead alone marks the box's time.
+                Rectangle {
+                    id: seekHoverLine
+                    objectName: "seekHoverLine"
+                    opacity: seekTimeBox.showsHover && seekTimeBox.contentItem.visible
+                        && !seekHoverLine.atPlayhead() ? seekTimeBox.opacity : 0
+                    visible: opacity > 0
+                    antialiasing: false
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    x: Math.max(0, Math.min(parent.width - width,
+                        Math.floor(seekSlider.hoverX * seekSlider.windowDevicePixelRatio)
+                            / seekSlider.windowDevicePixelRatio))
+                    width: root.devicePixelLine
+                    color: root.seekHoverLineColor
+                    function atPlayhead() {
+                        const gap = seekSlider.playheadLineWidth
+                        return seekPlayhead.visible
+                            && x + width > seekPlayhead.x - gap
+                            && x < seekPlayhead.x + seekPlayhead.width + gap
+                    }
+                }
+
                 // The playhead: its casing, cut to the bar at either end,
                 // with the line in it.
                 Rectangle {
+                    id: seekPlayhead
                     objectName: "seekPlayhead"
                     visible: seekSlider.trackLoaded
                     antialiasing: false
@@ -871,24 +901,6 @@ ToolBar {
                         width: seekSlider.playheadLineWidth
                         color: root.seekPlayheadColor
                     }
-                }
-
-                // A 1 px line at the hovering pointer, which comes and goes
-                // with the time box over it: at the box's opacity while the
-                // box shows, or fades out, the hover's time, where that last
-                // was. A gesture shows its time at the playhead with no line.
-                Rectangle {
-                    objectName: "seekHoverLine"
-                    opacity: seekTimeBox.showsHover && seekTimeBox.contentItem.visible ? seekTimeBox.opacity : 0
-                    visible: opacity > 0
-                    antialiasing: false
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    x: Math.max(0, Math.min(parent.width - width,
-                        Math.floor(seekSlider.hoverX * seekSlider.windowDevicePixelRatio)
-                            / seekSlider.windowDevicePixelRatio))
-                    width: root.devicePixelLine
-                    color: root.seekHoverLineColor
                 }
 
                 // Keyboard focus: one 2 px ring 3 px around the bar.
