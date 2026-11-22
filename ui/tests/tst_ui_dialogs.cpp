@@ -566,6 +566,8 @@ private slots:
     void lastFmButtonsHaveGlyphsAtTheDialogsSize();
     void aboutDialogsLayOutTheirPages_data();
     void aboutDialogsLayOutTheirPages();
+    void aboutsPageInsetFollowsTheFont_data();
+    void aboutsPageInsetFollowsTheFont();
     void recentIssuesLayOutTheirRows();
     void recentIssuesHeaderFollowsALargeFont();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
@@ -3409,6 +3411,53 @@ void UiDialogsTest::checkAboutPagesNeverRunUnderTheButtons(QQuickWindow *window)
         QVERIFY(!QTest::currentTestFailed());
     }
     QVERIFY(reject(dialog));
+}
+
+void UiDialogsTest::aboutsPageInsetFollowsTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The page of About, and of About KDE, has 12 px inside its frame, as much
+// larger as a larger font (8 px stayed under 32 px text at 24 pt), and the
+// icon's drawing, a twelfth of the icon in, starts where the page's text
+// does.
+void UiDialogsTest::aboutsPageInsetFollowsTheFont() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    const qreal scale = paletteOf(main.window)->property("fontScale").toReal();
+    const qreal inset = std::max(12.0, std::round(12.0 * scale));
+    QObject *dialog = object(main.window, QStringLiteral("aboutDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *about = windowOf(dialog);
+    QQuickItem *frame = visibleNamed(about, QStringLiteral("aboutPagesFrame"));
+    QQuickItem *text = visibleNamed(about, QStringLiteral("aboutDescription"));
+    QQuickItem *icon = visibleNamed(about, QStringLiteral("aboutIcon"));
+    QVERIFY(frame != nullptr && text != nullptr && icon != nullptr);
+    QTRY_VERIFY(!layoutPending(frame) && !layoutPending(icon));
+    QCOMPARE(sceneRect(text).left() - sceneRect(frame).left(), inset);
+    QCOMPARE(sceneRect(text).top() - sceneRect(frame).top(), inset);
+    QVERIFY2(qAbs(sceneRect(icon).left() + icon->width() / 12 - sceneRect(text).left()) <= 1,
+             qPrintable(describeItem(icon)));
+    QVERIFY(reject(dialog));
+
+    QObject *kde = object(main.window, QStringLiteral("aboutKdeDialog"));
+    QVERIFY(kde != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(kde, "open"));
+    QVERIFY(waitForDialogWindow(kde));
+    QQuickItem *kdeText = visibleNamed(windowOf(kde), QStringLiteral("aboutKdeText"));
+    QQuickItem *kdeIcon = visibleNamed(windowOf(kde), QStringLiteral("aboutKdeIcon"));
+    QVERIFY(kdeText != nullptr && kdeIcon != nullptr);
+    QTRY_VERIFY(!layoutPending(kdeIcon));
+    QCOMPARE(sceneRect(kdeText).left(), kde->property("contentPadding").toReal() + inset);
+    QVERIFY2(qAbs(sceneRect(kdeIcon).left() + kdeIcon->width() / 12 - sceneRect(kdeText).left()) <= 1,
+             qPrintable(describeItem(kdeIcon)));
+    QVERIFY(reject(kde));
 }
 
 // Recent Issues, a popup of rows over the main window: each check starts
