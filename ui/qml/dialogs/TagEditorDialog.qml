@@ -8,6 +8,7 @@ import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
 import "../logic/FormatUtils.js" as FormatUtils
+import "../logic/KeyUtils.js" as KeyUtils
 import "." as Dialogs
 
 // Edit Tags, in a window of its own: KWin draws its title bar, and it
@@ -602,6 +603,12 @@ Components.DialogWindow {
     }
 
     function handleRowClick(row, modifiers) {
+        // The row takes the keyboard from a column's Revert, which would
+        // keep it, and Enter, as the focus scope's focused item.
+        const focused = root.activeFocusItem
+        if (focused && focused.inTableHeader === true) {
+            focused.focus = false
+        }
         tagEditorTable.forceActiveFocus()
         const ctrl = (modifiers & Qt.ControlModifier) !== 0
         const shift = (modifiers & Qt.ShiftModifier) !== 0
@@ -956,6 +963,9 @@ Components.DialogWindow {
         }
         property var editRowsSnapshot: []
         readonly property bool changed: root.bulkFieldMarked(fieldEditor.field.key)
+        readonly property Item revert: revertButton
+        KeyNavigation.tab: root.tabStopFrom(fieldEditor, 1)
+        KeyNavigation.backtab: root.tabStopFrom(fieldEditor, -1)
 
         function captureEditRowsSnapshot() {
             editRowsSnapshot = root.tagEditorApi.selectedRows()
@@ -1029,6 +1039,15 @@ Components.DialogWindow {
             anchors.verticalCenter: parent.verticalCenter
             width: root.fieldRevertWidth
             height: width
+            KeyNavigation.tab: root.tabStopFrom(revertButton, 1)
+            KeyNavigation.backtab: root.tabStopFrom(revertButton, -1)
+            // Enter presses it, as Space does, rather than Save.
+            Keys.onPressed: function(event) {
+                if (KeyUtils.isEnter(event)) {
+                    event.accepted = true
+                    revertButton.clicked()
+                }
+            }
             visible: fieldEditor.changed
             enabled: !root.busy
             icon.name: "edit-undo"
@@ -1038,6 +1057,10 @@ Components.DialogWindow {
             text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1", fieldEditor.field.label)
             onClicked: {
                 fieldEditor.touched = false
+                // It hides as it reverts: the keyboard goes to its field.
+                if (revertButton.activeFocus) {
+                    fieldEditor.forceActiveFocus(Qt.OtherFocusReason)
+                }
                 root.tagEditorApi.revertBulkField(fieldEditor.field.key)
                 fieldEditor.syncFromController()
             }
@@ -1287,15 +1310,15 @@ Components.DialogWindow {
                 width: tagEditorFieldsScroll.availableWidth
                 spacing: Kirigami.Units.largeSpacing + 2
 
-                FieldRow { field: root.fieldAt("title") }
-                FieldRow { field: root.fieldAt("artist") }
-                FieldRow { field: root.fieldAt("album") }
-                FieldRow { field: root.fieldAt("albumArtist") }
-                FieldRow { field: root.fieldAt("genre") }
-                FieldRow { field: root.fieldAt("year") }
+                FieldRow { id: titleRow; field: root.fieldAt("title") }
+                FieldRow { id: artistRow; field: root.fieldAt("artist") }
+                FieldRow { id: albumRow; field: root.fieldAt("album") }
+                FieldRow { id: albumArtistRow; field: root.fieldAt("albumArtist") }
+                FieldRow { id: genreRow; field: root.fieldAt("genre") }
+                FieldRow { id: yearRow; field: root.fieldAt("year") }
                 NumberPair { id: trackPair; first: root.fieldAt("trackNo"); second: root.fieldAt("totalTracks") }
                 NumberPair { id: discPair; first: root.fieldAt("discNo"); second: root.fieldAt("totalDiscs") }
-                FieldRow { field: root.fieldAt("comment") }
+                FieldRow { id: commentRow; field: root.fieldAt("comment") }
             }
         }
 
@@ -1319,6 +1342,7 @@ Components.DialogWindow {
                 clip: true
                 focus: true
                 activeFocusOnTab: true
+                KeyNavigation.backtab: root.tabStopFrom(tagEditorTable, -1)
                 model: root.tagEditorApi.tableModel
                 currentIndex: -1
                 keyNavigationEnabled: false
@@ -1389,6 +1413,44 @@ Components.DialogWindow {
                                         anchors.verticalCenter: parent.verticalCenter
                                         visible: headerCell.changed
                                         enabled: !root.busy
+                                        readonly property bool inTableHeader: true
+                                        // It is the table's focused item only
+                                        // while it has the keyboard: the table,
+                                        // a focus scope, gave it back to it as
+                                        // Tab or a click came to the files.
+                                        // Another window's turn keeps it,
+                                        // when no item here has the keyboard
+                                        // (`active` holds for the window of
+                                        // a dialog over this one).
+                                        onActiveFocusChanged: {
+                                            if (columnRevert.activeFocus) {
+                                                root.showInTable(headerCell)
+                                            } else if (root.activeFocusItem !== null) {
+                                                columnRevert.focus = false
+                                            }
+                                        }
+                                        onVisibleChanged: {
+                                            if (!columnRevert.visible) {
+                                                columnRevert.focus = false
+                                            }
+                                        }
+                                        // Shift+Tab from the first goes back to
+                                        // the files, which Tab came from: the
+                                        // window's order skips a focus scope
+                                        // going back out of it.
+                                        Keys.onBacktabPressed: function(event) {
+                                            if (columnRevert.nextItemInFocusChain(false).inTableHeader === true) {
+                                                event.accepted = false
+                                            } else {
+                                                columnRevert.focus = false
+                                            }
+                                        }
+                                        Keys.onPressed: function(event) {
+                                            if (KeyUtils.isEnter(event)) {
+                                                event.accepted = true
+                                                columnRevert.clicked()
+                                            }
+                                        }
                                         width: root.uiPalette.labelIconSize + Kirigami.Units.smallSpacing
                                         height: width
                                         padding: 0
@@ -1550,6 +1612,41 @@ Components.DialogWindow {
         }
     }
 
+    // The fields, in the form's order.
+    readonly property list<Item> fieldEditors: [titleRow.editor, artistRow.editor, albumRow.editor,
+        albumArtistRow.editor, genreRow.editor, yearRow.editor, trackPair.firstEditor, trackPair.secondEditor,
+        discPair.firstEditor, discPair.secondEditor, commentRow.editor]
+    // Where Tab goes, up to the files: field to field, past the Revert of
+    // an edited one (it took a press for each, and Space there undid the
+    // edit just typed), then the fields' Reverts in their order, then the
+    // files, whose columns' Reverts follow in the window's own order. The
+    // links pass over a Revert that doesn't show.
+    readonly property var tabStops: {
+        const fields = []
+        const reverts = []
+        for (let i = 0; i < root.fieldEditors.length; ++i) {
+            fields.push(root.fieldEditors[i])
+            reverts.push(root.fieldEditors[i].revert)
+        }
+        return fields.concat(reverts, [tagEditorTable])
+    }
+
+    // The stop `step` from `item` in tabStops, or null past either end.
+    function tabStopFrom(item, step) {
+        const at = root.tabStops.indexOf(item)
+        return at >= 0 && at + step >= 0 && at + step < root.tabStops.length ? root.tabStops[at + step] : null
+    }
+
+    // Scrolls the table sideways until `item`, in its header, is in view.
+    function showInTable(item) {
+        const left = item.mapToItem(tagEditorTable, 0, 0).x
+        if (left < 0) {
+            tagEditorTable.contentX += left
+        } else if (left + item.width > tagEditorTable.width) {
+            tagEditorTable.contentX += left + item.width - tagEditorTable.width
+        }
+    }
+
     // The labels' column: as wide as the longest label, semibold.
     readonly property real fieldLabelWidth: {
         let widest = 0
@@ -1590,6 +1687,7 @@ Components.DialogWindow {
     component FieldRow: ColumnLayout {
         id: fieldRow
         required property var field
+        property alias editor: rowEditor
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
@@ -1598,7 +1696,7 @@ Components.DialogWindow {
             spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
 
             FieldLabel { field: fieldRow.field }
-            TagField { field: fieldRow.field }
+            TagField { id: rowEditor; field: fieldRow.field }
         }
 
         Label {
@@ -1633,6 +1731,8 @@ Components.DialogWindow {
             + 3 * pair.spacing + ofLabel.implicitWidth + 2 * pair.fieldLeastWidth)
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
+        property alias firstEditor: firstField
+        property alias secondEditor: secondField
 
         FieldLabel {
             field: pair.first

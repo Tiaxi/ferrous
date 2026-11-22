@@ -590,6 +590,8 @@ private slots:
     void editTagsColumnsHoldTheirValuesBeforeTheTableScrolls();
     void editTagsMeasuresABoundedNumberOfRows();
     void editTagsFileNameElidesWithinANarrowView();
+    void editTagsTabsFromFieldToField();
+    void editTagsRevertsWorkFromTheKeyboard();
     void editTagsKeepsWhatIdentifiesARowInView_data();
     void editTagsKeepsWhatIdentifiesARowInView();
     void editTagsDetailsHasAGlyphAsItsPeers_data();
@@ -6778,6 +6780,191 @@ void UiDialogsTest::configureWidthsFollowTheFont() {
         }
         QVERIFY(reject(dialog));
     }
+}
+
+namespace {
+
+// The name of the item with the keyboard in `window`, or of the named item
+// it is in, as a table's row is.
+QString focusedName(QQuickWindow *window) {
+    QQuickItem *item = window->activeFocusItem();
+    while (item != nullptr && item->objectName().isEmpty()) {
+        item = item->parentItem();
+    }
+    if (item == nullptr) {
+        return QString();
+    }
+    return item->objectName() == QLatin1String("tagEditorRow") ? QStringLiteral("tagEditorTable") : item->objectName();
+}
+
+void typeInto(QQuickWindow *window, const QByteArray &text) {
+    QTest::keyClick(window, Qt::Key_A, Qt::ControlModifier);
+    for (const char letter : text) {
+        QTest::keyClick(window, letter);
+    }
+}
+
+} // namespace
+
+// Tab from an edited field goes to the next field, and Shift+Tab to the one
+// before, past its Revert (#737). The fields' Reverts follow the last field
+// in their order, then the files and their columns' Reverts; Shift+Tab goes
+// back the same way, every step.
+void UiDialogsTest::editTagsTabsFromFieldToField() {
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfAnAlbum(4));
+    QVERIFY(tags != nullptr);
+    main.editor.setSelectedRows({1});
+    QQuickItem *title = visibleNamed(tags, QStringLiteral("tagEditorField_title"));
+    QVERIFY(title != nullptr);
+    title->forceActiveFocus(Qt::TabFocusReason);
+
+    // Each edit, Tab, and the field it lands on.
+    typeInto(tags, "Rain");
+    QVERIFY(visibleNamed(tags, QStringLiteral("tagEditorRevert_title")) != nullptr);
+    QTest::keyClick(tags, Qt::Key_Tab);
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorField_artist"));
+    typeInto(tags, "Trio");
+    QTest::keyClick(tags, Qt::Key_Backtab, Qt::ShiftModifier);
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorField_title"));
+    QTest::keyClick(tags, Qt::Key_Tab);
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorField_artist"));
+    for (const char *next : {"album", "albumArtist", "genre", "year", "trackNo"}) {
+        QTest::keyClick(tags, Qt::Key_Tab);
+        QCOMPARE(focusedName(tags), QStringLiteral("tagEditorField_") + QLatin1String(next));
+    }
+    typeInto(tags, "9");
+    for (const char *next : {"totalTracks", "discNo", "totalDiscs", "comment"}) {
+        QTest::keyClick(tags, Qt::Key_Tab);
+        QCOMPARE(focusedName(tags), QStringLiteral("tagEditorField_") + QLatin1String(next));
+    }
+    // The last field's own Revert too, though its edit is still being typed.
+    typeInto(tags, "Live");
+
+    QTRY_VERIFY(visibleNamed(tags, QStringLiteral("tagEditorColumnRevert_artist")) != nullptr);
+    QTRY_VERIFY(!layoutPending(visibleNamed(tags, QStringLiteral("tagEditorColumnRevert_artist"))));
+    const QStringList forward{
+        QStringLiteral("tagEditorRevert_title"), QStringLiteral("tagEditorRevert_artist"),
+        QStringLiteral("tagEditorRevert_trackNo"), QStringLiteral("tagEditorRevert_comment"),
+        QStringLiteral("tagEditorTable"),
+        QStringLiteral("tagEditorColumnRevert_trackNo"), QStringLiteral("tagEditorColumnRevert_title"),
+        QStringLiteral("tagEditorColumnRevert_artist"),
+        QStringLiteral("tagEditorToolsButton"),
+    };
+    for (const QString &next : forward) {
+        QTest::keyClick(tags, Qt::Key_Tab);
+        QCOMPARE(focusedName(tags), next);
+    }
+    for (qsizetype i = forward.size() - 2; i >= 0; --i) {
+        QTest::keyClick(tags, Qt::Key_Backtab, Qt::ShiftModifier);
+        QCOMPARE(focusedName(tags), forward.at(i));
+    }
+    for (const char *previous : {"comment", "totalDiscs", "discNo", "totalTracks", "trackNo", "year", "genre",
+                                 "albumArtist", "album", "artist", "title"}) {
+        QTest::keyClick(tags, Qt::Key_Backtab, Qt::ShiftModifier);
+        QCOMPARE(focusedName(tags), QStringLiteral("tagEditorField_") + QLatin1String(previous));
+    }
+
+    // Round again after a column's Revert had the keyboard: the files
+    // themselves come first, not that Revert.
+    visibleNamed(tags, QStringLiteral("tagEditorColumnRevert_title"))->forceActiveFocus(Qt::TabFocusReason);
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorColumnRevert_title"));
+    visibleNamed(tags, QStringLiteral("tagEditorRevert_comment"))->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(tags, Qt::Key_Tab);
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorTable"));
+
+    // With nothing edited, the files follow the last field.
+    main.editor.revertField(QStringLiteral("title"));
+    main.editor.revertField(QStringLiteral("artist"));
+    main.editor.revertField(QStringLiteral("trackNo"));
+    main.editor.revertField(QStringLiteral("comment"));
+    QTRY_VERIFY(visibleNamed(tags, QStringLiteral("tagEditorRevert_comment")) == nullptr);
+    visibleNamed(tags, QStringLiteral("tagEditorField_comment"))->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(tags, Qt::Key_Tab);
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorTable"));
+    QTest::keyClick(tags, Qt::Key_Backtab, Qt::ShiftModifier);
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorField_comment"));
+    QVERIFY(closeTagEditor(main));
+}
+
+// Every Revert works from the keyboard (#737): Space or Enter presses it
+// (Enter saved), and the keyboard goes on from its field, or from the files
+// for a column's, which comes into view as it takes the keyboard.
+void UiDialogsTest::editTagsRevertsWorkFromTheKeyboard() {
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    TagEditorController &editor = main.editor;
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfAnAlbum(4));
+    QVERIFY(tags != nullptr);
+    // Narrow: the Genre column is out of view.
+    tags->resize(std::max(tags->minimumWidth(), 900), tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), qreal(tags->width()));
+    editor.setSelectedRows({1});
+    editor.applyBulkFieldToRows({1}, QStringLiteral("title"), QStringLiteral("Rain"));
+    editor.applyBulkFieldToRows({1}, QStringLiteral("artist"), QStringLiteral("Trio"));
+    editor.applyBulkFieldToRows({0, 1}, QStringLiteral("genre"), QStringLiteral("Jazz"));
+    const auto value = [&](int row, const char *key) {
+        return editor.m_tableModel.fieldValue(row, QLatin1String(key));
+    };
+    QTRY_VERIFY(visibleNamed(tags, QStringLiteral("tagEditorColumnRevert_genre")) != nullptr);
+
+    QQuickItem *comment = visibleNamed(tags, QStringLiteral("tagEditorField_comment"));
+    QVERIFY(comment != nullptr);
+    comment->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(tags, Qt::Key_Tab);
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorRevert_title"));
+    QTest::keyClick(tags, Qt::Key_Space);
+    QTRY_COMPARE(value(1, "title"), QStringLiteral("Rain Over Fields"));
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorField_title"));
+
+    QQuickItem *artistRevert = visibleNamed(tags, QStringLiteral("tagEditorRevert_artist"));
+    QVERIFY(artistRevert != nullptr);
+    QVERIFY(tabTo(tags, artistRevert));
+    QTest::keyClick(tags, Qt::Key_Return);
+    QTRY_COMPARE(value(1, "artist"), QStringLiteral("The Lantern Assembly"));
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorField_artist"));
+    QVERIFY(!editor.saving() && editor.dirty() && tags->isVisible());
+
+    // A column's reverts every file, in view.
+    QQuickItem *genreRevert = visibleNamed(tags, QStringLiteral("tagEditorColumnRevert_genre"));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(genreRevert != nullptr && table != nullptr);
+    QVERIFY(sceneRect(genreRevert).right() > sceneRect(table).right());
+    QVERIFY(tabTo(tags, genreRevert));
+    QTRY_VERIFY2(sceneRect(genreRevert).left() >= sceneRect(table).left()
+                     && sceneRect(genreRevert).right() <= sceneRect(table).right() + 0.5,
+                 qPrintable(describeItem(genreRevert)));
+    // A dialog over it gives the keyboard back to it.
+    QObject *numbering = object(main.window, QStringLiteral("autoNumberDialog"));
+    QVERIFY(numbering != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(numbering, "open"));
+    QVERIFY(waitForDialogWindow(numbering));
+    QVERIFY(reject(numbering));
+    // isActive() holds for the window of a dialog over it: the focus window
+    // says when the keyboard is back.
+    QTRY_COMPARE(QGuiApplication::focusWindow(), tags);
+    QTRY_COMPARE(focusedName(tags), QStringLiteral("tagEditorColumnRevert_genre"));
+    // A click on a file takes the keyboard from it, on the current file
+    // too; then back to it.
+    QQuickItem *firstRow = visibleNamed(tags, QStringLiteral("tagEditorRow"));
+    QVERIFY(firstRow != nullptr);
+    table->setProperty("currentIndex", 0);
+    genreRevert->forceActiveFocus(Qt::TabFocusReason);
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorColumnRevert_genre"));
+    QTest::mouseClick(tags, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(qRound(sceneRect(table).left() + 20), qRound(sceneRect(firstRow).center().y())));
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorTable"));
+    QVERIFY(tabTo(tags, genreRevert));
+    QTest::keyClick(tags, Qt::Key_Enter, Qt::KeypadModifier);
+    QTRY_COMPARE(value(0, "genre"), QStringLiteral("Classical"));
+    QCOMPARE(value(1, "genre"), QStringLiteral("Classical"));
+    QCOMPARE(focusedName(tags), QStringLiteral("tagEditorTable"));
+    QVERIFY(!editor.saving() && !editor.dirty() && tags->isVisible());
+    // And the files' keys work on.
+    QTest::keyClick(tags, Qt::Key_Down);
+    QCOMPARE(editor.selectedRows().size(), 1);
+    QVERIFY(closeTagEditor(main));
 }
 
 int main(int argc, char **argv) {
