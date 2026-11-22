@@ -252,6 +252,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/AppMenu.qml
         qml/components/AppMenuBarItem.qml
         qml/components/CompactDialogWindow.qml
+        qml/components/ConditionalMenuItem.qml
         qml/components/DialogButtons.qml
         qml/components/DialogComboBox.qml
         qml/components/DialogFooter.qml
