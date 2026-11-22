@@ -191,7 +191,10 @@ Preferences.PreferencesPage {
     CheckBox {
         objectName: "showLevelMeterCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Level meter:")
-        text: I18n.i18nc("@option:check", "Show a level meter at the end of each lane")
+        // The label has said what it shows; a screen reader hears the whole
+        // phrase, the box alone.
+        text: I18n.i18nc("@option:check after the label Level meter", "Show at the end of each lane")
+        Accessible.name: I18n.i18nc("@option:check accessible name", "Show a level meter at the end of each lane")
         checked: root.settings.value("showLevelMeter")
         onToggled: root.settings.setValue("showLevelMeter", checked)
     }
@@ -220,7 +223,9 @@ Preferences.PreferencesPage {
         id: zoomCheckBox
         objectName: "spectrogramZoomCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Zoom:")
-        text: I18n.i18nc("@option:check", "Allow zooming")
+        // What it turns on ("Zoom: Allow zooming" said itself twice); the
+        // help has the rest.
+        text: I18n.i18nc("@option:check", "Scroll to zoom in and out")
         checked: root.settings.value("spectrogramZoomEnabled")
         onToggled: root.settings.setValue("spectrogramZoomEnabled", checked)
     }
@@ -230,8 +235,8 @@ Preferences.PreferencesPage {
         uiPalette: root.uiPalette
         indent: zoomCheckBox.contentItem.x
         text: root.resetZoomShortcut.length > 0
-            ? I18n.i18nc("@info %1 is the shortcut of View › Reset Zoom", "Scroll to zoom in or out, and drag with the middle button to move a zoomed waveform or centered spectrogram. %1 resets the zoom.", root.resetZoomShortcut)
-            : I18n.i18nc("@info", "Scroll to zoom in or out, and drag with the middle button to move a zoomed waveform or centered spectrogram.")
+            ? I18n.i18nc("@info %1 is the shortcut of View › Reset Zoom", "Drag with the middle button to move a zoomed waveform or centered spectrogram. %1 resets the zoom.", root.resetZoomShortcut)
+            : I18n.i18nc("@info", "Drag with the middle button to move a zoomed waveform or centered spectrogram.")
     }
 
     CheckBox {

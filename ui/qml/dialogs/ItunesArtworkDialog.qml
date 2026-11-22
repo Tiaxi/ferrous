@@ -431,6 +431,9 @@ Components.DialogWindow {
     // 24 pt), and elides past that, with the whole of it in a tooltip.
     component ArtworkText: Column {
         property string title: ""
+        // Semibold for the dialog's lead, the current art's; a result's
+        // is regular.
+        property int titleWeight: Font.Normal
         property string details: ""
         property color detailsColor: root.uiPalette.textSecondary
         property string titleObjectName: ""
@@ -443,6 +446,7 @@ Components.DialogWindow {
             width: parent.width
             textFormat: Text.PlainText
             text: parent.title
+            font.weight: parent.titleWeight
             color: root.uiPalette.text
             elide: Text.ElideRight
         }
@@ -532,14 +536,20 @@ Components.DialogWindow {
                 id: currentArtworkText
                 x: 1 + root.textX
                 y: Math.round((parent.height - height) / 2)
+                // The lead in every state, as the other dialogs' first
+                // line: what there is, apart from what is offered (it had
+                // the weight of every result's title).
+                titleWeight: Font.DemiBold
                 width: Math.max(0, currentArtworkPreviewButton.x - root.textActionsGap - x)
                 titleObjectName: "itunesArtworkCurrentTitle"
                 detailsObjectName: "itunesArtworkCurrentDetails"
                 title: I18n.i18nc("@label", "Current album art")
+                // Under the lead, which has said what it is: neither line
+                // says it again.
                 details: (root.currentArtworkSource || "").length === 0
-                    ? I18n.i18nc("@label", "No current album art is available for this track.")
+                    ? I18n.i18nc("@info after the title Current album art", "This track has no album art.")
                     : (Object.keys(root.currentArtworkInfo || {}).length === 0
-                        ? I18n.i18nc("@label", "Current artwork metadata is not available.")
+                        ? I18n.i18nc("@info after the title Current album art", "Image details aren’t available.")
                         : root.imageDetailsText(root.currentArtworkInfo))
             }
 
@@ -853,14 +863,19 @@ Components.DialogWindow {
         windowRoot: root
         title: I18n.i18nc("@title:window", "Replace Album Art")
         // A short sentence for each case, as the backend applies it
-        // (artwork::apply_artwork_to_track), then what is lost. A folder
-        // that shows any image as its cover gets a cover file: the one with
-        // a cover's name is overwritten, and otherwise a new one is written
+        // (artwork::apply_artwork_to_track), then what is lost. All of it
+        // is in the folder of the track the art was searched for. A folder
+        // with a JPEG or PNG gets a cover file, as Ferrous shows any such
+        // image as the folder's cover (folder_cover), a back scan alone
+        // too, which nobody would call "a cover image": the one with a
+        // cover's name is overwritten, and otherwise a new one is written
         // beside the images that stay, so not every replaced image is lost
         // ("replaces the album's cover image file" said it was). Without
-        // such an image, the album's tracks get it as their front cover.
-        details: I18n.i18nc("@info", "If the album’s folder has a cover image, the new album art is saved as its "
-            + "cover file. Otherwise it is embedded in the album’s tracks. Ferrous keeps no copy of what it overwrites.")
+        // such an image, the tracks in that folder with the album's tag get
+        // it as their front cover, and no other folder's.
+        details: I18n.i18nc("@info", "If the track’s folder has a JPEG or PNG image, the new album art becomes "
+            + "its cover file. Otherwise it is embedded in the album’s tracks in that folder. "
+            + "Ferrous keeps no copy of what it overwrites.")
         confirmText: I18n.i18nc("@action:button", "Replace")
         // Breeze's swap: one image for the other. Its "document-replace", a
         // page with a red ×, read as Delete; red is the glyph of the

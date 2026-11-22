@@ -837,15 +837,16 @@ void UiDialogsTest::checkConfigurePageList(QQuickWindow *window) {
         QCOMPARE(row->width(), list->width());
         click(prefs, row);
         QTRY_COMPARE(stack->property("currentIndex").toInt(), i);
-        // The page's title, 15 px semibold, on the content edge.
+        // The page's title, 17 px semibold, on the content edge.
         QQuickItem *page = stack->childItems().at(i);
         QQuickItem *title = itemsNamed(page, QStringLiteral("preferencesPageTitle")).value(0);
         QVERIFY(title != nullptr);
         QCOMPARE(title->property("text").toString(), pages[i]);
         const QFont font = title->property("font").value<QFont>();
         QCOMPARE(font.weight(), QFont::DemiBold);
-        // 15 px with the default 10 pt font.
-        QCOMPARE(font.pointSizeF(), paletteOf(window)->property("basePointSize").toReal() * 1.125);
+        // 17 px with the default 10 pt font: clearly over the groups'
+        // semibold 13 px (at 15 px the two ranks were 2 px apart).
+        QCOMPARE(font.pointSizeF(), paletteOf(window)->property("basePointSize").toReal() * 1.3);
         QCOMPARE(sceneRect(title).left(), sceneRect(page).left() + page->property("pageSideInset").toReal());
         QQuickItem *tint = itemsNamed(row, QStringLiteral("rowBackgroundTint")).value(0);
         QVERIFY(tint != nullptr && tint->isVisible());
@@ -1123,8 +1124,19 @@ void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
     QTRY_VERIFY(list->hasActiveFocus());
     QQuickItem *stack = nullptr;
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    // Its ring is the folder list's beside it, only while the keyboard is in
+    // use (it showed after a click and as the window opened).
+    const auto ringOf = [&](int page) {
+        QQuickItem *row = visibleNamed(prefs, QStringLiteral("preferencesPage_%1").arg(page));
+        QQuickItem *tint = row != nullptr ? itemsNamed(row, QStringLiteral("rowBackgroundTint")).value(0) : nullptr;
+        return tint != nullptr ? QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() : -1.0;
+    };
+    click(prefs, visibleNamed(prefs, QStringLiteral("preferencesPage_0")));
+    QTRY_VERIFY(list->hasActiveFocus());
+    QCOMPARE(ringOf(0), 0.0);
     QTest::keyClick(prefs, Qt::Key_Down);
     QTRY_COMPARE(stack->property("currentIndex").toInt(), 1);
+    QTRY_COMPARE(ringOf(1), 1.0);
     QTest::keyClick(prefs, Qt::Key_Down);
     QTRY_COMPARE(stack->property("currentIndex").toInt(), 2);
     QTest::keyClick(prefs, Qt::Key_Up);
@@ -1877,6 +1889,27 @@ void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *win
         }
     }
 
+    // A check box doesn't say its row's label again ("Zoom: Allow zooming"),
+    // and where that shortens it, is named by the whole phrase for a screen
+    // reader, which hears it alone. One that reads alone keeps Qt's name,
+    // its text.
+    struct Phrase { const char *box; const char *label; const char *text; const char *spoken; };
+    for (const Phrase &phrase : {
+             Phrase{"showLevelMeterCheckBox", "Level meter:", "Show at the end of each lane",
+                    "Show a level meter at the end of each lane"},
+             Phrase{"spectrogramZoomCheckBox", "Zoom:", "Scroll to zoom in and out", nullptr}}) {
+        QQuickItem *box = itemsNamed(stack, QString::fromLatin1(phrase.box)).value(0);
+        QVERIFY2(box != nullptr, phrase.box);
+        QCOMPARE(evaluate(box, QStringLiteral("Kirigami.FormData.label")).toString(), QString::fromLatin1(phrase.label));
+        QCOMPARE(box->property("text").toString(), QString::fromLatin1(phrase.text));
+        if (phrase.spoken == nullptr) {
+            continue;
+        }
+        QAccessibleInterface *spoken = QAccessible::queryAccessibleInterface(box);
+        QVERIFY2(spoken != nullptr, phrase.box);
+        QCOMPARE(spoken->text(QAccessible::Name), QString::fromLatin1(phrase.spoken));
+    }
+
     const auto gap = [](QQuickItem *above, QQuickItem *below) {
         return sceneRect(below).top() - sceneRect(above).bottom();
     };
@@ -1929,7 +1962,10 @@ void UiDialogsTest::checkConfigureGroupsItsSettingsOnFourPages(QQuickWindow *win
     // The first starts the form, under the page's title.
     QQuickItem *visualizationTitle = itemsNamed(stack->childItems().at(1), QStringLiteral("preferencesPageTitle")).value(0);
     QVERIFY(visualizationTitle != nullptr);
-    QVERIFY(gapIs(visualizationTitle, analysis, 14));
+    QVERIFY(visualizationTitle->property("font").value<QFont>().pointSizeF()
+            >= analysis->property("font").value<QFont>().pointSizeF() * 1.25);
+    // 12 px under the larger title, so the rows start about where they did.
+    QVERIFY(gapIs(visualizationTitle, analysis, 12));
     QVERIFY(gapIs(analysis, named("spectrogramViewComboBox"), 8));
     QVERIFY(gapIs(capHelp, display, 16));
     QVERIFY(gapIs(display, named("spectrogramDisplayComboBox"), 8));
@@ -2959,6 +2995,22 @@ void UiDialogsTest::checkLastFmStatusCountsDroppedScrobbles(QQuickWindow *window
     QQuickItem *pending = nullptr;
     QTRY_VERIFY((pending = visibleNamed(prefs, QStringLiteral("lastFmPendingLabel"))) != nullptr);
     QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmDroppedLabel")) == nullptr);
+    // The account's buttons hold still as its status comes, goes and wraps:
+    // they are over it (under it, Disconnect moved with every line).
+    QQuickItem *stack = visibleNamed(prefs, QStringLiteral("preferencesPages"));
+    QQuickItem *buttons = visibleNamed(prefs, QStringLiteral("lastFmAccountButtons"));
+    QVERIFY(stack != nullptr && buttons != nullptr);
+    QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
+    const qreal buttonsTop = sceneRect(buttons).top();
+    QTRY_VERIFY(sceneRect(pending).top() >= sceneRect(buttons).bottom());
+    for (const QString &status : {QString(), QStringLiteral("Now playing: The Quiet Meridian - A Remarkably "
+                                                            "Long Track Title That Wraps Onto A Second Line"),
+                                  QStringLiteral("Last.fm scrobble queue flushed.")}) {
+        QVERIFY(bridge->setProperty("lastFmStatusText", status));
+        QCoreApplication::processEvents();
+        QTRY_VERIFY(!layoutPendingUnder(stack->childItems().at(3)));
+        QCOMPARE(sceneRect(buttons).top(), buttonsTop);
+    }
 
     QVERIFY(bridge->setProperty("lastFmDroppedScrobbleCount", 1));
     QQuickItem *dropped = nullptr;
@@ -3040,9 +3092,21 @@ void UiDialogsTest::checkLastFmScrobblingNeedsABuildWithLastFm(QQuickWindow *win
     box->forceActiveFocus(Qt::TabFocusReason);
     QTest::keyClick(prefs, Qt::Key_Space);
     QCOMPARE(box->property("checked").toBool(), before);
-    // A build with Last.fm lets it be turned on.
+    // Its help steps down with it, under the line that says why, and still
+    // reads (in the secondary colour it outranked the setting it explains).
+    QQuickItem *help = visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp"));
+    QVERIFY(help != nullptr);
+    const QColor chrome = tokenOf(window, "chrome");
+    const QColor quiet = help->property("color").value<QColor>();
+    QCOMPARE(hex(quiet), hex(tokenOf(window, "textTertiary")));
+    QVERIFY2(contrastRatio(quiet, chrome) >= 4.5, qPrintable(describeContrast(QStringLiteral("help"), quiet, chrome)));
+    const QColor reason = visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))->property("color").value<QColor>();
+    QVERIFY(contrastRatio(quiet, chrome) < contrastRatio(reason, chrome));
+    // A build with Last.fm lets it be turned on, and explains it as every
+    // help does.
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
     QTRY_VERIFY(box->isEnabled());
+    QCOMPARE(hex(help->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
     QVERIFY(reject(dialog));
 }
 
@@ -3751,6 +3815,15 @@ void UiDialogsTest::recentIssuesActionsShowTheFileOrOpenTheSettings() {
     QVERIFY(openIssues(window));
     QTRY_VERIFY((action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"))) != nullptr);
     QCOMPARE(action->property("text").toString(), QStringLiteral("Show in Library"));
+    // Its path, which the action acts on, is secondary, over the time and
+    // the category (it had their tertiary ink).
+    const auto inkOf = [&](const char *name) {
+        return visibleNamed(window, QString::fromLatin1(name))->property("color").value<QColor>();
+    };
+    QVERIFY(visibleNamed(window, QStringLiteral("errorHistorySubject")) != nullptr);
+    QCOMPARE(hex(inkOf("errorHistorySubject")), hex(tokenOf(window, "textSecondary")));
+    QCOMPARE(hex(inkOf("errorHistoryTime")), hex(tokenOf(window, "textTertiary")));
+    QCOMPARE(hex(inkOf("errorHistoryCategory")), hex(tokenOf(window, "textTertiary")));
     click(window, action);
     QTRY_VERIFY(!popup->property("visible").toBool());
     QCOMPARE(bridge->property("shownInLibrary").toStringList(), QStringList{QStringLiteral("/music/gone.flac")});
@@ -6243,11 +6316,11 @@ void UiDialogsTest::checkDialogGlyphsAndMeasuresFollowTheFont(DialogsWindow &mai
     QVERIFY(closeTagEditor(main));
 }
 
-// A Recent Issues link's press reads as a press: its tint is a clear step
-// past the hover, 1.65:1 on the popup's window colour as the transport's
-// buttons' (at 10% it read as the hover), and it shows on its
-// first frame, with no fade while the button is down; the hover and the
-// release fade.
+// A Recent Issues link's states are the other flat actions', as Preview,
+// Apply and the Reverts show them: the accent's outline alone on hover (it
+// was a grey fill, pressed a darker grey), Breeze's pressed fill, the
+// accent at 30 %, within it on the first frame of the press, and the focus
+// ring. The link's ink reads on each.
 void UiDialogsTest::checkRecentIssuesLinkPressShowsAtOnce(QQuickWindow *window) {
     clearIssues(window);
     report(window, 1, 0, kStaticPath, kEndsEarly);
@@ -6255,43 +6328,78 @@ void UiDialogsTest::checkRecentIssuesLinkPressShowsAtOnce(QQuickWindow *window) 
     QQuickItem *action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"));
     QVERIFY(action != nullptr);
     auto *background = qvariant_cast<QQuickItem *>(action->property("background"));
-    QVERIFY(background != nullptr);
-    const auto colorOf = [&]() { return background->property("color").value<QColor>(); };
-    QObject *palette = paletteOf(window);
+    auto *caption = qvariant_cast<QQuickItem *>(action->property("contentItem"));
+    QVERIFY(background != nullptr && caption != nullptr);
+    const auto fill = [&]() { return background->property("color").value<QColor>(); };
+    const auto outline = [&]() { return QQmlProperty(background, QStringLiteral("border.width")).read().toReal(); };
+    const auto outlineColor = [&]() {
+        return hex(QQmlProperty(background, QStringLiteral("border.color")).read().value<QColor>());
+    };
     const QColor chrome = tokenOf(window, "chrome");
-    const QColor pressed = evaluate(palette, QStringLiteral("pressedOn(chrome)")).value<QColor>();
-    const QColor hover = tokenOf(window, "hover");
-    QVERIFY(pressed.isValid() && pressed.alpha() > 0);
-    // A step past the hover on the window colour.
-    const double pressedRatio = contrastRatio(drawnOver(pressed, chrome), chrome);
-    const double hoverRatio = contrastRatio(drawnOver(hover, chrome), chrome);
-    QVERIFY2(pressedRatio >= 1.65, qPrintable(QString::number(pressedRatio)));
-    QVERIFY2(pressedRatio >= hoverRatio + 0.25,
-             qPrintable(QStringLiteral("pressed %1:1, hover %2:1").arg(pressedRatio).arg(hoverRatio)));
-
+    const QColor accent = tokenOf(window, "accent");
+    const auto inkReadsOn = [&](const QColor &under) {
+        const QColor ink = caption->property("color").value<QColor>();
+        if (contrastRatio(ink, under) >= 4.5) {
+            return true;
+        }
+        qWarning().noquote() << describeContrast(QStringLiteral("link"), ink, under);
+        return false;
+    };
+    // As in a desktop's session, whose platform theme asks for hover
+    // effects; the offscreen platform has none.
+    QVERIFY(action->setProperty("hoverEnabled", true));
+    // At rest, with the keyboard in the content, nothing but the link.
+    visibleNamed(window, QStringLiteral("errorHistoryContent"))->forceActiveFocus(Qt::OtherFocusReason);
+    QTRY_VERIFY(!action->property("visualFocus").toBool());
     const QPoint centre = action->mapToScene(QPointF(action->width() / 2, action->height() / 2)).toPoint();
-    QCOMPARE(colorOf().alpha(), 0);
-    // The press: the pressed tint at once, before any frame of a fade.
+    const QPoint away = action->mapToScene(QPointF(action->width() / 2, -action->height())).toPoint();
+    QTest::mouseMove(window, away);
+    QTRY_VERIFY(!action->property("hovered").toBool());
+    QCOMPARE(fill().alpha(), 0);
+    QCOMPARE(outline(), 0.0);
+    QVERIFY(inkReadsOn(chrome));
+    // Hovered: the outline alone.
+    QTest::mouseMove(window, centre);
+    QTRY_VERIFY(action->property("hovered").toBool());
+    QCOMPARE(fill().alpha(), 0);
+    QCOMPARE(outline(), 1.0);
+    QCOMPARE(outlineColor(), hex(accent));
+    QVERIFY(inkReadsOn(chrome));
+    // Pressed: the fill at once, within the outline, apart from the hover.
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, centre);
     QVERIFY(action->property("down").toBool());
-    QCOMPARE(hex(colorOf()), hex(pressed));
+    QColor pressed = accent;
+    pressed.setAlphaF(0.3F);
+    const QColor expected = drawnOver(pressed, chrome);
+    QVERIFY2(qAbs(fill().alphaF() - 0.3F) < 0.01F, qPrintable(hex(fill())));
+    QCOMPARE(outline(), 1.0);
     const QImage frame = window->grabWindow().convertToFormat(QImage::Format_RGB32);
-    const QPointF inside = action->mapToScene(QPointF(2, action->height() / 2)) * frame.devicePixelRatio();
+    const QPointF inside = action->mapToScene(QPointF(3, action->height() / 2)) * frame.devicePixelRatio();
     // Drawn in that first frame, give or take the blend's rounding.
     const QColor drawn(frame.pixel(inside.toPoint()));
-    const QColor expected = drawnOver(pressed, chrome);
     QVERIFY2(qAbs(drawn.red() - expected.red()) <= 3 && qAbs(drawn.green() - expected.green()) <= 3
                  && qAbs(drawn.blue() - expected.blue()) <= 3,
              qPrintable(QStringLiteral("%1, not %2").arg(hex(drawn), hex(expected))));
-    // The release, off the button so it does nothing: a fade back.
-    const QPoint away = action->mapToScene(QPointF(action->width() / 2, -action->height())).toPoint();
+    // A clear step from the hover, whose inside is the window's colour.
+    const int step = qAbs(drawn.red() - chrome.red()) + qAbs(drawn.green() - chrome.green())
+        + qAbs(drawn.blue() - chrome.blue());
+    QVERIFY2(step >= 60, qPrintable(QStringLiteral("%1 on %2").arg(hex(drawn), hex(chrome))));
+    QVERIFY(inkReadsOn(drawn));
+    // With a margin that rounding to pixels cannot take away.
+    QVERIFY(contrastRatio(caption->property("color").value<QColor>(), expected) >= 4.55);
+    // The release, off the button so it does nothing: back to rest at once.
     QTest::mouseMove(window, away);
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, away);
     QTRY_VERIFY(!action->property("down").toBool());
-    if (evaluate(palette, QStringLiteral("Kirigami.Units.shortDuration")).toInt() > 0) {
-        QVERIFY2(colorOf() != pressed && colorOf().alpha() > 0, qPrintable(hex(colorOf())));
-    }
-    QTRY_COMPARE(colorOf().alpha(), 0);
+    QTRY_VERIFY(!action->property("hovered").toBool());
+    QCOMPARE(fill().alpha(), 0);
+    QCOMPARE(outline(), 0.0);
+    // The keyboard's ring. The press left it the pointer's focus.
+    visibleNamed(window, QStringLiteral("errorHistoryContent"))->forceActiveFocus(Qt::OtherFocusReason);
+    action->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(action->property("visualFocus").toBool());
+    QCOMPARE(outline(), 2.0);
+    QCOMPARE(outlineColor(), hex(tokenOf(window, "focusRing")));
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());
 }

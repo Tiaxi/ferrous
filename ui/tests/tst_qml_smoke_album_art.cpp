@@ -2852,12 +2852,19 @@ void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
     QVERIFY(dialogWindow->grabWindow().width() > 0);
     const qreal previewX = sceneRectOf(preview).left();
     const qreal baseline = baselineOf(message);
+    // The dialog's lead in each of its states, as the other dialogs' first
+    // line is (it had the weight of every result's title).
+    QQuickItem *lead = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkCurrentTitle"));
+    QVERIFY(lead != nullptr);
+    const auto weightOf = [](QQuickItem *label) { return label->property("font").value<QFont>().weight(); };
+    QCOMPARE(weightOf(lead), QFont::DemiBold);
 
     bridge->setProperty("itunesArtworkLoading", false);
     bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
     QVERIFY(dialogWindow->grabWindow().width() > 0);
     QCOMPARE(sceneRectOf(preview).left(), previewX);
     QTRY_COMPARE(baselineOf(message), baseline);
+    QCOMPARE(weightOf(lead), QFont::DemiBold);
 
     bridge->setProperty("itunesArtworkErrorText", QStringLiteral("Connection refused"));
     bridge->setProperty("itunesArtworkFailed", true);
@@ -2867,6 +2874,7 @@ void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
     QTRY_VERIFY2(qAbs(baselineOf(heading) - baseline) <= 1.0,
                  qPrintable(QStringLiteral("heading %1, searching %2").arg(baselineOf(heading)).arg(baseline)));
 
+    QCOMPARE(weightOf(lead), QFont::DemiBold);
     bridge->setProperty("itunesArtworkFailed", false);
     bridge->setProperty("itunesArtworkErrorText", QString());
     for (const int count : {2, 7}) {
@@ -2884,6 +2892,11 @@ void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
             QQuickItem *apply = itemNamed(row, QStringLiteral("itunesArtworkApplyButton"));
             QVERIFY(rowPreview != nullptr && apply != nullptr);
             QTRY_COMPARE(sceneRectOf(rowPreview).left(), previewX);
+            QCOMPARE(weightOf(lead), QFont::DemiBold);
+            // What is offered is regular.
+            QQuickItem *offered = itemNamed(row, QStringLiteral("itunesArtworkResultTitle"));
+            QVERIFY(offered != nullptr);
+            QCOMPARE(weightOf(offered), QFont::Normal);
             // Clear of the scroll bar's 8 px lane.
             QVERIFY(sceneRectOf(apply).right() <= sceneRectOf(results).right() - 8);
         }

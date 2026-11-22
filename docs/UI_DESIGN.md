@@ -50,7 +50,7 @@ The transport uses Breeze's Header colour set, as Breeze's toolbars and the menu
 | `textTertiaryOn(selected, hovered)` | tertiary text on a list row | on a hovered row it moves to `textTertiaryHovered`, and on a selected row it moves to `textTertiarySelected`, so small figures stay at least `rowFigureContrast` (5.4:1) on the row's tint. Antialiasing loses up to 14 % of contrast, and 5.4:1 still renders at 4.5:1 or more |
 | `textColumn` | the queue's Artist and Album cells | quieter than the title, and readable on every selection state |
 | `placeholderText` | a field's placeholder, such as Edit Tags' "Mixed" | Breeze Light's own placeholder colour is 4.2:1 on white |
-| `link` / `linkOn(background)` | link-coloured text and actions | 4.5:1 on both the window and the view colours, or on the tint under the link |
+| `link` | link-coloured text and actions | 4.5:1 on both the window and the view colours; a pressed link on a fill takes `readableOn` |
 | `negative` | error words, the warning glyph, the clip lamp, a failed section's heading | the theme's negative colour, adjusted for text contrast |
 
 ### Row and button states
@@ -60,7 +60,7 @@ The transport uses Breeze's Header colour set, as Breeze's toolbars and the menu
 | `hover` | hover on buttons and dialog lists: the least text-over-view tint that reaches 1.3:1 | reads as hover in any theme without looking like a selection |
 | `rowHover` / `hoveredRow` | hover on the library and queue rows: 1.44:1 dark, 1.31:1 light | 1.3:1 was too faint across a wide list. In light, a stronger tint outweighed the selection |
 | `pressed` | a pressed button: 1.65:1 on the view | a press must read as a clear step past the hover |
-| `hoverOn(bg)` / `pressedOn(bg)` | hover and pressed tints on another opaque background, such as the Header chrome or the popup's window colour | they keep the same steps on any surface |
+| `hoverOn(bg)` / `pressedOn(bg)` | hover and pressed tints on another opaque background, such as the Header chrome | they keep the same steps on any surface |
 | `selection` | a selected row in a focused list: the view mixed with the accent [#1f3e4e / #b5e0f7] | above the hover in both weight and hue |
 | `selectionInactive` | a selected row in a list without focus: the accent mix desaturated to 60 % | reads as a selection at rest, still above the hover |
 | `selectionHovered` / `selectionInactiveHovered` | a selected queue row under the pointer | a selected row responds to the pointer like any other row |
@@ -138,9 +138,10 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **Dialog buttons carry a Breeze glyph** at `labelIconSize`, in footers and in action rows alike: `dialog-cancel`, `dialog-ok-apply`, `edit-delete`, `edit-rename` and so on. A glyphless caption in a row of glyphs reads as a label. Current exceptions: Last.fm's Complete Connection, Reconnect… and Disconnect / Cancel Connection buttons (Connect… has its glyph).
 - **The colour of a destructive glyph comes from Breeze's own icon.** `edit-delete` and `edit-delete-remove` are red in Breeze, and Ferrous never tints them. Red belongs to removing and deleting only: Replace Album Art uses `document-swap`, because `document-replace` has a red × and read as Delete.
 - **Dialogs size to their content, with caps.** A compact dialog (`CompactDialogWindow`) is as tall as its content and follows it as it wraps. Its width is the measure, or the width its form and buttons need. Lists such as Rename Files open as wide as their widest line, up to a cap. Configure asks for the height of its tallest page, so no page scrolls when there is room. Dialogs open within the screen, and stay within it as a compact dialog's content grows; a page, or a compact dialog's content above its buttons, scrolls when the screen, or a size the user chose, leaves too little room. A fixed size left either a scrollbar or an empty band.
-- **Configure has one grouping rule.** Only a page with three or more groups (Visualization) gives them DemiBold subheadings (`FormGroupGap.heading`). Two-group pages separate them with the form label and a `FormGroupGap`, 16 px. Help text (`FormHelpText`) sits under its control in `textSecondary`. Three grouping styles in one dialog read as assembled work.
+- **Configure has one grouping rule.** Only a page with three or more groups (Visualization) gives them DemiBold subheadings (`FormGroupGap.heading`). Two-group pages separate them with the form label and a `FormGroupGap`, 16 px. Help text (`FormHelpText`) sits under its control in `textSecondary`, or in `textTertiary` while the build can't offer what it explains, so that it never outranks the line that says why. Three grouping styles in one dialog read as assembled work.
 - **Lists that compare entries share columns.** In Configure, every library folder's path starts at one x, and Rename Files shows its rows as old | → | new. The things being compared need one left edge.
 - **Empty and failed states keep their place.** "Nothing found" is quiet, secondary text. A failure gets a warning glyph in the spinner's slot and the system's words under it, so a network failure doesn't read as a routine empty result.
+- **Configure's page title outranks its groups.** It is 1.3 times the text, DemiBold, over subheadings of the text's size. At 1.125 times, only their x told the two ranks apart.
 - **About keeps KDE's About layout,** with its tabs standing on the frame of their pages.
 
 ## States
@@ -148,6 +149,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **Rest:** no fill. Flat tool buttons show their glyph only.
 - **Hover:** the hover tint for the surface (`hover`, `rowHover`, or `hoverOn(bg)`) fades in and out over `shortDuration`. On a viewer's strip and corner plate, hover is a wash of the plot's text colour: 14 % on dark (about 1.4:1), 12 % on light. At 6.5 %, hover looked the same as rest.
 - **Pressed:** `pressed` or `pressedOn(bg)`, a clear step past the hover. It shows on the first frame of the press, never faded in. A press that matches the hover reads as nothing.
+- **Flat actions in dialogs share Breeze's states,** Recent Issues' links too: the accent's outline alone on hover and the accent at 30 % within it when pressed, both at once. Grey fills for the links beside outlined buttons read as two kinds of control.
 - **Focus:** a focus ring appears only while the keyboard is in use:
   - a focused list row gets a 1 px `focusRing`, drawn as one rectangle with the selection tint when the row is also selected;
   - Ferrous's own tool buttons and link actions get a 2 px ring;

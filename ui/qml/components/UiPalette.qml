@@ -202,12 +202,6 @@ QtObject {
         return root._tintOf(root.text, background, 1.65)
     }
 
-    // The link on `background`, such as a hover tint drawn over the window
-    // colour: the link, darker or lighter where it falls short of 4.5:1 on it.
-    function linkOn(background) {
-        return root.readableOn(root.link, [background], 4.5)
-    }
-
     // `color`, or, where it is under `ratio` on any of the opaque
     // `backgrounds`, the nearest HSL lightness of it that reaches it on all
     // of them: darker on light backgrounds, lighter on dark ones.
