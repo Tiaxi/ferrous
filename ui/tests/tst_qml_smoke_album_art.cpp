@@ -2782,9 +2782,12 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     // a placeholder message where the results would be, a little above
     // their middle, with no frame or well around it, and a running busy
     // indicator above it while searching, under the current art, which stays
-    // the dialog's first line. A failed search says so in a semibold
-    // heading, with the system's words under it, so it does not read as
-    // finding nothing, and a warning glyph in the spinner's place.
+    // the dialog's first line. A search that ends without results says how
+    // in a semibold heading, the window's whole answer, with a line under
+    // it: "No artwork found" under the search's glyph, and a failure, with
+    // the system's words, under a warning glyph, so it does not read as
+    // finding nothing. The glyph is 48 px in the spinner's place (32 px
+    // and a lone line were under-scaled for the window's answer).
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
@@ -2812,7 +2815,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     QQuickItem *busy = itemNamed(content, QStringLiteral("itunesArtworkBusyIndicator"));
     QQuickItem *results = itemNamed(content, QStringLiteral("itunesArtworkResultsView"));
     QQuickItem *currentRow = itemNamed(content, QStringLiteral("itunesArtworkCurrentRow"));
-    QQuickItem *heading = itemNamed(content, QStringLiteral("itunesArtworkFailureHeading"));
+    QQuickItem *heading = itemNamed(content, QStringLiteral("itunesArtworkPlaceholderHeading"));
     QVERIFY(frame != nullptr && placeholder != nullptr && message != nullptr && busy != nullptr
             && results != nullptr && currentRow != nullptr && heading != nullptr);
     QObject *palette = qvariant_cast<QObject *>(dialog->property("uiPalette"));
@@ -2833,8 +2836,8 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             auto *spinner = qvariant_cast<QQuickItem *>(busy->property("contentItem"));
             QVERIFY2(spinner != nullptr && spinner->isVisible(), at.constData());
             QTRY_COMPARE(spinner->opacity(), 1.0);
-            QCOMPARE(busy->width(), 32.0);
-            QCOMPARE(busy->height(), 32.0);
+            QCOMPARE(busy->width(), 48.0);
+            QCOMPARE(busy->height(), 48.0);
         }
         // No frame or well: the dialog's own colour behind the message.
         QCOMPARE(frame->property("color").value<QColor>().alpha(), 0);
@@ -2850,9 +2853,10 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         // the text's, brighter than searching).
         QCOMPARE(message->property("color").value<QColor>().rgba(),
                  palette->property("textSecondary").value<QColor>().rgba());
-        QCOMPARE(heading->isVisible(), failed);
-        if (failed) {
-            QCOMPARE(heading->property("text").toString(), QStringLiteral("Couldn\u2019t search iTunes"));
+        QCOMPARE(heading->isVisible(), !searching);
+        if (!searching) {
+            QCOMPARE(heading->property("text").toString(), failed ? QStringLiteral("Couldn\u2019t search iTunes")
+                                                                  : QStringLiteral("No artwork found"));
             QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
             QCOMPARE(heading->property("color").value<QColor>().rgba(),
                      palette->property("text").value<QColor>().rgba());
@@ -2874,7 +2878,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             QVERIFY(warning->property("isMask").toBool());
             QCOMPARE(warning->property("color").value<QColor>().rgba(),
                      palette->property("negative").value<QColor>().rgba());
-            QTRY_COMPARE(sceneRectOf(warning).size(), QSizeF(32, 32));
+            QTRY_COMPARE(sceneRectOf(warning).size(), QSizeF(48, 48));
             QCOMPARE(sceneRectOf(warning).top(), sceneRectOf(placeholder).top());
             QCOMPARE(sceneRectOf(warning).center().x(), sceneRectOf(placeholder).center().x());
             QVERIFY2(sceneRectOf(warning).bottom() < sceneRectOf(heading).top(), at.constData());
@@ -2892,10 +2896,10 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             QVERIFY(found->property("isMask").toBool());
             QCOMPARE(found->property("color").value<QColor>().rgba(),
                      palette->property("textSecondary").value<QColor>().rgba());
-            QTRY_COMPARE(sceneRectOf(found).size(), QSizeF(32, 32));
+            QTRY_COMPARE(sceneRectOf(found).size(), QSizeF(48, 48));
             QCOMPARE(sceneRectOf(found).top(), sceneRectOf(placeholder).top());
             QCOMPARE(sceneRectOf(found).center().x(), sceneRectOf(placeholder).center().x());
-            QVERIFY2(sceneRectOf(found).bottom() <= sceneRectOf(message).top(), at.constData());
+            QVERIFY2(sceneRectOf(found).bottom() < sceneRectOf(heading).top(), at.constData());
         }
         // The only glyph: the busy indicator's while searching, the
         // warning's when the search failed, the search's with nothing found.
@@ -2956,8 +2960,8 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
              qPrintable(describeRect(sceneRectOf(currentPreview))));
 
     bridge->setProperty("itunesArtworkLoading", false);
-    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
-    checkState(State::NothingFound, QStringLiteral("No iTunes artwork suggestions found."));
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("iTunes has no suggestions for this album."));
+    checkState(State::NothingFound, QStringLiteral("iTunes has no suggestions for this album."));
     QCOMPARE(sceneRectOf(currentPreview).left(), columnX);
 
     // As BridgeClient tells a failed search (BridgeClientTest::
@@ -3016,7 +3020,7 @@ void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
     QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
     QQuickItem *preview = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkCurrentPreviewButton"));
     QQuickItem *message = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkPlaceholderMessage"));
-    QQuickItem *heading = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkFailureHeading"));
+    QQuickItem *heading = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkPlaceholderHeading"));
     QQuickItem *results = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkResultsView"));
     QVERIFY(preview != nullptr && message != nullptr && heading != nullptr && results != nullptr);
     const auto baselineOf = [](QQuickItem *label) { return sceneRectOf(label).top() + label->baselineOffset(); };
@@ -3025,6 +3029,13 @@ void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
     QVERIFY(dialogWindow->grabWindow().width() > 0);
     const qreal previewX = sceneRectOf(preview).left();
     const qreal baseline = baselineOf(message);
+    // The glyph's slot: 48 px at 10 pt, scaled with a larger font, in every
+    // state.
+    QQuickItem *slot = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkGlyphSlot"));
+    QVERIFY(slot != nullptr);
+    const QSizeF slotSize(std::round(48 * std::max(1.0, pointSize / 10)), std::round(48 * std::max(1.0, pointSize / 10)));
+    QCOMPARE(slot->size(), slotSize);
+    const qreal slotY = sceneRectOf(slot).top();
     // The dialog's lead in each of its states, as the other dialogs' first
     // line is (it had the weight of every result's title).
     QQuickItem *lead = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkCurrentTitle"));
@@ -3032,11 +3043,16 @@ void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
     const auto weightOf = [](QQuickItem *label) { return label->property("font").value<QFont>().weight(); };
     QCOMPARE(weightOf(lead), QFont::DemiBold);
 
+    // Finding nothing's heading, and a failure's, take searching's line.
     bridge->setProperty("itunesArtworkLoading", false);
-    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("iTunes has no suggestions for this album."));
+    QTRY_VERIFY(heading->isVisible());
     QVERIFY(dialogWindow->grabWindow().width() > 0);
     QCOMPARE(sceneRectOf(preview).left(), previewX);
-    QTRY_COMPARE(baselineOf(message), baseline);
+    QTRY_VERIFY2(qAbs(baselineOf(heading) - baseline) <= 1.0,
+                 qPrintable(QStringLiteral("heading %1, searching %2").arg(baselineOf(heading)).arg(baseline)));
+    QCOMPARE(slot->size(), slotSize);
+    QCOMPARE(sceneRectOf(slot).top(), slotY);
     QCOMPARE(weightOf(lead), QFont::DemiBold);
 
     bridge->setProperty("itunesArtworkErrorText", QStringLiteral("Connection refused"));
@@ -3046,6 +3062,8 @@ void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
     QCOMPARE(sceneRectOf(preview).left(), previewX);
     QTRY_VERIFY2(qAbs(baselineOf(heading) - baseline) <= 1.0,
                  qPrintable(QStringLiteral("heading %1, searching %2").arg(baselineOf(heading)).arg(baseline)));
+    QCOMPARE(slot->size(), slotSize);
+    QCOMPARE(sceneRectOf(slot).top(), slotY);
 
     QCOMPARE(weightOf(lead), QFont::DemiBold);
     bridge->setProperty("itunesArtworkFailed", false);
@@ -3653,13 +3671,14 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
              qPrintable(loadingAt));
 
     // The search's glyph, the spinner or a failure's warning mark, is
-    // 32 px with the default font and scaled with a larger one, as the
-    // text under it (it was 32 px over 24 pt text).
+    // 48 px with the default font and scaled with a larger one, as the
+    // text under it (it was 32 px over 24 pt text, and 32 px was small for
+    // the window's whole answer).
     const qreal fontScale = qvariant_cast<QObject *>(opened.dialog->property("uiPalette"))
         ->property("fontScale").toReal();
-    const qreal stateGlyph = std::max(32.0, qreal(std::round(32 * fontScale)));
+    const qreal stateGlyph = std::max(48.0, qreal(std::round(48 * fontScale)));
     if (!large) {
-        QCOMPARE(stateGlyph, 32.0);
+        QCOMPARE(stateGlyph, 48.0);
     }
     bridge->setProperty("itunesArtworkResults", QVariantList());
     bridge->setProperty("itunesArtworkLoading", true);

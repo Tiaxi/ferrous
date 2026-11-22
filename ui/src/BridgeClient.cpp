@@ -4001,7 +4001,8 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
                 m_itunesArtworkErrorText = aggregation->firstErrorDetail.isEmpty()
                     ? aggregation->firstError : aggregation->firstErrorDetail;
             } else {
-                m_itunesArtworkStatusText = i18nc("@info:status", "No iTunes artwork suggestions found.");
+                m_itunesArtworkStatusText = i18nc("@info:status under the heading No artwork found",
+                                                  "iTunes has no suggestions for this album.");
             }
             emit itunesArtworkChanged();
             return;

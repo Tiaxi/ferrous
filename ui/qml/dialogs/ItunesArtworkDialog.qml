@@ -806,15 +806,14 @@ Components.DialogWindow {
             // above the middle of where the results would be, under a slot
             // with the busy indicator while it searches. The slot stays, so
             // the first line keeps its baseline as the search ends, and the
-            // lines after it grow downwards. Finding nothing is a routine
-            // outcome, and speaks as searching does: a glyph in the slot and
-            // a line in the secondary colour, with no heading or frame (a
-            // line in the text's colour under an empty slot, it outranked
-            // searching). A search that failed says so in a
-            // semibold heading, with the system's words under it in the
-            // secondary colour (otherwise it read as finding nothing),
-            // and a warning glyph in the negative colour in the spinner's
-            // place. Built from its
+            // lines after it grow downwards. A search that ends without
+            // results says how in a semibold heading, the window's whole
+            // answer, with the words under it in the secondary colour:
+            // finding nothing under the search's glyph in the secondary
+            // colour, and a failure, with the system's words, under a
+            // warning glyph in the negative colour (a lone secondary line
+            // under a 32 px glyph was under-scaled for the window's
+            // answer). No frame, as no results are there. Built from its
             // parts: Kirigami.PlaceholderMessage's selectable text brings
             // Copy and Select All actions that would take Ctrl+C and Ctrl+A
             // from the Edit menu's.
@@ -825,7 +824,8 @@ Components.DialogWindow {
                 readonly property bool failed: !placeholder.searching && root.uiBridge.itunesArtworkFailed === true
                 // The slot and one line: what is placed, whatever follows
                 // the line (centred whole, finding nothing was 22 px above
-                // searching, and the failure's heading 11 px).
+                // searching, and the failure's heading 11 px): searching's
+                // line, or the heading of what the search found.
                 readonly property real firstLineBottom: glyphSlot.Layout.preferredHeight + placeholder.spacing
                     + lineMetrics.implicitHeight
                 anchors.horizontalCenter: parent.horizontalCenter
@@ -837,15 +837,16 @@ Components.DialogWindow {
                 visible: itunesArtworkResultsView.count === 0
                     && (placeholder.searching || placeholderMessage.text.length > 0)
 
-                // The state's one glyph: 32 px with the default font and
+                // The state's one glyph: 48 px with the default font and
                 // larger with a larger one, as the text under it (a fixed
-                // 32 px stood over 24 pt text).
+                // 32 px stood over 24 pt text, and 32 px was small for the
+                // window's whole answer).
                 Item {
                     id: glyphSlot
                     objectName: "itunesArtworkGlyphSlot"
                     Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
-                    Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
+                    Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
+                    Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)
 
                     // The style's spinner.
                     BusyIndicator {
@@ -886,18 +887,22 @@ Components.DialogWindow {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
 
+                    // Searching has none: its line says it all.
                     Label {
-                        objectName: "itunesArtworkFailureHeading"
+                        objectName: "itunesArtworkPlaceholderHeading"
                         Layout.fillWidth: true
-                        visible: placeholder.failed
+                        visible: !placeholder.searching
                         textFormat: Text.PlainText
-                        text: I18n.i18nc("@info", "Couldn\u2019t search iTunes")
+                        text: placeholder.failed
+                            ? I18n.i18nc("@info", "Couldn\u2019t search iTunes")
+                            : I18n.i18nc("@info", "No artwork found")
                         font.weight: Font.DemiBold
                         color: root.uiPalette.text
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.Wrap
-                        // The status in a sentence, as the bridge has it.
-                        Accessible.description: root.uiBridge.itunesArtworkStatusText || ""
+                        // A failure's status in a sentence, as the bridge has
+                        // it; finding nothing's is the line under it.
+                        Accessible.description: placeholder.failed ? (root.uiBridge.itunesArtworkStatusText || "") : ""
                     }
 
                     Label {
