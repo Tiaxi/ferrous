@@ -746,8 +746,8 @@ def main():
         procs = []
         t0 = time.time()
         for i in range(n_workers):
-            # Per round and worker: concurrent rounds never share run dirs, sockets or caches.
-            env = dict(os.environ, SHOT_RUN_PREFIX=f"{os.path.basename(rd)}-w{i}")
+            # Per round and worker: run dirs and sockets. Per worker alone: the apps' caches (driver.app_caches).
+            env = dict(os.environ, SHOT_RUN_PREFIX=f"{os.path.basename(rd)}-w{i}", SHOT_CACHE_SLOT=f"w{i}")
             log = open(os.path.join(rd, f"worker{i}.log"), "w")
             procs.append((subprocess.Popen(["nice", "-n", "10"] + args, env=env, stdout=log, stderr=subprocess.STDOUT), log))
         rc = 0

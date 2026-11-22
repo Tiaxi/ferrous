@@ -24,6 +24,30 @@ def tearDownModule():
     _WORK.cleanup()
 
 
+class AppCachesTest(unittest.TestCase):
+    def caches(self, **env):
+        old = {k: os.environ.pop(k, None) for k in ("SHOT_RUN_PREFIX", "SHOT_CACHE_SLOT")}
+        os.environ.update(env)
+        try:
+            return driver.app_caches()
+        finally:
+            for k, v in old.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+
+    def test_a_worker_keeps_its_caches_from_round_to_round(self):
+        a = self.caches(SHOT_RUN_PREFIX="r1-w3", SHOT_CACHE_SLOT="w3")
+        self.assertEqual(a, self.caches(SHOT_RUN_PREFIX="r2-w3", SHOT_CACHE_SLOT="w3"))
+
+    def test_parallel_workers_share_none(self):
+        a, b = (self.caches(SHOT_RUN_PREFIX=f"r1-w{i}", SHOT_CACHE_SLOT=f"w{i}") for i in (0, 1))
+        self.assertFalse(set(a.values()) & set(b.values()))
+
+    def test_an_app_outside_the_workers_has_its_prefixs(self):
+        self.assertIn("gst-registry-setup.bin", self.caches(SHOT_RUN_PREFIX="setup")["GST_REGISTRY"])
+
+
 class KWinSessionTest(unittest.TestCase):
     def session(self, scale, size=(1600, 1000)):
         iso = tempfile.mkdtemp(dir=_WORK.name)

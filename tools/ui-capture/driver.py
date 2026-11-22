@@ -150,6 +150,15 @@ def kwin_session(iso, size, scale, script):
             "--inputmethod", "/bin/true", "--exit-with-session", launcher]
 
 
+def app_caches():
+    """The app's GStreamer registry and shader cache: one of each per worker (SHOT_CACHE_SLOT), so parallel apps
+    never share them, and the same from round to round (one run at a time per work folder), so a run's workers
+    don't all rebuild both as they start together: that saturated every CPU for the first states of each."""
+    slot = os.environ.get("SHOT_CACHE_SLOT") or os.environ.get("SHOT_RUN_PREFIX", "run")
+    return dict(GST_REGISTRY=os.path.join(WORK, "run", f"gst-registry-{slot}.bin"),
+                MESA_SHADER_CACHE_DIR=os.path.join(WORK, "run", f"mesa-cache-{slot}"))
+
+
 class App:
     def __init__(self, name, scheme="BreezeLight", scale=1, size=(1600, 1000), fresh=True,
                  db_from=None, extra_env=None, font_pt=10, settings_extra="", anim_off=False, app_defaults=False):
@@ -210,9 +219,7 @@ class App:
             "QT_SCALE_FACTOR": str(scale),
             "QT_QUICK_BACKEND": "software" if os.environ.get("SHOT_SOFTWARE") else "",
             "FERROUS_GST_OUTPUT_SINK": "fakeaudiosink",
-            # Per worker (prefix): parallel apps never share the registry or the shader cache.
-            "GST_REGISTRY": os.path.join(WORK, "run", f"gst-registry-{os.environ.get('SHOT_RUN_PREFIX', 'run')}.bin"),
-            "MESA_SHADER_CACHE_DIR": os.path.join(WORK, "run", f"mesa-cache-{os.environ.get('SHOT_RUN_PREFIX', 'run')}"),
+            **app_caches(),
             "LD_PRELOAD": PROBE,
             "SHOTPROBE_DIR": self.pdir,
             "LANG": "en_US.UTF-8",
