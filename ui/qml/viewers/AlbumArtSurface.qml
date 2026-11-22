@@ -267,11 +267,13 @@ Item {
 
     // A button of the preview's footer: the style's own, as a dialog's
     // button row has, so Apply, the default, is Breeze's default button
-    // (a solid accent fill was unlike any other default button). The
+    // (a solid accent fill was unlike any other default button), its
+    // caption and glyph on the details' type scale (CaptionButton: they
+    // were 13 px under 16 px details). The
     // details are dark in both themes, so the buttons take
     // the complementary colours, Breeze's dark set in either. Space and
     // the tooltip as the details' other buttons.
-    component FooterButton: Button {
+    component FooterButton: Components.CaptionButton {
         property string toolTipText: ""
 
         Kirigami.Theme.inherit: false
@@ -600,9 +602,10 @@ Item {
     // window). Over the whole screen it follows its text, 1.2 times larger:
     // 336 px, or 40 characters of that text (at 320 px a folder's path was
     // cut beside the screen's room to spare).
-    // During a preview, it is wider for its buttons if they need it, up to
-    // half the view: in a narrower view, the buttons stack, so neither is
-    // cut short.
+    // During a preview, it is up to half the view, and wider still, up to
+    // three quarters, where one of its buttons alone needs more, as on a
+    // small screen with a large font: where they don't fit side by side the
+    // buttons stack, so neither is cut short.
     Item {
         id: infoColumn
         objectName: "albumArtInfoColumn"
@@ -621,10 +624,12 @@ Item {
         x: root.width - root.infoReserve + 1
         anchors.top: parent.top
         anchors.bottom: parent.bottom
+        readonly property real widestButton: Math.ceil(Math.max(previewBackButton.implicitWidth,
+            previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 2 * root.infoPadding
         width: root.previewActive
-            ? Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width / 2), Math.max(infoColumn.fortyCharacters,
-                Math.ceil(Math.max(previewBackButton.implicitWidth,
-                    previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 2 * root.infoPadding)))
+            ? Math.max(infoColumn.minimumWidth,
+                Math.min(Math.floor(root.width / 2), infoColumn.fortyCharacters),
+                Math.min(Math.floor(root.width * 0.75), infoColumn.widestButton))
             : Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width * 0.4), infoColumn.fortyCharacters))
 
         // The details' text: the body font, 1.2 times it over the whole
