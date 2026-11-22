@@ -3763,6 +3763,15 @@ void UiDialogsTest::recentIssuesActionsShowTheFileOrOpenTheSettings() {
     QVERIFY(openIssues(window));
     QTRY_VERIFY((action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"))) != nullptr);
     QCOMPARE(action->property("text").toString(), QStringLiteral("Show in Library"));
+    // Its path, which the action acts on, is secondary, over the time and
+    // the category (it had their tertiary ink).
+    const auto inkOf = [&](const char *name) {
+        return visibleNamed(window, QString::fromLatin1(name))->property("color").value<QColor>();
+    };
+    QVERIFY(visibleNamed(window, QStringLiteral("errorHistorySubject")) != nullptr);
+    QCOMPARE(hex(inkOf("errorHistorySubject")), hex(tokenOf(window, "textSecondary")));
+    QCOMPARE(hex(inkOf("errorHistoryTime")), hex(tokenOf(window, "textTertiary")));
+    QCOMPARE(hex(inkOf("errorHistoryCategory")), hex(tokenOf(window, "textTertiary")));
     click(window, action);
     QTRY_VERIFY(!popup->property("visible").toBool());
     QCOMPARE(bridge->property("shownInLibrary").toStringList(), QStringList{QStringLiteral("/music/gone.flac")});

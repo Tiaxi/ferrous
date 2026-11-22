@@ -483,7 +483,9 @@ Popup {
                                     textFormat: Text.PlainText
                                     elide: Text.ElideMiddle
                                     font.pointSize: root.uiPalette.smallPointSize
-                                    color: root.uiPalette.textTertiary
+                                    // What the action acts on: over the time
+                                    // and the category (it had their ink).
+                                    color: root.uiPalette.textSecondary
                                     Accessible.ignored: true
                                 }
 
