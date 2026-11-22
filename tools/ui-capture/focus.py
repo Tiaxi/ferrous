@@ -437,7 +437,7 @@ SCOPES = {
                ("dialog", "tag-editor-auto-number", "inner", "Auto Number", dict(margin=4, lh=16, gap=6))],
               [("dialog", "tag-editor-status-details", "inner", "Tag Editor Details, after a failed save",
                 dict(margin=4, lh=16, gap=6)),
-               ("dialog", "diagnostics", None, "Diagnostics, fitted", dict(fit=(620, 454), lh=16, gap=6))]]),
+               ("dialog", "diagnostics", None, "Diagnostics, fitted", dict(fit=(556, 407), lh=16, gap=6))]]),
             # Rename Files with the twelve-file batch (RENAME_BATCH): at 24 pt its window is about 1.4 MP, so it is
             # shown 1:1 in part, beside the whole of it at 10 pt
             ("dlg24-rename", "Rename Files, twelve files, 1:1, dark: 10 pt whole; 24 pt: its top rows and its buttons", "dark",
