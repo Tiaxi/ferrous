@@ -1526,8 +1526,17 @@ Components.DialogWindow {
                 boundsBehavior: Flickable.StopAtBounds
                 headerPositioning: ListView.OverlayHeader
                 pixelAligned: true
+                // From under the header to the rows' foot, as the
+                // Configure Keyboard Shortcuts list's bar runs: on the
+                // view, it ran through the header, its thumb level with
+                // the column names.
                 ScrollBar.vertical: ScrollBar {
                     id: tagEditorDownBar
+                    parent: tableFrame
+                    anchors.right: tagEditorTable.right
+                    anchors.top: tagEditorTable.top
+                    anchors.topMargin: root.tableRowHeight
+                    anchors.bottom: tagEditorTable.bottom
                 }
                 ScrollBar.horizontal: ScrollBar {
                     id: tagEditorAcrossBar

@@ -695,6 +695,8 @@ private slots:
     void editTagsFileNameWrapsBeforeItIsCut();
     void editTagsFileNameKeepsItsEndAtLargeFonts_data();
     void editTagsFileNameKeepsItsEndAtLargeFonts();
+    void editTagsDownBarStartsUnderTheHeader_data();
+    void editTagsDownBarStartsUnderTheHeader();
     void editTagsSetsChangedValuesInDemiBold_data();
     void editTagsSetsChangedValuesInDemiBold();
     void editTagsPinsWhatIdentifiesARowAsItScrolls_data();
@@ -6360,6 +6362,68 @@ void UiDialogsTest::editTagsFileNameKeepsItsEndAtLargeFonts() {
     if (pointSize >= 24) {
         QCOMPARE(mostLines, 3);
     }
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsDownBarStartsUnderTheHeader_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000;
+    QTest::newRow("24 pt, 1000 px") << 24.0 << 1000;
+    QTest::newRow("24 pt, 1600 px") << 24.0 << 1600;
+}
+
+// The table's vertical bar runs from under its header to its foot, as the
+// Configure Keyboard Shortcuts list's does, and clear of the sideways bar
+// under the rows: it ran through the header row, its thumb level with the
+// column names.
+void UiDialogsTest::editTagsDownBarStartsUnderTheHeader() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfTheShotBatch());
+    QVERIFY(tags != nullptr);
+    tags->resize(width, tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), qreal(width));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    for (int i = 0; i < retitledBatch().size(); ++i) {
+        main.editor.setCell(i, QStringLiteral("title"), retitledBatch().at(i).second);
+    }
+    main.editor.notifyRowMutation();
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    QQuickItem *header = visibleNamed(tags, QStringLiteral("tagEditorTableHeader"));
+    QVERIFY(header != nullptr);
+    // The table's bars, wherever they are parented.
+    QQuickItem *down = nullptr;
+    QQuickItem *across = nullptr;
+    QList<QQuickItem *> pending{table->parentItem()};
+    while (!pending.isEmpty()) {
+        QQuickItem *item = pending.takeFirst();
+        if (item->inherits("QQuickScrollBar")) {
+            (item->property("orientation").toInt() == Qt::Vertical ? down : across) = item;
+        }
+        pending.append(item->childItems());
+    }
+    QVERIFY(down != nullptr && across != nullptr);
+    QTRY_VERIFY(down->isVisible());
+    QVERIFY(down->property("size").toReal() < 1.0);
+    const QString at = describeItem(down) + QStringLiteral(" under ") + describeItem(header);
+    QVERIFY2(std::abs(sceneRect(down).top() - sceneRect(header).bottom()) <= 0.5, qPrintable(at));
+    QVERIFY2(std::abs(sceneRect(down).bottom() - sceneRect(table).bottom()) <= 0.5,
+             qPrintable(at + QStringLiteral(" in ") + describeItem(table)));
+    QVERIFY2(std::abs(sceneRect(down).right() - sceneRect(table).right()) <= 0.5,
+             qPrintable(at + QStringLiteral(" in ") + describeItem(table)));
+    if (across->isVisible()) {
+        QVERIFY2(sceneRect(down).bottom() <= sceneRect(across).top() + 0.5,
+                 qPrintable(at + QStringLiteral(" over ") + describeItem(across)));
+    }
+    // Its thumb reaches the foot when the rows do.
+    evaluate(table, QStringLiteral("positionViewAtEnd()"));
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    QTRY_VERIFY(std::abs(down->property("position").toReal() + down->property("size").toReal() - 1.0) < 0.01);
     QVERIFY(closeTagEditor(main));
 }
 
