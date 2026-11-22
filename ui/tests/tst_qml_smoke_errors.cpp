@@ -370,7 +370,7 @@ void ErrorsSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
     QVERIFY(sceneRectOf(issuesButton).right() <= sceneRectOf(close).left());
     const QStringList messages = errorHistoryMessages(ui.errors);
     QCOMPARE(messages.size(), 1);
-    QVERIFY2(messages.first().contains(QStringLiteral("Couldn't keep the screen awake")),
+    QVERIFY2(messages.first().contains(QStringLiteral("Couldn\u2019t keep the screen awake")),
              qPrintable(messages.first()));
     QVERIFY(messages.first().contains(QStringLiteral("no idle service")));
 

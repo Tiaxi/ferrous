@@ -57,12 +57,13 @@ Preferences.PreferencesPage {
         id: mediaCheckBox
         objectName: "systemMediaControlsCheckBox"
         Kirigami.FormData.label: I18n.i18nc("@label", "Media controls:")
-        // It says where Ferrous shows ("Show Ferrous" left that open); a
+        // It says where Ferrous shows ("Show Ferrous" alone left that open, and "Appear in media
+        // controls" repeated the label); a
         // screen reader hears the label and the box, the box alone.
         text: I18n.i18nc("@option:check after the label Media controls",
-            "Appear in media controls and answer media keys")
+            "Show Ferrous in Plasma and answer media keys")
         Accessible.name: I18n.i18nc("@option:check accessible name; it contains the check box's text",
-            "Media controls: Appear in media controls and answer media keys")
+            "Media controls: Show Ferrous in Plasma and answer media keys")
         checked: root.settings.value("systemMediaControlsEnabled")
         onToggled: root.settings.setValue("systemMediaControlsEnabled", checked)
     }

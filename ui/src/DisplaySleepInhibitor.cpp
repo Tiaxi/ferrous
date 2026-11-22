@@ -133,7 +133,7 @@ DisplaySleepInhibitor::DisplaySleepInhibitor(
         // Only a request still standing failed; a released one no longer matters.
         if (m_inhibited) {
             emit inhibitionFailed(
-                i18nc("@info", "Couldn't keep the screen awake during fullscreen playback: %1",
+                i18nc("@info", "Couldn’t keep the screen awake during fullscreen playback: %1",
                       reason));
         }
     });
