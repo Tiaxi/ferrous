@@ -380,10 +380,10 @@ SCOPES = {
               [("dialog", "quit-save-failed", None, "Couldn't save before quitting, dark", dict(lh=16, gap=6)),
                ("dialog", "confirm-remove-library-root", "inner", "Remove Library Folder, light",
                 dict(theme="light", margin=16, lh=16, gap=6))]]),
-            ("dlg-tag-editor", "Edit Tags, 1:1: from a 1000 px main window, whole (light); from a 1600 px one, its top "
+            ("dlg-tag-editor", "Edit Tags, 1:1: from a 1000 px main window, whole; from a 1600 px one, its top "
              "left: an edit typed with real keys, then committed with Tab", "dark",
-             [[("dialog", "tag-editor", None, "At rest, from a 1000 px main window, light",
-                dict(theme="light", variant="1000x720", lh=16, gap=6))],
+             [[("dialog", "tag-editor", None, "At rest, from a 1000 px main window, dark",
+                dict(variant="1000x720", lh=16, gap=6))],
               [("dialog", "tag-editor-editing", None, "\u201c (Live)\u201d typed in the Title field", dict(part=(0, 0, 0.7, 0.38), lh=16, gap=6))],
               [("dialog", "tag-editor-modified", None, "The same edit committed with Tab", dict(part=(0, 0, 0.7, 0.38), lh=16, gap=6))]]),
             # the 10 pt search sheet is left out (the palette has its own shots in shots/)
@@ -432,14 +432,15 @@ SCOPES = {
             ("dlg24-small", "At 24 pt, dark, 1:1: Add Library Folder; Finishing Tag Changes", "dark",
              [[("dialog", "library-root-name-add", None, "Add Library Folder", B24)],
               [("dialog", "tag-editor-quit-wait", "inner", "Finishing Tag Changes", dict(B24, margin=4))]]),
-            ("dlg24-about", "At 24 pt, 1:1: About's header (icon, name, version, tabs), dark and light; About KDE's "
-             "header; both footers' ends (dark)", "dark",
-             [[("dialog", "about", None, "About: header and tabs", dict(B24, part=(0, 0.06, 0.75, 0.4)))],
-              [("dialog", "about", None, "About: header and tabs, light", dict(B24, theme="light", part=(0, 0.06, 0.75, 0.4)))],
-              [("dialog", "about-kde", None, "About KDE: header and first lines", dict(B24, part=(0, 0.035, 1, 0.16)))],
-              [("dialog", "about", None, "About: footer, left", dict(B24, part=(0, 0.83, 0.4, 0.17))),
-               ("dialog", "about", None, "About: Close", dict(B24, part=(0.85, 0.83, 0.15, 0.17))),
-               ("dialog", "about-kde", None, "About KDE: Close", dict(B24, part=(0.85, 0.91, 0.15, 0.09)))]]),
+            # the small windows whole at 10 pt, so their size can be judged against what they hold (About at 24 pt,
+            # which had a sheet of its own, is in shots/)
+            ("dlg-windows", "Whole windows at 10 pt, dark: About, Auto Number, Tag Editor Details at 1:1; Diagnostics "
+             "fitted", "dark",
+             [[("dialog", "about", None, "About", dict(lh=16, gap=6)),
+               ("dialog", "tag-editor-auto-number", "inner", "Auto Number", dict(margin=4, lh=16, gap=6))],
+              [("dialog", "tag-editor-status-details", "inner", "Tag Editor Details, after a failed save",
+                dict(margin=4, lh=16, gap=6)),
+               ("dialog", "diagnostics", None, "Diagnostics, fitted", dict(fit=(500, 366), lh=16, gap=6))]]),
             # Rename Files with the twelve-file batch (RENAME_BATCH): at 24 pt its window is about 1.4 MP, so it is
             # shown 1:1 in part, beside the whole of it at 10 pt
             ("dlg24-rename", "Rename Files, twelve files, 1:1, dark: 10 pt whole; 24 pt: its top rows and its buttons", "dark",
@@ -488,7 +489,8 @@ SCOPES = {
             ("sheet", "dlg24-windows", "dark", "24 pt: Library page, Configure's footer; Diagnostics' line and toolbar; "
              "iTunes' count line", "the folder glyph and full paths; the toolbar and footer uncut"),
             ("sheet", "dlg24-small", "dark", "24 pt: Add Library Folder; Finishing Tag Changes", "the field, the wrap, the buttons"),
-            ("sheet", "dlg24-about", "dark", "24 pt: About's header dark and light; About KDE's header; the footers", "the icon, the tabs, the footers"),
+            ("sheet", "dlg-windows", "dark", "Whole windows at 10 pt: About, Auto Number, Tag Editor Details, Diagnostics",
+             "each window's size against what it holds; what leads in it"),
             ("sheet", "dlg24-rename", "dark", "Rename Files, twelve files: 10 pt whole; 24 pt in part, 1:1",
              "the preview's columns and arrows; the rows at 24 pt"),
             ("sheet", "dlg24-details", "dark", "24 pt: Tag Editor Details; an iTunes result loading its artwork",

@@ -6365,7 +6365,7 @@ STATES = [
            ("viewers", "viewer", f"spectrogram-{mname}-zoomed",
             ("window spectrogramFullscreenWindow | " if mode else "") + "wheel xy:700,450 120 4 | wait 1.2 | move xy:700,450 | wait 0.6",
             f"Spectrogram viewer, {mname}, zoomed 4 notches: zoom readout + Reset Zoom")]
-        + ([("viewers", "viewer", "spectrogram-windowed-reset-hover", "move xy:700,450 | wait 0.5 | hover plotZoomResetButton 1.3",
+        + ([("viewers", "viewer", "spectrogram-windowed-reset-hover", "move xy:700,450 | wait 0.5 | hover viewerResetButton 1.3",
              "Windowed viewer: Reset Zoom hovered (tooltip)"),
             ("viewers", "viewer", "spectrogram-windowed-meter",
              "js root.uiBridge.setShowLevelMeter(true) | wait 0.5 | move xy:700,450 | wait 0.6",
