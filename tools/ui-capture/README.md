@@ -72,8 +72,8 @@ tools/ui-capture/shoot_round.sh r2 ~/src/ferrous-branch --out /tmp/ui-rounds
 ```
 
 A focus capture shoots the sessions that the named scopes of `focus.py` need, once (the union of theirs), and
-packs only their images, into `<round>-focus/`; when all of them pass, it publishes each to
-`<round>/focus/<scope>/`. A scope's folder is the whole of one reviewer task: `FOCUS.md`, `FOCUS-FACTS.md` and the
+packs only their images, into `<round>-focus/`; when the whole run passes (no failed check or state), it
+publishes each to `<round>/focus/<scope>/`. So does a full capture given `--focus`. A scope's folder is the whole of one reviewer task: `FOCUS.md`, `FOCUS-FACTS.md` and the
 images. The round's packs of other scopes stay.
 
 ```bash
@@ -178,7 +178,7 @@ The pack is made for reviewers whose image input downscales anything over about 
 1.15 MP. Every image fits 1.15 MP: a 1:1 image as drawn, or the pack fails; the others are fitted to 1.0 MP.
 
 A focus pack holds at most 14 images, counting the contact sheets of "neither" frames that follow a recording which
-has them. Over 14, or with an image over 1.15 MP, `pack.py` fails (exit 3) and a focus-only run publishes nothing,
+has them. Over 14, or with an image over 1.15 MP, `pack.py` fails (exit 3) and no pack of the run is published,
 so a pack cannot grow round by round: an image added to a full scope replaces another. Keep a scope that shows
 recordings under 14, so a "neither" sheet has room.
 

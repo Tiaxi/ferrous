@@ -67,7 +67,11 @@ def shot_by(cell, theme, sessions):
 
 
 def recorded_by(name, theme, sessions):
-    """Whether one of `sessions` records the transition `name` in `theme` (light: only STRIP_BOTH_THEMES)."""
+    """Whether one of `sessions` records the transition `name`, or the recording it is another view of, in `theme`
+    (light: only STRIP_BOTH_THEMES)."""
+    for base, views in states.EXTRA_VIEWS.items():
+        if name in {f"{base}-{suffix}" for suffix, _ in views}:
+            name = base
     return ((theme == "dark" or name in states.STRIP_BOTH_THEMES)
             and any(s in sessions and (a, t) == ("motion", name) for s, a, t, *_ in states.STATES))
 
@@ -102,6 +106,9 @@ class ScopeSelection(unittest.TestCase):
         self.assertIn("albumart-info-toggle", both)  # an image
         self.assertLessEqual({"search-open", "search-close"}, both)  # a pair's two halves
         self.assertIn("menu-open-close", both)  # facts only
+
+    def test_another_view_of_a_recording_needs_that_recording(self):
+        self.assertIn("first-play-from-idle", pack.focus_strip_needs(["whole-app"]))
 
 
 class ScopeDefinitions(unittest.TestCase):
@@ -183,7 +190,7 @@ class PackWriting(unittest.TestCase):
         return fails
 
     def images(self, name):
-        return sorted(f for f in os.listdir(os.path.join(self.rd, "focus", name)) if f.endswith(".png"))
+        return sorted(f for f in os.listdir(os.path.join(self.rd, "focus-build", name)) if f.endswith(".png"))
 
     def test_each_scope_gets_a_folder_of_its_own(self):
         scopes = {"one": self.scope("one", 2), "two": self.scope("two", 3)}
@@ -192,7 +199,7 @@ class PackWriting(unittest.TestCase):
         self.assertEqual(len(self.images("two")), 3)
         for name in scopes:
             for doc in ("FOCUS.md", "FOCUS-FACTS.md"):
-                path = os.path.join(self.rd, "focus", name, doc)
+                path = os.path.join(self.rd, "focus-build", name, doc)
                 self.assertTrue(os.path.exists(path), path)
                 self.assertIn(path, pack.round_docs(self.rd))  # (so the privacy check reads it)
 
@@ -234,10 +241,12 @@ class SystemFacts(unittest.TestCase):
                     "| Hint text | light | #999999 | #ffffff | **2.85** | fails AA | - | x |\n")
         finding = dict(kind="contrast", severity=4, component="hintLabel", worst=2.85,
                        occurrences=[dict(shot="shots/shown.png"), dict(shot="shots/other.png")])
+        behind = dict(kind="contrast", severity=4, component="behindLabel", worst=1.5,
+                      occurrences=[dict(shot="shots/shown.png", in_shot=False)])
         elsewhere = dict(kind="elided", severity=3, component="unseenLabel", worst=0.5,
                          occurrences=[dict(shot="shots/other.png")])
         with open(os.path.join(rd, "layout.json"), "w") as f:
-            json.dump(dict(findings=[finding, elsewhere]), f)
+            json.dump(dict(findings=[finding, elsewhere, behind]), f)
         with open(os.path.join(rd, "a11y_dark_1x_1600x1000.jsonl"), "w") as f:
             f.write(json.dumps(dict(stop="Tab 1", item="playButton", role="Button", name="Play")) + "\n")
         text = "\n".join(pack.system_lead(rd, [("sheet", dict(tiles=[dict(file="shown.png")]))], ["F01"]))
@@ -245,6 +254,7 @@ class SystemFacts(unittest.TestCase):
         self.assertNotIn("| Body text |", text)
         self.assertIn("| contrast | hintLabel | 2.85 | 1 | F01 |", text)
         self.assertNotIn("unseenLabel", text)
+        self.assertNotIn("behindLabel", text)
         self.assertIn("| Tab 1 | `playButton` | Button | Play |", text)
 
 
@@ -295,7 +305,7 @@ class PointerSteps(unittest.TestCase):
 class DialogMenuGrab(unittest.TestCase):
     """A menu open in a dialog is a window of its own (#642), which a capture of the dialog's window leaves out."""
 
-    def grab(self, popups):
+    def grab(self, popups, captured=(600, 400)):
         s = shotlib.Session.__new__(shotlib.Session)
         s.suffix, s.tag, s.scale, s.size, s.renderer, s.index = "dark_1x_64x48", "dark", 1, (64, 48), "test", []
         s.settle_opacity = lambda win="", timeout=1.2: None
@@ -303,7 +313,7 @@ class DialogMenuGrab(unittest.TestCase):
         s.windows = lambda: []
         s.popups = lambda win="": popups
         s.kwin_frame = lambda title: (10.0, 20.0, 600.0, 400.0)
-        s.kwin_capture_area = mock.Mock(return_value=(600, 400))
+        s.kwin_capture_area = mock.Mock(return_value=captured)
         s.kwin_capture = mock.Mock(return_value=(600, 400))
         with contextlib.redirect_stdout(io.StringIO()):
             s.grab("dialog", "folder-menu", "", dialog_window=dict(cls="Dialog", title="Configure", w=600, h=370, parent=0))
@@ -314,6 +324,17 @@ class DialogMenuGrab(unittest.TestCase):
         self.assertEqual(s.kwin_capture_area.call_args[0][1], (10.0, 20.0, 600.0, 400.0))
         s.kwin_capture.assert_not_called()
         self.assertIn("open menu", s.index[-1]["desc"])
+
+    def test_a_failed_screen_capture_fails_rather_than_leaving_the_menu_out(self):
+        with self.assertRaisesRegex(RuntimeError, "menu would be missing"):
+            self.grab([dict(opened=True, cls="AppMenu_QMLTYPE_1")], captured=None)
+
+    def test_a_folder_menu_state_without_its_menu_fails(self):
+        s = mock.Mock(**{"dialog_window.return_value": dict(cls="Dialog"), "popups.return_value": []})
+        with mock.patch.object(states.time, "sleep"), \
+                mock.patch.object(states.time, "time", side_effect=iter(range(100))):
+            with self.assertRaisesRegex(RuntimeError, "no menu open"):
+                states.m_dialogmenu(mock.Mock(s=s), "")
 
     def test_without_one_the_dialogs_window_is_captured(self):
         s = self.grab([])

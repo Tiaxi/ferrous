@@ -2591,6 +2591,18 @@ def measure_now(r, label, kind, expr):
     return m
 
 
+def m_dialogmenu(r, arg):
+    """dialogmenu: a menu is open in the dialog window, shown by KWin, or the state fails (the dialog alone passed
+    the runner's check of a dialog state)."""
+    end = time.time() + 1.5
+    while time.time() < end:
+        dw = r.s.dialog_window()
+        if dw and any(p["opened"] and "Menu" in p["cls"] and p.get("exposed", True) for p in r.s.popups(dw["cls"])):
+            return
+        time.sleep(0.05)
+    raise RuntimeError("dialogmenu: no menu open in the dialog")
+
+
 def m_opendialog(r, arg):
     """opendialog ID: opens a dialog whether it is a Popup (open()) or a Window (show()); P2 turns
     Configure and About into real top-level windows."""
@@ -5609,7 +5621,7 @@ def m_ring_progression(r, arg):
                                "right end at 1x, the indicator (glyph and bar) at 6x (states injected)"))
 
 
-MACROS = dict(onetoone=m_onetoone, edge4x=m_edge4x, crop11=m_crop11, artqueue=m_artqueue, platehover=m_platehover, kwinprobe=m_kwinprobe, treekeys=m_treekeys, glyphline=m_glyphline, searchfield=m_searchfield, largelib=m_largelib, inwindow=m_inwindow, rollprobe=m_rollprobe, floorprobe=m_floorprobe, appicon5=m_appicon5, appicon6=m_appicon6, appicon7=m_appicon7, appicon8=m_appicon8, appicon9=m_appicon9, appicon10=m_appicon10, appicon11=m_appicon11, appicon4=m_appicon4, appicon3=m_appicon3, appicon2=m_appicon2, appicon=m_appicon, motif=m_motif, firstrunview=m_firstrunview, lanesrest=m_lanesrest, platesizes=m_platesizes, meterprobe=m_meterprobe, cardgeom=m_cardgeom, titlelines=m_titlelines, statusjumps=m_statusjumps, queuefocus=m_queuefocus, queuenow=m_queuenow, queuegeom=m_queuegeom, unreadable=m_unreadable, fsitem=m_fsitem, screenfacts=m_screenfacts, itunesfail=m_itunesfail, notefact=m_notefact, platefact=m_platefact, fillfact=m_fillfact, lastfmaccount=m_lastfmaccount, tagsavefail=m_tagsavefail, renamebatch=m_renamebatch, quitwait=m_quitwait, dlgtab=m_dlgtab, dlgfacts=m_dlgfacts, itunesapply=m_itunesapply, infoedge=m_infoedge, markprobe=m_markprobe, restprobe=m_restprobe, switchstates=m_switchstates, rowdetail=m_rowdetail, dialogwalk=m_dialogwalk, checkann=m_checkann, launch_focus=m_launch_focus, closeups=m_closeups, ring_progression=m_ring_progression, opendialog=m_opendialog, openprefs=m_openprefs, icons_ab=m_icons_ab, measure=m_measure, measure_na=m_measure_na, fakebridge=m_fakebridge, lastfm=m_lastfm, itunes=m_itunes, open_child=m_open_child, open_named=m_open_named,
+MACROS = dict(dialogmenu=m_dialogmenu, onetoone=m_onetoone, edge4x=m_edge4x, crop11=m_crop11, artqueue=m_artqueue, platehover=m_platehover, kwinprobe=m_kwinprobe, treekeys=m_treekeys, glyphline=m_glyphline, searchfield=m_searchfield, largelib=m_largelib, inwindow=m_inwindow, rollprobe=m_rollprobe, floorprobe=m_floorprobe, appicon5=m_appicon5, appicon6=m_appicon6, appicon7=m_appicon7, appicon8=m_appicon8, appicon9=m_appicon9, appicon10=m_appicon10, appicon11=m_appicon11, appicon4=m_appicon4, appicon3=m_appicon3, appicon2=m_appicon2, appicon=m_appicon, motif=m_motif, firstrunview=m_firstrunview, lanesrest=m_lanesrest, platesizes=m_platesizes, meterprobe=m_meterprobe, cardgeom=m_cardgeom, titlelines=m_titlelines, statusjumps=m_statusjumps, queuefocus=m_queuefocus, queuenow=m_queuenow, queuegeom=m_queuegeom, unreadable=m_unreadable, fsitem=m_fsitem, screenfacts=m_screenfacts, itunesfail=m_itunesfail, notefact=m_notefact, platefact=m_platefact, fillfact=m_fillfact, lastfmaccount=m_lastfmaccount, tagsavefail=m_tagsavefail, renamebatch=m_renamebatch, quitwait=m_quitwait, dlgtab=m_dlgtab, dlgfacts=m_dlgfacts, itunesapply=m_itunesapply, infoedge=m_infoedge, markprobe=m_markprobe, restprobe=m_restprobe, switchstates=m_switchstates, rowdetail=m_rowdetail, dialogwalk=m_dialogwalk, checkann=m_checkann, launch_focus=m_launch_focus, closeups=m_closeups, ring_progression=m_ring_progression, opendialog=m_opendialog, openprefs=m_openprefs, icons_ab=m_icons_ab, measure=m_measure, measure_na=m_measure_na, fakebridge=m_fakebridge, lastfm=m_lastfm, itunes=m_itunes, open_child=m_open_child, open_named=m_open_named,
               tagedit=m_tagedit, tab=m_tab, icons=m_icons)
 
 # The input-latency baseline: its rectangle's name (the strips' crop) and its scripts.
@@ -7606,7 +7618,7 @@ _insert_after("menus", "help-playing", [
     ("menus", "_", "_queue-redo-close", "esc | away", "")])
 # Configure's library folder row with its menu, from the keyboard (#680)
 _insert_after("roots", "preferences-library-root-selected", [
-    ("roots", "dialog", "preferences-library-root-menu", "window preferencesDialog | key Menu | wait 0.7 | window ",
+    ("roots", "dialog", "preferences-library-root-menu", "window preferencesDialog | key Menu | wait 0.7 | window | macro dialogmenu",
      "Configure, Library: the selected folder's menu, from the keyboard (Menu key)"),
     ("roots", "_", "_root-menu-close", "window preferencesDialog | key Escape | wait 0.4 | window ", "")])
 # the issues button with keyboard focus (#631), and the reason of a stopped engine (#621) in its tooltip
@@ -7663,14 +7675,14 @@ STATES += [
     ("viz-interaction", "main", "vi-waveform-zoomed",
      f"wheel {_VW}@0.5,0.4 120 6 | wait 1.0 | away | wait 0.4",
      "Waveform zoomed in 6 notches, following the playhead: the seek bar's band marks the part of the track shown"),
-    ("viz-interaction", "main", "vi-waveform-panned", _mdrag(_VW, 0.2, 0.8) + " | wait 0.4 | away | wait 0.3",
+    ("viz-interaction", "main", "vi-waveform-panned", _mdrag(_VW, 0.2, 0.8) + " | wait 0.4 | away | wait 0.3 | until followPlayheadAction.enabled",
      "A middle-drag of 60 % of the plot to the right: the view moved back in the track, detached from the playhead "
      "(which is now past its right edge); the band on the seek bar moved with it"),
     ("viz-interaction", "main", "vi-waveform-panned-held", "wait 3",
      "The same 3 s later, still playing: the moved view stays where it was put"),
     ("viz-interaction", "motion", "vi-follow-waveform", f"strip 1.2 0.1 {_VI_CROP} :: key F",
      "View › Follow Playhead (F) after a middle-drag: the waveform's view back on the playhead, the band with it"),
-    ("viz-interaction", "main", "vi-waveform-followed", "wait 0.6 | away", "After Follow Playhead (F): the view on the playhead again"),
+    ("viz-interaction", "main", "vi-waveform-followed", "wait 0.6 | away | until !followPlayheadAction.enabled", "After Follow Playhead (F): the view on the playhead again"),
     ("viz-interaction", "motion", "vi-pan-waveform",
      f"strip 1.6 0.1 {_VI_CROP} :: " + _mdrag(_VW, 0.7, 0.3, n=10, dt=0.05, sep=" ; "),
      "A middle-drag of 40 % of the zoomed waveform to the left: the time grabbed stays under the pointer, the band follows"),
@@ -7701,7 +7713,7 @@ STATES += [
      "js root.uiBridge.setSpectrogramDisplayMode(1) | click seekSlider@0.3,0.5 | ready 3 | away", ""),
     ("viz-interaction", "main", "vi-spectrogram-zoomed", f"wheel {_VS}@0.5,0.4 120 6 | wait 1.5 | away | wait 0.4",
      "The centred spectrogram zoomed in 6 notches, following the playhead: the band on the seek bar"),
-    ("viz-interaction", "main", "vi-spectrogram-panned", _mdrag(_VS, 0.2, 0.8) + " | away | wait 0.15",
+    ("viz-interaction", "main", "vi-spectrogram-panned", _mdrag(_VS, 0.2, 0.8) + " | away | wait 0.15 | until followPlayheadAction.enabled",
      "A middle-drag of the centred spectrogram 60 % to the right, just released: the view moved back in the track "
      "while its columns are decoded where it is"),
     ("viz-interaction", "main", "vi-spectrogram-panned-decoded", "wait 2.5",
@@ -7711,7 +7723,7 @@ STATES += [
      "A middle-drag of the zoomed centred spectrogram 40 % to the left, then 1.2 s as its columns come"),
     ("viz-interaction", "motion", "vi-follow-spectrogram", f"wait 0.4 | strip 1.2 0.1 {_VI_CROP} :: key F",
      "Follow Playhead (F) after a middle-drag of the centred spectrogram: back on the playhead"),
-    ("viz-interaction", "main", "vi-rolling-zoomed", "wait 0.4 | js root.uiBridge.setSpectrogramDisplayMode(0) | wait 2 | away",
+    ("viz-interaction", "main", "vi-rolling-zoomed", "wait 0.4 | until !followPlayheadAction.enabled | js root.uiBridge.setSpectrogramDisplayMode(0) | wait 2 | away",
      "The rolling spectrogram, still zoomed: its band on the seek bar"),
 ]
 

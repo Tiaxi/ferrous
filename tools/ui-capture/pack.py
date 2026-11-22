@@ -1657,7 +1657,7 @@ def main():
     write_motion_metrics(rd, strips, geo_s)
     bad = check_dialogs(rd, entries)
     bad = write_index(rd, src, entries, sheets, strips, dialog_failures=bad, geo_samples=geo_s)
-    if os.environ.get("SHOT_FOCUS"):  # the focus packs (focus.py), after the whole pack: focus/<scope>/ each
+    if os.environ.get("SHOT_FOCUS"):  # the focus packs (focus.py), after the whole pack: focus-build/<scope>/ each
         try:
             names = focus_scope_names()
         except KeyError as ex:
@@ -2419,7 +2419,7 @@ def _a11y_event_lines(rd, labels):
 
 def round_docs(rd):
     """The round's documents a reviewer reads (each checked for home-folder paths): its own and every focus pack's."""
-    return glob.glob(os.path.join(rd, "*.md")) + glob.glob(os.path.join(rd, "focus", "**", "*.md"), recursive=True)
+    return glob.glob(os.path.join(rd, "*.md")) + glob.glob(os.path.join(rd, "focus-build", "**", "*.md"), recursive=True)
 
 
 def focus_scope_names(spec=None):
@@ -2432,11 +2432,13 @@ def focus_strip_needs(names):
     """The recordings the scopes' images and facts need (a pair's two halves), for a --focus-only pack."""
     import focus
     pair_map = {f"pair:{nm}": (a_, b_) for nm, a_, b_, *_ in getattr(st, "STRIP_PAIRS", [])}
+    view_of = {f"{nm}-{sfx}": nm for nm, views in getattr(st, "EXTRA_VIEWS", {}).items() for sfx, _ in views}
     need = set()
     for sc_f in (focus.SCOPES[n_] for n_ in names):
         for kind, nm, *_ in sc_f.get("images", []):
             if kind == "strip":
-                need |= {h.partition("@")[0] for h in pair_map.get(nm, (nm,))}
+                # (another view of a recording, states.EXTRA_VIEWS, is made from that recording)
+                need |= {view_of.get(h.partition("@")[0], h.partition("@")[0]) for h in pair_map.get(nm, (nm,))}
         need |= {nm for nm, *_ in sc_f.get("facts_strips", [])}
     return need
 
@@ -2482,14 +2484,15 @@ def system_lead(rd, items, ids):
             where[t["file"]].add(id_)
     L += ["", "## Layout, summarised (the layout checker in this pack's shots)\n",
           "The app's own QML only; text contrast here is each visible text against its rendered background.\n",
-          "| issue | component | worst | shots | images |", "|---|---|---|---|---|"]
+          "| issue | component | worst in the round | shots | images |", "|---|---|---|---|---|"]
     p_, found = os.path.join(rd, "layout.json"), []
     layout = {}
     if os.path.exists(p_):
         with open(p_, encoding="utf-8") as f_:
             layout = json.load(f_)
     for fd in layout.get("findings", []):
-        shots = {os.path.basename(o.get("shot", "")) for o in fd.get("occurrences", [])} & set(where)
+        shots = {os.path.basename(o.get("shot", "")) for o in fd.get("occurrences", [])
+                 if o.get("in_shot", True)} & set(where)  # (not a window behind the one the shot is of)
         if shots and fd.get("severity") != 5:
             worst = fd.get("worst")
             found.append((fd.get("severity", 9), -len(shots), f"| {fd['kind']} | {esc(fd.get('component') or fd.get('type'))} | "
@@ -2510,9 +2513,9 @@ def system_lead(rd, items, ids):
 
 
 def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
-    """<round>/focus/<scope>/: only the scope's images (focus.SCOPES), FOCUS.md (ID, file, what it shows, what to
-    look at) and FOCUS-FACTS.md (their measured facts as text). Returns the failures (a missing or oversized image,
-    or more images than the cap)."""
+    """<round>/focus-build/<scope>/: only the scope's images (focus.SCOPES), FOCUS.md (ID, file, what it shows,
+    what to look at) and FOCUS-FACTS.md (their measured facts as text); shoot_round.sh publishes it. Returns the
+    failures (a missing or oversized image, or more images than the cap)."""
     import shutil
     import focus
     if scope_name not in focus.SCOPES:
@@ -2558,7 +2561,7 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
                     looks.append("what is drawn in each: a half-drawn plot, an empty lane, a wrong scale")
     items, fw = weigh(rd, items, label="focus")
     fails += fw
-    fd = os.path.join(rd, "focus", scope_name)
+    fd = os.path.join(rd, "focus-build", scope_name)
     shutil.rmtree(fd, ignore_errors=True)
     os.makedirs(fd)
     ids, L = [], []
@@ -2671,7 +2674,7 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
         lead = T_ + [""] + (lead or [])
     if sc_.get("system_facts"):
         lead = system_lead(rd, items, ids) + [""] + (lead or [])
-    write_core_facts(rd, items, strips, geo_samples, entries, out=f"focus/{scope_name}/FOCUS-FACTS.md", ids=ids, looks=looks, lead=lead,
+    write_core_facts(rd, items, strips, geo_samples, entries, out=f"focus-build/{scope_name}/FOCUS-FACTS.md", ids=ids, looks=looks, lead=lead,
                      fact_keys=sc_.get("facts", []), floor_labels=sc_.get("floors"),
                      title=f"# Focus facts: {sc_['title']}\n",
                      intro="What was measured in each focus image (IDs as in FOCUS.md), as text: tiles' states, key "

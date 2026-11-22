@@ -451,11 +451,14 @@ class Session:
                 # a menu open in the dialog is a window of its own (#642), which a capture of the dialog's window
                 # leaves out: the screen inside the dialog's frame has both
                 frame = self.kwin_frame(dialog_window["title"])
-                if frame:
-                    nested = (frame, frame, [])
+                if not frame:
+                    raise RuntimeError("KWin knows no frame of the dialog whose menu is open: the menu would be missing")
+                nested = (frame, frame, [])
             got = None
             if nested:
                 got = self.kwin_capture_area(path, nested[1])
+                if not got and not others:
+                    raise RuntimeError("the screen inside the dialog's frame was not captured: its menu would be missing")
                 how = (f"with its KWin decoration, over {', '.join(nested[2])} (nested windows, captured together "
                        "with their decorations)") if others else "with its KWin decoration and its open menu"
             if not got:

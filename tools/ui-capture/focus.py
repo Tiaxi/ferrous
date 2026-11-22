@@ -931,7 +931,7 @@ SCOPES.update({
              "one system across windows and popups: headers, margins, buttons, type; KDE platform fit"),
             ("sheet", "wa-focus-walk", "dark", "The keyboard focus walk, stops 0-15, 1:1", "the ring on every stop; the order"),
             ("sheet", "wa-focus-walk-light", "light", "The focus walk at 24 pt, light, stops 1-12, 1:1", "the ring at a large font in light"),
-            ("strip", "first-play-from-idle", "dark", "First Play from idle: the sidebar, and what animates in the window",
+            ("strip", "first-play-from-idle-window", "dark", "First Play from idle: the whole window, as a transition",
              "what moves at once when playback starts; consistency of the motion"),
         ],
         facts=["screen-", "status-jumps-"],

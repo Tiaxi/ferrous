@@ -98,10 +98,10 @@ WRAP=()
 if [ -n "${SHOT_BUILD_WRAPPER:-}" ]; then
     read -r -a WRAP <<< "$SHOT_BUILD_WRAPPER"
 fi
-# a focus-only run works in its own folder (<round>-focus: shots, strips, timings, its app and TMP dirs) and
-# publishes only <round>/focus/<scope>/ (FOCUS.md, FOCUS-FACTS.md, the images) of each of its scopes when it passes;
-# the full run of the same round packs <round>/ and leaves <round>/focus/ alone. So the two can be started together
-# (see the run lock below).
+# a focus-only run works in its own folder (<round>-focus: shots, strips, timings, its app and TMP dirs); the full
+# run of the same round packs <round>/. So the two can be started together (see the run lock below). Either builds
+# the focus packs asked of it in its focus-build/ and, only when the whole run passed, publishes each to
+# <round>/focus/<scope>/ (FOCUS.md, FOCUS-FACTS.md, the images).
 OUTNAME=$ROUND
 [ -n "$FOCUS_ONLY" ] && OUTNAME=$ROUND-focus
 OUT=$OUTROOT/$OUTNAME
@@ -234,7 +234,7 @@ phase template-db
 # 3. Shoot.
 if [ -z "$PARTIAL" ] || [ -n "$FOCUS_ONLY" ]; then  # (a focus-only run starts its own folder afresh)
     rm -rf "$WORK/run/$OUTNAME"-w[0-9]-*  # this run's previous per-worker app dirs
-    [ -n "$FOCUS_ONLY" ] && rm -rf "$OUT/focus"  # (a full run keeps <round>/focus/: the published focus pack)
+    rm -rf "$OUT/focus-build"  # (not <round>/focus/: the published packs stay until new ones pass)
     rm -rf "$OUT/shots" "$OUT/index" "$OUT/strips-raw" "$OUT/strips" "$OUT/sheets" "$OUT/icons-raw" \
         "$OUT/failures.txt" "$OUT"/focus_owners_*.txt "$OUT"/worker*.log "$OUT/contrast" "$OUT/CONTRAST.md" "$OUT/layout" "$OUT/LAYOUT.md" "$OUT/layout.json" \
         "$OUT/facts.jsonl" "$OUT/floors.jsonl" "$OUT/closeup-raw" "$OUT"/a11y*.jsonl \
@@ -255,24 +255,31 @@ nice -n 10 python3 "$H/layout.py" "$OUT"
 PACK_STATUS=0
 SHOT_PARTIAL="$PARTIAL" nice -n 10 python3 "$H/pack.py" "$OUT" "$SRC" "${PACK_ARGS[@]}" || PACK_STATUS=$?
 phase package
-# publish the focus packs of a focus-only run to <round>/focus/<scope>/, when the whole run passed (every pack
-# whole, or none); the round's packs of other scopes stay
-if [ -n "$FOCUS_ONLY" ] && [ "$PACK_STATUS" -eq 0 ] && [ -d "$OUT/focus" ]; then
-    FDEST=$OUTROOT/$ROUND/focus
-    mkdir -p "$FDEST"
+# publish the focus packs to <round>/focus/<scope>/ when the whole run passed (no failed check, measurement or
+# state): every pack copied aside first, then each renamed in. The round's packs of other scopes stay.
+if [ -n "${SHOT_FOCUS:-}" ] && [ "$PACK_STATUS" -eq 0 ] && [ "$CONTRAST_STATUS" -eq 0 ] && [ ! -s "$OUT/failures.txt" ]; then
     IFS=, read -r -a SCOPE_LIST <<< "$SHOT_FOCUS"
     for SC in "${SCOPE_LIST[@]}"; do
-        [ -f "$OUT/focus/$SC/FOCUS.md" ] || { echo "!!! focus pack $SC was not written" >&2; PACK_STATUS=3; }
+        [ -f "$OUT/focus-build/$SC/FOCUS.md" ] || { echo "!!! focus pack $SC was not written" >&2; PACK_STATUS=3; }
     done
-    [ "$PACK_STATUS" -eq 0 ] || SCOPE_LIST=()
-    # (a pack of the flat layout before per-scope folders: its files go, its scope is unknown)
-    [ ${#SCOPE_LIST[@]} -eq 0 ] || rm -f "$FDEST/FOCUS.md" "$FDEST/FOCUS-FACTS.md" "$FDEST/source.json" "$FDEST"/F[0-9][0-9]_*.png
-    for SC in "${SCOPE_LIST[@]}"; do
-        DEST=$FDEST/$SC
-        rm -rf "$DEST.new" && cp -a "$OUT/focus/$SC" "$DEST.new" && cp -p "$OUT/source.json" "$DEST.new/source.json" \
-            && rm -rf "$DEST" && mv "$DEST.new" "$DEST"
-        echo "focus pack published: $DEST/FOCUS.md ($(ls "$DEST"/F[0-9][0-9]_*.png 2>/dev/null | wc -l) images)"
-    done
+    if [ "$PACK_STATUS" -eq 0 ]; then
+        FDEST=$OUTROOT/$ROUND/focus
+        STAGED=$FDEST/.staged
+        rm -rf "$STAGED"
+        mkdir -p "$STAGED"
+        for SC in "${SCOPE_LIST[@]}"; do  # (a failed copy stops the script here, with nothing replaced)
+            cp -a "$OUT/focus-build/$SC" "$STAGED/$SC"
+            cp -p "$OUT/source.json" "$STAGED/$SC/source.json"
+        done
+        # (a pack of the flat layout before per-scope folders: its files go, its scope is unknown)
+        rm -f "$FDEST/FOCUS.md" "$FDEST/FOCUS-FACTS.md" "$FDEST/source.json" "$FDEST"/F[0-9][0-9]_*.png
+        for SC in "${SCOPE_LIST[@]}"; do
+            rm -rf "${FDEST:?}/$SC"
+            mv "$STAGED/$SC" "$FDEST/$SC"
+            echo "focus pack published: $FDEST/$SC/FOCUS.md ($(ls "$FDEST/$SC"/F[0-9][0-9]_*.png 2>/dev/null | wc -l) images)"
+        done
+        rmdir "$STAGED"
+    fi
 fi
 if [ ! -f "$OUT/BUGS.md" ]; then
     printf '# Non-visual bugs noticed while driving the app (%s)\n\nNone recorded yet.\n' "$ROUND" > "$OUT/BUGS.md"

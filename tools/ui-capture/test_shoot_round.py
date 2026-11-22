@@ -39,15 +39,23 @@ FOCUS_PACK_PY = """import os, sys
 for nm in os.environ["SHOT_FOCUS"].split(","):
     if nm == os.environ.get("FOCUS_PACK_SKIP"):
         continue
-    fd = os.path.join(sys.argv[1], "focus", nm)
-    os.makedirs(fd)
+    fd = os.path.join(sys.argv[1], "focus-build", nm)
+    os.makedirs(fd, exist_ok=True)
     with open(os.path.join(fd, "FOCUS.md"), "w") as f:
         f.write(nm + "\\n")
     with open(os.path.join(fd, "F01_image.png"), "w"):
         pass
+    if nm == os.environ.get("FOCUS_PACK_UNREADABLE"):
+        os.chmod(os.path.join(fd, "F01_image.png"), 0)
 sys.exit(int(os.environ.get("FOCUS_PACK_EXIT", "0")))
 """
-RUNNER_PY = "import json, os, sys\njson.dump(sys.argv[1:], open(os.environ['RUNNER_ARGV_OUT'], 'w'))\n"
+RUNNER_PY = """import json, os, sys
+with open(os.environ["RUNNER_ARGV_OUT"], "w") as f:
+    json.dump(sys.argv[1:], f)
+if os.environ.get("RUNNER_FAILURE"):
+    with open(os.path.join(os.path.dirname(os.environ["SHOT_OUT"]), "failures.txt"), "w") as f:
+        f.write(os.environ["RUNNER_FAILURE"] + "\\n")
+"""
 
 
 def write(path, text, mode=0o644):
@@ -188,6 +196,43 @@ class ShootRoundFocus(ShootRoundBase):
         p = self.run_script("--focus-only", "dialogs,viewers")
         self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
         self.assertEqual(self.published(), [])
+
+    def keep_an_earlier_pack(self):
+        kept = os.path.join(self.round, "focus", "dialogs", "earlier.txt")
+        write(kept, "")
+        return kept
+
+    def test_a_failed_state_keeps_the_earlier_packs(self):
+        self.env["RUNNER_FAILURE"] = "dialogs/dark dialog about: no window"
+        kept = self.keep_an_earlier_pack()
+        p = self.run_script("--focus-only", "dialogs,viewers")
+        self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+        self.assertEqual(self.published(), ["dialogs"])
+        self.assertTrue(os.path.exists(kept))
+
+    def test_a_failed_measurement_keeps_the_earlier_packs(self):
+        write(os.path.join(self.h, "contrast.py"), "import sys\nsys.exit(1)\n")
+        kept = self.keep_an_earlier_pack()
+        p = self.run_script("--focus-only", "dialogs,viewers")
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+        self.assertEqual(self.published(), ["dialogs"])
+        self.assertTrue(os.path.exists(kept))
+
+    def test_a_full_runs_failed_pack_keeps_the_earlier_packs(self):
+        self.env["FOCUS_PACK_EXIT"] = "3"
+        kept = self.keep_an_earlier_pack()
+        p = self.run_script("--focus", "dialogs")
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
+        self.assertTrue(os.path.exists(kept))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads any file")
+    def test_a_failed_copy_replaces_no_pack_and_claims_none(self):
+        self.env["FOCUS_PACK_UNREADABLE"] = "viewers"  # the second of the two
+        kept = self.keep_an_earlier_pack()
+        p = self.run_script("--focus-only", "dialogs,viewers")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertTrue(os.path.exists(kept))
+        self.assertNotIn("published", p.stdout)
 
     def test_an_unknown_scope_fails_before_any_work(self):
         p = self.run_script("--focus-only", "dialogs,no-such-scope")
