@@ -835,9 +835,10 @@ Dialog {
                         elide: Text.ElideRight
                     }
 
-                    // The lead: an artist's glyph, or the cover, with the
-                    // amber glyph over it while its track plays. The glyphs
-                    // are loaded only for the rows that show one, each with
+                    // The lead: an artist's glyph, or the cover or the
+                    // library's no-cover tile, with the amber glyph over it
+                    // while its track plays. The glyphs and the tile are
+                    // loaded only for the rows that show one, each with
                     // a source that never changes: a Kirigami icon looks its
                     // file up again on the GUI thread whenever its source
                     // changes, which recycled rows would do on every query.
@@ -848,11 +849,11 @@ Dialog {
                         sourceComponent: artistGlyph
                     }
                     Loader {
-                        x: root.sideInset + (root.leadSize - root.glyphSize) / 2
-                        y: Math.round((parent.height - root.glyphSize) / 2)
+                        x: root.sideInset
+                        y: Math.round((parent.height - root.leadSize) / 2)
                         active: resultRow.isResult && resultRow.rowType !== "artist"
-                            && (model.coverUrl || "").length === 0 && !resultRow.isNow
-                        sourceComponent: resultRow.rowType === "album" ? albumPlaceholder : trackPlaceholder
+                            && (model.coverUrl || "").length === 0
+                        sourceComponent: noCoverTile
                     }
                     Kirigami.ShadowedImage {
                         id: thumbnail
@@ -872,7 +873,7 @@ Dialog {
                     }
                     Rectangle {
                         objectName: "globalSearchNowScrim"
-                        visible: resultRow.isNow && thumbnail.visible
+                        visible: resultRow.isNow
                         x: thumbnail.x
                         y: thumbnail.y
                         width: root.leadSize
@@ -891,11 +892,11 @@ Dialog {
                             source: (root.controller.uiBridge.playbackState || "") === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                             isMask: true
-                            // Over the cover's dark scrim, the colour map's
-                            // bright amber in both themes (fixed, like the
-                            // plot's colours): the light theme's darker
-                            // amber is under 3:1 there.
-                            color: thumbnail.visible ? root.nowOnScrim : root.uiPalette.now
+                            // Over the dark scrim on the cover or the tile,
+                            // the colour map's bright amber in both themes
+                            // (fixed, like the plot's colours): the light
+                            // theme's darker amber is under 3:1 there.
+                            color: root.nowOnScrim
                         }
                     }
 
@@ -1398,7 +1399,11 @@ Dialog {
     property string toolTipText: ""
     onToolTipTargetChanged: if (root.toolTipTarget) root.toolTipRow = root.toolTipTarget
     onToolTipTargetTextChanged: if (root.toolTipTargetText.length > 0) root.toolTipText = root.toolTipTargetText
-    // The lead glyphs of the rows without a cover.
+    // The leads of the rows without a cover: an artist's glyph, and for an
+    // album or a track the library's tile, so the app has one way to say
+    // "no cover". (Breeze's album and track glyphs were no mark at a large
+    // font: their larger drawings, a green disc and a solid sheet, masked
+    // to a blob at 24 pt.)
     Component {
         id: artistGlyph
         Kirigami.Icon {
@@ -1411,25 +1416,13 @@ Dialog {
         }
     }
     Component {
-        id: albumPlaceholder
-        Kirigami.Icon {
+        id: noCoverTile
+        Components.NoCoverTile {
             objectName: "globalSearchCoverPlaceholder"
-            width: root.glyphSize
-            height: root.glyphSize
-            source: "media-optical-audio"
-            isMask: true
-            color: root.uiPalette.textSecondary
-        }
-    }
-    Component {
-        id: trackPlaceholder
-        Kirigami.Icon {
-            objectName: "globalSearchCoverPlaceholder"
-            width: root.glyphSize
-            height: root.glyphSize
-            source: "audio-x-generic"
-            isMask: true
-            color: root.uiPalette.textSecondary
+            uiPalette: root.uiPalette
+            size: root.leadSize
+            // A thumbnail's here.
+            radius: 2
         }
     }
 }

@@ -226,7 +226,7 @@ QVector<Row> meridianRows(const QString &coverUrl) {
          << track(QStringLiteral("Meridian Drift"), QStringLiteral("Afterimage"), 1.0f, QStringLiteral("/fixture/drift.flac"))
          << track(QStringLiteral("Morning Tide Field"), QStringLiteral("Small Hours"), 4.0f,
                   QStringLiteral("/fixture/morning.flac"));
-    // No cover: a placeholder glyph.
+    // No cover: the no-cover tile.
     Row bare = track(QStringLiteral("Lantern Signal"), QStringLiteral("Small Hours"), 4.0f, QStringLiteral("/fixture/lantern.flac"));
     bare.coverUrl.clear();
     rows << bare;
@@ -506,6 +506,8 @@ private slots:
     void clearGlyphIsQuietUntilPointedAt_data();
     void clearGlyphIsQuietUntilPointedAt();
     void tintsEndAtTheScrollbarsLaneAndTheTextStaysPut();
+    void noCoverTileIsTheLibrarys_data();
+    void noCoverTileIsTheLibrarys();
 };
 
 void SearchPaletteTest::initTestCase() {
@@ -915,7 +917,7 @@ void SearchPaletteTest::tooltipKeepsClearOfTheField() {
 }
 
 // The lead at 16 px (a 24 px thumbnail with a 2 px radius, the artist
-// glyph, or a placeholder without a cover), the title at 52 px in a 380 px
+// glyph, or the no-cover tile), the title at 52 px in a 380 px
 // column, and the context at one x for every row, whatever its title.
 void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
     Harness harness;
@@ -2363,10 +2365,10 @@ void SearchPaletteTest::textMeetsItsContrastAsDrawn() {
                           name == QStringLiteral("globalSearchSectionHeading") ? view : background, 4.5);
                 }
             }
-            for (const QString &name : {QStringLiteral("globalSearchArtistGlyph"), QStringLiteral("globalSearchCoverPlaceholder")}) {
-                if (QQuickItem *glyph = visibleChildNamed(row, name)) {
-                    check(QStringLiteral("%1 of row %2").arg(name).arg(i), colorOf(glyph), background, 3.0);
-                }
+            // The no-cover tile's mark is checked on its own floor
+            // (noCoverTileIsTheLibrarys).
+            if (QQuickItem *glyph = visibleChildNamed(row, QStringLiteral("globalSearchArtistGlyph"))) {
+                check(QStringLiteral("artist glyph of row %1").arg(i), colorOf(glyph), background, 3.0);
             }
             // The amber glyph on its scrim over a mid cover.
             if (QQuickItem *glyph = visibleChildNamed(row, QStringLiteral("globalSearchNowGlyph"))) {
@@ -2636,7 +2638,8 @@ void SearchPaletteTest::glyphsTargetsAndThumbnailsFollowTheFont() {
         for (const QString &name : {QStringLiteral("globalSearchArtistGlyph"), QStringLiteral("globalSearchCoverPlaceholder")}) {
             if (QQuickItem *leadGlyph = visibleChildNamed(row, name)) {
                 ++glyphs;
-                QCOMPARE(leadGlyph->width(), glyph);
+                // The no-cover tile is as large as a cover.
+                QCOMPARE(leadGlyph->width(), name == QStringLiteral("globalSearchArtistGlyph") ? glyph : lead);
                 QCOMPARE(sceneRect(leadGlyph).center().x() - frame.left(), 16.0 + lead / 2);
             }
         }
@@ -3059,6 +3062,90 @@ void SearchPaletteTest::tintsEndAtTheScrollbarsLaneAndTheTextStaysPut() {
     sampler.stop();
     QVERIFY2(problems.isEmpty(), qPrintable(problems.mid(0, 4).join(QStringLiteral("; "))));
     QVERIFY(withBar > 0 && without > 0);
+}
+
+void SearchPaletteTest::noCoverTileIsTheLibrarys_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<qreal>("points");
+    QTest::newRow("dark, 10 pt") << true << 10.0;
+    QTest::newRow("light, 10 pt") << false << 10.0;
+    QTest::newRow("dark, 24 pt") << true << 24.0;
+    QTest::newRow("light, 24 pt") << false << 24.0;
+}
+
+// An album or a track without a cover has the library's tile in a cover's
+// place, at its size: the floor, its edge and the quiet mark, as drawn, so
+// it reads at 24 pt too (the track's glyph became a grey blob there, the
+// album's a green one). While its track plays it has the amber glyph over a
+// scrim, as a cover has.
+void SearchPaletteTest::noCoverTileIsTheLibrarys() {
+    QFETCH(bool, dark);
+    QFETCH(qreal, points);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(points);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, &errorText, 1600, 1600), qPrintable(errorText));
+    QVERIFY(harness.open());
+    auto rows = meridianRows(harness.coverUrl);
+    rows[1].coverUrl.clear();
+    harness.search(QStringLiteral("meridian"), rows);
+    QTRY_VERIFY(harness.view()->isVisible());
+    QTest::mouseMove(harness.window, QPoint(2, 2));
+
+    const qreal lead = harness.dialog->property("leadSize").toReal();
+    const QColor floor = harness.token("plotFloor");
+    const QColor mark = QColor::fromRgb(0x8c, 0x82, 0xa3);
+    QVERIFY2(contrastRatio(mark, floor) >= 4.5, qPrintable(describeContrast(QStringLiteral("mark"), mark, floor)));
+    QStringList types;
+    QQuickItem *trackRow = nullptr;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        const QVariantMap data = harness.model.rowDataAt(i);
+        QQuickItem *row = harness.row(i);
+        if (row == nullptr) continue;
+        QQuickItem *tile = visibleChildNamed(row, QStringLiteral("globalSearchCoverPlaceholder"));
+        if (tile == nullptr) continue;
+        types << data.value(QStringLiteral("rowType")).toString();
+        if (types.last() == QStringLiteral("track")) trackRow = row;
+        const QRectF box = sceneRect(tile);
+        QCOMPARE(box.size(), QSizeF(lead, lead));
+        QCOMPARE(box.left() - sceneRect(harness.palette()).left(), 16.0);
+        QCOMPARE(tile->property("radius").toReal(), 2.0);
+        QCOMPARE(hex(colorOf(tile)), hex(floor));
+        QCOMPARE(hex(tile->property("border").value<QObject *>()->property("color").value<QColor>()),
+                 hex(harness.token("plotFloorEdge")));
+        const auto problem = [&]() -> QString {
+            const QImage image = harness.window->grabWindow();
+            const qreal scale = qreal(image.width()) / harness.window->width();
+            int marked = 0;
+            for (qreal y = 2.5; y < lead - 2; ++y) {
+                for (qreal x = 2.5; x < lead - 2; ++x) {
+                    const QColor pixel = image.pixelColor(((box.topLeft() + QPointF(x, y)) * scale).toPoint());
+                    marked += channelDistance(pixel, mark) <= 12 ? 1 : 0;
+                }
+            }
+            return marked >= lead ? QString() : QStringLiteral("%1 pixels of the mark").arg(marked);
+        };
+        QTRY_VERIFY2(problem().isEmpty(), qPrintable(problem()));
+    }
+    types.sort();
+    QCOMPARE(types, (QStringList{QStringLiteral("album"), QStringLiteral("track")}));
+    QVERIFY(trackRow != nullptr);
+
+    harness.bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/lantern.flac"));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QQuickItem *tile = visibleChildNamed(trackRow, QStringLiteral("globalSearchCoverPlaceholder"));
+    QQuickItem *scrim = visibleChildNamed(trackRow, QStringLiteral("globalSearchNowScrim"));
+    QQuickItem *now = visibleChildNamed(trackRow, QStringLiteral("globalSearchNowGlyph"));
+    QVERIFY(tile != nullptr && scrim != nullptr && now != nullptr);
+    QCOMPARE(sceneRect(scrim), sceneRect(tile));
+    QVERIFY(std::abs(sceneRect(now).center().x() - sceneRect(tile).center().x()) <= 0.5);
+    QVERIFY2(contrastRatio(colorOf(now), drawnOver(colorOf(scrim), mark)) >= 3.0,
+             qPrintable(describeContrast(QStringLiteral("playing glyph"), colorOf(now),
+                                         drawnOver(colorOf(scrim), mark))));
 }
 
 int main(int argc, char **argv) {

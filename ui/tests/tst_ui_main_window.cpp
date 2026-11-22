@@ -4064,7 +4064,7 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     QCOMPARE(QQmlProperty(glyph, QStringLiteral("border.width")).read().toReal(), 1.0);
     QCOMPARE(hex(QQmlProperty(glyph, QStringLiteral("border.color")).read().value<QColor>()),
              tokenHex(window, "plotFloorEdge"));
-    QQuickItem *mark = itemNamed(glyph, QStringLiteral("libraryRowCoverPlaceholderMark"));
+    QQuickItem *mark = itemNamed(glyph, QStringLiteral("noCoverTileMark"));
     QVERIFY(shown(mark));
     QCOMPARE(mark->size(), QSizeF(20, 20));
     QVERIFY(mark->property("source").toUrl().toString().endsWith(QStringLiteral("/no-art-mark-20.svg")));
@@ -4311,7 +4311,7 @@ void UiMainWindowTest::libraryThumbnailsFollowTheFont() {
     QQuickItem *chevron = itemNamed(album, QStringLiteral("libraryRowChevron"));
     QQuickItem *number = itemNamed(track, QStringLiteral("libraryRowNumber"));
     QQuickItem *tile = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholder"));
-    QQuickItem *mark = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholderMark"));
+    QQuickItem *mark = itemNamed(album, QStringLiteral("noCoverTileMark"));
     QVERIFY(thumbnail && chevron && number && shown(tile) && shown(mark));
     const qreal size = thumbnail->width();
     QCOMPARE(thumbnail->height(), size);

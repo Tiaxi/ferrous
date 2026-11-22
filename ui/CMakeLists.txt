@@ -264,6 +264,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/KeyHintMenuItem.qml
         qml/components/LaneScrollBar.qml
         qml/components/MenuHeading.qml
+        qml/components/NoCoverTile.qml
         qml/components/NowFadeOut.qml
         qml/components/NowPlayingPanel.qml
         qml/components/MessageLabel.qml
