@@ -135,6 +135,9 @@ AbstractButton {
     // it to its controls' height, so the slot is centred in the bar on whole
     // pixels and the glyph on the slot.
     property int blockHeight: 22
+    // From the slot's top up to the status bar's, which the keyboard's menu
+    // stays above: the status bar sets it.
+    property real roomToBarTop: 0
     // Last.fm accepted the scrobble.
     readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
     // The trough and the bar in it: while listening, and while the scrobble
@@ -252,8 +255,28 @@ AbstractButton {
         root.uiBridge.setLastFmScrobblingPaused(!root.paused)
     }
 
+    // From the keyboard the menu opens in the window, above the status bar
+    // and on the slot's right edge (under the slot, it was under the bar
+    // and out of the window). It is an item of the window then: Wayland's
+    // compositor places a window popup under its anchor wherever that is
+    // in the window.
     function openMenu() {
-        menu.popupAt(root, 0, root.height)
+        menu.popupType = Popup.Item
+        menu.popup(keyboardMenuAnchor, 0, 0)
+    }
+
+    function openMenuAt(x, y) {
+        menu.popupType = Popup.Window
+        menu.popupAt(root, x, y)
+    }
+
+    // Where that menu's top left is: it follows the menu's size, which
+    // Breeze gives it from its items as they show.
+    Item {
+        id: keyboardMenuAnchor
+        visible: false
+        x: root.width - menu.width
+        y: -root.roomToBarTop - menu.height - Kirigami.Units.smallSpacing
     }
 
     objectName: "scrobbleIndicator"
@@ -300,7 +323,7 @@ AbstractButton {
 
     TapHandler {
         acceptedButtons: Qt.RightButton
-        onTapped: function(eventPoint) { menu.popupAt(root, eventPoint.position.x, eventPoint.position.y) }
+        onTapped: function(eventPoint) { root.openMenuAt(eventPoint.position.x, eventPoint.position.y) }
     }
 
     Components.AppMenu {

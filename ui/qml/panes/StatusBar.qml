@@ -559,6 +559,7 @@ ToolBar {
             // The issues button's height, so its glyph is centred on the
             // status bar.
             blockHeight: root.barHeight - 2
+            roomToBarTop: root.contentItem.y + y
             Layout.alignment: Qt.AlignVCenter
             onSettingsRequested: root.lastFmSettingsRequested()
         }

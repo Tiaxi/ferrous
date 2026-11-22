@@ -553,6 +553,8 @@ private slots:
     void lastFmSlotBarFillsItsTrough_data();
     void lastFmSlotBarFillsItsTrough();
     void lastFmSlotToolTipShowsOnKeyboardFocus();
+    void lastFmKeyboardMenuOpensAboveTheBar_data();
+    void lastFmKeyboardMenuOpensAboveTheBar();
     void lastFmSlotSendingAndScrobbledLookApart_data();
     void lastFmSlotSendingAndScrobbledLookApart();
     void lastFmGlyphIsCentredOnItsBlock_data();
@@ -4190,6 +4192,74 @@ void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
     QTest::keyClick(harness.window, Qt::Key_Space);
     QTRY_VERIFY(harness.bridge->property("lastFmScrobblingPaused").toBool());
     QCOMPARE(harness.root->property("playPauseCount").toInt(), 0);
+}
+
+void TransportStatusTest::lastFmKeyboardMenuOpensAboveTheBar_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("key");
+    QTest::newRow("Shift+F10") << 10.0 << int(Qt::Key_F10);
+    QTest::newRow("Menu") << 10.0 << int(Qt::Key_Menu);
+    QTest::newRow("Shift+F10, 24 pt") << 24.0 << int(Qt::Key_F10);
+}
+
+// The Last.fm menu opened from the keyboard is in the window, above the
+// status bar and on the indicator's right edge (it opened under the bar,
+// out of the window). The pointer's stays a window of its own at the
+// pointer.
+void TransportStatusTest::lastFmKeyboardMenuOpensAboveTheBar() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, key);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    // The status bar at the window's bottom, as in the app, with room over it.
+    harness.window->setHeight(700);
+    QTRY_COMPARE(harness.window->contentItem()->height(), 700.0);
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QObject *menu = harness.root->findChild<QObject *>(QStringLiteral("scrobbleIndicatorMenu"));
+    QVERIFY(status && slot && menu);
+    status->setParentItem(harness.window->contentItem());
+    status->setPosition(QPointF(0, 700 - status->height()));
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    QTRY_VERIFY(slot->isVisible());
+    const auto openFromKeys = [&]() {
+        slot->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(harness.window, Qt::Key(key),
+                        key == Qt::Key_F10 ? Qt::ShiftModifier : Qt::NoModifier);
+    };
+    auto *panel = menu->property("background").value<QQuickItem *>();
+    QVERIFY(panel != nullptr);
+    for (int opening = 0; opening < 2; ++opening) {
+        openFromKeys();
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QCOMPARE(panel->window(), harness.window);
+        QRectF at;
+        QTRY_VERIFY2((at = sceneRect(panel), std::abs(at.right() - sceneRect(slot).right()) <= 1.0),
+                     qPrintable(describeRect(at)));
+        QVERIFY2(at.bottom() <= sceneRect(status).top() && at.bottom() >= sceneRect(status).top() - 6,
+                 qPrintable(describeRect(at)));
+        QVERIFY2(at.top() >= 0 && at.left() >= 0 && at.right() <= harness.window->width(),
+                 qPrintable(describeRect(at)));
+        // The keys work in it, and Escape closes it.
+        QTest::keyClick(harness.window, Qt::Key_Down);
+        QTRY_VERIFY(menu->property("currentIndex").toInt() >= 0);
+        QTest::keyClick(harness.window, Qt::Key_Escape);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+    }
+    // The pointer's, after that: a window of its own, at the pointer.
+    const QPoint pressed = sceneCentre(slot);
+    QTest::mouseClick(harness.window, Qt::RightButton, Qt::NoModifier, pressed);
+    QTRY_VERIFY(menu->property("opened").toBool());
+    QCOMPARE(menu->property("popupType").toInt(), 1); // Popup.Window
+    auto *anchor = menu->property("pointAnchor").value<QQuickItem *>();
+    QVERIFY(anchor != nullptr);
+    QCOMPARE(menu->property("parent").value<QQuickItem *>(), anchor);
+    QVERIFY(std::abs(anchor->mapToScene(QPointF()).x() - pressed.x()) <= 1.0
+            && std::abs(anchor->mapToScene(QPointF()).y() - pressed.y()) <= 1.0);
+    QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+    QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
 void TransportStatusTest::issuesButtonShowsNewSeenAndOpen_data() {
