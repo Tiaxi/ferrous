@@ -467,7 +467,9 @@ def custom_sheet(rd, sd, entries, name, title, theme, rows):
     image or a column of images; an image (area, state, crop, label) with crop "subject" (the area's item, as
     recorded at the grab), (fx, fy, fw, fh) fractions of the shot, or None (the whole shot)."""
     def strip_tile(c):
-        """A recording's frames at given times (ms after the action), cut around an item it recorded, zoomed."""
+        """A recording's frames at given times (ms after the action), cut around an item it recorded, or around
+        what changed in it (item "changed", with the item c["include"] names in a dialog shot's layout), zoomed, or
+        shrunk to c["fit"] (W, H; the label then says the scale)."""
         import motion_strip
         import numpy as np
         ds = sorted(glob.glob(os.path.join(rd, "strips-raw", f"{c['strip']}_{c.get('theme', theme)}_*")))
@@ -491,8 +493,14 @@ def custom_sheet(rd, sd, entries, name, title, theme, rows):
             follow = tracks[keys[0]]
             ox, oy = (meta.get("crop") or [0, 0])[:2]
         else:
-            box = motion_strip.resolve_rect(c["item"], meta, fw, fh)
-            box = (max(0, box[0] - p_), max(0, box[1] - p_), box[2] + 2 * p_, box[3] + 2 * p_)
+            if c["item"] == "changed":
+                box = change_box(c, ds[0], frames, t0)
+            else:
+                box = motion_strip.resolve_rect(c["item"], meta, fw, fh)
+            x0, y0 = max(0, box[0] - p_), max(0, box[1] - p_)
+            box = (x0, y0, box[2] + 2 * p_, box[3] + 2 * p_)
+            if c["item"] == "changed":  # (inside the frames: no black margin where the change reaches an edge)
+                box = (x0, y0, min(fw - x0, box[2]), min(fh - y0, box[3]))
         cut = []
         rel = 0.0
         if c.get("anchor") == "last-change":
@@ -544,6 +552,14 @@ def custom_sheet(rd, sd, entries, name, title, theme, rows):
                 im = fim.convert("RGB").crop((box[0], box[1], box[0] + box[2], box[1] + box[3]))
             cut.append((f"{frames[k]['t'] - t0 - rel:+.0f} ms" + (" from the change" if rel else ""),
                         im.resize((im.width * z, im.height * z), Image.NEAREST)))
+        label = c["label"]
+        if c.get("fit"):
+            w_, h_ = c["fit"]
+            f_ = min([1.0] + [min(w_ / i.width, h_ / i.height) for _, i in cut])
+            if f_ < 1.0:
+                cut = [(lb, i.resize((int(i.width * f_), int(i.height * f_)), Image.LANCZOS)) for lb, i in cut]
+                label += f" (shown at {f_:.2f}x)"
+                fitted.append(f_)
         g = 10
         S_ = Image.new("RGB", (sum(i.width for _, i in cut) + g * (len(cut) - 1), max(i.height for _, i in cut) + 20),
                        (78, 82, 88))
@@ -553,9 +569,40 @@ def custom_sheet(rd, sd, entries, name, title, theme, rows):
             d_.text((x, 0), lb, fill=(230, 230, 230), font=font(False, 13))
             S_.paste(i, (x, 20))
             x += i.width + g
-        return c["label"], S_, dict(_lh=c.get("lh"), _gap=c.get("gap"),  # (a frame row may set its label's height)
+        return label, S_, dict(_lh=c.get("lh"), _gap=c.get("gap"),  # (a frame row may set its label's height)
                                     file=os.path.basename(ds[0]), area="motion", state=c["strip"], theme=c.get("theme", theme),
                                     desc=c["label"], size=f"{meta['size'][0]}x{meta['size'][1]}", scale=meta.get("scale", 1))
+
+    def change_box(c, d, frames, t0):
+        """(x, y, w, h) around every pixel that changes after the action in a recording, with the rect of the item
+        c["include"] (area, state, name: from that dialog shot's layout, whose coordinates its window's frames
+        have)."""
+        got, prev = None, None
+        for f in frames:
+            with Image.open(os.path.join(d, f["file"])) as fim:
+                im = fim.convert("RGB")
+            if prev is not None and f["t"] >= t0:
+                b = ImageChops.difference(prev, im).convert("L").point(lambda v: 255 if v > 2 else 0).getbbox()
+                if b:
+                    got = b if got is None else (min(got[0], b[0]), min(got[1], b[1]), max(got[2], b[2]), max(got[3], b[3]))
+            prev = im
+        if got is None:
+            raise LookupError(f"custom sheet {name}: nothing changes in {c['strip']}")
+        if c.get("include"):
+            area, state, item = c["include"]
+            es = [e for e in entries if tile_matches(e, area, state, c.get("theme", theme))]
+            g_ = (es[0].get("grabbed") or {}) if es else {}
+            if not es or not es[0].get("layout"):
+                raise LookupError(f"custom sheet {name}: no layout of {area}/{state} to take {item} from")
+            with open(os.path.join(rd, es[0]["layout"])) as lf:
+                wins = json.load(lf)["windows"]
+            w_ = next((w for w in wins if w.get("cls") == g_.get("cls")), wins[-1])
+            rs = [t["rect"] for t in (w_.get("texts") or []) + (w_.get("actions") or []) if t.get("name") == item]
+            if not rs:
+                raise LookupError(f"custom sheet {name}: no {item} in {area}/{state}'s layout")
+            x, y, w, h = rs[0]
+            got = (min(got[0], x), min(got[1], y), max(got[2], x + w), max(got[3], y + h))
+        return (int(got[0]), int(got[1]), math.ceil(got[2] - got[0]), math.ceil(got[3] - got[1]))
 
     def tile(area, state, crop, label, opts=None):
         sc_ = (opts or {}).get("scale", 1)

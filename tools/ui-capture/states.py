@@ -7694,8 +7694,10 @@ _insert_after("dialogs", "keyboard-shortcuts-default-focus", [
     ("dialogs", "dialog", "keyboard-shortcuts-filter",
      "click keyboardShortcutsSearchField | wait 0.3 | window keyboardShortcutsDialog | type play | wait 0.6 | window | away",
      "Configure Keyboard Shortcuts: the list filtered by \u201cplay\u201d, typed in its search field"),
+    # (the pointer out of the dialog too: left on the search field, its tooltip covered the columns in the later
+    # states, which are compared with the one at rest)
     ("dialogs", "_", "_shortcuts-unfilter",
-     "window keyboardShortcutsDialog | key Backspace | key Backspace | key Backspace | key Backspace | wait 0.4 | window ", "")])
+     "window keyboardShortcutsDialog | leave | key Backspace | key Backspace | key Backspace | key Backspace | wait 0.4 | window ", "")])
 _insert_after("bigfont", "quit-save-failed", [  # (the next state's Escape closes it)
     ("bigfont", "dialog", "keyboard-shortcuts", "esc | macro opendialog keyboardShortcutsDialog | settle 1.2 | away",
      "Large font: Configure Keyboard Shortcuts")])
@@ -7787,7 +7789,7 @@ DLG_FACTS = {("dialogs", st) for st in (
            "about", "about-kde", "library-root-name-add", "library-root-name-rename", "confirm-remove-library-root",
            "confirm-clear-diagnostics", "quit-save-failed", "diagnostics", "recent-errors", "tag-editor", "tag-editor-auto-number",
            "tag-editor-rename-preview", "tag-editor-batch", "itunes-results-loading", "tag-editor-quit-wait", "tag-editor-status-details", "itunes-error", "itunes-empty",
-           "confirm-replace-cover", "preferences-library", "preferences-general", "preferences-lastfm")], ("narrow", f"preferences-{PREF_PAGES[1][1]}")}
+           "confirm-replace-cover", "preferences-library", "preferences-general", "preferences-lastfm")], ("narrow", f"preferences-{PREF_PAGES[1][1]}"), ("narrow", "tag-editor")}
 # the viewer's corner plate or strip as grabbed (shown, or auto-hidden after the pointer stopped): its fact
 # for the sheets' labels, recorded as the state's last step
 PLATE_FACTS = {("viewers", "albumart-windowed-info"): ("albumArtPopupControls", "corner plate"),

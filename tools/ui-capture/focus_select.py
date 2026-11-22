@@ -197,6 +197,9 @@ class Needs:
                         for c in column:
                             if isinstance(c, dict):
                                 self.recordings.add((c["strip"], c.get("theme", theme)))
+                                if c.get("include"):  # (the shot whose layout gives its crop an item)
+                                    area, state, _item = c["include"]
+                                    self.tiles.add((area, state, c.get("theme", theme), "", 1))
                                 continue
                             opts = (c[4] if len(c) > 4 else None) or {}
                             self.tiles.add((c[0], c[1], opts.get("theme", theme), opts.get("variant", ""),

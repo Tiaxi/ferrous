@@ -233,6 +233,100 @@ class PackWriting(unittest.TestCase):
         self.assertEqual(pack.focus_limits("big", [path]), [])
 
 
+class DialogsPack(unittest.TestCase):
+    sc = focus.SCOPES["dialogs"]
+
+    def tiles(self, sheet=None):
+        return [c for nm, _title, _th, rows in self.sc["sheets"] if sheet in (None, nm) for row in rows
+                for c in cells(row)]
+
+    def test_it_stays_at_the_cap_without_recordings_that_could_add_an_image(self):
+        self.assertEqual(len(self.sc["images"]), pack.FOCUS_MAX_IMAGES)
+        self.assertEqual({kind for kind, *_ in self.sc["images"]}, {"sheet"})
+
+    def test_the_visualization_page_and_edit_tags_from_a_1000_px_window_are_in_it(self):
+        got = {(c[1], (c[4] if len(c) > 4 else {}).get("variant", "")) for c in self.tiles() if isinstance(c, tuple)}
+        self.assertIn(("preferences-visualization", ""), got)
+        self.assertIn(("tag-editor", "1000x720"), got)
+        narrow = states.SESSIONS["narrow"]
+        self.assertEqual(tuple(narrow["size"]), (1000, 720))
+        self.assertIn(("narrow", "tag-editor"), states.DLG_FACTS)  # (the at-a-glance table's window and overflow)
+
+    def test_the_shortcuts_at_rest_filtered_and_refused_share_one_crop(self):
+        want = {"keyboard-shortcuts", "keyboard-shortcuts-filter", "keyboard-shortcuts-refused"}
+        crops = {c[1]: (c[2], c[4].get("part")) for c in self.tiles()
+                 if isinstance(c, tuple) and c[1] in want and not c[4].get("variant")}  # (not the one at 24 pt)
+        self.assertEqual(set(crops), want)
+        self.assertEqual(len(set(crops.values())), 1)
+
+    def test_the_pointer_leaves_before_the_states_compared_with_the_one_at_rest(self):
+        steps = next(s for _se, _a, st, s, _d in states.STATES if st == "_shortcuts-unfilter")
+        self.assertIn("window keyboardShortcutsDialog | leave", steps)
+
+    def test_the_itunes_failure_is_cut_to_what_changes_and_preview(self):
+        frames = [c for c in self.tiles("dlg-itunes-controls") if isinstance(c, dict)]
+        self.assertEqual([(c["item"], c["include"][2]) for c in frames],
+                         [("changed", "itunesArtworkCurrentPreviewButton")])
+
+    def test_rename_files_is_at_1_to_1(self):
+        self.assertFalse([c for c in self.tiles("dlg24-rename") if c[4].get("fit")])
+
+
+class ChangeCrop(unittest.TestCase):
+    """A recording's frames cut around all that changes after the action, with an item of a dialog shot's layout."""
+
+    def setUp(self):
+        self.rd = tempfile.mkdtemp(prefix="round-", dir=_TMP)
+        rec = os.path.join(self.rd, "strips-raw", "fails_dark_1x_1600x1000")
+        for d in ("sheets", "layout", rec):
+            os.makedirs(os.path.join(self.rd, d), exist_ok=True)
+        lines = ["mark\t1000\tnow ACTION"]
+        for k in range(4):
+            im = Image.new("RGB", (920, 604), (32, 35, 38))
+            if k == 0:
+                im.paste((255, 0, 0), (0, 590, 10, 600))  # (gone before the action: not in the crop)
+            if k >= 2:
+                im.paste((200, 200, 200), (300, 280, 400, 340))
+            im.paste((0, 255, 0), (700, 40, 780, 80))  # Preview, which holds still
+            im.save(os.path.join(rec, f"f{k}.png"))
+            lines.append(f"frame\t{k}\t{(970, 990, 1030, 1200)[k]}\t0\tf{k}.png")
+        with open(os.path.join(rec, "frames.tsv"), "w") as f:
+            f.write("\n".join(lines) + "\n")
+        with open(os.path.join(rec, "meta.json"), "w") as f:
+            json.dump(dict(name="fails", theme="dark", size=[1600, 1000], crop=None, scale=1, opts="", items={}), f)
+        with open(os.path.join(self.rd, "layout", "error.json"), "w") as f:
+            json.dump(dict(windows=[dict(cls="Main"), dict(cls="Replace", actions=[
+                dict(name="previewButton", rect=[700, 40, 80, 40])])]), f)
+        self.entries = [dict(file="dialog_error_dark.png", area="dialog", state="error", theme="dark", scale=1,
+                             size="1600x1000", desc="", layout="layout/error.json", grabbed=dict(cls="Replace"))]
+
+    def sheet(self, item="previewButton", **kw):
+        cell = dict(strip="fails", item="changed", include=("dialog", "error", item), times=[-5, 50], zoom=1, pad=8,
+                    lh=16, gap=6, label="Frames", **kw)
+        return pack.custom_sheet(self.rd, os.path.join(self.rd, "sheets"), self.entries, "fails", "Failing search",
+                                 "dark", [[cell]])
+
+    def test_the_crop_is_the_change_box_and_the_item(self):
+        x = self.sheet()
+        im = Image.open(os.path.join(self.rd, "sheets", x["file"])).convert("RGB")
+        colours = {c: n for n, c in im.getcolors(1 << 20)}
+        # (300,280)-(400,340) with Preview's (700,40)-(780,80), 8 px around: 496x316 a frame
+        self.assertEqual(x["size"][0], 2 * 496 + 10 + 2 * pack.PAD)
+        self.assertEqual(colours.get((0, 255, 0)), 2 * 80 * 40)
+        self.assertEqual(colours.get((200, 200, 200)), 100 * 60)
+        self.assertNotIn((255, 0, 0), colours)
+        self.assertTrue(x["one_to_one"])
+
+    def test_a_larger_change_is_shrunk_to_fit_and_says_so(self):
+        x = self.sheet(fit=(248, 400))
+        self.assertEqual((x["one_to_one"], x["tile_fit"]), (False, 0.5))
+        self.assertEqual(x["size"][0], 2 * 248 + 10 + 2 * pack.PAD)
+
+    def test_a_missing_item_fails_the_sheet(self):
+        with self.assertRaisesRegex(LookupError, "no noSuchButton"):
+            self.sheet("noSuchButton")
+
+
 class SystemFacts(unittest.TestCase):
     def test_contrast_layout_and_focus_order_are_summarised_for_the_packs_shots(self):
         rd = tempfile.mkdtemp(prefix="round-", dir=_TMP)
