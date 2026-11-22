@@ -2467,7 +2467,8 @@ def system_lead(rd, items, ids):
     L = ["## Contrast, summarised (CONTRAST.md: every measured element)\n"]
     if rows:
         for th in ("dark", "light"):
-            n = Counter(r_["verdict"] for r_ in rows if r_["theme"] == th)
+            n = Counter(r_["verdict"] if r_["verdict"].startswith(("AA", "fails", "meets", "below")) else
+                        "not required (see CONTRAST.md)" for r_ in rows if r_["theme"] == th)
             L.append(f"- {th}: " + (", ".join(f"{k} {v}" for k, v in n.most_common()) or "not measured"))
         low = [r_ for r_ in rows if r_["verdict"].startswith(("fails", "below", "AA large only"))]
         L += ["", "| element | theme | colours | ratio | verdict |", "|---|---|---|---|---|"]

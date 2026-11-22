@@ -7356,7 +7356,8 @@ ELEMENT_INK = {"art-to-no-art-24pt": NOW_PLAYING_LINES, "no-art-to-art-24pt": NO
                "stop-to-idle-narrow24": NOW_PLAYING_LINES + _FP_ITEMS, "title-change-narrow24": NOW_PLAYING_LINES, "queue-end-to-idle": NOW_PLAYING_ELEMENTS + _FP_ITEMS}
 # Strips whose crop holds the playing position (the playhead, its time text): their periodic single-frame
 # updates are masked out of the transitions (motion_strip.analyse). Elsewhere a single-frame change is a step.
-PERIODIC_UPDATES = {"art-to-no-art-24pt", "no-art-to-art-24pt", "art-to-no-art", "no-art-to-art", "seek-tooltip", "visualization-mode-switch", "visualization-mode-switch-back"}
+PERIODIC_UPDATES = {"art-to-no-art-24pt", "no-art-to-art-24pt", "art-to-no-art", "no-art-to-art", "seek-tooltip", "visualization-mode-switch", "visualization-mode-switch-back",
+                    "vi-autoscroll"}
 # The perceived-at-real-speed rows of a strip: `rect` (x, y, w, h in the recording's image) for small parts of
 # a large recording, `segment` "last" to show the last transition rather than the longest.
 # The top lane of the plot pane (below the mode switch's plate, left of the meter), and a band through its centre:
@@ -7371,9 +7372,9 @@ _HEADER_TRAVEL = ("the library's rows", "*libraryRowContent/libraryRowTitle*")  
 MOTION_FOCUS = {
     # the perceived rows follow the art: a box over its right edge before (x 1299) and after (x 1127)
     "albumart-info-toggle": dict(rect=(1000, 380, 380, 240), rows="all", b_lines=1, pursuit=("the art", "*albumArtImage")),
-    # visualization interaction: the perceived rows show the plot that moves, not the plates that fade beside it, and
-    # the seek bar's band (recording coordinates: its crop starts at the transport's top)
-    **{n: dict(rect=(361, 518, 1239, 431), b_lines=1, band=360, extra=[("the seek bar's band", (152, 4, 1240, 40))])
+    # visualization interaction: the perceived rows show the plot that moves (a 380 px stretch of its upper lane), not
+    # the plates that fade beside it (recording coordinates: its crop starts at the transport's top)
+    **{n: dict(rect=(741, 518, 380, 215), b_lines=1, band=360)
        for n in ("vi-pan-waveform", "vi-follow-waveform", "vi-pan-spectrogram", "vi-follow-spectrogram", "vi-autoscroll",
                  "vi-seek-plot", "vi-seek-bar")},
     # the queue's first rows where the playing row moves (rows 1-3, the number and title columns); the first scan:

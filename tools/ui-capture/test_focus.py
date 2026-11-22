@@ -122,6 +122,7 @@ class ScopeDefinitions(unittest.TestCase):
                 made = {(nm, th) for nm, _title, th, _rows in sc.get("sheets", [])}
                 shown = {(nm, th) for kind, nm, th, *_ in sc["images"] if kind == "sheet"}
                 self.assertEqual(made, shown)
+                self.assertLessEqual(set(sc.get("contrast", {})), {nm for nm, _th in made})
                 self.assertFalse(seen & made)
                 seen |= made
 

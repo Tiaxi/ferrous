@@ -66,15 +66,15 @@ SCOPES = {
                  for v, lb in (("1600x1000_font24", "compact 24 pt"), ("1000x720_font24", "narrow 24 pt"))]
                 for th in ("dark", "light")]),
             # the pane: each tile the pane as the app lays it out (1239 px wide at 1600x1000), cut where noted
-            ("focus-pane-spectrogram", "The pane playing, 1:1 (its left 88 %): the centred spectrogram, per channel; dark "
-             "above light", "dark",
-             [[("plot", "at-rest", "subject", f"Centred spectrogram, per channel, {th}", dict(theme=th, part=(0, 0, 0.88, 1), lh=16, gap=6))]
-              for th in ("dark", "light")]),
-            ("focus-pane-meter", "The pane's right 46 % with the level meter on, 1:1: spectrogram above waveform, dark "
-             "beside light", "dark",
-             [[("plot", st, "subject", f"{lb}, {th}", dict(theme=th, part=(0.54, 0, 0.46, 1), lh=16, gap=6))
-               for th in ("dark", "light")]
-              for st, lb in (("spectrogram-levelmeter", "Spectrogram, meter on"), ("waveform-levelmeter", "Waveform, meter on"))]),
+            ("focus-pane-spectrogram", "The pane playing, 1:1 (its left 88 %): the centred spectrogram in dark, the waveform in "
+             "light (the spectrogram is dark in both themes)", "dark",
+             [[("plot", "at-rest", "subject", "Centred spectrogram, per channel, dark", dict(part=(0, 0, 0.88, 1), lh=16, gap=6))],
+              [("plot", "floor-waveform", "subject", "Waveform, per channel, light", dict(theme="light", part=(0, 0, 0.88, 1), lh=16, gap=6))]]),
+            ("focus-pane-meter", "The pane's right end at 1:1 with the level meter on; the frequency scale", "dark",
+             [[("plot", "spectrogram-levelmeter", "subject", "Spectrogram, meter on", dict(part=(0.54, 0, 0.46, 1), lh=16, gap=6)),
+               ("main", "playing-scale-levelmeter", (0.6444, 0.544, 0.3556, 0.431), "The frequency scale too", dict(lh=16, gap=6))],
+              [("plot", "waveform-levelmeter", "subject", f"Waveform, meter on, {th}", dict(theme=th, part=(0.54, 0, 0.46, 1), lh=16, gap=6))
+               for th in ("dark", "light")]]),
             ("focus-pane-lanes", "5.1 with the meter on, 1:1: pointer over the pane (dark); away (light, the top four lanes)", "dark",
              [[("plot", "5.1-levelmeter-lanes", "subject", "5.1, meter on, pointer over the pane, dark", dict(lh=16, gap=6))],
               [("plot", "5.1-meter-rest", "subject", "5.1, meter on, pointer away, light",
@@ -107,9 +107,9 @@ SCOPES = {
              "the idle row gone before the cover; blink per element and content cuts in the facts"),
             ("strip", "pair:art-to-no-art-themes", "dark", "Album art to none (Next), wide, dark (left) and light (right)",
              "the no-art mark replacing the cover; the text block's lines; text overlap per line"),
-            ("sheet", "focus-pane-spectrogram", "dark", "The pane playing: the centred spectrogram per channel, both themes, 1:1",
+            ("sheet", "focus-pane-spectrogram", "dark", "The pane playing: the spectrogram (dark), the waveform (light), 1:1",
              "the lanes, their seam and L/R plates, the floor colour, the playhead"),
-            ("sheet", "focus-pane-meter", "dark", "The pane's right half with the meter on: spectrogram and waveform, both themes, 1:1",
+            ("sheet", "focus-pane-meter", "dark", "The pane's right end: meter and frequency scale; the waveform in both themes, 1:1",
              "the meter's scale and marks, its seam against the plot, the waveform's lanes"),
             ("sheet", "focus-pane-lanes", "dark", "5.1: six lanes with the meter, pointer over (dark) and away (light), 1:1",
              "the lane heads and M/S buttons, their spacing, the meter's six bars"),
@@ -146,7 +146,7 @@ SCOPES = {
         a11y_labels=[],
         # CONTRAST.md rows quoted under each focus sheet (by element-name fragment, case ignored)
         contrast={"focus-np-wide": ["now-playing", "library row title", "library header"],
-                  "focus-np-24pt-compact": ["now-playing", "library"], "focus-np-24pt-narrow": ["now-playing", "library"],
+                  "focus-np-24pt-compact": ["now-playing", "library"],
                   "focus-np-narrow": ["now-playing"], "focus-np-idle": ["now-playing"],
                   "focus-pane-spectrogram": ["lane", "plate", "plot"], "focus-pane-meter": ["meter", "waveform"],
                   "focus-pane-lanes": ["lane", "meter", "5.1"], "focus-pane-hover": ["plate", "mode switch", "readout", "tooltip"]},
@@ -223,22 +223,29 @@ SCOPES = {
              + [[("volume", st, (0.82, 0, 0.18, 0.1), lb, dict(lh=16, gap=6)) for st, lb in row]
                 for row in ((("mute-hover", "Mute hovered"), ("mute-focus", "Mute focused"), ("muted", "Muted")),
                             (("slider-hover", "Volume hovered"), ("slider-focus", "Volume focused"), ("dragging", "Volume dragged")))]),
-            ("focus-transport-sizes", "The transport at 24 pt (1600x1000) and in the narrow window (1000x720) at 10 pt and "
-             "24 pt, 1:1, dark; light at 24 pt", "dark",
-             [[("transport", "at-rest", "subject", "24 pt, 1600x1000, dark", dict(variant="1600x1000_font24", part=(0, 0, 0.6, 1), lh=16, gap=6))],
-              [("transport", "at-rest", "subject", "24 pt, 1600x1000, light", dict(variant="1600x1000_font24", theme="light", part=(0, 0, 0.6, 1), lh=16, gap=6))],
-              [("transport", "at-rest", "subject", "Narrow (1000x720), 10 pt, dark", dict(variant="1000x720", lh=16, gap=6))],
-              [("main", "playing-spectrogram-centered", (0, 0.07, 1, 0.11), "Narrow (1000x720), 24 pt, dark",
-                dict(variant="1000x720_font24", lh=16, gap=6))]]),
+            # the drag frame by frame (the merged strip of so wide and flat a recording shows it a few pixels high)
+            ("focus-transport-drag", "The seek bar dragged, frame by frame at 1:1: its time box appearing, following, "
+             "leaving; dark above light", "dark",
+             [[dict(strip="seek-drag-box", theme=th, item=(470, 0, 360, 80), times=ts, zoom=1, pad=0, lh=16, gap=6,
+                    label=f"{th}: about " + ", ".join(f"{t:+d} ms" for t in ts))]
+              for th in ("dark", "light") for ts in ([-20, 60, 280, 440], [700, 820, 1200, 2000])]),
+            ("focus-transport-sizes", "The transport at 24 pt and in the narrow window (1000x720), 1:1", "dark",
+             [[("transport", "at-rest", "subject", f"24 pt, 1600x1000, {th}: left",
+                dict(variant="1600x1000_font24", theme=th, part=(0, 0, 0.42, 1), lh=16, gap=6)),
+               ("transport", "at-rest", "subject", "right",
+                dict(variant="1600x1000_font24", theme=th, part=(0.5, 0, 0.5, 1), lh=16, gap=6))] for th in ("dark", "light")]
+             + [[("transport", "at-rest", "subject", "Narrow (1000x720), 10 pt, dark", dict(variant="1000x720", lh=16, gap=6))],
+                [("main", "playing-spectrogram-centered", (0, 0.07, 1, 0.11), "Narrow (1000x720), 24 pt, dark",
+                  dict(variant="1000x720_font24", lh=16, gap=6))]]),
             # the status bar: its right half (the indicators) per state, dark beside light
             ("focus-statusbar", "The status bar at 1:1, its left and right ends, per state: dark, then the "
              "error states in light", "dark",
-             [[("statusbar", st, (0, 0.974, 0.35, 0.026), lb + ("" if th == "dark" else ", light"), dict(theme=th, lh=16, gap=6)),
-               ("statusbar", st, (0.65, 0.974, 0.35, 0.026), "", dict(theme=th, lh=16, gap=6))]
+             [[("statusbar", st, (0, 0.975, 0.35, 0.025), lb + ("" if th == "dark" else ", light"), dict(theme=th, lh=16, gap=6)),
+               ("statusbar", st, (0.65, 0.975, 0.35, 0.025), "", dict(theme=th, lh=16, gap=6))]
               for th, rows_ in (("dark", (("playing", "Playing"), ("repeat-one-shuffle", "Repeat One, Shuffle"),
                                           ("repeat-all", "Repeat All"), ("issues-new", "A new issue"), ("issues-seen", "Issue seen"),
                                           ("issues-focus", "Issues focused"), ("scanning-known", "Scanning (known size)"),
-                                          ("scanning-unknown", "Scanning (unknown size)"), ("analysing", "Analysing"),
+                                          ("scanning-unknown", "Scanning (unknown size)"),
                                           ("backend-stopped", "Playback engine stopped"),
                                           ("backend-disconnected", "Playback engine not running"))),
                                 ("light", (("playing", "Playing"), ("issues-new", "A new issue"),
@@ -246,14 +253,14 @@ SCOPES = {
               for st, lb in rows_]),
             ("focus-statusbar-lastfm", "The status bar's Last.fm indicator, 1:1 (the bar's right 40 %): listening 0 %, half, "
              "almost; sending, scrobbled, not scrobbled, queued offline, failed, paused; dark beside light", "dark",
-             [[("statusbar", f"lastfm-{k}", (0.6, 0.974, 0.4, 0.026), f"{k.replace('-', ' ')}, {th}", dict(theme=th, lh=16, gap=6))
+             [[("statusbar", f"lastfm-{k}", (0.6, 0.975, 0.4, 0.025), f"{k.replace('-', ' ')}, {th}", dict(theme=th, lh=16, gap=6))
                for th in ("dark", "light")]
               for k in ("listening-0", "listening-half", "listening-almost", "sending", "scrobbled", "not-scrobbled",
                         "queued-offline", "failed", "paused")]),
             ("focus-statusbar-popups", "The status bar's popups at 1:1: tooltips, Last.fm's menu, "
              "Recent Issues; dark", "dark",
-             [[("statusbar", "format-hover", (0, 0.915, 0.32, 0.085), "Format hovered", dict(lh=16, gap=6)),
-               ("statusbar", "backend-stopped-hover", (0, 0.915, 0.32, 0.085), "Engine stopped, hovered: the reason", dict(lh=16, gap=6))],
+             [[("statusbar", "backend-stopped-hover", (0, 0.915, 0.32, 0.085), "Engine stopped, hovered: the reason", dict(lh=16, gap=6)),
+               ("statusbar", "lastfm-failed-tooltip", (0.68, 0.915, 0.32, 0.085), "Last.fm failed: the reason", dict(lh=16, gap=6))],
               [("statusbar", "lastfm-listening-half-tooltip", (0.82, 0.93, 0.18, 0.07), "Last.fm tooltip", dict(lh=16, gap=6)),
                ("statusbar", "issues-hover", (0.82, 0.93, 0.18, 0.07), "Issues hovered", dict(lh=16, gap=6)),
                ("menu", "context-scrobble-indicator", "popup", "Last.fm menu (Shift+F10)", dict(margin=24, lh=16, gap=6))],
@@ -276,7 +283,7 @@ SCOPES = {
             ("sheet", "focus-transport-seek", "dark", "The seek bar and volume in every state, 1:1",
              "the time box against the bar's ends; the drag; the focus rings; the muted glyph"),
             ("sheet", "focus-transport-sizes", "dark", "The transport at 24 pt and in the narrow window", "what crowds or elides"),
-            ("strip", "seek-drag-box", "dark", "The seek bar dragged: the time box appearing, following, leaving",
+            ("sheet", "focus-transport-drag", "dark", "The seek bar dragged, frame by frame: the time box, both themes",
              "the box's fade and its place over the playhead"),
             ("sheet", "focus-statusbar", "dark", "The status bar's indicators per state, both themes, 1:1",
              "the indicators' order, spacing and weight; the warning and error states"),
@@ -311,6 +318,7 @@ SCOPES = {
                       ("hover-fade-queue-row", "dark", "A queue row's hover fading in and out, dark"),
                       ("hover-fade-queue-row", "light", "A queue row's hover fading in and out, light"),
                       ("mute-toggle", "dark", "Mute, then unmute"),
+                      ("seek-drag-box", "dark", "The seek bar dragged: the time box"),
                       ("play-pause-glyph", "dark", "The play/pause glyph on pause"),
                       ("hover-fade-transport-button", "dark", "A transport button's hover fading in and out"),
                       ("first-scan", "dark", "The first library scan: the status bar's scan label")],
@@ -319,12 +327,11 @@ SCOPES = {
         # CONTRAST.md rows quoted under each focus sheet (by element-name fragment, case ignored)
         contrast={"focus-queue": ["queue title", "queue artist", "queue track", "queue header", "queue hover", "playing row"],
                   "focus-queue-light": ["queue title", "queue artist", "queue track", "queue header", "queue hover", "playing row"],
-                  "focus-queue-hover": ["queue hover", "playing row"], "focus-queue-hover-light": ["queue hover", "playing row"],
-                  "focus-queue-sizes": ["queue title", "queue header"],
+                  "focus-queue-hover": ["queue hover", "playing row"],
                   "focus-transport-buttons": ["transport"], "focus-transport-seek": ["seek", "volume"],
                   "focus-statusbar": ["status bar", "status"], "focus-statusbar-lastfm": ["last.fm", "scrobble"]},
     ),
-    # Dialogs and viewers. Configure tiles are fitted to 770x600: 1:1 once Configure is sized to its
+    # Dialogs (the viewers have their own scope). Configure tiles are fitted to 770x600: 1:1 once Configure is sized to its
     # content (about 760x560), labelled with their scale while it is larger. Confirmations: the innermost window
     # with its title bar and a margin of its parent ("inner"); main-window popups (search, Recent Issues): "popup".
     "dialogs": dict(
@@ -427,10 +434,9 @@ SCOPES = {
                 dict(B24, margin=4, box=(0, 0, 1000, 205))),
                ("dialog", "tag-editor-rename-preview", None, "24 pt, 1:1: its buttons",
                 dict(B24, items=["renamePreviewRenameButton", "renamePreviewCancelButton"]))]]),
-            ("dlg24-details", "At 24 pt, dark, 1:1: Tag Editor Details after a failed save; an iTunes result "
-             "loading its artwork", "dark",
-             [[("dialog", "tag-editor-status-details", "inner", "Tag Editor Details (but for its right border)",
-                dict(B24, margin=4, part=(0, 0, 0.975, 1)))],
+            ("dlg24-details", "At 24 pt, dark: Tag Editor Details after a failed save (fitted); an iTunes result "
+             "loading its artwork (1:1)", "dark",
+             [[("dialog", "tag-editor-status-details", "inner", "Tag Editor Details", dict(B24, margin=4, fit=(1520, 540)))],
               [("dialog", "itunes-results-loading", None, "Replace from iTunes: the first result, its full-size image loading",
                 dict(B24, items=["itunesArtworkResultTitle", "itunesArtworkResultDetails", "itunesArtworkPreviewButton",
                                  "itunesArtworkApplyButton"], first=True, margin=4, grow=(130, 0, 0, 0)))]]),
@@ -474,7 +480,8 @@ SCOPES = {
             ("sheet", "dlg24-light", "light", "24 pt: Recent Issues dark and light; Edit Tags' Track and Disc placeholders",
              "the popup's width, the glyph; the placeholders uncut"),
         ],
-        facts=["dlg-", "screen-", "itunes-failed-", "tagsave-", "renamebatch-", "recent-issues-opened", "plate-", "fill-"],
+        facts=["dlg-", "screen-", "itunes-failed-", "tagsave-", "renamebatch-", "recent-issues-opened",
+               "fill-about", "fill-itunes", "fill-recent-errors", "fill-tag-editor", "fill-preferences"],
         fact_table=True,  # one row per image at the top of FOCUS-FACTS
         # what Replace Album Art does, stated from the backend; the pack fails if these phrases leave the code
         source_notes=[("src/artwork/mod.rs",
@@ -491,15 +498,15 @@ SCOPES = {
                "(the fixture library, the app's own config, data and log folders), so the paths it shows are real and "
                "name no home folder; the pack still checks every recorded text and paints out any that does (none, in "
                "a run at the neutral paths).",
-               "The screen is KWin's virtual output (screen-* below): a fullscreen viewer fills it. Configure keeps its own "
+               "The screen is KWin's virtual output (screen-* below). Configure keeps its own "
                "size in the 1000x720 session (dlg-preferences-* facts).",
                "Real and injected states: the failed iTunes search is real (the app's application proxy set to 127.0.0.1:9, "
                "which refuses every request; nothing leaves the machine): BridgeClient sets itunesArtworkFailed; Tag Editor "
                "Details shows a real save with one folder not writable; Finishing Tag Changes is given two loaded files' "
                "names (a save here takes milliseconds) and its second stage. Searching and the stand-in results are "
                "injected (no network).",
-               "Recordings are the app's own frames: KWin's window animations (a dialog or viewer window opening, fullscreen "
-               "entry and exit) are not in them; a new window's first frame is drawn whole."],
+               "Recordings are the app's own frames: KWin's window animations (a dialog window opening and closing) are not "
+               "in them; a new window's first frame is drawn whole."],
         facts_strips=[("dialog-open-close", "dark", "A dialog (About) opening and closing"),
                       ("preferences-open", "dark", "Configure opening"),
                       ("preferences-page-switch", "dark", "Configure: a page switch"),
@@ -604,6 +611,10 @@ SCOPES = {
 # the seek bar in the transport's row at 1600x1000: from the buttons to the time
 _SEEK = (0.095, 0.03, 0.775, 0.04)
 _HALF = dict(fit=(620, 216), lh=16, gap=6)  # a pane at half size
+# the seek bar in each recording whose band the recording's merged image would show a few pixels high
+_VI_MOVES = [("vi-pan-waveform", "Middle-drag", [-20, 300, 700]), ("vi-follow-waveform", "Follow Playhead (F)", [-20, 150]),
+             ("vi-seek-plot", "Right click on the plot: the view stays", [-20, 150]),
+             ("vi-seek-bar", "Click on the seek bar: the view follows", [-20, 150])]
 _VI_TIMES = [-20, 300, 700, 1100, 1500, 1900, 2300, 2700, 3100]
 
 
@@ -619,7 +630,7 @@ SCOPES.update({
         sheets=[
             ("vi-band", "The seek bar at 1:1: its band marks the part of the track the zoomed plot shows; dark, one row light", "dark",
              [_vi_band("vi-waveform-zoomed", "Waveform zoomed, following"),
-              _vi_band("vi-waveform-panned", "Middle-dragged back (view detached), light", "light"),
+              _vi_band("vi-waveform-panned", "Middle-dragged back (view detached)", "light"),
               _vi_band("vi-waveform-panned", "Middle-dragged back (view detached)"),
               _vi_band("vi-waveform-panned-held", "3 s later: the view stays"),
               _vi_band("vi-waveform-followed", "Follow Playhead (F): back on the playhead"),
@@ -644,6 +655,10 @@ SCOPES.update({
                           (("vi-spectrogram-panned-decoded", "2.5 s later"), ("vi-rolling-zoomed", "Rolling, zoomed")))]
              + [[("main", "vi-waveform-zoomed", _PANE, "Waveform zoomed, light", dict(_HALF, theme="light")),
                  ("main", "vi-waveform-panned", _PANE, "Middle-dragged back, light", dict(_HALF, theme="light"))]]),
+            ("vi-moves-band", "The band through a drag, Follow Playhead and the two seeks: the seek bar at 1:1 from "
+             "the recordings", "dark",
+             [[dict(strip=nm, item=(152, 4, 1240, 40), times=[t], zoom=1, pad=0, lh=16, gap=4, label=f"{lb}: about {t:+d} ms")]
+              for nm, lb, ts in _VI_MOVES for t in ts]),
             ("vi-autoscroll-band", "Autoscroll, the seek bar at 1:1 from the recording: slow near the click, fast at "
              "the window's edge, going on outside it, stopped", "dark",
              # (the recording's crop starts at the transport's top: item is in its coordinates)
@@ -659,6 +674,8 @@ SCOPES.update({
              "the moved view's columns arriving; nothing jumping back"),
             ("sheet", "vi-autoscroll-band", "dark", "Autoscroll: the band every 0.4 s from the recording, 1:1",
              "slow near the click, faster at the edge, going on outside the window, then stopping"),
+            ("sheet", "vi-moves-band", "dark", "The band through a drag, F and the two seeks, frame by frame, 1:1",
+             "the band moving with the drag; coming back on F and a seek-bar click; staying for a seek on the plot"),
             ("strip", "vi-pan-waveform", "dark", "A middle-drag of the zoomed waveform, the seek bar with it",
              "the time grabbed staying under the pointer; the band following; no jump at the release"),
             ("strip", "vi-follow-waveform", "dark", "Follow Playhead (F) after a drag: the view back on the playhead",
@@ -706,7 +723,7 @@ SCOPES.update({
                [("library", "two-roots", "subject", "Two folders", dict(part=(0, 0, 1, 0.26), lh=16, gap=6)),
                 ("library", "two-roots-hover", "subject", "A root row hovered", dict(part=(0, 0, 1, 0.26), lh=16, gap=6))]],
               [("library", "expanded-playing", "subject", "24 pt, 1920x1200: expanded to the playing track",
-                dict(variant="1920x1200_font24", part=(0, 0, 1, 0.5), lh=16, gap=6))]]),
+                dict(variant="1920x1200_font24", part=(0, 0.32, 1, 0.5), lh=16, gap=6))]]),
             ("lib-menus", "The library's keyboard menus (Menu key), 1:1 with the rows around them: on a track, an album, an "
              "artist, a library folder's root row; dark", "dark",
              [[("menu", st, "popup", lb, dict(margin=40, lh=16, gap=6)) for st, lb in row]
@@ -799,8 +816,8 @@ SCOPES.update({
                (("albumart-fullscreen-strip-hover", "Fullscreen strip: info hovered"), ("albumart-fullscreen-strip-focus", "Info focused"),
                 ("albumart-fullscreen-strip-key-pressed", "Info held with Space"))],
               [("menu", "context-albumart-viewer-windowed", "popup", "Menu, windowed", dict(popup=1, margin=24, lh=16, gap=6)),
-               ("viewer", "albumart-fullscreen", (0, 0, 0.2, 0.04), "The strip's title", dict(lh=16, gap=6))],
-              [("menu", "context-albumart-viewer-fullscreen", (0.35, 0.35, 0.3, 0.2), "Menu, fullscreen (Menu key)", dict(lh=16, gap=6))]]),
+               ("viewer", "albumart-fullscreen", (0, 0, 0.3, 0.04), "The strip's title", dict(lh=16, gap=6))],
+              [("menu", "context-albumart-viewer-fullscreen", (0.49, 0.485, 0.14, 0.045), "Menu, fullscreen (Menu key)", dict(lh=16, gap=6))]]),
             ("vw-info", "The album art viewer's info column at 1:1", "dark",
              [[("viewer", "albumart-windowed-info", (0.77, 0, 0.23, 0.33), "Windowed, dark", dict(lh=16, gap=6)),
                ("viewer", "albumart-fullscreen-info", (0.78, 0, 0.22, 0.27), "Fullscreen, dark", dict(lh=16, gap=6))],
@@ -848,7 +865,7 @@ SCOPES.update({
             ("strip", "viewer-close-windowed", "dark", "The spectrogram viewer closing, windowed", "the last frames; blink"),
             ("strip", "viewer-autohide-fullscreen", "dark", "The fullscreen viewer's controls hiding", "the hide's fade; what stays"),
         ],
-        facts=["plate-", "fill-", "screen-"],
+        facts=["plate-", "fill-albumart", "fill-spectrogram", "screen-"],
         facts_strips=[("albumart-info-toggle", "light", "The info column shown, then hidden, light"),
                       ("albumart-autohide-fullscreen", "dark", "Album art viewer, fullscreen: its controls hiding"),
                       ("viewer-strip-show-fullscreen", "dark", "Spectrogram viewer, fullscreen: its strip showing again")],
@@ -885,11 +902,11 @@ SCOPES.update({
                 for row in ((("first-run-empty-library", "First run"), ("library-idle", "Idle")),
                             (("playing-spectrogram-centered", "Playing"), ("playing-ends-early", "A file that ends early")))])
               for th in ("dark", "light")],
-            ("wa-surfaces", "The app's surfaces side by side, fitted (scale in the label); dark", "dark",
+            ("wa-surfaces", "The app's surfaces side by side (scale in the label where fitted); dark", "dark",
              [[("dialog", "preferences-general", None, "Configure", dict(fit=(560, 380), lh=16, gap=6)),
                ("dialog", "about", None, "About", dict(fit=(560, 380), lh=16, gap=6))],
-              [("search", "results", None, "Search", dict(fit=(560, 350), lh=16, gap=6)),
-               ("menu", "playback-playing", None, "Playback menu", dict(fit=(560, 350), lh=16, gap=6))]]),
+              [("search", "results", (0.24, 0.1, 0.52, 0.6), "Search over the window", dict(fit=(560, 408), lh=16, gap=6)),
+               ("menu", "playback-playing", (0, 0, 0.4, 0.48), "A menu over the window", dict(fit=(560, 408), lh=16, gap=6))]]),
             ("wa-focus-walk", "The keyboard focus walk (Tab, real keys): at launch, then Tab 1 to 15; "
              "1:1 at each stop, dark", "dark",
              [[("focus", "launch-default" if n == 0 else f"tab-{n:02d}", "focus", "At launch" if n == 0 else f"Tab {n}",
