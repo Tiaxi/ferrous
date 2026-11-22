@@ -43,6 +43,10 @@ Item {
     // The plot's zoom, 1 at the default, and what resets it, for the strip.
     property real zoomLevel: 1.0
     property var resetZoom: null
+    // Whether the view is moved away from the playhead, which the controls
+    // say, hiding as they do (#467), and Follow Playhead's shortcut.
+    property bool viewMoved: false
+    property string followShortcut: ""
 
     property alias popupHost: spectrogramPopupHost
     // The visualization, whose last frame the viewer in the main window
@@ -363,6 +367,8 @@ Item {
                 closeViewer: root.closeViewer
                 zoomLevel: root.zoomLevel
                 resetView: root.resetZoom
+                noticeShown: root.viewMoved
+                followShortcut: root.followShortcut
 
                 ModeSwitch {
                     objectName: "spectrogramPopupModeSwitch"
@@ -514,6 +520,8 @@ Item {
                         closeViewer: root.closeViewer
                         zoomLevel: root.zoomLevel
                         resetView: root.resetZoom
+                        noticeShown: root.viewMoved
+                        followShortcut: root.followShortcut
 
                         ModeSwitch {
                             objectName: "spectrogramFullscreenCornerModeSwitch"
@@ -582,6 +590,8 @@ Item {
                         // set off by a 1 px divider, as on the corner plate.
                         zoomLevel: root.zoomLevel
                         resetView: root.resetZoom
+                        noticeShown: root.viewMoved
+                        followShortcut: root.followShortcut
                         dividers: true
                         closeDivided: true
 

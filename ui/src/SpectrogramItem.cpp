@@ -1259,14 +1259,16 @@ void rasterColumn(
     }
 }
 
-// The loudest of up to 64 display columns that share one pixel.
+// The loudest of up to 64 display columns, `stride` apart, that share one
+// pixel.
 template <typename Source>
 void rasterPeakHold(
     QImage &canvas,
     int x,
     qint64 colFirst,
     qint64 colLast,
-    SpectrogramRowMaxima<Source> &maxima) {
+    SpectrogramRowMaxima<Source> &maxima,
+    qint64 stride = 1) {
     if (colFirst == colLast) {
         rasterColumn(canvas, x, colFirst, maxima);
         return;
@@ -1275,11 +1277,11 @@ void rasterPeakHold(
     const SpectrogramProjection &projection = maxima.projection();
     // Cap to a reasonable max to avoid pathological cases.
     const int rangeCols = static_cast<int>(
-        std::min(colLast - colFirst + 1, static_cast<qint64>(64)));
+        std::min((colLast - colFirst) / stride + 1, static_cast<qint64>(64)));
     std::array<const quint8 *, 64> columns{};
     int validCount = 0;
     for (int i = 0; i < rangeCols; ++i) {
-        if (const quint8 *bins = source.column(colFirst + i)) {
+        if (const quint8 *bins = source.column(colFirst + i * stride)) {
             columns[static_cast<size_t>(validCount++)] = bins;
         }
     }
@@ -1543,13 +1545,18 @@ QVector<FrequencyScaleTick> frequencyScaleTicks(
 
 // The name of an overlay image's texture; a readout's plate is in `plate`.
 QString overlayImageKey(
-    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate) {
-    const QString colors = image.kind == SpectrogramOverlayImage::ReadoutPlate
-        ? QStringLiteral("%1|%2|%3|")
-              .arg(plate.fill.rgba(), 0, 16)
-              .arg(plate.text.rgba(), 0, 16)
-              .arg(plate.edge.rgba(), 0, 16)
-        : QString();
+    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate,
+    const QColor &floor) {
+    QString colors;
+    if (image.kind == SpectrogramOverlayImage::ReadoutPlate) {
+        colors = QStringLiteral("%1|%2|%3|")
+            .arg(plate.fill.rgba(), 0, 16)
+            .arg(plate.text.rgba(), 0, 16)
+            .arg(plate.edge.rgba(), 0, 16);
+    } else if (image.kind == SpectrogramOverlayImage::DashedColumn
+        || image.kind == SpectrogramOverlayImage::DashedRow) {
+        colors = QStringLiteral("%1|").arg(floor.rgba(), 0, 16);
+    }
     return QStringLiteral("%1|%2|%3|%4%5")
         .arg(static_cast<int>(image.kind))
         .arg(scale, 0, 'g', 17)
@@ -1576,7 +1583,8 @@ QSize overlayImagePixels(const SpectrogramOverlayImage &image, double scale) {
 // An overlay image at `scale` device pixels to a logical one; a readout's
 // plate is in `plate`.
 QImage renderOverlayImage(
-    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate) {
+    const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate,
+    const QColor &floor) {
     const bool dashedColumn = image.kind == SpectrogramOverlayImage::DashedColumn;
     if (dashedColumn || image.kind == SpectrogramOverlayImage::DashedRow) {
         const int lineWidth = deviceLineWidth(scale);
@@ -1588,16 +1596,22 @@ QImage renderOverlayImage(
         QPen dashPen(kCrosshairLineColor);
         dashPen.setWidth(lineWidth);
         dashPen.setCapStyle(Qt::FlatCap);
-        // Dashes of 4 logical pixels, 3 apart.
-        dashPen.setDashPattern({4.0 * scale / lineWidth, 3.0 * scale / lineWidth});
-        painter.setPen(dashPen);
+        QPen gapPen = dashPen;
+        gapPen.setColor(CrosshairReadout::dashGapColor(floor));
+        CrosshairReadout::setDashes(dashPen, false, scale / lineWidth);
+        CrosshairReadout::setDashes(gapPen, true, scale / lineWidth);
         // A one-pixel pen draws the pixels at its coordinates, a wider one
         // the pixels around them.
         const double offset = lineWidth > 1 ? lineWidth * 0.5 : 0.0;
-        if (dashedColumn) {
-            painter.drawLine(QPointF(offset, 0.0), QPointF(offset, length));
-        } else {
-            painter.drawLine(QPointF(0.0, offset), QPointF(length, offset));
+        const QLineF along = dashedColumn
+            ? QLineF(offset, 0.0, offset, length)
+            : QLineF(0.0, offset, length, offset);
+        // Each pixel is a dash's or a gap's: where antialiasing is off, one
+        // both reach is the dash's.
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        for (const QPen &pen : {gapPen, dashPen}) {
+            painter.setPen(pen);
+            painter.drawLine(along);
         }
         return line;
     }
@@ -2923,6 +2937,8 @@ void SpectrogramItem::setFloorColor(const QColor &value) {
             return;
         }
         m_floorColor = value;
+        // It is between the crosshair's dashes, and names their textures.
+        m_crosshairDirty = true;
     }
     emit floorColorChanged();
     update();
@@ -3588,16 +3604,57 @@ bool SpectrogramItem::ringHoldsColumnsLocked(qint64 firstColumn, qint64 lastColu
     return true;
 }
 
+bool SpectrogramItem::zoomOutWaitsForViewLocked(
+    const CenteredView &view, const CenteredColumns &columns, double columnsPerSecond) const {
+    if (m_precomputedCanvasRolling
+        || m_precomputedCanvasTrackToken != m_precomputedTrackToken
+        || m_precomputedCanvasZoomLevel <= 0.0
+        || m_precomputedCanvasColumnsPerSecond <= 0.0) {
+        return false;
+    }
+    const qint64 first = std::max<qint64>(0, view.left);
+    qint64 last = view.right;
+    if (columns.end > 0) {
+        // A length the file does not tell can overshoot its columns, which
+        // end a few windows short of it.
+        constexpr qint64 kTailSlack = 64;
+        last = std::min(last, columns.end - (columns.endKnown ? 1 : kTailSlack));
+    }
+    if (last < first || ringHoldsColumnsLocked(first, last)) {
+        return false;
+    }
+    // What stands in, in seconds from the stream origin: the canvas before
+    // the zoom, and the reserve as far as it has data.
+    double left = (static_cast<double>(m_precomputedCanvasDisplayLeft)
+        - m_precomputedCanvasSubpixelOffset / m_precomputedCanvasZoomLevel)
+            / m_precomputedCanvasColumnsPerSecond + m_precomputedCanvasStreamOrigin;
+    double right = left + static_cast<double>(m_canvasFilledCols)
+        / (m_precomputedCanvasZoomLevel * m_precomputedCanvasColumnsPerSecond);
+    if (!m_reserve.isNull() && !m_reserve.rolling
+        && m_reserve.validity == m_backdropValidity
+        && m_reserve.coveredEnd > m_reserve.coveredFirst
+        && m_reserve.coveredLeftSeconds() <= right && m_reserve.coveredRightSeconds() >= left) {
+        left = std::min(left, m_reserve.coveredLeftSeconds());
+        right = std::max(right, m_reserve.coveredRightSeconds());
+    }
+    // The few columns a view's ends round by.
+    constexpr double kSlackColumns = 16.0;
+    const double slack = kSlackColumns / columnsPerSecond;
+    return left <= static_cast<double>(first) / columnsPerSecond + m_streamOrigin + slack
+        && right >= static_cast<double>(last) / columnsPerSecond + m_streamOrigin - slack;
+}
+
 void SpectrogramItem::updateCanvasFillReadinessLocked() {
     if (m_zoomFillActive && m_awaitingZoomData) {
         // The data is not for the requested zoom yet.
         return;
     }
     if (m_zoomFillActive) {
-        // Only a centered zoom-in, or a centered seek, waits for the ring
-        // to cover the display.  Elsewhere the new data fills in as it
-        // arrives, which beats a preview held until almost the whole
-        // zoomed-out track has decoded.
+        // A centered zoom-in or seek waits for the ring to cover the
+        // display, and a centered zoom-out while an older picture fills it,
+        // which the new columns would split.  Elsewhere the new data fills
+        // in as it arrives, which beats a preview held until almost the
+        // whole zoomed-out track has decoded.
         const double currentPixelsPerSecond = currentPixelsPerSecondLocked();
         const bool zoomChanged = m_precomputedCanvasPixelsPerSecond > 0.0
             && std::abs(currentPixelsPerSecond / m_precomputedCanvasPixelsPerSecond - 1.0)
@@ -3605,8 +3662,27 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
         const bool waitForCoverage = m_displayMode == 1
             && (!zoomChanged || currentPixelsPerSecond > m_precomputedCanvasPixelsPerSecond);
         if (!waitForCoverage) {
+            std::optional<CenteredView> replacing;
+            if (m_displayMode == 1 && zoomChanged && !m_seekFillActive && m_precomputedHopSize > 0) {
+                const double cps = static_cast<double>(m_precomputedSampleRateHz)
+                    / static_cast<double>(m_precomputedHopSize);
+                const CenteredView view = centeredViewLocked(
+                    std::max(0.0, currentRenderPositionSecondsLocked(m_now())),
+                    canvasWidthLocked(), canvasHeightLocked(), std::max(0.001, canvasZoomLocked()), cps);
+                if (zoomOutWaitsForViewLocked(view, centeredColumnsLocked(), cps)) {
+                    return;
+                }
+                replacing = view;
+            }
             m_zoomFillActive = false;
+            m_seekFillActive = false;
             m_precomputedCanvasDirty = true;
+            if (replacing && isVisible()) {
+                // Now, not at the next frame, so that a wait for the whole
+                // view costs no frame of its own.
+                requestPrecomputedRasterLocked(canvasWidthLocked(), canvasHeightLocked(),
+                    replacing->left, replacing->right, false);
+            }
             return;
         }
     }
@@ -3859,12 +3935,15 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     // Early hop change detection: activate canvas freeze BEFORE any
     // reset processing that might call invalidateCanvas().  The freeze
-    // is only needed for finer-hop zoom-in restarts; on coarser-hop
-    // zoom-outs, preserving the old centered image makes the view look
-    // stuck at 1.0 until almost the full zoomed-out track has decoded.
+    // is for finer-hop zoom-in restarts, and for the zoom outs asked for,
+    // which hold it only while an older picture fills the view (see
+    // updateCanvasFillReadinessLocked): further out, preserving the old
+    // centered image makes the view look stuck at 1.0 until almost the
+    // full zoomed-out track has decoded.
     if (hopSize > 0
         && hopSize != m_precomputedHopSize
-        && (m_precomputedHopSize <= 0 || hopSize < m_precomputedHopSize)
+        && (m_precomputedHopSize <= 0 || hopSize < m_precomputedHopSize
+            || resetRestartsForZoomLocked(trackToken, hopSize))
         && m_displayMode == 1
         && !m_canvas.isNull()) {
         m_zoomFillActive = true;
@@ -5293,6 +5372,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     SpectrogramZoomPreview backdropMap;
     // The reserve, the same way: its image is not wrapped.
     bool reserveShown = false;
+    // The reserve shows instead of the canvas (a centered zoom out).
+    bool canvasHidden = false;
     QImage reserveImage;
     quint64 reserveSerial = 0;
     int reservePixels = 0;
@@ -5434,7 +5515,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 }
                 SpectrogramPlacedOverlayImage placed{image.key, rect, QImage()};
                 if (!node->overlayTextures.contains(placed.key)) {
-                    placed.image = renderOverlayImage(image, scale, m_readoutColors);
+                    placed.image = renderOverlayImage(image, scale, m_readoutColors, m_floorColor);
                 }
                 frame.images.push_back(std::move(placed));
             }
@@ -5812,6 +5893,41 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 reserveSerial = m_reserve.serial;
                 reservePixels = m_reserve.pixels;
             }
+            if (reserveShown && !rollingMode) {
+                // A zoom out of a centered view is one picture in each of
+                // its frames: the older canvas, smaller, beside the reserve
+                // was two resolutions and exposures with an edge through
+                // every lane. Where the reserve has all that the older
+                // layers show, and more of the view, it is shown alone. A
+                // rolling view's history is not decoded again, and keeps
+                // its layers for as long as it shows.
+                const auto inView = [cw](double x) { return std::clamp(x, 0.0, static_cast<double>(cw)); };
+                // Within a pixel of the reserve, whose ends round to one.
+                const double slack = reserveMap.scale + 1.0;
+                const double left = inView(reserveMap.map(m_reserve.coveredFirst));
+                const double right = inView(reserveMap.map(m_reserve.coveredEnd));
+                const auto replaces = [&](double from, double to) {
+                    from = inView(from);
+                    to = inView(to);
+                    return left <= from + slack && right >= to - slack
+                        && (left < from - slack || right > to + slack);
+                };
+                if (zoomPreviewShown && preview.scale < 1.0) {
+                    double from = preview.map(canvasDrawX);
+                    double to = preview.map(canvasDrawX + static_cast<double>(drawCols));
+                    if (backdropShown) {
+                        from = std::min(from, backdropMap.map(0.0));
+                        to = std::max(to, backdropMap.map(backdropPixels));
+                    }
+                    canvasHidden = replaces(from, to);
+                }
+                if (backdropShown
+                    && (canvasHidden
+                        || (backdropMap.scale < 1.0 - 1e-3
+                            && replaces(backdropMap.map(0.0), backdropMap.map(backdropPixels))))) {
+                    backdropShown = false;
+                }
+            }
             if (canvasTimed && shownPixelsPerSecond > 0.0) {
                 // The view's seconds, and how many seconds it shows.
                 const double viewLeft = timeAt(0.0);
@@ -5831,8 +5947,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     m_reserveZoomPixelsPerSecond = shownPixelsPerSecond;
                     m_reserveRequestedLeft = viewLeft - viewSeconds / 2.0;
                     m_reserveRequestedRight = viewRight + viewSeconds / 2.0;
-                    requestReserveLocked(m_reserveRequestedLeft, m_reserveRequestedRight,
-                        shownPixelsPerSecond / 2.0, cw, ch, rollingMode);
+                    // One that has all of that already stands in as it is:
+                    // drawn again from other columns, the zoom out's
+                    // picture changed a frame after it came.
+                    const qint64 end = rollingMode ? 0 : centeredColumnsLocked().end;
+                    const bool has = !rollingMode && reserveShown && end > 0
+                        && m_reserve.coveredEnd > m_reserve.coveredFirst
+                        && m_reserve.coveredLeftSeconds() - 1.0 / m_reserve.pixelsPerSecond
+                            <= std::max(m_streamOrigin, m_reserveRequestedLeft)
+                        && m_reserve.coveredRightSeconds() + 1.0 / m_reserve.pixelsPerSecond
+                            >= std::min(static_cast<double>(end) / columnsPerSecond + m_streamOrigin,
+                                m_reserveRequestedRight);
+                    if (!has) {
+                        requestReserveLocked(m_reserveRequestedLeft, m_reserveRequestedRight,
+                            shownPixelsPerSecond / 2.0, cw, ch, rollingMode);
+                    }
                 } else if (!zoomPreviewWanted
                     && canvasIsView
                     && !canvasFreeze
@@ -5851,7 +5980,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         && (rollingMode
                             ? viewLeft <= m_reserveRequestedRight
                             : viewRight + margin <= m_reserveRequestedRight);
-                    if (!covered) {
+                    // And again once the ring has what the last one was
+                    // short of: without it a zoom out showed the floor, or
+                    // another reserve's picture, at that end.
+                    const bool completes = !rollingMode && !m_reservePending
+                        && static_cast<double>(m_precomputedMaxColumnIndex) / columnsPerSecond + m_streamOrigin
+                            >= m_reserveShortUntilSeconds;
+                    if (!covered || completes) {
                         m_reserveZoomPixelsPerSecond = 0.0;
                         m_reserveRequestedLeft = viewLeft - (rollingMode ? 2.0 : 1.0) * viewSeconds;
                         m_reserveRequestedRight = rollingMode ? viewRight : viewRight + viewSeconds;
@@ -6180,7 +6315,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     node->ensureTileFragments(static_cast<int>(node->bands.size()) + 1);
     QSGTexture *canvasPlaceholder = node->canvasPlaceholder();
     int fragmentCursor = 0;
-    if (hasCanvas && node->canvasSize == canvasSize) {
+    if (hasCanvas && !canvasHidden && node->canvasSize == canvasSize) {
         auto configureSegment = [&](int canvasOffset, int length, double targetX) {
             int remainingLength = length;
             int segmentOffset = canvasOffset;
@@ -7129,7 +7264,7 @@ double SpectrogramItem::crosshairTrackTimeLocked(double continuousTime) const {
 
 void SpectrogramItem::nameOverlayImagesLocked(SpectrogramOverlayLayout &layout) const {
     for (SpectrogramOverlayImage &image : layout.images) {
-        image.key = overlayImageKey(image, m_canvasScale, m_readoutColors);
+        image.key = overlayImageKey(image, m_canvasScale, m_readoutColors, m_floorColor);
     }
 }
 
@@ -7970,8 +8105,16 @@ std::shared_ptr<SpectrogramRasterResult> SpectrogramItem::rasterize(
         if (px % kCanvasTileWidth == 0 && !wanted()) {
             return {};
         }
-        rasterPixel(canvas, px, static_cast<double>(px), target.displayLeft,
-            target.displayRight, target.effectiveZoom, maxima);
+        if (job.sampleColumns > 0 && target.effectiveZoom < 1.0) {
+            const qint64 first = std::min(target.displayRight, target.displayLeft
+                + static_cast<qint64>(static_cast<double>(px) / target.effectiveZoom));
+            const qint64 last = std::min(target.displayRight,
+                first + static_cast<qint64>(job.sampleColumns - 1) * job.sampleStride);
+            rasterPeakHold(canvas, px, first, last, maxima, job.sampleStride);
+        } else {
+            rasterPixel(canvas, px, static_cast<double>(px), target.displayLeft,
+                target.displayRight, target.effectiveZoom, maxima);
+        }
     }
     if (!job.underlay.isNull()
         && job.underlayPixelsPerSecond > 0.0
@@ -7993,6 +8136,21 @@ std::shared_ptr<SpectrogramRasterResult> SpectrogramItem::rasterize(
                 static_cast<double>(job.underlay.height())));
     }
     auto result = std::make_shared<SpectrogramRasterResult>();
+    if (job.sampleColumns > 0) {
+        // A pixel has data in all of its rows or in none.
+        const auto *row = reinterpret_cast<const QRgb *>(canvas.constScanLine(0));
+        for (int first = 0; first < target.width; ++first) {
+            int end = first;
+            while (end < target.width && qAlpha(row[end]) > 0) {
+                ++end;
+            }
+            if (end - first > result->coveredEnd - result->coveredFirst) {
+                result->coveredFirst = first;
+                result->coveredEnd = end;
+            }
+            first = end;
+        }
+    }
     result->serial = job.serial;
     result->target = target;
     result->drawPixels = drawPixels;
@@ -8163,6 +8321,7 @@ void SpectrogramItem::invalidateBackdropLocked() {
     m_reserveZoomPixelsPerSecond = 0.0;
     m_reserveRequestedLeft = 0.0;
     m_reserveRequestedRight = -1.0;
+    m_reserveShortUntilSeconds = std::numeric_limits<double>::infinity();
 }
 
 void SpectrogramItem::requestReserveLocked(double seconds, double endSeconds,
@@ -8173,6 +8332,8 @@ void SpectrogramItem::requestReserveLocked(double seconds, double endSeconds,
     if (columnsPerSecond <= 0.0 || pixelsPerSecond <= 0.0 || width <= 0 || endSeconds <= seconds) {
         return;
     }
+    // Before what it keeps of the last reserve's.
+    const double requestedEndSeconds = endSeconds;
     const qint64 epoch = rollingMode ? m_rollingEpoch : 0;
     // The ring's columns over the seconds, but only those it can hold: no
     // more than its capacity, which a centered ring's columns span twice
@@ -8241,6 +8402,32 @@ void SpectrogramItem::requestReserveLocked(double seconds, double endSeconds,
         return;
     }
     job->makeTiles = false;
+    // A column of zoom 1 peak-holds the windows in its time, an eighth of
+    // a window apart (column_hops in src/analysis/column_hop.rs). Holding
+    // every column of its pixel, the reserve was lighter than both the
+    // view before a zoom out and the one after, beside the one and before
+    // the other.
+    const double hop = m_precomputedHopSize;
+    const double referenceHop = referenceHopLocked();
+    const int fftSize = m_precomputedFftSize > 0
+        ? m_precomputedFftSize
+        : (m_precomputedBinsPerColumn - 1) * 2;
+    const double windowStep = std::max(64.0, fftSize / 8.0);
+    job->sampleColumns = 1;
+    if (hop < referenceHop && windowStep < referenceHop) {
+        job->sampleStride = std::max(1, static_cast<int>(std::lround(windowStep / hop)));
+        job->sampleColumns = std::clamp(
+            static_cast<int>(std::lround(referenceHop / hop / job->sampleStride)), 1, 64);
+    }
+    m_reserveShortUntilSeconds = std::numeric_limits<double>::infinity();
+    if (!rollingMode) {
+        const qint64 end = centeredColumnsLocked().end;
+        const auto asked = static_cast<qint64>(std::ceil((requestedEndSeconds - origin) * columnsPerSecond));
+        const qint64 wanted = end > 0 ? std::min(end - 1, asked) : asked;
+        if (wanted > ringRight) {
+            m_reserveShortUntilSeconds = static_cast<double>(wanted) / columnsPerSecond + origin;
+        }
+    }
     if (keepsReserve) {
         job->underlay = m_reserve.image;
         job->underlayPixels = m_reserve.pixels;
@@ -8330,6 +8517,8 @@ void SpectrogramItem::installReserve(const std::shared_ptr<SpectrogramRasterResu
         m_reserve.start = 0;
         // With what it kept of the reserve before it, past its columns.
         m_reserve.pixels = result->canvas.width();
+        m_reserve.coveredFirst = result->coveredFirst;
+        m_reserve.coveredEnd = result->coveredEnd;
         m_reserve.leftSeconds = static_cast<double>(target.displayLeft - target.epoch)
             / target.columnsPerSecond + target.streamOrigin;
         m_reserve.pixelsPerSecond = target.effectiveZoom * target.columnsPerSecond;

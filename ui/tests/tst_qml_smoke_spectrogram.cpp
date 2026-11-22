@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "QmlSmokeTest.h"
+#include "TestColor.h"
 
 #include <QtMath>
 #include <QSGOpacityNode>
@@ -31,6 +32,7 @@ private slots:
     void spectrogramPixelToFrequency();
     void spectrogramOverlayBenchmark();
     void spectrogramCrosshairOverlayGeneratesOnHover();
+    void spectrogramCrosshairReadsOverBrightData();
     void spectrogramCrosshairOverlayMovesOnlyItsTimeLabel();
     void spectrogramCrosshairReadoutClampsInsideTheLane_data();
     void spectrogramCrosshairReadoutClampsInsideTheLane();
@@ -1347,6 +1349,58 @@ void SpectrogramSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
         item.updateCrosshairOverlayLocked(200, 100, 0, false, 48000.0 / 1024.0, 0.0);
     }
     QTRY_VERIFY(item.crosshairReadout().isEmpty());
+}
+
+void SpectrogramSmokeTest::spectrogramCrosshairReadsOverBrightData() {
+    // The dashed white lines vanished on a bright harmonic. Between the
+    // dashes is the plot's floor at 60 %, dark there and nothing on the
+    // floor, and the lines are no thicker.
+    QQuickWindow window;
+    if (window.rendererInterface()->graphicsApi() == QSGRendererInterface::Null) {
+        QSKIP("The null renderer draws no pixels");
+    }
+    const QColor floor(0x14, 0x05, 0x28);
+    window.setColor(floor);
+    window.resize(200, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    auto &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setFloorColor(floor);
+    item.setCrosshairEnabled(true);
+    item.setAcceptHoverEvents(false);
+    constexpr int bins = 64;
+    item.feedPrecomputedChunk(QByteArray(bins * 200, '\xff'), bins, 0, 200, 0, 200, 48000, 1024,
+        true, true, 1, false);
+    setTestPosition(item, 4.0, 1);
+    const auto grab = [&]() {
+        item.update();
+        return window.grabWindow().convertToFormat(QImage::Format_RGB32);
+    };
+    QImage shown;
+    QTRY_VERIFY_WITH_TIMEOUT(
+        contrastRatio((shown = grab()).pixelColor(20, 50), floor) > 8.0
+            && !spectrogramRasterPending(item), 5000);
+    const QColor data = shown.pixelColor(20, 50);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(20.0, 50.0);
+        item.m_crosshairDirty = true;
+    }
+    shown = grab();
+    for (const bool column : {true, false}) {
+        double best = 1.0;
+        for (int i = 4; i < 16; ++i) {
+            const QPoint at = column ? QPoint(20, i) : QPoint(i, 50);
+            best = std::max(best, contrastRatio(shown.pixelColor(at), data));
+            QCOMPARE(shown.pixelColor(at + (column ? QPoint(-2, 0) : QPoint(0, -2))), data);
+        }
+        QVERIFY2(best >= 3.0, qPrintable(QStringLiteral("%1:1 over the data").arg(best)));
+    }
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairOverlayMovesOnlyItsTimeLabel() {

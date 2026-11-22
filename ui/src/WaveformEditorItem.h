@@ -127,6 +127,9 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // seek other than the plot's own, a track change or a reset of the zoom.
     // A view gliding back to the playhead is not.
     Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
+    // Whether autoscroll runs: told before detached as it starts, and after
+    // it as following again ends it (see publishDetached).
+    Q_PROPERTY(bool autoscrolling READ autoscrolling NOTIFY autoscrollingChanged)
     // Whether a middle-drag pans the view: from the drag distance to the
     // release. The surface shows a closed hand meanwhile.
     Q_PROPERTY(bool panning READ panning NOTIFY panningChanged)
@@ -220,6 +223,7 @@ public:
     void setPlayheadVisible(bool value);
 
     bool detached() const { return m_detached; }
+    bool autoscrolling() const { return m_autoscrollingShown; }
     bool panning() const { return m_panning; }
     double visibleStartSeconds() const { return m_visibleStartSeconds; }
     double visibleEndSeconds() const { return m_visibleEndSeconds; }
@@ -263,6 +267,7 @@ signals:
     void markerSecondsChanged();
     void markerXChanged();
     void detachedChanged();
+    void autoscrollingChanged();
     void panningChanged();
     void visibleRangeChanged();
     void seekRequested(double seconds);
@@ -848,6 +853,8 @@ private:
     bool m_autoscrolling{false};
     // detached, on the GUI thread, and as frames compare it.
     bool m_detached{false};
+    // The autoscrolling last told, on the GUI thread.
+    bool m_autoscrollingShown{false};
     std::atomic_bool m_detachedShown{false};
     std::atomic_bool m_detachedCheckPending{false};
     bool m_zoomOutHandoffPending{false};

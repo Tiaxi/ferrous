@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "QmlSmokeTest.h"
+#include "TestColor.h"
 
 #include <gst/gst.h>
 
@@ -76,6 +77,8 @@ private slots:
     void waveformEditorFollowsThePlaybackClock();
     void waveformEditorSeeksMoveAtOnce();
     void waveformEditorHoverDrawsCrosshairAndReadouts();
+    void waveformEditorCrosshairReadsOverTheFill_data();
+    void waveformEditorCrosshairReadsOverTheFill();
     void waveformEditorCrosshairLabelsMatchSpectrogramMargins();
     void waveformEditorCrosshairLabelsKeepApartInShortPlots();
     void waveformEditorCrosshairLabelsStayReadableInNarrowPlots();
@@ -1054,12 +1057,25 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
         // The crosshair is on the device column under the pointer, at its
         // left edge, dashed as the spectrogram's: 4 px on, 3 off, in the
         // plot's text at 45 %.
-        const QVector<double> crosshair = verticalLinesIn(drawn->engine, Qt::CustomDashLine);
+        QVector<double> crosshair;
+        for (const auto &[line, pen] : drawn->engine.lines) {
+            if (line.dx() == 0.0 && line.dy() != 0.0 && pen.style() == Qt::CustomDashLine
+                && pen.dashOffset() == 0.0) {
+                crosshair.push_back(line.x1());
+            }
+        }
         QCOMPARE(crosshair.size(), 1);
         const double columnX = std::floor(pointerX * scale + 1e-6) / scale;
         QVERIFY(std::abs(crosshair.constFirst() - columnX) < 1e-9);
         for (const auto &[line, pen] : drawn->engine.lines) {
-            if (pen.style() == Qt::CustomDashLine) {
+            if (pen.style() == Qt::CustomDashLine && pen.dashOffset() != 0.0) {
+                // What is between them, on the same line and no wider.
+                QCOMPARE(pen.dashPattern(), (QList<qreal>{3.0, 4.0}));
+                QVERIFY(pen.widthF() <= 1.0);
+                if (line.dx() == 0.0) {
+                    QVERIFY(std::abs(line.x1() - columnX) < 1e-9);
+                }
+            } else if (pen.style() == Qt::CustomDashLine) {
                 QCOMPARE(pen.dashPattern(), (QList<qreal>{4.0, 3.0}));
                 QCOMPARE(pen.color().rgb(), item->readoutTextColor().rgb());
                 QVERIFY(std::abs(pen.color().alphaF() - item->readoutTextColor().alphaF() * 0.45) < 0.01);
@@ -2514,6 +2530,66 @@ void WaveformSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
         }
     }
     QVERIFY(changedPixels > 250);
+}
+
+void WaveformSmokeTest::waveformEditorCrosshairReadsOverTheFill_data() {
+    QTest::addColumn<QColor>("floor");
+    QTest::addColumn<QColor>("fill");
+    QTest::addColumn<QColor>("text");
+    // The waveform plot's floor, fill and text in Breeze's two themes.
+    QTest::newRow("dark") << QColor(0x14, 0x16, 0x18) << QColor(0x86, 0xba, 0xd4) << QColor(0xfc, 0xfc, 0xfc);
+    QTest::newRow("light") << QColor(0xff, 0xff, 0xff) << QColor(0x2c, 0x56, 0x6c) << QColor(0x23, 0x26, 0x29);
+}
+
+void WaveformSmokeTest::waveformEditorCrosshairReadsOverTheFill() {
+    // The crosshair's dashes vanished over the waveform's fill, at 1.4:1.
+    // What is between them is the floor at 60 %: it reads on the fill, is
+    // nothing on the floor, and the line is a pixel wide as before.
+    QFETCH(QColor, floor);
+    QFETCH(QColor, fill);
+    QFETCH(QColor, text);
+    WaveformEditorItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDurationSeconds(10.0);
+    item.setBackgroundColor(floor);
+    item.setReadoutTextColor(text);
+    item.m_hoverPosition = QPointF(60.0, 30.0);
+    const auto drawnOn = [&item](const QColor &under) {
+        QImage plot(200, 100, QImage::Format_ARGB32_Premultiplied);
+        plot.fill(under);
+        QPainter painter(&plot);
+        item.drawCrosshair(painter, 200, 100, 0.0, 10.0);
+        painter.end();
+        return plot;
+    };
+    const QImage onFill = drawnOn(fill);
+    const QImage onFloor = drawnOn(floor);
+    // Both lines, where no plate is on them.
+    for (const bool column : {true, false}) {
+        double best = 1.0;
+        int touchedBeside = 0;
+        int dashes = 0;
+        int gaps = 0;
+        for (int i = 0; i < 25; ++i) {
+            const QPoint at = column ? QPoint(60, i) : QPoint(i, 30);
+            const QPoint beside = at + (column ? QPoint(-2, 0) : QPoint(0, -2));
+            best = std::max(best, contrastRatio(onFill.pixelColor(at), fill));
+            if (channelDistance(onFill.pixelColor(beside), fill) > 1) {
+                ++touchedBeside;
+            }
+            if (channelDistance(onFloor.pixelColor(at), floor) > 1) {
+                ++dashes;
+            } else {
+                ++gaps;
+            }
+        }
+        QVERIFY2(best >= 3.0, qPrintable(QStringLiteral("%1:1 over the fill").arg(best)));
+        QCOMPARE(touchedBeside, 0);
+        // Still dashed on the floor, 4 on and 3 off.
+        QVERIFY2(dashes >= 12 && gaps >= 8,
+            qPrintable(QStringLiteral("%1 on, %2 off").arg(dashes).arg(gaps)));
+    }
 }
 
 void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {

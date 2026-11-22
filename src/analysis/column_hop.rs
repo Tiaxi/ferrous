@@ -141,19 +141,15 @@ pub(super) struct ColumnHops {
 /// audio at `sample_rate`.
 ///
 /// The STFT runs at an eighth of the window, or every column when columns
-/// are closer, and the output peak-holds its rows down to one a column.
-/// Zoomed in, where each column needs a window of its own, the STFT steps
-/// by a column as long as its windows then still cover all the audio; when
-/// they would leave gaps, as a small window at a high rate does, it keeps
-/// the eighth-window hop and peak-holds instead.
+/// are closer, and the output peak-holds its rows down to one a column, at
+/// every zoom: how many windows a column holds is how bright its noise
+/// is. Stepping by the column as soon as the view was zoomed in, the first
+/// notch dropped from four windows a column to one with a small window or
+/// a high rate, and darkened the whole spectrogram.
 pub(super) fn column_hops(fft_size: usize, zoom: f32, sample_rate: u32) -> ColumnHops {
     let effective_hop = column_hop(sample_rate, zoom);
     let overlapped = (fft_size / 8).max(64);
-    let stft_hop = if zoom > 1.0 && effective_hop <= fft_size {
-        effective_hop
-    } else {
-        overlapped.min(effective_hop)
-    };
+    let stft_hop = overlapped.min(effective_hop);
     // Both hops are small; precision loss is negligible.
     #[allow(clippy::cast_precision_loss)]
     let output_interval = (effective_hop as f64 / stft_hop as f64).max(1.0);
@@ -356,7 +352,7 @@ mod tests {
             assert_eq!(column_hops(8192, 4.0, rate).stft_hop, 256);
             assert_eq!(column_hops(8192, 16.0, rate).stft_hop, 64);
             assert_eq!(column_hops(8192, 0.5, rate).stft_hop, 1024);
-            assert_eq!(column_hops(2048, 3.815, rate).stft_hop, 268);
+            assert_eq!(column_hops(2048, 3.815, rate).stft_hop, 256);
             assert!((column_hops(8192, 0.8, rate).output_interval - 1.25).abs() < 1e-12);
         }
     }
@@ -369,9 +365,30 @@ mod tests {
         let hops = column_hops(512, 1.5, 192_000);
         assert_eq!(hops.effective_hop, 2731);
         assert_eq!(hops.stft_hop, 64);
-        // A window as long as the column steps by the column.
+        // So does a window as long as the column.
         let hops = column_hops(4096, 1.5, 192_000);
-        assert_eq!(hops.stft_hop, 2731);
-        assert!((hops.output_interval - 1.0).abs() < f64::EPSILON);
+        assert_eq!(hops.stft_hop, 512);
+    }
+
+    #[test]
+    fn a_zoom_notch_keeps_the_windows_a_column_holds() {
+        // The brightness of noise goes with the windows a column peak-holds:
+        // a notch of the wheel, 1.25 times, changes them by no more than
+        // that, also from zoom 1.
+        for rate in [44_100, 48_000, 96_000, 192_000] {
+            for fft in FFT_SIZES {
+                let mut zoom = 0.512_f32;
+                while zoom < 16.0 {
+                    let held = column_hops(fft, zoom, rate).output_interval;
+                    let next = column_hops(fft, zoom * 1.25, rate).output_interval;
+                    // Hops are whole samples.
+                    assert!(
+                        next <= held * 1.01 && next >= held / 1.27,
+                        "{rate} {fft} {zoom}: {held} windows a column, then {next}"
+                    );
+                    zoom *= 1.25;
+                }
+            }
+        }
     }
 }

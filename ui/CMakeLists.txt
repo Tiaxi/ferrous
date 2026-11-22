@@ -258,6 +258,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/DialogFooter.qml
         qml/components/DialogWindow.qml
         qml/components/FormGroupGap.qml
+        qml/components/FollowNotice.qml
         qml/components/FormHelpText.qml
         qml/components/FullscreenControlsAutoHide.qml
         qml/components/KeyScrollView.qml

@@ -7,7 +7,7 @@ import "." as Components
 // The visualization viewer's controls where it has no title strip: in the
 // window, and over the whole screen with the strip turned off. They are the
 // strip's own (ViewerControls), in the plot's colours on one plate in the
-// top right corner: [Zoom ↺] | [⚠] [modes] | [✕], the modes declared inside
+// top right corner: [Not following | Zoom ↺] | [⚠] [modes] | [✕], the modes declared inside
 // it as they are inside the strip. So the viewer has one toolbar everywhere
 // (the corner's buttons were the plot's, with another checked fill, glyph
 // ink, warning colour and order than the strip's). Over the whole screen
@@ -31,6 +31,10 @@ Item {
     // The plot's zoom, 1 at the default; Reset calls resetView.
     property real zoomLevel: 1.0
     property var resetView: null
+    // Whether the view does not follow the playhead, and Follow Playhead's
+    // shortcut; see FollowNotice.
+    property bool noticeShown: false
+    property string followShortcut: ""
     property var errorController: null
     property string closeButtonName: "viewerCloseButton"
     // The viewer's own buttons, before Close.
@@ -84,6 +88,8 @@ Item {
         closeButtonName: root.closeButtonName
         zoomLevel: root.zoomLevel
         resetView: root.resetView
+        noticeShown: root.noticeShown
+        followShortcut: root.followShortcut
         errorController: root.errorController
         dividers: true
         closeDivided: true

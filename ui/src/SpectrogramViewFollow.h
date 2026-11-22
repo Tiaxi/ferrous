@@ -34,6 +34,11 @@ class SpectrogramViewFollow : public QObject {
     // at once on followPlayhead(), a seek other than the plot's own, a track
     // change, or a reset of the zoom. A view gliding back is not detached.
     Q_PROPERTY(bool detached READ detached NOTIFY detachedChanged)
+    // Whether autoscroll runs. As one change is announced, this is never
+    // false while detached is true for a view that autoscroll moves: it is
+    // told as autoscroll starts before the view detaches, and as it stops
+    // after the view follows again.
+    Q_PROPERTY(bool autoscrolling READ autoscrollingShown NOTIFY autoscrollingChanged)
 
 public:
     // How long the analysis waits at least between the anchors of a view
@@ -52,6 +57,7 @@ public:
     explicit SpectrogramViewFollow(QObject *parent = nullptr);
 
     bool detached() const { return m_detached; }
+    bool autoscrollingShown() const { return m_autoscrollingShown; }
     Snapshot snapshot() const;
     // How a view of `snapshot` is placed with the playhead at `position`.
     static ViewFollow::State stateAt(const Snapshot &snapshot, double position);
@@ -91,6 +97,7 @@ public:
 
 signals:
     void detachedChanged();
+    void autoscrollingChanged();
     // Where the view is placed changed; queued to the lanes.
     void changed();
     // Where the analysis decodes the view of the track of `trackToken`:
@@ -99,6 +106,7 @@ signals:
 
 private:
     void publish();
+    void publishAutoscrolling();
     void sendBackendAnchor();
     double reattachPointLocked() const;
     // Whether the user holds the view where it is, dragging it or
@@ -125,8 +133,10 @@ private:
     PlaybackClockState m_clockState;
     bool m_clockKnown{false};
 
-    // GUI thread: what detached and the analysis were last told.
+    // GUI thread: what detached, autoscrolling and the analysis were last
+    // told.
     bool m_detached{false};
+    bool m_autoscrollingShown{false};
     quint64 m_sentToken{0};
     double m_sentCenter{std::numeric_limits<double>::quiet_NaN()};
     qint64 m_sentAtMs{0};

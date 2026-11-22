@@ -71,12 +71,15 @@ void SpectrogramViewFollow::setPanning(bool panning) {
 }
 
 void SpectrogramViewFollow::setAutoscrolling(bool autoscrolling) {
-    QMutexLocker lock(&m_mutex);
-    m_autoscrolling = autoscrolling;
-    if (autoscrolling) {
-        // Nothing glides back until autoscroll stops.
-        m_reattachArmed = false;
+    {
+        QMutexLocker lock(&m_mutex);
+        m_autoscrolling = autoscrolling;
+        if (autoscrolling) {
+            // Nothing glides back until autoscroll stops.
+            m_reattachArmed = false;
+        }
     }
+    publishAutoscrolling();
 }
 
 bool SpectrogramViewFollow::autoscrolling() const {
@@ -253,7 +256,18 @@ void SpectrogramViewFollow::publish() {
         m_detached = detached;
         emit detachedChanged();
     }
+    // After detached: following again ends autoscroll, and the view is
+    // never told to be moved without it meanwhile.
+    publishAutoscrolling();
     sendBackendAnchor();
+}
+
+void SpectrogramViewFollow::publishAutoscrolling() {
+    const bool running = autoscrolling();
+    if (running != m_autoscrollingShown) {
+        m_autoscrollingShown = running;
+        emit autoscrollingChanged();
+    }
 }
 
 void SpectrogramViewFollow::sendBackendAnchor() {

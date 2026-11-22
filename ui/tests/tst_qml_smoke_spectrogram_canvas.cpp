@@ -106,6 +106,8 @@ private slots:
     void spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview();
     void spectrogramZoomShowsOlderDataUntilTheNewArrives_data();
     void spectrogramZoomShowsOlderDataUntilTheNewArrives();
+    void spectrogramZoomOutShowsOnePictureUntilTheNewViewIsWhole_data();
+    void spectrogramZoomOutShowsOnePictureUntilTheNewViewIsWhole();
     void spectrogramTrackChangeDuringAZoomShowsNothingOfTheTrackBefore_data();
     void spectrogramTrackChangeDuringAZoomShowsNothingOfTheTrackBefore();
     void spectrogramLateZoomDataKeepsTheRollingHistory();
@@ -5568,6 +5570,169 @@ void SpectrogramCanvasSmokeTest::spectrogramZoomShowsOlderDataUntilTheNewArrives
     QVERIFY(std::count(shown.begin(), shown.end(), true) > width / 2);
 
     delete node;
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramZoomOutShowsOnePictureUntilTheNewViewIsWhole_data() {
+    QTest::addColumn<double>("zoom");
+    QTest::addColumn<double>("target");
+    QTest::addColumn<bool>("moved");
+    QTest::addColumn<bool>("playing");
+    QTest::newRow("reset") << 2.0 << 1.0 << false << false;
+    QTest::newRow("reset while playing") << 2.0 << 1.0 << false << true;
+    QTest::newRow("reset from a step in") << 1.25 << 1.0 << false << true;
+    QTest::newRow("step out") << 2.0 << 1.6 << false << true;
+    QTest::newRow("step out of a moved view") << 2.0 << 1.6 << true << true;
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramZoomOutShowsOnePictureUntilTheNewViewIsWhole() {
+    // A centered zoom out drew the view before it, smaller, beside the
+    // coarser and lighter reserve, then the new columns beside both: slabs
+    // with an edge through every lane. Each frame is one picture: the
+    // reserve alone, as bright as zoom 1's columns, until the ring holds
+    // the whole view, and then the new canvas, in one frame.
+    QFETCH(double, zoom);
+    QFETCH(double, target);
+    QFETCH(bool, moved);
+    QFETCH(bool, playing);
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    TestTime time;
+    SpectrogramViewFollow follow;
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    time.drive(item);
+    constexpr int width = 200;
+    item.setWidth(width);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setViewFollow(&follow);
+    item.setZoomLevel(zoom);
+    QVERIFY(sendPendingBackendZoom(item));
+    item.setPlaying(playing);
+    constexpr int bins = 8;
+    constexpr int rate = 48'000;
+    constexpr double seconds = 60.0;
+    constexpr double trackSeconds = 128.0;
+    // One loud column in 16: the more columns a pixel held, the more
+    // pixels were loud, and the noise lighter.
+    constexpr int loudEvery = 16;
+    quint64 generation = 1;
+    const auto feed = [&](int hop, qint64 first, qint64 end, bool reset) {
+        QByteArray data(static_cast<qsizetype>(bins * (end - first)), '\x30');
+        for (qint64 column = first; column < end; ++column) {
+            if (column % loudEvery == 0) {
+                std::memset(data.data() + bins * (column - first), 0x90, bins);
+            }
+        }
+        item.feedPrecomputedChunk(data, bins, 0, static_cast<int>(end - first),
+            static_cast<int>(first), static_cast<int>(trackSeconds * rate / hop), rate, hop,
+            false, reset, 1, false, generation, 0, 8'192);
+    };
+    const int hop = static_cast<int>(std::lround(1024.0 / zoom));
+    const double shownAt = moved ? seconds + 2.0 : seconds;
+    const qint64 focus = static_cast<qint64>(shownAt * rate / hop);
+    // Up to just past the view at first, as a session decodes, and the
+    // rest of its lookahead later.
+    feed(hop, focus - 1'500, focus + width / 2 + 10, true);
+    setTestPosition(item, seconds, 1);
+    if (moved) {
+        follow.detach(shownAt, 0.5);
+    }
+    QSGNode *node = nullptr;
+    const auto guard = qScopeGuard([&node]() { delete node; });
+    const auto settle = [&]() {
+        for (int round = 0; round < 12; ++round) {
+            node = item.updatePaintNode(node, nullptr);
+            if (!spectrogramRasterPending(item) && !spectrogramReservePending(item)) {
+                node = item.updatePaintNode(node, nullptr);
+                return !spectrogramRasterPending(item);
+            }
+            if (!QTest::qWaitFor([&item]() {
+                    return !spectrogramRasterPending(item) && !spectrogramReservePending(item);
+                }, 5000)) {
+                return false;
+            }
+        }
+        return false;
+    };
+    QVERIFY(settle());
+    feed(hop, focus + width / 2 + 10, focus + 1'500, false);
+    QVERIFY(settle());
+    QVERIFY(settle());
+
+    // Most of the view before the zoom is the quiet columns' colour.
+    const QVector<QRgb> before = plotColumnColors(item, node, width);
+    const QRgb quiet = *std::max_element(before.begin(), before.end(),
+        [&before](QRgb a, QRgb b) { return before.count(a) < before.count(b); });
+
+    // The frame has no layer but the reserve, over the whole view.
+    const auto showsTheReserveAlone = [&](const char *step) {
+        QSGNode *tiles = node->childAtIndex(1);
+        for (int i = 0; i < tiles->childCount(); ++i) {
+            if (!static_cast<const QSGSimpleTextureNode *>(tiles->childAtIndex(i))->rect().isEmpty()) {
+                qWarning("%s: the canvas is in the zoom out's picture", step);
+                return false;
+            }
+        }
+        for (const int child : {1, 2}) {
+            if (!static_cast<const QSGSimpleTextureNode *>(
+                    node->childAtIndex(0)->childAtIndex(child))->rect().isEmpty()) {
+                qWarning("%s: the backdrop is in the zoom out's picture", step);
+                return false;
+            }
+        }
+        const QVector<QRgb> colors = plotColumnColors(item, node, width);
+        if (colors.contains(0)) {
+            qWarning("%s: x %lld shows the floor", step, static_cast<long long>(colors.indexOf(0)));
+            return false;
+        }
+        // As bright as zoom 1's: a column of those, not all of a pixel's.
+        const auto loud = width - colors.count(quiet);
+        if (loud > width / 8) {
+            qWarning("%s: %lld of %d pixels are loud, one column in %d is", step,
+                static_cast<long long>(loud), width, loudEvery);
+            return false;
+        }
+        return true;
+    };
+    const auto frame = [&]() {
+        if (playing) {
+            time.advance(0.016);
+        }
+        node = item.updatePaintNode(node, nullptr);
+    };
+
+    item.setZoomLevel(target);
+    frame();
+    QVERIFY(showsTheReserveAlone("first frame"));
+    QVERIFY(settle());
+    QVERIFY(showsTheReserveAlone("waiting for the data"));
+
+    QVERIFY(sendPendingBackendZoom(item));
+    const int newHop = item.columnHopForZoomLocked(item.backendZoomForRequestLocked());
+    const qint64 newFocus = static_cast<qint64>(shownAt * rate / newHop);
+    const qint64 reach = static_cast<qint64>(width / 2 + 40);
+    ++generation;
+    // The middle first, then the right, then the left of it.
+    feed(newHop, newFocus, newFocus + 8, true);
+    frame();
+    QVERIFY(showsTheReserveAlone("the first new columns"));
+    QVERIFY(settle());
+    QVERIFY(showsTheReserveAlone("the first new columns, drawn"));
+    feed(newHop, newFocus + 8, newFocus + 600, false);
+    frame();
+    QVERIFY(showsTheReserveAlone("the right of the new view"));
+    QVERIFY(settle());
+    QVERIFY(showsTheReserveAlone("the right of the new view, drawn"));
+    feed(newHop, newFocus - reach, newFocus, false);
+    QVERIFY2(spectrogramRasterPending(item), "the whole view waits for another frame to be drawn");
+    frame();
+    QVERIFY(settle());
+    // All of it, with no older layer in it.
+    QVERIFY(item.m_canvasComplete);
+    QVERIFY(item.m_backdrop.isNull());
+    QCOMPARE(drawnCanvasScale(node), 1.0);
 }
 
 void SpectrogramCanvasSmokeTest::spectrogramTrackChangeDuringAZoomShowsNothingOfTheTrackBefore_data() {

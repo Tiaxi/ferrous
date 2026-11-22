@@ -2039,6 +2039,19 @@ ApplicationWindow {
             ? spectrogramSurface.detached
             : waveformSurface.waveformItem.detached
 
+        // Whether autoscroll moves the shown plot.
+        readonly property bool autoscrolling: visualizationSurface.spectrogramShown
+            ? spectrogramSurface.autoscrolling
+            : waveformSurface.waveformItem.autoscrolling
+        // Whether the user moved the view and it stays there, which the zoom
+        // plate and the viewers' controls say; never while autoscroll runs,
+        // whose cursor is its only indicator (#655).
+        readonly property bool viewMoved: visualizationSurface.detached && !visualizationSurface.autoscrolling
+        // Follow Playhead's shortcut, as the user reads it, or "".
+        readonly property string followShortcut: followPlayheadAction.keyBindings.length > 0
+            ? StandardKeys.nativeText(followPlayheadAction.keyBindings[0])
+            : ""
+
         // View › Follow Playhead: the shown plot follows the playhead again.
         function followPlayhead() {
             if (visualizationSurface.spectrogramShown) {
@@ -2176,6 +2189,9 @@ ApplicationWindow {
             openIssues: function() { errorController.historyRequested() }
             zoomLevel: visualizationSurface.zoomLevel
             resetZoom: visualizationSurface.resetZoom
+            viewMoved: visualizationSurface.viewMoved
+            viewAutoscrolling: visualizationSurface.autoscrolling
+            followShortcut: visualizationSurface.followShortcut
             controlsInViewer: visualizationSurface.inViewer
         }
     }
@@ -2203,6 +2219,8 @@ ApplicationWindow {
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
         zoomLevel: visualizationSurface.zoomLevel
         resetZoom: visualizationSurface.resetZoom
+        viewMoved: visualizationSurface.viewMoved
+        followShortcut: visualizationSurface.followShortcut
     }
 
     Dialogs.ItunesArtworkDialog {

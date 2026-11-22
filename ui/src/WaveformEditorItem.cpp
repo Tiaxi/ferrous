@@ -1377,9 +1377,19 @@ void WaveformEditorItem::publishDetached() {
     // What moved the view, such as a zoom or a pan, moves the range in the
     // same frame.
     publishVisibleRange();
+    // Either side of detached, so that a view autoscroll moves is never
+    // told to be moved without it.
+    if (autoscrolling && !m_autoscrollingShown) {
+        m_autoscrollingShown = true;
+        emit autoscrollingChanged();
+    }
     if (m_detached != detached) {
         m_detached = detached;
         emit detachedChanged();
+    }
+    if (!autoscrolling && m_autoscrollingShown) {
+        m_autoscrollingShown = false;
+        emit autoscrollingChanged();
     }
     // A view brought back to the playhead, as by Follow Playhead, Reset
     // Zoom, a seek or a track change, ends autoscroll.
@@ -4143,13 +4153,18 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     // 45 %, so that they read on the light plot as on the dark one.
     QColor lineColor = colors.text;
     lineColor.setAlphaF(colors.text.alphaF() * 0.45);
-    QPen pen(lineColor);
-    pen.setWidthF(1.0);
-    pen.setCapStyle(Qt::FlatCap);
-    pen.setDashPattern({4.0, 3.0});
-    painter.setPen(pen);
-    painter.drawLine(QLineF(lineX, 0.0, lineX, height - 1.0));
-    painter.drawLine(0, y, width - 1, y);
+    QPen dashes(lineColor);
+    dashes.setWidthF(1.0);
+    dashes.setCapStyle(Qt::FlatCap);
+    QPen gaps = dashes;
+    gaps.setColor(CrosshairReadout::dashGapColor(m_colors.background));
+    CrosshairReadout::setDashes(dashes, false);
+    CrosshairReadout::setDashes(gaps, true);
+    for (const QPen &pen : {gaps, dashes}) {
+        painter.setPen(pen);
+        painter.drawLine(QLineF(lineX, 0.0, lineX, height - 1.0));
+        painter.drawLine(0, y, width - 1, y);
+    }
     const double time = axis.timeAt(column);
     const int channels = displayedChannelCountLocked();
     const double channelHeight = static_cast<double>(height) / channels;
