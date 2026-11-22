@@ -34,6 +34,8 @@ private slots:
     void visualizationPageNamesResetZoomsKey();
     void editorHasOneBaselineAndOneKeyButtonWidth_data();
     void editorHasOneBaselineAndOneKeyButtonWidth();
+    void editorGlyphsFollowTheFont_data();
+    void editorGlyphsFollowTheFont();
     void editorHoldsStillAsANoteComesAndGoes_data();
     void editorHoldsStillAsANoteComesAndGoes();
     void keyColumnsHoldStillAsTheScrollBarComesAndGoes_data();
@@ -1034,6 +1036,39 @@ void KeyboardShortcutsSmokeTest::columnHeadingsTakeTheTablesHeaderStyle() {
     QCOMPARE(headings->height(),
              std::ceil(palette->property("rowHeight").toReal()
                        + 2 * evaluateOn(headings, QStringLiteral("Kirigami.Units.smallSpacing")).toReal()));
+}
+
+void KeyboardShortcutsSmokeTest::editorGlyphsFollowTheFont_data() {
+    addFontAndStyleRows();
+}
+
+// The glyphs of the editors' buttons, the capture and the clear, are as
+// large as Defaults' (they stayed 16 px beside 24 pt captions), and the
+// buttons stay as tall as they were.
+void KeyboardShortcutsSmokeTest::editorGlyphsFollowTheFont() {
+    QFETCH(int, pointSize);
+    QFETCH(QString, widgetStyle);
+    if (!widgetStyle.isEmpty() && !QStyleFactory::keys().contains(widgetStyle, Qt::CaseInsensitive)) {
+        QSKIP("The Breeze widget style is not installed.");
+    }
+    const ScopedWidgetStyle style(widgetStyle);
+    const ScopedApplicationFont font(pointSize);
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    QVERIFY(fixture.showAtSizeFor(pointSize));
+    QQuickItem *defaults = visibleItemNamed(fixture.dialog, QStringLiteral("keyboardShortcutsDefaultsButton"));
+    QVERIFY(defaults != nullptr);
+    for (const char *editor : {"keyboardShortcutsShortcutEditor", "keyboardShortcutsAlternateEditor"}) {
+        for (const bool takesKey : {true, false}) {
+            QQuickItem *button = keyButtonIn(fixture.item(editor), takesKey);
+            QVERIFY2(button != nullptr, editor);
+            for (const char *side : {"icon.width", "icon.height"}) {
+                QTRY_COMPARE(QQmlProperty::read(button, QString::fromLatin1(side)).toReal(),
+                             QQmlProperty::read(defaults, QString::fromLatin1(side)).toReal());
+            }
+            QVERIFY2(button->implicitHeight() <= defaults->implicitHeight() + 0.5, editor);
+        }
+    }
 }
 
 std::unique_ptr<QmlSmokeTest> makeKeyboardShortcutsSmokeTest(const QString &userDirectoriesParent) {

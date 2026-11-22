@@ -380,6 +380,21 @@ Components.DialogWindow {
         }
     }
 
+    // Gives the glyphs of the editors' buttons the font's size, as
+    // Defaults' has (they stayed 16 px beside 24 pt captions): of the same
+    // children as above, those that are buttons, through a button's own
+    // icon.width and icon.height.
+    function sizeKeyButtonGlyphs(editors) {
+        for (const editor of editors) {
+            for (const child of editor.children) {
+                if (child.checkable !== undefined) {
+                    child.icon.width = Qt.binding(function() { return root.iconSize })
+                    child.icon.height = Qt.binding(function() { return root.iconSize })
+                }
+            }
+        }
+    }
+
     function matches(action, query) {
         if (query.length === 0) {
             return true
@@ -899,7 +914,15 @@ Components.DialogWindow {
                     onKeySequenceModified: root.takeKey(1, alternateEditor)
                 }
 
-                Component.onCompleted: root.shareKeyButtonWidth([shortcutEditor, alternateEditor])
+                Component.onCompleted: {
+                    const editors = [shortcutEditor, alternateEditor]
+                    root.shareKeyButtonWidth(editors)
+                    root.sizeKeyButtonGlyphs(editors)
+                    // Laid out with the glyphs' sizes before the window
+                    // shows: the rows took the buttons' new height only as
+                    // it did, which changed the window's minimum with it.
+                    editorColumn.ensurePolished()
+                }
             }
         }
 
