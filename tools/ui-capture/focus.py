@@ -401,7 +401,7 @@ SCOPES = {
                 for st, lb in (("itunes-results", "Preview, Apply at rest"), ("itunes-apply-hover", "Apply hovered"),
                                ("itunes-preview-pressed", "Preview pressed"))]]]),
             # 24 pt, 1:1: the dialogs now follow the font, so Configure and Diagnostics open at
-            # 1964x1392 and About, About KDE, Rename Files and Tag Editor Details wider; crops of the regions the fix
+            # 1964x1392 and About, About KDE, Rename Files and Tag Change Details wider; crops of the regions the fix
             # changed (the folder row and its glyph, the headers, the footers) in place of whole windows
             # (Configure and Diagnostics in one sheet: each a long line of text and a row of buttons at 24 pt)
             ("dlg24-windows", "At 24 pt, dark: Configure's Library page from a 1000 px main window and Diagnostics, "
@@ -431,11 +431,11 @@ SCOPES = {
               [("dialog", "tag-editor-quit-wait", "inner", "Finishing Tag Changes", dict(B24, margin=4))]]),
             # the small windows whole at 10 pt, so their size can be judged against what they hold (About at 24 pt,
             # which had a sheet of its own, is in shots/)
-            ("dlg-windows", "Whole windows at 10 pt, dark: About, Auto Number, Tag Editor Details at 1:1; Diagnostics "
+            ("dlg-windows", "Whole windows at 10 pt, dark: About, Auto Number, Tag Change Details at 1:1; Diagnostics "
              "fitted", "dark",
              [[("dialog", "about", None, "About", dict(lh=16, gap=6)),
                ("dialog", "tag-editor-auto-number", "inner", "Auto Number", dict(margin=4, lh=16, gap=6))],
-              [("dialog", "tag-editor-status-details", "inner", "Tag Editor Details, after a failed save",
+              [("dialog", "tag-editor-status-details", "inner", "Tag Change Details, after a failed save",
                 dict(margin=4, lh=16, gap=6)),
                ("dialog", "diagnostics", None, "Diagnostics, fitted", dict(fit=(556, 407), lh=16, gap=6))]]),
             # Rename Files with the twelve-file batch (RENAME_BATCH): at 24 pt its window is about 1.4 MP, so it is
@@ -486,7 +486,7 @@ SCOPES = {
             ("sheet", "dlg24-windows", "dark", "24 pt: Library from a narrow window and Diagnostics, whole; iTunes' count "
              "line", "the paths in the narrow window; the records' wrap; the toolbar and footer uncut"),
             ("sheet", "dlg24-small", "dark", "24 pt: Add Library Folder; Finishing Tag Changes", "the field, the wrap, the buttons"),
-            ("sheet", "dlg-windows", "dark", "Whole windows at 10 pt: About, Auto Number, Tag Editor Details, Diagnostics",
+            ("sheet", "dlg-windows", "dark", "Whole windows at 10 pt: About, Auto Number, Tag Change Details, Diagnostics",
              "each window's size against what it holds; what leads in it"),
             ("sheet", "dlg24-rename", "dark", "Rename Files, twelve files: 10 pt whole; 24 pt in part, 1:1",
              "the preview's columns and arrows; the rows at 24 pt"),

@@ -260,7 +260,7 @@ def put_fixture(path, data):
 
 @one_at_a_time
 def m_tagsavefail(r, arg):
-    """tagsavefail: Tag Editor Details with real content: two fixture tracks copied into this run's own TMPDIR,
+    """tagsavefail: Tag Change Details with real content: two fixture tracks copied into this run's own TMPDIR,
     one in a folder it cannot write to (the app writes atomically: a read-only file alone would still be replaced),
     opened in Edit Tags, a comment set on both, saved: one saved, one failed; the folder made writable again after."""
     import shutil
@@ -1778,7 +1778,7 @@ PRIVATE_ITEMS = []  # (none whole: at the neutral paths the log names no home fo
 def private_sidecar(r, file):
     """After every dialog, viewer and search grab (runner): what names this machine's home folder in the
     windows the image shows, as boxes in the image for pack.py to paint over (shots/FILE.redact.json): PRIVATE_ITEMS
-    whole (the diagnostics log's body); in a text edit (TextArea: Tag Editor Details' save errors) the exact boxes of
+    whole (the diagnostics log's body); in a text edit (TextArea: Tag Change Details' save errors) the exact boxes of
     the home-folder characters, line by line (positionToRectangle), its name listed as `precise`; any other item whose
     text names it (a label, a tooltip, which the layout's 60 recorded characters can miss) whole. The windows answer
     in logical px, scaled to the image's device px (#666). Windows: a dialog capture's own window at its image offset
@@ -6792,7 +6792,7 @@ STATES = [
     # one esc (the preview): a second would ask about the batch's unsaved edits
     ("bigfont", "dialog", "tag-editor-quit-wait", "esc | macro tagedit 4 | macro quitwait", "Large font: Finishing Tag Changes, two files"),
     ("bigfont", "dialog", "tag-editor-status-details", "esc | macro tagsavefail | macro open_child tagEditorDialog TagEditorStatusDetailsDialog",
-     "Large font: Tag Editor Details after a real save with one folder not writable"),
+     "Large font: Tag Change Details after a real save with one folder not writable"),
     ("bigfont", "_", "_dialogs24b-close", "esc | js tagEditorDialog.closeEditor() | wait 0.5", ""),
     ("bigfont", "dialog", "itunes-error", "js root.openItunesArtworkDialog() | settle 1 | macro itunesfail",
      "Large font: Replace from iTunes, a real failed search"),
@@ -7149,9 +7149,9 @@ _DIALOG_EXPECT = {
     "quit-save-failed": ("Couldn’t Save Before Quitting", "could not be saved"),
     "tag-editor-auto-number": ("Auto Number", "Number tracks in the table"),
     "tag-editor-rename-preview": ("Rename Files", "will be renamed"),
-    "tag-editor-status-details": ("Tag Editor Details", None),
+    "tag-editor-status-details": ("Tag Change Details", None),
     "tag-editor-quit-wait": ("Finishing Tag Changes", "Ferrous quits once the tag editor"),
-    "tag-editor-close-confirm": ("Unsaved Changes", "Save changes before closing the tag editor?"),
+    "tag-editor-close-confirm": ("Unsaved Changes", "Save tag changes before closing?"),
     "confirm-replace-cover": ("Replace Album Art", "Replace the album art of"),  # (its heading, set by applySuggestion)
     "tag-editor-editing": ("Edit Tags", None),
     "itunes-error": ("Replace", "search iTunes"),  # (the app's failed state, "Couldn’t search iTunes")
