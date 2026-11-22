@@ -53,7 +53,9 @@ DialogButtonBox {
         when: root.contentItem !== null && root.contentChildren.length > 0
     }
 
-    // Each button's glyph, at the row's size.
+    // Each button's glyph, at the row's size. The bindings restore nothing
+    // as they go: _applyPrimary takes a button out and back, and the old
+    // binding, deleted after the new one was set, put 16 px back.
     Instantiator {
         model: root.contentChildren
         delegate: Binding {
@@ -61,6 +63,7 @@ DialogButtonBox {
             target: modelData
             property: "icon.width"
             value: root.glyphSize
+            restoreMode: Binding.RestoreNone
         }
     }
 
@@ -71,6 +74,7 @@ DialogButtonBox {
             target: modelData
             property: "icon.height"
             value: root.glyphSize
+            restoreMode: Binding.RestoreNone
         }
     }
 

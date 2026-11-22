@@ -94,7 +94,7 @@ Components.CompactDialogWindow {
             ? I18n.i18nc("@info", "Save tag changes before quitting Ferrous?")
             : (root.forReload
                 ? I18n.i18nc("@info", "Discard unsaved changes and reload the tags from the files?")
-                : I18n.i18nc("@info", "Save changes before closing the tag editor?"))
+                : I18n.i18nc("@info the window that closes is Edit Tags", "Save tag changes before closing?"))
     }
 
     Label {
@@ -107,7 +107,7 @@ Components.CompactDialogWindow {
         // read the buttons out again).
         textFormat: Text.PlainText
         text: root.forReload
-            ? I18n.i18nc("@info", "Reloading drops every unsaved change. Cancel keeps editing.")
-            : I18n.i18nc("@info", "Discard drops every unsaved change.")
+            ? I18n.i18nc("@info", "If you reload, the changes are lost.")
+            : I18n.i18nc("@info", "If you discard them, the changes are lost.")
     }
 }

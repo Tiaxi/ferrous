@@ -107,8 +107,8 @@ Components.CompactDialogWindow {
             wrapMode: Text.WordWrap
             color: root.uiPalette.textSecondary
             textFormat: Text.PlainText
-            text: I18n.i18nc("@info the rows that Auto Number numbers",
-                "Applies to the selected rows, or all rows if none are selected.")
+            text: I18n.i18nc("@info the files that Auto Number numbers",
+                "Applies to the selected files, or all files if none are selected.")
         }
     }
 
