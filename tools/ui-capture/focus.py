@@ -393,8 +393,8 @@ SCOPES = {
              [[dict(strip="itunes-search-fails", item="changed", include=ITUNES_FAIL_WITH, times=ITUNES_FAIL_TIMES,
                     fit=(430, 300), zoom=1, pad=8, lh=16, gap=6,
                     label="Searching -> failed (ms after the action): all that changes, and Preview at the top right")],
-              [("dialog", "itunes-results", None, "Results, whole", dict(fit=(360, 248), lh=16, gap=6)),
-               ("dialog", "itunes-empty", None, "Nothing found, whole", dict(fit=(360, 248), lh=16, gap=6)),
+              [("dialog", "itunes-results", None, "Results, whole", dict(fit=(300, 208), lh=16, gap=6)),
+               ("dialog", "itunes-empty", None, "Nothing found, whole", dict(fit=(300, 208), lh=16, gap=6)),
                ("dialog", "confirm-replace-cover", "inner", "Replace album art, with the choice (1:1)",
                 dict(margin=4, lh=16, gap=6)),
                [("dialog", st, (0.68, 0.27, 0.32, 0.1), lb, dict(lh=16, gap=6))
@@ -426,9 +426,10 @@ SCOPES = {
                  dict(part=(0, 0.69, 1, 0.235), lh=16, gap=6)),
                 ("dialog", "keyboard-shortcuts-reassign", "inner", "Shortcut Conflict", dict(margin=8, lh=16, gap=6))]]]),
             # the small 24 pt windows together: the folder dialogs and the quit ones
-            ("dlg24-small", "At 24 pt, dark, 1:1: Add Library Folder; Finishing Tag Changes", "dark",
+            ("dlg24-small", "At 24 pt, dark: Add Library Folder (1:1); Finishing Tag Changes (fitted)", "dark",
              [[("dialog", "library-root-name-add", None, "Add Library Folder, below its title bar", dict(B24, part=(0, 0.11, 1, 0.89)))],
-              [("dialog", "tag-editor-quit-wait", "inner", "Finishing Tag Changes", dict(B24, margin=4))]]),
+              [("dialog", "tag-editor-quit-wait", "inner", "Finishing Tag Changes (fitted: the dialogs' 24 pt inset made the pair too big at 1:1)",
+                dict(B24, margin=4, fit=(880, 500)))]]),
             # the small windows whole at 10 pt, so their size can be judged against what they hold (About at 24 pt,
             # which had a sheet of its own, is in shots/)
             ("dlg-windows", "Whole windows at 10 pt, dark: About, Auto Number, Tag Change Details at 1:1; Diagnostics "
