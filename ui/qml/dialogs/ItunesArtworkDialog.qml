@@ -744,7 +744,8 @@ Components.DialogWindow {
             // searching). A search that failed says so in a
             // semibold heading, with the system's words under it in the
             // secondary colour (otherwise it read as finding nothing),
-            // and a warning glyph in the spinner's place. Built from its
+            // and a warning glyph in the negative colour in the spinner's
+            // place. Built from its
             // parts: Kirigami.PlaceholderMessage's selectable text brings
             // Copy and Select All actions that would take Ctrl+C and Ctrl+A
             // from the Edit menu's.
@@ -795,7 +796,7 @@ Components.DialogWindow {
                         visible: placeholder.failed
                         source: Qt.resolvedUrl("../assets/status-warning.svg")
                         isMask: true
-                        color: root.uiPalette.textSecondary
+                        color: root.uiPalette.negative
                         Accessible.ignored: true
                     }
 

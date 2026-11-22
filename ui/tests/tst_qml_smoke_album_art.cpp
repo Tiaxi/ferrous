@@ -2849,8 +2849,8 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             QTRY_VERIFY2(sceneRectOf(heading).bottom() <= sceneRectOf(message).top(), at.constData());
         }
         // A failed search has a warning glyph where the spinner is while
-        // searching: 32 px, a mask in the secondary colour, above the
-        // heading.
+        // searching: 32 px, a mask in the negative colour as every failure's
+        // glyph is, above the heading.
         QQuickItem *warning = itemNamed(content, QStringLiteral("itunesArtworkFailureIcon"));
         QVERIFY2(warning != nullptr, at.constData());
         QCOMPARE(warning->isVisible(), failed);
@@ -2861,7 +2861,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
                      qPrintable(warning->property("source").toString()));
             QVERIFY(warning->property("isMask").toBool());
             QCOMPARE(warning->property("color").value<QColor>().rgba(),
-                     palette->property("textSecondary").value<QColor>().rgba());
+                     palette->property("negative").value<QColor>().rgba());
             QTRY_COMPARE(sceneRectOf(warning).size(), QSizeF(32, 32));
             QCOMPARE(sceneRectOf(warning).top(), sceneRectOf(placeholder).top());
             QCOMPARE(sceneRectOf(warning).center().x(), sceneRectOf(placeholder).center().x());
