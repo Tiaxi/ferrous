@@ -596,6 +596,7 @@ private slots:
     void editTagsKeepsWhatIdentifiesARowInView_data();
     void editTagsKeepsWhatIdentifiesARowInView();
     void editTagsGoesByOneName();
+    void editTagsKeepsItsRulesAtALargeFont();
     void editTagsOutlinesOnlyTheFieldWithTheKeyboard();
     void editTagsTitlesCanBeCheckedBeforeSaving_data();
     void editTagsTitlesCanBeCheckedBeforeSaving();
@@ -4826,7 +4827,7 @@ void UiDialogsTest::checkAutoNumberIsOneFormInReadingOrder(DialogsWindow &main) 
     QCOMPARE(sceneRect(lead).left(), sceneRect(description).left());
     QVERIFY(sceneRect(lead).bottom() <= sceneRect(description).top());
     QCOMPARE(description->property("text").toString(),
-             QStringLiteral("Applies to the selected rows, or all rows if none are selected."));
+             QStringLiteral("Applies to the selected files, or all files if none are selected."));
     QCOMPARE(description->property("font").value<QFont>().weight(), QFont::Normal);
     QCOMPARE(hex(description->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
     // Write disc numbers enables the disc's start and its reset.
@@ -5379,6 +5380,57 @@ void UiDialogsTest::editTagsGoesByOneName() {
     }
     main.editor.reportFailures(QStringLiteral("Saved 0 files; 12 failed."), failures);
     QVERIFY2(reported.endsWith(QStringLiteral("Edit Tags lists them all.")), qPrintable(reported));
+    QVERIFY(closeTagEditor(main));
+}
+
+// The rules of Edit Tags hold in the states around them at 24 pt: the status
+// line, cut in a narrow window, gives all of it in its tooltip, as a cell
+// does, and the Reload question's buttons keep the font's glyphs as the
+// default moves to Cancel (moved out of the row and back, they fell to
+// 16 px beside 32 px captions).
+void UiDialogsTest::editTagsKeepsItsRulesAtALargeFont() {
+    const ScopedNotoSans font(24);
+    DialogsWindow main(1000, 720);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfAnAlbum(4));
+    QVERIFY(tags != nullptr);
+    main.editor.setSelectedRows({0});
+    main.editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Paper Harbour, Revised"));
+    QQuickItem *status = nullptr;
+    QTRY_VERIFY((status = visibleNamed(tags, QStringLiteral("tagEditorStatusLabel"))) != nullptr);
+    QTRY_VERIFY(status->property("truncated").toBool());
+    auto *tip = status->findChild<QObject *>(QStringLiteral("tagEditorStatusToolTip"));
+    QVERIFY(tip != nullptr);
+    QCOMPARE(tip->property("message").toString(), status->property("text").toString());
+    QVERIFY(!tip->property("visible").toBool());
+    QTest::mouseMove(tags, sceneRect(status).topLeft().toPoint() - QPoint(2, 2));
+    QTest::mouseMove(tags, sceneRect(status).center().toPoint());
+    QTRY_VERIFY(tip->property("visible").toBool());
+    QTest::mouseMove(tags, QPoint(2, 2));
+
+    QObject *confirm = object(main.window, QStringLiteral("tagEditorCloseConfirmDialog"));
+    QVERIFY(confirm != nullptr);
+    const int glyph = qRound(evaluate(confirm, QStringLiteral("Kirigami.Units.iconSizes.sizeForLabels")).toReal());
+    QVERIFY(glyph > 16);
+    // From one question to the other and back, as a close after a Reload.
+    for (const QString &purpose : {QStringLiteral("reload"), QStringLiteral("close"), QStringLiteral("reload")}) {
+        QVERIFY(confirm->setProperty("purpose", purpose));
+        QVERIFY(QMetaObject::invokeMethod(confirm, "open"));
+        QVERIFY(waitForDialogWindow(confirm));
+        QTest::qWait(50);
+        for (const char *name : {"tagEditorCloseConfirmSaveButton", "tagEditorCloseConfirmDiscardButton",
+                                 "tagEditorCloseConfirmKeepEditingButton"}) {
+            if (QQuickItem *button = visibleNamed(windowOf(confirm), QString::fromLatin1(name))) {
+                QVERIFY2(qRound(evaluate(button, QStringLiteral("icon.width")).toReal()) == glyph
+                             && qRound(evaluate(button, QStringLiteral("icon.height")).toReal()) == glyph,
+                         qPrintable(purpose + QLatin1Char(' ') + QLatin1String(name)
+                                    + QStringLiteral(": %1 of %2").arg(evaluate(button, QStringLiteral("icon.width")).toReal())
+                                          .arg(glyph)));
+            }
+        }
+        QVERIFY(QMetaObject::invokeMethod(confirm, "dismiss"));
+        QTRY_VERIFY(!confirm->property("visible").toBool());
+    }
     QVERIFY(closeTagEditor(main));
 }
 

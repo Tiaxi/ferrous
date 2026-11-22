@@ -1247,6 +1247,7 @@ Components.DialogWindow {
         }
 
         Label {
+            id: statusLabel
             objectName: "tagEditorStatusLabel"
             Layout.fillWidth: true
             Layout.bottomMargin: dialogButtons.bottomPadding
@@ -1257,6 +1258,18 @@ Components.DialogWindow {
             color: root.statusHasFailure && !root.busy ? root.uiPalette.negative : root.uiPalette.textSecondary
             elide: Text.ElideRight
             Accessible.role: Accessible.StatusBar
+
+            HoverHandler {
+                id: statusHover
+            }
+
+            // All of it while it is cut, as a cell's.
+            Components.PlainToolTip {
+                objectName: "tagEditorStatusToolTip"
+                message: statusLabel.text
+                delay: Kirigami.Units.toolTipDelay
+                visible: statusHover.hovered && statusLabel.truncated
+            }
         }
 
         Button {
