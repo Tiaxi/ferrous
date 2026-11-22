@@ -4188,7 +4188,10 @@ void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
         // stops it is its own (see ViewAutoscroll).
         event->accept();
         m_panPressed = true;
-        m_panning = false;
+        if (m_panning) {
+            m_panning = false;
+            emit panningChanged();
+        }
         m_panPressPosition = event->position();
         m_panStopsAutoscroll = m_autoscroll.takeStopPress(event->timestamp());
         return;
@@ -4219,6 +4222,7 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
     event->accept();
     const QPointF pointer = event->position();
     const double canvasWidth = std::max(1.0, std::floor(width()));
+    bool startsPan = false;
     {
         QMutexLocker lock(&m_stateMutex);
         // The crosshair keeps to the pointer, which holds the time it
@@ -4239,6 +4243,7 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
             m_reattachArmed = false;
             m_shownReattachArmed = false;
             m_panning = true;
+            startsPan = true;
             m_panOriginStart = visibleRangeLocked(nowNs).first;
             m_panOriginX = m_panPressPosition.x();
         }
@@ -4255,6 +4260,7 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
         m_anchorSeconds = start + 0.5 * span;
         m_anchorFraction = 0.5;
     }
+    if (startsPan) emit panningChanged();
     viewMoved();
 }
 
@@ -4281,6 +4287,7 @@ void WaveformEditorItem::mouseUngrabEvent() {
         // leaves the view where it was put.
         armReattachLocked(m_nowNs());
     }
+    emit panningChanged();
     publishDetached();
 }
 

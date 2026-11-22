@@ -88,10 +88,15 @@ Item {
     // What each lane's label and buttons take of it, by the lane's index;
     // see PlotLayer's laneHeadBoundsByLane.
     property var laneHeadBoundsByLane: []
-    // The pointer hides once the overlays have faded out, not as they start.
-    readonly property int pointerCursorShape: root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0
-        ? Qt.ArrowCursor
-        : Qt.BlankCursor
+    // The lane a pan last began on, which tells when it ends: the hand is
+    // the whole plot's, as the drag may go on over another lane.
+    property SpectrogramItem _panLane: null
+    // The pointer hides once the overlays have faded out, not as they start;
+    // hidden, it stays so. While a pan holds the plot it is a closed hand,
+    // as over the album art's.
+    readonly property int pointerCursorShape: !root.interactiveOverlaysVisible && root.interactiveOverlaysLevel <= 0
+        ? Qt.BlankCursor
+        : root._panLane && root._panLane.panning ? Qt.ClosedHandCursor : Qt.ArrowCursor
     property var channelDescriptors: []
     property double _crosshairSharedX: -1.0
     // The zooms the user chose, or 0 for the default zoom, which a view
@@ -444,6 +449,11 @@ Item {
                     onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
                     viewFollow: sharedViewFollow
+                    onPanningChanged: {
+                        if (spectrogramPaneItem.panning) {
+                            root._panLane = spectrogramPaneItem
+                        }
+                    }
                     stretchShortTracks: root.uiBridge.stretchShortTracks
                     // Each lane at its own default, which its data tells.
                     zoomLevel: root._chosenZoomLevel > 0

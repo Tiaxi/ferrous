@@ -2789,7 +2789,7 @@ void SpectrogramItem::setDisplayMode(int value) {
     }
     // A switch between rolling and centered follows the playhead.
     m_panPressed = false;
-    m_panning = false;
+    endPan();
     followPlayhead();
     emit displayModeChanged();
     if (redraw) {
@@ -6502,7 +6502,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
     if (event->button() == Qt::MiddleButton && m_zoomEnabled) {
         event->accept();
         m_panPressed = m_displayMode == 1;
-        m_panning = false;
+        endPan();
         m_panPressPosition = event->position();
         m_panStopsAutoscroll = m_autoscroll.takeStopPress(event->timestamp());
         return;
@@ -6669,6 +6669,7 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
         // Where it glides back from is reckoned from the view's width.
         reportFollowGeometry();
         follow->setPanning(true);
+        emit panningChanged();
     }
     follow->detach(anchorSeconds, 0.5);
     followChanged();
@@ -6822,7 +6823,7 @@ void SpectrogramItem::mouseUngrabEvent() {
     if (!m_panning) {
         return;
     }
-    m_panning = false;
+    endPan();
     SpectrogramViewFollow *follow = m_viewFollow.data();
     if (follow == nullptr) {
         return;
@@ -6837,6 +6838,14 @@ void SpectrogramItem::mouseUngrabEvent() {
     // A playhead already past the re-attach point, or past the view, leaves
     // the view where it was put.
     follow->arm(position);
+}
+
+void SpectrogramItem::endPan() {
+    if (!m_panning) {
+        return;
+    }
+    m_panning = false;
+    emit panningChanged();
 }
 
 void SpectrogramItem::wheelEvent(QWheelEvent *event) {

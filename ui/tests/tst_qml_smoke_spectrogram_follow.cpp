@@ -47,6 +47,7 @@ private slots:
     void autoscrollStopsAsTheViewComesBack_data();
     void autoscrollStopsAsTheViewComesBack();
     void autoscrollInAWindow();
+    void panShowsAClosedHand();
     void crosshairStaysWholeThroughAMiddleDrag_data();
     void crosshairStaysWholeThroughAMiddleDrag();
 };
@@ -1940,6 +1941,68 @@ void SpectrogramFollowSmokeTest::crosshairStaysWholeThroughAMiddleDrag() {
     QTRY_COMPARE(crosshairNotAt(plot, 140), QString());
     QTest::mouseMove(window, QPoint(260, y));
     QTRY_COMPARE(crosshairNotAt(plot, 260), QString());
+}
+
+// A closed hand from the pan's drag distance to its release, over any lane,
+// as the album art viewer's pan has; none in rolling mode, which does not
+// pan. The viewer's hidden pointer stays hidden, and autoscroll's cursor
+// stays its own.
+void SpectrogramFollowSmokeTest::panShowsAClosedHand() {
+    SurfaceInAWindow plot;
+    const QString error = plot.load(2, 1);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = plot.window;
+    const auto moveTo = [window](QPoint at) { QTest::mouseMove(window, at); };
+    const QPoint start(400, 60);
+    moveTo(start);
+    QTRY_COMPARE(window->cursor().shape(), Qt::ArrowCursor);
+
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, start);
+    moveTo(QPoint(397, 60));
+    QCOMPARE(window->cursor().shape(), Qt::ArrowCursor);
+    moveTo(QPoint(340, 60));
+    QCOMPARE(window->cursor().shape(), Qt::ClosedHandCursor);
+    moveTo(QPoint(300, 180));
+    QCOMPARE(window->cursor().shape(), Qt::ClosedHandCursor);
+    // A track change leaves the pan held.
+    for (SpectrogramItem *lane : std::as_const(plot.lanes)) {
+        setTestPosition(*lane, 0.5, 2);
+    }
+    QCOMPARE(window->cursor().shape(), Qt::ClosedHandCursor);
+    QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+
+    // Hidden with the viewer's controls, it stays so.
+    plot.surface->setProperty("interactiveOverlaysVisible", false);
+    // Qt takes a handler's cursor with the pointer's next event.
+    moveTo(QPoint(290, 180));
+    QCOMPARE(window->cursor().shape(), Qt::BlankCursor);
+    plot.surface->setProperty("interactiveOverlaysVisible", true);
+    moveTo(QPoint(289, 180));
+    QCOMPARE(window->cursor().shape(), Qt::ClosedHandCursor);
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, QPoint(290, 180));
+    // At once, with the pointer still.
+    QCOMPARE(window->cursor().shape(), Qt::ArrowCursor);
+
+    // A switch to rolling ends the pan with the button held, and a rolling
+    // view has none to show.
+    for (SpectrogramItem *lane : std::as_const(plot.lanes)) {
+        feedTrack(*lane, 2, 2);
+        setTestPosition(*lane, 60.0, 2);
+    }
+    moveTo(start);
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, start);
+    moveTo(QPoint(340, 60));
+    QCOMPARE(window->cursor().shape(), Qt::ClosedHandCursor);
+    QObject *bridge = window->findChild<QObject *>(QStringLiteral("surfaceBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("spectrogramDisplayMode", 0);
+    moveTo(QPoint(338, 60));
+    QCOMPARE(window->cursor().shape(), Qt::ArrowCursor);
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, QPoint(340, 60));
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, QPoint(340, 60));
+    moveTo(QPoint(280, 60));
+    QCOMPARE(window->cursor().shape(), Qt::ArrowCursor);
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, QPoint(280, 60));
 }
 
 std::unique_ptr<QmlSmokeTest> makeSpectrogramFollowSmokeTest(const QString &userDirectoriesParent) {

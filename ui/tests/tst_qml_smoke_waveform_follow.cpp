@@ -40,6 +40,7 @@ private slots:
     void autoscrollStopsAsTheViewComesBack_data();
     void autoscrollStopsAsTheViewComesBack();
     void autoscrollInAWindow();
+    void panShowsAClosedHand();
 };
 
 namespace {
@@ -1392,6 +1393,96 @@ void WaveformFollowSmokeTest::autoscrollInAWindow() {
     QVERIFY(QTest::qWaitForWindowActive(&dialog));
     QVERIFY(window.isActive());
     QTRY_VERIFY(!item->m_autoscroll.active());
+    QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+}
+
+// A closed hand from the pan's drag distance to its release, as the album
+// art viewer's pan has. The viewer's hidden pointer stays hidden, and a
+// click's autoscroll keeps the resize cursor alone.
+void WaveformFollowSmokeTest::panShowsAClosedHand() {
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Window {
+    id: paletteRoot
+    width: 600
+    height: 240
+    visible: true
+
+    QtObject {
+        id: bridge
+        property string playbackState: "Paused"
+        property string currentTrackPath: ""
+        property var waveformPeaksPacked: ""
+        property real waveformCoverageSeconds: 0
+        property bool waveformComplete: false
+        property real durationSeconds: 60
+        property int spectrogramViewMode: 1
+        property bool spectrogramZoomEnabled: true
+        property bool showSpectrogramCrosshair: true
+        property bool showFps: false
+        property int currentTrackChannels: 2
+        property var currentTrackChannelLabels: []
+        property var mutedChannels: []
+        property var soloedChannels: []
+    }
+
+    Viewers.WaveformSurface {
+        objectName: "handSurface"
+        anchors.fill: parent
+        uiBridge: bridge
+        uiPalette: Components.UiPalette { windowRoot: paletteRoot }
+    }
+}
+)QML"), QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml")), &errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    window->requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(window));
+    auto *item = window->findChild<WaveformEditorItem *>(QStringLiteral("waveformEditorItem"));
+    QObject *surface = window->findChild<QObject *>(QStringLiteral("handSurface"));
+    QVERIFY(item != nullptr && surface != nullptr);
+    setTestPosition(*item, 30.0, 1);
+    item->setZoomLevel(8.0);
+    const auto moveTo = [window](QPoint at) { QTest::mouseMove(window, at); };
+    const QPoint start(400, 60);
+    moveTo(start);
+    QTRY_COMPARE(window->cursor().shape(), Qt::ArrowCursor);
+
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, start);
+    moveTo(QPoint(397, 60));
+    QCOMPARE(window->cursor().shape(), Qt::ArrowCursor);
+    moveTo(QPoint(340, 60));
+    QCOMPARE(window->cursor().shape(), Qt::ClosedHandCursor);
+    QVERIFY(QGuiApplication::overrideCursor() == nullptr);
+    // A track change, gapless or Repeat-One, leaves the button's pan held.
+    setTestPosition(*item, 0.5, 2);
+    QCOMPARE(window->cursor().shape(), Qt::ClosedHandCursor);
+
+    // Hidden with the viewer's controls, it stays so.
+    surface->setProperty("interactiveOverlaysVisible", false);
+    // Qt takes a handler's cursor with the pointer's next event.
+    moveTo(QPoint(330, 60));
+    QCOMPARE(window->cursor().shape(), Qt::BlankCursor);
+    surface->setProperty("interactiveOverlaysVisible", true);
+    moveTo(QPoint(329, 60));
+    QCOMPARE(window->cursor().shape(), Qt::ClosedHandCursor);
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, QPoint(330, 60));
+    // At once, with the pointer still.
+    QCOMPARE(window->cursor().shape(), Qt::ArrowCursor);
+
+    QTest::mouseClick(window, Qt::MiddleButton, Qt::NoModifier, QPoint(330, 60));
+    QVERIFY(item->m_autoscroll.active());
+    QCOMPARE(QGuiApplication::overrideCursor()->shape(), Qt::SizeHorCursor);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QVERIFY(!item->m_autoscroll.active());
     QVERIFY(QGuiApplication::overrideCursor() == nullptr);
 }
 

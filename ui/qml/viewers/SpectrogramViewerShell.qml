@@ -62,6 +62,9 @@ Item {
     // whole-screen window: `holdsVisualization` tells Main.qml not to take
     // it there until then (see SpectrogramPane).
     property Item visualization: null
+    // The plot's pointer, which the areas over it show: hidden with the
+    // controls, or a pan's closed hand.
+    readonly property int plotCursorShape: root.visualization?.pointerCursorShape ?? Qt.ArrowCursor
     // Whether the viewer in the main window shows: while it is open, and
     // while it fades out after it closes.
     readonly property bool popupShown: spectrogramViewer.visible
@@ -338,6 +341,7 @@ Item {
                 MouseArea {
                     anchors.fill: parent
                     z: 1
+                    cursorShape: root.plotCursorShape
                     acceptedButtons: Qt.AllButtons
                     onPressed: function(mouse) {
                         spectrogramPopupViewFocus.forceActiveFocus(Qt.MouseFocusReason)
@@ -456,6 +460,7 @@ Item {
                         MouseArea {
                             anchors.fill: parent
                             z: 1
+                            cursorShape: root.plotCursorShape
                             acceptedButtons: Qt.AllButtons
                             onPressed: function(mouse) {
                                 spectrogramFullscreenViewFocus.forceActiveFocus(Qt.MouseFocusReason)
