@@ -748,9 +748,10 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     QTRY_VERIFY(fixture.quitAnywayOffered());
     QObject *message = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitMessage"));
     QVERIFY(message != nullptr);
-    // What quitting anyway costs comes straight after the status, and why
-    // it offers under the files, shorter, with every fact (the cost followed
-    // the example of a network share, in a paragraph of five lines at 24 pt).
+    // The files come straight after the status that counts them, then why
+    // it offers, and last what quitting anyway costs, over its button (the
+    // files stood between the two sentences), each short (as one paragraph
+    // they were five lines at 24 pt).
     auto *explanation = fixture.window->findChild<QQuickItem *>(QStringLiteral("tagEditorQuitWaitExplanation"));
     QVERIFY(explanation != nullptr);
     const QString consequence = message->property("text").toString();
@@ -774,8 +775,8 @@ void TagEditorSmokeTest::quittingDuringAStalledTagSaveOffersToQuitAnyway() {
     // it keeps the lines it had.
     auto *messageItem = qobject_cast<QQuickItem *>(message);
     auto *filesItem = qobject_cast<QQuickItem *>(files);
-    QTRY_VERIFY(sceneRectOf(messageItem).bottom() <= sceneRectOf(filesItem).top());
-    QVERIFY(sceneRectOf(status).bottom() <= sceneRectOf(messageItem).top());
+    QTRY_VERIFY(sceneRectOf(explanation).bottom() <= sceneRectOf(messageItem).top());
+    QVERIFY(sceneRectOf(status).bottom() <= sceneRectOf(filesItem).top());
     QVERIFY(sceneRectOf(filesItem).bottom() <= sceneRectOf(explanation).top());
     QTRY_COMPARE(sceneRectOf(explanation).left(), sceneRectOf(status).left());
     QCOMPARE(explanation->property("color").value<QColor>().rgba(),
