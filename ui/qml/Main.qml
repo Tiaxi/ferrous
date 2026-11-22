@@ -814,7 +814,7 @@ ApplicationWindow {
         objectName: "appendAllLibraryTracksAction"
         shortcutId: "queue_whole_library"
         overrides: root.keyboardShortcutOverrides
-        text: I18n.i18nc("@action:inmenu", "Queue &Whole Library")
+        text: I18n.i18nc("@action:inmenu", "Add &Whole Library to Queue")
         icon.name: "media-playlist-append"
         enabled: libraryController.canPlayAllTracks()
         onTriggered: libraryController.appendAllTracks()

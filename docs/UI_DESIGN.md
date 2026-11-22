@@ -117,7 +117,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 
 - **Each message dialog opens with a DemiBold lead sentence.** It says what happened or what is asked. The explanation, the path and the system's error follow in `textSecondary`. Weight, not size, ranks the lead, and one system everywhere keeps dialogs from reading as one grey block.
 - **The lead says what happened in words.** The system's error text, such as "Permission denied (os error 13)", goes on its own line below as a detail. It never repeats the window title.
-- **One term for one thing.** Use "Queue", never "Playlist". Use "Delete" for a delete. Use "full-size image", not "high-resolution artwork" in one place and "full-size" in another.
+- **One term for one thing.** Use "Queue", never "Playlist", and "Add … to Queue" for queueing, never "Queue" as a verb. Use "Delete" for a delete. Use "full-size image", not "high-resolution artwork" in one place and "full-size" in another.
 - **The library's and the search results' menus name what they act on:** "Play Album", "Add Album to Queue", with the keys that do the same in that view, and one icon per action in every menu. A bare "Play" and "Add to Queue" in one menu made it another family.
 - **Pass every visible string through `I18n.i18nc` in QML or `i18nc` in C++,** with a context marker, and `i18ncp` for counts. Follow [translations](DEVELOPMENT.md#translations). Use KDE HIG wording:
   - Title Case for buttons, menus and window titles;

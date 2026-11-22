@@ -855,6 +855,11 @@ Rectangle {
                                 return I18n.i18nc("@action:inmenu", "Play Album")
                             case "track":
                                 return I18n.i18nc("@action:inmenu", "Play Track")
+                            // A library folder's row, or an album's
+                            // subfolder's.
+                            case "root":
+                            case "section":
+                                return I18n.i18nc("@action:inmenu", "Play Folder")
                             default:
                                 return I18n.i18nc("@action:inmenu", "Play")
                             }
@@ -879,6 +884,9 @@ Rectangle {
                                 return I18n.i18nc("@action:inmenu", "Add Album to Queue")
                             case "track":
                                 return I18n.i18nc("@action:inmenu", "Add Track to Queue")
+                            case "root":
+                            case "section":
+                                return I18n.i18nc("@action:inmenu", "Add Folder to Queue")
                             default:
                                 return I18n.i18nc("@action:inmenu", "Add to Queue")
                             }
