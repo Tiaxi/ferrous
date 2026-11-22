@@ -198,7 +198,7 @@ Rules:
 - **No blink.** While content hands over, the outgoing and incoming layers together keep at least half a line's ink at every point. A layer that is leaving may fade to nothing, as long as its replacement is there. Cross-fades overlap rather than run in sequence, and no surface fades out before the one replacing it has arrived. The album art viewer keeps its image, and the visualization viewer its last frame, through the close fade. A popup draws one floor, never two layers at half opacity.
 - **No jump of the thing being looked at.** Geometry eases rather than switching in one frame: the art glides as the info column appears, and the library slides as now playing grows. Layouts that change per track keep one height. A track without a cover gets a stand-in in the cover's place, not a different layout.
 - **Details are already at rest when a viewer opens.** Only toggling the info column in an open viewer animates it. A viewer that opens with the column shown has it in place from the first frame. When the column slid in on open, Copy Path was briefly out of reach.
-- **Going back to "Nothing playing" plays the first play backwards,** as when playback stops because the queue was cleared or ran out. The track that showed stays while the panel shrinks into the compact row, and its lines fade out as they faded in.
+- **Going back to "Nothing playing" is the first play's move backwards,** on its curve and time, as when playback stops because the queue was cleared or ran out. The track that showed stays while the panel shrinks into the compact row: the seam closes the lines' room first, each line gone as the seam reaches it, and then takes the cover's foot up with it.
 - **Interruptions continue from what shows.** A new change mid-fade starts from each layer's current opacity, and a reversal reverses from where it is.
 - **Test motion on a stepped clock, not by counting frames.** `ui/tests/tst_ui_motion.cpp` installs a `SteppedAnimationDriver` that advances animation time 16 ms at a time. Tests check opacities and positions along the whole fade (no blink, no overlap, no jump), check that nothing is left running, and cover the instant path with animations off. Real-time frame counting fails on a slow machine.
 
@@ -251,6 +251,7 @@ Ideas that were tried and rejected, and why. Bring one back only if your change 
 | No-cover tile | the album title or a glyph in the slot; a different layout | repeated the lines below it, read as a broken image, and moved the library |
 | Track change | old and new text cross-fading over the same span | the two titles read as superimposed |
 | First play | the idle row leaving before the cover arrived | the band was empty for up to 140 ms, a blink |
+| Stop → idle | the lines out by time alone while the cover shrank | a blank band trailed the cover for some 150 ms |
 | Stop → idle | the cover and lines cut in one frame | a hard cut, not the reverse of first play |
 | Album art viewer | the window's light view colour around the art | a white surround competed with the art |
 | Album art viewer close | the image cut at once while the black floor faded | a blink on close |

@@ -1039,6 +1039,10 @@ private slots:
     void nowPlayingCoverAndStandInCrossFadeInPlace();
     void nowPlayingCoverAndStandInChangeAtOnceWithAnimationsOff();
     void nowPlayingShrinksBackIntoTheCompactRow();
+    void nowPlayingGoingIdleClosesWithoutATrailingBand_data();
+    void nowPlayingGoingIdleClosesWithoutATrailingBand();
+    void nowPlayingMoveTurnedBackJumpsNowhere_data();
+    void nowPlayingMoveTurnedBackJumpsNowhere();
     void nowPlayingGoingIdleIsTheFirstPlayReversed_data();
     void nowPlayingGoingIdleIsTheFirstPlayReversed();
     void nowPlayingPlayDuringTheShrinkReversesIntoTheNextTrack();
@@ -3549,6 +3553,168 @@ void UiMotionTest::nowPlayingShrinksBackIntoTheCompactRow() {
     QCOMPARE(panel->implicitHeight(), rest);
 }
 
+void UiMotionTest::nowPlayingGoingIdleClosesWithoutATrailingBand_data() {
+    QTest::addColumn<bool>("narrow");
+    QTest::newRow("wide") << false;
+    QTest::newRow("narrow") << true;
+}
+
+// Stop to nothing loaded closes with no band of nothing trailing the cover
+// (the lines were out at some 200 ms, and a band of 38 px, shrinking,
+// followed the cover for some 150): the cover stays until the seam comes up
+// to its foot and then goes up with it; until then each line stays where it
+// was and is gone as the seam reaches it, never under it, and no more than
+// two frames show a gap between the cover and the seam with no line in it.
+// The curve and the time are as they were.
+void UiMotionTest::nowPlayingGoingIdleClosesWithoutATrailingBand() {
+    QFETCH(bool, narrow);
+    Covers covers;
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    QQuickItem *area = named(window, "nowPlayingCoverArea");
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QQuickItem *header = named(window, "libraryHeader");
+    auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
+    QVERIFY(area && seam && header && growth);
+    QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
+    QVERIFY(grown(panel));
+    QVERIFY(finish(handover));
+    QTRY_VERIFY(libraryFollows(panel, header));
+    const double side = area->height();
+    QList<PanelLine> lines;
+    QList<double> tops;
+    for (const QString &name : narrow ? kNarrowLines : kWideLines) {
+        const PanelLine line = panelLine(panel, name);
+        // A row kept with no text draws nothing.
+        if (line.text().isEmpty()) {
+            continue;
+        }
+        lines.push_back(line);
+        tops.push_back(sceneRectOf(line.line()).top());
+    }
+    QList<double> before(lines.size(), 1.0);
+
+    clearPlayback(bridge);
+    QVERIFY(QMetaObject::invokeMethod(growth, "pause"));
+    QCOMPARE(easingOf(growth), QEasingCurve::InOutQuad);
+    const int duration = growth->property("duration").toInt();
+    QCOMPARE(duration, narrow ? units->longDuration() : qRound(units->veryLongDuration() * 9.0 / 8.0));
+    const QEasingCurve curve(QEasingCurve::InOutQuad);
+    int blankFrames = 0;
+    for (int frame = 1;; ++frame) {
+        const double progress = frame * 1000.0 / 60.0 / duration;
+        if (progress >= 1.0) {
+            break;
+        }
+        const QString where = QStringLiteral("%1 ms").arg(progress * duration);
+        panel->setProperty("presence", 1.0 - curve.valueForProgress(progress));
+        QVERIFY2(QTest::qWaitFor([&]() { return libraryFollows(panel, header); }), qPrintable(where));
+        QVERIFY(QQuickTest::qWaitForPolish(window));
+        const double seamTop = sceneRectOf(seam).top();
+        const QRectF band = sceneRectOf(area);
+        // The cover whole until the seam is at its foot, then up with it.
+        QVERIFY2(std::abs(band.bottom() - std::min(band.top() + side, seamTop)) <= 1.5,
+                 qPrintable(QStringLiteral("the cover to %1, the seam at %2, at %3").arg(band.bottom()).arg(seamTop).arg(where)));
+        double shownMost = 0.0;
+        for (qsizetype index = 0; index < lines.size(); ++index) {
+            QQuickItem *line = lines.at(index).line();
+            const double shown = opacityUpTo(line, panel);
+            QVERIFY2(shown <= before.at(index), qPrintable(where));
+            before[index] = shown;
+            if (shown > 0.0) {
+                QVERIFY2(sceneRectOf(line).bottom() <= seamTop + 1.5
+                             && std::abs(sceneRectOf(line).top() - tops.at(index)) <= 1.0,
+                         qPrintable(QStringLiteral("line %1 from %2 to %3, the seam at %4, at %5")
+                                        .arg(index).arg(sceneRectOf(line).top()).arg(sceneRectOf(line).bottom())
+                                        .arg(seamTop).arg(where)));
+            }
+            shownMost = std::max(shownMost, shown);
+        }
+        blankFrames += seamTop - band.bottom() > 1.5 && shownMost < 0.05 ? 1 : 0;
+    }
+    QVERIFY2(blankFrames <= 2, qPrintable(QStringLiteral("%1 frames of a blank band").arg(blankFrames)));
+    QVERIFY(finish(growth));
+}
+
+void UiMotionTest::nowPlayingMoveTurnedBackJumpsNowhere_data() {
+    QTest::addColumn<bool>("narrow");
+    QTest::addColumn<bool>("closing");
+    QTest::addColumn<double>("at");
+    QTest::newRow("wide, play as it closes") << false << true << 0.92;
+    QTest::newRow("wide, play late as it closes") << false << true << 0.4;
+    QTest::newRow("narrow, play as it closes") << true << true << 0.9;
+    QTest::newRow("wide, clear as it opens") << false << false << 0.2;
+    QTest::newRow("wide, clear late as it opens") << false << false << 0.7;
+    QTest::newRow("narrow, clear as it opens") << true << false << 0.9;
+}
+
+// The first Play and its reverse are drawn by different rules, so a move
+// that turns back goes on from what shows: the cover's band, each line's
+// place and opacity and the panel's height are the same the moment it turns.
+void UiMotionTest::nowPlayingMoveTurnedBackJumpsNowhere() {
+    QFETCH(bool, narrow);
+    QFETCH(bool, closing);
+    QFETCH(double, at);
+    Covers covers;
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    units->setShortDuration(400);
+    units->setLongDuration(1000);
+    units->setVeryLongDuration(2000);
+    QQuickItem *area = named(window, "nowPlayingCoverArea");
+    QQuickItem *header = named(window, "libraryHeader");
+    auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
+    QVERIFY(area && header && growth);
+    QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+    const auto play = [&]() {
+        showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
+    };
+    play();
+    if (closing) {
+        QVERIFY(grown(panel));
+        QVERIFY(finish(handover));
+        clearPlayback(bridge);
+    }
+    QVERIFY(QMetaObject::invokeMethod(growth, "pause"));
+    panel->setProperty("presence", at);
+    QVERIFY(QTest::qWaitFor([&]() { return libraryFollows(panel, header); }));
+    QVERIFY(QQuickTest::qWaitForPolish(window));
+    const QStringList names = narrow ? kNarrowLines : kWideLines;
+    const auto state = [&]() {
+        QList<double> values{panel->implicitHeight(), area->height()};
+        for (const QString &name : names) {
+            QQuickItem *line = panelLine(panel, name).line();
+            const double shown = line->opacity();
+            values.push_back(shown);
+            values.push_back(shown > 0.05 ? line->parentItem()->y() : 0.0);
+        }
+        return values;
+    };
+    const QList<double> turning = state();
+    if (closing) {
+        play();
+    } else {
+        clearPlayback(bridge);
+    }
+    QVERIFY(growth->property("running").toBool());
+    QVERIFY(QMetaObject::invokeMethod(growth, "pause"));
+    panel->setProperty("presence", at);
+    const QList<double> turned = state();
+    QCOMPARE(turned.size(), turning.size());
+    for (qsizetype index = 0; index < turned.size(); ++index) {
+        // Places to a pixel, opacities to a hundredth.
+        const bool place = index < 2 || index % 2 == 1;
+        QVERIFY2(std::abs(turned.at(index) - turning.at(index)) <= (place ? 1.0 : 0.01),
+                 qPrintable(QStringLiteral("value %1 from %2 to %3").arg(index).arg(turning.at(index)).arg(turned.at(index))));
+    }
+    QVERIFY(QMetaObject::invokeMethod(growth, "resume"));
+    QVERIFY(finish(growth));
+}
+
 void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed_data() {
     QTest::addColumn<bool>("narrow");
     QTest::addColumn<bool>("withCover");
@@ -3566,7 +3732,7 @@ void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed_data() {
 // frame, the tile's own disc mark alone in the band as it shrinks, and
 // "Nothing playing" only at its end): the track that showed, its cover or its
 // stand-in and its lines, stays while the panel shrinks, the lines fading out
-// as they faded in, before the row comes back, and the row and the cover
+// as the seam comes up to them, before the row comes back, and the row and the cover
 // handing over by the move's time. Every frame shows that track, the two
 // handing over, or the row: never neither, never a tile with nothing of the
 // track in it, and never the disc mark, which is gone. Once shrunk, the panel
