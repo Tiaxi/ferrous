@@ -29,6 +29,9 @@ Dialog {
     readonly property bool searching: !!root.controller.uiBridge.globalSearchBusy
     readonly property bool retained: !!root.controller.uiBridge.globalSearchModelRetained
     readonly property string queryText: queryField.text.trim()
+    // The query the rows were found by, which they show their matches of
+    // until the rows of a newer one replace them.
+    property string resultsQuery: ""
     readonly property string suggestion: root.controller.uiBridge.globalSearchSuggestion || ""
     // The result rows, from the model rather than the view: the view's
     // count notifies when the view next lays itself out, which the
@@ -221,7 +224,7 @@ Dialog {
     }
     function highlighted(value) {
         return root.controller.globalSearchModelApi.highlightText
-            ? root.controller.globalSearchModelApi.highlightText(String(value || ""), queryField.text)
+            ? root.controller.globalSearchModelApi.highlightText(String(value || ""), root.resultsQuery)
             : root.escaped(value)
     }
     function queryMatches(value) {
@@ -287,7 +290,7 @@ Dialog {
         const text = String(label || "")
         const segments = allEmphasized || !root.controller.globalSearchModelApi.highlightSegments
             ? [{ text: text, match: allEmphasized }]
-            : root.controller.globalSearchModelApi.highlightSegments(text, queryField.text)
+            : root.controller.globalSearchModelApi.highlightSegments(text, root.resultsQuery)
         return root.layOutRuns(segments, root.maxTitleRuns, root.titleWidth, regularMetrics, semiboldMetrics)
     }
     // A result emphasises its match in its title only: its
@@ -397,6 +400,7 @@ Dialog {
         target: root.controller.globalSearchModelApi
         ignoreUnknownSignals: true
         function onSearchRowsChanged() {
+            root.resultsQuery = queryField.text
             root.rowsRevision += 1
             resultsView.cancelFlick()
             if (!root.controller.selectAfterRowsChanged()) {
@@ -564,8 +568,39 @@ Dialog {
                 boundsBehavior: Flickable.StopAtBounds
                 flickDeceleration: root.snappyScrollFlickDeceleration
                 maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
-                opacity: root.searching ? 0.5 : 1
-                enabled: !root.searching
+                // The rows a running search is to replace take no keys,
+                // clicks or scrolling. The view stays enabled: a disabled
+                // Kirigami icon draws dimmed, so the glyphs dimmed on each
+                // keystroke.
+                interactive: !root.searching
+                // The busy indicator of a slow search: the rows it is to
+                // replace dim. A keystroke's search takes tens of
+                // milliseconds, and dimming for it flashed the list, so the
+                // indicator has a threshold, the animation's pause: it
+                // shows for a search still running 250 ms after its query,
+                // each query starting the pause again, and goes as the
+                // search ends.
+                readonly property string runningQuery: root.searching ? root.queryText : ""
+                onRunningQueryChanged: {
+                    if (resultsView.runningQuery.length === 0) {
+                        slowSearchDim.stop()
+                        resultsView.opacity = 1
+                    } else if (resultsView.opacity === 1) {
+                        slowSearchDim.restart()
+                    }
+                }
+                SequentialAnimation {
+                    id: slowSearchDim
+                    objectName: "globalSearchSlowSearchDim"
+                    PauseAnimation { duration: 250 }
+                    NumberAnimation {
+                        target: resultsView
+                        property: "opacity"
+                        to: 0.5
+                        duration: Kirigami.Units.shortDuration
+                        easing.type: Easing.OutCubic
+                    }
+                }
                 // The app's lane scrollbar, as the library's and the
                 // queue's (Breeze's own was another hand here):
                 // over the lane the rows' text keeps clear of, its thumb
@@ -574,11 +609,13 @@ Dialog {
                     id: resultScrollBar
                     objectName: "globalSearchScrollBar"
                     uiPalette: root.uiPalette
+                    interactive: !root.searching
                 }
                 // The lane the rows' text leaves for the scrollbar, when it
                 // shows.
                 readonly property real scrollbarLane: resultScrollBar.visible ? resultScrollBar.lane : 0
                 Keys.onPressed: function(event) {
+                    if (root.searching) return
                     if (root.handleResultKeys(event)) return
                     if (event.key === Qt.Key_Home || event.key === Qt.Key_End) {
                         root.controller.selectDisplayIndex(event.key === Qt.Key_Home
@@ -873,7 +910,11 @@ Dialog {
                         hoverEnabled: true
                         cursorShape: resultRow.isMore ? Qt.PointingHandCursor : Qt.ArrowCursor
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onPressed: function(mouse) {
+                            mouse.accepted = !root.searching
+                        }
                         onClicked: function(mouse) {
+                            if (root.searching) return
                             root.controller.selectDisplayIndex(resultRow.index)
                             if (resultRow.isMore && mouse.button === Qt.LeftButton) {
                                 root.controller.activateSelection()
@@ -1080,7 +1121,7 @@ Dialog {
             id: resultToolTip
             objectName: "globalSearchResultToolTip"
             parent: root.hoveredResultRow || resultsView
-            visible: !!root.hoveredResultRow && root.hoveredResultRow.hovered
+            visible: !!root.hoveredResultRow && root.hoveredResultRow.hovered && !root.searching
             delay: Kirigami.Units.toolTipDelay
             text: root.hoveredResultRow ? root.hoveredResultRow.toolTipText() : ""
         }

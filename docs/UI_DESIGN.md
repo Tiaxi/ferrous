@@ -180,6 +180,7 @@ Durations are Kirigami's (`shortDuration` 100 ms, `longDuration` 200 ms, `veryLo
 | now playing, first play | the panel grows from the compact row over `veryLongDuration` × 9/8 (450 ms, InOutQuad) when wide, or over `longDuration` when narrow. The library moves with it, and the lines fade in from 60 % of the way |
 | spectrogram ↔ waveform | the chosen plot fades in over the other, `shortDuration`. Labels, switch and meter stay put |
 | search palette and scrim | fade together, `shortDuration`, OutCubic |
+| search results while a newer query runs | none: they keep their contrast and their query's bold runs. A search still running 250 ms after its query dims them, `shortDuration`, OutCubic, and they come back at once. The 250 ms is the busy indicator's threshold, an animation's pause: without it the list flashed on every keystroke |
 | tree expand and collapse | rows below slide over the children, `longDuration`, OutCubic |
 | queue reorder by drag | displaced rows slide, `shortDuration`, OutCubic. A keyboard reorder is instant |
 | viewer controls auto-hiding | after 5 s at rest, one shared level fades the strip, plates, mode switch, lane buttons and crosshair together, `shortDuration`, OutCubic. The controls stay while they have keyboard focus |

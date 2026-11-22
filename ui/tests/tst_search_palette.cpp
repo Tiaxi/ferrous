@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFont>
 #include <QImage>
@@ -446,6 +447,8 @@ private slots:
     void mouseSelectsAndActs();
     void menuKeyOpensTheSelectedResultsMenu();
     void staleAndBusyResultsDoNotAct();
+    void typingKeepsTheResultsInPlaceAsTheyAre();
+    void onlyASlowSearchDimsTheResults();
     void reopeningWithKeptTextShowsNoEmptySearch();
     void paletteAndDimFadeTogether();
     void clearUsesTheBreezeIconAndNoTextGlyphs();
@@ -1677,8 +1680,22 @@ void SearchPaletteTest::staleAndBusyResultsDoNotAct() {
     harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 26});
     QTRY_VERIFY(harness.view()->isVisible());
     harness.bridge->setProperty("globalSearchBusy", true);
-    QCOMPARE(harness.view()->opacity(), 0.5);
-    QVERIFY(!harness.view()->isEnabled());
+    // The pointer neither selects nor acts on a row, nor scrolls the list.
+    QVERIFY(!harness.view()->property("interactive").toBool());
+    const int selected = harness.selection();
+    const int other = harness.model.indexOfResult(QStringLiteral("album"), 0);
+    QVERIFY(other >= 0 && other != selected);
+    const QPoint otherAt = sceneCentre(harness.row(other));
+    QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, otherAt);
+    QTest::mouseDClick(harness.window, Qt::LeftButton, Qt::NoModifier, otherAt);
+    QCOMPARE(harness.selection(), selected);
+    QVERIFY(harness.field()->hasActiveFocus());
+    // Nor do the list's own keys move the selection.
+    harness.view()->forceActiveFocus();
+    QTest::keyClick(harness.window, Qt::Key_End);
+    QTest::keyClick(harness.window, Qt::Key_Down);
+    QCOMPARE(harness.selection(), selected);
+    harness.field()->forceActiveFocus();
     QTest::keyClick(harness.window, Qt::Key_Return);
     QTest::keyClick(harness.window, Qt::Key_Return, Qt::ControlModifier);
     QTest::keyClick(harness.window, Qt::Key_Return, Qt::AltModifier);
@@ -1705,6 +1722,98 @@ void SearchPaletteTest::staleAndBusyResultsDoNotAct() {
     harness.field()->setProperty("text", QStringLiteral("other"));
     QVERIFY(!harness.controller->property("pendingExpansion").toMap().contains(QStringLiteral("rowType")));
     QCOMPARE(harness.strings("queries").last(), QStringLiteral("other"));
+}
+
+// While a newer query runs, the rows it replaces are drawn as they were:
+// at full contrast, glyphs too, with the bold runs of the query they were
+// found by (they dropped to half opacity and lost their bold runs on every
+// keystroke, a flash of about 57 ms).
+void SearchPaletteTest::typingKeepsTheResultsInPlaceAsTheyAre() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("me"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    const int track = harness.model.indexOfResult(QStringLiteral("track"), 0);
+    const auto emphasised = [&] {
+        QStringList texts;
+        for (QQuickItem *run : visibleNamed(harness.row(track), QStringLiteral("globalSearchResultTitle"))) {
+            if (run->property("font").value<QFont>().weight() == QFont::DemiBold) texts << run->property("text").toString();
+        }
+        return texts;
+    };
+    QCOMPARE(emphasised(), QStringList{QStringLiteral("Me")});
+    const auto drawnResults = [&] {
+        const QImage image = harness.window->grabWindow();
+        const qreal scale = static_cast<qreal>(image.width()) / harness.window->width();
+        const QRectF list = sceneRect(harness.view());
+        return image.copy(QRectF(list.topLeft() * scale, list.size() * scale).toAlignedRect());
+    };
+    // The selection stays on the first result, as the app keeps it.
+    const int first = harness.selection();
+    QVERIFY(first >= 0);
+    QImage before;
+    // Once the covers have loaded.
+    QTRY_VERIFY([&] {
+        const QImage last = before;
+        before = drawnResults();
+        return !last.isNull() && last == before;
+    }());
+
+    harness.bridge->setProperty("globalSearchBusy", true);
+    harness.field()->setProperty("text", QStringLiteral("mer"));
+    QVERIFY(QMetaObject::invokeMethod(harness.controller, "selectDisplayIndex", Q_ARG(QVariant, first)));
+    QCOMPARE(harness.view()->opacity(), 1.0);
+    QCOMPARE(emphasised(), QStringList{QStringLiteral("Me")});
+    QVERIFY2(drawnResults() == before, "the results changed as the query was typed");
+
+    // The new query's rows have its runs.
+    harness.model.presentSearchRows(meridianRows(harness.coverUrl), {1, 2, 4});
+    harness.bridge->setProperty("globalSearchBusy", false);
+    harness.settleRows();
+    QCOMPARE(emphasised(), QStringList{QStringLiteral("Mer")});
+}
+
+// The results dim only for a search still running 250 ms after its query,
+// the threshold of a busy indicator: each new query starts the wait again,
+// the dim fades in, and the results come back at once.
+void SearchPaletteTest::onlyASlowSearchDimsTheResults() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("me"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    QQuickItem *view = harness.view();
+
+    // The time of the last query, and of the first dim after it.
+    QElapsedTimer clock;
+    clock.start();
+    qint64 queried = 0;
+    qint64 dimmedAfter = -1;
+    const auto connection = QObject::connect(view, &QQuickItem::opacityChanged, view, [&] {
+        if (dimmedAfter < 0 && view->opacity() < 1.0) dimmedAfter = clock.elapsed() - queried;
+    });
+    const auto disconnect = qScopeGuard([&] { QObject::disconnect(connection); });
+
+    harness.bridge->setProperty("globalSearchBusy", true);
+    for (const QString &query : {QStringLiteral("mer"), QStringLiteral("meri"), QStringLiteral("merid")}) {
+        queried = clock.elapsed();
+        harness.field()->setProperty("text", query);
+        QCOMPARE(view->opacity(), 1.0);
+        if (query != QStringLiteral("merid")) QTest::qWait(100);
+    }
+    QTRY_VERIFY(dimmedAfter >= 0);
+    // Less what an animation may take of the frame it started in.
+    QVERIFY2(dimmedAfter >= 190, qPrintable(QStringLiteral("dimmed %1 ms after the last query").arg(dimmedAfter)));
+    QTRY_COMPARE(view->opacity(), 0.5);
+
+    // A query typed while it is dimmed keeps it so; the answer ends it at once.
+    harness.field()->setProperty("text", QStringLiteral("meridi"));
+    QCOMPARE(view->opacity(), 0.5);
+    harness.bridge->setProperty("globalSearchBusy", false);
+    QCOMPARE(view->opacity(), 1.0);
 }
 
 // Reopened with the text it kept, the palette searches it again before it
