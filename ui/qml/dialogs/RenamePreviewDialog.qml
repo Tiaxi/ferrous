@@ -57,13 +57,25 @@ Components.DialogWindow {
         return row.ok && !row.unchanged
     }
 
-    // A file's line: its name and its new name, or that it keeps its name.
-    // A renamed file's names and arrow show in columns; this is the line
-    // that screen readers read.
+    // Whether a file's line has an arrow and a new name: it gets one, or
+    // can't have the one its tags give.
+    function showsNewName(row) {
+        return !row.unchanged && (row.newName || "").length > 0 && row.newName !== row.oldName
+    }
+
+    // The new names' column in a file's line: that name, or that the file
+    // keeps its own.
+    function newColumnText(row) {
+        return root.showsNewName(row) ? row.newName
+            : I18n.i18nc("@item in the column of files' new names", "keeps its name")
+    }
+
+    // A file's line as screen readers read it: the names and the arrow
+    // show in columns.
     function rowText(row) {
-        return row.unchanged
-            ? I18n.i18nc("@item file name", "%1 (keeps its name)", row.oldName)
-            : I18n.i18nc("@item old file name, new file name", "%1 → %2", row.oldName, row.newName || "")
+        return root.showsNewName(row)
+            ? I18n.i18nc("@item old file name, new file name", "%1 → %2", row.oldName, row.newName)
+            : I18n.i18nc("@item file name", "%1 (keeps its name)", row.oldName)
     }
 
     objectName: "renamePreviewDialog"
@@ -73,10 +85,9 @@ Components.DialogWindow {
     readonly property Item body: renamePreviewContent
     minimumWidth: Kirigami.Units.gridUnit * 24
     minimumHeight: Kirigami.Units.gridUnit * 9
-    // As wide as its widest line, each time it opens: a renamed file's old
-    // name, arrow and new name in their columns, the line of a file that
-    // keeps its name, a sentence of the summary, the message that nothing
-    // is renamed, or the buttons; no narrower than its minimum, and no
+    // As wide as its widest line, each time it opens: a file's old name,
+    // arrow and new name in their columns, a sentence of the summary, the
+    // message that nothing is renamed, or the buttons; no narrower than its minimum, and no
     // wider than 42 grid units, which grow with a larger font, within the
     // screen, where a longer name elides in its middle (a fixed
     // 756 px held 390 px of lines, and 1814 px at 24 pt, wider than Edit
@@ -92,32 +103,29 @@ Components.DialogWindow {
         rowMetrics.font
         return Math.ceil(rowMetrics.advanceWidth(root.arrowText)) + 2 * root.arrowClearance
     }
-    // The widest old name and new name of the renamed files, and the widest
-    // line of the others, as their labels draw them.
+    // The widest name in each column, as their labels draw them, and the
+    // widest old name of the files that get a new one.
     readonly property var measuredRows: {
         // The binding follows the font: advanceWidth() is a function, which
         // it cannot follow.
         rowMetrics.font
+        let renamedName = 0
         let oldName = 0
         let newName = 0
-        let renamed = 0
-        let line = 0
         const measured = Math.min(root.rows.length, root.measuredRowLimit)
         for (let i = 0; i < measured; ++i) {
             const row = root.rows[i]
-            if (root.isRenamed(row)) {
-                ++renamed
-                oldName = Math.max(oldName, rowMetrics.advanceWidth(row.oldName))
-                newName = Math.max(newName, rowMetrics.advanceWidth(row.newName || ""))
-            } else {
-                line = Math.max(line, rowMetrics.advanceWidth(root.rowText(row)))
+            const width = rowMetrics.advanceWidth(row.oldName)
+            oldName = Math.max(oldName, width)
+            if (root.showsNewName(row)) {
+                renamedName = Math.max(renamedName, width)
             }
+            newName = Math.max(newName, rowMetrics.advanceWidth(root.newColumnText(row)))
         }
         return {
-            renamed: renamed,
+            renamedName: Math.ceil(renamedName),
             oldName: Math.ceil(oldName),
-            newName: Math.ceil(newName),
-            line: Math.ceil(line)
+            newName: Math.ceil(newName)
         }
     }
     readonly property real widestContentLine: {
@@ -132,26 +140,28 @@ Components.DialogWindow {
             widest = Math.max(widest, summaryMetrics.advanceWidth(sentences[i]))
         }
         const measured = root.measuredRows
-        if (measured.renamed > 0) {
+        if (root.rows.length > 0) {
             widest = Math.max(widest,
                 measured.oldName + root.arrowColumnWidth + measured.newName + root.listGutter)
-        }
-        if (measured.renamed < Math.min(root.rows.length, root.measuredRowLimit)) {
-            widest = Math.max(widest, measured.line + root.listGutter)
         }
         return widest
     }
     defaultWidth: Math.min(root.maximumDefaultWidth,
         Math.max(Math.ceil(2 * root.contentPadding + root.widestContentLine), dialogButtons.implicitWidth))
-    // The old names' column: as wide as the widest, where the window holds
-    // it; where it does not, it gives way to the new names, which are what
-    // is checked before renaming, down to 40 % of the list, and then the
-    // new names elide too (the arrows stood at seven places, and
-    // the new names had no column).
+    // The old names' column, every row's: as wide as the widest, where the
+    // window holds it; where it does not, it gives way to the new names,
+    // which are what is checked before renaming. The renamed files' old
+    // names give way down to 40 % of the list, and then the new names elide
+    // too (the arrows stood at seven places, and the new names had no
+    // column). A name that stays gives way further, to the renamed files'
+    // column or a quarter of the list, so a long one cuts no new name (it
+    // ran across the arrows and the new names).
     readonly property real oldNameColumnWidth: {
         const line = previewList.width - root.listGutter
-        return Math.max(0, Math.min(root.measuredRows.oldName,
-            Math.max(Math.floor(0.4 * line), line - root.arrowColumnWidth - root.measuredRows.newName)))
+        const measured = root.measuredRows
+        const least = Math.max(Math.floor(0.25 * line), Math.min(measured.renamedName, Math.floor(0.4 * line)))
+        return Math.max(0, Math.min(measured.oldName,
+            Math.max(least, line - root.arrowColumnWidth - measured.newName)))
     }
     readonly property real contentSpacing: 10
     // The room right of the rows for the list's scroll bar, and a refused
@@ -386,36 +396,30 @@ Components.DialogWindow {
                 id: previewRow
                 required property var modelData
                 readonly property bool renamed: root.isRenamed(modelData)
+                // What recedes in the row: all of one that keeps its name,
+                // the old name and the arrow of one that is renamed. All
+                // of one that can't be is in the negative colour.
+                readonly property color quietColor: previewRow.modelData.ok
+                    ? root.uiPalette.textSecondary : root.uiPalette.negative
                 width: ListView.view.width - root.listGutter
                 spacing: 0
 
-                // A file that keeps its name, muted, or can't be renamed:
-                // one line.
-                Label {
-                    objectName: "renamePreviewRowName"
-                    Layout.fillWidth: true
-                    visible: !previewRow.renamed
-                    elide: Text.ElideMiddle
-                    text: previewRow.renamed ? "" : root.rowText(previewRow.modelData)
-                    color: previewRow.modelData.ok ? root.uiPalette.textSecondary : root.uiPalette.negative
-                }
-
-                // A renamed file: its old name and the arrow muted, and its
-                // new name, which every row starts at one x.
+                // A file, in the three columns: its old name, the arrow where
+                // it has a new one, and that name, or that it keeps its own,
+                // which every row starts at one x.
                 Item {
-                    objectName: "renamePreviewRenamedRow"
+                    objectName: "renamePreviewFileRow"
                     Layout.fillWidth: true
                     implicitHeight: newNameLabel.implicitHeight
-                    visible: previewRow.renamed
                     Accessible.role: Accessible.StaticText
-                    Accessible.name: previewRow.renamed ? root.rowText(previewRow.modelData) : ""
+                    Accessible.name: root.rowText(previewRow.modelData)
 
                     Label {
                         objectName: "renamePreviewOldName"
                         width: root.oldNameColumnWidth
                         elide: Text.ElideMiddle
-                        text: previewRow.renamed ? previewRow.modelData.oldName : ""
-                        color: root.uiPalette.textSecondary
+                        text: previewRow.modelData.oldName
+                        color: previewRow.quietColor
                         Accessible.ignored: true
                     }
 
@@ -423,9 +427,10 @@ Components.DialogWindow {
                         objectName: "renamePreviewArrow"
                         x: root.oldNameColumnWidth
                         width: root.arrowColumnWidth
+                        visible: root.showsNewName(previewRow.modelData)
                         horizontalAlignment: Text.AlignHCenter
                         text: root.arrowText
-                        color: root.uiPalette.textSecondary
+                        color: previewRow.quietColor
                         Accessible.ignored: true
                     }
 
@@ -435,8 +440,8 @@ Components.DialogWindow {
                         x: root.oldNameColumnWidth + root.arrowColumnWidth
                         width: Math.max(0, parent.width - x)
                         elide: Text.ElideMiddle
-                        text: previewRow.renamed ? (previewRow.modelData.newName || "") : ""
-                        color: root.uiPalette.text
+                        text: root.newColumnText(previewRow.modelData)
+                        color: previewRow.renamed ? root.uiPalette.text : previewRow.quietColor
                         Accessible.ignored: true
                     }
                 }
