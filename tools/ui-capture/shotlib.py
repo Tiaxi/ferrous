@@ -47,6 +47,11 @@ def album_paths(*patterns):
     return out
 
 
+def session_suffix(tag, scale=1, size=(1600, 1000), suffix_extra=""):
+    """How a session's shots and recordings end: theme, scale, window size and the session's variant."""
+    return f"{tag}_{scale}x_{size[0]}x{size[1]}" + suffix_extra
+
+
 class Session:
     def __init__(self, name, tag, scale=1, size=(1600, 1000), font_pt=10, db=True, settings_extra="",
                  suffix_extra="", anim_off=False, app_defaults=False):
@@ -56,7 +61,7 @@ class Session:
         self.index = []
         self.composite_sources = []  # raw_grab/source_shot in the running macro (composite_evidence)
         self.composite_no_app_pixels = False  # the running macro draws images without app pixels
-        self.suffix = f"{tag}_{scale}x_{size[0]}x{size[1]}" + suffix_extra
+        self.suffix = session_suffix(tag, scale, size, suffix_extra)
         t_app = time.time()
         prefix = os.environ.get("SHOT_RUN_PREFIX", "run")
         self.a = App(f"{prefix}-{name}-{tag}", scheme=SCHEMES[tag], scale=scale, size=size,

@@ -39,6 +39,7 @@ if len(sys.argv) > 2 and os.path.isdir(sys.argv[2]):  # the round's source: stat
     os.environ.setdefault("SHOT_SRC", sys.argv[2])
 import states as st  # noqa: E402
 from colours import unique_colours  # noqa: E402
+from focus_select import tile_matches  # noqa: E402
 from framestore import FrameStore  # noqa: E402
 
 FONT = "/usr/share/fonts/google-noto/NotoSans-Regular.ttf"
@@ -560,9 +561,7 @@ def custom_sheet(rd, sd, entries, name, title, theme, rows):
         sc_ = (opts or {}).get("scale", 1)
         th_ = (opts or {}).get("theme", theme)
         var_ = (opts or {}).get("variant", "")  # e.g. "font24": that variant (any window size it was shot at)
-        es = [e for e in entries if e["area"] == area and e["state"] == state and e["theme"] == th_
-              and e["scale"] == sc_ and ((var_ in e["file"] and ("font24" in var_ or "font24" not in e["file"])) if var_
-                                         else (e.get("size") == "1600x1000" and "font24" not in e["file"]))]
+        es = [e for e in entries if tile_matches(e, area, state, th_, var_, sc_)]
         if not es:
             if (opts or {}).get("optional"):  # a tile that is made only sometimes (e.g. a changed glyph)
                 return None

@@ -152,7 +152,8 @@ class Pairs(Case):
         for d in dirs:
             recs, half = pack.strip_job((d, out, tmp))
             self.assertEqual(recs[0]["size"][0], pack.STRIP_SIZE[0])
-            self.assertEqual(Image.open(half["file"]).width, pack.HALF_SIZE[0])
+            with Image.open(half["file"]) as him:
+                self.assertEqual(him.width, pack.HALF_SIZE[0])
             self.assertEqual(half["caption"], recs[0]["caption"])
             halves.append(half)
         with mock.patch.object(motion_strip, "measure", side_effect=AssertionError("measured again")):

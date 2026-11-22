@@ -58,7 +58,7 @@ while [ $# -gt 0 ]; do
         --out) OUTROOT=$2; shift 2 ;;
         --only) ONLY=$2; PARTIAL=1; RUNNER_ARGS+=(--only "$2"); shift 2 ;;
         --themes|--sessions) PARTIAL=1; RUNNER_ARGS+=("$1" "$2"); shift 2 ;;
-        --workers) WORKERS=$(( $2 > 4 ? 4 : $2 )); shift 2 ;;
+        --workers) WORKERS=$(( $2 > 12 ? 12 : $2 )); shift 2 ;;
         # fewer pack workers use less memory (see README.md); without it, pack.py picks its own count
         --pack-jobs)
             [[ $2 =~ ^[1-9][0-9]*$ ]] || { echo "--pack-jobs needs a whole number of 1 or more (got '$2')" >&2; exit 2; }
@@ -79,7 +79,7 @@ if [ -n "${SHOT_FOCUS:-}" ]; then  # every scope must exist (loudly, before buil
     echo "focus scopes: $SHOT_FOCUS (sessions: $FOCUS_SESSIONS)"
     if [ -n "$FOCUS_ONLY" ]; then
         PARTIAL=1
-        RUNNER_ARGS+=(--sessions "$FOCUS_SESSIONS")
+        RUNNER_ARGS+=(--sessions "$FOCUS_SESSIONS" --focus "$SHOT_FOCUS")
     fi
 fi
 # The icon A/B (SHOT_ICON_AB=1) needs variant B's folder: fail before building, never a sheet without its B row.
