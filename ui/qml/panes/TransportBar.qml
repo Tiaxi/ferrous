@@ -565,19 +565,30 @@ ToolBar {
                 && isFinite(root.viewStartSeconds) && isFinite(root.viewEndSeconds)
                 && root.viewEndSeconds > root.viewStartSeconds
                 && root.viewEndSeconds > from && root.viewStartSeconds < to
-            function barXOf(seconds) {
+            // Where `seconds` is on the bar, in device pixels from its left.
+            function barPixelOf(seconds) {
                 const fraction = Math.max(0, Math.min(1, (seconds - from) / (to - from)))
-                return Math.round((mirrored ? 1 - fraction : fraction) * barDevicePixels)
-                    / windowDevicePixelRatio
+                return (mirrored ? 1 - fraction : fraction) * barDevicePixels
             }
-            // At least a device pixel wide, however deep the zoom, and on
-            // the bar at its end.
-            readonly property real viewBandLeft: !viewBandShown ? 0
-                : Math.min(barXOf(root.viewStartSeconds), barXOf(root.viewEndSeconds),
-                           (barDevicePixels - 1) / windowDevicePixelRatio)
-            readonly property real viewBandRight: !viewBandShown ? 0
-                : Math.max(barXOf(root.viewStartSeconds), barXOf(root.viewEndSeconds),
-                           viewBandLeft + 1 / windowDevicePixelRatio)
+            readonly property real viewRangeLeftPixel: !viewBandShown ? 0
+                : Math.min(barPixelOf(root.viewStartSeconds), barPixelOf(root.viewEndSeconds))
+            readonly property real viewRangeRightPixel: !viewBandShown ? 0
+                : Math.max(barPixelOf(root.viewStartSeconds), barPixelOf(root.viewEndSeconds))
+            // However deep the zoom, the band stays wide enough to find,
+            // and to show either side of the playhead on it: narrower, it
+            // is drawn this wide about the middle of its range, on the bar.
+            readonly property int viewBandMinimumWidth: 6
+            readonly property int viewBandMinimumDevicePixels:
+                Math.round(viewBandMinimumWidth * windowDevicePixelRatio)
+            readonly property bool viewBandWidened: viewBandShown
+                && Math.round(viewRangeRightPixel) - Math.round(viewRangeLeftPixel) < viewBandMinimumDevicePixels
+            readonly property real viewBandLeft: (!viewBandWidened ? Math.round(viewRangeLeftPixel)
+                : Math.max(0, Math.min(barDevicePixels - viewBandMinimumDevicePixels,
+                    Math.round((viewRangeLeftPixel + viewRangeRightPixel - viewBandMinimumDevicePixels) / 2))))
+                / windowDevicePixelRatio
+            readonly property real viewBandRight: !viewBandWidened
+                ? Math.round(viewRangeRightPixel) / windowDevicePixelRatio
+                : viewBandLeft + viewBandMinimumDevicePixels / windowDevicePixelRatio
             // The handle is a grab target wider than the line and not drawn.
             // Padding of half their difference outside the bar puts the
             // handle's centre, which a press or drag moves under the
