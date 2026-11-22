@@ -222,17 +222,22 @@ Dialog {
     function escaped(value) {
         return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     }
-    function highlighted(value) {
-        return root.controller.globalSearchModelApi.highlightText
-            ? root.controller.globalSearchModelApi.highlightText(String(value || ""), root.resultsQuery)
-            : root.escaped(value)
+    // `value` cut where the matches of the results' query start and end.
+    function querySegments(value) {
+        const text = String(value || "")
+        return root.controller.globalSearchModelApi.highlightSegments
+            ? root.controller.globalSearchModelApi.highlightSegments(text, root.resultsQuery)
+            : [{ text: text, match: false }]
     }
+    // From the segments rather than by comparing markup: the model escapes
+    // a quote, so text with one always differed from escaped(), a match.
     function queryMatches(value) {
-        return !!value && root.highlighted(value) !== root.escaped(value)
+        return !!value && root.querySegments(value).some(function(segment) { return segment.match })
     }
-    // A result's details after its title: who and where it is from, and
-    // what else matched.
-    function rowContext(row, full) {
+    readonly property string contextSeparator: " · "
+    // A result's details after its title, in parts: who and where it is
+    // from, and what else matched.
+    function rowContextParts(row, full) {
         let parts = []
         if (row.rowType === "track") {
             const artistAlbum = [row.artist || "", row.album || ""].filter(function(value) { return value.length > 0 })
@@ -247,7 +252,29 @@ Dialog {
         if (row.genre && (full || root.queryMatches(row.genre))) parts.push(row.genre)
         if (row.rootLabel && (full || row.showRoot || root.queryMatches(row.rootLabel))) parts.push(row.rootLabel)
         if (row.matchDetail) parts.push(row.matchDetail)
-        return parts.filter(function(value) { return value.length > 0 }).join(" · ")
+        return parts.filter(function(value) { return value.length > 0 })
+    }
+    function rowContext(row, full) {
+        return root.rowContextParts(row, full).join(root.contextSeparator)
+    }
+    // Why a row whose title has no match was found: its context as styled
+    // text, the matches in the text colour at the regular weight, the
+    // metadata escaped. "" for any other row. An artist's count of albums
+    // is counted, not searched, so it is no match.
+    function matchedContext(row) {
+        if (root.queryMatches(row.label)) return ""
+        const parts = root.rowContextParts(row, false)
+        const counted = row.rowType === "artist" && (row.count || 0) > 0 ? 1 : 0
+        const open = '<font color="' + root.uiPalette.text + '">'
+        let matched = false
+        const styled = parts.map(function(part, index) {
+            if (index < counted) return root.escaped(part)
+            return root.querySegments(part).map(function(segment) {
+                matched = matched || !!segment.match
+                return segment.match ? open + root.escaped(segment.text) + "</font>" : root.escaped(segment.text)
+            }).join("")
+        })
+        return matched ? styled.join(root.contextSeparator) : ""
     }
     // Translated once rather than in every row.
     readonly property var typeLabels: ({
@@ -288,14 +315,13 @@ Dialog {
     readonly property int maxTitleRuns: 5
     function titleRuns(label, allEmphasized) {
         const text = String(label || "")
-        const segments = allEmphasized || !root.controller.globalSearchModelApi.highlightSegments
-            ? [{ text: text, match: allEmphasized }]
-            : root.controller.globalSearchModelApi.highlightSegments(text, root.resultsQuery)
+        const segments = allEmphasized ? [{ text: text, match: true }] : root.querySegments(text)
         return root.layOutRuns(segments, root.maxTitleRuns, root.titleWidth, regularMetrics, semiboldMetrics)
     }
-    // A result emphasises its match in its title only: its
-    // context, such as the artist an album was found by, stays whole and
-    // regular, so it never outweighs the title.
+    // A result's semibold matches are in its title only: its context, such
+    // as the artist an album was found by, stays whole and regular, so it
+    // never outweighs the title. Without a match in the title, the match
+    // in the context is in the text colour (matchedContext).
     // `segments` as at most `maxRuns` runs side by side in `room`: matches
     // past the last run but one stay regular in the last.
     function layOutRuns(segments, maxRuns, room, regular, semibold) {
@@ -647,6 +673,7 @@ Dialog {
                         && (root.controller.uiBridge.playbackState || "Stopped") !== "Stopped"
                     readonly property var titleRuns: isResult ? root.titleRuns(model.label, isNow) : []
                     readonly property string context: isResult ? root.rowContext(model, false) : ""
+                    readonly property string matchedContext: isResult ? root.matchedContext(model) : ""
                     // The context's room: up to the length's column, or the
                     // row's end.
                     readonly property real contextWidth: Math.max(0, (lengthText.visible
@@ -871,7 +898,8 @@ Dialog {
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
                         color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
                     }
-                    // The context, whole and regular.
+                    // The context, whole and regular; where the title has
+                    // no match, its matches are in the text colour.
                     Text {
                         objectName: "globalSearchResultContext"
                         visible: resultRow.isResult
@@ -879,8 +907,11 @@ Dialog {
                         width: resultRow.contextWidth
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
-                        text: resultRow.context
-                        textFormat: Text.PlainText
+                        // Always styled and always escaped: a format that
+                        // followed the text changed after it, so a reused
+                        // row read its metadata as markup for a moment.
+                        text: resultRow.matchedContext || root.escaped(resultRow.context)
+                        textFormat: Text.StyledText
                         elide: Text.ElideRight
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize

@@ -25,6 +25,7 @@
 #include <QQmlExpression>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -266,11 +267,35 @@ QRectF contextBoxOf(QQuickItem *row) {
     return rect;
 }
 
+// The words of a context's text, without the colour of its matches.
+QString contextWords(QQuickItem *context) {
+    QString text = context->property("text").toString();
+    text.remove(QRegularExpression(QStringLiteral("<[^>]*>")));
+    text.replace(QStringLiteral("&lt;"), QStringLiteral("<"));
+    text.replace(QStringLiteral("&gt;"), QStringLiteral(">"));
+    text.replace(QStringLiteral("&amp;"), QStringLiteral("&"));
+    return text;
+}
+
 // A result's context, put together from its runs.
 QString contextText(QQuickItem *row) {
     QString text;
-    for (QQuickItem *item : contextTexts(row)) text += item->property("text").toString();
+    for (QQuickItem *item : contextTexts(row)) text += contextWords(item);
     return text;
+}
+
+// The runs of a result's context that are in `color`, as its markup says.
+QStringList contextRunsIn(QQuickItem *row, const QColor &color) {
+    QStringList runs;
+    const QRegularExpression run(QStringLiteral("<font color=\"([^\"]*)\">([^<]*)</font>"));
+    for (QQuickItem *item : contextTexts(row)) {
+        const QString text = item->property("text").toString();
+        for (auto found = run.globalMatch(text); found.hasNext();) {
+            const auto match = found.next();
+            if (QColor(match.captured(1)) == color) runs << match.captured(2);
+        }
+    }
+    return runs;
 }
 
 QColor colorOf(QQuickItem *item) {
@@ -433,6 +458,7 @@ private slots:
     void tooltipFollowsARowThatChangesKindUnderAStillPointer();
     void rowsShareTheirColumnsAndThumbnails();
     void matchesAreEmphasisedInTheTitleOnly();
+    void contextSaysWhyARowMatched();
     void selectedHoveredAndPlayingRowsAreDrawn();
     void footerNamesTheKeysForEachState();
     void suggestionIsASelectableRow();
@@ -857,7 +883,7 @@ void SearchPaletteTest::matchesAreEmphasisedInTheTitleOnly() {
     const auto wholeContext = [](QQuickItem *row) -> QString {
         const QList<QQuickItem *> texts = contextTexts(row);
         if (texts.size() != 1 || texts.first()->property("font").value<QFont>().weight() != QFont::Normal) return {};
-        return texts.first()->property("text").toString();
+        return contextWords(texts.first());
     };
 
     QQuickItem *row = rowLabelled(QStringLiteral("Meridian Line"));
@@ -877,7 +903,6 @@ void SearchPaletteTest::matchesAreEmphasisedInTheTitleOnly() {
     QQuickItem *context = visibleChildNamed(row, QStringLiteral("globalSearchResultContext"));
     QVERIFY(context != nullptr);
     QCOMPARE(context->property("text").toString(), QStringLiteral("The Quiet Meridian — Grey Lines"));
-    QCOMPARE(context->property("textFormat").toInt(), int(Qt::PlainText));
     QCOMPARE(context->property("font").value<QFont>().weight(), QFont::Normal);
     QCOMPARE(wholeContext(row), QStringLiteral("The Quiet Meridian — Grey Lines"));
 
@@ -920,6 +945,95 @@ void SearchPaletteTest::matchesAreEmphasisedInTheTitleOnly() {
     row = rowLabelled(QStringLiteral("Lantern Signal"));
     QVERIFY(row != nullptr);
     QVERIFY(!wholeContext(row).isEmpty());
+}
+
+// A row whose title has no match says why it was found: the matched run of
+// its context in the text colour, as regular as the rest (12 of 13 rows for
+// "mer", found by their artist, showed no match at all). Metadata that
+// looks like markup stays text.
+void SearchPaletteTest::contextSaysWhyARowMatched() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    const QColor text = harness.token("text");
+
+    auto rows = meridianRows(harness.coverUrl);
+    rows[0].count = 2;
+    // Quotes in a title are no match.
+    rows[6].label = QStringLiteral("The \"Lantern\" Signal");
+    // Metadata that looks like markup, and a match at the context's start.
+    rows[5].artist = QStringLiteral("Meridian <b>&amp; Sons</b> <img src=x>");
+    harness.search(QStringLiteral("mer"), rows, {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    const auto rowLabelled = [&harness](const QString &label) -> QQuickItem * {
+        for (int i = 0; i < harness.model.rowCount(); ++i) {
+            if (harness.model.rowDataAt(i).value(QStringLiteral("label")) == label) return harness.row(i);
+        }
+        return nullptr;
+    };
+
+    for (const QString &label : {QStringLiteral("Small Hours"), QStringLiteral("The \"Lantern\" Signal")}) {
+        QQuickItem *row = rowLabelled(label);
+        QVERIFY(row != nullptr);
+        QCOMPARE(contextRunsIn(row, text), QStringList{QStringLiteral("Mer")});
+        QQuickItem *context = contextTexts(row).first();
+        QCOMPARE(context->property("font").value<QFont>().weight(), QFont::Normal);
+        QCOMPARE(hex(colorOf(context)), hex(harness.token("textSecondary")));
+        // The words and the spaces between them keep their room.
+        const QFontMetricsF metrics(context->property("font").value<QFont>());
+        const qreal plain = metrics.horizontalAdvance(contextWords(context));
+        QVERIFY2(std::abs(context->implicitWidth() - plain) <= 3,
+                 qPrintable(QStringLiteral("%1 for %2").arg(context->implicitWidth()).arg(plain)));
+    }
+    QQuickItem *row = rowLabelled(QStringLiteral("Morning Tide Field"));
+    QVERIFY(row != nullptr);
+    QCOMPARE(contextRunsIn(row, text), QStringList{QStringLiteral("Mer")});
+    QCOMPARE(contextText(row), QStringLiteral("Meridian <b>&amp; Sons</b> <img src=x> — Small Hours"));
+    QVERIFY(!contextTexts(row).first()->property("text").toString().contains(QStringLiteral("<img")));
+    QVERIFY(!contextTexts(row).first()->property("text").toString().contains(QStringLiteral("<b>")));
+
+    // A title that has the match keeps it: its context stays plain.
+    row = rowLabelled(QStringLiteral("Meridian Line"));
+    QVERIFY(row != nullptr);
+    QVERIFY(contextRunsIn(row, text).isEmpty());
+
+    // As drawn: the run is brighter than the rest of the context.
+    row = rowLabelled(QStringLiteral("Small Hours"));
+    QVERIFY(row != nullptr);
+    const auto brightestIn = [&](const QString &before, const QString &run) {
+        QQuickItem *context = contextTexts(row).first();
+        const QFontMetricsF metrics(context->property("font").value<QFont>());
+        const QRectF box = sceneRect(context);
+        const QImage image = harness.window->grabWindow();
+        const qreal scale = static_cast<qreal>(image.width()) / harness.window->width();
+        const qreal from = box.left() + metrics.horizontalAdvance(before);
+        int brightest = 0;
+        for (qreal x = from + 1; x < from + metrics.horizontalAdvance(run) - 1; x += 0.5) {
+            for (qreal y = box.top(); y < box.bottom(); y += 0.5) {
+                brightest = std::max(brightest, qGray(image.pixel(qFloor(x * scale), qFloor(y * scale))));
+            }
+        }
+        return brightest;
+    };
+    QTRY_VERIFY(brightestIn(QStringLiteral("The Quiet "), QStringLiteral("Mer"))
+                > brightestIn(QString(), QStringLiteral("The Quiet")) + 30);
+
+    // What the search doesn't read is never a match: an artist's count.
+    harness.search(QStringLiteral("album"), rows, {1, 2, 4});
+    row = rowLabelled(QStringLiteral("The Quiet Meridian"));
+    QVERIFY(row != nullptr);
+    QVERIFY(contextRunsIn(row, text).isEmpty());
+    QCOMPARE(contextText(row), QStringLiteral("2 albums"));
+
+    // Escaped without a match too, and as rows are reused: a tag that
+    // reached the markup warns, which cleanup() catches.
+    harness.search(QStringLiteral("tide"), rows, {1, 2, 4});
+    row = rowLabelled(QStringLiteral("Morning Tide Field"));
+    QVERIFY(row != nullptr);
+    QVERIFY(contextRunsIn(row, text).isEmpty());
+    QCOMPARE(contextText(row), QStringLiteral("Meridian <b>&amp; Sons</b> <img src=x> — Small Hours"));
+    QVERIFY(!contextTexts(row).first()->property("text").toString().contains(QStringLiteral("<img")));
 }
 
 // Selected: the selection tint; hovered: the hover tint, which differs from
