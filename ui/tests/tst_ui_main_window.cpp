@@ -1073,6 +1073,8 @@ private slots:
     void showInLibraryBringsThePlayingRowIntoView();
     void showInLibraryOpensTheCollapsedLibraryFolderOfTheTrack();
     void showInLibraryGivesWayToTheUserBrowsingTheLibrary();
+    void showInLibraryLandsOnTheRowGrid_data();
+    void showInLibraryLandsOnTheRowGrid();
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void nowPlayingCoverIsAKeyboardStop();
     void libraryFoldersAreFolderHeaders();
@@ -3529,6 +3531,65 @@ void UiMainWindowTest::showInLibraryOpensTheCollapsedLibraryFolderOfTheTrack() {
     // Collapsing the folder again still works.
     libraryModel.toggleKey(rootB);
     QTRY_COMPARE(view->property("count").toInt(), 2);
+}
+
+void UiMainWindowTest::showInLibraryLandsOnTheRowGrid_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::addColumn<bool>("fromSearch");
+    QTest::newRow("the queue's, 10 pt") << 10.0 << false;
+    QTest::newRow("the queue's, 24 pt") << 24.0 << false;
+    QTest::newRow("the search's, 10 pt") << 10.0 << true;
+    QTest::newRow("the search's, 24 pt") << 24.0 << true;
+}
+
+// Show in Library, the queue's, which centres the row, and the search's,
+// which brings it into the view, lands on the row grid: the top row is
+// whole under the header (6 px of it was cut at 10 pt, and at 24 pt it was
+// cut through its letters), the revealed row whole in the view. The tree's
+// last row is the exception: to show it whole the view is at its end.
+void UiMainWindowTest::showInLibraryLandsOnTheRowGrid() {
+    QFETCH(qreal, points);
+    QFETCH(bool, fromSearch);
+    const ScopedApplicationFont font(points);
+    MainWindowFixture fixture(sized(1600, 1013));
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *view = named(window, "libraryView");
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(view != nullptr && controller != nullptr);
+    constexpr int count = 90;
+    fixture.libraryModel.setLibraryTreeFromBinary(manyArtistsTree(count));
+    QTRY_COMPARE(view->property("count").toInt(), count);
+    const qreal rowHeight = paletteOf(window)->property("rowHeight").toReal();
+    QVERIFY2(std::fmod(view->height(), rowHeight) >= 1.0, "the view holds whole rows, which proves nothing");
+
+    const auto reveal = [&](int index) {
+        const QString key = QStringLiteral("artist|Artist %1").arg(index, 2, 10, QLatin1Char('0'));
+        return fromSearch
+            ? QMetaObject::invokeMethod(controller, "requestRevealForSearchRow",
+                                        Q_ARG(QVariant, QVariant(QVariantMap{{QStringLiteral("artistKey"), key}})))
+            : QMetaObject::invokeMethod(controller, "requestBridgeReveal", Q_ARG(QVariant, QVariant(QStringList{})),
+                                        Q_ARG(QVariant, key));
+    };
+    const auto wholeInView = [&](int index) {
+        QQuickItem *row = viewRowAt(view, index);
+        return row != nullptr && sceneRect(row).top() >= sceneRect(view).top() - 0.5
+            && sceneRect(row).bottom() <= sceneRect(view).bottom() + 0.5;
+    };
+    // Down from the top, up again, near the end and one before the last.
+    for (const int index : {40, 12, 83, count - 2, 1}) {
+        QVERIFY(reveal(index));
+        QTRY_VERIFY2(wholeInView(index), qPrintable(QString::number(index)));
+        // After what the reveal runs once the view has laid out.
+        QCoreApplication::processEvents();
+        QVERIFY(wholeInView(index));
+        const qreal above = sceneRect(viewRowAt(view, index)).top() - sceneRect(view).top();
+        const qreal off = above - rowHeight * std::round(above / rowHeight);
+        QVERIFY2(std::abs(off) <= 0.5,
+                 qPrintable(QStringLiteral("row %1 is %2 px off the row grid").arg(index).arg(off)));
+    }
+    QVERIFY(reveal(count - 1));
+    QTRY_VERIFY(wholeInView(count - 1));
 }
 
 // Show in Library still waiting for its track's rows gives way to the user
