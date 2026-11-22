@@ -4316,6 +4316,14 @@ void UiDialogsTest::checkEditTagsMarksAChangedFieldAndColumnAndReverts(DialogsWi
     QQuickItem *columnLabel = itemsNamed(column, QStringLiteral("tagEditorColumnLabel")).at(0);
     QQuickItem *columnRevert = named(tags, QStringLiteral("tagEditorColumnRevert_genre"));
     QCOMPARE(label->property("text").toString(), QStringLiteral("Genre:"));
+    // A form's label is in sentence case; its field's name keeps title
+    // case, as a column's header.
+    QQuickItem *albumArtist = visibleNamed(tags, QStringLiteral("tagEditorLabel_albumArtist"));
+    QVERIFY(albumArtist != nullptr);
+    QCOMPARE(albumArtist->property("text").toString(), QStringLiteral("Album artist:"));
+    QCOMPARE(evaluate(visibleNamed(tags, QStringLiteral("tagEditorField_albumArtist")),
+                      QStringLiteral("Accessible.name")).toString(),
+             QStringLiteral("Album Artist"));
     QCOMPARE(label->property("font").value<QFont>().weight(), QFont::Normal);
     QVERIFY(!revert->isVisible());
     QCOMPARE(columnLabel->property("font").value<QFont>().weight(), QFont::Normal);
