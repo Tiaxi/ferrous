@@ -47,8 +47,8 @@ OUTROOT=${SHOT_OUT_ROOT:-$WORK/rounds}
 ONLY=""
 PARTIAL=""
 FOCUS_ONLY=""
-# The sessions wait far more than they compute (8 use about a third of 16 threads). More than 8 start to show in the
-# recordings' timing: at 12, more frame gaps and latency outliers.
+# The sessions wait far more than they compute, though as they start 8 fill every CPU for a second or two. More than
+# 8 show in the recordings' timing: at 12, more frame gaps and latency outliers.
 MAX_WORKERS=8
 WORKERS=$(( $(nproc) / 2 ))
 WORKERS=$(( WORKERS < 4 ? 4 : WORKERS > MAX_WORKERS ? MAX_WORKERS : WORKERS ))
