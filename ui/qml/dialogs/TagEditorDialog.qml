@@ -381,8 +381,10 @@ Components.DialogWindow {
     // The room above a cell's first line and under its last, in a row as
     // tall as one line as in one that wraps, so that all start on one line.
     readonly property real cellLineInset: (root.tableRowHeight - columnValueMetrics.height) / 2
-    // The lines a file name takes before it is cut.
-    readonly property int fileNameLineLimit: 2
+    // The lines a file name takes before it is cut: three, as a title
+    // wrapped at 24 pt takes, so a long name keeps its extension (on two
+    // it read "and a Distant Thunderst…" beside a three-line title).
+    readonly property int fileNameLineLimit: 3
 
     FontMetrics {
         id: columnHeaderMetrics
@@ -1795,7 +1797,7 @@ Components.DialogWindow {
                                 // and the row grows by it. Its height is the
                                 // committed value's, also while another is
                                 // typed over it, which elides within that.
-                                // A file name wraps to two lines before it
+                                // A file name wraps to three lines before it
                                 // is cut, and grows its row alike (cut on
                                 // one line, it lost the name's end beside a
                                 // title that had made the row two lines).

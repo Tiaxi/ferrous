@@ -693,6 +693,8 @@ private slots:
     void editTagsGivesTheTagsRoomToTitleAndFileName();
     void editTagsFileNameWrapsBeforeItIsCut_data();
     void editTagsFileNameWrapsBeforeItIsCut();
+    void editTagsFileNameKeepsItsEndAtLargeFonts_data();
+    void editTagsFileNameKeepsItsEndAtLargeFonts();
     void editTagsSetsChangedValuesInDemiBold_data();
     void editTagsSetsChangedValuesInDemiBold();
     void editTagsPinsWhatIdentifiesARowAsItScrolls_data();
@@ -5979,7 +5981,7 @@ void UiDialogsTest::editTagsShowsEachChangeWhole() {
                 QVERIFY2(std::abs(firstBaseline(cell) - firstBaseline(titled)) <= 1.0, qPrintable(at));
             }
             if (key == QStringLiteral("fileName")) {
-                QVERIFY2(cell->property("lineCount").toInt() <= 2, qPrintable(at));
+                QVERIFY2(cell->property("lineCount").toInt() <= 3, qPrintable(at));
             } else if (key != QStringLiteral("title") && key != QStringLiteral("discNo")
                        && !(i == 2 && key == QStringLiteral("album"))) {
                 QCOMPARE(cell->property("lineCount").toInt(), 1);
@@ -6162,7 +6164,7 @@ void UiDialogsTest::editTagsFileNameWrapsBeforeItIsCut_data() {
 // cut, and its row grows by it as by a wrapped change: at 1000 px the
 // batch's first name read "01 - Overture for Strings and a ..." beside a
 // title that had made the row two lines tall. A name that fits keeps one
-// line and its row's height; one still too long for two lines is cut at
+// line and its row's height; one still too long for three lines is cut at
 // its end, whole in its tooltip.
 void UiDialogsTest::editTagsFileNameWrapsBeforeItIsCut() {
     QFETCH(qreal, pointSize);
@@ -6202,8 +6204,8 @@ void UiDialogsTest::editTagsFileNameWrapsBeforeItIsCut() {
     const auto cellOf = [](QQuickItem *row, const QString &key) {
         return itemNamed(row, QStringLiteral("tagEditorCell_") + key);
     };
-    // Each name: two lines at most, as many as it needs, in a row as tall
-    // as its tallest cell; cut only past two, with its tooltip.
+    // Each name: three lines at most, as many as it needs, in a row as tall
+    // as its tallest cell; cut only past three, with its tooltip.
     bool retitled = false;
     const auto checkNames = [&]() {
         for (int index = 0; index < files.size(); ++index) {
@@ -6218,7 +6220,8 @@ void UiDialogsTest::editTagsFileNameWrapsBeforeItIsCut() {
             const int lines = name->property("lineCount").toInt();
             QCOMPARE(name->property("text").toString(), files.at(index).at(0));
             // (Within a pixel of its room, the layout may go either way.)
-            QVERIFY2(std::abs(needs - room) < 1 || lines == (needs <= room ? 1 : 2), qPrintable(at));
+            QVERIFY2(std::abs(needs - room) < 1 || (needs <= room ? lines == 1 : lines >= 2 && lines <= 3),
+                     qPrintable(at));
             QVERIFY2(name->property("contentHeight").toReal() <= name->height() - name->property("topPadding").toReal() + 0.5,
                      qPrintable(at));
             QVERIFY2(name->height() <= row->height() + 0.5, qPrintable(at + describeItem(row)));
@@ -6270,6 +6273,92 @@ void UiDialogsTest::editTagsFileNameWrapsBeforeItIsCut() {
         QVERIFY2(!name->property("truncated").toBool(), qPrintable(describeItem(name)));
         QCOMPARE(title->property("lineCount").toInt(), 2);
         QCOMPARE(row->height(), title->height());
+    }
+    QVERIFY(closeTagEditor(main));
+}
+
+
+void UiDialogsTest::editTagsFileNameKeepsItsEndAtLargeFonts_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::addColumn<bool>("allWhole");
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000 << true;
+    QTest::newRow("24 pt, 1000 px") << 24.0 << 1000 << false;
+    QTest::newRow("24 pt, 1600 px") << 24.0 << 1600 << true;
+}
+
+// A file name takes a third line before it is cut: at 24 pt in a 1600 px
+// window the retitled batch's first name read "01 - Overture for Strings /
+// and a Distant Thunderst…", its ".flac" gone, beside a title that had
+// made the row three lines tall. There every name of the batch reads
+// whole, its row as tall as it; in a narrower window a name is cut only
+// at the end of its third line, as one too long for three always is.
+void UiDialogsTest::editTagsFileNameKeepsItsEndAtLargeFonts() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    QFETCH(bool, allWhole);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QList<QStringList> files;
+    for (const auto &[fileName, title] : retitledBatch()) {
+        files.push_back({fileName, QStringLiteral("Brief Signal"), QStringLiteral("Orchid Static"),
+                         QStringLiteral("Loose Ends")});
+    }
+    const QString unbroken = QStringLiteral("13-") + QString(QLatin1Char('x')).repeated(400) + QStringLiteral(".flac");
+    files.push_back({unbroken, QStringLiteral("Brief Signal"), QStringLiteral("Orchid Static"),
+                     QStringLiteral("Loose Ends")});
+    QQuickWindow *tags = openTagEditor(main, tagRowsWith(files));
+    QVERIFY(tags != nullptr);
+    tags->resize(width, tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), qreal(width));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    for (int i = 0; i < retitledBatch().size(); ++i) {
+        main.editor.setCell(i, QStringLiteral("title"), retitledBatch().at(i).second);
+    }
+    main.editor.notifyRowMutation();
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    const auto rowAt = [&](int index) -> QQuickItem * {
+        evaluate(table, QStringLiteral("positionViewAtIndex(%1, ListView.Contain)").arg(index));
+        if (!QTest::qWaitFor([&]() { return !layoutPendingUnder(table); })) {
+            return nullptr;
+        }
+        for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
+            if (row->isVisible() && row->property("index").toInt() == index) {
+                return row;
+            }
+        }
+        return nullptr;
+    };
+    int mostLines = 0;
+    for (int index = 0; index < files.size(); ++index) {
+        QQuickItem *row = rowAt(index);
+        QVERIFY(row != nullptr);
+        QQuickItem *name = itemNamed(row, QStringLiteral("tagEditorCell_fileName"));
+        QVERIFY(name != nullptr);
+        const QString at = QStringLiteral("row %1: ").arg(index) + describeItem(name);
+        const int lines = name->property("lineCount").toInt();
+        QVERIFY2(lines <= 3, qPrintable(at));
+        QVERIFY2(name->property("contentHeight").toReal() <= name->height() - name->property("topPadding").toReal() + 0.5,
+                 qPrintable(at));
+        QVERIFY2(name->height() <= row->height() + 0.5, qPrintable(at + describeItem(row)));
+        if (index == files.size() - 1) {
+            QCOMPARE(lines, 3);
+            QVERIFY2(name->property("truncated").toBool(), qPrintable(at));
+            QCOMPARE(name->property("toolTipText").toString(), unbroken);
+        } else {
+            if (name->property("truncated").toBool()) {
+                QVERIFY2(!allWhole && lines == 3, qPrintable(at));
+            } else {
+                QVERIFY2(name->property("toolTipText").toString().isEmpty(), qPrintable(at));
+            }
+            mostLines = std::max(mostLines, lines);
+        }
+    }
+    // The name that was cut takes its third line.
+    if (pointSize >= 24) {
+        QCOMPARE(mostLines, 3);
     }
     QVERIFY(closeTagEditor(main));
 }
