@@ -514,9 +514,12 @@ ToolBar {
                 objectName: "statusBarScanBar"
                 anchors.verticalCenter: parent.verticalCenter
                 visible: !root.narrow && root.scanTotalKnown
-                width: 72
-                height: 4
-                radius: 2
+                // 72 by 4 px at the default font, and larger with a larger
+                // one, as the Last.fm bar is: as long as the glyphs grow,
+                // and as thick as that bar grows with its glyph.
+                width: root.uiPalette.scaledSize(72)
+                height: Math.max(4, Math.round(root.uiPalette.scaledSize(root.smallGlyphSize) / 5))
+                radius: height / 2
                 color: ColorUtils.withAlpha(root.uiPalette.text, 0.15)
 
                 Rectangle {
@@ -527,7 +530,7 @@ ToolBar {
                     // Whole pixels, rounded down: the bar moves with the
                     // batches, and is full only once the scan is.
                     width: Math.floor(parent.width * scanGroup.fraction)
-                    radius: 2
+                    radius: height / 2
                     color: root.uiPalette.textSecondary
                 }
             }

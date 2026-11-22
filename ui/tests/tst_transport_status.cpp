@@ -543,6 +543,7 @@ private slots:
     void statusBarFormatKeepsItsPlace_data();
     void statusBarFormatKeepsItsPlace();
     void statusBarShowsTheScanWithItsBar();
+    void statusBarScanBarGrowsWithTheFont();
     void statusBarScanBarFillsOnlyOnceTheRescanEnds();
     void statusBarScanWithoutATotalIsStill();
     void statusBarScanKeepsItsPlaceWhileItCounts_data();
@@ -3079,6 +3080,31 @@ void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
         harness.bridge->setProperty("libraryScanInProgress", false);
         QTRY_VERIFY(!scan->isVisible());
     }
+}
+
+// The scan's bar grows with a larger font, as the Last.fm slot's does (at
+// 24 pt it stayed 72 by 4 px beside 32 px text), and stays within the bar.
+void TransportStatusTest::statusBarScanBarGrowsWithTheFont() {
+    const ScopedApplicationFont font(24);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QQuickItem *bar = harness.item(QStringLiteral("statusBarScanBar"));
+    QQuickItem *fill = harness.item(QStringLiteral("statusBarScanBarFill"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QVERIFY(status && bar && fill && slot);
+    harness.bridge->setProperty("libraryScanProcessed", 50);
+    harness.bridge->setProperty("libraryScanTotal", 100);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    QTRY_VERIFY(bar->isVisible());
+    QCOMPARE(bar->width(), 173.0);
+    const int lastFm = slot->property("barHeight").toInt();
+    QVERIFY(lastFm > 3);
+    QVERIFY2(bar->height() > lastFm && bar->height() <= 2 * lastFm, qPrintable(QString::number(bar->height())));
+    QCOMPARE(bar->property("radius").toReal(), bar->height() / 2);
+    QCOMPARE(fill->property("radius").toReal(), bar->height() / 2);
+    QCOMPARE(fill->width(), std::floor(bar->width() / 2));
+    QTRY_VERIFY(within(sceneRect(bar), sceneRect(status)));
 }
 
 // A rescan, whose files are processed as soon as they are found: the bar
