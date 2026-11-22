@@ -8,6 +8,7 @@ A line: (session, area, state, steps, description).
   frame the window renders while the action runs; strips.py turns it into a film strip.
 - Steps run in order, in one app per (session, theme); later lines see the state earlier ones left.
 """
+import contextlib
 import glob
 import json
 import re
@@ -5383,6 +5384,25 @@ def _contrast(a, b):
     return (la + 0.05) / (lb + 0.05)
 
 
+@contextlib.contextmanager
+def tooltip_held(r, name):
+    """The item's tooltip held back (its delay a minute) while grabs of the item without it are taken, then its own
+    delay again. The grabs take as long as the machine is busy (each encodes a PNG and walks the layout): against
+    the tooltip's 700 ms they lost when eight apps started together, and the states after them found the button
+    still pressed."""
+    item = f"{FIND}('{name}')"
+    delay = r.s.ev(f"{item}.ToolTip.delay")
+    if not isinstance(delay, (int, float)):
+        raise RuntimeError(f"tooltip_held: {name} gave no tooltip delay ({delay})")
+    held = r.s.ev(f"(function(){{var b={item};b.ToolTip.delay=60000;return b.ToolTip.delay}})()")
+    try:
+        if held != 60000:
+            raise RuntimeError(f"tooltip_held: {name}'s tooltip delay stayed {held}")
+        yield
+    finally:
+        r.s.ev(f"(function(){{{item}.ToolTip.delay={int(delay)};return true}})()")
+
+
 def m_closeups(r, arg):
     """Close-ups at 4x nearest-neighbour, one image: a transport button at rest, hovered and pressed (held,
     released off it) with each fill's sampled colour and its ratio to the bar; the level meter's top at 2x on the
@@ -5420,23 +5440,24 @@ def m_closeups(r, arg):
         r.s.away()
         time.sleep(0.25)
         shots.append(("at rest", grab("btn-rest")))
-        # rest, hover and pressed all inside the tooltip's 700 ms delay (hover 0.2 s, press 0.15 s, no settle wait),
-        # from a start with no tooltip shown (one of an earlier state's may still be fading out)
+        # rest, hover and pressed all without the button's tooltip (hover 0.2 s, press 0.15 s, no settle wait), from a
+        # start with no tooltip shown (one of an earlier state's may still be fading out)
         end = time.time() + 1.5
         while any(q.get("tooltip") and q["opacity"] > 0.02 for q in r.s.popups()) and time.time() < end:
             time.sleep(0.05)
-        r.s.move(cx, cy)
-        time.sleep(0.2)  # the hover tint's fade (100 ms)
-        shots.append(("hovered", grab("btn-hover", settle=False)))
-        r.s.cmd(f"press {cx:.1f} {cy:.1f}")
-        time.sleep(0.15)
-        shots.append(("pressed (held)", grab("btn-press", settle=False)))
-        if [round(v) for v in (need(btn) or [])] != [round(v) for v in br]:  # one crop rectangle for all three
-            raise RuntimeError(f"closeups: {btn} moved while pressed ({need(btn)} vs {br})")
-        ax, ay = r.s.size[0] - 5, r.s.size[1] * 0.45
-        r.s.cmd(f"dmove {ax:.1f} {ay:.1f}")
-        r.s.cmd(f"release {ax:.1f} {ay:.1f}")  # released off the button: no click
-        r.s.away()
+        with tooltip_held(r, btn):
+            r.s.move(cx, cy)
+            time.sleep(0.2)  # the hover tint's fade (100 ms)
+            shots.append(("hovered", grab("btn-hover", settle=False)))
+            r.s.cmd(f"press {cx:.1f} {cy:.1f}")
+            time.sleep(0.15)
+            shots.append(("pressed (held)", grab("btn-press", settle=False)))
+            if [round(v) for v in (need(btn) or [])] != [round(v) for v in br]:  # one crop rectangle for all three
+                raise RuntimeError(f"closeups: {btn} moved while pressed ({need(btn)} vs {br})")
+            ax, ay = r.s.size[0] - 5, r.s.size[1] * 0.45
+            r.s.cmd(f"dmove {ax:.1f} {ay:.1f}")
+            r.s.cmd(f"release {ax:.1f} {ay:.1f}")  # released off the button: no click
+            r.s.away()
     ctx = None  # (the queue thumb in context is out of the core sheet; the meter edge sheet has its place)
     # The meter (part of the plot; on the spectrogram its fill takes the colour map's colour of its level;
     # ticks at 0/-12/-24/-48 dB only while the plot shows its scale): its column's top at 2x, per state, with the
