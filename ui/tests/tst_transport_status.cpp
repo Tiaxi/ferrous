@@ -491,6 +491,9 @@ private slots:
     void seekViewBandStaysFindableAtDeepZoom();
     void seekViewBandIsDecorationOnly();
     void seekHoverDrawsALineAndANativeToolTip();
+    void seekReleaseHandsTheTimeBoxToTheHover_data();
+    void seekReleaseHandsTheTimeBoxToTheHover();
+    void seekReleaseOffTheBarHidesTheTimeBox();
     void seekHoverLineLeavesThePlayheadWhole_data();
     void seekHoverLineLeavesThePlayheadWhole();
     void seekFocusDrawsOneRingAroundTheBar_data();
@@ -1272,6 +1275,101 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
     QVERIFY2(std::abs(tipRect.center().x() - sceneRect(playheadLine).center().x()) <= 1.0,
              qPrintable(describeRect(tipRect)));
     QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at.toPoint());
+}
+
+void TransportStatusTest::seekReleaseHandsTheTimeBoxToTheHover_data() {
+    QTest::addColumn<bool>("hoveredFirst");
+    QTest::addColumn<bool>("frameBeforeRelease");
+    QTest::newRow("hovered, then dragged") << true << true;
+    QTest::newRow("pressed as it arrived") << false << true;
+    QTest::newRow("released within a frame") << true << false;
+}
+
+// A drag's release over the bar hands the time box to the hover as one box:
+// it is never hidden between them, stays whole in every frame drawn, and is
+// at the released point with its time from the release on (it went out for a
+// frame and faded in again at each release).
+void TransportStatusTest::seekReleaseHandsTheTimeBoxToTheHover() {
+    QFETCH(bool, hoveredFirst);
+    QFETCH(bool, frameBeforeRelease);
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && tip);
+    auto *tipBox = tip->property("background").value<QQuickItem *>();
+    QVERIFY(tipBox != nullptr);
+    const QRectF bar = sceneRect(seek);
+    const int y = qRound(bar.center().y());
+    const auto at = [&bar, y](double fraction) { return QPoint(qRound(bar.left() + fraction * bar.width()), y); };
+    if (hoveredFirst) {
+        QTest::mouseMove(harness.window, at(0.3));
+    }
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, at(0.3));
+    QTest::mouseMove(harness.window, at(0.38));
+    QTest::mouseMove(harness.window, at(0.46));
+    QTRY_VERIFY(tip->property("opened").toBool() && tip->property("opacity").toReal() >= 1.0);
+    if (frameBeforeRelease) {
+        QVERIFY(!harness.window->grabWindow().isNull());
+    }
+
+    QSignalSpy shownChanges(tip, SIGNAL(shownChanged()));
+    QSignalSpy visibleChanges(tip, SIGNAL(visibleChanged()));
+    qreal faintest = 1.0;
+    const FrameSampler sampler(harness.window, [&]() {
+        faintest = std::min(faintest, tip->property("visible").toBool() ? tip->property("opacity").toReal() : 0.0);
+    });
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at(0.46));
+    QCOMPARE(seeksOf(harness).size(), 1);
+    QCOMPARE(shownChanges.count(), 0);
+    QCOMPARE(visibleChanges.count(), 0);
+    QCOMPARE(tip->property("opacity").toReal(), 1.0);
+    // At the released point at once, with its time, before any frame.
+    QVERIFY2(std::abs(sceneRect(tipBox).center().x() - at(0.46).x()) <= 2.0,
+             qPrintable(describeRect(sceneRect(tipBox))));
+    const int second = int(std::floor(seeksOf(harness).first().toDouble()));
+    QCOMPARE(tip->property("text").toString(),
+             QStringLiteral("%1:%2").arg(second / 60).arg(second % 60, 2, 10, QLatin1Char('0')));
+    // Through the frames after it, in which the hover catches up.
+    for (int frame = 0; frame < 4; ++frame) {
+        QVERIFY(!harness.window->grabWindow().isNull());
+        QTest::qWait(20);
+    }
+    QCOMPARE(shownChanges.count(), 0);
+    QCOMPARE(visibleChanges.count(), 0);
+    QCOMPARE(faintest, 1.0);
+    QVERIFY(std::abs(sceneRect(tipBox).center().x() - at(0.46).x()) <= 2.0);
+    // The hover's from there: it follows the pointer, and leaves with it.
+    QTest::mouseMove(harness.window, at(0.6));
+    QTRY_VERIFY(std::abs(sceneRect(tipBox).center().x() - at(0.6).x()) <= 2.0);
+    QCOMPARE(shownChanges.count(), 0);
+    QTest::mouseMove(harness.window, QPoint(at(0.6).x(), qRound(bar.bottom() + 60)));
+    QTRY_VERIFY(!tip->property("visible").toBool());
+}
+
+// A drag released off the bar shows no hover's time: the box leaves where
+// the drag had it, rather than from the point the hover last had.
+void TransportStatusTest::seekReleaseOffTheBarHidesTheTimeBox() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && tip);
+    auto *tipBox = tip->property("background").value<QQuickItem *>();
+    QVERIFY(tipBox != nullptr);
+    const QRectF bar = sceneRect(seek);
+    const QPoint start(qRound(bar.left() + 0.3 * bar.width()), qRound(bar.center().y()));
+    const QPoint end(qRound(bar.left() + 0.5 * bar.width()), qRound(bar.bottom() + 60));
+    QTest::mouseMove(harness.window, start);
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, start);
+    QTest::mouseMove(harness.window, QPoint(end.x() - 20, start.y()));
+    QTest::mouseMove(harness.window, end);
+    QTRY_VERIFY(tip->property("opened").toBool());
+    const qreal draggedTo = sceneRect(tipBox).center().x();
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, end);
+    QVERIFY(!tip->property("shown").toBool());
+    QVERIFY(std::abs(sceneRect(tipBox).center().x() - draggedTo) <= 1.0);
+    QTRY_VERIFY(!tip->property("visible").toBool());
 }
 
 void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole_data() {

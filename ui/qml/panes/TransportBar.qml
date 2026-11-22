@@ -729,8 +729,17 @@ ToolBar {
                 }
             }
             onPointerLifted: {
+                // Before the slider lets go, so the hover has the pointer
+                // as the gesture ends.
+                releasedOnBar = !heldByTouch && contains(heldPointerPosition)
+                handedToHover = true
                 if (pressed) {
                     takePointer()
+                }
+            }
+            onPointerHeldChanged: {
+                if (pointerHeld) {
+                    handedToHover = false
                 }
             }
             onAdjustingChanged: {
@@ -939,26 +948,39 @@ ToolBar {
                 objectName: "seekHover"
                 acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                 enabled: !seekPointer.touch
+                // The hover has caught up with the pointer.
+                onHoveredChanged: seekSlider.handedToHover = false
+                onPointChanged: seekSlider.handedToHover = false
             }
             WindowPointer {
                 id: seekPointer
                 window: seekSlider.Window.window
             }
 
-            // The time under the hovering pointer, shown while no gesture
-            // shows its own.
-            readonly property bool hoverTimeShown: seekHover.hovered && !adjusting && seekAllowed
+            // A drag hands the pointer over to the hover where it lifts. Qt
+            // sends no hover during a drag, so the handler still has the
+            // press's point, and that it is over the bar, until it catches
+            // up, at the next frame or move: until then the hover is the
+            // release's.
+            property bool handedToHover: false
+            property bool releasedOnBar: false
+            readonly property bool pointerOnBar: handedToHover ? releasedOnBar : seekHover.hovered
+            readonly property real pointerX: handedToHover
+                ? heldPointerPosition.x : seekHover.point.position.x
+            // The pointer has a time to show, which a gesture's goes before.
+            // It doesn't follow `adjusting`: as that ended at a release, what
+            // read both saw neither for a moment, and the box went out and
+            // faded in again.
+            readonly property bool hoverTimeShown: pointerOnBar && seekAllowed
             // Where the hovering pointer is, in the slider's coordinates, and
             // the second a click there would seek to, as a drag there shows
             // it. Hidden, they keep their last values, so the tooltip fades
-            // out where it was, with its time, and nothing hidden moves. Qt
-            // sends no hover during a drag, and brings the point up to date
-            // at the frame after it, before that frame draws.
+            // out where it was, with its time, and nothing hidden moves.
             property real hoverX: 0
             property int hoverSecond: 0
             Binding on hoverX {
                 when: seekSlider.hoverTimeShown
-                value: seekHover.point.position.x
+                value: seekSlider.pointerX
                 restoreMode: Binding.RestoreNone
             }
             Binding on hoverSecond {
@@ -968,7 +990,7 @@ ToolBar {
                 // `durationKnown` and `hoverTimeShown` can still hold the
                 // last length's values when this updates.
                 value: isFinite(root.uiBridge.durationSeconds) && root.uiBridge.durationSeconds > 0
-                    ? Math.floor(seekSlider.secondsAtX(seekHover.point.position.x))
+                    ? Math.floor(seekSlider.secondsAtX(seekSlider.pointerX))
                     : seekSlider.hoverSecond
                 restoreMode: Binding.RestoreNone
             }
@@ -992,9 +1014,11 @@ ToolBar {
                 // rather than a gesture's: the hover line then shows, and
                 // fades out, with it.
                 property bool showsHover: false
+                // From the gesture's and the hover's own state, as the
+                // anchor's: a drag released off the bar showed none.
                 Binding on showsHover {
-                    when: seekTimeBox.shown
-                    value: !seekSlider.gestureHeld()
+                    value: seekSlider.gestureHeld() ? false
+                        : seekSlider.pointerOnBar ? true : seekTimeBox.showsHover
                     restoreMode: Binding.RestoreNone
                 }
                 // A hover's time comes after a moment, so a pointer that
@@ -1032,7 +1056,7 @@ ToolBar {
                 Binding on anchorX {
                     value: seekSlider.gestureHeld()
                         ? seekSlider.playheadX + seekSlider.playheadLineWidth / 2
-                        : seekHover.hovered ? seekSlider.hoverX : seekTimeBox.anchorX
+                        : seekSlider.pointerOnBar ? seekSlider.hoverX : seekTimeBox.anchorX
                     restoreMode: Binding.RestoreNone
                 }
                 // Centred on the line, within the bar at either end. Near
@@ -1066,7 +1090,7 @@ ToolBar {
                 // Its source is chosen as the anchor's is.
                 readonly property string shownText: !shown ? ""
                     : seekSlider.gestureHeld() ? FormatUtils.formatClockTime(seekSlider.valueSecond)
-                    : seekHover.hovered ? FormatUtils.formatClockTime(seekSlider.hoverSecond)
+                    : seekSlider.pointerOnBar ? FormatUtils.formatClockTime(seekSlider.hoverSecond)
                     : ""
                 onShownTextChanged: {
                     if (shownText.length > 0) {
