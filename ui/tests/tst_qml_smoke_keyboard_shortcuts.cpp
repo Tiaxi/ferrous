@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
+#include <QIcon>
 #include <QStyle>
 #include <QStyleFactory>
 
@@ -38,6 +39,7 @@ private slots:
     void keyColumnsHoldStillAsTheScrollBarComesAndGoes_data();
     void keyColumnsHoldStillAsTheScrollBarComesAndGoes();
     void namesAndKeysAreQuotedAsInTheOtherDialogs();
+    void reassignHasAGlyphAsCancelHas();
 };
 
 namespace {
@@ -986,6 +988,28 @@ void KeyboardShortcutsSmokeTest::namesAndKeysAreQuotedAsInTheOtherDialogs() {
         QVERIFY2(said.startsWith(QChar(0x201C)) && said.contains(QChar(0x201D)), key);
         QVERIFY2(!said.contains(QChar(0x2018)) && !said.contains(QChar(0x2019)), qPrintable(said));
     }
+}
+
+// Shortcut Conflict's Reassign has a glyph, as the Cancel beside it has,
+// and as large.
+void KeyboardShortcutsSmokeTest::reassignHasAGlyphAsCancelHas() {
+    ShortcutsFixture fixture;
+    QVERIFY(fixture.open());
+    auto *reassign = fixture.dialog->findChild<QQuickWindow *>(QStringLiteral("keyboardShortcutsReassignDialog"));
+    QVERIFY(reassign != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(reassign, "open"));
+    QVERIFY(QTest::qWaitForWindowExposed(reassign));
+    QQuickItem *confirm = visibleItemNamed(reassign, QStringLiteral("confirmDialogConfirmButton"));
+    QQuickItem *cancel = visibleItemNamed(reassign, QStringLiteral("confirmDialogCancelButton"));
+    QVERIFY(confirm != nullptr && cancel != nullptr);
+    const QString glyph = QQmlProperty::read(confirm, QStringLiteral("icon.name")).toString();
+    QCOMPARE(glyph, QStringLiteral("dialog-ok"));
+    QVERIFY(QIcon::hasThemeIcon(glyph));
+    for (const char *size : {"icon.width", "icon.height"}) {
+        QTRY_COMPARE(QQmlProperty::read(confirm, QString::fromLatin1(size)),
+                     QQmlProperty::read(cancel, QString::fromLatin1(size)));
+    }
+    QVERIFY(QMetaObject::invokeMethod(reassign, "reject"));
 }
 
 std::unique_ptr<QmlSmokeTest> makeKeyboardShortcutsSmokeTest(const QString &userDirectoriesParent) {

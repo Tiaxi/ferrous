@@ -15,6 +15,7 @@
 #include <QFont>
 #include <QFontInfo>
 #include <QFontMetricsF>
+#include <QIcon>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -533,6 +534,8 @@ private slots:
     void compactDialogStaysWithinASmallScreenAsItGrows();
     void breakableTextKeepsNamesAndErrorCodesWhole();
     void lastFmPageFollowsTheBuildAndTheAccount();
+    void lastFmButtonsHaveGlyphsAtTheDialogsSize_data();
+    void lastFmButtonsHaveGlyphsAtTheDialogsSize();
     void aboutDialogsLayOutTheirPages_data();
     void aboutDialogsLayOutTheirPages();
     void recentIssuesLayOutTheirRows();
@@ -2703,6 +2706,51 @@ void UiDialogsTest::lastFmPageFollowsTheBuildAndTheAccount() {
 
 // Scrobbles the backend dropped unsent, as too old for Last.fm, get a line
 // of the status of their own, after the waiting ones; none, no line.
+void UiDialogsTest::lastFmButtonsHaveGlyphsAtTheDialogsSize_data() {
+    QTest::addColumn<int>("pointSize");
+    QTest::newRow("10 pt") << 10;
+    QTest::newRow("24 pt") << 24;
+}
+
+// Each of Last.fm's buttons has a glyph, as the Library page's have, at
+// their size (Reconnect…, Disconnect and Complete Connection had none).
+// Disconnect's says which of its two actions it is.
+void UiDialogsTest::lastFmButtonsHaveGlyphsAtTheDialogsSize() {
+    QFETCH(int, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
+    QObject *dialog = openPreferences(window, 3);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    const qreal size = paletteOf(window)->property("labelIconSize").toReal();
+
+    struct Glyph {
+        int authState;
+        bool connected;
+        const char *button;
+        const char *glyph;
+    };
+    for (const Glyph &expected : {Glyph{0, false, "lastFmConnectButton", "internet-services"},
+                                  Glyph{1, false, "lastFmCompleteButton", "dialog-ok-apply"},
+                                  Glyph{1, false, "lastFmDisconnectButton", "dialog-cancel"},
+                                  Glyph{2, true, "lastFmReconnectButton", "view-refresh"},
+                                  Glyph{2, true, "lastFmDisconnectButton", "network-disconnect"}}) {
+        QVERIFY(bridge->setProperty("lastFmAuthState", expected.authState));
+        QVERIFY(bridge->setProperty("lastFmUsername", expected.connected ? QStringLiteral("listener") : QString()));
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY2((button = visibleNamed(prefs, QString::fromLatin1(expected.button))) != nullptr, expected.button);
+        QCOMPARE(evaluate(button, QStringLiteral("icon.name")).toString(), QString::fromLatin1(expected.glyph));
+        QVERIFY2(QIcon::hasThemeIcon(QString::fromLatin1(expected.glyph)), expected.glyph);
+        QCOMPARE(evaluate(button, QStringLiteral("icon.width")).toReal(), size);
+        QCOMPARE(evaluate(button, QStringLiteral("icon.height")).toReal(), size);
+    }
+    QVERIFY(reject(dialog));
+}
+
 void UiDialogsTest::checkLastFmStatusCountsDroppedScrobbles(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));

@@ -964,6 +964,8 @@ Components.DialogWindow {
                     root.movedKeysText(root.pendingReassignment), root.movedFromText(root.pendingReassignment)))
             : ""
         confirmText: I18n.i18nc("@action:button", "Reassign")
+        // Not Apply's: the change still waits for OK or Apply.
+        confirmIcon: "dialog-ok"
         onConfirmed: root.reassign()
         onRejected: root.pendingReassignment = null
     }
