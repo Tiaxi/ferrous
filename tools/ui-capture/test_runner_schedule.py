@@ -3,6 +3,8 @@
 rounds, defaults, in that order), the history a whole run records, and the queue its workers share.
 
 Needs no KWin, app or shots. Run with `python3 -m unittest discover -s tools/ui-capture -p 'test_*.py'`."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -125,7 +127,8 @@ class Schedule(unittest.TestCase):
         argv = ["runner.py", "--jobs", "main:dark:3", "--claims", claims]
         with mock.patch.object(sys, "argv", argv), mock.patch.object(runner, "mark_done", done), \
                 mock.patch.dict(os.environ, SHOT_OUT=os.path.join(self.rd, "shots")), \
-                mock.patch.object(runner, "run_session", return_value=["main/dark: broke"]) as run:
+                mock.patch.object(runner, "run_session", return_value=["main/dark: broke"]) as run, \
+                contextlib.redirect_stdout(io.StringIO()):
             runner.main()
         self.assertEqual(seen, ["main/dark: broke\n"])
         self.assertEqual(len(run.call_args.args[2]), 3)  # (only the lines up to the cut)

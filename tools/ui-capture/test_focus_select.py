@@ -196,6 +196,15 @@ class Selection(unittest.TestCase):
         for image in ("pair:both", "seen", "two-window"):
             self.assertEqual(self.cut(table(*lines, **kw), dict(images=[("strip", image, "dark", "", "")])), 2)
 
+    def test_packs_that_share_a_file_are_not_written_at_the_same_time(self):
+        t = table(STRIP_PAIRS=[("both", "one", "two", "Both", ("dark",))])
+        sheet = dict(sheets=tile_sheet(("main", "a", None)))
+        pair = dict(images=[("strip", "pair:both", "dark", "", "")])
+        one, three = (dict(images=[("strip", nm, "dark", "", "")]) for nm in ("one", "three"))
+        self.assertFalse(focus_select.packs_apart([sheet, sheet], t))
+        self.assertFalse(focus_select.packs_apart([pair, one], t))  # (a pair's half's neither-frame sheet)
+        self.assertTrue(focus_select.packs_apart([sheet, pair, three], t))
+
     def test_what_a_focus_only_pack_builds(self):
         t = table(STRIP_PAIRS=[("both", "one@dark", "two@light", "Both", ("dark",))],
                   PERCEIVED_SHEETS=[("seen", "Seen", [("three", "dark", "Three")])], FRAMES11={"four": {}})
@@ -276,6 +285,9 @@ class RealTable(unittest.TestCase):
         for name in focus.resolve("census"):
             for job, n in self.selected([name])[1].items():
                 self.assertGreaterEqual(union.get(job, 0), n, (name, job))
+
+    def test_the_census_packs_can_be_written_at_the_same_time(self):
+        self.assertTrue(focus_select.packs_apart([focus.SCOPES[nm] for nm in focus.resolve("census")], states))
 
     def test_a_list_shoots_each_shared_state_once(self):
         jobs, union = self.selected(["dialogs", "viewers"])

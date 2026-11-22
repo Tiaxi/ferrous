@@ -242,6 +242,22 @@ def pack_needs(scope, states_mod):
     return analysed | quoted, quoted | {name for kind, name, *_ in scope.get("images", []) if kind == "strip"}
 
 
+def packs_apart(scopes, states_mod):
+    """Whether the scopes' packs write no file in common, so that they can be written at the same time: a sheet's,
+    or a strip image's (its fitted copy; its and its halves' neither-frame sheets, named as shown)."""
+    pairs = {f"pair:{nm}": (a, b) for nm, a, b, *_ in getattr(states_mod, "STRIP_PAIRS", [])}
+    seen = set()
+    for scope in scopes:
+        mine = {("sheet", name) for name, *_ in scope.get("sheets", [])}
+        for kind, name, *_ in scope.get("images", []):
+            if kind == "strip":
+                mine |= {("strip", n.partition("@")[0]) for n in (name, *pairs.get(name, ()))}
+        if mine & seen:
+            return False
+        seen |= mine
+    return True
+
+
 def recorded(area, state, theme, states_mod):
     """Whether a strip step of this line records in this theme (runner.run_session's no_record)."""
     return not (area == "motion" and theme != "dark" and state not in states_mod.STRIP_BOTH_THEMES)

@@ -39,7 +39,7 @@ if len(sys.argv) > 2 and os.path.isdir(sys.argv[2]):  # the round's source: stat
     os.environ.setdefault("SHOT_SRC", sys.argv[2])
 import states as st  # noqa: E402
 from colours import unique_colours  # noqa: E402
-from focus_select import pack_needs, tile_matches  # noqa: E402
+from focus_select import pack_needs, packs_apart, tile_matches  # noqa: E402
 from framestore import FrameStore  # noqa: E402
 
 FONT = "/usr/share/fonts/google-noto/NotoSans-Regular.ttf"
@@ -1030,13 +1030,15 @@ def load_geometry(gd):
 # ------------------------------------------------------------------ strips
 def strip_frames(d):
     frames, marks = [], []
-    for line in open(os.path.join(d, "frames.tsv"), encoding="utf-8"):
-        f = line.rstrip("\n").split("\t")
-        if f[0] == "frame":
-            frames.append(dict(i=int(f[1]), t=float(f[2]), win=int(f[3]), file=f[4]))
-        elif f[0] == "mark":
-            marks.append((float(f[1]), f[2]))
-    meta = json.load(open(os.path.join(d, "meta.json")))
+    with open(os.path.join(d, "frames.tsv"), encoding="utf-8") as tsv:
+        for line in tsv:
+            f = line.rstrip("\n").split("\t")
+            if f[0] == "frame":
+                frames.append(dict(i=int(f[1]), t=float(f[2]), win=int(f[3]), file=f[4]))
+            elif f[0] == "mark":
+                marks.append((float(f[1]), f[2]))
+    with open(os.path.join(d, "meta.json")) as mf:
+        meta = json.load(mf)
     # The main window (index 0), or with win= the one recorded window (the one with the most frames).
     wins = Counter(f["win"] for f in frames)
     w0 = 0 if 0 in wins and "win=" not in meta.get("opts", "") else (wins.most_common(1)[0][0] if wins else 0)
@@ -1527,7 +1529,10 @@ def strip_job(args):
         render_page(title + (f" ({i + 1}/{len(pages)})" if len(pages) > 1 else ""), cols, tw, ts,
                     label, os.path.join(fdir, name), label_h)
         page_files.append("frames/" + name)
-    size = list(Image.open(os.path.join(outdir, merged_file)).size) if merged_file else None
+    size = None
+    if merged_file:
+        with Image.open(os.path.join(outdir, merged_file)) as merged_im:
+            size = list(merged_im.size)
     recs = [dict(file=merged_file or page_files[0], pages=page_files, name=meta["name"], theme=meta["theme"],
                  desc=meta["desc"], frames=len(frames), shown=len(sel), duration_ms=round(total), fps=round(fps),
                  crop=r, zoom=up, note=note, size=size, raw=f"strips-raw/{base}/", caption=caption, metrics=mstats)] + extra
@@ -1734,9 +1739,8 @@ def main():
             names = focus_scope_names()
         except KeyError as ex:
             names, bad = [], list(bad or []) + [f"focus: no scope {ex}"]
-        for nm in names:
-            bad = list(bad or []) + write_focus(rd, src, nm, entries, sheets, strips, geo_s)
-            phase(f"focus pack {nm}")
+        bad = list(bad or []) + write_focus_packs(rd, src, names, entries, sheets, strips, geo_s, o.jobs)
+        phase(f"focus packs ({len(names)})")
     print(f"pack: {len(sheets)} sheets, {len(strips)} strip images")
     # the documents a reviewer reads: the home folder written "~" (the layout findings quote elided paths),
     # then none may still hold it
@@ -2418,7 +2422,8 @@ def write_core_facts(rd, core, strips, geo_samples, entries=(), out="CORE-FACTS.
         L += ["## Also measured (recordings not shown)\n"] + [f"- {t}" for t in extra] + [""]
     if a11y:
         L += ["## Accessibility lines\n"] + [f"- {t}" for t in a11y] + [""]
-    open(os.path.join(rd, out), "w", encoding="utf-8").write("\n".join(L) + "\n")
+    with open(os.path.join(rd, out), "w", encoding="utf-8") as doc:
+        doc.write("\n".join(L) + "\n")
 
 
 def neither_sheet(rd, sdir, name, theme, m, max_frames=12):
@@ -2754,6 +2759,17 @@ def write_focus(rd, src, scope_name, entries, sheets, strips, geo_samples):
     print(f"pack: focus {scope_name}: {len(items)} images, {total / 1e6:.1f} MP in {fd}")
     fails += focus_limits(scope_name, [os.path.join(fd, f_) for f_ in sorted(os.listdir(fd)) if f_.endswith(".png")])
     return fails
+
+
+def write_focus_packs(rd, src, names, entries, sheets, strips, geo_samples, jobs):
+    """Each scope's focus pack, at the same time where they write no file in common. Returns the failures, in the
+    scopes' order."""
+    import focus
+    if len(names) < 2 or jobs < 2 or not packs_apart([focus.SCOPES[nm] for nm in names], st):
+        return [f for nm in names for f in write_focus(rd, src, nm, entries, sheets, strips, geo_samples)]
+    with ProcessPoolExecutor(min(jobs, len(names))) as ex:
+        done = [ex.submit(write_focus, rd, src, nm, entries, sheets, strips, geo_samples) for nm in names]
+        return [f for d in done for f in d.result()]
 
 
 def write_index(rd, src, entries, sheets, strips, dialog_failures=(), geo_samples=None):
