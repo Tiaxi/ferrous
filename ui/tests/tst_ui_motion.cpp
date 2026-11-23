@@ -5507,6 +5507,12 @@ void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText_data() {
         QTest::addRow("%suntagged to tagged, the tags 50 ms late", layout) << 0 << 50 << header;
         QTest::addRow("%sanother album", layout) << 1 << 0 << header;
         QTest::addRow("%sthe next track of the album", layout) << 2 << 0 << header;
+        // Two files without tags in one folder, whose titles are their
+        // names: the lines follow the path, whose change used to reach
+        // them before the panel's track key, so the title switched in
+        // place as the same track's.
+        QTest::addRow("%sthe next untagged file of the folder", layout) << 3 << 0 << header;
+        QTest::addRow("%sthe next untagged file, its name as the title", layout) << 4 << 0 << header;
     }
 }
 
@@ -5545,9 +5551,14 @@ void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText() {
         window->resize(1000, 720);
     }
     const QStringList names = header ? kNarrowLines : kWideLines;
-    bridge->setProperty("currentTrackArtist", change == 0 ? QString() : QStringLiteral("Lantern Signal"));
-    if (change == 0) {
-        showTrack(bridge, kTrackA1, QString(), QString(), QString());
+    // Changes 3 and 4 are from one untagged file to the next of its folder:
+    // in 4 the title is the file's name, as BridgeClient tells it for a file
+    // without a title tag, told after the path.
+    const bool untaggedNext = change == 3 || change == 4;
+    bridge->setProperty("currentTrackArtist",
+                        change == 0 || untaggedNext ? QString() : QStringLiteral("Lantern Signal"));
+    if (change == 0 || untaggedNext) {
+        showTrack(bridge, kTrackA1, change == 4 ? QStringLiteral("01.flac") : QString(), QString(), QString());
     } else {
         tellTrack(bridge, kTrackA1, QStringLiteral("Moth Copper"), QStringLiteral("Album A"), 2005, 1,
                   covers.all.at(0));
@@ -5624,6 +5635,19 @@ void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText() {
         bridge->setProperty("currentTrackYear", 2007);
         bridge->setProperty("currentTrackNumber", 3);
         bridge->setProperty("currentTrackCoverPath", covers.all.at(1));
+    } else if (untaggedNext) {
+        QCOMPARE(panelLine(panel, QStringLiteral("Title")).text(), QStringLiteral("01.flac"));
+        bridge->setProperty("currentTrackPath", kTrackA2);
+        if (change == 4) {
+            bridge->setProperty("currentTrackTitle", QStringLiteral("02.flac"));
+        }
+        // A track change: the file's name goes out, and the next one's
+        // comes in, rather than switching in place.
+        QVERIFY(handover->property("running").toBool());
+        const PanelLine title = panelLine(panel, QStringLiteral("Title"));
+        QCOMPARE(title.text(), QStringLiteral("02.flac"));
+        QVERIFY(title.fades());
+        QCOMPARE(title.outgoingText(), QStringLiteral("01.flac"));
     } else {
         tellTrack(bridge, change == 1 ? kTrackB1 : kTrackA2, QStringLiteral("Hollow Arc"),
                   change == 1 ? QStringLiteral("Album B") : QStringLiteral("Album A"), 2005, 2,
@@ -5648,7 +5672,8 @@ void UiMotionTest::nowPlayingTrackChangeShowsNoDoubleText() {
         faded += faintFor.value(name) > 0.0 ? 1 : 0;
     }
     QVERIFY2(faint.isEmpty(), qPrintable(faint.join(QStringLiteral("; "))));
-    QVERIFY2(faded >= 2, qPrintable(QString::number(faded)));
+    // The next untagged file of the folder changes its title alone.
+    QVERIFY2(faded >= (untaggedNext ? 1 : 2), qPrintable(QString::number(faded)));
     QVERIFY(panelIdle(panel, names));
 }
 
