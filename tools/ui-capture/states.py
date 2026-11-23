@@ -760,14 +760,22 @@ def m_onetoone(r, arg):
     bgc = np.median(ia.reshape(-1, 3), axis=0)
     rows_ink = np.nonzero((np.abs(ia - bgc).sum(axis=2) > 60).any(axis=1))[0]
     info_c = info.crop((0, 0, info.width, min(info.height, int(rows_ink.max()) + 16 if len(rows_ink) else info.height)))
-    qh = min(que.height, 160)  # (the transport band grew in H31 ZA1 and H32 AA1: its thirds are taller)
-    que_c = que.crop((0, 0, min(que.width, b_w), qh))
     seam_c = seam.crop((0, 0, min(seam.width, W - 2 * P), seam.height))
     col_a = [("Now playing (the whole block)", np_), ("Library: its header and first rows", lib.crop((0, 0, lib.width, min(lib.height, 250))))]
+
+    def sheet_height(qh_):
+        col_b_ = thirds + [("", info_c), ("", que.crop((0, 0, min(que.width, b_w), qh_)))]
+        top_ = max(sum(LH + c.height + GAP for _, c in col_a), sum(LH + c.height + GAP for _, c in col_b_))
+        return 44 + top_ + LH + seam_c.height + GAP
+    # the queue's crop gives way to the transport's thirds (the band grew in H31-H34): as many of its rows as the
+    # sheet's 1.15 MP leaves room for, at least its header and three rows (the queue's rows are on the full shot)
+    qh = min(que.height, 230)
+    while qh > 110 and (W + 28) * (sheet_height(qh) + 64) > 1.15e6:
+        qh -= 1
+    que_c = que.crop((0, 0, min(que.width, b_w), qh))
     col_b = thirds + [("Album art viewer (windowed): its info column", info_c),
                       ("Queue: its header and first rows (left part)", que_c)]
-    top_h = max(sum(LH + c.height + GAP for _, c in col_a), sum(LH + c.height + GAP for _, c in col_b))
-    H = 44 + top_h + LH + seam_c.height + GAP
+    H = sheet_height(qh)
     if (W + 28) * (H + 64) > 1.15e6:  # as its sheet will be (a title above, a margin around)
         raise RuntimeError(f"onetoone: {W}x{H} is over 1.15 MP on its sheet")
     S = Image.new("RGB", (W, H), (78, 82, 88))
