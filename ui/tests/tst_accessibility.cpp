@@ -4514,9 +4514,9 @@ void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int
     QCOMPARE(chosenGlyph->opacity(), 1.0);
     QVERIFY2(std::abs(otherGlyph->opacity() - 0.72) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
 
-    // Under the pointer: a wash of 10 % or so, its glyph at 85 %; as drawn,
-    // it shows on the plate, under the chosen one's plate, which is 1.4:1 or
-    // more on it.
+    // Under the pointer: a wash of some 16 to 24 %, its glyph at 85 %; as
+    // drawn, it reads on the plate (at 10 %, 1.28:1, only the glyph told
+    // it), under the chosen one's plate, which is 1.4:1 or more on it.
     QTest::mouseMove(window, rectOf(other).center().toPoint() + QPoint(0, 1));
     QTest::mouseMove(window, rectOf(other).center().toPoint());
     QTRY_VERIFY(other->property("hovered").toBool());
@@ -4527,7 +4527,7 @@ void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int
     QVERIFY2(std::abs(otherGlyph->opacity() - 0.85) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
     const QColor washColor = wash->property("color").value<QColor>();
     const QColor fillColor = fill->property("color").value<QColor>();
-    QVERIFY2(washColor.alphaF() >= 0.095 && washColor.alphaF() <= 0.135, qPrintable(QString::number(washColor.alphaF())));
+    QVERIFY2(washColor.alphaF() >= 0.155 && washColor.alphaF() <= 0.245, qPrintable(QString::number(washColor.alphaF())));
     QVERIFY(washColor.alphaF() < fillColor.alphaF());
     // The plate whole, as the pointer on it reveals it.
     const auto shownWhole = [&]() {
@@ -4547,7 +4547,7 @@ void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int
         drawnAt(image, window, plate, QPointF(mode == 0 ? 1.5 : plate->width() - 1.5, plate->height() / 2));
     const double washStep = contrastRatio(drawnWash, drawnPlate);
     const double fillStep = contrastRatio(drawnFill, drawnPlate);
-    QVERIFY2(washStep >= 1.25 && washStep < fillStep,
+    QVERIFY2(washStep >= 1.5 && washStep < fillStep,
              qPrintable(QStringLiteral("hovered %1:1, chosen %2:1 (%3, %4 on %5)").arg(washStep).arg(fillStep)
                             .arg(drawnWash.name(), drawnFill.name(), drawnPlate.name())));
     QVERIFY2(contrastRatio(drawnFill, drawnWash) >= 1.4,
