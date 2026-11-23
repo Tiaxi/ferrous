@@ -430,6 +430,11 @@ Item {
     QCOMPARE(waveform->backgroundColor(), palette->property("view").value<QColor>());
     QCOMPARE(waveform->waveformColor(), palette->property("paneWave").value<QColor>());
     QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
+    // In a viewer, the viewer's seam, which a light theme makes stronger.
+    QVERIFY(surface->setProperty("viewerMode", true));
+    QCOMPARE(waveform->laneSeamColor(), palette->property("viewerWaveformLaneSeam").value<QColor>());
+    QVERIFY(surface->setProperty("viewerMode", false));
+    QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
     QCOMPARE(waveform->playheadColor().alpha(), 255);
     // The crosshair's readout on the plot's plates, as the spectrogram's
     // (not a translucent grey of its own, #5f5f65 on Breeze Light).

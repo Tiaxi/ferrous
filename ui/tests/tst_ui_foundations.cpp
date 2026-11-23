@@ -239,6 +239,8 @@ private slots:
     void viewerToolButtonHoverReadsOnThePlot();
     void viewerToolButtonShowsAKeyPressAtOnce_data();
     void viewerToolButtonShowsAKeyPressAtOnce();
+    void viewerWaveformLaneSeamReadsOnWhite_data();
+    void viewerWaveformLaneSeamReadsOnWhite();
     void viewerToolButtonCheckedToggleAnswersHover_data();
     void viewerToolButtonCheckedToggleAnswersHover();
     void plotToolButtonDrawsCheckedAndFocusApart_data();
@@ -1878,6 +1880,36 @@ void UiFoundationsTest::viewerToolButtonShowsAKeyPressAtOnce() {
     QVERIFY2(channelDistance(drawnReleased, surface) <= 3,
              qPrintable(QStringLiteral("the first frame after the release is %1, not %2")
                             .arg(drawnReleased.name(), surface.name())));
+}
+
+void UiFoundationsTest::viewerWaveformLaneSeamReadsOnWhite_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// The line between the waveform's lanes in a viewer: in Breeze Light
+// #cdd2d6, a step stronger than the pane's hairline, which on a white
+// screen all but vanished between the channels; in Breeze Dark the pane's.
+void UiFoundationsTest::viewerWaveformLaneSeamReadsOnWhite() {
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, QString()), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QVERIFY(tokens != nullptr);
+    QObject *waveform = tokens->property("waveformPlot").value<QObject *>();
+    QVERIFY(waveform != nullptr);
+    const QColor seam = colorOf(tokens, "viewerWaveformLaneSeam");
+    if (dark) {
+        QVERIFY(sameColor(seam, colorOf(waveform, "plotLaneSeam")));
+    } else {
+        QVERIFY2(sameColor(seam, fromHex(QStringLiteral("#cdd2d6"))), qPrintable(seam.name()));
+        QVERIFY(contrastRatio(seam, colorOf(waveform, "plotBg"))
+                > contrastRatio(colorOf(waveform, "plotLaneSeam"), colorOf(waveform, "plotBg")));
+    }
 }
 
 void UiFoundationsTest::viewerToolButtonCheckedToggleAnswersHover_data() {

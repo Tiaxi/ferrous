@@ -2119,6 +2119,7 @@ ApplicationWindow {
             visible: visualizationSurface.plotShown(1)
             opacity: visualizationSurface.plotOpacity(1)
             playheadVisible: visualizationSurface.playheadShown(1)
+            viewerMode: visualizationSurface.inViewer
             z: visualizationSurface.settledMode === 1 ? 0 : 1
             layer.enabled: opacity > 0 && opacity < 1
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible

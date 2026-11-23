@@ -461,6 +461,13 @@ QtObject {
         plotFocusRing: root.focusRing
     }
 
+    // The line between the waveform's lanes in a viewer: in a light theme
+    // #cdd2d6, a step stronger than the pane's hairline, which on a white
+    // screen all but vanished between the channels; in a dark one the
+    // pane's.
+    readonly property color viewerWaveformLaneSeam: root.themeIsDark
+        ? root.waveformPlot.plotLaneSeam : "#cdd2d6"
+
     // The waveform's colour toward the view: 35 %, or by 5 % steps less,
     // the most of it that is 3:1 on `trough`.
     function _waveformMeterFill(trough) {

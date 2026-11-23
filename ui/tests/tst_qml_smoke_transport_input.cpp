@@ -3451,6 +3451,10 @@ void TransportInputSmokeTest::viewerCornerPlateClearsTheLevelMeter() {
     }
     QTRY_COMPARE(surface->window(), host);
     QTRY_COMPARE(sceneRectOf(surface).top(), 0.0);
+    // The waveform there draws its lanes' seam as a viewer's.
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(waveformSurface != nullptr);
+    QVERIFY(waveformSurface->property("viewerMode").toBool());
     QQuickItem *plate = nullptr;
     QTRY_VERIFY((plate = visibleItemNamed(host, fullscreenMode == 0 ? QStringLiteral("spectrogramPopupControls")
                                                                     : QStringLiteral("spectrogramFullscreenCorner")))
@@ -3469,6 +3473,7 @@ void TransportInputSmokeTest::viewerCornerPlateClearsTheLevelMeter() {
 
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    QTRY_VERIFY(!waveformSurface->property("viewerMode").toBool());
     if (fullscreenMode == 1) {
         window->requestActivate();
         QVERIFY(QTest::qWaitForWindowActive(window));
