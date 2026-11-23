@@ -2830,8 +2830,11 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus_data() {
 // The volume slider in the seek bar's language: a 3 px groove, filled up to
 // the thumb in the seek bar's played colour and the rest in its unplayed
 // one, opaque, and a solid 12 px thumb in the played colour, centred on the
-// groove. Hover brightens the thumb to the text colour and shows
-// "Volume 80%"; keyboard focus draws a 2 px ring around the thumb.
+// groove. Hover and a drag show the thumb in its active colour, a clear
+// step from it at rest in either theme: the text colour on dark, and on
+// light, where the text was all but the played colour (1.2:1), the accent
+// as the focus ring draws it. Hover shows "Volume 80%"; keyboard focus
+// draws a 2 px ring around the thumb.
 void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QFETCH(bool, dark);
     Harness harness;
@@ -2876,15 +2879,36 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QVERIFY(channelDistance(pixelAt(image, QPointF(sceneRect(groove).left() + 2, sceneRect(groove).center().y()), scale),
                             played) <= 2);
 
-    // Hover brightens the thumb and shows "Volume 80%".
+    // The active colour: a clear step from the thumb at rest, and at
+    // least 3:1 on the chrome.
+    const QColor active = transport->property("volumeThumbActiveColor").value<QColor>();
+    QVERIFY(sameColor(active, harness.token(dark ? "text" : "focusRing")));
+    const QString step = describeContrast(QStringLiteral("active"), active, restFill)
+        + describeContrast(QStringLiteral(", on the chrome"), active, chrome);
+    // Apart by at least 60 in a channel: on light the text colour was 47
+    // from the played colour, which a hover then barely changed.
+    QVERIFY2(channelDistance(active, restFill) >= 60, qPrintable(step));
+    QVERIFY2(contrastRatio(active, chrome) >= 3.0, qPrintable(step));
+
+    // Hover shows the thumb in it and shows "Volume 80%".
     showToolTipsAtOnce(volume);
     SteppedAnimationDriver animations;
     QTest::mouseMove(harness.window, sceneCentre(volume));
     QVERIFY(volume->property("hovered").toBool());
-    QVERIFY(stepUntil(animations, [&] { return sameColor(thumb->property("color").value<QColor>(), harness.token("text")); }));
+    QVERIFY(stepUntil(animations, [&] { return sameColor(thumb->property("color").value<QColor>(), active); }));
     QCOMPARE(tip->property("text").toString(), QStringLiteral("Volume 80%"));
     QVERIFY(stepUntil(animations, [&] { return tip->property("visible").toBool(); }));
     QVERIFY(!ring->isVisible());
+    // As drawn, and through a drag.
+    QVERIFY(channelDistance(pixelAt(grabbed(harness.window, &scale), sceneRect(thumb).center(), scale), active) <= 2);
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(thumb));
+    QVERIFY(volume->property("pressed").toBool());
+    QTest::mouseMove(harness.window, sceneCentre(thumb) - QPoint(6, 0));
+    QVERIFY(sameColor(thumb->property("color").value<QColor>(), active));
+    QVERIFY(channelDistance(pixelAt(grabbed(harness.window, &scale), sceneRect(thumb).center(), scale), active) <= 2);
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(thumb));
+    harness.bridge->setProperty("volume", 0.8);
+    QTRY_COMPARE(volume->property("value").toDouble(), 80.0);
 
     // Away, the thumb is at rest again; keyboard focus draws a 2 px ring
     // around it and shows the tooltip too.
@@ -3077,7 +3101,7 @@ void TransportStatusTest::volumeMuteKeepsTheThumb_data() {
 // to 0), dims the filled groove and the thumb at rest to the unfilled
 // colour together, over the same fade (the thumb stayed bright), and shows
 // the muted glyph; the tooltip says so. A hover still shows the thumb in
-// the text colour. Unmuting brings both back.
+// its active colour. Unmuting brings both back.
 void TransportStatusTest::volumeMuteKeepsTheThumb() {
     QFETCH(bool, dark);
     Harness harness;
@@ -3136,10 +3160,11 @@ void TransportStatusTest::volumeMuteKeepsTheThumb() {
     QCOMPARE(tip->property("text").toString(), QStringLiteral("Volume 80%, muted"));
     QCOMPARE(accessibleText(volume, QAccessible::Description), QStringLiteral("80%"));
 
-    // A hover shows the thumb in the text colour while muted too, and the
-    // fill stays dim.
+    // A hover shows the thumb in its active colour while muted too, and
+    // the fill stays dim.
     QTest::mouseMove(harness.window, sceneCentre(thumb));
-    QVERIFY(stepUntil(animations, [&] { return sameColor(colorOf(thumb), harness.token("text")); }));
+    const QColor active = transport->property("volumeThumbActiveColor").value<QColor>();
+    QVERIFY(stepUntil(animations, [&] { return sameColor(colorOf(thumb), active); }));
     QVERIFY(sameColor(colorOf(fill), unfilled));
     QTest::mouseMove(harness.window, sceneCentre(mute));
     QVERIFY(stepUntil(animations, [&] { return sameColor(colorOf(thumb), unfilled); }));

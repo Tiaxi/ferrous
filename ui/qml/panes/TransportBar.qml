@@ -143,6 +143,15 @@ ToolBar {
     readonly property color volumeFilledColor: root.seekPlayedColor
     readonly property color volumeUnfilledColor: ColorUtils.mixColor(
         root.chromeColor, root.seekPlayedColor, root.seekUnplayedOpacity)
+    // The thumb under the pointer or dragged, a clear step from it at
+    // rest: on dark the text colour, brighter than the played colour
+    // (#fcfcfc from #a8cbde); on light the accent as the focus ring draws
+    // it, as Breeze marks a hovered handle, 3:1 on the chrome (#1c76a6 from
+    // #294758). The light theme's text, #232629, was all but the played
+    // colour, so hover and a drag went unseen.
+    readonly property color volumeThumbActiveColor: root.themeIsDark
+        ? root.uiPalette.text
+        : root.uiPalette.focusRing
 
     // The window's device pixels to a logical one, which fractional scaling
     // can make differ from its screen's. Qt before 6.11 gives only the
@@ -1630,7 +1639,7 @@ ToolBar {
             }
 
             // The solid thumb: the played colour, the unplayed one at rest
-            // while muted, as the fill, and the text colour while hovered
+            // while muted, as the fill, and the active colour while hovered
             // or dragged. Keyboard focus draws a 2 px ring around it.
             handle: Rectangle {
                 objectName: "volumeThumb"
@@ -1642,7 +1651,7 @@ ToolBar {
                 implicitHeight: volumeSlider.thumbSize
                 radius: width / 2
                 color: tinted
-                    ? root.uiPalette.text
+                    ? root.volumeThumbActiveColor
                     : (root.volumeMuted ? root.volumeUnfilledColor : root.volumeFilledColor)
                 border.width: 0
 
