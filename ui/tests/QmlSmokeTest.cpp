@@ -117,8 +117,16 @@ bool showOnScreen(QQuickWindow &window, double scale) {
 OverlayOnScreen overlayOnScreen(QSGNode *node, int layer) {
     OverlayOnScreen shown;
     QSGNode *root = node->childAtIndex(layer);
-    QSGNode *lines = root->childAtIndex(0);
-    QSGNode *images = root->childAtIndex(1);
+    // Its images, then its lines' casings and its lines over them.
+    QSGNode *images = root->childAtIndex(0);
+    QSGNode *casings = root->childAtIndex(1);
+    QSGNode *lines = root->childAtIndex(2);
+    for (int i = 0; i < casings->childCount(); ++i) {
+        const auto *casing = static_cast<QSGSimpleRectNode *>(casings->childAtIndex(i));
+        if (!casing->rect().isEmpty()) {
+            shown.casings.push_back(casing->rect());
+        }
+    }
     for (int i = 0; i < lines->childCount(); ++i) {
         const auto *line = static_cast<QSGSimpleRectNode *>(lines->childAtIndex(i));
         if (!line->rect().isEmpty()) {

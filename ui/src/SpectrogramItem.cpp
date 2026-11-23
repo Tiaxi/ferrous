@@ -296,18 +296,23 @@ struct SpectrogramPlacedOverlayImage {
 // What an overlay draws in a frame, in logical pixels.
 struct SpectrogramOverlayFrame {
     QVector<QRectF> lines;
+    // The lines' casings, in plotOutline under them.
+    QVector<QRectF> casings;
     QVector<SpectrogramPlacedOverlayImage> images;
 };
 
-// An overlay's nodes: rectangles for its lines, then its images above them.
+// An overlay's nodes: its images, then rectangles for its lines' casings
+// and its lines above them, so a label's shade never dims a tick.
 struct SpectrogramOverlayLayer {
     QSGNode *root{nullptr};
     // The root of a layer that fades as a whole, or null.
     QSGOpacityNode *opacity{nullptr};
-    QSGNode *linesRoot{nullptr};
     QSGNode *imagesRoot{nullptr};
-    QVector<QSGSimpleRectNode *> lines;
+    QSGNode *casingsRoot{nullptr};
+    QSGNode *linesRoot{nullptr};
     QVector<QSGSimpleTextureNode *> images;
+    QVector<QSGSimpleRectNode *> casings;
+    QVector<QSGSimpleRectNode *> lines;
 
     explicit SpectrogramOverlayLayer(bool fades = false) {
         if (fades) {
@@ -316,10 +321,12 @@ struct SpectrogramOverlayLayer {
         } else {
             root = new QSGNode();
         }
-        linesRoot = new QSGNode();
         imagesRoot = new QSGNode();
-        root->appendChildNode(linesRoot);
+        casingsRoot = new QSGNode();
+        linesRoot = new QSGNode();
         root->appendChildNode(imagesRoot);
+        root->appendChildNode(casingsRoot);
+        root->appendChildNode(linesRoot);
     }
 };
 
@@ -544,22 +551,28 @@ struct SpectrogramSceneNode final : public QSGNode {
         SpectrogramOverlayLayer &layer,
         const SpectrogramOverlayFrame &frame,
         const QColor &lineColor,
-        QQuickWindow *window) {
-        while (layer.lines.size() < frame.lines.size()) {
-            auto *line = new QSGSimpleRectNode();
-            layer.linesRoot->appendChildNode(line);
-            layer.lines.push_back(line);
-        }
-        for (int i = 0; i < layer.lines.size(); ++i) {
-            QSGSimpleRectNode *line = layer.lines[i];
-            const QRectF rect = i < frame.lines.size() ? frame.lines[i] : QRectF();
-            if (line->color() != lineColor) {
-                line->setColor(lineColor);
+        QQuickWindow *window,
+        const QColor &casingColor = QColor()) {
+        const auto showRects = [](QSGNode *parent, QVector<QSGSimpleRectNode *> &nodes,
+                                  const QVector<QRectF> &rects, const QColor &color) {
+            while (nodes.size() < rects.size()) {
+                auto *node = new QSGSimpleRectNode();
+                parent->appendChildNode(node);
+                nodes.push_back(node);
             }
-            if (line->rect() != rect) {
-                line->setRect(rect);
+            for (int i = 0; i < nodes.size(); ++i) {
+                QSGSimpleRectNode *node = nodes[i];
+                const QRectF rect = i < rects.size() ? rects[i] : QRectF();
+                if (node->color() != color) {
+                    node->setColor(color);
+                }
+                if (node->rect() != rect) {
+                    node->setRect(rect);
+                }
             }
-        }
+        };
+        showRects(layer.casingsRoot, layer.casings, frame.casings, casingColor);
+        showRects(layer.linesRoot, layer.lines, frame.lines, lineColor);
         int shown = 0;
         for (const SpectrogramPlacedOverlayImage &placed : frame.images) {
             QSGTexture *texture = overlayTextures.value(placed.key);
@@ -1469,6 +1482,71 @@ QFont scaleLabelFont(double textScale) {
 // A scale label's outline, around its text on every side.
 constexpr int kScaleLabelOutline = 1;
 
+// A scale label's shade: plotOutline at 55 % under its outline, reaching
+// 2 px past it and softening over the last. Over hot data, where the 1 px
+// outline alone left the numerals busy, each label gets a dark surround of
+// its own; on the plot's floor it is all but the floor, so the scale stays
+// outlined text there, never a plate or a ruler. Not part of the label's
+// layout: it spills past its rect.
+constexpr int kScaleLabelShade = 2;
+constexpr int kScaleLabelShadeAlpha = 140;
+
+// The device pixels a label's image reaches past its rect on each side:
+// a scale label's shade's; none for the rest.
+int overlayImageMargin(const SpectrogramOverlayImage &image, double scale) {
+    return image.kind == SpectrogramOverlayImage::ScaleLabel ? devicePixels(kScaleLabelShade, scale) : 0;
+}
+
+// `ink` over its shade, which reaches `reach` device pixels past its
+// opaque pixels, its last pixel soft.
+QImage shadedScaleLabel(const QImage &ink, int reach) {
+    const int width = ink.width();
+    const int height = ink.height();
+    // The offsets within reach, with how much each covers.
+    struct Offset {
+        int dx;
+        int dy;
+        double coverage;
+    };
+    std::vector<Offset> disk;
+    for (int dy = -reach; dy <= reach; ++dy) {
+        for (int dx = -reach; dx <= reach; ++dx) {
+            const double coverage = std::clamp(reach + 0.5 - std::hypot(dx, dy), 0.0, 1.0);
+            if (coverage > 0.0) disk.push_back({dx, dy, coverage});
+        }
+    }
+    std::vector<double> cover(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0.0);
+    for (int y = 0; y < height; ++y) {
+        const auto *row = reinterpret_cast<const QRgb *>(ink.constScanLine(y));
+        for (int x = 0; x < width; ++x) {
+            if (qAlpha(row[x]) < 128) continue;
+            for (const Offset &offset : disk) {
+                const int sx = x + offset.dx;
+                const int sy = y + offset.dy;
+                if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
+                double &at = cover[static_cast<std::size_t>(sy) * static_cast<std::size_t>(width)
+                    + static_cast<std::size_t>(sx)];
+                at = std::max(at, offset.coverage);
+            }
+        }
+    }
+    QImage shaded(ink.size(), QImage::Format_ARGB32_Premultiplied);
+    shaded.setDevicePixelRatio(ink.devicePixelRatio());
+    for (int y = 0; y < height; ++y) {
+        auto *row = reinterpret_cast<QRgb *>(shaded.scanLine(y));
+        for (int x = 0; x < width; ++x) {
+            const double at = cover[static_cast<std::size_t>(y) * static_cast<std::size_t>(width)
+                + static_cast<std::size_t>(x)];
+            // Black, premultiplied as it is.
+            row[x] = qRgba(0, 0, 0, static_cast<int>(std::lround(at * kScaleLabelShadeAlpha)));
+        }
+    }
+    QPainter painter(&shaded);
+    painter.drawImage(QPointF(0.0, 0.0), ink);
+    painter.end();
+    return shaded;
+}
+
 // The logical pixels between a rest line and its scale label's outline.
 constexpr double kRestLineLabelGap = 6.0;
 
@@ -1590,8 +1668,10 @@ QSize overlayImagePixels(const SpectrogramOverlayImage &image, double scale) {
         return {length, lineWidth};
     default:
         return {
-            std::max(1, static_cast<int>(std::ceil(image.rect.width() * scale - 1e-6))),
-            std::max(1, static_cast<int>(std::ceil(image.rect.height() * scale - 1e-6)))};
+            std::max(1, static_cast<int>(std::ceil(image.rect.width() * scale - 1e-6)))
+                + 2 * overlayImageMargin(image, scale),
+            std::max(1, static_cast<int>(std::ceil(image.rect.height() * scale - 1e-6)))
+                + 2 * overlayImageMargin(image, scale)};
     }
 }
 
@@ -1642,7 +1722,8 @@ QImage renderOverlayImage(
         return readout;
     }
     // A scale label: its text in a 1 px outline, at device resolution, as
-    // Text.Outline draws it.
+    // Text.Outline draws it, over its shade past its rect.
+    const int margin = overlayImageMargin(image, scale);
     QImage label(overlayImagePixels(image, scale), QImage::Format_ARGB32_Premultiplied);
     label.setDevicePixelRatio(scale);
     label.fill(Qt::transparent);
@@ -1650,7 +1731,8 @@ QImage renderOverlayImage(
     painter.setRenderHint(QPainter::TextAntialiasing, true);
     const QFont font = scaleLabelFont(textScale);
     painter.setFont(font);
-    const QPointF origin(kScaleLabelOutline, kScaleLabelOutline + QFontMetrics(font).ascent());
+    const QPointF origin(kScaleLabelOutline + margin / scale,
+                         kScaleLabelOutline + margin / scale + QFontMetrics(font).ascent());
     painter.setPen(kScaleOutlineColor);
     for (int dx = -kScaleLabelOutline; dx <= kScaleLabelOutline; ++dx) {
         for (int dy = -kScaleLabelOutline; dy <= kScaleLabelOutline; ++dy) {
@@ -1661,7 +1743,7 @@ QImage renderOverlayImage(
         ? kRestScaleTextColor : kScaleTextColor);
     painter.drawText(origin, image.text);
     painter.end();
-    return label;
+    return margin > 0 ? shadedScaleLabel(label, margin) : label;
 }
 
 // The crosshair's readout of a level: "−62 dB", "−∞ dB" for silence, or
@@ -5595,14 +5677,21 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 if (rect.intersects(pane) && rect.left() >= shown.left()
                     && rect.left() <= shown.right()) {
                     frame.lines.push_back(rect);
+                    if (layout.casing > 0) {
+                        const double casing = layout.casing / scale;
+                        frame.casings.push_back(
+                            rect.adjusted(-casing, -casing, casing, casing).intersected(pane));
+                    }
                 }
             }
             for (const SpectrogramOverlayImage &image : layout.images) {
-                // Whole device pixels, one texel to each.
+                // Whole device pixels, one texel to each, a label's shade
+                // reaching past its rect.
                 const QSize pixels = overlayImagePixels(image, scale);
+                const int margin = overlayImageMargin(image, scale);
                 const QRectF rect(
-                    std::round((image.rect.x() * scale) - shift) / scale,
-                    std::round(image.rect.y() * scale) / scale,
+                    (std::round((image.rect.x() * scale) - shift) - margin) / scale,
+                    (std::round(image.rect.y() * scale) - margin) / scale,
                     pixels.width() / scale,
                     pixels.height() / scale);
                 if (!rect.intersects(pane) || rect.center().x() < shown.left()
@@ -6578,8 +6667,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     // The scale and the crosshair: ticks, and small images one texel to a
     // device pixel.
     node->showOverlay(node->restGridLayer, restGridFrame, kRestGridLineColor, currentWindow);
-    node->showOverlay(node->freqGridLayer, freqGridFrame, kScaleTickColor, currentWindow);
-    node->showOverlay(node->timeGridLayer, timeGridFrame, kScaleTickColor, currentWindow);
+    node->showOverlay(node->freqGridLayer, freqGridFrame, kScaleTickColor, currentWindow, kScaleOutlineColor);
+    node->showOverlay(node->timeGridLayer, timeGridFrame, kScaleTickColor, currentWindow, kScaleOutlineColor);
     node->showOverlay(node->crosshairLayer, crosshairFrame, QColor(), currentWindow);
     if (node->crosshairLayer.opacity->opacity() != crosshairOpacity) {
         node->crosshairLayer.opacity->setOpacity(crosshairOpacity);
@@ -7616,6 +7705,9 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
     const int tickEnd = std::max(
         0, width - (m_scaleEdgeClearance > 0 ? devicePixels(m_scaleEdgeClearance, scale) : 0));
     const int labelGap = frequencyScaleLabelGapLocked();
+    // Each tick cased in the labels' outline, so it reads over hot data as
+    // they do (bare, it vanished into a bright broadband field, H29).
+    m_freqGrid.casing = devicePixels(kScaleLabelOutline, scale);
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
              m_iToBin, m_binsPerColumn, binHzLocked(), width, height, scale,
              frequencyScaleTopClearanceLocked(), labelGap, m_textScale)) {
@@ -7723,6 +7815,8 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
     const double scale = m_canvasScale;
     const int lineWidth = deviceLineWidth(scale);
     const int tickHeight = devicePixels(5.0, scale);
+    // Cased as the frequency scale's ticks.
+    m_timeGrid.casing = devicePixels(kScaleLabelOutline, scale);
     // Laid out wider than the widget so that each frame can shift it
     // instead of laying it out again; the frame clips what it shifts out.
     const int renderWidth = width + padding;

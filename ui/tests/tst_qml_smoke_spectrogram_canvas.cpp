@@ -4911,20 +4911,27 @@ void SpectrogramCanvasSmokeTest::spectrogramDrawsAtDevicePixels() {
     };
 
     // The frequency scale's ticks are on device rows, on whole hundreds of
-    // hertz, 4 px at the right edge; its labels are drawn at device
-    // resolution.
+    // hertz, 4 px at the right edge, each cased in 1 px on device pixels;
+    // its labels are drawn at device resolution.
     QVERIFY(item.m_freqGrid.valid);
     QCOMPARE(item.m_freqGrid.size, QSize(deviceWidth, deviceHeight));
     QVERIFY(!item.m_freqGrid.lines.isEmpty());
     const OverlayOnScreen freqGrid = overlayOnScreen(node, 5);
     QCOMPARE(freqGrid.lines.size(), item.m_freqGrid.lines.size());
     const int tickWidth = static_cast<int>(std::floor(4 * scale + 1e-6));
+    QCOMPARE(freqGrid.casings.size(), freqGrid.lines.size());
     for (int i = 0; i < item.m_freqGrid.lines.size(); ++i) {
         const QRect line = item.m_freqGrid.lines[i];
         QCOMPARE(line, QRect(deviceWidth - tickWidth, line.y(), tickWidth, lineWidth));
         // devicePixels() floors: whole device pixels within the 4 px.
         QVERIFY(nearlyEqual(freqGrid.lines[i],
             QRectF(line.x() / scale, line.y() / scale, tickWidth / scale, lineWidth / scale)));
+        // Its casing, within the plot: at its edge, only on the plot's side.
+        const int casing = static_cast<int>(std::floor(scale + 1e-6));
+        QVERIFY(nearlyEqual(freqGrid.casings[i],
+            QRectF((line.x() - casing) / scale, (line.y() - casing) / scale,
+                   (tickWidth + casing) / scale, (lineWidth + 2 * casing) / scale)));
+        QVERIFY(onDevicePixels(freqGrid.casings[i]));
         const double hz = item.pixelToFrequencyHzLocked(line.y(), deviceHeight);
         const double hzPerRow = 24000.0 / deviceHeight;
         QVERIFY2(std::abs(hz - std::round(hz / 100.0) * 100.0) <= hzPerRow,

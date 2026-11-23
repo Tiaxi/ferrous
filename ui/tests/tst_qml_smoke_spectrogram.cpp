@@ -73,6 +73,7 @@ private slots:
     void spectrogramScaleFollowsTheMeterInThePane();
     void spectrogramScaleTickIsDrawnOnTheLabelsOuterSide_data();
     void spectrogramScaleTickIsDrawnOnTheLabelsOuterSide();
+    void spectrogramScaleReadsOverHotData();
     void spectrogramGridOverlayGeneratesWhenEnabled();
     void spectrogramAtRestDrawsItsScaleFaintly_data();
     void spectrogramAtRestDrawsItsScaleFaintly();
@@ -3651,6 +3652,9 @@ void SpectrogramSmokeTest::spectrogramScaleTicksAreOnTheLabelsOuterSide() {
     }
     QVERIFY(scaleShown.images.size() >= 2);
     QCOMPARE(scaleShown.lines.size(), scaleShown.images.size());
+    // Each tick cased in the labels' 1 px outline; the lines at rest not.
+    QCOMPARE(scaleShown.casing, qRound(scale));
+    QCOMPARE(rest.casing, 0);
     double widest = 0.0;
     for (qsizetype index = 0; index < scaleShown.images.size(); ++index) {
         const QRectF label = scaleShown.images.at(index).rect;
@@ -3738,6 +3742,92 @@ void SpectrogramSmokeTest::spectrogramScaleTickIsDrawnOnTheLabelsOuterSide() {
         for (int x = qRound(label.left()) - 10; x < qRound(label.left()); ++x) {
             QVERIFY2(image.pixelColor(x, row) == QColor(Qt::black), at(x));
         }
+    }
+}
+
+// Over hot data, where the bare ticks vanished into a bright broadband
+// field and the outlined numerals read as busy (H29), each tick is cased
+// in the labels' outline, 1 px of black round its 60 % core, and each
+// label has a shade of its own, black at 55 % reaching 2 px past its
+// outline and soft over the last. Both stay local: 4 px from a label and
+// between labels the data shows as it is, so the scale is no ruler band.
+void SpectrogramSmokeTest::spectrogramScaleReadsOverHotData() {
+    QQuickWindow window;
+    window.resize(400, 200);
+    auto *item = new SpectrogramItem(window.contentItem());
+    item->setSize(QSizeF(400, 200));
+    item->setSampleRateHz(48'000);
+    item->setDisplayMode(1);
+    item->setGridEnabled(true);
+    item->setScaleEdgeClearance(8);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    // One hot level everywhere: the colour map's orange.
+    constexpr int bins = 4'097;
+    constexpr int columns = 1'000;
+    item->feedPrecomputedChunk(QByteArray(bins * columns, '\xd0'), bins, 0, columns, 0, columns, 48'000,
+                               1'024, false, true, 1, false);
+    QTRY_VERIFY(item->viewFilled());
+    SpectrogramOverlayLayout scaleShown;
+    QTRY_VERIFY((scaleShown = [item]() {
+        QMutexLocker lock(&item->m_stateMutex);
+        return item->m_freqGrid;
+    }()).images.size() >= 2);
+    const auto grab = [&window]() { return window.grabWindow().convertToFormat(QImage::Format_RGB32); };
+    const QRect firstTick = scaleShown.lines.constFirst();
+    QTRY_VERIFY(std::abs(grab().pixelColor(firstTick.x(), firstTick.y()).red() - 142) <= 1);
+    const QImage image = grab();
+    // The data, away from the scale.
+    const QColor data = image.pixelColor(100, 100);
+    QVERIFY2(data.lightnessF() > 0.4, qPrintable(data.name()));
+    const auto near = [](const QColor &drawn, const QColor &expected) {
+        return std::abs(drawn.red() - expected.red()) <= 1 && std::abs(drawn.green() - expected.green()) <= 1
+            && std::abs(drawn.blue() - expected.blue()) <= 1;
+    };
+    const auto describe = [&image](int x, int y) {
+        return qPrintable(QStringLiteral("x %1, y %2: %3").arg(x).arg(y).arg(image.pixelColor(x, y).name()));
+    };
+    for (qsizetype index = 0; index < scaleShown.images.size(); ++index) {
+        const QRect tick = scaleShown.lines.at(index);
+        const int row = tick.y();
+        // The core, in plotTick over the casing.
+        for (int x = tick.left(); x <= tick.right(); ++x) {
+            QVERIFY2(near(image.pixelColor(x, row), QColor(142, 142, 142)), describe(x, row));
+            QVERIFY2(image.pixelColor(x, row - 1) == QColor(Qt::black), describe(x, row - 1));
+            QVERIFY2(image.pixelColor(x, row + 1) == QColor(Qt::black), describe(x, row + 1));
+        }
+        QVERIFY2(image.pixelColor(tick.left() - 1, row) == QColor(Qt::black), describe(tick.left() - 1, row));
+        QVERIFY2(image.pixelColor(tick.right() + 1, row) == QColor(Qt::black), describe(tick.right() + 1, row));
+        // Past the casing, toward the meter, the data.
+        QVERIFY2(near(image.pixelColor(tick.right() + 2, row), data), describe(tick.right() + 2, row));
+        QVERIFY2(near(image.pixelColor(tick.left(), row - 2), data), describe(tick.left(), row - 2));
+
+        // The label's shade: round its outlined text, between its digits
+        // and letters, darkening the data. Without it about half of the
+        // label's rect showed the data as it is; with it under a third.
+        const QRect label = scaleShown.images.at(index).rect.toAlignedRect();
+        int plain = 0;
+        for (int y = label.top(); y <= label.bottom(); ++y) {
+            for (int x = label.left(); x <= label.right(); ++x) {
+                plain += near(image.pixelColor(x, y), data) ? 1 : 0;
+            }
+        }
+        QVERIFY2(plain * 10 < label.width() * label.height() * 3,
+                 qPrintable(QStringLiteral("%1 of %2").arg(plain).arg(label.width() * label.height())));
+        // 4 px out, the data as it is.
+        const int middle = label.center().y();
+        for (const QPoint &clear : {QPoint(label.left() - 4, middle), QPoint(label.center().x(), label.top() - 4),
+                                    QPoint(label.center().x(), label.bottom() + 4)}) {
+            QVERIFY2(near(image.pixelColor(clear), data), describe(clear.x(), clear.y()));
+        }
+    }
+    // Between two labels, the data as it is: no band along the scale.
+    QRectF upper = scaleShown.images.at(0).rect;
+    QRectF lower = scaleShown.images.at(1).rect;
+    if (upper.top() > lower.top()) std::swap(upper, lower);
+    const int between = qRound((upper.bottom() + lower.top()) / 2);
+    for (int x = qRound(upper.left()); x < 400 - 8; ++x) {
+        QVERIFY2(near(image.pixelColor(x, between), data), describe(x, between));
     }
 }
 
