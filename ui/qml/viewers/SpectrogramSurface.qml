@@ -553,6 +553,9 @@ Item {
                             root.followedAgain(fromStartSeconds, fromEndSeconds)
                         }
                     }
+                    // A wheel zoom is the pointer's activity too, also
+                    // where it rests.
+                    onWheelZoomed: (scenePosition) => root.notePointerActivity(scenePosition.x, scenePosition.y)
                     onPanPressedChanged: {
                         if (spectrogramPaneItem.panPressed) {
                             root._panLane = spectrogramPaneItem

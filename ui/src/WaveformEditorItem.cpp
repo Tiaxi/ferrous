@@ -4456,6 +4456,7 @@ void WaveformEditorItem::wheelEvent(QWheelEvent *event) {
     const double steps = event->angleDelta().y() / 120.0;
     if (std::abs(steps) < 0.01) { event->ignore(); return; }
     event->accept();
+    emit wheelZoomed(mapToScene(event->position()));
     {
         QMutexLocker lock(&m_stateMutex);
         const qint64 nowNs = m_nowNs();

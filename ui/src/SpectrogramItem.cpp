@@ -7192,6 +7192,7 @@ void SpectrogramItem::wheelEvent(QWheelEvent *event) {
         return;
     }
     event->accept();
+    emit wheelZoomed(mapToScene(event->position()));
 
     constexpr double kZoomStepFactor = 1.25;
     SpectrogramViewFollow *follow = m_viewFollow.data();

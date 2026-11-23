@@ -63,6 +63,8 @@ private slots:
     void laneHeadsStayQuietThroughAPan();
     void laneHeadsCloseOnTheMiddlePress_data();
     void laneHeadsCloseOnTheMiddlePress();
+    void wheelZoomIsPointerActivity_data();
+    void wheelZoomIsPointerActivity();
     void zoomPlateTextIsDrawnAsThePlotPlatesIs();
     void crosshairGivesWayToAutoscroll_data();
     void crosshairGivesWayToAutoscroll();
@@ -7235,6 +7237,43 @@ void TransportInputSmokeTest::viewerDragsCountAsPointerActivity() {
     autoHide->setProperty("hideDelay", 600000);
     QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "closeAlbumArtViewer" : "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property(albumArt ? "albumArtViewerOpen" : "spectrogramViewerOpen").toBool());
+}
+
+void TransportInputSmokeTest::wheelZoomIsPointerActivity_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// A wheel zoom is the pointer's activity, as a move is, though the pointer
+// rests where it is: a viewer whose controls hid as it rested wakes them,
+// with its zoom (H20). It zoomed with them hidden.
+void TransportInputSmokeTest::wheelZoomIsPointerActivity() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QQuickItem *plotSurface = mode == 0
+        ? corner.spectrogramSurface
+        : window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(plotSurface != nullptr);
+    QVERIFY(zoomWithColumns(corner, 1.0));
+    // Rested on the plot since it came, the pointer turns the wheel.
+    QTest::mouseMove(window, corner.onPane());
+    QJSValue activity = engine.evaluate(QStringLiteral(
+        "(function() { const seen = []; const f = function(x, y) { seen.push([x, y]) };"
+        " f.seen = seen; return f })()"));
+    QVERIFY(activity.isCallable());
+    plotSurface->setProperty("pointerActivity", QVariant::fromValue(activity));
+    wheelAt(window, corner.onPane());
+    QTRY_VERIFY(corner.readout->property("zoomLevel").toDouble() > 1.0);
+    const QJSValue seen = activity.property(QStringLiteral("seen"));
+    QCOMPARE(seen.property(QStringLiteral("length")).toInt(), 1);
+    QCOMPARE(seen.property(0).property(0).toNumber(), double(corner.onPane().x()));
+    QCOMPARE(seen.property(0).property(1).toNumber(), double(corner.onPane().y()));
 }
 
 std::unique_ptr<QmlSmokeTest> makeTransportInputSmokeTest(const QString &userDirectoriesParent) {

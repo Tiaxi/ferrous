@@ -640,6 +640,9 @@ signals:
     void detachedChanged();
     void panningChanged();
     void panPressedChanged();
+    // A wheel zoomed the plot at `scenePosition`: the pointer acted there,
+    // as when it moves, though it rests where it is.
+    void wheelZoomed(QPointF scenePosition);
     void pointerOnChanged();
 
 protected:

@@ -110,6 +110,12 @@ Item {
     WaveformEditorItem {
         id: waveform
         objectName: "waveformEditorItem"
+        // A wheel zoom is the pointer's activity too, also where it rests.
+        onWheelZoomed: (scenePosition) => {
+            if (root.pointerActivity) {
+                root.pointerActivity(scenePosition.x, scenePosition.y)
+            }
+        }
         width: root.plotWidth
         height: root.height
         // Hidden too: the item decodes nothing while it is not shown, and
