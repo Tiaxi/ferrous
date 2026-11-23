@@ -1705,14 +1705,6 @@ ApplicationWindow {
             seekCommitted: playbackController.seekCommitted
             viewStartSeconds: visualizationSurface.viewStartSeconds
             viewEndSeconds: visualizationSurface.viewEndSeconds
-            viewDetached: visualizationSurface.detached
-
-            Connections {
-                target: visualizationSurface
-                function onViewFollowedAgain(fromStartSeconds, fromEndSeconds) {
-                    transportBar.viewFollowedAgain(fromStartSeconds, fromEndSeconds)
-                }
-            }
         }
 
         // The first of the four seams: between the transport's chrome and
@@ -2033,28 +2025,6 @@ ApplicationWindow {
             : visualizationSurface.viewBandMode === 0
                 ? spectrogramSurface.visibleEndSeconds
                 : waveformSurface.waveformItem.visibleEndSeconds
-        // That view, moved by the user, follows the playhead again in its
-        // track, where it showed `fromStartSeconds` to `fromEndSeconds`:
-        // told once viewStartSeconds and viewEndSeconds give where it is
-        // now, for the seek bar's band to go there from where it was.
-        signal viewFollowedAgain(real fromStartSeconds, real fromEndSeconds)
-        Connections {
-            target: spectrogramSurface
-            function onFollowedAgain(fromStartSeconds, fromEndSeconds) {
-                if (visualizationSurface.viewBandMode === 0) {
-                    visualizationSurface.viewFollowedAgain(fromStartSeconds, fromEndSeconds)
-                }
-            }
-        }
-        Connections {
-            target: waveformSurface.waveformItem
-            function onFollowedAgain(fromStartSeconds, fromEndSeconds) {
-                if (visualizationSurface.viewBandMode === 1) {
-                    visualizationSurface.viewFollowedAgain(fromStartSeconds, fromEndSeconds)
-                }
-            }
-        }
-
         // View › Reset Zoom, and the viewer's Reset: the shown plot at its
         // default zoom, following the playhead. Nothing else changes; the
         // spectrogram keeps what it has drawn.

@@ -54,8 +54,8 @@ private slots:
     void notFollowingComesInWithThePlate();
     void plotsTellFollowingAgainInOneOrder_data();
     void plotsTellFollowingAgainInOneOrder();
-    void seekBarBandGlidesAsTheViewFollowsAgain_data();
-    void seekBarBandGlidesAsTheViewFollowsAgain();
+    void seekBarBandLandsWithThePlot_data();
+    void seekBarBandLandsWithThePlot();
     void zoomPlateSpacesItsDividerEvenly();
     void movedViewSaysSoInTheViewers_data();
     void movedViewSaysSoInTheViewers();
@@ -4751,17 +4751,19 @@ void TransportInputSmokeTest::plotsTellFollowingAgainInOneOrder() {
     for (const QMetaObject::Connection &c : std::as_const(connections)) QObject::disconnect(c);
 }
 
-void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain_data() {
+void TransportInputSmokeTest::seekBarBandLandsWithThePlot_data() {
     QTest::addColumn<int>("mode");
     QTest::newRow("spectrogram") << 0;
     QTest::newRow("waveform") << 1;
 }
 
 // As a moved view follows the playhead again, by Follow Playhead or a seek,
-// the seek bar's band glides from the moved view's place to the followed
-// one's, in either plot (TransportStatusTest has the rest); the plot cuts.
-// On Repeat-One, from the track's end back to its start, it moves at once.
-void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain() {
+// the seek bar's band is where the plot's view is in the frame the plot
+// shows it in, and stays there, in either plot: it glided there over 120
+// ms, behind a plot that had already landed, so the two moved differently
+// for one change (H16). On Repeat-One, from the track's end back to its
+// start, too.
+void TransportInputSmokeTest::seekBarBandLandsWithThePlot() {
     QFETCH(int, mode);
     PlaybackClock clock;
     LibraryTreeModel libraryModel;
@@ -4771,21 +4773,56 @@ void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain() {
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QVERIFY(shareClock(corner.window, clock, 100.0));
     QQuickWindow *window = corner.window;
-    auto *transport = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
     auto *seek = window->findChild<QQuickItem *>(QStringLiteral("seekSlider"));
     auto *band = window->findChild<QQuickItem *>(QStringLiteral("seekViewBand"));
-    QVERIFY(transport && seek && band);
+    QVERIFY(seek && band && band->parentItem());
+    QObject *plot = mode == 0 ? static_cast<QObject *>(corner.spectrogramSurface)
+                              : static_cast<QObject *>(corner.waveform);
     QTest::mouseMove(window, corner.away());
     QVERIFY(zoomWithColumns(corner, 4.0));
     QTRY_VERIFY(band->isVisible());
+    const qreal ratio = window->effectiveDevicePixelRatio();
+    // The band on the bar, and where the plot's view says it is.
+    const auto bandAt = [band]() {
+        const QRectF bar = sceneRectOf(band->parentItem());
+        const QRectF drawn = sceneRectOf(band);
+        return QPointF(drawn.left() - bar.left(), drawn.right() - bar.left());
+    };
+    const auto plotAt = [&]() {
+        QVariant left;
+        QVariant right;
+        if (!QMetaObject::invokeMethod(seek, "barPixelOf", Q_RETURN_ARG(QVariant, left),
+                                       Q_ARG(QVariant, plot->property("visibleStartSeconds")))
+            || !QMetaObject::invokeMethod(seek, "barPixelOf", Q_RETURN_ARG(QVariant, right),
+                                          Q_ARG(QVariant, plot->property("visibleEndSeconds")))) {
+            return QPointF(-1.0, -1.0);
+        }
+        return QPointF(std::round(left.toDouble()) / ratio, std::round(right.toDouble()) / ratio);
+    };
     const auto moveView = [&]() -> double {
-        if (!corner.moveView() || !transport->property("viewDetached").toBool()) return -1.0;
+        if (!corner.moveView()) return -1.0;
         // A frame of the moved view, which the spectrogram says it shows as
         // it draws it, and the events that come after it.
         window->grabWindow();
         QTest::qWait(50);
         window->grabWindow();
-        return band->isVisible() ? sceneRectOf(band).left() : -1.0;
+        return band->isVisible() ? bandAt().x() : -1.0;
+    };
+    // Frame by frame from the one the view comes back in: the band is
+    // where the plot is, which is not where it was moved to.
+    const auto landsWithThePlot = [&](SteppedAnimationDriver &animations, double movedLeft) {
+        QString path;
+        for (int frame = 0; frame <= 12; ++frame) {
+            window->grabWindow();
+            const QPointF at = bandAt();
+            path += QString::number(at.x()) + QLatin1Char(' ');
+            if (at != plotAt() || std::abs(at.x() - movedLeft) < 20.0) {
+                return QStringLiteral("frame %1: band %2-%3, plot %4-%5; band %6")
+                    .arg(frame).arg(at.x()).arg(at.y()).arg(plotAt().x()).arg(plotAt().y()).arg(path);
+            }
+            (void)animations.step(16);
+        }
+        return QString();
     };
 
     for (const bool bySeek : {false, true}) {
@@ -4797,44 +4834,21 @@ void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain() {
         } else {
             QVERIFY(QMetaObject::invokeMethod(corner.surface, "followPlayhead"));
         }
-        QVERIFY(!transport->property("viewDetached").toBool());
-        // Frame by frame: where the band is.
-        QList<double> lefts;
-        window->grabWindow();
-        lefts.append(sceneRectOf(band).left());
-        for (int frame = 1; frame <= 12; ++frame) {
-            QVERIFY(animations.step(16));
-            window->grabWindow();
-            lefts.append(sceneRectOf(band).left());
-        }
-        QString path;
-        for (const double left : std::as_const(lefts)) path += QString::number(left) + QLatin1Char(' ');
-        // Where it was as the view came back, then on its way, then there.
-        QCOMPARE(lefts.first(), movedLeft);
-        const double followedLeft = lefts.last();
-        QVERIFY2(std::abs(followedLeft - movedLeft) > 20.0, qPrintable(path));
-        QCOMPARE(lefts.at(lefts.size() - 2), followedLeft);
-        qsizetype between = 0;
-        for (qsizetype frame = 1; frame < lefts.size(); ++frame) {
-            QVERIFY2((lefts.at(frame) - lefts.at(frame - 1)) * (followedLeft - movedLeft) >= 0, qPrintable(path));
-            if (lefts.at(frame) != movedLeft && lefts.at(frame) != followedLeft) ++between;
-        }
-        QVERIFY2(between >= 4, qPrintable(path));
+        QVERIFY(!corner.surface->property("detached").toBool());
+        const QString failure = landsWithThePlot(animations, movedLeft);
+        QVERIFY2(failure.isEmpty(), qPrintable(failure));
     }
 
-    // Repeat-One from a view moved late in the track: the band goes to the
-    // start at once, rather than across the whole bar.
+    // Repeat-One from a view moved late in the track.
     setSharedPosition(clock, 200.0);
-    QVERIFY(moveView() >= 0.0);
+    const double movedLeft = moveView();
+    QVERIFY(movedLeft >= 0.0);
     {
         SteppedAnimationDriver animations;
         setSharedPosition(clock, 0.0, clock.state().trackToken + 1);
-        QTRY_VERIFY(!transport->property("viewDetached").toBool());
-        for (int frame = 0; frame <= 8; ++frame) {
-            window->grabWindow();
-            QCOMPARE(seek->property("viewBandGlide").toDouble(), 0.0);
-            (void)animations.step(16);
-        }
+        QTRY_VERIFY(!corner.surface->property("detached").toBool());
+        const QString failure = landsWithThePlot(animations, movedLeft);
+        QVERIFY2(failure.isEmpty(), qPrintable(failure));
     }
 }
 
