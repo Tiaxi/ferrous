@@ -43,6 +43,8 @@ private slots:
     void mainPaneCornerShowsAndHidesAsOneRow();
     void mainPaneCornerAndCrosshairShareOneHover_data();
     void mainPaneCornerAndCrosshairShareOneHover();
+    void laneSeamIsOnThePlot_data();
+    void laneSeamIsOnThePlot();
     void zoomReadoutKeepsItsWidthAsItsDigitsChange();
     void resetZoomResetsOnlyTheShownPlotsZoom();
     void resetZoomIsOffAtAShortTracksStretchedDefault();
@@ -2861,6 +2863,101 @@ void TransportInputSmokeTest::mainPaneCornerAndCrosshairShareOneHover() {
     QVERIFY2(agree(at, true).isEmpty(), qPrintable(QStringLiteral("past the edge: ") + agree(at, true)));
     QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, at.toPoint());
     QTRY_VERIFY2(agree(at, false).isEmpty(), qPrintable(QStringLiteral("let go: ") + agree(at, false)));
+}
+
+void TransportInputSmokeTest::laneSeamIsOnThePlot_data() {
+    // 0 the spectrogram, 1 the waveform.
+    QTest::addColumn<int>("view");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// Per channel, the 1 px seam between two lanes is neither lane's, but it is
+// on the plot: the corner's row and the crosshair stay there, rather than
+// go for a frame as the pointer crosses it (the lanes' hover is -1 there,
+// and the spectrogram's lanes are apart).
+void TransportInputSmokeTest::laneSeamIsOnThePlot() {
+    QFETCH(int, view);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QVERIFY(bridge && viewer && spectrogramSurface && waveformSurface && layer);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    bridge->setProperty("spectrogramViewMode", 1);
+    setChannelCount(bridge, spectrogramSurface, 2);
+    QQuickItem *surface = view == 1 ? waveformSurface : spectrogramSurface;
+    if (view == 1) {
+        viewer->setProperty("visualizationMode", 1);
+        QTRY_VERIFY(waveform->isVisible());
+        QTRY_VERIFY(waveform->crosshairEnabled());
+    }
+    QTRY_COMPARE(surface->property("laneCount").toInt(), 2);
+    const auto crosshairShown = [&](QPointF scene) {
+        if (view == 0) {
+            return spectrogramCrosshairShown(spectrogramSurface);
+        }
+        // What the waveform paints at the pointer that it paints without one.
+        const QSize size(int(waveform->width()), int(waveform->height()));
+        const auto painted = [&]() {
+            QImage image(size, QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::transparent);
+            QPainter painter(&image);
+            waveform->paint(&painter);
+            painter.end();
+            return image;
+        };
+        const QImage with = painted();
+        waveform->setCrosshairEnabled(false);
+        const QImage without = painted();
+        waveform->setCrosshairEnabled(true);
+        const int column = std::clamp(int(waveform->mapFromScene(scene).x()), 0, size.width() - 1);
+        for (int y = 0; y < size.height(); ++y) {
+            if (with.pixel(column, y) != without.pixel(column, y)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto agree = [&](QPointF scene, bool on) -> QString {
+        const bool corner = layer->property("cornerWanted").toBool();
+        const bool crosshair = crosshairShown(scene);
+        if (corner != on || crosshair != on) {
+            return QStringLiteral("at %1, %2: the corner %3, the crosshair %4")
+                .arg(scene.x()).arg(scene.y()).arg(corner ? "shown" : "hidden").arg(crosshair ? "shown" : "hidden");
+        }
+        return {};
+    };
+    const QRectF plot = sceneRectOf(surface);
+    // The seam's row: the first lane ends on it, the second starts after it.
+    const int seamRow = int(std::round(plot.height() / 2));
+    const QPointF away(8, window->height() - 8);
+    const QPointF above(plot.center().x(), plot.top() + seamRow - 6);
+    const QPointF seam(plot.center().x() + 3, plot.top() + seamRow);
+    const QPointF below(plot.center().x() + 6, plot.top() + seamRow + 6);
+    QTest::mouseMove(window, away.toPoint());
+    QTRY_VERIFY2(agree(away, false).isEmpty(), qPrintable(agree(away, false)));
+    for (const QPointF &at : {above, seam, below, seam}) {
+        QTest::mouseMove(window, at.toPoint());
+        QTRY_VERIFY2(agree(at, true).isEmpty(), qPrintable(agree(at, true)));
+    }
+    if (view == 0) {
+        // Through the seam, the lanes' line is at the pointer.
+        for (QQuickItem *lane : itemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem"))) {
+            QCOMPARE(lane->property("crosshairSharedX").toDouble(), lane->mapFromScene(seam.toPoint()).x());
+        }
+    }
+    QTest::mouseMove(window, away.toPoint());
+    QTRY_VERIFY2(agree(away, false).isEmpty(), qPrintable(agree(away, false)));
 }
 
 // The zoom readout is as wide as its widest four-digit value, its text

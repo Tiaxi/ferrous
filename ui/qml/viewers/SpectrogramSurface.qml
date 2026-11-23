@@ -54,9 +54,11 @@ Item {
     property int hoveredLane: -1
     // Where the pointer is on the plot, in the scene, while a lane has it.
     property point pointerScenePosition: Qt.point(0, 0)
-    // Whether the pointer is on the plot, or holds a button pressed on it:
-    // while it does, the crosshair shows (SpectrogramItem's pointerOn).
-    readonly property bool pointerOn: {
+    // Whether the pointer is on the plot, the seams between its lanes too,
+    // or holds a button pressed on it: while it does, the crosshair shows
+    // (SpectrogramItem's pointerOn).
+    readonly property bool pointerOn: root._seamHovered || root._lanePointerOn
+    readonly property bool _lanePointerOn: {
         for (let i = 0; i < spectrogramRepeater.count; ++i) {
             const pane = spectrogramRepeater.itemAt(i)
             if (pane && pane.spectrogramItem && pane.spectrogramItem.pointerOn) {
@@ -398,13 +400,35 @@ Item {
     // A fullscreen viewer closing right after a resize still reports it.
     Component.onDestruction: sendBackendWidth()
 
+    // Whether the pointer is on a seam between the lanes, which is neither
+    // lane's and has only this area under it: it is on the plot, and the
+    // lanes draw the crosshair's line and time through it, as for a pointer
+    // on another lane (the corner's row and the crosshair went there, a
+    // 1 px gap in one move across the plot).
+    readonly property bool _seamHovered: pointerArea.containsMouse && spectrogramRepeater.count > 1
+        && pointerArea.mouseX < root.plotWidth
+        && PlotLanes.laneAt(pointerArea.mouseY, spectrogramRepeater.count, root.height) < 0
+    function shareSeamCrosshair() {
+        if (root._seamHovered) {
+            root._crosshairSharedX = pointerArea.mouseX
+        } else if (!root._lanePointerOn) {
+            // A lane the pointer went on tells its own.
+            root._crosshairSharedX = -1.0
+        }
+    }
+    on_SeamHoveredChanged: root.shareSeamCrosshair()
+
     MouseArea {
+        id: pointerArea
         objectName: "spectrogramSurfacePointerArea"
         anchors.fill: parent
         acceptedButtons: Qt.NoButton
         hoverEnabled: true
         cursorShape: root.pointerCursorShape
         onPositionChanged: function(mouse) {
+            if (root._seamHovered) {
+                root.shareSeamCrosshair()
+            }
             root.notePointerActivity(mouse.x, mouse.y)
         }
     }
@@ -485,7 +509,14 @@ Item {
                     // one's markerX places the note.
                     markerSeconds: root.markerSeconds
                     crosshairSharedX: root._crosshairSharedX
-                    onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
+                    // A lane the pointer left for a seam leaves the line to it.
+                    onCrosshairHoverChanged: (x) => {
+                        if (x >= 0 || !root._seamHovered) {
+                            root._crosshairSharedX = x
+                        } else {
+                            root.shareSeamCrosshair()
+                        }
+                    }
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
                     viewFollow: sharedViewFollow
                     onPanningChanged: {
