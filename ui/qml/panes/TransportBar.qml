@@ -57,10 +57,6 @@ ToolBar {
     // its waveform.
     property real viewStartSeconds: NaN
     property real viewEndSeconds: NaN
-    // Whether that view stays where the user moved it, or autoscroll moves
-    // it, rather than following the playhead.
-    property bool viewDetached: false
-    onViewDetachedChanged: seekSlider.followViewDetached()
 
     readonly property alias seekPressed: seekSlider.pressed
     // The time of one device pixel of the seek bar's playhead: the smallest
@@ -621,91 +617,6 @@ ToolBar {
             readonly property real viewBandRight: !viewBandWidened
                 ? Math.round(viewRangeRightPixel) / windowDevicePixelRatio
                 : viewBandLeft + viewBandMinimumDevicePixels / windowDevicePixelRatio
-            // As a moved view follows the playhead again (Follow Playhead, a
-            // click on the bar), the band goes from where it was to its new
-            // place over 120 ms, OutCubic, its covers with it: one offset of
-            // its edges, eased to 0, over where the band is now, so that
-            // playback's own motion is never eased. It cut in a frame, which
-            // showed neither how far nor which way the view went (H15); the
-            // plot still cuts. Never as a drag or autoscroll moves it, nor
-            // from another track's view; at once with animations off.
-            property real viewBandGlide: 0
-            readonly property real shownBandLeft: viewBandGlide === 0 ? viewBandLeft
-                : Math.max(0, Math.min(barDevicePixels, Math.round((viewBandLeft + viewBandGlide) * windowDevicePixelRatio)))
-                    / windowDevicePixelRatio
-            readonly property real shownBandRight: viewBandGlide === 0 ? viewBandRight
-                : Math.max(shownBandLeft, Math.min(barDevicePixels / windowDevicePixelRatio,
-                    shownBandLeft + viewBandRight - viewBandLeft))
-            // Where the band was while the view was moved, and of which
-            // track: noted after the events that move it, so that a range
-            // the view publishes as it follows, before it says so, is never
-            // taken for the moved one.
-            property real _movedBandLeft: NaN
-            property string _movedBandTrack: ""
-            // Followed again before the band went to its new place: it
-            // glides from there on its next move.
-            property bool _glidePending: false
-            property real _glideFrom: NaN
-            function noteMovedBand() {
-                if (root.viewDetached && viewBandShown) {
-                    _movedBandLeft = viewBandLeft
-                    _movedBandTrack = root.uiBridge.currentTrackPath || ""
-                }
-            }
-            function glideViewBandFrom(left) {
-                _glidePending = false
-                viewBandGlideMotion.stop()
-                viewBandGlide = 0
-                if (!viewBandShown || left === viewBandLeft)
-                    return
-                viewBandGlide = left - viewBandLeft
-                viewBandGlideMotion.from = viewBandGlide
-                viewBandGlideMotion.start()
-            }
-            function followViewDetached() {
-                const from = _movedBandLeft
-                const sameTrack = _movedBandTrack === (root.uiBridge.currentTrackPath || "")
-                _movedBandLeft = NaN
-                _glidePending = false
-                viewBandGlideMotion.stop()
-                viewBandGlide = 0
-                if (root.viewDetached) {
-                    noteMovedBand()
-                } else if (isFinite(from) && sameTrack && viewBandShown && Kirigami.Units.shortDuration > 0) {
-                    if (viewBandLeft !== from) {
-                        glideViewBandFrom(from)
-                    } else {
-                        _glideFrom = from
-                        _glidePending = true
-                    }
-                }
-            }
-            // The view's start and end come one after the other: between
-            // them, the band may be hidden for no time at all, which a glide
-            // to come outlasts. One that is still hidden after them has no
-            // place to glide to.
-            function dropHiddenGlide() {
-                if (!viewBandShown)
-                    _glidePending = false
-            }
-            onViewBandLeftChanged: {
-                if (root.viewDetached) {
-                    Qt.callLater(noteMovedBand)
-                } else if (_glidePending) {
-                    if (viewBandShown)
-                        glideViewBandFrom(_glideFrom)
-                    else
-                        Qt.callLater(dropHiddenGlide)
-                }
-            }
-            NumberAnimation {
-                id: viewBandGlideMotion
-                target: seekSlider
-                property: "viewBandGlide"
-                to: 0
-                duration: Math.round(Kirigami.Units.shortDuration * 1.2)
-                easing.type: Easing.OutCubic
-            }
             // The handle is a grab target wider than the line and not drawn.
             // Padding of half their difference outside the bar puts the
             // handle's centre, which a press or drag moves under the
@@ -895,8 +806,8 @@ ToolBar {
                     objectName: "seekViewBand"
                     visible: seekSlider.viewBandShown
                     antialiasing: false
-                    x: seekSlider.shownBandLeft
-                    width: seekSlider.shownBandRight - seekSlider.shownBandLeft
+                    x: seekSlider.viewBandLeft
+                    width: seekSlider.viewBandRight - seekSlider.viewBandLeft
                     height: parent.height
                     color: root.seekViewBandColor
                 }
@@ -946,8 +857,8 @@ ToolBar {
                 // the light theme).
                 Rectangle {
                     objectName: "seekViewBandPlayed"
-                    readonly property real coverLeft: Math.min(seekSlider.shownBandLeft, seekSlider.playheadX)
-                    readonly property real coverRight: Math.min(seekSlider.shownBandRight, seekSlider.playheadX)
+                    readonly property real coverLeft: Math.min(seekSlider.viewBandLeft, seekSlider.playheadX)
+                    readonly property real coverRight: Math.min(seekSlider.viewBandRight, seekSlider.playheadX)
                     visible: seekSlider.viewBandShown && width > 0
                     antialiasing: false
                     x: coverLeft
@@ -972,9 +883,9 @@ ToolBar {
                     height: waveformItem.height
                     // Where the band is in it.
                     readonly property real bandLeft: seekSlider.viewBandShown
-                        ? Math.max(0, Math.min(width, seekSlider.shownBandLeft - x)) : width
+                        ? Math.max(0, Math.min(width, seekSlider.viewBandLeft - x)) : width
                     readonly property real bandRight: seekSlider.viewBandShown
-                        ? Math.max(bandLeft, Math.min(width, seekSlider.shownBandRight - x)) : width
+                        ? Math.max(bandLeft, Math.min(width, seekSlider.viewBandRight - x)) : width
 
                     Rectangle {
                         antialiasing: false

@@ -1705,7 +1705,6 @@ ApplicationWindow {
             seekCommitted: playbackController.seekCommitted
             viewStartSeconds: visualizationSurface.viewStartSeconds
             viewEndSeconds: visualizationSurface.viewEndSeconds
-            viewDetached: visualizationSurface.detached
         }
 
         // The first of the four seams: between the transport's chrome and
