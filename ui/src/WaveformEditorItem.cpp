@@ -2941,9 +2941,22 @@ void WaveformEditorItem::paint(QPainter *painter) {
             *painter, canvasWidth, canvasHeight, visibleStart, visibleEnd, channels);
         drawChannelSeparators(*painter, canvasWidth, canvasHeight, channels, colors.laneSeam);
     }
-    publishMarkerX(markerSeconds >= 0.0 && visibleEnd > visibleStart
+    const double markerX = markerSeconds >= 0.0 && visibleEnd > visibleStart
         ? std::round((markerSeconds - visibleStart) / (visibleEnd - visibleStart) * canvasWidth)
-        : std::numeric_limits<double>::quiet_NaN());
+        : std::numeric_limits<double>::quiet_NaN();
+    // Where the file is cut off, the track has no audio after it: the plot
+    // ends there in a lane seam's line, and past it is the bare floor, with
+    // none of the lanes' lines, rather than a silence the file never had.
+    if (!std::isnan(markerX) && markerX < canvasWidth) {
+        const int cut = std::max(0, static_cast<int>(markerX));
+        painter->fillRect(
+            QRect(cut, 0, canvasWidth - cut, canvasHeight), colors.background);
+        if (cut > 0) {
+            painter->setPen(QPen(colors.laneSeam, 1.0));
+            painter->drawLine(cut, 0, cut, canvasHeight - 1);
+        }
+    }
+    publishMarkerX(markerX);
     double playheadX = std::numeric_limits<double>::quiet_NaN();
     if (playheadVisible && visibleEnd > visibleStart && position >= visibleStart && position <= visibleEnd) {
         const TimeAxis axis{visibleStart, visibleEnd, canvasWidth, scale};
