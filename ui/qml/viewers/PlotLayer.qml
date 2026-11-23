@@ -180,9 +180,13 @@ Item {
         return false
     }
     // How much of the plot's crosshair and its readout show: none while the
-    // pointer is on a plate, where they ran under it and through it,
-    // fading over shortDuration, OutCubic; at once with animations off.
-    property real crosshairLevel: root.plateHovered ? 0 : 1
+    // pointer is on a plate, where they ran under it and through it, nor
+    // while autoscroll runs, whose pointer steers its speed rather than
+    // reads the plot, as with the lane heads' buttons: its time churned
+    // under the pointer at every frame, and went and came as the pointer
+    // left the window and came back (H18). Fading over shortDuration,
+    // OutCubic; at once with animations off.
+    property real crosshairLevel: root.plateHovered || root.viewAutoscrolling ? 0 : 1
     Behavior on crosshairLevel {
         enabled: Kirigami.Units.shortDuration > 0
         NumberAnimation {
@@ -220,10 +224,9 @@ Item {
         || zoomPlate.focusInside || root.viewAutoscrolling
 
     // As a view follows again, "Not following" leaves the plate as it came
-    // (PlotZoomPlate's notice): with the row staying, its text goes in the
-    // frame the view comes back in, which it would contradict, and the
-    // plate narrows to its new width; with the row fading out, it goes
-    // with the plate's fade. Autoscroll takes it at once, and so does a
+    // (PlotZoomPlate's notice): with the row staying, its text fades out
+    // as the plate narrows to its new width; with the row fading out, it
+    // goes with the plate's fade. Autoscroll takes it at once, and so does a
     // plate that doesn't show.
     // One state, 0 none, 1 shown, 2 leaving, set here alone: the plate's
     // two flags of it, each bound to its own of this layer's, changed one

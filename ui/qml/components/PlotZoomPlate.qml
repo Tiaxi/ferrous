@@ -28,20 +28,24 @@ Components.PlotPlate {
     // "Not following" (FollowNotice) on the plate, from the one state its
     // view tells, so that what follows from it never reads one part of it
     // changed and another not yet: 0 none, 1 shown, 2 leaving, the view
-    // following again; then noticeLeft. It comes as it goes, over 120 ms,
-    // OutCubic, in either plot, while the plate shows. Zoomed, the plate
-    // grows and narrows by its room at its left edge, Reset staying where
-    // it is, and that room fades in and out as it does (its edge jumped 89
-    // px in a frame with the row staying, H15, and stood as blank plate,
-    // H16): coming, its text and divider fade in with the room, in their
-    // place (the plate jumped 89 px wider in a frame, an empty box, while
-    // they faded in, H17); going, its text is gone in the frame the view
-    // comes back in, which it would contradict. At the default zoom, with
-    // nothing else on it, the whole plate fades at its width, the text
-    // with it (the text went in a frame while the empty plate faded on,
-    // H16). A plate revealed with it comes at its width, its text fading
-    // in on the plate's reveal. With the corner's row fading out as it
-    // goes, as with the pointer off the pane, the notice stays on the
+    // following again; then noticeLeft. It comes and goes while the plate
+    // shows, in either plot, on one plate with its own fill and edge, its
+    // corners round: the plate split in two, a room for the notice fading
+    // beside the rest, read as two tones with a seam (H18). Zoomed, the
+    // plate grows and narrows at its left edge, Reset staying where it is,
+    // and the text and divider stand in their place, drawn only while the
+    // plate holds them: clipped to the growing plate, the text was cut
+    // mid-letter for 83 ms (H18). Coming, the plate grows over 80 ms,
+    // OutCubic, and the text and divider fade in whole over 60 ms, OutCubic,
+    // once it holds them; going, they fade out over 40 ms, OutCubic, as the
+    // plate narrows over 90 ms, InOutCubic, slowly at first, so they are
+    // gone before it is narrower than they are: gone in a frame, an empty
+    // box narrowed for 60 ms (H18). At the default zoom, with nothing else
+    // on it, the whole plate fades at its width over 120 ms, OutCubic, the
+    // text with it (the text went in a frame while the empty plate faded
+    // on, H16). A plate revealed with it comes at its width, its text
+    // fading in on the plate's reveal. With the corner's row fading out as
+    // it goes, as with the pointer off the pane, the notice stays on the
     // plate and goes with its fade, at its width, on the row's one curve:
     // the plate narrowed 15 ms ahead of the row's fade, its text gone at
     // full opacity (H17).
@@ -56,44 +60,53 @@ Components.PlotPlate {
 
     // How much of the notice is on the plate as it comes and goes, from 0
     // to 1, and what it does: 0 neither, 1 comes, 2 goes, 3 goes with the
-    // row's fade. Its room, in
-    // whole pixels: the notice's alone, or with the readout's 6 px from the
-    // divider, more than its 6 px from the plate's edge.
+    // row's fade. Zoomed, it is the plate's width; at the default zoom,
+    // its opacity.
     property real noticeLevel: 1
     property int _motion: 0
-    readonly property bool _widening: root._motion === 1 && root.zoomed
-    readonly property bool _narrowing: root._motion === 2 && root.zoomed
+    // The notice's room, in whole pixels: the notice's alone, or with the
+    // readout's 6 px from the divider, more than its 6 px from the plate's
+    // edge; and how much of it the plate has.
     readonly property real _room: followNotice.implicitWidth + (root.zoomed ? root.horizontalPadding : 0)
-    readonly property real _roomLeft: root.noticeLevel >= 1 ? root._room
+    readonly property real _roomLeft: !root.zoomed || root.noticeLevel >= 1 ? root._room
         : Math.round(root._room * root.noticeLevel)
-    // As the room grows, the notice in it, less the readout's 4 px more on
-    // its side of the divider: with no room for it, the row skips it.
-    readonly property real _slot: Math.max(0, root._roomLeft - root.horizontalPadding)
-    readonly property bool _noticeInRow: (root.notice === 1 && !(root._widening && root._slot <= 0))
-        || (root.notice === 2 && (!root.zoomed || root._motion === 3))
-    // The text's and the divider's own fade, as a plate is revealed with
-    // them (they stood on it in a frame as it faded in, H15).
+    // The notice's box in the row, less the readout's 4 px more on its
+    // side of the divider: with no room for it, the row skips it.
+    readonly property real _slot: root.zoomed ? Math.max(0, root._roomLeft - root.horizontalPadding)
+        : followNotice.implicitWidth
+    // Where its text starts in the plate, 6 px in from the plate's edge as
+    // the plate is whole, and whether the plate holds it, 2 px in or more.
+    readonly property real _textLeft: root._roomLeft - root._room + 6
+    readonly property bool _holdsText: root._textLeft >= 2
+    // The text's and the divider's own level, as they come and go on a
+    // plate that shows, and as a plate is revealed with them (they stood on
+    // it in a frame as it faded in, H15).
     property real _textLevel: 1
     onNoticeChanged: {
         noticeMotion.stop()
-        textArrival.stop()
-        root._textLevel = 1
+        textMotion.stop()
+        const animated = Kirigami.Units.shortDuration > 0
         if (root.notice === 1) {
             // From what is left of it as it went, or from none.
             const from = root._motion === 2 ? root.noticeLevel : 0
-            if (from < 1 && Kirigami.Units.shortDuration > 0 && root.available
-                    && root.revealLevel * root.fadeLevel > 0) {
+            const textFrom = root._motion === 2 ? root._textLevel : 0
+            if (from < 1 && animated && root.available && root.revealLevel * root.fadeLevel > 0) {
                 root._motion = 1
                 root.noticeLevel = from
-                noticeMotion.to = 1
-                noticeMotion.start()
+                if (root.zoomed) {
+                    root._textLevel = textFrom
+                    root._move(1, 0.8, Easing.OutCubic)
+                    root._fadeText(1, root._holdingTime(from, 0.8), 0.6)
+                } else {
+                    root._textLevel = 1
+                    root._move(1, 1.2, Easing.OutCubic)
+                }
             } else {
                 root._motion = 0
                 root.noticeLevel = 1
-                if (from <= 0 && Kirigami.Units.shortDuration > 0) {
-                    root._textLevel = 0
-                    textArrival.start()
-                }
+                root._textLevel = from <= 0 && animated ? 0 : 1
+                if (root._textLevel < 1)
+                    root._fadeText(1, 0, 1)
             }
         } else if (root.notice === 2) {
             if (root.rowStays || root._motion === 1) {
@@ -107,13 +120,43 @@ Components.PlotPlate {
         } else {
             root._motion = 0
             root.noticeLevel = 1
+            root._textLevel = 1
         }
     }
     function _leaveAlone() {
         noticeMotion.stop()
+        textMotion.stop()
         root._motion = 2
-        noticeMotion.to = 0
+        if (root.zoomed) {
+            root._move(0, 0.9, Easing.InOutCubic)
+            root._fadeText(0, 0, 0.4)
+        } else {
+            root._move(0, 1.2, Easing.OutCubic)
+        }
+    }
+    // The notice's level to `to`, over `scale` of shortDuration.
+    function _move(to, scale, easing) {
+        noticeMotion.to = to
+        noticeMotion.duration = Math.round(Kirigami.Units.shortDuration * scale)
+        noticeMotion.easing.type = easing
         noticeMotion.start()
+    }
+    // The text's level, from where it is, to `to` after `pause` ms, over
+    // `scale` of shortDuration, OutCubic.
+    function _fadeText(to, pause, scale) {
+        textPause.duration = Math.max(0, Math.round(pause))
+        textFade.to = to
+        textFade.duration = Math.round(Kirigami.Units.shortDuration * scale)
+        textMotion.start()
+    }
+    // How long, in ms, the plate growing from `from` over `scale` of
+    // shortDuration, OutCubic, takes to hold the text.
+    function _holdingTime(from, scale) {
+        const hold = (root._room - 4) / root._room
+        const part = (hold - from) / (1 - from)
+        if (part <= 0)
+            return 0
+        return Kirigami.Units.shortDuration * scale * (1 - Math.cbrt(1 - Math.min(1, part)))
     }
     // Gone with the row as it has faded out; going alone as the row comes
     // back first.
@@ -132,8 +175,6 @@ Components.PlotPlate {
         id: noticeMotion
         target: root
         property: "noticeLevel"
-        duration: Math.round(Kirigami.Units.shortDuration * 1.2)
-        easing.type: Easing.OutCubic
         onFinished: {
             if (root._motion === 2)
                 root.noticeLeft()
@@ -141,21 +182,22 @@ Components.PlotPlate {
                 root._motion = 0
         }
     }
-    NumberAnimation {
-        id: textArrival
-        target: root
-        property: "_textLevel"
-        from: 0
-        to: 1
-        duration: Kirigami.Units.shortDuration
-        easing.type: Easing.OutCubic
+    SequentialAnimation {
+        id: textMotion
+        PauseAnimation {
+            id: textPause
+        }
+        NumberAnimation {
+            id: textFade
+            target: root
+            property: "_textLevel"
+            easing.type: Easing.OutCubic
+        }
     }
 
     visible: root.available && (root.zoomed || root.noticeShown)
     opacity: root.revealLevel * root.fadeLevel
         * ((root._motion === 1 || root._motion === 2) && !root.zoomed ? root.noticeLevel : 1)
-    // As it grows and narrows, its fill and edge are the parts below.
-    bare: root._widening || root._narrowing
     takesPointer: true
     Accessible.name: root.zoomed
         ? I18n.i18nc("@label", "Zoom")
@@ -174,114 +216,14 @@ Components.PlotPlate {
         }
     }
 
-    // The plate as it grows and narrows, cut where the notice's room ends:
-    // that room, fading in and out, and the rest, the plate as it is
-    // without the notice, so the two meet as one plate with the room
-    // whole. The rest's left corners round as the room goes, its edge
-    // there coming in with them (they were cut square, H17), and the
-    // room's edge reaches under them, for the plate's edge to run on as
-    // the room comes and goes. Behind the readout and Reset.
-    readonly property real _edgeCorner: root.radius + 1
-    Item {
-        objectName: "plotZoomPlateRoom"
-        parent: root
-        z: -1
-        visible: root.bare
-        opacity: root.noticeLevel
-        Rectangle {
-            x: 0
-            width: root._roomLeft
-            height: root.height
-            radius: root.radius
-            topRightRadius: 0
-            bottomRightRadius: 0
-            color: root.plotColors.plotPlate
-        }
-        Item {
-            x: -1
-            y: -1
-            width: root._roomLeft + root._edgeCorner
-            height: root.height + 2
-            clip: true
-            Rectangle {
-                width: root.width + 2
-                height: parent.height
-                radius: root._edgeCorner
-                color: "transparent"
-                border.width: 1
-                border.color: root.plotColors.plotPlateEdge
-            }
-        }
-    }
-    Item {
-        objectName: "plotZoomPlateStaying"
-        parent: root
-        z: -1
-        visible: root.bare
-        x: root._roomLeft
-        width: root.width - root._roomLeft
-        height: root.height
-        readonly property real cornerLevel: 1 - root.noticeLevel
-        Rectangle {
-            anchors.fill: parent
-            radius: root.radius
-            topLeftRadius: root.radius * parent.cornerLevel
-            bottomLeftRadius: root.radius * parent.cornerLevel
-            color: root.plotColors.plotPlate
-        }
-        // Its edge: the left of it, with its corners, coming in as the
-        // room goes, and the rest, as the plate's.
-        Item {
-            objectName: "plotZoomPlateStayingEdge"
-            x: -1
-            y: -1
-            width: root._edgeCorner
-            height: parent.height + 2
-            clip: true
-            opacity: parent.cornerLevel
-            Rectangle {
-                width: parent.parent.width + 2
-                height: parent.height
-                radius: root._edgeCorner
-                topLeftRadius: root._edgeCorner * parent.parent.cornerLevel
-                bottomLeftRadius: root._edgeCorner * parent.parent.cornerLevel
-                color: "transparent"
-                border.width: 1
-                border.color: root.plotColors.plotPlateEdge
-            }
-        }
-        Item {
-            x: root._edgeCorner - 1
-            y: -1
-            width: Math.max(0, parent.width + 2 - root._edgeCorner)
-            height: parent.height + 2
-            clip: true
-            Rectangle {
-                x: -root._edgeCorner
-                width: parent.parent.width + 2
-                height: parent.height
-                radius: root._edgeCorner
-                color: "transparent"
-                border.width: 1
-                border.color: root.plotColors.plotPlateEdge
-            }
-        }
-    }
-
-    // As it comes, in its room, in its place, which the room's edge shows
-    // as it grows; as it goes, zoomed, the readout keeps the room.
+    // In its room, as much of it as the plate has, its text and divider in
+    // their place at the room's right end.
     Components.FollowNotice {
         id: followNotice
         objectName: "plotFollowNotice"
-        // From the state and the way it goes: read with the plate's
-        // narrowing, which ends with the state, it showed for an instant as
-        // that ended, and its text started to come in again behind the
-        // hidden plate (H17).
-        visible: root.notice === 1 || (root.notice === 2 && (!root.zoomed || root._motion === 3))
-        width: root._widening ? root._slot : implicitWidth
-        clip: root._widening
-        contentShift: root._widening ? root._slot - implicitWidth : 0
-        arrivalLevel: root._widening ? root.noticeLevel : root._textLevel
+        visible: root.noticeShown && root._slot > 0
+        width: root._slot
+        arrivalLevel: root._holdsText ? root._textLevel : 0
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         shortcut: root.followShortcut
@@ -302,8 +244,8 @@ Components.PlotPlate {
         // placing what just appeared only when the window next draws.
         visible: root.zoomed || !root.noticeShown
         // 6 px from the notice's divider too, and the room it leaves.
-        leftPadding: root._noticeInRow ? 6 - root.contentSpacing
-            : 6 - root.horizontalPadding + (root.bare ? root._roomLeft : 0)
+        leftPadding: followNotice.visible ? 6 - root.contentSpacing
+            : 6 - root.horizontalPadding + (root.zoomed && root.noticeShown ? root._roomLeft : 0)
         rightPadding: 0
     }
 
