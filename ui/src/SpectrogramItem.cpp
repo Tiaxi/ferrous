@@ -141,10 +141,11 @@ const QColor kRestScaleTextColor(236, 236, 236, 184);
 // the canvas fragments a zoom preview scales (spectrogramSceneGraphDrawsTheCanvas).
 const QColor kPlayheadColor(0xe8, 0xe8, 0xe8, 254);
 const QColor kPlayheadCasingColor(0, 0, 0, 153);
-// The crosshair: dashed white 55%, with the floor at 80% between the
+// The crosshair: dashed white 62%, with the floor at 80% between the
 // dashes. One carries the 1 px line over dark texture, the other over bright
-// harmonics; at 35% and 60% it was lost in mid-bright texture (2.3:1).
-const QColor kCrosshairLineColor(255, 255, 255, 140);
+// harmonics; at 35% and 60% it was lost in mid-bright texture (2.3:1), and
+// at 55% the shared time line faded over the brighter parts of both lanes.
+const QColor kCrosshairLineColor(255, 255, 255, 158);
 constexpr double kCrosshairGapOpacity = 0.8;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 std::atomic<quint64> g_lastLoggedSeekProfileIncidentGeneration{0};
