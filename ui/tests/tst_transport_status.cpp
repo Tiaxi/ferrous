@@ -576,6 +576,7 @@ private slots:
     void lastFmGlyphsAreOneFamily();
     void warningGlyphIsTheSizeOfItsNeighbours();
     void statusBarNamesAStoppedEngineInPlainWords();
+    void statusBarEngineErrorShowsItsToolTipOverItsGlyphAndFromTheKeyboard();
     void issuesButtonShowsNewSeenAndOpen_data();
     void issuesButtonShowsNewSeenAndOpen();
     void statusBarHasNoDividers();
@@ -4532,7 +4533,10 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QQuickItem *state = harness.item(QStringLiteral("statusBarPlaybackState"));
     QQuickItem *glyph = harness.item(QStringLiteral("statusBarEngineErrorGlyph"));
     QQuickItem *stateLabel = harness.item(QStringLiteral("statusBarPlaybackStateLabel"));
-    QVERIFY(label && state && glyph && stateLabel);
+    QQuickItem *engineError = harness.item(QStringLiteral("statusBarEngineError"));
+    QObject *toolTip = harness.root->findChild<QObject *>(QStringLiteral("statusBarEngineErrorToolTip"));
+    QVERIFY(label && state && glyph && stateLabel && engineError && toolTip);
+    QVERIFY(!toolTip->property("visible").toBool());
     QVERIFY(!label->isVisible());
     QVERIFY(!glyph->isVisible());
     const qreal stateLeft = sceneRect(state).left();
@@ -4555,11 +4559,13 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QCOMPARE(label->property("text").toString(), QStringLiteral("Playback engine not running"));
     const QString tip = QStringLiteral(
         "Ferrous can't play music until its playback engine runs. Restart Ferrous to try again.");
-    QCOMPARE(toolTipText(label), tip);
-    QCOMPARE(accessibleText(label, QAccessible::Description), tip);
+    QCOMPARE(engineError->property("toolTipText").toString(), tip);
+    QCOMPARE(accessibleText(engineError, QAccessible::Name), QStringLiteral("Playback engine not running"));
+    QCOMPARE(accessibleText(engineError, QAccessible::Description), tip);
     showToolTipsAtOnce(label);
     QTest::mouseMove(harness.window, sceneCentre(label));
-    QTRY_VERIFY(toolTipShown(label));
+    QTRY_VERIFY(toolTip->property("visible").toBool());
+    QCOMPARE(toolTip->property("text").toString(), tip);
     // A failure the backend reported says so instead, in the same words
     // (it said "Backend stopped").
     QQuickItem *stopped = harness.item(QStringLiteral("statusBarBackendStoppedLabel"));
@@ -4571,13 +4577,64 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QCOMPARE(stopped->property("text").toString(), QStringLiteral("Playback engine stopped"));
     QTRY_VERIFY(treatedAsAnError(stopped));
     // Its tooltip says why, in the backend's words.
-    QCOMPARE(toolTipText(stopped), QStringLiteral("stopped for testing"));
-    QCOMPARE(accessibleText(stopped, QAccessible::Description), QStringLiteral("stopped for testing"));
-    showToolTipsAtOnce(stopped);
+    QCOMPARE(engineError->property("toolTipText").toString(), QStringLiteral("stopped for testing"));
+    QCOMPARE(accessibleText(engineError, QAccessible::Name), QStringLiteral("Playback engine stopped"));
+    QCOMPARE(accessibleText(engineError, QAccessible::Description), QStringLiteral("stopped for testing"));
     QTest::mouseMove(harness.window, sceneCentre(stopped));
-    QTRY_VERIFY(toolTipShown(stopped));
+    QTRY_COMPARE(toolTip->property("text").toString(), QStringLiteral("stopped for testing"));
+    QTRY_VERIFY(toolTip->property("visible").toBool());
     QVERIFY2(contrastRatio(harness.token("negative"), harness.token("chrome")) >= 3.0,
              qPrintable(describeContrast(QStringLiteral("glyph"), harness.token("negative"), harness.token("chrome"))));
+}
+
+// The stopped engine's glyph and words are one: the pointer over the
+// glyph shows the tooltip with the reason, as over the words (it showed
+// none over the glyph), and the error takes keyboard focus, in the status
+// bar's 2 px focus ring around both, 6 px outside them, and shows the
+// tooltip then too (from the keyboard it could not be read at all).
+void TransportStatusTest::statusBarEngineErrorShowsItsToolTipOverItsGlyphAndFromTheKeyboard() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *engineError = harness.item(QStringLiteral("statusBarEngineError"));
+    QQuickItem *glyph = harness.item(QStringLiteral("statusBarEngineErrorGlyph"));
+    QQuickItem *words = harness.item(QStringLiteral("statusBarBackendStoppedLabel"));
+    QQuickItem *background = harness.item(QStringLiteral("statusBarEngineErrorBackground"));
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QVERIFY(engineError && glyph && words && background && status);
+    const QString reason = QStringLiteral("The playback engine stopped (exit code 101).");
+    harness.bridge->setProperty("backendFailure", reason);
+    QTRY_VERIFY(engineError->isVisible() && words->isVisible());
+    showToolTipsAtOnce(engineError);
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("statusBarEngineErrorToolTip"));
+    QVERIFY(tip != nullptr);
+    const auto toolTip = [tip, &reason]() {
+        return tip->property("visible").toBool() && tip->property("text").toString() == reason;
+    };
+
+    // The pointer over the glyph.
+    QTest::mouseMove(harness.window, sceneCentre(glyph));
+    QTRY_VERIFY(toolTip());
+    QTest::mouseMove(harness.window, QPoint(harness.window->width() / 2, 10));
+    QTRY_VERIFY(!tip->property("visible").toBool());
+
+    // From the keyboard: Tab reaches it, and its ring is around the glyph
+    // and the words, inside the status bar.
+    QVERIFY(engineError->activeFocusOnTab());
+    QCOMPARE(evaluateOn(background, QStringLiteral("border.width")).toInt(), 0);
+    engineError->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(engineError->property("visualFocus").toBool());
+    QTRY_VERIFY(toolTip());
+    QCOMPARE(evaluateOn(background, QStringLiteral("border.width")).toInt(), 2);
+    QVERIFY(sameColor(evaluateOn(background, QStringLiteral("border.color")).value<QColor>(), harness.token("focusRing")));
+    const QRectF ring = sceneRect(background);
+    const QRectF inside = sceneRect(glyph).united(sceneRect(words));
+    QCOMPARE(inside.left() - ring.left(), 6.0);
+    QVERIFY2(ring.right() - inside.right() >= 6.0, qPrintable(describeRect(ring) + QLatin1Char(' ') + describeRect(inside)));
+    QVERIFY2(inside.top() - ring.top() >= 2.0 && ring.bottom() - inside.bottom() >= 2.0,
+             qPrintable(describeRect(ring) + QLatin1Char(' ') + describeRect(inside)));
+    QVERIFY(within(ring, sceneRect(status).adjusted(0, 1, 0, 0)));
+    QCOMPARE(ring.height(), sceneRect(harness.item(QStringLiteral("statusBarErrorsBackground"))).height());
+    QCOMPARE(accessibleText(engineError, QAccessible::Description), reason);
 }
 
 void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
