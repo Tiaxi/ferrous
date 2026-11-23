@@ -670,6 +670,13 @@ Rectangle {
                     objectName: "queueScrollBar"
                     uiPalette: root.uiPalette
                 }
+                // Where the rows' states end on the right while the
+                // scrollbar shows: its lane and 2 px more, so the focus
+                // ring, which the tint ends with, keeps 3 px clear of the
+                // thumb at its widest (at the lane, 1 px off it, the two
+                // read as touching). Without it, at the pane's edge.
+                readonly property real rowStatesEnd: playlistVerticalScrollBar.visible
+                    ? playlistVerticalScrollBar.lane + 2 : 0
 
                 MouseArea {
                     anchors.fill: parent
@@ -779,9 +786,9 @@ Rectangle {
                             && playlistView.draggingRow !== playlistRowMouseArea
                         active: playlistView.activeFocus
                         focused: playlistRow.rowCurrent
-                        // Every state ends at the scrollbar's lane while it
-                        // shows, clear of its thumb, as the library's.
-                        scrollbarLane: playlistVerticalScrollBar.visible ? playlistVerticalScrollBar.lane : 0
+                        // Every state ends clear of the scrollbar's lane
+                        // while it shows, and of its thumb.
+                        scrollbarLane: playlistView.rowStatesEnd
                     }
 
                     // The cells are where the header's columns are, which
@@ -1349,13 +1356,12 @@ Rectangle {
             }
 
             // Where a drop lands: a 2 px line in the focus colour, centred
-            // on the boundary between the rows, which runs to the
-            // scrollbar's lane while it shows, as the focus ring does.
+            // on the boundary between the rows, which ends where the focus
+            // ring does.
             Rectangle {
                 objectName: "queueDropIndicator"
                 x: playlistView.x
-                width: Math.max(0, playlistView.width
-                    - (playlistVerticalScrollBar.visible ? playlistVerticalScrollBar.lane : 0))
+                width: Math.max(0, playlistView.width - playlistView.rowStatesEnd)
                 height: 2
                 y: playlistDropArea.queueDropIndicatorY
                 color: root.uiPalette.focusRing
