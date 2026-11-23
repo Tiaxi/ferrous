@@ -55,18 +55,22 @@ Rectangle {
     // gaps between the columns come on top. Sizes are those of the design
     // at the default font, and grow with it as the rows do.
     readonly property real sizeScale: root.uiPalette.rowHeight / 26
-    // An unreadable row's mark: the status bar's warning sign, at its
-    // size, in the negative colour, as the status bar marks the same
-    // failure (Breeze's dialog-warning as a mask was a solid
-    // triangle that read as a transport glyph).
-    readonly property string warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
-    readonly property int warningGlyphSize: root.uiPalette.scaledSize(16)
+    // An unreadable row's mark: an error's ring with a cross, at the
+    // status bar's size, in the negative colour, as the status bar and
+    // Recent Issues mark the same failure; the triangle means a warning
+    // everywhere (the row had it, in red, for an error).
+    readonly property string errorGlyph: Qt.resolvedUrl("../assets/status-error.svg")
+    readonly property int errorGlyphSize: root.uiPalette.scaledSize(16)
     // Between the number and the title, and between the other columns.
     readonly property real titleGap: Math.round(12 * root.sizeScale)
     readonly property real columnGap: Math.round(16 * root.sizeScale)
-    // From the length's right end to the queue's: the scrollbar lane and
-    // the inset.
-    readonly property real rightPadding: Math.round(24 * root.sizeScale)
+    // From the length's right end to the queue's: the scrollbar's lane,
+    // which keeps its 8 px at any font, and a 16 px inset that grows with
+    // the font to half as much again, 24 px at 24 pt. Scaled as one, the
+    // two made 48 px at 24 pt, a gutter twice the lane's beside a column
+    // set that dropped Album and Artist for want of room.
+    readonly property real rightPadding: playlistVerticalScrollBar.lane
+        + Math.round(16 * Math.min(root.sizeScale, 1.5))
     // The share of the text columns' room Artist and Album have by default;
     // the title has the rest, 45%. Half left a gap after short titles and
     // elided artists at a large font while the title had room; these give
@@ -762,17 +766,17 @@ Rectangle {
                                 ? I18n.i18nc("@info accessible state of the current queue row", "stopped")
                                 : I18n.i18nc("@info accessible state of the current queue row", "playing")))
                     // Playing or paused, what the playback does; otherwise
-                    // the warning of an unreadable file before the stop
+                    // the error mark of an unreadable file before the stop
                     // mark, as a file that fails to play stays the
-                    // current row, stopped, and the warning says why
+                    // current row, stopped, and the error says why
                     // (it showed the stop mark, with the
                     // error as its tooltip, until another row played).
-                    readonly property bool showsWarning: !isNow && unreadable
+                    readonly property bool showsError: !isNow && unreadable
                     readonly property string stateGlyph: isNow
                         ? (root.uiBridge.playbackState === "Paused"
                             ? "media-playback-pause" : "media-playback-start")
-                        : (showsWarning
-                            ? root.warningGlyph
+                        : (showsError
+                            ? root.errorGlyph
                             : (isCurrentQueueRow ? "media-playback-stop" : ""))
 
                     width: ListView.view.width
@@ -836,12 +840,12 @@ Rectangle {
                             readonly property string glyph: playlistRow.stateGlyph
                             visible: glyph.length > 0
                             anchors.centerIn: parent
-                            // The warning at the status bar's size, the
+                            // The error mark at the status bar's size, the
                             // transport's marks smaller, and the stop
                             // square smaller again, so that its solid ink
                             // does not outweigh the play and pause marks
                             // (at their size it read heaviest of the three).
-                            width: playlistRow.showsWarning ? root.warningGlyphSize
+                            width: playlistRow.showsError ? root.errorGlyphSize
                                 : glyph === "media-playback-stop" ? root.uiPalette.scaledSize(10)
                                 : root.uiPalette.scaledSize(12)
                             height: width
@@ -853,7 +857,7 @@ Rectangle {
                             isMask: true
                             color: playlistRow.isNow
                                 ? root.uiPalette.now
-                                : !playlistRow.showsWarning ? playlistRow.secondaryTextColor
+                                : !playlistRow.showsError ? playlistRow.secondaryTextColor
                                 : playlistRow.rowSelected ? root.uiPalette.negativeSelected
                                 : root.uiPalette.negative
                             // The amber glyph fades in as the old row's
@@ -877,18 +881,33 @@ Rectangle {
                         }
                     }
 
-                    // Why an unreadable row is marked (reasonShown), over
-                    // the row from its title: on the 16 px glyph alone,
-                    // the pointer had to find it, and the keyboard never
-                    // could. Only such a row makes one.
+                    // Why an unreadable row is marked (reasonShown), from
+                    // its title, below it unless near the view's bottom,
+                    // and clear of the playing row: on the 16 px glyph
+                    // alone, the pointer had to find it, and the keyboard
+                    // never could. Only such a row makes one.
                     Loader {
                         active: playlistRow.unreadable
-                        sourceComponent: Components.PlainToolTip {
+                        sourceComponent: Components.RowReasonToolTip {
                             objectName: "queueRowReason"
-                            parent: playlistRow
+                            row: playlistRow
                             x: titleCell.x
+                            rowTop: playlistRow.y - playlistView.contentY
+                            viewHeight: playlistView.height
+                            room: playlistRow.width - playlistView.rowStatesEnd - titleCell.x
+                                - Kirigami.Units.smallSpacing
+                            // The rows are alike in height: the playing
+                            // row is where its index puts it.
+                            coversNow: function(top, bottom) {
+                                if (root.uiBridge.playbackState === "Stopped"
+                                        || root.uiBridge.playingQueueIndex < 0) {
+                                    return false
+                                }
+                                const nowTop = (root.uiBridge.playingQueueIndex - playlistRow.queueRowIndex)
+                                    * playlistRow.height
+                                return nowTop < bottom && nowTop + playlistRow.height > top
+                            }
                             visible: playlistRow.reasonShown
-                            delay: Kirigami.Units.toolTipDelay
                             message: playlistRow.unreadableReason
                         }
                     }

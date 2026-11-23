@@ -331,8 +331,9 @@ pub(super) fn file_ends_early(path: &std::path::Path, message: String) -> Bridge
     BridgeError::warning(ErrorCategory::Playback, message).about(path.to_string_lossy())
 }
 
-/// The error the user is shown for `error`, about its file. A skipped file
-/// leaves playback going.
+/// The error the user is shown for `error`, about its file, with why a
+/// track failed as its system text, which Recent Issues shows under it and
+/// the file's rows tell. A skipped file leaves playback going.
 fn playback_error(error: &crate::playback::PlaybackError) -> BridgeError {
     let severity = match error.outcome {
         PlaybackErrorOutcome::Skipped | PlaybackErrorOutcome::NotResumed => ErrorSeverity::Warning,
@@ -350,7 +351,7 @@ fn playback_error(error: &crate::playback::PlaybackError) -> BridgeError {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
         message: error.message(),
-        detail: String::new(),
+        detail: error.reason().to_string(),
     }
 }
 
@@ -1372,6 +1373,23 @@ mod tests {
             "{}",
             error.message
         );
+        assert_eq!(error.detail, "");
+    }
+
+    #[test]
+    fn a_track_that_failed_sends_why_apart_from_what_playback_did() {
+        let error = playback_error(&crate::playback::PlaybackError {
+            path: Some(PathBuf::from("/music/a.flac")),
+            detail: "No valid frames found before end of stream.".to_string(),
+            outcome: PlaybackErrorOutcome::Stopped,
+        });
+        assert_eq!(error.severity, ErrorSeverity::Error);
+        assert_eq!(error.subject, "/music/a.flac");
+        assert_eq!(
+            error.message,
+            "Couldn't play \u{201c}a.flac\u{201d}; playback stopped."
+        );
+        assert_eq!(error.detail, "No valid frames found before end of stream");
     }
 
     #[test]

@@ -11638,8 +11638,11 @@ mod engine_tests {
         assert_eq!(error.detail, STALLED_STREAM_DETAIL);
         assert_eq!(
             error.message(),
-            "Couldn't play \u{201c}a.mp3\u{201d} (playback could not start: GStreamer \
-             stalled twice while opening it); skipped it."
+            "Couldn't play \u{201c}a.mp3\u{201d}; skipped it."
+        );
+        assert_eq!(
+            error.reason(),
+            "playback could not start: GStreamer stalled twice while opening it"
         );
         assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Automatic);
         engine.wait_for_playing(1, millis(5_280));
@@ -11733,11 +11736,7 @@ mod engine_tests {
             error.detail,
             format!("missing GStreamer plugin: {description}")
         );
-        assert!(
-            error.message().contains(&description),
-            "{}",
-            error.message()
-        );
+        assert!(error.reason().contains(&description), "{}", error.reason());
         assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Automatic);
     }
 

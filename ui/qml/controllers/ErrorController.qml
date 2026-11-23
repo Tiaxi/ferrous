@@ -66,8 +66,9 @@ QtObject {
     }
 
     // The files the playback could not read, from the history: each
-    // playback error's file and its message. The queue and the library mark
-    // their rows; they stay marked while the history keeps the error.
+    // playback error's file and why it failed (ErrorUtils.unreadableReason).
+    // The queue and the library mark their rows; they stay marked while the
+    // history keeps the error.
     readonly property var unreadablePaths: {
         root.revision
         const paths = ({})
@@ -76,7 +77,7 @@ QtObject {
             if (entry.category === ErrorUtils.CategoryPlayback
                     && entry.severity === ErrorUtils.SeverityError
                     && entry.subject.length > 0) {
-                paths[entry.subject] = entry.message
+                paths[entry.subject] = ErrorUtils.unreadableReason(entry.subject, entry.message, entry.detail)
             }
         }
         return paths
