@@ -532,7 +532,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QCOMPARE(channelDistance(colorOf(spectrogram, "plotPlate"), fromHex(QStringLiteral("#141414"))), 0);
     QVERIFY(std::abs(colorOf(spectrogram, "plotPlateEdge").alphaF() - 0.14) < 0.002);
     QVERIFY(std::abs(colorOf(spectrogram, "plotTextSecondary").alphaF() - 0.72) < 0.002);
-    QVERIFY(std::abs(colorOf(spectrogram, "plotTick").alphaF() - 0.75) < 0.002);
+    QVERIFY(std::abs(colorOf(spectrogram, "plotTick").alphaF() - 0.6) < 0.002);
     QVERIFY(std::abs(colorOf(spectrogram, "meterClipOff").alphaF() - 0.2) < 0.002);
     QVERIFY(sameColor(colorOf(spectrogram, "meterSeam"), fromHex(QStringLiteral("#0a0318"))));
     // On the plot's floor, what is drawn is neutral, not tinted, except the

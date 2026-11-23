@@ -208,6 +208,7 @@ bool showOnScreen(QQuickWindow &window, double scale);
 // and its images with their textures' sizes.
 struct OverlayOnScreen {
     QVector<QRectF> lines;
+    QVector<QRectF> casings;
     QVector<QPair<QRectF, QSize>> images;
 };
 
