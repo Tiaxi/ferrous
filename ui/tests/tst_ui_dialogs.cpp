@@ -717,6 +717,8 @@ private slots:
     void editTagsNumberRevertFollowsItsHeader_data();
     void editTagsNumberRevertFollowsItsHeader();
     void editTagsWordsItsWarningsAlike();
+    void renameFilesOpensNoWiderThanEditTags_data();
+    void renameFilesOpensNoWiderThanEditTags();
     void autoNumberGroupsStandApartAtAnyFont_data();
     void autoNumberGroupsStandApartAtAnyFont();
     void autoNumberTotalsSayWhichTheyWrite();
@@ -7253,6 +7255,79 @@ void UiDialogsTest::editTagsWordsItsWarningsAlike() {
     preview->setProperty("errorText", QStringLiteral("no such folder"));
     QCOMPARE(evaluate(preview, QStringLiteral("summarySentences()[0]")).toString(),
              QStringLiteral("The new names couldn’t be worked out: no such folder"));
+}
+
+void UiDialogsTest::renameFilesOpensNoWiderThanEditTags_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("editorWidth");
+    QTest::newRow("10 pt") << 10.0 << 700;
+    QTest::newRow("24 pt") << 24.0 << 1600;
+}
+
+// Rename Files opens no wider than Edit Tags under it, less a 24 px inset on
+// either side scaled with the font, where long new names wrap in their
+// column and the arrows keep theirs (at 24 pt, long new names opened it at
+// 1691 px over a 1600 px Edit Tags).
+void UiDialogsTest::renameFilesOpensNoWiderThanEditTags() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, editorWidth);
+    const ScopedApplicationFont font(pointSize);
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRows(4));
+    QVERIFY(tags != nullptr);
+    tags->resize(editorWidth, tags->height());
+    QTRY_COMPARE(tags->width(), editorWidth);
+    QObject *preview = object(main.window, QStringLiteral("renamePreviewDialog"));
+    QVERIFY(preview != nullptr);
+    QVariantList rows;
+    constexpr int kFiles = 4;
+    for (int i = 0; i < kFiles; ++i) {
+        const QString number = QStringLiteral("%1").arg(i + 1, 2, 10, QLatin1Char('0'));
+        rows << QVariantMap{
+            {QStringLiteral("oldName"), number + QStringLiteral(" Song.flac")},
+            {QStringLiteral("newName"),
+             number + QStringLiteral(" An Unusually Long Song Title for a Preview Row, Extended Remaster with "
+                                     "Bonus Material, Alternate Takes and a Live Encore.flac")},
+            {QStringLiteral("ok"), true},
+            {QStringLiteral("unchanged"), false},
+        };
+    }
+    QVERIFY(preview->setProperty("rows", rows));
+    const qreal inset = evaluate(preview, QStringLiteral("uiPalette.scaledSize(24)")).toReal();
+    // Its limit, once Edit Tags' resize has reached it: Edit Tags less the
+    // insets, within 42 grid units scaled with the font.
+    const qreal fontLimit = evaluate(preview, QStringLiteral("uiPalette.scaledSize(Kirigami.Units.gridUnit * 42)")).toReal();
+    QVERIFY(editorWidth - 2 * inset < fontLimit);
+    QTRY_COMPARE(preview->property("maximumDefaultWidth").toReal(), editorWidth - 2 * inset);
+    QVERIFY(QMetaObject::invokeMethod(preview, "open"));
+    QVERIFY(waitForDialogWindow(preview));
+    QQuickWindow *renames = windowOf(preview);
+    const int room = qFloor(editorWidth - 2 * inset);
+    const QString where = QStringLiteral("Rename Files %1 px wide over a %2 px Edit Tags")
+        .arg(renames->width()).arg(editorWidth);
+    QVERIFY2(renames->width() == std::max(room, renames->minimumWidth()), qPrintable(where));
+    QCOMPARE(preview->property("parentInset").toReal(), inset);
+    QQuickItem *list = visibleNamed(renames, QStringLiteral("renamePreviewList"));
+    QVERIFY(list != nullptr);
+    QTRY_COMPARE(list->property("count").toInt(), kFiles);
+    QList<QQuickItem *> arrows;
+    QTRY_VERIFY((arrows = itemsNamed(list, QStringLiteral("renamePreviewArrow"))).size() == kFiles);
+    const QList<QQuickItem *> newNames = itemsNamed(list, QStringLiteral("renamePreviewNewName"));
+    QCOMPARE(newNames.size(), kFiles);
+    QTRY_VERIFY(!layoutPendingUnder(list));
+    // The new names wrap, whole, in their column, which starts at one x
+    // after the arrows' one column, inside the list.
+    for (qsizetype i = 0; i < kFiles; ++i) {
+        QTRY_VERIFY2(newNames.at(i)->property("lineCount").toInt() > 1, qPrintable(where));
+        QVERIFY(!newNames.at(i)->property("truncated").toBool());
+        QCOMPARE(sceneRect(arrows.at(i)).left(), sceneRect(arrows.first()).left());
+        QCOMPARE(sceneRect(newNames.at(i)).left(), sceneRect(newNames.first()).left());
+        QVERIFY(sceneRect(newNames.at(i)).left() >= sceneRect(arrows.at(i)).right());
+        QVERIFY2(sceneRect(newNames.at(i)).right() <= sceneRect(list).right(), qPrintable(where));
+    }
+    QVERIFY(reject(preview));
+    QVERIFY(closeTagEditor(main));
 }
 
 void UiDialogsTest::autoNumberGroupsStandApartAtAnyFont_data() {

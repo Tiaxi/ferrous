@@ -2146,10 +2146,11 @@ void checkRenamePreviewOpensAsTallAsItsList(TagEditorWindow &fixture, QObject *p
 // Rename Files opens as wide as its widest line: a file's old name, arrow
 // and new name in their columns, with the list's gutter, a sentence of the
 // summary, or the buttons, within its
-// minimum and 42 grid units scaled with the font, where longer names wrap
-// in their columns; each time it opens, so long names widen it and short
-// ones bring it back (a fixed 756 px held 390 px of lines at 10 pt, and
-// 1814 px at 24 pt held 950).
+// minimum and 42 grid units scaled with the font, and no wider than Edit
+// Tags less an inset on either side, where longer names wrap in their
+// columns; each time it opens, so long names widen it and short ones bring
+// it back (a fixed 756 px held 390 px of lines at 10 pt, and 1814 px at
+// 24 pt held 950).
 void checkRenamePreviewOpensAsWideAsItsLines(TagEditorWindow &fixture, QObject *previewDialog,
                                              const QByteArray &loadResponse) {
     constexpr int kFiles = 12;
@@ -2188,7 +2189,12 @@ void checkRenamePreviewOpensAsWideAsItsLines(TagEditorWindow &fixture, QObject *
     const qreal gridUnit = QQmlExpression(qmlContext(previewDialog), previewDialog,
                                           QStringLiteral("Kirigami.Units.gridUnit")).evaluate().toReal();
     QVERIFY(gridUnit > 0);
-    const qreal limit = std::max(42 * gridUnit, qreal(std::round(42 * gridUnit * fontScale)));
+    // 42 grid units scaled with the font, and Edit Tags' width less a
+    // 24 px inset on either side, scaled with the font too.
+    const qreal parentInset = std::max(qreal(24), qreal(std::round(24 * fontScale)));
+    QCOMPARE(previewDialog->property("parentInset").toReal(), parentInset);
+    const qreal limit = std::min(std::max(42 * gridUnit, qreal(std::round(42 * gridUnit * fontScale))),
+                                 fixture.tags()->width() - 2 * parentInset);
     QCOMPARE(previewDialog->property("maximumDefaultWidth").toReal(), limit);
     const qreal gutter = previewDialog->property("listGutter").toReal();
 
