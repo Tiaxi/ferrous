@@ -560,30 +560,39 @@ ToolBar {
             }
 
             Rectangle {
+                id: scanBar
                 objectName: "statusBarScanBar"
                 anchors.verticalCenter: parent.verticalCenter
                 visible: !root.narrow && root.scanTotalKnown
-                // 72 by 4 px at the default font, and larger with a larger
+                // 72 by 6 px at the default font, and larger with a larger
                 // one, as the Last.fm bar is: as long as the glyphs grow,
-                // and as thick as that bar grows with its glyph.
+                // and as thick as that bar grows with its glyph. Its frame
+                // is the Last.fm trough's, and the fill inside it 4 px.
+                readonly property int frame: scrobbleIndicator.troughFrame
                 width: root.uiPalette.scaledSize(72)
                 height: Math.max(4, Math.round(root.uiPalette.scaledSize(root.smallGlyphSize) / 5))
+                    + 2 * frame
                 radius: height / 2
                 // The status bar's progress trough and fill, the Last.fm
-                // bar's: the fill the secondary text, never louder than the
-                // words beside it, on a trough midway between it and the
-                // status bar, so that the share scanned reads against the
-                // rest (its trough, the text at 15%, was 1.6:1 / 1.3:1).
+                // bar's: a frame at 3:1 on the status bar around the view,
+                // and in it the fill, the secondary text, never louder than
+                // the words beside it, so that the share scanned reads
+                // against the rest (a solid trough midway between the fill
+                // and the status bar was 2.7:1 / 2.5:1 to each, and in a
+                // light theme it washed out into the status bar).
                 color: root.uiPalette.statusBarTrough
+                border.width: frame
+                border.color: root.uiPalette.statusBarTroughFrame
 
                 Rectangle {
                     objectName: "statusBarScanBarFill"
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    // Whole pixels, rounded down: the bar moves with the
-                    // batches, and is full only once the scan is.
-                    width: Math.floor(parent.width * scanGroup.fraction)
+                    x: scanBar.frame
+                    y: scanBar.frame
+                    height: scanBar.height - 2 * scanBar.frame
+                    // Whole pixels of the inside, rounded down: the bar
+                    // moves with the batches, and is full only once the
+                    // scan is.
+                    width: Math.floor((scanBar.width - 2 * scanBar.frame) * scanGroup.fraction)
                     radius: height / 2
                     color: root.uiPalette.statusBarFill
                 }

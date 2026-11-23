@@ -18,19 +18,21 @@ import "../logic/KeyUtils.js" as KeyUtils
 // antialiased strokes for offline read as three hands): outlines drawn for
 // 16 px with their straight edges on whole pixels and their corners as
 // arcs, all 16 px.
-// The bar is beside the glyph, 6 px before it and centred on its ink: 28
-// by 3 px at the default font, with square ends, longer and thicker with a
-// larger one (16 px long under the glyph, it read as an underline, part of
-// the glyph, and its share was hard to make out at 1x). It is the
-// listening done towards the scrobble, in the status bar's progress fill,
-// the glyph's own ink, over its opaque trough, the scan's: the trough
-// midway in contrast between the status bar and the fill, so that the
-// whole and the share done both read, and the bar is never louder than
-// its glyph (in a fill brighter than the glyph's letters, being sent was
-// the slot's loudest mark). It is under half the scan bar's length, with
-// square ends where the scan bar's are round, and the scan bar has its
-// percent beside it (the scan bar is 72 by 4 px), so that it does not read
-// as a second scan or a download.
+// The bar is beside the glyph, 6 px before it and centred on its ink: a
+// trough 28 by 5 px at the default font, with square ends, longer and
+// thicker with a larger one (16 px long under the glyph, it read as an
+// underline, part of the glyph, and its share was hard to make out at 1x).
+// The trough is the scan's: a 1 px frame at 3:1 on the status bar with the
+// view inside it, and inset in the frame the listening done towards the
+// scrobble, 3 px thick, in the status bar's progress fill, the glyph's own
+// ink, so that the whole and the share done both read at 1x, and the bar
+// is never louder than its glyph (in a fill brighter than the glyph's
+// letters, being sent was the slot's loudest mark; on a solid trough
+// midway between the status bar and the fill, neither edge reached 3:1).
+// It is under half the scan bar's length, with square ends where the scan
+// bar's are round, and the scan bar has its percent beside it (the scan
+// bar is 72 by 6 px), so that it does not read as a second scan or a
+// download.
 // - Listening: the glyph in the secondary colour, and the bar filling its
 //   trough with the listening done towards the scrobble, from a short mark
 //   at the left; the tooltip says how much is left. Both come from the scrobbler's listened
@@ -129,13 +131,19 @@ AbstractButton {
     // 12, centred in it.
     readonly property int inkTop: Math.round(root.glyphSize * 3 / 16)
     readonly property int inkBottom: Math.round(root.glyphSize * 13 / 16)
-    // The bar's trough beside it: 28 by 3 px at the default font, longer
-    // and thicker with a larger one, 6 px before the glyph's box.
-    readonly property int barWidth: root.uiPalette.scaledSize(28)
+    // The bar's trough beside it: 28 by 5 px at the default font, longer
+    // and thicker with a larger one, 6 px before the glyph's box. Its frame
+    // is 1 px, 2 px from 32 px glyphs; the bar fills what is inside it,
+    // 26 by 3 px.
+    readonly property int troughWidth: root.uiPalette.scaledSize(28)
+    readonly property int troughFrame: Math.max(1, Math.floor(root.glyphSize / 16))
+    readonly property int barWidth: root.troughWidth - 2 * root.troughFrame
     readonly property int barHeight: Math.max(3, Math.round(root.glyphSize * 3 / 16))
+    readonly property int troughHeight: root.barHeight + 2 * root.troughFrame
     readonly property int barGap: root.uiPalette.scaledSize(6)
-    // The bar's top, from the glyph's: centred on its ink, on a whole pixel.
-    readonly property int barY: Math.round((root.inkTop + root.inkBottom - root.barHeight) / 2)
+    // The trough's top, from the glyph's: centred on its ink, on a whole
+    // pixel.
+    readonly property int barY: Math.round((root.inkTop + root.inkBottom - root.troughHeight) / 2)
     // What is centred on the slot: the ink.
     readonly property int unitHeight: root.inkBottom - root.inkTop
     // The focus ring's width, and the clear space inside it around the ink
@@ -173,11 +181,12 @@ AbstractButton {
         const steps = Math.max(1, Math.round(root.barWidth * Math.max(1, Screen.devicePixelRatio)))
         return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
-    // The bar and its trough: the status bar's progress colours, the scan
-    // bar's: the fill is the glyph's ink (the trough at 20% text was
-    // 1.9:1 / 1.5:1 on the status bar).
+    // The bar and its framed trough: the status bar's progress colours,
+    // the scan bar's: the fill is the glyph's ink (the trough at 20% text
+    // was 1.9:1 / 1.5:1 on the status bar).
     readonly property color barColor: root.uiPalette.statusBarFill
     readonly property color troughColor: root.uiPalette.statusBarTrough
+    readonly property color troughFrameColor: root.uiPalette.statusBarTroughFrame
     // While listening, the bar is never less than a short mark from the
     // left, so that listening that has just started reads apart from a
     // scrobble, which has no bar (at 0% it was the trough alone); and it
@@ -413,20 +422,24 @@ AbstractButton {
             }
 
             // The whole the listening is a share of, centred on the
-            // glyph's ink.
+            // glyph's ink: framed, the view inside.
             Rectangle {
                 objectName: "scrobbleIndicatorTrough"
                 y: glyphBox.y + root.barY
-                width: root.barWidth
-                height: root.barHeight
+                width: root.troughWidth
+                height: root.troughHeight
                 visible: root.barShown
                 color: root.troughColor
+                border.width: root.troughFrame
+                border.color: root.troughFrameColor
 
-                // The listening done, from the left.
+                // The listening done, from the left, inside the frame.
                 Rectangle {
                     objectName: "scrobbleIndicatorBar"
+                    x: root.troughFrame
+                    y: root.troughFrame
                     width: root.barLength
-                    height: parent.height
+                    height: root.barHeight
                     visible: width > 0
                     color: root.barColor
                 }
