@@ -23,14 +23,13 @@ Item {
     // Follow Playhead's shortcut as the user reads it, or "".
     property string shortcut: ""
     property bool divided: false
-    // Whether it shows; set this rather than `visible` for its text and
-    // divider to come in over shortDuration, OutCubic, with the reveal of
-    // the plate it is on (they appeared in a frame as the plate faded in),
-    // at once with animations off.
-    property bool shown: true
-    // How far its text and divider have come in, from 0 to 1. They go at
-    // once.
+    // How far its text and divider have come in, from 0 to 1, which the
+    // plate it is on sets as it brings them in. They go at once.
     property real arrivalLevel: 1
+    // How far its text and divider lie right of their place, less than 0
+    // while the plate it is on brings it in narrower than itself, clipped,
+    // its text and divider staying where they come to.
+    property real contentShift: 0
     // The text's and the divider's 6 px from the plate's edge, less what
     // the plate has around them.
     property real inset: 0
@@ -44,30 +43,6 @@ Item {
     implicitHeight: root.uiPalette.toolButtonSize
     width: implicitWidth
     height: implicitHeight
-    visible: root.shown
-
-    function arrive() {
-        arrival.stop()
-        if (Kirigami.Units.shortDuration > 0 && root.shown) {
-            root.arrivalLevel = 0
-            arrival.start()
-        } else {
-            root.arrivalLevel = 1
-        }
-    }
-    onShownChanged: {
-        if (root.shown)
-            root.arrive()
-    }
-    NumberAnimation {
-        id: arrival
-        target: root
-        property: "arrivalLevel"
-        from: 0
-        to: 1
-        duration: Kirigami.Units.shortDuration
-        easing.type: Easing.OutCubic
-    }
 
     Accessible.role: Accessible.StaticText
     Accessible.name: label.text
@@ -76,6 +51,7 @@ Item {
     Label {
         id: label
         objectName: "followNoticeText"
+        x: root.contentShift
         opacity: root.arrivalLevel
         height: root.height
         verticalAlignment: Text.AlignVCenter
@@ -94,7 +70,7 @@ Item {
         objectName: "followNoticeDivider"
         visible: root.divided
         opacity: root.arrivalLevel
-        x: label.width + 6
+        x: root.contentShift + label.width + 6
         y: root.inset
         width: 1
         height: Math.max(0, root.height - 2 * root.inset)
