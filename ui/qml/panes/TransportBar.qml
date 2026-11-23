@@ -110,9 +110,14 @@ ToolBar {
     // chrome and lighter than the light one, away from the waveform's
     // tones, so the waveform on it keeps its contrast. The unplayed part
     // is the waveform at the unplayed opacity on the band as on the chrome.
+    // The played part is under the band's colour at 15 %, so the band's
+    // edge shows in the waveform's ink on either side of the playhead:
+    // under the bright played part alone, the band read as starting at the
+    // playhead rather than centred on it.
     readonly property color seekViewBandColor: root.uiPalette.view
     readonly property color seekViewBandUnplayedCover: ColorUtils.withAlpha(
         root.seekViewBandColor, 1 - root.seekUnplayedOpacity)
+    readonly property color seekViewBandPlayedCover: ColorUtils.withAlpha(root.seekViewBandColor, 0.15)
     // The volume slider, in the seek bar's language: its groove filled up
     // to the thumb in the played colour and the rest in the unplayed one,
     // opaque, and a solid thumb in the played colour. While muted, the
@@ -842,6 +847,21 @@ ToolBar {
                     bgColor: "transparent"
                     // Past the waveform's end, as without one.
                     emptyLineColor: root.seekEmptyLineColor
+                }
+
+                // The played part where the band is: the band's colour over
+                // the waveform before the playhead's line, at 15 %.
+                Rectangle {
+                    objectName: "seekViewBandPlayed"
+                    readonly property real coverLeft: Math.min(seekSlider.viewBandLeft, seekSlider.playheadX)
+                    readonly property real coverRight: Math.min(seekSlider.viewBandRight, seekSlider.playheadX)
+                    visible: seekSlider.viewBandShown && width > 0
+                    antialiasing: false
+                    x: coverLeft
+                    width: Math.max(0, coverRight - coverLeft)
+                    y: waveformItem.y
+                    height: waveformItem.height
+                    color: root.seekViewBandPlayedCover
                 }
 
                 // The unplayed part: the chrome over the waveform after the

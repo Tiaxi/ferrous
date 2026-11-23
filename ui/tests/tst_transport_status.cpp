@@ -983,9 +983,11 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform_data() {
 
 // While the visualization is zoomed, a band behind the seek bar's
 // waveform marks the part of the track its view shows: in the view colour,
-// across the bar's height, on whole device pixels. The waveform keeps its
-// colours on it, the unplayed part at the unplayed opacity on the band as
-// on the chrome, and the band is the same on either side of the playhead.
+// across the bar's height, on whole device pixels. The unplayed part is at
+// the unplayed opacity on the band as on the chrome, and the played part
+// under the view colour at 15 %, so the band's edge shows in the
+// waveform's ink on either side of the playhead: under the bright played
+// part alone, the band read as starting at the playhead (H14).
 void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1000,10 +1002,12 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
     QQuickItem *band = harness.item(QStringLiteral("seekViewBand"));
     QQuickItem *bandUnplayed = harness.item(QStringLiteral("seekViewBandUnplayed"));
+    QQuickItem *bandPlayed = harness.item(QStringLiteral("seekViewBandPlayed"));
     QQuickItem *line = harness.item(QStringLiteral("seekPlayheadLine"));
-    QVERIFY(transport && seek && waveform && band && bandUnplayed && line);
+    QVERIFY(transport && seek && waveform && band && bandUnplayed && bandPlayed && line);
     QVERIFY(!band->isVisible());
     QVERIFY(!bandUnplayed->isVisible());
+    QVERIFY(!bandPlayed->isVisible());
 
     // A view from 80 s to 120 s of the 229 s track.
     transport->setProperty("viewStartSeconds", 80.0);
@@ -1049,10 +1053,25 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
                      qPrintable(QStringLiteral("%1 at %2,%3").arg(drawn.name()).arg(x).arg(y)));
         }
     }
-    // The bars on it, played and unplayed, as on the chrome but on the band.
+    // The bars on it: the unplayed part as on the chrome but on the band,
+    // the played part under the view colour at 15 %.
     const QColor drawnPlayed = pixelAt(image, QPointF(playedX, middle), scale);
     const QColor drawnUnplayed = pixelAt(image, QPointF(unplayedX, middle), scale);
-    QVERIFY2(channelDistance(drawnPlayed, played) <= 2, qPrintable(drawnPlayed.name()));
+    const QColor expectedPlayed = mixed(played, view, 0.15);
+    QVERIFY2(channelDistance(drawnPlayed, expectedPlayed) <= 2,
+             qPrintable(drawnPlayed.name() + QStringLiteral(" vs ") + expectedPlayed.name()));
+    // Played and outside the band, the bars keep their colour.
+    QVERIFY(bandRect.left() > bar.left() + 20);
+    const QColor playedOutside = pixelAt(image, QPointF(bandRect.left() - 10, middle), scale);
+    QVERIFY2(channelDistance(playedOutside, played) <= 2, qPrintable(playedOutside.name()));
+    // The played part's cover runs from the band's left edge to the
+    // playhead's line, under the playhead.
+    QCOMPARE(sceneRect(bandPlayed).left(), bandRect.left());
+    QQuickItem *unplayedPart = harness.item(QStringLiteral("seekUnplayed"));
+    QVERIFY(unplayedPart != nullptr);
+    QCOMPARE(sceneRect(bandPlayed).right(), sceneRect(unplayedPart).left());
+    QCOMPARE(sceneRect(bandPlayed).top(), wave.top());
+    QCOMPARE(sceneRect(bandPlayed).height(), wave.height());
     const QColor expectedUnplayed = mixed(view, played, unplayedOpacity);
     QVERIFY2(channelDistance(drawnUnplayed, expectedUnplayed) <= 2,
              qPrintable(drawnUnplayed.name() + QStringLiteral(" vs ") + expectedUnplayed.name()));
@@ -1080,6 +1099,20 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     QVERIFY2(contrastRatio(drawnPlayed, view) >= 4.5,
              qPrintable(describeContrast(QStringLiteral("played on the band"), drawnPlayed, view)));
 
+    // A view all before the playhead: the cover is the band's, edge to
+    // edge, with nothing unplayed on it.
+    transport->setProperty("viewStartSeconds", 40.0);
+    transport->setProperty("viewEndSeconds", 60.0);
+    QVERIFY(bandPlayed->isVisible());
+    QVERIFY(!bandUnplayed->isVisible());
+    QCOMPARE(sceneRect(bandPlayed).left(), sceneRect(band).left());
+    QCOMPARE(sceneRect(bandPlayed).right(), sceneRect(band).right());
+    // And all after it: none.
+    transport->setProperty("viewStartSeconds", 140.0);
+    transport->setProperty("viewEndSeconds", 160.0);
+    QVERIFY(!bandPlayed->isVisible());
+    QVERIFY(bandUnplayed->isVisible());
+
     // A view past the track's end stops at the bar's end.
     transport->setProperty("viewStartSeconds", 200.0);
     transport->setProperty("viewEndSeconds", 260.0);
@@ -1094,6 +1127,7 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     harness.bridge->setProperty("durationSeconds", std::numeric_limits<double>::quiet_NaN());
     QVERIFY(!band->isVisible());
     QVERIFY(!bandUnplayed->isVisible());
+    QVERIFY(!bandPlayed->isVisible());
     harness.bridge->setProperty("durationSeconds", 0.0);
     QVERIFY(!band->isVisible());
     harness.bridge->setProperty("durationSeconds", 229.0);
@@ -1187,7 +1221,7 @@ void TransportStatusTest::seekViewBandIsDecorationOnly() {
     QCOMPARE(state(), before);
     QVERIFY(harness.root->property("seeks").value<QJSValue>().toVariant().toList().isEmpty());
     // Neither part of the band is an accessible object.
-    for (const char *name : {"seekViewBand", "seekViewBandUnplayed"}) {
+    for (const char *name : {"seekViewBand", "seekViewBandUnplayed", "seekViewBandPlayed"}) {
         QAccessibleInterface *part = QAccessible::queryAccessibleInterface(harness.item(QString::fromLatin1(name)));
         QVERIFY2(part == nullptr || part->role() == QAccessible::NoRole || part->state().invisible,
                  name);
