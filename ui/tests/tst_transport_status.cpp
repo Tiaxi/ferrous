@@ -3806,10 +3806,13 @@ void TransportStatusTest::statusBarScanKeepsItsPlaceWhileItCounts() {
 }
 
 // The first scan of a folder counts the files it has scanned, which keep
-// the room of "99,999 files" after the words, in tabular figures: the
-// words and the status bar's other groups stay where they are as the count
-// passes 10, 100 and 1,000 (the count's own width moved them left), at 10
-// and 24 pt, wide and narrow.
+// the room of the widest count of their digits after the words, from
+// "999 files", in tabular figures: the words stay where they are as the
+// count passes 10 and 100, and step once each at 1,000 and 10,000, never
+// back while the scan goes on, and the status bar's groups after them
+// stay put throughout (the count's own width moved them at every power
+// of ten; the room of "99,999 files" from the first file left a hole of
+// some 30 px after a short count), at 10 and 24 pt, wide and narrow.
 void TransportStatusTest::statusBarScanCountKeepsItsPlaceWithoutATotal_data() {
     statusBarScanKeepsItsPlaceWhileItCounts_data();
 }
@@ -3836,26 +3839,67 @@ void TransportStatusTest::statusBarScanCountKeepsItsPlaceWithoutATotal() {
     QTRY_COMPARE(count->property("text").toString(), QStringLiteral("1 file"));
     QVERIFY(count->property("font").value<QFont>().featureValue(QFont::Tag("tnum")) == 1);
     QTRY_VERIFY(scan->width() > 0);
+    // The status bar laid out as drawn: a grab polishes it.
+    const auto laidOut = [&] { QVERIFY(!harness.window->grabWindow().isNull()); };
+    laidOut();
     const QRectF scanRect = sceneRect(scan);
     const QRectF labelRect = sceneRect(label);
     const QRectF countRect = sceneRect(count);
     const QRectF slotRect = sceneRect(slot);
-    // The room of the widest count it keeps, and no more: a count's words
-    // are left-aligned in it.
+    // The room of the widest count of its digits it keeps, and no more: a
+    // count's words are left-aligned in it.
     QCOMPARE(count->property("horizontalAlignment").toInt(), int(Qt::AlignLeft));
-    const QString widest = QStringLiteral("99,999 files");
-    QCOMPARE(count->width(), std::ceil(QFontMetricsF(count->property("font").value<QFont>()).horizontalAdvance(widest)));
-    for (const int processed : {9, 10, 99, 100, 999, 1000, 1204, 9999, 10000, 99999}) {
-        harness.bridge->setProperty("libraryScanProcessed", processed);
+    const QFontMetricsF metrics(count->property("font").value<QFont>());
+    const auto room = [&](const QString &widest) { return std::ceil(metrics.horizontalAdvance(widest)); };
+    QCOMPARE(count->width(), room(QStringLiteral("999 files")));
+    struct Tier {
+        QList<int> counts;
+        QString widest;
+    };
+    const QList<Tier> tiers{{{9, 10, 57, 99, 100, 999}, QStringLiteral("999 files")},
+                            {{1000, 1204, 9999}, QStringLiteral("9,999 files")},
+                            {{10000, 99999}, QStringLiteral("99,999 files")}};
+    qreal previousWidth = 0;
+    for (const Tier &tier : tiers) {
+        harness.bridge->setProperty("libraryScanProcessed", tier.counts.first());
         QTRY_VERIFY(count->property("text").toString().endsWith(QStringLiteral(" files")));
-        QVERIFY2(count->property("implicitWidth").toReal() <= count->width() + 0.01,
-                 qPrintable(count->property("text").toString()));
-        QCOMPARE(sceneRect(scan), scanRect);
-        QCOMPARE(sceneRect(label), labelRect);
-        QCOMPARE(sceneRect(count), countRect);
+        laidOut();
+        QCOMPARE(count->width(), room(tier.widest));
+        QVERIFY(count->width() > previousWidth);
+        previousWidth = count->width();
+        // Within a tier, nothing moves; across one, the scan grows by the
+        // count's new room to the left, its words stepping with it, and
+        // the status bar's groups after it stay where they are.
+        const qreal grown = count->width() - countRect.width();
+        QCOMPARE(sceneRect(scan).width() - scanRect.width(), grown);
+        QCOMPARE(sceneRect(scan).right(), scanRect.right());
+        QCOMPARE(sceneRect(label), labelRect.translated(-grown, 0));
         QCOMPARE(sceneRect(slot), slotRect);
+        const QRectF tierScan = sceneRect(scan);
+        const QRectF tierLabel = sceneRect(label);
+        const QRectF tierCount = sceneRect(count);
+        for (const int processed : tier.counts) {
+            harness.bridge->setProperty("libraryScanProcessed", processed);
+            QTRY_VERIFY(count->property("text").toString().endsWith(QStringLiteral(" files")));
+            laidOut();
+            QVERIFY2(count->property("implicitWidth").toReal() <= count->width() + 0.01,
+                     qPrintable(count->property("text").toString()));
+            QCOMPARE(sceneRect(scan), tierScan);
+            QCOMPARE(sceneRect(label), tierLabel);
+            QCOMPARE(sceneRect(count), tierCount);
+            QCOMPARE(sceneRect(slot), slotRect);
+        }
+        QCOMPARE(count->property("text").toString(), tier.widest);
     }
-    QCOMPARE(count->property("text").toString(), widest);
+    // A new scan starts from the least room again.
+    harness.bridge->setProperty("libraryScanInProgress", false);
+    harness.bridge->setProperty("libraryScanProcessed", 0);
+    QTRY_VERIFY(!scan->isVisible());
+    harness.bridge->setProperty("libraryScanProcessed", 57);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    QTRY_VERIFY(scan->isVisible());
+    QTRY_COMPARE(count->property("text").toString(), QStringLiteral("57 files"));
+    QCOMPARE(count->width(), room(QStringLiteral("999 files")));
 }
 
 // The first scan of a folder cannot tell its total: the files scanned so
