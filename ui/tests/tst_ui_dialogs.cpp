@@ -3169,11 +3169,11 @@ void UiDialogsTest::checkLastFmStatusCountsDroppedScrobbles(QQuickWindow *window
     QVERIFY(bridge->setProperty("lastFmDroppedScrobbleCount", 1));
     QQuickItem *dropped = nullptr;
     QTRY_VERIFY((dropped = visibleNamed(prefs, QStringLiteral("lastFmDroppedLabel"))) != nullptr);
-    QCOMPARE(dropped->property("text").toString(),
-             QStringLiteral("1 old scrobble was discarded from the queue"));
+    // Worded without "queue", which elsewhere is the play queue.
+    QCOMPARE(dropped->property("text").toString(), QStringLiteral("1 old scrobble was discarded unsent"));
     QVERIFY(bridge->setProperty("lastFmDroppedScrobbleCount", 12));
-    QTRY_COMPARE(dropped->property("text").toString(),
-                 QStringLiteral("12 old scrobbles were discarded from the queue"));
+    QTRY_COMPARE(dropped->property("text").toString(), QStringLiteral("12 old scrobbles were discarded unsent"));
+    QVERIFY(!dropped->property("text").toString().contains(QStringLiteral("queue")));
     // It goes on from the waiting scrobbles' line, as one status.
     QTRY_VERIFY(sceneRect(dropped).top() >= sceneRect(pending).bottom() - 1);
     QCOMPARE(pending->property("trailingSpace").toReal(), 0.0);
