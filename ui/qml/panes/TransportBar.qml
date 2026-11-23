@@ -66,13 +66,6 @@ ToolBar {
     // its waveform.
     property real viewStartSeconds: NaN
     property real viewEndSeconds: NaN
-    // Where the seek bar's time box may go, in the transport's coordinates,
-    // whose left edge is the window's, as the menu bar's is: the right edge
-    // of the menu bar's titles above the transport, which the box must not
-    // cover, and of what the box may cover under the transport (the
-    // sidebar's, and not the queue's header beside it).
-    property real menuTitlesRight: 0
-    property real belowClearRight: 0
     readonly property alias seekPressed: seekSlider.pressed
     // The time of one device pixel of the seek bar's playhead: the smallest
     // move of the position it shows, so the position needs to change no more
@@ -226,8 +219,36 @@ ToolBar {
     }
 
     implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
-    // 48 px, or the buttons and 8 px above and below them.
-    implicitHeight: Math.max(48, root.buttonSize + 16)
+    // The row of controls: 48 px, or the buttons and 8 px above and below
+    // them.
+    readonly property real rowHeight: Math.max(48, root.buttonSize + 16)
+    // The seek bar's time box has one place: a lane above the bar, in the
+    // transport's band. Under the bar it hung over the queue's header (H5)
+    // and, at a large font, the now-playing title; above the band it met
+    // the menu's titles; beside its line on the waveform it hid what the
+    // scrub reads. The lane ends 1 px clear of the seek bar's focus ring
+    // and of the buttons' rings, and its boxes are a line of text and a
+    // little room above and below it, so the band grows by no more than
+    // the lane needs beyond the room above the bar. The lane's bottom, up
+    // from the row's centre line:
+    readonly property real laneClearance: Math.max(seekSlider.boxHeight / 2 + seekSlider.focusRingOutset + 1,
+        root.buttonSize / 2 + root.buttonFocusRingOutset + 1)
+    // The line's own leading, which grows with the font, is most of the
+    // room around its figures.
+    readonly property real laneToolTipPadding: 2
+    readonly property real laneTopMargin: 2
+    readonly property real laneBoxHeight: seekTimeBox.implicitHeight
+    // What the band grows by, above the row, in whole pixels.
+    readonly property real laneGrowth: Math.max(0,
+        Math.ceil(root.laneTopMargin + root.laneBoxHeight + root.laneClearance - root.rowHeight / 2))
+    // The lane's bottom, in the transport's coordinates.
+    readonly property real laneBottom: root.snapped(root.laneGrowth + root.rowHeight / 2 - root.laneClearance)
+    // The y of a box in the lane, `boxHeight` tall, whose parent is
+    // `rowItem`, an item of the row.
+    function laneY(rowItem, boxHeight) {
+        return root.laneBottom - boxHeight - root.topPadding - rowItem.y
+    }
+    implicitHeight: root.rowHeight + root.laneGrowth
     // The content's inset, on both sides, measured to what is drawn, as
     // the transport's other gaps are: Previous's glyph starts where the
     // library's rows and the status bar's text do, with its button's clear
@@ -240,7 +261,7 @@ ToolBar {
     readonly property int buttonFocusRingOutset: 3
     leftPadding: Math.max(root.buttonFocusRingOutset, Math.round(root.edgeInset - root.smallGlyphInset))
     rightPadding: root.edgeInset
-    topPadding: 0
+    topPadding: root.laneGrowth
     bottomPadding: 0
     // Chrome. The seam under it is the main window's.
     background: Rectangle {
@@ -1149,13 +1170,11 @@ ToolBar {
                 restoreMode: Binding.RestoreNone
             }
 
-            // The time in a native tooltip above the bar, over the line it
-            // names: the playhead while a gesture moves it, otherwise the
-            // hovering pointer's line. Its bottom edge is on the bar's top,
-            // in the band the volume's tooltip takes, so it hides none of
-            // the waveform it reads (beside the line it covered some 40 px
-            // of it where the pointer was); near the menu's titles it is
-            // under the bar, over the sidebar.
+            // The time in a native tooltip in the transport's lane above
+            // the bar, over the line it names: the playhead while a gesture
+            // moves it, otherwise the hovering pointer's line. It hides none
+            // of the waveform it reads (beside the line it covered some
+            // 40 px of it where the pointer was).
             ToolTip {
                 id: seekTimeBox
                 objectName: "seekTimeBox"
@@ -1217,44 +1236,15 @@ ToolBar {
                 readonly property real centredX: anchorX - width / 2
                 readonly property real placedX: root.snapped(Math.max(0,
                     Math.min(seekSlider.width - width, centredX)))
-                // Above the bar it reaches into the menu bar, and near the
-                // bar's start it covered the titles there ("Pla[0:04]k").
-                // Where it would, it goes under the bar, over the sidebar,
-                // which holds nothing the scrub needs (under the bar over
-                // the queue, it hung over the queue's header, H5). Where
-                // neither is clear, as at a large font whose titles run
-                // past the sidebar, it is whichever of the two is nearer
-                // its line: under the bar ending at the sidebar's edge, or
-                // above it starting past the titles (kept right of them
-                // at every point, it was up to 350 px from its line).
-                readonly property real barLeft: root.contentItem.x + seekSlider.x
-                readonly property bool aboveMeetsMenu: barLeft + placedX < root.menuTitlesRight
-                readonly property bool belowIsClear: barLeft + placedX + width <= root.belowClearRight
-                readonly property real belowPinnedX: Math.min(placedX,
-                    Math.floor(root.belowClearRight - barLeft - width))
-                readonly property real aboveShiftedX: Math.max(placedX,
-                    Math.ceil(root.menuTitlesRight - barLeft))
-                readonly property bool belowPinnedFits: belowPinnedX >= 0
-                readonly property bool aboveShiftedFits: aboveShiftedX + width <= seekSlider.width
-                readonly property bool below: aboveMeetsMenu && (belowIsClear || (belowPinnedFits
-                    && (!aboveShiftedFits || placedX - belowPinnedX <= aboveShiftedX - placedX)))
-                x: !aboveMeetsMenu ? placedX
-                    : below ? belowPinnedX
-                    : aboveShiftedFits ? aboveShiftedX : placedX
-                // Its bottom edge on the bar's top, or its top edge on the
-                // bar's bottom, and 1 px clear of the bar's focus ring while
-                // that shows (it covered the ring's edge). Above, it may
-                // reach the window's top edge, which it nearly does at
-                // 24 pt, and clears the ring as far as the window lets it:
-                // the style's 6 px margin there, or more than the window
-                // has, would flip it under the bar.
-                readonly property real ringClearance: seekSlider.visualFocus
-                    ? seekSlider.focusRingOutset + 1 : 0
-                function roomAbove() {
-                    return Math.max(0, seekSlider.mapToItem(null, 0, 0).y - height)
-                }
-                y: below ? seekSlider.height + ringClearance
-                    : -height - Math.min(ringClearance, roomAbove())
+                x: placedX
+                // At the lane's bottom, clear of the bar's focus ring, at
+                // every point of the bar: there is no other place to jump
+                // to (near the menu's titles it went under the bar, ~54 px
+                // down, over the now-playing title at 24 pt). Its padding
+                // is the lane's.
+                y: root.laneY(seekSlider, height)
+                topPadding: root.laneToolTipPadding
+                bottomPadding: root.laneToolTipPadding
                 topMargin: 0
                 // It comes in over the short duration of the window's other
                 // hovers, and goes as the style's tooltips do.

@@ -1521,10 +1521,9 @@ QString timeBoxPlacementError(QQuickItem *seek, const SeekTimeBox &box, qreal an
     if (!fuzzyEqual(drawn.left() * dpr, std::round(drawn.left() * dpr))) {
         errors.push_back(QStringLiteral("at %1 device pixels").arg(drawn.left() * dpr));
     }
-    // On the bar's top, or 1 px clear of the bar's focus ring while that
-    // shows.
-    const qreal clearance =
-        seek->property("visualFocus").toBool() ? seek->property("focusRingOutset").toReal() + 1 : 0.0;
+    // In the transport's lane, 1 px clear of the bar's focus ring, whether
+    // that shows or not: the box has one place.
+    const qreal clearance = seek->property("focusRingOutset").toReal() + 1;
     if (std::abs(drawn.bottom() - (bar.top() - clearance)) > slack) {
         errors.push_back(QStringLiteral("its bottom at %1, not %2 over the bar's top at %3")
                              .arg(drawn.bottom()).arg(clearance).arg(bar.top()));

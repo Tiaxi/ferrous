@@ -98,7 +98,7 @@ import "panes" as Panes
 ApplicationWindow {
     id: window
     width: %8
-    height: 200
+    height: 300
     visible: true
     palette.window: "%1"
     palette.base: "%2"
@@ -616,7 +616,8 @@ void TransportStatusTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
 }
 
-// The sizes of the design at 1×: a 48 px band; 32 px buttons 4 px apart
+// The sizes of the design at 1×: a 48 px row under the lane of the seek
+// bar's time box, which grows the band; 32 px buttons 4 px apart
 // from 12 px, the content's inset; the seek bar 16 px after Next; then on
 // one rhythm, between what is drawn: the time 16 px after the seek bar, as
 // wide as "0:00 / 0:00", the volume glyph 24 px after it, and the 96 px
@@ -627,8 +628,11 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QVERIFY2(harness.load(), qPrintable(harness.error));
     QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
     QVERIFY(transport != nullptr);
-    QCOMPARE(transport->height(), 48.0);
-    const qreal top = sceneRect(transport).top();
+    const qreal lane = transport->property("laneGrowth").toReal();
+    QVERIFY(lane > 0);
+    QCOMPARE(transport->height(), 48.0 + lane);
+    // The row's top.
+    const qreal top = sceneRect(transport).top() + lane;
 
     const QStringList names{QStringLiteral("previous"), QStringLiteral("playPause"), QStringLiteral("stop"),
                             QStringLiteral("next")};
@@ -1441,15 +1445,19 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
                                  .arg(static_cast<int>(seconds) % 60, 2, 10, QLatin1Char('0'));
     QCOMPARE(tip->property("text").toString(), expected);
     QVERIFY2(!expected.startsWith(QLatin1Char('0')), qPrintable(expected));
-    // Above the bar, its bottom edge on the bar's top, centred on the line:
-    // it covers none of the waveform it reads, and nothing under the bar
-    // such as the queue's header.
+    // In the transport's lane above the bar, 1 px clear of the bar's focus
+    // ring, centred on the line: it covers none of the waveform it reads,
+    // and nothing under the bar such as the queue's header.
     auto *tipBox = tip->property("background").value<QQuickItem *>();
     QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
-    QVERIFY(tipBox != nullptr && waveform != nullptr);
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QVERIFY(tipBox != nullptr && waveform != nullptr && transport != nullptr);
+    const QRectF band = sceneRect(transport);
     QTRY_VERIFY(tip->property("opened").toBool());
     const auto expectAbove = [&](const QRectF &tipRect) {
-        QVERIFY2(std::abs(tipRect.bottom() - bar.top()) <= 0.5, qPrintable(describeRect(tipRect)));
+        QVERIFY2(std::abs(tipRect.bottom() - (bar.top() - seek->property("focusRingOutset").toReal() - 1)) <= 0.5,
+                 qPrintable(describeRect(tipRect)));
+        QVERIFY2(tipRect.top() >= band.top(), qPrintable(describeRect(tipRect)));
         QVERIFY2(!tipRect.intersects(sceneRect(waveform)), qPrintable(describeRect(tipRect)));
         QVERIFY2(!tipRect.intersects(bar), qPrintable(describeRect(tipRect)));
     };
@@ -5131,7 +5139,7 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
         QVERIFY2(rect.left() >= previousRight, qPrintable(names[i]));
         previousRight = rect.right();
     }
-    QCOMPARE(band.height(), std::max(48.0, buttonSize + 16.0));
+    QCOMPARE(band.height(), std::max(48.0, buttonSize + 16.0) + transport->property("laneGrowth").toReal());
     for (const QString &name : {QStringLiteral("seekSlider"), QStringLiteral("transportTimePosition"),
                                 QStringLiteral("transportTimeLength"), QStringLiteral("muteButton"),
                                 QStringLiteral("volumeSlider")}) {
@@ -5202,6 +5210,8 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
     QVERIFY(within(sceneRect(harness.item(QStringLiteral("scrobbleIndicatorLabel"))), sceneRect(slot)));
     QVERIFY(within(sceneRect(harness.item(QStringLiteral("statusBarErrorsLabel"))), sceneRect(issues)));
 }
+
+
 
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault(argc, argv);
