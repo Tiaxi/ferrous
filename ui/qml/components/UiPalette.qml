@@ -159,11 +159,13 @@ QtObject {
     // The seek bar's waveform. #b9e1f5 / #2c566c.
     readonly property color wave: ColorUtils.mixColor(root.text, root.accent, 0.35)
     // The visualization pane's waveform: in a light theme the seek bar's;
-    // in a dark one quieter, the accent's hue at 60 % of its saturation and
-    // 68 % lightness, #87bad4, some 8.6:1 on the view (the seek bar's
+    // in a dark one quieter, the accent's hue at 55 % of its saturation and
+    // 61 % lightness, #70a9c7, some 7.1:1 on the view (the seek bar's
     // #b9e1f5, 13:1 over some 29 % of the pane, was the brightest mass of
-    // the dark window). One tone: no played part apart.
-    readonly property color paneWave: root.themeIsDark ? root._withHslLightness(root.accent, 0.6, 0.68) : root.wave
+    // the dark window, and #87bad4, 8.6:1, still outshone the cover). One
+    // tone: no played part apart. The waveform's level meter is mixed from
+    // it.
+    readonly property color paneWave: root.themeIsDark ? root._withHslLightness(root.accent, 0.55, 0.61) : root.wave
     // Fixed: the spectrogram colour map's amber. It marks only what is
     // playing: the playing row's glyph and title, the playing tree row, the
     // name of a collapsed tree row that holds it, and the seek playhead.

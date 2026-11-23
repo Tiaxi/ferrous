@@ -653,13 +653,15 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         QVERIFY2(contrastRatio(colorOf(waveform, "meterFill"), trough) >= 3.0,
                  qPrintable(describeContrast(QStringLiteral("rungs on the trough"), colorOf(waveform, "meterFill"), trough)));
         // The pane's waveform: the seek bar's in light; in dark a quieter
-        // tone of the same blue, #87bad4, some 8.6:1 on the view rather
-        // than the seek bar's 13:1.
+        // tone of the same blue, #70a9c7, some 7:1 on the view rather than
+        // the seek bar's 13:1 (#87bad4, 8.6:1, was still the dark window's
+        // brightest mass, over the cover).
         if (dark) {
-            QVERIFY2(channelDistance(wave, fromHex(QStringLiteral("#87bad4"))) <= 3, qPrintable(wave.name()));
+            QVERIFY2(channelDistance(wave, fromHex(QStringLiteral("#70a9c7"))) <= 3, qPrintable(wave.name()));
             QVERIFY(!sameColor(wave, colorOf(tokens, "wave")));
             const double onView = contrastRatio(wave, view);
-            QVERIFY2(onView >= 8.0 && onView <= 9.2, qPrintable(QString::number(onView)));
+            QVERIFY2(onView >= 6.8 && onView <= 7.4, qPrintable(QString::number(onView)));
+            QVERIFY(std::abs(wave.hslHue() - colorOf(tokens, "accent").hslHue()) <= 2);
             QVERIFY(onView < contrastRatio(colorOf(tokens, "wave"), view));
         } else {
             QVERIFY(sameColor(wave, colorOf(tokens, "wave")));
