@@ -511,13 +511,15 @@ def text_overlap(tracks, segs):
 
 DASH, DASH_PERIOD = 4, 7  # the plots' crosshair line: 4 px drawn, 3 not (logical px)
 CROSS_SEEN, CROSS_FAINT = 8.0, 5.0  # how far over the noise such a line stands: seen, or just there where expected
+LINE_NEAR = 3  # how far from the top score a line's own column can be (its copies 2 px either side; 2 px wide at 2x)
 
 
 def dashed_columns(lane):
     """How clearly each column of a lane's luminance (rows, cols) is a dashed vertical line of DASH on, the rest of
     DASH_PERIOD off, at any phase and lighter or darker than the plot: the t statistic of the column against its
-    neighbours 2 px either side, drawn rows against the others. The plot's own verticals (a transient, the solid
-    playhead) have no such period and stay at the noise's few units."""
+    neighbours 2 px either side, drawn rows against the others, and that contrast itself (the drawn rows' mean
+    against the others', in luminance), both at the phase the t statistic picks: (t, contrast). The plot's own
+    verticals (a transient, the solid playhead) have no such period and stay at the noise's few units."""
     r = lane[:, 2:-2] - 0.5 * (lane[:, :-4] + lane[:, 4:])
     n = r.shape[0]
     whole = n - n % DASH_PERIOD  # (the rows summed by their place in the period)
@@ -530,8 +532,23 @@ def dashed_columns(lane):
     n_on = (drawn @ np.bincount(np.arange(n) % DASH_PERIOD, minlength=DASH_PERIOD).astype(np.float32))[:, None]
     off, n_off = by_place.sum(axis=0) - on, n - n_on
     var = (np.einsum("ij,ij->j", r, r) - on * on / n_on - off * off / n_off) / max(1, n - 2)
-    t = np.abs(on / n_on - off / n_off) / np.sqrt(np.maximum(var, 1.0) * (1.0 / n_on + 1.0 / n_off))
-    return np.concatenate(([0, 0], t.max(axis=0), [0, 0]))
+    diff = np.abs(on / n_on - off / n_off)
+    t = diff / np.sqrt(np.maximum(var, 1.0) * (1.0 / n_on + 1.0 / n_off))
+    best = t.argmax(axis=0)
+    cols = np.arange(t.shape[1])
+    pad = lambda v: np.concatenate(([0, 0], v, [0, 0]))
+    return pad(t[best, cols]), pad(diff[best, cols])
+
+
+def line_column(t, contrast, near):
+    """Where a lane's dashed line is, near the column `near` that dashed_columns scores highest: of the columns
+    within LINE_NEAR px that it scores at least CROSS_FAINT, the one with the most contrast. (Measured against its
+    neighbours 2 px either side, a line shows again 2 px either side of itself at half its contrast; where rows
+    crossing the line, such as the other hair or a bright partial, make its own column vary more than those copies,
+    the t statistic can score a copy higher, though the copy's contrast stays half the line's.)"""
+    lo, hi = max(0, near - LINE_NEAR), min(len(t), near + LINE_NEAR + 1)
+    cand = [k for k in range(lo, hi) if t[k] >= CROSS_FAINT] or [near]
+    return max(cand, key=lambda k: contrast[k])
 
 
 def crosshair_lanes(ims, times, pane, lanes, at_=(0, 0)):
@@ -552,15 +569,16 @@ def crosshair_lanes(ims, times, pane, lanes, at_=(0, 0)):
         scores = []
         for i in range(lanes):  # (a lane's edge rows hold the seam)
             scores.append(dashed_columns(g[int(i * lh) + 3:int((i + 1) * lh) - 3]))
-        tops = [float(s.max()) for s in scores]
+        tops = [float(s.max()) for s, _c in scores]
         strongest = max(range(lanes), key=lambda i: tops[i])
         if tops[strongest] < CROSS_SEEN:
             continue
-        x0 = int(scores[strongest].argmax())
+        at_line = lambda s, c: line_column(s, c, int(s.argmax()))
+        x0 = at_line(*scores[strongest])
         xs = []
-        for s, top in zip(scores, tops):
+        for (s, c), top in zip(scores, tops):
             faint = float(s[max(0, x0 - 1):x0 + 2].max()) >= CROSS_FAINT
-            xs.append(int(s.argmax()) if top >= CROSS_SEEN else x0 if faint else None)
+            xs.append(at_line(s, c) if top >= CROSS_SEEN else x0 if faint else None)
         seen = [v for v in xs if v is not None]
         apart = max(seen) - min(seen)
         missing = len(seen) < lanes
