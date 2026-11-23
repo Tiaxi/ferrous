@@ -41,11 +41,12 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   trough and the mark and scrobbled has neither, so the two differ
 //   before any listening too.
 // - Not scrobbled: once playback has stopped, by the end of the queue or
-//   a stop, after a play that ended before its scrobble point. "Not
-//   scrobbled" and the glyph, both in the tertiary colour, a step below
-//   the scrobbles waiting, without the bar; the tooltip says how far the
-//   play got. A seek never decides it: the countdown goes on while the
-//   track plays.
+//   a stop, after a play that ended before its scrobble point. The glyph
+//   alone in the tertiary colour, without words or the bar; the tooltip
+//   says it was not scrobbled and how far the play got. A short play is
+//   routine, so words in the slot always mean scrobbles waiting or a
+//   failure ("Not scrobbled" read as a problem with Last.fm). A seek never
+//   decides it: the countdown goes on while the track plays.
 // - Being sent: the bar full, from the moment the play reaches its
 //   scrobble point, while the send goes on in the background. Only then:
 //   listening stops short of full.
@@ -216,8 +217,6 @@ AbstractButton {
                 root.pendingCount)
         case "failed":
             return I18n.i18nc("@info:status", "Scrobble failed")
-        case "notScrobbled":
-            return I18n.i18nc("@info:status", "Not scrobbled")
         default:
             return ""
         }
@@ -424,12 +423,9 @@ AbstractButton {
                 text: root.labelText
                 font.pointSize: root.uiPalette.smallPointSize
                 font.features: root.uiPalette.tabularFigures
-                // In its glyph's tone: a play that ended short is the
-                // quietest, a step below scrobbles waiting, and a failure
-                // the loudest.
-                color: root.look === "notScrobbled" ? root.uiPalette.textTertiary
-                    : root.look === "queued" ? root.uiPalette.textSecondary
-                    : root.uiPalette.text
+                // In its glyph's tone: scrobbles waiting in the secondary
+                // text, a step below a failure in the text colour.
+                color: root.look === "queued" ? root.uiPalette.textSecondary : root.uiPalette.text
                 Accessible.ignored: true
             }
 

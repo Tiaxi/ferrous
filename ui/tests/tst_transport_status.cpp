@@ -586,8 +586,8 @@ private slots:
     void lastFmSlotShowsEachState();
     void lastFmSlotCountsTheTimeLeftFromTheListenedTime();
     void lastFmSlotHidesWithTheTrackSectionsWhileTheEngineIsDown();
-    void lastFmNotScrobbledIsOneToneBelowWaiting_data();
-    void lastFmNotScrobbledIsOneToneBelowWaiting();
+    void lastFmNotScrobbledIsTheQuietGlyphAlone_data();
+    void lastFmNotScrobbledIsTheQuietGlyphAlone();
     void lastFmSlotPausedLooksStruckThrough_data();
     void lastFmSlotPausedLooksStruckThrough();
     void lastFmPausedKeepsBothLettersAndTheStrike_data();
@@ -3893,16 +3893,16 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
 
     // Once playback has stopped after a play that ended before its
-    // scrobble point: the slot says so, the glyph is quieter, there is no
-    // bar, and the tooltip says how far the play got.
+    // scrobble point: the glyph alone, quieter, without words or the bar,
+    // and the tooltip says it was not scrobbled and how far the play got.
     bridge->setProperty("lastFmScrobbleState", 6);
     bridge->setProperty("lastFmScrobbleIneligibility", 3);
-    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("Not scrobbled"));
-    QVERIFY(label->isVisible());
+    QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("notScrobbled"));
+    QVERIFY(slot->isVisible());
+    QVERIFY(!label->isVisible());
     QVERIFY(!bar->isVisible() && !trough->isVisible());
     QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textTertiary")));
-    QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textTertiary")));
     QCOMPARE(toolTipText(slot),
              QStringLiteral("Last.fm: not scrobbled. The play ended after 1:17 of the 1:55 of listening it "
                             "needed."));
@@ -4003,17 +4003,17 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
 // either way and a pause leave it, and only a new play, whose count starts
 // from zero, starts it over. The bar and the tooltip move by whole seconds
 // of listening, and not at all while the count holds.
-void TransportStatusTest::lastFmNotScrobbledIsOneToneBelowWaiting_data() {
+void TransportStatusTest::lastFmNotScrobbledIsTheQuietGlyphAlone_data() {
     addThemeRows();
 }
 
-// "Not scrobbled", a play that ended short, is the slot's quietest words:
-// its label in its glyph's tone, the tertiary text, a step below "waiting
-// (offline)" in the secondary text, and that a step below "Scrobble
-// failed" in the text colour (its label was the secondary text beside a
-// tertiary glyph, as loud as scrobbles waiting). It stays readable on the
-// status bar.
-void TransportStatusTest::lastFmNotScrobbledIsOneToneBelowWaiting() {
+// A play that ended short, routine, is the slot's quietest state: the
+// glyph alone in the tertiary text, as narrow as a scrobble's, with no
+// words ("Not scrobbled" beside it read as a problem with Last.fm, and
+// looked like "3 scrobbles waiting (offline)"). Words in the slot mean
+// scrobbles waiting, in the secondary text, or a failure, a step louder
+// in the text colour. The glyph stays readable on the status bar.
+void TransportStatusTest::lastFmNotScrobbledIsTheQuietGlyphAlone() {
     QFETCH(bool, dark);
     Harness harness;
     QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
@@ -4029,19 +4029,31 @@ void TransportStatusTest::lastFmNotScrobbledIsOneToneBelowWaiting() {
 
     bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
     bridge->setProperty("lastFmScrobbleListenedMs", 30000);
+    bridge->setProperty("lastFmScrobbleState", 3);
+    QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("scrobbled"));
+    QTRY_VERIFY(slot->isVisible());
+    const qreal scrobbledWidth = slot->width();
+
     bridge->setProperty("lastFmScrobbleIneligibility", 3);
     bridge->setProperty("lastFmScrobbleState", 6);
-    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("Not scrobbled"));
-    const auto [shortLabel, shortGlyph] = colours();
-    QVERIFY(sameColor(shortLabel, harness.token("textTertiary")));
-    QVERIFY(sameColor(shortLabel, shortGlyph));
-    QVERIFY2(contrastRatio(shortLabel, chrome) >= 4.5,
-             qPrintable(describeContrast(QStringLiteral("not scrobbled"), shortLabel, chrome)));
+    QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("notScrobbled"));
+    QVERIFY(slot->isVisible());
+    QVERIFY(!label->isVisible());
+    QCOMPARE(label->property("text").toString(), QString());
+    QTRY_COMPARE(slot->width(), scrobbledWidth);
+    const QColor shortGlyph = colours().second;
+    QVERIFY(sameColor(shortGlyph, harness.token("textTertiary")));
+    QVERIFY2(contrastRatio(shortGlyph, chrome) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("not scrobbled"), shortGlyph, chrome)));
+    QCOMPARE(toolTipText(slot),
+             QStringLiteral("Last.fm: not scrobbled. The play ended after 0:30 of the 2:00 of listening it "
+                            "needed."));
 
     bridge->setProperty("lastFmScrobbleIneligibility", 0);
     bridge->setProperty("lastFmScrobbleState", 5);
     bridge->setProperty("lastFmPendingScrobbleCount", 3);
     QTRY_COMPARE(label->property("text").toString(), QStringLiteral("3 scrobbles waiting (offline)"));
+    QVERIFY(label->isVisible());
     const auto [waitingLabel, waitingGlyph] = colours();
     QVERIFY(sameColor(waitingLabel, harness.token("textSecondary")));
     QVERIFY(sameColor(waitingLabel, waitingGlyph));
@@ -4052,11 +4064,11 @@ void TransportStatusTest::lastFmNotScrobbledIsOneToneBelowWaiting() {
     const QColor failedLabel = colours().first;
     QVERIFY(sameColor(failedLabel, harness.token("text")));
 
-    const QString ladder = describeContrast(QStringLiteral("not scrobbled"), shortLabel, chrome)
+    const QString ladder = describeContrast(QStringLiteral("not scrobbled"), shortGlyph, chrome)
         + describeContrast(QStringLiteral(", waiting"), waitingLabel, chrome)
         + describeContrast(QStringLiteral(", failed"), failedLabel, chrome);
     // Each a step apart, the palette's: 5.4:1 to 6.3:1 in Breeze Light.
-    QVERIFY2(contrastRatio(shortLabel, chrome) * 1.1 < contrastRatio(waitingLabel, chrome), qPrintable(ladder));
+    QVERIFY2(contrastRatio(shortGlyph, chrome) * 1.1 < contrastRatio(waitingLabel, chrome), qPrintable(ladder));
     QVERIFY2(contrastRatio(waitingLabel, chrome) * 1.1 < contrastRatio(failedLabel, chrome), qPrintable(ladder));
     QVERIFY(slot->isVisible());
 }
@@ -5494,8 +5506,8 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
     // The status bar: its text and glyphs within the bar under the seam,
     // and centred in it.
     harness.bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
-    harness.bridge->setProperty("lastFmScrobbleState", 6);
-    harness.bridge->setProperty("lastFmScrobbleIneligibility", 3);
+    harness.bridge->setProperty("lastFmScrobbleState", 5);
+    harness.bridge->setProperty("lastFmPendingScrobbleCount", 3);
     QVERIFY(harness.reportIssue(1, 0, QStringLiteral("first")));
     QQuickItem *status = harness.item(QStringLiteral("statusBar"));
     QQuickItem *label = harness.item(QStringLiteral("statusBarPlaybackStateLabel"));
