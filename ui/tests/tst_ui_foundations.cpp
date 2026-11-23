@@ -1676,6 +1676,9 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate_data() {
 // plots, the hovered one shows on the plate; the chosen one's fill is 3:1 on
 // the plate, so the choice reads by its fill rather than its edge alone, and
 // 2:1 on the hovered one's wash (at 2:1 on the plate it read by its edge).
+// On the light plate it is the other way round, the dark text at 7:1 with
+// its glyph in the plate's colour (a 2.6:1 mid-grey under a dark glyph read
+// as a muddy box).
 void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QFETCH(bool, dark);
     QFETCH(int, plotMode);
@@ -1720,12 +1723,26 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QCOMPARE(wash.rgb(), text.rgb());
     // The wash from 10 % up, as the plate needs (14 % and 18 % were 1.14:1
     // apart in dark, 1.08:1 in light); the chosen fill some 35 % on the
-    // dark plates, 44 % on the light one, where the same tint steps less.
+    // dark plates. On the light one the chosen one is the other way round,
+    // the dark text some 77 %, 7:1 on the plate, with its glyph in the
+    // plate's colour (at 44 % under a dark glyph, 2.6:1, a muddy grey box).
+    const bool lightPlate = chosen->property("lightPlate").toBool();
+    QCOMPARE(lightPlate, !dark && plotMode == 1);
     QVERIFY2(wash.alphaF() >= 0.095 && wash.alphaF() <= 0.135, qPrintable(QString::number(wash.alphaF())));
     QVERIFY2(std::abs(wash.alphaF() - other->property("segmentHoverOpacity").toReal()) < 0.005,
              qPrintable(QString::number(wash.alphaF())));
     QCOMPARE(plateFill.rgb(), text.rgb());
-    QVERIFY2(plateFill.alphaF() >= 0.3 && plateFill.alphaF() <= 0.55, qPrintable(QString::number(plateFill.alphaF())));
+    QVERIFY2(lightPlate ? plateFill.alphaF() >= 0.7 && plateFill.alphaF() <= 0.85
+                        : plateFill.alphaF() >= 0.3 && plateFill.alphaF() <= 0.55,
+             qPrintable(QString::number(plateFill.alphaF())));
+    {
+        QQuickItem *chosenGlyph = childNamed(chosen, QStringLiteral("plotToolButtonIcon"));
+        QVERIFY(chosenGlyph != nullptr);
+        const QColor plateColor = drawnOver(colorOf(plotColors, "plotPlate"), colorOf(plotColors, "plotBg"));
+        const QColor glyphColor = colorOf(chosenGlyph, "color");
+        QVERIFY2(channelDistance(glyphColor, lightPlate ? plateColor : text) <= 1, qPrintable(glyphColor.name()));
+        QCOMPARE(chosenGlyph->opacity(), 1.0);
+    }
     QVERIFY2(std::abs(plateFill.alphaF() - chosen->property("segmentFillOpacity").toReal()) < 0.005,
              qPrintable(QString::number(plateFill.alphaF())));
     QVERIFY2(std::abs(letter->opacity() - 0.85) < 0.005, qPrintable(QString::number(letter->opacity())));
@@ -1753,15 +1770,20 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
              qPrintable(QStringLiteral("hovered %1:1, chosen %2:1").arg(hoverStep).arg(chosenStep)));
     // The chosen fill reads on its own: 2:1 on the hovered wash, and on a
     // dark plate 3:1 on the plate, within a step of rounding; on a light one
-    // some 2.5:1, where its dark glyph keeps 4.5:1 on it.
-    const bool lightPlate = relativeLuminance(plate) > 0.5;
-    QVERIFY2(chosenStep >= (lightPlate ? 2.4 : 2.97),
+    // 7:1, as does its glyph in the plate's colour on it.
+    QCOMPARE(relativeLuminance(plate) > 0.5, lightPlate);
+    QVERIFY2(chosenStep >= (lightPlate ? 6.9 : 2.97),
              qPrintable(describeContrast(QStringLiteral("the chosen plate on the plate"), drawnChosen, plate)));
     QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.98,
              qPrintable(describeContrast(QStringLiteral("the chosen plate on the hovered one"), drawnChosen, drawnHover)));
-    // The chosen one's edge, as drawn, 3:1 on the plate and on its fill.
+    // Neutral: nothing of the accent's blue in it.
+    QVERIFY2(std::abs(drawnChosen.blue() - drawnChosen.red()) <= 12 && std::abs(drawnChosen.green() - drawnChosen.red()) <= 12,
+             qPrintable(drawnChosen.name()));
+    // The chosen one's edge, as drawn, 3:1 on the plate and, on a dark
+    // plate, on its fill; a light plate's fill is its own edge.
     const QColor edge = at(chosen, QPointF(chosen->width() / 2, 0.5));
-    QVERIFY2(contrastRatio(edge, plate) >= 3.0 && contrastRatio(edge, drawnChosen) >= 3.0,
+    QVERIFY2(contrastRatio(edge, plate) >= 3.0
+                 && (lightPlate ? channelDistance(edge, drawnChosen) <= 3 : contrastRatio(edge, drawnChosen) >= 3.0),
              qPrintable(QStringLiteral("edge %1 on plate %2 and fill %3").arg(edge.name(), plate.name(), drawnChosen.name())));
 
     // Pressed, its glyph is whole.

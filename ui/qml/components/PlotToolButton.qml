@@ -18,7 +18,9 @@ import "../logic/KeyUtils.js" as KeyUtils
 // the loudest thing on the plot): the plot's text colour over the plate,
 // 3:1 on a dark one, inside a 1 px edge of the plot's segmentEdge, at
 // least 3:1 on the plate and on the fill, with its glyph in the text
-// colour whole; the others' glyphs are at 72 %, whole only while pressed.
+// colour whole; on a light plate the plot's dark text, 7:1, its own edge,
+// with its glyph in the plate's colour whole. The others' glyphs are at
+// 72 %, whole only while pressed.
 // Under the pointer one of the others has a wash of the text colour at
 // 10 % or more, 1.25:1 on the plate, and its glyph at 85 %, which show
 // (8 % and 60 % were 1.2:1, nearly invisible), fading in and out over
@@ -50,39 +52,46 @@ ToolButton {
     // percent, whose tint on the plate is `ratio` on `over`, itself drawn
     // on the plate.
     function _tintFor(least, over, ratio) {
-        for (let percent = Math.round(least * 100); percent < 60; ++percent) {
+        for (let percent = Math.round(least * 100); percent < 100; ++percent) {
             const tint = ColorUtils.drawnOver(ColorUtils.withAlpha(root.plotColors.plotText, percent / 100),
                                               root.plateColor)
             if (ColorUtils.contrastRatio(tint, over) >= ratio)
                 return percent / 100
         }
-        return 0.6
+        return 1
     }
     readonly property real segmentHoverOpacity: root._tintFor(0.10, root.plateColor, 1.25)
     // The chosen one's fill: 2:1 on the hover wash, and on a dark plate 3:1
     // on the plate, so the choice reads by its fill and not by its edge
     // alone (at 2:1 on the plate it was carried by the edge,
-    // beside the lanes' solid M and S). On a light plate it stops at the
-    // wash's 2:1, some 2.5:1 on the plate: at 3:1 the thin strokes of its
-    // dark glyph drew under 4.5:1 on it.
+    // beside the lanes' solid M and S). On a light plate the other way
+    // round: the plot's dark text, 7:1 on the plate, with its glyph in the
+    // plate's colour, 7:1 on it, which reads at a glance (a mid-grey fill
+    // under a dark glyph, 2.6:1 on the plate, read as a muddy box; fuller,
+    // it took the dark glyph's thin strokes under 4.5:1; at 4.5:1 inverted
+    // it was still a grey box).
     readonly property bool lightPlate: ColorUtils.relativeLuminance(root.plateColor) > 0.5
-    readonly property real segmentFillOpacity: Math.max(
-        root.lightPlate ? 0 : root._tintFor(0.24, root.plateColor, 3),
-        root._tintFor(0.24, ColorUtils.drawnOver(
-            ColorUtils.withAlpha(root.plotColors.plotText, root.segmentHoverOpacity), root.plateColor), 2))
+    readonly property real segmentFillOpacity: root.lightPlate
+        ? root._tintFor(0.24, root.plateColor, 7)
+        : Math.max(root._tintFor(0.24, root.plateColor, 3),
+                   root._tintFor(0.24, ColorUtils.drawnOver(
+                       ColorUtils.withAlpha(root.plotColors.plotText, root.segmentHoverOpacity), root.plateColor), 2))
     readonly property real segmentRestOpacity: 0.72
     readonly property real segmentHoverGlyphOpacity: 0.85
-    // The chosen segment's edge: the plot's, or lighter on a dark plate and
-    // darker on a light one where it is under 3:1 on the plate or the fill.
-    readonly property color segmentEdgeColor: root.uiPalette.readableOn(root.plotColors.segmentEdge,
-        [root.plateColor, ColorUtils.drawnOver(root.checkedColor, root.plateColor)], 3.1)
+    // The chosen segment's edge: the plot's, or lighter on a dark plate
+    // where it is under 3:1 on the plate or the fill. On a light plate the
+    // fill is its own edge.
+    readonly property color segmentEdgeColor: root.lightPlate
+        ? ColorUtils.drawnOver(root.checkedColor, root.plateColor)
+        : root.uiPalette.readableOn(root.plotColors.segmentEdge,
+                                    [root.plateColor, ColorUtils.drawnOver(root.checkedColor, root.plateColor)], 3.1)
     // The pointer's wash: a segment's, under its chosen plate, and a
     // button's, which checked turns into a solid fill.
     readonly property real hoverOpacity: root.segment ? root.segmentHoverOpacity : 0.12
     readonly property color hoverColor: Qt.rgba(root.plotColors.plotText.r, root.plotColors.plotText.g,
                                                 root.plotColors.plotText.b, root.hoverOpacity)
     readonly property color glyphColor: root.segment
-        ? root.plotColors.plotText
+        ? (root.checked && root.lightPlate ? root.plateColor : root.plotColors.plotText)
         : (root.checked ? root.plotColors.checkedGlyph : root.plotColors.plotText)
     // A segment that is not the chosen one is quieter, with the keyboard's
     // focus too, which the focus ring shows, and a little less so under
