@@ -458,7 +458,8 @@ Item {
 
     // The seams between the lanes: at rest a cut in the plot's deep violet
     // with a lit edge, apart from its rest lines (UiPalette's
-    // plotRestLaneSeam and plotRestLaneSeamEdge, and the groove below).
+    // plotRestLaneSeam and plotRestLaneSeamEdge, and the groove below);
+    // playing, the lighter violet under a dark foot (the foot below).
     Rectangle {
         objectName: "spectrogramLaneSeams"
         width: root.plotWidth
@@ -641,12 +642,30 @@ Item {
         }
     }
 
+    // Playing, each seam between the lanes has a dark foot: the upper
+    // lane's last row in plotLaneSeamFoot over the seam's 1 px, so the seam
+    // is two rows, dark over the lighter violet, as the rest seam is built
+    // in two (UiPalette's plotLaneSeamFoot).
+    Repeater {
+        model: root.atRest ? 0 : Math.max(0, spectrogramRepeater.count - 1)
+
+        delegate: Rectangle {
+            required property int index
+
+            objectName: "spectrogramLaneSeamFoot"
+            width: root.plotWidth
+            y: PlotLanes.bottom(index, spectrogramRepeater.count, root.height) - 1
+            height: 1
+            color: root.uiPalette.plotLaneSeamFoot
+        }
+    }
+
     // At rest, never played, each seam between the lanes is a groove: 3 px
     // of plotRestLaneSeam centred on it, over the lanes' rows beside it,
     // its top row lit in plotRestLaneSeamEdge, so it reads as a cut between
     // the lanes, apart from their fainter single rest lines (dark alone it
     // was hard to find). The lanes keep their heights; playing, the seam is
-    // 1 px.
+    // 1 px under its foot.
     Repeater {
         model: root.atRest ? Math.max(0, spectrogramRepeater.count - 1) : 0
 

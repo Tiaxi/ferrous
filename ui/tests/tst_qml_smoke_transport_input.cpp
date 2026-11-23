@@ -1636,6 +1636,29 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QTRY_COMPARE(seams->property("color").value<QColor>(), spectrogramPlot->property("plotLaneSeam").value<QColor>());
     QCOMPARE(sceneRectOf(panes().at(0)), upper);
     QCOMPARE(sceneRectOf(panes().at(1)), lower);
+    // Playing, the seam is built in two parts, as the rest seam is: the
+    // upper lane's last row a dark foot over the seam's lighter violet, so
+    // the lanes part by structure and not by their lowest bins (a 1 px seam
+    // alone ran under each lane's lowest band, H28). As drawn.
+    {
+        QTRY_VERIFY(visibleItemsNamed(spectrogram, QStringLiteral("spectrogramRestSeamGroove")).isEmpty());
+        const QList<QQuickItem *> feet = visibleItemsNamed(spectrogram, QStringLiteral("spectrogramLaneSeamFoot"));
+        QCOMPARE(feet.size(), 1);
+        QCOMPARE(sceneRectOf(feet.first()),
+                 QRectF(pane.left(), upper.bottom() - 1, spectrogram->property("plotWidth").toReal(), 1));
+        const QColor foot = palette->property("plotLaneSeamFoot").value<QColor>();
+        const QColor seam = spectrogramPlot->property("plotLaneSeam").value<QColor>();
+        QCOMPARE(foot.rgb(), palette->property("plotRestLaneSeam").value<QColor>().rgb());
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        QVERIFY(!image.isNull());
+        const double scale = double(image.width()) / window->width();
+        const int x = int(pane.center().x() * scale);
+        QCOMPARE(image.pixelColor(x, int((upper.bottom() - 0.5) * scale)).rgb(), foot.rgb());
+        QCOMPARE(image.pixelColor(x, int((upper.bottom() + 0.5) * scale)).rgb(), seam.rgb());
+        // The lower lane starts right under the seam: two rows in all.
+        QVERIFY(image.pixelColor(x, int((lower.top() + 0.5) * scale)).rgb() != seam.rgb());
+    }
     QTRY_VERIFY(!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneButtons")).isEmpty()
                 || bridge->property("channelButtonsVisibility").toInt() == 0);
     // The waveform's lanes at rest gone with the first track.

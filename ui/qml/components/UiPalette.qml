@@ -395,6 +395,14 @@ QtObject {
     // as a rest line; the edge over its dark groove is a shape the lines
     // don't have).
     readonly property color plotRestLaneSeamEdge: "#5d4d80"
+    // Playing, the foot of each lane over a seam: its last row in the
+    // rest seam's deep violet, over plotLaneSeam's lighter one, so the
+    // seam is built in two parts as the rest seam is, and the lanes part by
+    // structure rather than by their lowest bins (alone, the 1 px seam ran
+    // right under each lane's lowest band, often its brightest, and in 5.1
+    // and 7.1 the lanes read as ruled by their data). It costs the lane its
+    // lowest row.
+    readonly property color plotLaneSeamFoot: root.plotRestLaneSeam
     // The never-played waveform's centre lines, one to a lane: the text
     // over the view, the least in whole percent that is 1.3:1 on it, as the
     // spectrogram's rest lines are faint on its floor.
