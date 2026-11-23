@@ -419,6 +419,37 @@ ToolBar {
         }
     }
 
+    // The box of every tooltip in the lane, the seek bar's time box's
+    // first: the style's tooltip fill, square on the band with a 1 px edge
+    // and no shadow, one style in both themes. The style's soft shadow,
+    // 16 px under a box 22 px tall, spread into the gap between the box
+    // and the waveform (light), and its edge, measured against the box's
+    // fill, was lost on the lighter Header chrome around it, so the light
+    // box read as a white card with a shadow and the dark one as a framed
+    // readout. The edge is the style's, at least 1.8:1 on both the fill and
+    // the chrome: as the style draws it in Breeze Dark (1.9:1), whose
+    // tooltip fill is the chrome; in Breeze Light, whose fill is lighter
+    // than the chrome, the style's edge was 1.5:1 on the chrome and soft
+    // without the shadow. #a6a7a8 / #535659.
+    readonly property real laneBoxEdgeContrast: 1.8
+    readonly property color laneBoxFill: laneBoxColors.Kirigami.Theme.backgroundColor
+    readonly property color laneBoxEdge: root.uiPalette.readableOn(
+        ColorUtils.mixColor(root.laneBoxFill, laneBoxColors.Kirigami.Theme.textColor,
+            laneBoxColors.Kirigami.Theme.frameContrast),
+        [root.laneBoxFill, root.chromeColor], root.laneBoxEdgeContrast)
+    Item {
+        id: laneBoxColors
+        Kirigami.Theme.colorSet: Kirigami.Theme.Tooltip
+        Kirigami.Theme.inherit: false
+    }
+    component LaneBox: Rectangle {
+        objectName: "transportLaneBox"
+        radius: Kirigami.Units.cornerRadius
+        color: root.laneBoxFill
+        border.width: root.devicePixelLine
+        border.color: root.laneBoxEdge
+    }
+
     // A tooltip in the lane above the row, of `rowItem`, an item of the
     // row: one line, as the time box is (the style's label wrapped Mute's
     // to two lines at a large font, past the lane's top).
@@ -429,6 +460,7 @@ ToolBar {
         y: root.laneY(rowItem, height)
         topPadding: root.laneToolTipPadding
         bottomPadding: root.laneToolTipPadding
+        background: LaneBox {}
         contentItem: Label {
             textFormat: Text.PlainText
             text: laneToolTip.text
@@ -1286,6 +1318,7 @@ ToolBar {
                 topPadding: root.laneToolTipPadding
                 bottomPadding: root.laneToolTipPadding
                 topMargin: 0
+                background: LaneBox {}
                 // It comes in over the short duration of the window's other
                 // hovers, and goes as the style's tooltips do.
                 enter: Transition {
