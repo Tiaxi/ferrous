@@ -8734,7 +8734,8 @@ void UiDialogsTest::configureWidthsFollowTheFont() {
 
 // At 24 pt on the reviews' 2000 × 1400 screen, Configure's Visualization
 // page says its help in as few lines as that allows: the crosshair's takes
-// one, and Default zoom, the last setting, shows at least most of its row
+// one, and names where a right-click seeks ("that point" had nothing to
+// refer to), and Default zoom, the last setting, shows at least most of its row
 // without a scroll (that help took two, and in Breeze the row was 58 px
 // under the page's foot, 14 px now; 31 px and none in the tests' style).
 // The window keeps its size rules.
@@ -8779,7 +8780,7 @@ void UiDialogsTest::configureVisualizationFitsTheReviewScreenAt24pt() {
         crosshair != nullptr ? itemsNamed(crosshair, QStringLiteral("formHelpTextLabel")).value(0) : nullptr;
     QVERIFY(crosshairLabel != nullptr);
     QCOMPARE(crosshairLabel->property("text").toString(),
-             QStringLiteral("In centered mode, right-click the spectrogram to seek to that point."));
+             QStringLiteral("In centered mode, a right-click seeks to the crosshair."));
     QVERIFY2(crosshairLabel->property("lineCount").toInt() == 1, qPrintable(describeItem(crosshairLabel)));
 
     QQuickItem *stretch = visibleNamed(prefs, QStringLiteral("stretchShortTracksCheckBox"));

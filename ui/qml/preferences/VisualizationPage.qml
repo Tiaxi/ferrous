@@ -184,9 +184,11 @@ Preferences.PreferencesPage {
         objectName: "crosshairHelp"
         uiPalette: root.uiPalette
         checkBox: crosshairCheckBox
-        // Under Crosshair, it is that box's: "with the crosshair" went
-        // without saying, and the line fits on one at 24 pt.
-        text: I18n.i18nc("@info", "In centered mode, right-click the spectrogram to seek to that point.")
+        // Under Crosshair, it is that box's, and says where a right-click
+        // seeks to, as SpectrogramItem does: the time under the crosshair,
+        // in centered mode only ("that point" had nothing to refer to). It
+        // fits on one line at 24 pt.
+        text: I18n.i18nc("@info", "In centered mode, a right-click seeks to the crosshair.")
     }
 
     CheckBox {
