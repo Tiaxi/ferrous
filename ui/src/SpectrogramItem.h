@@ -1003,10 +1003,19 @@ private:
     // Sets whether the lane has shown its whole view since its columns
     // came, from either thread, and tells the GUI thread when it changes.
     void publishViewFilledLocked(bool filled);
+    // A zoom's preview's time mapping, which the time scale is laid out on
+    // while the preview shows: the continuous time at device pixel 0 of the
+    // layout, and its device pixels a second.
+    struct TimeGridPreviewMapping {
+        double leftSeconds{0.0};
+        double devicePixelsPerSecond{0.0};
+    };
+    // Lays the time scale out on the view's columns, or on `preview`.
     void updateTimeGridOverlayLocked(
         int width, int height, int padding,
         qint64 displayLeft,
-        bool rollingMode, double columnsPerSecond, double drawX);
+        bool rollingMode, double columnsPerSecond, double drawX,
+        const TimeGridPreviewMapping *preview = nullptr);
     double effectiveZoomLocked() const;
     // The same for data `hop` samples apart drawn at `renderZoom`
     // (ferrous_ffi_spectrogram_effective_zoom); `renderZoom` until a hop
@@ -1618,6 +1627,9 @@ private:
     double m_timeGridRenderDrawX{0.0};
     bool m_timeGridCachedRollingMode{false};
     int m_timeGridPadding{0};
+    // Whether it was laid out on a zoom's preview, and that mapping.
+    bool m_timeGridCachedPreview{false};
+    TimeGridPreviewMapping m_timeGridPreviewMapping;
 
     // Rolling mode shows a gapless successor after the tracks before it:
     // its position plus this offset.
