@@ -719,6 +719,7 @@ private slots:
     void editTagsWordsItsWarningsAlike();
     void autoNumberGroupsStandApartAtAnyFont_data();
     void autoNumberGroupsStandApartAtAnyFont();
+    void autoNumberTotalsSayWhichTheyWrite();
     void editTagsRevertToolTipsStandAboveTheirGlyphs_data();
     void editTagsRevertToolTipsStandAboveTheirGlyphs();
     void dialogsShareOneLook();
@@ -7288,6 +7289,40 @@ void UiDialogsTest::autoNumberGroupsStandApartAtAnyFont() {
                  qPrintable(QStringLiteral("%1: %2 px, not %3").arg(QLatin1String(below)).arg(between).arg(gap)));
     }
     QVERIFY2(numbers->height() <= 1000, qPrintable(QString::number(numbers->height())));
+    QVERIFY(reject(dialog));
+    QVERIFY(closeTagEditor(main));
+}
+
+// Auto Number's totals say which it writes, as the editor does: the tracks'
+// total, and the discs' too while it writes disc numbers ("Write totals"
+// left the reader to guess which).
+void UiDialogsTest::autoNumberTotalsSayWhichTheyWrite() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(openTagEditor(main, tagRows(4)) != nullptr);
+    QObject *dialog = object(window, QStringLiteral("autoNumberDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *numbers = windowOf(dialog);
+    QQuickItem *totals = visibleNamed(numbers, QStringLiteral("autoNumberWriteTotalsCheck"));
+    QQuickItem *discs = visibleNamed(numbers, QStringLiteral("autoNumberWriteDiscCheck"));
+    QVERIFY(totals != nullptr && discs != nullptr);
+    QVERIFY(!discs->property("checked").toBool());
+    QCOMPARE(totals->property("text").toString(), QStringLiteral("Write track totals"));
+    QTest::mouseClick(numbers, Qt::LeftButton, Qt::NoModifier, sceneRect(discs).center().toPoint());
+    QTRY_VERIFY(discs->property("checked").toBool());
+    QCOMPARE(totals->property("text").toString(), QStringLiteral("Write track and disc totals"));
+    // Whole, within the window.
+    QQuickItem *body = visibleNamed(numbers, QStringLiteral("dialogBody"));
+    QVERIFY(body != nullptr);
+    QTRY_VERIFY(!layoutPending(body));
+    QVERIFY2(sceneRect(totals).left() >= 0 && sceneRect(totals).left() + totals->implicitWidth() <= numbers->width(),
+             qPrintable(describeItem(totals)));
+    QTest::mouseClick(numbers, Qt::LeftButton, Qt::NoModifier, sceneRect(discs).center().toPoint());
+    QTRY_VERIFY(!discs->property("checked").toBool());
+    QCOMPARE(totals->property("text").toString(), QStringLiteral("Write track totals"));
     QVERIFY(reject(dialog));
     QVERIFY(closeTagEditor(main));
 }
