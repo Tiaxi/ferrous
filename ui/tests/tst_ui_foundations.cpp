@@ -1758,8 +1758,8 @@ void UiFoundationsTest::plotSegmentHoverIsAnOutlineNotTheChosenFill_data() {
 
 // A segment of a plate's choices, as the visualization's mode switch,
 // under the pointer while another is the chosen one: a different shape
-// from the chosen one's solid fill, a 1 px outline inset 2 px, with its
-// glyph at 85 %, the two fading in together, whole only while pressed. A
+// from the chosen one's solid fill, a 1 px outline on the button's own
+// bounds and corners, as the fill is, with its glyph at 85 %, the two fading in together, whole only while pressed. A
 // wash of the text colour gave the hovered one the chosen one's filled
 // silhouette, so for the whole hover both read as chosen (2.03:1 apart on
 // the spectrogram, H28), and fainter ones told the target only by the
@@ -1771,7 +1771,9 @@ void UiFoundationsTest::plotSegmentHoverIsAnOutlineNotTheChosenFill_data() {
 // plate is a step lighter), so the choice reads by its fill rather than
 // its edge alone; on the light plate it is the other way round, the dark
 // text at 7:1 with its glyph in the plate's colour (a 2.6:1 mid-grey under
-// a dark glyph read as a muddy box).
+// a dark glyph read as a muddy box). Inset 2 px with a 2 px radius, the
+// outline read as a smaller box than the chosen fill beside it, 1 px from
+// the glyph (H29); on the bounds, it is 3 px clear of a 16 px glyph.
 void UiFoundationsTest::plotSegmentHoverIsAnOutlineNotTheChosenFill() {
     QFETCH(bool, dark);
     QFETCH(int, plotMode);
@@ -1824,11 +1826,23 @@ void UiFoundationsTest::plotSegmentHoverIsAnOutlineNotTheChosenFill() {
     // No wash, and the chosen one has no outline: only its fill.
     QVERIFY(!wash->isVisible());
     QVERIFY(!chosenOutline->isVisible());
-    // 1 px, 2 px inside the button, with a 2 px radius.
+    // 1 px, on the button's bounds and with the chosen fill's radius, so
+    // the two differ by fill alone, not by size.
     QCOMPARE(outline->mapRectToItem(other, QRectF(0, 0, outline->width(), outline->height())),
-             QRectF(2, 2, other->width() - 4, other->height() - 4));
+             QRectF(0, 0, other->width(), other->height()));
     QCOMPARE(QQmlProperty(outline, QStringLiteral("border.width")).read().toReal(), 1.0);
-    QCOMPARE(outline->property("radius").toReal(), 2.0);
+    QCOMPARE(outline->property("radius").toReal(), fill->property("radius").toReal());
+    QCOMPARE(fill->mapRectToItem(chosen, QRectF(0, 0, fill->width(), fill->height())),
+             QRectF(0, 0, chosen->width(), chosen->height()));
+    // The plate between the outline and a 16 px icon: 3 px on each side.
+    {
+        QQuickItem *icon = childNamed(other, QStringLiteral("plotToolButtonIcon"));
+        QVERIFY(icon != nullptr);
+        const QRectF iconRect = icon->mapRectToItem(other, QRectF(0, 0, icon->width(), icon->height()));
+        QCOMPARE(iconRect.width(), 16.0);
+        QCOMPARE(iconRect.left() - 1, 3.0);
+        QCOMPARE(other->height() - 1 - iconRect.bottom(), 3.0);
+    }
     QCOMPARE(colorOf(outline, "color").alphaF(), 0.0f);
 
     const QColor text = colorOf(plotColors, "plotText");
@@ -1862,18 +1876,26 @@ void UiFoundationsTest::plotSegmentHoverIsAnOutlineNotTheChosenFill() {
     };
     const QColor plate = drawnOver(colorOf(plotColors, "plotPlate"), colorOf(plotColors, "plotBg"));
     const QColor drawnChosen = at(chosen, QPointF(4.5, 4.5));
-    const QColor drawnLine = at(other, QPointF(2.5, other->height() / 2));
-    const QColor drawnInside = at(other, QPointF(4.5, 4.5));
-    const QColor drawnOutside = at(other, QPointF(1.5, other->height() / 2));
+    // The line on the button's first pixel, the plate the next one in and
+    // the first one out, between the two buttons.
+    const QColor drawnLine = at(other, QPointF(0.5, other->height() / 2));
+    const QColor drawnTop = at(other, QPointF(other->width() / 2, 0.5));
+    const QColor drawnInside = at(other, QPointF(1.5, other->height() / 2));
+    const QColor drawnCorner = at(other, QPointF(4.5, 4.5));
+    const QColor drawnOutside = at(other, QPointF(-0.5, other->height() / 2));
     QVERIFY2(channelDistance(drawnChosen, drawnOver(plateFill, plate)) <= 3,
              qPrintable(describeContrast(QStringLiteral("the chosen plate"), drawnChosen, plate)));
-    QVERIFY2(channelDistance(drawnLine, colorOf(other, "segmentHoverEdgeColor")) <= 3,
-             qPrintable(QStringLiteral("outline %1, meant %2")
-                            .arg(drawnLine.name(), colorOf(other, "segmentHoverEdgeColor").name())));
+    for (const QColor &drawn : {drawnLine, drawnTop}) {
+        QVERIFY2(channelDistance(drawn, colorOf(other, "segmentHoverEdgeColor")) <= 3,
+                 qPrintable(QStringLiteral("outline %1, meant %2")
+                                .arg(drawn.name(), colorOf(other, "segmentHoverEdgeColor").name())));
+    }
     // The plate inside and outside the outline: a line, not a fill.
-    QVERIFY2(channelDistance(drawnInside, plate) <= 3 && channelDistance(drawnOutside, plate) <= 3,
-             qPrintable(QStringLiteral("inside %1, outside %2, plate %3")
-                            .arg(drawnInside.name(), drawnOutside.name(), plate.name())));
+    for (const QColor &drawn : {drawnInside, drawnCorner, drawnOutside}) {
+        QVERIFY2(channelDistance(drawn, plate) <= 3,
+                 qPrintable(QStringLiteral("inside %1 and %2, outside %3, plate %4")
+                                .arg(drawnInside.name(), drawnCorner.name(), drawnOutside.name(), plate.name())));
+    }
     // The outline toward the text colour: 3.15:1 on a dark plate, the
     // chosen fill's step, and 4.5:1 on the light one, under its fill's 7:1.
     const qreal lineStep = contrastRatio(drawnLine, plate);

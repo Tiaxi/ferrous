@@ -23,13 +23,15 @@ import "../logic/KeyUtils.js" as KeyUtils
 // with its glyph in the plate's colour whole. The others' glyphs are at
 // 72 %, whole only while pressed.
 // Under the pointer one of the others is drawn as a different shape from
-// the chosen one: a 1 px outline inset 2 px, the text colour 3.15:1 on a
-// dark plate (as the chosen fill is) and 4.5:1 on a light one, and its
-// glyph at 85 %, the two fading in and out together over shortDuration,
-// OutCubic. A wash gave the hovered one the chosen one's filled
-// silhouette, so for the whole hover both read as chosen (2:1 apart; 14 %
-// on 18 % was 1.14:1), and a fainter one told the target only by the
-// glyph's brightening. The accent is left to the focus ring. A segment is a
+// the chosen one: a 1 px outline on the button's own bounds and corners,
+// 3 px clear of a 16 px glyph, the text colour 3.15:1 on a dark plate (as
+// the chosen fill is) and 4.5:1 on a light one, and its glyph at 85 %, the
+// two fading in and out together over shortDuration, OutCubic. A wash
+// gave the hovered one the chosen one's filled silhouette, so for the whole
+// hover both read as chosen (2:1 apart; 14 % on 18 % was 1.14:1), and a
+// fainter one told the target only by the glyph's brightening. Inset 2 px,
+// the outline read as a smaller box than the chosen one, 1 px from the
+// glyph. The accent is left to the focus ring. A segment is a
 // checkable, auto-exclusive button, so it is a radio button to assistive
 // technology, checkable and checked as chosen (as a plain button it told
 // of its checked state changing but not that it could be checked), and
@@ -237,12 +239,12 @@ ToolButton {
         }
 
         // A segment's hover: an outline, not a fill, so it never takes the
-        // chosen one's silhouette.
+        // chosen one's silhouette; on the button's bounds and corners, as
+        // the chosen fill is.
         Rectangle {
             objectName: "plotToolButtonHoverEdge"
             anchors.fill: parent
-            anchors.margins: 2
-            radius: 2
+            radius: 3
             color: "transparent"
             border.width: 1
             border.color: root.segmentHoverEdgeColor

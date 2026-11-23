@@ -690,6 +690,13 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2"
         TIMEOUT 60
     )
+    # The mode switch's hover outline on the button's first device pixels.
+    add_test(NAME ferrous_ui_foundations_segment_hover_2x
+        COMMAND ferrous_ui_foundations_tests plotSegmentHoverIsAnOutlineNotTheChosenFill)
+    set_tests_properties(ferrous_ui_foundations_segment_hover_2x PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2"
+        TIMEOUT 60
+    )
 
     # The transport and the status bar of #373, from the QML sources.
     qt_add_executable(ferrous_transport_status_tests
