@@ -13,7 +13,9 @@ import org.kde.kirigami 2.20 as Kirigami
 // A `compact` label, for a short lane, is 16 px tall with 11 px text, both
 // larger with a larger font, rather than 20 px with 12 px text. A larger
 // font's label is its capitals and the room around them tall (from the
-// text's line, a letter at 24 pt stood on a plate 28 by 48 px).
+// text's line, a letter at 24 pt stood on a plate 28 by 48 px), and never
+// shorter than the text's line, which its box holds (over the whole screen
+// at 24 pt, the capitals' room was 3 px short of it).
 Item {
     id: root
 
@@ -33,7 +35,7 @@ Item {
     readonly property real minimumSize: root.compact ? 16 : 20
     // A label's height, from the font alone.
     readonly property real labelHeight: Math.max(root.minimumSize, Math.ceil(capitalMetrics.tightBoundingRect.height)
-        + 2 * Math.round((root.compact ? 3 : 4) * root.uiPalette.fontScale))
+        + 2 * Math.round((root.compact ? 3 : 4) * root.uiPalette.fontScale), Math.ceil(lineMetrics.height))
     property real padding: 2
     property real horizontalPadding: root.isLabel ? (root.compact ? 4 : 6) : root.padding
     property real verticalPadding: root.isLabel ? 0 : root.padding
@@ -134,6 +136,11 @@ Item {
         font.pointSize: root.labelPointSize
         font.weight: Font.DemiBold
         text: "E"
+    }
+
+    FontMetrics {
+        id: lineMetrics
+        font: capitalMetrics.font
     }
 
     Row {
