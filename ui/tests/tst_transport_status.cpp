@@ -595,6 +595,8 @@ private slots:
     void statusBarEngineErrorShowsItsToolTipOverItsGlyphAndFromTheKeyboard();
     void issuesButtonShowsNewSeenAndOpen_data();
     void issuesButtonShowsNewSeenAndOpen();
+    void issuesGlyphTakesTheMostSevereNewIssue_data();
+    void issuesGlyphTakesTheMostSevereNewIssue();
     void statusBarHasNoDividers();
     void transportAndStatusBarGrowWithALargeFont();
 };
@@ -4789,8 +4791,9 @@ void TransportStatusTest::lastFmGlyphsAreOneFamily() {
 // says the playback engine isn't running, and its tooltip what to do. It is
 // an error, in the status bar's one treatment of them (a stopped engine was
 // red semibold words, one not running plain words with no glyph): the words
-// in the text colour, at the status bar's weight, after a 16 px warning
-// glyph in the negative colour.
+// in the text colour, at the status bar's weight, after a 16 px error
+// glyph (a ring with a cross, not the warning's triangle) in the negative
+// colour.
 void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
@@ -4810,7 +4813,7 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QVERIFY(!state->isVisible());
     const auto treatedAsAnError = [&](QQuickItem *words) {
         return glyph->isVisible() && glyph->size() == QSizeF(16, 16)
-            && glyph->property("source").toString().endsWith(QStringLiteral("status-warning.svg"))
+            && glyph->property("source").toString().endsWith(QStringLiteral("status-error.svg"))
             && sameColor(glyph->property("color").value<QColor>(), harness.token("negative"))
             && sameColor(words->property("color").value<QColor>(), harness.token("text"))
             && words->property("font").value<QFont>().weight() == QFont::Normal
@@ -5018,10 +5021,10 @@ void TransportStatusTest::issuesButtonShowsNewSeenAndOpen() {
     QTRY_VERIFY(button->isVisible());
     QCOMPARE(label->property("text").toString(), QStringLiteral("2 new issues"));
     // The status bar's one treatment of an error: a 16 px glyph in the
-    // negative colour and the words in the text colour.
+    // negative colour and the words in the text colour. One of the new
+    // issues is an error: its ring with a cross.
     QCOMPARE(glyph->size(), QSizeF(16, 16));
-    // An outlined triangle: Breeze's filled one loses its "!" as a mask.
-    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("status-warning.svg")));
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("status-error.svg")));
     QCOMPARE(button->height(), 22.0);
     const QColor negative = harness.token("negative");
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), negative));
@@ -5068,6 +5071,69 @@ void TransportStatusTest::issuesButtonShowsNewSeenAndOpen() {
     // A repeat is new again.
     QVERIFY(harness.reportIssue(1, 0, QStringLiteral("old")));
     QTRY_COMPARE(label->property("text").toString(), QStringLiteral("1 new issue"));
+}
+
+void TransportStatusTest::issuesGlyphTakesTheMostSevereNewIssue_data() {
+    addThemeRows();
+}
+
+// Severity is one system: the issues button's glyph is the shape of the
+// most severe new issue, an error's ring with a cross or a warning's
+// triangle, and red only while a new one is an error. New warnings alone
+// keep the triangle in the secondary colour, with "new" in the text colour
+// saying they are new (every new issue was a red triangle, so a scan's
+// notice looked like a stopped engine). Once seen, the glyph is the most
+// severe issue's shape in the secondary colour.
+void TransportStatusTest::issuesGlyphTakesTheMostSevereNewIssue() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QQuickItem *button = harness.item(QStringLiteral("statusBarErrorsButton"));
+    QQuickItem *glyph = harness.item(QStringLiteral("statusBarErrorsGlyph"));
+    QQuickItem *label = harness.item(QStringLiteral("statusBarErrorsLabel"));
+    QVERIFY(button && glyph && label);
+    const QColor chrome = harness.token("chrome");
+    const auto shows = [&](const QString &file, const char *glyphToken, const char *labelToken) {
+        return glyph->property("source").toString().endsWith(file)
+            && sameColor(glyph->property("color").value<QColor>(), harness.token(glyphToken))
+            && sameColor(label->property("color").value<QColor>(), harness.token(labelToken));
+    };
+    const QString error = QStringLiteral("status-error.svg");
+    const QString warning = QStringLiteral("status-warning.svg");
+
+    // Two new warnings: the triangle, not red, the words "new" in the text colour.
+    QVERIFY(harness.reportIssue(2, 0, QStringLiteral("notice")));
+    QVERIFY(harness.reportIssue(1, 0, QStringLiteral("ends early")));
+    QTRY_VERIFY(button->isVisible());
+    QCOMPARE(label->property("text").toString(), QStringLiteral("2 new issues"));
+    QCOMPARE(harness.errors->property("unseenErrorCount").toInt(), 0);
+    QVERIFY(shows(warning, "textSecondary", "text"));
+    QVERIFY2(contrastRatio(harness.token("textSecondary"), chrome) >= 3.0,
+             qPrintable(describeContrast(QStringLiteral("warning glyph"), harness.token("textSecondary"), chrome)));
+
+    // An error among them: its ring with a cross, red.
+    QVERIFY(harness.reportIssue(1, 1, QStringLiteral("unreadable")));
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("3 new issues"));
+    QCOMPARE(harness.errors->property("unseenErrorCount").toInt(), 1);
+    QVERIFY(shows(error, "negative", "text"));
+
+    // Seen: the error's shape, quiet.
+    QVERIFY(QMetaObject::invokeMethod(harness.errors, "markSeen"));
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("3 issues"));
+    QCOMPARE(harness.errors->property("unseenErrorCount").toInt(), 0);
+    QCOMPARE(harness.errors->property("errorEntryCount").toInt(), 1);
+    QVERIFY(shows(error, "textSecondary", "textSecondary"));
+
+    // A warning that repeats is new again, and the newest issues are
+    // warnings alone: the triangle, not red, although an error is seen.
+    QVERIFY(harness.reportIssue(2, 0, QStringLiteral("notice")));
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("1 new issue"));
+    QVERIFY(shows(warning, "textSecondary", "text"));
+
+    // The error repeats: red again.
+    QVERIFY(harness.reportIssue(1, 1, QStringLiteral("unreadable")));
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("2 new issues"));
+    QVERIFY(shows(error, "negative", "text"));
 }
 
 // Groups are set apart by space alone: no "|" labels, no 1 px rules other
@@ -5202,6 +5268,7 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
     QVERIFY(within(sceneRect(harness.item(QStringLiteral("scrobbleIndicatorLabel"))), sceneRect(slot)));
     QVERIFY(within(sceneRect(harness.item(QStringLiteral("statusBarErrorsLabel"))), sceneRect(issues)));
 }
+
 
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault(argc, argv);

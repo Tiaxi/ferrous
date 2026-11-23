@@ -19,7 +19,9 @@ import "../components" as Components
 // An error has one treatment here (it had three: red semibold words for a
 // stopped engine, plain words for one not running, and a glyph with words
 // for the issues and a failed scrobble): its words in the text colour
-// beside a 16 px glyph in the negative colour.
+// beside a 16 px glyph in the negative colour. Severity has one shape and
+// one colour wherever an issue shows: an error's ring with a cross in the
+// negative colour, a warning's triangle in the secondary one.
 ToolBar {
     id: root
 
@@ -71,6 +73,16 @@ ToolBar {
         ? Math.max(0, Number(root.errorController.unseenCount) || 0)
         : 0
     readonly property bool hasUnseenError: root.unseenErrorCount > 0
+    // Whether an error, rather than warnings alone, is among the new
+    // issues, or among them all once they are seen.
+    readonly property bool unseenIncludesError: root.errorController
+        ? (Number(root.errorController.unseenErrorCount) || 0) > 0
+        : false
+    readonly property bool issuesIncludeError: root.hasUnseenError
+        ? root.unseenIncludesError
+        : (root.errorController ? (Number(root.errorController.errorEntryCount) || 0) > 0 : false)
+    readonly property url errorGlyph: Qt.resolvedUrl("../assets/status-error.svg")
+    readonly property url warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
     readonly property string backendFailure: root.uiBridge.backendFailure || ""
     readonly property bool backendStopped: root.backendFailure.length > 0
     readonly property bool isDisconnected: !root.uiBridge.connected && !root.backendStopped
@@ -279,7 +291,7 @@ ToolBar {
                         objectName: "statusBarEngineErrorGlyph"
                         anchors.verticalCenter: parent.verticalCenter
                         size: root.errorGlyphSize
-                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        source: root.errorGlyph
                         color: root.uiPalette.negative
                     }
 
@@ -621,9 +633,14 @@ ToolBar {
             onSettingsRequested: root.lastFmSettingsRequested()
         }
 
-        // The issues: "2 new issues" in the text colour with a negative
-        // warning glyph until the user has seen them, then "3 issues" and
-        // the glyph in the secondary colour, the glyph 16 px in both.
+        // The issues: "2 new issues" in the text colour until the user has
+        // seen them, then "3 issues" in the secondary colour. The 16 px
+        // glyph is the shape of the most severe of them, the new ones while
+        // there are any: an error's ring with a cross, in the negative
+        // colour while an error is new, otherwise the warning's triangle;
+        // in the secondary colour once seen, and for warnings alone, which
+        // the word "new" marks (every new issue was red, so a scan's
+        // notice raised the alarm of a stopped engine).
         // It opens Recent Issues; with none there is nothing to show.
         ToolButton {
             id: issuesButton
@@ -640,7 +657,7 @@ ToolBar {
             text: root.hasUnseenError
                 ? I18n.i18ncp("@action:button", "%1 new issue", "%1 new issues", root.unseenErrorCount)
                 : I18n.i18ncp("@action:button", "%1 issue", "%1 issues", root.errorCount)
-            readonly property color glyphColor: root.hasUnseenError
+            readonly property color glyphColor: root.hasUnseenError && root.unseenIncludesError
                 ? root.uiPalette.negative
                 : root.uiPalette.textSecondary
             readonly property color labelColor: root.hasUnseenError
@@ -696,7 +713,7 @@ ToolBar {
                         objectName: "statusBarErrorsGlyph"
                         anchors.verticalCenter: parent.verticalCenter
                         size: root.errorGlyphSize
-                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        source: root.issuesIncludeError ? root.errorGlyph : root.warningGlyph
                         color: issuesButton.glyphColor
                     }
 

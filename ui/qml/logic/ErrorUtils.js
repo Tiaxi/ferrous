@@ -113,20 +113,18 @@ function issueTimeText(ms, nowMs) {
             Qt.formatDate(date, Qt.locale().dateFormat(1 /* Locale.ShortFormat */)), time)
 }
 
-// The glyph of an entry: Last.fm's waiting scrobbles have the offline
-// glyph; the rest the status bar's warning sign, quiet, in the secondary
-// colour, for the library's notices and in the negative colour for
-// anything else that went wrong.
-const GlyphWarning = 0
-const GlyphOffline = 1
-const GlyphNotice = 2
+// The glyph of an entry, one per severity wherever an issue shows: an
+// error's ring with a cross, in the negative colour; a warning's triangle,
+// quiet, in the secondary colour; Last.fm's waiting scrobbles, a warning,
+// the Last.fm slot's offline glyph in that colour. Shape and colour both
+// say which (the triangle in two colours told them apart by colour alone).
+const GlyphError = 0
+const GlyphWarning = 1
+const GlyphOffline = 2
 
 function issueGlyph(category, severity) {
-    if (severity === SeverityWarning && category === CategoryLastFm) {
-        return GlyphOffline
+    if (severity === SeverityError) {
+        return GlyphError
     }
-    if (severity === SeverityWarning && category === CategoryLibrary) {
-        return GlyphNotice
-    }
-    return GlyphWarning
+    return category === CategoryLastFm ? GlyphOffline : GlyphWarning
 }

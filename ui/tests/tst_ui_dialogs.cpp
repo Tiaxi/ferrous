@@ -755,7 +755,7 @@ private slots:
     void autoNumberCheckBoxesStartOnTheFieldsEdge_data();
     void autoNumberCheckBoxesStartOnTheFieldsEdge();
     void dialogListNumbersReadAsDrawn();
-    void recentIssuesUseTheStatusBarsTriangle();
+    void recentIssuesMarkSeverityByShapeAndColour();
 private:
     // The checks that the tests above run in turn in one window; each says
     // what it checks where it is defined.
@@ -3936,10 +3936,11 @@ void UiDialogsTest::checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(QQuick
     QVERIFY(!itemsNamed(first, QStringLiteral("errorHistorySubject")).at(0)->isVisible());
     // There is no system's text for it.
     QVERIFY(!itemsNamed(first, QStringLiteral("errorHistoryDetail")).at(0)->isVisible());
-    // The severity glyph as large as a line of text holds.
+    // The severity glyph as large as a line of text holds: a warning's,
+    // in the secondary colour.
     QQuickItem *glyph = itemsNamed(first, QStringLiteral("errorHistoryGlyph")).at(0);
     QCOMPARE(glyph->width(), paletteOf(window)->property("labelIconSize").toReal());
-    QCOMPARE(hex(glyph->property("color").value<QColor>()), hex(tokenOf(window, "negative")));
+    QCOMPARE(hex(glyph->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
     QQuickItem *action = itemsNamed(first, QStringLiteral("errorHistoryActionButton")).at(0);
     QVERIFY(action->isVisible());
     QCOMPARE(action->property("text").toString(), QStringLiteral("Show in Queue"));
@@ -4447,8 +4448,9 @@ void UiDialogsTest::thePanesEndsEarlyLinkOpensItsIssue() {
              QStringLiteral("04 - Static.flac ends early"));
     QCOMPARE(itemsNamed(rows[0], QStringLiteral("errorHistoryMessage")).at(0)->property("text").toString(),
              QStringLiteral("The last FLAC frame is cut off, so playback stops at 4:02."));
+    // A warning: the triangle in the secondary colour.
     QCOMPARE(hex(itemsNamed(rows[0], QStringLiteral("errorHistoryGlyph")).at(0)->property("color").value<QColor>()),
-             hex(tokenOf(window, "negative")));
+             hex(tokenOf(window, "textSecondary")));
     // One action.
     QList<QQuickItem *> actions;
     for (QQuickItem *action : itemsNamed(rows[0], QStringLiteral("errorHistoryActionButton"))) {
@@ -8702,7 +8704,7 @@ void UiDialogsTest::checkDialogGlyphsAndMeasuresFollowTheFont(DialogsWindow &mai
 
     // Recent Issues: 460 px, or with a larger font what it needs up to
     // that scaled with it, within the window, and its severity glyph as
-    // large as a line holds, centred on the category's lowercase.
+    // large as a line holds, centred on the title's lowercase.
     report(window, 1, 0, kStaticPath, kEndsEarly);
     QVERIFY(openIssues(window));
     QObject *issues = object(window, QStringLiteral("recentErrorsDialog"));
@@ -8718,15 +8720,15 @@ void UiDialogsTest::checkDialogGlyphsAndMeasuresFollowTheFont(DialogsWindow &mai
     QList<QQuickItem *> rows;
     QTRY_COMPARE((rows = itemsNamed(window->contentItem(), QStringLiteral("errorHistoryRow"))).size(), 1);
     QQuickItem *glyph = itemsNamed(rows.first(), QStringLiteral("errorHistoryGlyph")).value(0);
-    QQuickItem *category = itemsNamed(rows.first(), QStringLiteral("errorHistoryCategory")).value(0);
-    QVERIFY(glyph != nullptr && category != nullptr);
+    QQuickItem *heading = itemsNamed(rows.first(), QStringLiteral("errorHistoryHeading")).value(0);
+    QVERIFY(glyph != nullptr && heading != nullptr);
     QTRY_VERIFY(!layoutPending(rows.first()));
     QCOMPARE(glyph->width(), labelIcon);
     QCOMPARE(glyph->height(), labelIcon);
-    const qreal xMiddle = sceneRect(category).top() + category->baselineOffset()
-        - QFontMetricsF(category->property("font").value<QFont>()).xHeight() / 2;
+    const qreal xMiddle = sceneRect(heading).top() + heading->baselineOffset()
+        - QFontMetricsF(heading->property("font").value<QFont>()).xHeight() / 2;
     QVERIFY2(qAbs(sceneRect(glyph).center().y() - xMiddle) <= 0.5,
-             qPrintable(describeItem(glyph) + QStringLiteral(", the category's x-height centred at %1").arg(xMiddle)));
+             qPrintable(describeItem(glyph) + QStringLiteral(", the title's x-height centred at %1").arg(xMiddle)));
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!issues->property("visible").toBool());
 
@@ -9095,22 +9097,27 @@ void UiDialogsTest::dialogListNumbersReadAsDrawn() {
     main.editor.close();
 }
 
-// One warning vocabulary: Recent Issues marks warnings and errors with the
-// status bar's triangle in its two colours, the secondary for the library's
-// notices and the negative for what went wrong (the notices had an ⓘ of
-// their own, for issues the bar marks with the triangle). Scrobbles that
-// wait keep the offline glyph of the Last.fm slot.
-void UiDialogsTest::recentIssuesUseTheStatusBarsTriangle() {
+// Severity is one system, as the status bar shows it: an error's ring with
+// a cross in the negative colour, a warning's triangle in the secondary
+// one, so that shape and colour both tell them apart (the triangle in two
+// colours told them apart by colour alone, the status bar's red and grey
+// for new and seen). Scrobbles that wait keep the Last.fm slot's offline
+// glyph. Each glyph sits beside the entry's title, centred on its
+// lowercase, not beside the quiet category line over it; and a hairline
+// sets the header apart from the list, as one sets the footer apart.
+void UiDialogsTest::recentIssuesMarkSeverityByShapeAndColour() {
     DialogsWindow main;
     QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     // Category, severity, glyph, colour.
     const QList<std::tuple<int, int, QString, const char *>> issues{
         {2, 0, QStringLiteral("status-warning.svg"), "textSecondary"},
-        {2, 1, QStringLiteral("status-warning.svg"), "negative"},
-        {1, 0, QStringLiteral("status-warning.svg"), "negative"},
-        {1, 1, QStringLiteral("status-warning.svg"), "negative"},
+        {2, 1, QStringLiteral("status-error.svg"), "negative"},
+        {1, 0, QStringLiteral("status-warning.svg"), "textSecondary"},
+        {1, 1, QStringLiteral("status-error.svg"), "negative"},
         {5, 0, QStringLiteral("status-offline.svg"), "textSecondary"},
+        {5, 1, QStringLiteral("status-error.svg"), "negative"},
+        {6, 0, QStringLiteral("status-warning.svg"), "textSecondary"},
     };
     for (qsizetype i = 0; i < issues.size(); ++i) {
         report(window, std::get<0>(issues[i]), std::get<1>(issues[i]), QString(),
@@ -9131,7 +9138,37 @@ void UiDialogsTest::recentIssuesUseTheStatusBarsTriangle() {
         QVERIFY2(glyph->property("source").toString().endsWith(file),
                  qPrintable(QStringLiteral("%1/%2: %3").arg(category).arg(severity).arg(glyph->property("source").toString())));
         QCOMPARE(hex(glyph->property("color").value<QColor>()), hex(tokenOf(window, token)));
+        QVERIFY(glyph->property("isMask").toBool());
     }
+    // Beside the title, centred on its lowercase, in every row.
+    for (QQuickItem *row : std::as_const(rows)) {
+        QTRY_VERIFY(!layoutPending(row));
+        QQuickItem *glyph = itemsNamed(row, QStringLiteral("errorHistoryGlyph")).value(0);
+        QQuickItem *heading = itemsNamed(row, QStringLiteral("errorHistoryHeading")).value(0);
+        QQuickItem *category = itemsNamed(row, QStringLiteral("errorHistoryCategory")).value(0);
+        QVERIFY(glyph && heading && category);
+        const qreal xMiddle = sceneRect(heading).top() + heading->baselineOffset()
+            - QFontMetricsF(heading->property("font").value<QFont>()).xHeight() / 2;
+        QVERIFY2(qAbs(sceneRect(glyph).center().y() - xMiddle) <= 0.5,
+                 qPrintable(describeItem(glyph) + QStringLiteral(", the title's x-height centred at %1").arg(xMiddle)));
+        // Clear of the category's line over it.
+        QVERIFY2(sceneRect(glyph).top() >= sceneRect(category).center().y(),
+                 qPrintable(describeItem(glyph) + describeItem(category)));
+    }
+    // A hairline under the header, across the popup, in the footer rule's
+    // colour, with the list under it.
+    QQuickItem *header = visibleNamed(window, QStringLiteral("errorHistoryHeader"));
+    QQuickItem *line = visibleNamed(window, QStringLiteral("errorHistoryHeaderLine"));
+    QQuickItem *footerLine = visibleNamed(window, QStringLiteral("errorHistoryFooterLine"));
+    QQuickItem *list = visibleNamed(window, QStringLiteral("errorHistoryView"));
+    QVERIFY(header && line && footerLine && list);
+    QCOMPARE(line->height(), 1.0);
+    QCOMPARE(line->width(), footerLine->width());
+    QCOMPARE(sceneRect(line).left(), sceneRect(footerLine).left());
+    QCOMPARE(hex(line->property("color").value<QColor>()), hex(footerLine->property("color").value<QColor>()));
+    QVERIFY2(sceneRect(line).top() >= sceneRect(header).bottom() - 0.5
+                 && sceneRect(line).bottom() <= sceneRect(list).top() + 0.5,
+             qPrintable(describeItem(header) + describeItem(line) + describeItem(list)));
     QTest::keyClick(window, Qt::Key_Escape);
 }
 

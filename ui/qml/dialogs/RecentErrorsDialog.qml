@@ -37,6 +37,9 @@ Popup {
     readonly property real edgeMargin: Kirigami.Units.smallSpacing + 2
     // Between an entry's glyph and its text, and Open Diagnostics…' too.
     readonly property real glyphTextGap: Kirigami.Units.largeSpacing + 2
+    // The rules under the header and over the footer: the frame's colour.
+    readonly property color ruleColor: Kirigami.ColorUtils.linearInterpolation(
+        root.uiPalette.chrome, root.uiPalette.text, Kirigami.Theme.frameContrast)
     readonly property real statusBarClearance: root.uiPalette.rowHeight + Kirigami.Units.smallSpacing + 2
     // The files of the entries that are in the queue now, by path. It is
     // worked out again whenever the queue's rows change, whatever their
@@ -362,6 +365,16 @@ Popup {
             }
         }
 
+        // A hairline under the header, as over the footer: the header is
+        // the popup's, apart from the list it heads (with a rule only over
+        // the footer, the title stood on the first issue).
+        Rectangle {
+            objectName: "errorHistoryHeaderLine"
+            Layout.fillWidth: true
+            implicitHeight: 1
+            color: root.ruleColor
+        }
+
         Components.KeyScrollView {
             id: historyView
             objectName: "errorHistoryView"
@@ -441,33 +454,41 @@ Popup {
                             anchors.rightMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                             spacing: root.glyphTextGap
 
-                            // The only mark between an error and a notice: as
-                            // large as a line of text holds, and centred on the
-                            // category's lowercase, the middle of its x-height,
-                            // 2 px under the line's top with the default font
-                            // (it stayed 16 px at the top of a 24 pt line).
+                            // The entry's severity, as the status bar marks
+                            // it: as large as a line of text holds, and
+                            // centred on the title's lowercase, the middle
+                            // of its x-height, beside the words the eye
+                            // reads first (on the category's line above it,
+                            // it hung beside the quietest text).
                             Kirigami.Icon {
                                 id: severityGlyph
                                 objectName: "errorHistoryGlyph"
                                 Layout.alignment: Qt.AlignTop
-                                Layout.topMargin: Math.round(categoryLabel.y + categoryLabel.baselineOffset
-                                    - categoryMetrics.xHeight / 2 - implicitHeight / 2)
+                                Layout.topMargin: Math.round(headingLabel.y + headingLabel.baselineOffset
+                                    - headingMetrics.xHeight / 2 - implicitHeight / 2)
                                 implicitWidth: root.uiPalette.labelIconSize
                                 implicitHeight: root.uiPalette.labelIconSize
-                                // The status bar's triangle for each, in
-                                // its two colours (a notice had an ⓘ).
-                                source: historyRow.glyph === ErrorUtils.GlyphOffline
-                                    ? Qt.resolvedUrl("../assets/status-offline.svg")
-                                    : Qt.resolvedUrl("../assets/status-warning.svg")
+                                // An error's ring with a cross in the negative
+                                // colour, a warning's triangle in the
+                                // secondary one: shape and colour both.
+                                source: historyRow.glyph === ErrorUtils.GlyphError
+                                    ? Qt.resolvedUrl("../assets/status-error.svg")
+                                    : historyRow.glyph === ErrorUtils.GlyphOffline
+                                        ? Qt.resolvedUrl("../assets/status-offline.svg")
+                                        : Qt.resolvedUrl("../assets/status-warning.svg")
                                 isMask: true
-                                color: historyRow.glyph === ErrorUtils.GlyphWarning
+                                color: historyRow.glyph === ErrorUtils.GlyphError
                                     ? root.uiPalette.negative
                                     : root.uiPalette.textSecondary
                                 Accessible.ignored: true
                             }
 
+                            // At the row's top whatever the glyph's margin
+                            // (centred, it moved down by what the glyph
+                            // beside a short entry's title stood below it).
                             ColumnLayout {
                                 Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignTop
                                 spacing: 2
 
                                 // What the issue is about and when, as a
@@ -489,10 +510,6 @@ Popup {
                                         color: root.uiPalette.textTertiary
                                         Accessible.ignored: true
 
-                                        FontMetrics {
-                                            id: categoryMetrics
-                                            font: categoryLabel.font
-                                        }
                                     }
 
                                     Label {
@@ -517,6 +534,11 @@ Popup {
                                     font.weight: historyRow.unseen ? Font.DemiBold : Font.Normal
                                     color: root.uiPalette.text
                                     Accessible.ignored: true
+
+                                    FontMetrics {
+                                        id: headingMetrics
+                                        font: headingLabel.font
+                                    }
                                 }
 
                                 Components.MessageLabel {
@@ -621,12 +643,12 @@ Popup {
         }
 
         Rectangle {
+            objectName: "errorHistoryFooterLine"
             Layout.fillWidth: true
             Layout.topMargin: Kirigami.Units.smallSpacing
             Layout.bottomMargin: Kirigami.Units.smallSpacing
             implicitHeight: 1
-            color: Kirigami.ColorUtils.linearInterpolation(
-                root.uiPalette.chrome, root.uiPalette.text, Kirigami.Theme.frameContrast)
+            color: root.ruleColor
         }
 
         // On the header's x, with the glyph of Help's Diagnostics…, as Clear
