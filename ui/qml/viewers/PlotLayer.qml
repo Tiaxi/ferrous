@@ -598,12 +598,9 @@ Item {
         clipOffColor: root.plotColors.meterClipOff
         clipColor: root.uiPalette.negative
         tickColor: root.beforeAudio ? root.plotColors.meterRestTick : root.plotColors.meterTick
-        // On the waveform, whose colour the bar has, the bar is framed by
-        // its trough, so it reads as an instrument rather than as the
-        // waveform's tail. Its marks and scale are the same in both modes.
-        framed: root.visualizationMode === 1
-        // Out to the pane's edge, in the main window and in the viewers
-        // alike: its bar is far wider than the queue's scrollbar above it.
+        // One geometry in both modes; only the colours differ. Out to the
+        // pane's edge, in the main window and in the viewers alike: its
+        // column is far wider than the queue's scrollbar above it.
     }
 
     // Each lane's column, for its tooltip and for assistive technology:

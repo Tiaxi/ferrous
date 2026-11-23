@@ -22,29 +22,32 @@
 // lane, with a 1 px seam on its left, out to the pane's edge. Each column
 // is a vertical meter from -60 to 0 dBFS, with its listed levels evenly
 // spaced (-6, -12, -24 and -48 dB at 4/5 to 1/5 of the height): an 11 px
-// track the lane's height, and on it a 10 px bar out to the column's right
-// edge, with the track showing 1 px left of it, or, `framed`, no seam but a
-// 3 px gap in the plot's background at the plot's side, then a 9 px track
-// with a 7 px bar on it, the track framing it 1 px either side (the
-// waveform met the track, and where it reached the edge the two read as one
-// shape): the fill from the bottom and a 3 px clip lamp at the top. The
-// fill is a ladder,
-// 3 px rungs on a 4 px pitch from the scale's foot, the track showing
-// between them, so it reads as an instrument rather than a solid bar (a
-// solid bar was louder than the data, and in the view's colours read as the
-// thumb of the queue's scrollbar above the pane, whose right edge it
-// shares; 2 px rungs on a 3 px pitch read as a hatch). The meter's marks,
-// at -6, -12 and -24 dB (only -6 and -24 in a lane under 64 px), are 2 px
+// track the lane's height, and on it the meter's three readings, each of
+// its own shape (when they shared one, a line across the track, the
+// marks and the held peak took a second look to tell apart). The body, a
+// 6 px bar with the track 1 px either side of it, holds the level, the
+// clip lamp at its top and the held peak; the marks are short ticks on the
+// track's outer 3 px, beyond the body's break. The same in either
+// visualization mode; only the colours differ (the waveform's meter had a
+// frame of its own, and the two read as two instruments). The body is
+// framed by the track, so a bar in a waveform's colour reads as an
+// instrument and not as the waveform's tail. The fill is a ladder from the
+// bottom, 3 px rungs on a 4 px pitch from the scale's foot, the track
+// showing between them, so it reads as an instrument rather than a solid
+// bar (a solid bar was louder than the data, and in the view's colours
+// read as the thumb of the queue's scrollbar above the pane, whose right
+// edge it shares; 2 px rungs on a 3 px pitch read as a hatch), and a 3 px
+// clip lamp at the top, with a 1 px gap under it. The meter's marks, at
+// -6, -12 and -24 dB (only -6 and -24 in a lane under 64 px), are 2 px
 // gaps in the ladder, its rungs starting again over each, and a 1 px tick
-// across the track in each gap, which shows above the fill too (without
-// them the ladder had no reference). The same marks, scale and input in
-// either visualization mode; only the colours, and the frame, differ. The
-// rungs are of one colour, fillColor: on the spectrogram the app icon's
-// harmonic magenta, at 3:1 on the trough. A 2 px peak tick, at full
-// brightness, with a 1 px gap under it where it is on the fill. At rest,
-// without a track or stopped, it is the track with its marks' ticks alone
-// (an empty track read as a scrollbar's). A `topSeamColor` that is not
-// transparent draws a 1 px line across the column's top, which sets it
+// on the outer 3 px in each gap's upper row, which shows above the fill
+// too (without them the ladder had no reference). The rungs are of one
+// colour, fillColor: on the spectrogram the app icon's harmonic magenta,
+// at 3:1 on the trough. The held peak is a 2 px line across the body, at
+// full brightness, with a 1 px gap under it where it is on the fill. At
+// rest, without a track or stopped, it is the track with its marks' ticks
+// alone (an empty track read as a scrollbar's). A `topSeamColor` that is
+// not transparent draws a 1 px line across the column's top, which sets it
 // apart from what is above it, as the queue's scrollbar lane over the
 // waveform's meter (in the view's greys the bar read as a piece of that
 // scrollbar).
@@ -71,10 +74,6 @@ class LevelMeterItem : public QQuickItem {
     Q_PROPERTY(QColor tickColor MEMBER m_tickColor WRITE setTickColor NOTIFY colorsChanged)
     // The line across the column's top; none while transparent.
     Q_PROPERTY(QColor topSeamColor MEMBER m_topSeamColor WRITE setTopSeamColor NOTIFY colorsChanged)
-    // Whether the bar is framed by the track, which then starts kFramedGap
-    // into the column, as on the waveform, where the bar in the plot's own
-    // colour otherwise read as the waveform's tail.
-    Q_PROPERTY(bool framed READ framed WRITE setFramed NOTIFY framedChanged)
     // Whether something reads the levels, such as a tooltip: then
     // readoutChanged() tells it of new ones, a few times a second. It also
     // does while an assistive technology is active.
@@ -101,15 +100,13 @@ public:
     static constexpr double kColumnWidth = 12.0;
     static constexpr double kTrackLeft = 1.0;
     static constexpr double kTrackWidth = kColumnWidth - kTrackLeft;
-    // The bar on the track, out to the column's right edge: the fill and
-    // the lamp.
-    static constexpr double kBarLeft = 2.0;
-    static constexpr double kBarWidth = kColumnWidth - kBarLeft;
-    // Framed, the column starts with a gap in the plot's background, and
-    // the bar is kFramedInset in from either edge of the track after it.
-    static constexpr double kFramedGap = 3.0;
-    static constexpr double kFramedInset = 1.0;
-    static constexpr double kFramedBarWidth = kColumnWidth - kFramedGap - 2 * kFramedInset;
+    // The body on the track, 1 px in from its left: the fill, the lamp
+    // and the held peak.
+    static constexpr double kBodyLeft = kTrackLeft + 1.0;
+    static constexpr double kBodyWidth = 6.0;
+    // The marks' ticks, on the track's outer side, 1 px clear of the body.
+    static constexpr double kMarkLeft = kBodyLeft + kBodyWidth + 1.0;
+    static constexpr double kMarkWidth = kColumnWidth - kMarkLeft;
     // The meter keeps 3 px clear above and below in its lane; its top 3 px
     // are the clip lamp, with a 1 px gap under it.
     static constexpr double kInset = 3.0;
@@ -161,8 +158,6 @@ public:
     void setClipOffColor(const QColor &value) { setColor(m_clipOffColor, value); }
     void setClipColor(const QColor &value) { setColor(m_clipColor, value); }
     void setTickColor(const QColor &value) { setColor(m_tickColor, value); }
-    bool framed() const { return m_framed; }
-    void setFramed(bool value);
 
     QString sourcePath() const { return m_sourcePath; }
     PlaybackClock *clock() const { return m_clock; }
@@ -185,7 +180,6 @@ signals:
     void activeChanged();
     void colorsChanged();
     void readoutWantedChanged();
-    void framedChanged();
     // The levels laneReadout() gives changed.
     void readoutChanged();
 
@@ -288,7 +282,6 @@ private:
     QColor m_clipColor{QStringLiteral("#ed5a6a")};
     QColor m_tickColor{QColor::fromRgbF(1, 1, 1, 0.4)};
     QColor m_topSeamColor{Qt::transparent};
-    bool m_framed{false};
     // Tells readers of the levels of new ones, at most every 250 ms.
     QTimer m_readoutTimer;
     // Wakes the meter when the drawn levels next change, while no frame is due.

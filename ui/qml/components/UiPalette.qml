@@ -446,10 +446,9 @@ QtObject {
         // toward the view, less where that would be under 3:1 on the
         // trough (no seam across its top: under the queue's seam it made
         // one 2 px thick over the meter's column). From the pane's waveform
-        // colour, so it stays the plot's own. The trough frames the bar
-        // (LevelMeterItem's `framed`), a step off the view, so the column
-        // reads as an instrument and not as the waveform's tail (at 1.2:1
-        // it did not show).
+        // colour, so it stays the plot's own. The trough frames the body,
+        // a step off the view, so the column reads as an instrument and not
+        // as the waveform's tail (at 1.2:1 it did not show).
         meterTrough: root.themeIsDark ? "#2b2d2f" : "#e8e9ea"
         meterFill: root._waveformMeterFill(ColorUtils.drawnOver(waveformColors.meterTrough, root.view))
         meterSeam: root.view
@@ -460,9 +459,11 @@ QtObject {
         meterClipOff: ColorUtils.withAlpha(root.text, root.themeIsDark ? 0.18 : 0.27)
         // The meter's marks: the text colour, faint.
         meterTick: ColorUtils.withAlpha(root.text, 0.3)
-        // The view, and the waveform's rest lines on it.
+        // The view, and on it marks a step over the waveform's rest lines
+        // (1.3:1), at 1.7:1 as the spectrogram's are: the marks are 3 px
+        // ticks, which in the rest lines' colour all but vanished.
         meterRestTrough: root.view
-        meterRestTick: root.waveformRestLine
+        meterRestTick: ColorUtils.drawnOver(root._tintOf(root.text, root.view, 1.7), root.view)
         // The accent is 2.4:1 on white: the light fill is the focus ring's
         // darker blue. #3daee9 / #1a74a8.
         checkedFill: root.themeIsDark ? root.accent : root.focusRing
