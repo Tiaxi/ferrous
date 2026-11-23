@@ -635,8 +635,9 @@ void TransportStatusTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
 }
 
-// The sizes of the design at 1×: a 48 px row under the lane of the seek
-// bar's time box, which grows the band; 32 px buttons 4 px apart
+// The sizes of the design at 1×: a 48 px row under the lane of the
+// transport's popups, which grows the band, and over the room that
+// balances it; 32 px buttons 4 px apart
 // from 12 px, the content's inset; the seek bar 16 px after Next; then on
 // one rhythm, between what is drawn: the time 16 px after the seek bar, as
 // wide as "0:00 / 0:00", the volume glyph 24 px after it, and the 96 px
@@ -649,7 +650,7 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QVERIFY(transport != nullptr);
     const qreal lane = transport->property("laneGrowth").toReal();
     QVERIFY(lane > 0);
-    QCOMPARE(transport->height(), 48.0 + lane);
+    QCOMPARE(transport->height(), 48.0 + lane + transport->property("balanceRoom").toReal());
     // The row's top.
     const qreal top = sceneRect(transport).top() + lane;
 
@@ -969,18 +970,17 @@ void TransportStatusTest::transportButtonsAreOffWhereTheyCannotAct() {
     QVERIFY(playPause->isEnabled());
 }
 
-// The buttons' tooltips open under them 3 px clear of their focus rings, as
-// the style's are of a button (they met the ring's bottom edge), and not
-// while the button is held down. The seek bar's time box stands 1 px clear
-// of the bar's focus ring (it covered the ring's top). Mute's and the
-// volume's open in the time box's lane above the bar, one rail for the
-// bar's right end, Mute's 3 px clear of its ring as the buttons' are, the
-// volume's clear of its own (Mute's opened under the band, over the queue's
-// header, and the volume's above it).
+// Every tooltip of the transport opens in one lane above the row, the
+// seek bar's time box's: one rail for the band, on one line, as tall as
+// the time box, in the band, each 1 px clear of its control's focus ring
+// (the buttons' opened under the band, over the cover and the queue's
+// header, while Mute's and the volume's opened above it; the time box
+// covered the bar's ring's top). A button held down shows none.
 void TransportStatusTest::transportToolTipsClearTheFocusRings() {
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
     showToolTipsAtOnce(harness.item(QStringLiteral("transportBar")));
+    QList<std::pair<QString, QRectF>> buttonBoxes;
     const auto ringOf = [](QQuickItem *button) -> QQuickItem * {
         for (QQuickItem *child : button->findChildren<QQuickItem *>()) {
             if (child->objectName() == QStringLiteral("transportButtonFocusRing")) {
@@ -1003,10 +1003,12 @@ void TransportStatusTest::transportToolTipsClearTheFocusRings() {
         QVERIFY(box != nullptr);
         const QRectF boxRect = sceneRect(box);
         const QRectF ringRect = sceneRect(ring);
-        QVERIFY2(boxRect.top() >= ringRect.bottom() + 3 - 0.5,
+        QVERIFY2(boxRect.bottom() <= ringRect.top() - 1 + 0.5,
                  qPrintable(name + QLatin1Char(' ') + describeRect(boxRect) + QStringLiteral(" over ")
                             + describeRect(ringRect)));
         QVERIFY2(!boxRect.intersects(ringRect), qPrintable(name));
+        QVERIFY2(boxRect.top() >= sceneRect(harness.item(QStringLiteral("transportBar"))).top(), qPrintable(name));
+        buttonBoxes.append({name, boxRect});
         harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
         QTRY_VERIFY2(!tip->property("visible").toBool(), qPrintable(name));
     }
@@ -1041,6 +1043,13 @@ void TransportStatusTest::transportToolTipsClearTheFocusRings() {
     QVERIFY2(seekBoxRect.bottom() <= sceneRect(seekRing).top() - 1 + 0.5,
              qPrintable(describeRect(seekBoxRect) + QStringLiteral(" over ") + describeRect(sceneRect(seekRing))));
     QTest::keyRelease(harness.window, Qt::Key_Right);
+    // The buttons' on the time box's line, as tall as it.
+    for (const auto &[name, boxRect] : buttonBoxes) {
+        const QString where = name + QLatin1Char(' ') + describeRect(boxRect) + QStringLiteral(", the time box ")
+            + describeRect(seekBoxRect);
+        QVERIFY2(std::abs(boxRect.bottom() - seekBoxRect.bottom()) <= 0.5, qPrintable(where));
+        QVERIFY2(std::abs(boxRect.height() - seekBoxRect.height()) <= 0.5, qPrintable(where));
+    }
 
     // Mute's and the volume's, focused, in the same lane: as tall as the
     // time box, on the same line, in the band, and clear of their rings.
@@ -1069,8 +1078,7 @@ void TransportStatusTest::transportToolTipsClearTheFocusRings() {
         QVERIFY2(std::abs(boxRect.bottom() - seekBoxRect.bottom()) <= 0.5, qPrintable(where));
         QVERIFY2(std::abs(boxRect.height() - seekBoxRect.height()) <= 0.5, qPrintable(where));
         QVERIFY2(boxRect.top() >= band.top() && boxRect.right() <= band.right(), qPrintable(where));
-        QVERIFY2(boxRect.bottom() <= sceneRect(inLane.ring).top() - (inLane.control == mute ? 3 : 1) + 0.5,
-                 qPrintable(where));
+        QVERIFY2(boxRect.bottom() <= sceneRect(inLane.ring).top() - 1 + 0.5, qPrintable(where));
         harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
         QTRY_VERIFY2(!inLane.tip->property("visible").toBool(), qPrintable(name));
     }
@@ -5275,7 +5283,8 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
         QVERIFY2(rect.left() >= previousRight, qPrintable(names[i]));
         previousRight = rect.right();
     }
-    QCOMPARE(band.height(), std::max(48.0, buttonSize + 16.0) + transport->property("laneGrowth").toReal());
+    QCOMPARE(band.height(), std::max(48.0, buttonSize + 16.0) + transport->property("laneGrowth").toReal()
+                                + transport->property("balanceRoom").toReal());
     for (const QString &name : {QStringLiteral("seekSlider"), QStringLiteral("transportTimePosition"),
                                 QStringLiteral("transportTimeLength"), QStringLiteral("muteButton"),
                                 QStringLiteral("volumeSlider")}) {

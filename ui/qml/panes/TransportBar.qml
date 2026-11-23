@@ -222,37 +222,59 @@ ToolBar {
     // The row of controls: 48 px, or the buttons and 8 px above and below
     // them.
     readonly property real rowHeight: Math.max(48, root.buttonSize + 16)
-    // The seek bar's time box has one place: a lane above the bar, in the
-    // transport's band, which Mute's tooltip and the volume's share, so the
-    // bar's right end has one rail (Mute's opened under the band, over the
-    // queue's header, and the volume's above it). Under the bar the time
-    // box hung over the queue's header (H5)
-    // and, at a large font, the now-playing title; above the band it met
-    // the menu's titles; beside its line on the waveform it hid what the
-    // scrub reads. The lane ends 1 px clear of the seek bar's focus ring
-    // and 3 px clear of the buttons' rings, as the buttons' tooltips under
-    // them are (Mute's, 1 px clear, met its ring), and its boxes are a line
-    // of text and a little room above and below it, so the band grows by
-    // no more than the lane needs beyond the room above the bar. The
-    // lane's bottom, up from the row's centre line:
+    // The transport's popups have one place: a lane above the row, in the
+    // transport's band. The seek bar's time box, the buttons' tooltips,
+    // Mute's and the volume's open there, so the band has one rail (the
+    // buttons' opened under the band, over the cover and the queue's
+    // header, and Mute's and the volume's above it). Under the bar the
+    // time box hung over the queue's header (H5) and, at a large font, the
+    // now-playing title; above the band it met the menu's titles; beside
+    // its line on the waveform it hid what the scrub reads. The lane ends
+    // 1 px clear of the seek bar's focus ring and of the buttons', and its
+    // boxes are a line of text and a little room above and below it, so
+    // the band grows by no more than the lane needs beyond the room above
+    // the row. The lane's bottom, up from the row's centre line:
     readonly property real laneClearance: Math.max(seekSlider.boxHeight / 2 + seekSlider.focusRingOutset + 1,
-        root.buttonSize / 2 + root.buttonFocusRingOutset + 3)
+        root.buttonSize / 2 + root.buttonFocusRingOutset + 1)
     // The line's own leading, which grows with the font, is most of the
-    // room around its figures.
+    // room around its figures; the style's 6 px above and below it made
+    // the lane, which is empty at rest, a third taller.
     readonly property real laneToolTipPadding: 2
-    readonly property real laneTopMargin: 2
     readonly property real laneBoxHeight: seekTimeBox.implicitHeight
-    // What the band grows by, above the row, in whole pixels.
+    // What the band grows by, above the row, in whole pixels: the lane
+    // starts at the band's top, under the menu's titles.
     readonly property real laneGrowth: Math.max(0,
-        Math.ceil(root.laneTopMargin + root.laneBoxHeight + root.laneClearance - root.rowHeight / 2))
+        Math.ceil(root.laneBoxHeight + root.laneClearance - root.rowHeight / 2))
     // The lane's bottom, in the transport's coordinates.
     readonly property real laneBottom: root.snapped(root.laneGrowth + root.rowHeight / 2 - root.laneClearance)
     // The y of a box in the lane, `boxHeight` tall, whose parent is
-    // `rowItem`, an item of the row.
+    // `rowItem`, an item of the row or of a group in it.
     function laneY(rowItem, boxHeight) {
-        return root.laneBottom - boxHeight - root.topPadding - rowItem.y
+        let rowY = 0
+        for (let item = rowItem; item && item !== root.contentItem; item = item.parent) {
+            rowY += item.y
+        }
+        return root.laneBottom - boxHeight - root.topPadding - rowY
     }
-    implicitHeight: root.rowHeight + root.laneGrowth
+    // The room in the row above and under the glyphs' ink.
+    readonly property real rowInkInset: (root.rowHeight - root.smallGlyphSize) / 2
+    // The room under the row, which balances the lane above it: the band
+    // over the glyphs at most 4:3 of the band under them, so that with the
+    // menu's room under its titles the eye sees at most about 3:2 (the
+    // empty lane over the row and 8 px under it sank the controls onto
+    // the seam, 44 px above their ink against 17 px under it).
+    readonly property real wantedBalanceRoom: Math.max(0,
+        Math.ceil((root.laneGrowth + root.rowInkInset) * 3 / 4 - root.rowInkInset))
+    // The height the window has beyond its least, of which the room takes
+    // what it wants: in the least window, at a large font, the panes keep
+    // their minimums and the room gives way (it would make the window's
+    // least height 736 px at 24 pt, over the 720 px it fits).
+    property real balanceRoomLimit: Infinity
+    readonly property real balanceRoom: Math.max(0, Math.min(root.wantedBalanceRoom,
+        Math.floor(root.balanceRoomLimit)))
+    // The band without the room: what the window's least height holds.
+    readonly property real leastHeight: root.rowHeight + root.laneGrowth
+    implicitHeight: root.leastHeight + root.balanceRoom
     // The content's inset, on both sides, measured to what is drawn, as
     // the transport's other gaps are: Previous's glyph starts where the
     // library's rows and the status bar's text do, with its button's clear
@@ -266,7 +288,7 @@ ToolBar {
     leftPadding: Math.max(root.buttonFocusRingOutset, Math.round(root.edgeInset - root.smallGlyphInset))
     rightPadding: root.edgeInset
     topPadding: root.laneGrowth
-    bottomPadding: 0
+    bottomPadding: root.balanceRoom
     // Chrome. The seam under it is the main window's.
     background: Rectangle {
         objectName: "transportBackground"
@@ -397,20 +419,7 @@ ToolBar {
         }
     }
 
-    // The tooltip of a transport button: under it, as the style's tooltip
-    // flipped there for want of room above, 3 px clear of the button's
-    // focus ring as the style's is of a button (it met the ring's bottom
-    // edge); and not while the button is held down.
-    component ButtonToolTip: Components.PlainToolTip {
-        required property Item button
-        objectName: "transportButtonToolTip"
-        parent: button
-        visible: (button.hovered || button.visualFocus) && !button.down
-        delay: Kirigami.Units.toolTipDelay
-        y: button.height + root.buttonFocusRingOutset + 3
-    }
-
-    // A tooltip in the lane above the bar, of `rowItem`, an item of the
+    // A tooltip in the lane above the row, of `rowItem`, an item of the
     // row: one line, as the time box is (the style's label wrapped Mute's
     // to two lines at a large font, past the lane's top).
     component LaneToolTip: Components.PlainToolTip {
@@ -487,8 +496,12 @@ ToolBar {
         focusPolicy: Qt.TabFocus
         Accessible.name: transportButton.label
         readonly property string toolTipText: root.actionToolTip(transportButton.label, transportButton.shortcutText)
-        ButtonToolTip {
-            button: transportButton
+        // In the lane, and not while the button is held down.
+        LaneToolTip {
+            objectName: "transportButtonToolTip"
+            rowItem: transportButton
+            visible: (transportButton.hovered || transportButton.visualFocus) && !transportButton.down
+            delay: Kirigami.Units.toolTipDelay
             message: transportButton.toolTipText
         }
         // Space presses the focused button rather than playing or pausing;
@@ -1431,8 +1444,7 @@ ToolBar {
             // "Mute · Ctrl+Shift+M", as the other buttons name theirs.
             readonly property string toolTipText: root.actionToolTip(muteButton.text,
                 root.muteAction && root.muteAction.shortcut ? String(root.muteAction.shortcut) : "")
-            // In the lane, as the volume's beside it, and as the buttons'
-            // are, not while held down.
+            // In the lane, as the other buttons' are, not while held down.
             LaneToolTip {
                 objectName: "transportButtonToolTip"
                 rowItem: muteButton
