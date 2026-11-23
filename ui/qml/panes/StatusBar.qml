@@ -524,7 +524,11 @@ ToolBar {
                 width: root.uiPalette.scaledSize(72)
                 height: Math.max(4, Math.round(root.uiPalette.scaledSize(root.smallGlyphSize) / 5))
                 radius: height / 2
-                color: ColorUtils.withAlpha(root.uiPalette.text, 0.15)
+                // The status bar's progress trough and fill, the Last.fm
+                // bar's: the trough 3:1 on the status bar and the fill 3:1
+                // on it, so that the share scanned reads against the rest
+                // (its trough, the text at 15%, was 1.6:1 / 1.3:1).
+                color: root.uiPalette.statusBarTrough
 
                 Rectangle {
                     objectName: "statusBarScanBarFill"
@@ -535,7 +539,7 @@ ToolBar {
                     // batches, and is full only once the scan is.
                     width: Math.floor(parent.width * scanGroup.fraction)
                     radius: height / 2
-                    color: root.uiPalette.textSecondary
+                    color: root.uiPalette.statusBarFill
                 }
             }
 

@@ -545,6 +545,8 @@ private slots:
     void statusBarFormatKeepsItsPlace_data();
     void statusBarFormatKeepsItsPlace();
     void statusBarShowsTheScanWithItsBar();
+    void statusBarScanBarReadsAsAShare_data();
+    void statusBarScanBarReadsAsAShare();
     void statusBarScanBarGrowsWithTheFont();
     void statusBarScanBarFillsOnlyOnceTheRescanEnds();
     void statusBarScanWithoutATotalIsStill();
@@ -3141,6 +3143,51 @@ void TransportStatusTest::statusBarFormatKeepsItsPlace() {
     QVERIFY2(modes->parentItem()->width() >= modes->width()
                  && modes->parentItem()->width() < modes->width() + 16,
              qPrintable(QString::number(modes->parentItem()->width())));
+}
+
+void TransportStatusTest::statusBarScanBarReadsAsAShare_data() {
+    addThemeRows();
+}
+
+// The scan bar's trough reads as the whole the scan is a share of, and its
+// fill against it, as drawn: the status bar's progress trough, the Last.fm
+// bar's, 3:1 or more on the status bar (the text at 15% was 1.6:1 / 1.3:1),
+// and its fill 3:1 or more on the trough. The percent stays beside it.
+void TransportStatusTest::statusBarScanBarReadsAsAShare() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
+    QQuickItem *bar = harness.item(QStringLiteral("statusBarScanBar"));
+    QQuickItem *fill = harness.item(QStringLiteral("statusBarScanBarFill"));
+    QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QVERIFY(bar && fill && count && slot);
+    harness.bridge->setProperty("libraryScanProcessed", 31);
+    harness.bridge->setProperty("libraryScanTotal", 100);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    QTRY_VERIFY(bar->isVisible() && fill->isVisible());
+    QCOMPARE(count->property("text").toString(), QStringLiteral("31%"));
+    QVERIFY(count->isVisible());
+    const QColor chrome = harness.token("chrome");
+    const QColor trough = bar->property("color").value<QColor>();
+    const QColor done = fill->property("color").value<QColor>();
+    QCOMPARE(trough.alphaF(), 1.0F);
+    QVERIFY(sameColor(trough, harness.token("statusBarTrough")));
+    QVERIFY(sameColor(trough, slot->property("troughColor").value<QColor>()));
+    QVERIFY(sameColor(done, harness.token("statusBarFill")));
+    QVERIFY2(contrastRatio(trough, chrome) >= 3.0, qPrintable(describeContrast(QStringLiteral("trough"), trough, chrome)));
+    QVERIFY2(contrastRatio(done, trough) >= 3.0, qPrintable(describeContrast(QStringLiteral("fill"), done, trough)));
+
+    // As drawn: the fill on the left, then the trough, along the bar's
+    // middle row.
+    qreal scale = 1;
+    const QImage image = grabbed(harness.window, &scale);
+    const QRectF rect = sceneRect(bar);
+    const qreal middle = rect.center().y();
+    QVERIFY2(channelDistance(pixelAt(image, QPointF(rect.left() + fill->width() / 2, middle), scale), done) <= 2,
+             qPrintable(pixelAt(image, QPointF(rect.left() + fill->width() / 2, middle), scale).name()));
+    const QPointF rest(rect.left() + (fill->width() + rect.width()) / 2, middle);
+    QVERIFY2(channelDistance(pixelAt(image, rest, scale), trough) <= 2, qPrintable(pixelAt(image, rest, scale).name()));
 }
 
 void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
