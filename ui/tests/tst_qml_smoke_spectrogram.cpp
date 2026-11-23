@@ -43,6 +43,8 @@ private slots:
     void crosshairReadoutPlatesFollowThePointerSmoothly();
     void spectrogramCrosshairTimeKeepsClearOfTheLaneHead();
     void shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch();
+    void paneMessagesKeepOffTheLaneSeams_data();
+    void paneMessagesKeepOffTheLaneSeams();
     void laneHeadIsOnePlate_data();
     void laneHeadIsOnePlate();
     void laneHeadsAreOneSizeInAPane_data();
@@ -1901,6 +1903,94 @@ void SpectrogramSmokeTest::crosshairReadoutPlatesFollowThePointerSmoothly() {
             if (!check(x, y, false)) return;
         }
     }
+}
+
+void SpectrogramSmokeTest::paneMessagesKeepOffTheLaneSeams_data() {
+    QTest::addColumn<int>("lanes");
+    QTest::addColumn<int>("height");
+    QTest::addColumn<bool>("plate");
+    QTest::newRow("one lane") << 1 << 431 << false;
+    QTest::newRow("stereo") << 2 << 431 << false;
+    QTest::newRow("5.1") << 6 << 431 << false;
+    QTest::newRow("7.1, lanes shorter than the message") << 8 << 205 << true;
+}
+
+// The pane's messages, Analysing… and a file that ends early, are in a lane:
+// centred on the plot, stereo's seam, and every even count's, ran between
+// the warning and its link (H26). Where the lane is shorter than the
+// message, it is on an opaque plate that the seams go under.
+void SpectrogramSmokeTest::paneMessagesKeepOffTheLaneSeams() {
+    QFETCH(int, lanes);
+    QFETCH(int, height);
+    QFETCH(bool, plate);
+    QQmlApplicationEngine engine;
+    QString error;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kPlotLayerHarness, baseUrl, &error));
+    QVERIFY2(root != nullptr, qPrintable(error));
+    QQuickWindow window;
+    window.resize(640, height);
+    auto *harness = qobject_cast<QQuickItem *>(root.data());
+    QVERIFY(harness != nullptr);
+    harness->setParentItem(window.contentItem());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *layer = harness->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QObject *bridge = harness->findChild<QObject *>(QStringLiteral("testBridge"));
+    QVERIFY(layer != nullptr && bridge != nullptr);
+    layer->setHeight(height);
+    QVERIFY(layer->setProperty("laneCount", lanes));
+    QVERIFY(layer->setProperty("laneLabels", plotLaneLabels(lanes)));
+    const auto rectIn = [layer](QQuickItem *item) {
+        return item->mapRectToItem(layer, QRectF(0, 0, item->width(), item->height()));
+    };
+    // Whether `rect` is within one lane, clear of every seam's row.
+    const auto inALane = [&](const QRectF &rect) {
+        for (int lane = 0; lane < lanes; ++lane) {
+            const double top = lane > 0 ? std::round(lane * double(height) / lanes) + 1 : 0.0;
+            const double bottom = lane + 1 < lanes ? std::round((lane + 1) * double(height) / lanes) : height;
+            if (rect.top() >= top && rect.bottom() <= bottom) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // In its lane, or, where it is not, on its plate.
+    const auto check = [&](const char *name, const char *plateName, bool plated) {
+        QQuickItem *message = itemsNamed(layer, QString::fromLatin1(name)).value(0);
+        QQuickItem *backing = itemsNamed(layer, QString::fromLatin1(plateName)).value(0);
+        QVERIFY(message != nullptr && backing != nullptr);
+        QTRY_VERIFY(message->isVisible());
+        const QRectF rect = rectIn(message);
+        QVERIFY(rect.top() >= 0 && rect.bottom() <= height);
+        QCOMPARE(rect.top(), std::round(rect.top()));
+        QCOMPARE(backing->isVisible(), plated || !inALane(rect));
+        if (backing->isVisible()) {
+            const QRectF behind = rectIn(backing);
+            QVERIFY(behind.contains(rect));
+            QCOMPARE(backing->property("color").value<QColor>().alpha(), 255);
+        } else {
+            QVERIFY2(inALane(rect), qPrintable(QStringLiteral("%1 at %2 to %3")
+                                                  .arg(QString::fromLatin1(name))
+                                                  .arg(rect.top())
+                                                  .arg(rect.bottom())));
+            QVERIFY(!backing->isVisible());
+        }
+    };
+
+    QVERIFY(layer->setProperty("analysing", true));
+    // One line fits each of these lanes.
+    check("plotAnalysingText", "plotAnalysingPlate", false);
+
+    QVERIFY(bridge->setProperty("waveformCoverageSeconds", 32.7));
+    QVERIFY(bridge->setProperty("waveformEndsEarly", true));
+    QVERIFY(layer->setProperty("markerX", 200.0));
+    check("plotEndsEarlyColumn", "plotEndsEarlyPlate", plate);
+    // Across the part after the cut.
+    QQuickItem *column = itemsNamed(layer, QStringLiteral("plotEndsEarlyColumn")).value(0);
+    const QRectF rect = rectIn(column);
+    QVERIFY(std::abs((rect.left() + rect.right()) / 2 - (201 + layer->width()) / 2) <= 1.0);
 }
 
 void SpectrogramSmokeTest::laneHeadIsOnePlate_data() {
