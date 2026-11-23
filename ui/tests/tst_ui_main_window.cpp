@@ -463,9 +463,10 @@ bool settled(QQuickItem *panel) {
 // Why the now-playing panel is not the compact row of nothing loaded, or "":
 // one list row's height and the seam, the library's header right under it;
 // Ferrous's 16 px mark, larger with a larger font, at the 12 px inset, and
-// "Nothing playing" where a library row's text starts, 6 px after it, both in
-// the secondary text colour and centred in the row; no cover's square and
-// none of a track's lines.
+// "Nothing playing" where a library row's text starts, 6 px after it, that
+// gap too larger with a larger font (a fixed 6 px pressed the label against
+// the 32 px mark at 24 pt), both in the secondary text colour and centred in
+// the row; no cover's square and none of a track's lines.
 QString compactRowProblem(QQuickWindow *window) {
     QObject *palette = paletteOf(window);
     QQuickItem *panel = named(window, "nowPlayingPanel");
@@ -520,7 +521,9 @@ QString compactRowProblem(QQuickWindow *window) {
         || label->property("truncated").toBool() || label->implicitHeight() > label->height() + 0.5) {
         return QStringLiteral("label \"%1\" in %2").arg(label->property("text").toString(), colorOf(label));
     }
-    if (!at(labelRect.left(), glyphRect.right() + 6) || labelRect.right() > block.right() - 12 + 0.5
+    const qreal fontScale = std::max(1.0, palette->property("basePointSize").toReal() / 10.0);
+    const qreal gap = std::max<qreal>(6, std::round(6 * fontScale));
+    if (!at(labelRect.left(), glyphRect.right() + gap) || labelRect.right() > block.right() - 12 + 0.5
         || !at(labelRect.center().y(), rowRect.center().y()) || labelRect.bottom() > block.bottom()) {
         return QStringLiteral("label at %1, %2").arg(labelRect.left() - block.left()).arg(labelRect.top() - block.top());
     }
@@ -711,8 +714,9 @@ QString detailsColourProblem(QQuickWindow *window, QQuickItem *details) {
 // Why the details line of playTrack()'s track, of `genre`, is cut off, or
 // "": where it has no room for all of its details it leaves out what
 // matters least rather than be cut off (not "Classical · Track 2 o…"): the
-// album's track total, then the genre, then the year; the tooltip has the
-// whole, as it has every line's that is cut off (`lines`). Under the wide
+// word "Track" after the genre, then the genre, keeping the album position,
+// then the album's track total, then the year; the tooltip has the whole,
+// as it has every line's that is cut off (`lines`). Under the wide
 // cover the details have the year; the narrow lines have it with the
 // album. The panel measures them with tabular figures, every digit as wide
 // as the widest.
@@ -720,7 +724,7 @@ QString detailsCutProblem(QQuickItem *panel, QQuickItem *details, bool wide, con
                           const QList<QQuickItem *> &lines) {
     const QString year = wide ? QStringLiteral("2005 · ") : QString();
     const QString whole = year + genre + QStringLiteral(" · Track 2 of 8");
-    const QStringList candidates{whole, year + genre + QStringLiteral(" · Track 2"),
+    const QStringList candidates{whole, year + genre + QStringLiteral(" · 2 of 8"),
                                  year + QStringLiteral("Track 2 of 8"), year + QStringLiteral("Track 2"),
                                  QStringLiteral("Track 2")};
     const QString wholeText = panel->property(wide ? "detailsText" : "narrowDetailsText").toString();
@@ -789,8 +793,10 @@ QList<QQuickItem *> shownLines(QQuickWindow *window) {
 // tile's right edge, the wide tile's of four curves (with the faint 4th
 // harmonic, as the icon's 128 and 256 px drawings) and the small one's of
 // two, and no text at all (the lines under it give the album); a 1 px edge
-// in a light theme only. No disc glyph, and no cover. As drawn, the mark's
-// middle third is not all floor.
+// in a light theme, and on the small tiles in a dark one too, as the
+// library's has (without it their sides dissolved into the dark sidebar);
+// none on the wide tile in a dark one. No disc glyph, and no cover. As
+// drawn, the mark's middle third is not all floor.
 QString standInProblem(QQuickWindow *window) {
     QObject *palette = paletteOf(window);
     QQuickItem *panel = named(window, "nowPlayingPanel");
@@ -927,16 +933,18 @@ QString standInProblem(QQuickWindow *window) {
     if (fourthRatio < 3.1 || fourthRatio > 3.25 || fourthRatio > highRatio - 0.5) {
         return QStringLiteral("the 4th harmonic at %1:1 on the floor").arg(fourthRatio);
     }
-    // A 1 px edge in a light theme, none in a dark one.
+    // A 1 px edge in a light theme and on a small tile, none on the wide
+    // tile in a dark one.
     if (tokenOf(window, "plotFloorEdge").alpha() != 255) {
         return QStringLiteral("the edge colour is %1").arg(tokenHex(window, "plotFloorEdge"));
     }
     const bool dark = palette->property("themeIsDark").toBool();
-    if (shown(edge) == dark) {
-        return QStringLiteral("the edge %1 in the %2 theme").arg(shown(edge) ? "shows" : "is missing")
-            .arg(dark ? "dark" : "light");
+    const bool edged = !dark || !wide;
+    if (shown(edge) != edged) {
+        return QStringLiteral("the edge %1 on the %2 tile in the %3 theme").arg(shown(edge) ? "shows" : "is missing")
+            .arg(wide ? "wide" : "small").arg(dark ? "dark" : "light");
     }
-    if (!dark && (QQmlProperty(edge, QStringLiteral("border.width")).read().toReal() != 1.0
+    if (edged && (QQmlProperty(edge, QStringLiteral("border.width")).read().toReal() != 1.0
                   || hex(QQmlProperty(edge, QStringLiteral("border.color")).read().value<QColor>())
                       != tokenHex(window, "plotFloorEdge"))) {
         return QStringLiteral("the edge is not 1 px of plotFloorEdge");
@@ -1071,6 +1079,7 @@ private slots:
     void nowPlayingTitleIsOneSizePerLayout_data();
     void nowPlayingTitleIsOneSizePerLayout();
     void nowPlayingEllipsisFollowsTheTextWithoutASpace();
+    void nowPlayingNarrowDetailsKeepTheAlbumPosition();
     void levelMeterAtRestShowsItsMarks_data();
     void levelMeterAtRestShowsItsMarks();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
@@ -2554,10 +2563,13 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     // (checkFootLines is a tagged track's: the album's row stays, empty.)
     QCOMPARE(geometry(), before);
 
-    // A file without tags: its folder and its facts in the middle of the
-    // three rows, as far from the cover as from the seam's 12 px, rather
-    // than over an empty one; in a fade to a tagged track each keeps its
-    // place as it goes out.
+    // A file without tags: its folder and its facts in the first two rows,
+    // where a tagged track's artist and album are, footGap under the cover
+    // and stackedLineGap apart, with the spare row at the foot (shifted to
+    // the middle of the three, the folder stood ~30 px under the cover and
+    // moved on a change to a tagged track); in a fade to a tagged track
+    // each keeps its place as it goes out, where the tagged track's line
+    // comes in.
     bridge->setProperty("currentTrackPath", QStringLiteral("/music/Unsorted/track07.flac"));
     bridge->setProperty("currentTrackTitle", QStringLiteral("track07"));
     bridge->setProperty("currentTrackFormatLabel", QStringLiteral("FLAC"));
@@ -2566,8 +2578,9 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QVERIFY(settled(panel));
     QCOMPARE(geometry(), before);
     QQuickItem *folderText = itemNamed(panel, QStringLiteral("nowPlayingNarrowArtist"));
-    QQuickItem *factsText = itemNamed(panel, QStringLiteral("nowPlayingNarrowDetails"));
+    QQuickItem *factsText = itemNamed(panel, QStringLiteral("nowPlayingNarrowAlbum"));
     QVERIFY(folderText && factsText);
+    QTRY_COMPARE(itemNamed(panel, QStringLiteral("nowPlayingNarrowDetails"))->property("text").toString(), QString());
     QTRY_COMPARE(folderText->property("text").toString(), QStringLiteral("Unsorted"));
     QTRY_COMPARE(factsText->property("text").toString(), QStringLiteral("FLAC \u00b7 0:40"));
     QCOMPARE(QQmlProperty::read(factsText, QStringLiteral("Accessible.name"), qmlContext(factsText)).toString(),
@@ -2577,7 +2590,7 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     const QRectF factsRect = sceneRect(factsText);
     const qreal over = folderRect.top() - (coverRect.bottom() + 8);
     const qreal under = sceneRect(seam).top() - 12 - factsRect.bottom();
-    QVERIFY2(over > 4.0 && std::abs(over - under) <= 1.5,
+    QVERIFY2(std::abs(over) <= 0.5 && under >= folderRect.height(),
              qPrintable(QStringLiteral("%1 over and %2 under").arg(over).arg(under)));
     QVERIFY2(std::abs(factsRect.top() - folderRect.bottom() - 4) <= 1.5,
              qPrintable(QString::number(factsRect.top() - folderRect.bottom())));
@@ -2588,10 +2601,13 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
         QVERIFY(QMetaObject::invokeMethod(animation, "pause"));
         panel->setProperty("handover", 0.2);
         QQuickItem *goingFolder = itemNamed(panel, QStringLiteral("nowPlayingOutgoingNarrowArtist"));
-        QQuickItem *goingFacts = itemNamed(panel, QStringLiteral("nowPlayingOutgoingNarrowDetails"));
+        QQuickItem *goingFacts = itemNamed(panel, QStringLiteral("nowPlayingOutgoingNarrowAlbum"));
         QVERIFY(goingFolder && goingFacts);
         QCOMPARE(sceneRect(goingFolder).top(), folderRect.top());
         QCOMPARE(sceneRect(goingFacts).top(), factsRect.top());
+        // The tagged track's artist and album come in where they went out.
+        QCOMPARE(sceneRect(folderText).top(), folderRect.top());
+        QCOMPARE(sceneRect(factsText).top(), factsRect.top());
         // Whole inside the windows they go out through.
         for (QQuickItem *text : {goingFolder, goingFacts}) {
             const QRectF through = sceneRect(text->parentItem());
@@ -2807,6 +2823,87 @@ void UiMainWindowTest::nowPlayingTitleIsOneSizePerLayout() {
 // the second of the large-font header's title, its first line as it was;
 // the whole of it stays the accessible name and the tooltip's. A line cut
 // within a word is elided as Text elides it, "Long Track T…".
+// The narrow details keep the track's place on its album before they drop
+// its total ("Classical · Track 1" lost it in the narrow sidebar, with the
+// room for "Classical · 1 of 4"): the whole, then "Genre · n of m", then
+// "Track n of m", then "Track n", each where the one before does not fit;
+// "n of m" only after a genre and with a total. In the narrow sidebar,
+// without a cover, the line shows the longest of them that fits.
+void UiMainWindowTest::nowPlayingNarrowDetailsKeepTheAlbumPosition() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *details = named(window, "nowPlayingNarrowDetails");
+    QVERIFY(panel && details);
+    playTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QString());
+    window->resize(1000, 720);
+    QVERIFY(grown(window));
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+    QVERIFY(settled(panel));
+    QCOMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2 of 8"));
+
+    const QFontMetricsF metrics(details->property("font").value<QFont>());
+    QChar widest = QLatin1Char('0');
+    for (char digit = '1'; digit <= '9'; ++digit) {
+        if (metrics.horizontalAdvance(QLatin1Char(digit)) > metrics.horizontalAdvance(widest)) {
+            widest = QLatin1Char(digit);
+        }
+    }
+    const auto tabular = [&](QString text) {
+        return std::ceil(metrics.horizontalAdvance(text.replace(QRegularExpression(QStringLiteral("[0-9]")), widest)));
+    };
+    const auto fitting = [&](double width) {
+        QVariant result;
+        const bool called = QMetaObject::invokeMethod(panel, "_fittingDetails", Q_RETURN_ARG(QVariant, result),
+                                                      Q_ARG(QVariant, QString()), Q_ARG(QVariant, QStringLiteral(" · ")),
+                                                      Q_ARG(QVariant, width));
+        return called ? result.toString() : QStringLiteral("(no call)");
+    };
+    const QStringList candidates{QStringLiteral("Classical · Track 2 of 8"), QStringLiteral("Classical · 2 of 8"),
+                                 QStringLiteral("Track 2 of 8"), QStringLiteral("Track 2")};
+    for (qsizetype index = 0; index < candidates.size(); ++index) {
+        const double width = tabular(candidates.at(index));
+        QCOMPARE(fitting(width), candidates.at(index));
+        QCOMPARE(fitting(width - 1.0), candidates.at(std::min(index + 1, candidates.size() - 1)));
+    }
+    // Without a genre, no bare "2 of 8": the number with "Track".
+    bridge->setProperty("currentTrackGenre", QString());
+    QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Track 2 of 8"));
+    QCOMPARE(fitting(tabular(QStringLiteral("Track 2 of 8")) - 1.0), QStringLiteral("Track 2"));
+    // Without a total, the number alone after the genre.
+    bridge->setProperty("currentTrackGenre", QStringLiteral("Classical"));
+    bridge->setProperty("currentTrackTotal", 0);
+    QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2"));
+    QCOMPARE(fitting(tabular(QStringLiteral("Classical · Track 2")) - 1.0), QStringLiteral("Track 2"));
+
+    // In the narrow sidebar, a genre whose whole line does not fit, but
+    // does without "Track": the album position stays.
+    bridge->setProperty("currentTrackTotal", 8);
+    QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2 of 8"));
+    QVERIFY(settled(panel));
+    const double width = details->width();
+    QString genre;
+    for (const QString &each : {QStringLiteral("Ambient"), QStringLiteral("Classical"), QStringLiteral("Chamber Music"),
+                                QStringLiteral("Modern Classical"), QStringLiteral("Contemporary Jazz"),
+                                QStringLiteral("Progressive Rock Fusion")}) {
+        if (tabular(each + QStringLiteral(" · Track 2 of 8")) > width && tabular(each + QStringLiteral(" · 2 of 8")) <= width) {
+            genre = each;
+            break;
+        }
+    }
+    QVERIFY2(!genre.isEmpty(), qPrintable(QString::number(width)));
+    bridge->setProperty("currentTrackGenre", genre);
+    QTRY_COMPARE(panel->property("narrowDetailsText").toString(), genre + QStringLiteral(" · Track 2 of 8"));
+    QVERIFY(settled(panel));
+    QCOMPARE(details->property("text").toString(), genre + QStringLiteral(" · 2 of 8"));
+    QVERIFY(!details->property("elided").toBool());
+    // The whole in the tooltip.
+    QVERIFY(panel->property("textTruncated").toBool());
+}
+
 void UiMainWindowTest::nowPlayingEllipsisFollowsTheTextWithoutASpace() {
     const QString ellipsis(QChar(0x2026));
     // A run of narrow letters, so that some length of it puts the cut

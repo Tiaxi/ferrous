@@ -1463,16 +1463,17 @@ void checkLinesKeptUntilTheNextTracksAreKnown(const NowPlayingWindow &ui) {
 
 // A file without tags, as BridgeClient tells it, with its file name for a
 // title: its details line says what the file is, its container and its
-// length, "FLAC · 0:40", in the details' place and style, under the wide
-// cover and in the large-font header, where the album's row, which the
-// file has nothing for, is not kept, so the details follow the folder
-// 4 px under it; the panel's height and the library's place are a tagged
-// track's (at 24 pt the card stood some 100 px empty under "Unsorted").
+// length, "FLAC · 0:40", in the details' style: under the wide cover in
+// the details' place, and in the large-font header in the album's row,
+// which the file has nothing for, so the facts follow the folder 4 px under
+// it and the spare row is at the foot; the panel's height and the
+// library's place are a tagged track's (at 24 pt the card stood some 100 px
+// empty under "Unsorted").
 // The bridge's format label is from the file's extension, and its length
 // from the playback.
 void checkTaglessFileFacts(const NowPlayingWindow &ui, bool large) {
     QQuickItem *header = ui.item("libraryHeader");
-    QQuickItem *details = ui.item(large ? "nowPlayingNarrowDetails" : "nowPlayingDetails");
+    QQuickItem *details = ui.item(large ? "nowPlayingNarrowAlbum" : "nowPlayingDetails");
     QQuickItem *folder = ui.item(large ? "nowPlayingNarrowArtist" : "nowPlayingArtistAlbum");
     QObject *palette = qvariant_cast<QObject *>(ui.window->property("uiPalette"));
     QVERIFY(header != nullptr && details != nullptr && folder != nullptr && palette != nullptr);
@@ -1523,7 +1524,7 @@ void checkTaglessFileFacts(const NowPlayingWindow &ui, bool large) {
     QTRY_COMPARE(ui.panel->height(), panelHeight);
     QTRY_COMPARE(sceneRectOf(header).top(), headerTop);
     if (large) {
-        // No album row: the details 4 px under the folder.
+        // In the album's row: the facts 4 px under the folder.
         const QRectF folderRect = folder->mapRectToScene(folder->boundingRect());
         const QRectF detailsRect = details->mapRectToScene(details->boundingRect());
         QVERIFY2(std::abs(detailsRect.top() - (folderRect.bottom() + 4)) <= 1.0,
