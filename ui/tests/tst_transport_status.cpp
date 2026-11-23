@@ -983,12 +983,13 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform_data() {
 
 // While the visualization is zoomed, a band behind the seek bar's
 // waveform marks the part of the track its view shows: in the view colour,
-// across the bar's height, on whole device pixels. The unplayed part is at
+// on the light theme a step toward the chrome (H16), across the bar's
+// height, on whole device pixels. The unplayed part is at
 // the unplayed opacity on the band as on the chrome, and the played part
 // under the view colour at 15 %, so the band's edge shows in the
 // waveform's ink on either side of the playhead: under the bright played
 // part alone, the band read as starting at the playhead (H14). On the
-// light theme's white band it is 10 %: at 15 % the played part there
+// light theme's pale band it is 10 %: at 15 % the played part there
 // paled away from its colour off the band (H15).
 void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     QFETCH(bool, dark);
@@ -1033,8 +1034,13 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
             < band->parentItem()->childItems().indexOf(waveform));
 
     const QColor chrome = harness.transportChrome();
-    const QColor view = harness.token("view");
-    QVERIFY(sameColor(view, QColor(breeze(dark).view)));
+    QVERIFY(sameColor(harness.token("view"), QColor(breeze(dark).view)));
+    // The band: the view colour on the dark theme, and on the light one a
+    // quarter of the way from it to the chrome, about #f6f7f8 on Breeze's
+    // #dee0e2 (the white view colour read louder there, H16).
+    const QColor view = transport->property("seekViewBandColor").value<QColor>();
+    QVERIFY2(channelDistance(view, dark ? QColor(breeze(dark).view) : QColor(0xf6, 0xf7, 0xf8)) <= 1,
+             qPrintable(view.name()));
     const QColor played = transport->property("seekPlayedColor").value<QColor>();
     const qreal unplayedOpacity = transport->property("seekUnplayedOpacity").toReal();
     qreal scale = 1;
@@ -1093,7 +1099,7 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     // Faint: a quiet step from the chrome, well under the waveform's, and
     // the waveform keeps at least its contrast on the chrome.
     const double bandContrast = contrastRatio(view, chrome);
-    QVERIFY2(bandContrast >= 1.2 && bandContrast <= 1.6,
+    QVERIFY2(bandContrast >= 1.2 && bandContrast <= (dark ? 1.6 : 1.25),
              qPrintable(describeContrast(QStringLiteral("band"), view, chrome)));
     const QColor unplayedOnChrome = mixed(chrome, played, unplayedOpacity);
     QVERIFY2(contrastRatio(drawnUnplayed, view) >= contrastRatio(unplayedOnChrome, chrome),
