@@ -32,6 +32,7 @@ private slots:
     void spectrogramPixelToFrequency();
     void spectrogramOverlayBenchmark();
     void spectrogramCrosshairOverlayGeneratesOnHover();
+    void spectrogramLevelReadoutStopsAtTheMapsFloor();
     void spectrogramCrosshairReadsOverBrightData();
     void spectrogramCrosshairYieldsToThePlayhead();
     void spectrogramCrosshairOverlayMovesOnlyItsTimeLabel();
@@ -1407,6 +1408,35 @@ void SpectrogramSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
         item.updateCrosshairOverlayLocked(200, 100, 0, false, 48000.0 / 1024.0, 0.0);
     }
     QTRY_VERIFY(item.crosshairReadout().isEmpty());
+}
+
+// The crosshair's level never reads under the colour map's floor, which
+// draws every quieter level alike: there it is "< −132 dB" at the default
+// range, not a number such as "−145 dB" over near-silence (H26). Silence
+// stays "−∞ dB"; a wider range reads further down.
+void SpectrogramSmokeTest::spectrogramLevelReadoutStopsAtTheMapsFloor() {
+    const auto readoutOver = [](quint8 value, double dbRange) {
+        SpectrogramItem item;
+        item.setSampleRateHz(48000);
+        item.setCrosshairEnabled(true);
+        item.setDbRange(dbRange);
+        const int bins = 4097;
+        const QByteArray data(bins * 100, static_cast<char>(value));
+        item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024, false, true, 1, false);
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(50.0, 40.0);
+        item.m_crosshairDirty = true;
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.ensureMapping(100);
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, 48000.0 / 1024.0, 0.0);
+        return item.m_crosshairLaidOutReadout.split(QLatin1Char('\n')).value(0);
+    };
+    // 5 of 255 is about -147.6 dBFS; 128 is -75.
+    QVERIFY2(readoutOver(5, 132.0).endsWith(QStringLiteral(", < −132 dB")), qPrintable(readoutOver(5, 132.0)));
+    QVERIFY2(readoutOver(5, 150.0).endsWith(QStringLiteral(", −148 dB")), qPrintable(readoutOver(5, 150.0)));
+    QVERIFY2(readoutOver(128, 132.0).endsWith(QStringLiteral(", −75 dB")), qPrintable(readoutOver(128, 132.0)));
+    QVERIFY2(readoutOver(0, 132.0).endsWith(QStringLiteral(", −∞ dB")), qPrintable(readoutOver(0, 132.0)));
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairReadsOverBrightData() {
