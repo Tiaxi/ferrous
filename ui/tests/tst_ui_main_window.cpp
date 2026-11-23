@@ -41,6 +41,7 @@
 #include <functional>
 #include <tuple>
 #include <initializer_list>
+#include <limits>
 
 #include "../src/DiagnosticsLogView.h"
 #include "../src/InputModality.h"
@@ -1316,20 +1317,30 @@ void UiMainWindowTest::seekTimeStaysOverItsLine_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::addColumn<int>("windowWidth");
     QTest::addColumn<int>("windowHeight");
-    // The default window, and the time's widest box on the shortest bar.
-    QTest::newRow("10 pt, 1600 by 1000") << 10.0 << 1600 << 1000;
-    QTest::newRow("24 pt, 1000 by 720") << 24.0 << 1000 << 720;
+    QTest::addColumn<bool>("dark");
+    // The default window, the narrow one, and 24 pt, whose titles run past
+    // the sidebar in the wide window, and whose time's box is widest on the
+    // narrow window's shortest bar.
+    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true;
+    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false;
+    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false;
+    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true;
 }
 
-// The seek bar's time shows above the bar, in the menu bar's band, centred
-// on the line it reads, wherever the pointer is on the bar, and within the
-// bar at either end, so it stays in the window; it covers none of the
-// waveform. Near the bar's start it may cover a menu title for a moment
-// (kept right of the titles, it was up to 350 px from its line).
+// The seek bar's time shows above the bar, centred on the line it reads,
+// wherever the pointer is on the bar, and within the bar at either end, so
+// it stays in the window; it covers none of the waveform. It never covers a
+// menu title: where it would above the bar, near the bar's start, it is
+// under the bar, over the sidebar, and never over the queue's header (H5).
+// Where neither is clear, at 24 pt, it is whichever is nearer its line:
+// under the bar ending at the sidebar's edge, or above it starting past the
+// titles (kept right of them everywhere, it was up to 350 px from its line).
 void UiMainWindowTest::seekTimeStaysOverItsLine() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
     QFETCH(int, windowHeight);
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
     const ScopedApplicationFont font(pointSize);
     MainWindowFixture fixture(sized(windowWidth, windowHeight));
     QQuickWindow *window = fixture.window;
@@ -1340,20 +1351,48 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
     bridge->setProperty("durationText", QStringLiteral("03:49"));
     bridge->setProperty("durationSeconds", 229.0);
     playTrack(bridge);
+    QQuickItem *transport = named(window, "transportBar");
     QQuickItem *seek = named(window, "seekSlider");
     QQuickItem *waveform = named(window, "seekWaveform");
+    QQuickItem *menuBar = named(window, "mainMenuBar");
+    QQuickItem *sidebar = named(window, "sidebarPane");
+    QQuickItem *queueHeader = named(window, "queueHeader");
     QObject *tip = window->findChild<QObject *>(QStringLiteral("seekTimeBox"));
-    QVERIFY(seek && waveform && tip);
+    QVERIFY(transport && seek && waveform && menuBar && sidebar && queueHeader && tip);
     QTRY_VERIFY(seek->isEnabled());
     // Laid out in the window's width.
-    QTRY_VERIFY(sceneRect(named(window, "transportBar")).right() <= windowWidth);
+    QTRY_VERIFY(sceneRect(transport).right() <= windowWidth);
     auto *tipBox = tip->property("background").value<QQuickItem *>();
     QVERIFY(tipBox != nullptr);
     const QRectF bar = sceneRect(seek);
 
-    for (const qreal fraction : {0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.9, 0.98, 1.0}) {
-        const QPoint at = QPointF(std::min(bar.left() + bar.width() * fraction, bar.right() - 1),
-                                  bar.center().y()).toPoint();
+    // The titles, which the transport is told the end of, and the sidebar.
+    QList<QRectF> titles;
+    for (int i = 0; i < menuBar->property("count").toInt(); ++i) {
+        QQuickItem *title = nullptr;
+        QVERIFY(QMetaObject::invokeMethod(menuBar, "itemAt", Q_RETURN_ARG(QQuickItem *, title), Q_ARG(int, i)));
+        QVERIFY(title != nullptr);
+        titles.append(sceneRect(title));
+    }
+    QVERIFY(titles.size() >= 6);
+    const qreal titlesRight = titles.constLast().right();
+    const qreal sidebarRight = sceneRect(sidebar).right();
+    QCOMPARE(transport->property("menuTitlesRight").toReal(), titlesRight);
+    QCOMPARE(transport->property("belowClearRight").toReal(), sidebarRight);
+    QCOMPARE(sceneRect(transport).left(), 0.0);
+    QVERIFY(bar.left() < titlesRight);
+
+    // Every few pixels across the titles, then a few points beyond.
+    QList<qreal> xs;
+    for (qreal x = bar.left(); x < std::min(titlesRight + 100, bar.right() - 1); x += 7) {
+        xs.append(x);
+    }
+    for (const qreal fraction : {0.3, 0.5, 0.9, 0.98, 1.0}) {
+        xs.append(std::min(bar.left() + bar.width() * fraction, bar.right() - 1));
+    }
+    bool wentBelow = false;
+    for (const qreal x : xs) {
+        const QPoint at = QPointF(x, bar.center().y()).toPoint();
         QTest::mouseMove(window, at);
         QTRY_VERIFY2(tip->property("opened").toBool(),
                      qPrintable(QStringLiteral("at %1, %2: shown %3, the bar %4 to %5")
@@ -1362,25 +1401,44 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
         QTRY_VERIFY(std::abs(tip->property("anchorX").toReal() - (at.x() - bar.left())) < 1.0);
         const QRectF box = sceneRect(tipBox);
         const QString where =
-            QStringLiteral("at %1: %2, the bar %3").arg(fraction).arg(describeRect(box), describeRect(bar));
-        QVERIFY2(std::abs(box.bottom() - bar.top()) <= 0.5, qPrintable(where));
+            QStringLiteral("at %1: %2, the bar %3").arg(at.x()).arg(describeRect(box), describeRect(bar));
+        const bool above = std::abs(box.bottom() - bar.top()) <= 0.5;
+        const bool below = std::abs(box.top() - bar.bottom()) <= 0.5;
+        QVERIFY2(above || below, qPrintable(where));
+        wentBelow = wentBelow || below;
         QVERIFY2(!box.intersects(sceneRect(waveform)), qPrintable(where));
         // In the window.
         QVERIFY2(box.left() >= 0.0 && box.right() <= windowWidth && box.top() >= 0.0, qPrintable(where));
-        // Centred on its line, or, where that would hang past the bar's
-        // end, flush with that end and still over the line.
-        const qreal half = box.width() / 2;
-        const bool nearStart = at.x() - bar.left() < half;
-        const bool nearEnd = bar.right() - at.x() < half;
-        if (nearStart) {
-            QVERIFY2(std::abs(box.left() - bar.left()) <= 0.5, qPrintable(where));
-        } else if (nearEnd) {
-            QVERIFY2(std::abs(box.right() - bar.right()) <= 0.5, qPrintable(where));
-        } else {
-            QVERIFY2(std::abs(box.center().x() - at.x()) <= 1.0, qPrintable(where));
+        // No title covered, and under the bar only the sidebar.
+        for (const QRectF &title : titles) {
+            QVERIFY2(!box.intersects(title), qPrintable(where + QStringLiteral(", a title ") + describeRect(title)));
         }
-        QVERIFY2(box.left() <= at.x() && box.right() >= at.x(), qPrintable(where));
+        QVERIFY2(!box.intersects(sceneRect(queueHeader)), qPrintable(where));
+        if (below) {
+            QVERIFY2(box.right() <= sidebarRight, qPrintable(where));
+        }
+        // Where it would be centred on its line, or, where that would hang
+        // past the bar's end, flush with that end and still over the line.
+        const qreal half = box.width() / 2;
+        const qreal placedLeft = std::clamp(at.x() - half, bar.left(), bar.right() - box.width());
+        if (std::abs(box.left() - placedLeft) <= 0.5) {
+            QVERIFY2(box.left() <= at.x() && box.right() >= at.x(), qPrintable(where));
+            // Under the bar only where it would cover a title above it.
+            QVERIFY2(above || placedLeft < titlesRight, qPrintable(where));
+            continue;
+        }
+        // Moved off its line only where it would cover a title above and
+        // the queue's header under the bar, by the less of the two moves
+        // that keep it on the bar.
+        const qreal infinity = std::numeric_limits<qreal>::infinity();
+        const qreal belowMove =
+            sidebarRight - box.width() >= bar.left() ? placedLeft - (sidebarRight - box.width()) : infinity;
+        const qreal aboveMove = titlesRight + box.width() <= bar.right() ? titlesRight - placedLeft : infinity;
+        QVERIFY2(placedLeft < titlesRight && placedLeft + box.width() > sidebarRight, qPrintable(where));
+        QVERIFY2(std::abs(std::abs(box.left() - placedLeft) - std::min(belowMove, aboveMove)) <= 1.0,
+                 qPrintable(where));
     }
+    QVERIFY(wentBelow);
 }
 
 void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont_data() {

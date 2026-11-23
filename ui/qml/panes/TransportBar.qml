@@ -57,6 +57,13 @@ ToolBar {
     // its waveform.
     property real viewStartSeconds: NaN
     property real viewEndSeconds: NaN
+    // Where the seek bar's time box may go, in the transport's coordinates,
+    // whose left edge is the window's, as the menu bar's is: the right edge
+    // of the menu bar's titles above the transport, which the box must not
+    // cover, and of what the box may cover under the transport (the
+    // sidebar's, and not the queue's header beside it).
+    property real menuTitlesRight: 0
+    property real belowClearRight: 0
     readonly property alias seekPressed: seekSlider.pressed
     // The time of one device pixel of the seek bar's playhead: the smallest
     // move of the position it shows, so the position needs to change no more
@@ -1107,8 +1114,8 @@ ToolBar {
             // hovering pointer's line. Its bottom edge is on the bar's top,
             // in the band the volume's tooltip takes, so it hides none of
             // the waveform it reads (beside the line it covered some 40 px
-            // of it where the pointer was; under the bar it hung over the
-            // queue's header).
+            // of it where the pointer was); near the menu's titles it is
+            // under the bar, over the sidebar.
             ToolTip {
                 id: seekTimeBox
                 objectName: "seekTimeBox"
@@ -1166,19 +1173,39 @@ ToolBar {
                         : seekSlider.pointerOnBar ? seekSlider.hoverX : seekTimeBox.anchorX
                     restoreMode: Binding.RestoreNone
                 }
-                // Centred on the line, within the bar at either end. Near
-                // the bar's start it may cover a menu bar's titles above
-                // it for a moment, which costs less than a time away from
-                // its line (kept right of them, it was up to 350 px from
-                // it).
+                // Centred on the line, within the bar at either end.
                 readonly property real centredX: anchorX - width / 2
                 readonly property real placedX: root.snapped(Math.max(0,
                     Math.min(seekSlider.width - width, centredX)))
-                x: placedX
-                // Its bottom edge on the bar's top. It may reach the
-                // window's top edge, which it nearly does at 24 pt: the
-                // style's 6 px margin there would flip it under the bar.
-                y: -height
+                // Above the bar it reaches into the menu bar, and near the
+                // bar's start it covered the titles there ("Pla[0:04]k").
+                // Where it would, it goes under the bar, over the sidebar,
+                // which holds nothing the scrub needs (under the bar over
+                // the queue, it hung over the queue's header, H5). Where
+                // neither is clear, as at a large font whose titles run
+                // past the sidebar, it is whichever of the two is nearer
+                // its line: under the bar ending at the sidebar's edge, or
+                // above it starting past the titles (kept right of them
+                // at every point, it was up to 350 px from its line).
+                readonly property real barLeft: root.contentItem.x + seekSlider.x
+                readonly property bool aboveMeetsMenu: barLeft + placedX < root.menuTitlesRight
+                readonly property bool belowIsClear: barLeft + placedX + width <= root.belowClearRight
+                readonly property real belowPinnedX: Math.min(placedX,
+                    Math.floor(root.belowClearRight - barLeft - width))
+                readonly property real aboveShiftedX: Math.max(placedX,
+                    Math.ceil(root.menuTitlesRight - barLeft))
+                readonly property bool belowPinnedFits: belowPinnedX >= 0
+                readonly property bool aboveShiftedFits: aboveShiftedX + width <= seekSlider.width
+                readonly property bool below: aboveMeetsMenu && (belowIsClear || (belowPinnedFits
+                    && (!aboveShiftedFits || placedX - belowPinnedX <= aboveShiftedX - placedX)))
+                x: !aboveMeetsMenu ? placedX
+                    : below ? belowPinnedX
+                    : aboveShiftedFits ? aboveShiftedX : placedX
+                // Its bottom edge on the bar's top, or its top edge on the
+                // bar's bottom. Above, it may reach the window's top edge,
+                // which it nearly does at 24 pt: the style's 6 px margin
+                // there would flip it under the bar.
+                y: below ? seekSlider.height : -height
                 topMargin: 0
                 // It comes in over the short duration of the window's other
                 // hovers, and goes as the style's tooltips do.
