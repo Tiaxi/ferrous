@@ -5043,7 +5043,7 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     // At rest: neither tint.
     QVERIFY(!tint->isVisible());
     QVERIFY(!hover->isVisible());
-    // Hover: the lists' hover tint (about 1.45:1), and the year stepped up
+    // Hover: the lists' hover tint (about 1.35:1 on dark), and the year stepped up
     // to stay 4.6:1 on it.
     QTest::mouseMove(window, sceneRect(album).center().toPoint());
     QTRY_VERIFY(hover->isVisible() && hover->opacity() == 1.0);
@@ -5161,8 +5161,8 @@ void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane() {
     }
 }
 
-// A queue row under the pointer takes the lists' hover tint, about 1.45:1
-// on the view (at 1.3:1 it was faint), as drawn, with its number stepped up
+// A queue row under the pointer takes the lists' hover tint, about 1.35:1 on
+// a dark view (at 1.3:1 it was faint), as drawn, with its number stepped up
 // to stay 4.6:1 on it; a selected row keeps its selection tint over it, and
 // the playing row its amber title.
 void UiMainWindowTest::queueRowHoverIsTheListsTint() {

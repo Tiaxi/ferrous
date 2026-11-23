@@ -58,19 +58,19 @@ The transport uses Breeze's Header colour set, as Breeze's toolbars and the menu
 | Token | Use it for | Why |
 |---|---|---|
 | `hover` | hover on buttons and dialog lists: the least text-over-view tint that reaches 1.3:1 | reads as hover in any theme without looking like a selection |
-| `rowHover` / `hoveredRow` | hover on the library and queue rows: 1.44:1 dark, 1.31:1 light | 1.3:1 was too faint across a wide list. In light, a stronger tint outweighed the selection |
+| `rowHover` / `hoveredRow` | hover on the library and queue rows: 1.35:1 dark, 1.21:1 light | the bottom step of the rows' ladder: hover < inactive selection < selection < hovered selection, each a step in weight, not only in hue. 1.3:1 was too faint across a wide dark list |
 | `pressed` | a pressed button: 1.65:1 on the view | a press must read as a clear step past the hover |
 | `hoverOn(bg)` / `pressedOn(bg)` | hover and pressed tints on another opaque background, such as the Header chrome | they keep the same steps on any surface |
-| `selection` | a selected row in a focused list: the view mixed with the accent [#1f3e4e / #b5e0f7] | above the hover in both weight and hue |
-| `selectionInactive` | a selected row in a list without focus: the accent mix desaturated to 60 % | reads as a selection at rest, still above the hover |
-| `selectionHovered` / `selectionInactiveHovered` | a selected queue row under the pointer | a selected row responds to the pointer like any other row |
+| `selection` | a selected row in a focused list: the view mixed with the accent [#21475b / #acdcf6] | above the inactive selection, and so the hover, in both weight and hue |
+| `selectionInactive` | a selected row in a list without focus: the accent mix desaturated to 60 % | reads as a selection at rest, a step above the hover in weight |
+| `selectionHovered` / `selectionInactiveHovered` | a selected queue row under the pointer: a step past its selection, as far as the dark amber's 4.5:1 and the light focus ring's 3:1 allow | a selected row responds to the pointer like any other row |
 | `focusRing` | the 1 px focus ring on a row, and the 2 px ring on a button | the accent, lighter on dark and darker on light, so it stands out from the selection |
 
 ### Data and playback
 
 | Token | Use it for | Why |
 |---|---|---|
-| `now` | **only** what is playing: the playing row's glyph and title, the playing tree row, the collapsed row that holds it, and the seek playhead [#f2b035 / #814900] | amber means "now". Any other use dilutes it |
+| `now` | **only** what is playing: the playing row's glyph and title, the playing tree row, the collapsed row that holds it, and the seek playhead [#f2b035 / #7c4600] | amber means "now". Any other use dilutes it |
 | `nowPausedOpacity` | the amber name of a collapsed tree row while paused: 70 %, or more where that falls below 4.5:1 | paused reads as quieter without losing readability |
 | `accent` | Breeze's highlight colour, used for selection mixes, checked fills on a plot and the focus ring | not a decorative colour |
 | `wave` | the seek bar's waveform | the theme's pale accent, at least 3:1 against chrome for the unplayed part |
