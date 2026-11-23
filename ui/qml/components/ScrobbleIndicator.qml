@@ -315,10 +315,19 @@ AbstractButton {
         ? I18n.i18nc("@info", "Press to resume scrobbling.")
         : I18n.i18nc("@info", "Press to pause scrobbling.")
 
-    // Keyboard focus shows the same tooltip as hover.
-    ToolTip.visible: (root.hovered || root.visualFocus) && !menu.visible && root.stateText.length > 0
-    ToolTip.delay: Kirigami.Units.toolTipDelay
-    ToolTip.text: root.stateText
+    // How far above the status bar the tooltip ends, as the bar's other
+    // items' do: the status bar sets it.
+    property int toolTipClearance: 6
+
+    // Keyboard focus shows the same tooltip as hover. Its text as it is
+    // (Last.fm's reasons are in some), over the status bar.
+    Components.PlainToolTip {
+        objectName: "scrobbleIndicatorToolTip"
+        y: -root.roomToBarTop - height - root.toolTipClearance
+        message: root.stateText
+        visible: (root.hovered || root.visualFocus) && !menu.visible && root.stateText.length > 0
+        delay: Kirigami.Units.toolTipDelay
+    }
 
     onClicked: root.togglePaused()
     // Space presses the focused slot rather than playing or pausing; keys

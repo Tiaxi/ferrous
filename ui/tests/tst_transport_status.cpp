@@ -355,12 +355,27 @@ void showToolTipsAtOnce(QQuickItem *item) {
     unitsOf(item)->setToolTipDelay(0);
 }
 
+// The status bar's tooltip of `item`, a plain-text tooltip of its own.
+QObject *statusToolTip(QQuickItem *item) {
+    const QList<QObject *> children = item->findChildren<QObject *>(Qt::FindDirectChildrenOnly);
+    for (QObject *child : children) {
+        if (child->objectName().endsWith(QStringLiteral("ToolTip")) && child->property("message").isValid()) {
+            return child;
+        }
+    }
+    return nullptr;
+}
+
 QString toolTipText(QQuickItem *item) {
-    return evaluateOn(item, QStringLiteral("ToolTip.text")).toString();
+    QObject *tip = statusToolTip(item);
+    return tip != nullptr ? tip->property("message").toString()
+                          : evaluateOn(item, QStringLiteral("ToolTip.text")).toString();
 }
 
 bool toolTipShown(QQuickItem *item) {
-    return evaluateOn(item, QStringLiteral("ToolTip.visible")).toBool();
+    QObject *tip = statusToolTip(item);
+    return tip != nullptr ? tip->property("visible").toBool()
+                          : evaluateOn(item, QStringLiteral("ToolTip.visible")).toBool();
 }
 
 // The tooltip of a transport button or Mute, and its text.
@@ -597,6 +612,8 @@ private slots:
     void issuesButtonShowsNewSeenAndOpen();
     void issuesGlyphTakesTheMostSevereNewIssue_data();
     void issuesGlyphTakesTheMostSevereNewIssue();
+    void statusItemsShareOneToolTipLineAndTheScanIsOneUnit_data();
+    void statusItemsShareOneToolTipLineAndTheScanIsOneUnit();
     void statusBarHasNoDividers();
     void transportAndStatusBarGrowWithALargeFont();
 };
@@ -3497,11 +3514,11 @@ void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
         QCOMPARE(label->property("text").toString(), QStringLiteral("Scanning “Music”…"));
         QVERIFY(bar->isVisible());
         QCOMPARE(bar->size(), QSizeF(72, 4));
-        // The percent beside the bar, and the bar after it.
-        QTRY_VERIFY2(sceneRect(label).right() <= sceneRect(count).left(),
-                     qPrintable(describeRect(sceneRect(label)) + QStringLiteral(" / ") + describeRect(sceneRect(count))));
-        QVERIFY2(sceneRect(count).right() <= sceneRect(bar).left(),
-                 qPrintable(describeRect(sceneRect(count)) + QStringLiteral(" / ") + describeRect(sceneRect(bar))));
+        // The bar after the words, and the percent after the bar.
+        QTRY_VERIFY2(sceneRect(label).right() <= sceneRect(bar).left(),
+                     qPrintable(describeRect(sceneRect(label)) + QStringLiteral(" / ") + describeRect(sceneRect(bar))));
+        QVERIFY2(sceneRect(bar).right() <= sceneRect(count).left(),
+                 qPrintable(describeRect(sceneRect(bar)) + QStringLiteral(" / ") + describeRect(sceneRect(count))));
         // The bar moves with the batches, by whole pixels.
         QCOMPARE(fill->width(), std::floor(bar->width() * 412 / 1204));
         harness.bridge->setProperty("libraryScanProcessed", 602);
@@ -5267,6 +5284,102 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
     QVERIFY(within(sceneRect(harness.item(QStringLiteral("statusBarErrorsLabel"))), sceneRect(issues)));
 }
 
+
+
+void TransportStatusTest::statusItemsShareOneToolTipLineAndTheScanIsOneUnit_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Every tooltip of the status bar's items, the engine's, the scan's, the
+// Last.fm slot's and the issues', ends on one line 6 px above the bar's
+// seam (the engine's floated over it and the others sat on it), and shows
+// its text as plain text. The scan's words, bar and percent are one unit,
+// 6 px apart, the percent after the bar and left-aligned in the room of
+// "100%" (right-aligned after the words, it stood some 16 px off them).
+void TransportStatusTest::statusItemsShareOneToolTipLineAndTheScanIsOneUnit() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(kBreezeDark, 1200), qPrintable(harness.error));
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QQuickItem *engine = harness.item(QStringLiteral("statusBarEngineError"));
+    QQuickItem *scan = harness.item(QStringLiteral("statusBarScan"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *issues = harness.item(QStringLiteral("statusBarErrorsButton"));
+    QQuickItem *label = harness.item(QStringLiteral("statusBarScanLabel"));
+    QQuickItem *bar = harness.item(QStringLiteral("statusBarScanBar"));
+    QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
+    QVERIFY(status && engine && scan && slot && issues && label && bar && count);
+    harness.bridge->setProperty("libraryRootEntries",
+                                QVariantList{QVariantMap{{QStringLiteral("name"), QStringLiteral("<b>Music</b>")},
+                                                         {QStringLiteral("path"), QStringLiteral("/fixture/music")}}});
+    harness.bridge->setProperty("libraryScanProcessed", 31);
+    harness.bridge->setProperty("libraryScanTotal", 100);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleListenedMs", 60000);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    QVERIFY(harness.reportIssue(2, 0, QStringLiteral("notice")));
+    QTRY_VERIFY(scan->isVisible() && slot->isVisible() && issues->isVisible() && bar->isVisible());
+    // Room over the status bar for the tooltips, as at a window's foot: a
+    // tooltip with none would open under it.
+    harness.window->resize(harness.window->width(), 700);
+    harness.root->property("startButton").value<QQuickItem *>()->setHeight(480);
+    QTRY_VERIFY(sceneRect(status).top() > 500);
+    const qreal seam = sceneRect(status).top();
+    const qreal clearance = status->property("toolTipClearance").toReal();
+    QCOMPARE(clearance, 6.0);
+
+    // Each opened in turn, where its owner shows it.
+    const auto toolTipBottom = [&](QQuickItem *owner, const char *name) -> qreal {
+        QObject *tip = owner->findChild<QObject *>(QLatin1String(name));
+        if (tip == nullptr || !QMetaObject::invokeMethod(tip, "open")
+            || !QTest::qWaitFor([tip] { return tip->property("opened").toBool(); })) {
+            return -1;
+        }
+        // The popup's own item, which its content is in.
+        const QQuickItem *popupItem = qvariant_cast<QQuickItem *>(tip->property("contentItem"))->parentItem();
+        const qreal bottom = popupItem->mapToScene(QPointF(0, popupItem->height())).y();
+        QMetaObject::invokeMethod(tip, "close");
+        return QTest::qWaitFor([tip] { return !tip->property("visible").toBool(); }) ? bottom : -1;
+    };
+    struct Owner {
+        QQuickItem *item;
+        const char *toolTip;
+    };
+    for (const Owner &owner : {Owner{scan, "statusBarScanToolTip"}, Owner{slot, "scrobbleIndicatorToolTip"},
+                               Owner{issues, "statusBarErrorsToolTip"}}) {
+        const qreal bottom = toolTipBottom(owner.item, owner.toolTip);
+        QVERIFY2(std::abs(seam - clearance - bottom) <= 0.5,
+                 qPrintable(QStringLiteral("%1 ends at %2, the seam at %3").arg(QLatin1String(owner.toolTip)).arg(bottom).arg(seam)));
+    }
+    // The scan's tooltip names the folder as it is, not as markup.
+    QObject *scanTip = scan->findChild<QObject *>(QStringLiteral("statusBarScanToolTip"));
+    QVERIFY(scanTip->property("message").toString().contains(QStringLiteral("<b>Music</b>")));
+    QCOMPARE(qvariant_cast<QObject *>(scanTip->property("contentItem"))->property("textFormat").toInt(),
+             int(Qt::PlainText));
+    harness.bridge->setProperty("connected", false);
+    QTRY_VERIFY(engine->isVisible());
+    const qreal engineBottom = toolTipBottom(engine, "statusBarEngineErrorToolTip");
+    QVERIFY2(std::abs(seam - clearance - engineBottom) <= 0.5, qPrintable(QString::number(engineBottom)));
+    harness.bridge->setProperty("connected", true);
+
+    // The scan as one unit: its words, then its bar, then its percent, 6 px
+    // apart, the percent at the bar's end whatever its digits.
+    const qreal gap = scan->property("spacing").toReal();
+    QCOMPARE(gap, 6.0);
+    QTRY_COMPARE(sceneRect(bar).left() - sceneRect(label).right(), gap);
+    QCOMPARE(sceneRect(count).left() - sceneRect(bar).right(), gap);
+    QCOMPARE(count->property("horizontalAlignment").toInt(), int(Qt::AlignLeft));
+    const qreal countLeft = sceneRect(count).left();
+    const qreal scanRight = sceneRect(scan).right();
+    harness.bridge->setProperty("libraryScanProcessed", 7);
+    QTRY_COMPARE(count->property("text").toString(), QStringLiteral("7%"));
+    QCOMPARE(sceneRect(count).left(), countLeft);
+    QCOMPARE(sceneRect(scan).right(), scanRight);
+}
 
 
 int main(int argc, char **argv) {

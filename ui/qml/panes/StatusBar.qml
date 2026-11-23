@@ -216,6 +216,20 @@ ToolBar {
     // the default font and larger with a larger one, at that size rather
     // than rounded down to a theme icon size.
 
+    // How far above the status bar's seam every tooltip of its items ends:
+    // one line for all of them, as Recent Issues stands off it (the engine's
+    // tooltip floated over it, the others sat on it).
+    readonly property int toolTipClearance: Kirigami.Units.smallSpacing + 2
+
+    // A tooltip of one of the bar's items, `owner`, a child of its row: its
+    // text as it is, never as markup (a folder's name or Last.fm's words
+    // are in some), centred over the item and clear of the bar.
+    component StatusToolTip: Components.PlainToolTip {
+        required property Item owner
+        y: -(root.contentItem.y + owner.y) - height - root.toolTipClearance
+        delay: Kirigami.Units.toolTipDelay
+    }
+
     component StatusGlyph: Kirigami.Icon {
         property int size: 14
         implicitWidth: root.uiPalette.scaledSize(size)
@@ -263,11 +277,11 @@ ToolBar {
             Accessible.name: engineError.text
             Accessible.description: engineError.toolTipText
 
-            Components.PlainToolTip {
+            StatusToolTip {
                 objectName: "statusBarEngineErrorToolTip"
+                owner: engineError
                 message: engineError.toolTipText
                 visible: (engineError.hovered || engineError.visualFocus) && engineError.toolTipText.length > 0
-                delay: Kirigami.Units.toolTipDelay
             }
 
             background: Rectangle {
@@ -510,20 +524,23 @@ ToolBar {
             }
         }
 
-        // The library scan: "Scanning “Music”… 34%" and a bar that moves
-        // with the scan's batches; narrow: "Scanning… 34%". Its words say
+        // The library scan: "Scanning “Music”…", a bar that moves with the
+        // scan's batches, and "34%"; narrow: "Scanning… 34%". Its words say
         // what the bar is (a bare bar read as a twin of the
         // Last.fm slot's). Without a total: "Scanning “Music”… 412 files",
         // the count being the progress; the bar shows once there is a total
-        // to fill it against. The percent keeps the width of "100%", in
-        // tabular figures, so nothing in the status bar moves as it counts.
+        // to fill it against. The parts are one unit, 6 px apart, as a glyph
+        // and its words are (the percent, right-aligned in the room of
+        // "100%" after the words, stood some 16 px off them). The percent
+        // keeps the width of "100%" after it, in tabular figures, so nothing
+        // in the status bar moves as it counts.
         // Nothing in it moves on its own (#373: no indeterminate
         // animation), so it is still with the desktop's animations off.
         Row {
             id: scanGroup
             objectName: "statusBarScan"
             visible: root.scanning && root.showTrackSections
-            spacing: Kirigami.Units.largeSpacing
+            spacing: Kirigami.Units.smallSpacing + 2
             Layout.alignment: Qt.AlignVCenter
             readonly property real fraction: root.scanTotalKnown
                 ? Math.min(1, root.scanProcessed / root.scanTotal)
@@ -540,26 +557,6 @@ ToolBar {
                         ? I18n.i18nc("@info:status %1 is a library folder", "Scanning “%1”…",
                             root.scanFolderName)
                         : I18n.i18nc("@info:status", "Scanning library…")
-            }
-
-            StatusLabel {
-                id: scanCount
-                objectName: "statusBarScanCount"
-                anchors.verticalCenter: parent.verticalCenter
-                visible: text.length > 0
-                text: root.scanCountText
-                // A percent keeps the room of the widest, on the right of
-                // it, beside the bar.
-                width: root.scanTotalKnown
-                    ? Math.max(Math.ceil(implicitWidth), Math.ceil(fullPercentMetrics.advanceWidth))
-                    : implicitWidth
-                horizontalAlignment: Text.AlignRight
-
-                TextMetrics {
-                    id: fullPercentMetrics
-                    font: scanCount.font
-                    text: root.percentText(100)
-                }
             }
 
             Rectangle {
@@ -592,12 +589,35 @@ ToolBar {
                 }
             }
 
+            StatusLabel {
+                id: scanCount
+                objectName: "statusBarScanCount"
+                anchors.verticalCenter: parent.verticalCenter
+                visible: text.length > 0
+                text: root.scanCountText
+                // A percent keeps the room of the widest after it, the bar
+                // and the words before it staying where they are.
+                width: root.scanTotalKnown
+                    ? Math.max(Math.ceil(implicitWidth), Math.ceil(fullPercentMetrics.advanceWidth))
+                    : implicitWidth
+                horizontalAlignment: Text.AlignLeft
+
+                TextMetrics {
+                    id: fullPercentMetrics
+                    font: scanCount.font
+                    text: root.percentText(100)
+                }
+            }
+
             HoverHandler {
                 id: scanHover
             }
-            ToolTip.visible: scanHover.hovered
-            ToolTip.delay: Kirigami.Units.toolTipDelay
-            ToolTip.text: scanToolTipText.text
+            StatusToolTip {
+                objectName: "statusBarScanToolTip"
+                owner: scanGroup
+                message: scanToolTipText.text
+                visible: scanHover.hovered
+            }
 
             QtObject {
                 id: scanToolTipText
@@ -630,6 +650,7 @@ ToolBar {
             // status bar.
             blockHeight: root.barHeight - 2
             roomToBarTop: root.contentItem.y + y
+            toolTipClearance: root.toolTipClearance
             Layout.alignment: Qt.AlignVCenter
             onSettingsRequested: root.lastFmSettingsRequested()
         }
@@ -671,9 +692,12 @@ ToolBar {
                 ? ErrorUtils.describe(root.errorController.latest)
                 : ""
             // Keyboard focus shows the same tooltip as hover.
-            ToolTip.visible: (hovered || visualFocus) && !root.issuesOpen
-            ToolTip.delay: Kirigami.Units.toolTipDelay
-            ToolTip.text: I18n.i18nc("@info:tooltip", "Show Recent Issues")
+            StatusToolTip {
+                objectName: "statusBarErrorsToolTip"
+                owner: issuesButton
+                message: I18n.i18nc("@info:tooltip", "Show Recent Issues")
+                visible: (issuesButton.hovered || issuesButton.visualFocus) && !root.issuesOpen
+            }
             onClicked: root.errorController.historyRequested()
             // Plain Space presses the focused button, not the window's
             // Play/Pause shortcut.

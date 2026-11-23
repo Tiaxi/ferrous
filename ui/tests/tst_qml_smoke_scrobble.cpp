@@ -223,7 +223,7 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
         QCOMPARE(glyph->property("color").value<QColor>(), c.glyphColor);
         QCOMPARE(label->isVisible(), !c.label.isEmpty());
         QCOMPARE(label->property("text").toString(), c.label);
-        QCOMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(), c.tooltip);
+        QCOMPARE(indicator->findChild<QObject *>(QStringLiteral("scrobbleIndicatorToolTip"))->property("message").toString(), c.tooltip);
         QCOMPARE(QAccessible::queryAccessibleInterface(indicator)->text(QAccessible::Name), c.tooltip);
     }
 
@@ -389,7 +389,7 @@ void ScrobbleSmokeTest::scrobbleIndicatorBarMovesBySecondsWhileListening() {
     QObject *bridge = harness.bridge;
     bridge->setProperty("lastFmScrobbleThresholdMs", 60000);
     QTRY_VERIFY(indicator->isVisible());
-    QCOMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(),
+    QCOMPARE(indicator->findChild<QObject *>(QStringLiteral("scrobbleIndicatorToolTip"))->property("message").toString(),
              QStringLiteral("Last.fm: 1:00 to scrobble"));
     int frames = 0;
     const FrameSampler counting(harness.window, [&frames]() { ++frames; });
@@ -438,7 +438,7 @@ void ScrobbleSmokeTest::scrobbleIndicatorBarMovesBySecondsWhileListening() {
     QVERIFY(movedTo.last() <= 10.0 / 60.0);
     QCOMPARE(textChanged.count(), 10);
     QVERIFY2(frames <= 10, qPrintable(QString::number(frames)));
-    QCOMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(),
+    QCOMPARE(indicator->findChild<QObject *>(QStringLiteral("scrobbleIndicatorToolTip"))->property("message").toString(),
              QStringLiteral("Last.fm: 0:50 to scrobble"));
 
     // While the count holds, as while the track is paused, nothing moves.

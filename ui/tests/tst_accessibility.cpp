@@ -637,9 +637,10 @@ void AccessibilityTest::checkScrobbleIndicatorIsNamedAndWorksByKeyboard(QQuickWi
     QVERIFY(playPause != nullptr);
     QSignalSpy playPauseTriggered(playPause, SIGNAL(triggered(QObject*)));
     indicator->forceActiveFocus(Qt::TabFocusReason);
-    QTRY_COMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(),
-                 QStringLiteral("Last.fm: 1:30 to scrobble"));
-    QTRY_VERIFY(evaluateOn(indicator, QStringLiteral("ToolTip.visible")).toBool());
+    QObject *toolTip = indicator->findChild<QObject *>(QStringLiteral("scrobbleIndicatorToolTip"));
+    QVERIFY(toolTip != nullptr);
+    QTRY_COMPARE(toolTip->property("message").toString(), QStringLiteral("Last.fm: 1:30 to scrobble"));
+    QTRY_VERIFY(toolTip->property("visible").toBool());
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
     QCOMPARE(playPauseTriggered.count(), 0);
