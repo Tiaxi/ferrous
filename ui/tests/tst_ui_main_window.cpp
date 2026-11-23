@@ -1237,6 +1237,8 @@ private slots:
     void tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles();
     void focusedColumnHandleHasAFrameAndSaysItsKeys_data();
     void focusedColumnHandleHasAFrameAndSaysItsKeys();
+    void columnHandlesShowAQuietMarkAtRest_data();
+    void columnHandlesShowAQuietMarkAtRest();
     void transportStartsAndEndsAtTheContentInset();
     void firstRunsButtonIsThePrimaryOne();
     void viewersInTheWindowFadeAsTheStylesPopupsDo();
@@ -4677,8 +4679,12 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
 }
 
 // A selected row of the queue draws its length in the selected row's
-// secondary colour, which keeps its contrast on the selection under the
-// pointer; an unselected one in the plain one.
+// secondary colour and its artist and album in its column colour, which
+// stay over its number's contrast on the selection, under the pointer as
+// well; an unselected one in the plain ones. A selected playing row's
+// title and glyph take the amber made readable on the selection (on dark
+// the map's amber is 4.18:1 on the hovered selection, and it is lighter:
+// UiFoundationsTest holds the colours), an unselected one the map's own.
 void UiMainWindowTest::selectedRowsDrawTheirMarksForTheSelection() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
@@ -4695,6 +4701,25 @@ void UiMainWindowTest::selectedRowsDrawTheirMarksForTheSelection() {
     };
     QCOMPARE(lengthColor(1), tokenHex(window, "textSecondarySelected"));
     QCOMPARE(lengthColor(2), tokenHex(window, "textSecondary"));
+    // The artist and album likewise, over the row's number.
+    const auto artistColor = [view](int row) {
+        return colorOf(itemNamed(viewRowAt(view, row), QStringLiteral("queueCell_artist")));
+    };
+    QCOMPARE(artistColor(1), tokenHex(window, "textColumnSelected"));
+    QCOMPARE(artistColor(2), tokenHex(window, "textColumn"));
+
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("playingQueueIndex", 1);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    const auto cellColor = [view](int row, const char *cell) {
+        return colorOf(itemNamed(viewRowAt(view, row), QLatin1String(cell)));
+    };
+    QTRY_COMPARE(cellColor(1, "queueCell_title"), tokenHex(window, "nowSelected"));
+    QCOMPARE(cellColor(1, "queueRowState"), tokenHex(window, "nowSelected"));
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSingleSelection", Q_ARG(QVariant, 2)));
+    QTRY_VERIFY(rowTinted(view, 2));
+    QTRY_COMPARE(cellColor(1, "queueCell_title"), tokenHex(window, "now"));
+    QCOMPARE(cellColor(1, "queueRowState"), tokenHex(window, "now"));
 }
 
 // An album row without a cover keeps the 20 px place a cover's thumbnail
@@ -5838,11 +5863,23 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
     QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textSecondary"));
     QVERIFY(QQmlProperty(queueRow, QStringLiteral("Accessible.name"), qmlContext(queueRow))
                 .read().toString().endsWith(QStringLiteral(", The file cannot be read.")));
+    // Selected, the unreadable titles step up with the rows' other secondary
+    // text, over their figures (selectedRowTextsNeverReadUnderTheirFigures).
+    QObject *queueController = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(queueController != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(queueController, "setSingleSelection", Q_ARG(QVariant, 1)));
+    QTRY_COMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_title"))),
+                 tokenHex(window, "textSecondarySelected"));
+    QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textSecondarySelected"));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(track).center().toPoint());
+    QTRY_VERIFY(track->property("rowSelected").toBool());
+    QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowTitle"))), tokenHex(window, "textSecondarySelected"));
     // Clearing the history clears the marks.
     QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
     QTRY_VERIFY(!treeGlyph->isVisible());
     QTRY_VERIFY(!queueGlyph->isVisible());
-    QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textColumn"));
+    // Still selected.
+    QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textColumnSelected"));
 }
 
 // A file that fails to play stays the current row, stopped, as the backend
@@ -7076,6 +7113,90 @@ void UiMainWindowTest::tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles() {
     QTRY_VERIFY(queue->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
     QTRY_VERIFY(library->hasActiveFocus());
+}
+
+void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// In a populated header, each column's resize boundary shows a quiet mark at
+// rest, so a pointer user can see where to resize (it showed nothing until
+// hovered): a 1 px stroke in the seam colour, 10 px at 10 pt and growing with
+// the font, centred on the labels, where the divider is. It gives way to the
+// divider under the pointer and with focus; an empty queue's header, with
+// nothing to resize, shows none.
+void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *header = named(window, "queueHeader");
+    QVERIFY(header);
+    const auto restOf = [window](const char *column) {
+        return itemNamed(named(window, QStringLiteral("queueColumnHandle_") + QLatin1String(column)),
+                         QStringLiteral("queueColumnHandleRest"));
+    };
+    QVERIFY(restOf("length") != nullptr);
+    QVERIFY(!restOf("length")->isVisible());
+
+    setQueue(bridgeOf(window), sampleQueueRows(3));
+    for (const char *column : {"artist", "album", "length"}) {
+        QQuickItem *handle = named(window, QStringLiteral("queueColumnHandle_") + QLatin1String(column));
+        QQuickItem *label = named(window, QStringLiteral("queueHeader_") + QLatin1String(column));
+        QVERIFY2(handle && label, column);
+        QQuickItem *rest = restOf(column);
+        QQuickItem *line = itemNamed(handle, QStringLiteral("queueColumnHandleLine"));
+        QVERIFY(rest && line);
+        // A narrow queue drops its Album column.
+        if (!label->isVisible()) {
+            QVERIFY(!rest->isVisible());
+            continue;
+        }
+        QTRY_VERIFY2(rest->isVisible(), column);
+        QVERIFY(!line->isVisible());
+        QCOMPARE(rest->width(), 1.0);
+        QCOMPARE(rest->height(), qreal(scaledSize(window, 10)));
+        QCOMPARE(colorOf(rest), tokenHex(window, "seam"));
+        const QRectF mark = sceneRect(rest);
+        QCOMPARE(mark.left(), std::round(mark.left()));
+        QCOMPARE(mark.top(), std::round(mark.top()));
+        QCOMPARE(mark.left(), sceneRect(line).left());
+        // Short of the header's top and its hairline, and centred on the label.
+        QVERIFY(mark.top() > sceneRect(header).top() && mark.bottom() < sceneRect(header).bottom() - 1);
+        QVERIFY2(std::abs(mark.center().y() - sceneRect(label).center().y()) <= 1.0,
+                 qPrintable(QStringLiteral("%1: mark centred at %2, label at %3")
+                                .arg(QLatin1String(column))
+                                .arg(mark.center().y())
+                                .arg(sceneRect(label).center().y())));
+        // Left of the label it belongs to.
+        QVERIFY(mark.right() < sceneRect(label).left());
+    }
+
+    // Under the pointer, the divider alone.
+    QQuickItem *handle = named(window, "queueColumnHandle_length");
+    QQuickItem *line = itemNamed(handle, QStringLiteral("queueColumnHandleLine"));
+    // From elsewhere: a test before this one may have left the pointer there.
+    QTest::mouseMove(window, QPoint(window->width() / 2, window->height() - 60));
+    QTest::mouseMove(window, handle->mapToScene(QPointF(handle->width() / 2, handle->height() / 2)).toPoint());
+    QTRY_VERIFY(line->isVisible());
+    QVERIFY(!restOf("length")->isVisible());
+    QVERIFY(restOf("artist")->isVisible());
+    QTest::mouseMove(window, QPoint(window->width() / 2, window->height() - 60));
+    QTRY_VERIFY(!line->isVisible());
+    QVERIFY(restOf("length")->isVisible());
+    // With keyboard focus, the ring around the divider alone.
+    handle->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(line->isVisible());
+    QVERIFY(!restOf("length")->isVisible());
+
+    // Emptied, nothing to resize.
+    named(window, "playlistView")->forceActiveFocus(Qt::TabFocusReason);
+    setQueue(bridgeOf(window), QVariantList{});
+    QTRY_VERIFY(!restOf("length")->isVisible());
+    QVERIFY(!restOf("artist")->isVisible());
 }
 
 void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys_data() {

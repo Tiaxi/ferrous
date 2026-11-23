@@ -49,6 +49,7 @@ The transport uses Breeze's Header colour set, as Breeze's toolbars and the menu
 | `textTertiary` | counts, years, track numbers | a second step down, at least 4.6:1 on the view and on its hover tint |
 | `textTertiaryOn(selected, hovered)` | tertiary text on a list row | on a hovered row it moves to `textTertiaryHovered`, and on a selected row it moves to `textTertiarySelected`, so small figures stay at least `rowFigureContrast` (5.4:1) on the row's tint. Antialiasing loses up to 14 % of contrast, and 5.4:1 still renders at 4.5:1 or more |
 | `textColumn` | the queue's Artist and Album cells | quieter than the title, and readable on every selection state |
+| `textSecondarySelected` / `textColumnSelected` | secondary and column text on a selected row: `rowSecondaryContrast` (6:1) on every selection tint | never weaker than the row's figures, which are held at 5.4:1 |
 | `placeholderText` | a field's placeholder, such as Edit Tags' "Mixed" | Breeze Light's own placeholder colour is 4.2:1 on white |
 | `link` | link-coloured text and actions | 4.5:1 on both the window and the view colours; a pressed link on a fill takes `readableOn` |
 | `negative` | error words, the warning glyph, the clip lamp, a failed section's heading | the theme's negative colour, adjusted for text contrast |
@@ -63,7 +64,8 @@ The transport uses Breeze's Header colour set, as Breeze's toolbars and the menu
 | `hoverOn(bg)` / `pressedOn(bg)` | hover and pressed tints on another opaque background, such as the Header chrome | they keep the same steps on any surface |
 | `selection` | a selected row in a focused list: the view mixed with the accent [#21475b / #acdcf6] | above the inactive selection, and so the hover, in both weight and hue |
 | `selectionInactive` | a selected row in a list without focus: the accent mix desaturated to 60 % | reads as a selection at rest, a step above the hover in weight |
-| `selectionHovered` / `selectionInactiveHovered` | a selected queue row under the pointer: a step past its selection, as far as the dark amber's 4.5:1 and the light focus ring's 3:1 allow | a selected row responds to the pointer like any other row |
+| `selectionHovered` / `selectionInactiveHovered` | a selected queue row under the pointer: 1.25:1 past its selection, as far as the light focus ring's 3:1 allows; the inactive one stays under the active selection on dark | a selected row responds to the pointer like any other row, at a glance |
+| `nowSelected` | the amber of a selected playing queue row: `now`, lightened on dark to stay 4.5:1 on the hovered selection | the hovered selection's step is not held back by the amber, and the playhead keeps the spectrogram's amber |
 | `focusRing` | the 1 px focus ring on a row, and the 2 px ring on a button | the accent, lighter on dark and darker on light, so it stands out from the selection |
 
 ### Data and playback

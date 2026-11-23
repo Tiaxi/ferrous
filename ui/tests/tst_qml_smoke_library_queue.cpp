@@ -3589,7 +3589,7 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(tint(3), QStringLiteral("#00000000"));
     QCOMPARE(color(cell(4, "order")), paletteColor("textTertiarySelected"));
     QCOMPARE(color(cell(3, "order")), paletteColor("textTertiary"));
-    QCOMPARE(color(cell(2, "title")), paletteColor("now"));
+    QCOMPARE(color(cell(2, "title")), paletteColor("nowSelected"));
     QVERIFY(!ring(4));
     // With focus from the keyboard, in the active window: the active tint,
     // and a ring on the current row only.
@@ -3611,7 +3611,7 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QTest::mouseMove(window, queueRowPoint(view, 4, 0.5));
     QTRY_COMPARE(tint(4), paletteColor("selectionHovered"));
     QCOMPARE(tint(2), paletteColor("selection"));
-    QCOMPARE(color(cell(2, "title")), paletteColor("now"));
+    QCOMPARE(color(cell(2, "title")), paletteColor("nowSelected"));
     QTest::mouseMove(window, queueRowPoint(view, 3, 0.5));
     QTRY_COMPARE(tint(4), paletteColor("selection"));
     QCOMPARE(tint(3), QStringLiteral("#00000000"));

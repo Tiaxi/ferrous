@@ -429,6 +429,11 @@ Rectangle {
                     // The model's role, so a row costs the same with any
                     // number of rows selected.
                     readonly property bool rowSelected: !!model.selected
+                    // A track's state mark and an unreadable name: stepped
+                    // up on a selected row, over its figures, as the queue's.
+                    readonly property color secondaryTextColor: rowSelected
+                        ? root.uiPalette.textSecondarySelected
+                        : root.uiPalette.textSecondary
                     // The row the keyboard is on, in a list with focus,
                     // while the keyboard is in use: a click selects with the
                     // tint alone, and nothing is ringed at launch.
@@ -627,7 +632,7 @@ Rectangle {
                                 isMask: true
                                 color: libraryRow.isNow
                                     ? root.uiPalette.now
-                                    : !libraryRow.showsError ? root.uiPalette.textSecondary
+                                    : !libraryRow.showsError ? libraryRow.secondaryTextColor
                                     : libraryRow.rowSelected ? root.uiPalette.negativeSelected
                                     : root.uiPalette.negative
                             }
@@ -753,7 +758,7 @@ Rectangle {
                                 font.family: root.uiPalette.baseFont.family
                                 font.pointSize: root.uiPalette.basePointSize
                                 readonly property color plainColor: libraryRow.unreadableReason.length > 0
-                                    ? root.uiPalette.textSecondary
+                                    ? libraryRow.secondaryTextColor
                                     : root.uiPalette.text
                                 // The title's share of amber, which sets its weight
                                 // and its colour together, so the two change in the

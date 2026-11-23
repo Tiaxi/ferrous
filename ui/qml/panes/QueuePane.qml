@@ -827,7 +827,13 @@ Rectangle {
                         : root.uiPalette.textSecondary
                     readonly property color columnTextColor: playlistRow.unreadable
                         ? playlistRow.secondaryTextColor
+                        : playlistRow.rowSelected ? root.uiPalette.textColumnSelected
                         : root.uiPalette.textColumn
+                    // The amber of what plays, made readable on the
+                    // selection as well.
+                    readonly property color nowColor: playlistRow.rowSelected
+                        ? root.uiPalette.nowSelected
+                        : root.uiPalette.now
 
                     Item {
                         objectName: "queueCell_indicator"
@@ -856,7 +862,7 @@ Rectangle {
                             source: glyph
                             isMask: true
                             color: playlistRow.isNow
-                                ? root.uiPalette.now
+                                ? playlistRow.nowColor
                                 : !playlistRow.showsError ? playlistRow.secondaryTextColor
                                 : playlistRow.rowSelected ? root.uiPalette.negativeSelected
                                 : root.uiPalette.negative
@@ -876,7 +882,7 @@ Rectangle {
                             roundToIconSize: false
                             source: visible ? queueNowFade.target.glyph : ""
                             isMask: true
-                            color: root.uiPalette.now
+                            color: playlistRow.nowColor
                             opacity: playlistRow.amberLeft
                         }
                     }
@@ -952,8 +958,8 @@ Rectangle {
                             ? playlistRow.amberIn : playlistRow.amberLeft
                         font.weight: amber >= 0.5 ? Font.DemiBold : Font.Normal
                         color: amber >= 1
-                            ? root.uiPalette.now
-                            : (amber > 0 ? ColorUtils.mixColor(plainColor, root.uiPalette.now, amber) : plainColor)
+                            ? playlistRow.nowColor
+                            : (amber > 0 ? ColorUtils.mixColor(plainColor, playlistRow.nowColor, amber) : plainColor)
                     }
 
                     Text {
@@ -1506,6 +1512,22 @@ Rectangle {
                     width: 1
                     visible: resizeHandle.highlighted
                     color: resizeMouseArea.pressed ? root.uiPalette.focusRing : root.uiPalette.textTertiary
+                }
+
+                // At rest, over a populated header: a short stroke in the
+                // seam colour where the divider is, centred on the labels,
+                // so a pointer user can see where to resize (the boundary
+                // had nothing to aim at). It gives way to the divider
+                // under the pointer, while dragged and with focus.
+                Rectangle {
+                    objectName: "queueColumnHandleRest"
+                    x: resizeHandle.lineX
+                    // Centred above the header's 1 px hairline.
+                    y: Math.round((resizeHandle.height - 1 - height) / 2)
+                    width: 1
+                    height: root.uiPalette.scaledSize(10)
+                    visible: !resizeHandle.highlighted && root.uiBridge.queueLength > 0
+                    color: root.uiPalette.seam
                 }
 
                 // With keyboard focus, the app's ring around the divider,
