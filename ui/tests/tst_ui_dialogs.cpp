@@ -663,6 +663,7 @@ private slots:
     void recentIssuesOpenWithTheirFocusShown();
     void diagnosticsActionsShareOneRow_data();
     void diagnosticsActionsShareOneRow();
+    void diagnosticsLogFrameShowsFocusOnlyForTheKeyboard();
     void deletingTheLogPointsBugReportsAtTheCopyWithoutPaths();
     void recentIssuesAreSeenWhenThePopupCloses();
     void thePanesEndsEarlyLinkOpensItsIssue();
@@ -4225,6 +4226,53 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QTRY_VERIFY(!buttons.at(1)->isEnabled());
     QCOMPARE(diagnostics->minimumWidth(), minimumWidth);
     QVERIFY(reject(dialog));
+}
+
+// Diagnostics opens with the keyboard on its log, so that the keys scroll
+// it, and the log's frame takes the focus colour only while the keyboard is
+// in use, as the lists' rings: not at rest after opening, nor after a click
+// (it showed a focus frame round the whole log at rest).
+void UiDialogsTest::diagnosticsLogFrameShowsFocusOnlyForTheKeyboard() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QStringList lines;
+    for (int index = 0; index < 200; ++index) {
+        lines << QStringLiteral("[library] warning: fixture line %1").arg(index);
+    }
+    QVERIFY(bridge->setProperty("diagnosticsText", lines.join(QLatin1Char('\n'))));
+    QObject *dialog = object(window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *diagnostics = windowOf(dialog);
+    QQuickItem *frame = visibleNamed(diagnostics, QStringLiteral("diagnosticsLogFrame"));
+    QQuickItem *log = visibleNamed(diagnostics, QStringLiteral("diagnosticsLogView"));
+    QQuickItem *scrollView = visibleNamed(diagnostics, QStringLiteral("diagnosticsScrollView"));
+    QVERIFY(frame != nullptr && log != nullptr && scrollView != nullptr);
+    QObject *flickable = qvariant_cast<QObject *>(scrollView->property("contentItem"));
+    QVERIFY(flickable != nullptr);
+    const QColor focusColor = evaluate(frame, QStringLiteral("Kirigami.Theme.focusColor")).value<QColor>();
+    const auto frameColor = [&] { return QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>(); };
+    QTRY_VERIFY(log->hasActiveFocus());
+    QTRY_VERIFY(flickable->property("contentHeight").toReal() > scrollView->height());
+    QVERIFY(frameColor() != focusColor);
+
+    // The keyboard scrolls the log, and its frame shows that it has it.
+    QCOMPARE(flickable->property("contentY").toReal(), 0.0);
+    QTest::keyClick(diagnostics, Qt::Key_PageDown);
+    QTRY_VERIFY(flickable->property("contentY").toReal() > 0);
+    QVERIFY(log->hasActiveFocus());
+    QTRY_COMPARE(hex(frameColor()), hex(focusColor));
+
+    // A click in the log keeps it the keyboard's, at rest again.
+    QTest::mouseClick(diagnostics, Qt::LeftButton, Qt::NoModifier, sceneRect(log).center().toPoint());
+    QTRY_VERIFY(frameColor() != focusColor);
+    QVERIFY(log->hasActiveFocus());
+    QTest::keyClick(diagnostics, Qt::Key_Home);
+    QTRY_COMPARE(flickable->property("contentY").toReal(), 0.0);
+    QTRY_COMPARE(hex(frameColor()), hex(focusColor));    QVERIFY(reject(dialog));
 }
 
 // Recent Issues has the keyboard where it shows it: opened with the pointer,
