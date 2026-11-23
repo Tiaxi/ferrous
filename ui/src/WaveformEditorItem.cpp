@@ -4199,8 +4199,7 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     const double amplitude = std::clamp(std::abs((channelHeight * 0.5 - localY) / (channelHeight * 0.5)), 0.0, 1.0);
     const QString dbText = crosshairLevel(amplitude);
     const QString timeText = CrosshairReadout::formatCrosshairTime(
-        time, CrosshairReadout::crosshairTimeDecimals(
-                  (visibleEnd - visibleStart) / axis.columns(), m_presentedZoomLevel));
+        time, CrosshairReadout::crosshairTimeDecimals((visibleEnd - visibleStart) / axis.columns()));
     const QFont font = CrosshairReadout::font(m_textScale);
     const QFontMetrics metrics(font);
     // Whether a plate shows goes by the widest text it can have, so it

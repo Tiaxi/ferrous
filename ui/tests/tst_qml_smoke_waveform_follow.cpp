@@ -1522,7 +1522,7 @@ void WaveformFollowSmokeTest::grabbedTimeHoldsStillThroughAPan() {
         const double seconds = rightClickAt(item, x);
         const auto [start, end] = viewOf(item);
         return CrosshairReadout::formatCrosshairTime(seconds,
-            CrosshairReadout::crosshairTimeDecimals((end - start) / (width * scale), 8.0));
+            CrosshairReadout::crosshairTimeDecimals((end - start) / (width * scale)));
     };
     const QString grabbed = readout(pressX);
     sendMouse(item, QEvent::MouseButtonPress, pressX, Qt::MiddleButton, Qt::MiddleButton);

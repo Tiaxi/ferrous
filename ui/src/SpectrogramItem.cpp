@@ -7282,13 +7282,12 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
                   columnsPerSecond, logicalDrawX, effectiveZoomLocked()));
         if (std::isfinite(trackTime)) {
             // As finely as the view resolves it, by the waveform's rule: a
-            // device pixel, or an analysis column where that is longer; at
-            // the default zoom, a column to a logical pixel, tenths.
+            // device pixel, or an analysis column where that is longer.
             const double zoom = effectiveZoomLocked();
             const double secondsPerColumn = std::max(
                 1.0 / (columnsPerSecond * std::max(1e-9, zoom * scale)), 1.0 / columnsPerSecond);
             timeText = CrosshairReadout::formatCrosshairTime(
-                trackTime, CrosshairReadout::crosshairTimeDecimals(secondsPerColumn, zoom));
+                trackTime, CrosshairReadout::crosshairTimeDecimals(secondsPerColumn));
         }
     }
 

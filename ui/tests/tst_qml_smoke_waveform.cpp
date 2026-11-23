@@ -1058,6 +1058,9 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
         return device;
     };
 
+    // The time scale's labels, which read as finely.
+    item->setHoverPosition(0.0, 0.0, false);
+    const QStringList scaleTexts = record()->engine.texts;
     for (const double pointerX : {0.2, 137.7, 211.33, 319.9}) {
         item->setHoverPosition(pointerX, 50.0, true);
         const auto drawn = record();
@@ -1088,8 +1091,9 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
                 QVERIFY(std::abs(pen.color().alphaF() - item->readoutTextColor().alphaF() * 0.45) < 0.01);
             }
         }
-        // The time with one decimal at the default zoom, as the
-        // spectrogram's; zoomed in, as many as tell its columns apart.
+        // The time as finely as a device pixel tells it, and no finer:
+        // tenths for the whole 10 s track, 31 ms a pixel at 1x; zoomed in,
+        // 4 ms a pixel at 1x, hundredths (it read milliseconds).
         double viewStart = 0.0;
         double viewEnd = 0.0;
         {
@@ -1097,10 +1101,13 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
             std::tie(viewStart, viewEnd) = item->visibleRangeLocked();
         }
         const int decimals = CrosshairReadout::crosshairTimeDecimals(
-            (viewEnd - viewStart) / std::ceil(320 * scale - 1e-6), zoom);
-        QCOMPARE(decimals, zoom == 1.0 ? 1 : 3);
+            (viewEnd - viewStart) / std::ceil(320 * scale - 1e-6));
+        QCOMPARE(decimals, zoom == 1.0 ? 1 : 2);
         const QRegularExpression timeLabel(QStringLiteral("^\\d+:\\d\\d\\.\\d{%1}$").arg(decimals));
-        const QStringList shown = drawn->engine.texts.filter(timeLabel);
+        QStringList shown = drawn->engine.texts.filter(timeLabel);
+        for (const QString &label : scaleTexts) {
+            shown.removeOne(label);
+        }
         QCOMPARE(shown.size(), 1);
 
         // A click there seeks to the time it shows.
@@ -2677,13 +2684,21 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
     QCOMPARE(CrosshairReadout::formatCrosshairTime(106.0, 1), QStringLiteral("1:46.0"));
     QCOMPARE(CrosshairReadout::formatCrosshairTime(28.98, 1), QStringLiteral("0:29.0"));
     QCOMPARE(CrosshairReadout::formatCrosshairTime(3'723.004, 2), QStringLiteral("1:02:03.00"));
-    // One at the default zoom, whatever the track's length; zoomed in, as
-    // many as a column needs, to milliseconds.
-    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.24, 1.0), 1);
-    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.002, 1.0), 1);
-    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.24, 2.0), 1);
-    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.05, 4.0), 2);
-    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.0001, 64.0), 3);
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(83.43, 0), QStringLiteral("1:23"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(3'723.6, 0), QStringLiteral("1:02:04"));
+    // From how long a column is, one rule for both plots, whatever the
+    // zoom: hundredths below 10 ms, tenths to 100 ms, whole seconds above.
+    // A 3:49 track across 1,240 px: 185 ms at 100 %, 48 ms at 381 %, and
+    // 9 ms at 2,000 %.
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(229.0 / 1'240), 0);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(229.0 / 3.81 / 1'240), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(229.0 / 20.0 / 1'240), 2);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.1), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.01), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.0099), 2);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.0001), 2);
+    // Its digits tabular.
+    QCOMPARE(CrosshairReadout::font().featureValue(QFont::Tag("tnum")), 1u);
     // Padded as a lane's label, 6 px at either side of the text and 20 px
     // tall at the default font (it had 3 px around the text).
     const QFont applicationFont = QGuiApplication::font();
