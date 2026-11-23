@@ -5041,8 +5041,10 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         && bins == m_ring.bins();
     if (!preserveRollingHistory && restartsForZoom) {
         // A zoom's session replaces the ring's columns, which the canvas
-        // shows only part of: the reserve keeps them, around the view.
+        // shows only part of: the reserve keeps them, around the view, and
+        // the crosshair's level reads them while the preview shows them.
         reserveRingBeforeResetLocked();
+        keepShownColumnsLocked();
     }
     if (!preserveRollingHistory) {
         ++m_ringGeneration;
@@ -5887,6 +5889,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         * m_precomputedCanvasColumnsPerSecond * m_precomputedCanvasZoomLevel));
             }
             m_zoomPreviewShown = zoomPreviewShown;
+            if (!zoomPreviewShown) {
+                // The columns it showed are not on screen any more.
+                m_shownColumns = {};
+            }
             if (zoomPreviewShown) {
                 // In logical pixels, where clicks are.
                 m_zoomPreviewAnchorSeconds =
@@ -7367,23 +7373,28 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
             QRectF(0.0, lineY, width / scale, lineWidth / scale), QString()});
         const double freqHz = pixelToFrequencyHzLocked(deviceY, height);
         if (freqHz >= 0.0) {
-            // The level of the column at the line: in a preview, the one of
-            // the columns at hand that has its time.
+            // The level of the column at the line: in a preview, the one it
+            // shows at that time, of the ring the zoom's session replaced,
+            // or else of the columns at hand. Read from the session's own,
+            // which come from the playhead on, it said "— dB" for a frame
+            // at each wheel notch and on Reset Zoom (H23).
             const double columnF = preview
                 ? previewSeconds * columnsPerSecond
                     + (rollingMode ? static_cast<double>(m_rollingEpoch) : 0.0)
                 : static_cast<double>(displayLeft)
                     + (lineX - logicalDrawX) / std::max(1e-9, effectiveZoomLocked());
-            const quint8 *bins = std::isfinite(columnF)
-                ? ringColumnLocked(static_cast<qint64>(std::floor(columnF)), rollingMode)
-                : nullptr;
+            const quint8 *bins = preview ? shownColumnLocked(previewSeconds + m_streamOrigin) : nullptr;
+            int binCount = bins != nullptr ? m_shownColumns.ring.bins() : m_ring.bins();
+            if (bins == nullptr && std::isfinite(columnF)) {
+                bins = ringColumnLocked(static_cast<qint64>(std::floor(columnF)), rollingMode);
+            }
             const int row = height - 1 - deviceY;
             // Without one, the level's field stays, with a dash for its
             // number, so the readout keeps its form.
             QString level = crosshairDecibels(std::numeric_limits<double>::quiet_NaN());
             if (bins != nullptr && row >= 0 && row < static_cast<int>(m_iToBin.size())) {
                 const int bin = m_iToBin[static_cast<size_t>(row)];
-                if (bin >= 0 && bin < m_ring.bins()) {
+                if (bin >= 0 && bin < binCount) {
                     // 1..255 spans -150..0 dBFS; 0 is silence.
                     const int value = bins[bin];
                     level = crosshairDecibels(value == 0
@@ -8585,6 +8596,7 @@ void SpectrogramItem::dropReserveLocked() {
 void SpectrogramItem::invalidateBackdropLocked() {
     dropBackdropLocked();
     dropReserveLocked();
+    m_shownColumns = {};
     ++m_backdropValidity;
     ++m_reserveSerial;
     m_reservePending = false;
@@ -8766,6 +8778,58 @@ void SpectrogramItem::reserveRingBeforeResetLocked() {
     m_reserveRequestedRight = to;
     requestReserveLocked(from, to, zoom * columnsPerSecond, canvasWidthLocked(),
         m_canvas.height(), m_precomputedCanvasRolling);
+}
+
+void SpectrogramItem::keepShownColumnsLocked() {
+    if (m_precomputedCanvasRingGeneration != m_ringGeneration) {
+        // A canvas of an earlier ring, which a zoom before this one
+        // replaced: it keeps the columns it was drawn from.
+        if (m_shownColumns.ringGeneration != m_precomputedCanvasRingGeneration) {
+            m_shownColumns = {};
+        }
+        return;
+    }
+    m_shownColumns = {};
+    const double zoom = m_precomputedCanvasZoomLevel;
+    const double columnsPerSecond = m_precomputedCanvasColumnsPerSecond;
+    if (m_canvas.isNull() || zoom <= 0.0 || columnsPerSecond <= 0.0
+        || m_precomputedCanvasDisplayRight < m_precomputedCanvasDisplayLeft) {
+        return;
+    }
+    // The canvas's columns, and a view's more on either side, which a zoom
+    // out shows beside it (reserveRingBeforeResetLocked). Copying the ring
+    // shares its blocks; only the slot lookup costs anything here.
+    const auto view = static_cast<qint64>(std::ceil(static_cast<double>(canvasWidthLocked()) / zoom));
+    const qint64 left = m_precomputedCanvasDisplayLeft - view;
+    const qint64 right = std::max(m_precomputedCanvasDisplayRight, m_precomputedCanvasViewRight) + view;
+    const bool rolling = m_precomputedCanvasRolling;
+    m_shownColumns.ring = m_ring;
+    m_shownColumns.columnSlots.resize(static_cast<size_t>(right - left + 1));
+    for (qint64 column = left; column <= right; ++column) {
+        m_shownColumns.columnSlots[static_cast<size_t>(column - left)] =
+            ringSlotForDisplayIndexLocked(column, rolling);
+    }
+    m_shownColumns.left = left;
+    m_shownColumns.columnsPerSecond = columnsPerSecond;
+    m_shownColumns.epoch = m_precomputedCanvasEpoch;
+    m_shownColumns.streamOrigin = m_precomputedCanvasStreamOrigin;
+    m_shownColumns.ringGeneration = m_ringGeneration;
+}
+
+const quint8 *SpectrogramItem::shownColumnLocked(double seconds) const {
+    const ShownColumns &shown = m_shownColumns;
+    // Its bins are the rows' only while they are as many as the view's.
+    if (shown.columnSlots.empty() || shown.columnsPerSecond <= 0.0 || !std::isfinite(seconds)
+        || shown.ring.bins() != m_precomputedBinsPerColumn) {
+        return nullptr;
+    }
+    const double column = std::floor((seconds - shown.streamOrigin) * shown.columnsPerSecond)
+        + static_cast<double>(shown.epoch - shown.left);
+    if (column < 0.0 || column >= static_cast<double>(shown.columnSlots.size())) {
+        return nullptr;
+    }
+    const int slot = shown.columnSlots[static_cast<size_t>(column)];
+    return slot >= 0 ? shown.ring.column(slot) : nullptr;
 }
 
 void SpectrogramItem::installReserve(const std::shared_ptr<SpectrogramRasterResult> &result) {
