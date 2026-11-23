@@ -5647,8 +5647,9 @@ void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     QQuickItem *frame = itemNamed(handle, QStringLiteral("queueColumnHandleFocus"));
     QVERIFY(frame != nullptr);
     QTRY_VERIFY(frame->isVisible());
-    QCOMPARE(sceneRect(frame).top(), sceneRect(queueHeader).top());
-    QCOMPARE(sceneRect(frame).height(), sceneRect(queueHeader).height() - 1);
+    // 2 px clear of the seam above the header and of its hairline.
+    QCOMPARE(sceneRect(frame).top(), sceneRect(queueHeader).top() + 2);
+    QCOMPARE(sceneRect(frame).height(), sceneRect(queueHeader).height() - 5);
 }
 
 void UiMainWindowTest::queueNameKeepsTheTitleColumnsPlace_data() {
@@ -6184,10 +6185,13 @@ void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// A focused column handle has a frame in the app's focus ring, the header's
-// height and within the gap between the columns, and its tooltip says what
-// it is and its keys (a bare 2 px line read as a hover and said neither).
-// The pointer's hover is the thin seam, with no frame.
+// A focused column handle has a frame in the app's focus ring around its
+// divider, within the gap between the columns: 3 px clear of the label after
+// it, and 2 px clear of the seam above the header and of its hairline (a
+// 12 px box 2 px off "Artist" and flush on the seam, with no divider in it,
+// read as an empty checkbox). Its tooltip says what it is and its keys. The
+// pointer's hover is the divider alone, in the tertiary text colour, which
+// reads on the header (the seam colour, 1.5:1, barely showed).
 void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys() {
     QFETCH(qreal, pointSize);
     const ScopedApplicationFont font(pointSize);
@@ -6195,29 +6199,54 @@ void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys() {
     QQuickWindow *window = fixture.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     setQueue(bridgeOf(window), sampleQueueRows(3));
-    QQuickItem *handle = named(window, "queueColumnHandle_length");
     QQuickItem *header = named(window, "queueHeader");
-    QQuickItem *label = named(window, "queueHeader_length");
-    QVERIFY(handle && header && label);
-    QTRY_VERIFY(handle->activeFocusOnTab());
+    QVERIFY(header);
+    for (const char *column : {"artist", "album", "length"}) {
+        QQuickItem *handle = named(window, QStringLiteral("queueColumnHandle_") + QLatin1String(column));
+        QQuickItem *label = named(window, QStringLiteral("queueHeader_") + QLatin1String(column));
+        QVERIFY2(handle && label, column);
+        // A narrow queue drops its Album column.
+        if (!label->isVisible()) {
+            QVERIFY(!handle->isVisible());
+            continue;
+        }
+        QTRY_VERIFY(handle->activeFocusOnTab());
+        QQuickItem *frame = itemNamed(handle, QStringLiteral("queueColumnHandleFocus"));
+        QQuickItem *line = itemNamed(handle, QStringLiteral("queueColumnHandleLine"));
+        QVERIFY(frame && line);
+        QVERIFY(!frame->isVisible());
+        QVERIFY(!line->isVisible());
+
+        handle->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(frame->isVisible());
+        QCOMPARE(QQmlProperty(frame, QStringLiteral("border.width")).read().toReal(), 2.0);
+        QCOMPARE(hex(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>()),
+                 tokenHex(window, "focusRing"));
+        const QRectF ring = sceneRect(frame);
+        QVERIFY2(ring.width() >= 9.0, qPrintable(QString::number(ring.width())));
+        QCOMPARE(ring.top(), sceneRect(header).top() + 2);
+        QCOMPARE(ring.bottom(), sceneRect(header).bottom() - 1 - 2);
+        // 3 px clear of the label after it.
+        QVERIFY2(ring.right() <= sceneRect(label).left() - 3,
+                 qPrintable(QStringLiteral("%1: ring ends at %2, label at %3")
+                                .arg(QLatin1String(column)).arg(ring.right()).arg(sceneRect(label).left())));
+        QCOMPARE(ring.left(), std::round(ring.left()));
+        // The divider stays drawn, in the middle of the ring and inside it.
+        QVERIFY2(line->isVisible(), column);
+        QCOMPARE(line->width(), 1.0);
+        const QRectF divider = sceneRect(line);
+        QCOMPARE(divider.left() - ring.left(), ring.right() - divider.right());
+        QVERIFY(divider.left() - ring.left() >= 2 + 2);
+        QVERIFY(divider.top() >= ring.top() + 2 + 2);
+        QVERIFY(divider.bottom() <= ring.bottom() - 2 - 2);
+        QCOMPARE(colorOf(line), tokenHex(window, "textTertiary"));
+    }
+
+    QQuickItem *handle = named(window, "queueColumnHandle_length");
     QQuickItem *frame = itemNamed(handle, QStringLiteral("queueColumnHandleFocus"));
     QQuickItem *line = itemNamed(handle, QStringLiteral("queueColumnHandleLine"));
-    QVERIFY(frame && line);
-    QVERIFY(!frame->isVisible());
-
     handle->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(frame->isVisible());
-    QVERIFY(!line->isVisible());
-    QCOMPARE(QQmlProperty(frame, QStringLiteral("border.width")).read().toReal(), 2.0);
-    QCOMPARE(hex(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>()),
-             tokenHex(window, "focusRing"));
-    QVERIFY2(frame->width() >= 8.0, qPrintable(QString::number(frame->width())));
-    QCOMPARE(sceneRect(frame).top(), sceneRect(header).top());
-    QVERIFY(sceneRect(frame).bottom() <= sceneRect(header).bottom());
-    QVERIFY(sceneRect(frame).height() >= sceneRect(header).height() - 1);
-    // It covers no label's text.
-    QVERIFY(sceneRect(frame).right() <= sceneRect(label).left());
-    QCOMPARE(sceneRect(frame).left(), std::round(sceneRect(frame).left()));
     const QString says = evaluateOn(handle, QStringLiteral("ToolTip.text")).toString();
     QCOMPARE(says, QStringLiteral("Resize the Length column · Left or Right to resize, Home for the default width"));
     // After the desktop's tooltip delay, as the other tooltips' on focus.
@@ -6225,12 +6254,17 @@ void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys() {
 
     named(window, "playlistView")->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(!frame->isVisible());
+    QVERIFY(!line->isVisible());
     // Once it has faded out.
     QTRY_VERIFY(!evaluateOn(handle, QStringLiteral("ToolTip.visible")).toBool());
     QTest::mouseMove(window, handle->mapToScene(QPointF(handle->width() / 2, handle->height() / 2)).toPoint());
     QTRY_VERIFY(line->isVisible());
     QVERIFY(!frame->isVisible());
     QCOMPARE(line->width(), 1.0);
+    // The hover divider reads on the header: 3:1 at least.
+    const QColor ink(colorOf(line));
+    const QColor view(tokenHex(window, "view"));
+    QVERIFY2(contrastRatio(ink, view) >= 3.0, qPrintable(describeContrast(QStringLiteral("hover divider"), ink, view)));
 }
 
 // The transport's first glyph starts at the content's 12 px inset, where

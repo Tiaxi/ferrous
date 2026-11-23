@@ -1399,7 +1399,7 @@ Rectangle {
 
                 visible: modelData.header.visible
                 // On whole pixels, for the frame's edges.
-                x: Math.round(queueHeaderRow.x + modelData.header.x - root.columnGap / 2 - width / 2)
+                x: Math.round(queueHeaderRow.x + modelData.header.x - root.columnGap / 2) - resizeHandle.lineX
                 width: Kirigami.Units.largeSpacing
                 height: parent.height
                 // An empty queue's columns have no labels to resize.
@@ -1414,29 +1414,49 @@ Rectangle {
                 Accessible.description: resizeHandle.keysText
                 Accessible.focusable: true
 
-                // A 1 px seam under the pointer.
+                // The ring's inset from the header's top seam and from its
+                // hairline, so neither line merges into the ring's edge.
+                readonly property real ringInset: 2
+                // The divider's x, on a whole pixel, mid-gap.
+                readonly property real lineX: Math.floor(width / 2)
+                // The ring's half width past the divider: within the gap,
+                // 3 px clear of the label after it at least (at 12 px wide
+                // it was 2 px off "Artist"). Odd in all, so the divider is
+                // its middle pixel.
+                readonly property real ringReach: Math.floor(root.columnGap / 2) - 4
+
+                // The divider: 1 px in the tertiary text colour under the
+                // pointer (the seam colour, 1.5:1, barely showed), the
+                // focus colour while dragged. With keyboard focus it stays
+                // drawn inside the ring, so the ring reads as around a
+                // column's divider rather than an empty box.
                 Rectangle {
                     objectName: "queueColumnHandleLine"
-                    anchors.horizontalCenter: parent.horizontalCenter
+                    x: resizeHandle.lineX
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    anchors.topMargin: Kirigami.Units.smallSpacing
-                    anchors.bottomMargin: Kirigami.Units.smallSpacing
+                    anchors.topMargin: resizeHandle.activeFocus
+                        ? resizeHandle.ringInset + 4 : Kirigami.Units.smallSpacing
+                    anchors.bottomMargin: resizeHandle.activeFocus
+                        ? 1 + resizeHandle.ringInset + 4 : Kirigami.Units.smallSpacing
                     width: 1
-                    visible: resizeHandle.highlighted && !resizeHandle.activeFocus
-                    color: resizeMouseArea.pressed ? root.uiPalette.focusRing : root.uiPalette.seam
+                    visible: resizeHandle.highlighted
+                    color: resizeMouseArea.pressed ? root.uiPalette.focusRing : root.uiPalette.textTertiary
                 }
 
-                // With keyboard focus, the app's ring around the handle,
-                // the header's height over its hairline and within the gap
-                // between the columns (a 2 px line alone read as a hover).
+                // With keyboard focus, the app's ring around the divider,
+                // within the gap between the columns and clear of the
+                // header's top seam and hairline (a 2 px line alone read as
+                // a hover).
                 Rectangle {
                     objectName: "queueColumnHandleFocus"
-                    anchors.horizontalCenter: parent.horizontalCenter
+                    x: resizeHandle.lineX - resizeHandle.ringReach
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 1
-                    width: 2 * Math.round(root.columnGap * 3 / 8)
+                    anchors.topMargin: resizeHandle.ringInset
+                    // Over the header's hairline.
+                    anchors.bottomMargin: 1 + resizeHandle.ringInset
+                    width: 2 * resizeHandle.ringReach + 1
                     radius: 3
                     visible: resizeHandle.activeFocus
                     color: "transparent"
