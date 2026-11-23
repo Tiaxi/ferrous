@@ -47,6 +47,7 @@ private slots:
     void spectrogramDrawsAtDevicePixels_data();
     void spectrogramDrawsAtDevicePixels();
     void spectrogramWideCanvasDrawsEveryTile();
+    void spectrogramTilesAddedToADrawnLaneDrawInIt();
     void spectrogramCanvasTexturesSurviveSceneGraphChanges();
     void spectrogramSceneGraphDrawsTheCanvas_data();
     void spectrogramSceneGraphDrawsTheCanvas();
@@ -5155,6 +5156,55 @@ QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSi
 }
 
 } // namespace
+
+// Tiles a lane already on screen gains, as it widens, draw in the lane:
+// with the software renderer, which draws the UI tests, a node that joined
+// a plain node of the scene drew at the window's origin, unclipped, so a
+// lane's new tiles lay over the transport until something moved it.
+void SpectrogramCanvasSmokeTest::spectrogramTilesAddedToADrawnLaneDrawInIt() {
+    const QColor chrome(Qt::white);
+    QQuickWindow window;
+    window.setColor(chrome);
+    window.resize(400, 200);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    auto &item = *new SpectrogramItem(window.contentItem());
+    item.setPosition(QPointF(120.0, 100.0));
+    item.setSize(QSizeF(60.0, 40.0));
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int columns = 2000;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+    QTRY_VERIFY(!frames.isEmpty());
+    // Its first frame drew the lane in the tiles the scene node starts with.
+    const QImage narrow = window.grabWindow().convertToFormat(QImage::Format_RGB32);
+    const QRgb canvas = narrow.pixel(150, 120);
+    QVERIFY2(canvas != chrome.rgb() && canvas != kSpectrogramFloor,
+             qPrintable(QColor(canvas).name()));
+
+    // 270 pixels are five tiles.
+    item.setWidth(270.0);
+    frames.clear();
+    QTRY_VERIFY(!frames.isEmpty());
+    const QImage wide = window.grabWindow().convertToFormat(QImage::Format_RGB32);
+    saveForInspection(wide, QStringLiteral("tiles-added-to-a-drawn-lane"));
+    const QRect lane(120, 100, 270, 40);
+    int outside = 0;
+    for (int y = 0; y < wide.height(); ++y) {
+        for (int x = 0; x < wide.width(); ++x) {
+            outside += !lane.contains(x, y) && wide.pixel(x, y) != chrome.rgb() ? 1 : 0;
+        }
+    }
+    QVERIFY2(outside == 0, qPrintable(QStringLiteral("%1 pixels drawn outside the lane").arg(outside)));
+    // The new tiles are where the canvas is.
+    for (const int x : {150, 220, 290, 360, 385}) {
+        QVERIFY2(wide.pixel(x, 120) == canvas,
+                 qPrintable(QStringLiteral("%1: %2").arg(x).arg(QColor(wide.pixel(x, 120)).name())));
+    }
+}
 
 void SpectrogramCanvasSmokeTest::spectrogramCanvasTexturesSurviveSceneGraphChanges() {
     // A new scene graph, as when the window's is released, and another
