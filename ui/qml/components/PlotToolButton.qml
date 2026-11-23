@@ -22,13 +22,14 @@ import "../logic/KeyUtils.js" as KeyUtils
 // colour whole; on a light plate the plot's dark text, 7:1, its own edge,
 // with its glyph in the plate's colour whole. The others' glyphs are at
 // 72 %, whole only while pressed.
-// Under the pointer one of the others has a wash of the text colour,
-// 1.6:1 on the plate, and its glyph at 85 %, which read (8 % and 60 %
-// were 1.2:1, nearly invisible; at 1.25:1 only the glyph's brightening
-// told the target), fading in and out over shortDuration, OutCubic; the
-// chosen one's plate is 2:1 or more on that wash, so a hovered choice
-// never reads as the chosen one (18 % on 14 % was 1.14:1). The accent is
-// left to the focus ring. A segment is a
+// Under the pointer one of the others is drawn as a different shape from
+// the chosen one: a 1 px outline inset 2 px, the text colour 3.15:1 on a
+// dark plate (as the chosen fill is) and 4.5:1 on a light one, and its
+// glyph at 85 %, the two fading in and out together over shortDuration,
+// OutCubic. A wash gave the hovered one the chosen one's filled
+// silhouette, so for the whole hover both read as chosen (2:1 apart; 14 %
+// on 18 % was 1.14:1), and a fainter one told the target only by the
+// glyph's brightening. The accent is left to the focus ring. A segment is a
 // checkable, auto-exclusive button, so it is a radio button to assistive
 // technology, checkable and checked as chosen (as a plain button it told
 // of its checked state changing but not that it could be checked), and
@@ -82,9 +83,7 @@ ToolButton {
         }
         return 1
     }
-    readonly property real segmentHoverOpacity: root._tintFor(0.10, root.plateColor, 1.6)
-    // The chosen one's fill: 2:1 on the hover wash, and on a dark plate 3:1
-    // on the plate, so the choice reads by its fill and not by its edge
+    // The chosen one's fill: on a dark plate 3:1 on the plate, so the choice reads by its fill and not by its edge
     // alone (at 2:1 on the plate it was carried by the edge, beside the
     // lanes' solid M and S). It aims at 3.15:1 on the plate as reckoned
     // here: the spectrogram's plate is translucent, a step lighter over the
@@ -98,11 +97,28 @@ ToolButton {
     readonly property bool lightPlate: ColorUtils.relativeLuminance(root.plateColor) > 0.5
     readonly property real segmentFillOpacity: root.lightPlate
         ? root._tintFor(0.24, root.plateColor, 7)
-        : Math.max(root._tintFor(0.24, root.plateColor, 3.15),
-                   root._tintFor(0.24, ColorUtils.drawnOver(
-                       ColorUtils.withAlpha(root.plotColors.plotText, root.segmentHoverOpacity), root.plateColor), 2))
+        : root._tintFor(0.24, root.plateColor, 3.15)
     readonly property real segmentRestOpacity: 0.72
     readonly property real segmentHoverGlyphOpacity: 0.85
+    // The hovered segment's outline: the plot's text over the plate, the
+    // least in whole percent 3.15:1 on a dark plate, the chosen fill's
+    // step, so the two differ by shape and not by brightness; 4.5:1 on a
+    // light one, halfway to the chosen fill's 7:1, as a 1 px line at 3:1
+    // on white is a faint grey.
+    readonly property color segmentHoverEdgeColor: ColorUtils.drawnOver(
+        ColorUtils.withAlpha(root.plotColors.plotText, root._tintFor(0.01, root.plateColor, root.lightPlate ? 4.5 : 3.15)),
+        root.plateColor)
+    // The pointer's reveal, 0 to 1 over shortDuration, OutCubic: a
+    // button's wash, and a segment's outline and its glyph's brightening
+    // together. Not while checked: a chosen one shows its fill alone.
+    property real hoverProgress: root.hovered && !root.checked ? 1 : 0
+    Behavior on hoverProgress {
+        enabled: Kirigami.Units.shortDuration > 0
+        NumberAnimation {
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+        }
+    }
     // The chosen segment's edge. On a dark plate the fill, 3:1 on it,
     // carries the choice, so the edge is a quiet highlight on it: the
     // plot's text over the fill, the least in whole percent that is
@@ -120,19 +136,18 @@ ToolButton {
         }
         return root.plotColors.plotText
     }
-    // The pointer's wash: a segment's, under its chosen plate, and a
-    // button's, which checked turns into a solid fill.
-    readonly property real hoverOpacity: root.segment ? root.segmentHoverOpacity : 0.12
+    // The pointer's wash on a button, which checked turns into a solid
+    // fill; a segment has its outline instead.
     readonly property color hoverColor: Qt.rgba(root.plotColors.plotText.r, root.plotColors.plotText.g,
-                                                root.plotColors.plotText.b, root.hoverOpacity)
+                                                root.plotColors.plotText.b, 0.12)
     readonly property color glyphColor: root.segment
         ? (root.checked && root.lightPlate ? root.plateColor : root.plotColors.plotText)
         : (root.checked ? root.plotColors.checkedGlyph : root.plotColors.plotText)
     // A segment that is not the chosen one is quieter, with the keyboard's
     // focus too, which the focus ring shows, and a little less so under
-    // the pointer; whole only while pressed.
+    // the pointer, as its outline shows; whole only while pressed.
     readonly property real glyphOpacity: !root.segment || root.checked || root.down ? 1
-        : (root.hovered ? root.segmentHoverGlyphOpacity : root.segmentRestOpacity)
+        : root.segmentRestOpacity + (root.segmentHoverGlyphOpacity - root.segmentRestOpacity) * root.hoverProgress
     readonly property color checkedColor: root.segment
         ? Qt.rgba(root.plotColors.plotText.r, root.plotColors.plotText.g,
                   root.plotColors.plotText.b, root.segmentFillOpacity)
@@ -217,16 +232,22 @@ ToolButton {
             anchors.fill: parent
             radius: 3
             color: root.hoverColor
-            opacity: root.hovered && !root.checked ? 1 : 0
-            visible: opacity > 0
+            opacity: root.hoverProgress
+            visible: !root.segment && opacity > 0
+        }
 
-            Behavior on opacity {
-                enabled: Kirigami.Units.shortDuration > 0
-                NumberAnimation {
-                    duration: Kirigami.Units.shortDuration
-                    easing.type: Easing.OutCubic
-                }
-            }
+        // A segment's hover: an outline, not a fill, so it never takes the
+        // chosen one's silhouette.
+        Rectangle {
+            objectName: "plotToolButtonHoverEdge"
+            anchors.fill: parent
+            anchors.margins: 2
+            radius: 2
+            color: "transparent"
+            border.width: 1
+            border.color: root.segmentHoverEdgeColor
+            opacity: root.hoverProgress
+            visible: root.segment && !root.checked && opacity > 0
         }
 
         Rectangle {
