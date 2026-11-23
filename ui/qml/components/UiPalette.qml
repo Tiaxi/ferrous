@@ -58,8 +58,7 @@ QtObject {
     // list focused or not: the secondary colour, darkened or lightened to
     // be rowFigureContrast on each selection tint.
     readonly property color textTertiarySelected: root.readableOn(root.textSecondary,
-        [root.selection, root.selectionInactive, root.selectionHovered, root.selectionInactiveHovered],
-        root.rowFigureContrast)
+        root._selectedRows, root.rowFigureContrast)
     // A field's placeholder, such as Edit Tags' "Mixed", which
     // tells what saving does: the theme's own placeholder colour, its
     // inactive text, darkened or lightened where it is under 4.6:1 on the
@@ -70,7 +69,7 @@ QtObject {
     // they fall short of 4.5:1 on a selected row under the pointer, as on
     // light. #c2c2c3 / #555759 (#5a5c5e as mixed).
     readonly property color textColumn: root.readableOn(ColorUtils.mixColor(root.text, root.view, 0.25),
-        [root.view, root.selection, root.selectionInactive, root.selectionHovered, root.selectionInactiveHovered], 4.5)
+        [root.view].concat(root._selectedRows), 4.5)
     // The 1 px line where two regions meet. #383b40 / #d6d9dc.
     readonly property color seam: ColorUtils.mixColor(
         root.chrome, root._inactiveText, root.themeIsDark ? 0.18 : 0.20)
@@ -142,8 +141,17 @@ QtObject {
         root.selection, root.text, root._selectionHoverShare)
     readonly property color selectionInactiveHovered: ColorUtils.mixColor(
         root.selectionInactive, root.text, root._selectionHoverShare)
+    // A selected queue row held down by the pointer, until it is let go
+    // or dragged: the hovered selection at 1.6 times its saturation and the
+    // same luminance, a more intense blue, #184e6c / #92d8fd in Breeze, so
+    // a press reads apart from the pointer resting on the row (it was the
+    // hovered colour). Every text keeps its contrast on it: any darker
+    // put the light secondary text and the dark amber under 4.5:1. A
+    // pressed row's list has focus, so there is no inactive one.
+    readonly property color selectionPressed: root._desaturated(root.selectionHovered, 1.6)
     readonly property var _selectedRows: [root.selection, root.selectionInactive,
-                                          root.selectionHovered, root.selectionInactiveHovered]
+                                          root.selectionHovered, root.selectionInactiveHovered,
+                                          root.selectionPressed]
     // The secondary text on a selected row: lightened or darkened where it
     // is under 4.5:1 on one, as on dark under the pointer.
     // #b3bcc1 / #4f5a63.
@@ -185,8 +193,7 @@ QtObject {
     // #f2b035 / #814900.
     readonly property color now: root.themeIsDark
         ? "#f2b035"
-        : root.readableOn(root._nowLight, [root.view, root.hoveredRow, root.selection,
-                                           root.selectionHovered, root.selectionInactiveHovered], 4.5)
+        : root.readableOn(root._nowLight, [root.view, root.hoveredRow].concat(root._selectedRows), 4.5)
     readonly property color _nowLight: "#955500"
     // The opacity of the amber name of a collapsed tree row that holds the
     // playing track while it is paused: 70%, or more where that is under

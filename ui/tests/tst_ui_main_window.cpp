@@ -1204,6 +1204,7 @@ private slots:
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
+    void pressedQueueRowHasItsOwnColour();
     void queueNameKeepsTheTitleColumnsPlace_data();
     void queueNameKeepsTheTitleColumnsPlace();
     void narrowQueueDropsAlbumBeforeTitle();
@@ -4891,11 +4892,12 @@ void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath()
 
 // Why the selected row `index` of a list `view` does not show its focus
 // ring and tint as one rectangle beside the scrollbar, or "": while the
-// scrollbar shows, both end at its 8 px lane, with the thumb alone in it on
-// the view colour; without a scrollbar, both reach the edge. As drawn, on
-// the row's middle: the ring's right side just inside the lane, or at the
-// edge; past it, the view or the thumb, never the ring or the tint.
-QString focusRingProblem(QQuickWindow *window, QQuickItem *view, int index, bool scrolls) {
+// scrollbar shows, both end `clearance` px short of its 8 px lane, with the
+// thumb alone in it on the view colour; without a scrollbar, both reach the
+// edge. As drawn, on the row's middle: the ring's right side just inside
+// where the states end, or at the edge; past it, the view or the thumb,
+// never the ring or the tint.
+QString focusRingProblem(QQuickWindow *window, QQuickItem *view, int index, bool scrolls, qreal clearance = 0) {
     QQuickItem *row = viewRowAt(view, index);
     QQuickItem *tint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTint")) : nullptr;
     if (!shown(tint) || QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() != 1.0
@@ -4904,24 +4906,28 @@ QString focusRingProblem(QQuickWindow *window, QQuickItem *view, int index, bool
     }
     const qreal edge = sceneRect(view).right();
     const qreal lane = scrolls ? 8.0 : 0.0;
-    if (sceneRect(tint).right() != edge - lane) {
+    const qreal end = scrolls ? lane + clearance : 0.0;
+    if (sceneRect(tint).right() != edge - end) {
         return QStringLiteral("the ring to %1, the edge %2").arg(sceneRect(tint).right()).arg(edge);
     }
     const Drawn drawn(window);
     const qreal y = sceneRect(row).center().y();
     if (scrolls) {
-        // Either side of the thumb.
-        for (const qreal x : {edge - lane + 0.5, edge - 0.5}) {
+        // Either side of the thumb, and between the ring and the lane.
+        for (qreal x = edge - end + 0.5; x < edge - lane + 1; x += 1.0) {
             if (!near(drawn.at(x, y), tokenOf(window, "view"))) {
-                return QStringLiteral("%1 in the lane at %2 of %3").arg(drawn.at(x, y).name()).arg(x).arg(edge);
+                return QStringLiteral("%1 past the ring at %2 of %3").arg(drawn.at(x, y).name()).arg(x).arg(edge);
             }
+        }
+        if (!near(drawn.at(edge - 0.5, y), tokenOf(window, "view"))) {
+            return QStringLiteral("%1 at the edge").arg(drawn.at(edge - 0.5, y).name());
         }
     }
     const QColor ring = tokenOf(window, "focusRing");
-    if (!near(drawn.at(edge - lane - 0.5, y), ring)) {
-        return QStringLiteral("%1 where the ring ends").arg(drawn.at(edge - lane - 0.5, y).name());
+    if (!near(drawn.at(edge - end - 0.5, y), ring)) {
+        return QStringLiteral("%1 where the ring ends").arg(drawn.at(edge - end - 0.5, y).name());
     }
-    for (qreal x = edge - lane + 0.5; x < edge; x += 1.0) {
+    for (qreal x = edge - end + 0.5; x < edge; x += 1.0) {
         if (near(drawn.at(x, y), ring)) {
             return QStringLiteral("the ring at %1 of %2").arg(x).arg(edge);
         }
@@ -5021,13 +5027,15 @@ void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane_data() {
     QTest::newRow("dark") << true;
 }
 
-// The queue's focus ring and selection tint are one rectangle that ends at
-// the scrollbar's lane while the scrollbar shows, as the library's is
+// The queue's focus ring and selection tint are one rectangle that ends 2 px
+// short of the scrollbar's lane while the scrollbar shows
 // (focusRingProblem): the thumb never runs over the ring (it ran under the
-// thumb), and no tint runs on past it (the tint went on under the thumb, a
-// tab on the ring's end). The thumb, 4 px wide and 2 px from the edge, is
-// alone in the lane. A short queue, with no scrollbar, keeps both to the
-// edge (they stopped 8 px short of it).
+// thumb), no tint runs on past it (the tint went on under the thumb, a tab
+// on the ring's end), and the ring keeps 3 px clear of the thumb even at its
+// widest, under the pointer (at the lane it was 1 px off it, and the two
+// read as touching). The thumb, 4 px wide and 2 px from the edge, is alone
+// in the lane. A short queue, with no scrollbar, keeps both to the edge
+// (they stopped 8 px short of it).
 void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane() {
     QFETCH(bool, dark);
     const auto restorePalette = useDarkPalette(dark);
@@ -5057,7 +5065,7 @@ void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane() {
         // Without the keyboard: the tint alone, as drawn to the same edge,
         // the thumb past it.
         QQuickItem *tint = itemNamed(viewRowAt(queueView, 1), QStringLiteral("rowBackgroundTint"));
-        const qreal lane = scrolls ? 8.0 : 0.0;
+        const qreal lane = scrolls ? 8.0 + 2.0 : 0.0;
         QCOMPARE(sceneRect(tint).right(), sceneRect(queueView).right() - lane);
         const QColor tintColor = tint->property("color").value<QColor>();
         const qreal right = sceneRect(queueView).right();
@@ -5079,8 +5087,19 @@ void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane() {
         QTRY_VERIFY2(tintProblem().isEmpty(), qPrintable(tintProblem()));
         // From the keyboard: the ring too.
         tabInto(window, queueView);
-        QTRY_VERIFY2(focusRingProblem(window, queueView, 1, scrolls).isEmpty(),
-                     qPrintable(focusRingProblem(window, queueView, 1, scrolls)));
+        QTRY_VERIFY2(focusRingProblem(window, queueView, 1, scrolls, 2).isEmpty(),
+                     qPrintable(focusRingProblem(window, queueView, 1, scrolls, 2)));
+        if (scrolls) {
+            // The thumb at its widest, under the pointer: 3 px clear.
+            QQuickItem *thumb = itemNamed(scrollBar, QStringLiteral("laneScrollBarThumb"));
+            QVERIFY(thumb != nullptr);
+            const qreal restingGap = sceneRect(thumb).left() - sceneRect(tint).right();
+            QCOMPARE(restingGap, 4.0);
+            QTest::mouseMove(window, sceneRect(scrollBar).center().toPoint());
+            QTRY_VERIFY(scrollBar->property("engaged").toBool());
+            QTRY_COMPARE(sceneRect(thumb).left() - sceneRect(tint).right(), 3.0);
+            QTest::mouseMove(window, QPoint(2, window->height() - 2));
+        }
     }
 }
 
@@ -5138,9 +5157,10 @@ void UiMainWindowTest::rowStatesShareOneRightEdge_data() {
 }
 
 // A selected range, its current row's ring and a hovered row have one
-// straight right edge, in the library and in the queue: at the scrollbar's
-// lane while it shows, and at the pane's edge otherwise. The focused row
-// was a box with a tail under the thumb.
+// straight right edge, in the library and in the queue: while the
+// scrollbar shows, at its lane in the library and 2 px short of it in the
+// queue, whose ring keeps clear of the thumb; at the pane's edge otherwise.
+// The focused row was a box with a tail under the thumb.
 void UiMainWindowTest::rowStatesShareOneRightEdge() {
     QFETCH(bool, queue);
     QFETCH(bool, scrolls);
@@ -5180,7 +5200,7 @@ void UiMainWindowTest::rowStatesShareOneRightEdge() {
     QTRY_VERIFY(hover->isVisible() && hover->opacity() == 1.0);
 
     const qreal edge = sceneRect(view).right();
-    const qreal end = edge - (scrolls ? 8.0 : 0.0);
+    const qreal end = edge - (scrolls ? (queue ? 8.0 + 2.0 : 8.0) : 0.0);
     QCOMPARE(sceneRect(hover).right(), end);
     for (const int index : std::as_const(selected)) {
         QCOMPARE(sceneRect(itemNamed(viewRowAt(view, index), QStringLiteral("rowBackgroundTint"))).right(), end);
@@ -5647,8 +5667,50 @@ void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     QQuickItem *frame = itemNamed(handle, QStringLiteral("queueColumnHandleFocus"));
     QVERIFY(frame != nullptr);
     QTRY_VERIFY(frame->isVisible());
-    QCOMPARE(sceneRect(frame).top(), sceneRect(queueHeader).top());
-    QCOMPARE(sceneRect(frame).height(), sceneRect(queueHeader).height() - 1);
+    // 2 px clear of the seam above the header and of its hairline.
+    QCOMPARE(sceneRect(frame).top(), sceneRect(queueHeader).top() + 2);
+    QCOMPARE(sceneRect(frame).height(), sceneRect(queueHeader).height() - 5);
+}
+
+// A queue row held down by the pointer takes the pressed selection, apart
+// from the hovered selection it shows before and after (they were one
+// colour); a drag that takes the row away ends it.
+void UiMainWindowTest::pressedQueueRowHasItsOwnColour() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    setQueue(bridgeOf(window), sampleQueueRows(5));
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY(([&]() {
+        for (QQuickItem *candidate : itemsNamed(named(window, "playlistView"), QStringLiteral("queueRow"))) {
+            if (candidate->property("queueRowIndex").toInt() == 1) {
+                row = candidate;
+            }
+        }
+        return row != nullptr;
+    })());
+    QQuickItem *tint = itemNamed(row, QStringLiteral("rowBackgroundTint"));
+    QVERIFY(tint != nullptr);
+    const QPoint centre = row->mapToScene(QPointF(row->width() / 3, row->height() / 2)).toPoint();
+    QTest::mouseMove(window, centre);
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, centre);
+    QTRY_VERIFY(row->property("rowSelected").toBool());
+    QCOMPARE(colorOf(tint), tokenHex(window, "selectionPressed"));
+    QVERIFY(colorOf(tint) != tokenHex(window, "selectionHovered"));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, centre);
+    QTRY_COMPARE(colorOf(tint), tokenHex(window, "selectionHovered"));
+
+    // Pressed again, then dragged off: the row goes with the pointer, and
+    // stops showing the press.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, centre);
+    QCOMPARE(colorOf(tint), tokenHex(window, "selectionPressed"));
+    for (int step = 1; step <= 6; ++step) {
+        QTest::mouseMove(window, centre + QPoint(0, step * 8));
+    }
+    QTRY_VERIFY(named(window, "playlistView")->property("draggingRow").value<QObject *>() != nullptr);
+    QVERIFY(colorOf(tint) != tokenHex(window, "selectionPressed"));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, centre + QPoint(0, 48));
 }
 
 void UiMainWindowTest::queueNameKeepsTheTitleColumnsPlace_data() {
@@ -6184,10 +6246,13 @@ void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// A focused column handle has a frame in the app's focus ring, the header's
-// height and within the gap between the columns, and its tooltip says what
-// it is and its keys (a bare 2 px line read as a hover and said neither).
-// The pointer's hover is the thin seam, with no frame.
+// A focused column handle has a frame in the app's focus ring around its
+// divider, within the gap between the columns: 3 px clear of the label after
+// it, and 2 px clear of the seam above the header and of its hairline (a
+// 12 px box 2 px off "Artist" and flush on the seam, with no divider in it,
+// read as an empty checkbox). Its tooltip says what it is and its keys. The
+// pointer's hover is the divider alone, in the tertiary text colour, which
+// reads on the header (the seam colour, 1.5:1, barely showed).
 void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys() {
     QFETCH(qreal, pointSize);
     const ScopedApplicationFont font(pointSize);
@@ -6195,29 +6260,54 @@ void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys() {
     QQuickWindow *window = fixture.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     setQueue(bridgeOf(window), sampleQueueRows(3));
-    QQuickItem *handle = named(window, "queueColumnHandle_length");
     QQuickItem *header = named(window, "queueHeader");
-    QQuickItem *label = named(window, "queueHeader_length");
-    QVERIFY(handle && header && label);
-    QTRY_VERIFY(handle->activeFocusOnTab());
+    QVERIFY(header);
+    for (const char *column : {"artist", "album", "length"}) {
+        QQuickItem *handle = named(window, QStringLiteral("queueColumnHandle_") + QLatin1String(column));
+        QQuickItem *label = named(window, QStringLiteral("queueHeader_") + QLatin1String(column));
+        QVERIFY2(handle && label, column);
+        // A narrow queue drops its Album column.
+        if (!label->isVisible()) {
+            QVERIFY(!handle->isVisible());
+            continue;
+        }
+        QTRY_VERIFY(handle->activeFocusOnTab());
+        QQuickItem *frame = itemNamed(handle, QStringLiteral("queueColumnHandleFocus"));
+        QQuickItem *line = itemNamed(handle, QStringLiteral("queueColumnHandleLine"));
+        QVERIFY(frame && line);
+        QVERIFY(!frame->isVisible());
+        QVERIFY(!line->isVisible());
+
+        handle->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(frame->isVisible());
+        QCOMPARE(QQmlProperty(frame, QStringLiteral("border.width")).read().toReal(), 2.0);
+        QCOMPARE(hex(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>()),
+                 tokenHex(window, "focusRing"));
+        const QRectF ring = sceneRect(frame);
+        QVERIFY2(ring.width() >= 9.0, qPrintable(QString::number(ring.width())));
+        QCOMPARE(ring.top(), sceneRect(header).top() + 2);
+        QCOMPARE(ring.bottom(), sceneRect(header).bottom() - 1 - 2);
+        // 3 px clear of the label after it.
+        QVERIFY2(ring.right() <= sceneRect(label).left() - 3,
+                 qPrintable(QStringLiteral("%1: ring ends at %2, label at %3")
+                                .arg(QLatin1String(column)).arg(ring.right()).arg(sceneRect(label).left())));
+        QCOMPARE(ring.left(), std::round(ring.left()));
+        // The divider stays drawn, in the middle of the ring and inside it.
+        QVERIFY2(line->isVisible(), column);
+        QCOMPARE(line->width(), 1.0);
+        const QRectF divider = sceneRect(line);
+        QCOMPARE(divider.left() - ring.left(), ring.right() - divider.right());
+        QVERIFY(divider.left() - ring.left() >= 2 + 2);
+        QVERIFY(divider.top() >= ring.top() + 2 + 2);
+        QVERIFY(divider.bottom() <= ring.bottom() - 2 - 2);
+        QCOMPARE(colorOf(line), tokenHex(window, "textTertiary"));
+    }
+
+    QQuickItem *handle = named(window, "queueColumnHandle_length");
     QQuickItem *frame = itemNamed(handle, QStringLiteral("queueColumnHandleFocus"));
     QQuickItem *line = itemNamed(handle, QStringLiteral("queueColumnHandleLine"));
-    QVERIFY(frame && line);
-    QVERIFY(!frame->isVisible());
-
     handle->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(frame->isVisible());
-    QVERIFY(!line->isVisible());
-    QCOMPARE(QQmlProperty(frame, QStringLiteral("border.width")).read().toReal(), 2.0);
-    QCOMPARE(hex(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>()),
-             tokenHex(window, "focusRing"));
-    QVERIFY2(frame->width() >= 8.0, qPrintable(QString::number(frame->width())));
-    QCOMPARE(sceneRect(frame).top(), sceneRect(header).top());
-    QVERIFY(sceneRect(frame).bottom() <= sceneRect(header).bottom());
-    QVERIFY(sceneRect(frame).height() >= sceneRect(header).height() - 1);
-    // It covers no label's text.
-    QVERIFY(sceneRect(frame).right() <= sceneRect(label).left());
-    QCOMPARE(sceneRect(frame).left(), std::round(sceneRect(frame).left()));
     const QString says = evaluateOn(handle, QStringLiteral("ToolTip.text")).toString();
     QCOMPARE(says, QStringLiteral("Resize the Length column · Left or Right to resize, Home for the default width"));
     // After the desktop's tooltip delay, as the other tooltips' on focus.
@@ -6225,12 +6315,17 @@ void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys() {
 
     named(window, "playlistView")->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(!frame->isVisible());
+    QVERIFY(!line->isVisible());
     // Once it has faded out.
     QTRY_VERIFY(!evaluateOn(handle, QStringLiteral("ToolTip.visible")).toBool());
     QTest::mouseMove(window, handle->mapToScene(QPointF(handle->width() / 2, handle->height() / 2)).toPoint());
     QTRY_VERIFY(line->isVisible());
     QVERIFY(!frame->isVisible());
     QCOMPARE(line->width(), 1.0);
+    // The hover divider reads on the header: 3:1 at least.
+    const QColor ink(colorOf(line));
+    const QColor view(tokenHex(window, "view"));
+    QVERIFY2(contrastRatio(ink, view) >= 3.0, qPrintable(describeContrast(QStringLiteral("hover divider"), ink, view)));
 }
 
 // The transport's first glyph starts at the content's 12 px inset, where

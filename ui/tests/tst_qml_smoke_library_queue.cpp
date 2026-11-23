@@ -3842,11 +3842,12 @@ void LibraryQueueSmokeTest::queueDropLineKeepsTheScrollbarLaneOnlyWhileItShows()
     QCOMPARE(indicator->y(), boundary - 1);
     QCOMPARE(indicator->y() + indicator->height() / 2, boundary);
 
-    // A long one: the scrollbar shows, and the line stops at its lane.
+    // A long one: the scrollbar shows, and the line stops where the rows'
+    // focus ring does, 2 px short of its lane.
     QVERIFY(rows.insertRowsAt(4, queueRows(4, 60)));
     pane.bridge->setProperty("queueLength", 60);
     QTRY_VERIFY(scrollBar->isVisible());
-    QCOMPARE(indicator->width(), view->width() - lane);
+    QCOMPARE(indicator->width(), view->width() - lane - 2);
 }
 
 namespace {
