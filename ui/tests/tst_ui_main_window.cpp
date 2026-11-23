@@ -1204,6 +1204,7 @@ private slots:
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
+    void anUnreadableRowTellsWhyToThePointerAndTheKeyboard();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void pressedQueueRowHasItsOwnColour();
     void queueNameKeepsTheTitleColumnsPlace_data();
@@ -5582,11 +5583,11 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
     QCOMPARE(queueGlyph->y(), std::round(queueGlyph->y()));
     QVERIFY(queueGlyph->mapToItem(queueRow, QPointF(warningSize, 0)).x()
             <= itemNamed(queueRow, QStringLiteral("queueCell_order"))->x());
-    // The tooltip's hover target is the glyph, so it grows with it.
-    const QList<QObject *> glyphChildren = queueGlyph->children();
-    QVERIFY(std::any_of(glyphChildren.cbegin(), glyphChildren.cend(), [](QObject *child) {
-        return child->inherits("QQuickHoverHandler");
-    }));
+    // The reason is the row's, for the pointer anywhere on it and for the
+    // keyboard (anUnreadableRowTellsWhyToThePointerAndTheKeyboard).
+    QObject *reason = nullptr;
+    QTRY_VERIFY((reason = queueRow->findChild<QObject *>(QStringLiteral("queueRowReason"))) != nullptr);
+    QCOMPARE(reason->property("message").toString(), QStringLiteral("The file cannot be read."));
     QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_title"))), tokenHex(window, "textSecondary"));
     QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textSecondary"));
     QVERIFY(QQmlProperty(queueRow, QStringLiteral("Accessible.name"), qmlContext(queueRow))
@@ -5690,6 +5691,146 @@ void UiMainWindowTest::aTrackThatFailsToPlayShowsTheWarningWhileCurrent() {
     QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
     QTRY_COMPARE(queueGlyph(3), QStringLiteral("media-playback-stop"));
     QTRY_COMPARE(treeGlyphName(), QStringLiteral("media-playback-stop"));
+}
+
+// The tooltip that says why the row `row` of a list is marked unreadable,
+// or null while it has none.
+QObject *rowReasonOf(QQuickItem *row, const QString &name) {
+    return row != nullptr ? row->findChild<QObject *>(name) : nullptr;
+}
+
+bool reasonOpen(QObject *reason) {
+    return reason != nullptr && reason->property("opened").toBool();
+}
+
+// An unreadable row of the queue and of the library tells why it is marked
+// to the pointer anywhere on the row and to the keyboard on it, not only on
+// its 16 px glyph, where the pointer had to find it and the keyboard never
+// could. The reason sits over the row from its title, and goes while the
+// pointer holds the row down, and when the pointer or the keyboard leaves
+// it. A list gives one reason at a time: the keyboard's row gives way to
+// the pointer's. A readable row has none.
+void UiMainWindowTest::anUnreadableRowTellsWhyToThePointerAndTheKeyboard() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QQuickItem *queueView = named(window, "playlistView");
+    QQuickItem *libraryView = named(window, "libraryView");
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(bridge && errors && queueView && libraryView && controller);
+    showTree(fixture.libraryModel, kAllExpanded);
+    QVariantList rows = sampleQueueRows(4);
+    QVariantMap last = rows.at(3).toMap();
+    last.insert(QStringLiteral("path"), kTrackPath);
+    rows[3] = last;
+    setQueue(bridge, rows);
+    QTRY_COMPARE(queueView->property("count").toInt(), 4);
+    QQuickItem *track = nullptr;
+    QTRY_VERIFY((track = libraryRow(window, QStringLiteral("track"))) != nullptr);
+    const QString why = QStringLiteral("The file cannot be read.");
+    QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 1),
+                                      Q_ARG(QVariant, kTrackPath), Q_ARG(QVariant, why),
+                                      Q_ARG(QVariant, QString())));
+    QQuickItem *row = viewRowAt(queueView, 3);
+    QTRY_VERIFY(row != nullptr && row->property("unreadable").toBool());
+    QObject *reason = nullptr;
+    QTRY_VERIFY((reason = rowReasonOf(row, QStringLiteral("queueRowReason"))) != nullptr);
+    QCOMPARE(reason->property("message").toString(), why);
+    QCOMPARE(reason->property("text").toString(), why);
+    for (int index = 0; index < 3; ++index) {
+        QCOMPARE(rowReasonOf(viewRowAt(queueView, index), QStringLiteral("queueRowReason")), nullptr);
+    }
+    const QPoint away(window->width() - 10, window->height() - 60);
+    QTest::mouseMove(window, away);
+    QVERIFY(!reasonOpen(reason));
+
+    // The pointer on the title, far from the glyph: the reason, over the
+    // row from the title's start.
+    QQuickItem *title = itemNamed(row, QStringLiteral("queueCell_title"));
+    QVERIFY(title != nullptr);
+    const QPoint onTitle = sceneRect(title).center().toPoint();
+    QTest::mouseMove(window, onTitle - QPoint(8, 0));
+    QTest::mouseMove(window, onTitle);
+    QTRY_VERIFY(reasonOpen(reason));
+    QCOMPARE(reason->property("x").toReal(), title->x());
+    QVERIFY(reason->property("y").toReal() < 0);
+    // Held down, as a drag starts: none; let go: again.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, onTitle);
+    QTRY_VERIFY(!reasonOpen(reason));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, onTitle);
+    QTRY_VERIFY(reasonOpen(reason));
+    QTest::mouseMove(window, away);
+    QTRY_VERIFY(!reasonOpen(reason));
+
+    // The keyboard on the row: the reason; off it: none.
+    tabInto(window, queueView);
+    QTest::keyClick(window, Qt::Key_Home);
+    QTRY_VERIFY(viewRowAt(queueView, 0)->property("rowCurrent").toBool());
+    QVERIFY(!reasonOpen(reason));
+    QTest::keyClick(window, Qt::Key_End);
+    QTRY_VERIFY(row->property("rowCurrent").toBool());
+    QTRY_VERIFY(reasonOpen(reason));
+    QTest::keyClick(window, Qt::Key_Up);
+    QTRY_VERIFY(!reasonOpen(reason));
+
+    // The same file twice: the pointer on the one, the keyboard on the
+    // other. The pointer's reason alone, then, off it, the keyboard's.
+    QVariantMap first = rows.at(1).toMap();
+    first.insert(QStringLiteral("path"), kTrackPath);
+    rows[1] = first;
+    setQueue(bridge, rows);
+    QQuickItem *other = nullptr;
+    QTRY_VERIFY((other = viewRowAt(queueView, 1)) != nullptr && other->property("unreadable").toBool());
+    row = viewRowAt(queueView, 3);
+    QObject *otherReason = nullptr;
+    QTRY_VERIFY((otherReason = rowReasonOf(other, QStringLiteral("queueRowReason"))) != nullptr);
+    QTRY_VERIFY((reason = rowReasonOf(row, QStringLiteral("queueRowReason"))) != nullptr);
+    QTest::keyClick(window, Qt::Key_End);
+    QTRY_VERIFY(row->property("rowCurrent").toBool());
+    QTRY_VERIFY(reasonOpen(reason));
+    const QPoint onOther = sceneRect(itemNamed(other, QStringLiteral("queueCell_title"))).center().toPoint();
+    QTest::mouseMove(window, onOther - QPoint(8, 0));
+    QTest::mouseMove(window, onOther);
+    QTRY_VERIFY(reasonOpen(otherReason));
+    QTRY_VERIFY(!reasonOpen(reason));
+    QVERIFY(row->property("rowCurrent").toBool());
+    const QPoint onReadable = sceneRect(itemNamed(viewRowAt(queueView, 0), QStringLiteral("queueCell_title")))
+                                  .center().toPoint();
+    QTest::mouseMove(window, onReadable);
+    QTRY_VERIFY(!reasonOpen(otherReason));
+    QTRY_VERIFY(reasonOpen(reason));
+    QTest::mouseMove(window, away);
+
+    // The library's track row, alike.
+    QObject *treeReason = nullptr;
+    QTRY_VERIFY((treeReason = rowReasonOf(track, QStringLiteral("libraryRowReason"))) != nullptr);
+    QCOMPARE(treeReason->property("message").toString(), why);
+    QCOMPARE(rowReasonOf(libraryRow(window, QStringLiteral("album")), QStringLiteral("libraryRowReason")), nullptr);
+    QQuickItem *treeTitle = itemNamed(track, QStringLiteral("libraryRowTitle"));
+    QVERIFY(treeTitle != nullptr);
+    const QPoint onTreeTitle = sceneRect(treeTitle).center().toPoint();
+    QTest::mouseMove(window, onTreeTitle - QPoint(8, 0));
+    QTest::mouseMove(window, onTreeTitle);
+    QTRY_VERIFY(reasonOpen(treeReason));
+    QCOMPARE(treeReason->property("x").toReal(), track->property("titleX").toReal());
+    QTest::mouseMove(window, away);
+    QTRY_VERIFY(!reasonOpen(treeReason));
+    int trackIndex = -1;
+    for (int index = 0; index < libraryView->property("count").toInt(); ++index) {
+        if (viewRowAt(libraryView, index) == track) {
+            trackIndex = index;
+        }
+    }
+    QVERIFY(trackIndex > 0);
+    tabInto(window, libraryView);
+    QVERIFY(QMetaObject::invokeMethod(controller, "selectIndex", Q_ARG(QVariant, 0)));
+    QTRY_VERIFY(!track->property("rowCurrent").toBool());
+    QVERIFY(!reasonOpen(treeReason));
+    QVERIFY(QMetaObject::invokeMethod(controller, "selectIndex", Q_ARG(QVariant, trackIndex)));
+    QTRY_VERIFY(track->property("rowCurrent").toBool());
+    QTRY_VERIFY(reasonOpen(treeReason));
 }
 
 void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
