@@ -36,6 +36,7 @@ private slots:
     void itunesPreviewButtonsStayWholeInTheDetails_data();
     void itunesPreviewButtonsStayWholeInTheDetails();
     void albumArtRestsAtOneXOverTheWholeScreen();
+    void itunesBackToResultsKeepsThePreviewThroughTheFade();
     void itunesPreviewCannotApplyACandidateThatIsNotReady();
     void itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybackMovesOn();
     void itunesPreviewApplyShowsTheAppliedCoverAfterPlaybackMovesOn();
@@ -4380,6 +4381,100 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStayWholeInTheDetails() {
     }
     QVERIFY(finishIncubation(ui.engine));
     dropSizeHintMessages();
+}
+
+// Back to Results from a preview the viewer opened for: the viewer fades
+// out as it was, its heading, Show Current Album Art and its footer with
+// Apply in place, its column as wide, and no Image Details on its plate, as
+// its art stays, in every frame of the fade. They went on its first frame,
+// the column narrowed and Image Details showed, while the art faded. What
+// closing does is the same: the results show again, and the viewer closes.
+void AlbumArtSmokeTest::itunesBackToResultsKeepsThePreviewThroughTheFade() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
+    const QVariantList fixture = itunesArtworkFixture(dir, 3);
+    QCOMPARE(fixture.size(), 3);
+    const QVariantMap target{
+        {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
+        {QStringLiteral("album"), QStringLiteral("Small Hours")},
+        {QStringLiteral("coverPath"), coverUrl},
+    };
+    ItunesWindow ui(coverUrl);
+    QVERIFY2(ui.loaded(), "Main.qml failed to show");
+    ui.bridge->setProperty("viewerFullscreenMode", 0);
+    QQuickWindow *window = ui.window;
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QVERIFY(openItunesArtworkDialog(window, ui.dialog, ui.fake, fixture, target));
+    QVERIFY(QMetaObject::invokeMethod(ui.dialog, "requestSuggestionPreview", Q_ARG(QVariant, 1)));
+    QTRY_VERIFY(ui.viewer->property("albumArtPreviewActive").toBool() && !ui.dialog->property("visible").toBool());
+    QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton")) != nullptr
+                && visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"))->isEnabled());
+    QQuickItem *column = itemNamed(ui.surface, QStringLiteral("albumArtInfoColumn"));
+    QQuickItem *image = itemNamed(ui.surface, QStringLiteral("albumArtImage"));
+    QQuickItem *info = window->contentItem()->window()->findChild<QQuickItem *>(QStringLiteral("albumArtPopupInfoButton"));
+    QVERIFY(column != nullptr && image != nullptr && info != nullptr);
+    QTRY_VERIFY(popupsSettled() && ui.surface->property("infoReveal").toReal() >= 1.0);
+    QVERIFY(!info->isVisible());
+    const QRectF columnRect = sceneRectOf(column);
+    const QRectF artRect = paintedRectOf(image);
+    const QString source = image->property("source").toString();
+
+    // What the preview shows, in a frame of its fade.
+    const auto showsThePreview = [&](int frame) {
+        const QString at = QStringLiteral("frame %1, at opacity %2").arg(frame).arg(popup->property("opacity").toReal());
+        QQuickItem *heading = visibleItemNamed(window, QStringLiteral("albumArtPreviewLabel"));
+        QQuickItem *compare = visibleItemNamed(window, QStringLiteral("albumArtCompareButton"));
+        QQuickItem *apply = visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"));
+        QVERIFY2(heading != nullptr && heading->property("text").toString() == QStringLiteral("iTunes Artwork"),
+                 qPrintable(at));
+        QVERIFY2(compare != nullptr && compare->property("text").toString() == QStringLiteral("Show Current Album Art"),
+                 qPrintable(at));
+        QVERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPreviewFooter")) != nullptr
+                     && visibleItemNamed(window, QStringLiteral("albumArtPreviewBackButton")) != nullptr
+                     && apply != nullptr && apply->isEnabled(),
+                 qPrintable(at));
+        QVERIFY2(sceneRectOf(column) == columnRect, qPrintable(at));
+        QVERIFY2(paintedRectOf(image) == artRect && image->property("source").toString() == source, qPrintable(at));
+        QVERIFY2(!info->isVisible(), qPrintable(at));
+    };
+
+    QVERIFY(clickPreviewButton(window, QStringLiteral("albumArtPreviewBackButton")));
+    // Closing does as it did: the preview ends, the viewer closes, and the
+    // results show again.
+    QVERIFY(!ui.viewer->property("albumArtPreviewActive").toBool());
+    QVERIFY(!ui.viewer->property("albumArtViewerOpen").toBool());
+    // Each frame while the viewer still shows, fading out: the first at
+    // least. How many follow depends on the animations' clock, which the
+    // tests before this one move on.
+    int frames = 0;
+    for (; popup->property("visible").toBool() && frames < 200; ++frames) {
+        showsThePreview(frames);
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        QCoreApplication::processEvents();
+    }
+    QVERIFY(frames >= 1);
+    QVERIFY(!popup->property("visible").toBool());
+    QVERIFY(!ui.surface->isVisible());
+    QTRY_VERIFY(ui.dialog->property("opened").toBool());
+    QVERIFY(!ui.dialog->property("previewShown").toBool());
+
+    // The viewer opened again shows the current art, with no preview's.
+    QVERIFY(QMetaObject::invokeMethod(ui.dialog, "reject"));
+    QTRY_VERIFY(!ui.dialog->property("visible").toBool());
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(QMetaObject::invokeMethod(ui.viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(ui.viewer->property("albumArtViewerOpen").toBool());
+    QTRY_VERIFY(popupsSettled() && ui.surface->isVisible());
+    QVERIFY(visibleItemNamed(window, QStringLiteral("albumArtPreviewLabel")) == nullptr);
+    QVERIFY(visibleItemNamed(window, QStringLiteral("albumArtPreviewFooter")) == nullptr);
+    QVERIFY(info->isVisible());
+    QVERIFY(QMetaObject::invokeMethod(ui.viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!ui.viewer->property("albumArtViewerOpen").toBool());
+    QTRY_VERIFY(popupsSettled());
 }
 
 void AlbumArtSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady() {

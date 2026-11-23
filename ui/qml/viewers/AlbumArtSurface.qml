@@ -104,8 +104,54 @@ Item {
     property bool previewCanApply: false
     property var applyPreview: null
     readonly property alias imageStatus: albumArtImageFull.status
+    // What the viewer shows of a preview and of a comparison: the state
+    // above while the viewer is open; closed, the state it closed with, as
+    // it fades out, as with the art, which stays the image it showed. (Back
+    // to Results ended the preview as the fade began: its heading, Show
+    // Current Album Art and its footer went on the fade's first frame, and
+    // the column narrowed, while the art faded.)
+    property bool shownPreviewActive: false
+    property string shownPreviewLabel: ""
+    property bool shownPreviewHasCandidate: false
+    property bool shownPreviewCanApply: false
+    property bool shownComparisonModeAvailable: false
+    Binding {
+        target: root
+        property: "shownPreviewActive"
+        value: root.previewActive
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownPreviewLabel"
+        value: root.previewLabel
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownPreviewHasCandidate"
+        value: root.previewHasCandidate
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownPreviewCanApply"
+        value: root.previewCanApply
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownComparisonModeAvailable"
+        value: root.comparisonModeAvailable
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
     // Whether the details are headed by which image shows, over its file.
-    readonly property bool headedByImage: root.previewActive && root.previewLabel.length > 0
+    readonly property bool headedByImage: root.shownPreviewActive && root.shownPreviewLabel.length > 0
     // The art's pointer, which the area over it shows too: zoomed, an open
     // hand over the art, and a closed one while it is held to pan; the
     // arrow over the details and over the fitted art.
@@ -146,7 +192,7 @@ Item {
     // during a preview 24 px, so the art never touches their seam (with no
     // gutter, a wide window's art met it). The gutter eases with the
     // details' reveal, as their reserve does.
-    readonly property real artMargin: (root.previewActive ? 24 : 16) * root.infoReveal
+    readonly property real artMargin: (root.shownPreviewActive ? 24 : 16) * root.infoReveal
     readonly property real fitLeft: root.artMargin
     readonly property real fitWidth: Math.max(1, albumArtViewport.width - root.infoReserve - 2 * root.artMargin)
     readonly property real fitCenterX: root.fitLeft + root.fitWidth / 2
@@ -683,11 +729,11 @@ Item {
         // further right in one than in the other).
         readonly property real buttonsRow: !previewApplyButton.visible && !root.fullscreen ? 0
             : infoColumn.buttonsSideBySide
-        width: root.previewActive || root.fullscreen
+        width: root.shownPreviewActive || root.fullscreen
             ? Math.max(infoColumn.minimumWidth,
                 Math.min(Math.floor(root.width / 2), infoColumn.fortyCharacters),
                 infoColumn.buttonsRow <= Math.floor(root.width * 0.4) ? infoColumn.buttonsRow : 0,
-                root.previewActive ? Math.min(Math.floor(root.width * 0.75), infoColumn.widestButton) : 0)
+                root.shownPreviewActive ? Math.min(Math.floor(root.width * 0.75), infoColumn.widestButton) : 0)
             : Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width * 0.4), infoColumn.fortyCharacters))
 
         // The details' text: the body font, 1.2 times it over the whole
@@ -750,7 +796,7 @@ Item {
                     Layout.bottomMargin: Math.round(Kirigami.Units.smallSpacing * root.infoScale)
                     visible: root.headedByImage
                     textFormat: Text.PlainText
-                    text: root.previewLabel
+                    text: root.shownPreviewLabel
                     font.pointSize: root.infoTitlePointSize
                     font.weight: Font.DemiBold
                     color: root.plot.plotText
@@ -985,7 +1031,7 @@ Item {
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                             elide: Text.ElideRight
-                            maximumLineCount: root.previewActive ? 3 : 8
+                            maximumLineCount: root.shownPreviewActive ? 3 : 8
                             font.pointSize: root.infoPointSize
                             color: root.plot.plotText
                             Accessible.name: folderPathLabel.path
@@ -1009,7 +1055,7 @@ Item {
                 // From the iTunes artwork dialog: the other image to compare.
                 DetailsButton {
                     objectName: "albumArtCompareButton"
-                    visible: root.comparisonModeAvailable
+                    visible: root.shownComparisonModeAvailable
                     Layout.topMargin: Math.round(12 * root.infoScale)
                     // Its box's left edge on the column's text edge, as the
                     // rows' text above it.
@@ -1048,7 +1094,7 @@ Item {
         Item {
             id: previewFooter
             objectName: "albumArtPreviewFooter"
-            visible: root.previewActive
+            visible: root.shownPreviewActive
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
@@ -1107,8 +1153,8 @@ Item {
                         ? (previewButtons.height - height) / 2
                         : previewBackButton.height + previewButtons.spacing
                     width: previewButtons.oneRow ? implicitWidth : previewButtons.width
-                    visible: root.previewHasCandidate
-                    enabled: root.previewCanApply
+                    visible: root.shownPreviewHasCandidate
+                    enabled: root.shownPreviewCanApply
                     // Breeze draws the button marked default as such.
                     Accessible.defaultButton: true
                     icon.name: "dialog-ok-apply"
