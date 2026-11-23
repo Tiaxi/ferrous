@@ -572,6 +572,7 @@ private slots:
     void lastFmListeningNeverFillsTheBar_data();
     void lastFmListeningNeverFillsTheBar();
     void lastFmGlyphsAreOneFamily();
+    void warningGlyphIsTheSizeOfItsNeighbours();
     void statusBarNamesAStoppedEngineInPlainWords();
     void issuesButtonShowsNewSeenAndOpen_data();
     void issuesButtonShowsNewSeenAndOpen();
@@ -4223,6 +4224,47 @@ void TransportStatusTest::lastFmListeningNeverFillsTheBar() {
     }
     harness.bridge->setProperty("lastFmScrobbleState", 2);
     QCOMPARE(bar->width(), trough->width());
+}
+
+// The warning triangle is at its neighbours' optical size: 12 px across, as
+// dialog-error's square and the info glyph's circle, and about 11 px high,
+// centred across its box, its base's lower edge on a whole pixel at 16 px.
+// Filling its box, about 14 by 12 px, it was the largest glyph in the row
+// beside a 12 px info glyph and a 10 px close.
+void TransportStatusTest::warningGlyphIsTheSizeOfItsNeighbours() {
+    // The pixels of `name` at `size` with at least half their area covered.
+    const auto inkOf = [](const QString &name, int size) {
+        QImageReader reader(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/") + name);
+        reader.setScaledSize(QSize(size, size));
+        const QImage image = reader.read().convertToFormat(QImage::Format_ARGB32);
+        QRect ink;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                if (qAlpha(image.pixel(x, y)) >= 128) {
+                    ink = ink.united(QRect(x, y, 1, 1));
+                }
+            }
+        }
+        return ink;
+    };
+    // At 64 px, a 16 px drawing's quarter pixels.
+    const QRect warning = inkOf(QStringLiteral("status-warning.svg"), 64);
+    const QRect error = inkOf(QStringLiteral("status-error.svg"), 64);
+    const QString sizes = QStringLiteral("warning %1x%2 at %3,%4, error %5x%6")
+                              .arg(warning.width()).arg(warning.height()).arg(warning.x()).arg(warning.y())
+                              .arg(error.width()).arg(error.height());
+    QVERIFY2(std::abs(warning.width() - error.width()) <= 2, qPrintable(sizes));
+    QVERIFY2(std::abs(warning.height() - 42) <= 2, qPrintable(sizes));
+    QVERIFY2(std::abs(warning.left() - (64 - 1 - warning.right())) <= 1, qPrintable(sizes));
+    QVERIFY2(std::abs((warning.top() + warning.bottom() + 1) / 2.0 - 32) <= 2, qPrintable(sizes));
+
+    // At 16 px, the base is a whole row of pixels, with none under it.
+    QImageReader reader(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/status-warning.svg"));
+    reader.setScaledSize(QSize(16, 16));
+    const QImage one = reader.read().convertToFormat(QImage::Format_ARGB32);
+    QCOMPARE(one.size(), QSize(16, 16));
+    QVERIFY2(qAlpha(one.pixel(8, 12)) >= 230, qPrintable(QString::number(qAlpha(one.pixel(8, 12)))));
+    QVERIFY2(qAlpha(one.pixel(8, 13)) <= 25, qPrintable(QString::number(qAlpha(one.pixel(8, 13)))));
 }
 
 // The Last.fm slot's three glyphs are one family (the "as" was a grid of

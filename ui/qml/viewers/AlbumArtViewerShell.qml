@@ -44,6 +44,17 @@ Item {
     // Image Details button hides meanwhile, and Escape goes back to the
     // results, as closeViewer does then.
     property bool previewActive: false
+    // Whether the controls show a preview's: while the viewer is open, as
+    // it is; closed, as it closed, while the viewer fades out (Back to
+    // Results showed Image Details on the plate on the fade's first frame).
+    property bool shownPreviewActive: false
+    Binding {
+        target: root
+        property: "shownPreviewActive"
+        value: root.previewActive
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
     // Whether the title strip shows over the whole screen when the pointer
     // moves: the Preferences setting.
     property bool stripEnabled: true
@@ -185,7 +196,7 @@ Item {
     // keyboard focus. Hidden during a preview, whose details always show,
     // it takes no room.
     component InfoButton: Components.ViewerToolButton {
-        visible: !root.previewActive
+        visible: !root.shownPreviewActive
         width: visible ? implicitWidth : 0
         uiPalette: root.uiPalette
         // Checked follows the viewer, which the I key toggles too.

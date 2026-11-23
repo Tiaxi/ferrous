@@ -45,8 +45,8 @@ Item {
     required property var uiPalette
     // Whether the viewer is over the whole screen: the details' text is
     // then a step larger, 1.2 times the window's, as the title strip's
-    // over them, the file's name 16 px, and their column as much wider,
-    // 336 px with its seam.
+    // over them, the file's name 16 px, and their column at least as much
+    // wider, 336 px with its seam, and as wide as a preview's.
     property bool fullscreen: false
     // The colours of the view, dark in both themes.
     readonly property var plot: root.uiPalette.mediaPlot
@@ -74,12 +74,14 @@ Item {
     readonly property int detailsIconSize: root.uiPalette.scaledSize(
         Math.round(Kirigami.Units.iconSizes.small * root.infoScale))
     // The details' heading, the file's name or, during a preview, which
-    // image shows: the body size; during a preview, a step larger, 12 pt
-    // with the default 10 pt font; over the whole screen, the details' size,
-    // as the title strip's track title over it (at 1.35 times, 18 px, it
-    // outranked that title).
-    readonly property real infoTitlePointSize: root.uiPalette.basePointSize
-        * (root.fullscreen ? root.uiPalette.fullscreenTextScale : (root.previewActive ? 1.2 : 1))
+    // image shows: in semibold, 1.15 times the details' text, 11.5 pt with
+    // the default 10 pt font (at their size, it was set off from the rows by
+    // its weight alone); over the whole screen, the details' size, as the
+    // title strip's track title over it (at 1.35 times, 18 px, it outranked
+    // that title).
+    readonly property real infoTitlePointSize: root.fullscreen
+        ? root.uiPalette.basePointSize * root.uiPalette.fullscreenTextScale
+        : root.infoPointSize * 1.15
     // The image's details, from BridgeClient.cachedImageFileDetails: path,
     // fileName, width, height, fileSizeText, format, embeddedCover.
     property var fileInfo: ({})
@@ -102,8 +104,54 @@ Item {
     property bool previewCanApply: false
     property var applyPreview: null
     readonly property alias imageStatus: albumArtImageFull.status
+    // What the viewer shows of a preview and of a comparison: the state
+    // above while the viewer is open; closed, the state it closed with, as
+    // it fades out, as with the art, which stays the image it showed. (Back
+    // to Results ended the preview as the fade began: its heading, Show
+    // Current Album Art and its footer went on the fade's first frame, and
+    // the column narrowed, while the art faded.)
+    property bool shownPreviewActive: false
+    property string shownPreviewLabel: ""
+    property bool shownPreviewHasCandidate: false
+    property bool shownPreviewCanApply: false
+    property bool shownComparisonModeAvailable: false
+    Binding {
+        target: root
+        property: "shownPreviewActive"
+        value: root.previewActive
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownPreviewLabel"
+        value: root.previewLabel
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownPreviewHasCandidate"
+        value: root.previewHasCandidate
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownPreviewCanApply"
+        value: root.previewCanApply
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
+    Binding {
+        target: root
+        property: "shownComparisonModeAvailable"
+        value: root.comparisonModeAvailable
+        when: root.viewerOpen
+        restoreMode: Binding.RestoreNone
+    }
     // Whether the details are headed by which image shows, over its file.
-    readonly property bool headedByImage: root.previewActive && root.previewLabel.length > 0
+    readonly property bool headedByImage: root.shownPreviewActive && root.shownPreviewLabel.length > 0
     // The art's pointer, which the area over it shows too: zoomed, an open
     // hand over the art, and a closed one while it is held to pan; the
     // arrow over the details and over the fitted art.
@@ -144,32 +192,38 @@ Item {
     // during a preview 24 px, so the art never touches their seam (with no
     // gutter, a wide window's art met it). The gutter eases with the
     // details' reveal, as their reserve does.
-    readonly property real artMargin: (root.previewActive ? 24 : 16) * root.infoReveal
+    readonly property real artMargin: (root.shownPreviewActive ? 24 : 16) * root.infoReveal
     readonly property real fitLeft: root.artMargin
     readonly property real fitWidth: Math.max(1, albumArtViewport.width - root.infoReserve - 2 * root.artMargin)
     readonly property real fitCenterX: root.fitLeft + root.fitWidth / 2
     onFitWidthChanged: root.clampPan()
 
-    // A flat button of the details, reached with Tab, with its tooltip.
+    // A button of the details, reached with Tab, with its tooltip.
     // Space presses it rather than playing or pausing, which the viewer's
     // shortcuts would take; keys with modifiers stay the shortcuts'.
     // It is drawn in the plot's colours, as the strip's buttons are: the
-    // theme's icons would be a light theme's on the dark details. It shows
-    // only the hover tint; keyboard focus is the plot's 2 px ring 1 px
-    // outside it, with a 1 px gap in the details' colour.
+    // theme's icons would be a light theme's on the dark details. At rest it
+    // is a box with a 1 px edge, the plates' (flat, a line of text with a
+    // glyph, it read as one more row of the details, not as the column's
+    // action); the hover tint fills it inside that edge. While `current`, it
+    // is drawn as a checked toggle of the strip is. Keyboard focus is the
+    // plot's 2 px ring 1 px outside it, with a 1 px gap in the details'
+    // colour.
     component DetailsButton: Button {
         id: detailsButton
 
         property string toolTipText: ""
+        // Drawn checked: the comparison shows the other image.
+        property bool current: false
         readonly property color contentColor: root.plot.plotText
 
         focusPolicy: Qt.TabFocus
         hoverEnabled: true
         font.pointSize: root.infoPointSize
-        leftPadding: Math.round(8 * root.infoScale)
-        rightPadding: Math.round(8 * root.infoScale)
-        topPadding: Math.round(5 * root.infoScale)
-        bottomPadding: Math.round(5 * root.infoScale)
+        leftPadding: Math.round(6 * root.infoScale)
+        rightPadding: Math.round(6 * root.infoScale)
+        topPadding: Math.round(4 * root.infoScale)
+        bottomPadding: Math.round(4 * root.infoScale)
         spacing: Kirigami.Units.smallSpacing
         icon.width: root.detailsIconSize
         icon.height: root.detailsIconSize
@@ -197,10 +251,14 @@ Item {
                 anchors.centerIn: parent
                 spacing: detailsButton.spacing
 
+                // Its middle on the middle of the text's capitals, as the
+                // footer's chevron and checkmark sit, rather than on the
+                // middle of the text's line, which is lower.
                 Kirigami.Icon {
                     id: detailsButtonIcon
                     objectName: "albumArtDetailsButtonIcon"
-                    anchors.verticalCenter: parent.verticalCenter
+                    y: Math.round(detailsButtonLabel.y + detailsButtonLabel.baselineOffset
+                        - detailsButtonCapMetrics.capHeight / 2 - height / 2)
                     width: detailsButton.icon.width
                     height: detailsButton.icon.height
                     visible: detailsButton.icon.name.length > 0
@@ -221,15 +279,41 @@ Item {
                     color: detailsButton.contentColor
                     elide: Text.ElideRight
                     Accessible.ignored: true
+
+                    FontMetrics {
+                        id: detailsButtonCapMetrics
+                        readonly property real capHeight: detailsButtonCapMetrics.tightBoundingRect("H").height
+                        font: detailsButtonLabel.font
+                    }
                 }
             }
         }
 
         background: Item {
+            // Checked, as a toggle of the strip (ViewerToolButton): its
+            // fill and its edge.
+            Rectangle {
+                objectName: "albumArtDetailsButtonChecked"
+                anchors.fill: parent
+                radius: 3
+                visible: detailsButton.current
+                color: ColorUtils.withAlpha(root.plot.plotText, 0.18)
+            }
+
+            Rectangle {
+                objectName: "albumArtDetailsButtonEdge"
+                anchors.fill: parent
+                radius: 3
+                color: "transparent"
+                border.width: 1
+                border.color: detailsButton.current ? root.plot.segmentEdge : root.plot.plotPlateEdge
+            }
+
             Rectangle {
                 objectName: "albumArtDetailsButtonHover"
                 anchors.fill: parent
-                radius: 3
+                anchors.margins: 1
+                radius: 2
                 color: ColorUtils.withAlpha(root.plot.plotText,
                     detailsButton.down ? 0.18 : 0.12)
                 opacity: detailsButton.enabled && (detailsButton.hovered || detailsButton.down) ? 1 : 0
@@ -609,7 +693,8 @@ Item {
     // window). Over the whole screen it follows its text, 1.2 times larger:
     // 336 px, or 40 characters of that text (at 320 px a folder's path was
     // cut beside the screen's room to spare).
-    // During a preview, it is as wide as its two buttons side by side want
+    // During a preview, and over the whole screen whether a preview or
+    // not, it is as wide as a candidate's two buttons side by side want
     // if two fifths of the view or its own width hold them; otherwise they
     // stack, as a longer translation's do, and it is up to half the view,
     // and wider still, up to three quarters, where one of them alone needs
@@ -634,14 +719,21 @@ Item {
         anchors.bottom: parent.bottom
         readonly property real widestButton: Math.ceil(Math.max(previewBackButton.implicitWidth,
             previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 2 * root.infoPadding
-        readonly property real buttonsRow: !previewApplyButton.visible ? 0
-            : Math.ceil(previewBackButton.implicitWidth + previewButtons.spacing
-                + previewApplyButton.implicitWidth) + 2 * root.infoPadding
-        width: root.previewActive
+        // A candidate's preview's two buttons side by side, with the
+        // padding: what its column is as wide as, in a wide view.
+        readonly property real buttonsSideBySide: Math.ceil(previewBackButton.implicitWidth
+            + previewButtons.spacing + previewApplyButton.implicitWidth) + 2 * root.infoPadding
+        // Over the whole screen, every column is as wide as a candidate's
+        // preview's, so the art rests at the same x in each (the details'
+        // was 22 px narrower than the preview's, and the art sat 12 px
+        // further right in one than in the other).
+        readonly property real buttonsRow: !previewApplyButton.visible && !root.fullscreen ? 0
+            : infoColumn.buttonsSideBySide
+        width: root.shownPreviewActive || root.fullscreen
             ? Math.max(infoColumn.minimumWidth,
                 Math.min(Math.floor(root.width / 2), infoColumn.fortyCharacters),
                 infoColumn.buttonsRow <= Math.floor(root.width * 0.4) ? infoColumn.buttonsRow : 0,
-                Math.min(Math.floor(root.width * 0.75), infoColumn.widestButton))
+                root.shownPreviewActive ? Math.min(Math.floor(root.width * 0.75), infoColumn.widestButton) : 0)
             : Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width * 0.4), infoColumn.fortyCharacters))
 
         // The details' text: the body font, 1.2 times it over the whole
@@ -704,7 +796,7 @@ Item {
                     Layout.bottomMargin: Math.round(Kirigami.Units.smallSpacing * root.infoScale)
                     visible: root.headedByImage
                     textFormat: Text.PlainText
-                    text: root.previewLabel
+                    text: root.shownPreviewLabel
                     font.pointSize: root.infoTitlePointSize
                     font.weight: Font.DemiBold
                     color: root.plot.plotText
@@ -722,10 +814,13 @@ Item {
                                       root.infoLabelColumnMinimum),
                              Math.floor(infoLayout.width * 0.4)))
 
+                // The heading, or the file's name under it, is 12 px clear of
+                // the rows, more over the whole screen (at 8 px it ran into
+                // them).
                 Label {
                     objectName: "albumArtInfoTitle"
                     Layout.fillWidth: true
-                    Layout.bottomMargin: Math.round(8 * root.infoScale)
+                    Layout.bottomMargin: Math.round(12 * root.infoScale)
                     textFormat: Text.PlainText
                     text: root.sourceKind === "embedded"
                         ? I18n.i18nc("@info:title album art stored in the track's file", "Embedded Image")
@@ -936,7 +1031,7 @@ Item {
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                             elide: Text.ElideRight
-                            maximumLineCount: root.previewActive ? 3 : 8
+                            maximumLineCount: root.shownPreviewActive ? 3 : 8
                             font.pointSize: root.infoPointSize
                             color: root.plot.plotText
                             Accessible.name: folderPathLabel.path
@@ -960,22 +1055,23 @@ Item {
                 // From the iTunes artwork dialog: the other image to compare.
                 DetailsButton {
                     objectName: "albumArtCompareButton"
-                    visible: root.comparisonModeAvailable
+                    visible: root.shownComparisonModeAvailable
                     Layout.topMargin: Math.round(12 * root.infoScale)
-                    // Its glyph on the column's text edge (13 px in from it,
-                    // it read as a stray indent): flat, its hover and ring
-                    // reach out into the column's padding, as Copy Path's do.
-                    Layout.leftMargin: -leftPadding
-                    // Its box the size the glyph is drawn at, which a larger
-                    // one centres it in, off that edge (7 px in at 24 pt).
+                    // Its box's left edge on the column's text edge, as the
+                    // rows' text above it.
+                    // Its glyph's box the size the glyph is drawn at, sharp.
                     icon.width: Kirigami.Units.iconSizes.roundedIconSize(root.detailsIconSize)
                     icon.height: Kirigami.Units.iconSizes.roundedIconSize(root.detailsIconSize)
-                    flat: true
-                    // Two views and arrows between them, drawn for 16 px in
-                    // both Breeze themes: a switch (view-refresh said reload,
-                    // exchange-positions is drawn for 22 px and smudged, and
+                    // Checked while the current art shows: the comparison is
+                    // on, and pressing it goes back to the candidate.
+                    current: root.sourceKind !== "itunes"
+                    // Two views side by side, drawn for 16 px in both Breeze
+                    // themes in 1 px lines, as the footer's chevron: the two
+                    // images compared (swap-panels' panes and arrows, in
+                    // 16 px, read as a smudge; view-refresh said reload,
+                    // exchange-positions is drawn for 22 px, and
                     // document-swap's one sheet said replace, as Apply does).
-                    icon.name: "swap-panels"
+                    icon.name: "view-dual-symbolic"
                     text: root.sourceKind === "itunes"
                         ? I18n.i18nc("@action:button", "Show Current Album Art")
                         : I18n.i18nc("@action:button artwork found on iTunes", "Show iTunes Artwork")
@@ -998,7 +1094,7 @@ Item {
         Item {
             id: previewFooter
             objectName: "albumArtPreviewFooter"
-            visible: root.previewActive
+            visible: root.shownPreviewActive
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
@@ -1057,8 +1153,8 @@ Item {
                         ? (previewButtons.height - height) / 2
                         : previewBackButton.height + previewButtons.spacing
                     width: previewButtons.oneRow ? implicitWidth : previewButtons.width
-                    visible: root.previewHasCandidate
-                    enabled: root.previewCanApply
+                    visible: root.shownPreviewHasCandidate
+                    enabled: root.shownPreviewCanApply
                     // Breeze draws the button marked default as such.
                     Accessible.defaultButton: true
                     icon.name: "dialog-ok-apply"

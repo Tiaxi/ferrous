@@ -59,6 +59,11 @@ QtObject {
             root.albumArtPreviewClosed()
             return
         }
+        root.closeAlbumArtViewerNow()
+    }
+
+    // Closes the album art viewer, whether or not it shows a preview.
+    function closeAlbumArtViewerNow() {
         root.albumArtViewerOpen = false
         root.albumArtShowsAppliedCover = false
         root.comparisonModeAvailable = false
@@ -147,12 +152,17 @@ QtObject {
         if (!root.albumArtPreviewActive) {
             return
         }
-        root.albumArtPreviewActive = false
         const coverSource = root.uiBridge.currentTrackCoverPath || ""
         if (!applied && (!root.albumArtOpenBeforePreview || coverSource.length === 0)) {
-            root.closeAlbumArtViewer()
+            // The viewer closes while it still shows the preview, and ends
+            // it after: it fades out as it was, as it does with its art (the
+            // preview ended first, and the viewer's heading, Show Current
+            // Album Art and footer went on the fade's first frame).
+            root.closeAlbumArtViewerNow()
+            root.albumArtPreviewActive = false
             return
         }
+        root.albumArtPreviewActive = false
         const showsApplied = applied && (appliedSource || "").length > 0
         root.albumArtViewerSource = showsApplied ? appliedSource : coverSource
         root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(root.albumArtViewerSource)

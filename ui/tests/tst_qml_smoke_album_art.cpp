@@ -35,6 +35,8 @@ private slots:
     void itunesPreviewButtonsTakeSpaceFromThePlaybackShortcut();
     void itunesPreviewButtonsStayWholeInTheDetails_data();
     void itunesPreviewButtonsStayWholeInTheDetails();
+    void albumArtRestsAtOneXOverTheWholeScreen();
+    void itunesBackToResultsKeepsThePreviewThroughTheFade();
     void itunesPreviewCannotApplyACandidateThatIsNotReady();
     void itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybackMovesOn();
     void itunesPreviewApplyShowsTheAppliedCoverAfterPlaybackMovesOn();
@@ -523,6 +525,22 @@ qreal infoColumnWidth(bool fullscreen, qreal viewWidth) {
     return std::round(280 * infoColumnWidthScale(fullscreen, viewWidth)) - 1;
 }
 
+// The details column's width, less its seam, in a view `viewWidth` wide,
+// out of a preview: in the window, infoColumnWidth's; over the whole screen,
+// the width of a candidate's preview's column, so the art rests at the same
+// x in both: as wide as its two buttons side by side, `column`'s, if two
+// fifths of the view hold them, and never under 335 px or 40 characters of
+// the details' text, up to half the view.
+qreal detailsColumnWidth(QQuickItem *column, bool fullscreen, qreal viewWidth) {
+    if (!fullscreen) {
+        return infoColumnWidth(false, viewWidth);
+    }
+    const qreal sideBySide = column->property("buttonsSideBySide").toReal();
+    return qMax(qMax(infoColumnWidth(true, viewWidth),
+                     qMin(std::floor(viewWidth / 2), column->property("fortyCharacters").toReal())),
+                sideBySide <= std::floor(viewWidth * 0.4) ? sideBySide : 0.0);
+}
+
 // The details' column's 40 characters, less its seam: of the body font in
 // a window, as much wider as the column in a wide one; over the whole
 // screen, of the details' text, 1.2 times the body font.
@@ -847,11 +865,11 @@ void checkArtFitsLeftOfTheDetails(AlbumArtWindow &ui, int viewerMode) {
     QCOMPARE(columnRect.bottom(), viewRect.bottom());
     QCOMPARE(seamRect.right(), columnRect.left());
     // 280 px with its seam, 320 px in a window 1280 px wide or more, a
-    // quarter of one between, and 336 px over the whole screen, for its
-    // text 1.2 times larger.
-    QCOMPARE(columnRect.width(), infoColumnWidth(viewerMode == 1, viewRect.width()));
+    // quarter of one between, and over the whole screen 336 px or more,
+    // for its text 1.2 times larger, as wide as a preview's column.
+    QCOMPARE(columnRect.width(), detailsColumnWidth(column, viewerMode == 1, viewRect.width()));
     if (viewerMode == 1) {
-        QCOMPARE(columnRect.width(), 335.0);
+        QVERIFY2(columnRect.width() >= 335.0, qPrintable(QString::number(columnRect.width())));
     } else if (viewRect.width() >= 1280) {
         QCOMPARE(columnRect.width(), 319.0);
     } else if (viewRect.width() <= 1120) {
@@ -1202,7 +1220,7 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     const QRectF viewRect(QPointF(0, 0), window->size());
     QCOMPARE(sceneRectOf(viewport), viewRect);
     const auto columnAtTheEdge = [&](bool fullscreen) {
-        const qreal width = infoColumnWidth(fullscreen, viewRect.width());
+        const qreal width = detailsColumnWidth(column, fullscreen, viewRect.width());
         return QRectF(viewRect.right() - width, viewRect.top(), width, viewRect.height());
     };
     QTRY_COMPARE(sceneRectOf(column), columnAtTheEdge(false));
@@ -1242,9 +1260,11 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     const QString size = QLocale().toString(1400.0, 'f', 0);
     QCOMPARE(values, (QStringList{QStringLiteral("%1 × %1 px").arg(size), QStringLiteral("412 KiB"),
                                   QStringLiteral("JPEG"), QStringLiteral("Folder image")}));
-    // The values at the body size, as the file's name, and the labels at
-    // the small size, on the app's type scale (albumArtDetailsAreOnTheTypeScale).
-    const qreal bodySize = qvariant_cast<QFont>(title->property("font")).pointSizeF();
+    // The values at the body size, the file's name 1.15 times it, and the
+    // labels at the small size, on the app's type scale
+    // (albumArtDetailsAreOnTheTypeScale).
+    const qreal bodySize = palette->property("basePointSize").toReal();
+    QCOMPARE(qvariant_cast<QFont>(title->property("font")).pointSizeF(), bodySize * 1.15);
     for (const QString &name : {QStringLiteral("albumArtInfoValue"), QStringLiteral("albumArtFolderPath")}) {
         for (QQuickItem *text : visibleItemsNamed(column, name)) {
             QCOMPARE(qvariant_cast<QFont>(text->property("font")).pointSizeF(), bodySize);
@@ -1428,7 +1448,8 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     const QStringList lines = linesOf(path->property("text").toString());
     QTRY_COMPARE(path->property("lineCount").toInt(), lines.size());
     QVERIFY(!path->property("elided").toBool());
-    QVERIFY2(lines.size() == 3 && lines.last().endsWith(QStringLiteral("2005 - Small Hours Deluxe")),
+    // On two lines or more (three in a column 335 px wide).
+    QVERIFY2(lines.size() >= 2 && lines.last().endsWith(QStringLiteral("2005 - Small Hours Deluxe")),
              qPrintable(lines.join(QLatin1Char('|'))));
     for (qsizetype i = 0; i + 1 < lines.size(); ++i) {
         QVERIFY2(lines.at(i).endsWith(QLatin1Char('/')), qPrintable(lines.join(QLatin1Char('|'))));
@@ -1865,7 +1886,9 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnTheTypeScale() {
     QQuickItem *previewLabel = visibleItemNamed(window, QStringLiteral("albumArtPreviewLabel"));
     QVERIFY(previewLabel != nullptr);
     const auto headingFont = qvariant_cast<QFont>(previewLabel->property("font"));
-    QCOMPARE(headingFont.pointSizeF(), palette->property("basePointSize").toReal() * 1.2);
+    // A step larger than the details' text in the window, at their size
+    // over the whole screen, as the title strip's track title.
+    QCOMPARE(headingFont.pointSizeF(), palette->property("basePointSize").toReal() * (fullscreen ? 1.2 : 1.15));
     QCOMPARE(headingFont.weight(), QFont::DemiBold);
     QCOMPARE(qvariant_cast<QFont>(title->property("font")).pointSizeF(), small);
     QCOMPARE(qvariant_cast<QFont>(title->property("font")).weight(), QFont::Normal);
@@ -2279,13 +2302,13 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     QCOMPARE(rectOf(label).left() - columnRect.left(), padding);
     QCOMPARE(columnRect.right() - rectOf(apply).right(), padding);
     // The heading, which image shows, a step larger than the body size:
-    // 12 pt to its 10; over the whole screen, the details' 16 px, as the
+    // 11.5 pt to its 10; over the whole screen, the details' 16 px, as the
     // title strip's track title over it (at 18 px it outranked the title).
     // The file's name is secondary under it (it headed both images' details,
     // often "cover.jpg" for either).
     const qreal bodyPointSize = value->property("font").value<QFont>().pointSizeF() / infoScale;
     const auto headingFont = label->property("font").value<QFont>();
-    QVERIFY2(qAbs(headingFont.pointSizeF() - bodyPointSize * 1.2) < 0.001, at.constData());
+    QVERIFY2(qAbs(headingFont.pointSizeF() - bodyPointSize * (fullscreen ? 1.2 : 1.15)) < 0.001, at.constData());
     QCOMPARE(headingFont.weight(), QFont::DemiBold);
     QVERIFY2(title->property("font").value<QFont>().pointSizeF() < bodyPointSize * infoScale, at.constData());
     QCOMPARE(title->property("font").value<QFont>().weight(), QFont::Normal);
@@ -4360,6 +4383,100 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStayWholeInTheDetails() {
     dropSizeHintMessages();
 }
 
+// Back to Results from a preview the viewer opened for: the viewer fades
+// out as it was, its heading, Show Current Album Art and its footer with
+// Apply in place, its column as wide, and no Image Details on its plate, as
+// its art stays, in every frame of the fade. They went on its first frame,
+// the column narrowed and Image Details showed, while the art faded. What
+// closing does is the same: the results show again, and the viewer closes.
+void AlbumArtSmokeTest::itunesBackToResultsKeepsThePreviewThroughTheFade() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
+    const QVariantList fixture = itunesArtworkFixture(dir, 3);
+    QCOMPARE(fixture.size(), 3);
+    const QVariantMap target{
+        {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
+        {QStringLiteral("album"), QStringLiteral("Small Hours")},
+        {QStringLiteral("coverPath"), coverUrl},
+    };
+    ItunesWindow ui(coverUrl);
+    QVERIFY2(ui.loaded(), "Main.qml failed to show");
+    ui.bridge->setProperty("viewerFullscreenMode", 0);
+    QQuickWindow *window = ui.window;
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QVERIFY(openItunesArtworkDialog(window, ui.dialog, ui.fake, fixture, target));
+    QVERIFY(QMetaObject::invokeMethod(ui.dialog, "requestSuggestionPreview", Q_ARG(QVariant, 1)));
+    QTRY_VERIFY(ui.viewer->property("albumArtPreviewActive").toBool() && !ui.dialog->property("visible").toBool());
+    QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton")) != nullptr
+                && visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"))->isEnabled());
+    QQuickItem *column = itemNamed(ui.surface, QStringLiteral("albumArtInfoColumn"));
+    QQuickItem *image = itemNamed(ui.surface, QStringLiteral("albumArtImage"));
+    QQuickItem *info = window->contentItem()->window()->findChild<QQuickItem *>(QStringLiteral("albumArtPopupInfoButton"));
+    QVERIFY(column != nullptr && image != nullptr && info != nullptr);
+    QTRY_VERIFY(popupsSettled() && ui.surface->property("infoReveal").toReal() >= 1.0);
+    QVERIFY(!info->isVisible());
+    const QRectF columnRect = sceneRectOf(column);
+    const QRectF artRect = paintedRectOf(image);
+    const QString source = image->property("source").toString();
+
+    // What the preview shows, in a frame of its fade.
+    const auto showsThePreview = [&](int frame) {
+        const QString at = QStringLiteral("frame %1, at opacity %2").arg(frame).arg(popup->property("opacity").toReal());
+        QQuickItem *heading = visibleItemNamed(window, QStringLiteral("albumArtPreviewLabel"));
+        QQuickItem *compare = visibleItemNamed(window, QStringLiteral("albumArtCompareButton"));
+        QQuickItem *apply = visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"));
+        QVERIFY2(heading != nullptr && heading->property("text").toString() == QStringLiteral("iTunes Artwork"),
+                 qPrintable(at));
+        QVERIFY2(compare != nullptr && compare->property("text").toString() == QStringLiteral("Show Current Album Art"),
+                 qPrintable(at));
+        QVERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPreviewFooter")) != nullptr
+                     && visibleItemNamed(window, QStringLiteral("albumArtPreviewBackButton")) != nullptr
+                     && apply != nullptr && apply->isEnabled(),
+                 qPrintable(at));
+        QVERIFY2(sceneRectOf(column) == columnRect, qPrintable(at));
+        QVERIFY2(paintedRectOf(image) == artRect && image->property("source").toString() == source, qPrintable(at));
+        QVERIFY2(!info->isVisible(), qPrintable(at));
+    };
+
+    QVERIFY(clickPreviewButton(window, QStringLiteral("albumArtPreviewBackButton")));
+    // Closing does as it did: the preview ends, the viewer closes, and the
+    // results show again.
+    QVERIFY(!ui.viewer->property("albumArtPreviewActive").toBool());
+    QVERIFY(!ui.viewer->property("albumArtViewerOpen").toBool());
+    // Each frame while the viewer still shows, fading out: the first at
+    // least. How many follow depends on the animations' clock, which the
+    // tests before this one move on.
+    int frames = 0;
+    for (; popup->property("visible").toBool() && frames < 200; ++frames) {
+        showsThePreview(frames);
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        QCoreApplication::processEvents();
+    }
+    QVERIFY(frames >= 1);
+    QVERIFY(!popup->property("visible").toBool());
+    QVERIFY(!ui.surface->isVisible());
+    QTRY_VERIFY(ui.dialog->property("opened").toBool());
+    QVERIFY(!ui.dialog->property("previewShown").toBool());
+
+    // The viewer opened again shows the current art, with no preview's.
+    QVERIFY(QMetaObject::invokeMethod(ui.dialog, "reject"));
+    QTRY_VERIFY(!ui.dialog->property("visible").toBool());
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(QMetaObject::invokeMethod(ui.viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(ui.viewer->property("albumArtViewerOpen").toBool());
+    QTRY_VERIFY(popupsSettled() && ui.surface->isVisible());
+    QVERIFY(visibleItemNamed(window, QStringLiteral("albumArtPreviewLabel")) == nullptr);
+    QVERIFY(visibleItemNamed(window, QStringLiteral("albumArtPreviewFooter")) == nullptr);
+    QVERIFY(info->isVisible());
+    QVERIFY(QMetaObject::invokeMethod(ui.viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!ui.viewer->property("albumArtViewerOpen").toBool());
+    QTRY_VERIFY(popupsSettled());
+}
+
 void AlbumArtSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -4870,7 +4987,7 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
     QCOMPARE(colorOf(backing, "color"), colorOf(plot, "plotStrip"));
     QCOMPARE(colorOf(plot, "plotStrip"), qRgb(0x12, 0x12, 0x12));
     const QRgb strip = colorOf(backing, "color");
-    QTRY_COMPARE(column->width(), infoColumnWidth(fullscreen, surface->width()));
+    QTRY_COMPARE(column->width(), detailsColumnWidth(column, fullscreen, surface->width()));
     QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
     QVERIFY(image != nullptr);
     QTRY_VERIFY(paintedRectOf(image).left() > 16);
@@ -4909,10 +5026,21 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
     QQuickItem *value = visibleItemsNamed(column, QStringLiteral("albumArtInfoValue")).value(0);
     QVERIFY(value != nullptr);
     QCOMPARE(qvariant_cast<QFont>(value->property("font")).pointSizeF(), body * (fullscreen ? 1.2 : 1.0));
-    QCOMPARE(qvariant_cast<QFont>(title->property("font")).pointSizeF(), body * (fullscreen ? 1.2 : 1.0));
+    // The file's name heads them in semibold, 1.15 times their size in the
+    // window (at their size, it was set off from the rows by its weight
+    // alone), 12 px clear of the first row's inset, more over the whole
+    // screen (at 8 px it ran into the rows).
+    QCOMPARE(qvariant_cast<QFont>(title->property("font")).pointSizeF(), body * (fullscreen ? 1.2 : 1.15));
+    QCOMPARE(qvariant_cast<QFont>(title->property("font")).weight(), QFont::DemiBold);
     if (fullscreen && qFuzzyCompare(body, 10.0)) {
         QCOMPARE(QFontInfo(qvariant_cast<QFont>(value->property("font"))).pixelSize(), 16);
         QCOMPARE(QFontInfo(qvariant_cast<QFont>(title->property("font"))).pixelSize(), 16);
+    }
+    {
+        QQuickItem *firstRow = visibleItemsNamed(column, QStringLiteral("albumArtInfoRow")).value(0);
+        QVERIFY(firstRow != nullptr);
+        QCOMPARE(sceneRectOf(firstRow).top() - sceneRectOf(title).bottom(),
+                 std::round(12 * (fullscreen ? 1.2 : 1.0)) + surface->property("infoRowTopMargin").toReal());
     }
     QCOMPARE(sceneRectOf(title).left() - sceneRectOf(column).left(), surface->property("infoPadding").toReal());
 
@@ -4952,24 +5080,121 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
                             .arg(sceneRectOf(compare).left()).arg(sceneRectOf(compare).right())
                             .arg(sceneRectOf(compareLabel).left()).arg(sceneRectOf(compareLabel).right())));
     QVERIFY(compare->width() >= compareLabel->implicitWidth() + compareGlyph->width());
-    // It starts on the column's text edge, its glyph's box as large as the
-    // glyph is drawn (13 px in from the edge, it read as a stray indent),
-    // and the glyph says switch, not reload.
-    QVERIFY2(std::abs(sceneRectOf(compareGlyph).left() - sceneRectOf(title).left()) <= 0.5,
-             qPrintable(QStringLiteral("the glyph at %1, the text at %2")
-                            .arg(sceneRectOf(compareGlyph).left()).arg(sceneRectOf(title).left())));
+    // A button at rest, not a line of the details (flat, it read as one
+    // more row of them): its box starts on the column's text edge, 6 px
+    // and 4 px of padding around its glyph and label, more over the whole
+    // screen, inside a 1 px edge in the plates' colour, radius 3. Its
+    // glyph's box is as large as the glyph is drawn, and the glyph, two
+    // views side by side, sits on the middle of the label's capitals.
+    const qreal infoScale = fullscreen ? 1.2 : 1.0;
+    QVERIFY2(std::abs(sceneRectOf(compare).left() - sceneRectOf(title).left()) <= 0.5,
+             qPrintable(QStringLiteral("the button at %1, the text at %2")
+                            .arg(sceneRectOf(compare).left()).arg(sceneRectOf(title).left())));
+    QCOMPARE(compare->property("leftPadding").toReal(), std::round(6 * infoScale));
+    QCOMPARE(compare->property("rightPadding").toReal(), std::round(6 * infoScale));
+    QCOMPARE(compare->property("topPadding").toReal(), std::round(4 * infoScale));
+    QCOMPARE(compare->property("bottomPadding").toReal(), std::round(4 * infoScale));
+    QVERIFY2(std::abs(sceneRectOf(compareGlyph).left() - sceneRectOf(compare).left() - std::round(6 * infoScale)) <= 0.5,
+             qPrintable(QStringLiteral("the glyph at %1, the button at %2")
+                            .arg(sceneRectOf(compareGlyph).left()).arg(sceneRectOf(compare).left())));
     QCOMPARE(compareGlyph->property("paintedWidth").toReal(), compareGlyph->width());
+    {
+        const QFont labelFont = qvariant_cast<QFont>(compareLabel->property("font"));
+        const qreal capHeight = QFontMetricsF(labelFont).tightBoundingRect(QStringLiteral("H")).height();
+        const qreal capsMiddle = sceneRectOf(compareLabel).top()
+            + compareLabel->property("baselineOffset").toReal() - capHeight / 2;
+        // On whole pixels, within one of it.
+        QVERIFY2(std::abs(sceneRectOf(compareGlyph).center().y() - capsMiddle) <= 1.0,
+                 qPrintable(QStringLiteral("the glyph's middle at %1, the capitals' at %2")
+                                .arg(sceneRectOf(compareGlyph).center().y()).arg(capsMiddle)));
+    }
     QCOMPARE(QQmlExpression(qmlContext(compare), compare, QStringLiteral("icon.name")).evaluate().toString(),
-             QStringLiteral("swap-panels"));
+             QStringLiteral("view-dual-symbolic"));
     for (const QString &theme : {QStringLiteral("breeze"), QStringLiteral("breeze-dark")}) {
         const QString file = QStandardPaths::locate(
             QStandardPaths::GenericDataLocation,
-            QStringLiteral("icons/%1/actions/16/swap-panels.svg").arg(theme));
-        QVERIFY2(!file.isEmpty(), qPrintable(QStringLiteral("%1 draws no 16 px swap-panels").arg(theme)));
+            QStringLiteral("icons/%1/actions/16/view-dual-symbolic.svg").arg(theme));
+        QVERIFY2(!file.isEmpty(), qPrintable(QStringLiteral("%1 draws no 16 px view-dual-symbolic").arg(theme)));
     }
+    QQuickItem *edge = itemNamed(compare, QStringLiteral("albumArtDetailsButtonEdge"));
+    QQuickItem *checkedFill = itemNamed(compare, QStringLiteral("albumArtDetailsButtonChecked"));
+    QQuickItem *hoverFill = itemNamed(compare, QStringLiteral("albumArtDetailsButtonHover"));
+    QVERIFY(edge != nullptr && checkedFill != nullptr && hoverFill != nullptr);
+    QCOMPARE(sceneRectOf(edge), sceneRectOf(compare));
+    QCOMPARE(edge->property("radius").toReal(), 3.0);
+    QCOMPARE(qvariant_cast<QObject *>(edge->property("border"))->property("width").toInt(), 1);
+    // The hover tint inside the edge, not over it.
+    QCOMPARE(sceneRectOf(hoverFill), sceneRectOf(compare).adjusted(1, 1, -1, -1));
+    // Drawn checked, as a toggle of the strip, while the current art shows
+    // to compare: "Show iTunes Artwork"; at rest while the candidate does.
+    QCOMPARE(compare->property("text").toString(), QStringLiteral("Show iTunes Artwork"));
+    QVERIFY(checkedFill->isVisible());
+    QCOMPARE(colorOf(checkedFill, "color"), qRgba(0xec, 0xec, 0xec, qRound(0.18 * 255)));
+    QCOMPARE(borderColorOf(edge), colorOf(plot, "segmentEdge"));
+    surface->setProperty("sourceKind", QStringLiteral("itunes"));
+    QCOMPARE(compare->property("text").toString(), QStringLiteral("Show Current Album Art"));
+    QVERIFY(!checkedFill->isVisible());
+    QCOMPARE(borderColorOf(edge), colorOf(plot, "plotPlateEdge"));
+    surface->setProperty("sourceKind", QStringLiteral("folder"));
     QQuickItem *gap = itemNamed(compare, QStringLiteral("albumArtDetailsButtonFocusGap"));
     QVERIFY(gap != nullptr && gap->isVisible());
     QCOMPARE(borderColorOf(gap), strip);
+}
+
+// Over the whole screen, the details' column is as wide as a preview's, so
+// the art rests at the same x beside either: on a 2000 px screen the
+// details' column was 22 px narrower than the preview's, and the art sat
+// 12 px further right in one than in the other. A preview of the current
+// art alone, with no Apply, has that width too.
+void AlbumArtSmokeTest::albumArtRestsAtOneXOverTheWholeScreen() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 300, 300);
+    QVERIFY(!coverPath.isEmpty());
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(
+        createThemedDetailsSurfaceWindow(engine, coverPath, kDetailsBreezeDark, true, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    window->resize(2000, 1400);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    auto *surface = qvariant_cast<QQuickItem *>(root->property("surface"));
+    QVERIFY(surface != nullptr);
+    surface->setProperty("fileInfo", QVariantMap{
+        {QStringLiteral("path"), QStringLiteral("/music/Small Hours/cover.jpg")},
+        {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
+        {QStringLiteral("width"), 1400},
+        {QStringLiteral("height"), 1400},
+    });
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
+    QVERIFY(column != nullptr && image != nullptr);
+    QTRY_COMPARE(surface->width(), 2000.0);
+    QTRY_COMPARE(surface->property("imageStatus").toInt(), 1);
+    QTRY_COMPARE(paintedRectOf(image).height(), 1400.0);
+    const QRectF detailsColumn = sceneRectOf(column);
+    const QRectF detailsArt = paintedRectOf(image);
+
+    for (const bool candidate : {true, false}) {
+        surface->setProperty("previewLabel", QStringLiteral("iTunes Artwork"));
+        surface->setProperty("previewHasCandidate", candidate);
+        surface->setProperty("previewActive", true);
+        QTRY_VERIFY(itemNamed(surface, QStringLiteral("albumArtPreviewFooter"))->isVisible());
+        QCoreApplication::processEvents();
+        const QString at = QStringLiteral("candidate %1: details %2 wide, art at %3; preview %4 wide, art at %5")
+                               .arg(candidate).arg(detailsColumn.width()).arg(detailsArt.left())
+                               .arg(sceneRectOf(column).width()).arg(paintedRectOf(image).left());
+        QVERIFY2(detailsColumn == sceneRectOf(column), qPrintable(at));
+        QVERIFY2(detailsArt == paintedRectOf(image), qPrintable(at));
+        // As wide as a candidate's two buttons side by side, wider than
+        // 40 characters of the details' text here.
+        QVERIFY2(detailsColumn.width() == column->property("buttonsSideBySide").toReal()
+                     && detailsColumn.width() > 335, qPrintable(at));
+        surface->setProperty("previewActive", false);
+        QTRY_VERIFY(!itemNamed(surface, QStringLiteral("albumArtPreviewFooter"))->isVisible());
+    }
 }
 
 void AlbumArtSmokeTest::albumArtCopyPathIsOnTheFoldersLineUnderClose_data() {
