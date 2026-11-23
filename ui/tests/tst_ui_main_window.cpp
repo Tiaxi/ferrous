@@ -1151,6 +1151,8 @@ private slots:
     void drawsOffscreenUnlessAPlatformIsChosen();
     void seekTimeStaysOverItsLine_data();
     void seekTimeStaysOverItsLine();
+    void seekTimeBoxIsCrispWithoutAShadow_data();
+    void seekTimeBoxIsCrispWithoutAShadow();
     void transportRowSitsBalancedInItsBand_data();
     void transportRowSitsBalancedInItsBand();
     void contentIsOneSheetWithFourSeams();
@@ -1506,6 +1508,94 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
             QVERIFY2(!drawn.intersects(title), qPrintable(where + QStringLiteral(", a title ") + describeRect(title)));
         }
     }
+}
+
+void UiMainWindowTest::seekTimeBoxIsCrispWithoutAShadow_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("light") << false;
+    QTest::newRow("dark") << true;
+}
+
+// The seek bar's time box is one style in both themes: the tooltip's fill
+// with a crisp 1 px edge, and no shadow around it (light's soft shadow
+// spread into the gap between the box and the waveform, and its edge was
+// lost on the Header chrome, so it read as a white card where the dark
+// box read as a framed readout). The edge stands out as much on the
+// chrome as on the fill.
+void UiMainWindowTest::seekTimeBoxIsCrispWithoutAShadow() {
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
+    MainWindowFixture fixture(sized(1600, 1000));
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("durationText", QStringLiteral("03:49"));
+    bridge->setProperty("durationSeconds", 229.0);
+    playTrack(bridge);
+    QQuickItem *transport = named(window, "transportBar");
+    QQuickItem *seek = named(window, "seekSlider");
+    QObject *tip = window->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(transport && seek && tip);
+    QTRY_VERIFY(seek->isEnabled());
+    const QRectF bar = sceneRect(seek);
+    // Into the bar from under the band, as a pointer comes.
+    QTest::mouseMove(window, QPointF(bar.left() + bar.width() * 0.4, sceneRect(transport).bottom() + 40).toPoint());
+    QTest::mouseMove(window, QPointF(bar.left() + bar.width() * 0.4, bar.center().y()).toPoint());
+    QTRY_VERIFY(tip->property("opened").toBool());
+    QTRY_COMPARE(tip->property("opacity").toReal(), 1.0);
+    auto *box = tip->property("background").value<QQuickItem *>();
+    QVERIFY(box != nullptr);
+    // No shadow at all: the style's box, a Kirigami ShadowedRectangle, casts
+    // one that an offscreen grab doesn't draw.
+    QVERIFY2(!box->property("shadow").isValid(), box->metaObject()->className());
+    const QRectF drawnBox = sceneRect(box);
+
+    const Drawn drawn(window);
+    const QColor chrome = transport->property("chromeColor").value<QColor>();
+    const QColor fill = transport->property("laneBoxFill").value<QColor>();
+    // Square on the band: the chrome all round it, 1 px off its edge, in
+    // the gap over the bar and 2 px further down, beside it, and over it.
+    const qreal middle = drawnBox.center().x();
+    const QList<QPointF> around{
+        {middle, drawnBox.bottom() + 0.5},        {middle, drawnBox.bottom() + 2.5},
+        {middle - 20, drawnBox.bottom() + 1.5},   {drawnBox.left() - 1.5, drawnBox.center().y()},
+        {drawnBox.right() + 1.5, drawnBox.center().y()}, {middle, drawnBox.top() - 0.5}};
+    for (const QPointF &point : around) {
+        if (point.y() >= bar.top() || point.y() < sceneRect(transport).top()) {
+            continue;
+        }
+        QVERIFY2(channelDistance(drawn.at(point), chrome) <= 2,
+                 qPrintable(QStringLiteral("at %1, %2: %3, the chrome %4, the box %5")
+                                .arg(point.x()).arg(point.y())
+                                .arg(drawn.at(point).name(), chrome.name(), describeRect(drawnBox))));
+    }
+    // A 1 px edge, the same at the top and the bottom, then the fill.
+    const QColor top = drawn.at(middle, drawnBox.top() + 0.5);
+    const QColor bottom = drawn.at(middle, drawnBox.bottom() - 0.5);
+    QVERIFY2(channelDistance(top, bottom) <= 2, qPrintable(top.name() + QStringLiteral(" and ") + bottom.name()));
+    QVERIFY2(channelDistance(drawn.at(middle, drawnBox.top() + 1.5), fill) <= 2,
+             qPrintable(drawn.at(middle, drawnBox.top() + 1.5).name() + QStringLiteral(", the fill ") + fill.name()));
+    // At least 1.8:1 on both the fill and the chrome, as the style's edge
+    // is in Breeze Dark, whose fill is the chrome (in Breeze Light it was
+    // 1.5:1 on the chrome, and soft without the shadow).
+    const double least = transport->property("laneBoxEdgeContrast").toDouble();
+    QCOMPARE(least, 1.8);
+    const double onFill = contrastRatio(top, fill);
+    const double onChrome = contrastRatio(top, chrome);
+    QVERIFY2(onFill >= least - 0.05 && onChrome >= least - 0.05,
+             qPrintable(QStringLiteral("the edge %1: %2:1 on the fill %3, %4:1 on the chrome %5")
+                            .arg(top.name()).arg(onFill).arg(fill.name()).arg(onChrome).arg(chrome.name())));
+
+    // The buttons' tooltips in the same lane have the same box.
+    QQuickItem *playPause = named(window, "transportButton_playPause");
+    QVERIFY(playPause != nullptr);
+    QObject *buttonTip = playPause->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+    QVERIFY(buttonTip != nullptr);
+    auto *buttonBox = buttonTip->property("background").value<QQuickItem *>();
+    QVERIFY(buttonBox != nullptr);
+    QCOMPARE(buttonBox->objectName(), box->objectName());
+    QVERIFY(!buttonBox->property("shadow").isValid());
 }
 
 void UiMainWindowTest::transportRowSitsBalancedInItsBand_data() {
