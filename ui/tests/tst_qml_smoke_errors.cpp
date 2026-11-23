@@ -1145,6 +1145,7 @@ void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
         const char *windowName;
         const char *name;
         const char *closeName;
+        bool strip = true;
     };
     const QList<Viewer> viewers{
         {"openSpectrogramViewer", "spectrogramViewerOpen", 0, nullptr, "spectrogram popup",
@@ -1155,10 +1156,15 @@ void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
          "spectrogram fullscreen", "spectrogramFullscreenCloseButton"},
         {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen", 1, "albumArtFullscreenWindow",
          "album art fullscreen", "albumArtFullscreenCloseButton"},
+        // With the title strip turned off, its corner plate carries the
+        // button (it was never given the errors).
+        {"openSpectrogramViewer", "spectrogramViewerOpen", 1, "spectrogramFullscreenWindow",
+         "spectrogram fullscreen, strip off", "spectrogramFullscreenCornerCloseButton", false},
     };
     for (const Viewer &shown : viewers) {
         const QByteArray name(shown.name);
         bridge->setProperty("viewerFullscreenMode", shown.fullscreenMode);
+        bridge->setProperty("showFullscreenTitleStrip", shown.strip);
         QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
         settle();
         QTRY_VERIFY(viewer->property(shown.openProperty).toBool());

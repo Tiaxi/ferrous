@@ -548,6 +548,7 @@ Item {
                         controlsVisible: root.fullscreenControlsVisible
                         controlsLevel: root.fullscreenControlsLevel
                         pointerActivity: root.noteFullscreenPointerActivity
+                        errorController: root.errorController
                         closeViewer: root.closeViewer
                         zoomLevel: root.zoomLevel
                         resetView: root.resetZoom
