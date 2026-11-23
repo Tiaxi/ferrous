@@ -32,6 +32,13 @@ ToolBar {
     // The action Space triggers, whose shortcut the Play/Pause tooltip
     // names: Play and Pause have none of their own.
     property var playPauseAction: null
+    // Whether each button can act now: off, it shows Breeze's disabled
+    // state, as the Playback menu's item of its action does, while the
+    // action stays on for the shortcuts.
+    property bool playPauseCanAct: true
+    property bool stopCanAct: true
+    property bool previousCanAct: true
+    property bool nextCanAct: true
     required property bool volumeMuted
     // The volume a mute put aside, which the slider keeps showing while
     // muted.
@@ -385,6 +392,30 @@ ToolBar {
         readonly property color glyphColor: transportButton.enabled
             ? root.uiPalette.text
             : Kirigami.Theme.disabledTextColor
+        // Whether it can act now. Off, the button is, and its action stays
+        // on. Not a binding on `enabled`, which the button sets from its
+        // action as it takes the action and at each change of the action's,
+        // after the bindings that read them have run (ConditionalMenuItem):
+        // the button follows both after it has.
+        property bool canAct: true
+        property var followedAction: null
+        function followStates() {
+            transportButton.enabled = transportButton.canAct
+                && !!transportButton.action && transportButton.action.enabled
+        }
+        function followAction() {
+            if (transportButton.followedAction) {
+                transportButton.followedAction.enabledChanged.disconnect(transportButton.followStates)
+            }
+            transportButton.followedAction = transportButton.action
+            if (transportButton.followedAction) {
+                transportButton.followedAction.enabledChanged.connect(transportButton.followStates)
+            }
+            transportButton.followStates()
+        }
+        onCanActChanged: transportButton.followStates()
+        onActionChanged: transportButton.followAction()
+        Component.onCompleted: transportButton.followAction()
 
         objectName: "transportButton_" + name
         implicitWidth: root.buttonSize
@@ -439,6 +470,7 @@ ToolBar {
 
             TransportButton {
                 name: "previous"
+                canAct: root.previousCanAct
                 glyphSource: Qt.resolvedUrl("../assets/transport-previous.svg")
                 action: root.previousAction
             }
@@ -453,6 +485,7 @@ ToolBar {
             TransportButton {
                 id: playPauseButton
                 name: "playPause"
+                canAct: root.playPauseCanAct
                 // A step above its neighbours, within the same button.
                 glyphSize: root.playPauseGlyphSize
                 action: root.playing ? root.pauseAction : root.playAction
@@ -528,12 +561,14 @@ ToolBar {
 
             TransportButton {
                 name: "stop"
+                canAct: root.stopCanAct
                 glyphSource: Qt.resolvedUrl("../assets/transport-stop.svg")
                 action: root.stopAction
             }
 
             TransportButton {
                 name: "next"
+                canAct: root.nextCanAct
                 glyphSource: Qt.resolvedUrl("../assets/transport-next.svg")
                 action: root.nextAction
             }

@@ -490,6 +490,7 @@ private slots:
     void playPauseIsOneButtonThatShowsTheState();
     void playPauseGlyphsCrossFadeWithoutABlink();
     void transportToolTipsNameTheShortcut();
+    void transportButtonsAreOffWhereTheyCannotAct();
     void seekWaveformMeetsItsContrastAsDrawn_data();
     void seekWaveformMeetsItsContrastAsDrawn();
     void seekViewBandMarksTheViewBehindTheWaveform_data();
@@ -855,6 +856,71 @@ void TransportStatusTest::transportToolTipsNameTheShortcut() {
     showToolTipsAtOnce(next);
     next->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(toolTipShown(next));
+}
+
+// A button that cannot act shows Breeze's disabled state, as the Playback
+// menu's item of its action does: its glyph in the disabled text colour, no
+// hover, no click, no Tab stop; its action stays on for the shortcuts. It
+// keeps that through a change of its action (Play to Pause) or of the
+// action's own state, which the button copies.
+void TransportStatusTest::transportButtonsAreOffWhereTheyCannotAct() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *stop = harness.item(QStringLiteral("transportButton_stop"));
+    QQuickItem *playPause = harness.item(QStringLiteral("transportButton_playPause"));
+    QVERIFY(transport && stop && playPause);
+    QObject *stopAction = qvariant_cast<QObject *>(stop->property("action"));
+    QVERIFY(stopAction != nullptr);
+    QQuickItem *glyph = glyphOf(stop);
+    QVERIFY(glyph != nullptr);
+    QVERIFY(stop->isEnabled());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("text")));
+
+    transport->setProperty("stopCanAct", false);
+    QVERIFY(!stop->isEnabled());
+    QVERIFY(stopAction->property("enabled").toBool());
+    // The theme's disabled text colour, of its Disabled group, as the
+    // menu's disabled items have.
+    const QColor disabled = evaluateOn(stop, QStringLiteral("Kirigami.Theme.disabledTextColor")).value<QColor>();
+    QVERIFY(!sameColor(disabled, harness.token("text")));
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), disabled));
+    // No hover tint and no click.
+    QSignalSpy triggered(stopAction, SIGNAL(triggered(QObject *)));
+    QTest::mouseMove(harness.window, sceneCentre(stop));
+    QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(stop));
+    QCoreApplication::processEvents();
+    QCOMPARE(triggered.count(), 0);
+    QQuickItem *hover = nullptr;
+    for (QQuickItem *child : stop->findChildren<QQuickItem *>()) {
+        hover = child->objectName() == QStringLiteral("transportButtonHover") ? child : hover;
+    }
+    QVERIFY(hover != nullptr);
+    QVERIFY(!hover->isVisible());
+    // The action's own state comes back: the button stays off.
+    QVERIFY(stopAction->setProperty("enabled", false));
+    QVERIFY(stopAction->setProperty("enabled", true));
+    QVERIFY(!stop->isEnabled());
+    // Back on: it acts.
+    transport->setProperty("stopCanAct", true);
+    QVERIFY(stop->isEnabled());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("text")));
+    QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(stop));
+    QTRY_COMPARE(triggered.count(), 1);
+    // Off with its action, as before.
+    QVERIFY(stopAction->setProperty("enabled", false));
+    QVERIFY(!stop->isEnabled());
+    QVERIFY(stopAction->setProperty("enabled", true));
+    QVERIFY(stop->isEnabled());
+
+    // Play/Pause stays off as its action changes from Pause to Play.
+    transport->setProperty("playPauseCanAct", false);
+    QVERIFY(!playPause->isEnabled());
+    harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QTRY_COMPARE(toolTipText(playPause), QStringLiteral("Play · Space"));
+    QVERIFY(!playPause->isEnabled());
+    transport->setProperty("playPauseCanAct", true);
+    QVERIFY(playPause->isEnabled());
 }
 
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {

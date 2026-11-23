@@ -757,6 +757,8 @@ struct TransportFixture {
         bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
         bridge->setProperty("durationSeconds", 200.0);
         bridge->setProperty("playbackState", QStringLiteral("Playing"));
+        // A queue, for Next to act on.
+        bridge->setProperty("queueLength", 3);
         next = visibleItemNamed(window, QStringLiteral("transportButton_next"));
         mute = visibleItemNamed(window, QStringLiteral("muteButton"));
         seek = visibleItemNamed(window, QStringLiteral("seekSlider"));

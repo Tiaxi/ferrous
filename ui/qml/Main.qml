@@ -73,6 +73,15 @@ ApplicationWindow {
     property string pendingLibraryRootName: ""
     // The backend stopped without being asked to, so no control works anymore.
     readonly property bool backendStopped: (root.uiBridge.backendFailure || "").length > 0
+    // Where Playback's actions can act, which its menu's items and the
+    // transport's buttons show as Breeze's disabled state; the actions stay
+    // on for the shortcuts. Play and Pause need a track, Stop one that plays
+    // or is paused, and Previous and Next a queue, as MPRIS has CanGoPrevious
+    // and CanGoNext.
+    readonly property bool playPauseCanAct: root.uiBridge.queueLength > 0
+        || root.uiBridge.playbackState !== "Stopped"
+    readonly property bool stopCanAct: root.uiBridge.playbackState !== "Stopped"
+    readonly property bool skipCanAct: root.uiBridge.queueLength > 0
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     // Whether the window is on screen: visible, not minimized, and exposed.
@@ -1448,21 +1457,23 @@ ApplicationWindow {
         Components.AppMenu {
             objectName: "playbackMenu"
             title: I18n.i18nc("@title:menu", "&Playback")
-            MenuItem { action: playPauseAction }
-            // Off where they cannot act, here only: the actions stay on
-            // for the transport and the shortcuts. Previous and Next as
-            // MPRIS has CanGoPrevious and CanGoNext.
+            // Off where they cannot act, here and on the transport: the
+            // actions stay on for the shortcuts.
+            Components.ConditionalMenuItem {
+                action: playPauseAction
+                canAct: root.playPauseCanAct
+            }
             Components.ConditionalMenuItem {
                 action: stopAction
-                canAct: uiBridge.playbackState !== "Stopped"
+                canAct: root.stopCanAct
             }
             Components.ConditionalMenuItem {
                 action: previousAction
-                canAct: uiBridge.queueLength > 0
+                canAct: root.skipCanAct
             }
             Components.ConditionalMenuItem {
                 action: nextAction
-                canAct: uiBridge.queueLength > 0
+                canAct: root.skipCanAct
             }
             MenuSeparator {}
             MenuItem { action: seekBackwardAction }
@@ -1692,6 +1703,10 @@ ApplicationWindow {
             stopAction: stopAction
             nextAction: nextAction
             playPauseAction: playPauseAction
+            playPauseCanAct: root.playPauseCanAct
+            stopCanAct: root.stopCanAct
+            previousCanAct: root.skipCanAct
+            nextCanAct: root.skipCanAct
             volumeMuted: playbackController.volumeMuted
             mutedVolume: playbackController.rememberedVolumeBeforeMute
             keyboardSeekStepSeconds: root.keyboardSeekStepSeconds
