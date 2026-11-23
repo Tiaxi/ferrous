@@ -14,7 +14,7 @@ import "../logic/KeyUtils.js" as KeyUtils
 //
 // The tree has one indent step: each level moves the chevron 16 px. An
 // album row shows its thumbnail after the chevron and its year at the right
-// end; a track row shows its playing or warning glyph in its album's chevron
+// end; a track row shows its playing or error glyph in its album's chevron
 // column, its number under the album's thumbnail and its title where the
 // album's name starts. A library folder's row is a folder header: its name
 // semibold, right after the chevron and so left of its artists', and its
@@ -79,11 +79,11 @@ Rectangle {
     // text's right end, clear of the scrollbar.
     readonly property int yearInset: Kirigami.Units.smallSpacing
     readonly property int stateGlyphSize: root.uiPalette.scaledSize(12)
-    // An unreadable track's mark: the status bar's warning sign, at its
-    // size, in the negative colour, as the queue's. It fills the chevron
-    // column it is centred in.
-    readonly property string warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
-    readonly property int warningGlyphSize: root.uiPalette.scaledSize(16)
+    // An unreadable track's mark: an error's ring with a cross, at the
+    // status bar's size, in the negative colour, as the queue's. It fills
+    // the chevron column it is centred in.
+    readonly property string errorGlyph: Qt.resolvedUrl("../assets/status-error.svg")
+    readonly property int errorGlyphSize: root.uiPalette.scaledSize(16)
 
     // Each library folder's track count, by its path.
     readonly property var rootTrackCounts: {
@@ -485,16 +485,16 @@ Rectangle {
                             && fading.keys.indexOf(key || "") >= 0
                             ? treeNowFade.level : 0
                     }
-                    // As the queue's: an unreadable file's warning before
+                    // As the queue's: an unreadable file's error mark before
                     // the stop mark of a track that failed to play.
-                    readonly property bool showsWarning: !isNow && unreadableReason.length > 0
+                    readonly property bool showsError: !isNow && unreadableReason.length > 0
                     readonly property string stateGlyph: {
                         if (isNow) {
                             return root.playbackState === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                         }
-                        if (showsWarning) {
-                            return root.warningGlyph
+                        if (showsError) {
+                            return root.errorGlyph
                         }
                         return isCurrentTrack ? "media-playback-stop" : ""
                     }
@@ -619,7 +619,7 @@ Rectangle {
                                 visible: glyph.length > 0
                                 x: Math.round(libraryRow.stateX + (root.chevronSize - width) / 2)
                                 y: Math.round((libraryRow.height - height) / 2)
-                                width: libraryRow.showsWarning ? root.warningGlyphSize : root.stateGlyphSize
+                                width: libraryRow.showsError ? root.errorGlyphSize : root.stateGlyphSize
                                 height: width
                                 // At its size, which grows with the font.
                                 roundToIconSize: false
@@ -627,7 +627,7 @@ Rectangle {
                                 isMask: true
                                 color: libraryRow.isNow
                                     ? root.uiPalette.now
-                                    : !libraryRow.showsWarning ? root.uiPalette.textSecondary
+                                    : !libraryRow.showsError ? root.uiPalette.textSecondary
                                     : libraryRow.rowSelected ? root.uiPalette.negativeSelected
                                     : root.uiPalette.negative
                             }

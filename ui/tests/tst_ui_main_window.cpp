@@ -99,11 +99,17 @@ int scaledSize(QQuickWindow *window, int size) {
     return scaled.toInt();
 }
 
-// A state glyph's icon: a theme icon's name, or "status-warning" for the
-// app's own warning sign, the status bar's.
+// A state glyph's icon: a theme icon's name, or "status-error" or
+// "status-warning" for the app's own error and warning marks, the status
+// bar's.
 QString stateGlyphName(QQuickItem *glyph) {
     const QString source = glyph->property("source").toString();
-    return source.endsWith(QStringLiteral("/assets/status-warning.svg")) ? QStringLiteral("status-warning") : source;
+    for (const QString &own : {QStringLiteral("status-error"), QStringLiteral("status-warning")}) {
+        if (source.endsWith(QStringLiteral("/assets/") + own + QStringLiteral(".svg"))) {
+            return own;
+        }
+    }
+    return source;
 }
 
 // Where the now-playing cover is: at the panel's corner, and in the
@@ -1207,6 +1213,7 @@ private slots:
     void anUnreadableRowTellsWhyToThePointerAndTheKeyboard();
     void unreadableRowsTellWhatFailedNotWhatPlaybackDid();
     void unreadableRowsReasonOpensBelowClearOfThePlayingRow();
+    void unreadableRowsHaveTheErrorMarkNotTheWarnings();
     void queueStopMarkWeighsNoMoreThanPause_data();
     void queueStopMarkWeighsNoMoreThanPause();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
@@ -5567,7 +5574,7 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
                                       Q_ARG(QVariant, QString())));
     QVERIFY(unreadablePaths().isEmpty());
     // A playback error about the file marks its rows: the status bar's
-    // warning sign at its size, in the negative colour, centred where the
+    // error mark at its size, in the negative colour, centred where the
     // other marks are, and the title in the secondary colour.
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 1),
                                       Q_ARG(QVariant, kTrackPath),
@@ -5576,12 +5583,12 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
     QCOMPARE(unreadablePaths().value(kTrackPath).toString(), QStringLiteral("The file cannot be read."));
     QQuickItem *treeGlyph = itemNamed(track, QStringLiteral("libraryRowState"));
     QTRY_VERIFY(shown(treeGlyph));
-    QCOMPARE(stateGlyphName(treeGlyph), QStringLiteral("status-warning"));
+    QCOMPARE(stateGlyphName(treeGlyph), QStringLiteral("status-error"));
     QCOMPARE(colorOf(treeGlyph), tokenHex(window, "negative"));
     QVERIFY(treeGlyph->property("isMask").toBool());
-    const int warningSize = scaledSize(window, 16);
-    QCOMPARE(treeGlyph->width(), qreal(warningSize));
-    QCOMPARE(treeGlyph->height(), qreal(warningSize));
+    const int markSize = scaledSize(window, 16);
+    QCOMPARE(treeGlyph->width(), qreal(markSize));
+    QCOMPARE(treeGlyph->height(), qreal(markSize));
     // In the middle of the row, in the chevron column it fills, clear of
     // the thumbnail after it.
     QVERIFY(std::abs(treeGlyph->y() + treeGlyph->height() / 2 - track->height() / 2) <= 0.5);
@@ -5604,21 +5611,21 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
     })());
     QQuickItem *queueGlyph = itemNamed(queueRow, QStringLiteral("queueRowState"));
     QTRY_VERIFY(shown(queueGlyph));
-    QCOMPARE(stateGlyphName(queueGlyph), QStringLiteral("status-warning"));
+    QCOMPARE(stateGlyphName(queueGlyph), QStringLiteral("status-error"));
     QCOMPARE(colorOf(queueGlyph), tokenHex(window, "negative"));
     QVERIFY(queueGlyph->property("isMask").toBool());
-    QCOMPARE(queueGlyph->width(), qreal(warningSize));
-    QCOMPARE(queueGlyph->height(), qreal(warningSize));
+    QCOMPARE(queueGlyph->width(), qreal(markSize));
+    QCOMPARE(queueGlyph->height(), qreal(markSize));
     // Centred in its column and the row, on whole pixels, clear of the
     // number column.
     QQuickItem *indicatorCell = itemNamed(queueRow, QStringLiteral("queueCell_indicator"));
     QVERIFY(indicatorCell != nullptr);
-    const QPointF glyphCentre = queueGlyph->mapToItem(queueRow, QPointF(warningSize / 2.0, warningSize / 2.0));
+    const QPointF glyphCentre = queueGlyph->mapToItem(queueRow, QPointF(markSize / 2.0, markSize / 2.0));
     QVERIFY(std::abs(glyphCentre.x() - (indicatorCell->x() + indicatorCell->width() / 2)) <= 0.5);
     QVERIFY(std::abs(glyphCentre.y() - queueRow->height() / 2) <= 0.5);
     QCOMPARE(queueGlyph->x(), std::round(queueGlyph->x()));
     QCOMPARE(queueGlyph->y(), std::round(queueGlyph->y()));
-    QVERIFY(queueGlyph->mapToItem(queueRow, QPointF(warningSize, 0)).x()
+    QVERIFY(queueGlyph->mapToItem(queueRow, QPointF(markSize, 0)).x()
             <= itemNamed(queueRow, QStringLiteral("queueCell_order"))->x());
     // The reason is the row's, for the pointer anywhere on it and for the
     // keyboard (anUnreadableRowTellsWhyToThePointerAndTheKeyboard).
@@ -5638,8 +5645,8 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
 
 // A file that fails to play stays the current row, stopped, as the backend
 // leaves it when it was the queue's last: the queue's row and the tree's
-// show the unreadable warning, whose tooltip gives the reason, not the stop
-// mark (the warning came only once another row played). Played again, the
+// show the unreadable error mark, whose tooltip gives the reason, not the
+// stop mark (the mark came only once another row played). Played again, the
 // row shows what the playback does; a readable track that stops keeps the
 // stop mark.
 void UiMainWindowTest::aTrackThatFailsToPlayShowsTheWarningWhileCurrent() {
@@ -5685,8 +5692,8 @@ void UiMainWindowTest::aTrackThatFailsToPlayShowsTheWarningWhileCurrent() {
                                       Q_ARG(QString, QStringLiteral("No valid frames found before end of stream"))));
     const QString reason = QStringLiteral("Couldn't play “02.flac” (No valid frames found before end of stream).");
     bridge->setProperty("playbackState", QStringLiteral("Stopped"));
-    QTRY_COMPARE(queueGlyph(3), QStringLiteral("status-warning"));
-    QCOMPARE(treeGlyphName(), QStringLiteral("status-warning"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("status-error"));
+    QCOMPARE(treeGlyphName(), QStringLiteral("status-error"));
     QQuickItem *row = viewRowAt(queueView, 3);
     QVERIFY(row != nullptr && row->property("isCurrentQueueRow").toBool());
     QQuickItem *glyph = itemNamed(row, QStringLiteral("queueRowState"));
@@ -5700,17 +5707,17 @@ void UiMainWindowTest::aTrackThatFailsToPlayShowsTheWarningWhileCurrent() {
         QCOMPARE(queueGlyph(index), QString());
     }
 
-    // Another row plays: the failed one keeps its warning.
+    // Another row plays: the failed one keeps its mark.
     bridge->setProperty("currentTrackPath", QStringLiteral("/music/2.flac"));
     bridge->setProperty("playingQueueIndex", 2);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     QTRY_COMPARE(queueGlyph(2), QStringLiteral("media-playback-start"));
-    QCOMPARE(queueGlyph(3), QStringLiteral("status-warning"));
-    QCOMPARE(treeGlyphName(), QStringLiteral("status-warning"));
+    QCOMPARE(queueGlyph(3), QStringLiteral("status-error"));
+    QCOMPARE(treeGlyphName(), QStringLiteral("status-error"));
     // A readable track that stops shows the stop mark.
     bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QTRY_COMPARE(queueGlyph(2), QStringLiteral("media-playback-stop"));
-    QCOMPARE(queueGlyph(3), QStringLiteral("status-warning"));
+    QCOMPARE(queueGlyph(3), QStringLiteral("status-error"));
 
     // Played again, say once the file is fixed, the row shows the playback
     // until it stops.
@@ -5727,10 +5734,60 @@ void UiMainWindowTest::aTrackThatFailsToPlayShowsTheWarningWhileCurrent() {
 
     // With the issue cleared, a stopped current row is the stop mark again.
     bridge->setProperty("playbackState", QStringLiteral("Stopped"));
-    QTRY_COMPARE(queueGlyph(3), QStringLiteral("status-warning"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("status-error"));
     QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
     QTRY_COMPARE(queueGlyph(3), QStringLiteral("media-playback-stop"));
     QTRY_COMPARE(treeGlyphName(), QStringLiteral("media-playback-stop"));
+}
+
+// An unreadable file's rows have the error's mark, the ring with a cross
+// that the status bar and Recent Issues give the same failure, in the
+// negative colour, not the warning's triangle: the triangle in red on the
+// row and grey in Recent Issues gave one event two marks and the triangle
+// two meanings.
+void UiMainWindowTest::unreadableRowsHaveTheErrorMarkNotTheWarnings() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QQuickItem *queueView = named(window, "playlistView");
+    QVERIFY(bridge && errors && queueView);
+    showTree(fixture.libraryModel, kAllExpanded);
+    QVariantList rows = sampleQueueRows(3);
+    QVariantMap failed = rows.at(1).toMap();
+    failed.insert(QStringLiteral("path"), kTrackPath);
+    rows[1] = failed;
+    setQueue(bridge, rows);
+    QTRY_COMPARE(queueView->property("count").toInt(), 3);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError",
+                                      Q_ARG(QString, QStringLiteral("Couldn't play “02.flac”; playback stopped.")),
+                                      Q_ARG(int, 1), Q_ARG(int, 1), Q_ARG(QString, kTrackPath),
+                                      Q_ARG(QString, QStringLiteral("Resource not found"))));
+    QQuickItem *statusGlyph = nullptr;
+    QTRY_VERIFY(shown(statusGlyph = itemNamed(window->contentItem(), QStringLiteral("statusBarErrorsGlyph"))));
+    QVERIFY(statusGlyph->property("source").toString().endsWith(QStringLiteral("/assets/status-error.svg")));
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = viewRowAt(queueView, 1)) != nullptr && row->property("unreadable").toBool());
+    QQuickItem *queueGlyph = itemNamed(row, QStringLiteral("queueRowState"));
+    QTRY_VERIFY(shown(queueGlyph));
+    QCOMPARE(queueGlyph->property("source").toString(), statusGlyph->property("source").toString());
+    QCOMPARE(colorOf(queueGlyph), tokenHex(window, "negative"));
+    QCOMPARE(colorOf(queueGlyph), colorOf(statusGlyph));
+    QCOMPARE(queueGlyph->width(), statusGlyph->width());
+    QQuickItem *track = nullptr;
+    QTRY_VERIFY((track = libraryRow(window, QStringLiteral("track"))) != nullptr);
+    QQuickItem *treeGlyph = itemNamed(track, QStringLiteral("libraryRowState"));
+    QTRY_VERIFY(shown(treeGlyph));
+    QCOMPARE(treeGlyph->property("source").toString(), statusGlyph->property("source").toString());
+    QCOMPARE(colorOf(treeGlyph), tokenHex(window, "negative"));
+    QCOMPARE(treeGlyph->width(), statusGlyph->width());
+    // Selected, the negative colour for the selection, the same mark.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      sceneCentre(itemNamed(row, QStringLiteral("queueCell_title"))));
+    QTRY_VERIFY(rowTinted(queueView, 1));
+    QCOMPARE(stateGlyphName(queueGlyph), QStringLiteral("status-error"));
+    QCOMPARE(colorOf(queueGlyph), tokenHex(window, "negativeSelected"));
 }
 
 // The tooltip that says why the row `row` of a list is marked unreadable,
@@ -6939,6 +6996,7 @@ void UiMainWindowTest::viewersInTheWindowFadeAsTheStylesPopupsDo() {
         QCOMPARE(fadeDuration(popup, "exit"), exitDuration);
     }
 }
+
 
 
 int main(int argc, char **argv) {

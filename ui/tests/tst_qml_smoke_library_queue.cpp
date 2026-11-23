@@ -3556,13 +3556,13 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(weight(cell(2, "title")), QFont::Normal);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
 
-    // An unreadable file: the status bar's warning sign, at its size and
+    // An unreadable file: the status bar's error mark, at its size and
     // in its negative colour, and a quieter title (Breeze's dialog-warning
     // as a mask was a solid grey triangle).
     QVERIFY(errors->setProperty("unreadablePaths",
                                 QVariantMap{{QStringLiteral("/music/3.flac"),
                                              QStringLiteral("Cannot read the file")}}));
-    QTRY_VERIFY(glyphName(3).endsWith(QStringLiteral("/assets/status-warning.svg")));
+    QTRY_VERIFY(glyphName(3).endsWith(QStringLiteral("/assets/status-error.svg")));
     QCOMPARE(color(glyph(3)), paletteColor("negative"));
     QVERIFY(glyph(3)->property("isMask").toBool());
     QVariant warningSize;
