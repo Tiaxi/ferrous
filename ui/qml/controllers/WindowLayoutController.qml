@@ -145,9 +145,12 @@ QtObject {
     // The share of the right column the visualization takes before the
     // user drags the split: a little under half, so the window reads as an
     // instrument with a queue rather than a playlist with a footer (at
-    // 0.42 the pane was a 320 px band at 1600 by 1000). It is 423 px
-    // there, and a little more, as the queue keeps whole rows (queueHeight).
-    readonly property real visualizationDefaultShare: 0.47
+    // 0.42 the pane was a 320 px band at 1600 by 1000). It is 405 px
+    // there, and a little more, as the queue keeps whole rows (queueHeight):
+    // 411 px, the queue ending on the line of the library's header beside
+    // it (at 0.47, once the transport's band held the seek bar's time, it
+    // ended a row short of that line).
+    readonly property real visualizationDefaultShare: 0.46
     // The rows, its header among them, the queue keeps by default before
     // the visualization has its share, as with a large font in a short
     // window, where the visualization then has its minimum.

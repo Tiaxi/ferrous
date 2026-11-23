@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- The transport's Previous glyph, drawn for 16 px at 1x on whole pixels in Breeze's 16
      px geometry: two triangles pointing left and a 2 px bar at the left edge, 12 px tall in rows 2
-     to 13, as Previous, Stop, Next and the volume all are. Ferrous's own, so that the transport
+     to 13, as Previous, Next and the volume all are (Stop is a 10 px square). Ferrous's own, so that the transport
      keeps one scale at every font size: a theme draws its larger sizes from other designs, with more
      space around the glyph. A one-colour mask, drawn in the text colour. -->
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">

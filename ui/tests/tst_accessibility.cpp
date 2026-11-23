@@ -1522,13 +1522,23 @@ QString timeBoxPlacementError(QQuickItem *seek, const SeekTimeBox &box, qreal an
     if (!fuzzyEqual(drawn.left() * dpr, std::round(drawn.left() * dpr))) {
         errors.push_back(QStringLiteral("at %1 device pixels").arg(drawn.left() * dpr));
     }
-    // On the bar's top, or 1 px clear of the bar's focus ring while that
-    // shows.
-    const qreal clearance =
-        seek->property("visualFocus").toBool() ? seek->property("focusRingOutset").toReal() + 1 : 0.0;
-    if (std::abs(drawn.bottom() - (bar.top() - clearance)) > slack) {
-        errors.push_back(QStringLiteral("its bottom at %1, not %2 over the bar's top at %3")
-                             .arg(drawn.bottom()).arg(clearance).arg(bar.top()));
+    // At the bottom of the transport's lane, at least 1 px clear of the
+    // bar's focus ring, whether that shows or not: the box has one place.
+    QQuickItem *transport = seek;
+    while (transport != nullptr && !transport->property("laneBottom").isValid()) {
+        transport = transport->parentItem();
+    }
+    if (transport == nullptr) {
+        errors.push_back(QStringLiteral("no lane"));
+        return errors.join(QStringLiteral("; "));
+    }
+    const qreal laneBottom = transport->mapToScene(QPointF(0, transport->property("laneBottom").toReal())).y();
+    if (std::abs(drawn.bottom() - laneBottom) > slack) {
+        errors.push_back(QStringLiteral("its bottom at %1, not the lane's at %2").arg(drawn.bottom()).arg(laneBottom));
+    }
+    if (laneBottom > bar.top() - seek->property("focusRingOutset").toReal() - 1 + slack) {
+        errors.push_back(QStringLiteral("the lane's bottom at %1, on the ring over the bar's top at %2")
+                             .arg(laneBottom).arg(bar.top()));
     }
     return errors.join(QStringLiteral("; "));
 }

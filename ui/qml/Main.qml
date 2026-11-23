@@ -1721,15 +1721,6 @@ ApplicationWindow {
             seekCommitted: playbackController.seekCommitted
             viewStartSeconds: visualizationSurface.viewStartSeconds
             viewEndSeconds: visualizationSurface.viewEndSeconds
-            // The seek bar's time box keeps off the menu's titles above the
-            // transport, and under it covers only the sidebar. The menu bar,
-            // the transport and the sidebar all start at the window's left.
-            menuTitlesRight: {
-                const bar = root.menuBar
-                const last = bar && bar.visible && bar.count > 0 ? bar.itemAt(bar.count - 1) : null
-                return last ? bar.contentItem.x + last.x + last.width : 0
-            }
-            belowClearRight: sidebarPane.visible ? sidebarPane.width : 0
         }
 
         // The first of the four seams: between the transport's chrome and

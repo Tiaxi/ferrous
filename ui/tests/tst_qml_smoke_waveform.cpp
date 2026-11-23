@@ -637,7 +637,7 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     // height in either state.
     QVERIFY(!bridge->property("showLevelMeter").toBool());
     QTRY_VERIFY(surface->height() > 20);
-    // The queue at its default height: the visualization has 47% of the
+    // The queue at its default height: the visualization has 46% of the
     // right column, and what the queue's whole rows leave over. The meter
     // changes neither.
     auto *rightSplit = root->findChild<QQuickItem *>(QStringLiteral("rightSplit"));
@@ -647,7 +647,7 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     const double rowPitch = queue->property("rowPitch").toReal();
     QVERIFY(listTop > 0 && rowPitch > 0);
     const double queueHeight = listTop
-        + std::floor((std::round(rightSplit->height() * (1 - 0.47)) - listTop) / rowPitch) * rowPitch;
+        + std::floor((std::round(rightSplit->height() * (1 - 0.46)) - listTop) / rowPitch) * rowPitch;
     QTRY_COMPARE(queue->height(), queueHeight);
     QVERIFY(!meter->isVisible());
     QTRY_COMPARE(spectrogram->height(), surface->height());

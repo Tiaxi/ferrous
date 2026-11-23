@@ -41,7 +41,7 @@
 #include <functional>
 #include <tuple>
 #include <initializer_list>
-#include <limits>
+#include <optional>
 
 #include "../src/DiagnosticsLogView.h"
 #include "../src/InputModality.h"
@@ -1205,6 +1205,8 @@ private slots:
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
     void anUnreadableRowTellsWhyToThePointerAndTheKeyboard();
+    void queueStopMarkWeighsNoMoreThanPause_data();
+    void queueStopMarkWeighsNoMoreThanPause();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void pressedQueueRowHasItsOwnColour();
     void queueNameKeepsTheTitleColumnsPlace_data();
@@ -1320,23 +1322,23 @@ void UiMainWindowTest::seekTimeStaysOverItsLine_data() {
     QTest::addColumn<int>("windowWidth");
     QTest::addColumn<int>("windowHeight");
     QTest::addColumn<bool>("dark");
-    // The default window, the narrow one, and 24 pt, whose titles run past
-    // the sidebar in the wide window, and whose time's box is widest on the
-    // narrow window's shortest bar.
+    // The default window and the narrow one, at 10 pt and at 24 pt, whose
+    // time's box is widest on the narrow window's shortest bar, and whose
+    // titles run past the sidebar in the wide window.
     QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true;
     QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false;
     QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false;
     QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true;
 }
 
-// The seek bar's time shows above the bar, centred on the line it reads,
-// wherever the pointer is on the bar, and within the bar at either end, so
-// it stays in the window; it covers none of the waveform. It never covers a
-// menu title: where it would above the bar, near the bar's start, it is
-// under the bar, over the sidebar, and never over the queue's header (H5).
-// Where neither is clear, at 24 pt, it is whichever is nearer its line:
-// under the bar ending at the sidebar's edge, or above it starting past the
-// titles (kept right of them everywhere, it was up to 350 px from its line).
+// The seek bar's time has one place: a lane above the bar, in the
+// transport's band, centred on the line it reads, wherever the pointer is
+// on the bar, and within the bar at either end. It covers none of the
+// waveform, no menu title, nothing of the now-playing card or the queue's
+// header (it flipped under the bar near the start, ~54 px down and over
+// the now-playing title at 24 pt), and stays 1 px clear of the bar's and
+// the buttons' focus rings. The band grows by no more than the lane needs,
+// and the buttons, the bar, the time and the volume keep one centre line.
 void UiMainWindowTest::seekTimeStaysOverItsLine() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
@@ -1348,6 +1350,7 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
     QQuickWindow *window = fixture.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal(), pointSize);
+    QCOMPARE(window->size(), QSize(windowWidth, windowHeight));
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge != nullptr);
     bridge->setProperty("durationText", QStringLiteral("03:49"));
@@ -1356,19 +1359,37 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
     QQuickItem *transport = named(window, "transportBar");
     QQuickItem *seek = named(window, "seekSlider");
     QQuickItem *waveform = named(window, "seekWaveform");
+    QQuickItem *seekRing = named(window, "seekFocusRing");
     QQuickItem *menuBar = named(window, "mainMenuBar");
-    QQuickItem *sidebar = named(window, "sidebarPane");
+    QQuickItem *nowPlaying = named(window, "nowPlayingPanel");
     QQuickItem *queueHeader = named(window, "queueHeader");
+    QQuickItem *seam = named(window, "transportSeam");
+    QQuickItem *playPause = named(window, "transportButton_playPause");
+    QQuickItem *mute = named(window, "muteButton");
+    QQuickItem *volume = named(window, "volumeSlider");
+    QQuickItem *time = named(window, "transportTime");
     QObject *tip = window->findChild<QObject *>(QStringLiteral("seekTimeBox"));
-    QVERIFY(transport && seek && waveform && menuBar && sidebar && queueHeader && tip);
+    QVERIFY(transport && seek && waveform && seekRing && menuBar && nowPlaying && queueHeader && seam && playPause
+            && mute && volume && time && tip);
     QTRY_VERIFY(seek->isEnabled());
     // Laid out in the window's width.
     QTRY_VERIFY(sceneRect(transport).right() <= windowWidth);
     auto *tipBox = tip->property("background").value<QQuickItem *>();
     QVERIFY(tipBox != nullptr);
     const QRectF bar = sceneRect(seek);
+    const QRectF band = sceneRect(transport);
 
-    // The titles, which the transport is told the end of, and the sidebar.
+    // One centre line for the row.
+    for (QQuickItem *item : {playPause, mute, volume, time}) {
+        QVERIFY2(std::abs(sceneRect(item).center().y() - bar.center().y()) <= 0.5,
+                 qPrintable(item->objectName() + QLatin1Char(' ') + describeRect(sceneRect(item))
+                            + QStringLiteral(", the bar ") + describeRect(bar)));
+    }
+    // The band ends at its seam, and holds the row with 8 px under the
+    // buttons, or more where the band's 48 px leave more.
+    QCOMPARE(sceneRect(seam).top(), band.bottom());
+    QVERIFY(band.bottom() - sceneRect(playPause).bottom() >= 8 - 0.5);
+
     QList<QRectF> titles;
     for (int i = 0; i < menuBar->property("count").toInt(); ++i) {
         QQuickItem *title = nullptr;
@@ -1377,22 +1398,21 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
         titles.append(sceneRect(title));
     }
     QVERIFY(titles.size() >= 6);
-    const qreal titlesRight = titles.constLast().right();
-    const qreal sidebarRight = sceneRect(sidebar).right();
-    QCOMPARE(transport->property("menuTitlesRight").toReal(), titlesRight);
-    QCOMPARE(transport->property("belowClearRight").toReal(), sidebarRight);
-    QCOMPARE(sceneRect(transport).left(), 0.0);
-    QVERIFY(bar.left() < titlesRight);
+    QVERIFY(bar.left() < titles.constLast().right());
+    // Under the bar where it flipped before: the now-playing card and the
+    // queue's header.
+    const QRectF card = sceneRect(nowPlaying);
+    const QRectF header = sceneRect(queueHeader);
 
     // Every few pixels across the titles, then a few points beyond.
     QList<qreal> xs;
-    for (qreal x = bar.left(); x < std::min(titlesRight + 100, bar.right() - 1); x += 7) {
+    for (qreal x = bar.left(); x < std::min(titles.constLast().right() + 100, bar.right() - 1); x += 7) {
         xs.append(x);
     }
     for (const qreal fraction : {0.3, 0.5, 0.9, 0.98, 1.0}) {
         xs.append(std::min(bar.left() + bar.width() * fraction, bar.right() - 1));
     }
-    bool wentBelow = false;
+    std::optional<qreal> boxTop;
     for (const qreal x : xs) {
         const QPoint at = QPointF(x, bar.center().y()).toPoint();
         QTest::mouseMove(window, at);
@@ -1404,43 +1424,58 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
         const QRectF box = sceneRect(tipBox);
         const QString where =
             QStringLiteral("at %1: %2, the bar %3").arg(at.x()).arg(describeRect(box), describeRect(bar));
-        const bool above = std::abs(box.bottom() - bar.top()) <= 0.5;
-        const bool below = std::abs(box.top() - bar.bottom()) <= 0.5;
-        QVERIFY2(above || below, qPrintable(where));
-        wentBelow = wentBelow || below;
+        // In one place: every box at the same height, in the band, over the
+        // bar and its focus ring, and in the window.
+        if (!boxTop) {
+            boxTop = box.top();
+        }
+        QVERIFY2(std::abs(box.top() - *boxTop) <= 0.5, qPrintable(where));
+        QVERIFY2(box.top() >= band.top() - 0.5 && box.bottom() < bar.top(), qPrintable(where));
         QVERIFY2(!box.intersects(sceneRect(waveform)), qPrintable(where));
-        // In the window.
-        QVERIFY2(box.left() >= 0.0 && box.right() <= windowWidth && box.top() >= 0.0, qPrintable(where));
-        // No title covered, and under the bar only the sidebar.
+        QVERIFY2(box.left() >= 0.0 && box.right() <= windowWidth, qPrintable(where));
         for (const QRectF &title : titles) {
             QVERIFY2(!box.intersects(title), qPrintable(where + QStringLiteral(", a title ") + describeRect(title)));
         }
-        QVERIFY2(!box.intersects(sceneRect(queueHeader)), qPrintable(where));
-        if (below) {
-            QVERIFY2(box.right() <= sidebarRight, qPrintable(where));
-        }
-        // Where it would be centred on its line, or, where that would hang
-        // past the bar's end, flush with that end and still over the line.
+        QVERIFY2(!box.intersects(card), qPrintable(where + QStringLiteral(", the card ") + describeRect(card)));
+        QVERIFY2(!box.intersects(header), qPrintable(where));
+        // Centred on its line, or, where that would hang past the bar's
+        // end, flush with that end and still over the line.
         const qreal half = box.width() / 2;
         const qreal placedLeft = std::clamp(at.x() - half, bar.left(), bar.right() - box.width());
-        if (std::abs(box.left() - placedLeft) <= 0.5) {
-            QVERIFY2(box.left() <= at.x() && box.right() >= at.x(), qPrintable(where));
-            // Under the bar only where it would cover a title above it.
-            QVERIFY2(above || placedLeft < titlesRight, qPrintable(where));
-            continue;
-        }
-        // Moved off its line only where it would cover a title above and
-        // the queue's header under the bar, by the less of the two moves
-        // that keep it on the bar.
-        const qreal infinity = std::numeric_limits<qreal>::infinity();
-        const qreal belowMove =
-            sidebarRight - box.width() >= bar.left() ? placedLeft - (sidebarRight - box.width()) : infinity;
-        const qreal aboveMove = titlesRight + box.width() <= bar.right() ? titlesRight - placedLeft : infinity;
-        QVERIFY2(placedLeft < titlesRight && placedLeft + box.width() > sidebarRight, qPrintable(where));
-        QVERIFY2(std::abs(std::abs(box.left() - placedLeft) - std::min(belowMove, aboveMove)) <= 1.0,
-                 qPrintable(where));
+        QVERIFY2(std::abs(box.left() - placedLeft) <= 0.5, qPrintable(where));
+        QVERIFY2(box.left() <= at.x() && box.right() >= at.x(), qPrintable(where));
     }
-    QVERIFY(wentBelow);
+    QVERIFY(boxTop.has_value());
+    const QRectF box = sceneRect(tipBox);
+    // 1 px clear of the bar's focus ring and 3 px of the buttons' (3 px
+    // outside them), with the ring shown.
+    QVERIFY(box.bottom() <= playPause->mapToScene(QPointF(0, 0)).y() - 3 - 3 + 0.5);
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(seekRing->isVisible());
+    QVERIFY2(sceneRect(tipBox).bottom() <= sceneRect(seekRing).top() - 1 + 0.5,
+             qPrintable(describeRect(sceneRect(tipBox)) + QStringLiteral(" over ") + describeRect(sceneRect(seekRing))));
+    QCOMPARE(sceneRect(tipBox).top(), box.top());
+    // The band grew by no more than the lane needs: the box is 2 px under
+    // its top where the room above the bar was too little for it.
+    QVERIFY2(box.top() - band.top() <= std::max(2.0, bar.top() - band.top() - box.height()) + 1.0,
+             qPrintable(describeRect(box) + QStringLiteral(" in ") + describeRect(band)));
+
+    // Mute's and the volume's tooltips share the lane: one line on the time
+    // box's line, as tall as it, in the band and the window (Mute's opened
+    // under the band, over the queue's header).
+    QObject *volumeTip = window->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QObject *muteTip = mute->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+    QVERIFY(volumeTip && muteTip);
+    for (const auto &[control, laneTip] : {std::pair{mute, muteTip}, std::pair{volume, volumeTip}}) {
+        control->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(laneTip->property("opened").toBool(), qPrintable(control->objectName()));
+        const QRectF drawn = sceneRect(laneTip->property("background").value<QQuickItem *>());
+        const QString where = control->objectName() + QLatin1Char(' ') + describeRect(drawn)
+            + QStringLiteral(", the time box ") + describeRect(box);
+        QVERIFY2(std::abs(drawn.bottom() - box.bottom()) <= 0.5 && std::abs(drawn.height() - box.height()) <= 0.5,
+                 qPrintable(where));
+        QVERIFY2(drawn.top() >= band.top() && drawn.left() >= 0 && drawn.right() <= windowWidth, qPrintable(where));
+    }
 }
 
 void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont_data() {
@@ -3965,7 +4000,7 @@ void UiMainWindowTest::showInLibraryLandsOnTheRowGrid() {
     QFETCH(qreal, points);
     QFETCH(bool, fromSearch);
     const ScopedApplicationFont font(points);
-    MainWindowFixture fixture(sized(1600, 1013));
+    MainWindowFixture fixture(sized(1600, 1026));
     QQuickWindow *window = fixture.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QQuickItem *view = named(window, "libraryView");
@@ -5833,6 +5868,71 @@ void UiMainWindowTest::anUnreadableRowTellsWhyToThePointerAndTheKeyboard() {
     QTRY_VERIFY(reasonOpen(treeReason));
 }
 
+void UiMainWindowTest::queueStopMarkWeighsNoMoreThanPause_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The now row's stop square is drawn smaller than its play and pause marks,
+// 10/16 of their box as the transport's Stop is of its, so that its solid
+// ink, as drawn, is no more than the pause mark's, give or take its soft
+// edges (at their size it was half again the pause mark's, the heaviest of
+// the three).
+void UiMainWindowTest::queueStopMarkWeighsNoMoreThanPause() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal(), pointSize);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queueView = named(window, "playlistView");
+    QVERIFY(bridge && queueView);
+    setQueue(bridge, sampleQueueRows(4));
+    QTRY_COMPARE(queueView->property("count").toInt(), 4);
+    bridge->setProperty("playingQueueIndex", 1);
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = viewRowAt(queueView, 1)) != nullptr);
+    QQuickItem *glyph = itemNamed(row, QStringLiteral("queueRowState"));
+    QQuickItem *cell = itemNamed(row, QStringLiteral("queueCell_indicator"));
+    QVERIFY(glyph && cell);
+
+    // The ink of the mark, as drawn: each pixel of the cell by how far it is
+    // from the row's colour, in parts of the farthest.
+    const auto inkOf = [&](const QString &state, const QString &name) {
+        bridge->setProperty("playbackState", state);
+        if (!QTest::qWaitFor([&] { return stateGlyphName(glyph) == name && glyph->opacity() == 1.0; })) {
+            return -1.0;
+        }
+        QTest::qWait(300);
+        const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal scale = window->effectiveDevicePixelRatio();
+        const QRectF area = sceneRect(cell);
+        const QColor background = image.pixelColor(QPointF(area.left() + 1, area.top() + 1).toPoint() * scale);
+        QList<int> distances;
+        for (int y = int(area.top()); y < int(area.bottom()); ++y) {
+            for (int x = int(area.left()); x < int(area.right()); ++x) {
+                distances.append(channelDistance(image.pixelColor(QPoint(x, y) * scale), background));
+            }
+        }
+        const int farthest = *std::max_element(distances.cbegin(), distances.cend());
+        double ink = 0;
+        for (const int distance : distances) {
+            ink += farthest > 0 ? double(distance) / farthest : 0.0;
+        }
+        return ink;
+    };
+    const double playing = inkOf(QStringLiteral("Playing"), QStringLiteral("media-playback-start"));
+    const double paused = inkOf(QStringLiteral("Paused"), QStringLiteral("media-playback-pause"));
+    const double stopped = inkOf(QStringLiteral("Stopped"), QStringLiteral("media-playback-stop"));
+    const QString inks = QStringLiteral("playing %1, paused %2, stopped %3").arg(playing).arg(paused).arg(stopped);
+    QVERIFY2(playing > 0 && paused > 0 && stopped > 0, qPrintable(inks));
+    QVERIFY2(stopped <= 1.05 * paused, qPrintable(inks));
+    QCOMPARE(glyph->width(), qreal(scaledSize(window, 10)));
+    QCOMPARE(glyph->height(), glyph->width());
+}
+
 void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
@@ -6238,8 +6338,8 @@ void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn_data() {
     QTest::newRow("24 pt, 1000 by 720") << 24.0 << 1000 << 720;
 }
 
-// Before the user drags the split, the visualization takes 47% of the right
-// column (at 42% the pane read as a footer under a playlist): 423 px at
+// Before the user drags the split, the visualization takes 46% of the right
+// column (at 42% the pane read as a footer under a playlist): 411 px at
 // 1600 by 1000, where the queue keeps 16 rows and more with the default
 // font. The queue keeps its header and six rows first, and each pane its
 // minimum, the queue's its header and four rows: at 24 pt in a 720 px
@@ -6289,8 +6389,8 @@ void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn() {
         QVERIFY2(pane->height() >= 220 - 0.5 && pane->height() < 220 + rowHeight, qPrintable(heights));
     } else {
         // Its share, and what the grid leaves over.
-        const qreal wanted = std::round(split->height() * 0.47);
-        QVERIFY2((pane->height() >= wanted - 1.5 && pane->height() < wanted + rowHeight) || share < 0.47,
+        const qreal wanted = std::round(split->height() * 0.46);
+        QVERIFY2((pane->height() >= wanted - 1.5 && pane->height() < wanted + rowHeight) || share < 0.46,
                  qPrintable(heights));
         // The queue's header and six rows at least.
         QVERIFY2(queue->height() >= 7 * rowHeight - 0.5, qPrintable(heights));

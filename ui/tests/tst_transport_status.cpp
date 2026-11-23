@@ -98,7 +98,7 @@ import "panes" as Panes
 ApplicationWindow {
     id: window
     width: %8
-    height: 200
+    height: 300
     visible: true
     palette.window: "%1"
     palette.base: "%2"
@@ -635,7 +635,8 @@ void TransportStatusTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
 }
 
-// The sizes of the design at 1×: a 48 px band; 32 px buttons 4 px apart
+// The sizes of the design at 1×: a 48 px row under the lane of the seek
+// bar's time box, which grows the band; 32 px buttons 4 px apart
 // from 12 px, the content's inset; the seek bar 16 px after Next; then on
 // one rhythm, between what is drawn: the time 16 px after the seek bar, as
 // wide as "0:00 / 0:00", the volume glyph 24 px after it, and the 96 px
@@ -646,8 +647,11 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QVERIFY2(harness.load(), qPrintable(harness.error));
     QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
     QVERIFY(transport != nullptr);
-    QCOMPARE(transport->height(), 48.0);
-    const qreal top = sceneRect(transport).top();
+    const qreal lane = transport->property("laneGrowth").toReal();
+    QVERIFY(lane > 0);
+    QCOMPARE(transport->height(), 48.0 + lane);
+    // The row's top.
+    const qreal top = sceneRect(transport).top() + lane;
 
     const QStringList names{QStringLiteral("previous"), QStringLiteral("playPause"), QStringLiteral("stop"),
                             QStringLiteral("next")};
@@ -965,10 +969,14 @@ void TransportStatusTest::transportButtonsAreOffWhereTheyCannotAct() {
     QVERIFY(playPause->isEnabled());
 }
 
-// The buttons' and Mute's tooltips open under them 3 px clear of their
-// focus rings, as the style's are of a button (they met the ring's bottom
-// edge), and not while the button is held down. The seek bar's time box
-// stands 1 px clear of the bar's focus ring (it covered the ring's top).
+// The buttons' tooltips open under them 3 px clear of their focus rings, as
+// the style's are of a button (they met the ring's bottom edge), and not
+// while the button is held down. The seek bar's time box stands 1 px clear
+// of the bar's focus ring (it covered the ring's top). Mute's and the
+// volume's open in the time box's lane above the bar, one rail for the
+// bar's right end, Mute's 3 px clear of its ring as the buttons' are, the
+// volume's clear of its own (Mute's opened under the band, over the queue's
+// header, and the volume's above it).
 void TransportStatusTest::transportToolTipsClearTheFocusRings() {
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
@@ -982,8 +990,7 @@ void TransportStatusTest::transportToolTipsClearTheFocusRings() {
         return nullptr;
     };
     for (const QString &name : {QStringLiteral("transportButton_previous"), QStringLiteral("transportButton_playPause"),
-                                QStringLiteral("transportButton_stop"), QStringLiteral("transportButton_next"),
-                                QStringLiteral("muteButton")}) {
+                                QStringLiteral("transportButton_stop"), QStringLiteral("transportButton_next")}) {
         QQuickItem *button = harness.item(name);
         QVERIFY2(button != nullptr, qPrintable(name));
         QQuickItem *ring = ringOf(button);
@@ -1030,9 +1037,43 @@ void TransportStatusTest::transportToolTipsClearTheFocusRings() {
     QTRY_VERIFY(seekTip->property("opened").toBool());
     auto *seekBox = seekTip->property("background").value<QQuickItem *>();
     QVERIFY(seekBox != nullptr);
-    QVERIFY2(sceneRect(seekBox).bottom() <= sceneRect(seekRing).top() - 1 + 0.5,
-             qPrintable(describeRect(sceneRect(seekBox)) + QStringLiteral(" over ") + describeRect(sceneRect(seekRing))));
+    const QRectF seekBoxRect = sceneRect(seekBox);
+    QVERIFY2(seekBoxRect.bottom() <= sceneRect(seekRing).top() - 1 + 0.5,
+             qPrintable(describeRect(seekBoxRect) + QStringLiteral(" over ") + describeRect(sceneRect(seekRing))));
     QTest::keyRelease(harness.window, Qt::Key_Right);
+
+    // Mute's and the volume's, focused, in the same lane: as tall as the
+    // time box, on the same line, in the band, and clear of their rings.
+    const QRectF band = sceneRect(harness.item(QStringLiteral("transportBar")));
+    QQuickItem *mute = harness.item(QStringLiteral("muteButton"));
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QQuickItem *volumeRing = harness.item(QStringLiteral("volumeFocusRing"));
+    QObject *volumeTip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QVERIFY(mute && volume && volumeRing && volumeTip);
+    struct InLane {
+        QQuickItem *control;
+        QQuickItem *ring;
+        QObject *tip;
+    };
+    for (const InLane &inLane : {InLane{mute, ringOf(mute), buttonToolTip(mute)}, InLane{volume, volumeRing, volumeTip}}) {
+        const QString name = inLane.control->objectName();
+        QVERIFY2(inLane.ring && inLane.tip, qPrintable(name));
+        inLane.control->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(inLane.ring->isVisible(), qPrintable(name));
+        QTRY_VERIFY2(inLane.tip->property("opened").toBool(), qPrintable(name));
+        auto *box = inLane.tip->property("background").value<QQuickItem *>();
+        QVERIFY(box != nullptr);
+        const QRectF boxRect = sceneRect(box);
+        const QString where = name + QLatin1Char(' ') + describeRect(boxRect) + QStringLiteral(", the time box ")
+            + describeRect(seekBoxRect) + QStringLiteral(", the ring ") + describeRect(sceneRect(inLane.ring));
+        QVERIFY2(std::abs(boxRect.bottom() - seekBoxRect.bottom()) <= 0.5, qPrintable(where));
+        QVERIFY2(std::abs(boxRect.height() - seekBoxRect.height()) <= 0.5, qPrintable(where));
+        QVERIFY2(boxRect.top() >= band.top() && boxRect.right() <= band.right(), qPrintable(where));
+        QVERIFY2(boxRect.bottom() <= sceneRect(inLane.ring).top() - (inLane.control == mute ? 3 : 1) + 0.5,
+                 qPrintable(where));
+        harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(!inLane.tip->property("visible").toBool(), qPrintable(name));
+    }
 }
 
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {
@@ -1460,15 +1501,20 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
                                  .arg(static_cast<int>(seconds) % 60, 2, 10, QLatin1Char('0'));
     QCOMPARE(tip->property("text").toString(), expected);
     QVERIFY2(!expected.startsWith(QLatin1Char('0')), qPrintable(expected));
-    // Above the bar, its bottom edge on the bar's top, centred on the line:
-    // it covers none of the waveform it reads, and nothing under the bar
-    // such as the queue's header.
+    // In the transport's lane above the bar, clear of the bar's focus ring,
+    // centred on the line: it covers none of the waveform it reads,
+    // and nothing under the bar such as the queue's header.
     auto *tipBox = tip->property("background").value<QQuickItem *>();
     QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
-    QVERIFY(tipBox != nullptr && waveform != nullptr);
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QVERIFY(tipBox != nullptr && waveform != nullptr && transport != nullptr);
+    const QRectF band = sceneRect(transport);
     QTRY_VERIFY(tip->property("opened").toBool());
+    const qreal laneBottom = band.top() + transport->property("laneBottom").toReal();
+    QVERIFY(laneBottom <= bar.top() - seek->property("focusRingOutset").toReal() - 1);
     const auto expectAbove = [&](const QRectF &tipRect) {
-        QVERIFY2(std::abs(tipRect.bottom() - bar.top()) <= 0.5, qPrintable(describeRect(tipRect)));
+        QVERIFY2(std::abs(tipRect.bottom() - laneBottom) <= 0.5, qPrintable(describeRect(tipRect)));
+        QVERIFY2(tipRect.top() >= band.top(), qPrintable(describeRect(tipRect)));
         QVERIFY2(!tipRect.intersects(sceneRect(waveform)), qPrintable(describeRect(tipRect)));
         QVERIFY2(!tipRect.intersects(bar), qPrintable(describeRect(tipRect)));
     };
@@ -1635,8 +1681,9 @@ void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole_data() {
 }
 
 // The hover's line never paints over the playhead or stands beside it as a
-// second one: it is under it, and shows only with a gap as wide as the
-// playhead's line between them. The time stays.
+// second one: it is under it, and shows only with 4 px clear between it and
+// the playhead's line (2 or 3 px beside it, the two drew as one doubled
+// line). The time stays.
 void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1658,15 +1705,16 @@ void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole() {
     QTRY_VERIFY(tip->property("opened").toBool());
 
     const QRectF head = sceneRect(playhead);
-    const qreal clearance = sceneRect(line).width();
+    const QRectF amber = sceneRect(line);
+    const qreal clearance = 4;
     const qreal ratio = harness.window->effectiveDevicePixelRatio();
-    for (int x = qFloor(head.left()) - 6; x <= qCeil(head.right()) + 6; ++x) {
+    for (int x = qFloor(head.left()) - 8; x <= qCeil(head.right()) + 8; ++x) {
         QTest::mouseMove(harness.window, QPoint(x, y));
         // On the device pixel under the pointer.
         const qreal at = bar.left() + std::floor((x - bar.left()) * ratio + 1e-6) / ratio;
         QTRY_VERIFY(std::abs(sceneRect(hoverLine).left() - at) < 1e-6);
-        const bool clear = at + hoverLine->width() <= head.left() - clearance + 1e-6
-            || at >= head.right() + clearance - 1e-6;
+        const bool clear = at + hoverLine->width() <= amber.left() - clearance + 1e-6
+            || at >= amber.right() + clearance - 1e-6;
         QVERIFY2(hoverLine->isVisible() == clear, qPrintable(QStringLiteral("at %1").arg(x)));
         QVERIFY(tip->property("visible").toBool());
     }
@@ -1697,8 +1745,10 @@ void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek_data() {
 // A click or a drag released on the bar hands the time box to the hover at
 // the pointer, and its line comes with it: as playback takes the playhead on
 // from under the resting pointer, the line shows at the pointer under the
-// box once a gap opens (it waited for the pointer to move, and the box stood
-// beside the moving playhead with no line). The box never goes out.
+// box once 4 px clear of the playhead's line opens (it waited for the
+// pointer to move, and the box stood beside the moving playhead with no
+// line), and not before (2 or 3 px beside the playhead, the two drew as one
+// doubled line under the box). The box never goes out.
 void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek() {
     QFETCH(bool, dragged);
     Harness harness;
@@ -1706,8 +1756,9 @@ void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek() {
     QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
     QQuickItem *hoverLine = harness.item(QStringLiteral("seekHoverLine"));
     QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
+    QQuickItem *line = harness.item(QStringLiteral("seekPlayheadLine"));
     QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
-    QVERIFY(seek && hoverLine && playhead && tip);
+    QVERIFY(seek && hoverLine && playhead && line && tip);
     auto *tipBox = tip->property("background").value<QQuickItem *>();
     QVERIFY(tipBox != nullptr);
     const QRectF bar = sceneRect(seek);
@@ -1734,12 +1785,16 @@ void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek() {
             boxHidden = true;
             return;
         }
-        const QRectF head = sceneRect(playhead);
-        const qreal gap = 2.0;
-        const bool nearHead = to.x() + 1 > head.left() - gap && to.x() < head.right() + gap;
+        const QRectF head = sceneRect(line);
+        const qreal clear = 4.0;
+        const bool nearHead = to.x() + 1 > head.left() - clear && to.x() < head.right() + clear;
         if (!nearHead && !hoverLine->isVisible() && disagreed.isEmpty()) {
             disagreed = QStringLiteral("no line under the box %1, the playhead %2")
                             .arg(describeRect(sceneRect(tipBox)), describeRect(head));
+        }
+        if (nearHead && hoverLine->isVisible() && disagreed.isEmpty()) {
+            disagreed = QStringLiteral("a line at %1 beside the playhead %2")
+                            .arg(describeRect(sceneRect(hoverLine)), describeRect(head));
         }
     };
     const FrameSampler sampler(harness.window, lineIsTheBoxs);
@@ -1924,8 +1979,9 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale_data() {
 
 // The transport's glyphs on one scale (Play/Pause 22, Previous and Next 16
 // and Stop 14 read as three weights): Previous, Stop, Next and the volume
-// 16 px, their ink 12 px tall, and Play/Pause a step above at 20 px, its ink
-// 14 px tall; Stop's and Pause's ink at most 1.4 times Next's. They grow
+// 16 px, their ink 12 px tall, Stop's 10 px, and Play/Pause a step above at
+// 20 px, its ink 14 px tall; Stop's and Pause's ink at most 1.4 times
+// Next's, and Stop's no more than Play's. They grow
 // with the font on whole pixels, to at least 0.9 of its pixel size at 24 pt,
 // and are drawn at that size (Kirigami rounded a 24 pt font's 38 px glyphs
 // down to 32 px theme icons, and would draw a 20 px one at 16).
@@ -1953,7 +2009,7 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale() {
     const QList<Glyph> glyphs{
         {"previous", glyphOfButton("previous"), small, small * 12 / 16},
         {"pause", pause, large, large * 14 / 20},
-        {"stop", glyphOfButton("stop"), small, small * 12 / 16},
+        {"stop", glyphOfButton("stop"), small, small * 10 / 16},
         {"next", glyphOfButton("next"), small, small * 12 / 16},
         {"volume", harness.item(QStringLiteral("muteButtonGlyph")), small, small * 12 / 16},
     };
@@ -1995,6 +2051,13 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale() {
     QVERIFY2(std::abs(playInk.height - inks.value(QStringLiteral("pause")).height) <= 2,
              qPrintable(QStringLiteral("Play %1 px, Pause %2 px").arg(playInk.height)
                             .arg(inks.value(QStringLiteral("pause")).height)));
+    // Stop, a 10 px square, has no more ink than Play beside it, give or
+    // take the triangle's soft edges, and less than Pause (as a 12 px square
+    // it matched Pause and outweighed Play by half).
+    const int stop = inks.value(QStringLiteral("stop")).pixels;
+    QVERIFY2(stop * 100 <= playInk.pixels * 105 && stop < inks.value(QStringLiteral("pause")).pixels,
+             qPrintable(QStringLiteral("Stop %1 px of ink, Play %2, Pause %3")
+                            .arg(stop).arg(playInk.pixels).arg(inks.value(QStringLiteral("pause")).pixels)));
 }
 
 void TransportStatusTest::transportButtonsDrawTheAppsFocusRing_data() {
@@ -5212,7 +5275,7 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
         QVERIFY2(rect.left() >= previousRight, qPrintable(names[i]));
         previousRight = rect.right();
     }
-    QCOMPARE(band.height(), std::max(48.0, buttonSize + 16.0));
+    QCOMPARE(band.height(), std::max(48.0, buttonSize + 16.0) + transport->property("laneGrowth").toReal());
     for (const QString &name : {QStringLiteral("seekSlider"), QStringLiteral("transportTimePosition"),
                                 QStringLiteral("transportTimeLength"), QStringLiteral("muteButton"),
                                 QStringLiteral("volumeSlider")}) {
