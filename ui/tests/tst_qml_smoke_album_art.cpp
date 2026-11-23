@@ -987,8 +987,9 @@ void checkWindowedViewerFadesInOverOneFloor(AlbumArtWindow &ui) {
 
 // The windowed viewer's corner plate: zoomed, the readout and Reset are set
 // off from the viewer's buttons by a 1 px divider in the plot plate's edge
-// colour, with the buttons' 4 px either side and 6 px of plate above and
-// below it, as on the visualization viewer's. Not zoomed, none.
+// colour, the buttons' 4 px after Reset and 8 px before Image Details (at 4,
+// a checked button's edge stood against the line), and 6 px of plate above
+// and below it, as on the visualization viewer's. Not zoomed, none.
 void checkWindowedViewerCornerSetsTheZoomOff(AlbumArtWindow &ui) {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -1006,7 +1007,7 @@ void checkWindowedViewerCornerSetsTheZoomOff(AlbumArtWindow &ui) {
     QTRY_VERIFY(divider->isVisible() && reset->isVisible());
     QCOMPARE(divider->width(), 1.0);
     QCOMPARE(sceneRectOf(divider).left() - sceneRectOf(reset).right(), 4.0);
-    QCOMPARE(sceneRectOf(info).left() - sceneRectOf(divider).right(), 4.0);
+    QCOMPARE(sceneRectOf(info).left() - sceneRectOf(divider).right(), 8.0);
     QCOMPARE(sceneRectOf(divider).top() - sceneRectOf(controls).top(), 6.0);
     QCOMPARE(sceneRectOf(controls).bottom() - sceneRectOf(divider).bottom(), 6.0);
     QCOMPARE(colorOf(divider, "color"), colorOf(ui.plot(), "plotPlateEdge"));
@@ -5342,7 +5343,7 @@ void AlbumArtSmokeTest::albumArtStripSetsTheZoomOffAsItsPlateDoes() {
                                                               : QStringLiteral("albumArtPopupInfoButton"));
     QVERIFY(reset != nullptr && info != nullptr);
     QCOMPARE(sceneRectOf(divider).left() - sceneRectOf(reset).right(), 4.0);
-    QCOMPARE(sceneRectOf(info).left() - sceneRectOf(divider).right(), 4.0);
+    QCOMPARE(sceneRectOf(info).left() - sceneRectOf(divider).right(), 8.0);
     ui.surface->setProperty("zoom", 1.0);
     QVERIFY(ui.closeViewer(host));
 }

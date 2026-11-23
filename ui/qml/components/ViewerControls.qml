@@ -38,12 +38,14 @@ Item {
     // The viewer's own button before Close, if it has one.
     default property alias viewerControls: viewerControlsRow.data
     // On the windowed viewer's corner plate, the zoom is set off from the
-    // viewer's controls by a 1 px divider with the controls' 4 px either
-    // side, as on the visualization viewer's.
+    // viewer's controls by a 1 px divider, the controls' 4 px after the
+    // zoom and `dividerClearance` before the viewer's own, as on the
+    // visualization viewer's.
     property bool dividers: false
-    // The viewer's own controls set off from Close by a 1 px divider, with
-    // the controls' 4 px either side: the visualization viewer's mode switch
-    // in its title strip, a choice of two, beside the button that closes it.
+    // The viewer's own controls set off from Close by a 1 px divider,
+    // `dividerClearance` after them and the controls' 4 px before Close:
+    // the visualization viewer's mode switch in its title strip, a choice
+    // of two, beside the button that closes it.
     property bool closeDivided: false
     // Close, unless the viewer has none here, as with its strip turned off.
     property bool closeShown: true
@@ -59,6 +61,10 @@ Item {
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
     readonly property real spacing: 4
+    // Between a divider and the viewer's own controls, whose chosen segment
+    // has an edge of its own: 8 px, so that edge never stands 4 px from
+    // the divider's line, and a hovered button's fill never meets it.
+    readonly property real dividerClearance: 8
     // Which items take room, whatever the auto-hide does.
     readonly property bool readoutShown: root.zoomed
     readonly property bool resetShown: root.zoomed && root.resetView !== null
@@ -125,7 +131,7 @@ Item {
     readonly property bool _zoomDivided: root.dividers && root._viewShown
     readonly property real _dividerInset: 6 - root.platePadding
     readonly property real _afterZoom: !root._viewShown ? 0
-        : root._zoomEnd + root.spacing + (root._zoomDivided ? 1 + root.spacing : 0)
+        : root._zoomEnd + root.spacing + (root._zoomDivided ? 1 + root.dividerClearance : 0)
 
     Rectangle {
         objectName: "viewerControlsDivider"
@@ -178,7 +184,7 @@ Item {
     Rectangle {
         objectName: "viewerControlsCloseDivider"
         visible: root._closeDivided
-        x: viewerControlsRow.x + viewerControlsRow.implicitWidth + root.spacing
+        x: viewerControlsRow.x + viewerControlsRow.implicitWidth + root.dividerClearance
         y: root._dividerInset
         width: 1
         height: Math.max(0, root.height - 2 * root._dividerInset)
@@ -189,8 +195,8 @@ Item {
         id: closeButton
         objectName: root.closeButtonName
         visible: root.closeShown
-        x: viewerControlsRow.x + (root.viewerControlsShown ? viewerControlsRow.implicitWidth + root.spacing : 0)
-            + (root._closeDivided ? 1 + root.spacing : 0)
+        x: viewerControlsRow.x + (root.viewerControlsShown ? viewerControlsRow.implicitWidth
+            + (root._closeDivided ? root.dividerClearance + 1 + root.spacing : root.spacing) : 0)
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         text: I18n.i18nc("@action:button", "Close")

@@ -2616,12 +2616,14 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
             // None on the plot.
             QVERIFY(!readout->isVisible() && !reset->isVisible() && !zoomPlate->isVisible() && !modeSwitch->isVisible());
             {
-                // The readout, Reset, the mode switch and Close, each group
-                // 4 px either side of a 1 px divider, Close at the strip's
+                // The readout, Reset, the mode switch and Close, the groups
+                // set off by 1 px dividers that keep 8 px from the mode
+                // switch, whose chosen segment has an edge, and the
+                // buttons' 4 px from Reset and Close; Close at the strip's
                 // 8 px inset or 4 px inside the corner's plate.
                 QTRY_VERIFY(sceneRectOf(shownReadout).right() <= sceneRectOf(shownReset).left());
-                QCOMPARE(sceneRectOf(shownSwitch).left() - sceneRectOf(shownReset).right(), 9.0);
-                QCOMPARE(sceneRectOf(close).left() - sceneRectOf(shownSwitch).right(), 9.0);
+                QCOMPARE(sceneRectOf(shownSwitch).left() - sceneRectOf(shownReset).right(), 13.0);
+                QCOMPARE(sceneRectOf(close).left() - sceneRectOf(shownSwitch).right(), 13.0);
                 QCOMPARE(sceneRectOf(close).right(), inStrip ? host->width() - 8.0 : sceneRectOf(controls).right() - 4.0);
                 for (QQuickItem *item : {shownReadout, shownReset, shownSwitch, close}) {
                     QVERIFY(sceneRectOf(controls).contains(sceneRectOf(item)));
@@ -2826,7 +2828,8 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
         QQuickItem *beforeClose = itemNamed(controls, QStringLiteral("viewerControlsCloseDivider"));
         QVERIFY(afterZoom && beforeClose && afterZoom->isVisible() && beforeClose->isVisible());
         QCOMPARE(sceneRectOf(afterZoom).left(), sceneRectOf(viewerReset).right() + 4);
-        QCOMPARE(sceneRectOf(beforeClose).left(), sceneRectOf(viewerSwitch).right() + 4);
+        QCOMPARE(sceneRectOf(viewerSwitch).left(), sceneRectOf(afterZoom).right() + 8);
+        QCOMPARE(sceneRectOf(beforeClose).left(), sceneRectOf(viewerSwitch).right() + 8);
         for (QQuickItem *divider : {afterZoom, beforeClose}) {
             QCOMPARE(divider->width(), 1.0);
             QCOMPARE(sceneRectOf(divider).top() - sceneRectOf(cornerPlate).top(), 6.0);
@@ -3587,11 +3590,12 @@ void TransportInputSmokeTest::fullscreenVisualizationStripHoldsTheModeSwitch() {
     QVERIFY(!itemNamed(layer, QStringLiteral("plotZoomPlate"))->isVisible());
 
     // [Spectrogram Waveform] | [Close], 8 px in from the screen's edge, on
-    // one line, the divider in the strip's edge colour.
+    // one line, the divider in the strip's edge colour, 8 px from the
+    // switch's chosen segment and 4 px from Close.
     QTRY_COMPARE(sceneRectOf(close).right(), fullscreen->width() - 8.0);
     QTRY_VERIFY(spectrogramButton->isVisible() && waveformButton->isVisible() && divider->isVisible());
     QCOMPARE(sceneRectOf(waveformButton).left() - sceneRectOf(spectrogramButton).right(), 4.0);
-    QCOMPARE(sceneRectOf(divider).left() - sceneRectOf(waveformButton).right(), 4.0);
+    QCOMPARE(sceneRectOf(divider).left() - sceneRectOf(waveformButton).right(), 8.0);
     QCOMPARE(sceneRectOf(divider).width(), 1.0);
     QCOMPARE(sceneRectOf(close).left() - sceneRectOf(divider).right(), 4.0);
     for (QQuickItem *item : {spectrogramButton, waveformButton, divider}) {
