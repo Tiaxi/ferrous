@@ -47,10 +47,12 @@ Components.PlotPlate {
     // text with it (the text went in a frame while the empty plate faded
     // on, H16). A plate revealed with it comes at its width, its text
     // fading in on the plate's reveal. With the corner's row fading out as
-    // it goes, as with the pointer off the pane, the notice stays on the
-    // plate and goes with its fade, at its width, on the row's one curve:
-    // the plate narrowed 15 ms ahead of the row's fade, its text gone at
-    // full opacity (H17).
+    // it goes, as with the pointer off the pane, the plate keeps its width
+    // and fades on the row's one curve (it narrowed 15 ms ahead of the
+    // row's fade, its text gone at full opacity, H17), while the text and
+    // divider go in the frame the view follows again, with the view's cut:
+    // riding the row's fade, "Not following" was still legible 19 ms after
+    // the view had come back (H22).
     property int notice: 0
     // Whether the corner's row stays as the notice goes, read as it starts
     // to go.
@@ -115,8 +117,12 @@ Components.PlotPlate {
                 // From all of it, or from what came of it.
                 root._leaveAlone()
             } else {
+                // Its words go in the frame the view comes back in, and
+                // only the plate's fill fades with the row.
+                textMotion.stop()
                 root._motion = 3
                 root.noticeLevel = 1
+                root._textLevel = 0
                 root._goneWithRow()
             }
         } else {
@@ -197,9 +203,47 @@ Components.PlotPlate {
         }
     }
 
-    visible: root.available && (root.zoomed || root.noticeShown)
+    // With nothing but the zoom on it, the plate comes on the first wheel
+    // notch and goes on Reset as the corner's other plates come and go,
+    // fading over shortDuration, OutCubic, where it cut in and out in a
+    // frame (H22). Only with the corner revealed and staying; with the notice
+    // on the plate, which keeps it, the notice's own motion is the plate's.
+    // Going, it holds the last zoom it had, never "Zoom 100%".
+    property real _zoomPresence: 1
+    property real _lastZoom: 1.0
+    onZoomLevelChanged: {
+        if (Math.abs(root.zoomLevel - 1.0) > 0.001)
+            root._lastZoom = root.zoomLevel
+    }
+    onZoomedChanged: {
+        const wasMoving = zoomPresence.running
+        zoomPresence.stop()
+        if (!root.noticeShown && Kirigami.Units.shortDuration > 0 && root.available
+                && root.revealed && root.revealLevel * root.fadeLevel >= 1) {
+            // From what shows of it, as it was coming or going, or from none.
+            if (root.zoomed && !wasMoving)
+                root._zoomPresence = 0
+            zoomPresence.to = root.zoomed ? 1 : 0
+            zoomPresence.start()
+        } else {
+            root._zoomPresence = 1
+        }
+    }
+    NumberAnimation {
+        id: zoomPresence
+        target: root
+        property: "_zoomPresence"
+        duration: Kirigami.Units.shortDuration
+        easing.type: Easing.OutCubic
+        // Gone: hidden, and whole for its next showing.
+        onFinished: root._zoomPresence = 1
+    }
+    readonly property bool _zoomLeaving: zoomPresence.running && !root.zoomed
+
+    visible: root.available && (root.zoomed || root.noticeShown || root._zoomLeaving)
     opacity: root.revealLevel * root.fadeLevel
         * ((root._motion === 1 || root._motion === 2) && !root.zoomed ? root.noticeLevel : 1)
+        * (root.noticeShown ? 1 : root._zoomPresence)
     takesPointer: true
     Accessible.name: root.zoomed
         ? I18n.i18nc("@label", "Zoom")
@@ -240,7 +284,7 @@ Components.PlotPlate {
         objectName: "plotZoomReadout"
         uiPalette: root.uiPalette
         plotColors: root.plotColors
-        zoomLevel: root.zoomLevel
+        zoomLevel: root._zoomLeaving ? root._lastZoom : root.zoomLevel
         // Only the notice alone takes their room: while the plate is hidden
         // they keep it, so that it has its size as it appears, a row
         // placing what just appeared only when the window next draws.

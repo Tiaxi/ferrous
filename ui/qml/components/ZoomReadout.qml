@@ -9,9 +9,10 @@ import FerrousUi 1.0
 // figures, in the plot's secondary text colour, or without `plotColors` the
 // window's. It is as wide as its text, so that what is beside it keeps its
 // spacing at every digit count: the plates it is on are anchored at their
-// right, where Reset stays, and grow to the left. (As wide as its widest
-// four-digit value, it left 18 px between "Not following"'s divider and a
-// three-digit zoom, against the 6 px on the divider's other side.)
+// right, where Reset stays, and grow to the left, in whole pixels. (As
+// wide as its widest four-digit value, it left 18 px between "Not
+// following"'s divider and a three-digit zoom, against the 6 px on the
+// divider's other side.)
 Label {
     id: root
 
@@ -22,6 +23,9 @@ Label {
     property real zoomLevel: 1.0
     property real pointSize: root.uiPalette.smallPointSize
 
+    // Its text's width to the next whole pixel, so that the plate it is on,
+    // whose width it sets, and Reset after it are on the pixel grid.
+    width: Math.ceil(root.implicitWidth)
     height: root.uiPalette.toolButtonSize
     verticalAlignment: Text.AlignVCenter
     textFormat: Text.PlainText

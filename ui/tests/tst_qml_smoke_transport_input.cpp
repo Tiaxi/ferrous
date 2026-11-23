@@ -4,6 +4,8 @@
 #include "TestMainWindow.h"
 #include "TestColor.h"
 
+#include <Kirigami/Platform/Units>
+
 // Playback controls, keyboard and wheel input, and the fullscreen viewers.
 class TransportInputSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -63,6 +65,8 @@ private slots:
     void laneHeadsStayQuietThroughAPan();
     void laneHeadsCloseOnTheMiddlePress_data();
     void laneHeadsCloseOnTheMiddlePress();
+    void laneHeadsStayClosedThroughAPlotSeek_data();
+    void laneHeadsStayClosedThroughAPlotSeek();
     void wheelZoomIsPointerActivity_data();
     void wheelZoomIsPointerActivity();
     void zoomPlateTextIsDrawnAsThePlotPlatesIs();
@@ -73,6 +77,10 @@ private slots:
     void seekBarBandLandsWithThePlot_data();
     void seekBarBandLandsWithThePlot();
     void zoomPlateSpacesItsDividerEvenly();
+    void zoomPlateKeepsToWholePixels_data();
+    void zoomPlateKeepsToWholePixels();
+    void zoomPlateFadesOnTheFirstNotchAndReset_data();
+    void zoomPlateFadesOnTheFirstNotchAndReset();
     void movedViewSaysSoInTheViewers_data();
     void movedViewSaysSoInTheViewers();
     void followPlayheadBringsTheShownPlotBack();
@@ -3135,14 +3143,16 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
              plot->property("plotTextSecondary").value<QColor>().rgba());
     QCOMPARE(viewerReset->property("display").toInt(), 0); // AbstractButton.IconOnly
     QVERIFY(!viewerReset->property("checked").toBool());
-    // The readout 6 px in from the plate, and 6 px from Reset's glyph box.
+    // The readout 6 px in from the plate, and 6 px from Reset's glyph box,
+    // and less than a pixel more as the readout is whole pixels wide.
     QQuickItem *resetGlyph = itemNamed(viewerReset, QStringLiteral("viewerToolButtonIcon"));
     QVERIFY(resetGlyph != nullptr);
     const double textLeft = viewerReadout->mapToScene(QPointF()).x()
         + viewerReadout->property("leftPadding").toDouble();
     const double textRight = textLeft + viewerReadout->property("contentWidth").toDouble();
     QCOMPARE(textLeft - sceneRectOf(cornerPlate).left(), 6.0);
-    QCOMPARE(sceneRectOf(resetGlyph).left() - textRight, 6.0);
+    const double toReset = sceneRectOf(resetGlyph).left() - textRight;
+    QVERIFY2(toReset >= 6.0 && toReset < 7.0, qPrintable(QString::number(toReset)));
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
@@ -4350,11 +4360,12 @@ void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
     QTRY_VERIFY(toolTip->property("visible").toBool());
     QTest::mouseMove(window, away);
 
-    // Followed again with the pointer away, the notice goes with the row's
-    // fade, its text with it (notFollowingLeavesOneWay).
+    // Followed again with the pointer away, the notice's plate goes with
+    // the row's fade, its words at once (notFollowingLeavesOneWay).
     QVERIFY(QMetaObject::invokeMethod(surface, "followPlayhead"));
     QVERIFY(!moved());
     QVERIFY(text->isVisible());
+    QCOMPARE(text->opacity(), 0.0);
     QTRY_COMPARE(plate->opacity(), 0.0);
     QTRY_VERIFY(!notice->isVisible());
     QTRY_COMPARE(modeSwitch->opacity(), 0.0);
@@ -4536,10 +4547,10 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay_data() {
 // notFollowingMovesAsOnePlate has it frame by frame). At the default zoom,
 // with nothing else on it, the plate fades at its width with its text over
 // 120 ms, OutCubic: the text went in a frame while the empty plate faded
-// on (H16). With the row fading out, the notice goes
-// with the plate's fade, at its width, on the row's curve: the plate
-// narrowed 15 ms ahead of the row's fade, its text gone at full opacity
-// (H17).
+// on (H16). With the row fading out, the plate fades at its width, on
+// the row's curve: the plate narrowed 15 ms ahead of the row's fade, its
+// text gone at full opacity (H17); its text and divider go in the frame the
+// view follows in: riding the fade, they were legible 19 ms after it (H22).
 void TransportInputSmokeTest::notFollowingLeavesOneWay() {
     QFETCH(int, mode);
     QFETCH(bool, cornerWanted);
@@ -4615,8 +4626,13 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
         // One plate, its room and the rest.
         const Fills f = fills(image);
         QVERIFY2(channelDistance(f.room, f.staying) <= 1, qPrintable(f.room.name() + u' ' + f.staying.name()));
-    } else {
+    } else if (cornerWanted) {
         QCOMPARE(corner.text->opacity(), 1.0);
+    } else {
+        // With the row going, its words go with the view's cut, in this
+        // frame, the plate staying at its width (H22).
+        QCOMPARE(corner.text->opacity(), 0.0);
+        QCOMPARE(corner.divider->opacity(), 0.0);
     }
     double left = grownLeft;
     double opacity = 1.0;
@@ -4638,11 +4654,15 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
             textLevel = text;
             QCOMPARE(sceneRectOf(corner.reset), resetAt);
         } else {
-            // At its width, fading with its text, and with the row as it
-            // fades out.
+            // At its width, fading with its text, or with the row as it
+            // fades out, its fill alone.
             QCOMPARE(now, grownLeft);
-            QVERIFY2(corner.text->isVisible() && corner.text->opacity() == 1.0, qPrintable(where));
+            QVERIFY2(corner.text->isVisible() && corner.text->opacity() == (cornerWanted ? 1.0 : 0.0),
+                     qPrintable(QStringLiteral("%1: text %2").arg(where).arg(corner.text->opacity())));
             QCOMPARE(corner.divider->isVisible(), zoomed);
+            if (!cornerWanted) {
+                QCOMPARE(corner.divider->opacity(), 0.0);
+            }
             QVERIFY2(corner.plate->opacity() < opacity,
                      qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(corner.plate->opacity()).arg(opacity)));
             opacity = corner.plate->opacity();
@@ -5069,7 +5089,11 @@ void TransportInputSmokeTest::notFollowingArrivesAsItLeaves() {
         const QRectF plate = sceneRectOf(corner.plate);
         const double now = plate.left();
         const double text = came();
-        QVERIFY2(text > level && text < 1.0, qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(text).arg(level)));
+        // Whole at its last frame at most: the plate's room is whole
+        // pixels, which the growth reaches 2 ms before its end.
+        const bool last = zoomed && (frame + 1) * 16 >= 50;
+        QVERIFY2(text > level && (text < 1.0 || (last && text == 1.0)),
+                 qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(text).arg(level)));
         QCOMPARE(corner.divider->opacity(), corner.text->opacity());
         level = text;
         QCOMPARE(sceneRectOf(corner.modeSwitch), switchAt);
@@ -5140,8 +5164,8 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate_data() {
 // staying, the text fades
 // out as the plate narrows over 90 ms, InOutCubic, and no empty room
 // lingers: the text went in a frame while the empty plate narrowed for
-// 60 ms (H18). With the row fading out, it goes at the plate's width with
-// the row's fade.
+// 60 ms (H18). With the row fading out, the plate fades at its width with
+// the row, its text and divider gone with the view's cut (H22).
 void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
     QFETCH(int, mode);
     QFETCH(int, way);
@@ -5256,9 +5280,13 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
         }
         // No room standing empty: while the text is gone, the plate is
         // narrower than the text within 3 frames, 48 ms; coming, within
-        // 2, 32 ms.
+        // 2, 32 ms. With the row fading out, the text and divider are gone
+        // from the frame the view follows in, and the plate's fill fades.
+        if (!rowStays) {
+            QVERIFY2(level == 0.0, qPrintable(QStringLiteral("%1: text %2").arg(where).arg(level)));
+        }
         const double emptyRoom = plainLeft - plate.left();
-        if (corner.plate->opacity() > 0 && level < 0.05 && emptyRoom > 4) {
+        if (rowStays && corner.plate->opacity() > 0 && level < 0.05 && emptyRoom > 4) {
             longestEmpty = std::max(longestEmpty, ++emptyFrames);
         } else {
             emptyFrames = 0;
@@ -5665,10 +5693,91 @@ void TransportInputSmokeTest::laneHeadsCloseOnTheMiddlePress() {
     QTRY_VERIFY(laneHovered());
 }
 
+void TransportInputSmokeTest::laneHeadsStayClosedThroughAPlotSeek_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// A right-click seek after a pan holds the lane heads as the pan did,
+// until the pointer next moves on its own: a click that came with its
+// pointer's move opened lane L's Mute and Solo as the playhead landed
+// (H22). It holds them from its press with no pan before it too.
+void TransportInputSmokeTest::laneHeadsStayClosedThroughAPlotSeek() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    QObject *plot = mode == 0
+        ? static_cast<QObject *>(itemNamed(corner.spectrogramSurface, QStringLiteral("spectrogramPaneItem")))
+        : static_cast<QObject *>(corner.waveform);
+    QVERIFY(plot != nullptr);
+    QTRY_VERIFY(plot->property("crosshairEnabled").toBool());
+    QSignalSpy seeked(plot, SIGNAL(seekRequested(double)));
+    corner.zoom(4.0);
+    const QList<QQuickItem *> heads = itemsNamed(corner.layer, QStringLiteral("plotLaneHead"));
+    QVERIFY(!heads.isEmpty());
+    const auto laneHovered = [&]() {
+        for (QQuickItem *head : heads) {
+            if (head->property("laneHovered").toBool()) return true;
+        }
+        return false;
+    };
+    const QPoint from = corner.layer->mapToScene(
+        QPointF(corner.layer->width() / 2, corner.layer->height() * 0.25)).toPoint();
+    QTest::mouseMove(window, from + QPoint(1, 1));
+    QTest::mouseMove(window, from);
+    QTRY_VERIFY(laneHovered());
+
+    // A pan, let go: the heads stay closed.
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, from);
+    QPoint end = from;
+    for (int step = 1; step <= 5; ++step) {
+        end = from + QPoint(-12 * step, 0);
+        QTest::mouseMove(window, end);
+    }
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, end);
+    QTest::qWait(50);
+    QVERIFY(!laneHovered());
+
+    // A right click elsewhere on the lane, its pointer's move and press in
+    // one: it seeks, and no head opens, through its release and the frames
+    // after it.
+    const QPoint seekAt = end + QPoint(-40, 0);
+    QTest::mouseMove(window, seekAt);
+    QTest::mousePress(window, Qt::RightButton, Qt::NoModifier, seekAt);
+    QCOMPARE(seeked.count(), 1);
+    QVERIFY(!laneHovered());
+    QTest::mouseRelease(window, Qt::RightButton, Qt::NoModifier, seekAt);
+    QTest::qWait(50);
+    QVERIFY(!laneHovered());
+
+    // The pointer moves on its own: the lane under it has its buttons again.
+    QTest::mouseMove(window, seekAt + QPoint(1, 0));
+    QTRY_VERIFY(laneHovered());
+
+    // With no pan before it, a seek holds them from its press as well.
+    QTest::mousePress(window, Qt::RightButton, Qt::NoModifier, seekAt + QPoint(1, 0));
+    QCOMPARE(seeked.count(), 2);
+    QVERIFY(!laneHovered());
+    QTest::mouseRelease(window, Qt::RightButton, Qt::NoModifier, seekAt + QPoint(1, 0));
+    QTest::qWait(50);
+    QVERIFY(!laneHovered());
+    QTest::mouseMove(window, seekAt + QPoint(2, 0));
+    QTRY_VERIFY(laneHovered());
+}
+
 // The divider between "Not following" and the zoom has 6 px on each side
-// at every digit count: the readout is as wide as its text (as wide as
-// its widest four-digit value, it had 18 px on the zoom's side at three
-// digits, H15). The plate grows to the left, so Reset never moves, and
+// at every digit count: the readout is as wide as its text, to the next
+// whole pixel (as wide as its widest four-digit value, it had 18 px on the
+// zoom's side at three digits, H15). The plate grows to the left, so Reset
+// never moves, and
 // "Not following" moves once, as the zoom reaches four digits.
 void TransportInputSmokeTest::zoomPlateSpacesItsDividerEvenly() {
     LibraryTreeModel libraryModel;
@@ -5698,7 +5807,7 @@ void TransportInputSmokeTest::zoomPlateSpacesItsDividerEvenly() {
         QTRY_VERIFY(corner.text->isVisible());
         window->grabWindow();
         const double readoutText = boxOf(corner.readout).left() + corner.readout->property("leftPadding").toDouble();
-        QCOMPARE(corner.readout->width(), corner.readout->property("implicitWidth").toDouble());
+        QCOMPARE(corner.readout->width(), std::ceil(corner.readout->property("implicitWidth").toDouble()));
         QCOMPARE(sceneRectOf(corner.divider).left() - boxOf(corner.text).right(), 6.0);
         QCOMPARE(readoutText - sceneRectOf(corner.divider).right(), 6.0);
         if (!resetAt) resetAt = sceneRectOf(corner.reset);
@@ -5710,6 +5819,167 @@ void TransportInputSmokeTest::zoomPlateSpacesItsDividerEvenly() {
         } else {
             QCOMPARE(noticeLeft, *noticeAt);
         }
+    }
+}
+
+void TransportInputSmokeTest::zoomPlateKeepsToWholePixels_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// The zoom's plate is whole pixels wide at every value, with and without
+// "Not following": anchored at its right, its left edge was split across
+// two pixel columns, "Zoom 2,274%" at x 1413.5 (H22). Reset and the
+// divider stay on the pixel grid with it.
+void TransportInputSmokeTest::zoomPlateKeepsToWholePixels() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QTest::mouseMove(window, corner.onPane() + QPoint(1, 1));
+    QTest::mouseMove(window, corner.onPane());
+    const auto whole = [](double value) { return std::abs(value - std::round(value)) < 1e-6; };
+    std::optional<QRectF> resetAt;
+    for (const bool moved : {false, true}) {
+        for (const double level : {1.25, 3.81, 9.99, 22.74, 16.01, 123.45}) {
+            corner.zoom(level);
+            if (moved && !corner.moved()) QVERIFY(corner.moveView());
+            QTRY_VERIFY(corner.readout->isVisible());
+            QTRY_COMPARE(corner.plate->opacity(), 1.0);
+            if (moved) {
+                QTRY_COMPARE(corner.text->opacity(), 1.0);
+            }
+            window->grabWindow();
+            const QString where = QStringLiteral("%1 at %2%3")
+                .arg(corner.readout->property("text").toString()).arg(level)
+                .arg(moved ? QStringLiteral(", not following") : QString());
+            const QRectF plate = sceneRectOf(corner.plate);
+            QVERIFY2(whole(plate.left()) && whole(plate.width()),
+                     qPrintable(QStringLiteral("%1: plate at %2, %3 wide").arg(where).arg(plate.left()).arg(plate.width())));
+            const QRectF readout = boxOf(corner.readout);
+            QVERIFY2(whole(readout.left()) && whole(readout.width()),
+                     qPrintable(QStringLiteral("%1: readout at %2, %3 wide").arg(where).arg(readout.left()).arg(readout.width())));
+            if (!resetAt) resetAt = sceneRectOf(corner.reset);
+            QCOMPARE(sceneRectOf(corner.reset), *resetAt);
+            QVERIFY(whole(resetAt->left()));
+            if (moved) {
+                const QRectF divider = sceneRectOf(corner.divider);
+                QVERIFY2(whole(divider.left()), qPrintable(QStringLiteral("%1: divider at %2").arg(where).arg(divider.left())));
+            }
+        }
+    }
+}
+
+void TransportInputSmokeTest::zoomPlateFadesOnTheFirstNotchAndReset_data() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<bool>("animated");
+    QTest::newRow("spectrogram") << 0 << true;
+    QTest::newRow("waveform") << 1 << true;
+    QTest::newRow("waveform, animations off") << 1 << false;
+}
+
+// With the corner revealed, the zoom's plate fades in over 100 ms,
+// OutCubic, on the first wheel notch, and out on Reset, holding the zoom
+// it had as it goes, never "Zoom 100%": it cut in and out in a frame
+// (H22). With animations off it still cuts.
+void TransportInputSmokeTest::zoomPlateFadesOnTheFirstNotchAndReset() {
+    QFETCH(int, mode);
+    QFETCH(bool, animated);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    auto *units = qobject_cast<Kirigami::Platform::Units *>(
+        evaluateOn(corner.plate, QStringLiteral("Kirigami.Units")).value<QObject *>());
+    QVERIFY(units != nullptr);
+    if (!animated) {
+        units->setShortDuration(0);
+    }
+    QTest::mouseMove(window, corner.onPane() + QPoint(1, 1));
+    QTest::mouseMove(window, corner.onPane());
+    QTRY_COMPARE(corner.modeSwitch->opacity(), 1.0);
+    QVERIFY(!corner.plate->isVisible());
+    window->grabWindow();
+    const QRectF switchAt = sceneRectOf(corner.modeSwitch);
+
+    SteppedAnimationDriver animations;
+    const auto readoutText = [&corner]() { return corner.readout->property("text").toString(); };
+    // In: from none, each frame more of it, Reset where it stays.
+    corner.zoom(1.25);
+    QVERIFY(corner.plate->isVisible());
+    const QString shown = readoutText();
+    QVERIFY2(shown.contains(QStringLiteral("125")), qPrintable(shown));
+    window->grabWindow();
+    const QRectF resetAt = sceneRectOf(corner.reset);
+    QCOMPARE(sceneRectOf(corner.plate).right() + 8, switchAt.left());
+    if (animated) {
+        QCOMPARE(corner.plate->opacity(), 0.0);
+        double opacity = 0.0;
+        int frames = 0;
+        while (corner.plate->opacity() < 1.0) {
+            QVERIFY(animations.step(16));
+            ++frames;
+            QVERIFY2(corner.plate->opacity() > opacity,
+                     qPrintable(QStringLiteral("frame %1: %2 after %3")
+                                    .arg(frames).arg(corner.plate->opacity()).arg(opacity)));
+            opacity = corner.plate->opacity();
+            window->grabWindow();
+            QCOMPARE(sceneRectOf(corner.reset), resetAt);
+            QVERIFY(frames <= 8);
+        }
+        QVERIFY2(frames >= 6, qPrintable(QString::number(frames)));
+    } else {
+        QCOMPARE(corner.plate->opacity(), 1.0);
+    }
+    QCOMPARE(corner.modeSwitch->opacity(), 1.0);
+
+    // Out on Reset: in its place and with its zoom, each frame less of it.
+    corner.zoom(1.0);
+    if (animated) {
+        QVERIFY(corner.plate->isVisible());
+        double opacity = 1.0;
+        int frames = 0;
+        while (corner.plate->isVisible()) {
+            QCOMPARE(readoutText(), shown);
+            window->grabWindow();
+            QCOMPARE(sceneRectOf(corner.reset), resetAt);
+            QVERIFY(animations.step(16));
+            ++frames;
+            const double now = corner.plate->isVisible() ? corner.plate->opacity() : 0.0;
+            QVERIFY2(now < opacity || now == 0.0,
+                     qPrintable(QStringLiteral("frame %1: %2 after %3").arg(frames).arg(now).arg(opacity)));
+            opacity = now;
+            QVERIFY(frames <= 8);
+        }
+        QVERIFY2(frames >= 6, qPrintable(QString::number(frames)));
+    }
+    QVERIFY(!corner.plate->isVisible());
+    QCOMPARE(corner.modeSwitch->opacity(), 1.0);
+    // Whole again for its next showing.
+    QCOMPARE(corner.plate->property("_zoomPresence").toDouble(), 1.0);
+
+    // A notch as it goes takes it back from where it is.
+    if (animated) {
+        corner.zoom(1.25);
+        (void)animations.step(200);
+        QCOMPARE(corner.plate->opacity(), 1.0);
+        corner.zoom(1.0);
+        QVERIFY(animations.step(32));
+        const double going = corner.plate->opacity();
+        QVERIFY2(going > 0.0 && going < 1.0, qPrintable(QString::number(going)));
+        corner.zoom(1.56);
+        QVERIFY(corner.plate->isVisible());
+        QCOMPARE(corner.plate->opacity(), going);
+        QVERIFY(animations.step(16));
+        QVERIFY(corner.plate->opacity() > going);
+        (void)animations.step(200);
+        QCOMPARE(corner.plate->opacity(), 1.0);
     }
 }
 

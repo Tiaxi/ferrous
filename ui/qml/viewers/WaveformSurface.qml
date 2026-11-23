@@ -156,8 +156,13 @@ Item {
         laneSeamColor: root.atRest ? root.uiPalette.seam
             : root.viewerMode ? root.uiPalette.viewerWaveformLaneSeam : root.plotColors.plotLaneSeam
         // The crosshair's readout on the plot's plates, as the
-        // spectrogram's, and its dashes in the plot's text.
-        readoutPlateColor: root.plotColors.plotPlate
+        // spectrogram's, and its dashes in the plot's text. Opaque, as the
+        // spectrogram's are: the dashed line and the peaks showed through
+        // the digits at the plot plates' 94 % (H22).
+        readoutPlateColor: {
+            const plate = root.plotColors.plotPlate
+            return Qt.rgba(plate.r, plate.g, plate.b, 1)
+        }
         readoutPlateEdgeColor: root.plotColors.plotPlateEdge
         readoutTextColor: root.plotColors.plotText
         textScale: root.textScale
