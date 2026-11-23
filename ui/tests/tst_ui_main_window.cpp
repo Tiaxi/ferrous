@@ -1937,8 +1937,10 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
         const QRectF rect = sceneRect(line);
         const QString text = line->property("text").toString();
         QVERIFY2(!text.isEmpty(), name);
-        // In the panel, clear of the cover, with its font's height.
-        QVERIFY2(rect.left() >= block.left() + 12 && rect.right() <= block.right() - 12, name);
+        // In the panel, clear of the cover, with its font's height; the
+        // large-font header's title to 8 px from its right side.
+        const qreal end = line == title && panel->property("largeHeader").toBool() ? 8 : 12;
+        QVERIFY2(rect.left() >= block.left() + 12 && rect.right() <= block.right() - end, name);
         QVERIFY2(!rect.intersects(tile), name);
         QVERIFY2(rect.height() >= QFontMetricsF(line->property("font").value<QFont>()).height() - 1, name);
         if (stacked) {
@@ -1951,9 +1953,8 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
             QCOMPARE(rect.left(), block.left() + 12);
             QCOMPARE(rect.width(), block.width() - 24);
         } else {
-            // 12 px after the cover, or in the header the 8 px it is
-            // over the lines.
-            QCOMPARE(rect.left(), tile.right() + (headerRow ? 8 : 12));
+            // 12 px after the cover, in the header too.
+            QCOMPARE(rect.left(), tile.right() + 12);
         }
         // Whole, or at least 8 characters of it and the ellipsis.
         const QFontMetricsF metrics(line->property("font").value<QFont>());
@@ -2457,22 +2458,23 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QCOMPARE(cover->height(), side);
     const QRectF coverRect = sceneRect(cover);
     // One block at the panel's inset: 12 px from its top and left, and the
-    // title 8 px after the cover.
+    // title the inset after the cover, 12 px (8 px read cramped at 24 pt).
     QCOMPARE(coverRect.topLeft(), panelRect.topLeft() + QPointF(12, 12));
-    QTRY_COMPARE(sceneRect(title).left(), coverRect.right() + 8);
+    QTRY_COMPARE(sceneRect(title).left(), coverRect.right() + 12);
     // Its two lines span the cover, or, at the base size beside a 96 px
     // cover, are centred on it.
     QVERIFY2(std::abs(sceneRect(title).top() - (coverRect.top() + std::max(0.0, side - sceneRect(title).height()) / 2))
                  <= 1.0,
              qPrintable(QStringLiteral("the title from %1, %2 px high").arg(sceneRect(title).top())
                             .arg(sceneRect(title).height())));
-    QVERIFY(sceneRect(title).right() <= panelRect.right() - 12);
+    // To 8 px from the panel's right side, a ragged edge.
+    QCOMPARE(sceneRect(title).right(), panelRect.right() - 8);
     // A text of the title, on one line or two, is centred on the cover (a
     // title on one line hung on the cover's foot, with some 60 px empty
     // over it).
     const auto seatedProblem = [&](QQuickItem *text) -> QString {
         const QRectF rect = sceneRect(text);
-        if (rect.left() != coverRect.right() + 8 || std::abs(rect.center().y() - coverRect.center().y()) > 1.0
+        if (rect.left() != coverRect.right() + 12 || std::abs(rect.center().y() - coverRect.center().y()) > 1.0
             || rect.top() < coverRect.top()) {
             return QStringLiteral("\"%1\" on %2 line(s) at %3,%4 to %5, the cover %6 to %7")
                 .arg(text->property("text").toString()).arg(text->property("lineCount").toInt())
@@ -2723,6 +2725,13 @@ void UiMainWindowTest::nowPlayingTitleIsOneSizePerLayout() {
     QCOMPARE(titleFont.weight(), QFont::DemiBold);
     const QFontMetricsF metrics(titleFont);
     const qreal width = title->width();
+    // 12 px after the cover, the panel's inset, and to 8 px from its right
+    // side: the 12 px take no room from the title, which keeps the room it
+    // had 8 px after the cover (with the inset on the right too, "A
+    // Remarkably" no longer fitted the line, "A / Remarkably…").
+    QCOMPARE(sceneRect(title).left(), sceneRect(cover).right() + 12);
+    QCOMPARE(sceneRect(title).right(), sceneRect(panel).right() - 8);
+    QCOMPARE(width, panel->width() - 12 - cover->width() - 8 - 12);
     // The rule, from the fonts and the width: the room beside the cover a
     // heading-size title would have, against 12 of its average characters.
     QFont headingFont = titleFont;
@@ -3581,9 +3590,9 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
         // With a large font, all but the title under the header row, at
         // the panel's inset.
         const bool under = pointSize > 0 && qstrcmp(name, "nowPlayingNarrowTitle") != 0;
-        QTRY_COMPARE(sceneRect(line).left(),
-                     under ? sceneRect(panel).left() + 12 : tile.right() + (pointSize > 0 ? 8 : 12));
-        QVERIFY2(sceneRect(line).right() <= sceneRect(panel).right() - 12, name);
+        QTRY_COMPARE(sceneRect(line).left(), under ? sceneRect(panel).left() + 12 : tile.right() + 12);
+        // The large-font header's title to 8 px from the panel's right side.
+        QVERIFY2(sceneRect(line).right() <= sceneRect(panel).right() - (pointSize > 0 && !under ? 8 : 12), name);
         lowest = std::max(lowest, sceneRect(line).bottom());
     }
     QQuickItem *narrowTitle = named(window, "nowPlayingNarrowTitle");
@@ -3598,7 +3607,7 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     }
     QVERIFY(sceneRect(narrowTitle).top() < tile.bottom());
     QCOMPARE(tile.topLeft(), coverCorner(panel));
-    QCOMPARE(sceneRect(narrowTitle).left(), tile.right() + (pointSize > 0 ? 8 : 12));
+    QCOMPARE(sceneRect(narrowTitle).left(), tile.right() + 12);
     if (pointSize > 0) {
         // The lines run past the cover's foot at 24 pt.
         QVERIFY2(lowest > tile.bottom(), qPrintable(QString::number(lowest - tile.bottom())));

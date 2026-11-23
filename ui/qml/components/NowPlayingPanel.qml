@@ -194,7 +194,7 @@ Item {
     }
     // The same beside the large-font header's cover, which is at the inset.
     function _roomBesideHeader(side) {
-        return root.width - root.textInset - side - root.besideGap - root.textInset
+        return root.width - root.textInset - side - root.besideGap - root.headerTitleEnd
     }
     // Where the cover is in from the panel's corner: at the inset in the
     // large-font header, on its lines' left edge, and at the corner
@@ -1398,9 +1398,13 @@ Item {
     // some 264 px of it empty beside it, and the compact one cut the artist
     // off beside a 152 px cover): one block on one left edge, the panel's
     // inset. The cover, as high as two lines of the title (headerCoverSize),
-    // at the inset from the top too, and beside it, besideGap after it (12
-    // px after the inset cover, "A Remarkably" was past the 408 px
-    // sidebar's first line, and a long title showed two words), the title,
+    // at the inset from the top too, and beside it, besideGap after it, the
+    // panel's inset (8 px read cramped against the cover at 24 pt, tighter
+    // than every other gap in the block), the title, to headerTitleEnd
+    // from the panel's right side, so it keeps the room it had (with 12 px
+    // and the inset on the right, "A Remarkably" was past the 408 px
+    // sidebar's first line, "A / Remarkably…", and a long title showed two
+    // words),
     // on up to two lines and centred on it either way (flush in the corner
     // with the title on its foot, the header had three left edges and some
     // 60 px of nothing over the title); then, footGap, the panel's inset,
@@ -1420,7 +1424,12 @@ Item {
     readonly property bool largeHeader: !root.wideRoom && root.largeFont
         && (!root.narrow || root.narrowLinesTall)
         && root._roomBesideHeader(root.headerCoverSize) >= root.narrowLineMinimum
-    readonly property int besideGap: 8
+    readonly property int besideGap: root.textInset
+    // Where the header's title ends, from the panel's right side: a ragged
+    // right edge, which no line under it lines up with, so 8 px, Kirigami's
+    // two small spacings, rather than the inset, which the gap before it
+    // takes.
+    readonly property int headerTitleEnd: 2 * Kirigami.Units.smallSpacing
     readonly property int footGap: root.textInset
     readonly property int titleGapBeside: root.largeHeader ? root.besideGap : root.textInset
     readonly property real footLineWidth: Math.max(0, root.width - 2 * root.textInset)
@@ -2302,7 +2311,8 @@ Item {
             y: root._whileGrowing(root.narrowStacked
                 ? root.footTop + root.textInset
                 : root.besideTextTop + Math.round(root.lineShift * root.idleRowHeight))
-            width: Math.max(0, root.width - root.textInset - narrowColumn.x)
+            width: Math.max(0, root.width - (root.largeHeader ? root.headerTitleEnd : root.textInset)
+                                   - narrowColumn.x)
             spacing: root.narrowStacked || root.largeHeader ? root.stackedLineGap : 0
 
             HoverHandler {
