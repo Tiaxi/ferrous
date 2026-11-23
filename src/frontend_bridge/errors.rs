@@ -109,13 +109,16 @@ impl BridgeError {
     }
 
     /// The message and the system's text together, as the log has them:
-    /// "Settings couldn't be saved: failed to replace …".
+    /// "Settings couldn't be saved: failed to replace …". A message written
+    /// as a sentence drops its full stop before the colon, so the line never
+    /// reads "… playback stopped.: …".
     #[must_use]
     pub fn logged_message(&self) -> String {
         if self.detail.is_empty() {
             self.message.clone()
         } else {
-            format!("{}: {}", self.message, self.detail)
+            let message = self.message.strip_suffix('.').unwrap_or(&self.message);
+            format!("{message}: {}", self.detail)
         }
     }
 }
@@ -226,6 +229,27 @@ fn log_only(category: ErrorCategory, level: &str, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_logged_sentence_drops_its_full_stop_before_the_detail() {
+        let error = BridgeError::error(
+            ErrorCategory::Playback,
+            "Couldn't play “a.flac”; playback stopped.",
+        )
+        .with_detail("No valid frames found before end of stream");
+        assert_eq!(
+            error.logged_message(),
+            "Couldn't play “a.flac”; playback stopped: No valid frames found before end of stream"
+        );
+        let plain = BridgeError::error(ErrorCategory::Settings, "Settings couldn't be saved")
+            .with_detail("failed to replace");
+        assert_eq!(
+            plain.logged_message(),
+            "Settings couldn't be saved: failed to replace"
+        );
+        let bare = BridgeError::error(ErrorCategory::Settings, "Settings couldn't be saved.");
+        assert_eq!(bare.logged_message(), "Settings couldn't be saved.");
+    }
 
     #[test]
     fn a_quoted_path_escapes_its_quotes_and_backslashes() {
