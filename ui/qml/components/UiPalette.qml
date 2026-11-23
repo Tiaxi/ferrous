@@ -98,6 +98,12 @@ QtObject {
     // under the fill, so the fill is still the bar's strongest mark and
     // no louder than the glyph beside it. #6e7378 / #80868d.
     readonly property color statusBarTroughFrame: root._drawnAt(root.text, root.chrome, 3.2)
+    // The frame of a trough that holds nothing going on, the Last.fm
+    // slot's after a play that ended short: 2.2:1 on the status bar, a
+    // clear step under the 3.2:1 frame of a bar in progress, yet still a
+    // shape of its own (at 1.9:1 / 1.5:1, a trough with nothing drawn on it
+    // went unseen at 1x). #57595c / #a1a3a5.
+    readonly property color statusBarTroughFrameQuiet: root._drawnAt(root.text, root.chrome, 2.2)
     readonly property color statusBarTrough: root.view
     // Text over the row: the hover tint. The least of it, in whole
     // percent, that is 1.3:1 on the view, so a hovered row stands out in

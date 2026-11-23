@@ -593,8 +593,8 @@ private slots:
     void lastFmSlotShowsEachState();
     void lastFmSlotCountsTheTimeLeftFromTheListenedTime();
     void lastFmSlotHidesWithTheTrackSectionsWhileTheEngineIsDown();
-    void lastFmNotScrobbledHoldsTheShareThePlayReached_data();
-    void lastFmNotScrobbledHoldsTheShareThePlayReached();
+    void lastFmNotScrobbledMarksTheShareOnAnEmptyTrough_data();
+    void lastFmNotScrobbledMarksTheShareOnAnEmptyTrough();
     void lastFmSlotPausedLooksStruckThrough_data();
     void lastFmSlotPausedLooksStruckThrough();
     void lastFmPausedKeepsBothLettersAndTheStrike_data();
@@ -3973,18 +3973,19 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
 
     // Once playback has stopped after a play that ended before its
-    // scrobble point: the glyph, quieter, without words, the bar held at
-    // the share the play reached in the glyph's quieter ink, and the
-    // tooltip says it was not scrobbled and how far the play got.
+    // scrobble point: the glyph, quieter, without words, the trough empty
+    // with the end mark at the share the play reached, and the tooltip
+    // says it was not scrobbled and how far the play got.
     bridge->setProperty("lastFmScrobbleState", 6);
     bridge->setProperty("lastFmScrobbleIneligibility", 3);
     QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("notScrobbled"));
     QVERIFY(slot->isVisible());
     QVERIFY(!label->isVisible());
-    QVERIFY(trough->isVisible() && bar->isVisible());
+    QVERIFY(trough->isVisible() && !bar->isVisible());
     QCOMPARE(trough->size(), QSizeF(28, 5));
-    QCOMPARE(bar->width(), std::floor(77.0 / 115.0 * 26));
-    QVERIFY(sameColor(bar->property("color").value<QColor>(), harness.token("textTertiary")));
+    QQuickItem *endMark = harness.item(QStringLiteral("scrobbleIndicatorEndMark"));
+    QVERIFY(endMark && endMark->isVisible());
+    QCOMPARE(endMark->x(), 1 + std::floor(77.0 / 115.0 * 26) - 1);
     QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textTertiary")));
     QCOMPARE(toolTipText(slot),
@@ -4087,20 +4088,22 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
 // either way and a pause leave it, and only a new play, whose count starts
 // from zero, starts it over. The bar and the tooltip move by whole seconds
 // of listening, and not at all while the count holds.
-void TransportStatusTest::lastFmNotScrobbledHoldsTheShareThePlayReached_data() {
+void TransportStatusTest::lastFmNotScrobbledMarksTheShareOnAnEmptyTrough_data() {
     addThemeRows();
 }
 
 // A play that ended short, routine, is the slot's quietest state: the
 // glyph in the tertiary text with no words ("Not scrobbled" beside it read
 // as a problem with Last.fm, and looked like "3 scrobbles waiting
-// (offline)"), and beside it the trough with the bar held at the share of
-// the scrobble point the play reached, in the glyph's tertiary ink, with no
-// mark at either end. So it differs from scrobbled, the glyph alone, by
-// shape: the glyph alone in either tint, the two looked alike at 1x. Words
-// in the slot mean scrobbles waiting, in the secondary text, or a failure,
-// a step louder in the text colour. The glyph and the bar stay readable.
-void TransportStatusTest::lastFmNotScrobbledHoldsTheShareThePlayReached() {
+// (offline)"), and beside it the trough, empty, in a frame quieter than
+// listening's, with an upright end mark in the glyph's tertiary ink at the
+// share of the scrobble point the play reached. So it differs from
+// scrobbled, the glyph alone, by shape (the glyph alone in either tint,
+// the two looked alike at 1x), and from listening by shape as well: held
+// as a quieter fill, it read as listening going on. Words in the slot mean
+// scrobbles waiting, in the secondary text, or a failure, a step louder in
+// the text colour. The glyph and the mark stay readable.
+void TransportStatusTest::lastFmNotScrobbledMarksTheShareOnAnEmptyTrough() {
     QFETCH(bool, dark);
     Harness harness;
     QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
@@ -4109,18 +4112,26 @@ void TransportStatusTest::lastFmNotScrobbledHoldsTheShareThePlayReached() {
     QQuickItem *label = harness.item(QStringLiteral("scrobbleIndicatorLabel"));
     QQuickItem *bar = harness.item(QStringLiteral("scrobbleIndicatorBar"));
     QQuickItem *trough = harness.item(QStringLiteral("scrobbleIndicatorTrough"));
-    QVERIFY(slot && glyph && label && bar && trough);
+    QQuickItem *endMark = harness.item(QStringLiteral("scrobbleIndicatorEndMark"));
+    QVERIFY(slot && glyph && label && bar && trough && endMark);
     QObject *bridge = harness.bridge;
     const QColor chrome = harness.token("chrome");
     const auto colours = [&]() {
         return std::pair{label->property("color").value<QColor>(), glyph->property("color").value<QColor>()};
     };
 
+    // Listening at a quarter, for the frame it has.
     bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
     bridge->setProperty("lastFmScrobbleListenedMs", 30000);
+    bridge->setProperty("lastFmScrobbleState", 1);
+    QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("listening"));
+    QTRY_VERIFY(slot->isVisible());
+    QVERIFY(bar->isVisible() && !endMark->isVisible());
+    const QColor listeningFrame = evaluateOn(trough, QStringLiteral("border.color")).value<QColor>();
+    QVERIFY(sameColor(listeningFrame, harness.token("statusBarTroughFrame")));
+
     bridge->setProperty("lastFmScrobbleState", 3);
     QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("scrobbled"));
-    QTRY_VERIFY(slot->isVisible());
     QVERIFY(!trough->isVisible());
     const qreal scrobbledWidth = slot->width();
 
@@ -4130,40 +4141,66 @@ void TransportStatusTest::lastFmNotScrobbledHoldsTheShareThePlayReached() {
     QVERIFY(slot->isVisible());
     QVERIFY(!label->isVisible());
     QCOMPARE(label->property("text").toString(), QString());
-    // The trough and its 6 px gap beside the glyph that a scrobble lacks.
+    // The trough and its 6 px gap beside the glyph that a scrobble lacks,
+    // with nothing filling it.
     QVERIFY(trough->isVisible());
     QCOMPARE(trough->size(), QSizeF(28, 5));
     QTRY_COMPARE(slot->width(), scrobbledWidth + 28 + 6);
-    // A quarter of the 26 px inside the frame, by whole pixels, from the
-    // left, with no mark added.
-    QVERIFY(bar->isVisible());
-    QCOMPARE(bar->position(), QPointF(1, 1));
-    QCOMPARE(bar->size(), QSizeF(6, 3));
+    QVERIFY(!bar->isVisible());
+    // The mark: 2 px wide and 1 px past the trough at the top and the
+    // bottom, centred on a quarter of the 26 px inside the frame, by whole
+    // pixels (6 of them).
+    QVERIFY(endMark->isVisible());
+    QCOMPARE(endMark->size(), QSizeF(2, 7));
+    QCOMPARE(endMark->position(), QPointF(1 + 6 - 1, -1));
     const QColor shortGlyph = colours().second;
-    const QColor shortFill = bar->property("color").value<QColor>();
+    const QColor markColor = endMark->property("color").value<QColor>();
     const QColor troughColor = trough->property("color").value<QColor>();
+    const QColor quietFrame = evaluateOn(trough, QStringLiteral("border.color")).value<QColor>();
     QVERIFY(sameColor(shortGlyph, harness.token("textTertiary")));
-    QVERIFY(sameColor(shortFill, shortGlyph));
+    QVERIFY(sameColor(markColor, shortGlyph));
+    QVERIFY(sameColor(quietFrame, harness.token("statusBarTroughFrameQuiet")));
     QVERIFY2(contrastRatio(shortGlyph, chrome) >= 4.5,
              qPrintable(describeContrast(QStringLiteral("not scrobbled"), shortGlyph, chrome)));
-    QVERIFY2(contrastRatio(shortFill, troughColor) >= 4.5,
-             qPrintable(describeContrast(QStringLiteral("not scrobbled fill"), shortFill, troughColor)));
-    // Quieter than listening's fill, the secondary text.
-    QVERIFY2(contrastRatio(shortFill, troughColor) * 1.1
-                 < contrastRatio(harness.token("statusBarFill"), troughColor),
-             qPrintable(describeContrast(QStringLiteral("not scrobbled fill"), shortFill, troughColor)));
+    QVERIFY2(contrastRatio(markColor, troughColor) >= 4.5 && contrastRatio(markColor, chrome) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("not scrobbled mark"), markColor, troughColor)));
+    // The frame a step quieter than listening's, still a shape of its own
+    // on the status bar, and the mark well over it.
+    const QString frames = describeContrast(QStringLiteral("quiet frame"), quietFrame, chrome)
+        + describeContrast(QStringLiteral(", listening's"), listeningFrame, chrome);
+    QVERIFY2(contrastRatio(quietFrame, chrome) >= 2.0, qPrintable(frames));
+    QVERIFY2(contrastRatio(quietFrame, chrome) * 1.3 < contrastRatio(listeningFrame, chrome), qPrintable(frames));
+    QVERIFY2(contrastRatio(markColor, chrome) > 2 * contrastRatio(quietFrame, chrome), qPrintable(frames));
     QCOMPARE(toolTipText(slot),
              QStringLiteral("Last.fm: not scrobbled. The play ended after 0:30 of the 2:00 of listening it "
                             "needed."));
-    // The share as it is, with no mark at either end: 0 s leaves the
-    // trough empty, 119 s stops a part pixel short of full.
+
+    // As drawn: the trough's inside is the view on either side of the
+    // mark, and the mark crosses the frame.
+    qreal scale = 1.0;
+    const QImage image = grabbed(harness.window, &scale);
+    const QRectF troughRect = sceneRect(trough);
+    const QRectF markRect = sceneRect(endMark);
+    const qreal middle = troughRect.center().y();
+    for (const qreal x : {troughRect.left() + 2.5, markRect.left() - 1.5, markRect.right() + 1.5,
+                          troughRect.right() - 2.5}) {
+        QVERIFY2(channelDistance(pixelAt(image, QPointF(x, middle), scale), troughColor) <= 2,
+                 qPrintable(QStringLiteral("empty at %1").arg(x)));
+    }
+    for (const qreal y : {markRect.top() + 0.5, middle, markRect.bottom() - 0.5}) {
+        QVERIFY2(channelDistance(pixelAt(image, QPointF(markRect.center().x(), y), scale), markColor) <= 2,
+                 qPrintable(QStringLiteral("mark at %1").arg(y)));
+    }
+
+    // At the trough's ends the mark stays inside it: 0 s over its left
+    // frame, 119 s on the last whole pixel inside, short of the right
+    // frame.
     bridge->setProperty("lastFmScrobbleListenedMs", 0);
-    QTRY_VERIFY(!bar->isVisible());
-    QVERIFY(trough->isVisible());
-    QCOMPARE(bar->width(), 0.0);
+    QTRY_COMPARE(endMark->x(), 0.0);
+    QVERIFY(!bar->isVisible());
     bridge->setProperty("lastFmScrobbleListenedMs", 119000);
-    QTRY_COMPARE(bar->width(), std::floor(119.0 / 120.0 * 26));
-    QVERIFY(bar->isVisible());
+    QTRY_COMPARE(endMark->x(), 1 + std::floor(119.0 / 120.0 * 26) - 1);
+    QVERIFY(!bar->isVisible());
     bridge->setProperty("lastFmScrobbleListenedMs", 30000);
 
     bridge->setProperty("lastFmScrobbleIneligibility", 0);
