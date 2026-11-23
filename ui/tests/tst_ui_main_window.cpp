@@ -982,6 +982,38 @@ QString standInProblem(QQuickWindow *window) {
                 .arg(hex(drawn.at(side.inside))).arg(sceneRect(line).x()).arg(sceneRect(line).y());
         }
     }
+    // Under the mark: where a trace runs out through an edged side, the
+    // side's pixel is not the edge's colour (drawn over the mark, the edge
+    // capped the traces' ends on the right with a 1 px bar). Each pixel
+    // along the side with a trace solid 1 px inside it; the narrow and
+    // header tiles' right sides have some.
+    const QColor floorColour = tokenOf(window, "plotFloor");
+    int crossings = 0;
+    for (const auto &side : sides) {
+        if (!side.meetsView) {
+            continue;
+        }
+        const bool across = side.line.width() > side.line.height();
+        const QPointF inward = across ? QPointF(0, side.line.top() <= tileRect.top() + 0.5 ? 1 : -1)
+                                      : QPointF(side.line.left() <= tileRect.left() + 0.5 ? 1 : -1, 0);
+        const qreal length = across ? side.line.width() : side.line.height();
+        for (qreal along = 2.5; along < length - 2; along += 1) {
+            const QPointF onLine = side.line.topLeft() + (across ? QPointF(along, 0.5) : QPointF(0.5, along));
+            const QColor inside = drawn.at(onLine + inward);
+            if (channelDistance(inside, floorColour) < 80 || channelDistance(inside, edgeColour) < 80) {
+                continue;
+            }
+            ++crossings;
+            const QColor atEdge = drawn.at(onLine);
+            if (channelDistance(atEdge, edgeColour) <= 8) {
+                return QStringLiteral("the %1 edge %2 over the trace %3 at %4 in the %5 layout")
+                    .arg(QLatin1String(side.side), hex(atEdge), hex(inside)).arg(along).arg(layout);
+            }
+        }
+    }
+    if (crossings == 0 && sides[2].meetsView) {
+        return QStringLiteral("no trace runs out through the right side in the %1 layout").arg(layout);
+    }
     // The wide tileRect edges its foot alone, in both themes.
     if (wide && (!shown(itemNamed(cover, QStringLiteral("albumArtStandInEdge_bottom")))
                  || shown(itemNamed(cover, QStringLiteral("albumArtStandInEdge_top"))))) {
