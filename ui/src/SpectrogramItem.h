@@ -332,10 +332,6 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // and labels at rest keep under.
     Q_PROPERTY(int restLineCount READ restLineCount WRITE setRestLineCount NOTIFY restLineCountChanged)
     Q_PROPERTY(double restTopClearance READ restTopClearance WRITE setRestTopClearance NOTIFY restTopClearanceChanged)
-    // How far from the plot's right edge the frequency scale ends, beside
-    // a column there, such as the level meter's: its labels end there, with
-    // no ticks to the edge. 0 without one: its ticks are on the edge.
-    Q_PROPERTY(double scaleEndInset READ scaleEndInset WRITE setScaleEndInset NOTIFY scaleEndInsetChanged)
     // How much larger than the window's its text is, the crosshair's readout
     // and the scale's labels: in a viewer over the whole screen, its strip's
     // type scale (UiPalette.fullscreenTextScale), as its lane heads'; 1
@@ -471,8 +467,6 @@ public:
     void setRestLineCount(int value);
     double restTopClearance() const;
     void setRestTopClearance(double value);
-    double scaleEndInset() const;
-    void setScaleEndInset(double value);
     double textScale() const;
     void setTextScale(double value);
     QColor floorColor() const;
@@ -604,7 +598,6 @@ signals:
     void laneHeadBoundsChanged();
     void restLineCountChanged();
     void restTopClearanceChanged();
-    void scaleEndInsetChanged();
     void textScaleChanged();
     void readoutColorsChanged();
     void floorColorChanged();
@@ -998,7 +991,6 @@ private:
     // How far below the lane's top the frequency scale's labels start, in
     // logical pixels.
     int frequencyScaleTopClearanceLocked() const;
-    int frequencyScaleLabelGapLocked() const;
     // The lane at rest, without columns: faint lines across it, evenly
     // spaced, or with the scale shown at each of its ticks, where a session
     // at the analysis's settings and the lane's rate will put them, and
@@ -1594,7 +1586,6 @@ private:
     QRectF m_laneHeadBounds;
     int m_restLineCount{3};
     double m_restTopClearance{0.0};
-    double m_scaleEndInset{0.0};
     // textScale, under the state mutex.
     double m_textScale{1.0};
     // UiPalette's spectrogramPlot plates, until QML sets them.

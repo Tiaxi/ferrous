@@ -336,12 +336,6 @@ void LevelMeterItem::setActive(bool value) {
     noteReadout();
 }
 
-void LevelMeterItem::setFramed(bool value) {
-    if (m_framed == value) return;
-    m_framed = value;
-    emit framedChanged();
-    update();
-}
 
 
 void LevelMeterItem::setReadoutWanted(bool value) {
@@ -735,34 +729,26 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         if (ramp->rect() != rect) ramp->setRect(rect);
         child = child->nextSibling();
     };
-    // Across the track, and along the bar on it.
-    const double trackLeft = m_framed ? kFramedGap : kTrackLeft;
-    const auto track = [trackLeft](double y, double height) {
-        return QRectF(trackLeft, y, kColumnWidth - trackLeft, height);
-    };
-    const auto bar = [this](double y, double height) {
-        return m_framed ? QRectF(kFramedGap + kFramedInset, y, kFramedBarWidth, height)
-                        : QRectF(kBarLeft, y, kBarWidth, height);
-    };
-    // Framed, the plot's background runs to the column's edge, the gap's,
-    // with no seam beside it.
-    const double backgroundLeft = m_framed ? 0.0 : kTrackLeft;
+    // Across the track, along the body on it, and a mark's tick beside it.
+    const auto track = [](double y, double height) { return QRectF(kTrackLeft, y, kTrackWidth, height); };
+    const auto body = [](double y, double height) { return QRectF(kBodyLeft, y, kBodyWidth, height); };
+    const auto mark = [](double y) { return QRectF(kMarkLeft, y, kMarkWidth, 1.0); };
     for (int lane = 0; lane < m_laneCount; ++lane) {
         const auto [top, bottom] = laneRows(lane, m_laneCount, height());
-        next(QRectF(backgroundLeft, top, std::max(0.0, width() - backgroundLeft), bottom - top), m_backgroundColor);
+        next(QRectF(kTrackLeft, top, std::max(0.0, width() - kTrackLeft), bottom - top), m_backgroundColor);
         const double meterTop = top + kInset;
         const double meterBottom = std::max(meterTop, bottom - kInset);
         next(track(meterTop, meterBottom - meterTop), m_troughColor);
         const Painted &shown = m_painted[static_cast<std::size_t>(lane)];
         const double scaleTop = meterTop + kLampHeight + 1.0;
         const double scaleHeight = std::max(0.0, meterBottom - scaleTop);
-        // The marks' ticks, across the track, each in the upper row of its
-        // gap in the ladder.
+        // The marks' ticks, on the track's outer side, each in the upper row
+        // of its gap in the ladder.
         const auto nextMarks = [&]() {
             const std::vector<int> gaps = scaleHeight > 0.0 ? markGaps(scaleHeight) : std::vector<int>{};
             for (std::size_t i = 0; i < std::size(kMarksDb); ++i) {
                 const double y = i < gaps.size() ? std::max(scaleTop, meterBottom - gaps[i] - kMarkGap) : 0.0;
-                next(i < gaps.size() ? track(y, 1.0) : QRectF(), m_tickColor);
+                next(i < gaps.size() ? mark(y) : QRectF(), m_tickColor);
             }
         };
         if (!m_active || scaleHeight <= 0.0) {
@@ -777,21 +763,21 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
             next(QRectF(), m_backgroundColor);
             continue;
         }
-        next(bar(meterTop, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
-        next(track(meterTop + kLampHeight, 1.0), m_gapColor);
+        next(body(meterTop, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
+        next(body(meterTop + kLampHeight, 1.0), m_gapColor);
         // The fill and the tick end on device pixels; frames are drawn only
         // when these change. The fill is a ladder of rungs from the scale's
         // foot, of one colour.
         const double fill = shown.fill / dpr;
-        nextRamp(bar(meterBottom - fill, fill), scaleHeight * dpr, shown.fill);
+        nextRamp(body(meterBottom - fill, fill), scaleHeight * dpr, shown.fill);
         nextMarks();
-        // The 2 px tick is centred on its level, inside the scale. On the
-        // fill, a 1 px gap under it keeps it a mark of its own, whatever
-        // the fill's colour.
+        // The held peak, a 2 px line across the body, centred on its level,
+        // inside the scale. On the fill, a 1 px gap under it keeps it a
+        // mark of its own, whatever the fill's colour.
         const double tickY = std::clamp(meterBottom - shown.peak / dpr - 1.0, scaleTop, meterBottom - 2.0);
         const bool onFill = shown.peak >= 0 && meterBottom - fill < tickY + 3.0 && tickY + 3.0 <= meterBottom;
-        next(onFill ? track(tickY + 2.0, 1.0) : QRectF(), m_gapColor);
-        next(shown.peak >= 0 ? track(tickY, 2.0) : QRectF(), m_peakColor);
+        next(onFill ? body(tickY + 2.0, 1.0) : QRectF(), m_gapColor);
+        next(shown.peak >= 0 ? body(tickY, 2.0) : QRectF(), m_peakColor);
     }
     setRect(node->lastChild(), m_topSeamColor.alpha() > 0 ? QRectF(0.0, 0.0, width(), 1.0) : QRectF(),
             m_topSeamColor);

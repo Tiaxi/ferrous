@@ -1582,13 +1582,12 @@ void UiMenusTest::checkScaleItemIsOffInWaveformMode(QQuickWindow *window) {
 
 // The level meter as part of the plot: its column runs out to the pane's
 // edge, which is the window's and the right edge of the queue's scrollbar
-// above the pane, with no strip of the plot's floor beside it; its bar is
-// far wider than the scrollbar's thumb, and nothing of either overlaps the
-// other. Its fill is the plot set's meterFill, the app icon's magenta on
+// above the pane, with no strip of the plot's floor beside it; its column
+// is far wider than the scrollbar's thumb, and nothing of either overlaps
+// the other. Its fill is the plot set's meterFill, the app icon's magenta on
 // the spectrogram. It is one meter for both visualization modes, of the
 // same input, scale and marks, so one signal reads the same in either:
-// only its colours change, and on the waveform its bar is framed by the
-// trough.
+// only its colours change, its geometry the same in both.
 void UiMenusTest::checkLevelMeterIsPartOfThePlot(QQuickWindow *window) {
     QObject *bridge = bridgeOf(window);
     QObject *viewer = child(window, "viewerController");
@@ -1620,11 +1619,12 @@ void UiMenusTest::checkLevelMeterIsPartOfThePlot(QQuickWindow *window) {
     QVERIFY2(std::abs(meterRect.right() - laneRect.right()) < 1.0,
              qPrintable(QStringLiteral("meter ends at %1, the lane at %2").arg(meterRect.right()).arg(laneRect.right())));
     QCOMPARE(meter->implicitWidth(), LevelMeterItem::kColumnWidth);
-    // The bar out to that edge, 10 px: a ladder of 3 px rungs on a 4 px
-    // pitch rather than a solid bar, which tells it from the scrollbar's
-    // solid thumb (2 px rungs on a 3 px pitch read as a hatch).
-    QCOMPARE(LevelMeterItem::kBarLeft + LevelMeterItem::kBarWidth, meter->width());
-    QCOMPARE(LevelMeterItem::kBarWidth, 10.0);
+    // The track out to that edge, and on it a 6 px body: a ladder of 3 px
+    // rungs on a 4 px pitch rather than a solid bar, which tells it from
+    // the scrollbar's solid thumb (2 px rungs on a 3 px pitch read as a
+    // hatch).
+    QCOMPARE(LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth, meter->width());
+    QCOMPARE(LevelMeterItem::kBodyWidth, 6.0);
     QCOMPARE(LevelMeterItem::kRungHeight, 3.0);
     QCOMPARE(LevelMeterItem::kRungPitch, 4.0);
     // Neither overlaps the other: the thumb ends above the pane.
@@ -1642,8 +1642,7 @@ void UiMenusTest::checkLevelMeterIsPartOfThePlot(QQuickWindow *window) {
     };
     QCOMPARE(meter->property("fillColor").value<QColor>(), fillOf("spectrogramPlot"));
     QCOMPARE(fillOf("spectrogramPlot"), QColor(QStringLiteral("#c149a0")));
-    QVERIFY(!meter->framed());
-    // Every property of the meter but its colours and frame, which decide
+    // Every property of the meter but its colours, which decide
     // what it reads and where on its scale: the same in either mode, and
     // with or without the spectrogram's scale.
     const auto reading = [&]() {
@@ -1658,14 +1657,13 @@ void UiMenusTest::checkLevelMeterIsPartOfThePlot(QQuickWindow *window) {
     bridge->setProperty("showSpectrogramScale", true);
     QTest::qWait(50);
     QCOMPARE(reading(), spectrogramReading);
-    // The waveform: its own fill, the bar framed, and the same meter.
+    // The waveform: its own fill, and the same meter.
     QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1));
     QTRY_COMPARE(meter->property("fillColor").value<QColor>(), fillOf("waveformPlot"));
-    QVERIFY(meter->framed());
     QCOMPARE(qobject_cast<LevelMeterItem *>(child(window, "levelMeter")), meter);
     QCOMPARE(reading(), spectrogramReading);
     QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0));
-    QTRY_VERIFY(meter->property("fillColor").value<QColor>() == fillOf("spectrogramPlot") && !meter->framed());
+    QTRY_VERIFY(meter->property("fillColor").value<QColor>() == fillOf("spectrogramPlot"));
     // Its marks are where its scale puts -6, -12 and -24 dB, whatever the
     // mode: the meter's own mapping, the same as the levels'.
     const double scaleHeight = 300;
