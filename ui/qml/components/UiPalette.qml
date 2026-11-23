@@ -393,6 +393,10 @@ QtObject {
     // spectrogram's rest lines are faint on its floor.
     readonly property color waveformRestLine: ColorUtils.drawnOver(
         root._tintOf(root.text, root.view, 1.3), root.view)
+    // The seam between its lanes: 1 px, as every seam of the window, at 2:1
+    // on the view, so that it outranks the rest lines (a 3 px bar of the
+    // window's seam outweighed the 1 px seams it meets, H26).
+    readonly property color waveformRestSeam: root._drawnAt(root.text, root.view, 2)
 
     // The spectrogram is the same dark colour map in both themes, so its
     // set is fixed, on the plot's floor. Silence within a track is still

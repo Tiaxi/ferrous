@@ -150,10 +150,11 @@ Item {
         waveformColor: root.uiPalette.paneWave
         mutedWaveformColor: ColorUtils.mixColor(root.uiPalette.paneWave, root.plotColors.plotBg, 0.65)
         // Before any audio each lane is a silent one: its centre line, and
-        // the seam between lanes the stronger line.
+        // the seam between lanes the stronger line, 1 px as all the
+        // window's seams (UiPalette's waveformRestSeam).
         centerLineColor: root.atRest ? root.uiPalette.waveformRestLine
                                      : ColorUtils.withAlpha(root.uiPalette.text, 0.08)
-        laneSeamColor: root.atRest ? root.uiPalette.seam : root.plotColors.plotLaneSeam
+        laneSeamColor: root.atRest ? root.uiPalette.waveformRestSeam : root.plotColors.plotLaneSeam
         // The crosshair's readout on the plot's plates, as the
         // spectrogram's, and its dashes in the plot's text. Opaque, as the
         // spectrogram's are: the dashed line and the peaks showed through
@@ -173,25 +174,6 @@ Item {
         onSeekRequested: function(seconds) {
             if (root.seekCommitted) {
                 root.seekCommitted(seconds)
-            }
-        }
-
-        // Before any audio, the seam between lanes is 3 px, centred on its
-        // own, as the spectrogram's groove is, so that it is the stronger
-        // line and the pane reads as silent channels (with lines at half
-        // of full scale in each lane, stronger than the seam and the centre
-        // line, two lanes read as eight empty rows of a table). Gone with
-        // the first track.
-        Repeater {
-            model: root.atRest ? Math.max(0, root.laneCount - 1) : 0
-
-            delegate: Rectangle {
-                required property int index
-                objectName: "waveformRestSeam"
-                y: Math.round((index + 1) * waveform.height / root.laneCount) - 1
-                width: waveform.width
-                height: 3
-                color: root.uiPalette.seam
             }
         }
 

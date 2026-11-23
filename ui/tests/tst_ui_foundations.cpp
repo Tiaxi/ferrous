@@ -664,6 +664,16 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         } else {
             QVERIFY(sameColor(wave, colorOf(tokens, "wave")));
         }
+        // Never played, the seam between the waveform's lanes is 1 px at
+        // 2:1 on the view, outranking the rest lines' 1.3:1, in either
+        // theme (H26).
+        {
+            const QColor restSeam = colorOf(tokens, "waveformRestSeam");
+            const double seamRatio = contrastRatio(restSeam, view);
+            const double lineRatio = contrastRatio(colorOf(tokens, "waveformRestLine"), view);
+            QVERIFY2(seamRatio >= 1.95 && seamRatio <= 2.2 && seamRatio >= 1.4 * lineRatio,
+                     qPrintable(QStringLiteral("seam %1:1, rest lines %2:1").arg(seamRatio).arg(lineRatio)));
+        }
         // The trough reads against the view it frames.
         QVERIFY2(contrastRatio(colorOf(waveform, "meterTrough"), view) >= 1.15,
                  qPrintable(QString::number(contrastRatio(colorOf(waveform, "meterTrough"), view))));
