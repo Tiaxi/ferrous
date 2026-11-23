@@ -203,9 +203,47 @@ Components.PlotPlate {
         }
     }
 
-    visible: root.available && (root.zoomed || root.noticeShown)
+    // With nothing but the zoom on it, the plate comes on the first wheel
+    // notch and goes on Reset as the corner's other plates come and go,
+    // fading over shortDuration, OutCubic, where it cut in and out in a
+    // frame (H22). Only with the corner revealed and staying; with the notice
+    // on the plate, which keeps it, the notice's own motion is the plate's.
+    // Going, it holds the last zoom it had, never "Zoom 100%".
+    property real _zoomPresence: 1
+    property real _lastZoom: 1.0
+    onZoomLevelChanged: {
+        if (Math.abs(root.zoomLevel - 1.0) > 0.001)
+            root._lastZoom = root.zoomLevel
+    }
+    onZoomedChanged: {
+        const wasMoving = zoomPresence.running
+        zoomPresence.stop()
+        if (!root.noticeShown && Kirigami.Units.shortDuration > 0 && root.available
+                && root.revealed && root.revealLevel * root.fadeLevel >= 1) {
+            // From what shows of it, as it was coming or going, or from none.
+            if (root.zoomed && !wasMoving)
+                root._zoomPresence = 0
+            zoomPresence.to = root.zoomed ? 1 : 0
+            zoomPresence.start()
+        } else {
+            root._zoomPresence = 1
+        }
+    }
+    NumberAnimation {
+        id: zoomPresence
+        target: root
+        property: "_zoomPresence"
+        duration: Kirigami.Units.shortDuration
+        easing.type: Easing.OutCubic
+        // Gone: hidden, and whole for its next showing.
+        onFinished: root._zoomPresence = 1
+    }
+    readonly property bool _zoomLeaving: zoomPresence.running && !root.zoomed
+
+    visible: root.available && (root.zoomed || root.noticeShown || root._zoomLeaving)
     opacity: root.revealLevel * root.fadeLevel
         * ((root._motion === 1 || root._motion === 2) && !root.zoomed ? root.noticeLevel : 1)
+        * (root.noticeShown ? 1 : root._zoomPresence)
     takesPointer: true
     Accessible.name: root.zoomed
         ? I18n.i18nc("@label", "Zoom")
@@ -246,7 +284,7 @@ Components.PlotPlate {
         objectName: "plotZoomReadout"
         uiPalette: root.uiPalette
         plotColors: root.plotColors
-        zoomLevel: root.zoomLevel
+        zoomLevel: root._zoomLeaving ? root._lastZoom : root.zoomLevel
         // Only the notice alone takes their room: while the plate is hidden
         // they keep it, so that it has its size as it appears, a row
         // placing what just appeared only when the window next draws.

@@ -4,6 +4,8 @@
 #include "TestMainWindow.h"
 #include "TestColor.h"
 
+#include <Kirigami/Platform/Units>
+
 // Playback controls, keyboard and wheel input, and the fullscreen viewers.
 class TransportInputSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -77,6 +79,8 @@ private slots:
     void zoomPlateSpacesItsDividerEvenly();
     void zoomPlateKeepsToWholePixels_data();
     void zoomPlateKeepsToWholePixels();
+    void zoomPlateFadesOnTheFirstNotchAndReset_data();
+    void zoomPlateFadesOnTheFirstNotchAndReset();
     void movedViewSaysSoInTheViewers_data();
     void movedViewSaysSoInTheViewers();
     void followPlayheadBringsTheShownPlotBack();
@@ -5867,6 +5871,115 @@ void TransportInputSmokeTest::zoomPlateKeepsToWholePixels() {
                 QVERIFY2(whole(divider.left()), qPrintable(QStringLiteral("%1: divider at %2").arg(where).arg(divider.left())));
             }
         }
+    }
+}
+
+void TransportInputSmokeTest::zoomPlateFadesOnTheFirstNotchAndReset_data() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<bool>("animated");
+    QTest::newRow("spectrogram") << 0 << true;
+    QTest::newRow("waveform") << 1 << true;
+    QTest::newRow("waveform, animations off") << 1 << false;
+}
+
+// With the corner revealed, the zoom's plate fades in over 100 ms,
+// OutCubic, on the first wheel notch, and out on Reset, holding the zoom
+// it had as it goes, never "Zoom 100%": it cut in and out in a frame
+// (H22). With animations off it still cuts.
+void TransportInputSmokeTest::zoomPlateFadesOnTheFirstNotchAndReset() {
+    QFETCH(int, mode);
+    QFETCH(bool, animated);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    auto *units = qobject_cast<Kirigami::Platform::Units *>(
+        evaluateOn(corner.plate, QStringLiteral("Kirigami.Units")).value<QObject *>());
+    QVERIFY(units != nullptr);
+    if (!animated) {
+        units->setShortDuration(0);
+    }
+    QTest::mouseMove(window, corner.onPane() + QPoint(1, 1));
+    QTest::mouseMove(window, corner.onPane());
+    QTRY_COMPARE(corner.modeSwitch->opacity(), 1.0);
+    QVERIFY(!corner.plate->isVisible());
+    window->grabWindow();
+    const QRectF switchAt = sceneRectOf(corner.modeSwitch);
+
+    SteppedAnimationDriver animations;
+    const auto readoutText = [&corner]() { return corner.readout->property("text").toString(); };
+    // In: from none, each frame more of it, Reset where it stays.
+    corner.zoom(1.25);
+    QVERIFY(corner.plate->isVisible());
+    const QString shown = readoutText();
+    QVERIFY2(shown.contains(QStringLiteral("125")), qPrintable(shown));
+    window->grabWindow();
+    const QRectF resetAt = sceneRectOf(corner.reset);
+    QCOMPARE(sceneRectOf(corner.plate).right() + 8, switchAt.left());
+    if (animated) {
+        QCOMPARE(corner.plate->opacity(), 0.0);
+        double opacity = 0.0;
+        int frames = 0;
+        while (corner.plate->opacity() < 1.0) {
+            QVERIFY(animations.step(16));
+            ++frames;
+            QVERIFY2(corner.plate->opacity() > opacity,
+                     qPrintable(QStringLiteral("frame %1: %2 after %3")
+                                    .arg(frames).arg(corner.plate->opacity()).arg(opacity)));
+            opacity = corner.plate->opacity();
+            window->grabWindow();
+            QCOMPARE(sceneRectOf(corner.reset), resetAt);
+            QVERIFY(frames <= 8);
+        }
+        QVERIFY2(frames >= 6, qPrintable(QString::number(frames)));
+    } else {
+        QCOMPARE(corner.plate->opacity(), 1.0);
+    }
+    QCOMPARE(corner.modeSwitch->opacity(), 1.0);
+
+    // Out on Reset: in its place and with its zoom, each frame less of it.
+    corner.zoom(1.0);
+    if (animated) {
+        QVERIFY(corner.plate->isVisible());
+        double opacity = 1.0;
+        int frames = 0;
+        while (corner.plate->isVisible()) {
+            QCOMPARE(readoutText(), shown);
+            window->grabWindow();
+            QCOMPARE(sceneRectOf(corner.reset), resetAt);
+            QVERIFY(animations.step(16));
+            ++frames;
+            const double now = corner.plate->isVisible() ? corner.plate->opacity() : 0.0;
+            QVERIFY2(now < opacity || now == 0.0,
+                     qPrintable(QStringLiteral("frame %1: %2 after %3").arg(frames).arg(now).arg(opacity)));
+            opacity = now;
+            QVERIFY(frames <= 8);
+        }
+        QVERIFY2(frames >= 6, qPrintable(QString::number(frames)));
+    }
+    QVERIFY(!corner.plate->isVisible());
+    QCOMPARE(corner.modeSwitch->opacity(), 1.0);
+    // Whole again for its next showing.
+    QCOMPARE(corner.plate->property("_zoomPresence").toDouble(), 1.0);
+
+    // A notch as it goes takes it back from where it is.
+    if (animated) {
+        corner.zoom(1.25);
+        (void)animations.step(200);
+        QCOMPARE(corner.plate->opacity(), 1.0);
+        corner.zoom(1.0);
+        QVERIFY(animations.step(32));
+        const double going = corner.plate->opacity();
+        QVERIFY2(going > 0.0 && going < 1.0, qPrintable(QString::number(going)));
+        corner.zoom(1.56);
+        QVERIFY(corner.plate->isVisible());
+        QCOMPARE(corner.plate->opacity(), going);
+        QVERIFY(animations.step(16));
+        QVERIFY(corner.plate->opacity() > going);
+        (void)animations.step(200);
+        QCOMPARE(corner.plate->opacity(), 1.0);
     }
 }
 
