@@ -7148,7 +7148,7 @@ _DIALOG_EXPECT = {
     "library-root-name-rename": ("Rename Library Folder", "Without a name, the library shows the folder"),
     "library-root-name-add": ("Add Library Folder", "Without a name, the library shows the folder"),
     "confirm-clear-diagnostics": ("Delete Diagnostics Log", "Delete the diagnostics log?"),
-    "quit-save-failed": ("Couldn’t Save Before Quitting", "could not be saved"),
+    "quit-save-failed": ("Couldn’t Save Before Quitting", "couldn’t save its settings"),
     "tag-editor-auto-number": ("Auto Number", "Number tracks in the table"),
     "tag-editor-rename-preview": ("Rename Files", "will be renamed"),
     "tag-editor-status-details": ("Tag Change Details", None),

@@ -380,11 +380,12 @@ SCOPES = {
                ("dialog", "preferences-library-root-menu", (0.39, 0.09, 0.547, 0.295), "Configure: a folder's menu (Menu key), dark",
                 dict(lh=16, gap=6))]]),
             ("dlg-tag-editor", "Edit Tags, 1:1: a twelve-file edit from a 1000 px main window; from a 1600 px one, its top "
-             "left: an edit typed with real keys, then committed with Tab", "dark",
+             "left: an edit typed with real keys", "dark",
              [[("dialog", "tag-editor-batch", None, "Twelve files edited, not yet saved, from a 1000 px main window, dark",
                 dict(variant="1000x720", lh=16, gap=6))],
-              [("dialog", "tag-editor-editing", None, "\u201c (Live)\u201d typed in the Title field", dict(part=(0, 0, 0.7, 0.38), lh=16, gap=6))],
-              [("dialog", "tag-editor-modified", None, "The same edit committed with Tab", dict(part=(0, 0, 0.7, 0.38), lh=16, gap=6))]]),
+              # (the committed-with-Tab crop went when the batch opened at its fitted width: a typed and a committed
+              # value now look the same in the table, and the sheet had no room for both)
+              [("dialog", "tag-editor-editing", None, "\u201c (Live)\u201d typed in the Title field", dict(part=(0, 0, 0.7, 0.38), lh=16, gap=6))]]),
             # the 10 pt search sheet is left out (the palette has its own shots in shots/)
             # the searching -> failed recording (a real failed search; its frames around all that changes and Preview)
             # with the results and the controls' states; the failed window as a whole is in shots/ (dialog_itunes-error_*)
