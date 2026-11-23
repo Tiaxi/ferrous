@@ -7579,22 +7579,33 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
 
     // The frequency scale, inside the plot on its right: a 6 px tick at the
     // edge for each label, and the label 10 px from the edge, centred on
-    // its tick; beside the level meter, no ticks, the labels ending
-    // scaleEndInset clear of its seam (ticks that ended on the seam read as
-    // the meter's own graduation, which is in dB). Ticks on the canvas's
-    // device rows; labels laid out in logical pixels.
+    // its tick; beside the level meter, the labels end scaleEndInset clear
+    // of its seam, each with its 6 px tick on the plot's side, 3 px before
+    // it, so the value is pinned to its row (ticks that ended on the seam
+    // read as the meter's own graduation, which is in dB; without ticks the
+    // labels floated beside the meter's). Ticks on the canvas's device
+    // rows; labels laid out in logical pixels.
     const double scale = m_canvasScale;
     const int lineWidth = deviceLineWidth(scale);
     const int tickWidth = devicePixels(6.0, scale);
     const int labelGap = frequencyScaleLabelGapLocked();
-    const bool ticked = m_scaleEndInset <= 0.0;
+    const bool atEdge = m_scaleEndInset <= 0.0;
+    constexpr int kLeadingTickGap = 3;
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
              m_iToBin, m_binsPerColumn, binHzLocked(), width, height, scale,
              frequencyScaleTopClearanceLocked(), labelGap, m_textScale)) {
-        m_freqScaleWidth = std::max(
-            m_freqScaleWidth, labelGap + static_cast<int>(tick.labelRect.width()));
-        if (ticked) {
+        const int labelWidth = static_cast<int>(tick.labelRect.width());
+        if (atEdge) {
+            m_freqScaleWidth = std::max(m_freqScaleWidth, labelGap + labelWidth);
             m_freqGrid.lines.push_back(QRect(width - tickWidth, tick.pixelY, tickWidth, lineWidth));
+        } else {
+            // The crosshair's readout keeps clear of the tick too.
+            m_freqScaleWidth = std::max(
+                m_freqScaleWidth, labelGap + labelWidth + kLeadingTickGap + 6);
+            const int tickEnd = static_cast<int>(
+                std::floor((tick.labelRect.left() - kLeadingTickGap) * scale + 1e-6));
+            m_freqGrid.lines.push_back(
+                QRect(std::max(0, tickEnd - tickWidth), tick.pixelY, std::min(tickWidth, tickEnd), lineWidth));
         }
         m_freqGrid.images.push_back(
             {SpectrogramOverlayImage::ScaleLabel, tick.label, 0, tick.labelRect, QString()});
