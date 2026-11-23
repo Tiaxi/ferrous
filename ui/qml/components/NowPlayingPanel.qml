@@ -549,15 +549,6 @@ Item {
     function _isFactsLine(text) {
         return text.startsWith(root.factsMark)
     }
-    // How far a file without tags' two lines move towards the middle of
-    // the three rows the large-font header keeps, each by half a row, so
-    // the block has no hole at its foot: the folder down and the facts up.
-    readonly property real fileLinesShift: root.largeHeader
-        ? Math.round((narrowLineProbe.implicitHeight + root.stackedLineGap) / 2) : 0
-    function _fileLineShift(text) {
-        return root._isFolderLine(text) ? root.fileLinesShift
-            : root._isFactsLine(text) ? -root.fileLinesShift : 0
-    }
     function _folderLine(tagText) {
         return root.folderText.length > 0 ? root.folderMark + root.folderText : tagText
     }
@@ -615,9 +606,12 @@ Item {
         artistAlbum: root._folderLine(root.artistAlbumText),
         details: root.untagged ? root.fileFactsText : root.shownDetailsText,
         artist: root._folderLine(root.artistText),
-        narrowAlbum: root.narrowAlbumText,
-        narrowDetails: root.fileFactsText.length > 0 ? root.factsMark + root.fileFactsText
-            : root.untagged ? "" : root.shownNarrowDetailsText
+        // A file's facts in the album's row, which it has nothing for, right
+        // under its folder in the artist's, so the large-font header keeps
+        // its spare row at its foot, and the lines of a tagged track and an
+        // untagged file are in the same rows.
+        narrowAlbum: root.fileFactsText.length > 0 ? root.factsMark + root.fileFactsText : root.narrowAlbumText,
+        narrowDetails: root.untagged ? "" : root.shownNarrowDetailsText
     })
 
     // A track change fades, line by line: a line that differs for the next
@@ -1303,7 +1297,10 @@ Item {
     // apart. The block is one height for every track (largeHeaderHeight): a
     // line a track has no text for keeps its row, so a track change does
     // not move the library, and a file without tags has its folder and its
-    // facts in the middle of the three rows (fileLinesShift). Where the
+    // facts in the first two, as a tagged track's artist and album, the
+    // spare row at the foot (shifted to the middle of the three, the folder
+    // stood ~30 px under the cover and moved on a change to a tagged
+    // track). Where the
     // title would have under narrowLineMinimum beside the cover, the lines
     // go under it instead (narrowStacked).
     readonly property bool largeHeader: !root.wideRoom && root.largeFont
@@ -1584,7 +1581,8 @@ Item {
         required property var owner
         required property string wholeText
         // A file's folder rather than a tag (see folderText): without its
-        // mark, in textSecondary. A file's facts are without theirs.
+        // mark, in textSecondary. A file's facts are without theirs, in the
+        // details' textTertiary in whichever row they are.
         readonly property bool folderLine: root._isFolderLine(lineText.wholeText)
         readonly property string shownText: lineText.folderLine
             ? lineText.wholeText.slice(root.folderMark.length)
@@ -1619,13 +1617,12 @@ Item {
         text: lineText.laidOut.text
         width: owner.width
         // In the middle of the line's seat, where it has one (see
-        // FadingLine's seatHeight), and a file's own lines in the middle of
-        // the header's rows: each text by its own height and mark, so a
-        // layer that fades out stays where it showed. By the height of the
+        // FadingLine's seatHeight): each text by its own height, so a layer
+        // that fades out stays where it showed. By the height of the
         // laid-out text: reading implicitHeight here would lay it out from
         // within this binding, a binding loop.
-        y: owner.overhang + root._fileLineShift(lineText.wholeText) + (owner.seatHeight > 0
-            ? Math.max(0, Math.floor((owner.seatHeight - lineText.contentHeight) / 2)) : 0)
+        y: owner.seatHeight > 0
+            ? Math.max(0, Math.floor((owner.seatHeight - lineText.contentHeight) / 2)) : 0
         elide: Text.ElideRight
         maximumLineCount: owner.maximumLineCount
         wrapMode: owner.maximumLineCount <= 1 ? Text.NoWrap : Text.Wrap
@@ -1634,7 +1631,8 @@ Item {
         font.pointSize: owner.pointSize
         font.weight: owner.weight
         font.features: owner.features
-        color: lineText.folderLine ? root.uiPalette.textSecondary : owner.color
+        color: lineText.folderLine ? root.uiPalette.textSecondary
+            : root._isFactsLine(lineText.wholeText) ? root.uiPalette.textTertiary : owner.color
 
         // Each line in turn, on the line's width, which a text with this
         // handler is elided on only where it is set; the last call is for
@@ -1687,7 +1685,7 @@ Item {
         // shrinks (_lineLevel).
         property real roomNeeded: -1
         readonly property real footInColumn: line.y
-            + stillText.y - line.overhang + stillText.height + stillText.tailLineHeight
+            + stillText.y + stillText.height + stillText.tailLineHeight
         readonly property real foot: (line.parent ? line.parent.y : 0) + line.footInColumn
         readonly property real placedFoot: root.narrowColumnTop + line.footInColumn
         opacity: root._lineLevel(line.name, line.foot, line.placedFoot, line.roomNeeded)
@@ -1726,10 +1724,6 @@ Item {
         // for its top: the large-font header's title is centred on the
         // cover.
         property real seatHeight: 0
-        // How far over and under its row a text of the line may be drawn
-        // (fileLinesShift), which the windows it draws through take in.
-        readonly property real overhang: line.lineKey === "artist" || line.lineKey === "narrowDetails"
-            ? root.fileLinesShift : 0
         readonly property bool wraps: line.maximumLineCount > 1
         readonly property bool truncated: stillText.elided
         // The lines the playing track's text takes.
@@ -1875,9 +1869,8 @@ Item {
         // The playing track's text, whole while nothing fades; while the
         // line fades it draws through stillWindows and changingWindows.
         Item {
-            y: -line.overhang
             width: line.fading ? 0 : line.width
-            height: line.height + 2 * line.overhang
+            height: line.height
             clip: line.fading
 
             LineText {
@@ -1902,9 +1895,8 @@ Item {
 
                 objectName: "nowPlayingStill" + line.name
                 x: stillWindow.modelData[0]
-                y: -line.overhang
                 width: stillWindow.modelData[1] - stillWindow.modelData[0]
-                height: line.height + 2 * line.overhang
+                height: line.height
                 clip: true
 
                 LineText {
@@ -1942,9 +1934,8 @@ Item {
 
                         objectName: "nowPlayingOutgoing" + line.name + "Part"
                         x: part.modelData.x
-                        y: -line.overhang
                         width: part.modelData.width
-                        height: line.height + 2 * line.overhang
+                        height: line.height
                         clip: true
                         opacity: part.modelData.from * root.linesOutLevel
 
@@ -1977,9 +1968,8 @@ Item {
 
                     objectName: "nowPlayingIncoming" + line.name + "Window"
                     x: changingWindow.modelData[0]
-                    y: -line.overhang
                     width: changingWindow.modelData[1] - changingWindow.modelData[0]
-                    height: line.height + 2 * line.overhang
+                    height: line.height
                     clip: true
 
                     LineText {

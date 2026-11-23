@@ -2556,10 +2556,13 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     // (checkFootLines is a tagged track's: the album's row stays, empty.)
     QCOMPARE(geometry(), before);
 
-    // A file without tags: its folder and its facts in the middle of the
-    // three rows, as far from the cover as from the seam's 12 px, rather
-    // than over an empty one; in a fade to a tagged track each keeps its
-    // place as it goes out.
+    // A file without tags: its folder and its facts in the first two rows,
+    // where a tagged track's artist and album are, footGap under the cover
+    // and stackedLineGap apart, with the spare row at the foot (shifted to
+    // the middle of the three, the folder stood ~30 px under the cover and
+    // moved on a change to a tagged track); in a fade to a tagged track
+    // each keeps its place as it goes out, where the tagged track's line
+    // comes in.
     bridge->setProperty("currentTrackPath", QStringLiteral("/music/Unsorted/track07.flac"));
     bridge->setProperty("currentTrackTitle", QStringLiteral("track07"));
     bridge->setProperty("currentTrackFormatLabel", QStringLiteral("FLAC"));
@@ -2568,8 +2571,9 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QVERIFY(settled(panel));
     QCOMPARE(geometry(), before);
     QQuickItem *folderText = itemNamed(panel, QStringLiteral("nowPlayingNarrowArtist"));
-    QQuickItem *factsText = itemNamed(panel, QStringLiteral("nowPlayingNarrowDetails"));
+    QQuickItem *factsText = itemNamed(panel, QStringLiteral("nowPlayingNarrowAlbum"));
     QVERIFY(folderText && factsText);
+    QTRY_COMPARE(itemNamed(panel, QStringLiteral("nowPlayingNarrowDetails"))->property("text").toString(), QString());
     QTRY_COMPARE(folderText->property("text").toString(), QStringLiteral("Unsorted"));
     QTRY_COMPARE(factsText->property("text").toString(), QStringLiteral("FLAC \u00b7 0:40"));
     QCOMPARE(QQmlProperty::read(factsText, QStringLiteral("Accessible.name"), qmlContext(factsText)).toString(),
@@ -2579,7 +2583,7 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     const QRectF factsRect = sceneRect(factsText);
     const qreal over = folderRect.top() - (coverRect.bottom() + 8);
     const qreal under = sceneRect(seam).top() - 12 - factsRect.bottom();
-    QVERIFY2(over > 4.0 && std::abs(over - under) <= 1.5,
+    QVERIFY2(std::abs(over) <= 0.5 && under >= folderRect.height(),
              qPrintable(QStringLiteral("%1 over and %2 under").arg(over).arg(under)));
     QVERIFY2(std::abs(factsRect.top() - folderRect.bottom() - 4) <= 1.5,
              qPrintable(QString::number(factsRect.top() - folderRect.bottom())));
@@ -2590,10 +2594,13 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
         QVERIFY(QMetaObject::invokeMethod(animation, "pause"));
         panel->setProperty("handover", 0.2);
         QQuickItem *goingFolder = itemNamed(panel, QStringLiteral("nowPlayingOutgoingNarrowArtist"));
-        QQuickItem *goingFacts = itemNamed(panel, QStringLiteral("nowPlayingOutgoingNarrowDetails"));
+        QQuickItem *goingFacts = itemNamed(panel, QStringLiteral("nowPlayingOutgoingNarrowAlbum"));
         QVERIFY(goingFolder && goingFacts);
         QCOMPARE(sceneRect(goingFolder).top(), folderRect.top());
         QCOMPARE(sceneRect(goingFacts).top(), factsRect.top());
+        // The tagged track's artist and album come in where they went out.
+        QCOMPARE(sceneRect(folderText).top(), folderRect.top());
+        QCOMPARE(sceneRect(factsText).top(), factsRect.top());
         // Whole inside the windows they go out through.
         for (QQuickItem *text : {goingFolder, goingFacts}) {
             const QRectF through = sceneRect(text->parentItem());
