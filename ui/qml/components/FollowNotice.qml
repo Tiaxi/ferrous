@@ -64,6 +64,17 @@ Item {
         Accessible.ignored: true
     }
 
+    // On a plot's plate, drawn as curves with grey antialiasing, as the
+    // plate's other letters are (PlotPlate): the platform's subpixel
+    // antialiasing fringed them in colour there. In the window's chrome,
+    // as the style draws its labels.
+    Binding {
+        target: label
+        property: "renderType"
+        value: Text.CurveRendering
+        when: root.plotColors !== null
+    }
+
     Rectangle {
         objectName: "followNoticeDivider"
         visible: root.divided

@@ -61,6 +61,7 @@ private slots:
     void cornerHoldsWhileAutoscrollRuns();
     void laneHeadsStayQuietThroughAPan_data();
     void laneHeadsStayQuietThroughAPan();
+    void zoomPlateTextIsDrawnAsThePlotPlatesIs();
     void crosshairGivesWayToAutoscroll_data();
     void crosshairGivesWayToAutoscroll();
     void plotsTellFollowingAgainInOneOrder_data();
@@ -5495,6 +5496,85 @@ void TransportInputSmokeTest::laneHeadsStayQuietThroughAPan() {
     QTRY_VERIFY(!corner.surface->property("panning").toBool());
     QTest::mouseMove(window, end + QPoint(1, 0));
     QTRY_VERIFY(laneHovered());
+}
+
+// "Not following" and the zoom readout on a plot's plate are drawn as the
+// plate's other letters are, as curves with grey antialiasing (the
+// platform's subpixel antialiasing fringed them in colour on the plate);
+// without the plot's colours, in the window's chrome, as the window's
+// labels are.
+void TransportInputSmokeTest::zoomPlateTextIsDrawnAsThePlotPlatesIs() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+
+Window {
+    id: paletteRoot
+    width: 400
+    height: 200
+    visible: true
+
+    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+
+    Column {
+        Components.PlotPlate {
+            objectName: "lanePlate"
+            plotColors: palette.spectrogramPlot
+            uiPalette: palette
+            text: "L"
+        }
+        Components.FollowNotice {
+            objectName: "plotNotice"
+            uiPalette: palette
+            plotColors: palette.spectrogramPlot
+            divided: true
+        }
+        Components.ZoomReadout {
+            objectName: "plotReadout"
+            uiPalette: palette
+            plotColors: palette.waveformPlot
+            zoomLevel: 2
+        }
+        Components.FollowNotice {
+            objectName: "windowNotice"
+            uiPalette: palette
+        }
+        Components.ZoomReadout {
+            objectName: "windowReadout"
+            uiPalette: palette
+            zoomLevel: 2
+        }
+        Label {
+            objectName: "windowLabel"
+            text: "Window"
+        }
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    const auto renderTypeOf = [window](const QString &name, const QString &child = QString()) {
+        QQuickItem *item = itemNamed(window->contentItem(), name);
+        if (item != nullptr && !child.isEmpty()) item = itemNamed(item, child);
+        return item != nullptr ? item->property("renderType").toInt() : -1;
+    };
+    const int curves = renderTypeOf(QStringLiteral("lanePlate"), QStringLiteral("plotPlateLabel"));
+    QCOMPARE(curves, 2 /* Text.CurveRendering */);
+    QCOMPARE(renderTypeOf(QStringLiteral("plotNotice"), QStringLiteral("followNoticeText")), curves);
+    QCOMPARE(renderTypeOf(QStringLiteral("plotReadout")), curves);
+    // The window's own, as the style draws its labels.
+    const int windows = renderTypeOf(QStringLiteral("windowLabel"));
+    QVERIFY(windows >= 0 && windows != curves);
+    QCOMPARE(renderTypeOf(QStringLiteral("windowNotice"), QStringLiteral("followNoticeText")), windows);
+    QCOMPARE(renderTypeOf(QStringLiteral("windowReadout")), windows);
 }
 
 // The divider between "Not following" and the zoom has 6 px on each side
