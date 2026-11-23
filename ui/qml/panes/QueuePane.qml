@@ -63,7 +63,35 @@ Rectangle {
     readonly property int errorGlyphSize: root.uiPalette.scaledSize(16)
     // Between the number and the title, and between the other columns.
     readonly property real titleGap: Math.round(12 * root.sizeScale)
-    readonly property real columnGap: Math.round(16 * root.sizeScale)
+    readonly property real columnGap: root.compactColumns
+        ? root.compactColumnGap : root.standardColumnGap
+    readonly property real standardColumnGap: Math.round(16 * root.sizeScale)
+    // The narrow queue at a large font, which with the gaps and Length's
+    // room of the font gave Artist only a few characters, or none (at
+    // 24 pt in 1000 px it showed titles alone beside a 146 px Length
+    // and a 32 px gap before it, so tracks of one title could not be
+    // told apart): there the gaps keep their 16 px, Length has its
+    // least width, the title at least 208 px and Artist 120 px, the
+    // least a name reads in. It holds while it gives Artist more than
+    // the columns of the font would, that is until the title at its
+    // usual minimum leaves Artist its sixteen characters; where even
+    // these floors do not fit, the title shows alone.
+    readonly property real compactColumnGap: Math.min(16, root.standardColumnGap)
+    readonly property real compactMinimumTitleColumnWidth: Math.min(208, root.minimumTitleColumnWidth)
+    readonly property real compactMinimumArtistColumnWidth: Math.max(120, root.minimumShownTextColumnWidth)
+    readonly property bool compactColumnsFit: root.width - root.playlistIndicatorColumnWidth
+        - root.playlistOrderColumnWidth - root.titleGap - root.compactMinimumTitleColumnWidth
+        - 2 * root.compactColumnGap - root.compactMinimumArtistColumnWidth
+        - root.minimumLengthColumnWidth - root.rightPadding >= 0
+    // What the title at its minimum leaves Artist with the gaps and
+    // Length of the font.
+    readonly property real standardArtistRoom: root.width - root.standardReservedColumnsWidth
+        - root.minimumTitleColumnWidth - root.standardColumnGap
+    readonly property bool compactColumns: root.compactColumnsFit
+        && root.standardArtistRoom < root.minimumArtistColumnWidth
+    // The least the title is given way down to.
+    readonly property real titleColumnFloor: root.compactColumns
+        ? root.compactMinimumTitleColumnWidth : root.minimumTitleColumnWidth
     // From the length's right end to the queue's: the scrollbar's lane,
     // which keeps its 8 px at any font, and a 16 px inset that grows with
     // the font to half as much again, 24 px at 24 pt. Scaled as one, the
@@ -87,9 +115,12 @@ Rectangle {
     // as far as its own minimum (at 24 pt Artist showed eleven
     // characters of a name beside a title column twice as wide as its
     // titles).
+    // The compact columns keep Artist its least there, the title giving
+    // way below its minimum to its compact one.
     readonly property real defaultArtistColumnWidth: Math.max(
         root.defaultTextColumnWidth(root.defaultArtistColumnShare),
-        Math.min(root.minimumArtistColumnWidth, root.artistRoomAtTitleMinimum))
+        Math.min(root.minimumArtistColumnWidth, root.artistRoomAtTitleMinimum),
+        root.compactColumns ? root.compactMinimumArtistColumnWidth : 0)
     // The width Artist takes from the title before Artist's share: sixteen
     // characters of the font, as many as most artists' names have; under
     // its share with the default font but in the narrowest windows.
@@ -101,9 +132,12 @@ Rectangle {
         - (root.albumColumnVisible ? root.columnGap + root.defaultAlbumColumnWidth : 0))
     readonly property real defaultAlbumColumnWidth: root.defaultTextColumnWidth(root.defaultAlbumColumnShare)
     // Length: its longest value and two characters' room before it, apart
-    // from the album; about 56 px at the default font.
-    readonly property real defaultLengthColumnWidth: Math.max(root.minimumLengthColumnWidth,
+    // from the album; about 56 px at the default font. The compact
+    // columns give Length its least width.
+    readonly property real measuredLengthColumnWidth: Math.max(root.minimumLengthColumnWidth,
         Math.ceil(lengthValueMetrics.advanceWidth + 2 * columnFontMetrics.averageCharacterWidth))
+    readonly property real defaultLengthColumnWidth: root.compactColumns
+        ? root.minimumLengthColumnWidth : root.measuredLengthColumnWidth
     readonly property real artistColumnWidth: root.columnWidths.artist
     readonly property real albumColumnWidth: root.columnWidths.album
     readonly property real lengthColumnWidth: root.columnWidths.length
@@ -113,23 +147,30 @@ Rectangle {
     readonly property real reservedColumnsWidth: root.playlistIndicatorColumnWidth
         + root.playlistOrderColumnWidth + root.titleGap + root.columnGap
         + root.defaultLengthColumnWidth + root.rightPadding
+    // The same with the gaps and Length of the font, which decide which
+    // columns show.
+    readonly property real standardReservedColumnsWidth: root.playlistIndicatorColumnWidth
+        + root.playlistOrderColumnWidth + root.titleGap + root.standardColumnGap
+        + root.measuredLengthColumnWidth + root.rightPadding
     // Album drops first, as in a narrow window: it shows only where half
     // the table, less the columns that have their room first, would still
     // hold the title at its minimum, so a narrow window gives the title
     // the room rather than three cramped columns.
-    readonly property bool albumColumnVisible: root.artistColumnVisible
-        && root.width / 2 - root.reservedColumnsWidth >= root.minimumTitleColumnWidth
+    readonly property bool albumColumnVisible: !root.compactColumns
+        && root.standardArtistRoom >= root.minimumShownTextColumnWidth
+        && root.width / 2 - root.standardReservedColumnsWidth >= root.minimumTitleColumnWidth
     // Artist drops next, when what the title leaves would show only a few
-    // of its characters, as in a narrow window at a large font.
-    readonly property bool artistColumnVisible: root.width - root.reservedColumnsWidth
-        - root.minimumTitleColumnWidth - root.columnGap >= root.minimumShownTextColumnWidth
+    // of its characters, as in a narrow window at a large font, and the
+    // compact columns do not fit either.
+    readonly property bool artistColumnVisible: root.compactColumns
+        || root.standardArtistRoom >= root.minimumShownTextColumnWidth
     // The least width at which the queue shows all its columns: Album,
     // the first to drop, shows from here (albumColumnVisible). The number
     // column is counted as the queue's minimum counts it, for up to 99,999
     // tracks, so that it does not change as tracks are queued. The window
     // gives the library pane more than its share only past this.
     readonly property real widthWithAllColumns: Math.ceil(2 * (root.playlistIndicatorColumnWidth
-        + root.minimumOrderColumnWidth + root.titleGap + root.columnGap + root.defaultLengthColumnWidth
+        + root.minimumOrderColumnWidth + root.titleGap + root.standardColumnGap + root.measuredLengthColumnWidth
         + root.rightPadding + root.minimumTitleColumnWidth))
     readonly property var resizableColumns: root.albumColumnVisible
         ? ["artist", "album", "length"]
@@ -159,7 +200,7 @@ Rectangle {
     // minimum.
     readonly property real resizableColumnsRoom: Math.max(0, queueHeaderRow.width
         - root.playlistIndicatorColumnWidth - root.playlistOrderColumnWidth
-        - root.titleGap - root.minimumTitleColumnWidth
+        - root.titleGap - root.titleColumnFloor
         - root.resizableColumns.length * root.columnGap)
     // The column whose handle is being dragged, or moved with the keys; its
     // preferred width until the drag ends and the width is kept; and, from
@@ -364,9 +405,9 @@ Rectangle {
     // keeps the title at its minimum.
     readonly property real minimumTitleOnlyWidth: root.playlistIndicatorColumnWidth
         + root.minimumOrderColumnWidth + root.titleGap + root.minimumTitleColumnWidth
-        + root.columnGap + root.minimumLengthColumnWidth + root.rightPadding
+        + root.standardColumnGap + root.minimumLengthColumnWidth + root.rightPadding
     readonly property real minimumWithArtistWidth: (root.minimumTitleOnlyWidth
-        - root.minimumLengthColumnWidth + root.defaultLengthColumnWidth)
+        - root.minimumLengthColumnWidth + root.measuredLengthColumnWidth)
         / (1 - root.minimumArtistColumnShare)
     // The share of the width the narrowest queue is counted with for Artist:
     // the one it had before its default grew, so the window's
