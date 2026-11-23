@@ -1991,8 +1991,10 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     const qreal textBottom = sceneRectOf(text).top() + text->property("contentHeight").toReal();
     const QString where = QStringLiteral("text to %1, Close from %2 in a window %3 px tall, at most %4")
         .arg(textBottom).arg(sceneRectOf(close).top()).arg(detailsWindow->height()).arg(limit);
-    if (pointSize == 0 || detailsWindow->height() < limit) {
-        QVERIFY2(detailsWindow->height() < limit, qPrintable(where));
+    // A report that fits exactly at the limit is laid out as one that fits.
+    const bool fits = std::abs(sceneRectOf(close).top() - textBottom - inset) <= 1.0;
+    if (pointSize == 0 || detailsWindow->height() < limit || fits) {
+        QVERIFY2(detailsWindow->height() <= limit, qPrintable(where));
         QVERIFY2(std::abs(sceneRectOf(close).top() - textBottom - inset) <= 1.0, qPrintable(where));
         // With no scroll bar: the window was laid out hidden and small,
         // the bar shown, and the lines beside it took one more than the
