@@ -184,7 +184,10 @@ Item {
     // elsewhere.
     readonly property int coverInset: root.largeHeader ? root.textInset : 0
 
-    readonly property bool hasTrack: {
+    readonly property bool hasTrack: root._bridgeHasTrack()
+    // Whether the bridge tells of a track, as it does now (see
+    // _bridgeTrackKey).
+    function _bridgeHasTrack() {
         const hasMetadata = root._trimmed(root.uiBridge.currentTrackTitle).length > 0
             || root._trimmed(root.uiBridge.currentTrackArtist).length > 0
             || root._trimmed(root.uiBridge.currentTrackAlbum).length > 0
@@ -643,8 +646,15 @@ Item {
     // playing": the first track after it settles its cover and lines
     // together, whatever order the bridge tells them in. With animations
     // off every change is instant.
-    readonly property string trackKey: root.hasTrack
-        ? root._trimmed(root.uiBridge.currentTrackPath) : ""
+    readonly property string trackKey: root._bridgeTrackKey()
+    // The playing track's key as the bridge tells it now, which followTrack
+    // goes by rather than `trackKey`: a change of the path reaches the
+    // bindings that follow it one by one, so `trackLines` can change
+    // before `trackKey` does, and an untagged file's lines, which come from
+    // its path, then read as the same track's and switched in place.
+    function _bridgeTrackKey() {
+        return root._bridgeHasTrack() ? root._trimmed(root.uiBridge.currentTrackPath) : ""
+    }
     readonly property string coverPath: root.uiBridge.currentTrackCoverPath || ""
     // The playing track as last seen.
     property var shown: null
@@ -1120,7 +1130,7 @@ Item {
 
     function followTrack() {
         const next = {
-            trackKey: root.trackKey,
+            trackKey: root._bridgeTrackKey(),
             album: root.albumText,
             coverPath: root.coverPath,
             lines: root.trackLines
