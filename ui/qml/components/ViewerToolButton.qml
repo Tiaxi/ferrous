@@ -71,14 +71,19 @@ ToolButton {
     display: AbstractButton.IconOnly
     icon.width: root.uiPalette.toolIconSize
     icon.height: root.uiPalette.toolIconSize
-    focusPolicy: Qt.TabFocus
+    // A press takes the focus too, for the mouse: a button the keyboard
+    // focused before lets it go, and with it its ring (with Tab focus
+    // alone, Close kept its ring while the pointer pressed Info).
+    focusPolicy: Qt.StrongFocus
 
     Accessible.name: root.text
 
-    // Space presses the focused button rather than playing or pausing; keys
-    // with modifiers stay the shortcuts'.
+    // Space presses the button the keyboard focused rather than playing or
+    // pausing; one a click focused leaves it to the shortcut, as it did
+    // before a click took the focus. Keys with modifiers stay the
+    // shortcuts'.
     Keys.onShortcutOverride: function(event) {
-        event.accepted = KeyUtils.isPlainSpace(event)
+        event.accepted = root.focusReason !== Qt.MouseFocusReason && KeyUtils.isPlainSpace(event)
     }
 
     ToolTip.text: root.toolTipText

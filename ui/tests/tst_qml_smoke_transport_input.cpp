@@ -58,6 +58,8 @@ private slots:
     void viewerControlsStayWhileOneHasFocus();
     void fullscreenViewersCanKeepTheirTitleStripHidden();
     void fullscreenVisualizationStripHoldsTheModeSwitch();
+    void viewerButtonsRingOnlyForTheKeyboard_data();
+    void viewerButtonsRingOnlyForTheKeyboard();
     void viewerResetIsTheSameGlyphWindowedAndInTheStrip();
     void viewerToolbarIsOneVocabularyWindowedAndInTheStrip();
     void viewerStripIsOnOneTypeScale_data();
@@ -3316,6 +3318,97 @@ void TransportInputSmokeTest::viewerControlsStayWhileOneHasFocus() {
 // divider with 4 px either side, then Close. The plot's corner has no plate.
 // They are radio buttons to assistive technology, Tab takes them in order,
 // and each one's tooltip is clear of the others.
+void TransportInputSmokeTest::viewerButtonsRingOnlyForTheKeyboard_data() {
+    QTest::addColumn<int>("fullscreenMode");
+    QTest::newRow("window") << 0;
+    QTest::newRow("whole screen") << 1;
+}
+
+// The focus ring is the keyboard's alone: a press on a viewer button takes
+// the focus for the mouse, so the button the keyboard reached before lets
+// it go with its ring (Close kept its ring while the pointer pressed
+// another button, two buttons marked at once), and the pressed one shows
+// none. The focus a click gave holds neither the controls, which hide
+// after the pointer rests as before, nor Space, which plays and pauses.
+void TransportInputSmokeTest::viewerButtonsRingOnlyForTheKeyboard() {
+    QFETCH(int, fullscreenMode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide =
+        window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && autoHide != nullptr && playPause != nullptr);
+    setPlayingTrack(bridge);
+    autoHide->setProperty("hideDelay", 600000);
+    bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QQuickWindow *host = window;
+    QString modeName = QStringLiteral("spectrogramPopupModeButton");
+    QString closeName = QStringLiteral("spectrogramPopupCloseButton");
+    if (fullscreenMode == 1) {
+        host = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+        QVERIFY(host != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(host));
+        modeName = QStringLiteral("spectrogramStripModeButton");
+        closeName = QStringLiteral("spectrogramFullscreenCloseButton");
+    } else {
+        QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+        QVERIFY(popup != nullptr);
+        QTRY_VERIFY(popup->property("opened").toBool());
+    }
+    QQuickItem *close = nullptr;
+    QTRY_VERIFY((close = visibleItemNamed(host, closeName)) != nullptr);
+    QQuickItem *waveformButton = visibleItemNamed(host, modeName + QLatin1Char('1'));
+    QVERIFY(waveformButton != nullptr);
+    QQuickItem *closeRing = itemNamed(close, QStringLiteral("viewerToolButtonFocusRing"));
+    QQuickItem *waveformRing = itemNamed(waveformButton, QStringLiteral("viewerToolButtonFocusRing"));
+    QVERIFY(closeRing != nullptr && waveformRing != nullptr);
+
+    // The keyboard on Close: its ring.
+    for (int press = 0; press < 12 && !close->hasActiveFocus(); ++press) {
+        QTest::keyClick(host, Qt::Key_Tab);
+    }
+    QVERIFY(close->hasActiveFocus());
+    QTRY_VERIFY(closeRing->isVisible());
+
+    // The pointer pressing the waveform's button: no ring on either.
+    const QPoint inside = centerInWindow(waveformButton);
+    QTest::mouseMove(host, inside);
+    QTest::mousePress(host, Qt::LeftButton, Qt::NoModifier, inside);
+    QTRY_VERIFY(waveformButton->property("down").toBool());
+    QVERIFY(waveformButton->hasActiveFocus());
+    QCOMPARE(waveformButton->property("focusReason").toInt(), int(Qt::MouseFocusReason));
+    QVERIFY(!closeRing->isVisible());
+    QVERIFY(!waveformRing->isVisible());
+    QTest::mouseRelease(host, Qt::LeftButton, Qt::NoModifier, inside);
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
+    QVERIFY(!waveformRing->isVisible());
+
+    // Space plays and pauses, rather than pressing the clicked button.
+    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
+    viewer->setProperty("visualizationMode", 0);
+    QTRY_VERIFY(!waveformButton->property("checked").toBool());
+    QTest::keyClick(host, Qt::Key_Space);
+    QCOMPARE(toggled.count(), 1);
+    QCOMPARE(viewer->property("visualizationMode").toInt(), 0);
+
+    // Nor does it hold the controls: they hide after the pointer rests.
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    if (fullscreenMode == 1) {
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+}
+
 void TransportInputSmokeTest::fullscreenVisualizationStripHoldsTheModeSwitch() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;

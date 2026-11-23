@@ -71,9 +71,14 @@ Rectangle {
     // Whether the pointer is on the strip, which counts as on the view.
     readonly property bool hovered: stripHover.hovered
     // Whether keyboard focus is on one of the strip's buttons, which keeps
-    // the viewer's controls shown.
+    // the viewer's controls shown; not the focus a click gave one, which
+    // would hold them until the next press on the view.
     readonly property bool focusInside: {
-        for (let item = root.Window.activeFocusItem; item; item = item.parent) {
+        const focused = root.Window.activeFocusItem
+        if (focused && focused.focusReason === Qt.MouseFocusReason) {
+            return false
+        }
+        for (let item = focused; item; item = item.parent) {
             if (item === root) {
                 return true
             }

@@ -1047,7 +1047,10 @@ void checkInfoButtonTintedOnlyWhileChecked(AlbumArtWindow &ui) {
     QVERIFY(!tint->isVisible());
 
     // The keyboard reaches it: the ring for focus, and Space toggles it,
-    // with both the tint and the ring.
+    // with both the tint and the ring. Off the focus the click gave it
+    // first, which shows no ring.
+    QTest::keyClick(fullscreen, Qt::Key_Tab);
+    QVERIFY(fullscreen->activeFocusItem() != info);
     QVERIFY(tabTo(fullscreen, info));
     QVERIFY(ring->isVisible());
     QVERIFY(!tint->isVisible());

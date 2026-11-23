@@ -141,6 +141,10 @@ Item {
         toolTipText: I18n.i18nc("@info:tooltip %1 is the issue count", "%1: Show Recent Issues",
             text)
         icon.name: Qt.resolvedUrl("../assets/status-warning.svg")
+        // A click leaves the focus where it is: Recent Issues takes it, and
+        // the button goes once they are seen, so the focus would come back
+        // to a button that is no longer there.
+        focusPolicy: Qt.TabFocus
         // The window's negative is lightened on dark and darkened on light:
         // on a plot of the other brightness, such as the spectrogram's black
         // in a light theme, the glyph is the plot's text instead.

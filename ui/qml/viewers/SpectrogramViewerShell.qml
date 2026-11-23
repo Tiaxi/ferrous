@@ -195,10 +195,12 @@ Item {
         id: fullscreenControlsAutoHide
         objectName: "spectrogramFullscreenControlsAutoHide"
         active: root.viewerOpen
-        // The controls stay while one of them has focus, however it got it:
-        // the keyboard, a click, or assistive technology.
+        // The controls stay while one of them has focus from the keyboard
+        // or assistive technology; the focus a click gives a button lets
+        // them hide after the pointer rests, as before the click.
         held: root.focusedItem !== root.viewFocus
             && root.isInside(root.focusedItem, root.viewerScope)
+            && root.focusedItem.focusReason !== Qt.MouseFocusReason
     }
 
     // Sees a press on the view and where it moves, whatever takes it, for a
