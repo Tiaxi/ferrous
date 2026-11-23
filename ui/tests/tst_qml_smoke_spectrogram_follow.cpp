@@ -50,6 +50,7 @@ private slots:
     void panShowsAClosedHand();
     void crosshairStaysWholeThroughAMiddleDrag_data();
     void crosshairStaysWholeThroughAMiddleDrag();
+    void crosshairTimeHoldsThroughAPan();
 };
 
 namespace {
@@ -1941,6 +1942,50 @@ void SpectrogramFollowSmokeTest::crosshairStaysWholeThroughAMiddleDrag() {
     QTRY_COMPARE(crosshairNotAt(plot, 140), QString());
     QTest::mouseMove(window, QPoint(260, y));
     QTRY_COMPARE(crosshairNotAt(plot, 260), QString());
+}
+
+// Through a pan the time at the pointer is the time it grabbed: the view
+// is placed on whole columns, and read from them, the lowest lane's time
+// rolled across a digit and back mid-drag (1:10.0, 1:09.9, 1:10.0).
+void SpectrogramFollowSmokeTest::crosshairTimeHoldsThroughAPan() {
+    SurfaceInAWindow plot;
+    const QString error = plot.load(2, 1);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    // Zoomed: a column is 2.5 px, and the time shows to hundredths.
+    for (SpectrogramItem *lane : std::as_const(plot.lanes)) {
+        QMutexLocker lock(&lane->m_stateMutex);
+        lane->m_renderZoomLevel = 2.5;
+        lane->m_crosshairDirty = true;
+    }
+    QQuickWindow *window = plot.window;
+    SpectrogramItem *top = plot.lanes.first();
+    SpectrogramItem *lowest = plot.lanes.last();
+    const int y = static_cast<int>(top->mapToScene(QPointF(0.0, top->height() / 2)).y());
+    const auto timeShown = [lowest]() {
+        QMutexLocker lock(&lowest->m_stateMutex);
+        for (const SpectrogramOverlayImage &image : std::as_const(lowest->m_crosshair.images)) {
+            if (image.kind == SpectrogramOverlayImage::ReadoutPlate && image.text.contains(u':')) {
+                return image.text;
+            }
+        }
+        return QString();
+    };
+    QTest::mouseMove(window, QPoint(400, y));
+    QTRY_COMPARE(crosshairNotAt(plot, 400), QString());
+
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, QPoint(400, y));
+    QTest::mouseMove(window, QPoint(390, y));
+    QTRY_COMPARE(crosshairNotAt(plot, 390), QString());
+    const QString grabbed = timeShown();
+    QVERIFY2(grabbed.size() == 7, qPrintable(grabbed));
+    // A pixel at a time, a column every 2.5 of them.
+    for (int x = 389; x >= 360; --x) {
+        QTest::mouseMove(window, QPoint(x, y));
+        QTRY_COMPARE(crosshairNotAt(plot, x), QString());
+        QCOMPARE(timeShown(), grabbed);
+    }
+    QVERIFY(plot.surface->property("detached").toBool());
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, QPoint(360, y));
 }
 
 // A closed hand from the pan's drag distance to its release, over any lane,

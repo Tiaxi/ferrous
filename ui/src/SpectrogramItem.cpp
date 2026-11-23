@@ -6819,6 +6819,7 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
     event->accept();
     SpectrogramViewFollow *follow = m_viewFollow.data();
     double anchorSeconds = 0.0;
+    double pointerSeconds = 0.0;
     bool startsPan = false;
     {
         QMutexLocker lock(&m_stateMutex);
@@ -6858,6 +6859,10 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
         // Anchored at its middle, whole columns from the track's start.
         anchorSeconds = (std::round(left) + 0.5 * static_cast<double>(view.windowColumns))
             / view.columnsPerSecond;
+        // The time grabbed, before that rounding: what the lanes' readout
+        // shows at the pointer while the pan lasts.
+        pointerSeconds = (left + pointer.x() * m_canvasScale / view.canvasZoom)
+            / view.columnsPerSecond;
     }
     if (startsPan) {
         // Where it glides back from is reckoned from the view's width.
@@ -6865,7 +6870,7 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
         follow->setPanning(true);
         emit panningChanged();
     }
-    follow->detach(anchorSeconds, 0.5);
+    follow->detach(anchorSeconds, 0.5, pointerSeconds);
     followChanged();
 }
 
@@ -7215,9 +7220,16 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     }
     QString timeText;
     if (m_showCrosshairTime) {
-        const double trackTime = crosshairTrackTimeLocked(pixelToTimeSeconds(
-            lineX, displayLeft, rollingMode,
-            m_rollingEpoch, columnsPerSecond, logicalDrawX, effectiveZoomLocked()));
+        // While a drag pans the view, the time it grabbed, from the pan's
+        // continuous transform: from the view's whole columns, it rolled
+        // across a digit and back mid-drag (1:10.0, 1:09.9, 1:10.0).
+        const double panPointerSeconds =
+            rollingMode ? std::numeric_limits<double>::quiet_NaN()
+                        : followSnapshotLocked().panPointerSeconds;
+        const double trackTime = crosshairTrackTimeLocked(std::isfinite(panPointerSeconds)
+            ? panPointerSeconds
+            : pixelToTimeSeconds(lineX, displayLeft, rollingMode, m_rollingEpoch,
+                  columnsPerSecond, logicalDrawX, effectiveZoomLocked()));
         if (std::isfinite(trackTime)) {
             // As finely as the view resolves it, by the waveform's rule: a
             // device pixel, or an analysis column where that is longer; at
