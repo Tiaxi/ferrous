@@ -200,6 +200,9 @@ Item {
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         text: I18n.i18nc("@action:button", "Close")
+        // The tooltip names the key, as Image Details' does; the
+        // accessible name stays the action alone.
+        toolTipText: I18n.i18nc("@info:tooltip %1 is the key", "Close (%1)", "Esc")
         icon.name: "window-close"
         onClicked: root.closeViewer()
     }

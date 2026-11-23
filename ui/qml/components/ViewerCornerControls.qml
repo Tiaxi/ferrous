@@ -11,9 +11,10 @@ import "." as Components
 // it as they are inside the strip. So the viewer has one toolbar everywhere
 // (the corner's buttons were the plot's, with another checked fill, glyph
 // ink, warning colour and order than the strip's), and it ends in Close
-// there too, over the whole screen with the strip turned off. The plate is
-// as tall as the plot's, with 4 px around the buttons, so its top and
-// centre line are the lane heads'.
+// there too, over the whole screen with the strip turned off. The plate
+// has 4 px around the buttons: in the window it is as tall as the plot's,
+// so its top and centre line are the lane heads'; over the whole screen it
+// is on the strip's scale, as tall as the strip's band.
 Item {
     id: root
 
@@ -37,6 +38,12 @@ Item {
     property string followShortcut: ""
     property var errorController: null
     property string closeButtonName: "viewerCloseButton"
+    // Its buttons' size, their glyphs' and the readout's: the window's small
+    // tool button, or over the whole screen the title strip's, on its type
+    // scale, as the screen's other controls are.
+    property int viewerButtonSize: root.uiPalette.toolButtonSize
+    property int viewerIconSize: root.uiPalette.toolIconSize
+    property real readoutPointSize: root.uiPalette.smallPointSize
     // The viewer's own buttons, before Close.
     default property alias viewerControls: controls.viewerControls
 
@@ -86,6 +93,9 @@ Item {
         closeViewer: root.closeViewer
         closeShown: root.closeShown
         closeButtonName: root.closeButtonName
+        viewerButtonSize: root.viewerButtonSize
+        viewerIconSize: root.viewerIconSize
+        readoutPointSize: root.readoutPointSize
         zoomLevel: root.zoomLevel
         resetView: root.resetView
         noticeShown: root.noticeShown

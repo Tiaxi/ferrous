@@ -3498,6 +3498,10 @@ void TransportInputSmokeTest::viewerCornerPlateClearsTheLevelMeter_data() {
 // screen with the strip turned off, keeps 8 px from the level meter's
 // column (at 5 px its edge all but met the meter's seam), and 5 px from the
 // plot's corner without the meter; what the plot keeps clear of follows it.
+// Over the whole screen it is on the strip's scale, the strip's buttons,
+// glyphs and readout, 8 px in from the screen's top and right edges (it
+// fell back to the window's chrome, 24 px buttons 5 px from the corner,
+// beside lane heads on the larger type).
 void TransportInputSmokeTest::viewerCornerPlateClearsTheLevelMeter() {
     QFETCH(int, fullscreenMode);
     LibraryTreeModel libraryModel;
@@ -3536,16 +3540,37 @@ void TransportInputSmokeTest::viewerCornerPlateClearsTheLevelMeter() {
     QTRY_VERIFY((plate = visibleItemNamed(host, fullscreenMode == 0 ? QStringLiteral("spectrogramPopupControls")
                                                                     : QStringLiteral("spectrogramFullscreenCorner")))
                 != nullptr);
+    const bool wholeScreen = fullscreenMode == 1;
+    QQuickItem *buttons = itemNamed(plate, QStringLiteral("viewerCornerButtons"));
+    QQuickItem *close = visibleItemNamed(host, wholeScreen ? QStringLiteral("spectrogramFullscreenCornerCloseButton")
+                                                           : QStringLiteral("spectrogramPopupCloseButton"));
+    QVERIFY(buttons != nullptr && close != nullptr);
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    if (wholeScreen) {
+        QQuickItem *strip = itemNamed(host->contentItem(), QStringLiteral("spectrogramFullscreenStrip"));
+        QVERIFY(strip != nullptr);
+        QCOMPARE(close->height(), strip->property("buttonSize").toReal());
+        QCOMPARE(close->property("glyphSize").toInt(), strip->property("iconSize").toInt());
+        QCOMPARE(buttons->property("readoutPointSize").toReal(), strip->property("textPointSize").toReal());
+        // As tall as the strip's band.
+        QCOMPARE(plate->height(), strip->property("bandHeight").toReal());
+    } else {
+        QCOMPARE(close->height(), palette->property("toolButtonSize").toReal());
+        QCOMPARE(close->property("glyphSize").toInt(), palette->property("toolIconSize").toInt());
+        QCOMPARE(buttons->property("readoutPointSize").toReal(), palette->property("smallPointSize").toReal());
+    }
     for (const bool meterShown : {true, false}) {
         bridge->setProperty("showLevelMeter", meterShown);
         QTRY_COMPARE(meter->isVisible(), meterShown);
         const qreal edge = meterShown ? sceneRectOf(meter).left() : sceneRectOf(surface).right();
-        const qreal gap = meterShown ? 8.0 : 5.0;
+        const qreal gap = meterShown || wholeScreen ? 8.0 : 5.0;
         QTRY_COMPARE(edge - sceneRectOf(plate).right(), gap);
-        QCOMPARE(sceneRectOf(plate).top() - sceneRectOf(surface).top(), 5.0);
+        QCOMPARE(sceneRectOf(plate).top() - sceneRectOf(surface).top(), wholeScreen ? 8.0 : 5.0);
         // What the plot keeps clear of: the plate, its 1 px edge, the gap.
         const QSizeF reserved = surface->property("reservedCorner").toSizeF();
         QCOMPARE(reserved.width(), gap + plate->width() + 1.0);
+        QCOMPARE(reserved.height(), sceneRectOf(plate).bottom() - sceneRectOf(surface).top() + 1.0);
     }
 
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
@@ -3608,10 +3633,11 @@ void TransportInputSmokeTest::fullscreenVisualizationStripHoldsTheModeSwitch() {
     QCOMPARE(colorOf(divider, "color"), colorOf(plotColors, "plotPlateEdge"));
 
     // Each one's tooltip, under the pointer, covers none of the others.
+    // Close's names its key, as Image Details' does.
     const QList<std::pair<QQuickItem *, QString>> tips{
         {spectrogramButton, QStringLiteral("Spectrogram")},
         {waveformButton, QStringLiteral("Waveform")},
-        {close, QStringLiteral("Close")},
+        {close, QStringLiteral("Close (Esc)")},
     };
     // Where they show is the point, not after how long: at once.
     for (const auto &[button, text] : tips) {
@@ -3637,6 +3663,12 @@ void TransportInputSmokeTest::fullscreenVisualizationStripHoldsTheModeSwitch() {
 
     QAccessible::setActive(true);
     const QScopeGuard stopAccessibility([]() { QAccessible::setActive(false); });
+    // Close's accessible name is the action alone, without the key.
+    {
+        QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(close);
+        QVERIFY(accessible != nullptr);
+        QCOMPARE(accessible->text(QAccessible::Name), QStringLiteral("Close"));
+    }
     // The current mode checked, in the strip's look, and a radio button.
     for (const int mode : {1, 0}) {
         viewer->setProperty("visualizationMode", mode);
