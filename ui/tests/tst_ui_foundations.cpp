@@ -245,6 +245,8 @@ private slots:
     void waveformLaneSeamReadsOnWhite();
     void modeSwitchWaveformGlyphFillsWholePixels_data();
     void modeSwitchWaveformGlyphFillsWholePixels();
+    void modeSwitchSpectrogramGlyphFillsWholePixels_data();
+    void modeSwitchSpectrogramGlyphFillsWholePixels();
     void viewerToolButtonCheckedToggleAnswersHover_data();
     void viewerToolButtonCheckedToggleAnswersHover();
     void plotToolButtonDrawsCheckedAndFocusApart_data();
@@ -2185,6 +2187,174 @@ void UiFoundationsTest::modeSwitchWaveformGlyphFillsWholePixels() {
                                         .arg(x)
                                         .arg(y)
                                         .arg(drawn.name(), fill.name())));
+            }
+        }
+    }
+}
+
+void UiFoundationsTest::modeSwitchSpectrogramGlyphFillsWholePixels_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<int>("plotMode");
+    QTest::addColumn<bool>("chosen");
+    QTest::newRow("spectrogram, chosen") << true << 0 << true;
+    QTest::newRow("waveform dark, chosen") << true << 1 << true;
+    QTest::newRow("waveform light, chosen") << false << 1 << true;
+    QTest::newRow("waveform light, not chosen") << false << 1 << false;
+}
+
+// The mode switch's Spectrogram glyph, as drawn: a band of five 2 px cells
+// in the waveform glyph's columns under two 2 px traces that step up at the
+// columns' edges, every edge on a whole pixel. Each of its pixels is whole
+// and nothing else is touched, so the chosen glyph is its colour, 4.5:1 or
+// more on the fill, crisp at 1x and 2x (drawn smooth, it was the app's mark
+// and its 1.5 px trace a dimmer grey on the fill). Chosen on each plate,
+// and not chosen on the light one; on a dark plate the mask's black ink,
+// as offscreen draws it, does not tell from the plate. Measured from the
+// window's grab, at whatever scale the test runs (again at 2x in CTest).
+void UiFoundationsTest::modeSwitchSpectrogramGlyphFillsWholePixels() {
+    QFETCH(bool, dark);
+    QFETCH(int, plotMode);
+    QFETCH(bool, chosen);
+    const QString items = QStringLiteral(R"QML(
+        Rectangle {
+            id: plot
+            property var plotColors: tokens.plotColors(%1)
+            x: 16
+            y: 16
+            width: 300
+            height: 120
+            color: plotColors.plotBg
+
+            Components.PlotPlate {
+                x: 200
+                y: 40
+                plotColors: plot.plotColors
+                uiPalette: tokens
+
+                Components.PlotToolButton {
+                    objectName: "spectrogramSegment"
+                    plotColors: plot.plotColors
+                    uiPalette: tokens
+                    segment: true
+                    checked: %2
+                    text: "Spectrogram"
+                    icon.source: Qt.resolvedUrl("assets/spectrogram-symbolic.svg")
+                }
+
+                Components.PlotToolButton {
+                    plotColors: plot.plotColors
+                    uiPalette: tokens
+                    segment: true
+                    checked: !%2
+                    text: "Waveform"
+                    icon.source: Qt.resolvedUrl("assets/waveform-symbolic.svg")
+                }
+            }
+        }
+)QML").arg(plotMode).arg(chosen ? QStringLiteral("true") : QStringLiteral("false"));
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, items), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickItem *button = itemNamed(root.get(), QStringLiteral("spectrogramSegment"));
+    QVERIFY(button != nullptr);
+    QCOMPARE(button->property("checked").toBool(), chosen);
+    QCOMPARE(button->property("lightPlate").toBool(), !dark && plotMode == 1);
+    QQuickItem *icon = childNamed(button, QStringLiteral("plotToolButtonIcon"));
+    QVERIFY(icon != nullptr);
+    QTRY_VERIFY(icon->property("valid").toBool());
+    QCOMPARE(icon->size(), QSizeF(16, 16));
+    const QColor glyph = colorOf(button, "glyphColor");
+    const QColor plate = colorOf(button, "plateColor");
+    const QColor under = chosen ? drawnOver(colorOf(button, "checkedColor"), plate) : plate;
+    const qreal glyphOpacity = icon->property("opacity").toReal();
+    QCOMPARE(glyphOpacity, chosen ? 1.0 : button->property("segmentRestOpacity").toReal());
+
+    // The glyph's pixels, from its source's shape: the band's five cells
+    // and the two traces, each a row of 2 px runs stepping at x 4, 7, 10
+    // and 13.
+    std::array<std::array<bool, 16>, 16> inked{};
+    const auto run = [&inked](int left, int right, int top) {
+        for (int x = left; x < right; ++x) {
+            inked[top][x] = true;
+            inked[top + 1][x] = true;
+        }
+    };
+    for (int left : {1, 4, 7, 10, 13}) {
+        run(left, left + 2, 13);
+    }
+    const std::array<int, 6> edges{1, 4, 7, 10, 13, 15};
+    for (int slice = 0; slice < 5; ++slice) {
+        run(edges[slice], edges[slice + 1], std::array<int, 5>{10, 10, 9, 9, 8}[slice]);
+        run(edges[slice], edges[slice + 1], std::array<int, 5>{6, 5, 4, 3, 2}[slice]);
+    }
+
+    const QImage image = window->grabWindow();
+    QVERIFY(!image.isNull());
+    const qreal scale = grabScale(image, window);
+    // The glyph's square on whole pixels.
+    const QPointF origin = icon->mapToScene(QPointF(0, 0));
+    QCOMPARE(origin, QPointF(std::round(origin.x()), std::round(origin.y())));
+    const auto pixels = [&](int x, int y) {
+        QList<QColor> found;
+        for (int dy = 0; dy < int(scale); ++dy) {
+            for (int dx = 0; dx < int(scale); ++dx) {
+                found.push_back(image.pixelColor(int((origin.x() + x) * scale) + dx,
+                                                 int((origin.y() + y) * scale) + dy));
+            }
+        }
+        return found;
+    };
+    // The mask's ink: offscreen, Kirigami draws a file's mask in its own
+    // black rather than in `color` (see the Waveform glyph's test), so each
+    // pixel's cover from the ink drawn, and the glyph at that cover and its
+    // opacity over what is under it, as the app draws it.
+    const QColor sample = pixels(7, 13).first();
+    const QColor ink = channelDistance(sample, glyph) < channelDistance(sample, QColor(Qt::black))
+        ? glyph : QColor(Qt::black);
+    const auto channels = [](const QColor &color) {
+        return std::array<int, 3>{color.red(), color.green(), color.blue()};
+    };
+    int widest = 0;
+    for (int channel = 1; channel < 3; ++channel) {
+        if (std::abs(channels(ink)[channel] - channels(under)[channel])
+            > std::abs(channels(ink)[widest] - channels(under)[widest])) {
+            widest = channel;
+        }
+    }
+    QVERIFY(std::abs(channels(ink)[widest] - channels(under)[widest]) >= 32);
+    // The icon's opacity applies to the ink as drawn.
+    const auto coverOf = [&](const QColor &drawn) {
+        return double(channels(drawn)[widest] - channels(under)[widest])
+            / (double(channels(ink)[widest] - channels(under)[widest]) * glyphOpacity);
+    };
+    const auto tinted = [&](double cover) {
+        QColor color = glyph;
+        color.setAlphaF(float(std::clamp(cover * glyphOpacity, 0.0, 1.0)));
+        return drawnOver(color, under);
+    };
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            for (const QColor &drawn : pixels(x, y)) {
+                const double cover = coverOf(drawn);
+                const QString at = QStringLiteral("column %1, row %2: %3 of %4")
+                                       .arg(x)
+                                       .arg(y)
+                                       .arg(cover, 0, 'f', 2)
+                                       .arg(tinted(cover).name());
+                if (inked[y][x]) {
+                    QVERIFY2(cover >= 0.97, qPrintable(at));
+                    if (chosen) {
+                        QVERIFY2(contrastRatio(tinted(cover), under) >= 4.5,
+                                 qPrintable(describeContrast(at, tinted(cover), under)));
+                    }
+                } else {
+                    QVERIFY2(channelDistance(drawn, under) <= 3, qPrintable(at));
+                }
             }
         }
     }
