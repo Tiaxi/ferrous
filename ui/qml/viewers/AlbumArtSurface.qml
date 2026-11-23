@@ -45,8 +45,8 @@ Item {
     required property var uiPalette
     // Whether the viewer is over the whole screen: the details' text is
     // then a step larger, 1.2 times the window's, as the title strip's
-    // over them, the file's name 16 px, and their column as much wider,
-    // 336 px with its seam.
+    // over them, the file's name 16 px, and their column at least as much
+    // wider, 336 px with its seam, and as wide as a preview's.
     property bool fullscreen: false
     // The colours of the view, dark in both themes.
     readonly property var plot: root.uiPalette.mediaPlot
@@ -645,7 +645,8 @@ Item {
     // window). Over the whole screen it follows its text, 1.2 times larger:
     // 336 px, or 40 characters of that text (at 320 px a folder's path was
     // cut beside the screen's room to spare).
-    // During a preview, it is as wide as its two buttons side by side want
+    // During a preview, and over the whole screen whether a preview or
+    // not, it is as wide as a candidate's two buttons side by side want
     // if two fifths of the view or its own width hold them; otherwise they
     // stack, as a longer translation's do, and it is up to half the view,
     // and wider still, up to three quarters, where one of them alone needs
@@ -670,14 +671,21 @@ Item {
         anchors.bottom: parent.bottom
         readonly property real widestButton: Math.ceil(Math.max(previewBackButton.implicitWidth,
             previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 2 * root.infoPadding
-        readonly property real buttonsRow: !previewApplyButton.visible ? 0
-            : Math.ceil(previewBackButton.implicitWidth + previewButtons.spacing
-                + previewApplyButton.implicitWidth) + 2 * root.infoPadding
-        width: root.previewActive
+        // A candidate's preview's two buttons side by side, with the
+        // padding: what its column is as wide as, in a wide view.
+        readonly property real buttonsSideBySide: Math.ceil(previewBackButton.implicitWidth
+            + previewButtons.spacing + previewApplyButton.implicitWidth) + 2 * root.infoPadding
+        // Over the whole screen, every column is as wide as a candidate's
+        // preview's, so the art rests at the same x in each (the details'
+        // was 22 px narrower than the preview's, and the art sat 12 px
+        // further right in one than in the other).
+        readonly property real buttonsRow: !previewApplyButton.visible && !root.fullscreen ? 0
+            : infoColumn.buttonsSideBySide
+        width: root.previewActive || root.fullscreen
             ? Math.max(infoColumn.minimumWidth,
                 Math.min(Math.floor(root.width / 2), infoColumn.fortyCharacters),
                 infoColumn.buttonsRow <= Math.floor(root.width * 0.4) ? infoColumn.buttonsRow : 0,
-                Math.min(Math.floor(root.width * 0.75), infoColumn.widestButton))
+                root.previewActive ? Math.min(Math.floor(root.width * 0.75), infoColumn.widestButton) : 0)
             : Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width * 0.4), infoColumn.fortyCharacters))
 
         // The details' text: the body font, 1.2 times it over the whole

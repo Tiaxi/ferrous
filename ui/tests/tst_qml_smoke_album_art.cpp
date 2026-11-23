@@ -35,6 +35,7 @@ private slots:
     void itunesPreviewButtonsTakeSpaceFromThePlaybackShortcut();
     void itunesPreviewButtonsStayWholeInTheDetails_data();
     void itunesPreviewButtonsStayWholeInTheDetails();
+    void albumArtRestsAtOneXOverTheWholeScreen();
     void itunesPreviewCannotApplyACandidateThatIsNotReady();
     void itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybackMovesOn();
     void itunesPreviewApplyShowsTheAppliedCoverAfterPlaybackMovesOn();
@@ -523,6 +524,22 @@ qreal infoColumnWidth(bool fullscreen, qreal viewWidth) {
     return std::round(280 * infoColumnWidthScale(fullscreen, viewWidth)) - 1;
 }
 
+// The details column's width, less its seam, in a view `viewWidth` wide,
+// out of a preview: in the window, infoColumnWidth's; over the whole screen,
+// the width of a candidate's preview's column, so the art rests at the same
+// x in both: as wide as its two buttons side by side, `column`'s, if two
+// fifths of the view hold them, and never under 335 px or 40 characters of
+// the details' text, up to half the view.
+qreal detailsColumnWidth(QQuickItem *column, bool fullscreen, qreal viewWidth) {
+    if (!fullscreen) {
+        return infoColumnWidth(false, viewWidth);
+    }
+    const qreal sideBySide = column->property("buttonsSideBySide").toReal();
+    return qMax(qMax(infoColumnWidth(true, viewWidth),
+                     qMin(std::floor(viewWidth / 2), column->property("fortyCharacters").toReal())),
+                sideBySide <= std::floor(viewWidth * 0.4) ? sideBySide : 0.0);
+}
+
 // The details' column's 40 characters, less its seam: of the body font in
 // a window, as much wider as the column in a wide one; over the whole
 // screen, of the details' text, 1.2 times the body font.
@@ -847,11 +864,11 @@ void checkArtFitsLeftOfTheDetails(AlbumArtWindow &ui, int viewerMode) {
     QCOMPARE(columnRect.bottom(), viewRect.bottom());
     QCOMPARE(seamRect.right(), columnRect.left());
     // 280 px with its seam, 320 px in a window 1280 px wide or more, a
-    // quarter of one between, and 336 px over the whole screen, for its
-    // text 1.2 times larger.
-    QCOMPARE(columnRect.width(), infoColumnWidth(viewerMode == 1, viewRect.width()));
+    // quarter of one between, and over the whole screen 336 px or more,
+    // for its text 1.2 times larger, as wide as a preview's column.
+    QCOMPARE(columnRect.width(), detailsColumnWidth(column, viewerMode == 1, viewRect.width()));
     if (viewerMode == 1) {
-        QCOMPARE(columnRect.width(), 335.0);
+        QVERIFY2(columnRect.width() >= 335.0, qPrintable(QString::number(columnRect.width())));
     } else if (viewRect.width() >= 1280) {
         QCOMPARE(columnRect.width(), 319.0);
     } else if (viewRect.width() <= 1120) {
@@ -1202,7 +1219,7 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     const QRectF viewRect(QPointF(0, 0), window->size());
     QCOMPARE(sceneRectOf(viewport), viewRect);
     const auto columnAtTheEdge = [&](bool fullscreen) {
-        const qreal width = infoColumnWidth(fullscreen, viewRect.width());
+        const qreal width = detailsColumnWidth(column, fullscreen, viewRect.width());
         return QRectF(viewRect.right() - width, viewRect.top(), width, viewRect.height());
     };
     QTRY_COMPARE(sceneRectOf(column), columnAtTheEdge(false));
@@ -1428,7 +1445,8 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     const QStringList lines = linesOf(path->property("text").toString());
     QTRY_COMPARE(path->property("lineCount").toInt(), lines.size());
     QVERIFY(!path->property("elided").toBool());
-    QVERIFY2(lines.size() == 3 && lines.last().endsWith(QStringLiteral("2005 - Small Hours Deluxe")),
+    // On two lines or more (three in a column 335 px wide).
+    QVERIFY2(lines.size() >= 2 && lines.last().endsWith(QStringLiteral("2005 - Small Hours Deluxe")),
              qPrintable(lines.join(QLatin1Char('|'))));
     for (qsizetype i = 0; i + 1 < lines.size(); ++i) {
         QVERIFY2(lines.at(i).endsWith(QLatin1Char('/')), qPrintable(lines.join(QLatin1Char('|'))));
@@ -4870,7 +4888,7 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
     QCOMPARE(colorOf(backing, "color"), colorOf(plot, "plotStrip"));
     QCOMPARE(colorOf(plot, "plotStrip"), qRgb(0x12, 0x12, 0x12));
     const QRgb strip = colorOf(backing, "color");
-    QTRY_COMPARE(column->width(), infoColumnWidth(fullscreen, surface->width()));
+    QTRY_COMPARE(column->width(), detailsColumnWidth(column, fullscreen, surface->width()));
     QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
     QVERIFY(image != nullptr);
     QTRY_VERIFY(paintedRectOf(image).left() > 16);
@@ -5011,6 +5029,62 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
     QQuickItem *gap = itemNamed(compare, QStringLiteral("albumArtDetailsButtonFocusGap"));
     QVERIFY(gap != nullptr && gap->isVisible());
     QCOMPARE(borderColorOf(gap), strip);
+}
+
+// Over the whole screen, the details' column is as wide as a preview's, so
+// the art rests at the same x beside either: on a 2000 px screen the
+// details' column was 22 px narrower than the preview's, and the art sat
+// 12 px further right in one than in the other. A preview of the current
+// art alone, with no Apply, has that width too.
+void AlbumArtSmokeTest::albumArtRestsAtOneXOverTheWholeScreen() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 300, 300);
+    QVERIFY(!coverPath.isEmpty());
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(
+        createThemedDetailsSurfaceWindow(engine, coverPath, kDetailsBreezeDark, true, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    window->resize(2000, 1400);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    auto *surface = qvariant_cast<QQuickItem *>(root->property("surface"));
+    QVERIFY(surface != nullptr);
+    surface->setProperty("fileInfo", QVariantMap{
+        {QStringLiteral("path"), QStringLiteral("/music/Small Hours/cover.jpg")},
+        {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
+        {QStringLiteral("width"), 1400},
+        {QStringLiteral("height"), 1400},
+    });
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
+    QVERIFY(column != nullptr && image != nullptr);
+    QTRY_COMPARE(surface->width(), 2000.0);
+    QTRY_COMPARE(surface->property("imageStatus").toInt(), 1);
+    QTRY_COMPARE(paintedRectOf(image).height(), 1400.0);
+    const QRectF detailsColumn = sceneRectOf(column);
+    const QRectF detailsArt = paintedRectOf(image);
+
+    for (const bool candidate : {true, false}) {
+        surface->setProperty("previewLabel", QStringLiteral("iTunes Artwork"));
+        surface->setProperty("previewHasCandidate", candidate);
+        surface->setProperty("previewActive", true);
+        QTRY_VERIFY(itemNamed(surface, QStringLiteral("albumArtPreviewFooter"))->isVisible());
+        QCoreApplication::processEvents();
+        const QString at = QStringLiteral("candidate %1: details %2 wide, art at %3; preview %4 wide, art at %5")
+                               .arg(candidate).arg(detailsColumn.width()).arg(detailsArt.left())
+                               .arg(sceneRectOf(column).width()).arg(paintedRectOf(image).left());
+        QVERIFY2(detailsColumn == sceneRectOf(column), qPrintable(at));
+        QVERIFY2(detailsArt == paintedRectOf(image), qPrintable(at));
+        // As wide as a candidate's two buttons side by side, wider than
+        // 40 characters of the details' text here.
+        QVERIFY2(detailsColumn.width() == column->property("buttonsSideBySide").toReal()
+                     && detailsColumn.width() > 335, qPrintable(at));
+        surface->setProperty("previewActive", false);
+        QTRY_VERIFY(!itemNamed(surface, QStringLiteral("albumArtPreviewFooter"))->isVisible());
+    }
 }
 
 void AlbumArtSmokeTest::albumArtCopyPathIsOnTheFoldersLineUnderClose_data() {

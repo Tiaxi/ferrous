@@ -40,8 +40,14 @@ Button {
         Kirigami.MnemonicData.controlType: Kirigami.MnemonicData.ActionElement
         Kirigami.MnemonicData.label: root.text
 
-        implicitWidth: (glyph.visible ? glyph.width + root.spacing : 0) + Math.ceil(caption.implicitWidth)
-        implicitHeight: Math.max(glyph.visible ? glyph.height : 0, Math.ceil(caption.implicitHeight))
+        // Whether it has a glyph: from its icon, not from the glyph's
+        // visibility, so a hidden button asks for the size it shows at (a
+        // hidden one asked for its caption alone, and what was sized from
+        // it, such as the preview's column, changed as it showed).
+        readonly property bool hasGlyph: root.icon.name.length > 0
+
+        implicitWidth: (content.hasGlyph ? glyph.width + root.spacing : 0) + Math.ceil(caption.implicitWidth)
+        implicitHeight: Math.max(content.hasGlyph ? glyph.height : 0, Math.ceil(caption.implicitHeight))
 
         Shortcut {
             sequence: content.Kirigami.MnemonicData.sequence
@@ -61,7 +67,7 @@ Button {
                 anchors.verticalCenter: parent.verticalCenter
                 width: root.icon.width
                 height: root.icon.height
-                visible: root.icon.name.length > 0
+                visible: content.hasGlyph
                 source: root.icon.name
                 color: content.ink
                 isMask: true
@@ -73,7 +79,7 @@ Button {
                 objectName: "captionButtonCaption"
                 anchors.verticalCenter: parent.verticalCenter
                 width: Math.min(Math.ceil(implicitWidth),
-                                content.width - (glyph.visible ? glyph.width + root.spacing : 0))
+                                content.width - (content.hasGlyph ? glyph.width + root.spacing : 0))
                 textFormat: Text.PlainText
                 text: content.Kirigami.MnemonicData.plainTextLabel
                 font: root.font
