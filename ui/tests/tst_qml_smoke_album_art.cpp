@@ -5261,7 +5261,13 @@ void AlbumArtSmokeTest::albumArtWholeScreenDetailsFitTheirText() {
     QVERIFY(column != nullptr && path != nullptr);
     QTRY_COMPARE(surface->width(), 2000.0);
     QTRY_VERIFY(column->isVisible() && path->isVisible());
-    QCoreApplication::processEvents();
+    // The next frame: the rows' layouts place the values when the window
+    // polishes, after the column has widened to the details' text. Before
+    // it, a label could still be as wide as at the narrower column, and the
+    // values measured from there stood 36 px left of where they rest.
+    QSignalSpy frames(window, &QQuickWindow::frameSwapped);
+    window->update();
+    QVERIFY(frames.wait(5000));
     const QString at = QStringLiteral("%1 pt: the column %2 px wide").arg(points).arg(column->width());
     const qreal twoFifths = std::floor(surface->width() * 0.4);
     const qreal padding = surface->property("infoPadding").toReal();
