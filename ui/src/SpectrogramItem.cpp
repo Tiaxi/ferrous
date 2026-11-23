@@ -6937,12 +6937,20 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
             // where the view was drawn, which a view that follows the
             // playhead draws a fraction of a column off its whole columns
             // (taking them, the time slipped a pixel as the drag started).
-            m_panOriginLeft = m_crosshair.valid && !m_crosshairCachedRollingMode
-                    && !m_zoomPreviewShown
+            const bool fromCrosshair = m_crosshair.valid && !m_crosshairCachedRollingMode
+                && !m_zoomPreviewShown;
+            m_panOriginLeft = fromCrosshair
                 ? static_cast<double>(m_crosshairCachedDisplayLeft)
                     - m_crosshairCachedDrawX / std::max(1e-9, effectiveZoomLocked())
                 : static_cast<double>(view.left);
-            m_panOriginX = m_panPressPosition.x();
+            // And at the device pixel the crosshair was drawn on, whose time
+            // it showed: from the pointer's own x, which a compositor places
+            // between pixels, the time slipped by up to a pixel's as the drag
+            // started (1:09.95, then 1:09.96 throughout).
+            m_panOriginX = fromCrosshair
+                ? static_cast<double>(crosshairDeviceColumnLocked(
+                      m_panPressPosition.x(), std::max(1, canvasWidthLocked()))) / m_canvasScale
+                : m_panPressPosition.x();
         }
         // The column grabbed stays under the pointer. Held at an end of the
         // track, the pan starts again from there, so that a move back moves
