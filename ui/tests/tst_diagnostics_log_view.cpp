@@ -278,6 +278,7 @@ private slots:
     void aResizeKeepsThePlaceAndTheSelection();
     void theScrollBarMovesNothing();
     void selectsAcrossWrappedRows();
+    void rowsThatComeIntoViewDrawInTheView();
 };
 
 void DiagnosticsLogViewTest::initTestCase() {
@@ -898,6 +899,54 @@ void DiagnosticsLogViewTest::selectsAcrossWrappedRows() {
     QCOMPARE(log.view->selectedText(), text.mid(from, to - from));
     QTest::keyClick(log.window, Qt::Key_C, Qt::ControlModifier);
     QCOMPARE(clipboardText(), text.mid(from, to - from));
+}
+
+// The rows that come into view as the log scrolls draw in the view: with the
+// software renderer, which draws in VMs without OpenGL, a node that joined a
+// plain node of the scene drew at the window's origin, unclipped. The rows
+// join the view's clip, which the renderer keeps.
+void DiagnosticsLogViewTest::rowsThatComeIntoViewDrawInTheView() {
+    const QColor chrome(Qt::white);
+    QQuickWindow window;
+    window.setColor(chrome);
+    window.resize(480, 300);
+    auto &view = *new DiagnosticsLogView(window.contentItem());
+    const QRect shown(120, 100, 300, 120);
+    view.setPosition(shown.topLeft());
+    view.setSize(shown.size());
+    view.setColor(Qt::black);
+    view.setText(records(200, 40).join(QLatin1Char('\n')));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    // Each grab draws a frame of the window's scene.
+    const auto check = [&](const char *step) {
+        const QImage image = window.grabWindow().convertToFormat(QImage::Format_RGB32);
+        QCOMPARE(image.size(), window.size());
+        int outside = 0;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                outside += !shown.contains(x, y) && image.pixel(x, y) != chrome.rgb() ? 1 : 0;
+            }
+        }
+        QVERIFY2(outside == 0, qPrintable(QStringLiteral("%1: %2 pixels drawn outside the view")
+                                              .arg(QString::fromLatin1(step)).arg(outside)));
+        // Ink on the view's top and bottom rows.
+        const int rowHeight = static_cast<int>(std::ceil(view.m_layout.rowHeight()));
+        for (const int top : {shown.top(), shown.bottom() - 2 * rowHeight}) {
+            int ink = 0;
+            for (int y = top; y < top + rowHeight; ++y) {
+                for (int x = shown.left(); x <= shown.right(); ++x) {
+                    ink += image.pixel(x, y) != chrome.rgb() ? 1 : 0;
+                }
+            }
+            QVERIFY2(ink > 0, qPrintable(QStringLiteral("%1: no text at y %2")
+                                             .arg(QString::fromLatin1(step)).arg(top)));
+        }
+    };
+    check("at the top");
+    // A screen down: rows of their own.
+    view.setContentY(view.contentY() + 2 * shown.height());
+    check("scrolled");
 }
 
 int main(int argc, char **argv) {
