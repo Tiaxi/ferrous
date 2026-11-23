@@ -1292,9 +1292,16 @@ ToolBar {
                     font.features: root.uiPalette.tabularFigures
                     color: root.stopped ? root.uiPalette.textSecondary : root.uiPalette.text
                     textFormat: Text.PlainText
+                    // While a drag or held keys move the playhead, the
+                    // gesture's second, as the playhead and its time box
+                    // show it (the readout kept playback's, and the bar
+                    // contradicted it for the whole scrub); at the release
+                    // the seek lands and playback's takes over at once.
                     text: root.stopped
                         ? transportTime.noTime
-                        : FormatUtils.clockText(root.positionText)
+                        : !isNaN(seekSlider.gestureValue)
+                            ? FormatUtils.formatClockTime(Math.floor(seekSlider.gestureValue))
+                            : FormatUtils.clockText(root.positionText)
                 }
 
                 Label {

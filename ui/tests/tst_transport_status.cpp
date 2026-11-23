@@ -532,6 +532,7 @@ private slots:
     void seekPlayheadWaitsAtTheStartWithoutALength();
     void seekPlayheadThroughAZeroLengthFileThatFails();
     void timeReadoutShowsPositionAndLength();
+    void timeReadoutFollowsTheSeekGesture();
     void volumeDrawsGrooveHoverAndFocus_data();
     void volumeDrawsGrooveHoverAndFocus();
     void volumeMuteKeepsTheThumb_data();
@@ -2454,6 +2455,59 @@ void TransportStatusTest::timeReadoutShowsPositionAndLength() {
     harness.bridge->setProperty("durationSeconds", 4800.0);
     QCOMPARE(time->property("text").toString(), QStringLiteral("1:02:03 / 1:20:00"));
     QTRY_VERIFY(time->width() >= time->childItems().first()->implicitWidth());
+}
+
+// While a drag or held keys move the playhead, the readout shows the
+// gesture's second, as the playhead and its time box do (it kept playback's,
+// 0:09 beside a box and a playhead at 1:43); at the release playback's
+// takes over at once, with no frame of the gesture's left.
+void TransportStatusTest::timeReadoutFollowsTheSeekGesture() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *position = harness.item(QStringLiteral("transportTimePosition"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && position && tip);
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:17"));
+    const auto clock = [](double seconds) {
+        const int second = int(std::floor(seconds));
+        return QStringLiteral("%1:%2").arg(second / 60).arg(second % 60, 2, 10, QLatin1Char('0'));
+    };
+
+    // A drag: the readout is the box's time, in the text colour, at every
+    // move.
+    const QRectF bar = sceneRect(seek);
+    const int y = qRound(bar.center().y());
+    const auto at = [&bar, y](double fraction) { return QPoint(qRound(bar.left() + fraction * bar.width()), y); };
+    QTest::mouseMove(harness.window, at(0.1));
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, at(0.1));
+    for (const double fraction : {0.2, 0.35, 0.46}) {
+        QTest::mouseMove(harness.window, at(fraction));
+        const double gesture = seek->property("gestureValue").toDouble();
+        QVERIFY(std::isfinite(gesture));
+        QCOMPARE(position->property("text").toString(), clock(gesture));
+        QTRY_COMPARE(tip->property("text").toString(), clock(gesture));
+    }
+    QVERIFY(position->property("text").toString() != QStringLiteral("1:17"));
+    QVERIFY(sameColor(position->property("color").value<QColor>(), harness.token("text")));
+    // The release seeks, and playback's position is the readout's at once.
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at(0.46));
+    QCOMPARE(seeksOf(harness).size(), 1);
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:17"));
+
+    // Held keys: each step's time while held, playback's at the release.
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyPress(harness.window, Qt::Key_Right);
+    QVERIFY(seek->property("adjusting").toBool());
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:22"));
+    QTest::keyPress(harness.window, Qt::Key_Right, Qt::NoModifier);
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:27"));
+    QTest::keyRelease(harness.window, Qt::Key_Right);
+    QVERIFY(!seek->property("adjusting").toBool());
+    QCOMPARE(seeksOf(harness).size(), 2);
+    QCOMPARE(seeksOf(harness).last().toDouble(), 87.0);
+    harness.root->setProperty("positionText", QStringLiteral("01:27"));
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:27"));
 }
 
 void TransportStatusTest::volumeDrawsGrooveHoverAndFocus_data() {
