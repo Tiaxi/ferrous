@@ -7459,6 +7459,9 @@ MOTION_FOCUS = {
        for n in ("vi-pan-waveform", "vi-pan-spectrogram")},
     # the queue's first rows where the playing row moves (rows 1-3, the number and title columns); the first scan:
     # the status bar's right half (the scan label arriving and leaving)
+    # a wheel zoom and Reset with the pointer resting on the plot: whether the crosshair stays in every frame (h21:
+    # it is drawn into the plot's texture, so no text or opacity measure saw it vanish for ~215 ms per notch)
+    **{n: dict(presence="spectrogramPane") for n in ("spectrogram-zoom", "vi-zoom-waveform")},
     "queue-now-move": dict(rect="mainQueuePane:0,0.06,0.55,0.18", rows="all", b_lines=1),
     "first-scan": dict(rect="statusBar:0.4,0,0.6,1", rows="all", b_lines=1),
     "scan-large": dict(rect="statusBar:0.4,0,0.6,1", rows="all", b_lines=1),
@@ -7779,6 +7782,11 @@ STATES += [
     ("viz-interaction", "main", "vi-autoscroll-stopped", f"move {_VW}@0.5,0.5 | mclick {_VW}@0.5,0.5 | wait 0.8 | away",
      "Autoscroll stopped by a second middle click: the view stays where it got to"),
     ("viz-interaction", "_", "_autoscroll-stop", "key F | wait 0.6 | away", ""),
+    ("viz-interaction", "motion", "vi-zoom-waveform",
+     f"js resetZoomAction.trigger() | wait 0.6 | hover {_VW}@0.5,0.4 0.4 | strip 2.0 0.1 spectrogramPane :: "
+     f"wheel {_VW}@0.5,0.4 120 3 ; wait 0.8 ; js resetZoomAction.trigger()",
+     "Waveform zoom in (3 notches) and Reset Zoom with the pointer resting on the plot: the crosshair, its readouts "
+     "and the zoom readout"),
     ("viz-interaction", "motion", "vi-autoscroll",
      f"strip 3.4 0.1 {_VI_CROP} :: mclick {_VW}@0.3,0.5 ; move {_VW}@0.5,0.5 ; wait 0.9 ; move xy:1598,760 ; wait 0.9 ; "
      f"leave ; wait 0.9 ; move {_VW}@0.5,0.5 ; mclick {_VW}@0.5,0.5",

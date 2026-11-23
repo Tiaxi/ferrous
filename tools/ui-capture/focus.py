@@ -728,6 +728,8 @@ SCOPES.update({
              "the playhead's jump and the view's"),
             ("strip", "spectrogram-zoom", "dark", "The wheel zooming the spectrogram 3 notches, then Reset Zoom",
              "each notch's step; the readout; the reset"),
+            ("strip", "vi-zoom-waveform", "dark", "The wheel zooming the waveform 3 notches, then Reset Zoom",
+             "the crosshair and its readouts through each notch and the reset; the zoom readout"),
         ],
         facts=["plates-"],
         facts_strips=[("vi-follow-spectrogram", "dark", "Follow Playhead (F) after a drag of the centred spectrogram"),

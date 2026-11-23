@@ -4,6 +4,7 @@
 A strip lays a ~100 ms change out as frozen frames: slow motion a reviewer cannot watch at speed. `analyse`
 measures the recording and draws ONE merged image per transition, at the reviewers' 1568 px width:
 - caption: whether every lane's crosshair is at one x (the recordings MOTION_FOCUS "lanes" names);
+  whether the crosshair stays shown from the action on (MOTION_FOCUS "presence": a zoom with the pointer resting);
   latency (action to first change), each transition (first to last change; changes more than
   100 ms apart are separate transitions, e.g. a hover fade in and out, or a wait then an auto-hide) and the
   recording, kept apart; blink per scope and per changed item; text overlap; movement after the stated end;
@@ -610,6 +611,56 @@ def crosshair_text(c):
             + ", top lane first)")
 
 
+def crosshair_presence(ims, times, pane, lanes):
+    """Whether a plot's crosshair stays shown through an action that should keep it (a wheel zoom, Reset Zoom, with
+    the pointer resting on the plot): its dashed vertical line found in any lane, frame by frame, from the last frame
+    before the action. The crosshair is drawn into the plot's texture, so no text or opacity measure sees it go.
+    dict(ok: None when the frame before the action shows none, frames, shown, gaps: [dict(first, last, start_ms,
+    ms)], the frames without a line between ones with it or to the end, ms to the next frame that shows one)."""
+    out = dict(ok=None, frames=0, shown=0, gaps=[])
+    x, y, w, h = pane
+    lanes = max(1, lanes)
+    lh = h / lanes
+    pre = [k for k in range(len(ims)) if times[k] < 0]
+    k0 = pre[-1] if pre else 0
+    seen = []
+    for k in range(k0, len(ims)):
+        g = np.asarray(ims[k].crop((x, y, x + w, y + h)).convert("L"), dtype=np.float32)
+        tops = [float(dashed_columns(g[int(i * lh) + 3:int((i + 1) * lh) - 3])[0].max()) for i in range(lanes)]
+        seen.append(max(tops) >= CROSS_SEEN)
+    if not seen or not seen[0]:
+        return out
+    out["frames"], out["shown"] = len(seen), sum(seen)
+    k = 0
+    while k < len(seen):
+        if seen[k]:
+            k += 1
+            continue
+        j = k
+        while j < len(seen) and not seen[j]:
+            j += 1
+        a, b = k0 + k, k0 + j - 1
+        end_t = times[b + 1] if b + 1 < len(times) else times[b]
+        out["gaps"].append(dict(first=a, last=b, start_ms=round(times[a]), ms=round(end_t - times[a])))
+        k = j
+    out["ok"] = not out["gaps"]
+    return out
+
+
+def presence_text(c):
+    """crosshair_presence in words."""
+    q = "The crosshair shown in every frame from the action on:"
+    if c["ok"] is None:
+        return f"{q} NOT CHECKED (no crosshair in the frame before the action)"
+    if c["ok"]:
+        return f"{q} yes ({c['frames']} frames)"
+    gs = c["gaps"]
+    return (f"{q} NO (FAIL): gone in {c['frames'] - c['shown']} of {c['frames']} frames, {len(gs)} time"
+            + ("s" if len(gs) != 1 else "") + ": "
+            + ", ".join(f"f{g['first']:04d}-f{g['last']:04d} from +{g['start_ms']} ms for {g['ms']} ms" for g in gs[:6])
+            + (f" and {len(gs) - 6} more" if len(gs) > 6 else ""))
+
+
 def traced_lanes(tracks, pane):
     """How many lanes a plot pane (window coordinates) has: the distinct heights of its lane labels in the trace."""
     x, y, w, h = pane
@@ -953,6 +1004,11 @@ def measure(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
         pane = resolve_rect(fo["lanes"], meta, ims[0].width, ims[0].height)
         in_window = (pane[0] + off[0], pane[1] + off[1], pane[2], pane[3])
         cross = crosshair_lanes(ims, times, pane, traced_lanes(tracks, in_window), off)
+    presence = None
+    if fo.get("presence"):  # (recorded at 1x, as the lanes' fact)
+        pane = resolve_rect(fo["presence"], meta, ims[0].width, ims[0].height)
+        in_window = (pane[0] + off[0], pane[1] + off[1], pane[2], pane[3])
+        presence = crosshair_presence(ims, times, pane, traced_lanes(tracks, in_window))
     overlap = text_overlap(tracks, segs)
     # the overlap per transition, and per now-playing line (states.ELEMENT_INK: only that line's text items, e.g.
     # the outgoing and incoming titles)
@@ -1242,6 +1298,8 @@ def measure(frames, ims, t0, region, shown_idx, meta, d, zoom=1, t_stop=None, fo
     metrics["periodic_note"] = tick_note
     if cross is not None:
         metrics["crosshair"] = cross
+    if presence is not None:
+        metrics["crosshair_presence"] = presence
     if travel_px is not None:
         metrics["travel_px"] = round(travel_px)
         metrics["plot_note"] = travel_note
@@ -1291,6 +1349,8 @@ def fms(v):
 def caption(m, segs, continuous):
     """Latency (action to first change), each transition (first to last change) and the recording, kept apart."""
     parts = [crosshair_text(m["crosshair"]) + "."] if m.get("crosshair") else []
+    if m.get("crosshair_presence"):
+        parts.append(presence_text(m["crosshair_presence"]) + ".")
     if not segs:
         parts.append("No change after the action.")
     else:

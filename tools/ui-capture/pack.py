@@ -2306,6 +2306,9 @@ def strip_facts(m):
     if m.get("crosshair"):  # (first: the fact a pan is read for)
         import motion_strip
         first = [motion_strip.crosshair_text(m["crosshair"])]
+    if m.get("crosshair_presence"):  # (first too: the fact a zoom is read for)
+        import motion_strip
+        first.append(motion_strip.presence_text(m["crosshair_presence"]))
     parts = first + [f"latency {m['latency_ms']} ms"] + ([f"visual handover: {', '.join(hv)}"] if hv else []) + [
         f"pixel transition {m['duration_ms']} ms ({m['frames_60']} frames at 60 fps; every changed pixel, playback content "
         "and tooltips included)"]

@@ -107,6 +107,38 @@ class Lanes(unittest.TestCase):
         self.assertIn("fewer than two lanes", motion_strip.crosshair_text(c))
 
 
+
+class Presence(unittest.TestCase):
+    """motion_strip.crosshair_presence: the crosshair kept through a zoom (h21: it vanished for ~215 ms per notch)."""
+    def check(self, *frames, pre=1):
+        ims = [frame(xs, seed, alpha=0.6) for seed, xs in enumerate(frames)]
+        times = [17.0 * (k - pre) for k in range(len(ims))]
+        return motion_strip.crosshair_presence(ims, times, PANE, len(frames[0]))
+
+    def test_a_crosshair_kept_through_the_action_passes(self):
+        c = self.check((300, 300), (300, 300), (280, 280), (280, 280))
+        self.assertEqual((c["ok"], c["frames"], c["shown"]), (True, 4, 4))
+        self.assertIn("yes", motion_strip.presence_text(c))
+
+    def test_each_gap_is_named_with_its_frames_and_length(self):
+        on, off = (300, 300), (None, None)
+        c = self.check(on, off, off, on, off, on)
+        self.assertIs(c["ok"], False)
+        self.assertEqual([(g["first"], g["last"], g["start_ms"], g["ms"]) for g in c["gaps"]],
+                         [(1, 2, 0, 34), (4, 4, 51, 17)])
+        text = motion_strip.presence_text(c)
+        self.assertIn("NO (FAIL)", text)
+        self.assertIn("f0001-f0002 from +0 ms for 34 ms", text)
+
+    def test_one_lane_counts(self):
+        self.assertIs(self.check((300,), (300,))["ok"], True)
+        self.assertIs(self.check((300,), (None,))["ok"], False)
+
+    def test_without_a_crosshair_before_the_action_nothing_is_checked(self):
+        c = self.check((None, None), (300, 300))
+        self.assertIsNone(c["ok"])
+        self.assertIn("NOT CHECKED", motion_strip.presence_text(c))
+
 class InARecording(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
