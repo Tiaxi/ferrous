@@ -36,6 +36,8 @@ private slots:
     void itunesPreviewButtonsStayWholeInTheDetails_data();
     void itunesPreviewButtonsStayWholeInTheDetails();
     void albumArtRestsAtOneXOverTheWholeScreen();
+    void albumArtWholeScreenDetailsFitTheirText_data();
+    void albumArtWholeScreenDetailsFitTheirText();
     void itunesBackToResultsKeepsThePreviewThroughTheFade();
     void itunesPreviewCannotApplyACandidateThatIsNotReady();
     void itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybackMovesOn();
@@ -529,15 +531,15 @@ qreal infoColumnWidth(bool fullscreen, qreal viewWidth) {
 // out of a preview: in the window, infoColumnWidth's; over the whole screen,
 // the width of a candidate's preview's column, so the art rests at the same
 // x in both: as wide as its two buttons side by side, `column`'s, if two
-// fifths of the view hold them, and never under 335 px or 40 characters of
-// the details' text, up to half the view.
+// fifths of the view hold them, and never under 335 px or what its text
+// wants (its `contentWidth`), up to two fifths of the view.
 qreal detailsColumnWidth(QQuickItem *column, bool fullscreen, qreal viewWidth) {
     if (!fullscreen) {
         return infoColumnWidth(false, viewWidth);
     }
     const qreal sideBySide = column->property("buttonsSideBySide").toReal();
     return qMax(qMax(infoColumnWidth(true, viewWidth),
-                     qMin(std::floor(viewWidth / 2), column->property("fortyCharacters").toReal())),
+                     qMin(std::floor(viewWidth * 0.4), column->property("contentWidth").toReal())),
                 sideBySide <= std::floor(viewWidth * 0.4) ? sideBySide : 0.0);
 }
 
@@ -2301,7 +2303,11 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     font.setPointSizeF(font.pointSizeF() / infoScale);
     const qreal fortyCharacters = infoColumnFortyCharacters(font, fullscreen, column->parentItem()->width());
     const qreal halfTheView = std::floor(column->parentItem()->width() / 2);
-    QVERIFY2(column->width() >= qMax(std::round(280 * widthScale) - 1, qMin(halfTheView, fortyCharacters)) - 0.5,
+    // Over the whole screen, what its text wants, up to two fifths.
+    const qreal textWidth = fullscreen
+        ? qMin(std::floor(column->parentItem()->width() * 0.4), column->property("contentWidth").toReal())
+        : qMin(halfTheView, fortyCharacters);
+    QVERIFY2(column->width() >= qMax(std::round(280 * widthScale) - 1, textWidth) - 0.5,
              qPrintable(QStringLiteral("%1: %2 px").arg(QString::fromUtf8(at)).arg(column->width())));
     QCOMPARE(rectOf(label).left() - columnRect.left(), padding);
     QCOMPARE(columnRect.right() - rectOf(apply).right(), padding);
@@ -4225,8 +4231,12 @@ void checkPreviewButtonsWholeInTheDetails(ItunesWindow &ui, int viewerMode, qrea
     const qreal twoFifths = std::floor(column->parentItem()->width() * 0.4);
     const qreal sideBySide = std::ceil(back->implicitWidth() + buttons->property("spacing").toReal()
                                        + apply->implicitWidth()) + 2 * padding;
+    // Over the whole screen, what its text wants, up to two fifths.
+    const qreal textWidth = viewerMode == 1
+        ? qMin(std::floor(column->parentItem()->width() * 0.4), column->property("contentWidth").toReal())
+        : qMin(halfTheView, fortyCharacters);
     QCOMPARE(columnRect.width(),
-             qMax(qMax(qMax(leastWidth, qMin(halfTheView, fortyCharacters)),
+             qMax(qMax(qMax(leastWidth, textWidth),
                        sideBySide <= twoFifths ? sideBySide : 0.0),
                   qMin(threeQuarters, widestButton)));
     // The footer's buttons, under the details, inside the column.
@@ -5199,6 +5209,106 @@ void AlbumArtSmokeTest::albumArtRestsAtOneXOverTheWholeScreen() {
         surface->setProperty("previewActive", false);
         QTRY_VERIFY(!itemNamed(surface, QStringLiteral("albumArtPreviewFooter"))->isVisible());
     }
+}
+
+void AlbumArtSmokeTest::albumArtWholeScreenDetailsFitTheirText_data() {
+    QTest::addColumn<int>("points");
+    QTest::addColumn<QString>("folder");
+    const QString typical = QStringLiteral("/mnt/fixtures/library/The Quiet Meridian/2005 - Small Hours");
+    QTest::newRow("10 pt") << 10 << typical;
+    QTest::newRow("24 pt") << 24 << typical;
+    QTest::newRow("24 pt, a long folder")
+        << 24 << QStringLiteral("/mnt/fixtures/library/The Quiet Meridian/"
+                                "2005 - Small Hours, the Expanded Edition with Every Demo");
+}
+
+// Over the whole screen at a large font, the details' column is as wide as
+// its text: its widest row on one line, and the path's longest folder whole
+// on a line, with the padding, up to two fifths of the screen (at 40
+// characters of the large text, 876 px of a 2000 px screen, it stood
+// empty beside a smaller art). At the default font, the least width and the
+// preview's buttons set it, as before.
+void AlbumArtSmokeTest::albumArtWholeScreenDetailsFitTheirText() {
+    QFETCH(int, points);
+    QFETCH(QString, folder);
+    const ScopedApplicationFont font(points);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 300, 300);
+    QVERIFY(!coverPath.isEmpty());
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(
+        createThemedDetailsSurfaceWindow(engine, coverPath, kDetailsBreezeDark, true, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    window->resize(2000, 1400);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    auto *surface = qvariant_cast<QQuickItem *>(root->property("surface"));
+    QVERIFY(surface != nullptr);
+    surface->setProperty("sourceKind", QStringLiteral("folder"));
+    surface->setProperty("fileInfo", QVariantMap{
+        {QStringLiteral("path"), folder + QStringLiteral("/cover.jpg")},
+        {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
+        {QStringLiteral("width"), 1200},
+        {QStringLiteral("height"), 1200},
+        {QStringLiteral("fileSizeText"), QStringLiteral("246 KiB (251,762 bytes)")},
+        {QStringLiteral("format"), QStringLiteral("JPEG")},
+    });
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QQuickItem *path = itemNamed(surface, QStringLiteral("albumArtFolderPath"));
+    QVERIFY(column != nullptr && path != nullptr);
+    QTRY_COMPARE(surface->width(), 2000.0);
+    QTRY_VERIFY(column->isVisible() && path->isVisible());
+    QCoreApplication::processEvents();
+    const QString at = QStringLiteral("%1 pt: the column %2 px wide").arg(points).arg(column->width());
+    const qreal twoFifths = std::floor(surface->width() * 0.4);
+    const qreal padding = surface->property("infoPadding").toReal();
+    const qreal least = column->property("minimumWidth").toReal();
+    const qreal buttonsRow = column->property("buttonsSideBySide").toReal();
+    QVERIFY2(column->width() <= twoFifths, qPrintable(at));
+
+    // What it holds whole: each value's line from the column's left, the
+    // comparison's button (this one has it), and the path's longest folder
+    // with its slash, where its lines break.
+    const QRectF columnRect = sceneRectOf(column);
+    qreal widest = 0;
+    QList<QQuickItem *> whole = visibleItemsNamed(column, QStringLiteral("albumArtInfoValue"));
+    whole.append(visibleItemsNamed(column, QStringLiteral("albumArtCompareButton")));
+    QCOMPARE(whole.size(), 5);
+    for (QQuickItem *item : whole) {
+        widest = qMax(widest, sceneRectOf(item).left() - columnRect.left() + item->implicitWidth());
+    }
+    const QFontMetricsF pathMetrics(path->property("font").value<QFont>());
+    qreal longestName = 0;
+    for (const QString &name : folder.split(QLatin1Char('/'))) {
+        longestName = qMax(longestName, pathMetrics.horizontalAdvance(name + QLatin1Char('/')));
+    }
+    widest = qMax(widest, padding + longestName);
+    const qreal content = std::ceil(widest - padding) + 2 * padding;
+    if (points == 10) {
+        // The least width and the buttons, wider than the text.
+        QVERIFY2(content < qMax(least, buttonsRow), qPrintable(at));
+        QCOMPARE(column->width(), qMax(least, buttonsRow <= twoFifths ? buttonsRow : 0.0));
+    } else {
+        // As wide as its text, up to two fifths of the screen (or the
+        // buttons side by side, where two fifths hold them).
+        const qreal buttons = buttonsRow <= twoFifths ? buttonsRow : 0.0;
+        QVERIFY2(std::abs(column->width() - qMax(qMin(twoFifths, content), qMax(least, buttons))) <= 1.0,
+                 qPrintable(QStringLiteral("%1, its text %2 px, its buttons %3 px").arg(at).arg(content).arg(buttonsRow)));
+        QVERIFY2(column->width() < 876.0, qPrintable(at));
+    }
+    // Every value on one line where the column holds it, and the path never
+    // cut short.
+    for (QQuickItem *value : visibleItemsNamed(column, QStringLiteral("albumArtInfoValue"))) {
+        if (content <= twoFifths) {
+            QVERIFY2(value->property("lineCount").toInt() == 1,
+                     qPrintable(QStringLiteral("%1: \"%2\" on %3 lines").arg(at, value->property("text").toString())
+                                    .arg(value->property("lineCount").toInt())));
+        }
+    }
+    QVERIFY2(!path->property("elided").toBool(), qPrintable(at));
 }
 
 void AlbumArtSmokeTest::albumArtCopyPathIsOnTheFoldersLineUnderClose_data() {

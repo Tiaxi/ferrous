@@ -693,14 +693,17 @@ Item {
     // in a wide view, a quarter of it, up to 320 px, a seventh wider, so the
     // details are not crammed beside a wide art (as at 280 px in a 1600 px
     // window). Over the whole screen it follows its text, 1.2 times larger:
-    // 336 px, or 40 characters of that text (at 320 px a folder's path was
-    // cut beside the screen's room to spare).
+    // 336 px, or as wide as what it holds whole wants, its widest row and
+    // the path's longest folder, up to two fifths of the screen (at 320 px
+    // a folder's path was cut beside the screen's room to spare; at 40
+    // characters of a large font, it stood empty beside a smaller art).
     // During a preview, and over the whole screen whether a preview or
     // not, it is as wide as a candidate's two buttons side by side want
     // if two fifths of the view or its own width hold them; otherwise they
-    // stack, as a longer translation's do, and it is up to half the view,
-    // and wider still, up to three quarters, where one of them alone needs
-    // more, as on a small screen with a large font, so neither is cut short.
+    // stack, as a longer translation's do, and in a window it is up to half
+    // the view, and wider still, up to three quarters, where one of them
+    // alone needs more, as on a small screen with a large font, so neither
+    // is cut short.
     Item {
         id: infoColumn
         objectName: "albumArtInfoColumn"
@@ -709,10 +712,18 @@ Item {
         // Without its seam: 279 px, 319 px in a view 1280 px wide or more,
         // 335 px over the whole screen.
         readonly property real minimumWidth: Math.round(280 * infoColumn.widthScale) - 1
-        // Forty characters of the details' text; in a window, a quarter of
-        // the view's width wider in a wide one, as the column.
+        // Forty characters of the details' text, in a window, and a quarter
+        // of the view's width wider in a wide one, as the column.
         readonly property real fortyCharacters: Math.max(infoColumn.minimumWidth,
-            Math.ceil(infoFontMetrics.averageCharacterWidth * 40 * (root.fullscreen ? 1 : infoColumn.widthScale)) - 1)
+            Math.ceil(infoFontMetrics.averageCharacterWidth * 40 * infoColumn.widthScale) - 1)
+        // What the details hold whole, with the padding: the widest row's
+        // label and value on one line, the path's longest folder with its
+        // slash (where the path breaks), and the comparison's button. The
+        // column over the whole screen is as wide, so it is never wider
+        // than its text, nor cuts the path.
+        readonly property real contentWidth: Math.ceil(Math.max(infoRows.widestRow,
+            folderPathLabel.longestName, root.shownComparisonModeAvailable ? compareButton.implicitWidth : 0))
+            + 2 * root.infoPadding
         visible: root.infoReserve > 0
         // At the view's right edge once shown; past it, sliding in, while
         // they show or hide.
@@ -733,7 +744,8 @@ Item {
             : infoColumn.buttonsSideBySide
         width: root.shownPreviewActive || root.fullscreen
             ? Math.max(infoColumn.minimumWidth,
-                Math.min(Math.floor(root.width / 2), infoColumn.fortyCharacters),
+                root.fullscreen ? Math.min(Math.floor(root.width * 0.4), infoColumn.contentWidth)
+                                : Math.min(Math.floor(root.width / 2), infoColumn.fortyCharacters),
                 infoColumn.buttonsRow <= Math.floor(root.width * 0.4) ? infoColumn.buttonsRow : 0,
                 root.shownPreviewActive ? Math.min(Math.floor(root.width * 0.75), infoColumn.widestButton) : 0)
             : Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width * 0.4), infoColumn.fortyCharacters))
@@ -848,6 +860,23 @@ Item {
                         }
                         return widest
                     }
+                    // The widest row on one line: the labels' column, as
+                    // wide as its widest label, and the widest value (of
+                    // the rows the image has, whether the column shows or
+                    // not, so it is as wide as it rests while it slides).
+                    readonly property real widestRow: {
+                        let value = 0
+                        for (let i = 0; i < infoRows.count; ++i) {
+                            const row = infoRows.itemAt(i)
+                            if (row && row.modelData.value.length > 0) {
+                                value = Math.max(value, row.valueImplicitWidth)
+                            }
+                        }
+                        return value <= 0 ? 0
+                            : Math.max(Math.ceil(infoRows.widestWord), Math.ceil(infoRows.widestLabel),
+                                       root.infoLabelColumnMinimum) + infoRows.rowSpacing + value
+                    }
+                    readonly property real rowSpacing: 12
                     // The widest single word of any label: a label wraps only
                     // between its words.
                     readonly property real widestWord: {
@@ -882,6 +911,7 @@ Item {
                     delegate: RowLayout {
                         required property var modelData
                         readonly property real labelImplicitWidth: infoLabel.implicitWidth
+                        readonly property real valueImplicitWidth: infoValue.implicitWidth
                         readonly property real labelWidestWord: {
                             let widest = 0
                             for (const word of infoLabel.text.split(/\s+/)) {
@@ -902,7 +932,7 @@ Item {
                         Layout.preferredHeight: Math.round(Math.max(infoValue.implicitHeight,
                             infoLabel.implicitHeight + infoValue.baselineOffset - infoLabel.baselineOffset))
                         visible: modelData.value.length > 0
-                        spacing: 12
+                        spacing: infoRows.rowSpacing
 
                         Label {
                             id: infoLabel
@@ -1023,6 +1053,15 @@ Item {
                             // short.
                             readonly property string path: root.displayPath(root.folderPath)
                             readonly property bool elided: folderPathLabel.truncated
+                            // Its longest folder with its slash, which a
+                            // line holds whole where it is as wide.
+                            readonly property real longestName: {
+                                let widest = 0
+                                for (const name of folderPathLabel.path.split("/")) {
+                                    widest = Math.max(widest, folderPathMetrics.advanceWidth(name + "/"))
+                                }
+                                return widest
+                            }
                             anchors.left: parent.left
                             anchors.right: parent.right
                             // The lines break only between folders, never
@@ -1058,6 +1097,7 @@ Item {
 
                 // From the iTunes artwork dialog: the other image to compare.
                 DetailsButton {
+                    id: compareButton
                     objectName: "albumArtCompareButton"
                     visible: root.shownComparisonModeAvailable
                     Layout.topMargin: Math.round(12 * root.infoScale)
