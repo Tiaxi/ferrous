@@ -161,10 +161,12 @@ Item {
         : Qt.ArrowCursor
     readonly property bool zoomed: root.zoom > 1.0
     // How far the details are shown: 0 hidden, 1 shown. Showing or hiding
-    // them glides it over 180 ms, InOutQuad (unless eased, the art jumped
-    // aside in one frame; over 120 ms of OutCubic it went 91 % of the way
-    // in 43 ms, and still read as a jump, with the rest creeping after it),
-    // and at once with Plasma's animations off. The
+    // them glides it over 2.4 short durations, 200 ms, OutCubic both ways,
+    // so the art settles into its place (unless eased, it jumped aside in
+    // one frame; over 120 ms of OutCubic it went 91 % of the way in 43 ms
+    // and still read as a jump, and over 150 ms of InOutQuad it stopped
+    // short rather than settling), and at once with Plasma's animations
+    // off. The
     // space they take, their reserve, follows it: the column slides in
     // over the view's right edge, whole, as wide as it rests, and the art
     // glides with it. Only showing or hiding them in the open viewer is
@@ -173,13 +175,13 @@ Item {
     // controller sets them before it opens it) has them at rest from its
     // first frame. (They slid in as it opened, hidden, and so out of the
     // Tab order, until the slide's first step.)
-    readonly property int infoRevealDuration: Math.round(Kirigami.Units.shortDuration * 1.8)
+    readonly property int infoRevealDuration: Math.round(Kirigami.Units.shortDuration * 2.4)
     property real infoReveal: root.infoVisible ? 1 : 0
     Behavior on infoReveal {
         enabled: root.infoRevealDuration > 0 && root.viewerOpen
         NumberAnimation {
             duration: root.infoRevealDuration
-            easing.type: Easing.InOutQuad
+            easing.type: Easing.OutCubic
         }
     }
     // The details' width with their seam, in whole pixels, times how far
