@@ -48,6 +48,7 @@ private slots:
     void spectrogramDrawsAtDevicePixels();
     void spectrogramWideCanvasDrawsEveryTile();
     void spectrogramTilesAddedToADrawnLaneDrawInIt();
+    void spectrogramCrosshairFadesInPlace();
     void spectrogramCanvasTexturesSurviveSceneGraphChanges();
     void spectrogramSceneGraphDrawsTheCanvas_data();
     void spectrogramSceneGraphDrawsTheCanvas();
@@ -5203,6 +5204,75 @@ void SpectrogramCanvasSmokeTest::spectrogramTilesAddedToADrawnLaneDrawInIt() {
     for (const int x : {150, 220, 290, 360, 385}) {
         QVERIFY2(wide.pixel(x, 120) == canvas,
                  qPrintable(QStringLiteral("%1: %2").arg(x).arg(QColor(wide.pixel(x, 120)).name())));
+    }
+}
+
+// The crosshair draws at the pointer as it fades (#755): with the software
+// renderer a change of its opacity places it again by what the renderer
+// keeps of its parent, which was nothing for the plain node the lane's
+// scene was, so it drew at the window's origin, outside the lane, and the
+// lane showed none.
+void SpectrogramCanvasSmokeTest::spectrogramCrosshairFadesInPlace() {
+    const QColor chrome(Qt::white);
+    QQuickWindow window;
+    window.setColor(chrome);
+    window.resize(400, 240);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    auto &item = *new SpectrogramItem(window.contentItem());
+    const QRect lane(120, 121, 200, 80);
+    item.setPosition(lane.topLeft());
+    item.setSize(lane.size());
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setCrosshairEnabled(true);
+    constexpr int bins = 8;
+    constexpr int columns = 2000;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    QSignalSpy frames(&window, &QQuickWindow::frameSwapped);
+    QTRY_VERIFY(!frames.isEmpty());
+    const QRgb canvas = window.grabWindow().convertToFormat(QImage::Format_RGB32).pixel(lane.left() + 150, lane.top() + 10);
+    QVERIFY2(canvas != chrome.rgb() && canvas != kSpectrogramFloor, qPrintable(QColor(canvas).name()));
+    const QPoint pointer = lane.topLeft() + QPoint(60, 50);
+    // How many pixels of the column through the pointer the crosshair
+    // draws over the canvas, and how many the window has outside the lane.
+    struct Drawn {
+        int column = 0;
+        int outside = 0;
+    };
+    const auto drawn = [&](const QString &name) {
+        const QImage image = window.grabWindow().convertToFormat(QImage::Format_RGB32);
+        saveForInspection(image, name);
+        Drawn result;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                result.outside += !lane.contains(x, y) && image.pixel(x, y) != chrome.rgb() ? 1 : 0;
+            }
+        }
+        // Clear of the readout's plates, which sit beside the pointer.
+        for (int y = lane.top(); y < pointer.y() - 20; ++y) {
+            result.column += image.pixel(pointer.x(), y) != canvas ? 1 : 0;
+        }
+        return result;
+    };
+    // The lane's scales, before the pointer comes.
+    const Drawn before = drawn(QStringLiteral("before-the-crosshair"));
+    QCOMPARE(before.outside, 0);
+    // Through the window, which hovers its items where its pointer is.
+    QCursor::setPos(window.mapToGlobal(pointer));
+    QTest::mouseMove(&window, pointer);
+    QTRY_VERIFY(drawn(QStringLiteral("crosshair")).column > before.column);
+    QCOMPARE(drawn(QStringLiteral("crosshair")).outside, 0);
+
+    for (const double opacity : {0.6, 1.0}) {
+        frames.clear();
+        item.setCrosshairOpacity(opacity);
+        QTRY_VERIFY(!frames.isEmpty());
+        const Drawn faded = drawn(QStringLiteral("crosshair-%1").arg(opacity));
+        QVERIFY2(faded.outside == 0,
+                 qPrintable(QStringLiteral("%1: %2 pixels drawn outside the lane").arg(opacity).arg(faded.outside)));
+        QVERIFY2(faded.column > before.column, qPrintable(QStringLiteral("%1: no crosshair at the pointer").arg(opacity)));
     }
 }
 

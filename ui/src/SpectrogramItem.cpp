@@ -502,7 +502,11 @@ struct SpectrogramCanvasBand {
     QSGTexture *texture{nullptr};
 };
 
-struct SpectrogramSceneNode final : public QSGNode {
+// A parent node, as the crosshair under it fades: the software renderer
+// places a node whose opacity changes by what it keeps of its parent, and,
+// of a plain node, kept nothing, so the faded crosshair drew at the
+// window's origin (#755).
+struct SpectrogramSceneNode final : public SceneGraphParentNode {
     SpectrogramSceneNode() {
         background = new QSGSimpleRectNode();
         tilesRoot = newParentNode();
