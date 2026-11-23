@@ -1495,13 +1495,29 @@ ToolBar {
             // Its own tooltip, rather than the shared one, whose text a
             // drag or a key that moves the slider before the hover's delay
             // ends left at the volume it had ("Volume 100%" with the thumb
-            // at 40%). A press shows it at once.
+            // at 40%). A press shows it at once, a hover's still waiting
+            // too.
             Components.PlainToolTip {
                 id: volumeToolTip
                 objectName: "volumeToolTip"
                 parent: volumeSlider
-                visible: volumeSlider.hovered || volumeSlider.visualFocus || volumeSlider.pressed
-                delay: volumeSlider.pressed ? 0 : Kirigami.Units.toolTipDelay
+                readonly property bool wanted: volumeSlider.hovered || volumeSlider.visualFocus
+                    || volumeSlider.pressed
+                // Set together with the delay, which the tooltip reads as it
+                // is made visible: a binding of each could see the other
+                // still unchanged, and a press within the hover's delay then
+                // waited the delay out again.
+                visible: false
+                delay: 0
+                function showOrHide() {
+                    delay = volumeSlider.pressed ? 0 : Kirigami.Units.toolTipDelay
+                    visible = wanted
+                }
+                onWantedChanged: showOrHide()
+                Connections {
+                    target: volumeSlider
+                    function onPressedChanged() { volumeToolTip.showOrHide() }
+                }
                 message: volumeSlider.toolTipText
             }
 

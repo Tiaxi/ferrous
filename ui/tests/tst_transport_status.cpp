@@ -552,6 +552,7 @@ private slots:
     void volumeMuteKeepsTheThumb_data();
     void volumeMuteKeepsTheThumb();
     void volumeToolTipFollowsTheDrag();
+    void volumeToolTipShowsAtOnceOnAPress();
     void statusBarShowsTheNeutralPlaybackState();
     void statusBarModeGlyphsAreDrawnAtTheirSize();
     void statusBarShowsRepeatAndShuffleInWords();
@@ -3060,6 +3061,38 @@ void TransportStatusTest::volumeToolTipFollowsTheDrag() {
     }
     QVERIFY2(drawn, qPrintable(expected));
     QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, end);
+}
+
+// A press on the volume shows its tooltip at once, also while a hover's
+// delay is still waiting (it waited the delay out, so a quick drag showed
+// no volume).
+void TransportStatusTest::volumeToolTipShowsAtOnceOnAPress() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QQuickItem *thumb = harness.item(QStringLiteral("volumeThumb"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QVERIFY(volume && thumb && tip);
+    Kirigami::Platform::Units *units = unitsOf(volume);
+    QVERIFY(units != nullptr);
+    // A delay that the press comes well within.
+    units->setToolTipDelay(5000);
+    const QPoint at = sceneCentre(thumb);
+    QTest::mouseMove(harness.window, at);
+    QTRY_VERIFY(volume->property("hovered").toBool());
+    QTest::qWait(30);
+    QVERIFY(!tip->property("opened").toBool());
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, at);
+    QVERIFY(volume->property("pressed").toBool());
+    QTRY_VERIFY_WITH_TIMEOUT(tip->property("opened").toBool(), 2000);
+    QCOMPARE(tip->property("text").toString(),
+             QStringLiteral("Volume %1%").arg(std::lround(volume->property("value").toDouble())));
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at);
+    // Let go and still over the slider, it stays, as a hover's.
+    QVERIFY(tip->property("visible").toBool());
+    // Off the slider, it goes.
+    QTest::mouseMove(harness.window, QPoint(at.x(), at.y() + 80));
+    QTRY_VERIFY(!tip->property("visible").toBool());
 }
 
 void TransportStatusTest::statusBarShowsTheNeutralPlaybackState() {
