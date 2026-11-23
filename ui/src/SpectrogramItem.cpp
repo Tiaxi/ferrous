@@ -1660,13 +1660,23 @@ QImage renderOverlayImage(
 }
 
 // The crosshair's readout of a level: "−62 dB", "−∞ dB" for silence, or
-// "— dB" for NaN, a level not known.
-QString crosshairDecibels(double db) {
+// "— dB" for NaN, a level not known. A level under `floorDb`, the colour
+// map's floor, which draws it as the floor, is "< −132 dB": a number under
+// what the plot can show read as a measurement ("−145 dB", H26).
+QString crosshairDecibels(double db, double floorDb = -std::numeric_limits<double>::infinity()) {
     static const QString format = i18nc("@info level in decibels; %1 is a number", "%1 dB");
+    const auto number = [](long rounded) {
+        return rounded < 0 ? QStringLiteral("\u2212%1").arg(-rounded) : QString::number(rounded);
+    };
     if (std::isnan(db)) return format.arg(QStringLiteral("\u2014"));
     if (!std::isfinite(db)) return format.arg(QStringLiteral("\u2212\u221e"));
-    const long rounded = std::lround(db);
-    return format.arg(rounded < 0 ? QStringLiteral("\u2212%1").arg(-rounded) : QString::number(rounded));
+    if (db < floorDb) {
+        static const QString under = i18nc(
+            "@info level in decibels under the lowest the plot shows; %1 is a number such as \u2212132",
+            "< %1 dB");
+        return under.arg(number(std::lround(floorDb)));
+    }
+    return format.arg(number(std::lround(db)));
 }
 
 // The crosshair's readout of a frequency: "4.4 kHz", or "440 Hz".
@@ -7388,7 +7398,8 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
                     const int value = bins[bin];
                     level = crosshairDecibels(value == 0
                         ? -std::numeric_limits<double>::infinity()
-                        : (static_cast<double>(value - 1) / 254.0) * 150.0 - 150.0);
+                        : (static_cast<double>(value - 1) / 254.0) * 150.0 - 150.0,
+                        -SpectrogramColorMap::clampedDbRange(m_dbRange));
                 }
             }
             valueText = i18nc("@info %1 is a frequency, %2 a level", "%1, %2",
@@ -7484,10 +7495,11 @@ int SpectrogramItem::crosshairWidestValueWidthLocked() {
             const double underKilohertz = std::nextafter(1000.0, 0.0);
             int widest = 0;
             for (const double hz : {std::min(topHz, underKilohertz), topHz}) {
-                for (const double db : {-150.0, -std::numeric_limits<double>::infinity()}) {
+                for (const QString &level : {crosshairDecibels(-150.0), crosshairDecibels(-151.0, -150.0),
+                                             crosshairDecibels(-std::numeric_limits<double>::infinity())}) {
                     widest = std::max(widest, CrosshairReadout::widestDigitsWidth(
                         i18nc("@info %1 is a frequency, %2 a level", "%1, %2",
-                              crosshairFrequency(hz), crosshairDecibels(db)),
+                              crosshairFrequency(hz), level),
                         metrics));
                 }
             }

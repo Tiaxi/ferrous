@@ -32,6 +32,7 @@ private slots:
     void spectrogramPixelToFrequency();
     void spectrogramOverlayBenchmark();
     void spectrogramCrosshairOverlayGeneratesOnHover();
+    void spectrogramLevelReadoutStopsAtTheMapsFloor();
     void spectrogramCrosshairReadsOverBrightData();
     void spectrogramCrosshairYieldsToThePlayhead();
     void spectrogramCrosshairOverlayMovesOnlyItsTimeLabel();
@@ -43,6 +44,8 @@ private slots:
     void crosshairReadoutPlatesFollowThePointerSmoothly();
     void spectrogramCrosshairTimeKeepsClearOfTheLaneHead();
     void shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch();
+    void paneMessagesKeepOffTheLaneSeams_data();
+    void paneMessagesKeepOffTheLaneSeams();
     void laneHeadIsOnePlate_data();
     void laneHeadIsOnePlate();
     void laneHeadsAreOneSizeInAPane_data();
@@ -1407,6 +1410,35 @@ void SpectrogramSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
     QTRY_VERIFY(item.crosshairReadout().isEmpty());
 }
 
+// The crosshair's level never reads under the colour map's floor, which
+// draws every quieter level alike: there it is "< −132 dB" at the default
+// range, not a number such as "−145 dB" over near-silence (H26). Silence
+// stays "−∞ dB"; a wider range reads further down.
+void SpectrogramSmokeTest::spectrogramLevelReadoutStopsAtTheMapsFloor() {
+    const auto readoutOver = [](quint8 value, double dbRange) {
+        SpectrogramItem item;
+        item.setSampleRateHz(48000);
+        item.setCrosshairEnabled(true);
+        item.setDbRange(dbRange);
+        const int bins = 4097;
+        const QByteArray data(bins * 100, static_cast<char>(value));
+        item.feedPrecomputedChunk(data, bins, 0, 100, 0, 1000, 48000, 1024, false, true, 1, false);
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(50.0, 40.0);
+        item.m_crosshairDirty = true;
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.ensureMapping(100);
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, 48000.0 / 1024.0, 0.0);
+        return item.m_crosshairLaidOutReadout.split(QLatin1Char('\n')).value(0);
+    };
+    // 5 of 255 is about -147.6 dBFS; 128 is -75.
+    QVERIFY2(readoutOver(5, 132.0).endsWith(QStringLiteral(", < −132 dB")), qPrintable(readoutOver(5, 132.0)));
+    QVERIFY2(readoutOver(5, 150.0).endsWith(QStringLiteral(", −148 dB")), qPrintable(readoutOver(5, 150.0)));
+    QVERIFY2(readoutOver(128, 132.0).endsWith(QStringLiteral(", −75 dB")), qPrintable(readoutOver(128, 132.0)));
+    QVERIFY2(readoutOver(0, 132.0).endsWith(QStringLiteral(", −∞ dB")), qPrintable(readoutOver(0, 132.0)));
+}
+
 void SpectrogramSmokeTest::spectrogramCrosshairReadsOverBrightData() {
     // The dashed white lines vanished on a bright harmonic, and at 35 %
     // they were lost in mid-bright texture (2.3:1). The dashes are white at
@@ -1903,6 +1935,94 @@ void SpectrogramSmokeTest::crosshairReadoutPlatesFollowThePointerSmoothly() {
     }
 }
 
+void SpectrogramSmokeTest::paneMessagesKeepOffTheLaneSeams_data() {
+    QTest::addColumn<int>("lanes");
+    QTest::addColumn<int>("height");
+    QTest::addColumn<bool>("plate");
+    QTest::newRow("one lane") << 1 << 431 << false;
+    QTest::newRow("stereo") << 2 << 431 << false;
+    QTest::newRow("5.1") << 6 << 431 << false;
+    QTest::newRow("7.1, lanes shorter than the message") << 8 << 205 << true;
+}
+
+// The pane's messages, Analysing… and a file that ends early, are in a lane:
+// centred on the plot, stereo's seam, and every even count's, ran between
+// the warning and its link (H26). Where the lane is shorter than the
+// message, it is on an opaque plate that the seams go under.
+void SpectrogramSmokeTest::paneMessagesKeepOffTheLaneSeams() {
+    QFETCH(int, lanes);
+    QFETCH(int, height);
+    QFETCH(bool, plate);
+    QQmlApplicationEngine engine;
+    QString error;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kPlotLayerHarness, baseUrl, &error));
+    QVERIFY2(root != nullptr, qPrintable(error));
+    QQuickWindow window;
+    window.resize(640, height);
+    auto *harness = qobject_cast<QQuickItem *>(root.data());
+    QVERIFY(harness != nullptr);
+    harness->setParentItem(window.contentItem());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *layer = harness->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QObject *bridge = harness->findChild<QObject *>(QStringLiteral("testBridge"));
+    QVERIFY(layer != nullptr && bridge != nullptr);
+    layer->setHeight(height);
+    QVERIFY(layer->setProperty("laneCount", lanes));
+    QVERIFY(layer->setProperty("laneLabels", plotLaneLabels(lanes)));
+    const auto rectIn = [layer](QQuickItem *item) {
+        return item->mapRectToItem(layer, QRectF(0, 0, item->width(), item->height()));
+    };
+    // Whether `rect` is within one lane, clear of every seam's row.
+    const auto inALane = [&](const QRectF &rect) {
+        for (int lane = 0; lane < lanes; ++lane) {
+            const double top = lane > 0 ? std::round(lane * double(height) / lanes) + 1 : 0.0;
+            const double bottom = lane + 1 < lanes ? std::round((lane + 1) * double(height) / lanes) : height;
+            if (rect.top() >= top && rect.bottom() <= bottom) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // In its lane, or, where it is not, on its plate.
+    const auto check = [&](const char *name, const char *plateName, bool plated) {
+        QQuickItem *message = itemsNamed(layer, QString::fromLatin1(name)).value(0);
+        QQuickItem *backing = itemsNamed(layer, QString::fromLatin1(plateName)).value(0);
+        QVERIFY(message != nullptr && backing != nullptr);
+        QTRY_VERIFY(message->isVisible());
+        const QRectF rect = rectIn(message);
+        QVERIFY(rect.top() >= 0 && rect.bottom() <= height);
+        QCOMPARE(rect.top(), std::round(rect.top()));
+        QCOMPARE(backing->isVisible(), plated || !inALane(rect));
+        if (backing->isVisible()) {
+            const QRectF behind = rectIn(backing);
+            QVERIFY(behind.contains(rect));
+            QCOMPARE(backing->property("color").value<QColor>().alpha(), 255);
+        } else {
+            QVERIFY2(inALane(rect), qPrintable(QStringLiteral("%1 at %2 to %3")
+                                                  .arg(QString::fromLatin1(name))
+                                                  .arg(rect.top())
+                                                  .arg(rect.bottom())));
+            QVERIFY(!backing->isVisible());
+        }
+    };
+
+    QVERIFY(layer->setProperty("analysing", true));
+    // One line fits each of these lanes.
+    check("plotAnalysingText", "plotAnalysingPlate", false);
+
+    QVERIFY(bridge->setProperty("waveformCoverageSeconds", 32.7));
+    QVERIFY(bridge->setProperty("waveformEndsEarly", true));
+    QVERIFY(layer->setProperty("markerX", 200.0));
+    check("plotEndsEarlyColumn", "plotEndsEarlyPlate", plate);
+    // Across the part after the cut.
+    QQuickItem *column = itemsNamed(layer, QStringLiteral("plotEndsEarlyColumn")).value(0);
+    const QRectF rect = rectIn(column);
+    QVERIFY(std::abs((rect.left() + rect.right()) / 2 - (201 + layer->width()) / 2) <= 1.0);
+}
+
 void SpectrogramSmokeTest::laneHeadIsOnePlate_data() {
     QTest::addColumn<int>("lanes");
     QTest::addColumn<qreal>("pointSize");
@@ -1978,6 +2098,13 @@ void SpectrogramSmokeTest::laneHeadIsOnePlate() {
                      qPrintable(QStringLiteral("lane %1's chip to %2").arg(lane).arg(chips.at(lane).bottom())));
         }
         QVERIFY(chips.at(lane).top() >= 0.0 && chips.at(lane).bottom() <= height);
+        // In its lane's corner, as far from the top as from the side
+        // (centred in the plate's height, it sat 6 px lower than in, H26).
+        const qreal laneTop = lane > 0 ? std::round(lane * double(height) / lanes) + 1 : 0.0;
+        const qreal laneHeight = (lane + 1 < lanes ? std::round((lane + 1) * double(height) / lanes) : height) - laneTop;
+        if (laneHeight >= heads.at(lane)->height() + 5) {
+            QCOMPARE(chips.at(lane).top() - laneTop, chips.at(lane).left());
+        }
     }
     QObject *bridge = harness->findChild<QObject *>(QStringLiteral("testBridge"));
     QVERIFY(bridge != nullptr);
@@ -1999,9 +2126,15 @@ void SpectrogramSmokeTest::laneHeadIsOnePlate() {
         QCOMPARE(rectIn(chip), chips.at(index));
         QCOMPARE(rectIn(part(head, "plotPlateLabel")), letters.at(index));
         QCOMPARE(chip->property("backgroundLevel").toReal(), 0.0);
-        QCOMPARE(plateRect.left(), chips.at(index).left());
+        // The chip as far from the plate's left as from its top where the
+        // plate is in the lane, and as far again from the divider.
+        const qreal room = chips.at(index).left() - plateRect.left();
+        QVERIFY(room >= 0.0);
+        if (lane >= plateRect.height() + 5) {
+            QCOMPARE(room, chips.at(index).top() - plateRect.top());
+        }
         QCOMPARE(divider.width(), 1.0);
-        QCOMPARE(divider.left(), chips.at(index).right());
+        QCOMPARE(divider.left(), chips.at(index).right() + room);
         QVERIFY(mute.left() > divider.right() && solo.left() > mute.right() && solo.right() < plateRect.right());
         QVERIFY(plateRect.contains(mute) && plateRect.contains(solo));
         QCOMPARE(mute.center().y(), plateRect.center().y());

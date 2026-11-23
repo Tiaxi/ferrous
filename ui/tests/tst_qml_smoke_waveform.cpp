@@ -64,6 +64,7 @@ private slots:
     void waveformEditorPerChannelZoomShowsOlderDetailUntilTheNewArrives();
     void waveformEditorSparseDetailCoversEachPointsFrames();
     void waveformEditorSeparatesChannelPanes();
+    void waveformEditorDrawsNothingPastTheCut();
     void waveformEditorRestrictsDetailWorkToVisiblePoints();
     void waveformEditorDetailPointsUseAbsoluteSampleTimes();
     void waveformEditorReusesSameSizedCache();
@@ -2130,6 +2131,70 @@ void WaveformSmokeTest::waveformEditorSeparatesChannelPanes() {
     QCOMPARE(canvas.pixelColor(160, 90), QColor(79, 94, 86));
     QVERIFY(canvas.pixelColor(160, 89).green() > 180);
     QVERIFY(canvas.pixelColor(160, 91).green() > 180);
+}
+
+// A file that ends early: nothing of the lanes is drawn past where it is
+// cut off, neither the waveform's spine nor the centre lines nor the seam
+// between the lanes. The plot ends in a lane seam's line at the cut, and the
+// rest is the bare floor (H26).
+void WaveformSmokeTest::waveformEditorDrawsNothingPastTheCut() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(2);
+    item.m_detail.startSeconds = 0.0;
+    item.m_detail.endSeconds = 10.0;
+    item.m_detail.sampleRateHz = 1'000;
+    item.m_detail.channelCount = 2;
+    item.m_detail.framesPerPoint = 1;
+    item.m_detail.pointCount = 10'000;
+    item.m_detail.extrema.resize(40'000);
+    for (int i = 0; i < 20'000; ++i) {
+        // Silence after the cut, as the decoder reads none there.
+        const bool cut = i / 2 >= 5'000;
+        item.m_detail.extrema[i * 2] = cut ? 0.0F : -0.5F;
+        item.m_detail.extrema[i * 2 + 1] = cut ? 0.0F : 0.5F;
+    }
+    const QColor floor(5, 9, 7);
+    const QColor seam(79, 94, 86);
+    const auto paint = [&item] {
+        QImage canvas(320, 180, QImage::Format_RGB32);
+        canvas.fill(Qt::magenta);
+        QPainter painter(&canvas);
+        item.paint(&painter);
+        painter.end();
+        return canvas;
+    };
+
+    // Without a cut, the lanes' lines run to the plot's end.
+    const QImage whole = paint();
+    QCOMPARE(whole.pixelColor(240, 90), seam);
+    QVERIFY(whole.pixelColor(240, 45) != floor);
+    QVERIFY(whole.pixelColor(80, 35).green() > 180);
+
+    item.setMarkerSeconds(5.0);
+    const QImage cut = paint();
+    QTRY_COMPARE(item.markerX(), 160.0);
+    // Before the cut, the waveform and the seam between the lanes.
+    QVERIFY(cut.pixelColor(80, 35).green() > 180);
+    QCOMPARE(cut.pixelColor(80, 90), seam);
+    // At it, a seam's line the plot's height.
+    for (int y : {0, 45, 90, 179}) {
+        QCOMPARE(cut.pixelColor(160, y), seam);
+    }
+    // Past it, every pixel is the floor.
+    for (int x = 161; x < 320; ++x) {
+        for (int y = 0; y < 180; ++y) {
+            if (cut.pixelColor(x, y) != floor) {
+                QFAIL(qPrintable(QStringLiteral("drawn past the cut at %1,%2").arg(x).arg(y)));
+            }
+        }
+    }
+    // A cut past the view's end leaves the view as it is.
+    item.setMarkerSeconds(12.0);
+    QCOMPARE(paint(), whole);
 }
 
 void WaveformSmokeTest::waveformEditorRestrictsDetailWorkToVisiblePoints() {

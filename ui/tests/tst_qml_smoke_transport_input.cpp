@@ -1571,14 +1571,15 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QCOMPARE(waveformSurface->property("laneLabels").toStringList(),
              (QStringList{QStringLiteral("L"), QStringLiteral("R")}));
     // Each lane a silent one: one line at its centre, faint, about 1.3:1
-    // on the view, and the seam between the lanes the stronger line, 3 px
-    // (with lines at half of full scale in each lane, stronger than the
-    // seam, two lanes read as eight empty rows of a table).
+    // on the view, and the seam between the lanes the stronger line, 1 px
+    // as all the window's seams, at 2:1 (with lines at half of full scale
+    // in each lane, stronger than the seam, two lanes read as eight empty
+    // rows of a table; a 3 px bar of the window's seam outweighed the 1 px
+    // seams it meets, H26).
     QVERIFY(visibleItemsNamed(waveformSurface, QStringLiteral("waveformRestLine")).isEmpty());
+    QVERIFY(visibleItemsNamed(waveformSurface, QStringLiteral("waveformRestSeam")).isEmpty());
     auto *editor = waveformSurface->findChild<WaveformEditorItem *>(QStringLiteral("waveformEditorItem"));
     QVERIFY(editor != nullptr);
-    const auto restSeams = [&]() { return visibleItemsNamed(waveformSurface, QStringLiteral("waveformRestSeam")); };
-    QTRY_COMPARE(restSeams().size(), 1);
     {
         const QColor view = palette->property("view").value<QColor>();
         const QColor line = palette->property("waveformRestLine").value<QColor>();
@@ -1592,18 +1593,15 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
             / (std::min(luminance(view), luminance(line)) + 0.05);
         QVERIFY2(ratio >= 1.25 && ratio <= 1.45, qPrintable(QString::number(ratio)));
         QCOMPARE(editor->centerLineColor(), line);
-        const QColor seam = palette->property("seam").value<QColor>();
+        const QColor seam = palette->property("waveformRestSeam").value<QColor>();
         QCOMPARE(editor->laneSeamColor(), seam);
         const double seamRatio = (std::max(luminance(view), luminance(seam)) + 0.05)
             / (std::min(luminance(view), luminance(seam)) + 0.05);
-        QVERIFY2(seamRatio > ratio, qPrintable(QStringLiteral("seam %1, line %2").arg(seamRatio).arg(ratio)));
+        QVERIFY2(seamRatio >= 1.95 && seamRatio <= 2.2 && seamRatio >= 1.4 * ratio,
+                 qPrintable(QStringLiteral("seam %1, line %2").arg(seamRatio).arg(ratio)));
         const QRectF plot = sceneRectOf(waveformSurface);
-        const QRectF groove = sceneRectOf(restSeams().first());
-        QCOMPARE(groove.height(), 3.0);
-        QCOMPARE(groove.width(), plot.width());
-        QVERIFY(std::abs(groove.center().y() - plot.center().y()) <= 1.0);
         // As drawn down the plot's middle column: in each lane one line, at
-        // its centre, and the seam's three rows.
+        // its centre, and the seam's one row between them.
         QTRY_COMPARE(waveformSurface->opacity(), 1.0);
         QTest::qWait(100);
         const QImage image = window->grabWindow();
@@ -1616,9 +1614,14 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
                 inked.push_back(y);
             }
         }
-        QVERIFY2(inked.size() == 5 && std::abs(inked.first() - (plot.top() + plot.height() / 4)) <= 1.5
+        QVERIFY2(inked.size() == 3 && std::abs(inked.first() - (plot.top() + plot.height() / 4)) <= 1.5
+                     && std::abs(inked.at(1) - (plot.top() + plot.height() / 2)) <= 1.0
                      && std::abs(inked.last() - (plot.top() + plot.height() * 3 / 4)) <= 1.5,
                  qPrintable(QStringLiteral("%1 rows drawn").arg(inked.size())));
+        const QColor drawnSeam = image.pixelColor(int(plot.center().x() * scale), int((inked.at(1) + 0.5) * scale));
+        QVERIFY2(std::abs(drawnSeam.red() - seam.red()) <= 1 && std::abs(drawnSeam.green() - seam.green()) <= 1
+                     && std::abs(drawnSeam.blue() - seam.blue()) <= 1,
+                 qPrintable(drawnSeam.name() + QStringLiteral(" vs ") + seam.name()));
     }
     viewer->setProperty("visualizationMode", 0);
     QTRY_VERIFY(spectrogram->isVisible() && spectrogram->opacity() == 1.0);
@@ -1638,7 +1641,7 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     // The waveform's lanes at rest gone with the first track.
     viewer->setProperty("visualizationMode", 1);
     QTRY_VERIFY(waveformSurface->isVisible());
-    QTRY_VERIFY(restSeams().isEmpty());
+    QTRY_VERIFY(editor->laneSeamColor() != palette->property("waveformRestSeam").value<QColor>());
     QVERIFY(editor->centerLineColor() != palette->property("waveformRestLine").value<QColor>());
 }
 

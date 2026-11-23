@@ -205,6 +205,23 @@ Item {
     function laneTop(index) { return PlotLanes.top(index, root.laneCount, root.height) }
     function laneHeight(index) { return PlotLanes.laneHeight(index, root.laneCount, root.height) }
 
+    // The lane the pane's messages (Analysing…, a file that ends early)
+    // are centred in: the middle one, or the upper of the two middle ones.
+    // Centred on the plot, stereo's and every even count's seam ran through
+    // them, between the warning and its link (H26).
+    readonly property int messageLane: Math.floor((Math.max(1, root.laneCount) - 1) / 2)
+    // Where a message `height` tall is in it, on a whole pixel, in the plot.
+    function messageY(height) {
+        const centred = root.laneTop(root.messageLane) + (root.laneHeight(root.messageLane) - height) / 2
+        return Math.round(Math.max(0, Math.min(root.height - height, centred)))
+    }
+    // Whether a message `height` tall, with its room around it, is longer
+    // than its lane, as in a short pane of eight: then it is on an opaque
+    // plate, which the seams it crosses go under.
+    function messageNeedsPlate(height) {
+        return height + 2 * Kirigami.Units.smallSpacing > root.laneHeight(root.messageLane)
+    }
+
     // "4:02", as the Recent Issues entry says it.
     function formatCut(seconds) {
         const whole = Math.max(0, Math.floor(seconds))
@@ -389,6 +406,10 @@ Item {
             // The plate 5 px in, as the mode switch, whose height it has,
             // and the label centred in it.
             y: Math.max(root.laneTop(index), root.topInset) + root.headInset(height)
+            // The label at rest as far in from the lane's left as from its
+            // top: a short lane's plate is less far down; a viewer's heads
+            // are further in, on its title's line.
+            labelX: Math.max(0, labelY + root.headInset(height) - root.laneHeadInset)
             widestLabel: root.widestLabel
             visible: label.length > 0
             plotColors: root.plotColors
@@ -429,8 +450,9 @@ Item {
 
             Components.PlotPlate {
                 objectName: "plotLaneRestLabel"
+                x: laneHead.labelX
                 y: laneHead.labelY - laneHead.stripShift
-                width: laneHead.cellWidth
+                width: laneHead.labelWidth
                 visible: laneHead.stripShift > 0 && laneHead.underStrip < 1
                 fadeLevel: 1 - laneHead.underStrip
                 plotColors: root.plotColors
@@ -472,11 +494,26 @@ Item {
     // Over the plot, a Text rather than a Label: the desktop style's Label
     // has a hover handler, which would take the hover from the view. Unlike
     // a Label, a Text is not read by assistive technology unless it says so.
+    Rectangle {
+        objectName: "plotAnalysingPlate"
+        z: 1
+        visible: analysingText.visible && root.messageNeedsPlate(analysingText.height)
+        x: analysingText.x - Kirigami.Units.largeSpacing
+        y: analysingText.y - Kirigami.Units.smallSpacing
+        width: analysingText.width + 2 * Kirigami.Units.largeSpacing
+        height: analysingText.height + 2 * Kirigami.Units.smallSpacing
+        radius: 4
+        color: Qt.rgba(root.plotColors.plotPlate.r, root.plotColors.plotPlate.g, root.plotColors.plotPlate.b, 1)
+        border.width: 1
+        border.color: root.plotColors.plotPlateEdge
+    }
+
     Text {
+        id: analysingText
         objectName: "plotAnalysingText"
         z: 1
-        anchors.centerIn: parent
-        anchors.horizontalCenterOffset: -root.meterWidth / 2
+        x: Math.round((root.plotWidth - width) / 2)
+        y: root.messageY(height)
         visible: root._analysingShown
         textFormat: Text.PlainText
         text: I18n.i18nc("@info:status the visualization waits for its data", "Analysing…")
@@ -486,8 +523,8 @@ Item {
         Accessible.name: text
     }
 
-    // A file that ends early: centred in the empty part of the plot after
-    // the cut, with the Recent Issues entry it matches.
+    // A file that ends early: across the empty part of the plot after the
+    // cut, in the messages' lane, with the Recent Issues entry it matches.
     Item {
         id: endsEarly
         objectName: "plotEndsEarly"
@@ -499,9 +536,24 @@ Item {
         visible: root.cutSeconds >= 0 && !isNaN(root.markerX)
             && width >= endsEarlyColumn.implicitWidth + 2 * Kirigami.Units.largeSpacing
 
+        Rectangle {
+            objectName: "plotEndsEarlyPlate"
+            visible: root.messageNeedsPlate(endsEarlyColumn.height)
+            x: endsEarlyColumn.x - Kirigami.Units.largeSpacing
+            y: endsEarlyColumn.y - Kirigami.Units.smallSpacing
+            width: endsEarlyColumn.width + 2 * Kirigami.Units.largeSpacing
+            height: endsEarlyColumn.height + 2 * Kirigami.Units.smallSpacing
+            radius: 4
+            color: Qt.rgba(root.plotColors.plotPlate.r, root.plotColors.plotPlate.g, root.plotColors.plotPlate.b, 1)
+            border.width: 1
+            border.color: root.plotColors.plotPlateEdge
+        }
+
         Column {
             id: endsEarlyColumn
-            anchors.centerIn: parent
+            objectName: "plotEndsEarlyColumn"
+            x: Math.round((parent.width - width) / 2)
+            y: root.messageY(height)
             spacing: Kirigami.Units.smallSpacing
 
             Row {
@@ -575,7 +627,7 @@ Item {
         visible: root.meterShown
         laneCount: root.laneCount
         // Playing: paused, stopped or with no track, the column is a trough
-        // with the marks' ticks alone, still reserved.
+        // with its unlit ladder and the marks' ticks alone, still reserved.
         active: root.trackLoaded && root.uiBridge.connected
             && root.uiBridge.playbackState === "Playing"
         sourcePath: visible && root.trackLoaded ? root.uiBridge.currentTrackPath : ""
@@ -594,6 +646,8 @@ Item {
         // ticks, paused and stopped with a track too.
         troughColor: root.beforeAudio ? root.plotColors.meterRestTrough : root.plotColors.meterTrough
         fillColor: root.plotColors.meterFill
+        // Before any audio, no ladder: the pane waits with its marks alone.
+        unlitColor: root.beforeAudio ? "transparent" : root.plotColors.meterUnlit
         peakColor: root.plotColors.meterPeak
         clipOffColor: root.plotColors.meterClipOff
         clipColor: root.uiPalette.negative
