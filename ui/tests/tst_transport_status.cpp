@@ -5334,13 +5334,19 @@ void TransportStatusTest::issuesButtonShowsNewSeenAndOpen() {
     QVERIFY2(contrastRatio(negative, onTint) >= 3.0,
              qPrintable(describeContrast(QStringLiteral("glyph on the tint"), negative, onTint)));
 
-    // Seen: "3 issues" in the secondary colour.
+    // Seen: "3 issues" alone in the secondary colour, without a glyph (a
+    // grey ring with a cross beside the count read as "dismiss"), in the
+    // same plate and 6 px padding.
     QVERIFY(QMetaObject::invokeMethod(harness.errors, "markSeen"));
     harness.root->property("statusBar").value<QObject *>()->setProperty("issuesOpen", false);
     QTRY_COMPARE(label->property("text").toString(), QStringLiteral("3 issues"));
-    QCOMPARE(glyph->size(), QSizeF(16, 16));
-    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
+    QVERIFY(!glyph->isVisible());
+    QVERIFY(label->isVisible());
     QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
+    QTRY_COMPARE(sceneRect(label).left() - sceneRect(button).left(), 6.0);
+    QVERIFY(std::abs(button->width() - (label->width() + 12.0)) <= 1.0);
+    QCOMPARE(button->height(), 22.0);
+    QTRY_COMPARE(sceneRect(status).right() - sceneRect(button).right(), 6.0);
     QVERIFY2(contrastRatio(harness.token("textSecondary"), chrome) >= 4.5,
              qPrintable(describeContrast(QStringLiteral("seen issues"), harness.token("textSecondary"), chrome)));
 
@@ -5393,17 +5399,19 @@ void TransportStatusTest::issuesGlyphTakesTheMostSevereNewIssue() {
     QCOMPARE(harness.errors->property("unseenErrorCount").toInt(), 1);
     QVERIFY(shows(error, "negative", "text"));
 
-    // Seen: the error's shape, quiet.
+    // Seen: no glyph, the count alone and quiet, although an error is
+    // among them: a glyph means new issues.
     QVERIFY(QMetaObject::invokeMethod(harness.errors, "markSeen"));
     QTRY_COMPARE(label->property("text").toString(), QStringLiteral("3 issues"));
     QCOMPARE(harness.errors->property("unseenErrorCount").toInt(), 0);
-    QCOMPARE(harness.errors->property("errorEntryCount").toInt(), 1);
-    QVERIFY(shows(error, "textSecondary", "textSecondary"));
+    QVERIFY(!glyph->isVisible());
+    QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
 
     // A warning that repeats is new again, and the newest issues are
     // warnings alone: the triangle, not red, although an error is seen.
     QVERIFY(harness.reportIssue(2, 0, QStringLiteral("notice")));
     QTRY_COMPARE(label->property("text").toString(), QStringLiteral("1 new issue"));
+    QVERIFY(glyph->isVisible());
     QVERIFY(shows(warning, "textSecondary", "text"));
 
     // The error repeats: red again.

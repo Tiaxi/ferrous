@@ -47,17 +47,6 @@ QtObject {
         }
         return errors
     }
-    // How many entries are errors, new or seen.
-    readonly property int errorEntryCount: {
-        root.revision
-        let errors = 0
-        for (let i = 0; i < root.entries.count; ++i) {
-            if (root.entries.get(i).severity === ErrorUtils.SeverityError) {
-                ++errors
-            }
-        }
-        return errors
-    }
     // Bumped whenever an entry changes, for bindings to the newest one.
     property int revision: 0
     readonly property var latest: {

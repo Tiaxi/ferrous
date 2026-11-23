@@ -74,13 +74,10 @@ ToolBar {
         : 0
     readonly property bool hasUnseenError: root.unseenErrorCount > 0
     // Whether an error, rather than warnings alone, is among the new
-    // issues, or among them all once they are seen.
+    // issues.
     readonly property bool unseenIncludesError: root.errorController
         ? (Number(root.errorController.unseenErrorCount) || 0) > 0
         : false
-    readonly property bool issuesIncludeError: root.hasUnseenError
-        ? root.unseenIncludesError
-        : (root.errorController ? (Number(root.errorController.errorEntryCount) || 0) > 0 : false)
     readonly property url errorGlyph: Qt.resolvedUrl("../assets/status-error.svg")
     readonly property url warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
     readonly property string backendFailure: root.uiBridge.backendFailure || ""
@@ -667,14 +664,15 @@ ToolBar {
             onSettingsRequested: root.lastFmSettingsRequested()
         }
 
-        // The issues: "2 new issues" in the text colour until the user has
-        // seen them, then "3 issues" in the secondary colour. The 16 px
-        // glyph is the shape of the most severe of them, the new ones while
-        // there are any: an error's ring with a cross, in the negative
-        // colour while an error is new, otherwise the warning's triangle;
-        // in the secondary colour once seen, and for warnings alone, which
-        // the word "new" marks (every new issue was red, so a scan's
-        // notice raised the alarm of a stopped engine).
+        // The issues: "2 new issues" in the text colour beside a 16 px
+        // glyph until the user has seen them, then "3 issues" alone in the
+        // secondary colour. The glyph is the shape of the most severe new
+        // issue: an error's ring with a cross in the negative colour, or
+        // for warnings alone the warning's triangle in the secondary
+        // colour, which the word "new" marks (every new issue was red, so
+        // a scan's notice raised the alarm of a stopped engine). Once all
+        // are seen there is no glyph: a grey ring with a cross beside a
+        // count read as "dismiss these", so a glyph here always means new.
         // It opens Recent Issues; with none there is nothing to show.
         ToolButton {
             id: issuesButton
@@ -691,7 +689,7 @@ ToolBar {
             text: root.hasUnseenError
                 ? I18n.i18ncp("@action:button", "%1 new issue", "%1 new issues", root.unseenErrorCount)
                 : I18n.i18ncp("@action:button", "%1 issue", "%1 issues", root.errorCount)
-            readonly property color glyphColor: root.hasUnseenError && root.unseenIncludesError
+            readonly property color glyphColor: root.unseenIncludesError
                 ? root.uiPalette.negative
                 : root.uiPalette.textSecondary
             readonly property color labelColor: root.hasUnseenError
@@ -749,8 +747,9 @@ ToolBar {
                     StatusGlyph {
                         objectName: "statusBarErrorsGlyph"
                         anchors.verticalCenter: parent.verticalCenter
+                        visible: root.hasUnseenError
                         size: root.errorGlyphSize
-                        source: root.issuesIncludeError ? root.errorGlyph : root.warningGlyph
+                        source: root.unseenIncludesError ? root.errorGlyph : root.warningGlyph
                         color: issuesButton.glyphColor
                     }
 
