@@ -18,6 +18,10 @@ import "../logic/KeyUtils.js" as KeyUtils
 // over the view, and checked is the mode switch's chosen segment: the
 // plot's text colour at 18 % inside a 1 px edge of its segmentEdge, so the
 // plates have one way to show a choice that is on (not an accent tint).
+// A checked toggle, which a click turns off, answers the pointer: its fill
+// goes to 26 % while hovered (at one fill it read as inert, though a click
+// changed it); a chosen segment of a choice, which a click leaves chosen,
+// stays as it is.
 ToolButton {
     id: root
 
@@ -39,8 +43,21 @@ ToolButton {
         : root.uiPalette.hover
     readonly property color pressedColor: ColorUtils.withAlpha(root.baseTextColor,
         root.plotColors ? 0.22 : 0.10)
+    // Whether a click turns it off: checked, and not one of a choice.
+    readonly property bool _togglesOff: root.checked && !root.autoExclusive
+    // On a plot, how much of its text colour the checked fill is: 18 %, and
+    // 26 % while the pointer is on a toggle that a click turns off. Only the
+    // amount fades, so a change of plot recolours it at once.
+    property real _checkedAmount: root._togglesOff && root.hovered ? 0.26 : 0.18
+    Behavior on _checkedAmount {
+        enabled: Kirigami.Units.shortDuration > 0
+        NumberAnimation {
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+        }
+    }
     readonly property color checkedColor: root.plotColors
-        ? ColorUtils.withAlpha(root.plotColors.plotText, 0.18) : root.uiPalette.selection
+        ? ColorUtils.withAlpha(root.plotColors.plotText, root._checkedAmount) : root.uiPalette.selection
     readonly property color focusRingColor: root.plotColors
         ? root.plotColors.plotFocusRing : root.uiPalette.focusRing
 
