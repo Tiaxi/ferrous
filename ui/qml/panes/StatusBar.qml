@@ -40,8 +40,11 @@ ToolBar {
     readonly property bool narrow: root.width < 1200
 
     // The bar under its 1 px seam: 24 px, or the small text's line and 4 px
-    // above and below it when that is more.
-    readonly property real barHeight: Math.max(24, Math.round(smallMetrics.height) + 8)
+    // above and below it when that is more, or the Last.fm glyph and its bar
+    // clear of the slot's focus ring, with 1 px above and below, at a font
+    // where that is more (at 24 pt the bar sat on the window's edge).
+    readonly property real barHeight: Math.max(24, Math.round(smallMetrics.height) + 8,
+        scrobbleIndicator.minimumBlockHeight + 2)
 
     implicitHeight: root.topPadding + root.barHeight
     leftPadding: 12
@@ -567,6 +570,7 @@ ToolBar {
         }
 
         Components.ScrobbleIndicator {
+            id: scrobbleIndicator
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             // The issues button's height, so its glyph is centred on the

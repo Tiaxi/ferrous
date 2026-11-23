@@ -5,7 +5,6 @@ import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "." as Components
-import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
@@ -13,19 +12,24 @@ import "../logic/KeyUtils.js" as KeyUtils
 // short bar beneath it, and a few words before it when something needs
 // saying (a 10 px glyph inside a ring was a smudge at 1x, and its states
 // looked alike).
-// The glyph's ink is centred on the slot, on whole pixels (with the bar's
-// place under it, the glyph sat 2.5 px above the status bar's middle). Its
+// What the slot shows is centred on it, on whole pixels: the glyph's ink,
+// or the ink and the bar under it as one, clear of the slot's focus ring
+// by 2 px at any font (the bar hung under a centred glyph, over the ring's
+// lower edge, and at 24 pt on the window's bottom edge; with the bar's
+// place kept under a lone glyph, it sat 2.5 px above the middle). Its
 // glyphs are one family (a grid of squares for the "as", a staircase for
 // its strike and thin antialiased strokes for offline read as three
 // hands): outlines drawn for 16 px with their straight edges on whole
 // pixels and their corners as arcs, all 16 px.
-// The bar is the glyph's: as wide as the glyph, 3 px tall and 2 px under
-// its ink, with square ends (at 2 px its proportions did not read at 1x).
-// It is the listening done towards the scrobble, in the glyph's colour,
-// the secondary text colour (at least 3:1 on the status bar), over an
-// opaque trough at 3:1 on the status bar, so that it reads as a share of
-// a whole (a bar alone, 6 to 14 px long and brighter than its glyph, did
-// not read as progress). It is a fifth of the scan bar's length, with
+// The bar is the glyph's: as wide as the glyph, 3 px tall and 1 px under
+// its ink at the default font, with square ends (at 2 px its proportions
+// did not read at 1x). It is the listening done towards the scrobble, in
+// the status bar's progress fill over its opaque trough, the scan's: the
+// trough 3:1 on the status bar and the fill 3:1 on the trough, so that it
+// reads as a share of a whole at a glance (a bar alone, 6 to 14 px long and
+// brighter than its glyph, did not read as progress; in the glyph's
+// secondary colour it was 2.5:1 on the trough). It is a fifth of the scan
+// bar's length, with
 // square ends where the scan bar's are round, and the scan bar has its
 // percent beside it (the scan bar is 72 by 4 px), so that it does not
 // read as a second scan or a download.
@@ -124,16 +128,30 @@ AbstractButton {
     readonly property int glyphSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.small)
     // The glyph's ink, in its 16 px drawing: columns 1 to 14 and rows 3 to
     // 12, centred in it.
+    readonly property int inkTop: Math.round(root.glyphSize * 3 / 16)
     readonly property int inkBottom: Math.round(root.glyphSize * 13 / 16)
-    // The bar's trough under it: the glyph's width, 3 px tall and 2 px
-    // below the ink at the default font, a little more with a larger one,
-    // within the status bar's height: the status bar grows with the small
-    // font's line, which grows more slowly than the glyph.
+    // The bar's trough under it: the glyph's width, 3 px tall and 1 px
+    // below the ink at the default font, a little more of both with a
+    // larger one (2 px below, the ink and the bar did not fit the default
+    // status bar clear of the focus ring).
     readonly property int barWidth: root.glyphSize
     readonly property int barHeight: Math.max(3, Math.round(root.glyphSize * 3 / 20))
-    readonly property int barGap: Math.max(2, Math.round(root.glyphSize / 10))
+    readonly property int barGap: Math.max(1, Math.round(root.glyphSize / 12))
     // The bar's top, from the glyph's.
     readonly property int barY: root.inkBottom + root.barGap
+    // What is centred on the slot: the ink, and the bar under it while it
+    // shows.
+    readonly property int unitHeight: root.inkBottom - root.inkTop
+        + (root.barShown ? root.barGap + root.barHeight : 0)
+    // The focus ring's width, and the clear space inside it around the ink
+    // and the bar.
+    readonly property int focusRingWidth: 2
+    readonly property int focusRingClearance: 2
+    // The least height of the slot: the ink and the bar, clear of the focus
+    // ring. The status bar is at least this and 1 px either side tall, so
+    // that the bar stays off the window's bottom edge at any font.
+    readonly property int minimumBlockHeight: root.inkBottom - root.inkTop + root.barGap + root.barHeight
+        + 2 * (root.focusRingWidth + root.focusRingClearance)
     // The slot's height when nothing in it needs more: the status bar sets
     // it to its controls' height, so the slot is centred in the bar on whole
     // pixels and the glyph on the slot.
@@ -161,15 +179,10 @@ AbstractButton {
         const steps = Math.max(1, Math.round(root.barWidth * Math.max(1, Screen.devicePixelRatio)))
         return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
-    // The bar: the secondary text colour, the glyph's. Its trough: the text
-    // at 35% in the status bar, opaque, and darkened or lightened where
-    // that is under 3:1 on it, so that the whole reads as a whole (the text
-    // at 20% was 1.9:1 / 1.5:1), and still well short of the bar: #6e7173 /
-    // #86888b in Breeze.
-    readonly property color barColor: root.uiPalette.textSecondary
-    readonly property color troughColor: root.uiPalette.readableOn(
-        ColorUtils.mixColor(root.uiPalette.chrome, root.uiPalette.text, 0.35),
-        [root.uiPalette.chrome], 3.1)
+    // The bar and its trough: the status bar's progress colours, the scan
+    // bar's (the trough at 20% text was 1.9:1 / 1.5:1 on the status bar).
+    readonly property color barColor: root.uiPalette.statusBarFill
+    readonly property color troughColor: root.uiPalette.statusBarTrough
     // While listening, the bar is never less than a short mark from the
     // left, so that listening that has just started reads apart from a
     // scrobble, which has no bar (at 0% it was the trough alone); and it
@@ -291,11 +304,13 @@ AbstractButton {
     visible: root.occupied
     implicitWidth: leftPadding + slotRow.implicitWidth + rightPadding
     // The block's height, or a little more than its words, or than the
-    // glyph centred with the bar under it, at a larger font.
+    // glyph and its bar inside the focus ring.
     implicitHeight: Math.max(root.blockHeight, Math.round(slotLabel.implicitHeight) + 4,
-        2 * (root.barY + root.barHeight) - root.glyphSize)
-    leftPadding: root.labelText.length > 0 ? 6 : 3
-    rightPadding: 3
+        root.minimumBlockHeight)
+    // The glyph and its bar 2 px clear of the focus ring at the sides too
+    // (1 px, the ring ran against the bar's ends).
+    leftPadding: root.labelText.length > 0 ? 6 : root.focusRingWidth + root.focusRingClearance
+    rightPadding: root.focusRingWidth + root.focusRingClearance
     topPadding: 0
     bottomPadding: 0
     hoverEnabled: true
@@ -356,7 +371,7 @@ AbstractButton {
         color: root.down
             ? root.uiPalette.pressed
             : (root.hovered ? root.uiPalette.hover : "transparent")
-        border.width: root.visualFocus ? 2 : 0
+        border.width: root.visualFocus ? root.focusRingWidth : 0
         border.color: root.uiPalette.focusRing
 
         Behavior on color {
@@ -392,11 +407,11 @@ AbstractButton {
                 Accessible.ignored: true
             }
 
-            // The glyph's cell, centred on the slot on whole pixels, with
-            // the bar hanging under its ink.
+            // The glyph's cell: its ink, and the bar under it while it
+            // shows, centred on the slot on whole pixels.
             Item {
                 objectName: "scrobbleIndicatorBox"
-                y: Math.round((parent.height - height) / 2)
+                y: Math.round((parent.height - root.unitHeight) / 2) - root.inkTop
                 width: root.glyphSize
                 height: root.glyphSize
 
