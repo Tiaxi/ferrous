@@ -153,9 +153,15 @@ ToolBar {
     readonly property string scanCountText: root.scanTotalKnown
         ? root.percentText(root.scanPercent)
         : root.scanProcessed > 0
-            ? I18n.i18ncp("@info:status %2 is the files scanned so far", "%2 file", "%2 files",
-                root.scanProcessed, root.formatCount(root.scanProcessed))
+            ? root.scannedFilesText(root.scanProcessed)
             : ""
+
+    // The files scanned so far, as the scan without a total counts them:
+    // "412 files".
+    function scannedFilesText(count) {
+        return I18n.i18ncp("@info:status %2 is the files scanned so far", "%2 file", "%2 files",
+            count, root.formatCount(count))
+    }
 
     // A percent as the status bar shows it: "42%".
     function percentText(percent) {
@@ -529,8 +535,10 @@ ToolBar {
         // to fill it against. The parts are one unit, 6 px apart, as a glyph
         // and its words are (the percent, right-aligned in the room of
         // "100%" after the words, stood some 16 px off them). The percent
-        // keeps the width of "100%" after it, in tabular figures, so nothing
-        // in the status bar moves as it counts.
+        // keeps the width of "100%" after it, and the count without a total
+        // that of "99,999 files", in tabular figures, so nothing in the
+        // status bar moves as it counts (the count's own width moved the
+        // words left at 10, 100 and 1,000 files).
         // Nothing in it moves on its own (#373: no indeterminate
         // animation), so it is still with the desktop's animations off.
         Row {
@@ -601,17 +609,18 @@ ToolBar {
                 anchors.verticalCenter: parent.verticalCenter
                 visible: text.length > 0
                 text: root.scanCountText
-                // A percent keeps the room of the widest after it, the bar
-                // and the words before it staying where they are.
-                width: root.scanTotalKnown
-                    ? Math.max(Math.ceil(implicitWidth), Math.ceil(fullPercentMetrics.advanceWidth))
-                    : implicitWidth
+                // The count keeps the room of the widest after it, the
+                // bar and the words before it staying where they are: a
+                // percent that of "100%", the files scanned that of
+                // "99,999 files", past which a count grows (a first scan
+                // of a larger folder moves the words once more).
+                width: Math.max(Math.ceil(implicitWidth), Math.ceil(widestCountMetrics.advanceWidth))
                 horizontalAlignment: Text.AlignLeft
 
                 TextMetrics {
-                    id: fullPercentMetrics
+                    id: widestCountMetrics
                     font: scanCount.font
-                    text: root.percentText(100)
+                    text: root.scanTotalKnown ? root.percentText(100) : root.scannedFilesText(99999)
                 }
             }
 

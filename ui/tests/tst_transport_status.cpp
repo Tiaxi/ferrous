@@ -14,6 +14,7 @@
 #include <QFontInfo>
 #include <QFontMetricsF>
 #include <QHash>
+#include <QIcon>
 #include <QImage>
 #include <QImageReader>
 #include <QLocale>
@@ -581,6 +582,8 @@ private slots:
     void statusBarScanBarGrowsWithTheFont();
     void statusBarScanBarFillsOnlyOnceTheRescanEnds();
     void statusBarScanWithoutATotalIsStill();
+    void statusBarScanCountKeepsItsPlaceWithoutATotal_data();
+    void statusBarScanCountKeepsItsPlaceWithoutATotal();
     void statusBarScanKeepsItsPlaceWhileItCounts_data();
     void statusBarScanKeepsItsPlaceWhileItCounts();
     void lastFmSlotShowsEachState();
@@ -608,6 +611,7 @@ private slots:
     void lastFmListeningNeverFillsTheBar_data();
     void lastFmListeningNeverFillsTheBar();
     void lastFmGlyphsAreOneFamily();
+    void lastFmSettingsItemHasTheConfigureGlyph();
     void warningGlyphIsTheSizeOfItsNeighbours();
     void statusBarNamesAStoppedEngineInPlainWords();
     void statusBarEngineErrorShowsItsToolTipOverItsGlyphAndFromTheKeyboard();
@@ -3753,6 +3757,59 @@ void TransportStatusTest::statusBarScanKeepsItsPlaceWhileItCounts() {
     }
 }
 
+// The first scan of a folder counts the files it has scanned, which keep
+// the room of "99,999 files" after the words, in tabular figures: the
+// words and the status bar's other groups stay where they are as the count
+// passes 10, 100 and 1,000 (the count's own width moved them left), at 10
+// and 24 pt, wide and narrow.
+void TransportStatusTest::statusBarScanCountKeepsItsPlaceWithoutATotal_data() {
+    statusBarScanKeepsItsPlaceWhileItCounts_data();
+}
+
+void TransportStatusTest::statusBarScanCountKeepsItsPlaceWithoutATotal() {
+    QFETCH(int, width);
+    QFETCH(int, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    Harness harness;
+    QVERIFY2(harness.load(kBreezeDark, width), qPrintable(harness.error));
+    QQuickItem *scan = harness.item(QStringLiteral("statusBarScan"));
+    QQuickItem *label = harness.item(QStringLiteral("statusBarScanLabel"));
+    QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QVERIFY(scan && label && count && slot);
+    harness.bridge->setProperty("libraryRootEntries",
+                                QVariantList{QVariantMap{{QStringLiteral("name"), QStringLiteral("Music")}}});
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleState", 3);
+    harness.bridge->setProperty("libraryScanTotal", -1);
+    harness.bridge->setProperty("libraryScanProcessed", 1);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    QTRY_VERIFY(scan->isVisible() && slot->isVisible());
+    QTRY_COMPARE(count->property("text").toString(), QStringLiteral("1 file"));
+    QVERIFY(count->property("font").value<QFont>().featureValue(QFont::Tag("tnum")) == 1);
+    QTRY_VERIFY(scan->width() > 0);
+    const QRectF scanRect = sceneRect(scan);
+    const QRectF labelRect = sceneRect(label);
+    const QRectF countRect = sceneRect(count);
+    const QRectF slotRect = sceneRect(slot);
+    // The room of the widest count it keeps, and no more: a count's words
+    // are left-aligned in it.
+    QCOMPARE(count->property("horizontalAlignment").toInt(), int(Qt::AlignLeft));
+    const QString widest = QStringLiteral("99,999 files");
+    QCOMPARE(count->width(), std::ceil(QFontMetricsF(count->property("font").value<QFont>()).horizontalAdvance(widest)));
+    for (const int processed : {9, 10, 99, 100, 999, 1000, 1204, 9999, 10000, 99999}) {
+        harness.bridge->setProperty("libraryScanProcessed", processed);
+        QTRY_VERIFY(count->property("text").toString().endsWith(QStringLiteral(" files")));
+        QVERIFY2(count->property("implicitWidth").toReal() <= count->width() + 0.01,
+                 qPrintable(count->property("text").toString()));
+        QCOMPARE(sceneRect(scan), scanRect);
+        QCOMPARE(sceneRect(label), labelRect);
+        QCOMPARE(sceneRect(count), countRect);
+        QCOMPARE(sceneRect(slot), slotRect);
+    }
+    QCOMPARE(count->property("text").toString(), widest);
+}
+
 // The first scan of a folder cannot tell its total: the files scanned so
 // far, and no bar until the scan can tell, for there is nothing to fill it
 // against. Nothing in the scan moves on its own (#373: no indeterminate
@@ -5202,6 +5259,29 @@ void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
     QTest::keyClick(harness.window, Qt::Key_Space);
     QTRY_VERIFY(harness.bridge->property("lastFmScrobblingPaused").toBool());
     QCOMPARE(harness.root->property("playPauseCount").toInt(), 0);
+}
+
+// The menu's Last.fm Settings… has Breeze's glyph for settings, as
+// Configure Ferrous… has: without one it left a hole in the menu's glyph
+// column under Pause Scrobbling's check box.
+void TransportStatusTest::lastFmSettingsItemHasTheConfigureGlyph() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QObject *menu = harness.root->findChild<QObject *>(QStringLiteral("scrobbleIndicatorMenu"));
+    QVERIFY(slot && menu);
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    QTRY_VERIFY(slot->isVisible());
+    slot->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(harness.window, Qt::Key_F10, Qt::ShiftModifier);
+    QTRY_VERIFY(menu->property("opened").toBool());
+    QQuickItem *settings = harness.item(QStringLiteral("scrobbleIndicatorSettingsItem"));
+    QVERIFY(settings != nullptr && settings->isVisible());
+    QCOMPARE(evaluateOn(settings, QStringLiteral("icon.name")).toString(), QStringLiteral("configure"));
+    QVERIFY2(QIcon::hasThemeIcon(QStringLiteral("configure")), qPrintable(QIcon::themeName()));
+    QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+    QTRY_VERIFY(!menu->property("visible").toBool());
 }
 
 void TransportStatusTest::lastFmKeyboardMenuOpensAboveTheBar_data() {

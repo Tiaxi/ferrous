@@ -381,6 +381,9 @@ AbstractButton {
         MenuItem {
             objectName: "scrobbleIndicatorSettingsItem"
             text: I18n.i18nc("@action:inmenu", "Last.fm Settings…")
+            // Breeze's glyph for settings, as Configure Ferrous… has (the
+            // item had none, leaving a hole under Pause's check box).
+            icon.name: "configure"
             onTriggered: root.settingsRequested()
         }
     }
