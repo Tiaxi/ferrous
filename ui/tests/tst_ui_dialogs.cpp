@@ -716,6 +716,8 @@ private slots:
     void editTagsDetailsFollowsItsFailure();
     void editTagsSummaryNamesTheChangedFields_data();
     void editTagsSummaryNamesTheChangedFields();
+    void editTagsTrackColumnSaysWhatItNumbers_data();
+    void editTagsTrackColumnSaysWhatItNumbers();
     void editTagsNumberRevertFollowsItsHeader_data();
     void editTagsNumberRevertFollowsItsHeader();
     void editTagsWordsItsWarningsAlike();
@@ -4666,7 +4668,7 @@ void UiDialogsTest::checkEditTagsTableHeaderUsesTheQueuesHeaderStyle(DialogsWind
         QCOMPARE(font.weight(), queueFont.weight());
         QCOMPARE(hex(label->property("color").value<QColor>()), hex(queueLabel->property("color").value<QColor>()));
     }
-    QCOMPARE(labels.at(0)->property("text").toString(), QStringLiteral("#"));
+    QCOMPARE(labels.at(0)->property("text").toString(), QStringLiteral("Track"));
     QCOMPARE(labels.at(1)->property("text").toString(), QStringLiteral("File Name"));
     QCOMPARE(labels.at(2)->property("text").toString(), QStringLiteral("Title"));
     // The last column shown takes the room that is left, so nothing is cut
@@ -5494,7 +5496,7 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
         QCOMPARE(cellOf(QStringLiteral("title"))->property("toolTipText").toString(), QString());
     };
     // 1364 px: as it opens on a 1400 px screen, where the fields give way
-    // too, to no less than 16 grid units, rather than the table scroll.
+    // too, to no less than 15 grid units, rather than the table scroll.
     QQuickItem *fields = visibleNamed(tags, QStringLiteral("tagEditorFields"));
     QVERIFY(fields != nullptr);
     const qreal fieldsWidth = dialog->property("fieldsWidth").toReal();
@@ -7246,6 +7248,57 @@ void UiDialogsTest::editTagsSummaryNamesTheChangedFields() {
     QVERIFY2(status->property("lineCount").toInt() <= 2, qPrintable(at));
     QVERIFY2(status->property("lineCount").toInt() == 2 || !status->property("truncated").toBool(), qPrintable(at));
     QCOMPARE(sceneRect(save), narrowSaveAt);
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsTrackColumnSaysWhatItNumbers_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The track numbers' column reads "Track" ("#" read as the rows' own
+// numbering in a batch numbered in order), whole, with its Revert's room
+// after it, and as wide as that: the header sets its width, which the
+// Revert, shown as the numbers change, doesn't move.
+void UiDialogsTest::editTagsTrackColumnSaysWhatItNumbers() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(1600, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(main.window, QStringLiteral("tagEditorDialog"));
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfTheShotBatch());
+    QVERIFY(tags != nullptr);
+    QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_trackNo"));
+    QVERIFY(column != nullptr);
+    QQuickItem *label = itemsNamed(column, QStringLiteral("tagEditorColumnLabel")).at(0);
+    QQuickItem *revert = named(tags, QStringLiteral("tagEditorColumnRevert_trackNo"));
+    QVERIFY(label != nullptr && revert != nullptr);
+    QTRY_VERIFY(!layoutPending(column) && !layoutPending(label));
+    QCOMPARE(label->property("text").toString(), QStringLiteral("Track"));
+    const qreal leading = dialog->property("numberLeadingRoom").toReal();
+    const qreal revertRoom = dialog->property("columnRevertRoom").toReal();
+    // DemiBold, as the header is once its field changed.
+    QFont demiBold = label->property("font").value<QFont>();
+    demiBold.setWeight(QFont::DemiBold);
+    const qreal header = QFontMetricsF(demiBold).horizontalAdvance(QStringLiteral("Track")) + leading + revertRoom;
+    const QString at = describeItem(column) + describeItem(label) + QStringLiteral(" header %1").arg(header);
+    QVERIFY2(column->width() >= header && column->width() <= std::ceil(header) + 2, qPrintable(at));
+    QVERIFY2(!label->property("truncated").toBool(), qPrintable(at));
+    QVERIFY(!revert->isVisible());
+    const qreal width = column->width();
+    main.editor.selectAllRows();
+    main.editor.applyBulkField(QStringLiteral("trackNo"), QStringLiteral("1"));
+    QTRY_VERIFY(revert->isVisible());
+    QTRY_VERIFY(!layoutPending(column) && !layoutPending(label));
+    QCOMPARE(label->property("text").toString(), QStringLiteral("Track"));
+    QCOMPARE(label->property("font").value<QFont>().weight(), QFont::DemiBold);
+    QVERIFY2(!label->property("truncated").toBool(), qPrintable(describeItem(label)));
+    QCOMPARE(column->width(), width);
+    // The Revert after the header, within the column.
+    QVERIFY2(sceneRect(revert).left() >= sceneRect(label).left() + label->property("contentWidth").toReal()
+                 && sceneRect(revert).right() <= sceneRect(column).right() + 0.5,
+             qPrintable(describeItem(revert) + describeItem(label) + describeItem(column)));
     QVERIFY(closeTagEditor(main));
 }
 

@@ -107,7 +107,9 @@ Components.DialogWindow {
     // too little room for them all, either the tags or the paths were cut
     // short).
     readonly property var tableColumns: [
-        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "000" },
+        // "Track", which says what it numbers: "#" read as the rows' own
+        // numbering, in a batch numbered in order, beside a changed Disc.
+        { key: "trackNo", label: I18n.i18nc("@title:column track number", "Track"), width: 40, number: true, sample: "000" },
         { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, holds: 220, wants: 480, stretch: true, path: true },
         { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 100, holds: 160, wants: 400, wantsAtLeast: 240 },
         { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 100, holds: 160, fit: true },
@@ -501,9 +503,10 @@ Components.DialogWindow {
         return width
     }
     readonly property real fieldsWidth: Math.max(Kirigami.Units.gridUnit * 19, root.fieldsMinimumWidth)
-    // The fields' narrowest: 16 grid units, or what their labels and a
-    // field need.
-    readonly property real fieldsLeastWidth: Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
+    // The fields' narrowest: 15 grid units, or what their labels and a
+    // field need (at 16, the table scrolled on a 1400 px screen once the
+    // track numbers' column read "Track").
+    readonly property real fieldsLeastWidth: Math.max(Kirigami.Units.gridUnit * 15, root.fieldsMinimumWidth)
     // The fields' width as shown: narrower, down to their least, where
     // that gives Title and File Name what they want (from a 1600 px main
     // window, the batch's longest file name was cut by 47 px beside titles
@@ -1736,7 +1739,7 @@ Components.DialogWindow {
                                         icon.width: root.columnRevertGlyph
                                         icon.height: root.columnRevertGlyph
                                         display: AbstractButton.IconOnly
-                                        // By its field: the # column is Track's.
+                                        // By its field: the track number's column is Track's.
                                         text: headerCell.editable
                                             ? I18n.i18nc("@action:button %1 is a tag field", "Revert %1 in Every File",
                                                 root.fieldAt(headerCell.modelData.key).label)
