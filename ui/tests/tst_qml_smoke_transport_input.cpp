@@ -3633,10 +3633,11 @@ void TransportInputSmokeTest::fullscreenVisualizationStripHoldsTheModeSwitch() {
     QCOMPARE(colorOf(divider, "color"), colorOf(plotColors, "plotPlateEdge"));
 
     // Each one's tooltip, under the pointer, covers none of the others.
+    // Close's names its key, as Image Details' does.
     const QList<std::pair<QQuickItem *, QString>> tips{
         {spectrogramButton, QStringLiteral("Spectrogram")},
         {waveformButton, QStringLiteral("Waveform")},
-        {close, QStringLiteral("Close")},
+        {close, QStringLiteral("Close (Esc)")},
     };
     // Where they show is the point, not after how long: at once.
     for (const auto &[button, text] : tips) {
@@ -3662,6 +3663,12 @@ void TransportInputSmokeTest::fullscreenVisualizationStripHoldsTheModeSwitch() {
 
     QAccessible::setActive(true);
     const QScopeGuard stopAccessibility([]() { QAccessible::setActive(false); });
+    // Close's accessible name is the action alone, without the key.
+    {
+        QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(close);
+        QVERIFY(accessible != nullptr);
+        QCOMPARE(accessible->text(QAccessible::Name), QStringLiteral("Close"));
+    }
     // The current mode checked, in the strip's look, and a radio button.
     for (const int mode : {1, 0}) {
         viewer->setProperty("visualizationMode", mode);
