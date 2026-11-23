@@ -61,6 +61,8 @@ private slots:
     void cornerHoldsWhileAutoscrollRuns();
     void laneHeadsStayQuietThroughAPan_data();
     void laneHeadsStayQuietThroughAPan();
+    void laneHeadsCloseOnTheMiddlePress_data();
+    void laneHeadsCloseOnTheMiddlePress();
     void zoomPlateTextIsDrawnAsThePlotPlatesIs();
     void crosshairGivesWayToAutoscroll_data();
     void crosshairGivesWayToAutoscroll();
@@ -5575,6 +5577,86 @@ Window {
     QVERIFY(windows >= 0 && windows != curves);
     QCOMPARE(renderTypeOf(QStringLiteral("windowNotice"), QStringLiteral("followNoticeText")), windows);
     QCOMPARE(renderTypeOf(QStringLiteral("windowReadout")), windows);
+}
+
+void TransportInputSmokeTest::laneHeadsCloseOnTheMiddlePress_data() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<bool>("drags");
+    QTest::newRow("spectrogram, drag") << 0 << true;
+    QTest::newRow("spectrogram, click") << 0 << false;
+    QTest::newRow("waveform, drag") << 1 << true;
+    QTest::newRow("waveform, click") << 1 << false;
+}
+
+// The lane heads' hover reveal ends on the middle press itself, which leads
+// to a pan or to autoscroll, and nothing opens again on the release until
+// the pointer next moves: from the drag's threshold alone, the head under
+// the hand opened on the press, closed as the pan began and opened again
+// on the release (H20). The closed hand still waits for the pan.
+void TransportInputSmokeTest::laneHeadsCloseOnTheMiddlePress() {
+    QFETCH(int, mode);
+    QFETCH(bool, drags);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QQuickItem *plotSurface = mode == 0
+        ? corner.spectrogramSurface
+        : window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(plotSurface != nullptr);
+    corner.zoom(4.0);
+    const QList<QQuickItem *> heads = itemsNamed(corner.layer, QStringLiteral("plotLaneHead"));
+    QVERIFY2(!heads.isEmpty(), qPrintable(QString::number(heads.size())));
+    const auto laneHovered = [&]() {
+        for (QQuickItem *head : heads) {
+            if (head->property("laneHovered").toBool()) return true;
+        }
+        return false;
+    };
+    const QPoint from = corner.layer->mapToScene(
+        QPointF(corner.layer->width() / 2, corner.layer->height() * 0.25)).toPoint();
+    QTest::mouseMove(window, from + QPoint(1, 1));
+    QTest::mouseMove(window, from);
+    QTRY_VERIFY(laneHovered());
+
+    // Pressed, before any drag: no lane is hovered, and no hand is closed.
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, from);
+    QVERIFY(!laneHovered());
+    QVERIFY(corner.surface->property("panPressed").toBool());
+    QVERIFY(!corner.surface->property("panning").toBool());
+    QCOMPARE(plotSurface->property("pointerCursorShape").toInt(), int(Qt::ArrowCursor));
+    QPoint end = from;
+    if (drags) {
+        for (int step = 1; step <= 5; ++step) {
+            end = from + QPoint(-12 * step, 0);
+            QTest::mouseMove(window, end);
+            QVERIFY2(!laneHovered(), qPrintable(QStringLiteral("step %1").arg(step)));
+        }
+        QVERIFY(corner.surface->property("panning").toBool());
+        QCOMPARE(plotSurface->property("pointerCursorShape").toInt(), int(Qt::ClosedHandCursor));
+    }
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, end);
+    QVERIFY(!corner.surface->property("panPressed").toBool());
+    // Let go, still: nothing opens, also as the events the release brings
+    // are handled.
+    QTest::qWait(50);
+    QVERIFY(!laneHovered());
+    if (!drags) {
+        // The click started autoscroll; another click stops it, which is a
+        // middle press too.
+        QTRY_VERIFY(corner.surface->property("autoscrolling").toBool());
+        QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, end);
+        QVERIFY(!laneHovered());
+        QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, end);
+        QTRY_VERIFY(!corner.surface->property("autoscrolling").toBool());
+        QTest::qWait(50);
+        QVERIFY(!laneHovered());
+    }
+    // The pointer moves: the lane under it has its buttons again.
+    QTest::mouseMove(window, end + QPoint(1, 0));
+    QTRY_VERIFY(laneHovered());
 }
 
 // The divider between "Not following" and the zoom has 6 px on each side

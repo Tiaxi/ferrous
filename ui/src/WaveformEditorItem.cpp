@@ -4248,7 +4248,8 @@ void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
         // as it is released. While autoscroll runs, the middle press that
         // stops it is its own (see ViewAutoscroll).
         event->accept();
-        m_panPressed = true;
+        m_panScenePosition = mapToScene(event->position());
+        setPanPressed(true);
         setPointerHeld(true);
         if (m_panning) {
             m_panning = false;
@@ -4277,6 +4278,12 @@ void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
         }
     }
     event->accept(); setPointerHeld(true); emit seekRequested(seconds);
+}
+
+void WaveformEditorItem::setPanPressed(bool pressed) {
+    if (m_panPressed == pressed) return;
+    m_panPressed = pressed;
+    emit panPressedChanged();
 }
 
 void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
@@ -4341,6 +4348,7 @@ void WaveformEditorItem::mouseReleaseEvent(QMouseEvent *event) {
     const bool click = !m_panning && ViewAutoscroll::isClick(m_panPressPosition, event->position())
         && !m_panStopsAutoscroll;
     const QPointF pressed = m_panPressPosition;
+    m_panScenePosition = mapToScene(event->position());
     mouseUngrabEvent();
     if (click) startAutoscroll(pressed);
 }
@@ -4348,7 +4356,7 @@ void WaveformEditorItem::mouseReleaseEvent(QMouseEvent *event) {
 void WaveformEditorItem::mouseUngrabEvent() {
     setPointerHeld(false);
     if (!m_panPressed) return;
-    m_panPressed = false;
+    setPanPressed(false);
     if (!m_panning) return;
     m_panning = false;
     {

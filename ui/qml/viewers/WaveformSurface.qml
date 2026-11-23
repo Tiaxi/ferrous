@@ -43,6 +43,10 @@ Item {
     readonly property alias waveformItem: waveform
     // Whether a middle-drag pans the view.
     readonly property bool panning: waveform.panning
+    // Whether a middle press holds it, from the press to the release.
+    readonly property bool panPressed: waveform.panPressed
+    // Where, in the scene, it was pressed, or let go.
+    readonly property point panScenePosition: waveform.panScenePosition
     // The pointer hides once the overlays have faded out, and stays so.
     // While a pan holds the plot it is a closed hand, as over the album
     // art's.
