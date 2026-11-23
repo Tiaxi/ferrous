@@ -1042,14 +1042,14 @@ Components.DialogWindow {
             }
         }
 
-        // What is lost, on its own line and in the text's colour, only when
-        // Replace may overwrite a file: embedding replaces the tracks' own
-        // art, which the question already says.
+        // What is lost, on its own line and in the text's colour, whenever
+        // Replace may overwrite something: a folder's cover file, or the
+        // tracks' own embedded art, which embedding replaces and Ferrous
+        // keeps no copy of either. Only adding a cover file loses nothing.
         Label {
             objectName: "replaceCoverWarning"
             Layout.fillWidth: true
-            visible: replaceCoverConfirmDialog.outcomeCase === "overwrite"
-                || replaceCoverConfirmDialog.outcomeCase.length === 0
+            visible: replaceCoverConfirmDialog.outcomeCase !== "add"
             wrapMode: Text.Wrap
             color: root.uiPalette.text
             textFormat: Text.PlainText

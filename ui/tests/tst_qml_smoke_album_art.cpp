@@ -3202,7 +3202,7 @@ void AlbumArtSmokeTest::itunesReplaceStatesTheOutcomeThatApplies_data() {
         const QByteArray at = QByteArray::number(pointSize) + " pt";
         QTest::newRow(("embedded art, " + at).constData())
             << pointSize << QStringLiteral("0123456789abcdef0123456789abcdef.png") << QVariant(false)
-            << QVariant(true) << false << embed << false;
+            << QVariant(true) << false << embed << true;
         QTest::newRow(("folder cover, " + at).constData())
             << pointSize << QStringLiteral("cover.png") << QVariant(true) << QVariant(false) << false << overwrite
             << true;
