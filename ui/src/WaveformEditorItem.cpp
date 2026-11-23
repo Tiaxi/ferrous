@@ -1398,6 +1398,7 @@ void WaveformEditorItem::armReattachLocked(qint64 nowNs) {
 
 void WaveformEditorItem::reattachLocked() {
     m_follow = Follow::Playhead;
+    m_pressHolds = false;
     // A view brought back to the playhead ends autoscroll; see
     // publishDetached.
     m_autoscrolling = false;
@@ -1465,7 +1466,9 @@ bool WaveformEditorItem::detachedLocked(qint64 nowNs) const {
     // as one to the whole track does until it has its detail.
     const double span = std::min(visibleSpanForZoomLocked(m_zoomLevel),
                                  visibleSpanForZoomLocked(m_presentedZoomLevel));
-    return span < m_durationSeconds
+    // A view a middle press holds is moved only once a pan or autoscroll
+    // moves it.
+    return !m_pressHolds && span < m_durationSeconds
         && followStateLocked(m_presentedZoomLevel, displayedPositionSecondsLocked(nowNs)).mode
             == Follow::Detached;
 }
@@ -4257,6 +4260,18 @@ void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
         }
         m_panPressPosition = event->position();
         m_panStopsAutoscroll = m_autoscroll.takeStopPress(event->timestamp());
+        {
+            // A view that follows holds still from the press, which leads to
+            // a pan or to autoscroll, either of which leaves it where it is.
+            QMutexLocker lock(&m_stateMutex);
+            const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
+            const qint64 nowNs = m_nowNs();
+            settleFollowLocked(nowNs);
+            if (span > 0.0 && span < m_durationSeconds && m_follow != Follow::Detached) {
+                detachAtLocked(nowNs, 0.5);
+                m_pressHolds = true;
+            }
+        }
         return;
     }
     if (event->button() != Qt::RightButton || !crosshairEnabled()) { event->ignore(); return; }
@@ -4308,6 +4323,7 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
             }
             settleFollowLocked(nowNs);
             detachAtLocked(nowNs, 0.5);
+            m_pressHolds = false;
             // Nothing glides back until the user lets go.
             m_reattachArmed = false;
             m_shownReattachArmed = false;
@@ -4349,15 +4365,19 @@ void WaveformEditorItem::mouseReleaseEvent(QMouseEvent *event) {
         && !m_panStopsAutoscroll;
     const QPointF pressed = m_panPressPosition;
     m_panScenePosition = mapToScene(event->position());
-    mouseUngrabEvent();
+    // Autoscroll starts from the view the press holds.
     if (click) startAutoscroll(pressed);
+    mouseUngrabEvent();
 }
 
 void WaveformEditorItem::mouseUngrabEvent() {
     setPointerHeld(false);
     if (!m_panPressed) return;
     setPanPressed(false);
-    if (!m_panning) return;
+    if (!m_panning) {
+        releasePressHold();
+        return;
+    }
     m_panning = false;
     {
         QMutexLocker lock(&m_stateMutex);
@@ -4367,6 +4387,15 @@ void WaveformEditorItem::mouseUngrabEvent() {
     }
     emit panningChanged();
     publishDetached();
+}
+
+void WaveformEditorItem::releasePressHold() {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (!m_pressHolds) return;
+        reattachLocked();
+    }
+    viewMoved();
 }
 
 void WaveformEditorItem::startAutoscroll(QPointF position) {
@@ -4381,6 +4410,7 @@ void WaveformEditorItem::startAutoscroll(QPointF position) {
         // The view stays where it is, as one the user moved does; one
         // detached already keeps its anchor.
         if (m_follow != Follow::Detached) detachAtLocked(nowNs, 0.5);
+        m_pressHolds = false;
         // Nothing glides back until autoscroll stops.
         m_autoscrolling = true;
         m_reattachArmed = false;

@@ -579,6 +579,9 @@ private:
     void armReattachLocked(qint64 nowNs);
     // The view follows the playhead again.
     void reattachLocked();
+    // A middle press that held the view leads to nothing: it follows the
+    // playhead again.
+    void releasePressHold();
     // Autoscroll, the plot's second way to move its view, beside the
     // middle-drag: a middle click that did not drag, at `position`, starts
     // it on a zoomed view, which it detaches where it is.
@@ -881,6 +884,14 @@ private:
     // Whether the press stopped autoscroll, so that its release starts
     // none.
     bool m_panStopsAutoscroll{false};
+    // Whether a middle press holds a view that followed the playhead where
+    // it was, for the pan or the autoscroll it leads to: the time under the
+    // pointer stays from the press, not only from the drag distance (it
+    // moved on by a tenth meanwhile, H20). Detached in all but name, as
+    // nothing moved it yet: the plot says it is moved once a pan or
+    // autoscroll moves it, so that a click to autoscroll says nothing
+    // (#655). Under the state mutex.
+    bool m_pressHolds{false};
     double m_panOriginStart{0.0};
     double m_panOriginX{0.0};
     // Whether autoscroll moves the view (see m_autoscroll): nothing glides
