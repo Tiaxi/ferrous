@@ -46,13 +46,14 @@ import "../logic/PathUtils.js" as PathUtils
 //   where a library row has its text, both in the secondary colour; the
 //   library gets the height (an empty square took 360 px). The first
 //   track grows the cover's place from the row to its full size over
-//   moveDuration, InOutQuad, uncovering the cover, which lies at its full
+//   moveDuration, on the move's curve (moveCurve), uncovering the cover, which lies at its full
 //   size in place all along (a cover scaled up from a square in the middle
 //   of the band read as a zoom, with empty flanks), fading in as the row
 //   goes, by the move's time (see idleOut), the lines and the library
 //   moving down with its foot, so nothing jumps. Under the wide cover
-//   the move opens the lines' room first, over the moving seam, and then
-//   the rest of the cover (wideTextRoom), each line fading in once it has
+//   the move opens the lines' room the faster at first, over the moving
+//   seam, the band of the cover growing with it from the first frame
+//   (wideTextRoom), each line fading in once it has
 //   room, so the title reads in the move's first part, over the library and
 //   never under its seam; beside and under the narrow cover each line
 //   fades in likewise once it has room over the seam, its title first
@@ -62,11 +63,14 @@ import "../logic/PathUtils.js" as PathUtils
 //   backwards, on its curve and time (rather than the cover and lines
 //   going in one frame, leaving a mark alone in the band as it shrank):
 //   the track that showed stays, its cover or stand-in and its lines
-//   (heldTrack), while it shrinks. The seam closes the lines' room first:
-//   cover and lines stay put as it comes up, each line gone as it reaches
-//   its foot, then the cover's foot goes up with it (with the lines out
-//   by the time alone, a blank band trailed the cover for some 150 ms),
-//   and the row comes back over the move's end. A move turned back goes
+//   (heldTrack), while it shrinks. Under the wide cover the seam closes
+//   the lines' room the faster at first, the cover's foot going up from
+//   the first frame too, the lines with it, each line gone as the seam
+//   reaches its foot (with the lines out by the time alone, a blank band
+//   trailed the cover for some 150 ms); beside and under the narrow cover
+//   the cover and the lines stay put as the seam comes up, each line gone
+//   as it reaches its foot, then the cover's foot goes up with it; and the
+//   row comes back over the move's end. A move turned back goes
 //   on from what shows (moveFrom). With animations off, both are at once.
 // - A track without a cover keeps the cover's place, wide or narrow, with
 //   a stand-in in it (AlbumArtTile): the plot's floor colour with the app
@@ -167,6 +171,19 @@ Item {
                                                      root.narrowTextTop + root.narrowReservedHeight) + root.textInset
     readonly property real besideCoverSize: root._roomBeside(root.besideBlockSize) >= root.narrowLineMinimum
         ? root.besideBlockSize : root.narrowCoverSize
+    // The sides of the cover's place where it meets the sidebar's view
+    // colour, which the stand-in edges, rather than the panel's top, the
+    // window's edge, the sidebar's seam or the panel's (an edge all round
+    // doubled them, a purple frame inside the flush narrow tile and a 2 px
+    // seam under it): the wide tile's foot alone, the side of the narrow
+    // one that faces the lines, with its foot where the block runs on under
+    // it, and all four of the large-font header's, inset.
+    readonly property var standInEdgeSides: ({
+        top: root.coverInset > 0,
+        left: root.coverInset > 0,
+        right: root.coverInset + root.coverSize < root.width - 0.5,
+        bottom: root.coverInset + root.coverSize < root.layoutHeight - root.seamHeight - 0.5
+    })
     // The cover of the narrow layout: the large-font header's, the one that
     // fills the block beside the narrow lines, or 96 px.
     readonly property real narrowLayoutCoverSize: root.largeHeader ? root.headerCoverSize
@@ -177,7 +194,7 @@ Item {
     }
     // The same beside the large-font header's cover, which is at the inset.
     function _roomBesideHeader(side) {
-        return root.width - root.textInset - side - root.besideGap - root.textInset
+        return root.width - root.textInset - side - root.besideGap - root.headerTitleEnd
     }
     // Where the cover is in from the panel's corner: at the inset in the
     // large-font header, on its lines' left edge, and at the corner
@@ -205,18 +222,34 @@ Item {
 
     // The time of a move that carries the library under the panel: the
     // track's layout growing from the compact row or shrinking into it, on
-    // InOutQuad, which eases in rather than leaping off. Under the wide
+    // moveCurve. Under the wide
     // cover the library moves 350 to 420 px: over longDuration, OutCubic,
     // its first frames jumped some 100 px, four of its rows, and read as a
     // cross-fade rather than a slide; over veryLongDuration, OutCubic, it
     // still started at some 3,100 px/s; over wideMoveDuration, InOutQuad,
-    // it peaks at some 1,850 px/s, mid-way.
+    // it peaked at some 1,850 px/s, mid-way, after ~100 ms in which it
+    // hardly moved, a pause and then a sweep.
     // The narrow cover's 100 px or so take longDuration. None with
     // animations off.
     readonly property int wideMoveDuration: Math.round(Kirigami.Units.veryLongDuration * 9 / 8)
     readonly property int moveDuration: Kirigami.Units.longDuration <= 0 ? 0
         : (root.wideRoom ? root.wideMoveDuration : Kirigami.Units.longDuration)
-    readonly property int moveEasing: Easing.InOutQuad
+    // The move's curve: InOutQuad with a share, moveLead, of OutQuad, so it
+    // sets off at once, at half the mean speed (~460 px/s under the wide
+    // cover, some 8 px in the first frame), peaks mid-way at 1.75 times it
+    // (~1,600 px/s), and eases into place: one movement from the first
+    // frame, both ways, rather than a hold and a sweep. Two quadratic
+    // halves, exact as Bézier segments with even steps in time, so the
+    // animation's curve and _movePresence are one.
+    readonly property real moveLead: 0.25
+    readonly property real moveMiddle: (2 + root.moveLead) / 4
+    readonly property var moveCurve: [
+        1 / 6, root.moveLead / 3,
+        1 / 3, (2 * root.moveLead + (2 - 3 * root.moveLead) / 4) / 3,
+        0.5, root.moveMiddle,
+        2 / 3, (root.moveMiddle + 2) / 3,
+        5 / 6, 1,
+        1, 1]
     // In the narrow layouts a line has room from the presence where the
     // seam passes its foot, `foot` once in place: until then the foot moves
     // up from under the compact row, or under the cover moves down with
@@ -256,24 +289,40 @@ Item {
     readonly property real lineShift: root.presence >= 1 ? 0
         : root.moveFrom.closing ? root.moveFrom.shift
         : root.moveFrom.shift * (1 - root.openProgress)
-    // Under the wide cover the move gives the lines their room first, over
-    // the moving seam (the title waited behind the cover's reveal: at
-    // +276 ms of 450 the band under a growing piece of the cover was still
-    // empty). Their room grows on a curve that eases out just where the
-    // band of the cover eases in from rest, so that band starts with no
-    // jolt and the two together are the move's one curve: whole by
-    // wideRoomSpan of the way, some 190 ms of the 450. Closing, the room
-    // is what the seam leaves of it.
+    // Under the wide cover the move gives the lines their room the faster
+    // at first, over the moving seam (the title waited behind the cover's
+    // reveal: at +276 ms of 450 the band under a growing piece of the cover
+    // was still empty), but not all of it: wideRoomShare of the seam's
+    // travel at the start, so the band of the cover grows from the first
+    // frame too (with all of it, the band held at the row's height for
+    // some 100 ms, a strip, and then swept). The room's share eases out to
+    // nothing as it is whole, by wideRoomSpan of the way, some 190 ms of
+    // the 450, so the band's growth takes the seam's over with no jolt.
+    // Closing, the cover's foot goes up with the seam from the first frame,
+    // the lines with it, and the room closes on a smooth step, at most
+    // that share of the seam's travel, over wideCloseSpan (closed the
+    // faster at first, as it opens, its empty end, the title gone, trailed
+    // the cover for some 100 ms).
+    readonly property real wideRoomShare: 0.6
     readonly property real wideRoomWhole: Math.max(0, root.movedHeight - root.seamHeight - root.coverSize)
     readonly property real wideRoomSpan: root.moveTravel > 0
         ? Math.min(1 - root.moveFrom.presence,
-                   2 * Math.max(0, root.wideRoomWhole - root.moveFrom.room) / root.moveTravel)
+                   2 * Math.max(0, root.wideRoomWhole - root.moveFrom.room)
+                       / (root.wideRoomShare * root.moveTravel))
         : 1
+    readonly property real wideCloseSpan: root.moveTravel > 0
+        ? Math.min(root.moveFrom.presence,
+                   1.5 * Math.max(0, root.moveFrom.room) / (root.wideRoomShare * root.moveTravel))
+        : root.moveFrom.presence
     readonly property real wideTextRoom: {
         if (root.presence >= 1)
             return root.wideRoomWhole
-        if (root.moveFrom.closing)
-            return Math.max(0, root.moveFrom.room - root.moveTravel * (root.moveFrom.presence - root.presence))
+        if (root.moveFrom.closing) {
+            if (root.wideCloseSpan <= 0)
+                return 0
+            const closed = Math.min(1, Math.max(0, root.moveFrom.presence - root.presence) / root.wideCloseSpan)
+            return root.moveFrom.room * (1 - closed * closed * (3 - 2 * closed))
+        }
         if (root.wideRoomSpan <= 0)
             return root.wideRoomWhole
         const rest = 1 - Math.min(1, Math.max(0, root.presence - root.moveFrom.presence) / root.wideRoomSpan)
@@ -281,14 +330,17 @@ Item {
     }
     // Where the seam is as the compact row starts to come back, which
     // every line is gone by, so that no two texts show at once.
-    readonly property real rowBackSeam: root.idleRowHeight + root.moveTravel * root._movePresence(
+    readonly property real rowBackPresence: root._movePresence(
         root.idleOut[1] * Kirigami.Units.shortDuration / Math.max(1, root.moveDuration))
+    readonly property real rowBackSeam: root.idleRowHeight + root.moveTravel * root.rowBackPresence
     // The opacity of the line `name`, whose text's foot is `foot` from the
     // panel's top and `placedFoot` once in place, and which under the wide
     // cover needs `room` under that, -1 in the narrow layouts. Opening, it
     // fades in over shortDuration, OutCubic, from when there is room for
     // it, never clipped by the seam nor over the library. Closing, it fades
-    // out as the seam comes up to its foot. Read from the move's progress,
+    // out as the seam comes up to its foot: under the wide cover, which the
+    // lines go up with, as their room closes to what the line needs. Read
+    // from the move's progress,
     // so a move that turns back, or none, as with animations off, takes it
     // with it.
     function _lineLevel(name, foot, placedFoot, room) {
@@ -298,6 +350,18 @@ Item {
             return 0
         const from = root.moveFrom.levels[name] || 0
         if (root.moveFrom.closing) {
+            if (room >= 0) {
+                // Where the room is down to what the line needs: the smooth
+                // step's inverse (wideTextRoom).
+                const roomFrom = root.moveFrom.room
+                const reached = roomFrom > room
+                    ? root.moveFrom.presence - root.wideCloseSpan
+                        * (0.5 - Math.sin(Math.asin(2 * room / roomFrom - 1) / 3))
+                    : root.moveFrom.presence
+                const goneAt = Math.max(reached, root.rowBackPresence)
+                const awayFor = root.moveFrom.presence - goneAt
+                return awayFor > 0 ? from * Math.min(1, Math.max(0, root.presence - goneAt) / awayFor) : 0
+            }
             const gone = Math.max(foot, root.rowBackSeam)
             const away = root.idleRowHeight + root.moveTravel * root.moveFrom.presence - gone
             return away > 0 ? from * Math.min(1, Math.max(0, root.moveSeam - gone) / away) : 0
@@ -337,15 +401,20 @@ Item {
     readonly property real coverOpacity: root.presence <= 0 ? 0
         : root.moveEnded ? 1 : root._eased(root._handoverProgress(root.coverIn))
     // How far into the move, from 0 to 1, it is `presence` of the way:
-    // InOutQuad's inverse.
+    // moveCurve's inverse.
     function _moveTime(presence) {
         const p = Math.min(1, Math.max(0, presence))
-        return p < 0.5 ? Math.sqrt(p / 2) : 1 - Math.sqrt((1 - p) / 2)
+        const lead = root.moveLead
+        if (p >= root.moveMiddle)
+            return 1 - Math.sqrt((1 - p) / (2 - lead))
+        const square = 2 - 3 * lead
+        return square > 0 ? (Math.sqrt(lead * lead + square * p) - lead) / square : p / (2 * lead)
     }
-    // How far the move has come `time` of the way through it: InOutQuad.
+    // How far the move has come `time` of the way through it: moveCurve.
     function _movePresence(time) {
         const t = Math.min(1, Math.max(0, time))
-        return t < 0.5 ? 2 * t * t : 1 - 2 * (1 - t) * (1 - t)
+        const lead = root.moveLead
+        return t < 0.5 ? 2 * lead * t + (2 - 3 * lead) * t * t : 1 - (2 - lead) * (1 - t) * (1 - t)
     }
     readonly property string idleText: I18n.i18nc("@info", "Nothing playing")
 
@@ -395,7 +464,8 @@ Item {
         objectName: "nowPlayingPresenceAnimation"
         target: root
         property: "presence"
-        easing.type: root.moveEasing
+        easing.type: Easing.BezierSpline
+        easing.bezierCurve: root.moveCurve
         // The curve's last step can fall a rounding error short of its end,
         // which would leave the layout a hair from whole.
         onFinished: root.presence = root.presenceAnimation.to
@@ -513,8 +583,15 @@ Item {
         return at > 0 && /^[0-9]+$/.test(text.slice(at + format.between.length, end))
             ? [text.slice(0, at), text.slice(at)] : [text, ""]
     }
-    readonly property string narrowDetailsText: root._joined([root.genreText, root.trackNumberText],
-                                                             root.lineSeparators.narrowDetails)
+    // The narrow and compact layouts' details: one grammar for every track,
+    // the genre and the track's place, "Classical · 2 of 8", or "Track 2
+    // of 8" with no genre (dropping the word "Track" by width alone, the
+    // line read "Jazz · Track 1 of 8" on one track and "Classical · 1 of 4"
+    // on the next). The wide layout keeps "Track 2 of 8" after the genre.
+    readonly property bool narrowPositionAfterGenre: root.genreText.length > 0 && root.albumPositionText.length > 0
+    readonly property string narrowDetailsText: root._joined(
+        [root.genreText, root.narrowPositionAfterGenre ? root.albumPositionText : root.trackNumberText],
+        root.lineSeparators.narrowDetails)
     // A file without tags, with its file name for a title and no artist,
     // album or details, says where it is instead: the name of its folder,
     // in the artist's row, in textSecondary, as a fact of the file rather
@@ -564,9 +641,10 @@ Item {
     // then the year. The narrow sidebar dropped the total first, so
     // "Classical · Track 1" lost the album position the line had room for.
     // The whole of them is in the tooltip.
-    function _fittingDetails(year, separator, width) {
+    function _fittingDetails(year, separator, width, positionAfterGenre) {
         const candidates = [
-            [year, root.genreText, root.trackNumberText],
+            positionAfterGenre ? [year, root.genreText, root.albumPositionText]
+                               : [year, root.genreText, root.trackNumberText],
             root.genreText.length > 0 && root.albumPositionText.length > 0
                 ? [year, root.genreText, root.albumPositionText] : [],
             [year, root.trackNumberText],
@@ -600,9 +678,10 @@ Item {
         return widest
     }
     readonly property string shownDetailsText: root._fittingDetails(
-        root.yearText, root.lineSeparators.details, Math.max(0, root.width - 2 * root.textInset))
+        root.yearText, root.lineSeparators.details, Math.max(0, root.width - 2 * root.textInset), false)
     readonly property string shownNarrowDetailsText: root._fittingDetails(
-        "", root.lineSeparators.narrowDetails, root.largeHeader ? root.footLineWidth : narrowColumn.width)
+        "", root.lineSeparators.narrowDetails, root.largeHeader ? root.footLineWidth : narrowColumn.width,
+        root.narrowPositionAfterGenre)
 
     // The lines the panel shows, wide and narrow.
     readonly property var trackLines: ({
@@ -1328,9 +1407,13 @@ Item {
     // some 264 px of it empty beside it, and the compact one cut the artist
     // off beside a 152 px cover): one block on one left edge, the panel's
     // inset. The cover, as high as two lines of the title (headerCoverSize),
-    // at the inset from the top too, and beside it, besideGap after it (12
-    // px after the inset cover, "A Remarkably" was past the 408 px
-    // sidebar's first line, and a long title showed two words), the title,
+    // at the inset from the top too, and beside it, besideGap after it, the
+    // panel's inset (8 px read cramped against the cover at 24 pt, tighter
+    // than every other gap in the block), the title, to headerTitleEnd
+    // from the panel's right side, so it keeps the room it had (with 12 px
+    // and the inset on the right, "A Remarkably" was past the 408 px
+    // sidebar's first line, "A / Remarkably…", and a long title showed two
+    // words),
     // on up to two lines and centred on it either way (flush in the corner
     // with the title on its foot, the header had three left edges and some
     // 60 px of nothing over the title); then, footGap, the panel's inset,
@@ -1350,7 +1433,12 @@ Item {
     readonly property bool largeHeader: !root.wideRoom && root.largeFont
         && (!root.narrow || root.narrowLinesTall)
         && root._roomBesideHeader(root.headerCoverSize) >= root.narrowLineMinimum
-    readonly property int besideGap: 8
+    readonly property int besideGap: root.textInset
+    // Where the header's title ends, from the panel's right side: a ragged
+    // right edge, which no line under it lines up with, so 8 px, Kirigami's
+    // two small spacings, rather than the inset, which the gap before it
+    // takes.
+    readonly property int headerTitleEnd: 2 * Kirigami.Units.smallSpacing
     readonly property int footGap: root.textInset
     readonly property int titleGapBeside: root.largeHeader ? root.besideGap : root.textInset
     readonly property real footLineWidth: Math.max(0, root.width - 2 * root.textInset)
@@ -2031,9 +2119,10 @@ Item {
 
     // How much of the cover's place shows: opening, from the compact row's
     // height to the square, in the wide layout all the move opens but the
-    // lines' room (wideTextRoom); closing, what it showed, until the seam
-    // comes up to its foot, which then goes with it, so no band of nothing
-    // trails the cover.
+    // lines' room (wideTextRoom); closing, in the wide layout all the seam
+    // leaves but that room, and in the narrow ones what it showed, until
+    // the seam comes up to its foot, which then goes with it, so no band of
+    // nothing trails the cover.
     readonly property real coverBand: {
         if (root.presence >= 1)
             return root.coverSize
@@ -2041,7 +2130,8 @@ Item {
         const band = from.band >= 0 ? Math.min(root.coverSize, from.band)
                                     : Math.min(root.coverSize, root.idleRowHeight)
         if (from.closing)
-            return Math.min(band, Math.max(0, root.moveSeam - root.coverInset))
+            return Math.min(band, Math.max(0, root.moveSeam - root.coverInset
+                                              - (root.wideRoom ? root.wideTextRoom : 0)))
         if (!root.wideRoom)
             return band + (root.coverSize - band) * root.openProgress
         return Math.min(root.coverSize, Math.max(band, root.moveSeam - root.wideTextRoom))
@@ -2079,16 +2169,15 @@ Item {
             coverPath: root.shownCoverPath
             // The size it loads its image at, whatever the place's size.
             coverSourceSize: Math.max(256, root.width)
-            // No cover: the stand-in, its mark on the plot's floor, and in
-            // a light theme an edge, so the dark tile reads as a cover
-            // rather than a hole in the sidebar; in a dark one on the small
-            // tiles too, as the library's has, so their sides and the
-            // traces cut at them do not dissolve into the sidebar (the
-            // floor is ~1.06:1 on it). The wide 360 px tile, edge to edge,
-            // needs none in a dark theme.
+            // No cover: the stand-in, its mark on the plot's floor, with a
+            // 1 px edge in both themes on the sides where it meets the
+            // sidebar's view colour (standInEdgeSides), so the dark tile
+            // reads as a cover rather than a hole in the sidebar and its
+            // sides do not dissolve into a dark one (the floor is ~1.06:1
+            // on it).
             standInColor: root.uiPalette.plotFloor
-            standInEdgeColor: root.uiPalette.themeIsDark && root.wideRoom
-                ? "transparent" : root.uiPalette.plotFloorEdge
+            standInEdgeColor: root.uiPalette.plotFloorEdge
+            standInEdgeSides: root.standInEdgeSides
             // Nothing playing: the placeholder, on the sidebar.
             placeholderColor: root.placeholderColor
             hoverVeilColor: root.uiPalette.hover
@@ -2231,7 +2320,8 @@ Item {
             y: root._whileGrowing(root.narrowStacked
                 ? root.footTop + root.textInset
                 : root.besideTextTop + Math.round(root.lineShift * root.idleRowHeight))
-            width: Math.max(0, root.width - root.textInset - narrowColumn.x)
+            width: Math.max(0, root.width - (root.largeHeader ? root.headerTitleEnd : root.textInset)
+                                   - narrowColumn.x)
             spacing: root.narrowStacked || root.largeHeader ? root.stackedLineGap : 0
 
             HoverHandler {

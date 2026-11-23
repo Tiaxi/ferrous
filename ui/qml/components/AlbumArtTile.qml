@@ -18,8 +18,10 @@ import "../logic/KeyUtils.js" as KeyUtils
 // the app icon's glide and its harmonics, at the icon's own aspect, at a
 // cover mark's strength rather than data's. A small tile, as the narrow
 // layout's 96 px one, has the mark of three curves, without the 4th
-// harmonic. In a light theme a 1 px edge (`standInEdgeColor`) keeps the
-// dark tile from reading as a hole in the sidebar. With nothing playing
+// harmonic. A 1 px edge (`standInEdgeColor`) on the sides where the tile
+// meets the sidebar's view colour (`standInEdgeSides`) keeps the dark tile
+// from reading as a hole in it, and none where it meets a seam or the
+// window's edge, where it doubled them. With nothing playing
 // (`idle`) it shows only the placeholder colour: the now-playing panel
 // shows its compact row then, and while it shrinks into it the tile keeps
 // the track that went (a mark of its own there stood alone in an empty
@@ -46,9 +48,11 @@ Rectangle {
     // Nothing playing: the tile shows no cover, only the placeholder.
     property bool idle: false
     // The stand-in for a track without a cover: its colour, the plot's
-    // floor, and the 1 px edge around it, or transparent for none.
+    // floor, and its 1 px edge, or transparent for none, on the sides that
+    // `standInEdgeSides` names, {top, right, bottom, left}.
     property color standInColor: "transparent"
     property color standInEdgeColor: "transparent"
+    property var standInEdgeSides: ({ top: true, right: true, bottom: true, left: true })
     // The mark's colours, as drawn on the floor: a cover's mark, not the
     // plot's data. The glide in the icon's amber at the value it had at
     // 68 %, 5.1:1, its hue and chroma kept (mixed toward the floor it read
@@ -158,6 +162,15 @@ Rectangle {
     // Drawn as shapes, so their strokes keep the width set for the tile's
     // size (standInStroke) as the curves scale to it. Assistive technology
     // hears "No album art" from the keyboard stop over it.
+    // A side of the stand-in's edge (StandInMark), 1 px of
+    // standInEdgeColor where standInEdgeSides has it.
+    component EdgeSide: Rectangle {
+        required property string side
+        objectName: "albumArtStandInEdge_" + side
+        visible: root.standInEdgeSides[side] === true
+        color: root.standInEdgeColor
+    }
+
     component StandInMark: Item {
 
         Shape {
@@ -245,13 +258,34 @@ Rectangle {
             }
         }
 
-        Rectangle {
+        // Over the mark, which runs out to the right side.
+        Item {
             objectName: "albumArtStandInEdge"
             anchors.fill: parent
             visible: root.standInEdgeColor.a > 0
-            color: "transparent"
-            border.width: 1
-            border.color: root.standInEdgeColor
+
+            EdgeSide {
+                side: "top"
+                width: parent.width
+                height: 1
+            }
+            EdgeSide {
+                side: "bottom"
+                y: parent.height - 1
+                width: parent.width
+                height: 1
+            }
+            EdgeSide {
+                side: "left"
+                width: 1
+                height: parent.height
+            }
+            EdgeSide {
+                side: "right"
+                x: parent.width - 1
+                width: 1
+                height: parent.height
+            }
         }
     }
 
