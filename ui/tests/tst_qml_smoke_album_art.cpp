@@ -3227,10 +3227,11 @@ void AlbumArtSmokeTest::itunesReplaceStatesTheOutcomeThatApplies_data() {
 // the shown art is embedded, overwrites a folder image with a cover's name,
 // and adds a cover file beside another folder image. One paragraph in the
 // secondary ink under the question, the only semibold line, and the loss
-// line only when a file is overwritten. When the dialog can't tell, both
-// cases as regular conditions, 12 px apart at 10 pt, with the loss line
-// (two semibold conditions outranked the question and made the reader work
-// out the case).
+// line, also secondary, only when a file is overwritten. When the dialog
+// can't tell, both cases as regular conditions, 12 px apart at 10 pt, with
+// the loss line (two semibold conditions outranked the question and made the
+// reader work out the case; a loss line in the text's colour outranked the
+// outcome above it).
 void AlbumArtSmokeTest::itunesReplaceStatesTheOutcomeThatApplies() {
     QFETCH(qreal, pointSize);
     QFETCH(QString, fileName);
@@ -3330,7 +3331,8 @@ void AlbumArtSmokeTest::itunesReplaceStatesTheOutcomeThatApplies() {
     }
     if (warning != nullptr) {
         QCOMPARE(warning->property("text").toString(), QStringLiteral("Ferrous keeps no copy of what it overwrites."));
-        QCOMPARE(warning->property("color").value<QColor>().rgba(), ink);
+        // Secondary, as the other confirmations' loss lines.
+        QCOMPARE(warning->property("color").value<QColor>().rgba(), secondary);
         QTRY_VERIFY(sceneRectOf(warning).top() > sceneRectOf(lines.last()).bottom());
         lines.append(warning);
     }
@@ -5187,7 +5189,8 @@ void AlbumArtSmokeTest::itunesReplaceShowsWhatWasChosen() {
                     > std::max(sceneRectOf(thumbnail).bottom(), sceneRectOf(artist).bottom()));
         QTRY_VERIFY(sceneRectOf(warning).top() > sceneRectOf(outcome).bottom());
         QCOMPARE(sceneRectOf(warning).left(), sceneRectOf(consequence).left());
-        QCOMPARE(warning->property("color").value<QColor>().rgba(), palette->property("text").value<QColor>().rgba());
+        QCOMPARE(warning->property("color").value<QColor>().rgba(),
+                 palette->property("textSecondary").value<QColor>().rgba());
         QCOMPARE(artist->property("color").value<QColor>().rgba(),
                  palette->property("textSecondary").value<QColor>().rgba());
         // The safe choice is still the default.

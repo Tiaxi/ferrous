@@ -1042,16 +1042,19 @@ Components.DialogWindow {
             }
         }
 
-        // What is lost, on its own line and in the text's colour, whenever
-        // Replace may overwrite something: a folder's cover file, or the
-        // tracks' own embedded art, which embedding replaces and Ferrous
-        // keeps no copy of either. Only adding a cover file loses nothing.
+        // What is lost, on its own line, whenever Replace may overwrite
+        // something: a folder's cover file, or the tracks' own embedded art,
+        // which embedding replaces and Ferrous keeps no copy of either. Only
+        // adding a cover file loses nothing. In secondary ink, as Unsaved
+        // Changes' and Quit Anyway's loss lines: under the question every
+        // line is secondary (in the text's colour it outranked the outcome
+        // above it), and Cancel as the default guards the overwrite.
         Label {
             objectName: "replaceCoverWarning"
             Layout.fillWidth: true
             visible: replaceCoverConfirmDialog.outcomeCase !== "add"
             wrapMode: Text.Wrap
-            color: root.uiPalette.text
+            color: root.uiPalette.textSecondary
             textFormat: Text.PlainText
             text: I18n.i18nc("@info", "Ferrous keeps no copy of what it overwrites.")
         }
