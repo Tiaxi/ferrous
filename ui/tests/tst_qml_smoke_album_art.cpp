@@ -1259,9 +1259,11 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     const QString size = QLocale().toString(1400.0, 'f', 0);
     QCOMPARE(values, (QStringList{QStringLiteral("%1 × %1 px").arg(size), QStringLiteral("412 KiB"),
                                   QStringLiteral("JPEG"), QStringLiteral("Folder image")}));
-    // The values at the body size, as the file's name, and the labels at
-    // the small size, on the app's type scale (albumArtDetailsAreOnTheTypeScale).
-    const qreal bodySize = qvariant_cast<QFont>(title->property("font")).pointSizeF();
+    // The values at the body size, the file's name 1.15 times it, and the
+    // labels at the small size, on the app's type scale
+    // (albumArtDetailsAreOnTheTypeScale).
+    const qreal bodySize = palette->property("basePointSize").toReal();
+    QCOMPARE(qvariant_cast<QFont>(title->property("font")).pointSizeF(), bodySize * 1.15);
     for (const QString &name : {QStringLiteral("albumArtInfoValue"), QStringLiteral("albumArtFolderPath")}) {
         for (QQuickItem *text : visibleItemsNamed(column, name)) {
             QCOMPARE(qvariant_cast<QFont>(text->property("font")).pointSizeF(), bodySize);
@@ -1883,7 +1885,9 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnTheTypeScale() {
     QQuickItem *previewLabel = visibleItemNamed(window, QStringLiteral("albumArtPreviewLabel"));
     QVERIFY(previewLabel != nullptr);
     const auto headingFont = qvariant_cast<QFont>(previewLabel->property("font"));
-    QCOMPARE(headingFont.pointSizeF(), palette->property("basePointSize").toReal() * 1.2);
+    // A step larger than the details' text in the window, at their size
+    // over the whole screen, as the title strip's track title.
+    QCOMPARE(headingFont.pointSizeF(), palette->property("basePointSize").toReal() * (fullscreen ? 1.2 : 1.15));
     QCOMPARE(headingFont.weight(), QFont::DemiBold);
     QCOMPARE(qvariant_cast<QFont>(title->property("font")).pointSizeF(), small);
     QCOMPARE(qvariant_cast<QFont>(title->property("font")).weight(), QFont::Normal);
@@ -2297,13 +2301,13 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     QCOMPARE(rectOf(label).left() - columnRect.left(), padding);
     QCOMPARE(columnRect.right() - rectOf(apply).right(), padding);
     // The heading, which image shows, a step larger than the body size:
-    // 12 pt to its 10; over the whole screen, the details' 16 px, as the
+    // 11.5 pt to its 10; over the whole screen, the details' 16 px, as the
     // title strip's track title over it (at 18 px it outranked the title).
     // The file's name is secondary under it (it headed both images' details,
     // often "cover.jpg" for either).
     const qreal bodyPointSize = value->property("font").value<QFont>().pointSizeF() / infoScale;
     const auto headingFont = label->property("font").value<QFont>();
-    QVERIFY2(qAbs(headingFont.pointSizeF() - bodyPointSize * 1.2) < 0.001, at.constData());
+    QVERIFY2(qAbs(headingFont.pointSizeF() - bodyPointSize * (fullscreen ? 1.2 : 1.15)) < 0.001, at.constData());
     QCOMPARE(headingFont.weight(), QFont::DemiBold);
     QVERIFY2(title->property("font").value<QFont>().pointSizeF() < bodyPointSize * infoScale, at.constData());
     QCOMPARE(title->property("font").value<QFont>().weight(), QFont::Normal);
@@ -4927,10 +4931,21 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
     QQuickItem *value = visibleItemsNamed(column, QStringLiteral("albumArtInfoValue")).value(0);
     QVERIFY(value != nullptr);
     QCOMPARE(qvariant_cast<QFont>(value->property("font")).pointSizeF(), body * (fullscreen ? 1.2 : 1.0));
-    QCOMPARE(qvariant_cast<QFont>(title->property("font")).pointSizeF(), body * (fullscreen ? 1.2 : 1.0));
+    // The file's name heads them in semibold, 1.15 times their size in the
+    // window (at their size, it was set off from the rows by its weight
+    // alone), 12 px clear of the first row's inset, more over the whole
+    // screen (at 8 px it ran into the rows).
+    QCOMPARE(qvariant_cast<QFont>(title->property("font")).pointSizeF(), body * (fullscreen ? 1.2 : 1.15));
+    QCOMPARE(qvariant_cast<QFont>(title->property("font")).weight(), QFont::DemiBold);
     if (fullscreen && qFuzzyCompare(body, 10.0)) {
         QCOMPARE(QFontInfo(qvariant_cast<QFont>(value->property("font"))).pixelSize(), 16);
         QCOMPARE(QFontInfo(qvariant_cast<QFont>(title->property("font"))).pixelSize(), 16);
+    }
+    {
+        QQuickItem *firstRow = visibleItemsNamed(column, QStringLiteral("albumArtInfoRow")).value(0);
+        QVERIFY(firstRow != nullptr);
+        QCOMPARE(sceneRectOf(firstRow).top() - sceneRectOf(title).bottom(),
+                 std::round(12 * (fullscreen ? 1.2 : 1.0)) + surface->property("infoRowTopMargin").toReal());
     }
     QCOMPARE(sceneRectOf(title).left() - sceneRectOf(column).left(), surface->property("infoPadding").toReal());
 

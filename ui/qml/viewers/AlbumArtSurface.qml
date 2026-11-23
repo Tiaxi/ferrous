@@ -74,12 +74,14 @@ Item {
     readonly property int detailsIconSize: root.uiPalette.scaledSize(
         Math.round(Kirigami.Units.iconSizes.small * root.infoScale))
     // The details' heading, the file's name or, during a preview, which
-    // image shows: the body size; during a preview, a step larger, 12 pt
-    // with the default 10 pt font; over the whole screen, the details' size,
-    // as the title strip's track title over it (at 1.35 times, 18 px, it
-    // outranked that title).
-    readonly property real infoTitlePointSize: root.uiPalette.basePointSize
-        * (root.fullscreen ? root.uiPalette.fullscreenTextScale : (root.previewActive ? 1.2 : 1))
+    // image shows: in semibold, 1.15 times the details' text, 11.5 pt with
+    // the default 10 pt font (at their size, it was set off from the rows by
+    // its weight alone); over the whole screen, the details' size, as the
+    // title strip's track title over it (at 1.35 times, 18 px, it outranked
+    // that title).
+    readonly property real infoTitlePointSize: root.fullscreen
+        ? root.uiPalette.basePointSize * root.uiPalette.fullscreenTextScale
+        : root.infoPointSize * 1.15
     // The image's details, from BridgeClient.cachedImageFileDetails: path,
     // fileName, width, height, fileSizeText, format, embeddedCover.
     property var fileInfo: ({})
@@ -766,10 +768,13 @@ Item {
                                       root.infoLabelColumnMinimum),
                              Math.floor(infoLayout.width * 0.4)))
 
+                // The heading, or the file's name under it, is 12 px clear of
+                // the rows, more over the whole screen (at 8 px it ran into
+                // them).
                 Label {
                     objectName: "albumArtInfoTitle"
                     Layout.fillWidth: true
-                    Layout.bottomMargin: Math.round(8 * root.infoScale)
+                    Layout.bottomMargin: Math.round(12 * root.infoScale)
                     textFormat: Text.PlainText
                     text: root.sourceKind === "embedded"
                         ? I18n.i18nc("@info:title album art stored in the track's file", "Embedded Image")
