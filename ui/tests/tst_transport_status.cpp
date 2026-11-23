@@ -994,10 +994,11 @@ void TransportStatusTest::transportButtonsAreOffWhereTheyCannotAct() {
 
 // Every tooltip of the transport opens in one lane above the row, the
 // seek bar's time box's: one rail for the band, on one line, as tall as
-// the time box, in the band, each 1 px clear of its control's focus ring
+// the time box, in the band, each 3 px clear of its control's focus ring
 // (the buttons' opened under the band, over the cover and the queue's
 // header, while Mute's and the volume's opened above it; the time box
-// covered the bar's ring's top). A button held down shows none.
+// covered the bar's ring's top; 1 px clear, a box read as a tab on the
+// ring). A button held down shows none.
 void TransportStatusTest::transportToolTipsClearTheFocusRings() {
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
@@ -1025,7 +1026,7 @@ void TransportStatusTest::transportToolTipsClearTheFocusRings() {
         QVERIFY(box != nullptr);
         const QRectF boxRect = sceneRect(box);
         const QRectF ringRect = sceneRect(ring);
-        QVERIFY2(boxRect.bottom() <= ringRect.top() - 1 + 0.5,
+        QVERIFY2(boxRect.bottom() <= ringRect.top() - 3 + 0.5,
                  qPrintable(name + QLatin1Char(' ') + describeRect(boxRect) + QStringLiteral(" over ")
                             + describeRect(ringRect)));
         QVERIFY2(!boxRect.intersects(ringRect), qPrintable(name));
@@ -1062,7 +1063,7 @@ void TransportStatusTest::transportToolTipsClearTheFocusRings() {
     auto *seekBox = seekTip->property("background").value<QQuickItem *>();
     QVERIFY(seekBox != nullptr);
     const QRectF seekBoxRect = sceneRect(seekBox);
-    QVERIFY2(seekBoxRect.bottom() <= sceneRect(seekRing).top() - 1 + 0.5,
+    QVERIFY2(seekBoxRect.bottom() <= sceneRect(seekRing).top() - 3 + 0.5,
              qPrintable(describeRect(seekBoxRect) + QStringLiteral(" over ") + describeRect(sceneRect(seekRing))));
     QTest::keyRelease(harness.window, Qt::Key_Right);
     // The buttons' on the time box's line, as tall as it.
@@ -1541,7 +1542,7 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
     const QRectF band = sceneRect(transport);
     QTRY_VERIFY(tip->property("opened").toBool());
     const qreal laneBottom = band.top() + transport->property("laneBottom").toReal();
-    QVERIFY(laneBottom <= bar.top() - seek->property("focusRingOutset").toReal() - 1);
+    QVERIFY(laneBottom <= bar.top() - seek->property("focusRingOutset").toReal() - 3);
     const auto expectAbove = [&](const QRectF &tipRect) {
         QVERIFY2(std::abs(tipRect.bottom() - laneBottom) <= 0.5, qPrintable(describeRect(tipRect)));
         QVERIFY2(tipRect.top() >= band.top(), qPrintable(describeRect(tipRect)));
