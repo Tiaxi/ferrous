@@ -44,13 +44,18 @@ constexpr int kRadius = 3;
 constexpr double kDash = 4.0;
 constexpr double kDashGap = 3.0;
 
+// How near the playhead, in logical pixels, the crosshair's vertical line
+// gives way to it: the playhead is drawn above the crosshair, so that a seek
+// on the plot, which lands it under the pointer, shows. Its time stays.
+constexpr double kYieldsWithin = 1.0;
+
 // What is between the dashes, over data as light as they are, such as the
 // waveform's fill or a bright harmonic, where they were lost (1.4:1): the
-// plot's floor at 60 %, so nothing on the floor itself, and the line no
+// plot's floor at `opacity`, so nothing on the floor itself, and the line no
 // thicker.
-inline QColor dashGapColor(const QColor &floor) {
+inline QColor dashGapColor(const QColor &floor, double opacity) {
     QColor gap = floor;
-    gap.setAlphaF(static_cast<float>(floor.alphaF() * 0.6));
+    gap.setAlphaF(static_cast<float>(floor.alphaF() * opacity));
     return gap;
 }
 
@@ -344,6 +349,36 @@ inline QString signedNumber(double value, int decimals) {
     const double rounded = std::round(value * scale) / scale;
     const QString digits = QString::number(std::abs(rounded), 'f', decimals);
     return rounded < 0.0 ? QStringLiteral("\u2212") + digits : digits;
+}
+
+// The crosshair's time, "1:46.0", with `decimals` decimals, 1 to 3.
+inline QString formatCrosshairTime(double seconds, int decimals) {
+    decimals = std::clamp(decimals, 1, 3);
+    const qint64 unit = decimals == 1 ? 10 : (decimals == 2 ? 100 : 1000);
+    // Halfway rounds up, also a rounding error short of it: a pan works out
+    // the one time it holds afresh, from another start, on each move.
+    constexpr double roundingError = 1e-6;
+    const qint64 ticks = std::llround(
+        std::max(0.0, seconds) * static_cast<double>(unit) + roundingError);
+    const qint64 whole = ticks / unit;
+    const qint64 hours = whole / 3600;
+    const QString rest = QStringLiteral("%1.%2")
+        .arg(whole % 60, 2, 10, QLatin1Char('0'))
+        .arg(ticks % unit, decimals, 10, QLatin1Char('0'));
+    if (hours > 0) {
+        return QStringLiteral("%1:%2:%3").arg(hours).arg((whole / 60) % 60, 2, 10, QLatin1Char('0')).arg(rest);
+    }
+    return QStringLiteral("%1:%2").arg(whole / 60).arg(rest);
+}
+
+// Its decimals, one rule for both plots: one at the default zoom; zoomed in,
+// as many as tell a column of `secondsPerColumn` from the next, up to
+// milliseconds. A column is what the plot resolves: the waveform's device
+// pixel, and the spectrogram's device pixel or its analysis column,
+// whichever is longer.
+inline int crosshairTimeDecimals(double secondsPerColumn, double zoomLevel) {
+    if (zoomLevel <= 1.0001 || !(secondsPerColumn > 0.0)) return 1;
+    return std::clamp(static_cast<int>(std::ceil(-std::log10(secondsPerColumn) - 1e-9)), 1, 3);
 }
 
 // The level of silence: "−∞".

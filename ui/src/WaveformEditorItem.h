@@ -735,12 +735,6 @@ private:
         QPainter &painter, const QLineF &line,
         const QColor &foreground, const QColor &contrast);
     static QPainterPath buildSamplePath(const QPolygonF &samples);
-    // The crosshair's time, "1:46.0", with `decimals` decimals, 1 to 3.
-    static QString formatCrosshairTime(double seconds, int decimals);
-    // Its decimals: one at the default zoom, as the spectrogram's; zoomed
-    // in, as many as tell a column of `secondsPerColumn` from the next,
-    // up to milliseconds.
-    static int crosshairTimeDecimals(double secondsPerColumn, double zoomLevel);
     // The lowest lane's label and buttons, in a plot `height` tall of
     // `lanes` lanes.
     QRect lowestLaneHeadLocked(int height, int lanes) const;
@@ -801,8 +795,11 @@ private:
     std::shared_ptr<const DetailWindow> detailSnapshotLocked(
         double startSeconds, double endSeconds) const;
     LaneStyle laneStyleLocked() const;
+    // With the playhead drawn at `playheadX`, the crosshair's vertical line
+    // gives way to it within a pixel of it (see CrosshairReadout::kYieldsWithin).
     void drawCrosshair(QPainter &painter, int width, int height,
-                       double visibleStart, double visibleEnd);
+                       double visibleStart, double visibleEnd,
+                       double playheadX = std::numeric_limits<double>::quiet_NaN());
     // The width of the widest level the readout shows, in its font (see
     // CrosshairReadout::plateRects).
     int crosshairWidestLevelWidthLocked();

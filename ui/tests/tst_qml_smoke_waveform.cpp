@@ -92,6 +92,7 @@ private slots:
     void waveformEditorRulersFollowGridSetting();
     void waveformEditorRulersRemainVisibleWhenZoomed();
     void waveformEditorPlayheadIsThinAndNeutral();
+    void waveformEditorCrosshairYieldsToThePlayhead();
     void waveformEditorOverviewRespectsCoverageAndChannelIdentity();
     void waveformEditorReferenceLineContrastsWaveform();
     void waveformEditorContrastLinesUseFboSafeCompositionModes();
@@ -1095,7 +1096,7 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
             QMutexLocker lock(&item->m_stateMutex);
             std::tie(viewStart, viewEnd) = item->visibleRangeLocked();
         }
-        const int decimals = WaveformEditorItem::crosshairTimeDecimals(
+        const int decimals = CrosshairReadout::crosshairTimeDecimals(
             (viewEnd - viewStart) / std::ceil(320 * scale - 1e-6), zoom);
         QCOMPARE(decimals, zoom == 1.0 ? 1 : 3);
         const QRegularExpression timeLabel(QStringLiteral("^\\d+:\\d\\d\\.\\d{%1}$").arg(decimals));
@@ -1109,7 +1110,7 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
         item->mousePressEvent(&press);
         QCOMPARE(seekSpy.count(), 1);
         const double seconds = seekSpy.at(0).at(0).toDouble();
-        QCOMPARE(WaveformEditorItem::formatCrosshairTime(seconds, decimals), shown.constFirst());
+        QCOMPARE(CrosshairReadout::formatCrosshairTime(seconds, decimals), shown.constFirst());
         double start = 0.0;
         double end = 0.0;
         {
@@ -2548,9 +2549,11 @@ void WaveformSmokeTest::waveformEditorCrosshairReadsOverTheFill_data() {
 }
 
 void WaveformSmokeTest::waveformEditorCrosshairReadsOverTheFill() {
-    // The crosshair's dashes vanished over the waveform's fill, at 1.4:1.
-    // What is between them is the floor at 60 %: it reads on the fill, is
-    // nothing on the floor, and the line is a pixel wide as before.
+    // The crosshair's dashes vanished over the waveform's fill, at 1.4:1,
+    // and at 60 % of the floor what is between them was a faint second
+    // line there (3.6:1). At 85 % it is one dark dotted line through the
+    // fill (6.5:1; 6.3:1 in light), nothing on the floor, and the line is a
+    // pixel wide as before.
     QFETCH(QColor, floor);
     QFETCH(QColor, fill);
     QFETCH(QColor, text);
@@ -2590,7 +2593,7 @@ void WaveformSmokeTest::waveformEditorCrosshairReadsOverTheFill() {
                 ++gaps;
             }
         }
-        QVERIFY2(best >= 3.0, qPrintable(QStringLiteral("%1:1 over the fill").arg(best)));
+        QVERIFY2(best >= 6.0, qPrintable(QStringLiteral("%1:1 over the fill").arg(best)));
         QCOMPARE(touchedBeside, 0);
         // Still dashed on the floor, 4 on and 3 off.
         QVERIFY2(dashes >= 12 && gaps >= 8,
@@ -2641,7 +2644,7 @@ void WaveformSmokeTest::waveformEditorReadoutFollowsTheTextScale() {
         return CrosshairReadout::plateSize(metrics.horizontalAdvance(text), metrics,
                                            CrosshairReadout::Colors{}, textScale);
     };
-    const QString timeText = WaveformEditorItem::formatCrosshairTime(5.0, 1);
+    const QString timeText = CrosshairReadout::formatCrosshairTime(5.0, 1);
     const auto [windowValue, windowTime] = plates();
     QVERIFY(windowValue.isValid() && windowTime.isValid());
     // The rounded corners leave a plate's corner pixels out: its middle
@@ -2668,19 +2671,19 @@ void WaveformSmokeTest::waveformEditorReadoutFollowsTheTextScale() {
 }
 
 void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(28.98, 3), QStringLiteral("0:28.980"));
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(3'723.004, 3), QStringLiteral("1:02:03.004"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(28.98, 3), QStringLiteral("0:28.980"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(3'723.004, 3), QStringLiteral("1:02:03.004"));
     // One decimal, as the spectrogram's: "1:46.0".
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(106.0, 1), QStringLiteral("1:46.0"));
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(28.98, 1), QStringLiteral("0:29.0"));
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(3'723.004, 2), QStringLiteral("1:02:03.00"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(106.0, 1), QStringLiteral("1:46.0"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(28.98, 1), QStringLiteral("0:29.0"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(3'723.004, 2), QStringLiteral("1:02:03.00"));
     // One at the default zoom, whatever the track's length; zoomed in, as
     // many as a column needs, to milliseconds.
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.24, 1.0), 1);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.002, 1.0), 1);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.24, 2.0), 1);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.05, 4.0), 2);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.0001, 64.0), 3);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.24, 1.0), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.002, 1.0), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.24, 2.0), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.05, 4.0), 2);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.0001, 64.0), 3);
     // Padded as a lane's label, 6 px at either side of the text and 20 px
     // tall at the default font (it had 3 px around the text).
     const QFont applicationFont = QGuiApplication::font();
@@ -3136,6 +3139,62 @@ void WaveformSmokeTest::waveformEditorPlayheadIsThinAndNeutral() {
     QVERIFY(std::abs(playhead.red() - playhead.green()) < 12);
     QVERIFY(playhead.red() > left.red());
     QCOMPARE(left, right);
+}
+
+// A seek on the plot lands the playhead under the pointer, where the
+// crosshair's dashes were drawn over it: the landing read as the hover line.
+// Within a pixel of the playhead the crosshair's vertical line gives way to
+// it, and its time stays on the axis.
+void WaveformSmokeTest::waveformEditorCrosshairYieldsToThePlayhead() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setCrosshairEnabled(true);
+    setTestPosition(item, 5.0);
+    const auto paint = [&item]() {
+        QImage canvas(320, 180, QImage::Format_RGB32);
+        canvas.fill(Qt::black);
+        QPainter painter(&canvas);
+        item.paint(&painter);
+        painter.end();
+        return canvas;
+    };
+    const QImage bare = paint();
+    // The playhead, at 5 s of 10 in 320 px.
+    QVERIFY(QColor(bare.pixel(160, 40)).red() > QColor(bare.pixel(156, 40)).red());
+    // The rows above the horizontal line and the plates, and the bottom
+    // edge, where the time is.
+    const auto columnDiffers = [&bare](const QImage &shown, int x) {
+        int differing = 0;
+        for (int y = 0; y < 80; ++y) {
+            differing += shown.pixel(x, y) != bare.pixel(x, y) ? 1 : 0;
+        }
+        return differing;
+    };
+    const auto bottomDiffers = [&bare](const QImage &shown) {
+        int differing = 0;
+        for (int y = 150; y < 180; ++y) {
+            for (int x = 120; x < 200; ++x) {
+                differing += shown.pixel(x, y) != bare.pixel(x, y) ? 1 : 0;
+            }
+        }
+        return differing;
+    };
+    for (const double x : {159.0, 160.0, 161.0}) {
+        item.setHoverPosition(x, 120.0, true);
+        const QImage shown = paint();
+        for (int column = 158; column <= 162; ++column) {
+            QVERIFY2(columnDiffers(shown, column) == 0,
+                qPrintable(QStringLiteral("hover at %1: column %2").arg(x).arg(column)));
+        }
+        QVERIFY2(bottomDiffers(shown) > 50, qPrintable(QStringLiteral("no time at %1").arg(x)));
+    }
+    // Two pixels off, the line is the crosshair's.
+    item.setHoverPosition(162.0, 120.0, true);
+    QVERIFY(columnDiffers(paint(), 162) > 20);
+    item.setHoverPosition(158.0, 120.0, true);
+    QVERIFY(columnDiffers(paint(), 158) > 20);
 }
 
 void WaveformSmokeTest::waveformEditorOverviewRespectsCoverageAndChannelIdentity() {

@@ -1521,8 +1521,8 @@ void WaveformFollowSmokeTest::grabbedTimeHoldsStillThroughAPan() {
     const auto readout = [&](double x) {
         const double seconds = rightClickAt(item, x);
         const auto [start, end] = viewOf(item);
-        return WaveformEditorItem::formatCrosshairTime(seconds,
-            WaveformEditorItem::crosshairTimeDecimals((end - start) / (width * scale), 8.0));
+        return CrosshairReadout::formatCrosshairTime(seconds,
+            CrosshairReadout::crosshairTimeDecimals((end - start) / (width * scale), 8.0));
     };
     const QString grabbed = readout(pressX);
     sendMouse(item, QEvent::MouseButtonPress, pressX, Qt::MiddleButton, Qt::MiddleButton);

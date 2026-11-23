@@ -33,6 +33,7 @@ private slots:
     void spectrogramOverlayBenchmark();
     void spectrogramCrosshairOverlayGeneratesOnHover();
     void spectrogramCrosshairReadsOverBrightData();
+    void spectrogramCrosshairYieldsToThePlayhead();
     void spectrogramCrosshairOverlayMovesOnlyItsTimeLabel();
     void spectrogramCrosshairReadoutClampsInsideTheLane_data();
     void spectrogramCrosshairReadoutClampsInsideTheLane();
@@ -1406,14 +1407,15 @@ void SpectrogramSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairReadsOverBrightData() {
-    // The dashed white lines vanished on a bright harmonic. Between the
-    // dashes is the plot's floor at 60 %, dark there and nothing on the
-    // floor, and the lines are no thicker.
+    // The dashed white lines vanished on a bright harmonic, and at 35 %
+    // they were lost in mid-bright texture (2.3:1). The dashes are white at
+    // 55 % and what is between them the plot's floor at 80 %, so one or the
+    // other carries the line over any data, and the lines are no thicker.
     QQuickWindow window;
     if (window.rendererInterface()->graphicsApi() == QSGRendererInterface::Null) {
         QSKIP("The null renderer draws no pixels");
     }
-    const QColor floor(0x14, 0x05, 0x28);
+    const QColor floor(0x0a, 0x03, 0x18);
     window.setColor(floor);
     window.resize(200, 100);
     window.show();
@@ -1455,6 +1457,112 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadsOverBrightData() {
         }
         QVERIFY2(best >= 3.0, qPrintable(QStringLiteral("%1:1 over the data").arg(best)));
     }
+    // Its dashes and its gaps, each over the data.
+    const auto over = [&data](const QColor &top, double alpha) {
+        return QColor::fromRgbF(
+            static_cast<float>(alpha * top.redF() + (1.0 - alpha) * data.redF()),
+            static_cast<float>(alpha * top.greenF() + (1.0 - alpha) * data.greenF()),
+            static_cast<float>(alpha * top.blueF() + (1.0 - alpha) * data.blueF()));
+    };
+    const QColor dash = over(Qt::white, 140.0 / 255.0);
+    const QColor gap = over(floor, 0.8);
+    int dashes = 0;
+    int gaps = 0;
+    for (int i = 4; i < 32; ++i) {
+        const QColor at = shown.pixelColor(20, i);
+        dashes += channelDistance(at, dash) <= 2 ? 1 : 0;
+        gaps += channelDistance(at, gap) <= 2 ? 1 : 0;
+    }
+    // 4 on and 3 off, over 28 pixels.
+    QVERIFY2(dashes >= 12 && gaps >= 8, qPrintable(QStringLiteral("%1 dashes of %2, %3 gaps of %4, as %5 and %6")
+        .arg(dashes).arg(dash.name(), QString::number(gaps), gap.name(),
+             shown.pixelColor(20, 4).name(), shown.pixelColor(20, 8).name())));
+}
+
+// A seek on the plot lands the playhead under the pointer, where the
+// crosshair's dashes were drawn over it: the landing read as the hover line.
+// Within a pixel of the playhead the crosshair's vertical line gives way to
+// it, and its time stays on the axis.
+void SpectrogramSmokeTest::spectrogramCrosshairYieldsToThePlayhead() {
+    QQuickWindow window;
+    if (window.rendererInterface()->graphicsApi() == QSGRendererInterface::Null) {
+        QSKIP("The null renderer draws no pixels");
+    }
+    const QColor floor(0x0a, 0x03, 0x18);
+    window.setColor(floor);
+    window.resize(200, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    auto &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setFloorColor(floor);
+    item.setCrosshairEnabled(true);
+    item.setAcceptHoverEvents(false);
+    constexpr int bins = 64;
+    item.feedPrecomputedChunk(QByteArray(bins * 400, '\x40'), bins, 0, 400, 0, 400, 48000, 1024,
+        true, true, 1, false);
+    setTestPosition(item, 4.0, 1);
+    const auto grab = [&]() {
+        item.update();
+        return window.grabWindow().convertToFormat(QImage::Format_RGB32);
+    };
+    const QColor playhead(0xe8, 0xe8, 0xe8);
+    // The playhead's column.
+    int playheadX = -1;
+    QImage bare;
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&]() {
+            bare = grab();
+            if (spectrogramRasterPending(item)) return false;
+            for (int x = 0; x < bare.width(); ++x) {
+                if (channelDistance(bare.pixelColor(x, 20), playhead) <= 3) {
+                    playheadX = x;
+                    return true;
+                }
+            }
+            return false;
+        }(), 5000);
+    const auto hoverAt = [&](double x) {
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.m_hoverActive = true;
+            item.m_hoverPosition = QPointF(x + 0.5, 60.0);
+            item.m_crosshairDirty = true;
+        }
+        return grab();
+    };
+    const auto hasTime = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        for (const SpectrogramOverlayImage &image : std::as_const(item.m_crosshair.images)) {
+            if (image.kind == SpectrogramOverlayImage::ReadoutPlate && image.text.contains(u':')) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const int dx : {-1, 0, 1}) {
+        const QImage shown = hoverAt(playheadX + dx);
+        // Above the horizontal line and its plate: the playhead and its
+        // casing, as without the crosshair.
+        for (int x = playheadX - 2; x <= playheadX + 2; ++x) {
+            for (int y = 2; y < 40; ++y) {
+                QVERIFY2(shown.pixel(x, y) == bare.pixel(x, y),
+                    qPrintable(QStringLiteral("hover at %1: %2,%3 is %4, not %5").arg(playheadX + dx)
+                        .arg(x).arg(y).arg(shown.pixelColor(x, y).name(), bare.pixelColor(x, y).name())));
+            }
+        }
+        QVERIFY(hasTime());
+    }
+    // Two pixels off, the line is the crosshair's.
+    const QImage beside = hoverAt(playheadX + 3);
+    int dashed = 0;
+    for (int y = 2; y < 40; ++y) {
+        dashed += beside.pixel(playheadX + 3, y) != bare.pixel(playheadX + 3, y) ? 1 : 0;
+    }
+    QVERIFY(dashed > 10);
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairOverlayMovesOnlyItsTimeLabel() {
@@ -1545,12 +1653,13 @@ void layOutReadout(SpectrogramItem &item, const QSize &lane, double scale, const
 }
 
 // "1:46.0", as the readout shows a time under an hour.
-QString readoutTime(double seconds) {
-    const long tenths = std::lround(seconds * 10.0);
+QString readoutTime(double seconds, int decimals = 1) {
+    const qint64 unit = decimals == 1 ? 10 : (decimals == 2 ? 100 : 1'000);
+    const qint64 ticks = std::llround(seconds * static_cast<double>(unit));
     return QStringLiteral("%1:%2.%3")
-        .arg(tenths / 600)
-        .arg((tenths / 10) % 60, 2, 10, QLatin1Char('0'))
-        .arg(tenths % 10);
+        .arg(ticks / unit / 60)
+        .arg((ticks / unit) % 60, 2, 10, QLatin1Char('0'))
+        .arg(ticks % unit, decimals, 10, QLatin1Char('0'));
 }
 
 } // namespace
@@ -3000,10 +3109,13 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutReadsEachView() {
         layOutReadout(item, lane, scale, pointer, rolling, drawX);
         const QVector<SpectrogramOverlayImage> plates = readoutPlatesOf(item.m_crosshair);
         QCOMPARE(plates.size(), 2);
-        // The time of the column under the vertical line.
+        // The time of the column under the vertical line, as finely as the
+        // view resolves it, as the waveform's readout: tenths at the
+        // default zoom; zoomed, its columns, 21 ms, to hundredths (at
+        // tenths, the pointer crossed 16 px before the time changed).
         const double lineX = std::floor(pointer.x() * scale) / scale;
         const double seconds = (lineX - drawX) / effectiveZoom / kReadoutColumnsPerSecond;
-        QCOMPARE(plates[1].text, readoutTime(seconds));
+        QCOMPARE(plates[1].text, readoutTime(seconds, zoom > 1.0 ? 2 : 1));
         for (const SpectrogramOverlayImage &plate : plates) {
             QVERIFY(QRectF(QPointF(0.0, 0.0), QSizeF(lane)).contains(plate.rect));
             // Laid out in whole logical pixels: whole device pixels at any

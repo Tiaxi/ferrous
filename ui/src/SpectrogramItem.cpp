@@ -141,8 +141,11 @@ const QColor kRestScaleTextColor(236, 236, 236, 184);
 // the canvas fragments a zoom preview scales (spectrogramSceneGraphDrawsTheCanvas).
 const QColor kPlayheadColor(0xe8, 0xe8, 0xe8, 254);
 const QColor kPlayheadCasingColor(0, 0, 0, 153);
-// The crosshair: dashed white 35%.
-const QColor kCrosshairLineColor(255, 255, 255, 89);
+// The crosshair: dashed white 55%, with the floor at 80% between the
+// dashes. One carries the 1 px line over dark texture, the other over bright
+// harmonics; at 35% and 60% it was lost in mid-bright texture (2.3:1).
+const QColor kCrosshairLineColor(255, 255, 255, 140);
+constexpr double kCrosshairGapOpacity = 0.8;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 std::atomic<quint64> g_lastLoggedSeekProfileIncidentGeneration{0};
 std::atomic<quint64> g_lastLoggedSeekProfileSummaryGeneration{0};
@@ -1595,7 +1598,7 @@ QImage renderOverlayImage(
         dashPen.setWidth(lineWidth);
         dashPen.setCapStyle(Qt::FlatCap);
         QPen gapPen = dashPen;
-        gapPen.setColor(CrosshairReadout::dashGapColor(floor));
+        gapPen.setColor(CrosshairReadout::dashGapColor(floor, kCrosshairGapOpacity));
         CrosshairReadout::setDashes(dashPen, false, scale / lineWidth);
         CrosshairReadout::setDashes(gapPen, true, scale / lineWidth);
         // A one-pixel pen draws the pixels at its coordinates, a wider one
@@ -1659,20 +1662,6 @@ QString crosshairDecibels(double db) {
 QString crosshairFrequency(double hz) {
     if (hz >= 1000.0) return kilohertzFormat().arg(hz / 1000.0, 0, 'f', 1);
     return hertzFormat().arg(qRound(hz));
-}
-
-// The crosshair's readout of a time in the track: "1:46.0".
-QString crosshairTime(double seconds) {
-    const long tenths = std::lround(std::max(0.0, seconds) * 10.0);
-    const long whole = tenths / 10;
-    const long hours = whole / 3600;
-    const QString rest = QStringLiteral("%1.%2")
-        .arg(whole % 60, 2, 10, QLatin1Char('0'))
-        .arg(tenths % 10);
-    if (hours > 0) {
-        return QStringLiteral("%1:%2:%3").arg(hours).arg((whole / 60) % 60, 2, 10, QLatin1Char('0')).arg(rest);
-    }
-    return QStringLiteral("%1:%2").arg(whole / 60).arg(rest);
 }
 
 } // namespace
@@ -5546,10 +5535,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         const auto placeOverlay = [&](const SpectrogramOverlayLayout &layout,
                                       int shift,
                                       SpectrogramOverlayFrame &frame,
-                                      QRectF shown = QRectF()) {
+                                      QRectF shown = QRectF(),
+                                      double yieldX = std::numeric_limits<double>::quiet_NaN()) {
             // `shift` moves it that many device pixels left. With
             // `shown`, lines that start outside it are left out, and
-            // so are images centred outside it.
+            // so are images centred outside it. A dashed column within
+            // CrosshairReadout::kYieldsWithin of `yieldX` is left out.
             if (shown.isNull()) shown = pane;
             for (const QRect &line : layout.lines) {
                 const QRectF rect((line.x() - shift) / scale, line.y() / scale,
@@ -5569,6 +5560,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     pixels.height() / scale);
                 if (!rect.intersects(pane) || rect.center().x() < shown.left()
                     || rect.center().x() > shown.right()) {
+                    continue;
+                }
+                if (image.kind == SpectrogramOverlayImage::DashedColumn
+                    && std::abs(rect.left() - yieldX) <= CrosshairReadout::kYieldsWithin + 1e-9) {
                     continue;
                 }
                 SpectrogramPlacedOverlayImage placed{image.key, rect, QImage()};
@@ -6235,7 +6230,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         / static_cast<double>(m_precomputedHopSize);
                     updateCrosshairOverlayLocked(cw, ch, displayLeft, rollingMode, cps, drawX);
                 }
-                placeOverlay(m_crosshair, 0, crosshairFrame);
+                // The playhead is above the crosshair: where a seek on the
+                // plot lands it under the pointer, the dashes over it read
+                // as the hover line, and the landing didn't show. Within a
+                // pixel of it the vertical line gives way; the time stays.
+                placeOverlay(m_crosshair, 0, crosshairFrame, QRectF(),
+                    showPlayhead && m_playheadVisible
+                        ? playheadRect.left() : std::numeric_limits<double>::quiet_NaN());
             }
         } else if (!m_columns.empty() && m_binsPerColumn > 0) {
             // Appended rows are drawn one to a logical pixel.
@@ -6818,6 +6819,7 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
     event->accept();
     SpectrogramViewFollow *follow = m_viewFollow.data();
     double anchorSeconds = 0.0;
+    double pointerSeconds = 0.0;
     bool startsPan = false;
     {
         QMutexLocker lock(&m_stateMutex);
@@ -6840,7 +6842,15 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
             }
             m_panning = true;
             startsPan = true;
-            m_panOriginLeft = static_cast<double>(view.left);
+            // The time grabbed is the one the crosshair showed at the press:
+            // where the view was drawn, which a view that follows the
+            // playhead draws a fraction of a column off its whole columns
+            // (taking them, the time slipped a pixel as the drag started).
+            m_panOriginLeft = m_crosshair.valid && !m_crosshairCachedRollingMode
+                    && !m_zoomPreviewShown
+                ? static_cast<double>(m_crosshairCachedDisplayLeft)
+                    - m_crosshairCachedDrawX / std::max(1e-9, effectiveZoomLocked())
+                : static_cast<double>(view.left);
             m_panOriginX = m_panPressPosition.x();
         }
         // The column grabbed stays under the pointer. Held at an end of the
@@ -6857,6 +6867,10 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
         // Anchored at its middle, whole columns from the track's start.
         anchorSeconds = (std::round(left) + 0.5 * static_cast<double>(view.windowColumns))
             / view.columnsPerSecond;
+        // The time grabbed, before that rounding: what the lanes' readout
+        // shows at the pointer while the pan lasts.
+        pointerSeconds = (left + pointer.x() * m_canvasScale / view.canvasZoom)
+            / view.columnsPerSecond;
     }
     if (startsPan) {
         // Where it glides back from is reckoned from the view's width.
@@ -6864,7 +6878,7 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
         follow->setPanning(true);
         emit panningChanged();
     }
-    follow->detach(anchorSeconds, 0.5);
+    follow->detach(anchorSeconds, 0.5, pointerSeconds);
     followChanged();
 }
 
@@ -7214,24 +7228,39 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     }
     QString timeText;
     if (m_showCrosshairTime) {
-        const double trackTime = crosshairTrackTimeLocked(pixelToTimeSeconds(
-            lineX, displayLeft, rollingMode,
-            m_rollingEpoch, columnsPerSecond, logicalDrawX, effectiveZoomLocked()));
+        // While a drag pans the view, the time it grabbed, from the pan's
+        // continuous transform: from the view's whole columns, it rolled
+        // across a digit and back mid-drag (1:10.0, 1:09.9, 1:10.0).
+        const double panPointerSeconds =
+            rollingMode ? std::numeric_limits<double>::quiet_NaN()
+                        : followSnapshotLocked().panPointerSeconds;
+        const double trackTime = crosshairTrackTimeLocked(std::isfinite(panPointerSeconds)
+            ? panPointerSeconds
+            : pixelToTimeSeconds(lineX, displayLeft, rollingMode, m_rollingEpoch,
+                  columnsPerSecond, logicalDrawX, effectiveZoomLocked()));
         if (std::isfinite(trackTime)) {
-            timeText = crosshairTime(trackTime);
+            // As finely as the view resolves it, by the waveform's rule: a
+            // device pixel, or an analysis column where that is longer; at
+            // the default zoom, a column to a logical pixel, tenths.
+            const double zoom = effectiveZoomLocked();
+            const double secondsPerColumn = std::max(
+                1.0 / (columnsPerSecond * std::max(1e-9, zoom * scale)), 1.0 / columnsPerSecond);
+            timeText = CrosshairReadout::formatCrosshairTime(
+                trackTime, CrosshairReadout::crosshairTimeDecimals(secondsPerColumn, zoom));
         }
     }
 
     const QFontMetrics metrics(CrosshairReadout::font(m_textScale));
-    const auto plateFor = [&](const QString &text) {
+    const auto plateFor = [&](const QString &text, int textWidth) {
         return text.isEmpty()
             ? QSize()
-            : CrosshairReadout::plateSize(
-                  metrics.horizontalAdvance(text), metrics, m_readoutColors, m_textScale);
+            : CrosshairReadout::plateSize(textWidth, metrics, m_readoutColors, m_textScale);
     };
     const int logicalWidth = std::max(1, static_cast<int>(std::floor(width / scale + 1e-6)));
     const int logicalHeight = std::max(1, static_cast<int>(std::floor(height / scale + 1e-6)));
-    const QSize timePlate = plateFor(timeText);
+    // The time's plate is as wide as its widest digits, so it doesn't
+    // twitch as they change.
+    const QSize timePlate = plateFor(timeText, CrosshairReadout::widestDigitsWidth(timeText, metrics));
     // The frequency scale, and whether a label of it is beside the time.
     CrosshairReadout::RightScale rightScale;
     if (m_gridEnabled && m_freqGrid.valid) {
@@ -7250,7 +7279,7 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     const auto [valueRect, timeRect] = CrosshairReadout::plateRects(
         logicalWidth, logicalHeight,
         static_cast<int>(std::floor(lineX)), static_cast<int>(std::floor(lineY)),
-        plateFor(valueText), timePlate, m_reservedCorner, rightScale,
+        plateFor(valueText, metrics.horizontalAdvance(valueText)), timePlate, m_reservedCorner, rightScale,
         m_laneHeadBounds.isEmpty() ? QRect() : m_laneHeadBounds.toAlignedRect(),
         widestPlate(crosshairWidestValueWidthLocked()),
         timeText.isEmpty()

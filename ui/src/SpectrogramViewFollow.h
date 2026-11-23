@@ -52,6 +52,11 @@ public:
         double anchorFraction{0.5};
         // Where the playhead starts the glide back, or infinity for none.
         double reattachSeconds{std::numeric_limits<double>::infinity()};
+        // While a drag pans the view, the time at the pointer, from the
+        // pan's continuous, clamped transform; NaN otherwise. The view is
+        // placed on whole columns, so the time a lane reads at the pointer
+        // from where it draws them wobbles by up to half a column.
+        double panPointerSeconds{std::numeric_limits<double>::quiet_NaN()};
     };
 
     explicit SpectrogramViewFollow(QObject *parent = nullptr);
@@ -64,8 +69,10 @@ public:
 
     // The view stays where it is, with `anchorSeconds` at `fraction` of its
     // width: a pan or a zoom about the pointer. A view newly detached forgets
-    // the plot's own seek, and glides back only once a pan has ended.
-    void detach(double anchorSeconds, double fraction);
+    // the plot's own seek, and glides back only once a pan has ended. A pan
+    // tells the time at the pointer, `panPointerSeconds` (see Snapshot).
+    void detach(double anchorSeconds, double fraction,
+                double panPointerSeconds = std::numeric_limits<double>::quiet_NaN());
     // Whether a drag pans the view: until it ends, nothing glides back.
     void setPanning(bool panning);
     // Whether autoscroll moves the view: until it stops, nothing glides
@@ -120,6 +127,7 @@ private:
     ViewFollow::State m_state;
     double m_anchorSeconds{0.0};
     double m_anchorFraction{0.5};
+    double m_panPointerSeconds{std::numeric_limits<double>::quiet_NaN()};
     bool m_reattachArmed{false};
     bool m_panning{false};
     bool m_autoscrolling{false};
