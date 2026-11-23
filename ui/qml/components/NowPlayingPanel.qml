@@ -171,6 +171,19 @@ Item {
                                                      root.narrowTextTop + root.narrowReservedHeight) + root.textInset
     readonly property real besideCoverSize: root._roomBeside(root.besideBlockSize) >= root.narrowLineMinimum
         ? root.besideBlockSize : root.narrowCoverSize
+    // The sides of the cover's place where it meets the sidebar's view
+    // colour, which the stand-in edges, rather than the panel's top, the
+    // window's edge, the sidebar's seam or the panel's (an edge all round
+    // doubled them, a purple frame inside the flush narrow tile and a 2 px
+    // seam under it): the wide tile's foot alone, the side of the narrow
+    // one that faces the lines, with its foot where the block runs on under
+    // it, and all four of the large-font header's, inset.
+    readonly property var standInEdgeSides: ({
+        top: root.coverInset > 0,
+        left: root.coverInset > 0,
+        right: root.coverInset + root.coverSize < root.width - 0.5,
+        bottom: root.coverInset + root.coverSize < root.layoutHeight - root.seamHeight - 0.5
+    })
     // The cover of the narrow layout: the large-font header's, the one that
     // fills the block beside the narrow lines, or 96 px.
     readonly property real narrowLayoutCoverSize: root.largeHeader ? root.headerCoverSize
@@ -2138,16 +2151,15 @@ Item {
             coverPath: root.shownCoverPath
             // The size it loads its image at, whatever the place's size.
             coverSourceSize: Math.max(256, root.width)
-            // No cover: the stand-in, its mark on the plot's floor, and in
-            // a light theme an edge, so the dark tile reads as a cover
-            // rather than a hole in the sidebar; in a dark one on the small
-            // tiles too, as the library's has, so their sides and the
-            // traces cut at them do not dissolve into the sidebar (the
-            // floor is ~1.06:1 on it). The wide 360 px tile, edge to edge,
-            // needs none in a dark theme.
+            // No cover: the stand-in, its mark on the plot's floor, with a
+            // 1 px edge in both themes on the sides where it meets the
+            // sidebar's view colour (standInEdgeSides), so the dark tile
+            // reads as a cover rather than a hole in the sidebar and its
+            // sides do not dissolve into a dark one (the floor is ~1.06:1
+            // on it).
             standInColor: root.uiPalette.plotFloor
-            standInEdgeColor: root.uiPalette.themeIsDark && root.wideRoom
-                ? "transparent" : root.uiPalette.plotFloorEdge
+            standInEdgeColor: root.uiPalette.plotFloorEdge
+            standInEdgeSides: root.standInEdgeSides
             // Nothing playing: the placeholder, on the sidebar.
             placeholderColor: root.placeholderColor
             hoverVeilColor: root.uiPalette.hover

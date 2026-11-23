@@ -793,10 +793,15 @@ QList<QQuickItem *> shownLines(QQuickWindow *window) {
 // tile's right edge, the wide tile's of four curves (with the faint 4th
 // harmonic, as the icon's 128 and 256 px drawings) and the small one's of
 // two, and no text at all (the lines under it give the album); a 1 px edge
-// in a light theme, and on the small tiles in a dark one too, as the
-// library's has (without it their sides dissolved into the dark sidebar);
-// none on the wide tile in a dark one. No disc glyph, and no cover. As
-// drawn, the mark's middle third is not all floor.
+// in both themes on the sides where the tile meets the sidebar's view
+// colour, as drawn (without it the small tiles' sides dissolved into the
+// dark sidebar, and the wide dark tile had no foot over its title), and
+// none on a side that meets the panel's top, the window's edge or a seam
+// (all round, it doubled them: a frame inside the flush narrow tile, a 2 px
+// seam under it, a double edge at the light wide tile's top and right):
+// the wide tile's foot alone, the narrow tile's side facing the lines, and
+// all four of the large-font header's inset tile. No disc glyph, and no
+// cover. As drawn, the mark's middle third is not all floor.
 QString standInProblem(QQuickWindow *window) {
     QObject *palette = paletteOf(window);
     QQuickItem *panel = named(window, "nowPlayingPanel");
@@ -933,21 +938,52 @@ QString standInProblem(QQuickWindow *window) {
     if (fourthRatio < 3.1 || fourthRatio > 3.25 || fourthRatio > highRatio - 0.5) {
         return QStringLiteral("the 4th harmonic at %1:1 on the floor").arg(fourthRatio);
     }
-    // A 1 px edge in a light theme and on a small tile, none on the wide
-    // tile in a dark one.
-    if (tokenOf(window, "plotFloorEdge").alpha() != 255) {
+    // A 1 px edge of plotFloorEdge on each side that meets the view, none
+    // on the others, as drawn.
+    const QColor edgeColour = tokenOf(window, "plotFloorEdge");
+    if (edgeColour.alpha() != 255) {
         return QStringLiteral("the edge colour is %1").arg(tokenHex(window, "plotFloorEdge"));
     }
-    const bool dark = palette->property("themeIsDark").toBool();
-    const bool edged = !dark || !wide;
-    if (shown(edge) != edged) {
-        return QStringLiteral("the edge %1 on the %2 tile in the %3 theme").arg(shown(edge) ? "shows" : "is missing")
-            .arg(wide ? "wide" : "small").arg(dark ? "dark" : "light");
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    if (!shown(edge) || seam == nullptr) {
+        return QStringLiteral("no edge");
     }
-    if (edged && (QQmlProperty(edge, QStringLiteral("border.width")).read().toReal() != 1.0
-                  || hex(QQmlProperty(edge, QStringLiteral("border.color")).read().value<QColor>())
-                      != tokenHex(window, "plotFloorEdge"))) {
-        return QStringLiteral("the edge is not 1 px of plotFloorEdge");
+    const QRectF tileRect = sceneRect(cover);
+    const QRectF panelRect = sceneRect(panel);
+    const struct {
+        const char *side;
+        bool meetsView;
+        QPointF inside;
+        QRectF line;
+    } sides[] = {
+        {"top", tileRect.top() > panelRect.top() + 0.5, QPointF(tileRect.center().x(), tileRect.top() + 0.5),
+         QRectF(tileRect.left(), tileRect.top(), tileRect.width(), 1)},
+        {"left", tileRect.left() > panelRect.left() + 0.5, QPointF(tileRect.left() + 0.5, tileRect.center().y()),
+         QRectF(tileRect.left(), tileRect.top(), 1, tileRect.height())},
+        {"right", tileRect.right() < panelRect.right() - 0.5, QPointF(tileRect.right() - 0.5, tileRect.top() + 0.1 * tileRect.height()),
+         QRectF(tileRect.right() - 1, tileRect.top(), 1, tileRect.height())},
+        {"bottom", tileRect.bottom() < sceneRect(seam).top() - 0.5, QPointF(tileRect.center().x(), tileRect.bottom() - 0.5),
+         QRectF(tileRect.left(), tileRect.bottom() - 1, tileRect.width(), 1)},
+    };
+    const QString layout = panel->property("layoutMode").toString()
+        + (panel->property("largeHeader").toBool() ? QStringLiteral(" header") : QString());
+    const Drawn drawn(window);
+    for (const auto &side : sides) {
+        QQuickItem *line = itemNamed(cover, QStringLiteral("albumArtStandInEdge_") + QLatin1String(side.side));
+        if (line == nullptr || shown(line) != side.meetsView) {
+            return QStringLiteral("the %1 edge %2 in the %3 layout").arg(QLatin1String(side.side))
+                .arg(shown(line) ? QStringLiteral("shows") : QStringLiteral("is missing")).arg(layout);
+        }
+        if (side.meetsView
+            && (sceneRect(line) != side.line || channelDistance(drawn.at(side.inside), edgeColour) > 3)) {
+            return QStringLiteral("the %1 edge drawn %2 at %3,%4").arg(QLatin1String(side.side))
+                .arg(hex(drawn.at(side.inside))).arg(sceneRect(line).x()).arg(sceneRect(line).y());
+        }
+    }
+    // The wide tileRect edges its foot alone, in both themes.
+    if (wide && (!shown(itemNamed(cover, QStringLiteral("albumArtStandInEdge_bottom")))
+                 || shown(itemNamed(cover, QStringLiteral("albumArtStandInEdge_top"))))) {
+        return QStringLiteral("the wide tileRect's edges");
     }
     return {};
 }
@@ -3149,6 +3185,7 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data() {
     // header in the compact layout and in a narrow sidebar; each theme in
     // the wide tile's layout or a small one's.
     QTest::newRow("1600x1000, light, default font") << false << false << 0.0;
+    QTest::newRow("1600x1000, dark, default font") << false << true << 0.0;
     QTest::newRow("1000x720, dark, default font") << true << true << 0.0;
     QTest::newRow("1600x1000, dark, 24 pt") << false << true << 24.0;
     QTest::newRow("1000x720, light, 24 pt") << true << false << 24.0;
