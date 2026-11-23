@@ -217,7 +217,7 @@ SCOPES = {
             # the transport: the left part (the buttons) and the right part (seek bar, volume), 1:1
             ("focus-transport-buttons", "The transport's buttons at 1:1: play states; hover, press, "
              "keyboard focus, with tooltips; dark beside light", "dark",
-             [[("transport", st, (0, 0.026, 0.22, 0.078), f"{lb}, {th}", dict(theme=th, lh=16, gap=6))
+             [[("transport", st, (0, 0.026, 0.22, 0.098), f"{lb}, {th}", dict(theme=th, lh=16, gap=6))
                for st, lb in row for th in ("dark", "light")]
               for row in ((("playing", "Playing"), ("paused", "Paused")),
                           (("stopped", "Stopped"), ("previous-hover-tooltip", "Previous hovered")),
@@ -225,9 +225,8 @@ SCOPES = {
                           (("next-focus", "Next focused"),))]),
             ("focus-transport-seek", "The seek bar and volume at 1:1: hover and its time box, drag, "
              "focus; mute and volume states; dark", "dark",
-             # (near its start the time box sits under the bar, over the sidebar, so it can't cover the menu's
-             # titles (H30 YA2): that tile reaches below the bar)
-             [[("seek", st, (0.094, 0, 0.906, 0.11 if st == "hover-start" else 0.074), lb, dict(lh=16, gap=6))]
+             # (the time box has its own lane above the bar since H31 ZA1: the band, and these tiles, are taller)
+             [[("seek", st, (0.094, 0, 0.906, 0.095), lb, dict(lh=16, gap=6))]
               for st, lb in (("hover", "Seek bar hovered at 62 %: the time box"), ("hover-start", "Hovered near its start"),
                              ("dragging", "Dragged"), ("focus", "Keyboard focus"))]
              + [[("volume", st, (0.82, 0, 0.18, 0.1), lb, dict(lh=16, gap=6)) for st, lb in row]
