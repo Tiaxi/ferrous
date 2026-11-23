@@ -724,7 +724,10 @@ void ScrobbleSmokeTest::scrobbleIndicatorPausesScrobbling() {
         QVERIFY(object->property("text").toString() != QStringLiteral("Pause Scrobbl&ing"));
     }
 
-    // Without Last.fm, there is nothing to pause, and no indicator.
+    // Without Last.fm, there is nothing to pause, and no indicator. The
+    // slot shows only while the playback engine, where the scrobbler runs,
+    // is running.
+    QVERIFY(bridge->setProperty("connected", true));
     QVERIFY(!indicator->isVisible());
     bridge->setProperty("lastFmScrobblingEnabled", true);
     bridge->setProperty("lastFmAuthState", 2);

@@ -63,7 +63,10 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   the tertiary colour and the strike over them in the text colour, in a
 //   clear casing, without the bar (in one colour the strike's clear space
 //   took so much of the letters that neither read at 1x).
-// - Otherwise (not eligible, skipped, signed out): nothing.
+// - Otherwise (not eligible, skipped, signed out): nothing; nor while the
+//   playback engine has stopped or is not running, as the status bar's
+//   other track sections: the scrobbler runs in it, so what the slot
+//   showed was stale and a click or its menu could not reach it.
 // Clicking it pauses or resumes scrobbling; its menu has the settings.
 AbstractButton {
     id: root
@@ -74,7 +77,12 @@ AbstractButton {
     // The Last.fm preferences were asked for.
     signal settingsRequested()
 
-    readonly property bool shown: root.uiBridge.lastFmShowScrobbleProgress
+    // Whether the playback engine, where the scrobbler runs, is running:
+    // the status bar sets it.
+    property bool engineRunning: true
+
+    readonly property bool shown: root.engineRunning
+        && root.uiBridge.lastFmShowScrobbleProgress
         && root.uiBridge.lastFmScrobblingEnabled
         && root.uiBridge.lastFmAuthState === 2
     readonly property bool paused: root.uiBridge.lastFmScrobblingPaused

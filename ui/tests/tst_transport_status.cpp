@@ -585,6 +585,7 @@ private slots:
     void statusBarScanKeepsItsPlaceWhileItCounts();
     void lastFmSlotShowsEachState();
     void lastFmSlotCountsTheTimeLeftFromTheListenedTime();
+    void lastFmSlotHidesWithTheTrackSectionsWhileTheEngineIsDown();
     void lastFmNotScrobbledIsOneToneBelowWaiting_data();
     void lastFmNotScrobbledIsOneToneBelowWaiting();
     void lastFmSlotPausedLooksStruckThrough_data();
@@ -4039,6 +4040,60 @@ void TransportStatusTest::lastFmNotScrobbledIsOneToneBelowWaiting() {
     QVERIFY2(contrastRatio(shortLabel, chrome) * 1.1 < contrastRatio(waitingLabel, chrome), qPrintable(ladder));
     QVERIFY2(contrastRatio(waitingLabel, chrome) * 1.1 < contrastRatio(failedLabel, chrome), qPrintable(ladder));
     QVERIFY(slot->isVisible());
+}
+
+// The Last.fm slot follows the status bar's other track sections: while
+// the playback engine has stopped, or before it runs, it is hidden, in any
+// of its states, the scrobbler being in the engine (paused or with
+// scrobbles waiting, it stayed beside the engine's error, stale, and a
+// click or its menu could not reach the scrobbler). It comes back as it
+// was once the engine runs.
+void TransportStatusTest::lastFmSlotHidesWithTheTrackSectionsWhileTheEngineIsDown() {
+    struct Down {
+        const char *name;
+        const char *property;
+        QVariant down;
+        QVariant up;
+    };
+    const QList<Down> downs{
+        {"stopped", "backendFailure", QStringLiteral("stopped for testing"), QString()},
+        {"not running", "connected", false, true},
+    };
+    struct State {
+        const char *name;
+        bool paused;
+        int pending;
+        int state;
+    };
+    const QList<State> states{
+        {"listening", false, 0, 1}, {"paused", true, 0, 1}, {"waiting", false, 3, 5}, {"failed", false, 0, 4}};
+    for (const Down &down : downs) {
+        for (const State &state : states) {
+            const QString row = QStringLiteral("%1, %2").arg(QLatin1String(down.name), QLatin1String(state.name));
+            Harness harness;
+            QVERIFY2(harness.load(), qPrintable(harness.error));
+            QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+            QQuickItem *playback = harness.item(QStringLiteral("statusBarPlaybackState"));
+            QVERIFY(slot && playback);
+            QObject *bridge = harness.bridge;
+            bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+            bridge->setProperty("lastFmScrobbleListenedMs", 30000);
+            bridge->setProperty("lastFmScrobblingPaused", state.paused);
+            bridge->setProperty("lastFmPendingScrobbleCount", state.pending);
+            bridge->setProperty("lastFmScrobbleState", state.state);
+            QTRY_VERIFY2(slot->isVisible() && playback->isVisible(), qPrintable(row));
+            const QString look = slot->property("look").toString();
+            bridge->setProperty(down.property, down.down);
+            QTRY_VERIFY2(!playback->isVisible(), qPrintable(row));
+            QVERIFY2(!slot->isVisible(), qPrintable(row));
+            QCOMPARE(slot->property("look").toString(), QStringLiteral("hidden"));
+            if (qstrcmp(down.property, "connected") == 0) {
+                bridge->setProperty(down.property, down.up);
+                QTRY_VERIFY2(slot->isVisible() && playback->isVisible(), qPrintable(row));
+                QCOMPARE(slot->property("look").toString(), look);
+            }
+        }
+    }
 }
 
 void TransportStatusTest::lastFmSlotCountsTheTimeLeftFromTheListenedTime() {

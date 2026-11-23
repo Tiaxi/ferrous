@@ -655,6 +655,9 @@ ToolBar {
             id: scrobbleIndicator
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
+            // Hidden with the other track sections while the engine is
+            // stopped or not running.
+            engineRunning: root.showTrackSections
             // The issues button's height, so its glyph is centred on the
             // status bar.
             blockHeight: root.barHeight - 2

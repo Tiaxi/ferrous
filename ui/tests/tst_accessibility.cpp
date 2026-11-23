@@ -612,6 +612,9 @@ void AccessibilityTest::checkLibraryAndQueueRowsHaveAccessibleNames(MainWindowFi
 
 void AccessibilityTest::checkScrobbleIndicatorIsNamedAndWorksByKeyboard(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    // The slot shows only while the playback engine, where the scrobbler
+    // runs, is running.
+    QVERIFY(bridge->setProperty("connected", true));
     bridge->setProperty("lastFmScrobblingEnabled", true);
     bridge->setProperty("lastFmAuthState", 2);
     bridge->setProperty("lastFmScrobbleState", 1);
