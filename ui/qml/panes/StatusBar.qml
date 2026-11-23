@@ -42,9 +42,9 @@ ToolBar {
     readonly property bool narrow: root.width < 1200
 
     // The bar under its 1 px seam: 24 px, or the small text's line and 4 px
-    // above and below it when that is more, or the Last.fm glyph and its bar
-    // clear of the slot's focus ring, with 1 px above and below, at a font
-    // where that is more (at 24 pt the bar sat on the window's edge).
+    // above and below it when that is more, or the Last.fm glyph clear of
+    // the slot's focus ring, with 1 px above and below, at a font where
+    // that is more.
     readonly property real barHeight: Math.max(24, Math.round(smallMetrics.height) + 8,
         scrobbleIndicator.minimumBlockHeight + 2)
 
@@ -573,9 +573,10 @@ ToolBar {
                 height: Math.max(4, Math.round(root.uiPalette.scaledSize(root.smallGlyphSize) / 5))
                 radius: height / 2
                 // The status bar's progress trough and fill, the Last.fm
-                // bar's: the trough 3:1 on the status bar and the fill 3:1
-                // on it, so that the share scanned reads against the rest
-                // (its trough, the text at 15%, was 1.6:1 / 1.3:1).
+                // bar's: the fill the secondary text, never louder than the
+                // words beside it, on a trough midway between it and the
+                // status bar, so that the share scanned reads against the
+                // rest (its trough, the text at 15%, was 1.6:1 / 1.3:1).
                 color: root.uiPalette.statusBarTrough
 
                 Rectangle {

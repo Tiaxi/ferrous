@@ -80,16 +80,17 @@ QtObject {
     readonly property color chromeLine: ColorUtils.mixColor(
         root.chrome, root._inactiveText, root.themeIsDark ? 0.18 : 0.30)
     // The status bar's progress bars, the library scan's and the Last.fm
-    // slot's. The trough: the text at 35% on chrome, opaque, darkened or
-    // lightened to 3.1:1 on it, so that the whole reads as a whole (the
-    // scan's text at 15% was 1.6:1 / 1.3:1). #6d6f71 / #86888b.
-    readonly property color statusBarTrough: root.readableOn(
-        ColorUtils.mixColor(root.chrome, root.text, 0.35), [root.chrome], 3.1)
-    // The fill: the secondary text, lightened or darkened to 3.1:1 on the
-    // trough, so that the share done reads against the rest at a glance
-    // (the secondary text was 2.5:1 / 2:1 on it). It stays under the text.
-    // #c4cbd2 / #353e46.
-    readonly property color statusBarFill: root.readableOn(root.textSecondary, [root.statusBarTrough], 3.1)
+    // slot's. The fill: the secondary text, the ink of the glyph and the
+    // words beside it, so that a bar, the full one of a scrobble being sent
+    // too, is never louder than they are (lightened to 3.1:1 on its
+    // trough, it was the brightest mark of the Last.fm slot, over its
+    // glyph's letters).
+    readonly property color statusBarFill: root.textSecondary
+    // The trough: opaque, between the chrome and the fill, as far from
+    // either, so that both the whole and the share done of it read: 2.7:1
+    // / 2.5:1 on each in Breeze (at 3.1:1 on the chrome, the fill was
+    // 2.5:1 / 2:1 on it). #62666b / #959aa0.
+    readonly property color statusBarTrough: root._midwayBetween(root.chrome, root.statusBarFill)
     // Text over the row: the hover tint. The least of it, in whole
     // percent, that is 1.3:1 on the view, so a hovered row stands out in
     // any theme: 10% (#2b2d2f) / 14% (#e0e1e1). It stays nearer to the view
@@ -225,6 +226,22 @@ QtObject {
     // `color`, or, where it is under `ratio` on any of the opaque
     // `backgrounds`, the nearest HSL lightness of it that reaches it on all
     // of them: darker on light backgrounds, lighter on dark ones.
+    // The mix of `a` and `b`, in whole percent, as far in contrast from the
+    // one as from the other: opaque.
+    function _midwayBetween(a, b) {
+        let best = a
+        let bestLeast = 0
+        for (let percent = 1; percent < 100; ++percent) {
+            const candidate = ColorUtils.mixColor(a, b, percent / 100)
+            const least = Math.min(ColorUtils.contrastRatio(candidate, a), ColorUtils.contrastRatio(candidate, b))
+            if (least > bestLeast) {
+                best = candidate
+                bestLeast = least
+            }
+        }
+        return best
+    }
+
     function readableOn(color, backgrounds, ratio) {
         const worst = function(candidate) {
             let lowest = Infinity
