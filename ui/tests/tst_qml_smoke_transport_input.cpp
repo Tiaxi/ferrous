@@ -51,6 +51,7 @@ private slots:
     void movedViewSaysSoInTheCorner();
     void notFollowingLeavesOneWay_data();
     void notFollowingLeavesOneWay();
+    void notFollowingComesInWithThePlate();
     void zoomPlateSpacesItsDividerEvenly();
     void movedViewSaysSoInTheViewers_data();
     void movedViewSaysSoInTheViewers();
@@ -4589,6 +4590,56 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
         QVERIFY(!corner.plate->isVisible());
     }
     QCOMPARE(corner.modeSwitch->opacity(), cornerWanted ? 1.0 : 0.0);
+}
+
+// "Not following" and its divider come in over 100 ms, OutCubic, with
+// the plate's reveal, rather than stand on it in a frame as it faded in
+// (H15); and as the plate shows already, as a drag moves the view.
+void TransportInputSmokeTest::notFollowingComesInWithThePlate() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, 0, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    for (const bool cornerWanted : {false, true}) {
+        QTest::mouseMove(window, cornerWanted ? corner.onPane() : corner.away());
+        corner.zoom(4.0);
+        QTRY_COMPARE(corner.plate->opacity(), cornerWanted ? 1.0 : 0.0);
+        window->grabWindow();
+        SteppedAnimationDriver animations;
+        QVERIFY(corner.moveView());
+        QVERIFY(corner.moved());
+        QVERIFY(corner.text->isVisible() && corner.divider->isVisible());
+        window->grabWindow();
+        QCOMPARE(corner.text->opacity(), 0.0);
+        QCOMPARE(corner.divider->opacity(), 0.0);
+        double level = 0.0;
+        double gain = std::numeric_limits<double>::infinity();
+        for (int frame = 1; frame * 16 < 100; ++frame) {
+            QVERIFY(animations.step(16));
+            window->grabWindow();
+            const double now = corner.text->opacity();
+            QVERIFY2(now > level && now < 1.0, qPrintable(QStringLiteral("frame %1: %2").arg(frame).arg(now)));
+            QVERIFY(now - level <= gain + 1e-9);
+            QCOMPARE(corner.divider->opacity(), now);
+            if (!cornerWanted) {
+                // With the plate, on the same curve.
+                QVERIFY2(std::abs(corner.plate->opacity() - now) < 1e-6,
+                         qPrintable(QStringLiteral("%1 and %2").arg(corner.plate->opacity()).arg(now)));
+            }
+            gain = now - level;
+            level = now;
+        }
+        QVERIFY(animations.step(16));
+        QCOMPARE(corner.text->opacity(), 1.0);
+        QCOMPARE(corner.divider->opacity(), 1.0);
+        // It goes at once.
+        QVERIFY(QMetaObject::invokeMethod(corner.surface, "followPlayhead"));
+        QVERIFY(!corner.text->isVisible());
+        (void)animations.step(300);
+        QVERIFY(!corner.notice->isVisible());
+    }
 }
 
 // The divider between "Not following" and the zoom has 6 px on each side

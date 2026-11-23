@@ -92,7 +92,7 @@ Components.PlotPlate {
     Components.FollowNotice {
         id: notice
         objectName: "plotFollowNotice"
-        visible: root.noticeShown && !(root.noticeLeaving && root.zoomed)
+        shown: root.noticeShown && !(root.noticeLeaving && root.zoomed)
         width: root.noticeLeaving ? root._roomLeft : implicitWidth
         uiPalette: root.uiPalette
         plotColors: root.plotColors
