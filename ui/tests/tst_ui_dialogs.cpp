@@ -38,6 +38,7 @@
 #include <QtTest/QtTest>
 #include <qqml.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -7480,12 +7481,12 @@ void UiDialogsTest::editTagsMarksAFailedRowBesideItsName_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// A row whose save or rename failed has Breeze's error glyph where an
-// unsaved edit's dot is, beside the file name, in the negative colour (it
-// had the dot of an edit not yet saved, and its failure only in Status at
-// the table's far end): its cell's tooltip and its description say what
-// failed, and Status still does. On the selection, the glyph's colour is
-// the one that reads there.
+// A row whose save or rename failed has a light error mark, a ring with a
+// cross, where an unsaved edit's dot is, beside the file name, in the
+// negative colour (it had the dot of an edit not yet saved, and its failure
+// only in Status at the table's far end): its cell's tooltip and its
+// description say what failed, and Status still does. On the selection, the
+// glyph's colour is the one that reads there.
 void UiDialogsTest::editTagsMarksAFailedRowBesideItsName() {
     QFETCH(qreal, pointSize);
     const ScopedNotoSans font(pointSize);
@@ -7537,6 +7538,47 @@ void UiDialogsTest::editTagsMarksAFailedRowBesideItsName() {
         QVERIFY(glyph->property("isMask").toBool());
         QCOMPARE(hex(glyph->property("color").value<QColor>()), hex(palette->property("negative").value<QColor>()));
         QCOMPARE(glyph->width(), glyphSize);
+        // A light mark: a ring and a cross about a pixel in weight, as
+        // wide as the dot's slot, and not a filled square (Breeze's
+        // dialog-error, which outweighed the dot it stands for). Its ink,
+        // pixel by pixel, as a share of its strongest pixel's difference
+        // from the row, whatever the colour it is drawn in.
+        {
+            const QImage shown = tags->grabWindow().convertToFormat(QImage::Format_RGB32);
+            const QRect box = sceneRect(glyph).toAlignedRect() & shown.rect();
+            const QColor ground = shown.pixelColor(box.topLeft());
+            const auto difference = [&](int x, int y) {
+                const QColor pixel = shown.pixelColor(x, y);
+                return std::max({std::abs(pixel.red() - ground.red()), std::abs(pixel.green() - ground.green()),
+                                 std::abs(pixel.blue() - ground.blue())});
+            };
+            int strongest = 0;
+            for (int y = box.top(); y <= box.bottom(); ++y) {
+                for (int x = box.left(); x <= box.right(); ++x) {
+                    strongest = std::max(strongest, difference(x, y));
+                }
+            }
+            QVERIFY2(strongest > 40, qPrintable(at));
+            qreal coverage = 0;
+            int left = box.right();
+            int right = box.left();
+            for (int y = box.top(); y <= box.bottom(); ++y) {
+                for (int x = box.left(); x <= box.right(); ++x) {
+                    const qreal share = qreal(difference(x, y)) / strongest;
+                    coverage += share;
+                    if (share > 0.3) {
+                        left = std::min(left, x);
+                        right = std::max(right, x);
+                    }
+                }
+            }
+            const qreal slot = dialog->property("markSlotWidth").toReal();
+            const QString inkAt = at + QStringLiteral(" ink %1 of a %2 px slot, %3 px across")
+                                            .arg(coverage).arg(slot).arg(right - left + 1);
+            QVERIFY2(coverage <= 0.45 * slot * slot, qPrintable(inkAt));
+            QVERIFY2(coverage >= 0.15 * slot * slot, qPrintable(inkAt));
+            QVERIFY2(right - left + 1 <= slot + 1 && right - left + 1 >= slot - 2, qPrintable(inkAt));
+        }
         // On the first line, within the number's column and clear of its
         // digits (its square is three quarters of its size).
         QVERIFY2(std::abs(sceneRect(glyph).center().y() - (sceneRect(row).top() + rowHeight / 2)) <= 1.0, qPrintable(at));
