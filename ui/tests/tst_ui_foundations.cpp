@@ -12,6 +12,7 @@
 #include <QMutexLocker>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QQmlProperty>
 #include <QQuickItem>
 #include <QStandardPaths>
 #include <QQuickWindow>
@@ -235,8 +236,8 @@ private slots:
     void plotPlateLabelHoldsItsLine();
     void smallControlsScaleWithALargeFont_data();
     void smallControlsScaleWithALargeFont();
-    void plotSegmentHoverStaysUnderTheChosenPlate_data();
-    void plotSegmentHoverStaysUnderTheChosenPlate();
+    void plotSegmentHoverIsAnOutlineNotTheChosenFill_data();
+    void plotSegmentHoverIsAnOutlineNotTheChosenFill();
     void viewerToolButtonHoverReadsOnThePlot_data();
     void viewerToolButtonHoverReadsOnThePlot();
     void viewerToolButtonShowsAKeyPressAtOnce_data();
@@ -1746,7 +1747,7 @@ void UiFoundationsTest::smallControlsScaleWithALargeFont() {
     }
 }
 
-void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate_data() {
+void UiFoundationsTest::plotSegmentHoverIsAnOutlineNotTheChosenFill_data() {
     QTest::addColumn<bool>("dark");
     QTest::addColumn<int>("plotMode");
     QTest::newRow("spectrogram, dark") << true << 0;
@@ -1756,21 +1757,22 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate_data() {
 }
 
 // A segment of a plate's choices, as the visualization's mode switch,
-// under the pointer while another is the chosen one (a 12 % hover with its
-// glyph whole came to the chosen plate's brightness): a wash of the plot's
-// text colour, against the chosen plate's fill and its edge, with its glyph
-// at 85 %, whole only while pressed (8 % with the glyph at 60 % was 1.2:1,
-// nearly invisible, and 10 %, 1.28:1, showed only by the glyph's
-// brightening). As drawn, in both themes and on both plots, the hovered one
-// reads on the plate, some 1.6:1; the chosen one's fill is 3:1 on the plate
-// with room to spare (3:1 as reckoned came to 2.98:1 over the spectrogram,
-// where the translucent plate is a step lighter), so the choice reads by its
-// fill rather than its edge alone, and 2:1 on the hovered one's wash (at 2:1
-// on the plate it read by its edge).
-// On the light plate it is the other way round, the dark text at 7:1 with
-// its glyph in the plate's colour (a 2.6:1 mid-grey under a dark glyph read
-// as a muddy box).
-void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
+// under the pointer while another is the chosen one: a different shape
+// from the chosen one's solid fill, a 1 px outline inset 2 px, with its
+// glyph at 85 %, the two fading in together, whole only while pressed. A
+// wash of the text colour gave the hovered one the chosen one's filled
+// silhouette, so for the whole hover both read as chosen (2.03:1 apart on
+// the spectrogram, H28), and fainter ones told the target only by the
+// glyph's brightening. As drawn, in both themes and on both plots: the
+// outline the text colour 3.15:1 on a dark plate, as the chosen fill is,
+// 4.5:1 on a light one, with the plate inside it, where the chosen one is
+// its fill. The chosen fill is 3:1 on a dark plate with room to spare (3:1
+// as reckoned came to 2.98:1 over the spectrogram, where the translucent
+// plate is a step lighter), so the choice reads by its fill rather than
+// its edge alone; on the light plate it is the other way round, the dark
+// text at 7:1 with its glyph in the plate's colour (a 2.6:1 mid-grey under
+// a dark glyph read as a muddy box).
+void UiFoundationsTest::plotSegmentHoverIsAnOutlineNotTheChosenFill() {
     QFETCH(bool, dark);
     QFETCH(int, plotMode);
     QQmlEngine engine;
@@ -1794,35 +1796,47 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     }
     QVERIFY(chosen->property("checked").toBool());
     QVERIFY(!other->property("checked").toBool());
-    QQuickItem *hover = childNamed(other, QStringLiteral("plotToolButtonHover"));
+    QQuickItem *wash = childNamed(other, QStringLiteral("plotToolButtonHover"));
+    QQuickItem *outline = childNamed(other, QStringLiteral("plotToolButtonHoverEdge"));
+    QQuickItem *chosenOutline = childNamed(chosen, QStringLiteral("plotToolButtonHoverEdge"));
     QQuickItem *fill = childNamed(chosen, QStringLiteral("plotToolButtonChecked"));
     QQuickItem *letter = childNamed(other, QStringLiteral("plotToolButtonGlyph"));
-    QVERIFY(hover != nullptr && fill != nullptr && letter != nullptr);
+    QVERIFY(wash != nullptr && outline != nullptr && chosenOutline != nullptr && fill != nullptr
+            && letter != nullptr);
+    QVERIFY(!outline->isVisible());
 
-    // The pointer over the other one, until its wash has faded in, in
-    // animation time: from off the plate, as QTest leaves a move to where it
-    // already is out.
+    // The pointer over the other one, in animation time: from off the
+    // plate, as QTest leaves a move to where it already is out. Part way,
+    // the outline and the glyph's brightening go together.
     SteppedAnimationDriver animations;
     QTest::mouseMove(window, QPoint(2, 2));
     QTest::mouseMove(window, other->mapToScene(QPointF(12, 12)).toPoint());
     QTRY_VERIFY(other->property("hovered").toBool());
+    (void)animations.step(32);
+    const qreal partWay = outline->opacity();
+    QVERIFY2(partWay > 0.05 && partWay < 0.95, qPrintable(QString::number(partWay)));
+    QVERIFY2(std::abs(letter->opacity() - (0.72 + 0.13 * partWay)) < 0.005,
+             qPrintable(QStringLiteral("glyph %1 with the outline at %2").arg(letter->opacity()).arg(partWay)));
     (void)animations.step(1000);
-    QCOMPARE(hover->opacity(), 1.0);
+    QCOMPARE(outline->opacity(), 1.0);
+    QVERIFY(outline->isVisible());
+    QVERIFY2(std::abs(letter->opacity() - 0.85) < 0.005, qPrintable(QString::number(letter->opacity())));
+    // No wash, and the chosen one has no outline: only its fill.
+    QVERIFY(!wash->isVisible());
+    QVERIFY(!chosenOutline->isVisible());
+    // 1 px, 2 px inside the button, with a 2 px radius.
+    QCOMPARE(outline->mapRectToItem(other, QRectF(0, 0, outline->width(), outline->height())),
+             QRectF(2, 2, other->width() - 4, other->height() - 4));
+    QCOMPARE(QQmlProperty(outline, QStringLiteral("border.width")).read().toReal(), 1.0);
+    QCOMPARE(outline->property("radius").toReal(), 2.0);
+    QCOMPARE(colorOf(outline, "color").alphaF(), 0.0f);
+
     const QColor text = colorOf(plotColors, "plotText");
-    const QColor wash = colorOf(hover, "color");
     const QColor plateFill = colorOf(fill, "color");
-    QCOMPARE(wash.rgb(), text.rgb());
-    // The wash some 16 to 24 %, as the plate needs for 1.6:1 (14 % and 18 %
-    // were 1.14:1 apart in dark, 1.08:1 in light, when the chosen one had
-    // no more); the chosen fill some 36 to 40 % on the dark plates. On the
-    // light one the chosen one is the other way round, the dark text some
-    // 77 %, 7:1 on the plate, with its glyph in the plate's colour (at 44 %
-    // under a dark glyph, 2.6:1, a muddy grey box).
     const bool lightPlate = chosen->property("lightPlate").toBool();
     QCOMPARE(lightPlate, !dark && plotMode == 1);
-    QVERIFY2(wash.alphaF() >= 0.155 && wash.alphaF() <= 0.245, qPrintable(QString::number(wash.alphaF())));
-    QVERIFY2(std::abs(wash.alphaF() - other->property("segmentHoverOpacity").toReal()) < 0.005,
-             qPrintable(QString::number(wash.alphaF())));
+    // The chosen fill some 35 to 40 % on the dark plates; on the light one
+    // the dark text some 77 %, 7:1 on the plate.
     QCOMPARE(plateFill.rgb(), text.rgb());
     QVERIFY2(lightPlate ? plateFill.alphaF() >= 0.7 && plateFill.alphaF() <= 0.85
                         : plateFill.alphaF() >= 0.3 && plateFill.alphaF() <= 0.55,
@@ -1837,10 +1851,9 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     }
     QVERIFY2(std::abs(plateFill.alphaF() - chosen->property("segmentFillOpacity").toReal()) < 0.005,
              qPrintable(QString::number(plateFill.alphaF())));
-    QVERIFY2(std::abs(letter->opacity() - 0.85) < 0.005, qPrintable(QString::number(letter->opacity())));
 
-    // As drawn: the plate around the buttons, the chosen one's plate and
-    // the hovered one's wash, clear of their glyphs.
+    // As drawn: the plate around the buttons, the chosen one's fill, and
+    // the hovered one's outline round the plate, clear of their glyphs.
     const QImage image = window->grabWindow();
     QVERIFY(!image.isNull());
     const qreal scale = grabScale(image, window);
@@ -1848,31 +1861,38 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
         return pixelAt(image, item->mapToScene(point) * scale);
     };
     const QColor plate = drawnOver(colorOf(plotColors, "plotPlate"), colorOf(plotColors, "plotBg"));
-    const QColor drawnChosen = at(chosen, QPointF(2.5, 2.5));
-    const QColor drawnHover = at(other, QPointF(2.5, 2.5));
+    const QColor drawnChosen = at(chosen, QPointF(4.5, 4.5));
+    const QColor drawnLine = at(other, QPointF(2.5, other->height() / 2));
+    const QColor drawnInside = at(other, QPointF(4.5, 4.5));
+    const QColor drawnOutside = at(other, QPointF(1.5, other->height() / 2));
     QVERIFY2(channelDistance(drawnChosen, drawnOver(plateFill, plate)) <= 3,
              qPrintable(describeContrast(QStringLiteral("the chosen plate"), drawnChosen, plate)));
-    QVERIFY2(channelDistance(drawnHover, drawnOver(wash, plate)) <= 3,
-             qPrintable(describeContrast(QStringLiteral("the hover wash"), drawnHover, plate)));
-    // Toward the text colour, both: lighter on a dark plate, darker on a
-    // light one; the hovered one reads, some 1.6:1, and less than the
-    // chosen one.
+    QVERIFY2(channelDistance(drawnLine, colorOf(other, "segmentHoverEdgeColor")) <= 3,
+             qPrintable(QStringLiteral("outline %1, meant %2")
+                            .arg(drawnLine.name(), colorOf(other, "segmentHoverEdgeColor").name())));
+    // The plate inside and outside the outline: a line, not a fill.
+    QVERIFY2(channelDistance(drawnInside, plate) <= 3 && channelDistance(drawnOutside, plate) <= 3,
+             qPrintable(QStringLiteral("inside %1, outside %2, plate %3")
+                            .arg(drawnInside.name(), drawnOutside.name(), plate.name())));
+    // The outline toward the text colour: 3.15:1 on a dark plate, the
+    // chosen fill's step, and 4.5:1 on the light one, under its fill's 7:1.
+    const qreal lineStep = contrastRatio(drawnLine, plate);
     const qreal chosenStep = contrastRatio(drawnChosen, plate);
-    const qreal hoverStep = contrastRatio(drawnHover, plate);
-    QVERIFY2(hoverStep >= 1.55 && hoverStep <= 1.75 && hoverStep < chosenStep,
-             qPrintable(QStringLiteral("hovered %1:1, chosen %2:1").arg(hoverStep).arg(chosenStep)));
-    // The chosen fill reads on its own: 2:1 on the hovered wash, and on a
-    // dark plate 3:1 on the plate with the room the spectrogram's lighter
-    // plate takes, 3.1:1 here; on a light one 7:1, as does its glyph in the
-    // plate's colour on it.
+    QVERIFY2(lightPlate ? lineStep >= 4.4 && lineStep <= 4.9 : lineStep >= 3.05 && lineStep <= 3.45,
+             qPrintable(describeContrast(QStringLiteral("the hover outline"), drawnLine, plate)));
+    QVERIFY2((relativeLuminance(drawnLine) > relativeLuminance(plate)) == !lightPlate,
+             qPrintable(drawnLine.name()));
+    // The chosen fill reads on its own: on a dark plate 3:1 on the plate
+    // with the room the spectrogram's lighter plate takes, 3.1:1 here; on
+    // a light one 7:1, as does its glyph in the plate's colour on it.
     QCOMPARE(relativeLuminance(plate) > 0.5, lightPlate);
     QVERIFY2(chosenStep >= (lightPlate ? 6.9 : 3.1),
              qPrintable(describeContrast(QStringLiteral("the chosen plate on the plate"), drawnChosen, plate)));
-    QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.98,
-             qPrintable(describeContrast(QStringLiteral("the chosen plate on the hovered one"), drawnChosen, drawnHover)));
-    // Neutral: nothing of the accent's blue in it.
-    QVERIFY2(std::abs(drawnChosen.blue() - drawnChosen.red()) <= 12 && std::abs(drawnChosen.green() - drawnChosen.red()) <= 12,
-             qPrintable(drawnChosen.name()));
+    // Neutral, both: nothing of the accent's blue in them.
+    for (const QColor &drawn : {drawnChosen, drawnLine}) {
+        QVERIFY2(std::abs(drawn.blue() - drawn.red()) <= 12 && std::abs(drawn.green() - drawn.red()) <= 12,
+                 qPrintable(drawn.name()));
+    }
     // The chosen one's edge, as drawn: on a dark plate a quiet highlight,
     // a step lighter than its fill, some 1.25:1 on it, and no more than
     // 4.5:1 on the plate (an edge 3:1 on the fill as well came to a
@@ -1891,11 +1911,14 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
                  qPrintable(edgeText));
     }
 
-    // Pressed, its glyph is whole.
+    // Pressed, its glyph is whole; chosen, its outline gives way to the
+    // fill at once.
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, other->mapToScene(QPointF(12, 12)).toPoint());
     QTRY_VERIFY(other->property("down").toBool());
     QCOMPARE(letter->opacity(), 1.0);
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, other->mapToScene(QPointF(12, 12)).toPoint());
+    QTRY_VERIFY(other->property("checked").toBool());
+    QVERIFY(!outline->isVisible());
 }
 
 void UiFoundationsTest::viewerToolButtonHoverReadsOnThePlot_data() {

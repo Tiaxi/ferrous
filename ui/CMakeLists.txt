@@ -350,6 +350,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/assets/no-art-mark.svg
         qml/assets/spectrogram-symbolic.svg
         qml/assets/waveform-symbolic.svg
+        qml/assets/ferrous-mark-small-symbolic.svg
         qml/assets/ferrous-mark-symbolic.svg
         qml/assets/volume.svg
         qml/assets/volume-muted.svg

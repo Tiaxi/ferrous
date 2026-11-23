@@ -4354,9 +4354,9 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
         if (glyph(chosen)->opacity() != 1.0) {
             return QStringLiteral("the chosen glyph at %1").arg(glyph(chosen)->opacity());
         }
-        // Quiet with the keyboard's focus too, less so under the pointer:
-        // whole only while pressed.
-        const double quiet = other->property("hovered").toBool() ? 0.85 : 0.72;
+        // Quiet with the keyboard's focus too, less so under the pointer,
+        // as its outline fades in: whole only while pressed.
+        const double quiet = 0.72 + 0.13 * other->property("hoverProgress").toDouble();
         if (!other->property("down").toBool() && std::abs(glyph(other)->opacity() - quiet) > 0.005) {
             return QStringLiteral("the other glyph at %1").arg(glyph(other)->opacity());
         }
@@ -4439,9 +4439,10 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
 // between them as around them, so the keyboard's 2 px focus ring, with its
 // 1 px gap in the plate's colour, stays inside the plate and clear of the
 // chosen button's edge; the chosen glyph is whole, the other at 72 %, and under the
-// pointer at 85 % on a 14 % wash, which shows on the plate and stays under
-// the chosen one's plate. On both plots; in both Breeze themes,
-// UiFoundationsTest's plotSegmentHoverStaysUnderTheChosenPlate and
+// pointer at 85 % inside a 1 px outline, a different shape from the chosen
+// one's fill (a wash gave it the chosen one's silhouette). On both plots;
+// in both Breeze themes, UiFoundationsTest's
+// plotSegmentHoverIsAnOutlineNotTheChosenFill and
 // plotToolButtonDrawsCheckedAndFocusApart draw the hover and the ring.
 // A plot tool button's tooltip stands above its plate, the style's 3 px
 // clear of the plate's 1 px outer edge: above the button alone, it ran over
@@ -4565,21 +4566,20 @@ void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int
     QCOMPARE(chosenGlyph->opacity(), 1.0);
     QVERIFY2(std::abs(otherGlyph->opacity() - 0.72) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
 
-    // Under the pointer: a wash of some 16 to 24 %, its glyph at 85 %; as
-    // drawn, it reads on the plate (at 10 %, 1.28:1, only the glyph told
-    // it), under the chosen one's plate, which is 1.4:1 or more on it.
+    // Under the pointer: a 1 px outline inset 2 px, its glyph at 85 %, and
+    // no wash; as drawn, the outline reads on the plate, 3:1 or more, with
+    // the plate inside it where the chosen one is its fill (a wash took the
+    // chosen one's silhouette, and both read as chosen for the hover).
     QTest::mouseMove(window, rectOf(other).center().toPoint() + QPoint(0, 1));
     QTest::mouseMove(window, rectOf(other).center().toPoint());
     QTRY_VERIFY(other->property("hovered").toBool());
     QQuickItem *wash = part(other, "plotToolButtonHover");
+    QQuickItem *outline = part(other, "plotToolButtonHoverEdge");
     QQuickItem *fill = part(chosen, "plotToolButtonChecked");
-    QVERIFY(wash != nullptr && fill != nullptr);
-    QTRY_COMPARE(wash->opacity(), 1.0);
+    QVERIFY(wash != nullptr && outline != nullptr && fill != nullptr);
+    QTRY_COMPARE(outline->opacity(), 1.0);
+    QVERIFY(outline->isVisible() && !wash->isVisible());
     QVERIFY2(std::abs(otherGlyph->opacity() - 0.85) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
-    const QColor washColor = wash->property("color").value<QColor>();
-    const QColor fillColor = fill->property("color").value<QColor>();
-    QVERIFY2(washColor.alphaF() >= 0.155 && washColor.alphaF() <= 0.245, qPrintable(QString::number(washColor.alphaF())));
-    QVERIFY(washColor.alphaF() < fillColor.alphaF());
     // The plate whole, as the pointer on it reveals it.
     const auto shownWhole = [&]() {
         double opacity = 1.0;
@@ -4591,18 +4591,17 @@ void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int
     QTRY_VERIFY(shownWhole());
     QTest::qWait(50);
     const QImage image = window->grabWindow();
-    const QColor drawnWash = drawnAt(image, window, other, QPointF(2.5, 2.5));
-    const QColor drawnFill = drawnAt(image, window, chosen, QPointF(2.5, 2.5));
+    const QColor drawnLine = drawnAt(image, window, other, QPointF(2.5, other->height() / 2));
+    const QColor drawnInside = drawnAt(image, window, other, QPointF(4.5, 4.5));
+    const QColor drawnFill = drawnAt(image, window, chosen, QPointF(4.5, 4.5));
     // The plate beside the chosen one, clear of the other's focus ring.
     const QColor drawnPlate =
         drawnAt(image, window, plate, QPointF(mode == 0 ? 1.5 : plate->width() - 1.5, plate->height() / 2));
-    const double washStep = contrastRatio(drawnWash, drawnPlate);
-    const double fillStep = contrastRatio(drawnFill, drawnPlate);
-    QVERIFY2(washStep >= 1.5 && washStep < fillStep,
-             qPrintable(QStringLiteral("hovered %1:1, chosen %2:1 (%3, %4 on %5)").arg(washStep).arg(fillStep)
-                            .arg(drawnWash.name(), drawnFill.name(), drawnPlate.name())));
-    QVERIFY2(contrastRatio(drawnFill, drawnWash) >= 1.4,
-             qPrintable(QStringLiteral("chosen %1 on hovered %2").arg(drawnFill.name(), drawnWash.name())));
+    const QString drawnText = QStringLiteral("outline %1, inside %2, chosen %3 on plate %4")
+                                  .arg(drawnLine.name(), drawnInside.name(), drawnFill.name(), drawnPlate.name());
+    QVERIFY2(contrastRatio(drawnLine, drawnPlate) >= 3.0, qPrintable(drawnText));
+    QVERIFY2(contrastRatio(drawnInside, drawnPlate) <= 1.05, qPrintable(drawnText));
+    QVERIFY2(contrastRatio(drawnFill, drawnPlate) >= 3.0, qPrintable(drawnText));
 }
 
 void AccessibilityTest::checkVisualizationsHaveAccessibleRoles(QQuickWindow *window) {

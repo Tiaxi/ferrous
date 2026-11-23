@@ -173,6 +173,37 @@ Rectangle {
 
     component StandInMark: Item {
 
+        // Under the mark, which runs out to the right side and exits the
+        // tile clean there (over it, the edge capped the traces' ends).
+        Item {
+            objectName: "albumArtStandInEdge"
+            anchors.fill: parent
+            visible: root.standInEdgeColor.a > 0
+
+            EdgeSide {
+                side: "top"
+                width: parent.width
+                height: 1
+            }
+            EdgeSide {
+                side: "bottom"
+                y: parent.height - 1
+                width: parent.width
+                height: 1
+            }
+            EdgeSide {
+                side: "left"
+                width: 1
+                height: parent.height
+            }
+            EdgeSide {
+                side: "right"
+                x: parent.width - 1
+                width: 1
+                height: parent.height
+            }
+        }
+
         Shape {
             id: mark
             objectName: "albumArtStandInMark"
@@ -255,36 +286,6 @@ Rectangle {
                 PathSvg {
                     path: mark.placed("M240.35 791.76 C245.70 789.37 251.05 787.08 256.39 784.87 C264.41 781.55 272.43 778.42 280.45 775.43 C293.82 770.46 307.18 765.90 320.55 761.63 C339.26 755.66 357.97 750.28 376.68 745.31 C400.74 738.91 424.80 733.19 448.86 727.92 C480.93 720.90 513.01 714.69 545.09 709.00 C582.51 702.37 619.94 696.46 657.36 691.04 C705.48 684.06 753.59 677.88 801.71 672.23 C855.17 665.95 908.63 660.31 962.10 655.12 C984.73 652.92 1007.37 650.81 1030.00 648.76")
                 }
-            }
-        }
-
-        // Over the mark, which runs out to the right side.
-        Item {
-            objectName: "albumArtStandInEdge"
-            anchors.fill: parent
-            visible: root.standInEdgeColor.a > 0
-
-            EdgeSide {
-                side: "top"
-                width: parent.width
-                height: 1
-            }
-            EdgeSide {
-                side: "bottom"
-                y: parent.height - 1
-                width: parent.width
-                height: 1
-            }
-            EdgeSide {
-                side: "left"
-                width: 1
-                height: parent.height
-            }
-            EdgeSide {
-                side: "right"
-                x: parent.width - 1
-                width: 1
-                height: parent.height
             }
         }
     }
