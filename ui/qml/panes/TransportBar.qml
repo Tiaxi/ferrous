@@ -107,24 +107,25 @@ ToolBar {
     // the window shows its content in, as a quiet well in the chrome (about
     // 1.28:1 on Breeze Dark's Header colour). It is darker than the dark
     // chrome and lighter than the light one, away from the waveform's
-    // tones, so the waveform on it keeps its contrast. On the light
-    // theme it is a quarter of the way to the chrome, about 1.23:1 on
-    // Breeze's Header colour: the view's white, 1.32:1, read louder there
-    // than the dark band does on its chrome (H16). The unplayed part
-    // is the waveform at the unplayed opacity on the band as on the chrome.
-    // The played part is under the band's colour at 15 %, at 10 % on the
-    // light theme's pale band, so the band's edge shows in the waveform's
-    // ink on either side of the playhead: under the bright played part
-    // alone, the band read as starting at the playhead rather than centred
-    // on it. At 15 % the light played part paled to a tone of its own,
-    // away from its colour off the band (H15).
+    // tones, so the waveform on it keeps its contrast. On the light theme
+    // it is 45 % of the way to the chrome, about 1.17:1 on Breeze's Header
+    // colour: the view's white, 1.32:1, and a quarter of the way, 1.23:1,
+    // read as a raised white slot, louder than the dark band's well (H16,
+    // H17). The unplayed part is the waveform at the unplayed opacity on
+    // the band as on the chrome. The played part is under the band's
+    // colour at 8 %, 6 % on the light theme's pale band, so the band's edge
+    // shows in the waveform's ink on either side of the playhead: under the
+    // bright played part alone, the band read as starting at the playhead
+    // rather than centred on it. More paled the played part to a tone of
+    // its own, a step inside the band (H15, H17 light), and in dark left
+    // the part in view the dimmest of the bar (H17).
     readonly property color seekViewBandColor: root.themeIsDark
         ? root.uiPalette.view
-        : ColorUtils.mixColor(root.uiPalette.view, root.chromeColor, 0.25)
+        : ColorUtils.mixColor(root.uiPalette.view, root.chromeColor, 0.45)
     readonly property color seekViewBandUnplayedCover: ColorUtils.withAlpha(
         root.seekViewBandColor, 1 - root.seekUnplayedOpacity)
     readonly property color seekViewBandPlayedCover: ColorUtils.withAlpha(
-        root.seekViewBandColor, root.themeIsDark ? 0.15 : 0.10)
+        root.seekViewBandColor, root.themeIsDark ? 0.08 : 0.06)
     // The volume slider, in the seek bar's language: its groove filled up
     // to the thumb in the played colour and the rest in the unplayed one,
     // opaque, and a solid thumb in the played colour. While muted, the
