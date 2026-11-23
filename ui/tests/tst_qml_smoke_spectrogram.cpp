@@ -2068,6 +2068,13 @@ void SpectrogramSmokeTest::laneHeadIsOnePlate() {
                      qPrintable(QStringLiteral("lane %1's chip to %2").arg(lane).arg(chips.at(lane).bottom())));
         }
         QVERIFY(chips.at(lane).top() >= 0.0 && chips.at(lane).bottom() <= height);
+        // In its lane's corner, as far from the top as from the side
+        // (centred in the plate's height, it sat 6 px lower than in, H26).
+        const qreal laneTop = lane > 0 ? std::round(lane * double(height) / lanes) + 1 : 0.0;
+        const qreal laneHeight = (lane + 1 < lanes ? std::round((lane + 1) * double(height) / lanes) : height) - laneTop;
+        if (laneHeight >= heads.at(lane)->height() + 5) {
+            QCOMPARE(chips.at(lane).top() - laneTop, chips.at(lane).left());
+        }
     }
     QObject *bridge = harness->findChild<QObject *>(QStringLiteral("testBridge"));
     QVERIFY(bridge != nullptr);
@@ -2089,9 +2096,15 @@ void SpectrogramSmokeTest::laneHeadIsOnePlate() {
         QCOMPARE(rectIn(chip), chips.at(index));
         QCOMPARE(rectIn(part(head, "plotPlateLabel")), letters.at(index));
         QCOMPARE(chip->property("backgroundLevel").toReal(), 0.0);
-        QCOMPARE(plateRect.left(), chips.at(index).left());
+        // The chip as far from the plate's left as from its top where the
+        // plate is in the lane, and as far again from the divider.
+        const qreal room = chips.at(index).left() - plateRect.left();
+        QVERIFY(room >= 0.0);
+        if (lane >= plateRect.height() + 5) {
+            QCOMPARE(room, chips.at(index).top() - plateRect.top());
+        }
         QCOMPARE(divider.width(), 1.0);
-        QCOMPARE(divider.left(), chips.at(index).right());
+        QCOMPARE(divider.left(), chips.at(index).right() + room);
         QVERIFY(mute.left() > divider.right() && solo.left() > mute.right() && solo.right() < plateRect.right());
         QVERIFY(plateRect.contains(mute) && plateRect.contains(solo));
         QCOMPARE(mute.center().y(), plateRect.center().y());

@@ -406,6 +406,10 @@ Item {
             // The plate 5 px in, as the mode switch, whose height it has,
             // and the label centred in it.
             y: Math.max(root.laneTop(index), root.topInset) + root.headInset(height)
+            // The label at rest as far in from the lane's left as from its
+            // top: a short lane's plate is less far down; a viewer's heads
+            // are further in, on its title's line.
+            labelX: Math.max(0, labelY + root.headInset(height) - root.laneHeadInset)
             widestLabel: root.widestLabel
             visible: label.length > 0
             plotColors: root.plotColors
@@ -446,8 +450,9 @@ Item {
 
             Components.PlotPlate {
                 objectName: "plotLaneRestLabel"
+                x: laneHead.labelX
                 y: laneHead.labelY - laneHead.stripShift
-                width: laneHead.cellWidth
+                width: laneHead.labelWidth
                 visible: laneHead.stripShift > 0 && laneHead.underStrip < 1
                 fadeLevel: 1 - laneHead.underStrip
                 plotColors: root.plotColors

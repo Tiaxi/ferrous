@@ -4732,7 +4732,11 @@ void AccessibilityTest::checkLaneButtonsAreCheckableToggles(QQuickWindow *window
     QVERIFY2(std::abs(rectOf(modeSwitch).center().y() - plateRect.center().y()) <= 0.5,
              qPrintable(QStringLiteral("switch centre %1, plate centre %2")
                             .arg(rectOf(modeSwitch).center().y()).arg(plateRect.center().y())));
-    QCOMPARE(rectOf(label).left() - rectOf(layer).left(), plateInset);
+    // The label as far in from the plate's left as from its top, so in the
+    // lane's corner as far from the side as from the top (H26).
+    QCOMPARE(plateRect.left() - rectOf(layer).left(), plateInset);
+    QCOMPARE(rectOf(label).left() - plateRect.left(), rectOf(label).top() - plateRect.top());
+    QCOMPARE(rectOf(label).left() - rectOf(layer).left(), rectOf(label).top() - rectOf(layer).top());
     mute->forceActiveFocus(Qt::TabFocusReason);
     QQuickItem *ring = mute->findChild<QQuickItem *>(QStringLiteral("plotToolButtonFocusRing"));
     QVERIFY(ring != nullptr);

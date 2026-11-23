@@ -13,7 +13,10 @@ import "." as Components
 // the plate, and while keyboard focus is on either button, and in a viewer
 // with its controls; hidden, the buttons stay Tab stops, so the keyboard
 // reveals them. At rest the label alone shows, on a chip in the cell's
-// place, as wide, so nothing moves as Mute and Solo show.
+// place, as far in from the plate's left as from its top, so that it sits
+// in the lane's corner as far from the top as from the side (centred in
+// the plate's height, it sat 6 px lower than in, H26), and nothing moves as
+// Mute and Solo show.
 // A `compact` head, in a short lane, such as each of 5.1's in the main
 // window, has a 16 px label with 11 px text and 20 px buttons,
 // larger with a larger font, and its buttons show only on the pointer or
@@ -71,7 +74,7 @@ Item {
             return false
         const onPlate = buttons.visible && buttons.revealed
         const plate = onPlate ? Qt.rect(0, buttons.y, buttons.width, buttons.height)
-                              : Qt.rect(0, labelPlate.y, labelPlate.width, labelPlate.height)
+                              : Qt.rect(labelPlate.x, labelPlate.y, labelPlate.width, labelPlate.height)
         const x = root.pointerPosition.x - root.x
         const y = root.pointerPosition.y - root.y
         return x >= plate.x && x < plate.x + plate.width && y >= plate.y && y < plate.y + plate.height
@@ -99,14 +102,19 @@ Item {
     // so that a button's focus ring, 3 px out from it, keeps 1 px of the
     // plate outside it and clears the divider.
     readonly property int platePadding: 4
-    // The label's cell, up to the divider: the widest label and the room
-    // beside it, and at least a button's width, so a letter's chip is
-    // never taller than it is wide.
-    readonly property real cellWidth: Math.max(root.buttonSize, Math.ceil(root.widestLabel)
+    // The label's chip: the widest label and the room beside it, and at
+    // least a button's width, so a letter's chip is never taller than it
+    // is wide.
+    readonly property real labelWidth: Math.max(root.buttonSize, Math.ceil(root.widestLabel)
         + 2 * root.uiPalette.scaledSize(root.compact ? 4 : 6))
-    readonly property real plateWidth: root.cellWidth + 1 + 3 * root.platePadding + 2 * root.buttonSize
-    // The label's chip, centred in the plate's height.
+    // The chip, centred in the plate's height, and in from its left as far
+    // as the plot layer puts it from the lane's top (`labelX`): as far as
+    // from the plate's top where the plate is as far in from both edges.
     readonly property real labelY: Math.round((root.height - labelPlate.height) / 2)
+    property real labelX: root.labelY
+    // The label's cell, up to the divider: the chip with the room around it.
+    readonly property real cellWidth: 2 * root.labelX + root.labelWidth
+    readonly property real plateWidth: root.cellWidth + 1 + 3 * root.platePadding + 2 * root.buttonSize
     // The sizes from the font and the pane alone, at once, rather than as
     // the plate's row is laid out, for the plot's overlays to keep clear.
     implicitWidth: buttons.visible ? root.plateWidth : root.cellWidth
@@ -116,7 +124,7 @@ Item {
     // stays the same as it reveals and hides.
     readonly property rect occupiedBounds: buttons.visible
         ? Qt.rect(-1, root.plateShift - 1, root.plateWidth + 2, root.height + 2)
-        : Qt.rect(-1, root.labelY - 1, root.cellWidth + 2, labelPlate.height + 2)
+        : Qt.rect(root.labelX - 1, root.labelY - 1, root.labelWidth + 2, labelPlate.height + 2)
     width: implicitWidth
     height: implicitHeight
 
@@ -137,8 +145,9 @@ Item {
         textScale: root.textScale
         fadeLevel: root.labelLevel
         z: 1
+        x: root.labelX
         y: root.labelY
-        width: root.cellWidth
+        width: root.labelWidth
         height: Math.min(implicitHeight, root.laneRoom - 2)
         // Its own fill and edge give way to the shared plate's as that
         // comes in, the plate never thinner between them.
