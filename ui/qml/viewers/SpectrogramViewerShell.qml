@@ -36,8 +36,10 @@ Item {
     // What the level meter's column takes of the view's right edge, which
     // the corner's plate keeps clear of.
     property real meterWidth: 0
-    // The corner plate's inset from the plot's corner, as the lane heads'.
-    readonly property int cornerInset: 5
+    // The corner plate's inset from the plot's corner: in the window, the
+    // lane heads'; over the whole screen, the title strip's 8 px, as its
+    // plate is on the strip's scale.
+    readonly property int cornerInset: root.useWholeScreenViewerMode ? 8 : 5
     // Its inset from the plot's right edge: the corner's, or beside the
     // level meter's column, 8 px from it (at 5 px, its edge all but met the
     // meter's seam).
@@ -534,6 +536,13 @@ Item {
                         anchors.rightMargin: root.meterWidth + root.cornerRightInset
                         available: !root.stripEnabled
                         closeButtonName: "spectrogramFullscreenCornerCloseButton"
+                        // The strip's buttons, glyphs and readout, so the
+                        // screen has one scale with the strip turned off
+                        // too (the window's chrome, a size too small,
+                        // stood beside lane heads on the larger type).
+                        viewerIconSize: spectrogramStrip.iconSize
+                        viewerButtonSize: spectrogramStrip.buttonSize
+                        readoutPointSize: spectrogramStrip.textPointSize
                         plotColors: root.uiPalette.plotColors(root.visualizationMode)
                         uiPalette: root.uiPalette
                         controlsVisible: root.fullscreenControlsVisible
