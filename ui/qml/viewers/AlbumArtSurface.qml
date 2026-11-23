@@ -150,26 +150,32 @@ Item {
     readonly property real fitCenterX: root.fitLeft + root.fitWidth / 2
     onFitWidthChanged: root.clampPan()
 
-    // A flat button of the details, reached with Tab, with its tooltip.
+    // A button of the details, reached with Tab, with its tooltip.
     // Space presses it rather than playing or pausing, which the viewer's
     // shortcuts would take; keys with modifiers stay the shortcuts'.
     // It is drawn in the plot's colours, as the strip's buttons are: the
-    // theme's icons would be a light theme's on the dark details. It shows
-    // only the hover tint; keyboard focus is the plot's 2 px ring 1 px
-    // outside it, with a 1 px gap in the details' colour.
+    // theme's icons would be a light theme's on the dark details. At rest it
+    // is a box with a 1 px edge, the plates' (flat, a line of text with a
+    // glyph, it read as one more row of the details, not as the column's
+    // action); the hover tint fills it inside that edge. While `current`, it
+    // is drawn as a checked toggle of the strip is. Keyboard focus is the
+    // plot's 2 px ring 1 px outside it, with a 1 px gap in the details'
+    // colour.
     component DetailsButton: Button {
         id: detailsButton
 
         property string toolTipText: ""
+        // Drawn checked: the comparison shows the other image.
+        property bool current: false
         readonly property color contentColor: root.plot.plotText
 
         focusPolicy: Qt.TabFocus
         hoverEnabled: true
         font.pointSize: root.infoPointSize
-        leftPadding: Math.round(8 * root.infoScale)
-        rightPadding: Math.round(8 * root.infoScale)
-        topPadding: Math.round(5 * root.infoScale)
-        bottomPadding: Math.round(5 * root.infoScale)
+        leftPadding: Math.round(6 * root.infoScale)
+        rightPadding: Math.round(6 * root.infoScale)
+        topPadding: Math.round(4 * root.infoScale)
+        bottomPadding: Math.round(4 * root.infoScale)
         spacing: Kirigami.Units.smallSpacing
         icon.width: root.detailsIconSize
         icon.height: root.detailsIconSize
@@ -197,10 +203,14 @@ Item {
                 anchors.centerIn: parent
                 spacing: detailsButton.spacing
 
+                // Its middle on the middle of the text's capitals, as the
+                // footer's chevron and checkmark sit, rather than on the
+                // middle of the text's line, which is lower.
                 Kirigami.Icon {
                     id: detailsButtonIcon
                     objectName: "albumArtDetailsButtonIcon"
-                    anchors.verticalCenter: parent.verticalCenter
+                    y: Math.round(detailsButtonLabel.y + detailsButtonLabel.baselineOffset
+                        - detailsButtonCapMetrics.capHeight / 2 - height / 2)
                     width: detailsButton.icon.width
                     height: detailsButton.icon.height
                     visible: detailsButton.icon.name.length > 0
@@ -221,15 +231,41 @@ Item {
                     color: detailsButton.contentColor
                     elide: Text.ElideRight
                     Accessible.ignored: true
+
+                    FontMetrics {
+                        id: detailsButtonCapMetrics
+                        readonly property real capHeight: detailsButtonCapMetrics.tightBoundingRect("H").height
+                        font: detailsButtonLabel.font
+                    }
                 }
             }
         }
 
         background: Item {
+            // Checked, as a toggle of the strip (ViewerToolButton): its
+            // fill and its edge.
+            Rectangle {
+                objectName: "albumArtDetailsButtonChecked"
+                anchors.fill: parent
+                radius: 3
+                visible: detailsButton.current
+                color: ColorUtils.withAlpha(root.plot.plotText, 0.18)
+            }
+
+            Rectangle {
+                objectName: "albumArtDetailsButtonEdge"
+                anchors.fill: parent
+                radius: 3
+                color: "transparent"
+                border.width: 1
+                border.color: detailsButton.current ? root.plot.segmentEdge : root.plot.plotPlateEdge
+            }
+
             Rectangle {
                 objectName: "albumArtDetailsButtonHover"
                 anchors.fill: parent
-                radius: 3
+                anchors.margins: 1
+                radius: 2
                 color: ColorUtils.withAlpha(root.plot.plotText,
                     detailsButton.down ? 0.18 : 0.12)
                 opacity: detailsButton.enabled && (detailsButton.hovered || detailsButton.down) ? 1 : 0
@@ -962,20 +998,21 @@ Item {
                     objectName: "albumArtCompareButton"
                     visible: root.comparisonModeAvailable
                     Layout.topMargin: Math.round(12 * root.infoScale)
-                    // Its glyph on the column's text edge (13 px in from it,
-                    // it read as a stray indent): flat, its hover and ring
-                    // reach out into the column's padding, as Copy Path's do.
-                    Layout.leftMargin: -leftPadding
-                    // Its box the size the glyph is drawn at, which a larger
-                    // one centres it in, off that edge (7 px in at 24 pt).
+                    // Its box's left edge on the column's text edge, as the
+                    // rows' text above it.
+                    // Its glyph's box the size the glyph is drawn at, sharp.
                     icon.width: Kirigami.Units.iconSizes.roundedIconSize(root.detailsIconSize)
                     icon.height: Kirigami.Units.iconSizes.roundedIconSize(root.detailsIconSize)
-                    flat: true
-                    // Two views and arrows between them, drawn for 16 px in
-                    // both Breeze themes: a switch (view-refresh said reload,
-                    // exchange-positions is drawn for 22 px and smudged, and
+                    // Checked while the current art shows: the comparison is
+                    // on, and pressing it goes back to the candidate.
+                    current: root.sourceKind !== "itunes"
+                    // Two views side by side, drawn for 16 px in both Breeze
+                    // themes in 1 px lines, as the footer's chevron: the two
+                    // images compared (swap-panels' panes and arrows, in
+                    // 16 px, read as a smudge; view-refresh said reload,
+                    // exchange-positions is drawn for 22 px, and
                     // document-swap's one sheet said replace, as Apply does).
-                    icon.name: "swap-panels"
+                    icon.name: "view-dual-symbolic"
                     text: root.sourceKind === "itunes"
                         ? I18n.i18nc("@action:button", "Show Current Album Art")
                         : I18n.i18nc("@action:button artwork found on iTunes", "Show iTunes Artwork")

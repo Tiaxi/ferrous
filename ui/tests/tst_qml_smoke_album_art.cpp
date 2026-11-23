@@ -4952,21 +4952,62 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
                             .arg(sceneRectOf(compare).left()).arg(sceneRectOf(compare).right())
                             .arg(sceneRectOf(compareLabel).left()).arg(sceneRectOf(compareLabel).right())));
     QVERIFY(compare->width() >= compareLabel->implicitWidth() + compareGlyph->width());
-    // It starts on the column's text edge, its glyph's box as large as the
-    // glyph is drawn (13 px in from the edge, it read as a stray indent),
-    // and the glyph says switch, not reload.
-    QVERIFY2(std::abs(sceneRectOf(compareGlyph).left() - sceneRectOf(title).left()) <= 0.5,
-             qPrintable(QStringLiteral("the glyph at %1, the text at %2")
-                            .arg(sceneRectOf(compareGlyph).left()).arg(sceneRectOf(title).left())));
+    // A button at rest, not a line of the details (flat, it read as one
+    // more row of them): its box starts on the column's text edge, 6 px
+    // and 4 px of padding around its glyph and label, more over the whole
+    // screen, inside a 1 px edge in the plates' colour, radius 3. Its
+    // glyph's box is as large as the glyph is drawn, and the glyph, two
+    // views side by side, sits on the middle of the label's capitals.
+    const qreal infoScale = fullscreen ? 1.2 : 1.0;
+    QVERIFY2(std::abs(sceneRectOf(compare).left() - sceneRectOf(title).left()) <= 0.5,
+             qPrintable(QStringLiteral("the button at %1, the text at %2")
+                            .arg(sceneRectOf(compare).left()).arg(sceneRectOf(title).left())));
+    QCOMPARE(compare->property("leftPadding").toReal(), std::round(6 * infoScale));
+    QCOMPARE(compare->property("rightPadding").toReal(), std::round(6 * infoScale));
+    QCOMPARE(compare->property("topPadding").toReal(), std::round(4 * infoScale));
+    QCOMPARE(compare->property("bottomPadding").toReal(), std::round(4 * infoScale));
+    QVERIFY2(std::abs(sceneRectOf(compareGlyph).left() - sceneRectOf(compare).left() - std::round(6 * infoScale)) <= 0.5,
+             qPrintable(QStringLiteral("the glyph at %1, the button at %2")
+                            .arg(sceneRectOf(compareGlyph).left()).arg(sceneRectOf(compare).left())));
     QCOMPARE(compareGlyph->property("paintedWidth").toReal(), compareGlyph->width());
+    {
+        const QFont labelFont = qvariant_cast<QFont>(compareLabel->property("font"));
+        const qreal capHeight = QFontMetricsF(labelFont).tightBoundingRect(QStringLiteral("H")).height();
+        const qreal capsMiddle = sceneRectOf(compareLabel).top()
+            + compareLabel->property("baselineOffset").toReal() - capHeight / 2;
+        // On whole pixels, within one of it.
+        QVERIFY2(std::abs(sceneRectOf(compareGlyph).center().y() - capsMiddle) <= 1.0,
+                 qPrintable(QStringLiteral("the glyph's middle at %1, the capitals' at %2")
+                                .arg(sceneRectOf(compareGlyph).center().y()).arg(capsMiddle)));
+    }
     QCOMPARE(QQmlExpression(qmlContext(compare), compare, QStringLiteral("icon.name")).evaluate().toString(),
-             QStringLiteral("swap-panels"));
+             QStringLiteral("view-dual-symbolic"));
     for (const QString &theme : {QStringLiteral("breeze"), QStringLiteral("breeze-dark")}) {
         const QString file = QStandardPaths::locate(
             QStandardPaths::GenericDataLocation,
-            QStringLiteral("icons/%1/actions/16/swap-panels.svg").arg(theme));
-        QVERIFY2(!file.isEmpty(), qPrintable(QStringLiteral("%1 draws no 16 px swap-panels").arg(theme)));
+            QStringLiteral("icons/%1/actions/16/view-dual-symbolic.svg").arg(theme));
+        QVERIFY2(!file.isEmpty(), qPrintable(QStringLiteral("%1 draws no 16 px view-dual-symbolic").arg(theme)));
     }
+    QQuickItem *edge = itemNamed(compare, QStringLiteral("albumArtDetailsButtonEdge"));
+    QQuickItem *checkedFill = itemNamed(compare, QStringLiteral("albumArtDetailsButtonChecked"));
+    QQuickItem *hoverFill = itemNamed(compare, QStringLiteral("albumArtDetailsButtonHover"));
+    QVERIFY(edge != nullptr && checkedFill != nullptr && hoverFill != nullptr);
+    QCOMPARE(sceneRectOf(edge), sceneRectOf(compare));
+    QCOMPARE(edge->property("radius").toReal(), 3.0);
+    QCOMPARE(qvariant_cast<QObject *>(edge->property("border"))->property("width").toInt(), 1);
+    // The hover tint inside the edge, not over it.
+    QCOMPARE(sceneRectOf(hoverFill), sceneRectOf(compare).adjusted(1, 1, -1, -1));
+    // Drawn checked, as a toggle of the strip, while the current art shows
+    // to compare: "Show iTunes Artwork"; at rest while the candidate does.
+    QCOMPARE(compare->property("text").toString(), QStringLiteral("Show iTunes Artwork"));
+    QVERIFY(checkedFill->isVisible());
+    QCOMPARE(colorOf(checkedFill, "color"), qRgba(0xec, 0xec, 0xec, qRound(0.18 * 255)));
+    QCOMPARE(borderColorOf(edge), colorOf(plot, "segmentEdge"));
+    surface->setProperty("sourceKind", QStringLiteral("itunes"));
+    QCOMPARE(compare->property("text").toString(), QStringLiteral("Show Current Album Art"));
+    QVERIFY(!checkedFill->isVisible());
+    QCOMPARE(borderColorOf(edge), colorOf(plot, "plotPlateEdge"));
+    surface->setProperty("sourceKind", QStringLiteral("folder"));
     QQuickItem *gap = itemNamed(compare, QStringLiteral("albumArtDetailsButtonFocusGap"));
     QVERIFY(gap != nullptr && gap->isVisible());
     QCOMPARE(borderColorOf(gap), strip);
