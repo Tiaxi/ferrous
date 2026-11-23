@@ -2900,8 +2900,9 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks_data() {
 // the -6, -12 and -24 dB marks' ticks across it, 1 px each, where they are
 // while it plays, and no lamp, fill or peak tick (the blank trough of the
 // first run read as a scrollbar's): in either mode and theme. Before any
-// audio, the pane at rest, the trough is the plot's floor and the marks the
-// rest lines' colour, on the spectrogram #14062e and #433858 (the lit
+// audio, the pane at rest, the trough is the plot's floor and the marks
+// faint, on the spectrogram #14062e and #433858, a step over the rest
+// lines, as short marks need it to show (the lit
 // #30244a trough was the one instrument switched on); with a track, paused
 // or stopped, the lit trough and its ticks; and with the queue cleared, the
 // floor again.
@@ -2989,6 +2990,20 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
             QTRY_VERIFY2(marksProblem(meter, trough, tick).isEmpty(),
                          qPrintable(QStringLiteral("%1, mode %2: %3").arg(phase).arg(mode)
                                         .arg(marksProblem(meter, trough, tick))));
+            // Under the queue's seam the column draws no seam of its own:
+            // over the waveform's meter one made the seam 2 px thick there.
+            {
+                const Drawn drawn(window);
+                const QRectF rect = sceneRect(meter);
+                const QColor seam = palette->property("seam").value<QColor>();
+                const double x = rect.left() + LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth / 2;
+                QVERIFY2(near(drawn.at(x, rect.top() - 0.5), seam),
+                         qPrintable(QStringLiteral("%1, mode %2: over the meter %3")
+                                        .arg(phase).arg(mode).arg(hex(drawn.at(x, rect.top() - 0.5)))));
+                QVERIFY2(!near(drawn.at(x, rect.top() + 0.5), seam),
+                         qPrintable(QStringLiteral("%1, mode %2: the meter's top row %3, the seam's colour")
+                                        .arg(phase).arg(mode).arg(hex(drawn.at(x, rect.top() + 0.5)))));
+            }
         }
     };
 

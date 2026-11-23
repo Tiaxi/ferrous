@@ -325,8 +325,6 @@ QtObject {
         required property color meterPeak
         required property color meterClipOff
         required property color meterTick
-        // A 1 px line across the meter's top, or transparent for none.
-        required property color meterTopSeam
         // The meter before any audio, while the pane is at rest: its track
         // in the plot's floor and its marks in the rest lines' colour, so
         // it is of one piece with the pane waiting (a lit trough stood out
@@ -368,6 +366,13 @@ QtObject {
     // floor and its lines). Playing, the seam is
     // plotLaneSeam's neutral one, which shows between lanes of silence.
     readonly property color plotRestLaneSeam: root.spectrogramPlot.meterSeam
+    // The top 1 px of that cut, lit in the floor's violet: 2.6:1 on the
+    // floor, twice the rest lines' 1.3:1, so the cut reads as the lanes'
+    // boundary and not as one more line (dark alone, at 1.05:1, the seam
+    // all but vanished between the louder lines; a single lighter seam read
+    // as a rest line; the edge over its dark groove is a shape the lines
+    // don't have).
+    readonly property color plotRestLaneSeamEdge: "#5d4d80"
     // The never-played waveform's centre lines, one to a lane: the text
     // over the view, the least in whole percent that is 1.3:1 on it, as the
     // spectrogram's rest lines are faint on its floor.
@@ -407,8 +412,10 @@ QtObject {
         meterPeak: "#f4f4f6"
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)
         meterTick: Qt.rgba(1, 1, 1, 0.4)
-        meterTopSeam: "transparent"
-        // The floor, and the rest lines' white 20 % on it: #433858.
+        // The floor, and on it marks in white 20 %, #433858: a step over
+        // the rest lines' 11 %, as a mark a few pixels long needs more
+        // than a line across the lane to show (a meter without marks read
+        // as a scrollbar's track).
         meterRestTrough: root.plotFloor
         meterRestTick: ColorUtils.drawnOver(Qt.rgba(1, 1, 1, 0.2), root.plotFloor)
         checkedFill: root.accent
@@ -437,17 +444,20 @@ QtObject {
         // instrument rather than as a piece of the queue's scrollbar above
         // it, whose greys it had: the waveform's colour mixed about 35 %
         // toward the view, less where that would be under 3:1 on the
-        // trough, and a seam across its top. From the pane's waveform
+        // trough (no seam across its top: under the queue's seam it made
+        // one 2 px thick over the meter's column). From the pane's waveform
         // colour, so it stays the plot's own. The trough frames the bar
         // (LevelMeterItem's `framed`), a step off the view, so the column
         // reads as an instrument and not as the waveform's tail (at 1.2:1
         // it did not show).
         meterTrough: root.themeIsDark ? "#2b2d2f" : "#e8e9ea"
         meterFill: root._waveformMeterFill(ColorUtils.drawnOver(waveformColors.meterTrough, root.view))
-        meterTopSeam: root.seam
         meterSeam: root.view
         meterPeak: ColorUtils.withAlpha(root.text, 0.95)
-        meterClipOff: ColorUtils.withAlpha(root.text, 0.18)
+        // The unlit clip lamp, over the trough: in a light theme text at
+        // 27 %, some 1.7:1 on it (at 18 %, 1.4:1, the lamp all but vanished
+        // and its gap read as a notch at the bar's top).
+        meterClipOff: ColorUtils.withAlpha(root.text, root.themeIsDark ? 0.18 : 0.27)
         // The meter's marks: the text colour, faint.
         meterTick: ColorUtils.withAlpha(root.text, 0.3)
         // The view, and the waveform's rest lines on it.
@@ -509,7 +519,6 @@ QtObject {
         meterPeak: spectrogramColors.meterPeak
         meterClipOff: spectrogramColors.meterClipOff
         meterTick: spectrogramColors.meterTick
-        meterTopSeam: spectrogramColors.meterTopSeam
         meterRestTrough: spectrogramColors.meterRestTrough
         meterRestTick: spectrogramColors.meterRestTick
         checkedFill: spectrogramColors.checkedFill

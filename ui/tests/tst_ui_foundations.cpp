@@ -556,6 +556,18 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         QVERIFY(sameColor(restSeam, colorOf(spectrogram, "meterSeam")));
         QVERIFY2(relativeLuminance(restSeam) < relativeLuminance(floor), qPrintable(restSeam.name()));
         QVERIFY2(restSeam.blue() > restSeam.green() + 10 && restSeam.red() > restSeam.green(), qPrintable(restSeam.name()));
+        // Its lit top edge, in the floor's violet, outranks the rest lines
+        // (white 11 % over the floor, 1.3:1), so the cut reads as the
+        // lanes' boundary rather than one more line.
+        const QColor edge = colorOf(tokens, "plotRestLaneSeamEdge");
+        QCOMPARE(edge.alphaF(), 1.0f);
+        const double edgeContrast = contrastRatio(edge, floor);
+        QVERIFY2(edgeContrast >= 2.3 && edgeContrast <= 2.8, qPrintable(QString::number(edgeContrast)));
+        const QColor restLine = QColor::fromRgbF(floor.redF() + (1.0f - floor.redF()) * 28.0f / 255.0f,
+                                                 floor.greenF() + (1.0f - floor.greenF()) * 28.0f / 255.0f,
+                                                 floor.blueF() + (1.0f - floor.blueF()) * 28.0f / 255.0f);
+        QVERIFY2(contrastRatio(edge, restLine) >= 1.8, qPrintable(restLine.name()));
+        QVERIFY2(edge.blue() > edge.green() + 20 && edge.red() > edge.green(), qPrintable(edge.name()));
     }
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "plotBg")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "meterSeam")) >= 1.3);
@@ -605,8 +617,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     // or by 5 % steps less, the most that is 3:1 on the trough; the trough
     // a step off the view that frames the bar, #2b2d2f in dark and #e8e9ea
     // in light (the text at 6 %, 1.2:1, did not show); the marks the text
-    // at 30 %; a seam across its top in the seam colour. The spectrogram's
-    // meter has no such seam.
+    // at 30 %.
     {
         const QColor wave = colorOf(tokens, "paneWave");
         QVERIFY(sameColor(colorOf(waveform, "meterTrough"),
@@ -640,9 +651,19 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         // The trough reads against the view it frames.
         QVERIFY2(contrastRatio(colorOf(waveform, "meterTrough"), view) >= 1.15,
                  qPrintable(QString::number(contrastRatio(colorOf(waveform, "meterTrough"), view))));
-        QVERIFY(sameColor(colorOf(waveform, "meterTopSeam"), colorOf(tokens, "seam")));
-        QCOMPARE(colorOf(spectrogram, "meterTopSeam").alpha(), 0);
-        QCOMPARE(colorOf(media, "meterTopSeam").alpha(), 0);
+        // No seam across the meter's top, in any set: under the queue's
+        // seam, the waveform's made it 2 px thick over the meter's column.
+        for (const QObject *colors : {waveform, spectrogram, media}) {
+            QVERIFY(colors->metaObject()->indexOfProperty("meterTopSeam") < 0);
+        }
+        // The unlit clip lamp reads on the trough it is drawn over: about
+        // 1.7:1 in a light theme (at 1.4:1 it all but vanished).
+        {
+            const QColor lampTrough = drawnOver(colorOf(waveform, "meterTrough"), view);
+            const double lamp = contrastRatio(drawnOver(colorOf(waveform, "meterClipOff"), lampTrough), lampTrough);
+            QVERIFY2(dark || (lamp >= 1.65 && lamp <= 1.8), qPrintable(QString::number(lamp)));
+            QVERIFY2(lamp >= 1.3, qPrintable(QString::number(lamp)));
+        }
     }
     // A checked button: the accent in dark, the focus ring's darker blue in
     // light; its glyph the view in dark, white in light.

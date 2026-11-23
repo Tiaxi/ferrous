@@ -598,7 +598,6 @@ Item {
         clipOffColor: root.plotColors.meterClipOff
         clipColor: root.uiPalette.negative
         tickColor: root.beforeAudio ? root.plotColors.meterRestTick : root.plotColors.meterTick
-        topSeamColor: root.plotColors.meterTopSeam
         // On the waveform, whose colour the bar has, the bar is framed by
         // its trough, so it reads as an instrument rather than as the
         // waveform's tail. Its marks and scale are the same in both modes.
