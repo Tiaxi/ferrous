@@ -1235,6 +1235,8 @@ private slots:
     void tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles();
     void focusedColumnHandleHasAFrameAndSaysItsKeys_data();
     void focusedColumnHandleHasAFrameAndSaysItsKeys();
+    void columnHandlesShowAQuietMarkAtRest_data();
+    void columnHandlesShowAQuietMarkAtRest();
     void transportStartsAndEndsAtTheContentInset();
     void firstRunsButtonIsThePrimaryOne();
     void viewersInTheWindowFadeAsTheStylesPopupsDo();
@@ -7021,6 +7023,90 @@ void UiMainWindowTest::tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles() {
     QTRY_VERIFY(queue->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
     QTRY_VERIFY(library->hasActiveFocus());
+}
+
+void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// In a populated header, each column's resize boundary shows a quiet mark at
+// rest, so a pointer user can see where to resize (it showed nothing until
+// hovered): a 1 px stroke in the seam colour, 10 px at 10 pt and growing with
+// the font, centred on the labels, where the divider is. It gives way to the
+// divider under the pointer and with focus; an empty queue's header, with
+// nothing to resize, shows none.
+void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *header = named(window, "queueHeader");
+    QVERIFY(header);
+    const auto restOf = [window](const char *column) {
+        return itemNamed(named(window, QStringLiteral("queueColumnHandle_") + QLatin1String(column)),
+                         QStringLiteral("queueColumnHandleRest"));
+    };
+    QVERIFY(restOf("length") != nullptr);
+    QVERIFY(!restOf("length")->isVisible());
+
+    setQueue(bridgeOf(window), sampleQueueRows(3));
+    for (const char *column : {"artist", "album", "length"}) {
+        QQuickItem *handle = named(window, QStringLiteral("queueColumnHandle_") + QLatin1String(column));
+        QQuickItem *label = named(window, QStringLiteral("queueHeader_") + QLatin1String(column));
+        QVERIFY2(handle && label, column);
+        QQuickItem *rest = restOf(column);
+        QQuickItem *line = itemNamed(handle, QStringLiteral("queueColumnHandleLine"));
+        QVERIFY(rest && line);
+        // A narrow queue drops its Album column.
+        if (!label->isVisible()) {
+            QVERIFY(!rest->isVisible());
+            continue;
+        }
+        QTRY_VERIFY2(rest->isVisible(), column);
+        QVERIFY(!line->isVisible());
+        QCOMPARE(rest->width(), 1.0);
+        QCOMPARE(rest->height(), qreal(scaledSize(window, 10)));
+        QCOMPARE(colorOf(rest), tokenHex(window, "seam"));
+        const QRectF mark = sceneRect(rest);
+        QCOMPARE(mark.left(), std::round(mark.left()));
+        QCOMPARE(mark.top(), std::round(mark.top()));
+        QCOMPARE(mark.left(), sceneRect(line).left());
+        // Short of the header's top and its hairline, and centred on the label.
+        QVERIFY(mark.top() > sceneRect(header).top() && mark.bottom() < sceneRect(header).bottom() - 1);
+        QVERIFY2(std::abs(mark.center().y() - sceneRect(label).center().y()) <= 1.0,
+                 qPrintable(QStringLiteral("%1: mark centred at %2, label at %3")
+                                .arg(QLatin1String(column))
+                                .arg(mark.center().y())
+                                .arg(sceneRect(label).center().y())));
+        // Left of the label it belongs to.
+        QVERIFY(mark.right() < sceneRect(label).left());
+    }
+
+    // Under the pointer, the divider alone.
+    QQuickItem *handle = named(window, "queueColumnHandle_length");
+    QQuickItem *line = itemNamed(handle, QStringLiteral("queueColumnHandleLine"));
+    // From elsewhere: a test before this one may have left the pointer there.
+    QTest::mouseMove(window, QPoint(window->width() / 2, window->height() - 60));
+    QTest::mouseMove(window, handle->mapToScene(QPointF(handle->width() / 2, handle->height() / 2)).toPoint());
+    QTRY_VERIFY(line->isVisible());
+    QVERIFY(!restOf("length")->isVisible());
+    QVERIFY(restOf("artist")->isVisible());
+    QTest::mouseMove(window, QPoint(window->width() / 2, window->height() - 60));
+    QTRY_VERIFY(!line->isVisible());
+    QVERIFY(restOf("length")->isVisible());
+    // With keyboard focus, the ring around the divider alone.
+    handle->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(line->isVisible());
+    QVERIFY(!restOf("length")->isVisible());
+
+    // Emptied, nothing to resize.
+    named(window, "playlistView")->forceActiveFocus(Qt::TabFocusReason);
+    setQueue(bridgeOf(window), QVariantList{});
+    QTRY_VERIFY(!restOf("length")->isVisible());
+    QVERIFY(!restOf("artist")->isVisible());
 }
 
 void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys_data() {

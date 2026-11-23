@@ -1514,6 +1514,22 @@ Rectangle {
                     color: resizeMouseArea.pressed ? root.uiPalette.focusRing : root.uiPalette.textTertiary
                 }
 
+                // At rest, over a populated header: a short stroke in the
+                // seam colour where the divider is, centred on the labels,
+                // so a pointer user can see where to resize (the boundary
+                // had nothing to aim at). It gives way to the divider
+                // under the pointer, while dragged and with focus.
+                Rectangle {
+                    objectName: "queueColumnHandleRest"
+                    x: resizeHandle.lineX
+                    // Centred above the header's 1 px hairline.
+                    y: Math.round((resizeHandle.height - 1 - height) / 2)
+                    width: 1
+                    height: root.uiPalette.scaledSize(10)
+                    visible: !resizeHandle.highlighted && root.uiBridge.queueLength > 0
+                    color: root.uiPalette.seam
+                }
+
                 // With keyboard focus, the app's ring around the divider,
                 // within the gap between the columns and clear of the
                 // header's top seam and hairline (a 2 px line alone read as
