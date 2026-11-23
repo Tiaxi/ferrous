@@ -52,6 +52,10 @@ private slots:
     void notFollowingLeavesOneWay_data();
     void notFollowingLeavesOneWay();
     void notFollowingComesInWithThePlate();
+    void plotsTellFollowingAgainInOneOrder_data();
+    void plotsTellFollowingAgainInOneOrder();
+    void seekBarBandGlidesAsTheViewFollowsAgain_data();
+    void seekBarBandGlidesAsTheViewFollowsAgain();
     void zoomPlateSpacesItsDividerEvenly();
     void movedViewSaysSoInTheViewers_data();
     void movedViewSaysSoInTheViewers();
@@ -4590,6 +4594,248 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
         QVERIFY(!corner.plate->isVisible());
     }
     QCOMPARE(corner.modeSwitch->opacity(), cornerWanted ? 1.0 : 0.0);
+}
+
+namespace {
+
+// Gives the main window's plots `clock`, which the fallback bridge lacks,
+// as the engine's, at `seconds` of the track of token 1, paused.
+bool shareClock(QQuickWindow *window, PlaybackClock &clock, double seconds) {
+    auto *bridge = window->property("uiBridge").value<QObject *>();
+    if (bridge == nullptr || !bridge->setProperty("playbackClock", QVariant::fromValue(&clock))) return false;
+    PlaybackSample sample;
+    sample.positionSeconds = seconds;
+    sample.sampledAtNs = clock.nowNs();
+    sample.durationSeconds = 229.0;
+    sample.trackToken = 1;
+    clock.applySample(sample, false);
+    return true;
+}
+
+// Zooms the corner's plot in to `level` and, for the spectrogram, gives its
+// lanes the columns of that zoom, as the analysis does once it has
+// restarted for it: until then a lane shows its canvas scaled, and its view
+// stays the scaled canvas's.
+bool zoomWithColumns(const PlotCorner &corner, double level) {
+    corner.zoom(level);
+    if (corner.mode != 0) return true;
+    QList<SpectrogramItem *> lanes;
+    collectQuickItems(corner.spectrogramSurface, &lanes);
+    for (SpectrogramItem *lane : std::as_const(lanes)) {
+        if (!QTest::qWaitFor([lane, level]() { return std::abs(lane->zoomLevel() - level) < 0.01; })) {
+            return false;
+        }
+        int hop = 0;
+        {
+            QMutexLocker lock(&lane->m_stateMutex);
+            hop = lane->columnHopForZoomLocked(lane->backendZoomForRequestLocked());
+        }
+        if (hop <= 0) return false;
+        constexpr int bins = 16;
+        const int columns = static_cast<int>(229.0 * 48'000 / hop) + 1;
+        lane->feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns, 0, columns, 48'000, hop,
+                                   true, true, 1, false);
+        if (!QTest::qWaitFor([lane]() {
+                QMutexLocker lock(&lane->m_stateMutex);
+                return !lane->zoomPreviewWantedLocked();
+            })) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Sets `clock` to `seconds` of the track of `token` (0 for the one it has),
+// as the engine does: a seek, or with another token a track change.
+void setSharedPosition(PlaybackClock &clock, double seconds, quint64 token = 0) {
+    PlaybackSample sample;
+    sample.positionSeconds = seconds;
+    sample.sampledAtNs = clock.nowNs();
+    sample.trackToken = token != 0 ? token : clock.state().trackToken;
+    sample.durationSeconds = 229.0;
+    clock.applySample(sample, false);
+}
+
+} // namespace
+
+void TransportInputSmokeTest::plotsTellFollowingAgainInOneOrder_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// A moved view that follows the playhead again tells where it is now, then
+// where it was, then that it follows, in either plot: the spectrogram told
+// that it followed first and where it was a frame later, the waveform where
+// it was first, so that the seek bar's band could not glide from one to the
+// other without waiting for both (H15). Where it was, only in its own
+// track: by Follow Playhead and a seek, not by Repeat-One or another track.
+void TransportInputSmokeTest::plotsTellFollowingAgainInOneOrder() {
+    QFETCH(int, mode);
+    PlaybackClock clock;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(shareClock(corner.window, clock, 100.0));
+    QObject *plot = mode == 0 ? static_cast<QObject *>(corner.spectrogramSurface)
+                              : static_cast<QObject *>(corner.waveform);
+    QVERIFY(zoomWithColumns(corner, 4.0));
+    // What the plot tells, in its order, and where its view was each time.
+    QStringList told;
+    QList<double> from;
+    const auto start = [plot]() { return plot->property("visibleStartSeconds").toDouble(); };
+    auto *lane = qobject_cast<SpectrogramItem *>(
+        itemNamed(corner.spectrogramSurface, QStringLiteral("spectrogramPaneItem")));
+    QVERIFY(lane != nullptr);
+    QList<QMetaObject::Connection> connections;
+    if (mode == 0) {
+        connections << QObject::connect(lane, &SpectrogramItem::visibleRangeChanged, [&] { told << QStringLiteral("range"); });
+        connections << QObject::connect(lane, &SpectrogramItem::followedAgain, [&](double a, double) {
+            told << QStringLiteral("from");
+            from << a;
+        });
+        connections << QObject::connect(spectrogramFollow(corner.window), &SpectrogramViewFollow::detachedChanged,
+                                        [&] { told << QStringLiteral("detached"); });
+    } else {
+        connections << QObject::connect(corner.waveform, &WaveformEditorItem::visibleRangeChanged,
+                                        [&] { told << QStringLiteral("range"); });
+        connections << QObject::connect(corner.waveform, &WaveformEditorItem::followedAgain, [&](double a, double) {
+            told << QStringLiteral("from");
+            from << a;
+        });
+        connections << QObject::connect(corner.waveform, &WaveformEditorItem::detachedChanged,
+                                        [&] { told << QStringLiteral("detached"); });
+    }
+    // A frame of the moved view, so that the plot has told where it is.
+    const auto moveView = [&]() -> double {
+        if (!corner.moveView()) return -1.0;
+        corner.window->grabWindow();
+        QTest::qWait(30);
+        corner.window->grabWindow();
+        told.clear();
+        from.clear();
+        return start();
+    };
+    const auto onTheWay = [&]() {
+        // The first of them as it follows again; a frame may tell more.
+        const qsizetype detached = told.indexOf(QStringLiteral("detached"));
+        return detached > 0 ? told.mid(0, detached + 1) : told;
+    };
+
+    // Follow Playhead.
+    double moved = moveView();
+    QVERIFY(moved >= 0.0);
+    QVERIFY(QMetaObject::invokeMethod(corner.surface, "followPlayhead"));
+    QCOMPARE(onTheWay(), (QStringList{QStringLiteral("range"), QStringLiteral("from"), QStringLiteral("detached")}));
+    QCOMPARE(from, QList<double>{moved});
+    QVERIFY2(std::abs(start() - moved) > 5.0, qPrintable(QString::number(start())));
+
+    // A seek in the track, as from the seek bar.
+    moved = moveView();
+    QVERIFY(moved >= 0.0);
+    setSharedPosition(clock, 150.0);
+    QCOMPARE(onTheWay(), (QStringList{QStringLiteral("range"), QStringLiteral("from"), QStringLiteral("detached")}));
+    QCOMPARE(from, QList<double>{moved});
+
+    // Repeat-One: the track again, from its start, as a gapless successor
+    // of itself; and another track.
+    for (const double restart : {0.0, 30.0}) {
+        moved = moveView();
+        QVERIFY(moved >= 0.0);
+        setSharedPosition(clock, restart, clock.state().trackToken + 1);
+        QTRY_VERIFY(!corner.surface->property("detached").toBool());
+        QVERIFY2(!told.contains(QStringLiteral("from")), qPrintable(told.join(u' ')));
+    }
+    for (const QMetaObject::Connection &c : std::as_const(connections)) QObject::disconnect(c);
+}
+
+void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// As a moved view follows the playhead again, by Follow Playhead or a seek,
+// the seek bar's band glides from the moved view's place to the followed
+// one's, in either plot (TransportStatusTest has the rest); the plot cuts.
+// On Repeat-One, from the track's end back to its start, it moves at once.
+void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain() {
+    QFETCH(int, mode);
+    PlaybackClock clock;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(shareClock(corner.window, clock, 100.0));
+    QQuickWindow *window = corner.window;
+    auto *transport = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
+    auto *seek = window->findChild<QQuickItem *>(QStringLiteral("seekSlider"));
+    auto *band = window->findChild<QQuickItem *>(QStringLiteral("seekViewBand"));
+    QVERIFY(transport && seek && band);
+    QTest::mouseMove(window, corner.away());
+    QVERIFY(zoomWithColumns(corner, 4.0));
+    QTRY_VERIFY(band->isVisible());
+    const auto moveView = [&]() -> double {
+        if (!corner.moveView() || !transport->property("viewDetached").toBool()) return -1.0;
+        // A frame of the moved view, which the spectrogram says it shows as
+        // it draws it, and the events that come after it.
+        window->grabWindow();
+        QTest::qWait(50);
+        window->grabWindow();
+        return band->isVisible() ? sceneRectOf(band).left() : -1.0;
+    };
+
+    for (const bool bySeek : {false, true}) {
+        const double movedLeft = moveView();
+        QVERIFY(movedLeft >= 0.0);
+        SteppedAnimationDriver animations;
+        if (bySeek) {
+            setSharedPosition(clock, 20.0);
+        } else {
+            QVERIFY(QMetaObject::invokeMethod(corner.surface, "followPlayhead"));
+        }
+        QVERIFY(!transport->property("viewDetached").toBool());
+        // Frame by frame: where the band is.
+        QList<double> lefts;
+        window->grabWindow();
+        lefts.append(sceneRectOf(band).left());
+        for (int frame = 1; frame <= 12; ++frame) {
+            QVERIFY(animations.step(16));
+            window->grabWindow();
+            lefts.append(sceneRectOf(band).left());
+        }
+        QString path;
+        for (const double left : std::as_const(lefts)) path += QString::number(left) + QLatin1Char(' ');
+        // Where it was as the view came back, then on its way, then there.
+        QCOMPARE(lefts.first(), movedLeft);
+        const double followedLeft = lefts.last();
+        QVERIFY2(std::abs(followedLeft - movedLeft) > 20.0, qPrintable(path));
+        QCOMPARE(lefts.at(lefts.size() - 2), followedLeft);
+        qsizetype between = 0;
+        for (qsizetype frame = 1; frame < lefts.size(); ++frame) {
+            QVERIFY2((lefts.at(frame) - lefts.at(frame - 1)) * (followedLeft - movedLeft) >= 0, qPrintable(path));
+            if (lefts.at(frame) != movedLeft && lefts.at(frame) != followedLeft) ++between;
+        }
+        QVERIFY2(between >= 4, qPrintable(path));
+    }
+
+    // Repeat-One from a view moved late in the track: the band goes to the
+    // start at once, rather than across the whole bar.
+    setSharedPosition(clock, 200.0);
+    QVERIFY(moveView() >= 0.0);
+    {
+        SteppedAnimationDriver animations;
+        setSharedPosition(clock, 0.0, clock.state().trackToken + 1);
+        QTRY_VERIFY(!transport->property("viewDetached").toBool());
+        for (int frame = 0; frame <= 8; ++frame) {
+            window->grabWindow();
+            QCOMPARE(seek->property("viewBandGlide").toDouble(), 0.0);
+            (void)animations.step(16);
+        }
+    }
 }
 
 // "Not following" and its divider come in over 100 ms, OutCubic, with

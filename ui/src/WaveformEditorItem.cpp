@@ -376,6 +376,8 @@ void WaveformEditorItem::clockStateChanged() {
     bool request = false;
     bool cacheNeedsUpdate = false;
     bool courseCorrection = false;
+    // A seek that brought a moved view back to the playhead in its track.
+    bool sameTrack = false;
     qint64 frameDelayNs = 0;
     const qint64 nowNs = m_nowNs();
     {
@@ -413,6 +415,7 @@ void WaveformEditorItem::clockStateChanged() {
                     armReattachLocked(nowNs);
                 } else {
                     reattachLocked();
+                    sameTrack = !trackChanged;
                 }
             } else if (!ownSeek) {
                 // Playback has moved on from it: a later seek there is
@@ -442,7 +445,7 @@ void WaveformEditorItem::clockStateChanged() {
         if (courseCorrection) frameDelayNs = playbackFrameDelayNsLocked(nowNs);
     }
     emit positionSecondsChanged();
-    publishDetached();
+    publishDetached(sameTrack);
     if (request) scheduleDetailRequest();
     if (courseCorrection) {
         schedulePlaybackFrame(frameDelayNs, nowNs);
@@ -775,7 +778,7 @@ void WaveformEditorItem::followPlayhead() {
         if (m_follow == Follow::Playhead) return;
         reattachLocked();
     }
-    viewMoved();
+    viewMoved(true);
 }
 double WaveformEditorItem::maximumZoomLevel() const { QMutexLocker lock(&m_stateMutex); return maximumZoomLevelLocked(); }
 
@@ -1403,7 +1406,7 @@ void WaveformEditorItem::reattachLocked() {
     m_ownSeekSeconds = std::numeric_limits<double>::quiet_NaN();
 }
 
-void WaveformEditorItem::publishDetached() {
+void WaveformEditorItem::publishDetached(bool sameTrack) {
     bool detached = false;
     bool autoscrolling = false;
     {
@@ -1414,8 +1417,14 @@ void WaveformEditorItem::publishDetached() {
     }
     m_detachedShown.store(detached, std::memory_order_release);
     // What moved the view, such as a zoom or a pan, moves the range in the
-    // same frame.
+    // same frame; a moved view that follows again says where it was after
+    // where it is.
+    const double fromStart = m_visibleStartSeconds;
+    const double fromEnd = m_visibleEndSeconds;
     publishVisibleRange();
+    if (sameTrack && m_detached && !detached) {
+        emit followedAgain(fromStart, fromEnd);
+    }
     // Either side of detached, so that a view autoscroll moves is never
     // told to be moved without it.
     if (autoscrolling && !m_autoscrollingShown) {
@@ -1461,7 +1470,7 @@ bool WaveformEditorItem::detachedLocked(qint64 nowNs) const {
             == Follow::Detached;
 }
 
-void WaveformEditorItem::viewMoved() {
+void WaveformEditorItem::viewMoved(bool sameTrack) {
     bool request = false;
     {
         QMutexLocker lock(&m_stateMutex);
@@ -1475,7 +1484,7 @@ void WaveformEditorItem::viewMoved() {
             invalidateCacheLocked();
         }
     }
-    publishDetached();
+    publishDetached(sameTrack);
     if (request) scheduleDetailRequest();
     cancelPlaybackFrame();
     requestPlaybackFrame();

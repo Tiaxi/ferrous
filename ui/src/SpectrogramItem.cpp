@@ -1944,6 +1944,17 @@ void SpectrogramItem::followChanged() {
     requestPlaybackFrame();
 }
 
+void SpectrogramItem::viewFollowFollowingAgain(bool sameTrack) {
+    // Where the view is now, rather than a frame later, so that whatever
+    // shows it, such as the seek bar's band, has it as the view follows.
+    const double fromStart = m_visibleStartSeconds;
+    const double fromEnd = m_visibleEndSeconds;
+    publishVisibleRange();
+    if (sameTrack) {
+        emit followedAgain(fromStart, fromEnd);
+    }
+}
+
 void SpectrogramItem::setViewFollow(SpectrogramViewFollow *value) {
     if (value == nullptr) {
         value = m_ownViewFollow;
@@ -1956,6 +1967,7 @@ void SpectrogramItem::setViewFollow(SpectrogramViewFollow *value) {
     const bool wasDetached = detached();
     disconnect(m_viewFollowChangedConnection);
     disconnect(m_viewFollowDetachedConnection);
+    disconnect(m_viewFollowFollowingAgainConnection);
     disconnect(m_viewFollowDestroyedConnection);
     {
         QMutexLocker lock(&m_stateMutex);
@@ -1968,6 +1980,10 @@ void SpectrogramItem::setViewFollow(SpectrogramViewFollow *value) {
             Qt::QueuedConnection);
         m_viewFollowDetachedConnection = connect(
             value, &SpectrogramViewFollow::detachedChanged, this, &SpectrogramItem::detachedChanged);
+        // Direct: before detachedChanged, as the waveform tells them.
+        m_viewFollowFollowingAgainConnection = connect(
+            value, &SpectrogramViewFollow::followingAgain, this,
+            &SpectrogramItem::viewFollowFollowingAgain);
         if (value != m_ownViewFollow) {
             // A shared one that goes leaves the lane its own.
             m_viewFollowDestroyedConnection = connect(

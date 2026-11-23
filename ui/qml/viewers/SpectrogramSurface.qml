@@ -39,6 +39,11 @@ Item {
         const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
         return first && first.spectrogramItem ? first.spectrogramItem.visibleEndSeconds : NaN
     }
+    // The view the user moved follows the playhead again in its track,
+    // where it showed `fromStartSeconds` to `fromEndSeconds`: told after
+    // visibleStartSeconds and visibleEndSeconds give where it is now, before
+    // detached, as the waveform tells them (SpectrogramItem's followedAgain).
+    signal followedAgain(real fromStartSeconds, real fromEndSeconds)
     // The lanes, each one's label ("" for none) and the one under the pointer.
     readonly property int laneCount: Math.max(1, root.channelDescriptors.length)
     readonly property var laneLabels: {
@@ -528,6 +533,12 @@ Item {
                     }
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
                     viewFollow: sharedViewFollow
+                    // The first lane's view is the plot's (visibleStartSeconds).
+                    onFollowedAgain: (fromStartSeconds, fromEndSeconds) => {
+                        if (index === 0) {
+                            root.followedAgain(fromStartSeconds, fromEndSeconds)
+                        }
+                    }
                     onPanningChanged: {
                         if (spectrogramPaneItem.panning) {
                             root._panLane = spectrogramPaneItem
