@@ -1145,6 +1145,8 @@ private slots:
     void drawsOffscreenUnlessAPlatformIsChosen();
     void seekTimeStaysOverItsLine_data();
     void seekTimeStaysOverItsLine();
+    void transportRowSitsBalancedInItsBand_data();
+    void transportRowSitsBalancedInItsBand();
     void contentIsOneSheetWithFourSeams();
     void sidebarWidthFollowsTheWindowAndTheFont_data();
     void sidebarWidthFollowsTheWindowAndTheFont();
@@ -1447,26 +1449,40 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
     }
     QVERIFY(boxTop.has_value());
     const QRectF box = sceneRect(tipBox);
-    // 1 px clear of the bar's focus ring and 3 px of the buttons' (3 px
-    // outside them), with the ring shown.
-    QVERIFY(box.bottom() <= playPause->mapToScene(QPointF(0, 0)).y() - 3 - 3 + 0.5);
+    // 1 px clear of the bar's focus ring and of the buttons' (3 px outside
+    // them), with the ring shown.
+    QVERIFY(box.bottom() <= playPause->mapToScene(QPointF(0, 0)).y() - 3 - 1 + 0.5);
     seek->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(seekRing->isVisible());
     QVERIFY2(sceneRect(tipBox).bottom() <= sceneRect(seekRing).top() - 1 + 0.5,
              qPrintable(describeRect(sceneRect(tipBox)) + QStringLiteral(" over ") + describeRect(sceneRect(seekRing))));
     QCOMPARE(sceneRect(tipBox).top(), box.top());
-    // The band grew by no more than the lane needs: the box is 2 px under
-    // its top where the room above the bar was too little for it.
-    QVERIFY2(box.top() - band.top() <= std::max(2.0, bar.top() - band.top() - box.height()) + 1.0,
+    // The band grew by no more than the lane needs: the box is at its top
+    // where the room above the bar was too little for it.
+    QVERIFY2(box.top() - band.top() <= std::max(0.0, bar.top() - band.top() - box.height()) + 1.0,
              qPrintable(describeRect(box) + QStringLiteral(" in ") + describeRect(band)));
 
-    // Mute's and the volume's tooltips share the lane: one line on the time
-    // box's line, as tall as it, in the band and the window (Mute's opened
-    // under the band, over the queue's header).
+    // Every tooltip of the transport shares the lane: one line on the time
+    // box's line, as tall as it, in the band and the window, none of the
+    // menu's titles covered (the buttons' opened under the band, over the
+    // cover and the queue's header, and Mute's did).
+    QList<std::pair<QQuickItem *, QObject *>> laneTips;
+    for (const char *name : {"transportButton_previous", "transportButton_playPause", "transportButton_stop",
+                             "transportButton_next", "muteButton"}) {
+        QQuickItem *button = named(window, name);
+        QVERIFY2(button != nullptr, name);
+        QObject *buttonTip = button->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+        QVERIFY2(buttonTip != nullptr, name);
+        // Those that can act: one that cannot takes no focus.
+        if (button->isEnabled()) {
+            laneTips.append({button, buttonTip});
+        }
+    }
     QObject *volumeTip = window->findChild<QObject *>(QStringLiteral("volumeToolTip"));
-    QObject *muteTip = mute->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
-    QVERIFY(volumeTip && muteTip);
-    for (const auto &[control, laneTip] : {std::pair{mute, muteTip}, std::pair{volume, volumeTip}}) {
+    QVERIFY(volumeTip != nullptr);
+    laneTips.append({volume, volumeTip});
+    QVERIFY(laneTips.size() >= 4);
+    for (const auto &[control, laneTip] : laneTips) {
         control->forceActiveFocus(Qt::TabFocusReason);
         QTRY_VERIFY2(laneTip->property("opened").toBool(), qPrintable(control->objectName()));
         const QRectF drawn = sceneRect(laneTip->property("background").value<QQuickItem *>());
@@ -1475,7 +1491,101 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
         QVERIFY2(std::abs(drawn.bottom() - box.bottom()) <= 0.5 && std::abs(drawn.height() - box.height()) <= 0.5,
                  qPrintable(where));
         QVERIFY2(drawn.top() >= band.top() && drawn.left() >= 0 && drawn.right() <= windowWidth, qPrintable(where));
+        for (const QRectF &title : titles) {
+            QVERIFY2(!drawn.intersects(title), qPrintable(where + QStringLiteral(", a title ") + describeRect(title)));
+        }
     }
+}
+
+void UiMainWindowTest::transportRowSitsBalancedInItsBand_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<int>("windowHeight");
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true;
+    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false;
+    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false;
+    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true;
+}
+
+// The transport's row sits balanced in its band, the lane of its popups
+// above it, empty at rest, and room under it: from the menu's titles down
+// to the buttons' glyphs, as drawn, at most 3:2 of the band under the
+// glyphs (the lane over the row and 8 px under it sank the controls onto
+// the seam, 44 px against 17 px at 10 pt, 76 px against 21 px at 24 pt).
+// In the least window, at 24 pt in 1000 by 720, the room under the row
+// gives way to the panes' minimums, so the window still fits; the row
+// still sits higher than it did.
+void UiMainWindowTest::transportRowSitsBalancedInItsBand() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
+    const ScopedApplicationFont font(pointSize);
+    MainWindowFixture fixture(sized(windowWidth, windowHeight));
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal(), pointSize);
+    QCOMPARE(window->size(), QSize(windowWidth, windowHeight));
+    QVERIFY2(window->minimumHeight() <= 720, qPrintable(QString::number(window->minimumHeight())));
+    QQuickItem *transport = named(window, "transportBar");
+    QQuickItem *seam = named(window, "transportSeam");
+    QQuickItem *menuBar = named(window, "mainMenuBar");
+    QQuickItem *previous = named(window, "transportButton_previous");
+    QQuickItem *next = named(window, "transportButton_next");
+    QVERIFY(transport && seam && menuBar && previous && next);
+    const QRectF band = sceneRect(transport);
+    QCOMPARE(sceneRect(seam).top(), band.bottom());
+
+    // The room under the row: what balances the lane, or in the least
+    // window what it has beyond the panes' minimums.
+    const qreal wanted = transport->property("wantedBalanceRoom").toReal();
+    const qreal room = transport->property("balanceRoom").toReal();
+    QVERIFY(wanted > 0);
+    QCOMPARE(band.height(), transport->property("leastHeight").toReal() + room);
+    const bool least = pointSize > 10 && windowHeight == 720;
+    if (least) {
+        QVERIFY2(room < wanted && room >= 0, qPrintable(QStringLiteral("%1 of %2").arg(room).arg(wanted)));
+        QCOMPARE(room, qreal(windowHeight - window->minimumHeight()));
+    } else {
+        QCOMPARE(room, wanted);
+    }
+
+    // As drawn: the lowest ink of the titles, and the glyphs' ink, read
+    // against the chrome at the band's right end.
+    const Drawn drawn(window);
+    const QColor chrome = drawn.at(band.right() - 2, band.bottom() - 2);
+    const auto inked = [&](qreal x, qreal y) {
+        const QColor c = drawn.at(x, y);
+        return std::abs(c.red() - chrome.red()) + std::abs(c.green() - chrome.green())
+            + std::abs(c.blue() - chrome.blue()) > 60;
+    };
+    const auto inkRows = [&](const QRectF &area) {
+        std::optional<qreal> top;
+        std::optional<qreal> bottom;
+        for (qreal y = std::floor(area.top()); y < area.bottom(); ++y) {
+            for (qreal x = std::floor(area.left()); x < area.right(); ++x) {
+                if (inked(x + 0.5, y + 0.5)) {
+                    top = top ? top : y;
+                    bottom = y + 1;
+                    break;
+                }
+            }
+        }
+        return std::pair{top, bottom};
+    };
+    const QRectF menu = sceneRect(menuBar);
+    const auto [menuTop, menuBottom] = inkRows(QRectF(menu.left(), menu.top(), std::min(menu.width(), 400.0), menu.height()));
+    const QRectF buttons = sceneRect(previous).united(sceneRect(next));
+    const auto [glyphTop, glyphBottom] = inkRows(buttons);
+    QVERIFY(menuTop && menuBottom && glyphTop && glyphBottom);
+    const qreal above = *glyphTop - *menuBottom;
+    const qreal below = band.bottom() - *glyphBottom;
+    const QString proportions = QStringLiteral("%1 px over the glyphs, %2 px under them, the band %3")
+        .arg(above).arg(below).arg(describeRect(band));
+    QVERIFY2(below > 0 && above > 0, qPrintable(proportions));
+    QVERIFY2(above <= (least ? 2.2 : 1.5) * below, qPrintable(proportions));
 }
 
 void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont_data() {
@@ -6412,8 +6522,15 @@ void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn() {
     QTRY_VERIFY2(std::abs(queue->height() - expected()) <= 1,
                  qPrintable(QStringLiteral("%1, not %2").arg(queue->height()).arg(expected())));
 
-    // One off the grid stays exactly there.
+    // One off the grid stays exactly there. The least window, at 24 pt in
+    // 720 px, has no room for one: the transport's band takes what the
+    // panes' minimums leave over, the queue at its least on the grid.
     const qreal gridRows = std::ceil((queueMinimum - header->height()) / rowHeight);
+    if (split->height() < header->height() + gridRows * rowHeight + 7 + 220 + 1) {
+        QCOMPARE(split->height(), queueMinimum + 220 + 1);
+        QCOMPARE(queueMinimum, header->height() + gridRows * rowHeight);
+        return;
+    }
     const qreal offGrid = header->height() + gridRows * rowHeight + 7;
     QVERIFY(QMetaObject::invokeMethod(layout, "noteQueueHeight", Q_ARG(QVariant, offGrid),
                                       Q_ARG(QVariant, split->height())));
