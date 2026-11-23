@@ -1662,8 +1662,9 @@ void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole_data() {
 }
 
 // The hover's line never paints over the playhead or stands beside it as a
-// second one: it is under it, and shows only with a gap as wide as the
-// playhead's line between them. The time stays.
+// second one: it is under it, and shows only with 4 px clear between it and
+// the playhead's line (2 or 3 px beside it, the two drew as one doubled
+// line). The time stays.
 void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1685,15 +1686,16 @@ void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole() {
     QTRY_VERIFY(tip->property("opened").toBool());
 
     const QRectF head = sceneRect(playhead);
-    const qreal clearance = sceneRect(line).width();
+    const QRectF amber = sceneRect(line);
+    const qreal clearance = 4;
     const qreal ratio = harness.window->effectiveDevicePixelRatio();
-    for (int x = qFloor(head.left()) - 6; x <= qCeil(head.right()) + 6; ++x) {
+    for (int x = qFloor(head.left()) - 8; x <= qCeil(head.right()) + 8; ++x) {
         QTest::mouseMove(harness.window, QPoint(x, y));
         // On the device pixel under the pointer.
         const qreal at = bar.left() + std::floor((x - bar.left()) * ratio + 1e-6) / ratio;
         QTRY_VERIFY(std::abs(sceneRect(hoverLine).left() - at) < 1e-6);
-        const bool clear = at + hoverLine->width() <= head.left() - clearance + 1e-6
-            || at >= head.right() + clearance - 1e-6;
+        const bool clear = at + hoverLine->width() <= amber.left() - clearance + 1e-6
+            || at >= amber.right() + clearance - 1e-6;
         QVERIFY2(hoverLine->isVisible() == clear, qPrintable(QStringLiteral("at %1").arg(x)));
         QVERIFY(tip->property("visible").toBool());
     }
@@ -1724,8 +1726,10 @@ void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek_data() {
 // A click or a drag released on the bar hands the time box to the hover at
 // the pointer, and its line comes with it: as playback takes the playhead on
 // from under the resting pointer, the line shows at the pointer under the
-// box once a gap opens (it waited for the pointer to move, and the box stood
-// beside the moving playhead with no line). The box never goes out.
+// box once 4 px clear of the playhead's line opens (it waited for the
+// pointer to move, and the box stood beside the moving playhead with no
+// line), and not before (2 or 3 px beside the playhead, the two drew as one
+// doubled line under the box). The box never goes out.
 void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek() {
     QFETCH(bool, dragged);
     Harness harness;
@@ -1733,8 +1737,9 @@ void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek() {
     QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
     QQuickItem *hoverLine = harness.item(QStringLiteral("seekHoverLine"));
     QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
+    QQuickItem *line = harness.item(QStringLiteral("seekPlayheadLine"));
     QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
-    QVERIFY(seek && hoverLine && playhead && tip);
+    QVERIFY(seek && hoverLine && playhead && line && tip);
     auto *tipBox = tip->property("background").value<QQuickItem *>();
     QVERIFY(tipBox != nullptr);
     const QRectF bar = sceneRect(seek);
@@ -1761,12 +1766,16 @@ void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek() {
             boxHidden = true;
             return;
         }
-        const QRectF head = sceneRect(playhead);
-        const qreal gap = 2.0;
-        const bool nearHead = to.x() + 1 > head.left() - gap && to.x() < head.right() + gap;
+        const QRectF head = sceneRect(line);
+        const qreal clear = 4.0;
+        const bool nearHead = to.x() + 1 > head.left() - clear && to.x() < head.right() + clear;
         if (!nearHead && !hoverLine->isVisible() && disagreed.isEmpty()) {
             disagreed = QStringLiteral("no line under the box %1, the playhead %2")
                             .arg(describeRect(sceneRect(tipBox)), describeRect(head));
+        }
+        if (nearHead && hoverLine->isVisible() && disagreed.isEmpty()) {
+            disagreed = QStringLiteral("a line at %1 beside the playhead %2")
+                            .arg(describeRect(sceneRect(hoverLine)), describeRect(head));
         }
     };
     const FrameSampler sampler(harness.window, lineIsTheBoxs);

@@ -1053,9 +1053,11 @@ ToolBar {
                 // with the time box over it: at the box's opacity while the
                 // box shows, or fades out, the hover's time, where that last
                 // was. A gesture shows its time at the playhead with no line.
-                // It is under the playhead and shows only with a gap as wide
-                // as the playhead's line between them: on or beside it, the
-                // playhead alone marks the box's time. After a click or a
+                // It is under the playhead and shows only with 4 px clear
+                // between it and the playhead's line: on it or nearer, the
+                // playhead alone marks the box's time (2 or 3 px beside it,
+                // after a click, the two drew as one doubled line under the
+                // box). After a click or a
                 // drag released on the bar it is the box's line as at any
                 // hover, at the pointer, so the box never stands beside a
                 // playhead that playback moves on with no line under it
@@ -1076,10 +1078,10 @@ ToolBar {
                     width: root.devicePixelLine
                     color: root.seekHoverLineColor
                     function atPlayhead() {
-                        const gap = seekSlider.playheadLineWidth
+                        const clear = 4
                         return seekPlayhead.visible
-                            && x + width > seekPlayhead.x - gap
-                            && x < seekPlayhead.x + seekPlayhead.width + gap
+                            && x + width > seekSlider.playheadX - clear
+                            && x < seekSlider.playheadX + seekSlider.playheadLineWidth + clear
                     }
                 }
 
