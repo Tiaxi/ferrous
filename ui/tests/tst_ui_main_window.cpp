@@ -4587,8 +4587,9 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
 }
 
 // A selected row of the queue draws its length in the selected row's
-// secondary colour, which keeps its contrast on the selection under the
-// pointer; an unselected one in the plain one. A selected playing row's
+// secondary colour and its artist and album in its column colour, which
+// stay over its number's contrast on the selection, under the pointer as
+// well; an unselected one in the plain ones. A selected playing row's
 // title and glyph take the amber made readable on the selection (on dark
 // the map's amber is 4.18:1 on the hovered selection, and it is lighter:
 // UiFoundationsTest holds the colours), an unselected one the map's own.
@@ -4608,6 +4609,12 @@ void UiMainWindowTest::selectedRowsDrawTheirMarksForTheSelection() {
     };
     QCOMPARE(lengthColor(1), tokenHex(window, "textSecondarySelected"));
     QCOMPARE(lengthColor(2), tokenHex(window, "textSecondary"));
+    // The artist and album likewise, over the row's number.
+    const auto artistColor = [view](int row) {
+        return colorOf(itemNamed(viewRowAt(view, row), QStringLiteral("queueCell_artist")));
+    };
+    QCOMPARE(artistColor(1), tokenHex(window, "textColumnSelected"));
+    QCOMPARE(artistColor(2), tokenHex(window, "textColumn"));
 
     QObject *bridge = bridgeOf(window);
     bridge->setProperty("playingQueueIndex", 1);
@@ -5764,11 +5771,23 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
     QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textSecondary"));
     QVERIFY(QQmlProperty(queueRow, QStringLiteral("Accessible.name"), qmlContext(queueRow))
                 .read().toString().endsWith(QStringLiteral(", The file cannot be read.")));
+    // Selected, the unreadable titles step up with the rows' other secondary
+    // text, over their figures (selectedRowTextsNeverReadUnderTheirFigures).
+    QObject *queueController = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(queueController != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(queueController, "setSingleSelection", Q_ARG(QVariant, 1)));
+    QTRY_COMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_title"))),
+                 tokenHex(window, "textSecondarySelected"));
+    QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textSecondarySelected"));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(track).center().toPoint());
+    QTRY_VERIFY(track->property("rowSelected").toBool());
+    QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowTitle"))), tokenHex(window, "textSecondarySelected"));
     // Clearing the history clears the marks.
     QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
     QTRY_VERIFY(!treeGlyph->isVisible());
     QTRY_VERIFY(!queueGlyph->isVisible());
-    QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textColumn"));
+    // Still selected.
+    QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textColumnSelected"));
 }
 
 // A file that fails to play stays the current row, stopped, as the backend

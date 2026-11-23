@@ -174,10 +174,20 @@ QtObject {
     readonly property var _selectedRows: [root.selection, root.selectionInactive,
                                           root.selectionHovered, root.selectionInactiveHovered,
                                           root.selectionPressed]
-    // The secondary text on a selected row: lightened or darkened where it
-    // is under 4.5:1 on one, as on dark under the pointer.
-    // #bfc5ca / #4c545d.
-    readonly property color textSecondarySelected: root.readableOn(root.textSecondary, root._selectedRows, 4.5)
+    // The contrast of a selected row's secondary text, its length and an
+    // unreadable title, and of its column text on each selection tint: a
+    // step over the figures' rowFigureContrast, as on the view, so that
+    // neither reads under the row's track number (at 4.5:1, a selected
+    // row's "3:20" and an unreadable title read weaker than its "3").
+    readonly property real rowSecondaryContrast: 6.0
+    // The secondary text on a selected row: lightened or darkened to be
+    // rowSecondaryContrast on each selection tint. #dee1e4 / #3c4249.
+    readonly property color textSecondarySelected: root.readableOn(root.textSecondary, root._selectedRows,
+                                                                   root.rowSecondaryContrast)
+    // The artist and album cells of a selected queue row, likewise.
+    // #e1e1e1 / #414344.
+    readonly property color textColumnSelected: root.readableOn(root.textColumn, root._selectedRows,
+                                                                root.rowSecondaryContrast)
     // An unreadable file's mark on a selected row: the negative colour, 3:1
     // on each. #ef7682 / #c4293b.
     readonly property color negativeSelected: root.readableOn(root.negative, root._selectedRows, 3)

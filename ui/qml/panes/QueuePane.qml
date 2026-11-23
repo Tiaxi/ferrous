@@ -827,6 +827,7 @@ Rectangle {
                         : root.uiPalette.textSecondary
                     readonly property color columnTextColor: playlistRow.unreadable
                         ? playlistRow.secondaryTextColor
+                        : playlistRow.rowSelected ? root.uiPalette.textColumnSelected
                         : root.uiPalette.textColumn
                     // The amber of what plays, made readable on the
                     // selection as well.

@@ -259,6 +259,8 @@ private slots:
     void plotToolButtonIsAnAccessibleCheckableButton();
     void activeSelectionIsUnmistakableInDark_data();
     void activeSelectionIsUnmistakableInDark();
+    void selectedRowTextsNeverReadUnderTheirFigures_data();
+    void selectedRowTextsNeverReadUnderTheirFigures();
 };
 
 void UiFoundationsTest::initTestCase() {
@@ -3000,6 +3002,47 @@ void UiFoundationsTest::activeSelectionIsUnmistakableInDark() {
             QVERIFY2(contrastRatio(colorOf(tokens, token), colorOf(tokens, under)) >= minimum,
                      qPrintable(describeContrast(QLatin1String(token) + QStringLiteral(" on ") + QLatin1String(under),
                                                  colorOf(tokens, token), colorOf(tokens, under))));
+        }
+    }
+}
+
+void UiFoundationsTest::selectedRowTextsNeverReadUnderTheirFigures_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// On every selection tint, a selected row's secondary text (its length, an
+// unreadable title) and its column text (artist, album) read at least a step
+// over its tertiary figures, as they do on the view: the figures are held at
+// rowFigureContrast, 5.4:1, for antialiasing, and at 4.5:1 the length and an
+// unreadable title read weaker than the track number beside them. They stay
+// under the title.
+void UiFoundationsTest::selectedRowTextsNeverReadUnderTheirFigures() {
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, QString()), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QVERIFY(tokens != nullptr);
+    QVariant number;
+    QVERIFY(QMetaObject::invokeMethod(tokens, "textTertiaryOn", Q_RETURN_ARG(QVariant, number),
+                                      Q_ARG(QVariant, QVariant(true)), Q_ARG(QVariant, QVariant(false))));
+    const QColor figures = number.value<QColor>();
+    const QColor text = colorOf(tokens, "text");
+    for (const char *under : {"selection", "selectionInactive", "selectionHovered", "selectionInactiveHovered",
+                              "selectionPressed"}) {
+        const QColor tint = colorOf(tokens, under);
+        for (const char *token : {"textSecondarySelected", "textColumnSelected"}) {
+            const QColor color = colorOf(tokens, token);
+            QVERIFY2(contrastRatio(color, tint) >= 1.08 * contrastRatio(figures, tint)
+                         && contrastRatio(color, tint) >= tokens->property("rowSecondaryContrast").toDouble()
+                         && contrastRatio(text, tint) > contrastRatio(color, tint),
+                     qPrintable(describeContrast(QLatin1String(token) + QStringLiteral(" on ") + QLatin1String(under),
+                                                 color, tint)
+                                + QStringLiteral(", ") + describeContrast(QStringLiteral("figures"), figures, tint)));
         }
     }
 }

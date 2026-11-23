@@ -49,6 +49,7 @@ The transport uses Breeze's Header colour set, as Breeze's toolbars and the menu
 | `textTertiary` | counts, years, track numbers | a second step down, at least 4.6:1 on the view and on its hover tint |
 | `textTertiaryOn(selected, hovered)` | tertiary text on a list row | on a hovered row it moves to `textTertiaryHovered`, and on a selected row it moves to `textTertiarySelected`, so small figures stay at least `rowFigureContrast` (5.4:1) on the row's tint. Antialiasing loses up to 14 % of contrast, and 5.4:1 still renders at 4.5:1 or more |
 | `textColumn` | the queue's Artist and Album cells | quieter than the title, and readable on every selection state |
+| `textSecondarySelected` / `textColumnSelected` | secondary and column text on a selected row: `rowSecondaryContrast` (6:1) on every selection tint | never weaker than the row's figures, which are held at 5.4:1 |
 | `placeholderText` | a field's placeholder, such as Edit Tags' "Mixed" | Breeze Light's own placeholder colour is 4.2:1 on white |
 | `link` | link-coloured text and actions | 4.5:1 on both the window and the view colours; a pressed link on a fill takes `readableOn` |
 | `negative` | error words, the warning glyph, the clip lamp, a failed section's heading | the theme's negative colour, adjusted for text contrast |
