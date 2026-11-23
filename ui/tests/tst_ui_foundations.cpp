@@ -243,6 +243,8 @@ private slots:
     void viewerToolButtonShowsAKeyPressAtOnce();
     void viewerWaveformLaneSeamReadsOnWhite_data();
     void viewerWaveformLaneSeamReadsOnWhite();
+    void modeSwitchWaveformGlyphFillsWholePixels_data();
+    void modeSwitchWaveformGlyphFillsWholePixels();
     void viewerToolButtonCheckedToggleAnswersHover_data();
     void viewerToolButtonCheckedToggleAnswersHover();
     void plotToolButtonDrawsCheckedAndFocusApart_data();
@@ -2021,6 +2023,161 @@ void UiFoundationsTest::viewerWaveformLaneSeamReadsOnWhite() {
         QVERIFY2(sameColor(seam, fromHex(QStringLiteral("#cdd2d6"))), qPrintable(seam.name()));
         QVERIFY(contrastRatio(seam, colorOf(waveform, "plotBg"))
                 > contrastRatio(colorOf(waveform, "plotLaneSeam"), colorOf(waveform, "plotBg")));
+    }
+}
+
+void UiFoundationsTest::modeSwitchWaveformGlyphFillsWholePixels_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// The mode switch's Waveform glyph, chosen, as drawn: its five 2 px strokes
+// cover whole columns, so the glyph's colour is 4.5:1 or more on the chosen
+// segment's fill, with a clear column of fill between them. At 1.5 px on
+// the same centres each column was three quarters covered, and the dark
+// theme's chosen glyph #d6d6d7 on #636466, 4.08:1. Measured from the
+// window's grab, at whatever scale the test runs (again at 2x in CTest).
+void UiFoundationsTest::modeSwitchWaveformGlyphFillsWholePixels() {
+    QFETCH(bool, dark);
+    const QString items = QStringLiteral(R"QML(
+        Rectangle {
+            id: plot
+            property var plotColors: tokens.waveformPlot
+            x: 16
+            y: 16
+            width: 300
+            height: 120
+            color: plotColors.plotBg
+
+            Components.PlotPlate {
+                x: 200
+                y: 40
+                plotColors: plot.plotColors
+                uiPalette: tokens
+
+                Components.PlotToolButton {
+                    plotColors: plot.plotColors
+                    uiPalette: tokens
+                    segment: true
+                    text: "Spectrogram"
+                    icon.source: Qt.resolvedUrl("assets/spectrogram-symbolic.svg")
+                }
+
+                Components.PlotToolButton {
+                    objectName: "waveformSegment"
+                    plotColors: plot.plotColors
+                    uiPalette: tokens
+                    segment: true
+                    checked: true
+                    text: "Waveform"
+                    icon.source: Qt.resolvedUrl("assets/waveform-symbolic.svg")
+                }
+            }
+        }
+)QML");
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, items), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickItem *button = itemNamed(root.get(), QStringLiteral("waveformSegment"));
+    QVERIFY(button != nullptr);
+    QVERIFY(button->property("checked").toBool());
+    QQuickItem *icon = childNamed(button, QStringLiteral("plotToolButtonIcon"));
+    QVERIFY(icon != nullptr);
+    QTRY_VERIFY(icon->property("valid").toBool());
+    QCOMPARE(icon->size(), QSizeF(16, 16));
+    QCOMPARE(icon->property("opacity").toReal(), 1.0);
+    const QColor glyph = colorOf(button, "glyphColor");
+    const QColor fill = drawnOver(colorOf(button, "checkedColor"), colorOf(button, "plateColor"));
+
+    const QImage image = window->grabWindow();
+    QVERIFY(!image.isNull());
+    const qreal scale = grabScale(image, window);
+    // The glyph's square on whole pixels.
+    const QPointF origin = icon->mapToScene(QPointF(0, 0));
+    QCOMPARE(origin, QPointF(std::round(origin.x()), std::round(origin.y())));
+    // Every device pixel of the glyph's column `x`, row `y`.
+    const auto pixels = [&](int x, int y) {
+        QList<QColor> found;
+        for (int dy = 0; dy < int(scale); ++dy) {
+            for (int dx = 0; dx < int(scale); ++dx) {
+                found.push_back(image.pixelColor(int((origin.x() + x) * scale) + dx,
+                                                 int((origin.y() + y) * scale) + dy));
+            }
+        }
+        return found;
+    };
+    // The mask's ink: offscreen, Kirigami draws a file's mask in its own
+    // black rather than in `color`, as the app on the desktop does not (the
+    // harness's shot of the dark switch, #d6d6d7 for #fcfcfc over #636466,
+    // is the old glyph's three quarters cover, tinted). So each pixel's
+    // cover, from the ink drawn, and the glyph's colour at that cover over
+    // the fill, as the app draws it.
+    const QColor middle = pixels(7, 8).first();
+    const QColor ink = channelDistance(middle, glyph) < channelDistance(middle, QColor(Qt::black))
+        ? glyph : QColor(Qt::black);
+    // The channel that tells the ink from the fill the most.
+    const auto channels = [](const QColor &color) {
+        return std::array<int, 3>{color.red(), color.green(), color.blue()};
+    };
+    int widest = 0;
+    for (int channel = 1; channel < 3; ++channel) {
+        if (std::abs(channels(ink)[channel] - channels(fill)[channel])
+            > std::abs(channels(ink)[widest] - channels(fill)[widest])) {
+            widest = channel;
+        }
+    }
+    QVERIFY(std::abs(channels(ink)[widest] - channels(fill)[widest]) >= 32);
+    const auto coverOf = [&](const QColor &drawn) {
+        return double(channels(drawn)[widest] - channels(fill)[widest])
+            / double(channels(ink)[widest] - channels(fill)[widest]);
+    };
+    const auto tinted = [&](double cover) {
+        QColor color = glyph;
+        color.setAlphaF(float(std::clamp(cover, 0.0, 1.0)));
+        return drawnOver(color, fill);
+    };
+    // Each stroke's two columns, over its height less a row for each cap:
+    // whole, so the glyph's colour, 4.5:1 or more on the fill.
+    struct Stroke {
+        int left;
+        int top;
+        int bottom;
+    };
+    for (const Stroke &stroke : {Stroke{1, 6, 10}, Stroke{4, 3, 13}, Stroke{7, 1, 15}, Stroke{10, 3, 13},
+                                 Stroke{13, 6, 10}}) {
+        for (int x = stroke.left; x < stroke.left + 2; ++x) {
+            for (int y = stroke.top + 1; y < stroke.bottom - 1; ++y) {
+                for (const QColor &drawn : pixels(x, y)) {
+                    const double cover = coverOf(drawn);
+                    const QString at = QStringLiteral("column %1, row %2: %3 of %4")
+                                           .arg(x)
+                                           .arg(y)
+                                           .arg(cover, 0, 'f', 2)
+                                           .arg(tinted(cover).name());
+                    QVERIFY2(cover >= 0.97, qPrintable(at));
+                    QVERIFY2(contrastRatio(tinted(cover), fill) >= 4.5,
+                             qPrintable(describeContrast(at, tinted(cover), fill)));
+                }
+            }
+        }
+    }
+    // Between the strokes, and beside them, a whole column of the fill.
+    for (int x : {0, 3, 6, 9, 12, 15}) {
+        for (int y = 0; y < 16; ++y) {
+            for (const QColor &drawn : pixels(x, y)) {
+                QVERIFY2(channelDistance(drawn, fill) <= 3,
+                         qPrintable(QStringLiteral("column %1, row %2: %3, not %4")
+                                        .arg(x)
+                                        .arg(y)
+                                        .arg(drawn.name(), fill.name())));
+            }
+        }
     }
 }
 

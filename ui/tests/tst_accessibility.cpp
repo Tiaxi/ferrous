@@ -4157,12 +4157,13 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
     }
     {
         // The waveform glyph's 16 px source, on the spectrogram glyph's
-        // grid: five vertical strokes of its upper weight, 1.5 px with round
-        // caps, mirrored about the middle line, 4, 9, 14, 9 and 4 px tall
+        // grid: five vertical strokes of its lower weight, 2 px with round
+        // caps, mirrored about the middle line, 4, 10, 14, 10 and 4 px tall
         // with their caps, an envelope that swells and falls back. They
-        // stand 3 px apart on whole pixels, so each covers the same two
-        // columns at 1x, three whole ones at 2x, with a clear column
-        // between neighbours; all inside the 16 px square.
+        // stand 3 px apart with their edges and ends on whole pixels, so
+        // each fills two whole columns at 1x, with a clear column between
+        // neighbours (at 1.5 px each column was three quarters covered, and
+        // the chosen glyph under 4.5:1); all inside the 16 px square.
         QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/waveform-symbolic.svg"));
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString svg = QString::fromUtf8(file.readAll());
@@ -4175,7 +4176,7 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
         for (auto match = stroke.globalMatch(svg); match.hasNext();) {
             const QRegularExpressionMatch each = match.next();
             const double width = each.captured(1).toDouble();
-            QCOMPARE(width, 1.5);
+            QCOMPARE(width, 2.0);
             const double top = each.captured(3).toDouble() - width / 2;
             const double bottom = each.captured(4).toDouble() + width / 2;
             // Mirrored about y 8, inside the square.
@@ -4184,8 +4185,13 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
             xs.push_back(each.captured(2).toDouble());
             heights.push_back(bottom - top);
         }
-        QCOMPARE(heights, (QList<double>{4.0, 9.0, 14.0, 9.0, 4.0}));
+        QCOMPARE(heights, (QList<double>{4.0, 10.0, 14.0, 10.0, 4.0}));
         QCOMPARE(xs, (QList<double>{2.0, 5.0, 8.0, 11.0, 14.0}));
+        // Edges and ends on whole pixels.
+        for (int i = 0; i < xs.size(); ++i) {
+            QCOMPARE(xs[i] - 1.0, std::floor(xs[i] - 1.0));
+            QCOMPARE(heights[i] / 2, std::floor(heights[i] / 2));
+        }
     }
     {
         // The glyph's 16 px source: the app icon's small-size pair in its
