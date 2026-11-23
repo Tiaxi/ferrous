@@ -27,14 +27,18 @@ Components.PlotPlate {
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
     // Whether it says that the view does not follow the playhead.
     property bool noticeShown: false
-    // Whether the notice is leaving, the view following again: its text
-    // is gone in the frame the view comes back in, and the plate narrows
-    // from the width it had to its new one over 120 ms, OutCubic, at its
-    // left edge, Reset staying where it is; with nothing left on it, it
-    // fades as it narrows. Whether the row stays or fades out with it, and
-    // in either plot, it goes this one way (the plate's edge jumped 89 px
-    // in a frame with the row staying). Then noticeLeft.
+    // Whether the notice is leaving, the view following again, over 120
+    // ms, OutCubic, whether the row stays or fades out with it, and in
+    // either plot; then noticeLeft. Zoomed, its text is gone in the frame
+    // the view comes back in, and the plate narrows to its width without
+    // it at its left edge, Reset staying where it is (its edge jumped 89 px
+    // in a frame with the row staying, H15): the room it gives up fades as
+    // it narrows, rather than stand as blank plate (H16). At the default
+    // zoom, with nothing else on it, the whole plate fades at its width,
+    // the text with it: the text went in a frame while the empty plate
+    // faded on (H16).
     property bool noticeLeaving: false
+    readonly property bool _narrowing: root.noticeLeaving && root.zoomed
     signal noticeLeft()
     property string followShortcut: ""
 
@@ -69,6 +73,8 @@ Components.PlotPlate {
     visible: root.available && (root.zoomed || root.noticeShown)
     opacity: root.revealLevel * root.fadeLevel
         * (root.noticeLeaving && !root.zoomed ? root.leavingLevel : 1)
+    // As it narrows, its fill and edge are the two parts below.
+    bare: root._narrowing
     takesPointer: true
     Accessible.name: root.zoomed
         ? I18n.i18nc("@label", "Zoom")
@@ -87,18 +93,93 @@ Components.PlotPlate {
         }
     }
 
+    // The plate as it narrows, cut where the room the notice leaves ends:
+    // that room, fading as it narrows, and the rest, as the plate is. Each
+    // is the whole plate's fill and edge, clipped to its part, so the two
+    // meet as one plate in the frame the view comes back in, and the rest
+    // is the whole plate, its left corners rounded, as the room closes.
+    // Behind the readout and Reset.
+    Item {
+        objectName: "plotZoomPlateLeavingRoom"
+        parent: root
+        z: -1
+        visible: root._narrowing
+        opacity: root.leavingLevel
+        x: -1
+        y: -1
+        width: Math.max(0, root._roomLeft)
+        height: root.height + 2
+        clip: true
+        Rectangle {
+            x: 0
+            width: root.width + 2
+            height: parent.height
+            radius: root.radius + 1
+            color: "transparent"
+            border.width: 1
+            border.color: root.plotColors.plotPlateEdge
+        }
+        Rectangle {
+            x: 1
+            y: 1
+            width: root.width
+            height: root.height
+            radius: root.radius
+            color: root.plotColors.plotPlate
+        }
+    }
+    Item {
+        objectName: "plotZoomPlateStaying"
+        parent: root
+        z: -1
+        visible: root._narrowing
+        x: root._roomLeft - 1
+        y: -1
+        width: Math.max(0, root.width - root._roomLeft + 2)
+        height: root.height + 2
+        clip: true
+        Rectangle {
+            x: -root._roomLeft
+            width: root.width + 2
+            height: parent.height
+            radius: root.radius + 1
+            color: "transparent"
+            border.width: 1
+            border.color: root.plotColors.plotPlateEdge
+        }
+        Rectangle {
+            x: 1 - root._roomLeft
+            y: 1
+            width: root.width
+            height: root.height
+            radius: root.radius
+            color: root.plotColors.plotPlate
+        }
+        // Its own left edge, between its corners, coming in as the room
+        // goes: the light plot shows the plate by its edge.
+        Rectangle {
+            objectName: "plotZoomPlateStayingEdge"
+            x: 0
+            y: 1 + root.radius
+            width: 1
+            height: Math.max(0, root.height - 2 * root.radius)
+            opacity: 1 - root.leavingLevel
+            color: root.plotColors.plotPlateEdge
+        }
+    }
+
     // As it leaves, the readout keeps its room while the plate is zoomed,
     // and it keeps its own otherwise.
     Components.FollowNotice {
         id: notice
         objectName: "plotFollowNotice"
-        shown: root.noticeShown && !(root.noticeLeaving && root.zoomed)
-        width: root.noticeLeaving ? root._roomLeft : implicitWidth
+        shown: root.noticeShown && !root._narrowing
+        width: root._narrowing ? root._roomLeft : implicitWidth
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         shortcut: root.followShortcut
         divided: root.zoomed
-        textShown: !root.noticeLeaving
+        textShown: !root._narrowing
         inset: 6 - root.horizontalPadding
     }
 
