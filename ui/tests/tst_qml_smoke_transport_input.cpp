@@ -63,6 +63,8 @@ private slots:
     void laneHeadsStayQuietThroughAPan();
     void laneHeadsCloseOnTheMiddlePress_data();
     void laneHeadsCloseOnTheMiddlePress();
+    void laneHeadsStayClosedThroughAPlotSeek_data();
+    void laneHeadsStayClosedThroughAPlotSeek();
     void wheelZoomIsPointerActivity_data();
     void wheelZoomIsPointerActivity();
     void zoomPlateTextIsDrawnAsThePlotPlatesIs();
@@ -5662,6 +5664,86 @@ void TransportInputSmokeTest::laneHeadsCloseOnTheMiddlePress() {
     }
     // The pointer moves: the lane under it has its buttons again.
     QTest::mouseMove(window, end + QPoint(1, 0));
+    QTRY_VERIFY(laneHovered());
+}
+
+void TransportInputSmokeTest::laneHeadsStayClosedThroughAPlotSeek_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// A right-click seek after a pan holds the lane heads as the pan did,
+// until the pointer next moves on its own: a click that came with its
+// pointer's move opened lane L's Mute and Solo as the playhead landed
+// (H22). It holds them from its press with no pan before it too.
+void TransportInputSmokeTest::laneHeadsStayClosedThroughAPlotSeek() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    QObject *plot = mode == 0
+        ? static_cast<QObject *>(itemNamed(corner.spectrogramSurface, QStringLiteral("spectrogramPaneItem")))
+        : static_cast<QObject *>(corner.waveform);
+    QVERIFY(plot != nullptr);
+    QTRY_VERIFY(plot->property("crosshairEnabled").toBool());
+    QSignalSpy seeked(plot, SIGNAL(seekRequested(double)));
+    corner.zoom(4.0);
+    const QList<QQuickItem *> heads = itemsNamed(corner.layer, QStringLiteral("plotLaneHead"));
+    QVERIFY(!heads.isEmpty());
+    const auto laneHovered = [&]() {
+        for (QQuickItem *head : heads) {
+            if (head->property("laneHovered").toBool()) return true;
+        }
+        return false;
+    };
+    const QPoint from = corner.layer->mapToScene(
+        QPointF(corner.layer->width() / 2, corner.layer->height() * 0.25)).toPoint();
+    QTest::mouseMove(window, from + QPoint(1, 1));
+    QTest::mouseMove(window, from);
+    QTRY_VERIFY(laneHovered());
+
+    // A pan, let go: the heads stay closed.
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, from);
+    QPoint end = from;
+    for (int step = 1; step <= 5; ++step) {
+        end = from + QPoint(-12 * step, 0);
+        QTest::mouseMove(window, end);
+    }
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, end);
+    QTest::qWait(50);
+    QVERIFY(!laneHovered());
+
+    // A right click elsewhere on the lane, its pointer's move and press in
+    // one: it seeks, and no head opens, through its release and the frames
+    // after it.
+    const QPoint seekAt = end + QPoint(-40, 0);
+    QTest::mouseMove(window, seekAt);
+    QTest::mousePress(window, Qt::RightButton, Qt::NoModifier, seekAt);
+    QCOMPARE(seeked.count(), 1);
+    QVERIFY(!laneHovered());
+    QTest::mouseRelease(window, Qt::RightButton, Qt::NoModifier, seekAt);
+    QTest::qWait(50);
+    QVERIFY(!laneHovered());
+
+    // The pointer moves on its own: the lane under it has its buttons again.
+    QTest::mouseMove(window, seekAt + QPoint(1, 0));
+    QTRY_VERIFY(laneHovered());
+
+    // With no pan before it, a seek holds them from its press as well.
+    QTest::mousePress(window, Qt::RightButton, Qt::NoModifier, seekAt + QPoint(1, 0));
+    QCOMPARE(seeked.count(), 2);
+    QVERIFY(!laneHovered());
+    QTest::mouseRelease(window, Qt::RightButton, Qt::NoModifier, seekAt + QPoint(1, 0));
+    QTest::qWait(50);
+    QVERIFY(!laneHovered());
+    QTest::mouseMove(window, seekAt + QPoint(2, 0));
     QTRY_VERIFY(laneHovered());
 }
 

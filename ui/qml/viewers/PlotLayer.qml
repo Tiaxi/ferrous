@@ -245,16 +245,33 @@ Item {
     // not a lane's buttons, which no lane under it opens meanwhile: from
     // the drag's threshold alone, the head under it opened on the press,
     // closed as the pan began and opened again on the release (H20).
+    // A seek on the plot (its right press) holds it as well, from the press
+    // until the pointer next moves from where it pressed: it acts on the
+    // data, not on a lane's buttons. A click that came with its pointer's
+    // move, after a pan, opened lane L's Mute and Solo as the playhead
+    // landed (H22). `_handSeekAt` is that press's place, or null while the
+    // hold is a pan's, which `viewPanLetGoAt` ends.
     property bool _handHolds: false
+    property var _handSeekAt: null
     onViewPanPressedChanged: {
-        if (root.viewPanPressed)
+        if (root.viewPanPressed) {
             root._handHolds = true
+            root._handSeekAt = null
+        }
+    }
+    // The plot seeks where the pointer pressed it.
+    function plotSeeked() {
+        root._handHolds = true
+        root._handSeekAt = root.pointerPosition
     }
     onPointerPositionChanged: {
-        if (root._handHolds && !root.viewPanPressed
-                && (root.pointerPosition.x !== root.viewPanLetGoAt.x
-                    || root.pointerPosition.y !== root.viewPanLetGoAt.y))
+        if (!root._handHolds || root.viewPanPressed)
+            return
+        const at = root._handSeekAt !== null ? root._handSeekAt : root.viewPanLetGoAt
+        if (root.pointerPosition.x !== at.x || root.pointerPosition.y !== at.y) {
             root._handHolds = false
+            root._handSeekAt = null
+        }
     }
     onViewMovedChanged: root._notice = root.viewMoved ? 1
         : !root.viewAutoscrolling && !root.controlsInViewer && modeSwitch.revealLevel > 0

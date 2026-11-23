@@ -2124,7 +2124,11 @@ ApplicationWindow {
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             clock: playbackController.playbackClock
-            seekCommitted: playbackController.seekCommitted
+            // A seek on the plot holds its lane heads as a pan does.
+            seekCommitted: function(seconds) {
+                plotLayer.plotSeeked()
+                playbackController.seekCommitted(seconds)
+            }
         }
 
         Viewers.WaveformSurface {
@@ -2149,7 +2153,11 @@ ApplicationWindow {
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             clock: playbackController.playbackClock
-            seekCommitted: playbackController.seekCommitted
+            // A seek on the plot holds its lane heads as a pan does.
+            seekCommitted: function(seconds) {
+                plotLayer.plotSeeked()
+                playbackController.seekCommitted(seconds)
+            }
         }
 
         // A press of any button, or the wheel, on the plot in the pane takes
