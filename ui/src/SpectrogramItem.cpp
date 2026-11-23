@@ -1451,20 +1451,22 @@ QString fpsCounterText(int fps) {
 }
 
 // The scale's text: the small text of the design, 12 px at the default
-// 10 pt font (UiPalette.smallPointSize).
-QFont scaleLabelFont() {
+// 10 pt font (UiPalette.smallPointSize), `textScale` times that (see
+// SpectrogramItem::textScale).
+QFont scaleLabelFont(double textScale) {
     QFont font = QGuiApplication::font();
     const double points = font.pointSizeF() > 0.0 ? font.pointSizeF() : font.pixelSize() * 0.75;
-    font.setPointSizeF(points * 0.9);
+    font.setPointSizeF(points * 0.9 * textScale);
     return font;
 }
 
 // A scale label's outline, around its text on every side.
 constexpr int kScaleLabelOutline = 1;
 
-// The logical size of a scale label of `text`, with its outline.
-QSize scaleLabelSize(const QString &text) {
-    const QFontMetrics metrics(scaleLabelFont());
+// The logical size of a scale label of `text` at `textScale`, with its
+// outline.
+QSize scaleLabelSize(const QString &text, double textScale) {
+    const QFontMetrics metrics(scaleLabelFont(textScale));
     return {metrics.horizontalAdvance(text) + 2 * kScaleLabelOutline,
             metrics.height() + 2 * kScaleLabelOutline};
 }
@@ -1480,11 +1482,12 @@ struct FrequencyScaleTick {
 // The frequency scale's ticks in a lane `width` x `height` device pixels,
 // `scale` to a logical one, whose rows show `rowBins` (frequencyRowBins):
 // round numbers of kilohertz, one to a label, each label `labelGap` from
-// the lane's right edge and centred on its tick. Labels closer to the lane's
-// top than `topClearance` logical pixels are left out, ticks and all.
+// the lane's right edge and centred on its tick, in text at `textScale`.
+// Labels closer to the lane's top than `topClearance` logical pixels are
+// left out, ticks and all.
 QVector<FrequencyScaleTick> frequencyScaleTicks(
     const std::vector<int> &rowBins, int bins, double binHz,
-    int width, int height, double scale, int topClearance, int labelGap) {
+    int width, int height, double scale, int topClearance, int labelGap, double textScale) {
     QVector<FrequencyScaleTick> ticks;
     if (width <= 0 || height <= 0 || bins <= 1 || binHz <= 0.0
         || static_cast<int>(rowBins.size()) != height) {
@@ -1493,7 +1496,7 @@ QVector<FrequencyScaleTick> frequencyScaleTicks(
     const int logicalWidth = std::max(1, static_cast<int>(std::floor(width / scale + 1e-6)));
     const int logicalHeight = std::max(1, static_cast<int>(std::floor(height / scale + 1e-6)));
     // A label's height and 12 px: 5 kHz apart in a lane of about 125 px.
-    const int minPixelSpacing = scaleLabelSize(QStringLiteral("0")).height() + 12;
+    const int minPixelSpacing = scaleLabelSize(QStringLiteral("0"), textScale).height() + 12;
 
     // Nyquist, or with the frequency cap, the cap.
     const double topHz = static_cast<double>(bins - 1) * binHz;
@@ -1521,7 +1524,7 @@ QVector<FrequencyScaleTick> frequencyScaleTicks(
             continue;
         }
         const QString label = formatFrequencyLabel(freq);
-        const QSize size = scaleLabelSize(label);
+        const QSize size = scaleLabelSize(label, textScale);
         const int labelY = static_cast<int>(std::round(pixelY / scale)) - size.height() / 2;
         if (labelY < topClearance || labelY + size.height() > logicalHeight) {
             continue;
@@ -1533,19 +1536,24 @@ QVector<FrequencyScaleTick> frequencyScaleTicks(
     return ticks;
 }
 
-// The name of an overlay image's texture; a readout's plate is in `plate`.
+// The name of an overlay image's texture; a readout's plate is in `plate`,
+// and its text, and a scale label's, at `textScale`.
 QString overlayImageKey(
     const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate,
-    const QColor &floor) {
+    const QColor &floor, double textScale) {
     QString colors;
+    if (image.kind == SpectrogramOverlayImage::DashedColumn
+        || image.kind == SpectrogramOverlayImage::DashedRow) {
+        colors = QStringLiteral("%1|").arg(floor.rgba(), 0, 16);
+    } else {
+        // Its text's size.
+        colors = QStringLiteral("%1|").arg(textScale, 0, 'g', 17);
+    }
     if (image.kind == SpectrogramOverlayImage::ReadoutPlate) {
-        colors = QStringLiteral("%1|%2|%3|")
+        colors += QStringLiteral("%1|%2|%3|")
             .arg(plate.fill.rgba(), 0, 16)
             .arg(plate.text.rgba(), 0, 16)
             .arg(plate.edge.rgba(), 0, 16);
-    } else if (image.kind == SpectrogramOverlayImage::DashedColumn
-        || image.kind == SpectrogramOverlayImage::DashedRow) {
-        colors = QStringLiteral("%1|").arg(floor.rgba(), 0, 16);
     }
     return QStringLiteral("%1|%2|%3|%4%5")
         .arg(static_cast<int>(image.kind))
@@ -1571,10 +1579,10 @@ QSize overlayImagePixels(const SpectrogramOverlayImage &image, double scale) {
 }
 
 // An overlay image at `scale` device pixels to a logical one; a readout's
-// plate is in `plate`.
+// plate is in `plate`, and its text, and a scale label's, at `textScale`.
 QImage renderOverlayImage(
     const SpectrogramOverlayImage &image, double scale, const CrosshairReadout::Colors &plate,
-    const QColor &floor) {
+    const QColor &floor, double textScale) {
     const bool dashedColumn = image.kind == SpectrogramOverlayImage::DashedColumn;
     if (dashedColumn || image.kind == SpectrogramOverlayImage::DashedRow) {
         const int lineWidth = deviceLineWidth(scale);
@@ -1612,7 +1620,7 @@ QImage renderOverlayImage(
         QPainter painter(&readout);
         CrosshairReadout::drawPlate(
             painter, QRect(QPoint(0, 0), image.rect.size().toSize()), image.text,
-            CrosshairReadout::font(), plate);
+            CrosshairReadout::font(textScale), plate);
         painter.end();
         return readout;
     }
@@ -1623,7 +1631,7 @@ QImage renderOverlayImage(
     label.fill(Qt::transparent);
     QPainter painter(&label);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
-    const QFont font = scaleLabelFont();
+    const QFont font = scaleLabelFont(textScale);
     painter.setFont(font);
     const QPointF origin(kScaleLabelOutline, kScaleLabelOutline + QFontMetrics(font).ascent());
     painter.setPen(kScaleOutlineColor);
@@ -2936,6 +2944,31 @@ void SpectrogramItem::setRestTopClearance(double value) {
 double SpectrogramItem::scaleEndInset() const {
     QMutexLocker lock(&m_stateMutex);
     return m_scaleEndInset;
+}
+
+double SpectrogramItem::textScale() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_textScale;
+}
+
+void SpectrogramItem::setTextScale(double value) {
+    if (!std::isfinite(value) || value <= 0.0) {
+        value = 1.0;
+    }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_textScale == value) {
+            return;
+        }
+        m_textScale = value;
+        // Its text is measured again and its labels and plates laid out
+        // again, on the render thread; the columns are kept.
+        m_freqGridDirty = true;
+        m_timeGridDirty = true;
+        m_crosshairDirty = true;
+    }
+    emit textScaleChanged();
+    update();
 }
 
 void SpectrogramItem::setScaleEndInset(double value) {
@@ -5540,7 +5573,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 }
                 SpectrogramPlacedOverlayImage placed{image.key, rect, QImage()};
                 if (!node->overlayTextures.contains(placed.key)) {
-                    placed.image = renderOverlayImage(image, scale, m_readoutColors, m_floorColor);
+                    placed.image = renderOverlayImage(image, scale, m_readoutColors, m_floorColor, m_textScale);
                 }
                 frame.images.push_back(std::move(placed));
             }
@@ -7189,11 +7222,12 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
         }
     }
 
-    const QFontMetrics metrics(CrosshairReadout::font());
+    const QFontMetrics metrics(CrosshairReadout::font(m_textScale));
     const auto plateFor = [&](const QString &text) {
         return text.isEmpty()
             ? QSize()
-            : CrosshairReadout::plateSize(metrics.horizontalAdvance(text), metrics, m_readoutColors);
+            : CrosshairReadout::plateSize(
+                  metrics.horizontalAdvance(text), metrics, m_readoutColors, m_textScale);
     };
     const int logicalWidth = std::max(1, static_cast<int>(std::floor(width / scale + 1e-6)));
     const int logicalHeight = std::max(1, static_cast<int>(std::floor(height / scale + 1e-6)));
@@ -7211,7 +7245,7 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     // Whether a plate shows goes by the widest text it can have, so it
     // doesn't come and go as the level and time under the pointer change.
     const auto widestPlate = [&](int textWidth) {
-        return CrosshairReadout::plateSize(textWidth, metrics, m_readoutColors).width();
+        return CrosshairReadout::plateSize(textWidth, metrics, m_readoutColors, m_textScale).width();
     };
     const auto [valueRect, timeRect] = CrosshairReadout::plateRects(
         logicalWidth, logicalHeight,
@@ -7239,7 +7273,7 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
 int SpectrogramItem::crosshairWidestValueWidthLocked() {
     const double topHz = topFrequencyHzLocked();
     return m_crosshairWidestValue.get(
-        CrosshairReadout::font(), topHz, [topHz](const QFontMetrics &metrics) {
+        CrosshairReadout::font(m_textScale), topHz, [topHz](const QFontMetrics &metrics) {
             // Each form at its most digits, as the readout's formatters write
             // them: the hertz just under a kilohertz, which round up to
             // "1000 Hz", and the top of the band, which can round up in
@@ -7289,7 +7323,7 @@ double SpectrogramItem::crosshairTrackTimeLocked(double continuousTime) const {
 
 void SpectrogramItem::nameOverlayImagesLocked(SpectrogramOverlayLayout &layout) const {
     for (SpectrogramOverlayImage &image : layout.images) {
-        image.key = overlayImageKey(image, m_canvasScale, m_readoutColors, m_floorColor);
+        image.key = overlayImageKey(image, m_canvasScale, m_readoutColors, m_floorColor, m_textScale);
     }
 }
 
@@ -7338,7 +7372,7 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
     const bool ticked = m_scaleEndInset <= 0.0;
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
              m_iToBin, m_binsPerColumn, binHzLocked(), width, height, scale,
-             frequencyScaleTopClearanceLocked(), labelGap)) {
+             frequencyScaleTopClearanceLocked(), labelGap, m_textScale)) {
         m_freqScaleWidth = std::max(
             m_freqScaleWidth, labelGap + static_cast<int>(tick.labelRect.width()));
         if (ticked) {
@@ -7406,7 +7440,8 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
         ? std::max(0, width - devicePixels(static_cast<double>(frequencyScaleLabelGapLocked()), scale))
         : width;
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
-             rowBins, bins, binHz, width, height, scale, topClearance, frequencyScaleLabelGapLocked())) {
+             rowBins, bins, binHz, width, height, scale, topClearance, frequencyScaleLabelGapLocked(),
+             m_textScale)) {
         m_restGrid.lines.push_back(QRect(0, tick.pixelY, end, lineWidth));
         m_restGrid.images.push_back(
             {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});
@@ -7491,7 +7526,7 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
         }
         m_timeGrid.lines.push_back(QRect(pixelX, 0, lineWidth, tickHeight));
         const QString label = formatTimeLabel(trackT, timeInterval);
-        const QSize size = scaleLabelSize(label);
+        const QSize size = scaleLabelSize(label, m_textScale);
         m_timeGrid.images.push_back({SpectrogramOverlayImage::ScaleLabel, label, 0,
             QRectF(std::round(pixelX / scale) - size.width() / 2, 5.0,
                    size.width(), size.height()), QString()});

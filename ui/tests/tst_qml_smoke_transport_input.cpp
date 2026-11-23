@@ -66,6 +66,8 @@ private slots:
     void viewerToolbarIsOneVocabularyWindowedAndInTheStrip();
     void fullscreenLaneHeadsAreOnTheStripsTypeScale_data();
     void fullscreenLaneHeadsAreOnTheStripsTypeScale();
+    void fullscreenPlotTextIsOnTheStripsTypeScale_data();
+    void fullscreenPlotTextIsOnTheStripsTypeScale();
     void viewerStripButtonsFollowItsType_data();
     void viewerStripButtonsFollowItsType();
     void viewerStripIsOnOneTypeScale_data();
@@ -5137,6 +5139,82 @@ void TransportInputSmokeTest::fullscreenLaneHeadsAreOnTheStripsTypeScale() {
     QTRY_VERIFY((head = firstHead()) != nullptr);
     QTRY_VERIFY(qAbs(labelPoints(head) - small) < 0.01);
     QTRY_COMPARE(sceneRectOf(head).left() - sceneRectOf(layer).left(), 5.0);
+}
+
+void TransportInputSmokeTest::fullscreenPlotTextIsOnTheStripsTypeScale_data() {
+    // 0 in the window, 1 over the whole screen, 2 there without the strip.
+    QTest::addColumn<int>("where");
+    QTest::newRow("window") << 0;
+    QTest::newRow("whole screen") << 1;
+    QTest::newRow("whole screen, no strip") << 2;
+}
+
+// Over the whole screen the plots' own text, the crosshair's readout and the
+// scale's labels, is on the strip's type scale with the lane heads, 1.2
+// times the window's (it was the window's 12 px under the strip's 16 px). In
+// the window, and in the main window before and after, it is the window's.
+void TransportInputSmokeTest::fullscreenPlotTextIsOnTheStripsTypeScale() {
+    QFETCH(int, where);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveform = window->findChild<QQuickItem *>(QStringLiteral("waveformEditorItem"));
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(bridge && viewer && layer && spectrogramSurface && waveform && palette);
+    const qreal fullscreenScale = palette->property("fullscreenTextScale").toDouble();
+    QCOMPARE(fullscreenScale, 1.2);
+    setPlayingTrack(bridge);
+    QVERIFY(bridge->setProperty("spectrogramViewMode", 1));
+    setChannelCount(bridge, spectrogramSurface, 2);
+    // Every lane's, and the waveform's, and the lane heads' with them.
+    const auto checkScale = [&](qreal expected) {
+        const QList<QQuickItem *> lanes =
+            visibleItemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem"));
+        QVERIFY(lanes.size() == 2);
+        for (QQuickItem *lane : lanes) {
+            QTRY_COMPARE(lane->property("textScale").toDouble(), expected);
+        }
+        QTRY_COMPARE(waveform->property("textScale").toDouble(), expected);
+        QCOMPARE(layer->property("textScale").toDouble(), expected);
+    };
+    QTRY_COMPARE(visibleItemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem")).size(), 2);
+    checkScale(1.0);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    bridge->setProperty("showFullscreenTitleStrip", where != 2);
+    bridge->setProperty("viewerFullscreenMode", where == 0 ? 0 : 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QQuickWindow *host = window;
+    if (where != 0) {
+        host = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+        QVERIFY(host != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(host));
+    } else {
+        QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+        QVERIFY(popup != nullptr);
+        QTRY_VERIFY(popup->property("opened").toBool());
+    }
+    QTRY_COMPARE(layer->window(), host);
+    checkScale(where == 0 ? 1.0 : fullscreenScale);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    if (where != 0) {
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+    QTRY_COMPARE(layer->window(), window);
+    checkScale(1.0);
 }
 
 void TransportInputSmokeTest::viewerStripButtonsFollowItsType_data() {

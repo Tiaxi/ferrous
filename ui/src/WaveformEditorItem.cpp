@@ -667,6 +667,23 @@ void WaveformEditorItem::setReadoutPlateEdgeColor(const QColor &value) { setRead
 QColor WaveformEditorItem::readoutTextColor() const { QMutexLocker lock(&m_stateMutex); return m_readoutColors.text; }
 void WaveformEditorItem::setReadoutTextColor(const QColor &value) { setReadoutColor(&CrosshairReadout::Colors::text, value); }
 
+double WaveformEditorItem::textScale() const { QMutexLocker lock(&m_stateMutex); return m_textScale; }
+
+void WaveformEditorItem::setTextScale(double value) {
+    if (!std::isfinite(value) || value <= 0.0) value = 1.0;
+    bool shown = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_textScale == value) return;
+        m_textScale = value;
+        // Only the crosshair's readout is in it, which a frame lays out and
+        // draws; the cached rasters and tiles are kept.
+        shown = m_crosshairEnabled && m_hoverActive;
+    }
+    emit textScaleChanged();
+    if (shown) update();
+}
+
 void WaveformEditorItem::setReadoutColor(QColor CrosshairReadout::Colors::*member, const QColor &value) {
     bool shown = false;
     {
@@ -3656,10 +3673,11 @@ std::pair<QRect, QRect> WaveformEditorItem::crosshairLabelRects(
     int width, int height, int x, int y,
     int valueTextWidth, int timeTextWidth, int textHeight,
     const QSizeF &reservedCorner, const QRect &laneHead,
-    int widestValueTextWidth, int widestTimeTextWidth, const CrosshairReadout::Colors &colors) {
+    int widestValueTextWidth, int widestTimeTextWidth, const CrosshairReadout::Colors &colors,
+    double textScale) {
     // The spectrogram's plates, with its edge when the colours have one.
     const auto plate = [&](int textWidth) {
-        return CrosshairReadout::plateSize(textWidth, textHeight, colors);
+        return CrosshairReadout::plateSize(textWidth, textHeight, colors, textScale);
     };
     return CrosshairReadout::plateRects(
         width, height, x, y, plate(valueTextWidth), plate(timeTextWidth),
@@ -4129,7 +4147,7 @@ QString crosshairLevel(double amplitude) {
 
 int WaveformEditorItem::crosshairWidestLevelWidthLocked() {
     return m_crosshairWidestLevel.get(
-        CrosshairReadout::font(), 0.0, [](const QFontMetrics &metrics) {
+        CrosshairReadout::font(m_textScale), 0.0, [](const QFontMetrics &metrics) {
             // Silence, and the lowest level above it, -100 dB: a louder level
             // has no more digits.
             return std::max(
@@ -4173,7 +4191,7 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     const QString dbText = crosshairLevel(amplitude);
     const QString timeText = formatCrosshairTime(
         time, crosshairTimeDecimals((visibleEnd - visibleStart) / axis.columns(), m_presentedZoomLevel));
-    const QFont font = CrosshairReadout::font();
+    const QFont font = CrosshairReadout::font(m_textScale);
     const QFontMetrics metrics(font);
     // Whether a plate shows goes by the widest text it can have, so it
     // doesn't come and go as the level and time under the pointer change.
@@ -4181,7 +4199,7 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
         width, height, x, y, metrics.horizontalAdvance(dbText),
         metrics.horizontalAdvance(timeText), metrics.height(), m_reservedCorner,
         lowestLaneHeadLocked(height, channels), crosshairWidestLevelWidthLocked(),
-        CrosshairReadout::widestDigitsWidth(timeText, metrics), colors);
+        CrosshairReadout::widestDigitsWidth(timeText, metrics), colors, m_textScale);
     CrosshairReadout::drawPlate(painter, dbRect, dbText, font, colors);
     CrosshairReadout::drawPlate(painter, timeRect, timeText, font, colors);
 }

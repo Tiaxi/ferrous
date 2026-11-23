@@ -85,20 +85,27 @@ inline double fontScale() {
     return std::max(1.0, applicationPoints() / 10.0);
 }
 
+// `textScale` below is how much larger than the window's a plot's text is:
+// in a viewer over the whole screen, its strip's type scale
+// (UiPalette.fullscreenTextScale), as its lane heads' labels; 1 elsewhere.
+
 // Between a plate's edge and its text at either side: a lane label's, 6 px
-// at the default font (UiPalette.scaledSize(6)), larger with a larger one.
-inline int padding() {
-    return std::max(6, static_cast<int>(std::lround(6.0 * fontScale())));
+// at the default font (UiPalette.scaledSize(6)), larger with a larger one
+// and with its text's scale.
+inline int padding(double textScale = 1.0) {
+    return std::max(6, static_cast<int>(std::lround(6.0 * fontScale() * textScale)));
 }
 
 // The readout's text: the application's font at the small size of the
 // design (UiPalette.smallPointSize), as the plot's lane labels, so it grows
-// with a larger font: 12 px at the default 10 pt. It is sized in pixels, at
-// Qt's logical 96 dpi as QML's text is, so the plates it is measured for and
-// the images it is drawn in agree whatever the device pixel ratio.
-inline QFont font() {
+// with a larger font: 12 px at the default 10 pt, 14 px on a scale of 1.2.
+// It is sized in pixels, at Qt's logical 96 dpi as QML's text is, so the
+// plates it is measured for and the images it is drawn in agree whatever
+// the device pixel ratio.
+inline QFont font(double textScale = 1.0) {
     QFont font;
-    font.setPixelSize(std::max(1, static_cast<int>(std::lround(applicationPoints() * 0.9 * 96.0 / 72.0))));
+    font.setPixelSize(std::max(
+        1, static_cast<int>(std::lround(applicationPoints() * 0.9 * textScale * 96.0 / 72.0))));
     return font;
 }
 
@@ -148,10 +155,11 @@ private:
 };
 
 // How tall a plate's fill is for text `textHeight` tall: as a lane label's
-// (PlotPlate.labelHeight), its capitals and the room around them, 20 px at
-// the default font; never less than the text's line.
-inline int plateHeight(int textHeight) {
-    QFont label = font();
+// (PlotPlate.labelHeight), its capitals in its font at `textScale` and the
+// room around them, 20 px at the default font; never less than the text's
+// line.
+inline int plateHeight(int textHeight, double textScale = 1.0) {
+    QFont label = font(textScale);
     label.setWeight(QFont::DemiBold);
     // Measured once a font: a crosshair lays its plates out every frame.
     thread_local WidestWidth capitals;
@@ -162,14 +170,16 @@ inline int plateHeight(int textHeight) {
     return std::max({20, labelHeight, textHeight});
 }
 
-// The size of a plate for text `textWidth` wide and `textHeight` tall.
-inline QSize plateSize(int textWidth, int textHeight, const Colors &colors) {
+// The size of a plate for text `textWidth` wide and `textHeight` tall, in
+// the readout's font at `textScale`.
+inline QSize plateSize(int textWidth, int textHeight, const Colors &colors, double textScale = 1.0) {
     const int edge = colors.hasEdge() ? 2 : 0;
-    return {textWidth + 2 * padding() + edge, plateHeight(textHeight) + edge};
+    return {textWidth + 2 * padding(textScale) + edge, plateHeight(textHeight, textScale) + edge};
 }
 
-inline QSize plateSize(int textWidth, const QFontMetrics &metrics, const Colors &colors) {
-    return plateSize(textWidth, metrics.height(), colors);
+inline QSize plateSize(int textWidth, const QFontMetrics &metrics, const Colors &colors,
+                       double textScale = 1.0) {
+    return plateSize(textWidth, metrics.height(), colors, textScale);
 }
 
 // A scale along a plot's right edge: how far its labels reach from the
