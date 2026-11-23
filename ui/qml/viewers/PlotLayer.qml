@@ -268,19 +268,22 @@ Item {
         pointerActivity: root.pointerActivity
     }
 
-    // The zoom, 4 px left of the mode switch, so that the corner's plates
-    // read as one row: while the plot is zoomed, it shows and hides with
-    // the switch (shown without it, it floated 68 px from the corner). At
-    // rest the seek bar's band is the zoom's cue, and the wheel zooms with
-    // the pointer on the pane, where the readout shows as it changes. It
-    // keeps its place and its Tab stop while it is hidden. "Not following"
-    // grows it to the left, so Reset never moves from under the pointer.
+    // The zoom, left of the mode switch, their edges 6 px apart, so that
+    // the corner's plates read as one row: while the plot is zoomed, it
+    // shows and hides with the switch (shown without it, it floated 68 px
+    // from the corner). At rest the seek bar's band is the zoom's cue, and
+    // the wheel zooms with the pointer on the pane, where the readout
+    // shows as it changes. It keeps its place and its Tab stop while it is
+    // hidden. "Not following" grows it to the left, so Reset never moves
+    // from under the pointer.
     Components.PlotZoomPlate {
         id: zoomPlate
         z: 2
         anchors.top: modeSwitch.top
         anchors.right: modeSwitch.left
-        anchors.rightMargin: 4
+        // Each plate's 1 px edge is outside it: at 4 px between the plates,
+        // their edges were 2 px apart, pinched together (H19).
+        anchors.rightMargin: 6 + 2
         available: !root.controlsInViewer && (root.controlsVisible || root.controlsLevel > 0)
         revealed: modeSwitch.revealed
         fadeLevel: root.controlsLevel

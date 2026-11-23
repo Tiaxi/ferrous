@@ -2977,10 +2977,11 @@ void TransportInputSmokeTest::laneSeamIsOnThePlot() {
 }
 
 // The main pane shows its zoom while it is zoomed (with the scale off,
-// nothing showed it): the viewers' readout and Reset, on a plate 4 px left
-// of the mode switch, in its place also while both hide. The plot keeps its
-// place and size; its overlays keep clear of the plate. A viewer shows the
-// same readout and Reset on its own plate, in the same order.
+// nothing showed it): the viewers' readout and Reset, on a plate left of
+// the mode switch, their edges 6 px apart, in its place also while both
+// hide. The plot keeps its place and size; its overlays keep clear of the
+// plate. A viewer shows the same readout and Reset on its own plate, in the
+// same order.
 void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -3031,20 +3032,21 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
         QCOMPARE(reset->property("text").toString(), QStringLiteral("Reset Zoom"));
         QCOMPARE(plate->property("plotColors").value<QObject *>(),
                  layer->property("plotColors").value<QObject *>());
-        // 4 px left of the switch, on its top, also while the switch hides
+        // Left of the switch, their 1 px edges outside them 6 px apart, on
+        // its top, also while the switch hides
         // (the click on Reset below puts the pointer on the pane, which
         // reveals it).
         if (mode == 0) {
             QCOMPARE(modeSwitch->opacity(), 0.0);
         }
-        QTRY_COMPARE(sceneRectOf(plate).right() + 4, sceneRectOf(modeSwitch).left());
+        QTRY_COMPARE(sceneRectOf(plate).right() + 8, sceneRectOf(modeSwitch).left());
         QCOMPARE(sceneRectOf(plate).top(), sceneRectOf(modeSwitch).top());
         QCOMPARE(sceneRectOf(plate).height(), sceneRectOf(modeSwitch).height());
         QVERIFY(sceneRectOf(readout).right() <= sceneRectOf(reset).left());
         // The plot stays where it is; its overlays keep clear of the plate.
         QCOMPARE(sceneRectOf(spectrogramSurface), plotBefore);
         const QSizeF corner = surface->property("reservedCorner").toSizeF();
-        QCOMPARE(corner.width(), cornerBefore.width() + 4 + plate->width());
+        QCOMPARE(corner.width(), cornerBefore.width() + 8 + plate->width());
         QCOMPARE(corner.height(), cornerBefore.height());
 
         // Reset: the default zoom, and the plate goes.
@@ -4316,6 +4318,13 @@ void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
     QVERIFY(divider != nullptr && divider->isVisible());
     QCOMPARE(sceneRectOf(divider).left() - boxOf(text).right(), 6.0);
     QVERIFY(surface->property("reservedCorner").toSizeF().width() > plate->width() + modeSwitch->width());
+    // The zoom's plate and the mode switch's 6 px apart, edge to edge, each
+    // edge 1 px outside its plate (with 4 px between the plates, their
+    // edges were 2 px apart, pinched together), and the plot keeps clear of
+    // the zoom's edge.
+    QCOMPARE((sceneRectOf(modeSwitch).left() - 1.0) - (sceneRectOf(plate).right() + 1.0), 6.0);
+    QCOMPARE(surface->property("reservedCorner").toSizeF().width(),
+             sceneRectOf(layer).right() - (sceneRectOf(plate).left() - 1.0));
 
     // Its tooltip names the way back and that action's shortcut as it is.
     QObject *toolTip = notice->findChild<QObject *>(QStringLiteral("followNoticeToolTip"));
@@ -4388,7 +4397,7 @@ void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
         QTRY_COMPARE(plate->opacity(), 1.0);
         QCOMPARE(sceneRectOf(modeSwitch), switchAt);
         window->grabWindow();
-        QCOMPARE(sceneRectOf(plate).right() + 4, sceneRectOf(modeSwitch).left());
+        QCOMPARE(sceneRectOf(plate).right() + 8, sceneRectOf(modeSwitch).left());
         // 6 px of plate either side of the text.
         QCOMPARE(boxOf(text).left() + text->property("leftPadding").toDouble() - sceneRectOf(plate).left(), 6.0);
         QCOMPARE(sceneRectOf(plate).right() - boxOf(text).right(), 6.0);
@@ -4636,7 +4645,7 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
                                         .arg(where).arg(corner.plate->opacity()).arg(corner.modeSwitch->opacity())));
             }
         }
-        QCOMPARE(sceneRectOf(corner.plate).right() + 4, switchAt.left());
+        QCOMPARE(sceneRectOf(corner.plate).right() + 8, switchAt.left());
         QCOMPARE(sceneRectOf(corner.modeSwitch), switchAt);
         if (cornerWanted && zoomed) {
             QCOMPARE(corner.plate->opacity(), 1.0);
@@ -5058,7 +5067,7 @@ void TransportInputSmokeTest::notFollowingArrivesAsItLeaves() {
         level = text;
         QCOMPARE(sceneRectOf(corner.modeSwitch), switchAt);
         QCOMPARE(corner.modeSwitch->opacity(), 1.0);
-        QCOMPARE(plate.right() + 4, switchAt.left());
+        QCOMPARE(plate.right() + 8, switchAt.left());
         if (!zoomed) {
             // At its width, fading in with its text, which is whole.
             QCOMPARE(corner.text->opacity(), 1.0);
@@ -5202,7 +5211,7 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
         }
         QCOMPARE(sceneRectOf(corner.reset), resetAt);
         QCOMPARE(sceneRectOf(corner.modeSwitch), switchAt);
-        QCOMPARE(plate.right() + 4, switchAt.left());
+        QCOMPARE(plate.right() + 8, switchAt.left());
         if (rowStays) {
             QCOMPARE(corner.plate->opacity(), 1.0);
         } else {
