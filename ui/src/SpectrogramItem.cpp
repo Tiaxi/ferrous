@@ -5549,10 +5549,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         const auto placeOverlay = [&](const SpectrogramOverlayLayout &layout,
                                       int shift,
                                       SpectrogramOverlayFrame &frame,
-                                      QRectF shown = QRectF()) {
+                                      QRectF shown = QRectF(),
+                                      double yieldX = std::numeric_limits<double>::quiet_NaN()) {
             // `shift` moves it that many device pixels left. With
             // `shown`, lines that start outside it are left out, and
-            // so are images centred outside it.
+            // so are images centred outside it. A dashed column within
+            // CrosshairReadout::kYieldsWithin of `yieldX` is left out.
             if (shown.isNull()) shown = pane;
             for (const QRect &line : layout.lines) {
                 const QRectF rect((line.x() - shift) / scale, line.y() / scale,
@@ -5572,6 +5574,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     pixels.height() / scale);
                 if (!rect.intersects(pane) || rect.center().x() < shown.left()
                     || rect.center().x() > shown.right()) {
+                    continue;
+                }
+                if (image.kind == SpectrogramOverlayImage::DashedColumn
+                    && std::abs(rect.left() - yieldX) <= CrosshairReadout::kYieldsWithin + 1e-9) {
                     continue;
                 }
                 SpectrogramPlacedOverlayImage placed{image.key, rect, QImage()};
@@ -6238,7 +6244,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         / static_cast<double>(m_precomputedHopSize);
                     updateCrosshairOverlayLocked(cw, ch, displayLeft, rollingMode, cps, drawX);
                 }
-                placeOverlay(m_crosshair, 0, crosshairFrame);
+                // The playhead is above the crosshair: where a seek on the
+                // plot lands it under the pointer, the dashes over it read
+                // as the hover line, and the landing didn't show. Within a
+                // pixel of it the vertical line gives way; the time stays.
+                placeOverlay(m_crosshair, 0, crosshairFrame, QRectF(),
+                    showPlayhead && m_playheadVisible
+                        ? playheadRect.left() : std::numeric_limits<double>::quiet_NaN());
             }
         } else if (!m_columns.empty() && m_binsPerColumn > 0) {
             // Appended rows are drawn one to a logical pixel.

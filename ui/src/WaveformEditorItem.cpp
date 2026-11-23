@@ -2910,9 +2910,11 @@ void WaveformEditorItem::paint(QPainter *painter) {
     publishMarkerX(markerSeconds >= 0.0 && visibleEnd > visibleStart
         ? std::round((markerSeconds - visibleStart) / (visibleEnd - visibleStart) * canvasWidth)
         : std::numeric_limits<double>::quiet_NaN());
+    double playheadX = std::numeric_limits<double>::quiet_NaN();
     if (playheadVisible && visibleEnd > visibleStart && position >= visibleStart && position <= visibleEnd) {
         const TimeAxis axis{visibleStart, visibleEnd, canvasWidth, scale};
         const double x = axis.x(axis.columnOf(position));
+        playheadX = x;
         // A device pixel's core cased in one on each side: the column's
         // left edge is on one, and cosmetic pens draw a device pixel wide.
         const double pixel = 1.0 / scale;
@@ -2932,7 +2934,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         m_hoverPosition = hover;
         painter->save();
         painter->setOpacity(crosshairOpacity);
-        drawCrosshair(*painter, canvasWidth, canvasHeight, visibleStart, visibleEnd);
+        drawCrosshair(*painter, canvasWidth, canvasHeight, visibleStart, visibleEnd, playheadX);
         painter->restore();
     }
     if (showFps && fpsValue > 0) drawFpsOverlay(*painter, canvasWidth, fpsValue, reservedCorner);
@@ -4158,7 +4160,7 @@ int WaveformEditorItem::crosshairWidestLevelWidthLocked() {
 }
 
 void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
-                                        double visibleStart, double visibleEnd) {
+                                        double visibleStart, double visibleEnd, double playheadX) {
     // On the column under the pointer, showing the time a click there
     // seeks to.
     const TimeAxis axis{visibleStart, visibleEnd, width, renderScaleLocked()};
@@ -4181,9 +4183,15 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     gaps.setColor(CrosshairReadout::dashGapColor(m_colors.background, 0.85));
     CrosshairReadout::setDashes(dashes, false);
     CrosshairReadout::setDashes(gaps, true);
+    // The playhead is above the crosshair: where a seek on the plot lands
+    // it under the pointer, the dashes over it read as the hover line, and
+    // the landing didn't show. The time stays on the axis.
+    const bool lineYields = std::abs(lineX - playheadX) <= CrosshairReadout::kYieldsWithin;
     for (const QPen &pen : {gaps, dashes}) {
         painter.setPen(pen);
-        painter.drawLine(QLineF(lineX, 0.0, lineX, height - 1.0));
+        if (!lineYields) {
+            painter.drawLine(QLineF(lineX, 0.0, lineX, height - 1.0));
+        }
         painter.drawLine(0, y, width - 1, y);
     }
     const double time = axis.timeAt(column);

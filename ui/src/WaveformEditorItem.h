@@ -801,8 +801,11 @@ private:
     std::shared_ptr<const DetailWindow> detailSnapshotLocked(
         double startSeconds, double endSeconds) const;
     LaneStyle laneStyleLocked() const;
+    // With the playhead drawn at `playheadX`, the crosshair's vertical line
+    // gives way to it within a pixel of it (see CrosshairReadout::kYieldsWithin).
     void drawCrosshair(QPainter &painter, int width, int height,
-                       double visibleStart, double visibleEnd);
+                       double visibleStart, double visibleEnd,
+                       double playheadX = std::numeric_limits<double>::quiet_NaN());
     // The width of the widest level the readout shows, in its font (see
     // CrosshairReadout::plateRects).
     int crosshairWidestLevelWidthLocked();

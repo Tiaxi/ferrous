@@ -92,6 +92,7 @@ private slots:
     void waveformEditorRulersFollowGridSetting();
     void waveformEditorRulersRemainVisibleWhenZoomed();
     void waveformEditorPlayheadIsThinAndNeutral();
+    void waveformEditorCrosshairYieldsToThePlayhead();
     void waveformEditorOverviewRespectsCoverageAndChannelIdentity();
     void waveformEditorReferenceLineContrastsWaveform();
     void waveformEditorContrastLinesUseFboSafeCompositionModes();
@@ -3138,6 +3139,62 @@ void WaveformSmokeTest::waveformEditorPlayheadIsThinAndNeutral() {
     QVERIFY(std::abs(playhead.red() - playhead.green()) < 12);
     QVERIFY(playhead.red() > left.red());
     QCOMPARE(left, right);
+}
+
+// A seek on the plot lands the playhead under the pointer, where the
+// crosshair's dashes were drawn over it: the landing read as the hover line.
+// Within a pixel of the playhead the crosshair's vertical line gives way to
+// it, and its time stays on the axis.
+void WaveformSmokeTest::waveformEditorCrosshairYieldsToThePlayhead() {
+    WaveformEditorItem item;
+    item.setWidth(320);
+    item.setHeight(180);
+    item.setDurationSeconds(10.0);
+    item.setCrosshairEnabled(true);
+    setTestPosition(item, 5.0);
+    const auto paint = [&item]() {
+        QImage canvas(320, 180, QImage::Format_RGB32);
+        canvas.fill(Qt::black);
+        QPainter painter(&canvas);
+        item.paint(&painter);
+        painter.end();
+        return canvas;
+    };
+    const QImage bare = paint();
+    // The playhead, at 5 s of 10 in 320 px.
+    QVERIFY(QColor(bare.pixel(160, 40)).red() > QColor(bare.pixel(156, 40)).red());
+    // The rows above the horizontal line and the plates, and the bottom
+    // edge, where the time is.
+    const auto columnDiffers = [&bare](const QImage &shown, int x) {
+        int differing = 0;
+        for (int y = 0; y < 80; ++y) {
+            differing += shown.pixel(x, y) != bare.pixel(x, y) ? 1 : 0;
+        }
+        return differing;
+    };
+    const auto bottomDiffers = [&bare](const QImage &shown) {
+        int differing = 0;
+        for (int y = 150; y < 180; ++y) {
+            for (int x = 120; x < 200; ++x) {
+                differing += shown.pixel(x, y) != bare.pixel(x, y) ? 1 : 0;
+            }
+        }
+        return differing;
+    };
+    for (const double x : {159.0, 160.0, 161.0}) {
+        item.setHoverPosition(x, 120.0, true);
+        const QImage shown = paint();
+        for (int column = 158; column <= 162; ++column) {
+            QVERIFY2(columnDiffers(shown, column) == 0,
+                qPrintable(QStringLiteral("hover at %1: column %2").arg(x).arg(column)));
+        }
+        QVERIFY2(bottomDiffers(shown) > 50, qPrintable(QStringLiteral("no time at %1").arg(x)));
+    }
+    // Two pixels off, the line is the crosshair's.
+    item.setHoverPosition(162.0, 120.0, true);
+    QVERIFY(columnDiffers(paint(), 162) > 20);
+    item.setHoverPosition(158.0, 120.0, true);
+    QVERIFY(columnDiffers(paint(), 158) > 20);
 }
 
 void WaveformSmokeTest::waveformEditorOverviewRespectsCoverageAndChannelIdentity() {

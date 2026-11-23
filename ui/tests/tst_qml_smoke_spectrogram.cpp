@@ -33,6 +33,7 @@ private slots:
     void spectrogramOverlayBenchmark();
     void spectrogramCrosshairOverlayGeneratesOnHover();
     void spectrogramCrosshairReadsOverBrightData();
+    void spectrogramCrosshairYieldsToThePlayhead();
     void spectrogramCrosshairOverlayMovesOnlyItsTimeLabel();
     void spectrogramCrosshairReadoutClampsInsideTheLane_data();
     void spectrogramCrosshairReadoutClampsInsideTheLane();
@@ -1476,6 +1477,92 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadsOverBrightData() {
     QVERIFY2(dashes >= 12 && gaps >= 8, qPrintable(QStringLiteral("%1 dashes of %2, %3 gaps of %4, as %5 and %6")
         .arg(dashes).arg(dash.name(), QString::number(gaps), gap.name(),
              shown.pixelColor(20, 4).name(), shown.pixelColor(20, 8).name())));
+}
+
+// A seek on the plot lands the playhead under the pointer, where the
+// crosshair's dashes were drawn over it: the landing read as the hover line.
+// Within a pixel of the playhead the crosshair's vertical line gives way to
+// it, and its time stays on the axis.
+void SpectrogramSmokeTest::spectrogramCrosshairYieldsToThePlayhead() {
+    QQuickWindow window;
+    if (window.rendererInterface()->graphicsApi() == QSGRendererInterface::Null) {
+        QSKIP("The null renderer draws no pixels");
+    }
+    const QColor floor(0x0a, 0x03, 0x18);
+    window.setColor(floor);
+    window.resize(200, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    auto &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setFloorColor(floor);
+    item.setCrosshairEnabled(true);
+    item.setAcceptHoverEvents(false);
+    constexpr int bins = 64;
+    item.feedPrecomputedChunk(QByteArray(bins * 400, '\x40'), bins, 0, 400, 0, 400, 48000, 1024,
+        true, true, 1, false);
+    setTestPosition(item, 4.0, 1);
+    const auto grab = [&]() {
+        item.update();
+        return window.grabWindow().convertToFormat(QImage::Format_RGB32);
+    };
+    const QColor playhead(0xe8, 0xe8, 0xe8);
+    // The playhead's column.
+    int playheadX = -1;
+    QImage bare;
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&]() {
+            bare = grab();
+            if (spectrogramRasterPending(item)) return false;
+            for (int x = 0; x < bare.width(); ++x) {
+                if (channelDistance(bare.pixelColor(x, 20), playhead) <= 3) {
+                    playheadX = x;
+                    return true;
+                }
+            }
+            return false;
+        }(), 5000);
+    const auto hoverAt = [&](double x) {
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.m_hoverActive = true;
+            item.m_hoverPosition = QPointF(x + 0.5, 60.0);
+            item.m_crosshairDirty = true;
+        }
+        return grab();
+    };
+    const auto hasTime = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        for (const SpectrogramOverlayImage &image : std::as_const(item.m_crosshair.images)) {
+            if (image.kind == SpectrogramOverlayImage::ReadoutPlate && image.text.contains(u':')) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const int dx : {-1, 0, 1}) {
+        const QImage shown = hoverAt(playheadX + dx);
+        // Above the horizontal line and its plate: the playhead and its
+        // casing, as without the crosshair.
+        for (int x = playheadX - 2; x <= playheadX + 2; ++x) {
+            for (int y = 2; y < 40; ++y) {
+                QVERIFY2(shown.pixel(x, y) == bare.pixel(x, y),
+                    qPrintable(QStringLiteral("hover at %1: %2,%3 is %4, not %5").arg(playheadX + dx)
+                        .arg(x).arg(y).arg(shown.pixelColor(x, y).name(), bare.pixelColor(x, y).name())));
+            }
+        }
+        QVERIFY(hasTime());
+    }
+    // Two pixels off, the line is the crosshair's.
+    const QImage beside = hoverAt(playheadX + 3);
+    int dashed = 0;
+    for (int y = 2; y < 40; ++y) {
+        dashed += beside.pixel(playheadX + 3, y) != bare.pixel(playheadX + 3, y) ? 1 : 0;
+    }
+    QVERIFY(dashed > 10);
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairOverlayMovesOnlyItsTimeLabel() {
