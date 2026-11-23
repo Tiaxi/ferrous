@@ -620,7 +620,10 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     // or by 5 % steps less, the most that is 3:1 on the trough; the trough
     // a step off the view that frames the bar, #2b2d2f in dark and #e8e9ea
     // in light (the text at 6 %, 1.2:1, did not show); the marks the text
-    // at 30 %.
+    // over the trough at 4:1, as are the spectrogram's in white (at 30 %
+    // and 40 % they were 1.8:1 and 2.4:1, lost beside the rungs, H26); the
+    // unlit rungs the fill over the trough at 1.3:1, a step under the
+    // fill, which is lit.
     {
         const QColor wave = colorOf(tokens, "paneWave");
         QVERIFY(sameColor(colorOf(waveform, "meterTrough"),
@@ -632,11 +635,21 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         QVERIFY2(amount >= 0.2, qPrintable(QString::number(amount)));
         QVERIFY2(channelDistance(colorOf(waveform, "meterFill"), mixed(wave, view, amount)) <= 1,
                  qPrintable(colorOf(waveform, "meterFill").name()));
-        const QColor tick = colorOf(waveform, "meterTick");
-        QVERIFY(std::abs(tick.alphaF() - 0.3) < 0.003 && sameColor(QColor(tick.rgb()), QColor(colorOf(tokens, "text").rgb())));
-        QVERIFY(std::abs(colorOf(spectrogram, "meterTick").alphaF() - 0.4) < 0.003);
         // Its rungs 3:1 on their trough, as drawn on the view.
         const QColor trough = drawnOver(colorOf(waveform, "meterTrough"), view);
+        for (QObject *plot : {waveform, spectrogram, media}) {
+            const QColor plotTrough = drawnOver(colorOf(plot, "meterTrough"), colorOf(plot, "plotBg"));
+            const QColor tick = colorOf(plot, "meterTick");
+            QCOMPARE(tick.alphaF(), 1.0f);
+            const double marks = contrastRatio(tick, plotTrough);
+            QVERIFY2(marks >= 4.0 && marks < 4.4, qPrintable(describeContrast(QStringLiteral("marks"), tick, plotTrough)));
+            const QColor unlit = colorOf(plot, "meterUnlit");
+            QCOMPARE(unlit.alphaF(), 1.0f);
+            const double unlitRungs = contrastRatio(unlit, plotTrough);
+            QVERIFY2(unlitRungs >= 1.3 && unlitRungs < 1.45,
+                     qPrintable(describeContrast(QStringLiteral("unlit rungs"), unlit, plotTrough)));
+            QVERIFY(contrastRatio(colorOf(plot, "meterFill"), plotTrough) > unlitRungs + 1.0);
+        }
         QVERIFY2(contrastRatio(colorOf(waveform, "meterFill"), trough) >= 3.0,
                  qPrintable(describeContrast(QStringLiteral("rungs on the trough"), colorOf(waveform, "meterFill"), trough)));
         // The pane's waveform: the seek bar's in light; in dark a quieter

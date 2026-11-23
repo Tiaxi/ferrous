@@ -622,7 +622,7 @@ Item {
         visible: root.meterShown
         laneCount: root.laneCount
         // Playing: paused, stopped or with no track, the column is a trough
-        // with the marks' ticks alone, still reserved.
+        // with its unlit ladder and the marks' ticks alone, still reserved.
         active: root.trackLoaded && root.uiBridge.connected
             && root.uiBridge.playbackState === "Playing"
         sourcePath: visible && root.trackLoaded ? root.uiBridge.currentTrackPath : ""
@@ -641,6 +641,8 @@ Item {
         // ticks, paused and stopped with a track too.
         troughColor: root.beforeAudio ? root.plotColors.meterRestTrough : root.plotColors.meterTrough
         fillColor: root.plotColors.meterFill
+        // Before any audio, no ladder: the pane waits with its marks alone.
+        unlitColor: root.beforeAudio ? "transparent" : root.plotColors.meterUnlit
         peakColor: root.plotColors.meterPeak
         clipOffColor: root.plotColors.meterClipOff
         clipColor: root.uiPalette.negative

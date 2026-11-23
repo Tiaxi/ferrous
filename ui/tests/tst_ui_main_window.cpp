@@ -2999,16 +2999,18 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks_data() {
 }
 
 // With nothing loaded, the visualization's level meter is its trough with
-// the -6, -12 and -24 dB marks' ticks on its outer side, 1 px each, where
-// they are while it plays, and no lamp, fill or peak tick (the blank trough
+// the -6, -12 and -24 dB marks' ticks on its outer side, each beside its
+// 2 px gap and as tall, where they are while it plays, and no lamp, fill or
+// peak tick (the blank trough
 // of the first run read as a scrollbar's): in either mode and theme, with
 // the same geometry. Before any audio, the pane at rest, the trough is the
 // plot's floor and the marks faint, on the spectrogram #14062e and
 // #433858, on the waveform 1.7:1 on the view, a step over the rest lines,
 // as short marks need it to show (the lit
 // #30244a trough was the one instrument switched on); with a track, paused
-// or stopped, the lit trough and its ticks; and with the queue cleared, the
-// floor again.
+// or stopped, the lit trough, its unlit ladder on the body (a bare trough
+// read as a scrollbar's track, H26) and its ticks; and with the queue
+// cleared, the floor again.
 void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
     QFETCH(bool, dark);
     const auto restorePalette = useDarkPalette(dark);
@@ -3031,7 +3033,9 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
     };
     // The column's track and its marks as drawn, against `trough` and
     // `tick` drawn over it.
-    const auto marksProblem = [&](LevelMeterItem *meter, const QColor &trough, const QColor &tick) -> QString {
+    // `unlit` is the unlit ladder's colour, or invalid for none.
+    const auto marksProblem = [&](LevelMeterItem *meter, const QColor &trough, const QColor &tick,
+                                  const QColor &unlit) -> QString {
         if (meter->property("troughColor").value<QColor>() != trough
             || meter->property("tickColor").value<QColor>() != tick) {
             return QStringLiteral("the trough %1, the ticks %2")
@@ -3041,7 +3045,7 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
         const QColor ticked = drawnOver(tick, trough);
         const Drawn drawn(window);
         const QRectF rect = sceneRect(meter);
-        // On the marks' outer 3 px, and on the body, where no mark crosses.
+        // On the marks' outer 4 px, and on the body, where no mark crosses.
         const double x = rect.left() + LevelMeterItem::kMarkLeft + LevelMeterItem::kMarkWidth / 2;
         const double bodyX = rect.left() + LevelMeterItem::kBodyLeft + LevelMeterItem::kBodyWidth / 2;
         for (int lane = 0; lane < meter->laneCount(); ++lane) {
@@ -3053,18 +3057,26 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
             if (gaps.size() != std::size_t(bottom - top < LevelMeterItem::kFullScaleLaneHeight ? 2 : 3)) {
                 return QStringLiteral("lane %1 has %2 marks").arg(lane).arg(gaps.size());
             }
+            int unlitRows = 0;
             for (double y = meterTop + 0.5; y < meterBottom; y += 1) {
                 const bool onTick = std::any_of(gaps.begin(), gaps.end(), [&](int gap) {
-                    return std::abs(y - (meterBottom - gap - LevelMeterItem::kMarkGap + 0.5)) < 0.01;
+                    return y > meterBottom - gap - LevelMeterItem::kMarkGap && y < meterBottom - gap;
                 });
                 if (!near(drawn.at(x, y), onTick ? ticked : trough)) {
                     return QStringLiteral("lane %1, y %2: %3, wanted %4")
                         .arg(lane).arg(y - rect.top()).arg(hex(drawn.at(x, y)), hex(onTick ? ticked : trough));
                 }
-                if (!near(drawn.at(bodyX, y), trough)) {
+                // The body: the trough, or an unlit rung, never beside a
+                // mark's tick.
+                const bool unlitRung = unlit.isValid() && !onTick && near(drawn.at(bodyX, y), unlit);
+                unlitRows += unlitRung ? 1 : 0;
+                if (!unlitRung && !near(drawn.at(bodyX, y), trough)) {
                     return QStringLiteral("lane %1, y %2, on the body: %3, wanted %4")
                         .arg(lane).arg(y - rect.top()).arg(hex(drawn.at(bodyX, y)), hex(trough));
                 }
+            }
+            if (unlit.isValid() && unlitRows == 0) {
+                return QStringLiteral("lane %1 has no unlit ladder").arg(lane);
             }
         }
         return {};
@@ -3079,6 +3091,8 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
             QVERIFY(plotColors != nullptr);
             const QColor trough = plotColors->property(lit ? "meterTrough" : "meterRestTrough").value<QColor>();
             const QColor tick = plotColors->property(lit ? "meterTick" : "meterRestTick").value<QColor>();
+            // Before any audio, no ladder.
+            const QColor unlit = lit ? plotColors->property("meterUnlit").value<QColor>() : QColor();
             LevelMeterItem *meter = nullptr;
             QTRY_VERIFY((meter = visibleMeter()) != nullptr
                         && meter->property("troughColor").value<QColor>() == trough);
@@ -3091,7 +3105,7 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
                     QCOMPARE(tick.name(), QStringLiteral("#433858"));
                 } else {
                     QCOMPARE(trough, palette->property("view").value<QColor>());
-                    // The rest lines' 1.3:1 is too faint for 3 px marks:
+                    // The rest lines' 1.3:1 is too faint for short marks:
                     // 1.7:1, as on the spectrogram. Checked in light only:
                     // this fixture's dark palette leaves Kirigami's text
                     // colour light-theme's, which no tint lifts off the view.
@@ -3103,9 +3117,9 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
             } else {
                 QVERIFY(trough != plotColors->property("meterRestTrough").value<QColor>());
             }
-            QTRY_VERIFY2(marksProblem(meter, trough, tick).isEmpty(),
+            QTRY_VERIFY2(marksProblem(meter, trough, tick, unlit).isEmpty(),
                          qPrintable(QStringLiteral("%1, mode %2: %3").arg(phase).arg(mode)
-                                        .arg(marksProblem(meter, trough, tick))));
+                                        .arg(marksProblem(meter, trough, tick, unlit))));
             // Under the queue's seam the column draws no seam of its own:
             // over the waveform's meter one made the seam 2 px thick there.
             {

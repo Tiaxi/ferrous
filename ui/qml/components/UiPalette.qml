@@ -232,6 +232,18 @@ QtObject {
 
     // `color` at the least opacity, in whole percent from 5% up to 30%,
     // that is `ratio` on the opaque `background`.
+    // `color` drawn over `background` at the least alpha, in whole percent,
+    // that is `ratio` on it: opaque.
+    function _drawnAt(color, background, ratio) {
+        for (let percent = 1; percent < 100; ++percent) {
+            const drawn = ColorUtils.drawnOver(ColorUtils.withAlpha(color, percent / 100), background)
+            if (ColorUtils.contrastRatio(drawn, background) >= ratio) {
+                return drawn
+            }
+        }
+        return ColorUtils.drawnOver(color, background)
+    }
+
     function _tintOf(color, background, ratio) {
         for (let percent = 5; percent < 30; ++percent) {
             const tint = ColorUtils.withAlpha(color, percent / 100)
@@ -325,6 +337,9 @@ QtObject {
         required property color meterPeak
         required property color meterClipOff
         required property color meterTick
+        // The ladder's rungs above the level, unlit: a step off the trough,
+        // in the fill's hue.
+        required property color meterUnlit
         // The meter before any audio, while the pane is at rest: its track
         // in the plot's floor and its marks in the rest lines' colour, so
         // it is of one piece with the pane waiting (a lit trough stood out
@@ -411,7 +426,11 @@ QtObject {
         meterSeam: "#0a0318"
         meterPeak: "#f4f4f6"
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)
-        meterTick: Qt.rgba(1, 1, 1, 0.4)
+        // The marks: white over the trough, 4:1 on it, a step over the
+        // rungs' 3.2:1, so the references read at a glance beside them (at
+        // 40 % they were 2.4:1 and receded behind the ladder, H26).
+        meterTick: root._drawnAt(Qt.rgba(1, 1, 1, 1), spectrogramColors.meterTrough, 4)
+        meterUnlit: root._drawnAt(spectrogramColors.meterFill, spectrogramColors.meterTrough, 1.3)
         // The floor, and on it marks in white 20 %, #433858: a step over
         // the rest lines' 11 %, as a mark a few pixels long needs more
         // than a line across the lane to show (a meter without marks read
@@ -462,8 +481,12 @@ QtObject {
         // 27 %, some 1.7:1 on it (at 18 %, 1.4:1, the lamp all but vanished
         // and its gap read as a notch at the bar's top).
         meterClipOff: ColorUtils.withAlpha(root.text, root.themeIsDark ? 0.18 : 0.27)
-        // The meter's marks: the text colour, faint.
-        meterTick: ColorUtils.withAlpha(root.text, 0.3)
+        // The meter's marks: the text colour over the trough, 4:1 on it, a
+        // step over the rungs' 3:1 (at 30 % they were 1.8:1 in a light
+        // theme and all but vanished, H26).
+        meterTick: root._drawnAt(root.text, ColorUtils.drawnOver(waveformColors.meterTrough, root.view), 4)
+        meterUnlit: root._drawnAt(waveformColors.meterFill,
+                                  ColorUtils.drawnOver(waveformColors.meterTrough, root.view), 1.3)
         // The view, and on it marks a step over the waveform's rest lines
         // (1.3:1), at 1.7:1 as the spectrogram's are: the marks are 3 px
         // ticks, which in the rest lines' colour all but vanished.
@@ -518,6 +541,7 @@ QtObject {
         meterPeak: spectrogramColors.meterPeak
         meterClipOff: spectrogramColors.meterClipOff
         meterTick: spectrogramColors.meterTick
+        meterUnlit: spectrogramColors.meterUnlit
         meterRestTrough: spectrogramColors.meterRestTrough
         meterRestTick: spectrogramColors.meterRestTick
         checkedFill: spectrogramColors.checkedFill

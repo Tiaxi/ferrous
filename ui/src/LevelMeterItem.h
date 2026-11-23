@@ -26,8 +26,8 @@
 // its own shape (when they shared one, a line across the track, the
 // marks and the held peak took a second look to tell apart). The body, a
 // 6 px bar with the track 1 px either side of it, holds the level, the
-// clip lamp at its top and the held peak; the marks are short ticks on the
-// track's outer 3 px, beyond the body's break. The same in either
+// clip lamp at its top and the held peak; the marks are 4 x 2 px ticks on
+// the track's outer side, from the body's edge. The same in either
 // visualization mode; only the colours differ (the waveform's meter had a
 // frame of its own, and the two read as two instruments). The body is
 // framed by the track, so a bar in a waveform's colour reads as an
@@ -37,15 +37,19 @@
 // bar (a solid bar was louder than the data, and in the view's colours
 // read as the thumb of the queue's scrollbar above the pane, whose right
 // edge it shares; 2 px rungs on a 3 px pitch read as a hatch), and a 3 px
-// clip lamp at the top, with a 1 px gap under it. The meter's marks, at
-// -6, -12 and -24 dB (only -6 and -24 in a lane under 64 px), are 2 px
-// gaps in the ladder, its rungs starting again over each, and a 1 px tick
-// on the outer 3 px in each gap's upper row, which shows above the fill
-// too (without them the ladder had no reference). The rungs are of one
-// colour, fillColor: on the spectrogram the app icon's harmonic magenta,
-// at 3:1 on the trough. The held peak is a 2 px line across the body, at
-// full brightness, with a 1 px gap under it where it is on the fill. At
-// rest, without a track or stopped, it is the track with its marks' ticks
+// clip lamp at the top, with a 1 px gap under it. Above the level the
+// ladder goes on unlit, in unlitColor, so the column is a meter's
+// segments, lit or not, rather than a solid track (which read as a
+// scrollbar's). The meter's marks, at -6, -12 and -24 dB (only -6 and -24
+// in a lane under 64 px), are 2 px gaps in the ladder, its rungs starting
+// again over each, and beside each gap a tick its height on the track's
+// outer 4 px, at 4:1 on the trough, which shows above the fill too
+// (without them the ladder had no reference; as 3 x 1 px ticks they were
+// lost beside the rungs). The rungs are of one colour, fillColor: on the
+// spectrogram the app icon's harmonic magenta, at 3:1 on the trough. The
+// held peak is a 2 px line across the body, at full brightness, with a
+// 1 px gap under it where it is on the fill. At rest, without a track or
+// stopped, it is the track with its unlit ladder and its marks' ticks
 // alone (an empty track read as a scrollbar's). A `topSeamColor` that is
 // not transparent draws a 1 px line across the column's top, which sets it
 // apart from what is above it, as the queue's scrollbar lane over the
@@ -67,10 +71,12 @@ class LevelMeterItem : public QQuickItem {
     Q_PROPERTY(QColor gapColor MEMBER m_gapColor WRITE setGapColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor troughColor MEMBER m_troughColor WRITE setTroughColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor fillColor MEMBER m_fillColor WRITE setFillColor NOTIFY colorsChanged)
+    // The ladder's rungs above the level, unlit; none while transparent.
+    Q_PROPERTY(QColor unlitColor MEMBER m_unlitColor WRITE setUnlitColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor peakColor MEMBER m_peakColor WRITE setPeakColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor clipOffColor MEMBER m_clipOffColor WRITE setClipOffColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor clipColor MEMBER m_clipColor WRITE setClipColor NOTIFY colorsChanged)
-    // The marks' ticks across the track.
+    // The marks' ticks beside the body.
     Q_PROPERTY(QColor tickColor MEMBER m_tickColor WRITE setTickColor NOTIFY colorsChanged)
     // The line across the column's top; none while transparent.
     Q_PROPERTY(QColor topSeamColor MEMBER m_topSeamColor WRITE setTopSeamColor NOTIFY colorsChanged)
@@ -104,8 +110,10 @@ public:
     // and the held peak.
     static constexpr double kBodyLeft = kTrackLeft + 1.0;
     static constexpr double kBodyWidth = 6.0;
-    // The marks' ticks, on the track's outer side, 1 px clear of the body.
-    static constexpr double kMarkLeft = kBodyLeft + kBodyWidth + 1.0;
+    // The marks' ticks, on the track's outer side from the body's edge to
+    // the column's, each as tall as its gap in the ladder, which it is
+    // beside: rungs are never beside a tick.
+    static constexpr double kMarkLeft = kBodyLeft + kBodyWidth;
     static constexpr double kMarkWidth = kColumnWidth - kMarkLeft;
     // The meter keeps 3 px clear above and below in its lane; its top 3 px
     // are the clip lamp, with a 1 px gap under it.
@@ -154,6 +162,7 @@ public:
     void setTopSeamColor(const QColor &value) { setColor(m_topSeamColor, value); }
     void setTroughColor(const QColor &value) { setColor(m_troughColor, value); }
     void setFillColor(const QColor &value) { setColor(m_fillColor, value); }
+    void setUnlitColor(const QColor &value) { setColor(m_unlitColor, value); }
     void setPeakColor(const QColor &value) { setColor(m_peakColor, value); }
     void setClipOffColor(const QColor &value) { setColor(m_clipOffColor, value); }
     void setClipColor(const QColor &value) { setColor(m_clipColor, value); }
@@ -277,6 +286,7 @@ private:
     QColor m_gapColor{QStringLiteral("#000000")};
     QColor m_troughColor{QStringLiteral("#2a2a2a")};
     QColor m_fillColor{QStringLiteral("#a3a3a3")};
+    QColor m_unlitColor{Qt::transparent};
     QColor m_peakColor{QStringLiteral("#f4f4f6")};
     QColor m_clipOffColor{QColor::fromRgbF(1, 1, 1, 0.2)};
     QColor m_clipColor{QStringLiteral("#ed5a6a")};
