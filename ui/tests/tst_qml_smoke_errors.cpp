@@ -437,6 +437,19 @@ void ErrorsSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
 
 namespace {
 
+// The quit failure's paragraphs of the system's errors, under `message`,
+// in order.
+QList<QQuickItem *> quitFailureErrorLines(QQuickItem *message) {
+    QList<QQuickItem *> lines;
+    for (QQuickItem *child : message->childItems()) {
+        if (child->objectName() == QLatin1String("quitSaveFailedMessageLine") && child->isVisible()) {
+            lines << child;
+        }
+    }
+    std::sort(lines.begin(), lines.end(), [](QQuickItem *a, QQuickItem *b) { return a->y() < b->y(); });
+    return lines;
+}
+
 // A failed save before quitting, as BridgeClient's quitSaveFailureMap gives
 // it: the settings, and the queue if `queue`, with `cause` and the system's
 // text `detail`.
@@ -514,16 +527,22 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     ui.window->close();
 
     QTRY_VERIFY(ui.saveFailed->property("visible").toBool());
-    // The system's text as it is; shown with its paths broken between
-    // folders and its "(os error 28)" whole.
+    // The system's text as it is, each error a paragraph of its own; shown
+    // with its paths broken between folders and its "(os error 28)" whole.
     QObject *message = ui.saveFailedMessage;
     QCOMPARE(message->property("message").toString(), error);
-    QCOMPARE(message->property("text").toString().remove(QChar(0x200b)).remove(QChar(0x2060))
-                 .replace(QChar(0x00a0), QLatin1Char(' ')),
-             error);
-    // Whole: as it is, or with no-break spaces where it wraps.
-    QVERIFY(message->property("text").toString().contains(
-        QRegularExpression(QStringLiteral("\\(os[ \u00a0]error[ \u00a0]28\\)"))));
+    const QList<QQuickItem *> errorLines = quitFailureErrorLines(qobject_cast<QQuickItem *>(message));
+    QCOMPARE(errorLines.size(), 2);
+    QStringList shownErrors;
+    for (QQuickItem *line : errorLines) {
+        shownErrors << line->property("text").toString().remove(QChar(0x200b)).remove(QChar(0x2060))
+                           .replace(QChar(0x00a0), QLatin1Char(' '));
+        // Whole: as it is, or with no-break spaces where it wraps.
+        QVERIFY(line->property("text").toString().contains(
+            QRegularExpression(QStringLiteral("\\(os[ \u00a0]error[ \u00a0]28\\)"))));
+        QCOMPARE(line->property("textFormat").toInt(), int(Qt::PlainText));
+    }
+    QCOMPARE(shownErrors.join(QLatin1Char('\n')), error);
     QVERIFY(ui.window->isVisible());
     // The lead names what wasn't saved, the cause says why in plain words,
     // and the system's text is under them, in the secondary colour, as Tag
@@ -546,17 +565,17 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
     QCOMPARE(cause->property("font").value<QFont>().weight(), QFont::Normal);
     QCOMPARE(colorOf(cause, "color"), colorOf(heading, "color"));
-    QCOMPARE(messageItem->property("font").value<QFont>().weight(), QFont::Normal);
+    QCOMPARE(errorLines.first()->property("font").value<QFont>().weight(), QFont::Normal);
+    // What Quit Anyway loses is what the lead says wasn't saved.
     QCOMPARE(details->property("text").toString(),
-             QStringLiteral("Quit Anyway loses unsaved settings, queue changes and Last.fm scrobbles."));
+             QStringLiteral("Quit Anyway loses unsaved settings and queue changes."));
     // No cure that contradicts the cause above it, such as a denied
     // permission (it advised freeing disk space under one).
     QVERIFY(!details->property("text").toString().contains(QStringLiteral("disk space")));
     QVERIFY(sceneRectOf(details).top() >= sceneRectOf(messageItem).bottom());
     QVERIFY2(!headingText.contains(QStringLiteral("os error")), qPrintable(headingText));
     QVERIFY(sceneRectOf(messageItem).top() >= sceneRectOf(heading).bottom());
-    QCOMPARE(message->property("textFormat").toInt(), int(Qt::PlainText));
-    QVERIFY(colorOf(message, "color") != colorOf(heading, "color"));
+    QVERIFY(colorOf(errorLines.first(), "color") != colorOf(heading, "color"));
 
     // The disk has room again.
     QVERIFY(failStateSaves(ui.bridge, {}));
