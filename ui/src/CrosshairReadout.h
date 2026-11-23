@@ -47,7 +47,8 @@ constexpr double kDashGap = 3.0;
 // How near the playhead, in logical pixels, the crosshair's vertical line
 // gives way to it: the playhead is drawn above the crosshair, so that a seek
 // on the plot, which lands it under the pointer, shows. Its time stays.
-constexpr double kYieldsWithin = 1.0;
+// Within 1 px, a landing a pixel or two off read as a doubled line (H16).
+constexpr double kYieldsWithin = 2.0;
 
 // What is between the dashes, over data as light as they are, such as the
 // waveform's fill or a bright harmonic, where they were lost (1.4:1): the
