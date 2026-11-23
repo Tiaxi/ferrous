@@ -23,6 +23,7 @@ private slots:
     void spectrogramRingHoldsEveryColumnOfAWiderSession();
     void spectrogramZoomPreviewRequestsEveryFrame();
     void spectrogramCrosshairStaysThroughZoomPreviews();
+    void spectrogramTimeScaleStaysThroughZoomPreviews();
     void spectrogramVisibleRangeIsTheViewAFrameShows();
     void spectrogramDynamicRangePreservesSilence();
     void spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans();
@@ -750,6 +751,134 @@ void SpectrogramCanvasSmokeTest::spectrogramCrosshairStaysThroughZoomPreviews() 
             checkCrosshair("Reset Zoom");
             feedZoomData();
             checkCrosshair("reset data");
+        }
+        delete node;
+    }
+}
+
+// Regression (H21): with the scale on, the time scale's ticks and labels
+// were left out of every frame of a zoom's preview, and blinked out at each
+// wheel notch and on Reset Zoom. They stay, on the times the preview shows:
+// each tick at a whole step of the scale for the frame's seconds a pixel.
+void SpectrogramCanvasSmokeTest::spectrogramTimeScaleStaysThroughZoomPreviews() {
+    constexpr int kWidth = 1200;
+    for (const int mode : {0, 1}) {
+        const QByteArray label = mode == 0 ? "rolling" : "centered";
+        // A window, which makes the labels' textures.
+        QQuickWindow window;
+        window.resize(kWidth, 100);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+        TestTime time;
+        SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+        prepareScrollingPlayback(item, time, mode);
+        item.setWidth(kWidth);
+        item.setGridEnabled(true);
+        item.setShowTimeLabels(true);
+        item.setZoomEnabled(true);
+        // As the surface takes the zoom the wheel asks for.
+        connect(&item, &SpectrogramItem::zoomRequested, &item, &SpectrogramItem::setZoomLevel);
+        QSGNode *node = paintSettled(item, nullptr);
+
+        // The frame's time scale: its ticks and labels, each tick at the
+        // time the frame's view has there, as the seek bar's band reads it,
+        // a whole step of the scale (see updateTimeGridOverlayLocked).
+        const auto checkTimeScale = [&](const char *step) {
+            const QString where = QStringLiteral("%1, %2").arg(QString::fromLatin1(label),
+                QString::fromLatin1(step));
+            item.handleWindowAfterAnimating();
+            const OverlayOnScreen shown = overlayOnScreen(node, 6);
+            QVERIFY2(!shown.lines.isEmpty() && shown.images.size() == shown.lines.size(),
+                     qPrintable(QStringLiteral("%1: %2 ticks, %3 labels")
+                         .arg(where).arg(shown.lines.size()).arg(shown.images.size())));
+            const double start = item.visibleStartSeconds();
+            const double end = item.visibleEndSeconds();
+            const double secondsPerPixel = (end - start) / item.width();
+            QVERIFY2(secondsPerPixel > 0.0, qPrintable(where));
+            static constexpr double kSteps[] = {0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600};
+            double interval = kSteps[std::size(kSteps) - 1];
+            for (const double candidate : kSteps) {
+                if (candidate / secondsPerPixel >= 240.0) {
+                    interval = candidate;
+                    break;
+                }
+            }
+            // Within two pixels: the tick's and the scroll's whole pixels,
+            // and a scale shifted by whole pixels between its layouts.
+            for (const QRectF &tick : shown.lines) {
+                const double seconds = start + tick.left() * secondsPerPixel;
+                const double steps = seconds / interval;
+                QVERIFY2(std::abs(steps - std::round(steps)) * interval <= 2.0 * secondsPerPixel,
+                         qPrintable(QStringLiteral("%1: a tick at %2 s, %3 s apart")
+                             .arg(where).arg(seconds).arg(interval)));
+            }
+        };
+        checkTimeScale("at rest");
+
+        // A wheel notch: the canvas scaled, until the zoom's data comes.
+        const QPointF pointer(600.0, 40.0);
+        QWheelEvent notch(pointer, pointer, QPoint(), QPoint(0, 120), Qt::NoButton,
+                          Qt::NoModifier, Qt::NoScrollPhase, false);
+        for (int notches = 0; notches < 2; ++notches) {
+            item.wheelEvent(&notch);
+            QVERIFY(notch.isAccepted());
+            for (int frame = 0; frame < 3; ++frame) {
+                node = item.updatePaintNode(node, nullptr);
+                {
+                    QMutexLocker lock(&item.m_stateMutex);
+                    QVERIFY2(item.m_zoomPreviewShown, label.constData());
+                }
+                checkTimeScale("wheel notch");
+                time.advance(0.016);
+            }
+        }
+        // Reset Zoom before the zoom's columns came: the canvas as it is.
+        item.setZoomLevel(1.0);
+        node = item.updatePaintNode(node, nullptr);
+        checkTimeScale("Reset Zoom at once");
+
+        if (mode == 1) {
+            // The zoom's columns, as the session for its hop sends them,
+            // which replace the preview.
+            quint64 generation = 1;
+            const auto feedZoomData = [&] {
+                QVERIFY(sendPendingBackendZoom(item));
+                int hop = 0;
+                {
+                    QMutexLocker lock(&item.m_stateMutex);
+                    hop = item.columnHopForZoomLocked(item.backendZoomForRequestLocked());
+                }
+                QVERIFY(hop > 0);
+                const int columns = kStripeColumns * 1024 / hop;
+                QByteArray data(kStripeBins * columns, Qt::Uninitialized);
+                for (int column = 0; column < columns; ++column) {
+                    std::fill_n(data.data() + static_cast<qsizetype>(column) * kStripeBins,
+                        kStripeBins, static_cast<char>(40 + (column * 53) % 180));
+                }
+                item.feedPrecomputedChunk(data, kStripeBins, 0, columns, 0, columns,
+                    48'000, hop, true, true, 1, true, ++generation);
+                node = paintSettled(item, node);
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY(!item.m_zoomPreviewShown);
+                QVERIFY(!item.m_timeGridCachedPreview);
+            };
+            item.wheelEvent(&notch);
+            node = item.updatePaintNode(node, nullptr);
+            checkTimeScale("wheel notch again");
+            feedZoomData();
+            checkTimeScale("zoom data");
+
+            // Reset Zoom: the zoomed canvas, smaller, until zoom 1's
+            // columns come.
+            item.setZoomLevel(1.0);
+            node = item.updatePaintNode(node, nullptr);
+            {
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY(item.m_zoomPreviewShown);
+            }
+            checkTimeScale("Reset Zoom");
+            feedZoomData();
+            checkTimeScale("reset data");
         }
         delete node;
     }

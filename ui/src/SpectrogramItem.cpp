@@ -6210,28 +6210,45 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // wider than the widget with right-side padding. Each frame
             // shifts it by the combined displayLeft + drawX delta, and it is
             // laid out again only when the shift exhausts the padding.
-            // The time grid follows the data, not the scaled preview, so it
-            // waits for the data.
-            if (m_gridEnabled && m_showTimeLabels && m_binsPerColumn > 1 && !zoomPreviewShown) {
+            // A zoom's preview shows the canvas scaled, and the time scale
+            // with it, on the preview's mapping: left out until the zoom's
+            // data came, it blinked out at every wheel notch and on Reset
+            // Zoom (H21).
+            if (m_gridEnabled && m_showTimeLabels && m_binsPerColumn > 1) {
                 const int timeGridPadding = devicePixels(400.0, scale);
+                const bool onPreview = zoomPreviewShown && m_zoomPreviewPixelsPerSecond > 0.0;
+                // The preview's mapping, as clicks and the crosshair read it.
+                TimeGridPreviewMapping previewMapping;
+                if (onPreview) {
+                    previewMapping.leftSeconds = m_zoomPreviewAnchorSeconds
+                        - m_zoomPreviewAnchorX / m_zoomPreviewPixelsPerSecond;
+                    previewMapping.devicePixelsPerSecond = m_zoomPreviewPixelsPerSecond * scale;
+                }
                 // The pixel shift accounts for both displayLeft advancement
                 // and drawX changes (critical in rolling mode where drawX
-                // varies during the initial canvas fill phase).
-                const double rawShift =
-                    static_cast<double>(overlayLeft - m_timeGridRenderDisplayLeft) * canvasZoom
-                    - (overlayDrawX - m_timeGridRenderDrawX);
-                int shift = static_cast<int>(std::round(rawShift));
+                // varies during the initial canvas fill phase), or, on a
+                // preview, for how far its mapping has moved.
+                const double rawShift = onPreview
+                    ? (previewMapping.leftSeconds - m_timeGridPreviewMapping.leftSeconds)
+                        * previewMapping.devicePixelsPerSecond
+                    : static_cast<double>(overlayLeft - m_timeGridRenderDisplayLeft) * canvasZoom
+                        - (overlayDrawX - m_timeGridRenderDrawX);
+                int shift = std::isfinite(rawShift) ? static_cast<int>(std::round(rawShift)) : -1;
                 const bool timeStale = m_timeGridDirty
                     || !m_timeGrid.valid
                     || m_timeGrid.size != QSize(cw + timeGridPadding, ch)
                     || shift < 0 || shift > m_timeGridPadding
-                    || rollingMode != m_timeGridCachedRollingMode;
+                    || rollingMode != m_timeGridCachedRollingMode
+                    || onPreview != m_timeGridCachedPreview
+                    || (onPreview
+                        && previewMapping.devicePixelsPerSecond
+                            != m_timeGridPreviewMapping.devicePixelsPerSecond);
                 if (timeStale) {
                     const double cps =
                         static_cast<double>(m_precomputedSampleRateHz)
                         / static_cast<double>(m_precomputedHopSize);
-                    updateTimeGridOverlayLocked(
-                        cw, ch, timeGridPadding, overlayLeft, rollingMode, cps, overlayDrawX);
+                    updateTimeGridOverlayLocked(cw, ch, timeGridPadding, overlayLeft, rollingMode,
+                        cps, overlayDrawX, onPreview ? &previewMapping : nullptr);
                     shift = 0;
                 }
                 // Within 48 px of the left edge, and of the mode switch and
@@ -7638,7 +7655,8 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
 void SpectrogramItem::updateTimeGridOverlayLocked(
     int width, int height, int padding,
     qint64 displayLeft,
-    bool rollingMode, double columnsPerSecond, double drawX) {
+    bool rollingMode, double columnsPerSecond, double drawX,
+    const TimeGridPreviewMapping *preview) {
     // width, height, padding and drawX are in device pixels.
     m_timeGrid = SpectrogramOverlayLayout{};
     m_timeGrid.size = QSize(width + padding, height);
@@ -7647,8 +7665,12 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
     m_timeGridRenderDrawX = drawX;
     m_timeGridCachedRollingMode = rollingMode;
     m_timeGridPadding = padding;
+    m_timeGridCachedPreview = preview != nullptr;
+    m_timeGridPreviewMapping = preview != nullptr ? *preview : TimeGridPreviewMapping{};
     if (!m_gridEnabled || !m_showTimeLabels || width <= 0 || height <= 0
-        || columnsPerSecond <= 0.0) {
+        || columnsPerSecond <= 0.0
+        || (preview != nullptr
+            && (!std::isfinite(preview->leftSeconds) || !(preview->devicePixelsPerSecond > 0.0)))) {
         m_timeGridPadding = 0;
         return;
     }
@@ -7673,7 +7695,9 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
         0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600
     };
     // Spacing in logical pixels; positions in device pixels.
-    const double secondsPerPixel = 1.0 / (columnsPerSecond * effectiveZoomLocked());
+    const double secondsPerPixel = preview != nullptr
+        ? scale / preview->devicePixelsPerSecond
+        : 1.0 / (columnsPerSecond * effectiveZoomLocked());
     const double timeInterval = selectGridInterval(
         kTimeCandidates,
         static_cast<int>(std::size(kTimeCandidates)),
@@ -7682,12 +7706,22 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
 
     // Compute time range for the full padded width.
     // These are in continuous (cross-track) time.
+    // On a preview, by its mapping, which clicks and the crosshair read.
     const double cz = canvasZoomLocked();
-    const double timeLeft = pixelToTimeSeconds(
-        0.0, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX, cz);
-    const double timeRight = pixelToTimeSeconds(
-        static_cast<double>(renderWidth - 1), displayLeft, rollingMode,
-        m_rollingEpoch, columnsPerSecond, drawX, cz);
+    const auto timeAtPixel = [&](double pixelX) {
+        return preview != nullptr
+            ? preview->leftSeconds + pixelX / preview->devicePixelsPerSecond
+            : pixelToTimeSeconds(
+                pixelX, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX, cz);
+    };
+    const auto pixelAtTime = [&](double seconds) {
+        return preview != nullptr
+            ? (seconds - preview->leftSeconds) * preview->devicePixelsPerSecond
+            : timeToPixelX(
+                seconds, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX, cz);
+    };
+    const double timeLeft = timeAtPixel(0.0);
+    const double timeRight = timeAtPixel(static_cast<double>(renderWidth - 1));
 
     // Convert to per-track time for grid line snapping and labels.
     // m_gaplessPositionOffset is the continuous-time value where the
@@ -7703,9 +7737,7 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
         const double trackT = static_cast<double>(step) * timeInterval;
         // Convert per-track time back to continuous time for pixel positioning.
         const double continuousT = trackT + m_gaplessPositionOffset;
-        const double pxF = timeToPixelX(
-            continuousT, displayLeft, rollingMode, m_rollingEpoch, columnsPerSecond, drawX,
-            cz);
+        const double pxF = pixelAtTime(continuousT);
         const int pixelX = static_cast<int>(std::round(pxF));
         if (pixelX < 0 || pixelX >= renderWidth) {
             continue;
