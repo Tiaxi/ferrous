@@ -4993,6 +4993,11 @@ QString focusRingProblem(QQuickWindow *window, QQuickItem *view, int index, bool
     return {};
 }
 
+// The library's focus ring and selection tint end 2 px short of the
+// scrollbar's lane while it shows, as the queue's do, so the ring keeps 3 px
+// clear of the thumb even at its widest, under the pointer (at the lane it
+// was 1 px off it, and the two read as touching); without a scrollbar they
+// reach the edge.
 void UiMainWindowTest::libraryFocusRingStopsAtTheScrollBarLane() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
@@ -5012,8 +5017,19 @@ void UiMainWindowTest::libraryFocusRingStopsAtTheScrollBarLane() {
         QTRY_COMPARE(scrollBar->isVisible(), longTree);
         tabInto(window, view);
         QVERIFY(QMetaObject::invokeMethod(controller, "selectIndex", Q_ARG(QVariant, 0)));
-        QTRY_VERIFY2(focusRingProblem(window, view, 0, longTree).isEmpty(),
-                     qPrintable(focusRingProblem(window, view, 0, longTree)));
+        QTRY_VERIFY2(focusRingProblem(window, view, 0, longTree, 2).isEmpty(),
+                     qPrintable(focusRingProblem(window, view, 0, longTree, 2)));
+        if (longTree) {
+            QQuickItem *tint = itemNamed(viewRowAt(view, 0), QStringLiteral("rowBackgroundTint"));
+            QQuickItem *thumb = itemNamed(scrollBar, QStringLiteral("laneScrollBarThumb"));
+            QVERIFY(tint != nullptr && thumb != nullptr);
+            QCOMPARE(sceneRect(thumb).left() - sceneRect(tint).right(), 4.0);
+            QTest::mouseMove(window, sceneRect(scrollBar).center().toPoint());
+            QTRY_VERIFY(scrollBar->property("engaged").toBool());
+            QTRY_COMPARE(sceneRect(thumb).left() - sceneRect(tint).right(), 3.0);
+            QTest::mouseMove(window, QPoint(2, window->height() - 2));
+            QTRY_VERIFY(!scrollBar->property("engaged").toBool());
+        }
     }
 }
 
@@ -5216,8 +5232,8 @@ void UiMainWindowTest::rowStatesShareOneRightEdge_data() {
 
 // A selected range, its current row's ring and a hovered row have one
 // straight right edge, in the library and in the queue: while the
-// scrollbar shows, at its lane in the library and 2 px short of it in the
-// queue, whose ring keeps clear of the thumb; at the pane's edge otherwise.
+// scrollbar shows, 2 px short of its lane, so the ring keeps clear of the
+// thumb; at the pane's edge otherwise.
 // The focused row was a box with a tail under the thumb.
 void UiMainWindowTest::rowStatesShareOneRightEdge() {
     QFETCH(bool, queue);
@@ -5258,7 +5274,7 @@ void UiMainWindowTest::rowStatesShareOneRightEdge() {
     QTRY_VERIFY(hover->isVisible() && hover->opacity() == 1.0);
 
     const qreal edge = sceneRect(view).right();
-    const qreal end = edge - (scrolls ? (queue ? 8.0 + 2.0 : 8.0) : 0.0);
+    const qreal end = edge - (scrolls ? 8.0 + 2.0 : 0.0);
     QCOMPARE(sceneRect(hover).right(), end);
     for (const int index : std::as_const(selected)) {
         QCOMPARE(sceneRect(itemNamed(viewRowAt(view, index), QStringLiteral("rowBackgroundTint"))).right(), end);

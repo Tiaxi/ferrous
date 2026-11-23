@@ -332,6 +332,13 @@ Rectangle {
                     objectName: "libraryScrollBar"
                     uiPalette: root.uiPalette
                 }
+                // Where the rows' states end on the right while the
+                // scrollbar shows: its lane and 2 px more, so the focus
+                // ring, which the tint ends with, keeps 3 px clear of the
+                // thumb at its widest, as the queue's does (at the lane,
+                // 1 px off it, the two read as touching). Without it, at
+                // the pane's edge.
+                readonly property real rowStatesEnd: libraryScrollBar.visible ? libraryScrollBar.lane + 2 : 0
 
                 MouseArea {
                     anchors.fill: parent
@@ -559,9 +566,9 @@ Rectangle {
                                 selected: libraryRow.rowSelected
                                 active: libraryAlbumView.activeFocus
                                 focused: libraryRow.rowCurrent
-                                // Every state ends at the scrollbar's lane
-                                // while it shows, clear of its thumb.
-                                scrollbarLane: libraryScrollBar.visible ? libraryScrollBar.lane : 0
+                                // Every state ends clear of the scrollbar's
+                                // lane while it shows, and of its thumb.
+                                scrollbarLane: libraryAlbumView.rowStatesEnd
                             }
 
                             Kirigami.Icon {
