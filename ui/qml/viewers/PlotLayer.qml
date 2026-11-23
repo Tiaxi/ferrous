@@ -215,20 +215,16 @@ Item {
         || root.paneHovered || modeSwitch.pointerHovered || modeSwitch.focusInside
         || zoomPlate.focusInside
 
-    // As a view follows again with nothing else showing the row, "Not
-    // following" keeps its room on the plate as that fades out, rather
-    // than go and leave the row to fade without it; its text goes in the
-    // frame the view comes back in, which it would contradict. Autoscroll
-    // takes it at once.
+    // As a view follows again, "Not following" leaves the plate one way,
+    // whether the row stays or fades out with it (PlotZoomPlate's
+    // noticeLeaving): its text goes in the frame the view comes back in,
+    // which it would contradict, and the plate narrows to its new width.
+    // Autoscroll takes it at once, and so does a plate that doesn't show.
     property bool _noticeLeaving: false
     onViewMovedChanged: root._noticeLeaving = !root.viewMoved && !root.viewAutoscrolling
-        && !root.cornerWanted && !root.controlsInViewer && modeSwitch.revealLevel > 0
+        && !root.controlsInViewer && modeSwitch.revealLevel > 0 && Kirigami.Units.shortDuration > 0
     onViewAutoscrollingChanged: {
         if (root.viewAutoscrolling)
-            root._noticeLeaving = false
-    }
-    onCornerWantedChanged: {
-        if (root.cornerWanted)
             root._noticeLeaving = false
     }
 
@@ -251,10 +247,6 @@ Item {
         // to the pane at the level of those; hidden, it takes no pointer.
         visible: !root.controlsInViewer && (root.controlsVisible || root.controlsLevel > 0)
         revealed: root.cornerWanted || root.viewMoved
-        onRevealLevelChanged: {
-            if (modeSwitch.revealLevel <= 0)
-                root._noticeLeaving = false
-        }
         fadeLevel: root.controlsLevel
         plotColors: root.plotColors
         uiPalette: root.uiPalette
@@ -285,6 +277,7 @@ Item {
         resetView: root.resetZoom
         noticeShown: root.viewMoved || root._noticeLeaving
         noticeLeaving: root._noticeLeaving
+        onNoticeLeft: root._noticeLeaving = false
         followShortcut: root.followShortcut
         pointerActivity: root.pointerActivity
     }
