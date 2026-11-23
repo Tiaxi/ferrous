@@ -141,8 +141,11 @@ const QColor kRestScaleTextColor(236, 236, 236, 184);
 // the canvas fragments a zoom preview scales (spectrogramSceneGraphDrawsTheCanvas).
 const QColor kPlayheadColor(0xe8, 0xe8, 0xe8, 254);
 const QColor kPlayheadCasingColor(0, 0, 0, 153);
-// The crosshair: dashed white 35%.
-const QColor kCrosshairLineColor(255, 255, 255, 89);
+// The crosshair: dashed white 55%, with the floor at 80% between the
+// dashes. One carries the 1 px line over dark texture, the other over bright
+// harmonics; at 35% and 60% it was lost in mid-bright texture (2.3:1).
+const QColor kCrosshairLineColor(255, 255, 255, 140);
+constexpr double kCrosshairGapOpacity = 0.8;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 std::atomic<quint64> g_lastLoggedSeekProfileIncidentGeneration{0};
 std::atomic<quint64> g_lastLoggedSeekProfileSummaryGeneration{0};
@@ -1595,7 +1598,7 @@ QImage renderOverlayImage(
         dashPen.setWidth(lineWidth);
         dashPen.setCapStyle(Qt::FlatCap);
         QPen gapPen = dashPen;
-        gapPen.setColor(CrosshairReadout::dashGapColor(floor));
+        gapPen.setColor(CrosshairReadout::dashGapColor(floor, kCrosshairGapOpacity));
         CrosshairReadout::setDashes(dashPen, false, scale / lineWidth);
         CrosshairReadout::setDashes(gapPen, true, scale / lineWidth);
         // A one-pixel pen draws the pixels at its coordinates, a wider one

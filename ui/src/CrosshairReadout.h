@@ -46,11 +46,11 @@ constexpr double kDashGap = 3.0;
 
 // What is between the dashes, over data as light as they are, such as the
 // waveform's fill or a bright harmonic, where they were lost (1.4:1): the
-// plot's floor at 60 %, so nothing on the floor itself, and the line no
+// plot's floor at `opacity`, so nothing on the floor itself, and the line no
 // thicker.
-inline QColor dashGapColor(const QColor &floor) {
+inline QColor dashGapColor(const QColor &floor, double opacity) {
     QColor gap = floor;
-    gap.setAlphaF(static_cast<float>(floor.alphaF() * 0.6));
+    gap.setAlphaF(static_cast<float>(floor.alphaF() * opacity));
     return gap;
 }
 

@@ -4175,7 +4175,7 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     dashes.setWidthF(1.0);
     dashes.setCapStyle(Qt::FlatCap);
     QPen gaps = dashes;
-    gaps.setColor(CrosshairReadout::dashGapColor(m_colors.background));
+    gaps.setColor(CrosshairReadout::dashGapColor(m_colors.background, 0.6));
     CrosshairReadout::setDashes(dashes, false);
     CrosshairReadout::setDashes(gaps, true);
     for (const QPen &pen : {gaps, dashes}) {

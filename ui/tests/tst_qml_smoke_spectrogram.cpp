@@ -1406,14 +1406,15 @@ void SpectrogramSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairReadsOverBrightData() {
-    // The dashed white lines vanished on a bright harmonic. Between the
-    // dashes is the plot's floor at 60 %, dark there and nothing on the
-    // floor, and the lines are no thicker.
+    // The dashed white lines vanished on a bright harmonic, and at 35 %
+    // they were lost in mid-bright texture (2.3:1). The dashes are white at
+    // 55 % and what is between them the plot's floor at 80 %, so one or the
+    // other carries the line over any data, and the lines are no thicker.
     QQuickWindow window;
     if (window.rendererInterface()->graphicsApi() == QSGRendererInterface::Null) {
         QSKIP("The null renderer draws no pixels");
     }
-    const QColor floor(0x14, 0x05, 0x28);
+    const QColor floor(0x0a, 0x03, 0x18);
     window.setColor(floor);
     window.resize(200, 100);
     window.show();
@@ -1455,6 +1456,26 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadsOverBrightData() {
         }
         QVERIFY2(best >= 3.0, qPrintable(QStringLiteral("%1:1 over the data").arg(best)));
     }
+    // Its dashes and its gaps, each over the data.
+    const auto over = [&data](const QColor &top, double alpha) {
+        return QColor::fromRgbF(
+            static_cast<float>(alpha * top.redF() + (1.0 - alpha) * data.redF()),
+            static_cast<float>(alpha * top.greenF() + (1.0 - alpha) * data.greenF()),
+            static_cast<float>(alpha * top.blueF() + (1.0 - alpha) * data.blueF()));
+    };
+    const QColor dash = over(Qt::white, 140.0 / 255.0);
+    const QColor gap = over(floor, 0.8);
+    int dashes = 0;
+    int gaps = 0;
+    for (int i = 4; i < 32; ++i) {
+        const QColor at = shown.pixelColor(20, i);
+        dashes += channelDistance(at, dash) <= 2 ? 1 : 0;
+        gaps += channelDistance(at, gap) <= 2 ? 1 : 0;
+    }
+    // 4 on and 3 off, over 28 pixels.
+    QVERIFY2(dashes >= 12 && gaps >= 8, qPrintable(QStringLiteral("%1 dashes of %2, %3 gaps of %4, as %5 and %6")
+        .arg(dashes).arg(dash.name(), QString::number(gaps), gap.name(),
+             shown.pixelColor(20, 4).name(), shown.pixelColor(20, 8).name())));
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairOverlayMovesOnlyItsTimeLabel() {
