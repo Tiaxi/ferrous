@@ -345,13 +345,13 @@ SCOPES = {
             # the 10 pt sheets: seven (Configure on two, confirmations, Edit Tags, iTunes, the shortcuts on two); the
             # large font on seven (the dialogs at 24 pt at 1:1, cropped to regions where it is large; Recent Issues dark and light)
             ("dlg-configure-a", "Configure, 1:1: Library, three named folders, the third hovered (light, top 56 %); Last.fm "
-             "connected (a stand-in: no network; top 40 %); Last.fm unavailable (top 32 %)", "light",
+             "connected (a stand-in: no network; top 40 %); Last.fm unavailable (whole, fitted)", "light",
              [[("dialog", "preferences-library-three-roots-hover", None, "Library: three named folders, the third hovered, light",
                 dict(theme="light", part=(0, 0, 1, 0.56), lh=16, gap=6))],
               [("dialog", "preferences-lastfm-account", None, "Last.fm, connected (stand-in), dark",
                 dict(theme="dark", part=(0, 0, 1, 0.4), lh=16, gap=6))],
-              [("dialog", "preferences-lastfm", None, "Last.fm in a build without it, dark",
-                dict(theme="dark", part=(0, 0, 1, 0.32), lh=16, gap=6))]]),
+              [("dialog", "preferences-lastfm", None, "Last.fm in a build without it, dark, whole",
+                dict(theme="dark", fit=(330, 292), lh=16, gap=6))]]),
             # (the longest page whole; beside it the flat controls' states, which no other sheet has room for)
             ("dlg-configure-visualization", "Configure's Visualization page at 1:1; the small flat controls in other "
              "dialogs, each state; dark", "dark",
