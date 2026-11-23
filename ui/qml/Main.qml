@@ -2047,6 +2047,10 @@ ApplicationWindow {
         readonly property bool autoscrolling: visualizationSurface.spectrogramShown
             ? spectrogramSurface.autoscrolling
             : waveformSurface.waveformItem.autoscrolling
+        // Whether a middle-drag pans it.
+        readonly property bool panning: visualizationSurface.spectrogramShown
+            ? spectrogramSurface.panning
+            : waveformSurface.panning
         // Whether the user moved the view and it stays there, which the zoom
         // plate and the viewers' controls say; never while autoscroll runs,
         // whose cursor is its only indicator (#655).
@@ -2203,6 +2207,7 @@ ApplicationWindow {
             resetZoom: visualizationSurface.resetZoom
             viewMoved: visualizationSurface.viewMoved
             viewAutoscrolling: visualizationSurface.autoscrolling
+            viewPanning: visualizationSurface.panning
             followShortcut: visualizationSurface.followShortcut
             controlsInViewer: visualizationSurface.inViewer
         }

@@ -59,6 +59,8 @@ private slots:
     void notFollowingMovesAsOnePlate();
     void cornerHoldsWhileAutoscrollRuns_data();
     void cornerHoldsWhileAutoscrollRuns();
+    void laneHeadsStayQuietThroughAPan_data();
+    void laneHeadsStayQuietThroughAPan();
     void crosshairGivesWayToAutoscroll_data();
     void crosshairGivesWayToAutoscroll();
     void plotsTellFollowingAgainInOneOrder_data();
@@ -5436,6 +5438,63 @@ void TransportInputSmokeTest::cornerHoldsWhileAutoscrollRuns() {
     QVERIFY(corner.notice->isVisible());
     QCOMPARE(left, before - (corner.notice->implicitWidth() + 4));
     QCOMPARE(corner.text->opacity(), 1.0);
+}
+
+void TransportInputSmokeTest::laneHeadsStayQuietThroughAPan_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// A middle-drag that pans the plot shows no lane's Mute and Solo, as
+// autoscroll shows none: the hand holds the plot, not a lane's buttons,
+// which opened under it as it went (H19).
+void TransportInputSmokeTest::laneHeadsStayQuietThroughAPan() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QQuickItem *plot = corner.waveform;
+    if (mode == 0) {
+        plot = itemNamed(corner.spectrogramSurface, QStringLiteral("spectrogramPaneItem"));
+        QVERIFY(plot != nullptr);
+    }
+    QTest::mouseMove(window, corner.onPane() + QPoint(1, 1));
+    QTest::mouseMove(window, corner.onPane());
+    corner.zoom(4.0);
+    const QList<QQuickItem *> heads = itemsNamed(corner.layer, QStringLiteral("plotLaneHead"));
+    const auto laneHovered = [&]() {
+        for (QQuickItem *head : heads) {
+            if (head->property("laneHovered").toBool()) return true;
+        }
+        return false;
+    };
+    QVERIFY2(!heads.isEmpty(), qPrintable(QString::number(heads.size())));
+    QTRY_VERIFY(laneHovered());
+
+    // From the upper lane, left and down across the plot's lanes.
+    const QPointF from = corner.layer->mapToScene(
+        QPointF(corner.layer->width() / 2, corner.layer->height() * 0.25));
+    QTest::mouseMove(window, from.toPoint());
+    QTRY_VERIFY(laneHovered());
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, from.toPoint());
+    for (int step = 1; step <= 10; ++step) {
+        const QPoint at = (from + QPointF(-12.0 * step, corner.layer->height() * 0.05 * step)).toPoint();
+        QTest::mouseMove(window, at);
+        QVERIFY2(plot->property("panning").toBool(), qPrintable(QStringLiteral("step %1").arg(step)));
+        QVERIFY2(!laneHovered(), qPrintable(QStringLiteral("step %1, at %2,%3")
+                                                .arg(step).arg(at.x()).arg(at.y())));
+        QVERIFY(corner.surface->property("panning").toBool());
+    }
+    // Let go, the lane under the pointer has its buttons again.
+    const QPoint end = (from + QPointF(-120.0, corner.layer->height() * 0.5)).toPoint();
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, end);
+    QTRY_VERIFY(!corner.surface->property("panning").toBool());
+    QTest::mouseMove(window, end + QPoint(1, 0));
+    QTRY_VERIFY(laneHovered());
 }
 
 // The divider between "Not following" and the zoom has 6 px on each side

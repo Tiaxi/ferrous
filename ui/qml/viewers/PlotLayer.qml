@@ -78,6 +78,8 @@ Item {
     // (#655). Follow Playhead's shortcut is for its tooltip.
     property bool viewMoved: false
     property bool viewAutoscrolling: false
+    // Whether a middle-drag pans the plot.
+    property bool viewPanning: false
     property string followShortcut: ""
     // Whether a viewer shows the mode switch and the zoom in its own
     // controls, on its corner plate or in its title strip: then they are
@@ -365,8 +367,11 @@ Item {
             revealedWithControls: root.controlsAutoHide
             // Not while autoscroll runs, whose pointer steers its speed
             // across the lanes, not at their buttons: their plates came
-            // and went as it crossed them (H17).
+            // and went as it crossed them (H17). Nor while a middle-drag
+            // pans the plot, whose hand holds the plot, not a lane's
+            // buttons: they opened under it (H19).
             laneHovered: root.hoveredLane === index && !root.viewAutoscrolling
+                && !root.viewPanning
             pointerPosition: root.pointerPosition
             pointerKnown: root.pointerKnown
             pointerActivity: root.pointerActivity
