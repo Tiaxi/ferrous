@@ -5476,7 +5476,7 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
     const QFontMetricsF values(paletteOf(window)->property("baseFont").value<QFont>());
     const auto needOf = [&values](const QString &value) { return std::floor(values.horizontalAdvance(value)) + 16; };
     const QList<std::tuple<QString, qreal, qreal>> giving{
-        {QStringLiteral("title"), 190, needOf(QStringLiteral("Morning Tide Field"))},
+        {QStringLiteral("title"), 190, std::max<qreal>(160, needOf(QStringLiteral("Morning Tide Field")))},
         {QStringLiteral("artist"), 170, needOf(QStringLiteral("The Quiet Meridian"))},
         {QStringLiteral("album"), 170, needOf(QStringLiteral("Harbour Light Songs"))},
         {QStringLiteral("genre"), 100, 70},
@@ -5578,21 +5578,23 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
         // The title cells, short, have no tooltip.
         QCOMPARE(cellOf(QStringLiteral("title"))->property("toolTipText").toString(), QString());
     };
-    // 1364 px: as it opens on a 1400 px screen, where the fields give way
-    // too, to no less than 15 grid units, rather than the table scroll.
+    // 1364 px: as it opens on a 1400 px screen. Title keeps 160 px there
+    // (at its old 100 px least a batch's new titles broke inside words,
+    // "Thunderstor-m"), so the table scrolls, with # and File Name pinned
+    // and Title given the room beside them; at 1400 px and wider it fits.
     QQuickItem *fields = visibleNamed(tags, QStringLiteral("tagEditorFields"));
     QVERIFY(fields != nullptr);
     const qreal fieldsWidth = dialog->property("fieldsWidth").toReal();
     const qreal fieldsLeast = dialog->property("fieldsLeastWidth").toReal();
     QVERIFY(fieldsLeast < fieldsWidth);
-    for (const int width : {1364, 1400, 1600}) {
+    checkColumns(1364, false, true);
+    QVERIFY(!QTest::currentTestFailed());
+    for (const int width : {1400, 1600}) {
         checkColumns(width, false, false);
         QVERIFY(!QTest::currentTestFailed());
         QVERIFY2(fields->width() >= fieldsLeast && fields->width() <= fieldsWidth,
                  qPrintable(QStringLiteral("%1 px: fields %2").arg(width).arg(fields->width())));
-        if (width == 1364) {
-            QVERIFY2(fields->width() < fieldsWidth, qPrintable(QString::number(fields->width())));
-        }
+
     }
     QCOMPARE(fields->width(), fieldsWidth);
     // An edit moves no column (Status came with the first edit, and took

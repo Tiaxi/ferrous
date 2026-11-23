@@ -111,7 +111,7 @@ Components.DialogWindow {
         // numbering, in a batch numbered in order, beside a changed Disc.
         { key: "trackNo", label: I18n.i18nc("@title:column track number", "Track"), width: 40, number: true, sample: "000" },
         { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, holds: 220, wants: 480, stretch: true, path: true },
-        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 100, holds: 160, wants: 400, wantsAtLeast: 240 },
+        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 160, holds: 160, wants: 400, wantsAtLeast: 240 },
         { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 100, holds: 160, fit: true },
         { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 100, holds: 160, fit: true },
         { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 100, give: 2, least: 70, holds: 160, fit: true },
