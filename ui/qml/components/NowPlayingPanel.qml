@@ -2036,9 +2036,14 @@ Item {
             coverSourceSize: Math.max(256, root.width)
             // No cover: the stand-in, its mark on the plot's floor, and in
             // a light theme an edge, so the dark tile reads as a cover
-            // rather than a hole in the sidebar.
+            // rather than a hole in the sidebar; in a dark one on the small
+            // tiles too, as the library's has, so their sides and the
+            // traces cut at them do not dissolve into the sidebar (the
+            // floor is ~1.06:1 on it). The wide 360 px tile, edge to edge,
+            // needs none in a dark theme.
             standInColor: root.uiPalette.plotFloor
-            standInEdgeColor: root.uiPalette.themeIsDark ? "transparent" : root.uiPalette.plotFloorEdge
+            standInEdgeColor: root.uiPalette.themeIsDark && root.wideRoom
+                ? "transparent" : root.uiPalette.plotFloorEdge
             // Nothing playing: the placeholder, on the sidebar.
             placeholderColor: root.placeholderColor
             hoverVeilColor: root.uiPalette.hover

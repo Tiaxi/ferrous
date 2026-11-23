@@ -793,8 +793,10 @@ QList<QQuickItem *> shownLines(QQuickWindow *window) {
 // tile's right edge, the wide tile's of four curves (with the faint 4th
 // harmonic, as the icon's 128 and 256 px drawings) and the small one's of
 // two, and no text at all (the lines under it give the album); a 1 px edge
-// in a light theme only. No disc glyph, and no cover. As drawn, the mark's
-// middle third is not all floor.
+// in a light theme, and on the small tiles in a dark one too, as the
+// library's has (without it their sides dissolved into the dark sidebar);
+// none on the wide tile in a dark one. No disc glyph, and no cover. As
+// drawn, the mark's middle third is not all floor.
 QString standInProblem(QQuickWindow *window) {
     QObject *palette = paletteOf(window);
     QQuickItem *panel = named(window, "nowPlayingPanel");
@@ -931,16 +933,18 @@ QString standInProblem(QQuickWindow *window) {
     if (fourthRatio < 3.1 || fourthRatio > 3.25 || fourthRatio > highRatio - 0.5) {
         return QStringLiteral("the 4th harmonic at %1:1 on the floor").arg(fourthRatio);
     }
-    // A 1 px edge in a light theme, none in a dark one.
+    // A 1 px edge in a light theme and on a small tile, none on the wide
+    // tile in a dark one.
     if (tokenOf(window, "plotFloorEdge").alpha() != 255) {
         return QStringLiteral("the edge colour is %1").arg(tokenHex(window, "plotFloorEdge"));
     }
     const bool dark = palette->property("themeIsDark").toBool();
-    if (shown(edge) == dark) {
-        return QStringLiteral("the edge %1 in the %2 theme").arg(shown(edge) ? "shows" : "is missing")
-            .arg(dark ? "dark" : "light");
+    const bool edged = !dark || !wide;
+    if (shown(edge) != edged) {
+        return QStringLiteral("the edge %1 on the %2 tile in the %3 theme").arg(shown(edge) ? "shows" : "is missing")
+            .arg(wide ? "wide" : "small").arg(dark ? "dark" : "light");
     }
-    if (!dark && (QQmlProperty(edge, QStringLiteral("border.width")).read().toReal() != 1.0
+    if (edged && (QQmlProperty(edge, QStringLiteral("border.width")).read().toReal() != 1.0
                   || hex(QQmlProperty(edge, QStringLiteral("border.color")).read().value<QColor>())
                       != tokenHex(window, "plotFloorEdge"))) {
         return QStringLiteral("the edge is not 1 px of plotFloorEdge");
