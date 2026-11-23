@@ -5250,6 +5250,10 @@ void AlbumArtSmokeTest::albumArtCopyPathIsOnTheFoldersLineUnderClose() {
             .arg(boxOf(close).center().x()).arg(boxOf(label).center().y());
     };
     QTRY_VERIFY2(qAbs(boxOf(copy).center().x() - boxOf(close).center().x()) <= 0.5, qPrintable(describe()));
+    // In Close's ink, not the labels' secondary one, so the two glyphs
+    // read as one column.
+    QCOMPARE(colorOf(copy, "glyphColor"), colorOf(close, "glyphColor"));
+    QCOMPARE(colorOf(copy, "glyphColor"), colorOf(ui.plot(), "plotText"));
     QTRY_VERIFY2(qAbs(boxOf(copy).center().y() - boxOf(label).center().y()) <= 0.51, qPrintable(describe()));
     QVERIFY2(boxOf(label).right() < boxOf(copy).left(), qPrintable(describe()));
     QVERIFY2(boxOf(column).contains(boxOf(copy)), qPrintable(describe()));

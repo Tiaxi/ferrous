@@ -964,7 +964,10 @@ Item {
                     // one line of buttons at its edge. The button reaches
                     // out into the column's padding there; it and its glyph
                     // are a step larger over the whole screen, as the
-                    // details' text is.
+                    // details' text is. Its glyph is in Close's ink, so
+                    // the two read as one column of buttons (in the
+                    // labels' secondary ink, it read fainter and smaller
+                    // than Close above it).
                     Item {
                         id: folderHead
                         objectName: "albumArtFolderHead"
@@ -997,7 +1000,6 @@ Item {
                             plotColors: root.plot
                             text: I18n.i18nc("@action:button", "Copy Path")
                             icon.name: "edit-copy"
-                            glyphColor: root.plot.plotTextSecondary
                             Accessible.description: root.folderPath
                             onClicked: root.copyText(root.folderPath)
                         }
