@@ -779,9 +779,10 @@ if(BUILD_TESTING)
     # The areas that run in shards, as `<area> <shards> <cost>`, the cost
     # each shard's seconds when run alone, as ferrous_add_sharded_test takes
     # it: in one process, transport_input took most of its timeout in the
-    # Debug CI job, and the longest of the run.
+    # Debug CI job, and the longest of the run; in two shards each took
+    # 89-103 s of its 120 s on a busy machine, so it runs in three.
     set(FERROUS_QML_SMOKE_SHARDED_AREAS
-        transport_input 2 22
+        transport_input 3 22
     )
     set(ferrous_smoke_area_names "")
     list(LENGTH FERROUS_QML_SMOKE_AREAS ferrous_smoke_area_values)
