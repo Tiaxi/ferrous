@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The visualization mode switch's Waveform glyph, the Spectrogram glyph's partner, drawn on its
+     grid for 16 px at 1x: five vertical strokes mirrored about the middle line, an envelope that
+     swells and falls back, 4, 9, 14, 9 and 4 px tall with their round caps. 1.5 px strokes, the
+     spectrogram glyph's upper weight, 3 px apart on whole pixels, so each one covers the same two
+     columns at 1x and three whole ones at 2x, with a clear column between neighbours. Breeze's
+     waveform glyph read as an arrow with a diamond beside the app's own trace. A one-colour mask,
+     drawn in the plot's text colour. -->
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M2 6.75V9.25"/>
+<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M5 4.25V11.75"/>
+<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M8 1.75V14.25"/>
+<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M11 4.25V11.75"/>
+<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M14 6.75V9.25"/>
+</svg>

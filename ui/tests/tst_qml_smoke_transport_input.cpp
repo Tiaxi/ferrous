@@ -3683,6 +3683,20 @@ void TransportInputSmokeTest::viewerButtonsRingOnlyForTheKeyboard() {
     QTRY_VERIFY((close = visibleItemNamed(host, closeName)) != nullptr);
     QQuickItem *waveformButton = visibleItemNamed(host, modeName + QLatin1Char('1'));
     QVERIFY(waveformButton != nullptr);
+    // The viewer's switch draws the app's own glyph pair, as the pane's:
+    // neither is a theme icon (Breeze's waveform read as an arrow with a
+    // diamond beside the spectrogram's trace).
+    for (int mode = 0; mode < 2; ++mode) {
+        QQuickItem *button = visibleItemNamed(host, modeName + QString::number(mode));
+        QVERIFY(button != nullptr);
+        QQuickItem *glyph = itemNamed(button, QStringLiteral("viewerToolButtonIcon"));
+        QVERIFY(glyph != nullptr);
+        const QString source = glyph->property("source").toUrl().toString();
+        const QString asset = mode == 0 ? QStringLiteral("/assets/spectrogram-symbolic.svg")
+                                        : QStringLiteral("/assets/waveform-symbolic.svg");
+        QVERIFY2(source.endsWith(asset), qPrintable(source));
+        QTRY_VERIFY2(glyph->property("valid").toBool(), qPrintable(source));
+    }
     QQuickItem *closeRing = itemNamed(close, QStringLiteral("viewerToolButtonFocusRing"));
     QQuickItem *waveformRing = itemNamed(waveformButton, QStringLiteral("viewerToolButtonFocusRing"));
     QVERIFY(closeRing != nullptr && waveformRing != nullptr);

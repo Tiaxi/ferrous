@@ -7,7 +7,7 @@
      in its first half, bending over as a glide does. The harmonic, the icon's top trace, a 1.5 px
      stroke, starts 4 px above it and rises at some 45 degrees, bending over to 20: two arcs fanning
      apart, some 4 px clear of each other half way across and 6 px at the end, and 1.75 px or more
-     everywhere. Round caps, a weight beside Breeze's waveform glyph. A one-colour mask, drawn in the
+     everywhere. Round caps, a weight beside its waveform partner. A one-colour mask, drawn in the
      plot's text colour. -->
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
 <path fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" d="M2.75 13.25C5.25 12.1 8.75 11.15 13.25 10.75"/>

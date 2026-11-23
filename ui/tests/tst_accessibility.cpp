@@ -4135,10 +4135,12 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
     QVERIFY(viewer != nullptr && spectrogramButton != nullptr && waveformButton != nullptr);
     // Real tool buttons with glyphs, tooltips and accessible names: the
     // spectrogram's the app icon's glide and harmonic as a 16 px symbolic
-    // mask (Breeze's bar chart said statistics), the waveform's Breeze's.
+    // mask (Breeze's bar chart said statistics), the waveform's its partner
+    // on the same grid (Breeze's read as an arrow with a diamond beside it),
+    // both the app's own, neither a theme icon.
     for (const auto &[button, name, icon] : {
              std::tuple{spectrogramButton, QStringLiteral("Spectrogram"), QStringLiteral("spectrogram-symbolic.svg")},
-             std::tuple{waveformButton, QStringLiteral("Waveform"), QStringLiteral("waveform")}}) {
+             std::tuple{waveformButton, QStringLiteral("Waveform"), QStringLiteral("waveform-symbolic.svg")}}) {
         QVERIFY(button->inherits("QQuickToolButton"));
         QCOMPARE(accessibleRole(button), QAccessible::RadioButton);
         QCOMPARE(accessibleText(button, QAccessible::Name), name);
@@ -4148,15 +4150,42 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
         QVERIFY(glyph != nullptr);
         QVERIFY(glyph->property("isMask").toBool());
         QTRY_VERIFY2(glyph->property("valid").toBool(), qPrintable(name));
-        if (button == spectrogramButton) {
-            QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), QString());
-            const QString source = evaluateOn(button, QStringLiteral("icon.source")).toUrl().toString();
-            QVERIFY2(source.endsWith(QStringLiteral("/assets/") + icon), qPrintable(source));
-            QCOMPARE(glyph->property("source").toUrl().toString(), source);
-        } else {
-            QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), icon);
-            QCOMPARE(glyph->property("source").toString(), icon);
+        QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), QString());
+        const QString source = evaluateOn(button, QStringLiteral("icon.source")).toUrl().toString();
+        QVERIFY2(source.endsWith(QStringLiteral("/assets/") + icon), qPrintable(source));
+        QCOMPARE(glyph->property("source").toUrl().toString(), source);
+    }
+    {
+        // The waveform glyph's 16 px source, on the spectrogram glyph's
+        // grid: five vertical strokes of its upper weight, 1.5 px with round
+        // caps, mirrored about the middle line, 4, 9, 14, 9 and 4 px tall
+        // with their caps, an envelope that swells and falls back. They
+        // stand 3 px apart on whole pixels, so each covers the same two
+        // columns at 1x, three whole ones at 2x, with a clear column
+        // between neighbours; all inside the 16 px square.
+        QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/waveform-symbolic.svg"));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QString svg = QString::fromUtf8(file.readAll());
+        QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
+        QCOMPARE(svg.count(QStringLiteral("<path ")), 5);
+        const QRegularExpression stroke(QStringLiteral(
+            "stroke-width=\"([0-9.]+)\" stroke-linecap=\"round\" d=\"M([0-9.]+) ([0-9.]+)V([0-9.]+)\""));
+        QList<double> xs;
+        QList<double> heights;
+        for (auto match = stroke.globalMatch(svg); match.hasNext();) {
+            const QRegularExpressionMatch each = match.next();
+            const double width = each.captured(1).toDouble();
+            QCOMPARE(width, 1.5);
+            const double top = each.captured(3).toDouble() - width / 2;
+            const double bottom = each.captured(4).toDouble() + width / 2;
+            // Mirrored about y 8, inside the square.
+            QCOMPARE(top + bottom, 16.0);
+            QVERIFY(top >= 0.0 && bottom <= 16.0);
+            xs.push_back(each.captured(2).toDouble());
+            heights.push_back(bottom - top);
         }
+        QCOMPARE(heights, (QList<double>{4.0, 9.0, 14.0, 9.0, 4.0}));
+        QCOMPARE(xs, (QList<double>{2.0, 5.0, 8.0, 11.0, 14.0}));
     }
     {
         // The glyph's 16 px source: the app icon's small-size pair in its
@@ -4276,7 +4305,9 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
     // over the switch's plate, 3:1 on it (PlotToolButton's
-    // segmentFillOpacity), with its glyph in the text colour whole; the
+    // segmentFillOpacity), with its glyph in the text colour whole; on a
+    // light plate the dark text, 7:1, with its glyph in the plate's colour
+    // (a mid-grey fill under a dark glyph read as a muddy box); the
     // other's glyph is at 72 % but while pressed (the accent's solid fill
     // read as keyboard focus; whole under the pointer, the other rivalled
     // the chosen one). Nothing of the switch is in the accent, or in the
@@ -4296,6 +4327,8 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
         QObject *plot = set.value<QObject *>();
         const QColor text = plot->property("plotText").value<QColor>();
         const QColor fill = checkedFill(chosen)->property("color").value<QColor>();
+        const bool lightPlate = chosen->property("lightPlate").toBool();
+        const QColor chosenInk = lightPlate ? chosen->property("plateColor").value<QColor>() : text;
         if (!chosen->property("segment").toBool() || !other->property("segment").toBool()) {
             return QStringLiteral("not segments");
         }
@@ -4303,7 +4336,7 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
             return QStringLiteral("the chosen one's plate does not show, or the other's does");
         }
         if (fill.red() != text.red() || fill.green() != text.green() || fill.blue() != text.blue()
-            || fill.alphaF() < 0.3f || fill.alphaF() > 0.55f
+            || fill.alphaF() < (lightPlate ? 0.7f : 0.3f) || fill.alphaF() > (lightPlate ? 0.85f : 0.55f)
             || std::abs(fill.alphaF() - chosen->property("segmentFillOpacity").toFloat()) > 0.005f) {
             return QStringLiteral("the plate is %1").arg(fill.name(QColor::HexArgb));
         }
@@ -4311,7 +4344,7 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
             return QStringLiteral("the plate is the accent");
         }
         for (QQuickItem *button : {chosen, other}) {
-            if (glyph(button)->property("color").value<QColor>() != text) {
+            if (glyph(button)->property("color").value<QColor>() != (button == chosen ? chosenInk : text)) {
                 return QStringLiteral("a glyph in %1").arg(glyph(button)->property("color").value<QColor>().name());
             }
         }
@@ -4351,7 +4384,8 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
     }
     // The chosen one's 1 px edge, inside it, at 3:1 or more on the plate
     // and on its fill, as drawn (the fill alone was 1.4 to 1.7:1), in both
-    // modes' plot colours.
+    // modes' plot colours; on a light plate the fill, 7:1 on the plate, is
+    // its own edge.
     const auto edgeProblem = [&](QQuickItem *chosen, QQuickItem *other) -> QString {
         QQuickItem *edge = chosen->findChild<QQuickItem *>(QStringLiteral("plotToolButtonCheckedEdge"));
         QQuickItem *otherEdge = other->findChild<QQuickItem *>(QStringLiteral("plotToolButtonCheckedEdge"));
@@ -4364,6 +4398,12 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
         // The fill between the edge and the glyph.
         const QColor fill = drawnAt(image, window, chosen, QPointF(chosen->width() / 2, 2.5));
         const QColor plate = drawnAt(image, window, other, QPointF(other->width() - 2.5, 2.5));
+        if (chosen->property("lightPlate").toBool()) {
+            if (contrastRatio(fill, plate) < 6.9 || channelDistance(line, fill) > 3) {
+                return QStringLiteral("edge %1 and fill %2 on plate %3").arg(line.name(), fill.name(), plate.name());
+            }
+            return {};
+        }
         if (contrastRatio(line, plate) < 3.0 || contrastRatio(line, fill) < 3.0) {
             return QStringLiteral("edge %1 on plate %2 and fill %3").arg(line.name(), plate.name(), fill.name());
         }
@@ -4463,7 +4503,8 @@ void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int
     QObject *plot = set.value<QObject *>();
     QVERIFY(plot != nullptr);
     const QColor text = plot->property("plotText").value<QColor>();
-    QCOMPARE(chosenGlyph->property("color").value<QColor>(), text);
+    QCOMPARE(chosenGlyph->property("color").value<QColor>(),
+             chosen->property("lightPlate").toBool() ? chosen->property("plateColor").value<QColor>() : text);
     QCOMPARE(chosenGlyph->opacity(), 1.0);
     QVERIFY2(std::abs(otherGlyph->opacity() - 0.72) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
 
