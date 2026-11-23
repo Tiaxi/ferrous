@@ -5011,7 +5011,7 @@ void TransportInputSmokeTest::notFollowingArrivesAsItLeaves_data() {
 
 // "Not following" comes as it goes while the corner's row shows, as the
 // view is dragged away or autoscroll stops on it: zoomed, the plate grows
-// to the left over 80 ms, OutCubic, Reset and the switch staying, and its
+// to the left over 50 ms, OutCubic, Reset and the switch staying, and its
 // left corners stay round; the text and divider fade in once it holds them
 // (notFollowingMovesAsOnePlate). It jumped 89 px wider in a frame, an
 // empty box, as the text faded in (H17). At the default zoom the plate
@@ -5062,7 +5062,7 @@ void TransportInputSmokeTest::notFollowingArrivesAsItLeaves() {
     double left = plainLeft;
     double step = std::numeric_limits<double>::infinity();
     double level = 0.0;
-    for (int frame = 1; frame * 16 < (zoomed ? 80 : 120); ++frame) {
+    for (int frame = 1; frame * 16 < (zoomed ? 50 : 120); ++frame) {
         QVERIFY(animations.step(16));
         image = window->grabWindow();
         const QString where = QStringLiteral("frame %1").arg(frame);
@@ -5134,7 +5134,10 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate_data() {
 // staying. The text and divider are never cut and never outside the plate,
 // drawn only once it holds them: clipped to the growing plate, the text
 // read "ing", "llowing", "t following" for 83 ms (H18). Coming, the plate
-// grows over 80 ms, OutCubic; going with the row staying, the text fades
+// grows over 50 ms, OutCubic, and stands empty for two frames at most
+// before its text fades in, as one arrival: grown over 80 ms, it stood
+// empty for 57 ms, a beat before the text (H20); going with the row
+// staying, the text fades
 // out as the plate narrows over 90 ms, InOutCubic, and no empty room
 // lingers: the text went in a frame while the empty plate narrowed for
 // 60 ms (H18). With the row fading out, it goes at the plate's width with
@@ -5252,7 +5255,8 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
                                     .arg(plate.left()).arg(plate.right()).arg(level)));
         }
         // No room standing empty: while the text is gone, the plate is
-        // narrower than the text within 3 frames, 48 ms.
+        // narrower than the text within 3 frames, 48 ms; coming, within
+        // 2, 32 ms.
         const double emptyRoom = plainLeft - plate.left();
         if (corner.plate->opacity() > 0 && level < 0.05 && emptyRoom > 4) {
             longestEmpty = std::max(longestEmpty, ++emptyFrames);
@@ -5271,14 +5275,14 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
                                         .arg(where, now.name()).arg(x).arg(first.name())));
             }
         }
-        // Timing: the plate grown over 80 ms, narrowed over 90 ms.
-        if (way == 0 && frame * 16 >= 80) {
+        // Timing: the plate grown over 50 ms, narrowed over 90 ms.
+        if (way == 0 && frame * 16 >= 50) {
             QCOMPARE(plate.left(), plainLeft - room);
         } else if (way == 1 && frame * 16 >= 96) {
             QCOMPARE(plate.left(), plainLeft);
         }
     }
-    QVERIFY2(longestEmpty <= 3, qPrintable(QStringLiteral("%1 frames").arg(longestEmpty)));
+    QVERIFY2(longestEmpty <= (way == 0 ? 2 : 3), qPrintable(QStringLiteral("%1 frames").arg(longestEmpty)));
     if (way == 0) {
         QCOMPARE(corner.text->opacity(), 1.0);
         QCOMPARE(corner.divider->opacity(), 1.0);
