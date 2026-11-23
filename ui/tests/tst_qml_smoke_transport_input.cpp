@@ -2,6 +2,7 @@
 
 #include "QmlSmokeTest.h"
 #include "TestMainWindow.h"
+#include "TestColor.h"
 
 // Playback controls, keyboard and wheel input, and the fullscreen viewers.
 class TransportInputSmokeTest : public QmlSmokeTest {
@@ -52,10 +53,12 @@ private slots:
     void notFollowingLeavesOneWay_data();
     void notFollowingLeavesOneWay();
     void notFollowingComesInWithThePlate();
+    void cornerHoldsWhileAutoscrollRuns_data();
+    void cornerHoldsWhileAutoscrollRuns();
     void plotsTellFollowingAgainInOneOrder_data();
     void plotsTellFollowingAgainInOneOrder();
-    void seekBarBandGlidesAsTheViewFollowsAgain_data();
-    void seekBarBandGlidesAsTheViewFollowsAgain();
+    void seekBarBandLandsWithThePlot_data();
+    void seekBarBandLandsWithThePlot();
     void zoomPlateSpacesItsDividerEvenly();
     void movedViewSaysSoInTheViewers_data();
     void movedViewSaysSoInTheViewers();
@@ -4506,11 +4509,14 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay_data() {
 }
 
 // As the view follows again, "Not following" leaves one way in both plots,
-// whether the corner's row stays or fades out: its text goes in the frame
-// the view comes back in, and the plate narrows from its width to its new
-// one over 120 ms, OutCubic, at its left edge; Reset and the switch stay.
-// With the row staying, the plate's edge jumped 89 px in a frame (H15).
-// With nothing left on it, the plate fades as it narrows.
+// whether the corner's row stays or fades out, over 120 ms, OutCubic.
+// Zoomed, its text goes in the frame the view comes back in, and the plate
+// narrows from its width to its new one at its left edge, Reset and the
+// switch staying (its edge jumped 89 px in a frame with the row staying,
+// H15); the room it gives up fades as it narrows, where it stood as blank
+// plate (H16). At the default zoom, with nothing else on it, the plate
+// fades at its width with its text, which went in a frame while the empty
+// plate faded on (H16).
 void TransportInputSmokeTest::notFollowingLeavesOneWay() {
     QFETCH(int, mode);
     QFETCH(bool, cornerWanted);
@@ -4542,37 +4548,88 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
     QTRY_COMPARE(corner.text->opacity(), 1.0);
     window->grabWindow();
     const double grownLeft = sceneRectOf(corner.plate).left();
-    // Where it narrows to: its width without the notice, or its least.
-    const double endLeft = zoomed ? plainLeft : switchAt.left() - 4 - 20;
-    QVERIFY(grownLeft < endLeft - 40);
+    if (zoomed) {
+        QVERIFY(grownLeft < plainLeft - 40);
+    }
+
+    const qreal ratio = window->effectiveDevicePixelRatio();
+    const auto pixel = [ratio](const QImage &image, double x, double y) {
+        return image.pixelColor(static_cast<int>(std::floor(x * ratio)), static_cast<int>(std::floor(y * ratio)));
+    };
+    // Zoomed: the plate's edge along its top, which shows on either
+    // theme's plot (the light waveform's fill is its floor), left of the
+    // readout's text, where the plate stays, in the middle of the room it
+    // gives up, and the plot beside it.
+    struct Fills {
+        QColor staying;
+        QColor room;
+        QColor plot;
+        double roomWidth = 0.0;
+    };
+    const auto fills = [&](const QImage &image) {
+        const QRectF plate = sceneRectOf(corner.plate);
+        const double text = boxOf(corner.readout).left() + corner.readout->property("leftPadding").toDouble();
+        const double y = plate.top() - 0.5;
+        Fills f;
+        f.roomWidth = text - 7 - plate.left();
+        f.staying = pixel(image, text - 3, y);
+        f.room = pixel(image, plate.left() + f.roomWidth / 2, y);
+        f.plot = pixel(image, plate.left() - 12, y);
+        return f;
+    };
 
     SteppedAnimationDriver animations;
     QVERIFY(QMetaObject::invokeMethod(corner.surface, "followPlayhead"));
     QVERIFY(!corner.moved());
-    // The frame it follows in: no text, the plate as it was.
-    QVERIFY(!corner.text->isVisible());
-    QVERIFY(!corner.divider->isVisible());
-    window->grabWindow();
+    // The frame it follows in: the plate as it was, without its text when
+    // zoomed, and with it, as it was, at the default zoom.
+    QCOMPARE(corner.text->isVisible(), !zoomed);
+    QCOMPARE(corner.divider->isVisible(), false);
+    QImage image = window->grabWindow();
     QCOMPARE(sceneRectOf(corner.plate).left(), grownLeft);
     QCOMPARE(corner.plate->opacity(), 1.0);
+    if (zoomed) {
+        // One plate, its room and the rest.
+        const Fills f = fills(image);
+        QVERIFY2(channelDistance(f.room, f.staying) <= 1, qPrintable(f.room.name() + u' ' + f.staying.name()));
+    } else {
+        QCOMPARE(corner.text->opacity(), 1.0);
+    }
     double left = grownLeft;
     double step = std::numeric_limits<double>::infinity();
+    double opacity = 1.0;
     for (int frame = 1; frame * 16 < 120; ++frame) {
         QVERIFY(animations.step(16));
-        window->grabWindow();
+        image = window->grabWindow();
         const double now = sceneRectOf(corner.plate).left();
-        // Narrowing, more slowly as it goes, its right edge where it was.
-        QVERIFY2((frame == 1 ? now > left && now < endLeft : now >= left) && now <= endLeft,
-                 qPrintable(QStringLiteral("frame %1: %2 after %3, to %4").arg(frame).arg(now).arg(left).arg(endLeft)));
-        QVERIFY2(now - left <= step + 1,
-                 qPrintable(QStringLiteral("frame %1: %2 after %3").arg(frame).arg(now - left).arg(step)));
-        step = now - left;
-        left = now;
-        QVERIFY(!corner.text->isVisible());
-        QCOMPARE(sceneRectOf(corner.plate).right() + 4, switchAt.left());
+        const QString where = QStringLiteral("frame %1").arg(frame);
         if (zoomed) {
+            // Narrowing, more slowly as it goes, its right edge where it was.
+            QVERIFY2((frame == 1 ? now > left && now < plainLeft : now >= left) && now <= plainLeft,
+                     qPrintable(QStringLiteral("frame %1: %2 after %3, to %4").arg(frame).arg(now).arg(left).arg(plainLeft)));
+            QVERIFY2(now - left <= step + 1,
+                     qPrintable(QStringLiteral("frame %1: %2 after %3").arg(frame).arg(now - left).arg(step)));
+            step = now - left;
+            left = now;
+            QVERIFY(!corner.text->isVisible());
             QCOMPARE(sceneRectOf(corner.reset), resetAt);
+            // The room it gives up is fading to the plot: never the plate's
+            // fill, as the rest is.
+            const Fills f = fills(image);
+            if (f.roomWidth >= 12) {
+                QVERIFY2(channelDistance(f.room, f.plot) + 2 < channelDistance(f.staying, f.plot),
+                         qPrintable(QStringLiteral("%1: room %2, plate %3, plot %4")
+                                        .arg(where, f.room.name(), f.staying.name(), f.plot.name())));
+            }
+        } else {
+            // At its width, fading with its text.
+            QCOMPARE(now, grownLeft);
+            QVERIFY2(corner.text->isVisible() && corner.text->opacity() == 1.0, qPrintable(where));
+            QVERIFY2(corner.plate->opacity() < opacity,
+                     qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(corner.plate->opacity()).arg(opacity)));
+            opacity = corner.plate->opacity();
         }
+        QCOMPARE(sceneRectOf(corner.plate).right() + 4, switchAt.left());
         QCOMPARE(sceneRectOf(corner.modeSwitch), switchAt);
         if (cornerWanted && zoomed) {
             QCOMPARE(corner.plate->opacity(), 1.0);
@@ -4584,12 +4641,17 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
         }
     }
     QVERIFY(animations.step(32));
-    window->grabWindow();
+    image = window->grabWindow();
     QVERIFY(!corner.notice->isVisible());
     if (zoomed) {
         QCOMPARE(sceneRectOf(corner.plate).left(), plainLeft);
         QCOMPARE(sceneRectOf(corner.reset), resetAt);
         QCOMPARE(corner.plate->opacity(), cornerWanted ? 1.0 : 0.0);
+        if (cornerWanted) {
+            // The plate as before the view was moved, with its own edge.
+            QQuickItem *fill = itemNamed(corner.plate, QStringLiteral("plotPlateFill"));
+            QVERIFY(fill != nullptr && fill->isVisible());
+        }
     } else {
         QVERIFY(!corner.plate->isVisible());
     }
@@ -4751,17 +4813,19 @@ void TransportInputSmokeTest::plotsTellFollowingAgainInOneOrder() {
     for (const QMetaObject::Connection &c : std::as_const(connections)) QObject::disconnect(c);
 }
 
-void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain_data() {
+void TransportInputSmokeTest::seekBarBandLandsWithThePlot_data() {
     QTest::addColumn<int>("mode");
     QTest::newRow("spectrogram") << 0;
     QTest::newRow("waveform") << 1;
 }
 
 // As a moved view follows the playhead again, by Follow Playhead or a seek,
-// the seek bar's band glides from the moved view's place to the followed
-// one's, in either plot (TransportStatusTest has the rest); the plot cuts.
-// On Repeat-One, from the track's end back to its start, it moves at once.
-void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain() {
+// the seek bar's band is where the plot's view is in the frame the plot
+// shows it in, and stays there, in either plot: it glided there over 120
+// ms, behind a plot that had already landed, so the two moved differently
+// for one change (H16). On Repeat-One, from the track's end back to its
+// start, too.
+void TransportInputSmokeTest::seekBarBandLandsWithThePlot() {
     QFETCH(int, mode);
     PlaybackClock clock;
     LibraryTreeModel libraryModel;
@@ -4771,21 +4835,56 @@ void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain() {
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QVERIFY(shareClock(corner.window, clock, 100.0));
     QQuickWindow *window = corner.window;
-    auto *transport = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
     auto *seek = window->findChild<QQuickItem *>(QStringLiteral("seekSlider"));
     auto *band = window->findChild<QQuickItem *>(QStringLiteral("seekViewBand"));
-    QVERIFY(transport && seek && band);
+    QVERIFY(seek && band && band->parentItem());
+    QObject *plot = mode == 0 ? static_cast<QObject *>(corner.spectrogramSurface)
+                              : static_cast<QObject *>(corner.waveform);
     QTest::mouseMove(window, corner.away());
     QVERIFY(zoomWithColumns(corner, 4.0));
     QTRY_VERIFY(band->isVisible());
+    const qreal ratio = window->effectiveDevicePixelRatio();
+    // The band on the bar, and where the plot's view says it is.
+    const auto bandAt = [band]() {
+        const QRectF bar = sceneRectOf(band->parentItem());
+        const QRectF drawn = sceneRectOf(band);
+        return QPointF(drawn.left() - bar.left(), drawn.right() - bar.left());
+    };
+    const auto plotAt = [&]() {
+        QVariant left;
+        QVariant right;
+        if (!QMetaObject::invokeMethod(seek, "barPixelOf", Q_RETURN_ARG(QVariant, left),
+                                       Q_ARG(QVariant, plot->property("visibleStartSeconds")))
+            || !QMetaObject::invokeMethod(seek, "barPixelOf", Q_RETURN_ARG(QVariant, right),
+                                          Q_ARG(QVariant, plot->property("visibleEndSeconds")))) {
+            return QPointF(-1.0, -1.0);
+        }
+        return QPointF(std::round(left.toDouble()) / ratio, std::round(right.toDouble()) / ratio);
+    };
     const auto moveView = [&]() -> double {
-        if (!corner.moveView() || !transport->property("viewDetached").toBool()) return -1.0;
+        if (!corner.moveView()) return -1.0;
         // A frame of the moved view, which the spectrogram says it shows as
         // it draws it, and the events that come after it.
         window->grabWindow();
         QTest::qWait(50);
         window->grabWindow();
-        return band->isVisible() ? sceneRectOf(band).left() : -1.0;
+        return band->isVisible() ? bandAt().x() : -1.0;
+    };
+    // Frame by frame from the one the view comes back in: the band is
+    // where the plot is, which is not where it was moved to.
+    const auto landsWithThePlot = [&](SteppedAnimationDriver &animations, double movedLeft) {
+        QString path;
+        for (int frame = 0; frame <= 12; ++frame) {
+            window->grabWindow();
+            const QPointF at = bandAt();
+            path += QString::number(at.x()) + QLatin1Char(' ');
+            if (at != plotAt() || std::abs(at.x() - movedLeft) < 20.0) {
+                return QStringLiteral("frame %1: band %2-%3, plot %4-%5; band %6")
+                    .arg(frame).arg(at.x()).arg(at.y()).arg(plotAt().x()).arg(plotAt().y()).arg(path);
+            }
+            (void)animations.step(16);
+        }
+        return QString();
     };
 
     for (const bool bySeek : {false, true}) {
@@ -4797,44 +4896,21 @@ void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain() {
         } else {
             QVERIFY(QMetaObject::invokeMethod(corner.surface, "followPlayhead"));
         }
-        QVERIFY(!transport->property("viewDetached").toBool());
-        // Frame by frame: where the band is.
-        QList<double> lefts;
-        window->grabWindow();
-        lefts.append(sceneRectOf(band).left());
-        for (int frame = 1; frame <= 12; ++frame) {
-            QVERIFY(animations.step(16));
-            window->grabWindow();
-            lefts.append(sceneRectOf(band).left());
-        }
-        QString path;
-        for (const double left : std::as_const(lefts)) path += QString::number(left) + QLatin1Char(' ');
-        // Where it was as the view came back, then on its way, then there.
-        QCOMPARE(lefts.first(), movedLeft);
-        const double followedLeft = lefts.last();
-        QVERIFY2(std::abs(followedLeft - movedLeft) > 20.0, qPrintable(path));
-        QCOMPARE(lefts.at(lefts.size() - 2), followedLeft);
-        qsizetype between = 0;
-        for (qsizetype frame = 1; frame < lefts.size(); ++frame) {
-            QVERIFY2((lefts.at(frame) - lefts.at(frame - 1)) * (followedLeft - movedLeft) >= 0, qPrintable(path));
-            if (lefts.at(frame) != movedLeft && lefts.at(frame) != followedLeft) ++between;
-        }
-        QVERIFY2(between >= 4, qPrintable(path));
+        QVERIFY(!corner.surface->property("detached").toBool());
+        const QString failure = landsWithThePlot(animations, movedLeft);
+        QVERIFY2(failure.isEmpty(), qPrintable(failure));
     }
 
-    // Repeat-One from a view moved late in the track: the band goes to the
-    // start at once, rather than across the whole bar.
+    // Repeat-One from a view moved late in the track.
     setSharedPosition(clock, 200.0);
-    QVERIFY(moveView() >= 0.0);
+    const double movedLeft = moveView();
+    QVERIFY(movedLeft >= 0.0);
     {
         SteppedAnimationDriver animations;
         setSharedPosition(clock, 0.0, clock.state().trackToken + 1);
-        QTRY_VERIFY(!transport->property("viewDetached").toBool());
-        for (int frame = 0; frame <= 8; ++frame) {
-            window->grabWindow();
-            QCOMPARE(seek->property("viewBandGlide").toDouble(), 0.0);
-            (void)animations.step(16);
-        }
+        QTRY_VERIFY(!corner.surface->property("detached").toBool());
+        const QString failure = landsWithThePlot(animations, movedLeft);
+        QVERIFY2(failure.isEmpty(), qPrintable(failure));
     }
 }
 
@@ -4886,6 +4962,64 @@ void TransportInputSmokeTest::notFollowingComesInWithThePlate() {
         (void)animations.step(300);
         QVERIFY(!corner.notice->isVisible());
     }
+}
+
+void TransportInputSmokeTest::cornerHoldsWhileAutoscrollRuns_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// While autoscroll runs, the corner's row stays as the pointer leaves the
+// pane for the window's edge, where autoscroll is fastest: it faded out
+// there and back in as autoscroll stopped on the moved view, mid-gesture
+// (H16). "Not following" stays absent while it runs (#655): the row shows
+// what it showed with the pointer on the pane, and nothing more.
+void TransportInputSmokeTest::cornerHoldsWhileAutoscrollRuns() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QQuickItem *plot = corner.waveform;
+    if (mode == 0) {
+        plot = itemNamed(corner.spectrogramSurface, QStringLiteral("spectrogramPaneItem"));
+        QVERIFY(plot != nullptr);
+    }
+    // A move onto the pane, wherever the last test left the pointer.
+    QTest::mouseMove(window, corner.onPane() + QPoint(1, 1));
+    QTest::mouseMove(window, corner.onPane());
+    corner.zoom(4.0);
+    QTRY_COMPARE(corner.plate->opacity(), 1.0);
+    QTRY_COMPARE(corner.modeSwitch->opacity(), 1.0);
+    window->grabWindow();
+
+    SteppedAnimationDriver animations;
+    middleClickPlot(plot, plot->width() / 2);
+    QVERIFY(corner.surface->property("autoscrolling").toBool());
+    QTest::mouseMove(window, corner.away());
+    for (int frame = 0; frame < 20; ++frame) {
+        (void)animations.step(16);
+        window->grabWindow();
+        QVERIFY(corner.surface->property("autoscrolling").toBool());
+        QVERIFY2(corner.plate->opacity() == 1.0 && corner.modeSwitch->opacity() == 1.0,
+                 qPrintable(QStringLiteral("frame %1: plate %2, switch %3")
+                                .arg(frame).arg(corner.plate->opacity()).arg(corner.modeSwitch->opacity())));
+        QVERIFY(!corner.moved() && !corner.notice->isVisible());
+    }
+    // Stopped there, on the moved view: the row stays, and says so.
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!corner.surface->property("autoscrolling").toBool());
+    QVERIFY(corner.moved());
+    for (int frame = 0; frame < 10; ++frame) {
+        (void)animations.step(16);
+        window->grabWindow();
+        QCOMPARE(corner.plate->opacity(), 1.0);
+        QCOMPARE(corner.modeSwitch->opacity(), 1.0);
+    }
+    QVERIFY(corner.notice->isVisible());
 }
 
 // The divider between "Not following" and the zoom has 6 px on each side

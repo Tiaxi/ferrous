@@ -57,21 +57,6 @@ ToolBar {
     // its waveform.
     property real viewStartSeconds: NaN
     property real viewEndSeconds: NaN
-    // Whether that view stays where the user moved it, or autoscroll moves
-    // it: a band gliding to the view it followed again stops there.
-    property bool viewDetached: false
-    onViewDetachedChanged: {
-        if (root.viewDetached) {
-            seekSlider.stopViewBandGlide()
-        }
-    }
-    // The view the user moved follows the playhead again in its track,
-    // where it showed `fromStartSeconds` to `fromEndSeconds`; the plot says
-    // so after viewStartSeconds and viewEndSeconds give where it is now.
-    function viewFollowedAgain(fromStartSeconds, fromEndSeconds) {
-        seekSlider.glideViewBandFrom(fromStartSeconds, fromEndSeconds)
-    }
-
     readonly property alias seekPressed: seekSlider.pressed
     // The time of one device pixel of the seek bar's playhead: the smallest
     // move of the position it shows, so the position needs to change no more
@@ -120,17 +105,22 @@ ToolBar {
     readonly property color seekEmptyLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.18)
     // The band of the visualization's view: the view colour, of the panes
     // the window shows its content in, as a quiet well in the chrome (about
-    // 1.35:1 on Breeze's Header colours). It is darker than the dark
+    // 1.28:1 on Breeze Dark's Header colour). It is darker than the dark
     // chrome and lighter than the light one, away from the waveform's
-    // tones, so the waveform on it keeps its contrast. The unplayed part
+    // tones, so the waveform on it keeps its contrast. On the light
+    // theme it is a quarter of the way to the chrome, about 1.23:1 on
+    // Breeze's Header colour: the view's white, 1.32:1, read louder there
+    // than the dark band does on its chrome (H16). The unplayed part
     // is the waveform at the unplayed opacity on the band as on the chrome.
     // The played part is under the band's colour at 15 %, at 10 % on the
-    // light theme's white band, so the band's edge shows in the waveform's
+    // light theme's pale band, so the band's edge shows in the waveform's
     // ink on either side of the playhead: under the bright played part
     // alone, the band read as starting at the playhead rather than centred
     // on it. At 15 % the light played part paled to a tone of its own,
     // away from its colour off the band (H15).
-    readonly property color seekViewBandColor: root.uiPalette.view
+    readonly property color seekViewBandColor: root.themeIsDark
+        ? root.uiPalette.view
+        : ColorUtils.mixColor(root.uiPalette.view, root.chromeColor, 0.25)
     readonly property color seekViewBandUnplayedCover: ColorUtils.withAlpha(
         root.seekViewBandColor, 1 - root.seekUnplayedOpacity)
     readonly property color seekViewBandPlayedCover: ColorUtils.withAlpha(
@@ -624,63 +614,16 @@ ToolBar {
                 Math.round(viewBandMinimumWidth * windowDevicePixelRatio)
             readonly property bool viewBandWidened: viewBandShown
                 && Math.round(viewRangeRightPixel) - Math.round(viewRangeLeftPixel) < viewBandMinimumDevicePixels
-            readonly property real viewBandLeft: bandLeftOf(viewRangeLeftPixel, viewRangeRightPixel)
+            // The band moves with the view, in the frame the plot shows it
+            // in, however it moved: a glide as a moved view followed again
+            // left the band behind a plot that had already landed (H16).
+            readonly property real viewBandLeft: (!viewBandWidened ? Math.round(viewRangeLeftPixel)
+                : Math.max(0, Math.min(barDevicePixels - viewBandMinimumDevicePixels,
+                    Math.round((viewRangeLeftPixel + viewRangeRightPixel - viewBandMinimumDevicePixels) / 2))))
+                / windowDevicePixelRatio
             readonly property real viewBandRight: !viewBandWidened
                 ? Math.round(viewRangeRightPixel) / windowDevicePixelRatio
                 : viewBandLeft + viewBandMinimumDevicePixels / windowDevicePixelRatio
-            // The band's left edge for a range from `leftPixel` to
-            // `rightPixel` (device pixels on the bar).
-            function bandLeftOf(leftPixel, rightPixel) {
-                const widened = Math.round(rightPixel) - Math.round(leftPixel) < viewBandMinimumDevicePixels
-                return (!widened ? Math.round(leftPixel)
-                    : Math.max(0, Math.min(barDevicePixels - viewBandMinimumDevicePixels,
-                        Math.round((leftPixel + rightPixel - viewBandMinimumDevicePixels) / 2))))
-                    / windowDevicePixelRatio
-            }
-            // As a moved view follows the playhead again (Follow Playhead, a
-            // click on the bar), the band goes from where it was to its new
-            // place over 120 ms, OutCubic, its covers with it: one offset of
-            // its edges, eased to 0, over where the band is now, so that
-            // playback's own motion is never eased. It cut in a frame, which
-            // showed neither how far nor which way the view went (H15); the
-            // plot still cuts. Only then: a drag, autoscroll, following, a
-            // track change, a gapless successor or Repeat-One move it at
-            // once, and so does every move with animations off.
-            property real viewBandGlide: 0
-            readonly property real shownBandLeft: viewBandGlide === 0 ? viewBandLeft
-                : Math.max(0, Math.min(barDevicePixels,
-                    Math.round((viewBandLeft + viewBandGlide) * windowDevicePixelRatio))) / windowDevicePixelRatio
-            readonly property real shownBandRight: viewBandGlide === 0 ? viewBandRight
-                : Math.max(shownBandLeft, Math.min(barDevicePixels / windowDevicePixelRatio,
-                    shownBandLeft + viewBandRight - viewBandLeft))
-            function stopViewBandGlide() {
-                viewBandGlideMotion.stop()
-                viewBandGlide = 0
-            }
-            function glideViewBandFrom(fromStartSeconds, fromEndSeconds) {
-                stopViewBandGlide()
-                if (!viewBandShown || Kirigami.Units.shortDuration <= 0
-                    || !isFinite(fromStartSeconds) || !isFinite(fromEndSeconds)) {
-                    return
-                }
-                const a = barPixelOf(fromStartSeconds)
-                const b = barPixelOf(fromEndSeconds)
-                const from = bandLeftOf(Math.min(a, b), Math.max(a, b))
-                if (from === viewBandLeft) {
-                    return
-                }
-                viewBandGlide = from - viewBandLeft
-                viewBandGlideMotion.from = viewBandGlide
-                viewBandGlideMotion.start()
-            }
-            NumberAnimation {
-                id: viewBandGlideMotion
-                target: seekSlider
-                property: "viewBandGlide"
-                to: 0
-                duration: Math.round(Kirigami.Units.shortDuration * 1.2)
-                easing.type: Easing.OutCubic
-            }
             // The handle is a grab target wider than the line and not drawn.
             // Padding of half their difference outside the bar puts the
             // handle's centre, which a press or drag moves under the
@@ -870,8 +813,8 @@ ToolBar {
                     objectName: "seekViewBand"
                     visible: seekSlider.viewBandShown
                     antialiasing: false
-                    x: seekSlider.shownBandLeft
-                    width: seekSlider.shownBandRight - seekSlider.shownBandLeft
+                    x: seekSlider.viewBandLeft
+                    width: seekSlider.viewBandRight - seekSlider.viewBandLeft
                     height: parent.height
                     color: root.seekViewBandColor
                 }
@@ -921,8 +864,8 @@ ToolBar {
                 // the light theme).
                 Rectangle {
                     objectName: "seekViewBandPlayed"
-                    readonly property real coverLeft: Math.min(seekSlider.shownBandLeft, seekSlider.playheadX)
-                    readonly property real coverRight: Math.min(seekSlider.shownBandRight, seekSlider.playheadX)
+                    readonly property real coverLeft: Math.min(seekSlider.viewBandLeft, seekSlider.playheadX)
+                    readonly property real coverRight: Math.min(seekSlider.viewBandRight, seekSlider.playheadX)
                     visible: seekSlider.viewBandShown && width > 0
                     antialiasing: false
                     x: coverLeft
@@ -947,9 +890,9 @@ ToolBar {
                     height: waveformItem.height
                     // Where the band is in it.
                     readonly property real bandLeft: seekSlider.viewBandShown
-                        ? Math.max(0, Math.min(width, seekSlider.shownBandLeft - x)) : width
+                        ? Math.max(0, Math.min(width, seekSlider.viewBandLeft - x)) : width
                     readonly property real bandRight: seekSlider.viewBandShown
-                        ? Math.max(bandLeft, Math.min(width, seekSlider.shownBandRight - x)) : width
+                        ? Math.max(bandLeft, Math.min(width, seekSlider.viewBandRight - x)) : width
 
                     Rectangle {
                         antialiasing: false

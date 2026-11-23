@@ -496,7 +496,6 @@ private slots:
     void seekViewBandMarksTheViewBehindTheWaveform();
     void seekViewBandStaysFindableAtDeepZoom();
     void seekViewBandIsDecorationOnly();
-    void seekViewBandGlidesAsTheViewFollowsAgain();
     void seekHoverDrawsALineAndANativeToolTip();
     void seekReleaseHandsTheTimeBoxToTheHover_data();
     void seekReleaseHandsTheTimeBoxToTheHover();
@@ -984,12 +983,13 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform_data() {
 
 // While the visualization is zoomed, a band behind the seek bar's
 // waveform marks the part of the track its view shows: in the view colour,
-// across the bar's height, on whole device pixels. The unplayed part is at
+// on the light theme a step toward the chrome (H16), across the bar's
+// height, on whole device pixels. The unplayed part is at
 // the unplayed opacity on the band as on the chrome, and the played part
 // under the view colour at 15 %, so the band's edge shows in the
 // waveform's ink on either side of the playhead: under the bright played
 // part alone, the band read as starting at the playhead (H14). On the
-// light theme's white band it is 10 %: at 15 % the played part there
+// light theme's pale band it is 10 %: at 15 % the played part there
 // paled away from its colour off the band (H15).
 void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     QFETCH(bool, dark);
@@ -1034,8 +1034,13 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
             < band->parentItem()->childItems().indexOf(waveform));
 
     const QColor chrome = harness.transportChrome();
-    const QColor view = harness.token("view");
-    QVERIFY(sameColor(view, QColor(breeze(dark).view)));
+    QVERIFY(sameColor(harness.token("view"), QColor(breeze(dark).view)));
+    // The band: the view colour on the dark theme, and on the light one a
+    // quarter of the way from it to the chrome, about #f6f7f8 on Breeze's
+    // #dee0e2 (the white view colour read louder there, H16).
+    const QColor view = transport->property("seekViewBandColor").value<QColor>();
+    QVERIFY2(channelDistance(view, dark ? QColor(breeze(dark).view) : QColor(0xf6, 0xf7, 0xf8)) <= 1,
+             qPrintable(view.name()));
     const QColor played = transport->property("seekPlayedColor").value<QColor>();
     const qreal unplayedOpacity = transport->property("seekUnplayedOpacity").toReal();
     qreal scale = 1;
@@ -1094,7 +1099,7 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     // Faint: a quiet step from the chrome, well under the waveform's, and
     // the waveform keeps at least its contrast on the chrome.
     const double bandContrast = contrastRatio(view, chrome);
-    QVERIFY2(bandContrast >= 1.2 && bandContrast <= 1.6,
+    QVERIFY2(bandContrast >= 1.2 && bandContrast <= (dark ? 1.6 : 1.25),
              qPrintable(describeContrast(QStringLiteral("band"), view, chrome)));
     const QColor unplayedOnChrome = mixed(chrome, played, unplayedOpacity);
     QVERIFY2(contrastRatio(drawnUnplayed, view) >= contrastRatio(unplayedOnChrome, chrome),
@@ -1198,151 +1203,6 @@ void TransportStatusTest::seekViewBandStaysFindableAtDeepZoom() {
     showView(50.0, 60.0);
     QCOMPARE(drawn().x(), std::round(50.0 / 229.0 * barPixels));
     QCOMPARE(drawn().x() + drawn().y(), std::round(60.0 / 229.0 * barPixels));
-}
-
-// As a moved view follows the playhead again (Follow Playhead, a click on
-// the bar), the band goes from where it was to its new place over 120 ms,
-// OutCubic, its covers with it, rather than cut in a frame, which showed
-// neither how far nor which way the view went (H15). One offset of its
-// edges eases to 0 over where it is now, so playback still moves it as it
-// goes. The plot tells it where the view was once it has said where it is
-// now (viewFollowedAgain); a drag, autoscroll, following and a track change
-// move it at once, as does everything with animations off, and a drag
-// begun as it glides takes it at once.
-void TransportStatusTest::seekViewBandGlidesAsTheViewFollowsAgain() {
-    Harness harness;
-    QVERIFY2(harness.load(), qPrintable(harness.error));
-    harness.bridge->setProperty("waveformPeaksPacked", QByteArray(800, static_cast<char>(128)));
-    harness.bridge->setProperty("waveformComplete", true);
-    harness.bridge->setProperty("waveformCoverageSeconds", 229.0);
-    harness.root->setProperty("positionSeconds", 100.0);
-    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
-    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
-    QQuickItem *band = harness.item(QStringLiteral("seekViewBand"));
-    QQuickItem *bandPlayed = harness.item(QStringLiteral("seekViewBandPlayed"));
-    QQuickItem *bandUnplayed = harness.item(QStringLiteral("seekViewBandUnplayed"));
-    QVERIFY(transport && seek && band && bandPlayed && bandUnplayed);
-    Kirigami::Platform::Units *units = unitsOf(seek);
-    QVERIFY(units != nullptr);
-    units->setShortDuration(100);
-    const qreal ratio = harness.window->effectiveDevicePixelRatio();
-    const QRectF bar = sceneRect(seek);
-    const double barPixels = std::floor(bar.width() * ratio + 1e-6);
-    const auto barX = [&](double seconds) {
-        return bar.left() + std::round(seconds / 229.0 * barPixels) / ratio;
-    };
-    const auto view = [transport](double start) {
-        transport->setProperty("viewStartSeconds", start);
-        transport->setProperty("viewEndSeconds", start + 40.0);
-    };
-    const auto bandLeft = [band]() { return sceneRect(band).left(); };
-    // A drag: the band goes with the view, as the events that move it come.
-    const auto drag = [&](double start) {
-        transport->setProperty("viewDetached", true);
-        view(start);
-        QCOMPARE(bandLeft(), barX(start));
-    };
-    // The plot follows again, from `from` to `to`, in the order it tells it.
-    const auto followAgain = [&](double from, double to) {
-        view(to);
-        QVERIFY(QMetaObject::invokeMethod(transport, "viewFollowedAgain", Q_ARG(QVariant, from),
-                                          Q_ARG(QVariant, from + 40.0)));
-        transport->setProperty("viewDetached", false);
-    };
-    // The covers keep to the band's edges.
-    const auto coversKeepToTheBand = [&]() {
-        QCOMPARE(sceneRect(bandPlayed).left(), sceneRect(band).left());
-        if (bandUnplayed->isVisible()) {
-            QCOMPARE(sceneRect(bandUnplayed).right(), sceneRect(band).right());
-        } else {
-            QCOMPARE(sceneRect(bandPlayed).right(), sceneRect(band).right());
-        }
-    };
-
-    view(80.0);
-    QCOMPARE(bandLeft(), barX(80.0));
-    // Following: the band goes with the view at once.
-    view(81.0);
-    QCOMPARE(bandLeft(), barX(81.0));
-    drag(60.0);
-    drag(20.0);
-    QCOMPARE(sceneRect(band).width(), barX(60.0) - barX(20.0));
-
-    {
-        SteppedAnimationDriver animations;
-        // The view follows from 20 s to 82 s, the playhead in the middle.
-        followAgain(20.0, 82.0);
-        // In the frame it follows in, the band is where it was, as wide as
-        // it is now.
-        QCOMPARE(bandLeft(), barX(20.0));
-        QCOMPARE(sceneRect(band).width(), barX(122.0) - barX(82.0));
-        coversKeepToTheBand();
-        double left = barX(20.0);
-        double step = std::numeric_limits<double>::infinity();
-        for (int frame = 1; frame * 16 < 112; ++frame) {
-            QVERIFY(animations.step(16));
-            const double now = bandLeft();
-            // On its way, more slowly as it goes, on whole device pixels.
-            QVERIFY2(now > left && now < barX(82.0),
-                     qPrintable(QStringLiteral("frame %1: %2 after %3").arg(frame).arg(now).arg(left)));
-            QVERIFY(now - left <= step + 1.0 / ratio);
-            QCOMPARE(std::round((now - bar.left()) * ratio), (now - bar.left()) * ratio);
-            QCOMPARE(sceneRect(band).width(), barX(122.0) - barX(82.0));
-            coversKeepToTheBand();
-            step = now - left;
-            left = now;
-        }
-        QVERIFY(animations.step(32));
-        QCOMPARE(bandLeft(), barX(82.0));
-        coversKeepToTheBand();
-    }
-
-    // Playback moves it as it glides, by as much as it moves the view.
-    drag(20.0);
-    {
-        SteppedAnimationDriver animations;
-        followAgain(20.0, 82.0);
-        QVERIFY(animations.step(32));
-        const double offset = bandLeft() - barX(82.0);
-        QVERIFY(offset < -10.0);
-        view(90.0);
-        QVERIFY(std::abs(bandLeft() - barX(90.0) - offset) <= 1.0 / ratio);
-        (void)animations.step(200);
-        QCOMPARE(bandLeft(), barX(90.0));
-    }
-
-    // A drag begun as it glides takes it at once.
-    drag(20.0);
-    {
-        SteppedAnimationDriver animations;
-        followAgain(20.0, 82.0);
-        QVERIFY(animations.step(32));
-        QVERIFY(bandLeft() < barX(82.0));
-        drag(70.0);
-        (void)animations.step(16);
-        QCOMPARE(bandLeft(), barX(70.0));
-    }
-
-    // Autoscroll moves it at once: the view stays detached as it goes. A
-    // track change, which the plot tells no place of, too.
-    drag(20.0);
-    {
-        SteppedAnimationDriver animations;
-        view(40.0);
-        QCOMPARE(bandLeft(), barX(40.0));
-        view(70.0);
-        QCOMPARE(bandLeft(), barX(70.0));
-        transport->setProperty("viewDetached", false);
-        view(0.0);
-        QCOMPARE(bandLeft(), barX(0.0));
-    }
-
-    // With animations off: at once.
-    units->setShortDuration(0);
-    drag(20.0);
-    followAgain(20.0, 82.0);
-    QCOMPARE(bandLeft(), barX(82.0));
-    QCOMPARE(seek->property("viewBandGlide").toDouble(), 0.0);
 }
 
 // The band is decoration: it changes neither the seek bar's value nor what

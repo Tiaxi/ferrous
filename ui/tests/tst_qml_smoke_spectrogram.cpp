@@ -1481,8 +1481,9 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadsOverBrightData() {
 
 // A seek on the plot lands the playhead under the pointer, where the
 // crosshair's dashes were drawn over it: the landing read as the hover line.
-// Within a pixel of the playhead the crosshair's vertical line gives way to
-// it, and its time stays on the axis.
+// Within 2 px of the playhead the crosshair's vertical line gives way to
+// it, and its time stays on the axis: within 1 px, a landing a pixel off
+// still showed the dashes beside the playhead as a doubled line (H16).
 void SpectrogramSmokeTest::spectrogramCrosshairYieldsToThePlayhead() {
     QQuickWindow window;
     if (window.rendererInterface()->graphicsApi() == QSGRendererInterface::Null) {
@@ -1543,11 +1544,11 @@ void SpectrogramSmokeTest::spectrogramCrosshairYieldsToThePlayhead() {
         }
         return false;
     };
-    for (const int dx : {-1, 0, 1}) {
+    for (const int dx : {-2, -1, 0, 1, 2}) {
         const QImage shown = hoverAt(playheadX + dx);
         // Above the horizontal line and its plate: the playhead and its
         // casing, as without the crosshair.
-        for (int x = playheadX - 2; x <= playheadX + 2; ++x) {
+        for (int x = playheadX - 3; x <= playheadX + 3; ++x) {
             for (int y = 2; y < 40; ++y) {
                 QVERIFY2(shown.pixel(x, y) == bare.pixel(x, y),
                     qPrintable(QStringLiteral("hover at %1: %2,%3 is %4, not %5").arg(playheadX + dx)
@@ -1556,7 +1557,7 @@ void SpectrogramSmokeTest::spectrogramCrosshairYieldsToThePlayhead() {
         }
         QVERIFY(hasTime());
     }
-    // Two pixels off, the line is the crosshair's.
+    // Three pixels off, the line is the crosshair's.
     const QImage beside = hoverAt(playheadX + 3);
     int dashed = 0;
     for (int y = 2; y < 40; ++y) {

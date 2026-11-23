@@ -3158,8 +3158,9 @@ void WaveformSmokeTest::waveformEditorPlayheadIsThinAndNeutral() {
 
 // A seek on the plot lands the playhead under the pointer, where the
 // crosshair's dashes were drawn over it: the landing read as the hover line.
-// Within a pixel of the playhead the crosshair's vertical line gives way to
-// it, and its time stays on the axis.
+// Within 2 px of the playhead the crosshair's vertical line gives way to
+// it, and its time stays on the axis: within 1 px, a landing a pixel off
+// still showed the dashes beside the playhead as a doubled line (H16).
 void WaveformSmokeTest::waveformEditorCrosshairYieldsToThePlayhead() {
     WaveformEditorItem item;
     item.setWidth(320);
@@ -3196,20 +3197,20 @@ void WaveformSmokeTest::waveformEditorCrosshairYieldsToThePlayhead() {
         }
         return differing;
     };
-    for (const double x : {159.0, 160.0, 161.0}) {
+    for (const double x : {158.0, 159.0, 160.0, 161.0, 162.0}) {
         item.setHoverPosition(x, 120.0, true);
         const QImage shown = paint();
-        for (int column = 158; column <= 162; ++column) {
+        for (int column = 157; column <= 163; ++column) {
             QVERIFY2(columnDiffers(shown, column) == 0,
                 qPrintable(QStringLiteral("hover at %1: column %2").arg(x).arg(column)));
         }
         QVERIFY2(bottomDiffers(shown) > 50, qPrintable(QStringLiteral("no time at %1").arg(x)));
     }
-    // Two pixels off, the line is the crosshair's.
-    item.setHoverPosition(162.0, 120.0, true);
-    QVERIFY(columnDiffers(paint(), 162) > 20);
-    item.setHoverPosition(158.0, 120.0, true);
-    QVERIFY(columnDiffers(paint(), 158) > 20);
+    // Three pixels off, the line is the crosshair's.
+    item.setHoverPosition(163.0, 120.0, true);
+    QVERIFY(columnDiffers(paint(), 163) > 20);
+    item.setHoverPosition(157.0, 120.0, true);
+    QVERIFY(columnDiffers(paint(), 157) > 20);
 }
 
 void WaveformSmokeTest::waveformEditorOverviewRespectsCoverageAndChannelIdentity() {
