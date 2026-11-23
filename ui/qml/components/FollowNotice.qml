@@ -37,7 +37,9 @@ Item {
         : I18n.i18nc("@info:tooltip View › Follow Playhead is a menu command",
             "Follow Playhead in the View menu brings the view back to the playhead")
 
-    implicitWidth: label.implicitWidth + (root.divided ? 6 + 1 : root.inset)
+    // In whole pixels, its text's to the next one, so that the plate it
+    // grows and its divider are on the pixel grid.
+    implicitWidth: label.width + (root.divided ? 6 + 1 : root.inset)
     implicitHeight: root.uiPalette.toolButtonSize
     width: implicitWidth
     height: implicitHeight
@@ -50,6 +52,7 @@ Item {
         id: label
         objectName: "followNoticeText"
         x: root.width - root.implicitWidth
+        width: Math.ceil(label.implicitWidth)
         opacity: root.arrivalLevel
         height: root.height
         verticalAlignment: Text.AlignVCenter

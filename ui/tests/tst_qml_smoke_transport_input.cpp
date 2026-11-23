@@ -75,6 +75,8 @@ private slots:
     void seekBarBandLandsWithThePlot_data();
     void seekBarBandLandsWithThePlot();
     void zoomPlateSpacesItsDividerEvenly();
+    void zoomPlateKeepsToWholePixels_data();
+    void zoomPlateKeepsToWholePixels();
     void movedViewSaysSoInTheViewers_data();
     void movedViewSaysSoInTheViewers();
     void followPlayheadBringsTheShownPlotBack();
@@ -3137,14 +3139,16 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
              plot->property("plotTextSecondary").value<QColor>().rgba());
     QCOMPARE(viewerReset->property("display").toInt(), 0); // AbstractButton.IconOnly
     QVERIFY(!viewerReset->property("checked").toBool());
-    // The readout 6 px in from the plate, and 6 px from Reset's glyph box.
+    // The readout 6 px in from the plate, and 6 px from Reset's glyph box,
+    // and less than a pixel more as the readout is whole pixels wide.
     QQuickItem *resetGlyph = itemNamed(viewerReset, QStringLiteral("viewerToolButtonIcon"));
     QVERIFY(resetGlyph != nullptr);
     const double textLeft = viewerReadout->mapToScene(QPointF()).x()
         + viewerReadout->property("leftPadding").toDouble();
     const double textRight = textLeft + viewerReadout->property("contentWidth").toDouble();
     QCOMPARE(textLeft - sceneRectOf(cornerPlate).left(), 6.0);
-    QCOMPARE(sceneRectOf(resetGlyph).left() - textRight, 6.0);
+    const double toReset = sceneRectOf(resetGlyph).left() - textRight;
+    QVERIFY2(toReset >= 6.0 && toReset < 7.0, qPrintable(QString::number(toReset)));
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
@@ -5081,7 +5085,11 @@ void TransportInputSmokeTest::notFollowingArrivesAsItLeaves() {
         const QRectF plate = sceneRectOf(corner.plate);
         const double now = plate.left();
         const double text = came();
-        QVERIFY2(text > level && text < 1.0, qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(text).arg(level)));
+        // Whole at its last frame at most: the plate's room is whole
+        // pixels, which the growth reaches 2 ms before its end.
+        const bool last = zoomed && (frame + 1) * 16 >= 50;
+        QVERIFY2(text > level && (text < 1.0 || (last && text == 1.0)),
+                 qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(text).arg(level)));
         QCOMPARE(corner.divider->opacity(), corner.text->opacity());
         level = text;
         QCOMPARE(sceneRectOf(corner.modeSwitch), switchAt);
@@ -5762,9 +5770,10 @@ void TransportInputSmokeTest::laneHeadsStayClosedThroughAPlotSeek() {
 }
 
 // The divider between "Not following" and the zoom has 6 px on each side
-// at every digit count: the readout is as wide as its text (as wide as
-// its widest four-digit value, it had 18 px on the zoom's side at three
-// digits, H15). The plate grows to the left, so Reset never moves, and
+// at every digit count: the readout is as wide as its text, to the next
+// whole pixel (as wide as its widest four-digit value, it had 18 px on the
+// zoom's side at three digits, H15). The plate grows to the left, so Reset
+// never moves, and
 // "Not following" moves once, as the zoom reaches four digits.
 void TransportInputSmokeTest::zoomPlateSpacesItsDividerEvenly() {
     LibraryTreeModel libraryModel;
@@ -5794,7 +5803,7 @@ void TransportInputSmokeTest::zoomPlateSpacesItsDividerEvenly() {
         QTRY_VERIFY(corner.text->isVisible());
         window->grabWindow();
         const double readoutText = boxOf(corner.readout).left() + corner.readout->property("leftPadding").toDouble();
-        QCOMPARE(corner.readout->width(), corner.readout->property("implicitWidth").toDouble());
+        QCOMPARE(corner.readout->width(), std::ceil(corner.readout->property("implicitWidth").toDouble()));
         QCOMPARE(sceneRectOf(corner.divider).left() - boxOf(corner.text).right(), 6.0);
         QCOMPARE(readoutText - sceneRectOf(corner.divider).right(), 6.0);
         if (!resetAt) resetAt = sceneRectOf(corner.reset);
@@ -5805,6 +5814,58 @@ void TransportInputSmokeTest::zoomPlateSpacesItsDividerEvenly() {
             QVERIFY2(noticeLeft < *noticeAt, qPrintable(QStringLiteral("%1 at %2").arg(noticeLeft).arg(shown)));
         } else {
             QCOMPARE(noticeLeft, *noticeAt);
+        }
+    }
+}
+
+void TransportInputSmokeTest::zoomPlateKeepsToWholePixels_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// The zoom's plate is whole pixels wide at every value, with and without
+// "Not following": anchored at its right, its left edge was split across
+// two pixel columns, "Zoom 2,274%" at x 1413.5 (H22). Reset and the
+// divider stay on the pixel grid with it.
+void TransportInputSmokeTest::zoomPlateKeepsToWholePixels() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QTest::mouseMove(window, corner.onPane() + QPoint(1, 1));
+    QTest::mouseMove(window, corner.onPane());
+    const auto whole = [](double value) { return std::abs(value - std::round(value)) < 1e-6; };
+    std::optional<QRectF> resetAt;
+    for (const bool moved : {false, true}) {
+        for (const double level : {1.25, 3.81, 9.99, 22.74, 16.01, 123.45}) {
+            corner.zoom(level);
+            if (moved && !corner.moved()) QVERIFY(corner.moveView());
+            QTRY_VERIFY(corner.readout->isVisible());
+            QTRY_COMPARE(corner.plate->opacity(), 1.0);
+            if (moved) {
+                QTRY_COMPARE(corner.text->opacity(), 1.0);
+            }
+            window->grabWindow();
+            const QString where = QStringLiteral("%1 at %2%3")
+                .arg(corner.readout->property("text").toString()).arg(level)
+                .arg(moved ? QStringLiteral(", not following") : QString());
+            const QRectF plate = sceneRectOf(corner.plate);
+            QVERIFY2(whole(plate.left()) && whole(plate.width()),
+                     qPrintable(QStringLiteral("%1: plate at %2, %3 wide").arg(where).arg(plate.left()).arg(plate.width())));
+            const QRectF readout = boxOf(corner.readout);
+            QVERIFY2(whole(readout.left()) && whole(readout.width()),
+                     qPrintable(QStringLiteral("%1: readout at %2, %3 wide").arg(where).arg(readout.left()).arg(readout.width())));
+            if (!resetAt) resetAt = sceneRectOf(corner.reset);
+            QCOMPARE(sceneRectOf(corner.reset), *resetAt);
+            QVERIFY(whole(resetAt->left()));
+            if (moved) {
+                const QRectF divider = sceneRectOf(corner.divider);
+                QVERIFY2(whole(divider.left()), qPrintable(QStringLiteral("%1: divider at %2").arg(where).arg(divider.left())));
+            }
         }
     }
 }

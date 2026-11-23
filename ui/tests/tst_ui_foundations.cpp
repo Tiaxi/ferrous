@@ -1640,8 +1640,9 @@ void UiFoundationsTest::smallControlsScaleWithALargeFont() {
         QVERIFY2(pixels >= std::max(11.0, 11.0 * pointSize / 10.0), qPrintable(QString::number(pixels)));
     }
 
-    // The lane label's plate: its text whole inside it, 6 px either side.
-    QCOMPARE(label->width(), std::max(20.0, text->width() + 12.0));
+    // The lane label's plate: its text whole inside it, 6 px either side,
+    // to the next whole pixel.
+    QCOMPARE(label->width(), std::max(20.0, std::ceil(text->width() + 12.0)));
     QVERIFY2(text->implicitHeight() <= label->height(),
              qPrintable(QStringLiteral("%1 > %2").arg(text->implicitHeight()).arg(label->height())));
     if (pointSize == 10.0) {

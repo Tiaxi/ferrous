@@ -63,7 +63,10 @@ Item {
     // How far the plate is revealed, from 0 to 1, as it fades in or out.
     property real revealLevel: root.revealed ? 1 : 0
 
-    implicitWidth: Math.max(root.minimumSize, content.implicitWidth + 2 * root.horizontalPadding)
+    // In whole pixels: a plate anchored at its right, such as the zoom's,
+    // had its left edge split across two pixel columns at most widths of
+    // its text ("Zoom 2,274%" at x 1413.5, H22).
+    implicitWidth: Math.ceil(Math.max(root.minimumSize, content.implicitWidth + 2 * root.horizontalPadding))
     implicitHeight: root.isLabel ? root.labelHeight
         : Math.max(root.minimumSize, content.implicitHeight + 2 * root.verticalPadding)
 
