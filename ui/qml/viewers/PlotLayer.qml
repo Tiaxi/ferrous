@@ -232,9 +232,12 @@ Item {
 
     // As a view follows again, "Not following" leaves the plate as it came
     // (PlotZoomPlate's notice): with the row staying, its text fades out
-    // as the plate narrows to its new width; with the row fading out, it
-    // goes with the plate's fade. Autoscroll takes it at once, and so does a
-    // plate that doesn't show.
+    // as the plate narrows to its new width. With the row fading out, it
+    // goes with the view's cut, the plate taking its zoom's width in that
+    // frame, or going with it at the default zoom, and fading with the row:
+    // with its words gone at the cut, the plate faded at its width, an empty
+    // room of 89 px beside the zoom for 35-49 ms (H23). Autoscroll takes it
+    // at once, and so does a plate that doesn't show.
     // One state, 0 none, 1 shown, 2 leaving, set here alone: the plate's
     // two flags of it, each bound to its own of this layer's, changed one
     // after the other as it ended, and its notice showed between them
@@ -274,7 +277,7 @@ Item {
         }
     }
     onViewMovedChanged: root._notice = root.viewMoved ? 1
-        : !root.viewAutoscrolling && !root.controlsInViewer && modeSwitch.revealLevel > 0
+        : root.cornerWanted && !root.viewAutoscrolling && !root.controlsInViewer && modeSwitch.revealLevel > 0
             && Kirigami.Units.shortDuration > 0 ? 2 : 0
     onViewAutoscrollingChanged: {
         if (root.viewAutoscrolling && root._notice === 2)
@@ -332,7 +335,6 @@ Item {
         zoomLevel: root.zoomLevel
         resetView: root.resetZoom
         notice: root._notice
-        rowStays: root.cornerWanted
         onNoticeLeft: root._notice = 0
         followShortcut: root.followShortcut
         pointerActivity: root.pointerActivity

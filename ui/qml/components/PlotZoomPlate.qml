@@ -47,24 +47,19 @@ Components.PlotPlate {
     // text with it (the text went in a frame while the empty plate faded
     // on, H16). A plate revealed with it comes at its width, its text
     // fading in on the plate's reveal. With the corner's row fading out as
-    // it goes, as with the pointer off the pane, the plate keeps its width
-    // and fades on the row's one curve (it narrowed 15 ms ahead of the
-    // row's fade, its text gone at full opacity, H17), while the text and
-    // divider go in the frame the view follows again, with the view's cut:
-    // riding the row's fade, "Not following" was still legible 19 ms after
-    // the view had come back (H22).
+    // it goes, as with the pointer off the pane, its view sets it to 0 with
+    // the view's cut (PlotLayer): riding the row's fade, "Not following"
+    // was still legible 19 ms after the view had come back (H22), and with
+    // its words gone at the cut, the plate faded at its width, its room
+    // empty (H23).
     property int notice: 0
-    // Whether the corner's row stays as the notice goes, read as it starts
-    // to go.
-    property bool rowStays: true
     readonly property bool noticeShown: root.notice !== 0
     readonly property bool noticeLeaving: root.notice === 2
     signal noticeLeft()
     property string followShortcut: ""
 
     // How much of the notice is on the plate as it comes and goes, from 0
-    // to 1, and what it does: 0 neither, 1 comes, 2 goes, 3 goes with the
-    // row's fade. Zoomed, it is the plate's width; at the default zoom,
+    // to 1, and what it does: 0 neither, 1 comes, 2 goes. Zoomed, it is the plate's width; at the default zoom,
     // its opacity.
     property real noticeLevel: 1
     property int _motion: 0
@@ -113,18 +108,8 @@ Components.PlotPlate {
                     root._fadeText(1, 0, 1)
             }
         } else if (root.notice === 2) {
-            if (root.rowStays || root._motion === 1) {
-                // From all of it, or from what came of it.
-                root._leaveAlone()
-            } else {
-                // Its words go in the frame the view comes back in, and
-                // only the plate's fill fades with the row.
-                textMotion.stop()
-                root._motion = 3
-                root.noticeLevel = 1
-                root._textLevel = 0
-                root._goneWithRow()
-            }
+            // From all of it, or from what came of it.
+            root._leaveAlone()
         } else {
             root._motion = 0
             root.noticeLevel = 1
@@ -165,19 +150,6 @@ Components.PlotPlate {
         if (part <= 0)
             return 0
         return Kirigami.Units.shortDuration * scale * (1 - Math.cbrt(1 - Math.min(1, part)))
-    }
-    // Gone with the row as it has faded out; going alone as the row comes
-    // back first.
-    function _goneWithRow() {
-        if (root._motion === 3 && (!root.available || root.revealLevel * root.fadeLevel <= 0))
-            root.noticeLeft()
-    }
-    onRevealLevelChanged: root._goneWithRow()
-    onFadeLevelChanged: root._goneWithRow()
-    onAvailableChanged: root._goneWithRow()
-    onRevealedChanged: {
-        if (root._motion === 3 && root.revealed)
-            root._leaveAlone()
     }
     NumberAnimation {
         id: noticeMotion
