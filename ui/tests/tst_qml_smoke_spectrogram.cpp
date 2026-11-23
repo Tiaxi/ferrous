@@ -69,6 +69,7 @@ private slots:
     void spectrogramScaleTicksAreOnTheLabelsOuterSide_data();
     void spectrogramScaleTicksAreOnTheLabelsOuterSide();
     void spectrogramScaleFollowsTheMeterInThePane();
+    void spectrogramScaleTickIsDrawnOnTheLabelsOuterSide_data();
     void spectrogramScaleTickIsDrawnOnTheLabelsOuterSide();
     void spectrogramGridOverlayGeneratesWhenEnabled();
     void spectrogramAtRestDrawsItsScaleFaintly_data();
@@ -3532,22 +3533,30 @@ Window {
 
 void SpectrogramSmokeTest::spectrogramScaleTicksAreOnTheLabelsOuterSide_data() {
     QTest::addColumn<double>("scale");
-    QTest::newRow("1x") << 1.0;
-    QTest::newRow("2x") << 2.0;
+    QTest::addColumn<int>("clearance");
+    for (const double scale : {1.0, 2.0}) {
+        QTest::addRow("%gx", scale) << scale << 0;
+        QTest::addRow("%gx, beside the meter", scale) << scale << 3;
+    }
 }
 
-// The frequency scale, with or without the level meter beside the plot:
-// each label's 6 px tick flush at the plot's right edge, on its row, on
-// the label's outer side, and the label 10 px from the edge ("15 kHz -|";
-// a tick on the label's plot side read as a minus sign, "- 15 kHz"); the
+// The frequency scale: each label's 6 px tick on its row, on the label's
+// outer side, and the label 10 px from the tick's end ("15 kHz -|"; a tick
+// on the label's plot side read as a minus sign, "- 15 kHz"). Without the
+// level meter the ticks end flush at the plot's right edge; beside it they
+// end 3 px clear of it, the labels moving with them (ticks that met the
+// meter's seam ran into its column and read as its marks, H27). The
 // crosshair's readout keeps left of the labels; at rest, each line ends
 // 6 px before its label.
 void SpectrogramSmokeTest::spectrogramScaleTicksAreOnTheLabelsOuterSide() {
     QFETCH(double, scale);
+    QFETCH(int, clearance);
     SpectrogramItem item;
     item.setSampleRateHz(48'000);
     item.setAnalysisFftSize(4'096);
     item.setGridEnabled(true);
+    item.setScaleEdgeClearance(clearance);
+    QCOMPARE(item.scaleEdgeClearance(), double(clearance));
     const int width = qRound(600 * scale);
     const int height = qRound(240 * scale);
     constexpr int bins = 2'049;
@@ -3575,30 +3584,38 @@ void SpectrogramSmokeTest::spectrogramScaleTicksAreOnTheLabelsOuterSide() {
     double widest = 0.0;
     for (qsizetype index = 0; index < scaleShown.images.size(); ++index) {
         const QRectF label = scaleShown.images.at(index).rect;
-        QCOMPARE(label.right(), 590.0);
+        QCOMPARE(label.right(), 590.0 - clearance);
         widest = std::max(widest, label.width());
         const QRect tick = scaleShown.lines.at(index);
         QCOMPARE(tick.width(), qRound(6 * scale));
-        QCOMPARE(tick.x() + tick.width(), width);
+        QCOMPARE(tick.x() + tick.width(), width - qRound(clearance * scale));
         // On the label's row, and past its end.
         QVERIFY(tick.y() >= qRound(label.top() * scale) && tick.y() < qRound(label.bottom() * scale));
         QVERIFY(tick.x() >= qRound((label.right() + 3) * scale));
     }
-    QCOMPARE(double(scaleWidth), 10.0 + widest);
+    // The crosshair's readout keeps clear of the clearance too.
+    QCOMPARE(double(scaleWidth), 10.0 + clearance + widest);
     QVERIFY(!rest.images.isEmpty());
     QCOMPARE(rest.lines.size(), rest.images.size());
     for (qsizetype index = 0; index < rest.images.size(); ++index) {
         const QRectF label = rest.images.at(index).rect;
-        QCOMPARE(label.right(), 590.0);
+        QCOMPARE(label.right(), 590.0 - clearance);
         QCOMPARE(rest.lines.at(index).x() + rest.lines.at(index).width(), qRound((label.left() - 6) * scale));
     }
 }
 
+void SpectrogramSmokeTest::spectrogramScaleTickIsDrawnOnTheLabelsOuterSide_data() {
+    QTest::addColumn<int>("clearance");
+    QTest::newRow("at the edge") << 0;
+    QTest::newRow("beside the meter") << 3;
+}
+
 // As drawn: each kHz label's tick in the scale's ink, on the label's row,
-// from 4 px past its end to the plot's edge, where the meter's seam is
-// when it shows, and nothing before the label, where a tick read as a
-// minus sign.
+// from 4 px past its end to the plot's edge, or beside the meter to 3 px
+// short of it, the plot's floor between, and nothing before the label,
+// where a tick read as a minus sign.
 void SpectrogramSmokeTest::spectrogramScaleTickIsDrawnOnTheLabelsOuterSide() {
+    QFETCH(int, clearance);
     QQuickWindow window;
     window.resize(400, 200);
     auto *item = new SpectrogramItem(window.contentItem());
@@ -3606,6 +3623,7 @@ void SpectrogramSmokeTest::spectrogramScaleTickIsDrawnOnTheLabelsOuterSide() {
     item->setSampleRateHz(48'000);
     item->setDisplayMode(1);
     item->setGridEnabled(true);
+    item->setScaleEdgeClearance(clearance);
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     // Columns of silence, black, under the scale.
@@ -3637,10 +3655,14 @@ void SpectrogramSmokeTest::spectrogramScaleTickIsDrawnOnTheLabelsOuterSide() {
         const auto at = [&](int x) {
             return qPrintable(QStringLiteral("x %1, row %2: %3").arg(x).arg(row).arg(image.pixelColor(x, row).name()));
         };
-        for (int x = 394; x < 400; ++x) {
+        const int tickEnd = 400 - clearance;
+        for (int x = tickEnd - 6; x < tickEnd; ++x) {
             QVERIFY2(near(image.pixelColor(x, row), tickColor), at(x));
         }
-        for (int x = qRound(label.right()); x < 394; ++x) {
+        for (int x = qRound(label.right()); x < tickEnd - 6; ++x) {
+            QVERIFY2(image.pixelColor(x, row) == QColor(Qt::black), at(x));
+        }
+        for (int x = tickEnd; x < 400; ++x) {
             QVERIFY2(image.pixelColor(x, row) == QColor(Qt::black), at(x));
         }
         for (int x = qRound(label.left()) - 10; x < qRound(label.left()); ++x) {
@@ -3649,9 +3671,9 @@ void SpectrogramSmokeTest::spectrogramScaleTickIsDrawnOnTheLabelsOuterSide() {
     }
 }
 
-// Beside the level meter, the pane's lanes end at the meter's seam, so the
-// frequency scale's ticks, flush at their right edge, end beside it; and
-// at the window's edge without the meter.
+// Beside the level meter, the pane's lanes end at the meter's seam, and the
+// frequency scale's ticks end 3 px clear of it; without the meter, the
+// lanes end at the window's edge and the ticks flush at it.
 void SpectrogramSmokeTest::spectrogramScaleFollowsTheMeterInThePane() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -3677,6 +3699,7 @@ void SpectrogramSmokeTest::spectrogramScaleFollowsTheMeterInThePane() {
         QVERIFY(!panes.isEmpty());
         for (QQuickItem *pane : panes) {
             QTRY_COMPARE(sceneRect(pane).right(), edge);
+            QTRY_COMPARE(pane->property("scaleEdgeClearance").toDouble(), meter ? 3.0 : 0.0);
         }
     }
 }

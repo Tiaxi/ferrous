@@ -1471,8 +1471,8 @@ constexpr int kScaleLabelOutline = 1;
 // The logical pixels between a rest line and its scale label's outline.
 constexpr double kRestLineLabelGap = 6.0;
 
-// The logical pixels from the plot's right edge to a frequency label's end,
-// with the label's 6 px tick on the edge between them.
+// The logical pixels from the scale's edge to a frequency label's end, with
+// the label's 6 px tick on the edge between them.
 constexpr int kFrequencyScaleLabelGap = 10;
 
 // The logical size of a scale label of `text` at `textScale`, with its
@@ -2964,6 +2964,28 @@ void SpectrogramItem::setRestTopClearance(double value) {
         m_restTopClearance = value;
     }
     emit restTopClearanceChanged();
+    update();
+}
+
+double SpectrogramItem::scaleEdgeClearance() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_scaleEdgeClearance;
+}
+
+void SpectrogramItem::setScaleEdgeClearance(double value) {
+    const int clearance = std::isfinite(value) ? std::max(0, static_cast<int>(std::lround(value))) : 0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_scaleEdgeClearance == clearance) {
+            return;
+        }
+        m_scaleEdgeClearance = clearance;
+        // The scale's ticks and labels move, and the crosshair's readout
+        // keeps clear of them.
+        m_freqGridDirty = true;
+        m_crosshairDirty = true;
+    }
+    emit scaleEdgeClearanceChanged();
     update();
 }
 
@@ -7575,21 +7597,26 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
     m_freqGrid.valid = true;
 
     // The frequency scale, inside the plot on its right: for each label a
-    // 6 px tick flush at the plot's edge, on the label's outer side, and
-    // the label kFrequencyScaleLabelGap from the edge, centred on its tick:
-    // "15 kHz -|". Beside the level meter the same, its ticks then ending at
-    // the meter's seam (the meter's own marks are on its far side; a tick
-    // on the label's plot side read as a minus sign, "- 15 kHz"). Ticks on
-    // the canvas's device rows; labels laid out in logical pixels.
+    // 6 px tick on the label's outer side, and the label
+    // kFrequencyScaleLabelGap before the tick's end, centred on its tick:
+    // "15 kHz -|". The ticks end flush at the plot's edge; beside the level
+    // meter they end scaleEdgeClearance short of it, the labels moving
+    // with them (ticks that ended on the meter's seam ran into its column
+    // and read as its marks; a tick on the label's plot side read as a
+    // minus sign, "- 15 kHz"). Ticks on the canvas's device rows; labels
+    // laid out in logical pixels.
     const double scale = m_canvasScale;
     const int lineWidth = deviceLineWidth(scale);
     const int tickWidth = devicePixels(6.0, scale);
+    const int tickEnd = std::max(
+        0, width - (m_scaleEdgeClearance > 0 ? devicePixels(m_scaleEdgeClearance, scale) : 0));
+    const int labelGap = frequencyScaleLabelGapLocked();
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
              m_iToBin, m_binsPerColumn, binHzLocked(), width, height, scale,
-             frequencyScaleTopClearanceLocked(), kFrequencyScaleLabelGap, m_textScale)) {
-        m_freqScaleWidth = std::max(
-            m_freqScaleWidth, kFrequencyScaleLabelGap + static_cast<int>(tick.labelRect.width()));
-        m_freqGrid.lines.push_back(QRect(width - tickWidth, tick.pixelY, tickWidth, lineWidth));
+             frequencyScaleTopClearanceLocked(), labelGap, m_textScale)) {
+        m_freqScaleWidth = std::max(m_freqScaleWidth, labelGap + static_cast<int>(tick.labelRect.width()));
+        m_freqGrid.lines.push_back(
+            QRect(std::max(0, tickEnd - tickWidth), tick.pixelY, std::min(tickWidth, tickEnd), lineWidth));
         m_freqGrid.images.push_back(
             {SpectrogramOverlayImage::ScaleLabel, tick.label, 0, tick.labelRect, QString()});
     }
@@ -7602,6 +7629,10 @@ int SpectrogramItem::frequencyScaleTopClearanceLocked() const {
     // corner when they reach further down, as below a viewer's title strip.
     constexpr int kTopClearance = 34;
     return std::max(kTopClearance, static_cast<int>(std::ceil(m_reservedCorner.height())) + 2);
+}
+
+int SpectrogramItem::frequencyScaleLabelGapLocked() const {
+    return kFrequencyScaleLabelGap + m_scaleEdgeClearance;
 }
 
 void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
@@ -7643,7 +7674,7 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     const int topClearance = std::max(
         frequencyScaleTopClearanceLocked(), static_cast<int>(std::ceil(m_restTopClearance)) + 2);
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
-             rowBins, bins, binHz, width, height, scale, topClearance, kFrequencyScaleLabelGap,
+             rowBins, bins, binHz, width, height, scale, topClearance, frequencyScaleLabelGapLocked(),
              m_textScale)) {
         // Each ends 6 px before its label, whose digits it ran through, and
         // so clear of the meter's seam beside it too.

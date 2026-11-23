@@ -332,6 +332,11 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // and labels at rest keep under.
     Q_PROPERTY(int restLineCount READ restLineCount WRITE setRestLineCount NOTIFY restLineCountChanged)
     Q_PROPERTY(double restTopClearance READ restTopClearance WRITE setRestTopClearance NOTIFY restTopClearanceChanged)
+    // How far clear of the plot's right edge the frequency scale's ticks
+    // end, in logical pixels, its labels moving with them: beside a column
+    // there, as the level meter's, so the ticks don't run into its edge; 0
+    // without one, the ticks then flush at the edge.
+    Q_PROPERTY(double scaleEdgeClearance READ scaleEdgeClearance WRITE setScaleEdgeClearance NOTIFY scaleEdgeClearanceChanged)
     // How much larger than the window's its text is, the crosshair's readout
     // and the scale's labels: in a viewer over the whole screen, its strip's
     // type scale (UiPalette.fullscreenTextScale), as its lane heads'; 1
@@ -467,6 +472,8 @@ public:
     void setRestLineCount(int value);
     double restTopClearance() const;
     void setRestTopClearance(double value);
+    double scaleEdgeClearance() const;
+    void setScaleEdgeClearance(double value);
     double textScale() const;
     void setTextScale(double value);
     QColor floorColor() const;
@@ -598,6 +605,7 @@ signals:
     void laneHeadBoundsChanged();
     void restLineCountChanged();
     void restTopClearanceChanged();
+    void scaleEdgeClearanceChanged();
     void textScaleChanged();
     void readoutColorsChanged();
     void floorColorChanged();
@@ -991,6 +999,9 @@ private:
     // How far below the lane's top the frequency scale's labels start, in
     // logical pixels.
     int frequencyScaleTopClearanceLocked() const;
+    // The logical pixels from the plot's right edge to a frequency label's
+    // end: its tick's 6 px and gaps, past scaleEdgeClearance.
+    int frequencyScaleLabelGapLocked() const;
     // The lane at rest, without columns: faint lines across it, evenly
     // spaced, or with the scale shown at each of its ticks, where a session
     // at the analysis's settings and the lane's rate will put them, and
@@ -1586,6 +1597,8 @@ private:
     QRectF m_laneHeadBounds;
     int m_restLineCount{3};
     double m_restTopClearance{0.0};
+    // scaleEdgeClearance, whole logical pixels.
+    int m_scaleEdgeClearance{0};
     // textScale, under the state mutex.
     double m_textScale{1.0};
     // UiPalette's spectrogramPlot plates, until QML sets them.

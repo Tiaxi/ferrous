@@ -628,7 +628,10 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(sameColor(colorOf(waveform, "plotStrip"), view));
     QVERIFY(sameColor(colorOf(waveform, "meterSeam"), view));
     // The waveform's meter in the waveform's colour: 35 % toward the view,
-    // or by 5 % steps less, the most that is 3:1 on the trough; the trough
+    // or by 5 % steps less, the most that is 3:1 on the trough, 4.4:1 in a
+    // light theme, where at 3:1 the lit ladder averaged 1.8:1 against the
+    // unlit one and read as a hatch continuing the queue's scrollbar
+    // (H27); the trough
     // a step off the view that frames the bar, #2b2d2f in dark and #e8e9ea
     // in light (the text at 6 %, 1.2:1, did not show); the marks the text
     // over the trough at 4:1, as are the spectrogram's in white (at 30 %
@@ -639,11 +642,13 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         const QColor wave = colorOf(tokens, "paneWave");
         QVERIFY(sameColor(colorOf(waveform, "meterTrough"),
                           fromHex(dark ? QStringLiteral("#2b2d2f") : QStringLiteral("#e8e9ea"))));
+        const double rungRatio = dark ? 3.0 : 4.4;
         double amount = 0.35;
-        while (amount > 0.01 && contrastRatio(mixed(wave, view, amount), colorOf(waveform, "meterTrough")) < 3.0) {
+        while (amount > 0.01
+               && contrastRatio(mixed(wave, view, amount), colorOf(waveform, "meterTrough")) < rungRatio) {
             amount -= 0.05;
         }
-        QVERIFY2(amount >= 0.2, qPrintable(QString::number(amount)));
+        QVERIFY2(amount >= (dark ? 0.2 : 0.1), qPrintable(QString::number(amount)));
         QVERIFY2(channelDistance(colorOf(waveform, "meterFill"), mixed(wave, view, amount)) <= 1,
                  qPrintable(colorOf(waveform, "meterFill").name()));
         // Its rungs 3:1 on their trough, as drawn on the view.
@@ -660,9 +665,32 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
             QVERIFY2(unlitRungs >= 1.3 && unlitRungs < 1.45,
                      qPrintable(describeContrast(QStringLiteral("unlit rungs"), unlit, plotTrough)));
             QVERIFY(contrastRatio(colorOf(plot, "meterFill"), plotTrough) > unlitRungs + 1.0);
+            // The meter's keyline, its own edge beside the plot's seam: 3:1
+            // on the trough, a step under the marks, so the column reads as
+            // an instrument beside the plot rather than its continuation
+            // (H27: the waveform's tips and the kHz ticks ran into it).
+            const QColor keyline = colorOf(plot, "meterKeyline");
+            QCOMPARE(keyline.alphaF(), 1.0f);
+            const double edge = contrastRatio(keyline, plotTrough);
+            QVERIFY2(edge >= 3.0 && edge < 3.4 && edge < marks,
+                     qPrintable(describeContrast(QStringLiteral("keyline"), keyline, plotTrough)));
         }
-        QVERIFY2(contrastRatio(colorOf(waveform, "meterFill"), trough) >= 3.0,
+        // On the waveform, in the waveform's hue, as its rungs are, not the
+        // queue scrollbar's grey; on the spectrogram, white as its marks.
+        QVERIFY2(std::abs(colorOf(waveform, "meterKeyline").hslHue() - wave.hslHue()) <= 6,
+                 qPrintable(colorOf(waveform, "meterKeyline").name() + QStringLiteral(" vs ") + wave.name()));
+        QVERIFY(sameColor(colorOf(media, "meterKeyline"), colorOf(spectrogram, "meterKeyline")));
+        QVERIFY2(contrastRatio(colorOf(waveform, "meterFill"), trough) >= rungRatio,
                  qPrintable(describeContrast(QStringLiteral("rungs on the trough"), colorOf(waveform, "meterFill"), trough)));
+        // In light, the lit ladder as seen, its 3 px rungs and 1 px gaps on
+        // a 4 px pitch, at least 2.3:1 against the unlit ladder seen alike
+        // (it was 1.8:1), so the column reads as a level and not as a hatch.
+        if (!dark) {
+            const QColor unlit = colorOf(waveform, "meterUnlit");
+            const auto seen = [&](const QColor &rung) { return mixed(rung, trough, 0.25); };
+            const double lit = contrastRatio(seen(colorOf(waveform, "meterFill")), seen(unlit));
+            QVERIFY2(lit >= 2.3, qPrintable(QString::number(lit)));
+        }
         // The pane's waveform: the seek bar's in light; in dark a quieter
         // tone of the same blue, #70a9c7, some 7:1 on the view rather than
         // the seek bar's 13:1 (#87bad4, 8.6:1, was still the dark window's

@@ -526,6 +526,9 @@ Item {
                     readoutTextColor: root.uiPalette.spectrogramPlot.plotText
                     textScale: root.textScale
                     gridEnabled: root.uiBridge.showSpectrogramScale
+                    // Beside the meter's column, the kHz ticks end 3 px
+                    // clear of its edge.
+                    scaleEdgeClearance: root.plotWidth < root.width ? 3 : 0
                     // At rest, the scale's lines where a session will put
                     // its ticks.
                     analysisFftSize: root.uiBridge.fftSize || 0

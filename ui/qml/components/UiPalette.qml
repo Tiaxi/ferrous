@@ -339,6 +339,11 @@ QtObject {
         required property color meterPeak
         required property color meterClipOff
         required property color meterTick
+        // The meter's own edge: a 1 px keyline down the column beside the
+        // plot's seam, 3:1 on the trough, so the meter reads as an
+        // instrument of its own beside the plot (with the seam alone the
+        // waveform's tips and the kHz ticks ran into its column).
+        required property color meterKeyline
         // The ladder's rungs above the level, unlit: a step off the trough,
         // in the fill's hue.
         required property color meterUnlit
@@ -437,6 +442,8 @@ QtObject {
         // rungs' 3.2:1, so the references read at a glance beside them (at
         // 40 % they were 2.4:1 and receded behind the ladder, H26).
         meterTick: root._drawnAt(Qt.rgba(1, 1, 1, 1), spectrogramColors.meterTrough, 4)
+        // White as the marks are, over the violet trough: a muted lavender.
+        meterKeyline: root._drawnAt(Qt.rgba(1, 1, 1, 1), spectrogramColors.meterTrough, 3)
         meterUnlit: root._drawnAt(spectrogramColors.meterFill, spectrogramColors.meterTrough, 1.3)
         // The floor, and on it marks in white 20 %, #433858: a step over
         // the rest lines' 11 %, as a mark a few pixels long needs more
@@ -476,13 +483,17 @@ QtObject {
         // instrument rather than as a piece of the queue's scrollbar above
         // it, whose greys it had: the waveform's colour mixed about 35 %
         // toward the view, less where that would be under 3:1 on the
-        // trough (no seam across its top: under the queue's seam it made
+        // trough, or in a light theme under 4.4:1 (#4c6f82, 15 %: at 3:1
+        // the rungs and their gaps averaged 1.8:1 against the unlit ladder
+        // and the lit column read as a hatch continuing the queue's
+        // scrollbar, H27) (no seam across its top: under the queue's seam it made
         // one 2 px thick over the meter's column). From the pane's waveform
         // colour, so it stays the plot's own. The trough frames the body,
         // a step off the view, so the column reads as an instrument and not
         // as the waveform's tail (at 1.2:1 it did not show).
         meterTrough: root.themeIsDark ? "#2b2d2f" : "#e8e9ea"
-        meterFill: root._waveformMeterFill(ColorUtils.drawnOver(waveformColors.meterTrough, root.view))
+        meterFill: root._waveformMeterFill(ColorUtils.drawnOver(waveformColors.meterTrough, root.view),
+                                           root.themeIsDark ? 3 : 4.4)
         meterSeam: root.view
         meterPeak: ColorUtils.withAlpha(root.text, 0.95)
         // The unlit clip lamp, over the trough: in a light theme text at
@@ -493,6 +504,9 @@ QtObject {
         // step over the rungs' 3:1 (at 30 % they were 1.8:1 in a light
         // theme and all but vanished, H26).
         meterTick: root._drawnAt(root.text, ColorUtils.drawnOver(waveformColors.meterTrough, root.view), 4)
+        // In the waveform's hue, as the rungs are, so the edge is the
+        // meter's and not the queue scrollbar's grey.
+        meterKeyline: root._drawnAt(root.paneWave, ColorUtils.drawnOver(waveformColors.meterTrough, root.view), 3)
         meterUnlit: root._drawnAt(waveformColors.meterFill,
                                   ColorUtils.drawnOver(waveformColors.meterTrough, root.view), 1.3)
         // The view, and on it marks a step over the waveform's rest lines
@@ -509,11 +523,11 @@ QtObject {
     }
 
     // The waveform's colour toward the view: 35 %, or by 5 % steps less,
-    // the most of it that is 3:1 on `trough`.
-    function _waveformMeterFill(trough) {
+    // the most of it that is `ratio`:1 on `trough`.
+    function _waveformMeterFill(trough, ratio) {
         for (let amount = 0.35; amount > 0; amount -= 0.05) {
             const fill = ColorUtils.mixColor(root.paneWave, root.view, amount)
-            if (ColorUtils.contrastRatio(fill, trough) >= 3)
+            if (ColorUtils.contrastRatio(fill, trough) >= ratio)
                 return fill
         }
         return root.paneWave
@@ -549,6 +563,7 @@ QtObject {
         meterPeak: spectrogramColors.meterPeak
         meterClipOff: spectrogramColors.meterClipOff
         meterTick: spectrogramColors.meterTick
+        meterKeyline: spectrogramColors.meterKeyline
         meterUnlit: spectrogramColors.meterUnlit
         meterRestTrough: spectrogramColors.meterRestTrough
         meterRestTick: spectrogramColors.meterRestTick
