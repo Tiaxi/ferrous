@@ -60,6 +60,7 @@ private slots:
     void fullscreenVisualizationStripHoldsTheModeSwitch();
     void viewerButtonsRingOnlyForTheKeyboard_data();
     void viewerButtonsRingOnlyForTheKeyboard();
+    void albumArtViewerClickedDetailsLetTheControlsHide();
     void viewerCornerPlateClearsTheLevelMeter_data();
     void viewerCornerPlateClearsTheLevelMeter();
     void viewerResetIsTheSameGlyphWindowedAndInTheStrip();
@@ -3416,6 +3417,72 @@ void TransportInputSmokeTest::viewerButtonsRingOnlyForTheKeyboard() {
         window->requestActivate();
         QVERIFY(QTest::qWaitForWindowActive(window));
     }
+}
+
+// In the album art viewer in the window, a click on Image Details, which
+// takes the focus for the mouse, doesn't hold its controls: they hide after
+// the pointer rests, as the visualization viewer's do (they stayed for as
+// long as the button had the focus). The keyboard's focus on it still holds
+// them.
+void TransportInputSmokeTest::albumArtViewerClickedDetailsLetTheControlsHide() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("albumArtFullscreenControlsAutoHide"));
+    auto *art = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge && viewer && autoHide && art);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("viewerFullscreenMode", 0);
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTRY_COMPARE(art->property("imageStatus").toInt(), 1);
+    const QPoint onArt = sceneRectOf(art).center().toPoint();
+    QTest::mouseMove(window, onArt + QPoint(1, 1));
+    QTest::mouseMove(window, onArt);
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    QQuickItem *details = nullptr;
+    QTRY_VERIFY((details = visibleItemNamed(window, QStringLiteral("albumArtPopupInfoButton"))) != nullptr);
+
+    // A click on Image Details: its focus is the mouse's, and the controls
+    // hide once the pointer rests.
+    const QPoint inside = centerInWindow(details);
+    QTest::mouseMove(window, inside);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, inside);
+    QTRY_VERIFY(details->hasActiveFocus());
+    QCOMPARE(details->property("focusReason").toInt(), int(Qt::MouseFocusReason));
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+
+    // Back, and the keyboard on it: they stay while it has the focus.
+    autoHide->setProperty("hideDelay", 600000);
+    QTest::mouseMove(window, onArt + QPoint(1, 1));
+    QTest::mouseMove(window, onArt);
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    for (int press = 0; press < 12 && !(details->hasActiveFocus()
+             && details->property("focusReason").toInt() == int(Qt::TabFocusReason)); ++press) {
+        QTest::keyClick(window, Qt::Key_Tab);
+    }
+    QVERIFY(details->hasActiveFocus());
+    QCOMPARE(details->property("focusReason").toInt(), int(Qt::TabFocusReason));
+    QTRY_VERIFY(autoHide->property("held").toBool());
+    autoHide->setProperty("hideDelay", 1);
+    QTest::qWait(100);
+    QVERIFY(autoHide->property("controlsVisible").toBool());
+
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
 
 void TransportInputSmokeTest::viewerCornerPlateClearsTheLevelMeter_data() {
