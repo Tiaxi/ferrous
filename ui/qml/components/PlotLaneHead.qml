@@ -183,6 +183,7 @@ Item {
 
         Components.PlotToolButton {
             id: muteButton
+            plate: buttons
             objectName: "plotLaneMuteButton"
             plotColors: root.plotColors
             uiPalette: root.uiPalette
@@ -205,6 +206,7 @@ Item {
 
         Components.PlotToolButton {
             id: soloButton
+            plate: buttons
             objectName: "plotLaneSoloButton"
             plotColors: root.plotColors
             uiPalette: root.uiPalette

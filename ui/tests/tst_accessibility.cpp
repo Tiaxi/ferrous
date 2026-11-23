@@ -308,6 +308,7 @@ private:
     void checkModeSwitchSegmentsAreCheckableRadioButtons(QQuickWindow *window);
     void checkModeSwitchIconFollowsTheMode(QQuickWindow *window);
     void checkModeSwitchStatesStayApart(QQuickWindow *window, int mode);
+    void checkPlotToolTipsClearTheirPlates(QQuickWindow *window);
     void checkPlotLayerShowsThePaneStates(QQuickWindow *window);
     void checkLevelMeterReservesItsColumnAndReadsOut(QQuickWindow *window);
     void checkLaneButtonsAreTabStopsThatRevealThemselves(QQuickWindow *window);
@@ -463,7 +464,8 @@ void AccessibilityTest::modeSwitchIsTwoRadioButtons() {
     runInTurn({[&] { checkModeSwitchSegmentsAreCheckableRadioButtons(main.window); },
                [&] { checkModeSwitchIconFollowsTheMode(main.window); },
                [&] { checkModeSwitchStatesStayApart(main.window, 0); },
-               [&] { checkModeSwitchStatesStayApart(main.window, 1); }});
+               [&] { checkModeSwitchStatesStayApart(main.window, 1); },
+               [&] { checkPlotToolTipsClearTheirPlates(main.window); }});
 }
 
 // The plot layer's messages before and during a track, and its level
@@ -4383,9 +4385,11 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
         QVERIFY2(contrastRatio(drawn, plate) >= 1.4,
                  qPrintable(QStringLiteral("%1 on %2").arg(drawn.name(), plate.name())));
     }
-    // The chosen one's 1 px edge, inside it, at 3:1 or more on the plate
-    // and on its fill, as drawn (the fill alone was 1.4 to 1.7:1), in both
-    // modes' plot colours; on a light plate the fill, 7:1 on the plate, is
+    // The chosen one's 1 px edge, inside it, as drawn, in both modes' plot
+    // colours: on a dark plate a quiet highlight over a fill that is 3:1 on
+    // the plate and carries the choice (the fill alone was 1.4 to 1.7:1
+    // once; an edge 3:1 on the fuller fill came to a near-white 10:1 wire
+    // box on the plate); on a light plate the fill, 7:1 on the plate, is
     // its own edge.
     const auto edgeProblem = [&](QQuickItem *chosen, QQuickItem *other) -> QString {
         QQuickItem *edge = chosen->findChild<QQuickItem *>(QStringLiteral("plotToolButtonCheckedEdge"));
@@ -4405,7 +4409,8 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
             }
             return {};
         }
-        if (contrastRatio(line, plate) < 3.0 || contrastRatio(line, fill) < 3.0) {
+        if (contrastRatio(fill, plate) < 3.0 || contrastRatio(line, plate) > 4.5
+            || contrastRatio(line, fill) < 1.15 || contrastRatio(line, fill) > 1.4) {
             return QStringLiteral("edge %1 on plate %2 and fill %3").arg(line.name(), plate.name(), fill.name());
         }
         return {};
@@ -4438,6 +4443,57 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
 // the chosen one's plate. On both plots; in both Breeze themes,
 // UiFoundationsTest's plotSegmentHoverStaysUnderTheChosenPlate and
 // plotToolButtonDrawsCheckedAndFocusApart draw the hover and the ring.
+// A plot tool button's tooltip stands above its plate, the style's 3 px
+// clear of the plate's 1 px outer edge: above the button alone, it ran over
+// the plate's top edge (the mode switch's and a lane's Mute and Solo,
+// H27). Every plate's buttons know their plate.
+void AccessibilityTest::checkPlotToolTipsClearTheirPlates(QQuickWindow *window) {
+    int buttonCount = 0;
+    for (const QString &name : {QStringLiteral("plotLaneMuteButton"), QStringLiteral("plotLaneSoloButton"),
+                                QStringLiteral("plotZoomResetButton"), QStringLiteral("visualizationModeButton0"),
+                                QStringLiteral("visualizationModeButton1")}) {
+        for (QQuickItem *button : itemsNamed(window->contentItem(), name)) {
+            QQuickItem *buttonPlate = qvariant_cast<QQuickItem *>(button->property("plate"));
+            QVERIFY2(buttonPlate != nullptr && button->parentItem() != nullptr
+                         && button->parentItem()->parentItem() == buttonPlate,
+                     qPrintable(name));
+            QVERIFY2(button->property("plateEdgeAbove").toReal() >= 2.0, qPrintable(name));
+            ++buttonCount;
+        }
+    }
+    QVERIFY2(buttonCount >= 4, qPrintable(QString::number(buttonCount)));
+
+    QQuickItem *plate = visibleItemNamed(window, QStringLiteral("visualizationModeSwitch"));
+    QQuickItem *button = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
+    QVERIFY(plate != nullptr && button != nullptr);
+    QObject *toolTip = button->findChild<QObject *>(QStringLiteral("plotToolButtonToolTip"));
+    QVERIFY(toolTip != nullptr);
+    // The other one with the keyboard's focus.
+    QVERIFY(tabTo(window, visibleItemNamed(window, QStringLiteral("visualizationModeButton0"))));
+    const QPoint center = button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint();
+    QTest::mouseMove(window, center + QPoint(0, 1));
+    QTest::mouseMove(window, center);
+    QTRY_VERIFY(button->property("hovered").toBool());
+    QTRY_VERIFY(toolTip->property("opened").toBool());
+    // One tooltip at a time: the other one, which may have the keyboard's
+    // focus, shows none while the pointer is on this one.
+    QQuickItem *otherButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
+    QVERIFY(otherButton != nullptr);
+    QObject *otherToolTip = otherButton->findChild<QObject *>(QStringLiteral("plotToolButtonToolTip"));
+    QVERIFY(otherToolTip != nullptr && !otherToolTip->property("visible").toBool());
+    auto *background = qvariant_cast<QQuickItem *>(toolTip->property("background"));
+    QVERIFY(background != nullptr && background->parentItem() != nullptr);
+    QQuickItem *popupItem = background->parentItem();
+    const QRectF tipRect = popupItem->mapRectToScene(QRectF(0, 0, popupItem->width(), popupItem->height()));
+    const QRectF plateRect = plate->mapRectToScene(QRectF(0, 0, plate->width(), plate->height()));
+    // The plate's edge is the row above its fill.
+    const qreal clearance = (plateRect.top() - 1) - tipRect.bottom();
+    QVERIFY2(clearance >= 2.5 && clearance <= 4.5,
+             qPrintable(QStringLiteral("tooltip bottom %1, plate edge %2").arg(tipRect.bottom()).arg(plateRect.top() - 1)));
+    QTest::mouseMove(window, QPoint(5, 5));
+    QTRY_VERIFY(!toolTip->property("visible").toBool());
+}
+
 void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int mode) {
     QObject *tokens = qvariant_cast<QObject *>(window->property("uiPalette"));
     QVERIFY(tokens != nullptr);
