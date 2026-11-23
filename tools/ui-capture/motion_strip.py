@@ -692,8 +692,8 @@ def _ancestors(key, keys):
 
 def text_peak(tracks, segs, keys=None):
     """the text overlap as an amount, not a thresholded duration: during each transition, the largest opacity
-    two text items in the same place show at once (min of the two effective opacities: each item's own times its
-    tracked ancestors', e.g. a fading outgoing layer), one of them mid-fade and the two not fading as one layer,
+    two text items in the same place show at once (min of the two effective opacities, as the trace records them:
+    each item's own times its ancestors', e.g. a fading outgoing layer), one of them mid-fade and the two not fading as one layer,
     both in the same layer. Only what is drawn counts: each item's rect is cut by its tracked ancestors' rects
     (a clip window wiping it), and an item never pairs with its own ancestor or descendant (a line and the elision
     tail drawn inside it are one line). Returns dict(peak, t, ops, names, ms): ms = how long any pair stays at or
@@ -712,10 +712,10 @@ def text_peak(tracks, segs, keys=None):
         return same if len(same) == 1 else grp
 
     def eff(k, m):
-        v = opac(tracks[k], m)
-        for grp in anc[k]:
-            v *= max(opac(tracks[a_], m) for a_ in chosen(k, grp))
-        return v
+        # (the trace records each item's effective opacity, its own times its ancestors' (shotprobe effOpacity):
+        # multiplying by the ancestors again counted a fading layer twice, so a cross-fade's two titles at .51/.22
+        # and .20/.42 read as a peak of .04 (h24's double print went unreported))
+        return opac(tracks[k], m)
 
     def visible(k, m):
         x0, y0, w0, h0 = at(cand[k]["pts"], cand[k]["rects"], m)
