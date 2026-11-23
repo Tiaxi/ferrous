@@ -714,6 +714,8 @@ private slots:
     void editTagsDetailsHasAGlyphAsItsPeers();
     void editTagsDetailsFollowsItsFailure_data();
     void editTagsDetailsFollowsItsFailure();
+    void editTagsSummaryNamesTheChangedFields_data();
+    void editTagsSummaryNamesTheChangedFields();
     void editTagsNumberRevertFollowsItsHeader_data();
     void editTagsNumberRevertFollowsItsHeader();
     void editTagsWordsItsWarningsAlike();
@@ -7161,6 +7163,89 @@ void UiDialogsTest::editTagsDetailsFollowsItsFailure() {
     QCOMPARE(sceneRect(save), saveAt);
     QCOMPARE(sceneRect(cancel), cancelAt);
     QCOMPARE(status->property("font").value<QFont>().pointSizeF(), palette->property("smallPointSize").toReal());
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsSummaryNamesTheChangedFields_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000;
+    QTest::newRow("10 pt, 1600 px") << 10.0 << 1600;
+    QTest::newRow("24 pt, 1000 px") << 24.0 << 1000;
+    QTest::newRow("24 pt, 1600 px") << 24.0 << 1600;
+}
+
+// Under a batch edit, the footer names the fields that changed, by the
+// form's labels and in its order, a total in its number's ("5 fields
+// changed." named none, and some were out of the table's view); past four,
+// the first three and how many more. It takes two lines where one is too
+// short, and Save and Cancel stay where they are as it grows.
+void UiDialogsTest::editTagsSummaryNamesTheChangedFields() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    TagEditorController &editor = main.editor;
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfAnAlbum(12));
+    QVERIFY(tags != nullptr);
+    editor.selectAllRows();
+    QQuickItem *status = visibleNamed(tags, QStringLiteral("tagEditorStatusLabel"));
+    QQuickItem *save = visibleNamed(tags, QStringLiteral("tagEditorSaveButton"));
+    QQuickItem *cancel = visibleNamed(tags, QStringLiteral("tagEditorCancelButton"));
+    QVERIFY(status && save && cancel);
+    QTRY_COMPARE(status->property("text").toString(), QStringLiteral("12 files selected."));
+    QTRY_VERIFY(!layoutPending(save) && !layoutPending(status));
+    const QRectF saveAt = sceneRect(save);
+    const QRectF cancelAt = sceneRect(cancel);
+    // One field: its old value.
+    editor.applyBulkField(QStringLiteral("discNo"), QStringLiteral("1"));
+    QTRY_COMPARE(status->property("text").toString(), QStringLiteral("12 files selected. Disc changed."));
+    // A number and its total are their row's: "Track", once.
+    editor.applyBulkField(QStringLiteral("totalDiscs"), QStringLiteral("2"));
+    QTRY_COMPARE(status->property("text").toString(), QStringLiteral("12 files selected. Changed: Disc."));
+    editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
+    editor.applyBulkField(QStringLiteral("trackNo"), QStringLiteral("1"));
+    editor.applyBulkField(QStringLiteral("totalTracks"), QStringLiteral("12"));
+    QTRY_COMPARE(status->property("text").toString(),
+                 QStringLiteral("12 files selected. Changed: Title, Track, Disc."));
+    // In the form's order, as the form labels them.
+    editor.applyBulkField(QStringLiteral("albumArtist"), QStringLiteral("Various"));
+    QTRY_COMPARE(status->property("text").toString(),
+                 QStringLiteral("12 files selected. Changed: Title, Album artist, Track, Disc."));
+    editor.applyBulkField(QStringLiteral("genre"), QStringLiteral("Ambient"));
+    QTRY_COMPARE(status->property("text").toString(),
+                 QStringLiteral("12 files selected. Changed: Title, Album artist, Genre and 2 more."));
+    editor.applyBulkField(QStringLiteral("comment"), QStringLiteral("Checked"));
+    QTRY_COMPARE(status->property("text").toString(),
+                 QStringLiteral("12 files selected. Changed: Title, Album artist, Genre and 3 more."));
+    QTRY_VERIFY(!layoutPending(save) && !layoutPending(status));
+    QString at = describeItem(status) + QStringLiteral(" in a window %1 wide").arg(tags->width());
+    QVERIFY2(!status->property("truncated").toBool(), qPrintable(at));
+    QVERIFY2(status->property("lineCount").toInt() == 1, qPrintable(at));
+    QCOMPARE(sceneRect(save), saveAt);
+    QCOMPARE(sceneRect(cancel), cancelAt);
+    // In a window too narrow for one line: two, whole where they hold it,
+    // and the buttons still.
+    tags->resize(qCeil(tags->minimumWidth()), tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), qreal(qCeil(tags->minimumWidth())));
+    QTRY_VERIFY(!layoutPending(save) && !layoutPending(status));
+    for (const char *field : {"comment", "genre", "albumArtist", "title", "trackNo", "totalTracks", "totalDiscs"}) {
+        editor.revertBulkField(QString::fromLatin1(field));
+    }
+    QTRY_COMPARE(status->property("text").toString(), QStringLiteral("12 files selected. Disc changed."));
+    QTRY_VERIFY(!layoutPending(save) && !layoutPending(status));
+    const QRectF narrowSaveAt = sceneRect(save);
+    editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
+    editor.applyBulkField(QStringLiteral("trackNo"), QStringLiteral("1"));
+    editor.applyBulkField(QStringLiteral("totalDiscs"), QStringLiteral("2"));
+    QTRY_COMPARE(status->property("text").toString(),
+                 QStringLiteral("12 files selected. Changed: Title, Track, Disc."));
+    QTRY_VERIFY(!layoutPending(save) && !layoutPending(status));
+    at = describeItem(status) + QStringLiteral(" in a window %1 wide").arg(tags->width());
+    QVERIFY2(status->property("lineCount").toInt() <= 2, qPrintable(at));
+    QVERIFY2(status->property("lineCount").toInt() == 2 || !status->property("truncated").toBool(), qPrintable(at));
+    QCOMPARE(sceneRect(save), narrowSaveAt);
     QVERIFY(closeTagEditor(main));
 }
 
