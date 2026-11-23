@@ -1457,6 +1457,20 @@ private:
         qint64 shownRight{-1};
     };
     IdleView m_idleView;
+    // A centered frame that showed its canvas as its view's: the canvas's
+    // first column, and where the view placed the playhead, the time scale,
+    // the marker and the crosshair. A jump the canvas cannot follow keeps
+    // them there until the new view's canvas lands (see updatePaintNode).
+    struct ShownFrame {
+        bool valid{false};
+        qint64 canvasLeft{0};
+        quint64 trackToken{0};
+        qint64 displayLeft{0};
+        double drawX{0.0};
+        bool showPlayhead{false};
+        QRectF playheadRect;
+    };
+    ShownFrame m_shownFrame;
     // Wakes playback frames until then; see schedulePlaybackFrame.
     QPointer<PlaybackFrameScheduler> m_frameScheduler;
     // How many playback frames the item has asked for, for tests.
