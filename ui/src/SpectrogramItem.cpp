@@ -1468,6 +1468,9 @@ QFont scaleLabelFont(double textScale) {
 // A scale label's outline, around its text on every side.
 constexpr int kScaleLabelOutline = 1;
 
+// The logical pixels between a rest line and its scale label's outline.
+constexpr double kRestLineLabelGap = 6.0;
+
 // The logical size of a scale label of `text` at `textScale`, with its
 // outline.
 QSize scaleLabelSize(const QString &text, double textScale) {
@@ -7650,13 +7653,13 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     // With the scale's 2 px under them, as the corner's lane leaves.
     const int topClearance = std::max(
         frequencyScaleTopClearanceLocked(), static_cast<int>(std::ceil(m_restTopClearance)) + 2);
-    // Beside the meter they end where their labels do, clear of its seam.
-    const int end = m_scaleEndInset > 0.0
-        ? std::max(0, width - devicePixels(static_cast<double>(frequencyScaleLabelGapLocked()), scale))
-        : width;
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
              rowBins, bins, binHz, width, height, scale, topClearance, frequencyScaleLabelGapLocked(),
              m_textScale)) {
+        // Each ends 6 px before its label, whose digits it ran through, and
+        // so clear of the meter's seam beside it too.
+        const int end = std::max(
+            0, static_cast<int>(std::floor((tick.labelRect.left() - kRestLineLabelGap) * scale + 1e-6)));
         m_restGrid.lines.push_back(QRect(0, tick.pixelY, end, lineWidth));
         m_restGrid.images.push_back(
             {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});

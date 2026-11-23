@@ -3454,11 +3454,12 @@ void SpectrogramSmokeTest::spectrogramScaleEndsClearOfTheMeter() {
     }
     QCOMPARE(double(scaleWidth), 8.0 + widest);
     QVERIFY(!rest.images.isEmpty());
-    for (const SpectrogramOverlayImage &label : std::as_const(rest.images)) {
-        QCOMPARE(label.rect.right(), 592.0);
-    }
-    for (const QRect &line : std::as_const(rest.lines)) {
-        QCOMPARE(line.x() + line.width(), qRound(592 * scale));
+    QCOMPARE(rest.lines.size(), rest.images.size());
+    for (qsizetype index = 0; index < rest.images.size(); ++index) {
+        const QRectF label = rest.images.at(index).rect;
+        QCOMPARE(label.right(), 592.0);
+        // Each line ends 6 px before its label, and so clear of the seam.
+        QCOMPARE(rest.lines.at(index).x() + rest.lines.at(index).width(), qRound((label.left() - 6) * scale));
     }
 
     item.setScaleEndInset(0.0);
@@ -3529,10 +3530,12 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsItsScaleFaintly() {
     QVERIFY(rest.valid);
     QVERIFY(!rest.lines.isEmpty());
     QCOMPARE(rest.images.size(), rest.lines.size());
-    for (const QRect &line : std::as_const(rest.lines)) {
-        // Across the lane.
+    for (qsizetype index = 0; index < rest.lines.size(); ++index) {
+        // Across the lane, up to 6 px before its label, whose digits a line
+        // to the edge ran through.
+        const QRect line = rest.lines.at(index);
         QCOMPARE(line.x(), 0);
-        QCOMPARE(line.width(), width);
+        QCOMPARE(line.width(), qRound((rest.images.at(index).rect.left() - 6) * scale));
     }
     for (const SpectrogramOverlayImage &label : std::as_const(rest.images)) {
         QCOMPARE(label.kind, SpectrogramOverlayImage::RestScaleLabel);
@@ -3573,7 +3576,8 @@ void SpectrogramSmokeTest::spectrogramAtRestHasWholeRegularLines_data() {
 // given, evenly spaced, each the lane's whole width, none cut for a plate in
 // the corner (cut beside the plates, at a length of its own per lane, the
 // first line read as a broken one). With the scale shown, its ticks' lines,
-// whole too, under the band the pane's plates take in any lane.
+// each to 6 px before its label, under the band the pane's plates take in
+// any lane.
 void SpectrogramSmokeTest::spectrogramAtRestHasWholeRegularLines() {
     QFETCH(double, scale);
     SpectrogramItem item;
@@ -3621,7 +3625,8 @@ void SpectrogramSmokeTest::spectrogramAtRestHasWholeRegularLines() {
     for (qsizetype index = 0; index < clear.lines.size(); ++index) {
         const QRect line = clear.lines.at(index);
         QCOMPARE(line.x(), 0);
-        QCOMPARE(line.width(), width);
+        // To 6 px before its label.
+        QCOMPARE(line.width(), qRound((clear.images.at(index).rect.left() - 6) * scale));
         QVERIFY(plain.lines.contains(line));
         QVERIFY(clear.images.at(index).rect.top() >= 100.0);
     }
@@ -3742,10 +3747,19 @@ void SpectrogramSmokeTest::spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty() {
     const QColor black(0, 0, 0);
     // The rest lines, white 11 % over the black floor.
     const QColor line(28, 28, 28);
-    for (const QRect &rule : std::as_const(rest.lines)) {
+    QCOMPARE(rest.lines.size(), rest.images.size());
+    for (qsizetype index = 0; index < rest.lines.size(); ++index) {
+        const QRect rule = rest.lines.at(index);
         QCOMPARE(atRest.pixelColor(100, rule.y()), line);
         QCOMPARE(atRest.pixelColor(100, rule.y() - 3), black);
         QCOMPARE(atRest.pixelColor(100, rule.y() + 3), black);
+        // It stops 6 px before its label: the floor there (it ran to the
+        // edge, through the digits).
+        const int labelLeft = qRound(rest.images.at(index).rect.left());
+        QCOMPARE(atRest.pixelColor(labelLeft - 7, rule.y()), line);
+        for (int x = labelLeft - 6; x < labelLeft; ++x) {
+            QCOMPARE(atRest.pixelColor(x, rule.y()), black);
+        }
     }
     // The labels: plotText at 72% on black, not plotText.
     for (const SpectrogramOverlayImage &label : std::as_const(rest.images)) {
