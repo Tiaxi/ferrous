@@ -725,6 +725,8 @@ private slots:
     void editTagsPinsWhatIdentifiesARowAsItScrolls_data();
     void editTagsPinsWhatIdentifiesARowAsItScrolls();
     void editTagsTitleMeetsTheEdgeUnderAWideScrollBar();
+    void editTagsShowsAChangedDiscBesideTheTitles_data();
+    void editTagsShowsAChangedDiscBesideTheTitles();
     void editTagsDetailsHasAGlyphAsItsPeers_data();
     void editTagsDetailsHasAGlyphAsItsPeers();
     void editTagsDetailsFollowsItsFailure_data();
@@ -5498,10 +5500,15 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
         if (scrolls) {
             QTRY_VERIFY2(table->property("contentWidth").toReal() > table->width(), qPrintable(at + describeColumns()));
             for (const auto &[key, preferred, least] : giving) {
-                // Title has all the room beside # and File Name.
+                // Title has all the room beside #, File Name and Disc, which
+                // follows it, or, with too little for both, Disc's too.
                 if (key == QStringLiteral("title")) {
-                    QCOMPARE(sceneRect(named(tags, QStringLiteral("tagEditorColumn_title"))).left() + columnWidth(key),
-                             std::floor(sceneRect(table).right() - dialog->property("tableInset").toReal()));
+                    const qreal edge = std::floor(sceneRect(table).right() - dialog->property("tableInset").toReal());
+                    const qreal titleEnd =
+                        sceneRect(named(tags, QStringLiteral("tagEditorColumn_title"))).left() + columnWidth(key);
+                    const qreal disc = columnWidth(QStringLiteral("discNo"));
+                    QVERIFY2((titleEnd + disc == edge && columnWidth(key) >= 160) || titleEnd == edge,
+                             qPrintable(at + describeColumns()));
                     continue;
                 }
                 // Genre's least also holds its header beside its Revert.
@@ -5922,8 +5929,8 @@ void UiDialogsTest::editTagsTitlesCanBeCheckedBeforeSaving_data() {
 }
 
 // The new titles can be checked before Save writes them: where the table
-// scrolls sideways anyway, Title has all the room beside # and File Name,
-// to the view's edge (it stayed 190 px beside an unchanged Artist), or
+// scrolls sideways anyway, Title has all the room beside #, File Name and
+// Disc, to the view's edge (it stayed 190 px beside an unchanged Artist), or
 // about 160 px to scroll to where that room is less than its least, 100 px
 // scaled with the font. An unchanged cell that is cut gives its whole
 // value in its tooltip. An edit of no field moves a column:
@@ -5957,7 +5964,10 @@ void UiDialogsTest::editTagsTitlesCanBeCheckedBeforeSaving() {
                                 ->property("tableInset").toReal();
         const qreal left = table->width() - 2 * inset - column(QStringLiteral("trackNo"))->width()
             - column(QStringLiteral("fileName"))->width();
-        const qreal expected = left < 100 * scale ? std::min(160 * scale, table->width() - 2 * inset) : left;
+        // Disc, beside it, keeps its room where Title still has its least.
+        const qreal disc = column(QStringLiteral("discNo"))->width();
+        const qreal expected = left - disc >= 160 * scale ? left - disc
+            : left < 100 * scale ? std::min(160 * scale, table->width() - 2 * inset) : left;
         QVERIFY2(std::abs(title->width() - expected) <= 1.5,
                  qPrintable(QStringLiteral("Title %1, expected %2, room left %3").arg(title->width()).arg(expected).arg(left)));
     }
@@ -7140,18 +7150,85 @@ void UiDialogsTest::editTagsTitleMeetsTheEdgeUnderAWideScrollBar() {
     QTRY_VERIFY(!layoutPendingUnder(table));
     const qreal inset = object(main.window, QStringLiteral("tagEditorDialog"))->property("tableInset").toReal();
     const qreal edge = sceneRect(table).right();
+    // Title, then Disc beside it, which meets the view's edge.
     QQuickItem *title = named(tags, QStringLiteral("tagEditorColumn_title"));
-    QVERIFY(title != nullptr);
-    QVERIFY2(std::abs(sceneRect(title).right() - (edge - inset)) <= 1.0, qPrintable(describeItem(title)));
+    QQuickItem *disc = named(tags, QStringLiteral("tagEditorColumn_discNo"));
+    QVERIFY(title != nullptr && disc != nullptr);
+    QVERIFY2(std::abs(sceneRect(disc).left() - sceneRect(title).right()) <= 1.0, qPrintable(describeItem(disc)));
+    QVERIFY2(std::abs(sceneRect(disc).right() - (edge - inset)) <= 1.0, qPrintable(describeItem(disc)));
     for (QQuickItem *cell : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorCell_artist"))) {
         QVERIFY2(sceneRect(cell).left() + cell->property("leftPadding").toReal() >= edge - 1.0,
                  qPrintable(describeItem(cell)));
     }
     for (QQuickItem *cell : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorCell_title"))) {
         QVERIFY2(!cell->property("truncated").toBool(), qPrintable(describeItem(cell)));
+    }
+    // The text at the edge, Disc's, clear of the bar.
+    for (QQuickItem *cell : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorCell_discNo"))) {
         QVERIFY2(sceneRect(cell).right() - cell->property("rightPadding").toReal() <= edge - barWidth + 0.5,
                  qPrintable(describeItem(cell)));
     }
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsShowsAChangedDiscBesideTheTitles_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::newRow("24 pt, 1600 px") << 24.0 << 1600;
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000;
+    QTest::newRow("10 pt, 1600 px") << 10.0 << 1600;
+}
+
+// Disc follows Title, so a batch's new disc numbers are checked in the
+// view it opens with, beside the new titles, while # and File Name stay
+// pinned at the left (at 24 pt from a 1600 px window, Title took the view
+// to its edge and the changed Disc was past it). Title keeps at least its
+// least, 160 px scaled with the font.
+void UiDialogsTest::editTagsShowsAChangedDiscBesideTheTitles() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfTheBatch());
+    QVERIFY(tags != nullptr);
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    main.editor.selectAllRows();
+    for (int i = 0; i < retitledBatch().size(); ++i) {
+        main.editor.setCell(i, QStringLiteral("title"), retitledBatch().at(i).second);
+        main.editor.setCell(i, QStringLiteral("discNo"), i < 6 ? QStringLiteral("1") : QStringLiteral("2"));
+    }
+    main.editor.notifyRowMutation();
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    QCOMPARE(table->property("contentX").toReal(), 0.0);
+    QObject *dialog = object(main.window, QStringLiteral("tagEditorDialog"));
+    const QStringList order = evaluate(dialog, QStringLiteral("tableColumns.map(c => c.key)")).toStringList();
+    QCOMPARE(order.mid(0, 4), (QStringList{QStringLiteral("trackNo"), QStringLiteral("fileName"),
+                                          QStringLiteral("title"), QStringLiteral("discNo")}));
+    QCOMPARE(dialog->property("pinnedColumnCount").toInt(), 2);
+    QQuickItem *title = named(tags, QStringLiteral("tagEditorColumn_title"));
+    QQuickItem *disc = named(tags, QStringLiteral("tagEditorColumn_discNo"));
+    QVERIFY(title != nullptr && disc != nullptr);
+    const QString at = describeItem(title) + describeItem(disc) + describeItem(table);
+    QVERIFY2(std::abs(sceneRect(disc).left() - sceneRect(title).right()) <= 1.0, qPrintable(at));
+    // Disc whole in the opening view, Title at its least or wider.
+    QVERIFY2(sceneRect(disc).right() <= sceneRect(table).right() + 0.5, qPrintable(at));
+    QVERIFY2(title->width() >= std::round(160 * std::max(1.0, pointSize / 10)) - 0.5, qPrintable(at));
+    if (table->property("contentWidth").toReal() > table->width() + 0.5) {
+        QVERIFY2(dialog->property("pinsColumns").toBool(), qPrintable(at));
+    }
+    // Each new disc number in view and whole, on its title's row.
+    int shown = 0;
+    for (QQuickItem *cell : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorCell_discNo"))) {
+        if (!cell->isVisible() || sceneRect(cell).bottom() > sceneRect(table).bottom()) {
+            continue;
+        }
+        ++shown;
+        QVERIFY2(!cell->property("truncated").toBool(), qPrintable(describeItem(cell)));
+        QVERIFY2(sceneRect(cell).right() <= sceneRect(table).right() + 0.5, qPrintable(describeItem(cell)));
+    }
+    QVERIFY(shown > 0);
     QVERIFY(closeTagEditor(main));
 }
 
@@ -9098,7 +9175,11 @@ void UiDialogsTest::editTagsColumnsHoldTheirValuesBeforeTheTableScrolls() {
             const qreal left = table->width() - 16 - column(QStringLiteral("trackNo"))->width()
                 - column(QStringLiteral("fileName"))->width();
             QVERIFY(left >= 150);
-            QVERIFY2(std::abs(width - left) <= 2, qPrintable(at));
+            // All the room beside # and File Name but Disc's, which follows
+            // it, where that leaves Title its least.
+            const qreal disc = column(QStringLiteral("discNo"))->width();
+            const qreal expected = left - disc >= 160 ? left - disc : left;
+            QVERIFY2(std::abs(width - expected) <= 2, qPrintable(at));
             continue;
         }
         // Its values whole, or as much of them as the most it holds.
