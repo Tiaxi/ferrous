@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- The transport's Play glyph, drawn for 20 px at 1x: Breeze's triangle, its corners on
-     whole pixels, 14 px tall in rows 3 to 16, a step above the 12 px of Previous and Next beside
-     it, as Breeze's 22 px glyph is above its 16 px ones. A one-colour mask, drawn in the
-     text colour. -->
+<!-- The transport's Play glyph, drawn for 20 px at 1x: a triangle with its corners on whole
+     pixels, 16 px tall in rows 2 to 17 and 16 px wide in columns 3 to 18. It weighs as much as
+     the Pause it cross-fades with, within a tenth (as tall as Pause, at 14 px, it had a third
+     less ink and read lighter and narrower), its tips a pixel past Pause's rows as a point
+     needs to look as tall as a flat edge, and it starts at Pause's left edge, so its box sits a
+     pixel right of the centre and its weight, which a triangle holds at its flat side, nearer
+     the centre. A step above the 12 px of Previous and Next beside it, as Breeze's 22 px glyph
+     is above its 16 px ones. A one-colour mask, drawn in the text colour. -->
 <svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-<path fill="#000" d="M3 3v14l14-7z"/>
+<path fill="#000" d="M3 2v16l16-8z"/>
 </svg>

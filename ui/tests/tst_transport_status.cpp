@@ -464,10 +464,13 @@ QQuickItem *glyphOf(QQuickItem *button) {
 // it as the glyph's strongest, so that how a mask is coloured doesn't count
 // (offscreen, without the desktop's platform theme, Kirigami draws a mask
 // file uncoloured, which is dark on the dark chrome); their count and the
-// rows they span, in scene pixels. None where nothing is drawn.
+// rows they span, and the columns, from the glyph's left, in scene pixels.
+// None where nothing is drawn.
 struct Ink {
     int pixels = 0;
     int height = 0;
+    int left = -1;
+    int right = -1;
 };
 
 Ink inkOf(QQuickWindow *window, QQuickItem *glyph, const QColor &chrome) {
@@ -492,6 +495,8 @@ Ink inkOf(QQuickWindow *window, QQuickItem *glyph, const QColor &chrome) {
             ink.pixels += 1;
             top = top < 0 ? i / width : top;
             bottom = i / width;
+            ink.left = ink.left < 0 ? i % width : std::min(ink.left, i % width);
+            ink.right = std::max(ink.right, i % width);
         }
     }
     ink.height = bottom - top + 1;
@@ -2002,8 +2007,11 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale_data() {
 // The transport's glyphs on one scale (Play/Pause 22, Previous and Next 16
 // and Stop 14 read as three weights): Previous, Stop, Next and the volume
 // 16 px, their ink 12 px tall, Stop's 10 px, and Play/Pause a step above at
-// 20 px, its ink 14 px tall; Stop's and Pause's ink at most 1.4 times
-// Next's, and Stop's no more than Play's. They grow
+// 20 px, Pause's ink 14 px tall; Stop's and Pause's ink at most 1.4 times
+// Next's, and Stop's no more than Play's. Play weighs as much as Pause,
+// within a tenth, its tips a pixel past Pause's rows, and sits about a
+// pixel right of Pause's centre, as a triangle needs to look centred and
+// as heavy as two bars. They grow
 // with the font on whole pixels, to at least 0.9 of its pixel size at 24 pt,
 // and are drawn at that size (Kirigami rounded a 24 pt font's 38 px glyphs
 // down to 32 px theme icons, and would draw a 20 px one at 16).
@@ -2069,10 +2077,25 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale() {
     QVERIFY(stepUntil(animations, [&] { return play->opacity() == 1.0 && !pause->isVisible(); }));
     Ink playInk;
     QTRY_VERIFY((playInk = inkOf(harness.window, play, chrome)).pixels > 0);
-    // Give or take the triangle's thin tips, at most a pixel at each end.
-    QVERIFY2(std::abs(playInk.height - inks.value(QStringLiteral("pause")).height) <= 2,
-             qPrintable(QStringLiteral("Play %1 px, Pause %2 px").arg(playInk.height)
-                            .arg(inks.value(QStringLiteral("pause")).height)));
+    const Ink pauseInk = inks.value(QStringLiteral("pause"));
+    const QString both = QStringLiteral("Play %1 px of ink in rows %2 high, columns %3 to %4; Pause %5, %6, %7 to %8")
+                             .arg(playInk.pixels).arg(playInk.height).arg(playInk.left).arg(playInk.right)
+                             .arg(pauseInk.pixels).arg(pauseInk.height).arg(pauseInk.left).arg(pauseInk.right);
+    // As heavy as Pause, within a tenth: as tall as Pause, Play had a third
+    // less ink and read lighter and narrower, so the anchor glyph changed
+    // weight with the state.
+    QVERIFY2(std::abs(playInk.pixels - pauseInk.pixels) * 10 <= pauseInk.pixels, qPrintable(both));
+    // Its tips a pixel past Pause's rows at each end, at 1x, as a point
+    // needs to look as tall as a flat edge, and no more.
+    const qreal pixel = large / 20.0;
+    QVERIFY2(playInk.height >= pauseInk.height && playInk.height <= pauseInk.height + 2 * pixel + 1, qPrintable(both));
+    // Optically centred: its ink starts where Pause's does, so it reaches
+    // further right, and its box sits right of Pause's centre by about a
+    // pixel (centred on the glyph's box, the triangle's weight, at its flat
+    // side, sat left of it, nearer Previous than Stop).
+    QCOMPARE(playInk.left, pauseInk.left);
+    const qreal offset = (playInk.left + playInk.right) / 2.0 - (pauseInk.left + pauseInk.right) / 2.0;
+    QVERIFY2(offset >= 0.25 * pixel && offset <= 1.5 * pixel, qPrintable(both));
     // Stop, a 10 px square, has no more ink than Play beside it, give or
     // take the triangle's soft edges, and less than Pause (as a 12 px square
     // it matched Pause and outweighed Play by half).
