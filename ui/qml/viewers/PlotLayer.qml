@@ -219,11 +219,12 @@ Item {
         || root.paneHovered || modeSwitch.pointerHovered || modeSwitch.focusInside
         || zoomPlate.focusInside || root.viewAutoscrolling
 
-    // As a view follows again, "Not following" leaves the plate one way,
-    // whether the row stays or fades out with it (PlotZoomPlate's
-    // notice): its text goes in the frame the view comes back in, which
-    // it would contradict, and the plate narrows to its new width.
-    // Autoscroll takes it at once, and so does a plate that doesn't show.
+    // As a view follows again, "Not following" leaves the plate as it came
+    // (PlotZoomPlate's notice): with the row staying, its text goes in the
+    // frame the view comes back in, which it would contradict, and the
+    // plate narrows to its new width; with the row fading out, it goes
+    // with the plate's fade. Autoscroll takes it at once, and so does a
+    // plate that doesn't show.
     // One state, 0 none, 1 shown, 2 leaving, set here alone: the plate's
     // two flags of it, each bound to its own of this layer's, changed one
     // after the other as it ended, and its notice showed between them
@@ -285,6 +286,7 @@ Item {
         zoomLevel: root.zoomLevel
         resetView: root.resetZoom
         notice: root._notice
+        rowStays: root.cornerWanted
         onNoticeLeft: root._notice = 0
         followShortcut: root.followShortcut
         pointerActivity: root.pointerActivity

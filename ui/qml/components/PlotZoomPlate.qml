@@ -40,15 +40,23 @@ Components.PlotPlate {
     // nothing else on it, the whole plate fades at its width, the text
     // with it (the text went in a frame while the empty plate faded on,
     // H16). A plate revealed with it comes at its width, its text fading
-    // in on the plate's reveal.
+    // in on the plate's reveal. With the corner's row fading out as it
+    // goes, as with the pointer off the pane, the notice stays on the
+    // plate and goes with its fade, at its width, on the row's one curve:
+    // the plate narrowed 15 ms ahead of the row's fade, its text gone at
+    // full opacity (H17).
     property int notice: 0
+    // Whether the corner's row stays as the notice goes, read as it starts
+    // to go.
+    property bool rowStays: true
     readonly property bool noticeShown: root.notice !== 0
     readonly property bool noticeLeaving: root.notice === 2
     signal noticeLeft()
     property string followShortcut: ""
 
     // How much of the notice is on the plate as it comes and goes, from 0
-    // to 1, and what it does: 0 neither, 1 comes, 2 goes. Its room, in
+    // to 1, and what it does: 0 neither, 1 comes, 2 goes, 3 goes with the
+    // row's fade. Its room, in
     // whole pixels: the notice's alone, or with the readout's 6 px from the
     // divider, more than its 6 px from the plate's edge.
     property real noticeLevel: 1
@@ -62,7 +70,7 @@ Components.PlotPlate {
     // its side of the divider: with no room for it, the row skips it.
     readonly property real _slot: Math.max(0, root._roomLeft - root.horizontalPadding)
     readonly property bool _noticeInRow: (root.notice === 1 && !(root._widening && root._slot <= 0))
-        || (root.notice === 2 && !root.zoomed)
+        || (root.notice === 2 && (!root.zoomed || root._motion === 3))
     // The text's and the divider's own fade, as a plate is revealed with
     // them (they stood on it in a frame as it faded in, H15).
     property real _textLevel: 1
@@ -88,14 +96,37 @@ Components.PlotPlate {
                 }
             }
         } else if (root.notice === 2) {
-            // From all of it, or from what came of it.
-            root._motion = 2
-            noticeMotion.to = 0
-            noticeMotion.start()
+            if (root.rowStays || root._motion === 1) {
+                // From all of it, or from what came of it.
+                root._leaveAlone()
+            } else {
+                root._motion = 3
+                root.noticeLevel = 1
+                root._goneWithRow()
+            }
         } else {
             root._motion = 0
             root.noticeLevel = 1
         }
+    }
+    function _leaveAlone() {
+        noticeMotion.stop()
+        root._motion = 2
+        noticeMotion.to = 0
+        noticeMotion.start()
+    }
+    // Gone with the row as it has faded out; going alone as the row comes
+    // back first.
+    function _goneWithRow() {
+        if (root._motion === 3 && (!root.available || root.revealLevel * root.fadeLevel <= 0))
+            root.noticeLeft()
+    }
+    onRevealLevelChanged: root._goneWithRow()
+    onFadeLevelChanged: root._goneWithRow()
+    onAvailableChanged: root._goneWithRow()
+    onRevealedChanged: {
+        if (root._motion === 3 && root.revealed)
+            root._leaveAlone()
     }
     NumberAnimation {
         id: noticeMotion
@@ -122,7 +153,7 @@ Components.PlotPlate {
 
     visible: root.available && (root.zoomed || root.noticeShown)
     opacity: root.revealLevel * root.fadeLevel
-        * (root._motion !== 0 && !root.zoomed ? root.noticeLevel : 1)
+        * ((root._motion === 1 || root._motion === 2) && !root.zoomed ? root.noticeLevel : 1)
     // As it grows and narrows, its fill and edge are the parts below.
     bare: root._widening || root._narrowing
     takesPointer: true
@@ -242,10 +273,11 @@ Components.PlotPlate {
     Components.FollowNotice {
         id: followNotice
         objectName: "plotFollowNotice"
-        // From the state alone: read with the plate's narrowing, which
-        // ends with the state, it showed for an instant as that ended, and
-        // its text started to come in again behind the hidden plate (H17).
-        visible: root.notice === 1 || (root.notice === 2 && !root.zoomed)
+        // From the state and the way it goes: read with the plate's
+        // narrowing, which ends with the state, it showed for an instant as
+        // that ended, and its text started to come in again behind the
+        // hidden plate (H17).
+        visible: root.notice === 1 || (root.notice === 2 && (!root.zoomed || root._motion === 3))
         width: root._widening ? root._slot : implicitWidth
         clip: root._widening
         contentShift: root._widening ? root._slot - implicitWidth : 0
