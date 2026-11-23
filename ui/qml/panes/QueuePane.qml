@@ -815,8 +815,13 @@ Rectangle {
                             visible: glyph.length > 0
                             anchors.centerIn: parent
                             // The warning at the status bar's size, the
-                            // transport's marks smaller.
-                            width: playlistRow.showsWarning ? root.warningGlyphSize : root.uiPalette.scaledSize(12)
+                            // transport's marks smaller, and the stop
+                            // square smaller again, so that its solid ink
+                            // does not outweigh the play and pause marks
+                            // (at their size it read heaviest of the three).
+                            width: playlistRow.showsWarning ? root.warningGlyphSize
+                                : glyph === "media-playback-stop" ? root.uiPalette.scaledSize(10)
+                                : root.uiPalette.scaledSize(12)
                             height: width
                             // At its size, which grows with the font
                             // (Kirigami drew the 29 px glyph of a

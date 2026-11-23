@@ -1204,6 +1204,8 @@ private slots:
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
+    void queueStopMarkWeighsNoMoreThanPause_data();
+    void queueStopMarkWeighsNoMoreThanPause();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void pressedQueueRowHasItsOwnColour();
     void queueNameKeepsTheTitleColumnsPlace_data();
@@ -5690,6 +5692,71 @@ void UiMainWindowTest::aTrackThatFailsToPlayShowsTheWarningWhileCurrent() {
     QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
     QTRY_COMPARE(queueGlyph(3), QStringLiteral("media-playback-stop"));
     QTRY_COMPARE(treeGlyphName(), QStringLiteral("media-playback-stop"));
+}
+
+void UiMainWindowTest::queueStopMarkWeighsNoMoreThanPause_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The now row's stop square is drawn smaller than its play and pause marks,
+// 10/16 of their box as the transport's Stop is of its, so that its solid
+// ink, as drawn, is no more than the pause mark's, give or take its soft
+// edges (at their size it was half again the pause mark's, the heaviest of
+// the three).
+void UiMainWindowTest::queueStopMarkWeighsNoMoreThanPause() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal(), pointSize);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queueView = named(window, "playlistView");
+    QVERIFY(bridge && queueView);
+    setQueue(bridge, sampleQueueRows(4));
+    QTRY_COMPARE(queueView->property("count").toInt(), 4);
+    bridge->setProperty("playingQueueIndex", 1);
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = viewRowAt(queueView, 1)) != nullptr);
+    QQuickItem *glyph = itemNamed(row, QStringLiteral("queueRowState"));
+    QQuickItem *cell = itemNamed(row, QStringLiteral("queueCell_indicator"));
+    QVERIFY(glyph && cell);
+
+    // The ink of the mark, as drawn: each pixel of the cell by how far it is
+    // from the row's colour, in parts of the farthest.
+    const auto inkOf = [&](const QString &state, const QString &name) {
+        bridge->setProperty("playbackState", state);
+        if (!QTest::qWaitFor([&] { return stateGlyphName(glyph) == name && glyph->opacity() == 1.0; })) {
+            return -1.0;
+        }
+        QTest::qWait(300);
+        const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal scale = window->effectiveDevicePixelRatio();
+        const QRectF area = sceneRect(cell);
+        const QColor background = image.pixelColor(QPointF(area.left() + 1, area.top() + 1).toPoint() * scale);
+        QList<int> distances;
+        for (int y = int(area.top()); y < int(area.bottom()); ++y) {
+            for (int x = int(area.left()); x < int(area.right()); ++x) {
+                distances.append(channelDistance(image.pixelColor(QPoint(x, y) * scale), background));
+            }
+        }
+        const int farthest = *std::max_element(distances.cbegin(), distances.cend());
+        double ink = 0;
+        for (const int distance : distances) {
+            ink += farthest > 0 ? double(distance) / farthest : 0.0;
+        }
+        return ink;
+    };
+    const double playing = inkOf(QStringLiteral("Playing"), QStringLiteral("media-playback-start"));
+    const double paused = inkOf(QStringLiteral("Paused"), QStringLiteral("media-playback-pause"));
+    const double stopped = inkOf(QStringLiteral("Stopped"), QStringLiteral("media-playback-stop"));
+    const QString inks = QStringLiteral("playing %1, paused %2, stopped %3").arg(playing).arg(paused).arg(stopped);
+    QVERIFY2(playing > 0 && paused > 0 && stopped > 0, qPrintable(inks));
+    QVERIFY2(stopped <= 1.05 * paused, qPrintable(inks));
+    QCOMPARE(glyph->width(), qreal(scaledSize(window, 10)));
+    QCOMPARE(glyph->height(), glyph->width());
 }
 
 void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {

@@ -1913,8 +1913,9 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale_data() {
 
 // The transport's glyphs on one scale (Play/Pause 22, Previous and Next 16
 // and Stop 14 read as three weights): Previous, Stop, Next and the volume
-// 16 px, their ink 12 px tall, and Play/Pause a step above at 20 px, its ink
-// 14 px tall; Stop's and Pause's ink at most 1.4 times Next's. They grow
+// 16 px, their ink 12 px tall, Stop's 10 px, and Play/Pause a step above at
+// 20 px, its ink 14 px tall; Stop's and Pause's ink at most 1.4 times
+// Next's, and Stop's no more than Play's. They grow
 // with the font on whole pixels, to at least 0.9 of its pixel size at 24 pt,
 // and are drawn at that size (Kirigami rounded a 24 pt font's 38 px glyphs
 // down to 32 px theme icons, and would draw a 20 px one at 16).
@@ -1942,7 +1943,7 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale() {
     const QList<Glyph> glyphs{
         {"previous", glyphOfButton("previous"), small, small * 12 / 16},
         {"pause", pause, large, large * 14 / 20},
-        {"stop", glyphOfButton("stop"), small, small * 12 / 16},
+        {"stop", glyphOfButton("stop"), small, small * 10 / 16},
         {"next", glyphOfButton("next"), small, small * 12 / 16},
         {"volume", harness.item(QStringLiteral("muteButtonGlyph")), small, small * 12 / 16},
     };
@@ -1984,6 +1985,13 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale() {
     QVERIFY2(std::abs(playInk.height - inks.value(QStringLiteral("pause")).height) <= 2,
              qPrintable(QStringLiteral("Play %1 px, Pause %2 px").arg(playInk.height)
                             .arg(inks.value(QStringLiteral("pause")).height)));
+    // Stop, a 10 px square, has no more ink than Play beside it, give or
+    // take the triangle's soft edges, and less than Pause (as a 12 px square
+    // it matched Pause and outweighed Play by half).
+    const int stop = inks.value(QStringLiteral("stop")).pixels;
+    QVERIFY2(stop * 100 <= playInk.pixels * 105 && stop < inks.value(QStringLiteral("pause")).pixels,
+             qPrintable(QStringLiteral("Stop %1 px of ink, Play %2, Pause %3")
+                            .arg(stop).arg(playInk.pixels).arg(inks.value(QStringLiteral("pause")).pixels)));
 }
 
 void TransportStatusTest::transportButtonsDrawTheAppsFocusRing_data() {
