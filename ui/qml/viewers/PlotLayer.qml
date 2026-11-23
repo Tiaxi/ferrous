@@ -180,9 +180,13 @@ Item {
         return false
     }
     // How much of the plot's crosshair and its readout show: none while the
-    // pointer is on a plate, where they ran under it and through it,
-    // fading over shortDuration, OutCubic; at once with animations off.
-    property real crosshairLevel: root.plateHovered ? 0 : 1
+    // pointer is on a plate, where they ran under it and through it, nor
+    // while autoscroll runs, whose pointer steers its speed rather than
+    // reads the plot, as with the lane heads' buttons: its time churned
+    // under the pointer at every frame, and went and came as the pointer
+    // left the window and came back (H18). Fading over shortDuration,
+    // OutCubic; at once with animations off.
+    property real crosshairLevel: root.plateHovered || root.viewAutoscrolling ? 0 : 1
     Behavior on crosshairLevel {
         enabled: Kirigami.Units.shortDuration > 0
         NumberAnimation {

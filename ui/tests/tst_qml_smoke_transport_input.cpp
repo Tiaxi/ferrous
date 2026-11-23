@@ -59,6 +59,8 @@ private slots:
     void notFollowingMovesAsOnePlate();
     void cornerHoldsWhileAutoscrollRuns_data();
     void cornerHoldsWhileAutoscrollRuns();
+    void crosshairGivesWayToAutoscroll_data();
+    void crosshairGivesWayToAutoscroll();
     void plotsTellFollowingAgainInOneOrder_data();
     void plotsTellFollowingAgainInOneOrder();
     void seekBarBandLandsWithThePlot_data();
@@ -5269,6 +5271,72 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
         QCOMPARE(sceneRectOf(corner.plate).left(), plainLeft);
         QCOMPARE(corner.notice->property("arrivalLevel").toDouble(), 1.0);
     }
+}
+
+void TransportInputSmokeTest::crosshairGivesWayToAutoscroll_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// While autoscroll runs, the plot's crosshair and its readouts fade out over
+// 100 ms, OutCubic, as the lane heads' buttons do, and come back as it stops:
+// its pointer steers the speed, and the time under it churned at every
+// frame, and went and came as the pointer left the window and came back
+// (H18). Nothing else says autoscroll runs (#655).
+void TransportInputSmokeTest::crosshairGivesWayToAutoscroll() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    auto *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    QList<QQuickItem *> plots;
+    if (mode == 0) {
+        plots = visibleItemsNamed(corner.spectrogramSurface, QStringLiteral("spectrogramPaneItem"));
+    } else {
+        plots = {corner.waveform};
+    }
+    QVERIFY(!plots.isEmpty());
+    const auto all = [&](double value) {
+        return std::all_of(plots.begin(), plots.end(), [&](QQuickItem *plot) {
+            return std::abs(plot->property("crosshairOpacity").toDouble() - value) < 1e-6;
+        });
+    };
+    QTest::mouseMove(window, corner.onPane() + QPoint(1, 1));
+    QTest::mouseMove(window, corner.onPane());
+    corner.zoom(4.0);
+    QTRY_VERIFY(all(1.0));
+
+    SteppedAnimationDriver animations;
+    middleClickPlot(plots.first(), plots.first()->width() / 2);
+    QVERIFY(corner.surface->property("autoscrolling").toBool());
+    // Under way after a frame, over 100 ms, OutCubic.
+    QVERIFY(animations.step(16));
+    const double during = corner.layer->property("crosshairLevel").toDouble();
+    QVERIFY2(during > 0.0 && during < 1.0, qPrintable(QString::number(during)));
+    (void)animations.step(96);
+    QVERIFY(all(0.0));
+    // Gone wherever the pointer steers it, off the window and back.
+    for (const QPoint at : {corner.onPane() + QPoint(60, 0), corner.away(), corner.onPane() + QPoint(-40, 10)}) {
+        QTest::mouseMove(window, at + QPoint(1, 0));
+        QTest::mouseMove(window, at);
+        (void)animations.step(32);
+        QVERIFY(corner.surface->property("autoscrolling").toBool());
+        QVERIFY2(all(0.0), qPrintable(QStringLiteral("at %1,%2").arg(at.x()).arg(at.y())));
+    }
+    // Back as it stops, with the pointer on the plot.
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!corner.surface->property("autoscrolling").toBool());
+    QVERIFY(animations.step(16));
+    const double coming = corner.layer->property("crosshairLevel").toDouble();
+    QVERIFY2(coming > 0.0 && coming < 1.0, qPrintable(QString::number(coming)));
+    (void)animations.step(96);
+    QVERIFY(all(1.0));
 }
 
 void TransportInputSmokeTest::cornerHoldsWhileAutoscrollRuns_data() {
