@@ -51,9 +51,10 @@ import "../logic/KeyUtils.js" as KeyUtils
 // - Scrobbled: once Last.fm has accepted it, the glyph alone in the
 //   secondary colour, so that the routine success is no louder than the
 //   status bar's other words.
-// - Queued: "3 scrobbles waiting" and the offline glyph, only while
-//   scrobbles stay queued: after a send failed, or while Last.fm holds
-//   them back.
+// - Queued: "3 scrobbles waiting (offline)" and the glyph in the
+//   secondary colour, only while scrobbles stay queued: after a send
+//   failed, or while Last.fm holds them back. The words say why (a generic
+//   offline glyph in the glyph's place lost what was waiting).
 // - Failed: "Scrobble failed" in the text colour and the glyph in the
 //   negative colour, without the bar: the status bar's one treatment of an
 //   error, as its new issues.
@@ -198,7 +199,8 @@ AbstractButton {
     readonly property string labelText: {
         switch (root.look) {
         case "queued":
-            return I18n.i18ncp("@info:status", "%1 scrobble waiting", "%1 scrobbles waiting",
+            return I18n.i18ncp("@info:status Last.fm can't be reached",
+                "%1 scrobble waiting (offline)", "%1 scrobbles waiting (offline)",
                 root.pendingCount)
         case "failed":
             return I18n.i18nc("@info:status", "Scrobble failed")
@@ -250,8 +252,6 @@ AbstractButton {
 
     readonly property string glyphSource: {
         switch (root.look) {
-        case "queued":
-            return Qt.resolvedUrl("../assets/status-offline.svg")
         case "paused":
             return Qt.resolvedUrl("../assets/lastfm-paused.svg")
         default:

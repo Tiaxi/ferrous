@@ -3538,21 +3538,22 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     bridge->setProperty("lastFmScrobbleState", 2);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: sending the scrobble"));
 
-    // Queued: the words and the offline glyph, of the Last.fm glyph's
-    // family and size, where it is (it was a 14 px one), without the bar.
+    // Queued: the words, with why they wait, and the Last.fm glyph in the
+    // secondary colour, where it is, without the bar (a generic offline
+    // glyph in its place lost what was waiting).
     bridge->setProperty("lastFmScrobbleState", 5);
     bridge->setProperty("lastFmPendingScrobbleCount", 3);
     QTRY_VERIFY(slot->isVisible());
-    QCOMPARE(label->property("text").toString(), QStringLiteral("3 scrobbles waiting"));
+    QCOMPARE(label->property("text").toString(), QStringLiteral("3 scrobbles waiting (offline)"));
     QVERIFY(label->isVisible());
     QVERIFY(!bar->isVisible() && !trough->isVisible());
-    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("status-offline.svg")));
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
     QCOMPARE(glyph->size(), QSizeF(16, 16));
     QCOMPARE(glyph->position(), QPointF(0, 0));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(toolTipText(slot).startsWith(QStringLiteral("Last.fm can't be reached.")));
     bridge->setProperty("lastFmPendingScrobbleCount", 1);
-    QCOMPARE(label->property("text").toString(), QStringLiteral("1 scrobble waiting"));
+    QCOMPARE(label->property("text").toString(), QStringLiteral("1 scrobble waiting (offline)"));
 
     // Failed: the status bar's one treatment of an error: the words in the
     // text colour and the 16 px glyph in the negative colour, the slot's
