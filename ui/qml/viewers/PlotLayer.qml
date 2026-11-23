@@ -205,8 +205,9 @@ Item {
     function laneTop(index) { return PlotLanes.top(index, root.laneCount, root.height) }
     function laneHeight(index) { return PlotLanes.laneHeight(index, root.laneCount, root.height) }
 
-    // The lane the pane's messages (Analysing…, a file that ends early)
-    // are centred in: the middle one, or the upper of the two middle ones.
+    // The lane the pane's messages (Analysing…, a file that ends early on
+    // the spectrogram) are centred in: the middle one, or the upper of the
+    // two middle ones.
     // Centred on the plot, stereo's and every even count's seam ran through
     // them, between the warning and its link (H26).
     readonly property int messageLane: Math.floor((Math.max(1, root.laneCount) - 1) / 2)
@@ -524,12 +525,17 @@ Item {
     }
 
     // A file that ends early: across the empty part of the plot after the
-    // cut, in the messages' lane, with the Recent Issues entry it matches.
+    // cut, with the Recent Issues entry it matches. The spectrogram's seams
+    // run on past the cut, so there it is in the messages' lane; the
+    // waveform draws nothing past it, seams neither, so there it is centred
+    // on the whole height of that bare part (in the lane, it floated high
+    // over nothing in stereo, H29).
     Item {
         id: endsEarly
         objectName: "plotEndsEarly"
         z: 1
         readonly property real cutEdge: Math.max(0, Math.ceil(root.markerX) + 1)
+        readonly property bool undivided: root.visualizationMode === 1
         x: cutEdge
         width: Math.max(0, root.plotWidth - cutEdge)
         height: root.height
@@ -538,7 +544,7 @@ Item {
 
         Rectangle {
             objectName: "plotEndsEarlyPlate"
-            visible: root.messageNeedsPlate(endsEarlyColumn.height)
+            visible: !endsEarly.undivided && root.messageNeedsPlate(endsEarlyColumn.height)
             x: endsEarlyColumn.x - Kirigami.Units.largeSpacing
             y: endsEarlyColumn.y - Kirigami.Units.smallSpacing
             width: endsEarlyColumn.width + 2 * Kirigami.Units.largeSpacing
@@ -553,7 +559,9 @@ Item {
             id: endsEarlyColumn
             objectName: "plotEndsEarlyColumn"
             x: Math.round((parent.width - width) / 2)
-            y: root.messageY(height)
+            y: endsEarly.undivided
+                ? Math.round(Math.max(0, (parent.height - height) / 2))
+                : root.messageY(height)
             spacing: Kirigami.Units.smallSpacing
 
             Row {

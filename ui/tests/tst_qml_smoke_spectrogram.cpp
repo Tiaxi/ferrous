@@ -46,6 +46,8 @@ private slots:
     void shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch();
     void paneMessagesKeepOffTheLaneSeams_data();
     void paneMessagesKeepOffTheLaneSeams();
+    void waveformEndsEarlyNoticeIsCentredPastTheCut_data();
+    void waveformEndsEarlyNoticeIsCentredPastTheCut();
     void laneHeadIsOnePlate_data();
     void laneHeadIsOnePlate();
     void laneHeadsAreOneSizeInAPane_data();
@@ -2022,6 +2024,73 @@ void SpectrogramSmokeTest::paneMessagesKeepOffTheLaneSeams() {
     QQuickItem *column = itemsNamed(layer, QStringLiteral("plotEndsEarlyColumn")).value(0);
     const QRectF rect = rectIn(column);
     QVERIFY(std::abs((rect.left() + rect.right()) / 2 - (201 + layer->width()) / 2) <= 1.0);
+}
+
+void SpectrogramSmokeTest::waveformEndsEarlyNoticeIsCentredPastTheCut_data() {
+    QTest::addColumn<int>("lanes");
+    QTest::addColumn<int>("height");
+    QTest::newRow("one lane") << 1 << 431;
+    QTest::newRow("stereo") << 2 << 431;
+    QTest::newRow("5.1") << 6 << 431;
+    QTest::newRow("7.1, lanes shorter than the message") << 8 << 205;
+}
+
+// The waveform draws nothing past a cut, seams neither, so a file that ends
+// early has its notice centred on the whole height of the bare part after
+// the cut, with no plate: in the messages' lane it floated in the upper
+// quarter of a stereo pane over nothing (H29). The spectrogram, whose seams
+// run on past the cut, keeps it in the lane.
+void SpectrogramSmokeTest::waveformEndsEarlyNoticeIsCentredPastTheCut() {
+    QFETCH(int, lanes);
+    QFETCH(int, height);
+    QQmlApplicationEngine engine;
+    QString error;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kPlotLayerHarness, baseUrl, &error));
+    QVERIFY2(root != nullptr, qPrintable(error));
+    QQuickWindow window;
+    window.resize(640, height);
+    auto *harness = qobject_cast<QQuickItem *>(root.data());
+    QVERIFY(harness != nullptr);
+    harness->setParentItem(window.contentItem());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *layer = harness->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QObject *bridge = harness->findChild<QObject *>(QStringLiteral("testBridge"));
+    QVERIFY(layer != nullptr && bridge != nullptr);
+    layer->setHeight(height);
+    QVERIFY(layer->setProperty("laneCount", lanes));
+    QVERIFY(layer->setProperty("laneLabels", plotLaneLabels(lanes)));
+    QVERIFY(layer->setProperty("visualizationMode", 1));
+    QVERIFY(bridge->setProperty("waveformCoverageSeconds", 32.7));
+    QVERIFY(bridge->setProperty("waveformEndsEarly", true));
+    QVERIFY(layer->setProperty("markerX", 200.0));
+    QQuickItem *column = itemsNamed(layer, QStringLiteral("plotEndsEarlyColumn")).value(0);
+    QQuickItem *plate = itemsNamed(layer, QStringLiteral("plotEndsEarlyPlate")).value(0);
+    QVERIFY(column != nullptr && plate != nullptr);
+    QTRY_VERIFY(column->isVisible());
+    const auto rectIn = [layer](QQuickItem *item) {
+        return item->mapRectToItem(layer, QRectF(0, 0, item->width(), item->height()));
+    };
+
+    // Centred on the plot's height and across the part after the cut, on
+    // whole pixels, with nothing behind it.
+    QRectF rect = rectIn(column);
+    QCOMPARE(rect.top(), std::round(rect.top()));
+    QVERIFY2(std::abs(rect.center().y() - height / 2.0) <= 0.5,
+             qPrintable(QStringLiteral("%1 to %2 in %3").arg(rect.top()).arg(rect.bottom()).arg(height)));
+    QVERIFY(std::abs(rect.center().x() - (201 + layer->width()) / 2) <= 1.0);
+    QVERIFY(!plate->isVisible());
+
+    // On the spectrogram, back in the messages' lane.
+    QVERIFY(layer->setProperty("visualizationMode", 0));
+    QVariant laneY;
+    QVERIFY(QMetaObject::invokeMethod(layer, "messageY", Q_RETURN_ARG(QVariant, laneY),
+                                      Q_ARG(QVariant, column->height())));
+    rect = rectIn(column);
+    QCOMPARE(rect.top(), laneY.toReal());
+    QCOMPARE(plate->isVisible(), lanes == 8);
 }
 
 void SpectrogramSmokeTest::laneHeadIsOnePlate_data() {
