@@ -68,7 +68,7 @@ QtObject {
     readonly property color placeholderText: root.readableOn(root._inactiveText, [root.view], 4.6)
     // The artist and album cells of the queue: darkened or lightened where
     // they fall short of 4.5:1 on a selected row under the pointer, as on
-    // light. #c2c2c3 / #535557 (#5a5c5e as mixed).
+    // light. #c5c5c6 / #535557 (#c2c2c3 / #5a5c5e as mixed).
     readonly property color textColumn: root.readableOn(ColorUtils.mixColor(root.text, root.view, 0.25),
         [root.view].concat(root._selectedRows), 4.5)
     // The 1 px line where two regions meet. #383b40 / #d6d9dc.
@@ -129,9 +129,9 @@ QtObject {
     // colour (at 26 %, #1f3e4e, the two were 1.04:1 apart on dark, and
     // nothing said which list takes Enter or Delete after a click; at
     // 38 %, #b5e0f7, the light one was 1.05:1 from it). No stronger: the
-    // hovered step above it has to stay under the dark amber's 4.5:1 and
-    // the light focus ring's 3:1, and room for it there is what makes it
-    // seen. #21475b / #acdcf6.
+    // hovered step above it has to keep the text 7:1 and the light focus
+    // ring 3:1, and room for it there is what makes it seen. #21475b /
+    // #acdcf6.
     readonly property color selection: ColorUtils.mixColor(
         root.view, root.accent, root.themeIsDark ? 0.32 : 0.43)
     // The selection of a list without keyboard focus: quieter than the
@@ -147,17 +147,18 @@ QtObject {
         ColorUtils.mixColor(root.view, root.accent, root.themeIsDark ? 0.25 : 0.33), 0.6)
     // A selected queue row under the pointer: the text colour over the
     // selection, active or inactive, so a selected row answers the pointer
-    // as the others do, the top step of the rows' ladder, some 1.15:1 /
-    // 1.13:1 past the selection. See _selectionHoverShare: 5 % / 7 % in
-    // Breeze, #2c5063 / #a2cfe8. The secondary and column text, the amber
-    // and the warning mark are made readable on it.
+    // as the others do, the top step of the rows' ladder, 1.25:1 / 1.13:1
+    // past the selection. See _selectionHoverShare: 8 % / 7 % in Breeze,
+    // #335568 / #a2cfe8; the inactive one 5 % / 7 %, #33454e / #c1d5df. The
+    // secondary and column text, the amber and the warning mark are made
+    // readable on it.
     readonly property color selectionHovered: ColorUtils.mixColor(
         root.selection, root.text, root._selectionHoverShare)
     readonly property color selectionInactiveHovered: ColorUtils.mixColor(
-        root.selectionInactive, root.text, root._selectionHoverShare)
+        root.selectionInactive, root.text, root._selectionInactiveHoverShare)
     // A selected queue row held down by the pointer, until it is let go
     // or dragged: the hovered selection at a higher saturation and the
-    // same luminance, a more intense blue, #1a516e / #94d1f1 in Breeze, so
+    // same luminance, a more intense blue, #215673 / #94d1f1 in Breeze, so
     // a press reads apart from the pointer resting on the row (it was the
     // hovered colour). Every text keeps its contrast on it: any darker
     // put the light secondary text and the dark amber under 4.5:1, and the
@@ -175,7 +176,7 @@ QtObject {
                                           root.selectionPressed]
     // The secondary text on a selected row: lightened or darkened where it
     // is under 4.5:1 on one, as on dark under the pointer.
-    // #b7bdc3 / #4c545d.
+    // #bfc5ca / #4c545d.
     readonly property color textSecondarySelected: root.readableOn(root.textSecondary, root._selectedRows, 4.5)
     // An unreadable file's mark on a selected row: the negative colour, 3:1
     // on each. #ef7682 / #c4293b.
@@ -217,6 +218,11 @@ QtObject {
         : root.readableOn(root._nowLight, [root.view, root.hoveredRow].concat(root._selectedRows), 4.5)
     readonly property color _nowDark: "#f2b035"
     readonly property color _nowLight: "#955500"
+    // The amber of a selected playing queue row: `now`, lightened on dark
+    // where it is under 4.5:1 on a selected row, as under the pointer,
+    // whose step the amber no longer holds back. The playhead and every
+    // other row keep the map's amber. #f4b94d / #7c4600.
+    readonly property color nowSelected: root.readableOn(root.now, root._selectedRows, 4.5)
     // The opacity of the amber name of a collapsed tree row that holds the
     // playing track while it is paused: 70%, or more where that is under
     // 4.5:1 on a row's background, plain, hovered or selected, so the name
@@ -296,39 +302,49 @@ QtObject {
         return ColorUtils.withAlpha(color, 0.3)
     }
 
-    // The share of the text colour over the selection, active or inactive,
-    // under the pointer: the most, in whole percent up to 7 %, that keeps
-    // the text 7:1 and the focus ring 3:1 on both hovered selections and
-    // on the pressed one, and, on dark, the fixed amber of a playing row
-    // 4.5:1 on them and the hovered inactive selection under the active
-    // one, so another list's selection under the pointer never outweighs
+    // The share of the text colour over the selection under the pointer:
+    // the least, in whole percent, that steps it 1.25:1 past the
+    // selection, so a hovered selected row reads at a glance (at 5 %,
+    // 1.15:1, a single dark row was easy to miss), and no more than keeps
+    // the text 7:1 and the focus ring 3:1 on it and on the pressed
+    // selection. 8 % / 7 % in Breeze: on light the focus ring stops it at
+    // 1.13:1. The other texts and the marks of a selected row are made
+    // readable on it in turn (`textSecondarySelected`, `textColumn`,
+    // `nowSelected`, `negativeSelected`).
+    readonly property real _selectionHoverShare: root._hoverShare(root.selection, function(hovered) {
+        return ColorUtils.contrastRatio(root.focusRing, root._desaturated(hovered, root._pressedSaturation)) >= 3
+            && ColorUtils.contrastRatio(root.text, root._desaturated(hovered, root._pressedSaturation)) >= 7
+    })
+    // The inactive selection's: as far, yet no further than the active
+    // one's, and on dark short of the active selection's weight on the
+    // view, so another list's selection under the pointer never outweighs
     // the focused list's (on light the two are some 10 ΔE apart in
-    // colour). 5 % / 7 % in Breeze: at 4 % / 6 % the step, 1.12:1 /
-    // 1.11:1, was barely seen. One share for both, so they step alike. The other texts and the marks of a
-    // selected row are made readable on them in turn
-    // (`textSecondarySelected`, `textColumn`, `now`, `negativeSelected`).
-    readonly property real _selectionHoverShare: {
-        const selections = [root.selection, root.selectionInactive]
-        for (let percent = 7; percent > 0; --percent) {
-            const hovered = selections.map(function(selection) {
-                return ColorUtils.mixColor(selection, root.text, percent / 100)
-            })
-            const backgrounds = hovered.concat([root._desaturated(hovered[0], root._pressedSaturation)])
-            let readable = true
-            for (let b = 0; readable && b < backgrounds.length; ++b) {
-                readable = ColorUtils.contrastRatio(root.text, backgrounds[b]) >= 7
-                    && ColorUtils.contrastRatio(root.focusRing, backgrounds[b]) >= 3
-                    && (!root.themeIsDark || ColorUtils.contrastRatio(root._nowDark, backgrounds[b]) >= 4.5)
+    // colour). 5 % / 7 % in Breeze.
+    readonly property real _selectionInactiveHoverShare: root._hoverShare(root.selectionInactive, function(hovered, share) {
+        return share <= root._selectionHoverShare
+            && (!root.themeIsDark
+                || ColorUtils.contrastRatio(hovered, root.view) < ColorUtils.contrastRatio(root.selection, root.view))
+    })
+
+    // The share of the text over `selection` under the pointer: the least,
+    // in whole percent, that is 1.25:1 on it, or else the most that keeps
+    // the text 7:1 and the focus ring 3:1 on it and that `allows(hovered,
+    // share)`.
+    function _hoverShare(selection, allows) {
+        let share = 0
+        for (let percent = 1; percent <= 30; ++percent) {
+            const hovered = ColorUtils.mixColor(selection, root.text, percent / 100)
+            if (ColorUtils.contrastRatio(root.text, hovered) < 7
+                    || ColorUtils.contrastRatio(root.focusRing, hovered) < 3
+                    || !allows(hovered, percent / 100)) {
+                break
             }
-            if (readable && root.themeIsDark) {
-                readable = ColorUtils.contrastRatio(hovered[1], root.view)
-                    < ColorUtils.contrastRatio(root.selection, root.view)
-            }
-            if (readable) {
-                return percent / 100
+            share = percent / 100
+            if (ColorUtils.contrastRatio(hovered, selection) >= 1.25) {
+                break
             }
         }
-        return 0
+        return share
     }
 
     // Tertiary text steps up to the selected row's own on a selected row,

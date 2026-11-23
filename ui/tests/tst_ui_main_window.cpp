@@ -4588,7 +4588,10 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
 
 // A selected row of the queue draws its length in the selected row's
 // secondary colour, which keeps its contrast on the selection under the
-// pointer; an unselected one in the plain one.
+// pointer; an unselected one in the plain one. A selected playing row's
+// title and glyph take the amber made readable on the selection (on dark
+// the map's amber is 4.18:1 on the hovered selection, and it is lighter:
+// UiFoundationsTest holds the colours), an unselected one the map's own.
 void UiMainWindowTest::selectedRowsDrawTheirMarksForTheSelection() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
@@ -4605,6 +4608,19 @@ void UiMainWindowTest::selectedRowsDrawTheirMarksForTheSelection() {
     };
     QCOMPARE(lengthColor(1), tokenHex(window, "textSecondarySelected"));
     QCOMPARE(lengthColor(2), tokenHex(window, "textSecondary"));
+
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("playingQueueIndex", 1);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    const auto cellColor = [view](int row, const char *cell) {
+        return colorOf(itemNamed(viewRowAt(view, row), QLatin1String(cell)));
+    };
+    QTRY_COMPARE(cellColor(1, "queueCell_title"), tokenHex(window, "nowSelected"));
+    QCOMPARE(cellColor(1, "queueRowState"), tokenHex(window, "nowSelected"));
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSingleSelection", Q_ARG(QVariant, 2)));
+    QTRY_VERIFY(rowTinted(view, 2));
+    QTRY_COMPARE(cellColor(1, "queueCell_title"), tokenHex(window, "now"));
+    QCOMPARE(cellColor(1, "queueRowState"), tokenHex(window, "now"));
 }
 
 // An album row without a cover keeps the 20 px place a cover's thumbnail

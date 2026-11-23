@@ -311,7 +311,7 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         {"textTertiary", QStringLiteral("#91989f"), QStringLiteral("#59626d")},
         // Light: darkened from #5a5c5e to be 4.5:1 on a selected queue row
         // under the pointer.
-        {"textColumn", QStringLiteral("#c2c2c3"), QStringLiteral("#535557")},
+        {"textColumn", QStringLiteral("#c5c5c6"), QStringLiteral("#535557")},
         // The theme's placeholder colour, darkened on light to be 4.6:1 on
         // the view, which Breeze Light's 4.2:1 was not.
         {"placeholderText", QStringLiteral("#a1a9b1"), QStringLiteral("#697582")},
@@ -1014,8 +1014,11 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
         QVERIFY2(contrastRatio(number.value<QColor>(), selected) >= figureContrast,
                  qPrintable(describeContrast(QStringLiteral("selected number"), number.value<QColor>(), selected)));
         // A step under the text, by their own contrast: on dark's stronger
-        // selection both are nearer it.
-        QVERIFY(contrastRatio(colorOf(tokens, "text"), selected) >= 1.5 * contrastRatio(number.value<QColor>(), selected));
+        // selection both are nearer it, and the number, 5.4:1 on the hovered
+        // selection 1.25:1 past it, is nearer still (1.42 times under it).
+        QVERIFY2(contrastRatio(colorOf(tokens, "text"), selected) >= 1.4 * contrastRatio(number.value<QColor>(), selected),
+                 qPrintable(describeContrast(QStringLiteral("text"), colorOf(tokens, "text"), selected) + QStringLiteral(", ")
+                            + describeContrast(QStringLiteral("number"), number.value<QColor>(), selected)));
     }
 }
 
@@ -1066,7 +1069,7 @@ void UiFoundationsTest::rowStatesStepApartInWeight() {
     }
 
     const QList<std::pair<const char *, double>> floors{
-        {"text", 7.0}, {"textSecondarySelected", 4.5}, {"textColumn", 4.5}, {"now", 4.5}};
+        {"text", 7.0}, {"textSecondarySelected", 4.5}, {"textColumn", 4.5}, {"nowSelected", 4.5}};
     for (const char *under : {"selection", "selectionInactive", "selectionHovered", "selectionInactiveHovered",
                               "selectionPressed"}) {
         for (const auto &[token, minimum] : floors) {
@@ -1075,14 +1078,23 @@ void UiFoundationsTest::rowStatesStepApartInWeight() {
                                                  colorOf(tokens, token), colorOf(tokens, under))));
         }
     }
-    // The amber is the theme's own on dark, so the hovered step stops
-    // where it would fall under 4.5:1: one more percent of the text does.
+    // A selected row under the pointer reads at a glance: 1.25:1 past the
+    // selection where the focus ring allows it (at 1.15:1 a single dark row
+    // was easy to miss); on light the ring stops it, one more percent of the
+    // text puts the ring under 3:1. The amber no longer holds it back: the
+    // selected playing row's is made readable on it, and the map's amber
+    // stays on the playhead and every other row.
+    const QColor selection = colorOf(tokens, "selection");
+    const QColor selectionHovered = colorOf(tokens, "selectionHovered");
     if (dark) {
+        QVERIFY2(contrastRatio(selectionHovered, selection) >= 1.25,
+                 qPrintable(describeContrast(QStringLiteral("hovered over the selection"), selectionHovered, selection)));
+        QVERIFY(sameColor(colorOf(tokens, "now"), fromHex(QStringLiteral("#f2b035"))));
+    } else {
         const double share = tokens->property("_selectionHoverShare").toDouble();
-        const QColor more = mixed(colorOf(tokens, "selection"), colorOf(tokens, "text"), share + 0.01);
-        QVERIFY(contrastRatio(colorOf(tokens, "now"), more) < 4.5
-                || contrastRatio(mixed(colorOf(tokens, "selectionInactive"), colorOf(tokens, "text"), share + 0.01), view)
-                       >= contrastRatio(colorOf(tokens, "selection"), view));
+        const QColor more = mixed(selection, colorOf(tokens, "text"), share + 0.01);
+        QVERIFY(contrastRatio(colorOf(tokens, "focusRing"), more) < 3.0);
+        QVERIFY(sameColor(colorOf(tokens, "nowSelected"), colorOf(tokens, "now")));
     }
 }
 
@@ -1134,11 +1146,12 @@ void UiFoundationsTest::selectedQueueRowAnswersHover_data() {
 // A selected queue row under the pointer steps its selection tint toward
 // the text colour, with the hover tint's own fade, active or not; the
 // library's does not (hover changed nothing on a selected row). The step is
-// the most text, in whole percent up to 7 %, that keeps the text 7:1 and,
-// on dark, the amber 4.5:1 (5 % / 7 % in Breeze); the row's other texts and
-// its mark are made readable on it. It is visible yet under the hover's
-// from the view, and every text a selected row draws, the column text and
-// the playing amber made readable on it, stays 4.5:1 on it.
+// the least text, in whole percent, that is 1.25:1 on the selection, as far
+// as the text's 7:1 and the focus ring's 3:1 allow (8 % / 7 % in Breeze; the
+// inactive selection's 5 % / 7 %, under the active selection on dark); the
+// row's other texts and its mark are made readable on it. It is visible yet
+// under the hover's from the view, and every text a selected row draws, the
+// column text and the playing amber made readable on it, stays 4.5:1 on it.
 void UiFoundationsTest::selectedQueueRowAnswersHover() {
     QFETCH(bool, dark);
     QQmlEngine engine;
@@ -1165,14 +1178,19 @@ void UiFoundationsTest::selectedQueueRowAnswersHover() {
         {QStringLiteral("text"), text},
         {QStringLiteral("secondary"), colorOf(tokens, "textSecondarySelected")},
         {QStringLiteral("column"), colorOf(tokens, "textColumn")},
-        {QStringLiteral("now"), colorOf(tokens, "now")},
+        {QStringLiteral("now"), colorOf(tokens, "nowSelected")},
         {QStringLiteral("selected number"), number.value<QColor>()},
     };
-    const double share = tokens->property("_selectionHoverShare").toDouble();
-    QVERIFY2(std::abs(share - (dark ? 0.05 : 0.07)) < 1e-9, qPrintable(QString::number(share)));
+    // The active selection steps further on dark than the inactive one,
+    // which stays under the active selection's weight.
+    const double activeShare = tokens->property("_selectionHoverShare").toDouble();
+    const double inactiveShare = tokens->property("_selectionInactiveHoverShare").toDouble();
+    QVERIFY2(std::abs(activeShare - (dark ? 0.08 : 0.07)) < 1e-9, qPrintable(QString::number(activeShare)));
+    QVERIFY2(std::abs(inactiveShare - (dark ? 0.05 : 0.07)) < 1e-9, qPrintable(QString::number(inactiveShare)));
     for (const auto &[selectionToken, hoveredToken] : selections) {
         const QColor selected = colorOf(tokens, selectionToken);
         const QColor selectedHovered = colorOf(tokens, hoveredToken);
+        const double share = selected == colorOf(tokens, "selection") ? activeShare : inactiveShare;
         QVERIFY2(channelDistance(selectedHovered, mixed(selected, text, share)) <= 1,
                  qPrintable(QLatin1String(hoveredToken) + QStringLiteral(" is ") + selectedHovered.name()));
         // A visible step, toward the text, yet less than the hover's.
@@ -1290,7 +1308,7 @@ void UiFoundationsTest::pressedQueueRowIntensifiesItsSelection() {
         {QStringLiteral("text"), colorOf(tokens, "text")},
         {QStringLiteral("secondary"), colorOf(tokens, "textSecondarySelected")},
         {QStringLiteral("column"), colorOf(tokens, "textColumn")},
-        {QStringLiteral("now"), colorOf(tokens, "now")},
+        {QStringLiteral("now"), colorOf(tokens, "nowSelected")},
         {QStringLiteral("selected number"), number.value<QColor>()},
     };
     for (const auto &[what, color] : texts) {
@@ -2975,7 +2993,7 @@ void UiFoundationsTest::activeSelectionIsUnmistakableInDark() {
         QVERIFY(sameColor(colorOf(tokens, "negativeSelected"), colorOf(tokens, "negative")));
     }
     const QList<std::pair<const char *, double>> drawn{
-        {"text", 4.5}, {"textColumn", 4.5}, {"textSecondarySelected", 4.5}, {"now", 4.5},
+        {"text", 4.5}, {"textColumn", 4.5}, {"textSecondarySelected", 4.5}, {"nowSelected", 4.5},
         {"textTertiarySelected", 5.4}, {"negativeSelected", 3.0}, {"focusRing", 3.0}};
     for (const char *under : {"selection", "selectionInactive", "selectionHovered", "selectionInactiveHovered"}) {
         for (const auto &[token, minimum] : drawn) {

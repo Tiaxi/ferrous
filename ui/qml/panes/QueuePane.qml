@@ -828,6 +828,11 @@ Rectangle {
                     readonly property color columnTextColor: playlistRow.unreadable
                         ? playlistRow.secondaryTextColor
                         : root.uiPalette.textColumn
+                    // The amber of what plays, made readable on the
+                    // selection as well.
+                    readonly property color nowColor: playlistRow.rowSelected
+                        ? root.uiPalette.nowSelected
+                        : root.uiPalette.now
 
                     Item {
                         objectName: "queueCell_indicator"
@@ -856,7 +861,7 @@ Rectangle {
                             source: glyph
                             isMask: true
                             color: playlistRow.isNow
-                                ? root.uiPalette.now
+                                ? playlistRow.nowColor
                                 : !playlistRow.showsError ? playlistRow.secondaryTextColor
                                 : playlistRow.rowSelected ? root.uiPalette.negativeSelected
                                 : root.uiPalette.negative
@@ -876,7 +881,7 @@ Rectangle {
                             roundToIconSize: false
                             source: visible ? queueNowFade.target.glyph : ""
                             isMask: true
-                            color: root.uiPalette.now
+                            color: playlistRow.nowColor
                             opacity: playlistRow.amberLeft
                         }
                     }
@@ -952,8 +957,8 @@ Rectangle {
                             ? playlistRow.amberIn : playlistRow.amberLeft
                         font.weight: amber >= 0.5 ? Font.DemiBold : Font.Normal
                         color: amber >= 1
-                            ? root.uiPalette.now
-                            : (amber > 0 ? ColorUtils.mixColor(plainColor, root.uiPalette.now, amber) : plainColor)
+                            ? playlistRow.nowColor
+                            : (amber > 0 ? ColorUtils.mixColor(plainColor, playlistRow.nowColor, amber) : plainColor)
                     }
 
                     Text {
