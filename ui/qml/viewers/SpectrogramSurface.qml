@@ -39,6 +39,11 @@ Item {
         const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
         return first && first.spectrogramItem ? first.spectrogramItem.visibleEndSeconds : NaN
     }
+    // The view the user moved follows the playhead again in its track,
+    // where it showed `fromStartSeconds` to `fromEndSeconds`: told after
+    // visibleStartSeconds and visibleEndSeconds give where it is now, before
+    // detached, as the waveform tells them (SpectrogramItem's followedAgain).
+    signal followedAgain(real fromStartSeconds, real fromEndSeconds)
     // The lanes, each one's label ("" for none) and the one under the pointer.
     readonly property int laneCount: Math.max(1, root.channelDescriptors.length)
     readonly property var laneLabels: {
@@ -132,7 +137,22 @@ Item {
         ? Qt.BlankCursor
         : root._panLane && root._panLane.panning ? Qt.ClosedHandCursor : Qt.ArrowCursor
     property var channelDescriptors: []
+    // The crosshair's one x, which every lane draws its line at, the
+    // pointer's own too, and what told it: the lane or the seams' area the
+    // pointer is on. Only that one takes it back as the pointer leaves it:
+    // the leave of the lane it left comes after the enter of the one it
+    // went on, and took the line from the others (H15).
     property double _crosshairSharedX: -1.0
+    property Item _crosshairSource: null
+    function shareCrosshair(source, x) {
+        if (x >= 0) {
+            root._crosshairSource = source
+            root._crosshairSharedX = x
+        } else if (root._crosshairSource === source) {
+            root._crosshairSource = null
+            root._crosshairSharedX = -1.0
+        }
+    }
     // The zooms the user chose, or 0 for the default zoom, which a view
     // then follows: that of a short track changes with the plot's width and
     // once the track's length is known.
@@ -409,12 +429,7 @@ Item {
         && pointerArea.mouseX < root.plotWidth
         && PlotLanes.laneAt(pointerArea.mouseY, spectrogramRepeater.count, root.height) < 0
     function shareSeamCrosshair() {
-        if (root._seamHovered) {
-            root._crosshairSharedX = pointerArea.mouseX
-        } else if (!root._lanePointerOn) {
-            // A lane the pointer went on tells its own.
-            root._crosshairSharedX = -1.0
-        }
+        root.shareCrosshair(pointerArea, root._seamHovered ? pointerArea.mouseX : -1.0)
     }
     on_SeamHoveredChanged: root.shareSeamCrosshair()
 
@@ -511,14 +526,19 @@ Item {
                     crosshairSharedX: root._crosshairSharedX
                     // A lane the pointer left for a seam leaves the line to it.
                     onCrosshairHoverChanged: (x) => {
-                        if (x >= 0 || !root._seamHovered) {
-                            root._crosshairSharedX = x
-                        } else {
+                        root.shareCrosshair(spectrogramPaneItem, x)
+                        if (x < 0) {
                             root.shareSeamCrosshair()
                         }
                     }
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
                     viewFollow: sharedViewFollow
+                    // The first lane's view is the plot's (visibleStartSeconds).
+                    onFollowedAgain: (fromStartSeconds, fromEndSeconds) => {
+                        if (index === 0) {
+                            root.followedAgain(fromStartSeconds, fromEndSeconds)
+                        }
+                    }
                     onPanningChanged: {
                         if (spectrogramPaneItem.panning) {
                             root._panLane = spectrogramPaneItem

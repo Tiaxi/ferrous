@@ -103,6 +103,13 @@ public:
     Q_INVOKABLE void followPlayhead() { reattach(); }
 
 signals:
+    // A detached view follows the playhead again: told before
+    // detachedChanged, so that the lanes publish where their view is now
+    // first, as the waveform does. `sameTrack` for a view brought back in
+    // the track it was moved in, by Follow Playhead, a reset of the zoom or
+    // a seek; not for a track change, a gapless successor or Repeat-One,
+    // nor for a view that playback reached.
+    void followingAgain(bool sameTrack);
     void detachedChanged();
     void autoscrollingChanged();
     // Where the view is placed changed; queued to the lanes.
@@ -112,7 +119,8 @@ signals:
     void backendAnchorChanged(quint64 trackToken, double centerSeconds);
 
 private:
-    void publish();
+    // Tells what changed; `sameTrack` as for followingAgain.
+    void publish(bool sameTrack = false);
     void publishAutoscrolling();
     void sendBackendAnchor();
     double reattachPointLocked() const;

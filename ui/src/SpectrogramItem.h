@@ -367,6 +367,11 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // mode. False again until a new session's columns fill it.
     Q_PROPERTY(bool viewFilled READ viewFilled NOTIFY viewFilledChanged)
     Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
+    // Where the crosshair's line is, in logical x, for every lane of a plot
+    // alike, the pointer's own too; -1 for none, where a lane on its own
+    // draws it at its pointer. A plot sets it from crosshairHoverChanged,
+    // which tells the pointer's x on the lane, or -1 as it leaves it, also
+    // while the crosshair is hidden.
     Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
     Q_PROPERTY(bool channelMuted READ channelMuted WRITE setChannelMuted NOTIFY channelMutedChanged)
     // Whether the playhead is drawn: the plot going out under another as
@@ -616,6 +621,12 @@ signals:
     void backendZoomRequested(float zoomLevel);
     void spectrogramWidthChanged(int width);
     void viewFollowChanged();
+    // The view the user moved follows the playhead again in the same track
+    // (see SpectrogramViewFollow::followingAgain), where it showed
+    // `fromStartSeconds` to `fromEndSeconds`: told after visibleRangeChanged
+    // tells where it is now, before detachedChanged, in the order
+    // WaveformEditorItem tells them.
+    void followedAgain(double fromStartSeconds, double fromEndSeconds);
     void detachedChanged();
     void panningChanged();
     void pointerOnChanged();
@@ -727,6 +738,8 @@ private:
     void reportFollowGeometry();
     // A lane, or the follow, moved the view: a frame for it.
     void followChanged();
+    // The shared view follows the playhead again: where it is now, first.
+    void viewFollowFollowingAgain(bool sameTrack);
     // The plot asked to seek to `seconds`; see SpectrogramViewFollow.
     void noteOwnSeek(double seconds);
     // The fastest autoscroll moves the view, in seconds of the track a
@@ -1463,6 +1476,7 @@ private:
     QPointer<SpectrogramViewFollow> m_viewFollow;
     QMetaObject::Connection m_viewFollowChangedConnection;
     QMetaObject::Connection m_viewFollowDetachedConnection;
+    QMetaObject::Connection m_viewFollowFollowingAgainConnection;
     QMetaObject::Connection m_viewFollowDestroyedConnection;
     // A middle-drag: whether the button is down, whether it has moved far
     // enough to pan, where it was pressed, and where the pan last started

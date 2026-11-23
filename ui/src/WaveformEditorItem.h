@@ -280,6 +280,13 @@ signals:
     void pictureReadyChanged();
     void markerSecondsChanged();
     void markerXChanged();
+    // The view the user moved follows the playhead again in the same track,
+    // where it showed `fromStartSeconds` to `fromEndSeconds`: by Follow
+    // Playhead or a seek other than its own, not by a track change, a
+    // gapless successor or Repeat-One, nor as playback reaches it. Told
+    // after visibleRangeChanged tells where it is now, before
+    // detachedChanged, in the order SpectrogramItem tells them.
+    void followedAgain(double fromStartSeconds, double fromEndSeconds);
     void detachedChanged();
     void autoscrollingChanged();
     void panningChanged();
@@ -572,14 +579,15 @@ private:
     // of a drag.
     void autoscrollStopped();
     // Follows detached, and the visible range with it, on the GUI thread,
-    // after the state has changed.
-    void publishDetached();
+    // after the state has changed; `sameTrack` for a view brought back to
+    // the playhead in its track, which followedAgain tells.
+    void publishDetached(bool sameTrack = false);
     // Follows visibleStartSeconds and visibleEndSeconds on the GUI thread:
     // at each frame, and as the view is moved.
     void publishVisibleRange();
     // Asks for what a view that moved by the user's hand needs: its detail,
     // a cache for it and a frame.
-    void viewMoved();
+    void viewMoved(bool sameTrack = false);
     std::pair<double, double> visibleRangeLocked(qint64 nowNs) const;
     std::pair<double, double> visibleRangeLocked() const;
     std::pair<double, double> detailRequestVisibleRangeLocked() const;

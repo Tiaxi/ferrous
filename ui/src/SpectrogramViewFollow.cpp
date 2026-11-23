@@ -171,6 +171,7 @@ void SpectrogramViewFollow::noteOwnSeek(double seconds) {
 
 void SpectrogramViewFollow::clockChanged(const PlaybackClockState &next, qint64 nowNs) {
     bool placementChanged = false;
+    bool sameTrack = false;
     {
         QMutexLocker lock(&m_mutex);
         if (m_clockKnown && sameClockState(next, m_clockState)) {
@@ -204,6 +205,7 @@ void SpectrogramViewFollow::clockChanged(const PlaybackClockState &next, qint64 
                 armLocked(position);
             } else {
                 reattachLocked();
+                sameTrack = !trackChanged;
             }
             placementChanged = true;
         } else if (!ownSeek) {
@@ -214,7 +216,7 @@ void SpectrogramViewFollow::clockChanged(const PlaybackClockState &next, qint64 
     if (placementChanged) {
         emit changed();
     }
-    publish();
+    publish(sameTrack);
 }
 
 void SpectrogramViewFollow::reattach() {
@@ -226,7 +228,7 @@ void SpectrogramViewFollow::reattach() {
         reattachLocked();
     }
     emit changed();
-    publish();
+    publish(true);
 }
 
 void SpectrogramViewFollow::reattachLocked() {
@@ -253,7 +255,7 @@ double SpectrogramViewFollow::reattachPointLocked() const {
     return detachedLeftLocked() + ViewFollow::kReattachViewFraction * m_spanSeconds;
 }
 
-void SpectrogramViewFollow::publish() {
+void SpectrogramViewFollow::publish(bool sameTrack) {
     bool detached = false;
     {
         QMutexLocker lock(&m_mutex);
@@ -261,6 +263,9 @@ void SpectrogramViewFollow::publish() {
     }
     if (detached != m_detached) {
         m_detached = detached;
+        if (!detached) {
+            emit followingAgain(sameTrack);
+        }
         emit detachedChanged();
     }
     // After detached: following again ends autoscroll, and the view is

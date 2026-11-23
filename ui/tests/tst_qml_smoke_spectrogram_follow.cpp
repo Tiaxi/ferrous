@@ -51,6 +51,8 @@ private slots:
     void crosshairStaysWholeThroughAMiddleDrag_data();
     void crosshairStaysWholeThroughAMiddleDrag();
     void crosshairTimeHoldsThroughAPan();
+    void crosshairIsOneColumnInEveryFrame_data();
+    void crosshairIsOneColumnInEveryFrame();
     void panStartsFromTheTimeTheCrosshairShowed();
 };
 
@@ -1943,6 +1945,136 @@ void SpectrogramFollowSmokeTest::crosshairStaysWholeThroughAMiddleDrag() {
     QTRY_COMPARE(crosshairNotAt(plot, 140), QString());
     QTest::mouseMove(window, QPoint(260, y));
     QTRY_COMPARE(crosshairNotAt(plot, 260), QString());
+}
+
+void SpectrogramFollowSmokeTest::crosshairIsOneColumnInEveryFrame_data() {
+    QTest::addColumn<int>("channels");
+    QTest::newRow("stereo") << 2;
+    QTest::newRow("5.1") << 6;
+}
+
+// Every frame that shows the crosshair shows its line on one device column
+// in every lane, the pointer's own lane too: as the pointer comes onto the
+// plot, as a middle-drag starts on it and goes on into another lane, and as
+// the pointer goes from lane to lane, whose leave the lane it left may get
+// after the one it went on got its enter. The lanes' lines were up to 2 px
+// apart at a drag's start (H15): the pointer's lane drew its own pointer,
+// the others the one the plot shared.
+void SpectrogramFollowSmokeTest::crosshairIsOneColumnInEveryFrame() {
+    QFETCH(int, channels);
+    SurfaceInAWindow plot;
+    const QString error = plot.load(channels, 1);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = plot.window;
+    // Each frame's columns, lane by lane (-1 for none), as it is drawn.
+    QList<QList<int>> frames;
+    const QMetaObject::Connection recording = QObject::connect(window, &QQuickWindow::afterSynchronizing, window,
+        [&plot, &frames]() {
+            // A lane lays its line out only while it shows one.
+            QList<int> columns;
+            for (SpectrogramItem *lane : std::as_const(plot.lanes)) {
+                QMutexLocker lock(&lane->m_stateMutex);
+                const QRect line = lane->m_crosshairVerticalLineRect;
+                const bool shown = lane->m_crosshairEnabled
+                    && (lane->pointerOnLocked() || lane->m_crosshairSharedX >= 0.0);
+                columns.append(shown && !line.isEmpty() ? line.x() : -1);
+            }
+            frames.append(columns);
+        }, Qt::DirectConnection);
+    const auto send = [&](QEvent::Type type, QPointF scene, Qt::MouseButton button, Qt::MouseButtons buttons) {
+        QMouseEvent event(type, scene, scene, window->mapToGlobal(scene), button, buttons, Qt::NoModifier);
+        QGuiApplication::sendEvent(window, &event);
+    };
+    // Where the pointer is.
+    QPointF at;
+    // What a frame drawn now shows: in every lane a line on one column, the
+    // pointer's, or in none.
+    QString steps;
+    const auto frame = [&](const QString &step) -> QString {
+        frames.clear();
+        window->grabWindow();
+        steps += step + QLatin1Char(' ');
+        if (frames.isEmpty()) return QStringLiteral("after %1: no frame").arg(steps);
+        const int pointerColumn = static_cast<int>(std::floor(at.x() * window->effectiveDevicePixelRatio() + 1e-9));
+        for (const QList<int> &columns : std::as_const(frames)) {
+            if (columns.count(columns.first()) != columns.size()
+                || (columns.first() >= 0 && columns.first() != pointerColumn)) {
+                QString text;
+                for (const int c : columns) text += QString::number(c) + QLatin1Char(' ');
+                return QStringLiteral("after %1: the lanes' lines at %2(-1 for none)").arg(steps, text);
+            }
+        }
+        return QString();
+    };
+    const auto middleOf = [&](int lane) {
+        SpectrogramItem *item = plot.lanes[lane];
+        return item->mapToScene(QPointF(0.0, item->height() / 2)).y();
+    };
+    // The last frame drew the line, wherever the pointer is on the plot.
+    const auto allShow = [&]() { return !frames.isEmpty() && frames.last().first() >= 0; };
+    const QPointF outside(-20.0, middleOf(0));
+    at = outside;
+    send(QEvent::MouseMove, outside, Qt::NoButton, Qt::NoButton);
+    QCOMPARE(frame(QStringLiteral("outside")), QString());
+
+    // Onto the top lane, off whole pixels, then pressed there, held still.
+    const double y = middleOf(0) + 0.4;
+    at = QPointF(420.6, y);
+    send(QEvent::MouseMove, at, Qt::NoButton, Qt::NoButton);
+    QCOMPARE(frame(QStringLiteral("on")), QString());
+    QVERIFY(allShow());
+    at.rx() -= 1.3;
+    send(QEvent::MouseMove, at, Qt::NoButton, Qt::NoButton);
+    QCOMPARE(frame(QStringLiteral("moved")), QString());
+    // The crosshair hidden, as with the viewer's controls, while the
+    // pointer moves on, and shown again there.
+    plot.surface->setProperty("interactiveOverlaysVisible", false);
+    at.rx() += 6.2;
+    send(QEvent::MouseMove, at, Qt::NoButton, Qt::NoButton);
+    QCOMPARE(frame(QStringLiteral("hidden")), QString());
+    QVERIFY(!allShow());
+    plot.surface->setProperty("interactiveOverlaysVisible", true);
+    QCOMPARE(frame(QStringLiteral("shown again")), QString());
+    QVERIFY(allShow());
+    send(QEvent::MouseButtonPress, at, Qt::MiddleButton, Qt::MiddleButton);
+    QCOMPARE(frame(QStringLiteral("pressed")), QString());
+    QCOMPARE(frame(QStringLiteral("held")), QString());
+    // The drag, as the plot pans, then down into the lowest lane.
+    for (int step = 0; step < 10; ++step) {
+        at.rx() -= step == 0 ? 0.7 : 17.35;
+        send(QEvent::MouseMove, at, Qt::NoButton, Qt::MiddleButton);
+        QCOMPARE(frame(QStringLiteral("drag %1").arg(step)), QString());
+        QVERIFY(allShow());
+    }
+    QVERIFY(plot.surface->property("detached").toBool());
+    for (const double down : {middleOf(0) + 30.2, middleOf(channels - 1) + 0.3}) {
+        at = QPointF(at.x() - 3.6, down);
+        send(QEvent::MouseMove, at, Qt::NoButton, Qt::MiddleButton);
+        QCOMPARE(frame(QStringLiteral("down")), QString());
+        QVERIFY(allShow());
+    }
+    send(QEvent::MouseButtonRelease, at, Qt::MiddleButton, Qt::NoButton);
+    QCOMPARE(frame(QStringLiteral("released")), QString());
+    QVERIFY(allShow());
+
+    // From lane to lane, over a seam and straight across it, each way.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int lane = channels - 1; lane >= 0; --lane) {
+            at = QPointF(at.x() + 5.3, middleOf(lane) + (pass == 0 ? 0.2 : 0.7));
+            send(QEvent::MouseMove, at, Qt::NoButton, Qt::NoButton);
+            QCOMPARE(frame(QStringLiteral("to lane %1").arg(lane)), QString());
+            QVERIFY(allShow());
+            // Up to the lane's top row, then on.
+            SpectrogramItem *item = plot.lanes[lane];
+            at = QPointF(at.x() + 1.1, item->mapToScene(QPointF(0.0, 0.0)).y() + 0.1);
+            send(QEvent::MouseMove, at, Qt::NoButton, Qt::NoButton);
+            QCOMPARE(frame(QStringLiteral("lane %1's top").arg(lane)), QString());
+            QVERIFY(allShow());
+        }
+    }
+    send(QEvent::MouseMove, outside, Qt::NoButton, Qt::NoButton);
+    QCOMPARE(frame(QStringLiteral("off")), QString());
+    QObject::disconnect(recording);
 }
 
 // Through a pan the time at the pointer is the time it grabbed: the view
