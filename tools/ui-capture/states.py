@@ -143,9 +143,9 @@ def itunes_status(kind, n=5):
         if m:
             return m.group(1 if n == 1 else 2).replace("%1", str(n))
     else:
-        pat = {"empty": r'"(No iTunes artwork suggestions found\.)"', "searching": r'"(Searching iTunes[^"]*)"',
+        pat = {"empty": r'"(iTunes has no suggestions for this album\.)"', "searching": r'"(Searching iTunes[^"]*)"',
                "failed": r'"(iTunes search failed: %1)"'}[kind]
-        m = re.search(r'i18nc\("@info:status",\s*' + pat, txt)
+        m = re.search(r'i18nc\("@info:status[^"]*",\s*' + pat, txt)
         if m:  # a failed search: Qt's own wording for a host lookup that fails, as with no network
             return m.group(1).replace("%1", "Host itunes.apple.com not found")
     raise LookupError(f"itunes: no '{kind}' status string in {q}")
