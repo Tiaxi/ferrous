@@ -177,7 +177,7 @@ Item {
     }
     // The same beside the large-font header's cover, which is at the inset.
     function _roomBesideHeader(side) {
-        return root.width - root.textInset - side - root.footGap - root.textInset
+        return root.width - root.textInset - side - root.besideGap - root.textInset
     }
     // Where the cover is in from the panel's corner: at the inset in the
     // large-font header, on its lines' left edge, and at the corner
@@ -1318,13 +1318,14 @@ Item {
     // some 264 px of it empty beside it, and the compact one cut the artist
     // off beside a 152 px cover): one block on one left edge, the panel's
     // inset. The cover, as high as two lines of the title (headerCoverSize),
-    // at the inset from the top too, and beside it, footGap after it as the
-    // lines are under it (12 px after the inset cover, "A Remarkably" was
-    // past the 408 px sidebar's first line, and a long title showed two
-    // words), the title, on up to two lines and centred on it either way
-    // (flush in the corner with the title on its foot, the header had three
-    // left edges and some 60 px of nothing over the title); then, footGap
-    // under the cover, on its left edge and to the panel's inset, the
+    // at the inset from the top too, and beside it, besideGap after it (12
+    // px after the inset cover, "A Remarkably" was past the 408 px
+    // sidebar's first line, and a long title showed two words), the title,
+    // on up to two lines and centred on it either way (flush in the corner
+    // with the title on its foot, the header had three left edges and some
+    // 60 px of nothing over the title); then, footGap, the panel's inset,
+    // under the cover (8 px there read tight under the 24 pt title and the
+    // cover over it), on its left edge and to the panel's inset, the
     // artist, "Album (Year)", the album cut off before its year, in
     // textSecondary, and the details, a line each, elided, stackedLineGap
     // apart. The block is one height for every track (largeHeaderHeight): a
@@ -1339,8 +1340,9 @@ Item {
     readonly property bool largeHeader: !root.wideRoom && root.largeFont
         && (!root.narrow || root.narrowLinesTall)
         && root._roomBesideHeader(root.headerCoverSize) >= root.narrowLineMinimum
-    readonly property int footGap: 8
-    readonly property int titleGapBeside: root.largeHeader ? root.footGap : root.textInset
+    readonly property int besideGap: 8
+    readonly property int footGap: root.textInset
+    readonly property int titleGapBeside: root.largeHeader ? root.besideGap : root.textInset
     readonly property real footLineWidth: Math.max(0, root.width - 2 * root.textInset)
     readonly property real largeHeaderHeight: root.textInset + root.headerCoverSize + root.footGap
         + 3 * narrowLineProbe.implicitHeight + 2 * root.stackedLineGap
