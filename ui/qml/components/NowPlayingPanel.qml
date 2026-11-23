@@ -459,6 +459,17 @@ Item {
                          "Track %1 of %2", number, total)
             : I18n.i18nc("@info the playing track's number on its album", "Track %1", number)
     }
+    // The track's place on its album without the word "Track", "2 of 8",
+    // after the genre on a line with no room for the whole (see
+    // _fittingDetails); "" without a total the backend is sure of.
+    readonly property string albumPositionText: {
+        const number = root.uiBridge.currentTrackNumber
+        const total = root.uiBridge.currentTrackTotal
+        return number > 0 && total >= number
+            ? I18n.i18nc("@info the playing track's number and the tracks on its album, after its genre",
+                         "%1 of %2", number, total)
+            : ""
+    }
     // The same without the total, for a line with no room for it.
     readonly property string trackNumberShortText: {
         const number = root.uiBridge.currentTrackNumber
@@ -552,13 +563,17 @@ Item {
     }
     // The details as the lines show them: all of them where the line has
     // room, and otherwise without what matters least, rather than cut off
-    // (at 24 pt, "Classical · Track 2 o…"): first the album's
-    // track total, then the genre, then the year. The whole of them is in
-    // the tooltip.
+    // (at 24 pt, "Classical · Track 2 o…"): first the word "Track" after
+    // the genre ("Classical · 2 of 8"), then the genre, keeping the track's
+    // place on its album ("Track 2 of 8"), then the album's track total,
+    // then the year. The narrow sidebar dropped the total first, so
+    // "Classical · Track 1" lost the album position the line had room for.
+    // The whole of them is in the tooltip.
     function _fittingDetails(year, separator, width) {
         const candidates = [
             [year, root.genreText, root.trackNumberText],
-            [year, root.genreText, root.trackNumberShortText],
+            root.genreText.length > 0 && root.albumPositionText.length > 0
+                ? [year, root.genreText, root.albumPositionText] : [],
             [year, root.trackNumberText],
             [year, root.trackNumberShortText],
             [root.trackNumberShortText]
