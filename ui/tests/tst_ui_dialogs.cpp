@@ -672,7 +672,8 @@ private slots:
     void editTagsShowsItsFilesAndEdits();
     void editTagsIsAWindowOfItsOwnThatAsksBeforeClosing();
     void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
-    void editTagsOpensNoWiderThanTheMainWindow();
+    void editTagsOpensAtItsFittedWidthFromANarrowWindow_data();
+    void editTagsOpensAtItsFittedWidthFromANarrowWindow();
     void editTagsFileColumnsGiveWayBeforeTheTags();
     void editTagsColumnsHoldTheirValuesBeforeTheTableScrolls_data();
     void editTagsColumnsHoldTheirValuesBeforeTheTableScrolls();
@@ -4851,7 +4852,8 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
         const QString at = key + QStringLiteral(": ") + describeColumns();
         QQuickItem *label = itemsNamed(named(tags, QStringLiteral("tagEditorColumn_") + key),
                                        QStringLiteral("tagEditorColumnLabel")).at(0);
-        const qreal header = label->implicitWidth() + 8
+        const qreal header = label->implicitWidth()
+            + (key == QStringLiteral("trackNo") ? dialog->property("numberLeadingRoom").toReal() : 8)
             + (key == QStringLiteral("formatKind") ? 8 : dialog->property("columnRevertRoom").toReal());
         const qreal after = key == QStringLiteral("trackNo") ? dialog->property("columnRevertRoom").toReal() : 8;
         const qreal value = QFontMetricsF(valueFont).horizontalAdvance(sample) + 8 + after;
@@ -4959,27 +4961,92 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     QVERIFY(closeTagEditor(main));
 }
 
-// The editor opens no wider than the main window it opens from, frames
-// and all (it opened 1624 px wide from a 1600 px one), and as wide as it
-// when it needs more. How its columns give way at about that width,
+void UiDialogsTest::editTagsOpensAtItsFittedWidthFromANarrowWindow_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The editor opens as wide as what it holds, within the screen's room,
+// whatever the main window it opens from: from a 1000 px one it opened no
+// wider than it, its table showing three of its columns and the changed
+// Disc out of view, on a screen with room to spare. Only a main window
+// that falls short of that by less than 2 grid units gives it its width,
+// frame and all (it opened 1624 px wide from a 1600 px one). How its
+// columns give way at about that width,
 // editTagsColumnsFitTheDefaultWindowAndFollowTheFont checks.
-void UiDialogsTest::editTagsOpensNoWiderThanTheMainWindow() {
-    const ScopedApplicationFont font(10);
-    for (const QSize mainSize : {QSize(1600, 1000), QSize(1000, 720)}) {
-        DialogsWindow main(mainSize.width(), mainSize.height());
+void UiDialogsTest::editTagsOpensAtItsFittedWidthFromANarrowWindow() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    QScreen *small = nullptr;
+    for (QScreen *screen : QGuiApplication::screens()) {
+        if (screen->name() == QLatin1String("Small")) {
+            small = screen;
+        }
+    }
+    qreal fitted = 0;
+    qreal snap = 0;
+    {
+        DialogsWindow main(1600, 1000);
+        QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+        QObject *dialog = object(main.window, QStringLiteral("tagEditorDialog"));
+        QVERIFY(openTagEditor(main, tagRowsOfAnAlbum(4)) != nullptr);
+        fitted = dialog->property("fittedWidth").toReal();
+        snap = 2 * evaluate(dialog, QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+        QVERIFY(snap > 0);
+        QVERIFY(closeTagEditor(main));
+    }
+    // Main windows 1000 px wide, the fitted width less 2 grid units (no
+    // snap), and just inside that (a snap); at 10 pt, 1600 px is the last.
+    const int far = qFloor(fitted - snap);
+    const int near = far + 1;
+    QVERIFY2(fitted > 1000 && far > 1000, qPrintable(QStringLiteral("fitted %1").arg(fitted)));
+    for (const int width : {1000, far, near, 1600}) {
+        if (width >= fitted) {
+            continue;
+        }
+        DialogsWindow main(width, 1000);
         QQuickWindow *window = main.window;
         QVERIFY2(window != nullptr, "Main.qml failed to show");
         QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
         QQuickWindow *tags = openTagEditor(main, tagRowsOfAnAlbum(4));
         QVERIFY(tags != nullptr);
-        const QString where = QStringLiteral("editor %1 (frame %2), main window %3 (frame %4)")
-            .arg(tags->width()).arg(tags->frameGeometry().width()).arg(window->width())
+        const QString where = QStringLiteral("editor %1 (frame %2), fitted %3, main window %4 (frame %5)")
+            .arg(tags->width()).arg(tags->frameGeometry().width()).arg(fitted).arg(window->width())
             .arg(window->frameGeometry().width());
-        // It needs more than either main window gives it.
-        QVERIFY2(dialog->property("fittedWidth").toReal() >= mainSize.width(), qPrintable(where));
-        QVERIFY2(tags->frameGeometry().width() <= window->frameGeometry().width(), qPrintable(where));
-        QCOMPARE(tags->width(), window->width());
+        QCOMPARE(dialog->property("fittedWidth").toReal(), fitted);
+        // Within the screen's room, a grid unit free at each edge.
+        const qreal room = tags->screen()->geometry().width() - snap;
+        if (fitted - width < snap) {
+            QVERIFY2(tags->frameGeometry().width() <= window->frameGeometry().width(), qPrintable(where));
+            QVERIFY2(qAbs(tags->width() - std::min(qreal(window->width()), room)) <= 1, qPrintable(where));
+        } else {
+            QVERIFY2(qAbs(tags->width() - std::min(fitted, room)) <= 1, qPrintable(where));
+        }
+        QVERIFY(closeTagEditor(main));
     }
+    if (small == nullptr) {
+        // main() adds it to the offscreen platform, which the tests run on.
+        QVERIFY(QGuiApplication::platformName() != QLatin1String("offscreen"));
+        QSKIP("needs the offscreen platform's small screen; see main()");
+    }
+    // On a screen as narrow as the main window, within its room: a grid
+    // unit free at each edge.
+    DialogsWindow main(1000, 700);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(main.window, QStringLiteral("tagEditorDialog"));
+    QQuickWindow *dialogWindow = windowOf(dialog);
+    QVERIFY(dialogWindow != nullptr);
+    for (QQuickWindow *on : {main.window, dialogWindow}) {
+        on->setScreen(small);
+        on->setPosition(small->geometry().topLeft() + QPoint(qCeil(snap / 2), qCeil(snap / 2)));
+    }
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfAnAlbum(4));
+    QVERIFY(tags != nullptr);
+    QCOMPARE(tags->screen(), small);
+    QCOMPARE(qreal(tags->width()), std::max(dialog->property("minimumWidth").toReal(),
+                                            std::ceil(small->geometry().width() - snap)));
+    QVERIFY(closeTagEditor(main));
 }
 
 // Auto Number is one form in reading order: the tracks' start and Write
@@ -5162,9 +5229,11 @@ void UiDialogsTest::checkEditTagsNumberPairsShowMultipleValuesWhole(DialogsWindo
         QCOMPARE(dialog->property("fieldsWidth").toReal(), 19 * gridUnit);
     }
     QVERIFY(dialog->property("fieldsWidth").toReal() >= 19 * gridUnit);
-    // Edit Tags is no wider than the window it opens from.
-    QVERIFY2(tags->width() <= window->width(),
-             qPrintable(QStringLiteral("Edit Tags %1 wide, its window %2").arg(tags->width()).arg(window->width())));
+    // Edit Tags is no wider than what it holds, or than the screen's room.
+    QVERIFY2(tags->width() <= std::ceil(dialog->property("fittedWidth").toReal())
+                 && tags->width() <= tags->screen()->geometry().width() - 2 * gridUnit,
+             qPrintable(QStringLiteral("Edit Tags %1 wide, fitted %2").arg(tags->width())
+                            .arg(dialog->property("fittedWidth").toReal())));
     const int openedWidth = tags->width();
     QQuickItem *number = nullptr;
     QTRY_VERIFY((number = visibleNamed(tags, QStringLiteral("tagEditorField_trackNo"))) != nullptr);
@@ -5426,7 +5495,7 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
     // too, to no less than 16 grid units, rather than the table scroll.
     QQuickItem *fields = visibleNamed(tags, QStringLiteral("tagEditorFields"));
     QVERIFY(fields != nullptr);
-    const qreal fieldsWidth = fields->width();
+    const qreal fieldsWidth = dialog->property("fieldsWidth").toReal();
     const qreal fieldsLeast = dialog->property("fieldsLeastWidth").toReal();
     QVERIFY(fieldsLeast < fieldsWidth);
     for (const int width : {1364, 1400, 1600}) {
@@ -5647,6 +5716,9 @@ void UiDialogsTest::editTagsKeepsItsRulesAtALargeFont() {
     QVERIFY2(main.window != nullptr, "Main.qml failed to show");
     QQuickWindow *tags = openTagEditor(main, tagRowsOfAnAlbum(4));
     QVERIFY(tags != nullptr);
+    // At the main window's width, which it opens wider than.
+    tags->resize(1000, tags->height());
+    QTRY_COMPARE(tags->contentItem()->width(), 1000.0);
     main.editor.setSelectedRows({0});
     main.editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Paper Harbour, Revised"));
     QQuickItem *status = nullptr;
@@ -6954,6 +7026,8 @@ void UiDialogsTest::editTagsTitleMeetsTheEdgeUnderAWideScrollBar() {
     QVERIFY2(main.window != nullptr, "Main.qml failed to show");
     QQuickWindow *tags = openTagEditor(main, tagRowsOfTheBatch());
     QVERIFY(tags != nullptr);
+    // At the main window's width, which it opens wider than.
+    tags->resize(1000, tags->height());
     QTRY_COMPARE(tags->contentItem()->width(), 1000.0);
     QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
     QVERIFY(table != nullptr);
@@ -8563,6 +8637,8 @@ void UiDialogsTest::editTagsColumnsHoldTheirValuesBeforeTheTableScrolls() {
     QVERIFY2(main.window != nullptr, "Main.qml failed to show");
     QQuickWindow *tags = openTagEditor(main, tagRowsWith(files));
     QVERIFY(tags != nullptr);
+    // At the main window's width, which it opens wider than.
+    tags->resize(1000, tags->height());
     QTRY_COMPARE(tags->contentItem()->width(), 1000.0);
     QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
     QVERIFY(table != nullptr);
@@ -8643,6 +8719,8 @@ void UiDialogsTest::editTagsMeasuresABoundedNumberOfRows() {
                      QStringLiteral("The Northbound Platform Chamber Orchestra"), QStringLiteral("EP")});
     QQuickWindow *tags = openTagEditor(main, tagRowsWith(files));
     QVERIFY(tags != nullptr);
+    // At the main window's width, which it opens wider than.
+    tags->resize(1000, tags->height());
     QTRY_COMPARE(tags->contentItem()->width(), 1000.0);
     QTRY_VERIFY(named(tags, QStringLiteral("tagEditorColumn_artist")) != nullptr);
     QTRY_COMPARE(named(tags, QStringLiteral("tagEditorColumn_artist"))->width(), 100.0);

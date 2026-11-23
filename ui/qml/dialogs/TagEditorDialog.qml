@@ -499,12 +499,18 @@ Components.DialogWindow {
     // table at its width, clear of its scroll bar.
     readonly property real fittedWidth: Math.ceil(2 * root.contentPadding + root.fieldsWidth
         + root.contentSpacing + root.tableWidthThrough("directory") + Kirigami.Units.gridUnit)
-    // As wide as what it holds and no wider, within the screen and no wider
-    // than the window it opens from, frame and all, as the two have the
-    // same frame (not 1624 px from a 1600 px main window): with less room,
-    // File Name and Folder give way first, then the tags.
-    defaultWidth: Math.min(root.fittedWidth,
-        root.windowRoot && root.windowRoot.width > 0 ? root.windowRoot.width : Number.POSITIVE_INFINITY)
+    // As wide as what it holds and no wider, within the screen's room: from
+    // a narrow main window too (no wider than a 1000 px one, its table
+    // showed three of its columns, the changed Disc out of view, on a
+    // screen with room to spare). Only a window that falls short of it by
+    // less than 2 grid units is a width to keep, frame and all, as the two
+    // have the same frame (not 1624 px from a 1600 px main window). With
+    // less room, File Name and Folder give way first, then the tags.
+    readonly property real parentWindowWidth: root.windowRoot && root.windowRoot.width > 0
+        ? root.windowRoot.width : 0
+    defaultWidth: root.parentWindowWidth > 0 && root.fittedWidth > root.parentWindowWidth
+            && root.fittedWidth - root.parentWindowWidth < 2 * Kirigami.Units.gridUnit
+        ? root.parentWindowWidth : root.fittedWidth
     // As tall as the fields, or a table of 12 rows, whichever is taller,
     // and no taller than 46 grid units, scaled with the font: a few files
     // leave no wide empty table, and the user may make it taller.
