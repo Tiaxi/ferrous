@@ -606,11 +606,9 @@ Item {
     })
 
     // A track change fades, line by line: a line that differs for the next
-    // track cross-fades, in place, the one before going out over the first
-    // 40 % of the fade as the next track's comes in over all of it (see
-    // _linesOutLevel), so the line never drops below half of its ink (out,
-    // then in, left each line under half for up to 50 ms) and the two texts
-    // hardly show together; where only a word or a number of it changes,
+    // track changes in place, the one before going out before the next
+    // track's comes in (see _linesOutLevel), so the two texts never show
+    // together; where only a word or a number of it changes,
     // its fields, and the words of a field in which only a number changes,
     // that are the same for both and do not move stay still (#537), and
     // otherwise it fades whole (see `_fadesWhole`); a line that is the same
@@ -674,21 +672,26 @@ Item {
     }
     // At `at` of the fade, how much of their opacity the lines before keep
     // and how far the playing track's lines have come in; and how much of
-    // their opacity the covers before keep, going out over all of it. The
-    // lines before go out over the first linesOutSpan of it, OutCubic, 80
-    // ms of a 200 ms fade, as the playing track's come in over all of it,
-    // OutCubic, so the two texts are both over 0.3 for some 4 ms of it
-    // rather than 50 (at 50 two titles read superimposed), and between
-    // them a line keeps over half of a text's ink in every frame, so it
-    // does not blink. The incoming lines start with the
-    // fade: held back any longer, as to 60 ms, the line would drop under
-    // half its ink for up to 70 ms, a blink.
-    readonly property real linesOutSpan: 0.4
+    // their opacity the covers before keep, going out over all of it. A
+    // line that changes shows one text in every frame: the lines before go
+    // out first, OutCubic, over linesOutTime, 40 % of shortDuration, and
+    // only then the playing track's come in, OutCubic, over linesInTime, 60
+    // % of it; the lines' change takes shortDuration, ~100 ms, in the
+    // long fade too, while the cover cross-fades over all of it. (Out and
+    // in over the same time, even with the lines before gone over its first
+    // 40 %, showed two titles at once for ~50 ms, a ghost at real speed.)
+    // The spans are each the share of the fade that runs (handover).
+    readonly property real linesOutTime: 0.4 * Kirigami.Units.shortDuration
+    readonly property real linesInTime: 0.6 * Kirigami.Units.shortDuration
+    readonly property real linesOutSpan: root.handoverAnimation.duration > 0
+        ? Math.min(1, root.linesOutTime / root.handoverAnimation.duration) : 0
+    readonly property real linesInSpan: root.handoverAnimation.duration > 0
+        ? Math.min(1 - root.linesOutSpan, root.linesInTime / root.handoverAnimation.duration) : 0
     function _linesOutLevel(at) {
-        return 1 - root._eased(at / root.linesOutSpan)
+        return root.linesOutSpan > 0 ? 1 - root._eased(at / root.linesOutSpan) : 0
     }
     function _linesInLevel(at) {
-        return root._eased(at)
+        return root.linesInSpan > 0 ? root._eased((at - root.linesOutSpan) / root.linesInSpan) : 1
     }
     function _coversOutLevel(at) {
         return 1 - root._eased(at)
