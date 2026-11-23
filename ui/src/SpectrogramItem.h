@@ -1552,6 +1552,12 @@ private:
     double m_crosshairCachedDrawX{0.0};
     bool m_crosshairCachedRollingMode{false};
     int m_crosshairCachedBinsPerColumn{0};
+    // The zoom preview's time mapping the crosshair was laid out for, while
+    // it read the scaled canvas (see m_zoomPreviewAnchorSeconds).
+    bool m_crosshairCachedPreview{false};
+    double m_crosshairCachedPreviewAnchorSeconds{0.0};
+    double m_crosshairCachedPreviewAnchorX{0.0};
+    double m_crosshairCachedPreviewPixelsPerSecond{0.0};
     QRect m_crosshairVerticalLineRect;
     QRect m_crosshairHorizontalLineRect;
     bool m_showCrosshairTime{true};

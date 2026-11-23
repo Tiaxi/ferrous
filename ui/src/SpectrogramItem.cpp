@@ -1651,9 +1651,11 @@ QImage renderOverlayImage(
     return label;
 }
 
-// The crosshair's readout of a level: "−62 dB", or "−∞ dB" for silence.
+// The crosshair's readout of a level: "−62 dB", "−∞ dB" for silence, or
+// "— dB" for NaN, a level not known.
 QString crosshairDecibels(double db) {
     static const QString format = i18nc("@info level in decibels; %1 is a number", "%1 dB");
+    if (std::isnan(db)) return format.arg(QStringLiteral("\u2014"));
     if (!std::isfinite(db)) return format.arg(QStringLiteral("\u2212\u221e"));
     const long rounded = std::lround(db);
     return format.arg(rounded < 0 ? QStringLiteral("\u2212%1").arg(-rounded) : QString::number(rounded));
@@ -6208,8 +6210,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // wider than the widget with right-side padding. Each frame
             // shifts it by the combined displayLeft + drawX delta, and it is
             // laid out again only when the shift exhausts the padding.
-            // The time grid and the crosshair's readout follow the data,
-            // not the scaled preview, so they wait for the data.
+            // The time grid follows the data, not the scaled preview, so it
+            // waits for the data.
             if (m_gridEnabled && m_showTimeLabels && m_binsPerColumn > 1 && !zoomPreviewShown) {
                 const int timeGridPadding = devicePixels(400.0, scale);
                 // The pixel shift accounts for both displayLeft advancement
@@ -6253,19 +6255,27 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // Crosshair overlay — laid out again on mouse move or display
             // parameter change. Shown on the hovered pane (full crosshair)
             // and on non-hovered panes when crosshairSharedX >= 0 (vertical
-            // line + bottom time label).
+            // line + bottom time label). A zoom's preview keeps it: hidden
+            // until the zoom's data came, it blinked out for a fifth of a
+            // second at every wheel notch and on Reset Zoom (H21).
             if (m_crosshairEnabled
-                && (pointerOnLocked() || m_crosshairSharedX >= 0.0)
-                && !zoomPreviewShown) {
+                && (pointerOnLocked() || m_crosshairSharedX >= 0.0)) {
                 // The readout reads the data under the crosshair, which
                 // the view moves on: the hovered pane's frequency and
-                // level, and the lowest pane's time.
+                // level, and the lowest pane's time. In a zoom's preview,
+                // where the scaled canvas shows it, which playback moves.
                 bool crosshairTimeStale = false;
                 if (pointerOnLocked() || m_showCrosshairTime) {
                     crosshairTimeStale =
                         overlayLeft != m_crosshairCachedDisplayLeft
                         || !qFuzzyCompare(overlayDrawX / scale + 1.0, m_crosshairCachedDrawX + 1.0)
-                        || rollingMode != m_crosshairCachedRollingMode;
+                        || rollingMode != m_crosshairCachedRollingMode
+                        || zoomPreviewShown != m_crosshairCachedPreview
+                        || (zoomPreviewShown
+                            && (m_zoomPreviewAnchorSeconds != m_crosshairCachedPreviewAnchorSeconds
+                                || m_zoomPreviewAnchorX != m_crosshairCachedPreviewAnchorX
+                                || m_zoomPreviewPixelsPerSecond
+                                    != m_crosshairCachedPreviewPixelsPerSecond));
                 }
                 const bool crosshairStale = m_crosshairDirty
                     || !m_crosshair.valid
@@ -6938,8 +6948,10 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
             // where the view was drawn, which a view that follows the
             // playhead draws a fraction of a column off its whole columns
             // (taking them, the time slipped a pixel as the drag started).
+            // Not from one laid out over a zoom's preview, whose time is
+            // the scaled canvas's, nor while a preview shows.
             const bool fromCrosshair = m_crosshair.valid && !m_crosshairCachedRollingMode
-                && !m_zoomPreviewShown;
+                && !m_crosshairCachedPreview && !m_zoomPreviewShown;
             m_panOriginLeft = fromCrosshair
                 ? static_cast<double>(m_crosshairCachedDisplayLeft)
                     - m_crosshairCachedDrawX / std::max(1e-9, effectiveZoomLocked())
@@ -7289,6 +7301,13 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     m_crosshairCachedDrawX = logicalDrawX;
     m_crosshairCachedRollingMode = rollingMode;
     m_crosshairCachedBinsPerColumn = m_binsPerColumn;
+    // While a zoom's preview shows the canvas scaled, the readout reads it
+    // as it shows: the time where a click there seeks (viewSecondsAtLocked).
+    const bool preview = m_zoomPreviewShown && m_zoomPreviewPixelsPerSecond > 0.0;
+    m_crosshairCachedPreview = m_zoomPreviewShown;
+    m_crosshairCachedPreviewAnchorSeconds = m_zoomPreviewAnchorSeconds;
+    m_crosshairCachedPreviewAnchorX = m_zoomPreviewAnchorX;
+    m_crosshairCachedPreviewPixelsPerSecond = m_zoomPreviewPixelsPerSecond;
     // The vertical line is at the plot's one x in every lane, the pointer's
     // own too, so that all draw it on one column in every frame: the lane
     // with the pointer drew its own, which the others' shared x was not in
@@ -7316,6 +7335,10 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
         QRectF(deviceX / scale, 0.0, lineWidth / scale, height / scale), QString()});
     const double lineX = static_cast<double>(deviceX) / scale;
     const double lineY = static_cast<double>(deviceY) / scale;
+    // The time at the line, in the columns' time, as the preview shows it.
+    const double previewSeconds = preview
+        ? m_zoomPreviewAnchorSeconds + (lineX - m_zoomPreviewAnchorX) / m_zoomPreviewPixelsPerSecond
+        : std::numeric_limits<double>::quiet_NaN();
 
     // The readout, on the axes: the frequency and the level at the pointer
     // on the hovered pane's right edge, and the time on the bottom edge of
@@ -7327,24 +7350,32 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
             QRectF(0.0, lineY, width / scale, lineWidth / scale), QString()});
         const double freqHz = pixelToFrequencyHzLocked(deviceY, height);
         if (freqHz >= 0.0) {
-            valueText = crosshairFrequency(freqHz);
-            const double columnF = static_cast<double>(displayLeft)
-                + (lineX - logicalDrawX) / std::max(1e-9, effectiveZoomLocked());
-            const qint64 displayIndex = static_cast<qint64>(std::floor(columnF));
-            const quint8 *bins = ringColumnLocked(displayIndex, rollingMode);
+            // The level of the column at the line: in a preview, the one of
+            // the columns at hand that has its time.
+            const double columnF = preview
+                ? previewSeconds * columnsPerSecond
+                    + (rollingMode ? static_cast<double>(m_rollingEpoch) : 0.0)
+                : static_cast<double>(displayLeft)
+                    + (lineX - logicalDrawX) / std::max(1e-9, effectiveZoomLocked());
+            const quint8 *bins = std::isfinite(columnF)
+                ? ringColumnLocked(static_cast<qint64>(std::floor(columnF)), rollingMode)
+                : nullptr;
             const int row = height - 1 - deviceY;
+            // Without one, the level's field stays, with a dash for its
+            // number, so the readout keeps its form.
+            QString level = crosshairDecibels(std::numeric_limits<double>::quiet_NaN());
             if (bins != nullptr && row >= 0 && row < static_cast<int>(m_iToBin.size())) {
                 const int bin = m_iToBin[static_cast<size_t>(row)];
                 if (bin >= 0 && bin < m_ring.bins()) {
                     // 1..255 spans -150..0 dBFS; 0 is silence.
                     const int value = bins[bin];
-                    const double db = value == 0
+                    level = crosshairDecibels(value == 0
                         ? -std::numeric_limits<double>::infinity()
-                        : (static_cast<double>(value - 1) / 254.0) * 150.0 - 150.0;
-                    valueText = i18nc("@info %1 is a frequency, %2 a level", "%1, %2",
-                                      valueText, crosshairDecibels(db));
+                        : (static_cast<double>(value - 1) / 254.0) * 150.0 - 150.0);
                 }
             }
+            valueText = i18nc("@info %1 is a frequency, %2 a level", "%1, %2",
+                              crosshairFrequency(freqHz), level);
         }
     }
     QString timeText;
@@ -7353,18 +7384,24 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
         // continuous transform: from the view's whole columns, it rolled
         // across a digit and back mid-drag (1:10.0, 1:09.9, 1:10.0).
         const double panPointerSeconds =
-            rollingMode ? std::numeric_limits<double>::quiet_NaN()
-                        : followSnapshotLocked().panPointerSeconds;
-        const double trackTime = crosshairTrackTimeLocked(std::isfinite(panPointerSeconds)
-            ? panPointerSeconds
-            : pixelToTimeSeconds(lineX, displayLeft, rollingMode, m_rollingEpoch,
-                  columnsPerSecond, logicalDrawX, effectiveZoomLocked()));
+            rollingMode || preview ? std::numeric_limits<double>::quiet_NaN()
+                                   : followSnapshotLocked().panPointerSeconds;
+        double continuousTime = previewSeconds;
+        if (!preview) {
+            continuousTime = std::isfinite(panPointerSeconds)
+                ? panPointerSeconds
+                : pixelToTimeSeconds(lineX, displayLeft, rollingMode, m_rollingEpoch,
+                      columnsPerSecond, logicalDrawX, effectiveZoomLocked());
+        }
+        const double trackTime = crosshairTrackTimeLocked(continuousTime);
         if (std::isfinite(trackTime)) {
             // As finely as the view resolves it, by the waveform's rule: a
             // device pixel, or an analysis column where that is longer.
-            const double zoom = effectiveZoomLocked();
+            const double devicePixelsPerSecond = preview
+                ? m_zoomPreviewPixelsPerSecond * scale
+                : columnsPerSecond * std::max(1e-9, effectiveZoomLocked() * scale);
             const double secondsPerColumn = std::max(
-                1.0 / (columnsPerSecond * std::max(1e-9, zoom * scale)), 1.0 / columnsPerSecond);
+                1.0 / devicePixelsPerSecond, 1.0 / columnsPerSecond);
             timeText = CrosshairReadout::formatCrosshairTime(
                 trackTime, CrosshairReadout::crosshairTimeDecimals(secondsPerColumn));
         }

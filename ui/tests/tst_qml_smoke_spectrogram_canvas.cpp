@@ -22,6 +22,7 @@ private slots:
     void spectrogramRingHoldsTheSessionsWidthUntilTheNextSession();
     void spectrogramRingHoldsEveryColumnOfAWiderSession();
     void spectrogramZoomPreviewRequestsEveryFrame();
+    void spectrogramCrosshairStaysThroughZoomPreviews();
     void spectrogramVisibleRangeIsTheViewAFrameShows();
     void spectrogramDynamicRangePreservesSilence();
     void spectrogramProjectionSharesImmutableSettingsAndReleasesUnusedPlans();
@@ -618,6 +619,137 @@ void SpectrogramCanvasSmokeTest::spectrogramZoomPreviewRequestsEveryFrame() {
             item.handleWindowAfterAnimating();
             QCOMPARE(item.m_playbackFrameRequests, requested + frame);
             QVERIFY(!playbackFrameScheduled(item));
+        }
+        delete node;
+    }
+}
+
+// Regression (H21): the crosshair and its readout were left out of every
+// frame of a zoom's preview, a fifth of a second at each wheel notch and on
+// Reset Zoom. They stay, and read the canvas as the preview shows it: the
+// time where the view the frame shows puts it, and a level.
+void SpectrogramCanvasSmokeTest::spectrogramCrosshairStaysThroughZoomPreviews() {
+    for (const int mode : {0, 1}) {
+        const QByteArray label = mode == 0 ? "rolling" : "centered";
+        // A window, which makes the readout's textures.
+        QQuickWindow window;
+        window.resize(400, 100);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+        TestTime time;
+        SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+        prepareScrollingPlayback(item, time, mode);
+        item.setCrosshairEnabled(true);
+        item.setZoomEnabled(true);
+        // As the surface takes the zoom the wheel asks for.
+        connect(&item, &SpectrogramItem::zoomRequested, &item, &SpectrogramItem::setZoomLevel);
+        const QPointF pointer(150.0, 40.0);
+        // Through the window, which hovers its items where its pointer is.
+        // The frames hover it where the cursor is, so the cursor is there.
+        QCursor::setPos(window.mapToGlobal(pointer.toPoint()));
+        QTest::mouseMove(&window, pointer.toPoint());
+        const auto hovered = [&item](QPointF at) {
+            QMutexLocker lock(&item.m_stateMutex);
+            return item.pointerOnLocked() && item.m_hoverPosition == at;
+        };
+        QTRY_VERIFY(hovered(pointer));
+        QSGNode *node = paintSettled(item, nullptr);
+
+        // The frame's crosshair: its two lines and both plates, the level
+        // in its own, and the time the frame's view has at the pointer,
+        // as the seek bar's band reads it.
+        const auto checkCrosshair = [&](const char *step) {
+            const QString where = QStringLiteral("%1, %2").arg(QString::fromLatin1(label),
+                QString::fromLatin1(step));
+            item.handleWindowAfterAnimating();
+            const qsizetype placed = overlayOnScreen(node, 7).images.size();
+            QVERIFY2(placed == 4, qPrintable(QStringLiteral("%1: %2 placed").arg(where).arg(placed)));
+            QString readout;
+            {
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY2(item.m_crosshair.valid, qPrintable(where));
+                readout = item.m_crosshairLaidOutReadout;
+            }
+            const QStringList lines = readout.split(QLatin1Char('\n'));
+            QCOMPARE(lines.size(), 2);
+            QVERIFY2(lines[0].contains(QStringLiteral("Hz, \u2212")) && lines[0].endsWith(QStringLiteral(" dB")),
+                     qPrintable(where + QStringLiteral(": ") + lines[0]));
+            const QStringList parts = lines[1].split(QLatin1Char(':'));
+            QCOMPARE(parts.size(), 2);
+            const double shown = parts[0].toDouble() * 60.0 + parts[1].toDouble();
+            const double start = item.visibleStartSeconds();
+            const double end = item.visibleEndSeconds();
+            // To the pixel's time, within the readout's last digit.
+            const double expected = start + std::floor(pointer.x()) * (end - start) / item.width();
+            const int decimals = parts[1].contains(QLatin1Char('.'))
+                ? static_cast<int>(parts[1].size() - parts[1].indexOf(QLatin1Char('.')) - 1) : 0;
+            QVERIFY2(std::abs(shown - expected) <= 0.5 * std::pow(10.0, -decimals) + 1e-9,
+                     qPrintable(QStringLiteral("%1: %2 shown, %3 s expected")
+                         .arg(where, lines[1]).arg(expected)));
+        };
+        checkCrosshair("at rest");
+
+        // A wheel notch: the canvas scaled, until the zoom's data comes.
+        QWheelEvent notch(pointer, pointer, QPoint(), QPoint(0, 120), Qt::NoButton,
+                          Qt::NoModifier, Qt::NoScrollPhase, false);
+        item.wheelEvent(&notch);
+        QVERIFY(notch.isAccepted());
+        for (int frame = 0; frame < 3; ++frame) {
+            node = item.updatePaintNode(node, nullptr);
+            {
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY2(item.m_zoomPreviewShown, label.constData());
+            }
+            checkCrosshair("wheel notch");
+            time.advance(0.016);
+        }
+        // Reset Zoom before the zoom's columns came: the canvas as it is.
+        item.setZoomLevel(1.0);
+        node = item.updatePaintNode(node, nullptr);
+        checkCrosshair("Reset Zoom at once");
+
+        if (mode == 1) {
+            // The zoom's columns, as the session for its hop sends them,
+            // which replace the preview.
+            quint64 generation = 1;
+            const auto feedZoomData = [&] {
+                QVERIFY(sendPendingBackendZoom(item));
+                int hop = 0;
+                {
+                    QMutexLocker lock(&item.m_stateMutex);
+                    hop = item.columnHopForZoomLocked(item.backendZoomForRequestLocked());
+                }
+                QVERIFY(hop > 0);
+                const int columns = kStripeColumns * 1024 / hop;
+                QByteArray data(kStripeBins * columns, Qt::Uninitialized);
+                for (int column = 0; column < columns; ++column) {
+                    std::fill_n(data.data() + static_cast<qsizetype>(column) * kStripeBins,
+                        kStripeBins, static_cast<char>(40 + (column * 53) % 180));
+                }
+                item.feedPrecomputedChunk(data, kStripeBins, 0, columns, 0, columns,
+                    48'000, hop, true, true, 1, true, ++generation);
+                node = paintSettled(item, node);
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY(!item.m_zoomPreviewShown);
+                QVERIFY(!item.m_crosshairCachedPreview);
+            };
+            item.wheelEvent(&notch);
+            node = item.updatePaintNode(node, nullptr);
+            checkCrosshair("wheel notch again");
+            feedZoomData();
+            checkCrosshair("zoom data");
+
+            // Reset Zoom: the zoomed canvas, smaller, until zoom 1's
+            // columns come.
+            item.setZoomLevel(1.0);
+            node = item.updatePaintNode(node, nullptr);
+            {
+                QMutexLocker lock(&item.m_stateMutex);
+                QVERIFY(item.m_zoomPreviewShown);
+            }
+            checkCrosshair("Reset Zoom");
+            feedZoomData();
+            checkCrosshair("reset data");
         }
         delete node;
     }
