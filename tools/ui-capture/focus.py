@@ -146,6 +146,10 @@ SCOPES = {
                       ("centered-scroll", "dark", "The centred spectrogram scrolling (0.5 s)"),
                       ("meter-motion-spectrogram", "dark", "The level meter moving on music-like levels, spectrogram"),
                       ("plates-reveal", "dark", "The pointer entering the pane: the plates revealed")],
+        # (h24: a reviewer read the fixtures' fades at an unzoomed waveform's ends as the drawing tapering)
+        notes=["The test tracks fade in over their first 0.5 s and out over their last 1.5 s. At 100 % zoom the "
+               "waveform's first and last columns are the track's start and end, so the narrowing there is the audio, "
+               "drawn at its true size, not the drawing tapering at the pane's edges."],
         floors=None,  # (every floor region measured)
         a11y_labels=[],
         # CONTRAST.md rows quoted under each focus sheet (by element-name fragment, case ignored)
