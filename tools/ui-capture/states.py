@@ -760,7 +760,7 @@ def m_onetoone(r, arg):
     bgc = np.median(ia.reshape(-1, 3), axis=0)
     rows_ink = np.nonzero((np.abs(ia - bgc).sum(axis=2) > 60).any(axis=1))[0]
     info_c = info.crop((0, 0, info.width, min(info.height, int(rows_ink.max()) + 16 if len(rows_ink) else info.height)))
-    qh = min(que.height, 185)  # (185 since H31 ZA1's taller transport band: its thirds grew 19 px each)
+    qh = min(que.height, 160)  # (the transport band grew in H31 ZA1 and H32 AA1: its thirds are taller)
     que_c = que.crop((0, 0, min(que.width, b_w), qh))
     seam_c = seam.crop((0, 0, min(seam.width, W - 2 * P), seam.height))
     col_a = [("Now playing (the whole block)", np_), ("Library: its header and first rows", lib.crop((0, 0, lib.width, min(lib.height, 250))))]
