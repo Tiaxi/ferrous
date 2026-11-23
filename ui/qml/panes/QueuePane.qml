@@ -771,8 +771,12 @@ Rectangle {
                         hovered: playlistRowMouseArea.containsMouse
                         hoverColor: root.uiPalette.rowHover
                         selected: playlistRow.rowSelected
-                        // A selected row answers the pointer too.
+                        // A selected row answers the pointer too, and
+                        // its press, until a drag takes the row away.
                         selectedHover: true
+                        pressed: (playlistRowMouseArea.pressedButtons & Qt.LeftButton) !== 0
+                            && !playlistRowMouseArea.dragCancelled
+                            && playlistView.draggingRow !== playlistRowMouseArea
                         active: playlistView.activeFocus
                         focused: playlistRow.rowCurrent
                         // Every state ends at the scrollbar's lane while it

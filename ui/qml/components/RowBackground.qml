@@ -27,6 +27,10 @@ import "../logic/ColorUtils.js" as ColorUtils
 //   its selection tint toward the text colour, with the hover tint's own
 //   fade, so it answers the pointer as the other rows do.
 //
+// - pressed (the queue's): a selected row held down by the pointer takes
+//   the more intense selectionPressed at once, and gives it up at once, so a
+//   press reads apart from a hover.
+//
 // - opaque: the row also paints the view colour under its tints and in
 //   the lane, so a row that slides over another while its list moves rows
 //   hides it.
@@ -47,6 +51,7 @@ Item {
     // lane while it shows.
     property real scrollbarLane: 0
     property bool selectedHover: false
+    property bool pressed: false
 
     readonly property color selectionColor: root.active ? root.uiPalette.selection : root.uiPalette.selectionInactive
     // How far the selection has stepped toward its hovered colour: the
@@ -54,6 +59,7 @@ Item {
     readonly property real selectionHoverLevel: root.selectedHover ? hoverTint.opacity : 0
     readonly property color tintColor: !root.selected
         ? "transparent"
+        : root.pressed ? root.uiPalette.selectionPressed
         : (root.selectionHoverLevel > 0
             ? ColorUtils.mixColor(root.selectionColor,
                                   root.active ? root.uiPalette.selectionHovered

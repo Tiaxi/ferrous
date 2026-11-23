@@ -223,6 +223,8 @@ private slots:
     void hoverAndPressedTintsOnAnotherBackground();
     void selectedQueueRowAnswersHover_data();
     void selectedQueueRowAnswersHover();
+    void pressedQueueRowIntensifiesItsSelection_data();
+    void pressedQueueRowIntensifiesItsSelection();
     void unreadableMarkReadsOnEveryRowBackground_data();
     void unreadableMarkReadsOnEveryRowBackground();
     void rowBackgroundShowsEachState_data();
@@ -1153,6 +1155,79 @@ void UiFoundationsTest::selectedQueueRowAnswersHover() {
     QCOMPARE(colorOf(tintRect, "color").alphaF(), 0.0f);
     background->setProperty("selected", true);
     QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selectionHovered")));
+}
+
+void UiFoundationsTest::pressedQueueRowIntensifiesItsSelection_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// A selected queue row held down by the pointer has its own colour, the
+// hovered selection it is pressed from at a higher saturation and the same
+// luminance (it was the hovered selection's, so a press gave no feedback of
+// its own): a visible step from the selection and from the hovered one,
+// bluer than both, and so every text and mark a selected row draws keeps its
+// contrast on it. It comes and goes at once, not with the hover's fade.
+void UiFoundationsTest::pressedQueueRowIntensifiesItsSelection() {
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, kRowItems), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QQuickItem *background = itemNamed(root.get(), QStringLiteral("rowBackground"));
+    QVERIFY(tokens != nullptr && background != nullptr);
+    QQuickItem *tintRect = childNamed(background, QStringLiteral("rowBackgroundTint"));
+    QVERIFY(tintRect != nullptr);
+
+    const QColor selection = colorOf(tokens, "selection");
+    const QColor hovered = colorOf(tokens, "selectionHovered");
+    const QColor pressed = colorOf(tokens, "selectionPressed");
+    QVERIFY2(labDistance(pressed, selection) >= 5.0 && labDistance(pressed, hovered) >= 5.0,
+             qPrintable(QStringLiteral("%1 is %2 from the selection, %3 from the hovered one")
+                            .arg(pressed.name())
+                            .arg(labDistance(pressed, selection))
+                            .arg(labDistance(pressed, hovered))));
+    QVERIFY(labChroma(pressed) >= labChroma(hovered) + 4.0);
+    QVERIFY(labChroma(pressed) >= labChroma(selection) + 4.0);
+    QVERIFY2(std::abs(relativeLuminance(pressed) - relativeLuminance(hovered)) < 0.002,
+             qPrintable(pressed.name() + QStringLiteral(" vs ") + hovered.name()));
+
+    QVariant number;
+    QVERIFY(QMetaObject::invokeMethod(tokens, "textTertiaryOn", Q_RETURN_ARG(QVariant, number),
+                                      Q_ARG(QVariant, QVariant(true)), Q_ARG(QVariant, QVariant(true))));
+    const QList<std::pair<QString, QColor>> texts{
+        {QStringLiteral("text"), colorOf(tokens, "text")},
+        {QStringLiteral("secondary"), colorOf(tokens, "textSecondarySelected")},
+        {QStringLiteral("column"), colorOf(tokens, "textColumn")},
+        {QStringLiteral("now"), colorOf(tokens, "now")},
+        {QStringLiteral("selected number"), number.value<QColor>()},
+    };
+    for (const auto &[what, color] : texts) {
+        QVERIFY2(contrastRatio(color, pressed) >= 4.5, qPrintable(describeContrast(what, color, pressed)));
+    }
+    QVERIFY2(contrastRatio(number.value<QColor>(), pressed) >= tokens->property("rowFigureContrast").toDouble(),
+             qPrintable(describeContrast(QStringLiteral("selected number"), number.value<QColor>(), pressed)));
+    const QColor mark = colorOf(tokens, "negativeSelected");
+    QVERIFY2(contrastRatio(mark, pressed) >= 3.0, qPrintable(describeContrast(QStringLiteral("mark"), mark, pressed)));
+
+    // The queue's row: hovered, selected, then held down and let go.
+    SteppedAnimationDriver animations;
+    background->setProperty("selectedHover", true);
+    background->setProperty("selected", true);
+    background->setProperty("hovered", true);
+    (void)animations.step(1000);
+    QVERIFY(sameColor(colorOf(tintRect, "color"), hovered));
+    background->setProperty("pressed", true);
+    QVERIFY(sameColor(colorOf(tintRect, "color"), pressed));
+    background->setProperty("pressed", false);
+    QVERIFY(sameColor(colorOf(tintRect, "color"), hovered));
+    // An unselected row held down keeps the hover alone.
+    background->setProperty("selected", false);
+    background->setProperty("pressed", true);
+    QCOMPARE(colorOf(tintRect, "color").alphaF(), 0.0f);
 }
 
 void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground_data() {

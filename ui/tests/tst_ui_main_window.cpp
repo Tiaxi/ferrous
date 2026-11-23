@@ -1204,6 +1204,7 @@ private slots:
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
+    void pressedQueueRowHasItsOwnColour();
     void queueNameKeepsTheTitleColumnsPlace_data();
     void queueNameKeepsTheTitleColumnsPlace();
     void narrowQueueDropsAlbumBeforeTitle();
@@ -5650,6 +5651,47 @@ void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     // 2 px clear of the seam above the header and of its hairline.
     QCOMPARE(sceneRect(frame).top(), sceneRect(queueHeader).top() + 2);
     QCOMPARE(sceneRect(frame).height(), sceneRect(queueHeader).height() - 5);
+}
+
+// A queue row held down by the pointer takes the pressed selection, apart
+// from the hovered selection it shows before and after (they were one
+// colour); a drag that takes the row away ends it.
+void UiMainWindowTest::pressedQueueRowHasItsOwnColour() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    setQueue(bridgeOf(window), sampleQueueRows(5));
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY(([&]() {
+        for (QQuickItem *candidate : itemsNamed(named(window, "playlistView"), QStringLiteral("queueRow"))) {
+            if (candidate->property("queueRowIndex").toInt() == 1) {
+                row = candidate;
+            }
+        }
+        return row != nullptr;
+    })());
+    QQuickItem *tint = itemNamed(row, QStringLiteral("rowBackgroundTint"));
+    QVERIFY(tint != nullptr);
+    const QPoint centre = row->mapToScene(QPointF(row->width() / 3, row->height() / 2)).toPoint();
+    QTest::mouseMove(window, centre);
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, centre);
+    QTRY_VERIFY(row->property("rowSelected").toBool());
+    QCOMPARE(colorOf(tint), tokenHex(window, "selectionPressed"));
+    QVERIFY(colorOf(tint) != tokenHex(window, "selectionHovered"));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, centre);
+    QTRY_COMPARE(colorOf(tint), tokenHex(window, "selectionHovered"));
+
+    // Pressed again, then dragged off: the row goes with the pointer, and
+    // stops showing the press.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, centre);
+    QCOMPARE(colorOf(tint), tokenHex(window, "selectionPressed"));
+    for (int step = 1; step <= 6; ++step) {
+        QTest::mouseMove(window, centre + QPoint(0, step * 8));
+    }
+    QTRY_VERIFY(named(window, "playlistView")->property("draggingRow").value<QObject *>() != nullptr);
+    QVERIFY(colorOf(tint) != tokenHex(window, "selectionPressed"));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, centre + QPoint(0, 48));
 }
 
 void UiMainWindowTest::queueNameKeepsTheTitleColumnsPlace_data() {
