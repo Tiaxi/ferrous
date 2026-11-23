@@ -245,6 +245,8 @@ private slots:
     void waveformLaneSeamReadsOnWhite();
     void modeSwitchWaveformGlyphFillsWholePixels_data();
     void modeSwitchWaveformGlyphFillsWholePixels();
+    void modeSwitchSpectrogramGlyphFillsWholePixels_data();
+    void modeSwitchSpectrogramGlyphFillsWholePixels();
     void viewerToolButtonCheckedToggleAnswersHover_data();
     void viewerToolButtonCheckedToggleAnswersHover();
     void plotToolButtonDrawsCheckedAndFocusApart_data();
@@ -1692,12 +1694,15 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate_data() {
 // A segment of a plate's choices, as the visualization's mode switch,
 // under the pointer while another is the chosen one (a 12 % hover with its
 // glyph whole came to the chosen plate's brightness): a wash of the plot's
-// text colour at 10 % or more, against the chosen plate's fill and its edge,
-// with its glyph at 85 %, whole only while pressed (8 % with the glyph at
-// 60 % was 1.2:1, nearly invisible). As drawn, in both themes and on both
-// plots, the hovered one shows on the plate; the chosen one's fill is 3:1 on
-// the plate, so the choice reads by its fill rather than its edge alone, and
-// 2:1 on the hovered one's wash (at 2:1 on the plate it read by its edge).
+// text colour, against the chosen plate's fill and its edge, with its glyph
+// at 85 %, whole only while pressed (8 % with the glyph at 60 % was 1.2:1,
+// nearly invisible, and 10 %, 1.28:1, showed only by the glyph's
+// brightening). As drawn, in both themes and on both plots, the hovered one
+// reads on the plate, some 1.6:1; the chosen one's fill is 3:1 on the plate
+// with room to spare (3:1 as reckoned came to 2.98:1 over the spectrogram,
+// where the translucent plate is a step lighter), so the choice reads by its
+// fill rather than its edge alone, and 2:1 on the hovered one's wash (at 2:1
+// on the plate it read by its edge).
 // On the light plate it is the other way round, the dark text at 7:1 with
 // its glyph in the plate's colour (a 2.6:1 mid-grey under a dark glyph read
 // as a muddy box).
@@ -1743,14 +1748,15 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     const QColor wash = colorOf(hover, "color");
     const QColor plateFill = colorOf(fill, "color");
     QCOMPARE(wash.rgb(), text.rgb());
-    // The wash from 10 % up, as the plate needs (14 % and 18 % were 1.14:1
-    // apart in dark, 1.08:1 in light); the chosen fill some 35 % on the
-    // dark plates. On the light one the chosen one is the other way round,
-    // the dark text some 77 %, 7:1 on the plate, with its glyph in the
-    // plate's colour (at 44 % under a dark glyph, 2.6:1, a muddy grey box).
+    // The wash some 16 to 24 %, as the plate needs for 1.6:1 (14 % and 18 %
+    // were 1.14:1 apart in dark, 1.08:1 in light, when the chosen one had
+    // no more); the chosen fill some 36 to 40 % on the dark plates. On the
+    // light one the chosen one is the other way round, the dark text some
+    // 77 %, 7:1 on the plate, with its glyph in the plate's colour (at 44 %
+    // under a dark glyph, 2.6:1, a muddy grey box).
     const bool lightPlate = chosen->property("lightPlate").toBool();
     QCOMPARE(lightPlate, !dark && plotMode == 1);
-    QVERIFY2(wash.alphaF() >= 0.095 && wash.alphaF() <= 0.135, qPrintable(QString::number(wash.alphaF())));
+    QVERIFY2(wash.alphaF() >= 0.155 && wash.alphaF() <= 0.245, qPrintable(QString::number(wash.alphaF())));
     QVERIFY2(std::abs(wash.alphaF() - other->property("segmentHoverOpacity").toReal()) < 0.005,
              qPrintable(QString::number(wash.alphaF())));
     QCOMPARE(plateFill.rgb(), text.rgb());
@@ -1785,16 +1791,18 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QVERIFY2(channelDistance(drawnHover, drawnOver(wash, plate)) <= 3,
              qPrintable(describeContrast(QStringLiteral("the hover wash"), drawnHover, plate)));
     // Toward the text colour, both: lighter on a dark plate, darker on a
-    // light one; the hovered one shows, and less than the chosen one.
+    // light one; the hovered one reads, some 1.6:1, and less than the
+    // chosen one.
     const qreal chosenStep = contrastRatio(drawnChosen, plate);
     const qreal hoverStep = contrastRatio(drawnHover, plate);
-    QVERIFY2(hoverStep >= 1.25 && hoverStep < chosenStep,
+    QVERIFY2(hoverStep >= 1.55 && hoverStep <= 1.75 && hoverStep < chosenStep,
              qPrintable(QStringLiteral("hovered %1:1, chosen %2:1").arg(hoverStep).arg(chosenStep)));
     // The chosen fill reads on its own: 2:1 on the hovered wash, and on a
-    // dark plate 3:1 on the plate, within a step of rounding; on a light one
-    // 7:1, as does its glyph in the plate's colour on it.
+    // dark plate 3:1 on the plate with the room the spectrogram's lighter
+    // plate takes, 3.1:1 here; on a light one 7:1, as does its glyph in the
+    // plate's colour on it.
     QCOMPARE(relativeLuminance(plate) > 0.5, lightPlate);
-    QVERIFY2(chosenStep >= (lightPlate ? 6.9 : 2.97),
+    QVERIFY2(chosenStep >= (lightPlate ? 6.9 : 3.1),
              qPrintable(describeContrast(QStringLiteral("the chosen plate on the plate"), drawnChosen, plate)));
     QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.98,
              qPrintable(describeContrast(QStringLiteral("the chosen plate on the hovered one"), drawnChosen, drawnHover)));
@@ -2179,6 +2187,174 @@ void UiFoundationsTest::modeSwitchWaveformGlyphFillsWholePixels() {
                                         .arg(x)
                                         .arg(y)
                                         .arg(drawn.name(), fill.name())));
+            }
+        }
+    }
+}
+
+void UiFoundationsTest::modeSwitchSpectrogramGlyphFillsWholePixels_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<int>("plotMode");
+    QTest::addColumn<bool>("chosen");
+    QTest::newRow("spectrogram, chosen") << true << 0 << true;
+    QTest::newRow("waveform dark, chosen") << true << 1 << true;
+    QTest::newRow("waveform light, chosen") << false << 1 << true;
+    QTest::newRow("waveform light, not chosen") << false << 1 << false;
+}
+
+// The mode switch's Spectrogram glyph, as drawn: a band of five 2 px cells
+// in the waveform glyph's columns under two 2 px traces that step up at the
+// columns' edges, every edge on a whole pixel. Each of its pixels is whole
+// and nothing else is touched, so the chosen glyph is its colour, 4.5:1 or
+// more on the fill, crisp at 1x and 2x (drawn smooth, it was the app's mark
+// and its 1.5 px trace a dimmer grey on the fill). Chosen on each plate,
+// and not chosen on the light one; on a dark plate the mask's black ink,
+// as offscreen draws it, does not tell from the plate. Measured from the
+// window's grab, at whatever scale the test runs (again at 2x in CTest).
+void UiFoundationsTest::modeSwitchSpectrogramGlyphFillsWholePixels() {
+    QFETCH(bool, dark);
+    QFETCH(int, plotMode);
+    QFETCH(bool, chosen);
+    const QString items = QStringLiteral(R"QML(
+        Rectangle {
+            id: plot
+            property var plotColors: tokens.plotColors(%1)
+            x: 16
+            y: 16
+            width: 300
+            height: 120
+            color: plotColors.plotBg
+
+            Components.PlotPlate {
+                x: 200
+                y: 40
+                plotColors: plot.plotColors
+                uiPalette: tokens
+
+                Components.PlotToolButton {
+                    objectName: "spectrogramSegment"
+                    plotColors: plot.plotColors
+                    uiPalette: tokens
+                    segment: true
+                    checked: %2
+                    text: "Spectrogram"
+                    icon.source: Qt.resolvedUrl("assets/spectrogram-symbolic.svg")
+                }
+
+                Components.PlotToolButton {
+                    plotColors: plot.plotColors
+                    uiPalette: tokens
+                    segment: true
+                    checked: !%2
+                    text: "Waveform"
+                    icon.source: Qt.resolvedUrl("assets/waveform-symbolic.svg")
+                }
+            }
+        }
+)QML").arg(plotMode).arg(chosen ? QStringLiteral("true") : QStringLiteral("false"));
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, items), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickItem *button = itemNamed(root.get(), QStringLiteral("spectrogramSegment"));
+    QVERIFY(button != nullptr);
+    QCOMPARE(button->property("checked").toBool(), chosen);
+    QCOMPARE(button->property("lightPlate").toBool(), !dark && plotMode == 1);
+    QQuickItem *icon = childNamed(button, QStringLiteral("plotToolButtonIcon"));
+    QVERIFY(icon != nullptr);
+    QTRY_VERIFY(icon->property("valid").toBool());
+    QCOMPARE(icon->size(), QSizeF(16, 16));
+    const QColor glyph = colorOf(button, "glyphColor");
+    const QColor plate = colorOf(button, "plateColor");
+    const QColor under = chosen ? drawnOver(colorOf(button, "checkedColor"), plate) : plate;
+    const qreal glyphOpacity = icon->property("opacity").toReal();
+    QCOMPARE(glyphOpacity, chosen ? 1.0 : button->property("segmentRestOpacity").toReal());
+
+    // The glyph's pixels, from its source's shape: the band's five cells
+    // and the two traces, each a row of 2 px runs stepping at x 4, 7, 10
+    // and 13.
+    std::array<std::array<bool, 16>, 16> inked{};
+    const auto run = [&inked](int left, int right, int top) {
+        for (int x = left; x < right; ++x) {
+            inked[top][x] = true;
+            inked[top + 1][x] = true;
+        }
+    };
+    for (int left : {1, 4, 7, 10, 13}) {
+        run(left, left + 2, 13);
+    }
+    const std::array<int, 6> edges{1, 4, 7, 10, 13, 15};
+    for (int slice = 0; slice < 5; ++slice) {
+        run(edges[slice], edges[slice + 1], std::array<int, 5>{10, 10, 9, 9, 8}[slice]);
+        run(edges[slice], edges[slice + 1], std::array<int, 5>{6, 5, 4, 3, 2}[slice]);
+    }
+
+    const QImage image = window->grabWindow();
+    QVERIFY(!image.isNull());
+    const qreal scale = grabScale(image, window);
+    // The glyph's square on whole pixels.
+    const QPointF origin = icon->mapToScene(QPointF(0, 0));
+    QCOMPARE(origin, QPointF(std::round(origin.x()), std::round(origin.y())));
+    const auto pixels = [&](int x, int y) {
+        QList<QColor> found;
+        for (int dy = 0; dy < int(scale); ++dy) {
+            for (int dx = 0; dx < int(scale); ++dx) {
+                found.push_back(image.pixelColor(int((origin.x() + x) * scale) + dx,
+                                                 int((origin.y() + y) * scale) + dy));
+            }
+        }
+        return found;
+    };
+    // The mask's ink: offscreen, Kirigami draws a file's mask in its own
+    // black rather than in `color` (see the Waveform glyph's test), so each
+    // pixel's cover from the ink drawn, and the glyph at that cover and its
+    // opacity over what is under it, as the app draws it.
+    const QColor sample = pixels(7, 13).first();
+    const QColor ink = channelDistance(sample, glyph) < channelDistance(sample, QColor(Qt::black))
+        ? glyph : QColor(Qt::black);
+    const auto channels = [](const QColor &color) {
+        return std::array<int, 3>{color.red(), color.green(), color.blue()};
+    };
+    int widest = 0;
+    for (int channel = 1; channel < 3; ++channel) {
+        if (std::abs(channels(ink)[channel] - channels(under)[channel])
+            > std::abs(channels(ink)[widest] - channels(under)[widest])) {
+            widest = channel;
+        }
+    }
+    QVERIFY(std::abs(channels(ink)[widest] - channels(under)[widest]) >= 32);
+    // The icon's opacity applies to the ink as drawn.
+    const auto coverOf = [&](const QColor &drawn) {
+        return double(channels(drawn)[widest] - channels(under)[widest])
+            / (double(channels(ink)[widest] - channels(under)[widest]) * glyphOpacity);
+    };
+    const auto tinted = [&](double cover) {
+        QColor color = glyph;
+        color.setAlphaF(float(std::clamp(cover * glyphOpacity, 0.0, 1.0)));
+        return drawnOver(color, under);
+    };
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            for (const QColor &drawn : pixels(x, y)) {
+                const double cover = coverOf(drawn);
+                const QString at = QStringLiteral("column %1, row %2: %3 of %4")
+                                       .arg(x)
+                                       .arg(y)
+                                       .arg(cover, 0, 'f', 2)
+                                       .arg(tinted(cover).name());
+                if (inked[y][x]) {
+                    QVERIFY2(cover >= 0.97, qPrintable(at));
+                    if (chosen) {
+                        QVERIFY2(contrastRatio(tinted(cover), under) >= 4.5,
+                                 qPrintable(describeContrast(at, tinted(cover), under)));
+                    }
+                } else {
+                    QVERIFY2(channelDistance(drawn, under) <= 3, qPrintable(at));
+                }
             }
         }
     }

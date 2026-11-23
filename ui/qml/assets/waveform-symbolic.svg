@@ -3,7 +3,7 @@
 <!-- The visualization mode switch's Waveform glyph, the Spectrogram glyph's partner, drawn on its
      grid for 16 px at 1x: five vertical strokes mirrored about the middle line, an envelope that
      swells and falls back, 4, 10, 14, 10 and 4 px tall with their round caps. 2 px strokes, the
-     spectrogram glyph's lower weight, 3 px apart with their edges on whole pixels, so each one
+     spectrogram glyph's weight, 3 px apart with their edges on whole pixels, so each one
      fills two whole columns at 1x and four at 2x, with a clear column between neighbours, and its
      caps end on whole pixels. At 1.5 px on the same centres each column was three quarters
      covered, and the checked glyph a dimmer grey under 4.5:1 on the dark checked fill. Breeze's

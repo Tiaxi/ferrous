@@ -681,9 +681,10 @@ if(BUILD_TESTING)
         TIMEOUT 90
     )
     ferrous_add_default_platform_test(ferrous_ui_foundations_tests drawsOffscreenUnlessAPlatformIsChosen)
-    # The mode switch's waveform glyph fills whole device pixels: again at 2x.
+    # The mode switch's glyphs fill whole device pixels: again at 2x.
     add_test(NAME ferrous_ui_foundations_glyph_2x
-        COMMAND ferrous_ui_foundations_tests modeSwitchWaveformGlyphFillsWholePixels)
+        COMMAND ferrous_ui_foundations_tests modeSwitchWaveformGlyphFillsWholePixels
+            modeSwitchSpectrogramGlyphFillsWholePixels)
     set_tests_properties(ferrous_ui_foundations_glyph_2x PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2"
         TIMEOUT 60

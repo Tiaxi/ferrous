@@ -34,7 +34,6 @@
 #include <cmath>
 #include <functional>
 #include <memory>
-#include <numbers>
 #include <optional>
 #include <tuple>
 
@@ -4134,9 +4133,9 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
     QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
     QVERIFY(viewer != nullptr && spectrogramButton != nullptr && waveformButton != nullptr);
     // Real tool buttons with glyphs, tooltips and accessible names: the
-    // spectrogram's the app icon's glide and harmonic as a 16 px symbolic
-    // mask (Breeze's bar chart said statistics), the waveform's its partner
-    // on the same grid (Breeze's read as an arrow with a diamond beside it),
+    // spectrogram's a note's traces over a beat's pulses as a 16 px
+    // symbolic mask (Breeze's bar chart said statistics), the waveform's its
+    // partner on the same grid (Breeze's read as an arrow with a diamond beside it),
     // both the app's own, neither a theme icon.
     for (const auto &[button, name, icon] : {
              std::tuple{spectrogramButton, QStringLiteral("Spectrogram"), QStringLiteral("spectrogram-symbolic.svg")},
@@ -4157,7 +4156,7 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
     }
     {
         // The waveform glyph's 16 px source, on the spectrogram glyph's
-        // grid: five vertical strokes of its lower weight, 2 px with round
+        // grid: five vertical strokes of its weight, 2 px with round
         // caps, mirrored about the middle line, 4, 10, 14, 10 and 4 px tall
         // with their caps, an envelope that swells and falls back. They
         // stand 3 px apart with their edges and ends on whole pixels, so
@@ -4194,120 +4193,116 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
         }
     }
     {
-        // The glyph's 16 px source: the app icon's small-size pair in its
-        // weight order, a 2 px lowest stroke from x 2 to 14, the icon's
-        // fundamental (without it the other read as "/"), under a 1.5 px
-        // one, its 3rd harmonic (the other way round, a 1.5 px glide under a
-        // 1.75 px harmonic, read as "/" over "_"), with round caps; no
-        // middle trace (at 16 px it crowded the two). Each starts on its
-        // own, in the same column, as the icon's traces do, with 1.5 px or
-        // more of clear space between them everywhere (from one vertex the
-        // two read as an angle sign). The lowest rises 2.5 px along its
-        // length, most of it in its first half, a glide (level, or rising
-        // 1 px, it read as a baseline). The upper one's end is 1.5 px or
-        // more clear of the lowest stroke's end, and half way across 3 px or
-        // more clear of it; both inside the 16 px square with their caps. It
-        // is the app icon's top harmonic, a glide (rising at 81 degrees it
-        // read as a hook): it starts at 40 to 55 degrees and bends over to
-        // under 35, steeper than the lowest everywhere, so that the two fan
-        // apart.
+        // The spectrogram glyph's 16 px source, on the waveform glyph's
+        // grid: filled outlines with every edge on a whole pixel and no
+        // curve (drawn smooth it was the app's mark, which the idle row and
+        // the stand-in cover use), inside the waveform's x 1 to 15 and
+        // y 1 to 15. A band of five 2 px cells in the waveform's five
+        // columns, a beat's pulses, under two 2 px traces that run the
+        // whole width and step up only at a column's edge, never down: a
+        // note's fundamental and its harmonic, rising twice as much, so
+        // they fan apart, with a clear row or more between each part and
+        // the next in every column (three ascending bars read as levels).
         QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString svg = QString::fromUtf8(file.readAll());
         QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
-        QCOMPARE(svg.count(QStringLiteral("<path ")), 2);
-        // The lowest first, then the upper one.
-        const QRegularExpression stroke(QStringLiteral("stroke-width=\"([0-9.]+)\" stroke-linecap=\"round\" d=\"M"));
-        QList<double> widths;
-        for (auto match = stroke.globalMatch(svg); match.hasNext();) {
-            widths.push_back(match.next().captured(1).toDouble());
-        }
-        QCOMPARE(widths, (QList<double>{2.0, 1.5}));
-        const double halfWidths = (widths[0] + widths[1]) / 2;
-        const QRegularExpression path(QStringLiteral(
-            "d=\"M([0-9.]+) ([0-9.]+)C([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+)\""));
-        QList<QList<QPointF>> curves;
-        QList<QList<QPointF>> controlPoints;
-        for (auto match = path.globalMatch(svg); match.hasNext();) {
-            const QRegularExpressionMatch each = match.next();
-            QList<QPointF> controls;
-            for (int i = 1; i <= 8; i += 2) {
-                controls.push_back(QPointF(each.captured(i).toDouble(), each.captured(i + 1).toDouble()));
-            }
-            controlPoints.push_back(controls);
-            QList<QPointF> points;
-            for (int step = 0; step <= 200; ++step) {
-                const double t = step / 200.0;
-                const double u = 1 - t;
-                points.push_back(u * u * u * controls[0] + 3 * u * u * t * controls[1] + 3 * u * t * t * controls[2]
-                                 + t * t * t * controls[3]);
-            }
-            curves.push_back(points);
-        }
-        // The lowest stroke first, then the one over it.
-        QCOMPARE(curves.size(), 2);
-        const QList<QPointF> lowest = curves.takeFirst();
-        controlPoints.removeFirst();
-        {
-            // With its round caps, x 2 to 14; rising 2.5 px, never falling,
-            // more in its first half than in its second.
-            QCOMPARE(lowest.first().x(), 2.75);
-            QCOMPARE(lowest.last().x(), 13.25);
-            const double rise = lowest.first().y() - lowest.last().y();
-            QVERIFY2(rise >= 2.25 && rise <= 2.75, qPrintable(QString::number(rise)));
-            const QPointF middle = lowest[lowest.size() / 2];
-            QVERIFY(lowest.first().y() - middle.y() > middle.y() - lowest.last().y());
-            for (qsizetype i = 1; i < lowest.size(); ++i) {
-                QVERIFY(lowest[i].y() <= lowest[i - 1].y() + 1e-9);
-            }
-            for (const QPointF &point : lowest) {
-                QVERIFY(point.y() + widths[0] / 2 <= 16.0);
-            }
-        }
-        {
-            const QList<QPointF> &top = controlPoints.first();
-            const auto degrees = [](QPointF from, QPointF to) {
-                return std::atan2(from.y() - to.y(), to.x() - from.x()) * 180.0 / std::numbers::pi;
-            };
-            const double start = degrees(top[0], top[1]);
-            const double end = degrees(top[2], top[3]);
-            QVERIFY2(start >= 40 && start <= 55, qPrintable(QString::number(start)));
-            QVERIFY2(end > 0 && end < 35, qPrintable(QString::number(end)));
-        }
-        // Half way across, x 8, 3 px or more of clear space between them.
-        const auto heightAt = [](const QList<QPointF> &curve, double x) {
-            return std::min_element(curve.cbegin(), curve.cend(), [x](QPointF a, QPointF b) {
-                       return std::abs(a.x() - x) < std::abs(b.x() - x);
-                   })->y();
-        };
-        const double halfWay = heightAt(lowest, 8) - heightAt(curves[0], 8) - halfWidths;
-        QVERIFY2(halfWay >= 3.0, qPrintable(QString::number(halfWay)));
-        // Fanning apart: the height between them grows all the way across.
-        for (double x = 3.25; x <= 13.25; x += 0.5) {
-            const double before = heightAt(lowest, x - 0.5) - heightAt(curves[0], x - 0.5);
-            const double after = heightAt(lowest, x) - heightAt(curves[0], x);
-            QVERIFY2(after >= before - 0.05, qPrintable(QStringLiteral("at x %1: %2 after %3").arg(x).arg(after).arg(before)));
-        }
-        for (const QList<QPointF> &curve : curves) {
-            // Its own start, in the lowest one's column and above it, and
-            // 1.5 px or more of clear space between the strokes everywhere,
-            // caps included: no shared vertex.
-            QCOMPARE(curve.first().x(), lowest.first().x());
-            QVERIFY(curve.first().y() < lowest.first().y());
-            double nearest = 1e9;
-            for (const QPointF &p : curve) {
-                for (const QPointF &q : lowest) {
-                    nearest = std::min(nearest, std::hypot(p.x() - q.x(), p.y() - q.y()));
+        QVERIFY(!svg.contains(QStringLiteral("stroke=")));
+        const QRegularExpression pathData(QStringLiteral("<path fill=\"#000\" d=\"([^\"]+)\"/>"));
+        // Each path's pixels, by their centres, even-odd: only M, H, V and
+        // Z with whole numbers.
+        QList<std::array<std::array<bool, 16>, 16>> parts;
+        for (auto match = pathData.globalMatch(svg); match.hasNext();) {
+            const QString d = match.next().captured(1);
+            QVERIFY2(QRegularExpression(QStringLiteral("^([MHVZ][0-9 ]*)+$")).match(d).hasMatch(), qPrintable(d));
+            QList<QList<QPoint>> outlines;
+            QPoint pen;
+            const QRegularExpression command(QStringLiteral("([MHVZ])([0-9]*)(?: ([0-9]+))?"));
+            for (auto each = command.globalMatch(d); each.hasNext();) {
+                const QRegularExpressionMatch step = each.next();
+                const QChar op = step.captured(1).front();
+                if (op == QLatin1Char('M')) {
+                    pen = QPoint(step.captured(2).toInt(), step.captured(3).toInt());
+                    outlines.push_back({pen});
+                } else if (op == QLatin1Char('H')) {
+                    pen.setX(step.captured(2).toInt());
+                    outlines.last().push_back(pen);
+                } else if (op == QLatin1Char('V')) {
+                    pen.setY(step.captured(2).toInt());
+                    outlines.last().push_back(pen);
                 }
             }
-            QVERIFY2(nearest - halfWidths >= 1.5, qPrintable(QString::number(nearest)));
-            QVERIFY2(lowest.last().y() - curve.last().y() - halfWidths >= 1.5, qPrintable(QString::number(curve.last().y())));
-            const double half = widths[1] / 2;
-            for (const QPointF &point : curve) {
-                QVERIFY(point.x() - half >= 0.0 && point.x() + half <= 16.0);
-                QVERIFY(point.y() - half >= 0.0 && point.y() + half <= 16.0);
+            std::array<std::array<bool, 16>, 16> inked{};
+            for (int y = 0; y < 16; ++y) {
+                for (int x = 0; x < 16; ++x) {
+                    const QPointF centre(x + 0.5, y + 0.5);
+                    bool inside = false;
+                    for (const QList<QPoint> &outline : outlines) {
+                        for (qsizetype i = 0; i < outline.size(); ++i) {
+                            const QPointF a = outline[i];
+                            const QPointF b = outline[(i + 1) % outline.size()];
+                            if ((a.y() > centre.y()) != (b.y() > centre.y())
+                                && centre.x() < a.x() + (centre.y() - a.y()) * (b.x() - a.x()) / (b.y() - a.y())) {
+                                inside = !inside;
+                            }
+                        }
+                    }
+                    inked[y][x] = inside;
+                }
+            }
+            parts.push_back(inked);
+        }
+        // The harmonic, the fundamental, the band.
+        QCOMPARE(parts.size(), 3);
+        const auto rows = [](const std::array<std::array<bool, 16>, 16> &inked, int x) {
+            QList<int> found;
+            for (int y = 0; y < 16; ++y) {
+                if (inked[y][x])
+                    found.push_back(y);
+            }
+            return found;
+        };
+        const QList<int> slices{1, 4, 7, 10, 13};
+        for (int x = 0; x < 16; ++x) {
+            const bool inColumn = slices.contains(x) || slices.contains(x - 1);
+            // The band: one 2 px cell in each of the waveform's columns,
+            // rows 13 and 14, the waveform's foot.
+            QCOMPARE(rows(parts[2], x), inColumn ? (QList<int>{13, 14}) : QList<int>{});
+        }
+        QList<QList<int>> tops(2);
+        for (int trace = 0; trace < 2; ++trace) {
+            for (int x = 0; x < 16; ++x) {
+                const QList<int> inked = rows(parts[trace], x);
+                if (x < 1 || x > 14) {
+                    QVERIFY(inked.isEmpty());
+                    continue;
+                }
+                // 2 px, whole, and above the next part with a clear row.
+                QCOMPARE(inked.size(), 2);
+                QCOMPARE(inked[1], inked[0] + 1);
+                QVERIFY(inked[0] >= 1);
+                const QList<int> below = rows(parts[trace + 1], x);
+                if (!below.isEmpty()) {
+                    QVERIFY2(below.first() - inked[1] >= 2, qPrintable(QStringLiteral("trace %1, x %2").arg(trace).arg(x)));
+                }
+                tops[trace].push_back(inked[0]);
+                // Steps only at a column's edge, and never down.
+                if (x > 1) {
+                    const int before = tops[trace][tops[trace].size() - 2];
+                    QVERIFY(inked[0] <= before);
+                    if (inked[0] != before) {
+                        QVERIFY2(slices.contains(x), qPrintable(QStringLiteral("trace %1 steps at x %2").arg(trace).arg(x)));
+                        // A step of a row, so the trace stays one line.
+                        QCOMPARE(before - inked[0], 1);
+                    }
+                }
             }
         }
+        // The harmonic rises twice as much as the fundamental: they fan.
+        const int harmonicRise = tops[0].first() - tops[0].last();
+        const int fundamentalRise = tops[1].first() - tops[1].last();
+        QVERIFY(fundamentalRise > 0);
+        QCOMPARE(harmonicRise, 2 * fundamentalRise);
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
     // over the switch's plate, 3:1 on it (PlotToolButton's
@@ -4514,9 +4509,9 @@ void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int
     QCOMPARE(chosenGlyph->opacity(), 1.0);
     QVERIFY2(std::abs(otherGlyph->opacity() - 0.72) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
 
-    // Under the pointer: a wash of 10 % or so, its glyph at 85 %; as drawn,
-    // it shows on the plate, under the chosen one's plate, which is 1.4:1 or
-    // more on it.
+    // Under the pointer: a wash of some 16 to 24 %, its glyph at 85 %; as
+    // drawn, it reads on the plate (at 10 %, 1.28:1, only the glyph told
+    // it), under the chosen one's plate, which is 1.4:1 or more on it.
     QTest::mouseMove(window, rectOf(other).center().toPoint() + QPoint(0, 1));
     QTest::mouseMove(window, rectOf(other).center().toPoint());
     QTRY_VERIFY(other->property("hovered").toBool());
@@ -4527,7 +4522,7 @@ void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int
     QVERIFY2(std::abs(otherGlyph->opacity() - 0.85) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
     const QColor washColor = wash->property("color").value<QColor>();
     const QColor fillColor = fill->property("color").value<QColor>();
-    QVERIFY2(washColor.alphaF() >= 0.095 && washColor.alphaF() <= 0.135, qPrintable(QString::number(washColor.alphaF())));
+    QVERIFY2(washColor.alphaF() >= 0.155 && washColor.alphaF() <= 0.245, qPrintable(QString::number(washColor.alphaF())));
     QVERIFY(washColor.alphaF() < fillColor.alphaF());
     // The plate whole, as the pointer on it reveals it.
     const auto shownWhole = [&]() {
@@ -4547,7 +4542,7 @@ void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int
         drawnAt(image, window, plate, QPointF(mode == 0 ? 1.5 : plate->width() - 1.5, plate->height() / 2));
     const double washStep = contrastRatio(drawnWash, drawnPlate);
     const double fillStep = contrastRatio(drawnFill, drawnPlate);
-    QVERIFY2(washStep >= 1.25 && washStep < fillStep,
+    QVERIFY2(washStep >= 1.5 && washStep < fillStep,
              qPrintable(QStringLiteral("hovered %1:1, chosen %2:1 (%3, %4 on %5)").arg(washStep).arg(fillStep)
                             .arg(drawnWash.name(), drawnFill.name(), drawnPlate.name())));
     QVERIFY2(contrastRatio(drawnFill, drawnWash) >= 1.4,

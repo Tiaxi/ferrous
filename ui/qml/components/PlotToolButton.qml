@@ -21,12 +21,13 @@ import "../logic/KeyUtils.js" as KeyUtils
 // colour whole; on a light plate the plot's dark text, 7:1, its own edge,
 // with its glyph in the plate's colour whole. The others' glyphs are at
 // 72 %, whole only while pressed.
-// Under the pointer one of the others has a wash of the text colour at
-// 10 % or more, 1.25:1 on the plate, and its glyph at 85 %, which show
-// (8 % and 60 % were 1.2:1, nearly invisible), fading in and out over
-// shortDuration, OutCubic; the chosen one's plate is 2:1 or more on that
-// wash, so a hovered choice never reads as the chosen one (18 % on 14 %
-// was 1.14:1). The accent is left to the focus ring. A segment is a
+// Under the pointer one of the others has a wash of the text colour,
+// 1.6:1 on the plate, and its glyph at 85 %, which read (8 % and 60 %
+// were 1.2:1, nearly invisible; at 1.25:1 only the glyph's brightening
+// told the target), fading in and out over shortDuration, OutCubic; the
+// chosen one's plate is 2:1 or more on that wash, so a hovered choice
+// never reads as the chosen one (18 % on 14 % was 1.14:1). The accent is
+// left to the focus ring. A segment is a
 // checkable, auto-exclusive button, so it is a radio button to assistive
 // technology, checkable and checked as chosen (as a plain button it told
 // of its checked state changing but not that it could be checked), and
@@ -60,12 +61,15 @@ ToolButton {
         }
         return 1
     }
-    readonly property real segmentHoverOpacity: root._tintFor(0.10, root.plateColor, 1.25)
+    readonly property real segmentHoverOpacity: root._tintFor(0.10, root.plateColor, 1.6)
     // The chosen one's fill: 2:1 on the hover wash, and on a dark plate 3:1
     // on the plate, so the choice reads by its fill and not by its edge
-    // alone (at 2:1 on the plate it was carried by the edge,
-    // beside the lanes' solid M and S). On a light plate the other way
-    // round: the plot's dark text, 7:1 on the plate, with its glyph in the
+    // alone (at 2:1 on the plate it was carried by the edge, beside the
+    // lanes' solid M and S). It aims at 3.15:1 on the plate as reckoned
+    // here: the spectrogram's plate is translucent, a step lighter over the
+    // plot than over its floor, and a fill 3:1 on the floor's plate came to
+    // 2.98:1 over the plot. On a light plate the other way round: the plot's
+    // dark text, 7:1 on the plate, with its glyph in the
     // plate's colour, 7:1 on it, which reads at a glance (a mid-grey fill
     // under a dark glyph, 2.6:1 on the plate, read as a muddy box; fuller,
     // it took the dark glyph's thin strokes under 4.5:1; at 4.5:1 inverted
@@ -73,7 +77,7 @@ ToolButton {
     readonly property bool lightPlate: ColorUtils.relativeLuminance(root.plateColor) > 0.5
     readonly property real segmentFillOpacity: root.lightPlate
         ? root._tintFor(0.24, root.plateColor, 7)
-        : Math.max(root._tintFor(0.24, root.plateColor, 3),
+        : Math.max(root._tintFor(0.24, root.plateColor, 3.15),
                    root._tintFor(0.24, ColorUtils.drawnOver(
                        ColorUtils.withAlpha(root.plotColors.plotText, root.segmentHoverOpacity), root.plateColor), 2))
     readonly property real segmentRestOpacity: 0.72
