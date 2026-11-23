@@ -153,8 +153,7 @@ Item {
         // the seam between lanes the stronger line.
         centerLineColor: root.atRest ? root.uiPalette.waveformRestLine
                                      : ColorUtils.withAlpha(root.uiPalette.text, 0.08)
-        laneSeamColor: root.atRest ? root.uiPalette.seam
-            : root.viewerMode ? root.uiPalette.viewerWaveformLaneSeam : root.plotColors.plotLaneSeam
+        laneSeamColor: root.atRest ? root.uiPalette.seam : root.plotColors.plotLaneSeam
         // The crosshair's readout on the plot's plates, as the
         // spectrogram's, and its dashes in the plot's text. Opaque, as the
         // spectrogram's are: the dashed line and the peaks showed through

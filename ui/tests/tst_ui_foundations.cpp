@@ -241,8 +241,8 @@ private slots:
     void viewerToolButtonHoverReadsOnThePlot();
     void viewerToolButtonShowsAKeyPressAtOnce_data();
     void viewerToolButtonShowsAKeyPressAtOnce();
-    void viewerWaveformLaneSeamReadsOnWhite_data();
-    void viewerWaveformLaneSeamReadsOnWhite();
+    void waveformLaneSeamReadsOnWhite_data();
+    void waveformLaneSeamReadsOnWhite();
     void modeSwitchWaveformGlyphFillsWholePixels_data();
     void modeSwitchWaveformGlyphFillsWholePixels();
     void viewerToolButtonCheckedToggleAnswersHover_data();
@@ -610,7 +610,6 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY2(sameColor(colorOf(waveform, "plotText"), colorOf(tokens, "text")), qPrintable(colorOf(waveform, "plotText").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "text").name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(waveform, "plotTextSecondary"), colorOf(tokens, "textSecondary")), qPrintable(colorOf(waveform, "plotTextSecondary").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "textSecondary").name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(waveform, "plotPlateEdge"), colorOf(tokens, "seam")), qPrintable(colorOf(waveform, "plotPlateEdge").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "seam").name(QColor::HexArgb)));
-    QVERIFY2(sameColor(colorOf(waveform, "plotLaneSeam"), colorOf(tokens, "hairline")), qPrintable(colorOf(waveform, "plotLaneSeam").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "hairline").name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(waveform, "plotLink"), colorOf(tokens, "link")), qPrintable(colorOf(waveform, "plotLink").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "link").name(QColor::HexArgb)));
     QVERIFY(std::abs(colorOf(waveform, "plotPlate").alphaF() - 0.94) < 0.002);
     QVERIFY(sameColor(colorOf(waveform, "plotStrip"), view));
@@ -1996,16 +1995,17 @@ void UiFoundationsTest::viewerToolButtonShowsAKeyPressAtOnce() {
                             .arg(drawnReleased.name(), surface.name())));
 }
 
-void UiFoundationsTest::viewerWaveformLaneSeamReadsOnWhite_data() {
+void UiFoundationsTest::waveformLaneSeamReadsOnWhite_data() {
     QTest::addColumn<bool>("dark");
     QTest::newRow("breeze dark") << true;
     QTest::newRow("breeze light") << false;
 }
 
-// The line between the waveform's lanes in a viewer: in Breeze Light
-// #cdd2d6, a step stronger than the pane's hairline, which on a white
-// screen all but vanished between the channels; in Breeze Dark the pane's.
-void UiFoundationsTest::viewerWaveformLaneSeamReadsOnWhite() {
+// The line between the waveform's lanes, one token for the main pane and
+// the viewers: in Breeze Light #cdd2d6, 1.5:1 on white, a step stronger than
+// the hairline (1.17:1), which on a white screen all but vanished between
+// the channels; in Breeze Dark the hairline. No viewer's seam of its own.
+void UiFoundationsTest::waveformLaneSeamReadsOnWhite() {
     QFETCH(bool, dark);
     QQmlEngine engine;
     QString errorText;
@@ -2016,13 +2016,16 @@ void UiFoundationsTest::viewerWaveformLaneSeamReadsOnWhite() {
     QVERIFY(tokens != nullptr);
     QObject *waveform = tokens->property("waveformPlot").value<QObject *>();
     QVERIFY(waveform != nullptr);
-    const QColor seam = colorOf(tokens, "viewerWaveformLaneSeam");
+    QVERIFY(tokens->metaObject()->indexOfProperty("viewerWaveformLaneSeam") < 0);
+    const QColor seam = colorOf(waveform, "plotLaneSeam");
+    const QColor hairline = colorOf(tokens, "hairline");
     if (dark) {
-        QVERIFY(sameColor(seam, colorOf(waveform, "plotLaneSeam")));
+        QVERIFY2(sameColor(seam, hairline), qPrintable(seam.name() + QStringLiteral(" vs ") + hairline.name()));
     } else {
         QVERIFY2(sameColor(seam, fromHex(QStringLiteral("#cdd2d6"))), qPrintable(seam.name()));
-        QVERIFY(contrastRatio(seam, colorOf(waveform, "plotBg"))
-                > contrastRatio(colorOf(waveform, "plotLaneSeam"), colorOf(waveform, "plotBg")));
+        const double onView = contrastRatio(seam, colorOf(waveform, "plotBg"));
+        QVERIFY2(onView >= 1.45 && onView > contrastRatio(hairline, colorOf(waveform, "plotBg")),
+                 qPrintable(describeContrast(QStringLiteral("the lane seam"), seam, colorOf(waveform, "plotBg"))));
     }
 }
 
