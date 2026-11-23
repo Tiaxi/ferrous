@@ -1355,7 +1355,7 @@ void UiMainWindowTest::seekTimeStaysOverItsLine_data() {
 // on the bar, and within the bar at either end. It covers none of the
 // waveform, no menu title, nothing of the now-playing card or the queue's
 // header (it flipped under the bar near the start, ~54 px down and over
-// the now-playing title at 24 pt), and stays 1 px clear of the bar's and
+// the now-playing title at 24 pt), and stays 3 px clear of the bar's and
 // the buttons' focus rings. The band grows by no more than the lane needs,
 // and the buttons, the bar, the time and the volume keep one centre line.
 void UiMainWindowTest::seekTimeStaysOverItsLine() {
@@ -1466,12 +1466,12 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
     }
     QVERIFY(boxTop.has_value());
     const QRectF box = sceneRect(tipBox);
-    // 1 px clear of the bar's focus ring and of the buttons' (3 px outside
+    // 3 px clear of the bar's focus ring and of the buttons' (3 px outside
     // them), with the ring shown.
-    QVERIFY(box.bottom() <= playPause->mapToScene(QPointF(0, 0)).y() - 3 - 1 + 0.5);
+    QVERIFY(box.bottom() <= playPause->mapToScene(QPointF(0, 0)).y() - 3 - 3 + 0.5);
     seek->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(seekRing->isVisible());
-    QVERIFY2(sceneRect(tipBox).bottom() <= sceneRect(seekRing).top() - 1 + 0.5,
+    QVERIFY2(sceneRect(tipBox).bottom() <= sceneRect(seekRing).top() - 3 + 0.5,
              qPrintable(describeRect(sceneRect(tipBox)) + QStringLiteral(" over ") + describeRect(sceneRect(seekRing))));
     QCOMPARE(sceneRect(tipBox).top(), box.top());
     // The band grew by no more than the lane needs: the box is at its top
@@ -1620,7 +1620,9 @@ void UiMainWindowTest::transportRowSitsBalancedInItsBand_data() {
 // the seam, 44 px against 17 px at 10 pt, 76 px against 21 px at 24 pt).
 // In the least window, at 24 pt in 1000 by 720, the room under the row
 // gives way to the panes' minimums, so the window still fits; the row
-// still sits higher than it did.
+// still sits higher than it did (76 px against 21). There the lane's
+// 3 px clear of the focus rings, 2 px more than it had, come out of the
+// room under the row: 74 px against 32.
 void UiMainWindowTest::transportRowSitsBalancedInItsBand() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
@@ -1690,7 +1692,7 @@ void UiMainWindowTest::transportRowSitsBalancedInItsBand() {
     const QString proportions = QStringLiteral("%1 px over the glyphs, %2 px under them, the band %3")
         .arg(above).arg(below).arg(describeRect(band));
     QVERIFY2(below > 0 && above > 0, qPrintable(proportions));
-    QVERIFY2(above <= (least ? 2.2 : 1.5) * below, qPrintable(proportions));
+    QVERIFY2(above <= (least ? 2.35 : 1.5) * below, qPrintable(proportions));
 }
 
 void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont_data() {
@@ -3895,7 +3897,9 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     QTest::newRow("default font") << 0.0 << 1600 << 700 << 1000;
     // 24 pt: narrow in 1000 px of height, wide in 1400.
     QTest::newRow("24 pt") << 24.0 << 1600 << 1000 << 1400;
-    QTest::newRow("24 pt, 1920 px") << 24.0 << 1920 << 1000 << 1400;
+    // The wide panel's larger cover at 1920 px, under a band whose lane
+    // keeps 3 px clear of the focus rings: wide from 1440.
+    QTest::newRow("24 pt, 1920 px") << 24.0 << 1920 << 1000 << 1440;
 }
 
 // Where the wide layout would leave the library fewer than six rows under

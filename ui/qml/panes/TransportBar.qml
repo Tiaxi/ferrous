@@ -230,12 +230,16 @@ ToolBar {
     // time box hung over the queue's header (H5) and, at a large font, the
     // now-playing title; above the band it met the menu's titles; beside
     // its line on the waveform it hid what the scrub reads. The lane ends
-    // 1 px clear of the seek bar's focus ring and of the buttons', and its
-    // boxes are a line of text and a little room above and below it, so
-    // the band grows by no more than the lane needs beyond the room above
-    // the row. The lane's bottom, up from the row's centre line:
-    readonly property real laneClearance: Math.max(seekSlider.boxHeight / 2 + seekSlider.focusRingOutset + 1,
-        root.buttonSize / 2 + root.buttonFocusRingOutset + 1)
+    // laneRingGap clear of the seek bar's focus ring and of the buttons',
+    // and its boxes are a line of text and a little room above and below
+    // it, so the band grows by no more than the lane needs beyond the room
+    // above the row. The lane's bottom, up from the row's centre line:
+    readonly property real laneClearance: Math.max(
+        seekSlider.boxHeight / 2 + seekSlider.focusRingOutset + root.laneRingGap,
+        root.buttonSize / 2 + root.buttonFocusRingOutset + root.laneRingGap)
+    // Between a box in the lane and the focus ring under it: at 1 px the
+    // box read as a tab on the ring, joined to it.
+    readonly property int laneRingGap: 3
     // The line's own leading, which grows with the font, is most of the
     // room around its figures; the style's 6 px above and below it made
     // the lane, which is empty at rest, a third taller.
@@ -259,12 +263,13 @@ ToolBar {
     // The room in the row above and under the glyphs' ink.
     readonly property real rowInkInset: (root.rowHeight - root.smallGlyphSize) / 2
     // The room under the row, which balances the lane above it: the band
-    // over the glyphs at most 4:3 of the band under them, so that with the
-    // menu's room under its titles the eye sees at most about 3:2 (the
-    // empty lane over the row and 8 px under it sank the controls onto
-    // the seam, 44 px above their ink against 17 px under it).
+    // over the glyphs under 4:3 of the band under them, by a whole pixel
+    // at most, so that with the menu's room under its titles the eye sees
+    // at most 3:2 (the empty lane over the row and 8 px under it sank the
+    // controls onto the seam, 44 px above their ink against 17 px under
+    // it; at exactly 4:3, 36 against 27 px at 10 pt, the eye saw 41:27).
     readonly property real wantedBalanceRoom: Math.max(0,
-        Math.ceil((root.laneGrowth + root.rowInkInset) * 3 / 4 - root.rowInkInset))
+        Math.floor((root.laneGrowth + root.rowInkInset) * 3 / 4) + 1 - root.rowInkInset)
     // The height the window has beyond its least, of which the room takes
     // what it wants: in the least window, at a large font, the panes keep
     // their minimums and the room gives way (it would make the window's

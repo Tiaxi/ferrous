@@ -285,6 +285,17 @@ bool configureTextureNode(
     const QRectF &source,
     QSGTexture *placeholderTexture);
 
+// A node that other nodes join while it is in the scene: the canvas's
+// spans and an overlay's images, casings and lines. Qt's software renderer
+// places a node that joins by what it keeps of the node's parent, which it
+// keeps of transform, clip and opacity nodes and of drawn ones, not of a
+// plain QSGNode: under one, the new node drew at the window's origin,
+// unclipped, until an item above it moved. An opacity node at 1 is kept
+// and changes nothing else.
+QSGNode *newParentNode() {
+    return new QSGOpacityNode();
+}
+
 // An overlay image placed for a frame, with the image itself when the scene
 // node has no texture of it yet.
 struct SpectrogramPlacedOverlayImage {
@@ -321,9 +332,9 @@ struct SpectrogramOverlayLayer {
         } else {
             root = new QSGNode();
         }
-        imagesRoot = new QSGNode();
-        casingsRoot = new QSGNode();
-        linesRoot = new QSGNode();
+        imagesRoot = newParentNode();
+        casingsRoot = newParentNode();
+        linesRoot = newParentNode();
         root->appendChildNode(imagesRoot);
         root->appendChildNode(casingsRoot);
         root->appendChildNode(linesRoot);
@@ -498,7 +509,7 @@ struct SpectrogramCanvasBand {
 struct SpectrogramSceneNode final : public QSGNode {
     SpectrogramSceneNode() {
         background = new QSGSimpleRectNode();
-        tilesRoot = new QSGNode();
+        tilesRoot = newParentNode();
         latest = new QSGSimpleTextureNode();
         pastEnd = new QSGSimpleRectNode();
         playheadCasing = new QSGSimpleRectNode();
