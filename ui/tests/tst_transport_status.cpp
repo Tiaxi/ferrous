@@ -14,7 +14,6 @@
 #include <QFontInfo>
 #include <QFontMetricsF>
 #include <QHash>
-#include <QIcon>
 #include <QImage>
 #include <QImageReader>
 #include <QLocale>
@@ -616,7 +615,7 @@ private slots:
     void lastFmListeningNeverFillsTheBar_data();
     void lastFmListeningNeverFillsTheBar();
     void lastFmGlyphsAreOneFamily();
-    void lastFmSettingsItemHasTheConfigureGlyph();
+    void lastFmMenuWordsShareOneColumn();
     void warningGlyphIsTheSizeOfItsNeighbours();
     void statusBarNamesAStoppedEngineInPlainWords();
     void statusBarEngineErrorShowsItsToolTipOverItsGlyphAndFromTheKeyboard();
@@ -5321,10 +5320,11 @@ void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
     QCOMPARE(harness.root->property("playPauseCount").toInt(), 0);
 }
 
-// The menu's Last.fm Settings… has Breeze's glyph for settings, as
-// Configure Ferrous… has: without one it left a hole in the menu's glyph
-// column under Pause Scrobbling's check box.
-void TransportStatusTest::lastFmSettingsItemHasTheConfigureGlyph() {
+// The menu's items have no glyphs, so their words start on one column
+// after Pause Scrobbling's check box: Breeze gives a glyph a column of its
+// own beside the check box's, and with the configure glyph on Last.fm
+// Settings… the two items' marks and words were staggered.
+void TransportStatusTest::lastFmMenuWordsShareOneColumn() {
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
     QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
@@ -5336,10 +5336,29 @@ void TransportStatusTest::lastFmSettingsItemHasTheConfigureGlyph() {
     slot->forceActiveFocus(Qt::TabFocusReason);
     QTest::keyClick(harness.window, Qt::Key_F10, Qt::ShiftModifier);
     QTRY_VERIFY(menu->property("opened").toBool());
+    QQuickItem *pause = harness.item(QStringLiteral("scrobbleIndicatorPauseItem"));
     QQuickItem *settings = harness.item(QStringLiteral("scrobbleIndicatorSettingsItem"));
+    QVERIFY(pause != nullptr && pause->isVisible());
     QVERIFY(settings != nullptr && settings->isVisible());
-    QCOMPARE(evaluateOn(settings, QStringLiteral("icon.name")).toString(), QStringLiteral("configure"));
-    QVERIFY2(QIcon::hasThemeIcon(QStringLiteral("configure")), qPrintable(QIcon::themeName()));
+    for (QQuickItem *item : {pause, settings}) {
+        QVERIFY2(evaluateOn(item, QStringLiteral("icon.name")).toString().isEmpty(), qPrintable(item->objectName()));
+        QVERIFY2(evaluateOn(item, QStringLiteral("icon.source")).toUrl().isEmpty(), qPrintable(item->objectName()));
+    }
+    // Where each item's words start, in the menu.
+    const auto wordsLeft = [](QQuickItem *item) {
+        const QString text = item->property("text").toString();
+        const QList<QQuickItem *> descendants = item->findChildren<QQuickItem *>();
+        for (QQuickItem *child : descendants) {
+            if (child->inherits("QQuickText") && child->property("text").toString() == text && child->isVisible()) {
+                return child->mapToItem(nullptr, QPointF(0, 0)).x();
+            }
+        }
+        return -1.0;
+    };
+    const qreal pauseWords = wordsLeft(pause);
+    QVERIFY(pauseWords >= 0);
+    QCOMPARE(wordsLeft(settings), pauseWords);
+    QCOMPARE(settings->mapToItem(nullptr, QPointF(0, 0)).x(), pause->mapToItem(nullptr, QPointF(0, 0)).x());
     QVERIFY(QMetaObject::invokeMethod(menu, "close"));
     QTRY_VERIFY(!menu->property("visible").toBool());
 }
