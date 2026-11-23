@@ -1150,6 +1150,8 @@ private slots:
     void nowPlayingNarrowFirstPlayClipsNoLine();
     void nowPlayingFirstPlayBandIsNeverEmpty_data();
     void nowPlayingFirstPlayBandIsNeverEmpty();
+    void nowPlayingBandMovesFromTheFirstFrame_data();
+    void nowPlayingBandMovesFromTheFirstFrame();
     void nowPlayingLateCoverKeepsEveryLayerContinuous();
     void nowPlayingLateCoverKeepsEveryLayerContinuous_data();
     void nowPlayingThirdTrackGoesOnFromEveryLayer();
@@ -2913,9 +2915,37 @@ double coverOpacityAt(double elapsed, double shortDuration) {
     const double rest = 1.0 - std::clamp((elapsed - 0.12 * shortDuration) / shortDuration, 0.0, 1.0);
     return 1.0 - rest * rest * rest;
 }
-// How far into an InOutQuad move, from 0 to 1, it is `presence` of the way.
+// The panel's move curve: InOutQuad with a share `lead` of OutQuad, so it
+// sets off at once and eases into place.
+constexpr double kMoveLead = 0.25;
+double movePresenceAt(double time) {
+    const double t = std::clamp(time, 0.0, 1.0);
+    return t < 0.5 ? 2 * kMoveLead * t + (2 - 3 * kMoveLead) * t * t
+                   : 1 - (2 - kMoveLead) * (1 - t) * (1 - t);
+}
+// How far into the move, from 0 to 1, it is `presence` of the way.
 double moveTimeAt(double presence) {
-    return presence < 0.5 ? std::sqrt(presence / 2) : 1 - std::sqrt((1 - presence) / 2);
+    const double p = std::clamp(presence, 0.0, 1.0);
+    if (p >= (2 + kMoveLead) / 4) {
+        return 1 - std::sqrt((1 - p) / (2 - kMoveLead));
+    }
+    const double square = 2 - 3 * kMoveLead;
+    return (std::sqrt(kMoveLead * kMoveLead + square * p) - kMoveLead) / square;
+}
+// Whether `animation` runs on the panel's move curve: the animation's own
+// curve is the one movePresenceAt computes.
+bool onTheMoveCurve(const QObject *animation) {
+    const QEasingCurve curve = animation->property("easing").value<QEasingCurve>();
+    if (curve.type() != QEasingCurve::BezierSpline) {
+        return false;
+    }
+    for (int step = 0; step <= 20; ++step) {
+        const double time = step / 20.0;
+        if (std::abs(curve.valueForProgress(time) - movePresenceAt(time)) > 1e-3) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Whether the library's header is laid out right under the panel.
@@ -2931,8 +2961,8 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay_data() {
 }
 
 // The first track after nothing loaded grows the cover's place from the
-// compact row to its full size, InOutQuad (OutCubic would start off at
-// some 3,100 px/s): the panel's height and the cover's band follow one
+// compact row to its full size, on the panel's move curve (OutCubic would
+// start off at some 3,100 px/s, InOutQuad held ~100 ms): the panel's height and the cover's band follow one
 // progress, the lines and the library's header move down with it, and the
 // compact row and the cover hand over by the move's time: the row out from
 // 20 to 50 ms, the cover in from 12 to 112 ms, OutCubic, with Kirigami's
@@ -2978,7 +3008,7 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     // Kirigami's own (see nowPlayingLibrarySlidesWithTheCoversPlace).
     QCOMPARE(growth->property("duration").toInt(),
              narrow ? units->longDuration() : qRound(units->veryLongDuration() * 9.0 / 8.0));
-    QCOMPARE(easingOf(growth), QEasingCurve::InOutQuad);
+    QVERIFY(onTheMoveCurve(growth));
     QCOMPARE(growth->property("from").toDouble(), 0.0);
     QCOMPARE(growth->property("to").toDouble(), 1.0);
 
@@ -3147,18 +3177,17 @@ void UiMotionTest::nowPlayingFirstPlayShowsTheTitleEarly() {
         lines.push_back(panelLine(panel, name));
     }
     QList<double> before(lines.size(), 0.0);
-    double bandBefore = 0.0;
-    const QEasingCurve curve(QEasingCurve::InOutQuad);
+    double bandBefore = panel->property("idleRowHeight").toDouble();
     for (int frame = 1;; ++frame) {
         const double progress = std::min(1.0, frame * 1000.0 / 60.0 / duration);
         const QString where = QStringLiteral("%1 ms").arg(progress * duration);
-        panel->setProperty("presence", curve.valueForProgress(progress));
+        panel->setProperty("presence", movePresenceAt(progress));
         QVERIFY2(QTest::qWaitFor([&]() { return libraryFollows(panel, header); }), qPrintable(where));
         QVERIFY(QQuickTest::qWaitForPolish(window));
         const double band = area->height();
         QVERIFY2(band >= bandBefore, qPrintable(where));
-        if (frame == 2) {
-            QVERIFY2(band - bandBefore <= 4.0, qPrintable(QStringLiteral("the band's first step %1").arg(band - bandBefore)));
+        if (frame <= 2) {
+            QVERIFY2(band - bandBefore <= 8.0, qPrintable(QStringLiteral("the band's first step %1").arg(band - bandBefore)));
         }
         bandBefore = band;
         for (qsizetype index = 0; index < lines.size(); ++index) {
@@ -3212,11 +3241,10 @@ void UiMotionTest::nowPlayingNarrowFirstPlayClipsNoLine() {
     QVERIFY(QMetaObject::invokeMethod(growth, "pause"));
     const int duration = growth->property("duration").toInt();
     QCOMPARE(duration, units->longDuration());
-    const QEasingCurve curve(QEasingCurve::InOutQuad);
     for (int frame = 1;; ++frame) {
         const double progress = std::min(1.0, frame * 1000.0 / 60.0 / duration);
         const QString where = QStringLiteral("%1 ms").arg(progress * duration);
-        panel->setProperty("presence", curve.valueForProgress(progress));
+        panel->setProperty("presence", movePresenceAt(progress));
         QVERIFY2(QTest::qWaitFor([&]() { return libraryFollows(panel, header); }), qPrintable(where));
         QVERIFY(QQuickTest::qWaitForPolish(window));
         for (const QString &name : kNarrowLines) {
@@ -3288,6 +3316,84 @@ void UiMotionTest::nowPlayingFirstPlayBandIsNeverEmpty() {
     }
     QCOMPARE(cover->opacity(), 1.0);
     QVERIFY(!row->isVisible());
+}
+
+void UiMotionTest::nowPlayingBandMovesFromTheFirstFrame_data() {
+    QTest::addColumn<bool>("narrow");
+    QTest::addColumn<bool>("closing");
+    QTest::newRow("wide, first play") << false << false;
+    QTest::newRow("wide, stop to idle") << false << true;
+    QTest::newRow("narrow, first play") << true << false;
+}
+
+// The first Play, and its reverse under the wide cover, move the cover's
+// band and the library from the first frame of the move to its end, at
+// Kirigami's own durations, on the test's time: the band grew or shrank in
+// every frame until it was within 2 px of its end (on InOutQuad, with the
+// lines' room taking all of the seam's first travel, it held at the
+// compact row's 26 to 28 px from +107 to +204 ms, then swept), and its
+// first steps are small, a start rather than a jump.
+void UiMotionTest::nowPlayingBandMovesFromTheFirstFrame() {
+    QFETCH(bool, narrow);
+    QFETCH(bool, closing);
+    Covers covers;
+    Motion ui(narrow);
+    QVERIFY(ui.loaded());
+    const auto [window, bridge, panel, handover, units] = ui.parts();
+    QQuickItem *area = named(window, "nowPlayingCoverArea");
+    QQuickItem *header = named(window, "libraryHeader");
+    auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
+    QVERIFY(area && header && growth);
+    QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+    QTRY_VERIFY(libraryFollows(panel, header));
+    const double side = narrow ? panel->property("narrowLayoutCoverSize").toDouble() : panel->width();
+    const double rowHeight = panel->property("idleRowHeight").toDouble();
+    if (closing) {
+        showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
+        bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
+        QVERIFY(grown(panel));
+        QVERIFY(finish(handover));
+        QTRY_VERIFY(libraryFollows(panel, header));
+    }
+    QList<double> bands;
+    QList<double> tops;
+    SteppedAnimationDriver driver;
+    if (closing) {
+        clearPlayback(bridge);
+    } else {
+        showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
+    }
+    QVERIFY(growth->property("running").toBool());
+    QVERIFY(onTheMoveCurve(growth));
+    QVERIFY(framesToEnd(driver, window, growth, [&]() {
+        if (growth->property("running").toBool() && area->isVisible()) {
+            bands.push_back(area->height());
+            tops.push_back(sceneRectOf(header).top());
+        }
+    }));
+    QVERIFY2(bands.size() >= 10, qPrintable(QString::number(bands.size())));
+    const double start = closing ? side : std::min(side, rowHeight);
+    const double end = closing ? std::min(side, rowHeight) : side;
+    QString steps;
+    for (qsizetype index = 0; index < bands.size(); ++index) {
+        steps += QStringLiteral(" %1").arg(bands.at(index));
+    }
+    for (qsizetype index = 0; index < bands.size(); ++index) {
+        const double before = index == 0 ? start : bands.at(index - 1);
+        const double step = closing ? before - bands.at(index) : bands.at(index) - before;
+        if (std::abs(before - end) <= 2.0) {
+            break;
+        }
+        QVERIFY2(step >= 1.0, qPrintable(QStringLiteral("frame %1:%2").arg(index).arg(steps)));
+        // At most the library's own first steps, some 8 px.
+        if (index < 2) {
+            QVERIFY2(step <= 10.0, qPrintable(QStringLiteral("a jump in frame %1:%2").arg(index).arg(steps)));
+        }
+        if (index > 0 && index < 6) {
+            QVERIFY2(std::abs(tops.at(index) - tops.at(index - 1)) >= 1.0,
+                     qPrintable(QStringLiteral("the library held in frame %1").arg(index)));
+        }
+    }
 }
 
 void UiMotionTest::nowPlayingLibrarySlidesWithTheCoversPlace_data() {
@@ -3663,7 +3769,7 @@ void UiMotionTest::nowPlayingShrinksBackIntoTheCompactRow() {
     QVERIFY(panel->property("idle").toBool());
     QVERIFY(growth->property("running").toBool());
     QCOMPARE(growth->property("to").toDouble(), 0.0);
-    QCOMPARE(easingOf(growth), QEasingCurve::InOutQuad);
+    QVERIFY(onTheMoveCurve(growth));
     QCOMPARE(panel->implicitHeight(), full);
     QVERIFY(QMetaObject::invokeMethod(growth, "pause"));
     QTRY_VERIFY(libraryFollows(panel, header));
@@ -3708,11 +3814,13 @@ void UiMotionTest::nowPlayingGoingIdleClosesWithoutATrailingBand_data() {
 
 // Stop to nothing loaded closes with no band of nothing trailing the cover
 // (the lines were out at some 200 ms, and a band of 38 px, shrinking,
-// followed the cover for some 150): the cover stays until the seam comes up
-// to its foot and then goes up with it; until then each line stays where it
-// was and is gone as the seam reaches it, never under it, and no more than
-// two frames show a gap between the cover and the seam with no line in it.
-// The curve and the time are as they were.
+// followed the cover for some 150): beside and under the narrow cover the
+// cover stays until the seam comes up to its foot and then goes up with it,
+// each line staying where it was until then; under the wide one the
+// cover's foot goes up from the first frame, the seam less the lines' room,
+// the lines with it. Each line is gone as the seam reaches it, never under
+// it, and no more than three frames, some 50 ms, show a gap between the
+// cover and the seam with no line in it, shrinking. The time is as it was.
 void UiMotionTest::nowPlayingGoingIdleClosesWithoutATrailingBand() {
     QFETCH(bool, narrow);
     Covers covers;
@@ -3731,6 +3839,7 @@ void UiMotionTest::nowPlayingGoingIdleClosesWithoutATrailingBand() {
     QVERIFY(finish(handover));
     QTRY_VERIFY(libraryFollows(panel, header));
     const double side = area->height();
+    const double coverTop = sceneRectOf(area).top();
     QList<PanelLine> lines;
     QList<double> tops;
     for (const QString &name : narrow ? kNarrowLines : kWideLines) {
@@ -3740,16 +3849,16 @@ void UiMotionTest::nowPlayingGoingIdleClosesWithoutATrailingBand() {
             continue;
         }
         lines.push_back(line);
-        tops.push_back(sceneRectOf(line.line()).top());
+        // Under the wide cover, from its foot.
+        tops.push_back(sceneRectOf(line.line()).top() - (narrow ? 0.0 : coverTop + side));
     }
     QList<double> before(lines.size(), 1.0);
 
     clearPlayback(bridge);
     QVERIFY(QMetaObject::invokeMethod(growth, "pause"));
-    QCOMPARE(easingOf(growth), QEasingCurve::InOutQuad);
+    QVERIFY(onTheMoveCurve(growth));
     const int duration = growth->property("duration").toInt();
     QCOMPARE(duration, narrow ? units->longDuration() : qRound(units->veryLongDuration() * 9.0 / 8.0));
-    const QEasingCurve curve(QEasingCurve::InOutQuad);
     int blankFrames = 0;
     for (int frame = 1;; ++frame) {
         const double progress = frame * 1000.0 / 60.0 / duration;
@@ -3757,14 +3866,21 @@ void UiMotionTest::nowPlayingGoingIdleClosesWithoutATrailingBand() {
             break;
         }
         const QString where = QStringLiteral("%1 ms").arg(progress * duration);
-        panel->setProperty("presence", 1.0 - curve.valueForProgress(progress));
+        panel->setProperty("presence", 1.0 - movePresenceAt(progress));
         QVERIFY2(QTest::qWaitFor([&]() { return libraryFollows(panel, header); }), qPrintable(where));
         QVERIFY(QQuickTest::qWaitForPolish(window));
         const double seamTop = sceneRectOf(seam).top();
         const QRectF band = sceneRectOf(area);
-        // The cover whole until the seam is at its foot, then up with it.
-        QVERIFY2(std::abs(band.bottom() - std::min(band.top() + side, seamTop)) <= 1.5,
+        // Narrow, the cover whole until the seam is at its foot, then up
+        // with it; wide, the seam less the lines' room, from the start.
+        const double foot = narrow ? std::min(band.top() + side, seamTop)
+                                   : std::min(band.top() + side, seamTop - panel->property("wideTextRoom").toDouble());
+        QVERIFY2(std::abs(band.bottom() - foot) <= 1.5,
                  qPrintable(QStringLiteral("the cover to %1, the seam at %2, at %3").arg(band.bottom()).arg(seamTop).arg(where)));
+        if (!narrow && frame <= 3) {
+            QVERIFY2(band.bottom() < coverTop + side - 0.5,
+                     qPrintable(QStringLiteral("the cover whole at %1").arg(where)));
+        }
         double shownMost = 0.0;
         for (qsizetype index = 0; index < lines.size(); ++index) {
             QQuickItem *line = lines.at(index).line();
@@ -3773,7 +3889,7 @@ void UiMotionTest::nowPlayingGoingIdleClosesWithoutATrailingBand() {
             before[index] = shown;
             if (shown > 0.0) {
                 QVERIFY2(sceneRectOf(line).bottom() <= seamTop + 1.5
-                             && std::abs(sceneRectOf(line).top() - tops.at(index)) <= 1.0,
+                             && std::abs(sceneRectOf(line).top() - (narrow ? 0.0 : band.bottom()) - tops.at(index)) <= 1.0,
                          qPrintable(QStringLiteral("line %1 from %2 to %3, the seam at %4, at %5")
                                         .arg(index).arg(sceneRectOf(line).top()).arg(sceneRectOf(line).bottom())
                                         .arg(seamTop).arg(where)));
@@ -3782,7 +3898,7 @@ void UiMotionTest::nowPlayingGoingIdleClosesWithoutATrailingBand() {
         }
         blankFrames += seamTop - band.bottom() > 1.5 && shownMost < 0.05 ? 1 : 0;
     }
-    QVERIFY2(blankFrames <= 2, qPrintable(QStringLiteral("%1 frames of a blank band").arg(blankFrames)));
+    QVERIFY2(blankFrames <= (narrow ? 2 : 3), qPrintable(QStringLiteral("%1 frames of a blank band").arg(blankFrames)));
     QVERIFY(finish(growth));
 }
 
