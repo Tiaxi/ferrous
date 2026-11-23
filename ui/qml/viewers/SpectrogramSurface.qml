@@ -506,7 +506,13 @@ Item {
                         ? root.laneHeadBounds : Qt.rect(0, 0, 0, 0)
                     restLineCount: root.restLineCount
                     restTopClearance: root.restTopClearance
-                    readoutPlateColor: root.uiPalette.spectrogramPlot.plotPlate
+                    // The plot's plate, opaque: the strongest traces
+                    // showed through the readouts' digits. The lane heads'
+                    // and the zoom's plates keep its 88 %.
+                    readoutPlateColor: {
+                        const plate = root.uiPalette.spectrogramPlot.plotPlate
+                        return Qt.rgba(plate.r, plate.g, plate.b, 1)
+                    }
                     readoutPlateEdgeColor: root.uiPalette.spectrogramPlot.plotPlateEdge
                     readoutTextColor: root.uiPalette.spectrogramPlot.plotText
                     textScale: root.textScale
