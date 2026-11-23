@@ -3110,12 +3110,12 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutReadsEachView() {
         const QVector<SpectrogramOverlayImage> plates = readoutPlatesOf(item.m_crosshair);
         QCOMPARE(plates.size(), 2);
         // The time of the column under the vertical line, as finely as the
-        // view resolves it, as the waveform's readout: tenths at the
-        // default zoom; zoomed, its columns, 21 ms, to hundredths (at
-        // tenths, the pointer crossed 16 px before the time changed).
+        // view resolves it, by the waveform's rule: never finer than its
+        // columns, 21 ms, so tenths at any zoom (zoomed, it read
+        // hundredths, where the waveform at the same zoom read tenths).
         const double lineX = std::floor(pointer.x() * scale) / scale;
         const double seconds = (lineX - drawX) / effectiveZoom / kReadoutColumnsPerSecond;
-        QCOMPARE(plates[1].text, readoutTime(seconds, zoom > 1.0 ? 2 : 1));
+        QCOMPARE(plates[1].text, readoutTime(seconds, 1));
         for (const SpectrogramOverlayImage &plate : plates) {
             QVERIFY(QRectF(QPointF(0.0, 0.0), QSizeF(lane)).contains(plate.rect));
             // Laid out in whole logical pixels: whole device pixels at any

@@ -1952,7 +1952,7 @@ void SpectrogramFollowSmokeTest::crosshairTimeHoldsThroughAPan() {
     SurfaceInAWindow plot;
     const QString error = plot.load(2, 1);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    // Zoomed: a column is 2.5 px, and the time shows to hundredths.
+    // Zoomed: a column is 2.5 px, and 21 ms, so the time shows to tenths.
     for (SpectrogramItem *lane : std::as_const(plot.lanes)) {
         QMutexLocker lock(&lane->m_stateMutex);
         lane->m_renderZoomLevel = 2.5;
@@ -1978,7 +1978,7 @@ void SpectrogramFollowSmokeTest::crosshairTimeHoldsThroughAPan() {
     QTest::mouseMove(window, QPoint(390, y));
     QTRY_COMPARE(crosshairNotAt(plot, 390), QString());
     const QString grabbed = timeShown();
-    QVERIFY2(grabbed.size() == 7, qPrintable(grabbed));
+    QVERIFY2(grabbed.size() == 6, qPrintable(grabbed));
     // A pixel at a time, a column every 2.5 of them.
     for (int x = 389; x >= 360; --x) {
         QTest::mouseMove(window, QPoint(x, y));
@@ -2018,7 +2018,7 @@ void SpectrogramFollowSmokeTest::panStartsFromTheTimeTheCrosshairShowed() {
     QTest::mouseMove(window, QPoint(400, y));
     QTRY_COMPARE(crosshairNotAt(plot, 400), QString());
     const QString pressed = timeShown();
-    QVERIFY2(pressed.size() == 7, qPrintable(pressed));
+    QVERIFY2(pressed.size() == 6, qPrintable(pressed));
     {
         // The view as drawn is off its whole columns, as in the app.
         QMutexLocker lock(&top->m_stateMutex);
