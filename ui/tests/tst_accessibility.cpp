@@ -4566,10 +4566,11 @@ void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int
     QCOMPARE(chosenGlyph->opacity(), 1.0);
     QVERIFY2(std::abs(otherGlyph->opacity() - 0.72) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
 
-    // Under the pointer: a 1 px outline inset 2 px, its glyph at 85 %, and
-    // no wash; as drawn, the outline reads on the plate, 3:1 or more, with
-    // the plate inside it where the chosen one is its fill (a wash took the
-    // chosen one's silhouette, and both read as chosen for the hover).
+    // Under the pointer: a 1 px outline on the button's bounds, its glyph at
+    // 85 %, and no wash; as drawn, the outline reads on the plate, 3:1 or
+    // more, with the plate inside it where the chosen one is its fill (a
+    // wash took the chosen one's silhouette, and both read as chosen for the
+    // hover).
     QTest::mouseMove(window, rectOf(other).center().toPoint() + QPoint(0, 1));
     QTest::mouseMove(window, rectOf(other).center().toPoint());
     QTRY_VERIFY(other->property("hovered").toBool());
@@ -4591,8 +4592,8 @@ void AccessibilityTest::checkModeSwitchStatesStayApart(QQuickWindow *window, int
     QTRY_VERIFY(shownWhole());
     QTest::qWait(50);
     const QImage image = window->grabWindow();
-    const QColor drawnLine = drawnAt(image, window, other, QPointF(2.5, other->height() / 2));
-    const QColor drawnInside = drawnAt(image, window, other, QPointF(4.5, 4.5));
+    const QColor drawnLine = drawnAt(image, window, other, QPointF(0.5, other->height() / 2));
+    const QColor drawnInside = drawnAt(image, window, other, QPointF(2.5, other->height() / 2));
     const QColor drawnFill = drawnAt(image, window, chosen, QPointF(4.5, 4.5));
     // The plate beside the chosen one, clear of the other's focus ring.
     const QColor drawnPlate =
