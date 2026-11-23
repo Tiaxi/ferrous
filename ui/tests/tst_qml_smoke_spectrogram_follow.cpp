@@ -55,6 +55,7 @@ private slots:
     void crosshairIsOneColumnInEveryFrame_data();
     void crosshairIsOneColumnInEveryFrame();
     void panStartsFromTheTimeTheCrosshairShowed();
+    void panHoldsTheTimeShownAtASubpixelPress();
 };
 
 namespace {
@@ -2286,6 +2287,81 @@ void SpectrogramFollowSmokeTest::panStartsFromTheTimeTheCrosshairShowed() {
         QCOMPARE(timeShown(), pressed);
     }
     QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, QPoint(365, y));
+}
+
+// The pan holds the time the crosshair showed at a press between device
+// pixels, as a compositor places the pointer: the crosshair reads the time
+// at the device pixel it is drawn on, and the pan took the pointer's own x,
+// up to a pixel on, so the last digit moved as the drag started (1:09.95,
+// then 1:09.96 throughout).
+void SpectrogramFollowSmokeTest::panHoldsTheTimeShownAtASubpixelPress() {
+    SurfaceInAWindow plot;
+    const QString error = plot.load(2, 1);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    // Zoomed: a column is 2.5 px, and 21 ms, so the time shows to tenths.
+    for (SpectrogramItem *lane : std::as_const(plot.lanes)) {
+        QMutexLocker lock(&lane->m_stateMutex);
+        lane->m_renderZoomLevel = 2.5;
+        lane->m_crosshairDirty = true;
+    }
+    QQuickWindow *window = plot.window;
+    SpectrogramItem *top = plot.lanes.first();
+    SpectrogramItem *lowest = plot.lanes.last();
+    const double y = std::floor(top->mapToScene(QPointF(0.0, top->height() / 2)).y()) + 0.5;
+    const auto timeShown = [lowest]() {
+        QMutexLocker lock(&lowest->m_stateMutex);
+        for (const SpectrogramOverlayImage &image : std::as_const(lowest->m_crosshair.images)) {
+            if (image.kind == SpectrogramOverlayImage::ReadoutPlate && image.text.contains(u':')) {
+                return image.text;
+            }
+        }
+        return QString();
+    };
+    const auto lineAt = [&plot](double x) {
+        const int column = static_cast<int>(
+            std::floor(x * plot.window->effectiveDevicePixelRatio() + 1e-9));
+        for (SpectrogramItem *lane : std::as_const(plot.lanes)) {
+            QMutexLocker lock(&lane->m_stateMutex);
+            if (lane->m_crosshairVerticalLineRect.x() != column) return false;
+        }
+        return true;
+    };
+    // The pointer between pixels, as KWin places it (in 1/256 px).
+    const auto send = [window, y](QEvent::Type type, double x, Qt::MouseButton button,
+                                  Qt::MouseButtons buttons) {
+        const QPointF at(x, y);
+        QMouseEvent event(type, at, at, window->mapToGlobal(at), button, buttons, Qt::NoModifier,
+                          QPointingDevice::primaryPointingDevice());
+        QCoreApplication::sendEvent(window, &event);
+    };
+    // The pixels on each side of a step in the time shown, so that a press
+    // just short of the second pixel shows the first's time.
+    int stepAt = -1;
+    QString before;
+    for (int x = 330; x <= 420 && stepAt < 0; ++x) {
+        send(QEvent::MouseMove, x, Qt::NoButton, Qt::NoButton);
+        QTRY_VERIFY(lineAt(x));
+        QTRY_VERIFY(!timeShown().isEmpty());
+        const QString shown = timeShown();
+        if (!before.isEmpty() && shown != before) stepAt = x;
+        before = shown;
+    }
+    QVERIFY2(stepAt > 0, "no step in the time shown");
+    const double pressX = stepAt - 1.0 / 256.0;
+    send(QEvent::MouseMove, pressX, Qt::NoButton, Qt::NoButton);
+    QTRY_VERIFY(lineAt(pressX));
+    QTRY_COMPARE(timeShown().size(), 6);
+    const QString pressed = timeShown();
+
+    send(QEvent::MouseButtonPress, pressX, Qt::MiddleButton, Qt::MiddleButton);
+    // Steps of a pixel and a fraction, the time held at each.
+    for (double x = pressX - 12.3; x > pressX - 60.0; x -= 1.7) {
+        send(QEvent::MouseMove, x, Qt::NoButton, Qt::MiddleButton);
+        QTRY_VERIFY(lineAt(x));
+        QTRY_VERIFY(plot.surface->property("detached").toBool());
+        QCOMPARE(timeShown(), pressed);
+    }
+    send(QEvent::MouseButtonRelease, pressX - 60.0, Qt::MiddleButton, Qt::NoButton);
 }
 
 // A closed hand from the pan's drag distance to its release, over any lane,

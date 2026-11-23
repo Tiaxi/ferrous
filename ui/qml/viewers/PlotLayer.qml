@@ -78,6 +78,8 @@ Item {
     // (#655). Follow Playhead's shortcut is for its tooltip.
     property bool viewMoved: false
     property bool viewAutoscrolling: false
+    // Whether a middle-drag pans the plot.
+    property bool viewPanning: false
     property string followShortcut: ""
     // Whether a viewer shows the mode switch and the zoom in its own
     // controls, on its corner plate or in its title strip: then they are
@@ -268,19 +270,22 @@ Item {
         pointerActivity: root.pointerActivity
     }
 
-    // The zoom, 4 px left of the mode switch, so that the corner's plates
-    // read as one row: while the plot is zoomed, it shows and hides with
-    // the switch (shown without it, it floated 68 px from the corner). At
-    // rest the seek bar's band is the zoom's cue, and the wheel zooms with
-    // the pointer on the pane, where the readout shows as it changes. It
-    // keeps its place and its Tab stop while it is hidden. "Not following"
-    // grows it to the left, so Reset never moves from under the pointer.
+    // The zoom, left of the mode switch, their edges 6 px apart, so that
+    // the corner's plates read as one row: while the plot is zoomed, it
+    // shows and hides with the switch (shown without it, it floated 68 px
+    // from the corner). At rest the seek bar's band is the zoom's cue, and
+    // the wheel zooms with the pointer on the pane, where the readout
+    // shows as it changes. It keeps its place and its Tab stop while it is
+    // hidden. "Not following" grows it to the left, so Reset never moves
+    // from under the pointer.
     Components.PlotZoomPlate {
         id: zoomPlate
         z: 2
         anchors.top: modeSwitch.top
         anchors.right: modeSwitch.left
-        anchors.rightMargin: 4
+        // Each plate's 1 px edge is outside it: at 4 px between the plates,
+        // their edges were 2 px apart, pinched together (H19).
+        anchors.rightMargin: 6 + 2
         available: !root.controlsInViewer && (root.controlsVisible || root.controlsLevel > 0)
         revealed: modeSwitch.revealed
         fadeLevel: root.controlsLevel
@@ -362,8 +367,11 @@ Item {
             revealedWithControls: root.controlsAutoHide
             // Not while autoscroll runs, whose pointer steers its speed
             // across the lanes, not at their buttons: their plates came
-            // and went as it crossed them (H17).
+            // and went as it crossed them (H17). Nor while a middle-drag
+            // pans the plot, whose hand holds the plot, not a lane's
+            // buttons: they opened under it (H19).
             laneHovered: root.hoveredLane === index && !root.viewAutoscrolling
+                && !root.viewPanning
             pointerPosition: root.pointerPosition
             pointerKnown: root.pointerKnown
             pointerActivity: root.pointerActivity

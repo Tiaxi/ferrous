@@ -135,7 +135,7 @@ Item {
     // as over the album art's.
     readonly property int pointerCursorShape: !root.interactiveOverlaysVisible && root.interactiveOverlaysLevel <= 0
         ? Qt.BlankCursor
-        : root._panLane && root._panLane.panning ? Qt.ClosedHandCursor : Qt.ArrowCursor
+        : root.panning ? Qt.ClosedHandCursor : Qt.ArrowCursor
     property var channelDescriptors: []
     // The crosshair's one x, which every lane draws its line at, the
     // pointer's own too, and what told it: the lane or the seams' area the
@@ -205,6 +205,8 @@ Item {
     readonly property bool detached: sharedViewFollow.detached
     // Whether autoscroll moves it.
     readonly property bool autoscrolling: sharedViewFollow.autoscrolling
+    // Whether a middle-drag pans it, on whichever lane it began.
+    readonly property bool panning: root._panLane !== null && root._panLane.panning
     // The view follows the playhead again, at once.
     function followPlayhead() {
         sharedViewFollow.followPlayhead()
@@ -506,7 +508,13 @@ Item {
                         ? root.laneHeadBounds : Qt.rect(0, 0, 0, 0)
                     restLineCount: root.restLineCount
                     restTopClearance: root.restTopClearance
-                    readoutPlateColor: root.uiPalette.spectrogramPlot.plotPlate
+                    // The plot's plate, opaque: the strongest traces
+                    // showed through the readouts' digits. The lane heads'
+                    // and the zoom's plates keep its 88 %.
+                    readoutPlateColor: {
+                        const plate = root.uiPalette.spectrogramPlot.plotPlate
+                        return Qt.rgba(plate.r, plate.g, plate.b, 1)
+                    }
                     readoutPlateEdgeColor: root.uiPalette.spectrogramPlot.plotPlateEdge
                     readoutTextColor: root.uiPalette.spectrogramPlot.plotText
                     textScale: root.textScale

@@ -59,6 +59,9 @@ private slots:
     void notFollowingMovesAsOnePlate();
     void cornerHoldsWhileAutoscrollRuns_data();
     void cornerHoldsWhileAutoscrollRuns();
+    void laneHeadsStayQuietThroughAPan_data();
+    void laneHeadsStayQuietThroughAPan();
+    void zoomPlateTextIsDrawnAsThePlotPlatesIs();
     void crosshairGivesWayToAutoscroll_data();
     void crosshairGivesWayToAutoscroll();
     void plotsTellFollowingAgainInOneOrder_data();
@@ -2977,10 +2980,11 @@ void TransportInputSmokeTest::laneSeamIsOnThePlot() {
 }
 
 // The main pane shows its zoom while it is zoomed (with the scale off,
-// nothing showed it): the viewers' readout and Reset, on a plate 4 px left
-// of the mode switch, in its place also while both hide. The plot keeps its
-// place and size; its overlays keep clear of the plate. A viewer shows the
-// same readout and Reset on its own plate, in the same order.
+// nothing showed it): the viewers' readout and Reset, on a plate left of
+// the mode switch, their edges 6 px apart, in its place also while both
+// hide. The plot keeps its place and size; its overlays keep clear of the
+// plate. A viewer shows the same readout and Reset on its own plate, in the
+// same order.
 void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -3031,20 +3035,21 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
         QCOMPARE(reset->property("text").toString(), QStringLiteral("Reset Zoom"));
         QCOMPARE(plate->property("plotColors").value<QObject *>(),
                  layer->property("plotColors").value<QObject *>());
-        // 4 px left of the switch, on its top, also while the switch hides
+        // Left of the switch, their 1 px edges outside them 6 px apart, on
+        // its top, also while the switch hides
         // (the click on Reset below puts the pointer on the pane, which
         // reveals it).
         if (mode == 0) {
             QCOMPARE(modeSwitch->opacity(), 0.0);
         }
-        QTRY_COMPARE(sceneRectOf(plate).right() + 4, sceneRectOf(modeSwitch).left());
+        QTRY_COMPARE(sceneRectOf(plate).right() + 8, sceneRectOf(modeSwitch).left());
         QCOMPARE(sceneRectOf(plate).top(), sceneRectOf(modeSwitch).top());
         QCOMPARE(sceneRectOf(plate).height(), sceneRectOf(modeSwitch).height());
         QVERIFY(sceneRectOf(readout).right() <= sceneRectOf(reset).left());
         // The plot stays where it is; its overlays keep clear of the plate.
         QCOMPARE(sceneRectOf(spectrogramSurface), plotBefore);
         const QSizeF corner = surface->property("reservedCorner").toSizeF();
-        QCOMPARE(corner.width(), cornerBefore.width() + 4 + plate->width());
+        QCOMPARE(corner.width(), cornerBefore.width() + 8 + plate->width());
         QCOMPARE(corner.height(), cornerBefore.height());
 
         // Reset: the default zoom, and the plate goes.
@@ -4316,6 +4321,13 @@ void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
     QVERIFY(divider != nullptr && divider->isVisible());
     QCOMPARE(sceneRectOf(divider).left() - boxOf(text).right(), 6.0);
     QVERIFY(surface->property("reservedCorner").toSizeF().width() > plate->width() + modeSwitch->width());
+    // The zoom's plate and the mode switch's 6 px apart, edge to edge, each
+    // edge 1 px outside its plate (with 4 px between the plates, their
+    // edges were 2 px apart, pinched together), and the plot keeps clear of
+    // the zoom's edge.
+    QCOMPARE((sceneRectOf(modeSwitch).left() - 1.0) - (sceneRectOf(plate).right() + 1.0), 6.0);
+    QCOMPARE(surface->property("reservedCorner").toSizeF().width(),
+             sceneRectOf(layer).right() - (sceneRectOf(plate).left() - 1.0));
 
     // Its tooltip names the way back and that action's shortcut as it is.
     QObject *toolTip = notice->findChild<QObject *>(QStringLiteral("followNoticeToolTip"));
@@ -4388,7 +4400,7 @@ void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
         QTRY_COMPARE(plate->opacity(), 1.0);
         QCOMPARE(sceneRectOf(modeSwitch), switchAt);
         window->grabWindow();
-        QCOMPARE(sceneRectOf(plate).right() + 4, sceneRectOf(modeSwitch).left());
+        QCOMPARE(sceneRectOf(plate).right() + 8, sceneRectOf(modeSwitch).left());
         // 6 px of plate either side of the text.
         QCOMPARE(boxOf(text).left() + text->property("leftPadding").toDouble() - sceneRectOf(plate).left(), 6.0);
         QCOMPARE(sceneRectOf(plate).right() - boxOf(text).right(), 6.0);
@@ -4636,7 +4648,7 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
                                         .arg(where).arg(corner.plate->opacity()).arg(corner.modeSwitch->opacity())));
             }
         }
-        QCOMPARE(sceneRectOf(corner.plate).right() + 4, switchAt.left());
+        QCOMPARE(sceneRectOf(corner.plate).right() + 8, switchAt.left());
         QCOMPARE(sceneRectOf(corner.modeSwitch), switchAt);
         if (cornerWanted && zoomed) {
             QCOMPARE(corner.plate->opacity(), 1.0);
@@ -5058,7 +5070,7 @@ void TransportInputSmokeTest::notFollowingArrivesAsItLeaves() {
         level = text;
         QCOMPARE(sceneRectOf(corner.modeSwitch), switchAt);
         QCOMPARE(corner.modeSwitch->opacity(), 1.0);
-        QCOMPARE(plate.right() + 4, switchAt.left());
+        QCOMPARE(plate.right() + 8, switchAt.left());
         if (!zoomed) {
             // At its width, fading in with its text, which is whole.
             QCOMPARE(corner.text->opacity(), 1.0);
@@ -5202,7 +5214,7 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
         }
         QCOMPARE(sceneRectOf(corner.reset), resetAt);
         QCOMPARE(sceneRectOf(corner.modeSwitch), switchAt);
-        QCOMPARE(plate.right() + 4, switchAt.left());
+        QCOMPARE(plate.right() + 8, switchAt.left());
         if (rowStays) {
             QCOMPARE(corner.plate->opacity(), 1.0);
         } else {
@@ -5427,6 +5439,142 @@ void TransportInputSmokeTest::cornerHoldsWhileAutoscrollRuns() {
     QVERIFY(corner.notice->isVisible());
     QCOMPARE(left, before - (corner.notice->implicitWidth() + 4));
     QCOMPARE(corner.text->opacity(), 1.0);
+}
+
+void TransportInputSmokeTest::laneHeadsStayQuietThroughAPan_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// A middle-drag that pans the plot shows no lane's Mute and Solo, as
+// autoscroll shows none: the hand holds the plot, not a lane's buttons,
+// which opened under it as it went (H19).
+void TransportInputSmokeTest::laneHeadsStayQuietThroughAPan() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QQuickItem *plot = corner.waveform;
+    if (mode == 0) {
+        plot = itemNamed(corner.spectrogramSurface, QStringLiteral("spectrogramPaneItem"));
+        QVERIFY(plot != nullptr);
+    }
+    QTest::mouseMove(window, corner.onPane() + QPoint(1, 1));
+    QTest::mouseMove(window, corner.onPane());
+    corner.zoom(4.0);
+    const QList<QQuickItem *> heads = itemsNamed(corner.layer, QStringLiteral("plotLaneHead"));
+    const auto laneHovered = [&]() {
+        for (QQuickItem *head : heads) {
+            if (head->property("laneHovered").toBool()) return true;
+        }
+        return false;
+    };
+    QVERIFY2(!heads.isEmpty(), qPrintable(QString::number(heads.size())));
+    QTRY_VERIFY(laneHovered());
+
+    // From the upper lane, left and down across the plot's lanes.
+    const QPointF from = corner.layer->mapToScene(
+        QPointF(corner.layer->width() / 2, corner.layer->height() * 0.25));
+    QTest::mouseMove(window, from.toPoint());
+    QTRY_VERIFY(laneHovered());
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, from.toPoint());
+    for (int step = 1; step <= 10; ++step) {
+        const QPoint at = (from + QPointF(-12.0 * step, corner.layer->height() * 0.05 * step)).toPoint();
+        QTest::mouseMove(window, at);
+        QVERIFY2(plot->property("panning").toBool(), qPrintable(QStringLiteral("step %1").arg(step)));
+        QVERIFY2(!laneHovered(), qPrintable(QStringLiteral("step %1, at %2,%3")
+                                                .arg(step).arg(at.x()).arg(at.y())));
+        QVERIFY(corner.surface->property("panning").toBool());
+    }
+    // Let go, the lane under the pointer has its buttons again.
+    const QPoint end = (from + QPointF(-120.0, corner.layer->height() * 0.5)).toPoint();
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, end);
+    QTRY_VERIFY(!corner.surface->property("panning").toBool());
+    QTest::mouseMove(window, end + QPoint(1, 0));
+    QTRY_VERIFY(laneHovered());
+}
+
+// "Not following" and the zoom readout on a plot's plate are drawn as the
+// plate's other letters are, as curves with grey antialiasing (the
+// platform's subpixel antialiasing fringed them in colour on the plate);
+// without the plot's colours, in the window's chrome, as the window's
+// labels are.
+void TransportInputSmokeTest::zoomPlateTextIsDrawnAsThePlotPlatesIs() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+
+Window {
+    id: paletteRoot
+    width: 400
+    height: 200
+    visible: true
+
+    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+
+    Column {
+        Components.PlotPlate {
+            objectName: "lanePlate"
+            plotColors: palette.spectrogramPlot
+            uiPalette: palette
+            text: "L"
+        }
+        Components.FollowNotice {
+            objectName: "plotNotice"
+            uiPalette: palette
+            plotColors: palette.spectrogramPlot
+            divided: true
+        }
+        Components.ZoomReadout {
+            objectName: "plotReadout"
+            uiPalette: palette
+            plotColors: palette.waveformPlot
+            zoomLevel: 2
+        }
+        Components.FollowNotice {
+            objectName: "windowNotice"
+            uiPalette: palette
+        }
+        Components.ZoomReadout {
+            objectName: "windowReadout"
+            uiPalette: palette
+            zoomLevel: 2
+        }
+        Label {
+            objectName: "windowLabel"
+            text: "Window"
+        }
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    const auto renderTypeOf = [window](const QString &name, const QString &child = QString()) {
+        QQuickItem *item = itemNamed(window->contentItem(), name);
+        if (item != nullptr && !child.isEmpty()) item = itemNamed(item, child);
+        return item != nullptr ? item->property("renderType").toInt() : -1;
+    };
+    const int curves = renderTypeOf(QStringLiteral("lanePlate"), QStringLiteral("plotPlateLabel"));
+    QCOMPARE(curves, 2 /* Text.CurveRendering */);
+    QCOMPARE(renderTypeOf(QStringLiteral("plotNotice"), QStringLiteral("followNoticeText")), curves);
+    QCOMPARE(renderTypeOf(QStringLiteral("plotReadout")), curves);
+    // The window's own, as the style draws its labels.
+    const int windows = renderTypeOf(QStringLiteral("windowLabel"));
+    QVERIFY(windows >= 0 && windows != curves);
+    QCOMPARE(renderTypeOf(QStringLiteral("windowNotice"), QStringLiteral("followNoticeText")), windows);
+    QCOMPARE(renderTypeOf(QStringLiteral("windowReadout")), windows);
 }
 
 // The divider between "Not following" and the zoom has 6 px on each side

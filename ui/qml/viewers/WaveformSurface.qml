@@ -41,12 +41,14 @@ Item {
     property real markerSeconds: -1
     readonly property real markerX: waveform.markerX
     readonly property alias waveformItem: waveform
+    // Whether a middle-drag pans the view.
+    readonly property bool panning: waveform.panning
     // The pointer hides once the overlays have faded out, and stays so.
     // While a pan holds the plot it is a closed hand, as over the album
     // art's.
     readonly property int pointerCursorShape: !root.interactiveOverlaysVisible && root.interactiveOverlaysLevel <= 0
         ? Qt.BlankCursor
-        : waveform.panning ? Qt.ClosedHandCursor : Qt.ArrowCursor
+        : root.panning ? Qt.ClosedHandCursor : Qt.ArrowCursor
     readonly property var plotColors: root.uiPalette.waveformPlot
     // The lanes: one per channel in the per-channel view, one otherwise.
     readonly property int laneCount: waveform.viewMode === 1 ? Math.max(1, waveform.channelCount) : 1

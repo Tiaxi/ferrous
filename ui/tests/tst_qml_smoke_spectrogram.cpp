@@ -3314,7 +3314,7 @@ Window {
         function setSpectrogramWidgetWidth(width) {}
     }
 
-    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+    Components.UiPalette { id: palette; objectName: "readoutPalette"; windowRoot: paletteRoot }
 
     // Above a strip of the window the pointer leaves the plot for.
     Viewers.SpectrogramSurface {
@@ -3341,8 +3341,18 @@ Window {
                      surface, QStringLiteral("spectrogramPaneItem")))) != nullptr);
     QVERIFY(findQuickItemByObjectName(surface, QStringLiteral("spectrogramCrosshairToolTip"))
             == nullptr);
-    // The plot's plates, from UiPalette's spectrogramPlot.
-    QCOMPARE(pane->readoutPlateColor().rgba(), qRgba(20, 20, 20, 224));
+    // The plot's plates, from UiPalette's spectrogramPlot. The axis
+    // readouts' are its plate, opaque: a bright trace under the 88 % plate
+    // showed through the digits. The lanes' and the zoom's plates stay as
+    // they are.
+    QCOMPARE(pane->readoutPlateColor().rgba(), qRgba(20, 20, 20, 255));
+    {
+        QObject *palette = root->findChild<QObject *>(QStringLiteral("readoutPalette"));
+        QVERIFY(palette != nullptr);
+        const QObject *plot = palette->property("spectrogramPlot").value<QObject *>();
+        QVERIFY(plot != nullptr);
+        QCOMPARE(plot->property("plotPlate").value<QColor>().rgba(), qRgba(20, 20, 20, 224));
+    }
     QCOMPARE(pane->readoutPlateEdgeColor().rgba(), qRgba(255, 255, 255, 36));
     QCOMPARE(pane->readoutTextColor().rgba(), qRgba(0xec, 0xec, 0xec, 255));
     QVERIFY(pane->showCrosshairTime());
