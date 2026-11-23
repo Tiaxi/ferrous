@@ -47,10 +47,12 @@ Components.PlotPlate {
     // text with it (the text went in a frame while the empty plate faded
     // on, H16). A plate revealed with it comes at its width, its text
     // fading in on the plate's reveal. With the corner's row fading out as
-    // it goes, as with the pointer off the pane, the notice stays on the
-    // plate and goes with its fade, at its width, on the row's one curve:
-    // the plate narrowed 15 ms ahead of the row's fade, its text gone at
-    // full opacity (H17).
+    // it goes, as with the pointer off the pane, the plate keeps its width
+    // and fades on the row's one curve (it narrowed 15 ms ahead of the
+    // row's fade, its text gone at full opacity, H17), while the text and
+    // divider go in the frame the view follows again, with the view's cut:
+    // riding the row's fade, "Not following" was still legible 19 ms after
+    // the view had come back (H22).
     property int notice: 0
     // Whether the corner's row stays as the notice goes, read as it starts
     // to go.
@@ -115,8 +117,12 @@ Components.PlotPlate {
                 // From all of it, or from what came of it.
                 root._leaveAlone()
             } else {
+                // Its words go in the frame the view comes back in, and
+                // only the plate's fill fades with the row.
+                textMotion.stop()
                 root._motion = 3
                 root.noticeLevel = 1
+                root._textLevel = 0
                 root._goneWithRow()
             }
         } else {
