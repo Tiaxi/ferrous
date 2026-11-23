@@ -347,11 +347,12 @@ Item {
     readonly property string idleText: I18n.i18nc("@info", "Nothing playing")
 
     // The compact row of nothing loaded: a list row's height, with the
-    // library's glyph size and gap, so its text starts where a library
-    // row's does.
+    // library's glyph size and gap, both following the font, so its text
+    // starts where a library row's does (a fixed 6 px gap left the label
+    // pressed against the 32 px glyph at 24 pt).
     readonly property real idleRowHeight: root.uiPalette.rowHeight
     readonly property int idleGlyphSize: root.uiPalette.toolIconSize
-    readonly property int idleGlyphGap: 6
+    readonly property int idleGlyphGap: root.uiPalette.scaledSize(6)
     // The panel's height with nothing loaded: the row and the seam.
     readonly property real restHeight: root.idleRowHeight + root.seamHeight
     // The side of the cover's square, at the panel's top left: the

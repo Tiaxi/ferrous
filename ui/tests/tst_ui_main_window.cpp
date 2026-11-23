@@ -463,9 +463,10 @@ bool settled(QQuickItem *panel) {
 // Why the now-playing panel is not the compact row of nothing loaded, or "":
 // one list row's height and the seam, the library's header right under it;
 // Ferrous's 16 px mark, larger with a larger font, at the 12 px inset, and
-// "Nothing playing" where a library row's text starts, 6 px after it, both in
-// the secondary text colour and centred in the row; no cover's square and
-// none of a track's lines.
+// "Nothing playing" where a library row's text starts, 6 px after it, that
+// gap too larger with a larger font (a fixed 6 px pressed the label against
+// the 32 px mark at 24 pt), both in the secondary text colour and centred in
+// the row; no cover's square and none of a track's lines.
 QString compactRowProblem(QQuickWindow *window) {
     QObject *palette = paletteOf(window);
     QQuickItem *panel = named(window, "nowPlayingPanel");
@@ -520,7 +521,9 @@ QString compactRowProblem(QQuickWindow *window) {
         || label->property("truncated").toBool() || label->implicitHeight() > label->height() + 0.5) {
         return QStringLiteral("label \"%1\" in %2").arg(label->property("text").toString(), colorOf(label));
     }
-    if (!at(labelRect.left(), glyphRect.right() + 6) || labelRect.right() > block.right() - 12 + 0.5
+    const qreal fontScale = std::max(1.0, palette->property("basePointSize").toReal() / 10.0);
+    const qreal gap = std::max<qreal>(6, std::round(6 * fontScale));
+    if (!at(labelRect.left(), glyphRect.right() + gap) || labelRect.right() > block.right() - 12 + 0.5
         || !at(labelRect.center().y(), rowRect.center().y()) || labelRect.bottom() > block.bottom()) {
         return QStringLiteral("label at %1, %2").arg(labelRect.left() - block.left()).arg(labelRect.top() - block.top());
     }
