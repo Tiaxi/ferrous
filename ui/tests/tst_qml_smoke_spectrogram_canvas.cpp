@@ -23,6 +23,7 @@ private slots:
     void spectrogramRingHoldsEveryColumnOfAWiderSession();
     void spectrogramZoomPreviewRequestsEveryFrame();
     void spectrogramCrosshairStaysThroughZoomPreviews();
+    void spectrogramCrosshairLevelReadsTheColumnsAPreviewShows();
     void spectrogramTimeScaleStaysThroughZoomPreviews();
     void spectrogramVisibleRangeIsTheViewAFrameShows();
     void spectrogramDynamicRangePreservesSilence();
@@ -882,6 +883,96 @@ void SpectrogramCanvasSmokeTest::spectrogramTimeScaleStaysThroughZoomPreviews() 
         }
         delete node;
     }
+}
+
+// Regression (H23): through a zoom's preview, the level was read from the
+// zoom's own columns, which the session sends from the playhead on: in the
+// frame its first came, the readout said "— dB" at a time the preview
+// showed, and its plate narrowed 9 px for that frame, at each wheel notch
+// and on Reset Zoom. It reads the columns the preview shows.
+void SpectrogramCanvasSmokeTest::spectrogramCrosshairLevelReadsTheColumnsAPreviewShows() {
+    // A window, which makes the readout's textures.
+    QQuickWindow window;
+    window.resize(400, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    TestTime time;
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    prepareScrollingPlayback(item, time, 1);
+    item.setCrosshairEnabled(true);
+    item.setZoomEnabled(true);
+    connect(&item, &SpectrogramItem::zoomRequested, &item, &SpectrogramItem::setZoomLevel);
+    // Left of the playhead, which is in the middle: before the zoom's
+    // first columns.
+    const QPointF pointer(150.0, 40.0);
+    QCursor::setPos(window.mapToGlobal(pointer.toPoint()));
+    QTest::mouseMove(&window, pointer.toPoint());
+    const auto hovered = [&item, pointer] {
+        QMutexLocker lock(&item.m_stateMutex);
+        return item.pointerOnLocked() && item.m_hoverPosition == pointer;
+    };
+    QTRY_VERIFY(hovered());
+    QSGNode *node = paintSettled(item, nullptr);
+    const auto levelShown = [&](const char *step) {
+        item.handleWindowAfterAnimating();
+        QMutexLocker lock(&item.m_stateMutex);
+        if (!item.m_crosshair.valid) {
+            return QStringLiteral("%1: no crosshair").arg(QString::fromLatin1(step));
+        }
+        return item.m_crosshairLaidOutReadout.split(QLatin1Char('\n')).constFirst();
+    };
+
+    quint64 generation = 1;
+    const auto notch = [&](int delta) {
+        QWheelEvent wheel(pointer, pointer, QPoint(), QPoint(0, delta), Qt::NoButton,
+                          Qt::NoModifier, Qt::NoScrollPhase, false);
+        item.wheelEvent(&wheel);
+        return wheel.isAccepted();
+    };
+    for (const int step : {120, -120}) {
+        const char *what = step > 0 ? "wheel notch" : "notch back";
+        QVERIFY(notch(step));
+        node = item.updatePaintNode(node, nullptr);
+        const QString before = levelShown(what);
+        QVERIFY2(before.contains(QStringLiteral("Hz, −")) && before.endsWith(QStringLiteral(" dB")),
+                 qPrintable(QStringLiteral("%1: %2").arg(QString::fromLatin1(what), before)));
+
+        // The zoom's session, its first columns from the playhead on.
+        QVERIFY(sendPendingBackendZoom(item));
+        int hop = 0;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            hop = item.columnHopForZoomLocked(item.backendZoomForRequestLocked());
+        }
+        QVERIFY(hop > 0);
+        const int first = static_cast<int>(std::floor(item.positionSeconds() * 48'000.0 / hop));
+        const int columns = 32;
+        QByteArray data(kStripeBins * columns, static_cast<char>(200));
+        item.feedPrecomputedChunk(data, kStripeBins, 0, columns, first, kStripeColumns * 1024 / hop,
+            48'000, hop, false, true, 1, true, ++generation, 0, 0, 0, 0, true);
+        node = item.updatePaintNode(node, nullptr);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY2(item.m_zoomPreviewShown, what);
+        }
+        // The preview shows the same columns at the same time, and so the
+        // same level.
+        const QString after = levelShown(what);
+        QVERIFY2(after == before, qPrintable(QStringLiteral("%1: %2, then %3")
+                                                .arg(QString::fromLatin1(what), before, after)));
+        // The rest of the session, which replaces the preview.
+        const int total = kStripeColumns * 1024 / hop;
+        QByteArray rest(kStripeBins * total, static_cast<char>(200));
+        item.feedPrecomputedChunk(rest, kStripeBins, 0, total, 0, total,
+            48'000, hop, true, false, 1, false, generation, 0, 0, 0, 0, true);
+        node = paintSettled(item, node);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QVERIFY2(!item.m_zoomPreviewShown, what);
+            QVERIFY2(item.m_shownColumns.columnSlots.empty(), what);
+        }
+    }
+    delete node;
 }
 
 // The view's range, which the seek bar marks while it is zoomed: what the

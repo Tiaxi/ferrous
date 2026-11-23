@@ -895,6 +895,13 @@ private:
     // Drops both, and the reserve being drawn: their times are not the
     // view's any more.
     void invalidateBackdropLocked();
+    // Keeps the ring's columns the canvas was drawn from, as a zoom's
+    // session replaces them, for the crosshair's level while the zoom's
+    // preview shows that canvas (m_shownColumns).
+    void keepShownColumnsLocked();
+    // The kept column at `seconds`, counted as the stream origin's are, or
+    // null without one.
+    const quint8 *shownColumnLocked(double seconds) const;
     // Draws the ring's columns from `seconds` to `endSeconds`, at most
     // `pixelsPerSecond` canvas pixels a second and `width` wide, on a
     // worker, for the reserve.
@@ -1252,6 +1259,20 @@ private:
     SpectrogramBackdrop m_backdrop;
     SpectrogramBackdrop m_reserve;
     quint64 m_backdropSerial{0};
+    // The columns a zoom's preview shows, from the ring its session
+    // replaced: copies of its blocks, the slot of each display column from
+    // `left` (-1 without one), how those columns are timed, and the ring
+    // they are of. Empty but while a preview shows them.
+    struct ShownColumns {
+        SpectrogramRingStorage ring;
+        std::vector<int> columnSlots;
+        qint64 left{0};
+        double columnsPerSecond{0.0};
+        qint64 epoch{0};
+        double streamOrigin{0.0};
+        quint64 ringGeneration{0};
+    };
+    ShownColumns m_shownColumns;
     // The reserve being drawn: its serial, whether it is under way, the
     // canvas pixels a second of the zoom it was last drawn for (0 for
     // none), and the seconds last asked of it. And the validity of what is

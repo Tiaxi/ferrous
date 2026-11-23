@@ -4360,14 +4360,13 @@ void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
     QTRY_VERIFY(toolTip->property("visible").toBool());
     QTest::mouseMove(window, away);
 
-    // Followed again with the pointer away, the notice's plate goes with
-    // the row's fade, its words at once (notFollowingLeavesOneWay).
+    // Followed again with the pointer away, the notice goes at once, and
+    // the plate goes with the row's fade at its zoom's width
+    // (notFollowingLeavesOneWay).
     QVERIFY(QMetaObject::invokeMethod(surface, "followPlayhead"));
     QVERIFY(!moved());
-    QVERIFY(text->isVisible());
-    QCOMPARE(text->opacity(), 0.0);
+    QVERIFY(!notice->isVisible());
     QTRY_COMPARE(plate->opacity(), 0.0);
-    QTRY_VERIFY(!notice->isVisible());
     QTRY_COMPARE(modeSwitch->opacity(), 0.0);
 
     // With the pointer on the pane, its text fades out as the plate
@@ -4547,10 +4546,11 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay_data() {
 // notFollowingMovesAsOnePlate has it frame by frame). At the default zoom,
 // with nothing else on it, the plate fades at its width with its text over
 // 120 ms, OutCubic: the text went in a frame while the empty plate faded
-// on (H16). With the row fading out, the plate fades at its width, on
-// the row's curve: the plate narrowed 15 ms ahead of the row's fade, its
-// text gone at full opacity (H17); its text and divider go in the frame the
-// view follows in: riding the fade, they were legible 19 ms after it (H22).
+// on (H16). With the row fading out, the notice goes in the frame the
+// view follows in, the plate at its zoom's width in that frame, or gone at
+// the default zoom, and fades on the row's curve: riding the fade, the
+// text was legible 19 ms after the cut (H22); with only its words gone,
+// the plate faded at its width, its room standing empty (H23).
 void TransportInputSmokeTest::notFollowingLeavesOneWay() {
     QFETCH(int, mode);
     QFETCH(bool, cornerWanted);
@@ -4615,24 +4615,29 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
     SteppedAnimationDriver animations;
     QVERIFY(QMetaObject::invokeMethod(corner.surface, "followPlayhead"));
     QVERIFY(!corner.moved());
-    // The frame it follows in: the plate as it was, its text on it.
+    // The frame it follows in: the plate as it was, its text on it; with
+    // the row going, the notice goes with the view's cut, the plate at its
+    // zoom's width or gone (H22, H23).
     const bool narrows = zoomed && cornerWanted;
-    QVERIFY(corner.text->isVisible());
-    QCOMPARE(corner.divider->isVisible(), zoomed);
     QImage image = window->grabWindow();
-    QCOMPARE(sceneRectOf(corner.plate).left(), grownLeft);
     QCOMPARE(corner.plate->opacity(), 1.0);
+    if (cornerWanted) {
+        QVERIFY(corner.text->isVisible());
+        QCOMPARE(corner.divider->isVisible(), zoomed);
+        QCOMPARE(sceneRectOf(corner.plate).left(), grownLeft);
+    } else {
+        QVERIFY(!corner.notice->isVisible());
+        QCOMPARE(corner.plate->isVisible(), zoomed);
+        if (zoomed) {
+            QCOMPARE(sceneRectOf(corner.plate).left(), plainLeft);
+        }
+    }
     if (narrows) {
         // One plate, its room and the rest.
         const Fills f = fills(image);
         QVERIFY2(channelDistance(f.room, f.staying) <= 1, qPrintable(f.room.name() + u' ' + f.staying.name()));
     } else if (cornerWanted) {
         QCOMPARE(corner.text->opacity(), 1.0);
-    } else {
-        // With the row going, its words go with the view's cut, in this
-        // frame, the plate staying at its width (H22).
-        QCOMPARE(corner.text->opacity(), 0.0);
-        QCOMPARE(corner.divider->opacity(), 0.0);
     }
     double left = grownLeft;
     double opacity = 1.0;
@@ -4653,20 +4658,25 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
             QVERIFY2(text < textLevel || text == 0.0, qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(text).arg(textLevel)));
             textLevel = text;
             QCOMPARE(sceneRectOf(corner.reset), resetAt);
-        } else {
-            // At its width, fading with its text, or with the row as it
-            // fades out, its fill alone.
+        } else if (cornerWanted) {
+            // At its width, fading with its text.
             QCOMPARE(now, grownLeft);
-            QVERIFY2(corner.text->isVisible() && corner.text->opacity() == (cornerWanted ? 1.0 : 0.0),
+            QVERIFY2(corner.text->isVisible() && corner.text->opacity() == 1.0,
                      qPrintable(QStringLiteral("%1: text %2").arg(where).arg(corner.text->opacity())));
             QCOMPARE(corner.divider->isVisible(), zoomed);
-            if (!cornerWanted) {
-                QCOMPARE(corner.divider->opacity(), 0.0);
-            }
             QVERIFY2(corner.plate->opacity() < opacity,
                      qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(corner.plate->opacity()).arg(opacity)));
             opacity = corner.plate->opacity();
-            if (!cornerWanted) {
+        } else {
+            // With the row as it fades out, never wider than its zoom, and
+            // nothing at the default zoom: no empty room fades (H23).
+            QVERIFY2(!corner.notice->isVisible(), qPrintable(where));
+            QCOMPARE(corner.plate->isVisible(), zoomed);
+            if (zoomed) {
+                QVERIFY2(now == plainLeft, qPrintable(QStringLiteral("%1: %2, its zoom's %3").arg(where).arg(now).arg(plainLeft)));
+                QVERIFY2(corner.plate->opacity() < opacity,
+                         qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(corner.plate->opacity()).arg(opacity)));
+                opacity = corner.plate->opacity();
                 QVERIFY2(corner.plate->opacity() == corner.modeSwitch->opacity(),
                          qPrintable(QStringLiteral("%1: plate %2, switch %3")
                                         .arg(where).arg(corner.plate->opacity()).arg(corner.modeSwitch->opacity())));
@@ -5011,10 +5021,10 @@ void TransportInputSmokeTest::notFollowingComesInWithThePlate() {
         QVERIFY(animations.step(cornerWanted ? 128 : 16));
         QCOMPARE(corner.text->opacity(), 1.0);
         QCOMPARE(corner.divider->opacity(), 1.0);
-        // It fades out as the plate narrows, and goes with the plate's fade
+        // It fades out as the plate narrows, and goes with the view's cut
         // as the row fades out (notFollowingLeavesOneWay).
         QVERIFY(QMetaObject::invokeMethod(corner.surface, "followPlayhead"));
-        QVERIFY(corner.text->isVisible());
+        QCOMPARE(corner.notice->isVisible(), cornerWanted);
         (void)animations.step(300);
         QVERIFY(!corner.notice->isVisible());
     }
@@ -5164,8 +5174,9 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate_data() {
 // staying, the text fades
 // out as the plate narrows over 90 ms, InOutCubic, and no empty room
 // lingers: the text went in a frame while the empty plate narrowed for
-// 60 ms (H18). With the row fading out, the plate fades at its width with
-// the row, its text and divider gone with the view's cut (H22).
+// 60 ms (H18). With the row fading out, the notice goes with the view's
+// cut, the plate at its zoom's width in that frame, fading with the row
+// (H22, H23).
 void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
     QFETCH(int, mode);
     QFETCH(int, way);
@@ -5251,7 +5262,8 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
         } else {
             QCOMPARE(corner.plate->opacity(), corner.modeSwitch->opacity());
             if (corner.plate->opacity() > 0) {
-                QCOMPARE(plate.left(), plainLeft - room);
+                QVERIFY2(plate.left() == plainLeft,
+                         qPrintable(QStringLiteral("%1: %2, its zoom's %3").arg(where).arg(plate.left()).arg(plainLeft)));
             }
         }
         // Growing or narrowing one way, at its left edge.
@@ -5280,13 +5292,14 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
         }
         // No room standing empty: while the text is gone, the plate is
         // narrower than the text within 3 frames, 48 ms; coming, within
-        // 2, 32 ms. With the row fading out, the text and divider are gone
-        // from the frame the view follows in, and the plate's fill fades.
+        // 2, 32 ms. With the row fading out, the notice is gone from the
+        // frame the view follows in, and the plate fades at its zoom's
+        // width.
         if (!rowStays) {
             QVERIFY2(level == 0.0, qPrintable(QStringLiteral("%1: text %2").arg(where).arg(level)));
         }
         const double emptyRoom = plainLeft - plate.left();
-        if (rowStays && corner.plate->opacity() > 0 && level < 0.05 && emptyRoom > 4) {
+        if (corner.plate->opacity() > 0 && level < 0.05 && emptyRoom > 4) {
             longestEmpty = std::max(longestEmpty, ++emptyFrames);
         } else {
             emptyFrames = 0;
