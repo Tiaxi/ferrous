@@ -3,6 +3,7 @@
 #include "LevelMeterItem.h"
 #include "FerrousBridgeFfi.h"
 #include "PlaybackClock.h"
+#include "SceneGraphParentNode.h"
 #include "WindowPresence.h"
 
 #include <QFutureWatcher>
@@ -41,7 +42,9 @@ constexpr int kRampNode = 5;
 
 using Self = LevelMeterItem;
 
-struct MeterNode : QSGNode {
+// A parent node, as its nodes are made again for a new lane count while it
+// is drawn.
+struct MeterNode : SceneGraphParentNode {
     int lanes{-1};
 };
 

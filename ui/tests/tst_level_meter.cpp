@@ -338,6 +338,7 @@ private slots:
     void readsItsFileOnlyWhileVisibleForPlayback();
     void scaleAndLanesAreLaidOutLikeThePlot();
     void sceneGraphDrawsAColumnPerLane();
+    void lanesAddedToADrawnMeterDrawInIt();
     void topSeamCrossesTheColumnOnlyWhenSet();
     void meterIsPartOfThePlot();
     void fillIsALadderOfOneColour_data();
@@ -936,6 +937,58 @@ void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
                 QCOMPARE(pixel(width - 0.5, peak - 0.5), 0x30);
                 QCOMPARE(pixel(mid, peak - 2.5), 0x30);
             }
+        }
+    }
+}
+
+// The nodes a meter on screen makes for a new lane count draw in the
+// meter: with the software renderer, which draws the UI tests and VMs
+// without OpenGL, a node that joined a plain node of the scene drew at the
+// window's origin, unclipped, so a track of another channel count moved
+// the meter to the window's corner until something above it moved.
+void LevelMeterTest::lanesAddedToADrawnMeterDrawInIt() {
+    constexpr double width = LevelMeterItem::kColumnWidth;
+    const QColor chrome(Qt::white);
+    QQuickWindow view;
+    view.setColor(chrome);
+    view.resize(200, 240);
+    LevelMeterItem item(view.contentItem());
+    const QRect meter(120, 40, int(width), 160);
+    item.setPosition(meter.topLeft());
+    item.setSize(meter.size());
+    item.setActive(true);
+    item.setBackgroundColor(QColor(0x10, 0x00, 0x00));
+    item.setSeamColor(QColor(0x20, 0x00, 0x00));
+    item.setTroughColor(QColor(0x30, 0x00, 0x00));
+    item.setKeylineColor(QColor(0xb0, 0x00, 0x00));
+    view.show();
+    QTRY_VERIFY(view.isExposed());
+    // Drawn first with one lane.
+    QVERIFY(!view.grabWindow().isNull());
+    for (const int lanes : {2, 1}) {
+        item.setLaneCount(lanes);
+        item.setChannelCountHint(lanes);
+        item.m_channels.assign(static_cast<std::size_t>(lanes), {});
+        item.m_shown = item.m_channels;
+        item.update();
+        const QImage image = view.grabWindow().convertToFormat(QImage::Format_RGB32);
+        QCOMPARE(image.size(), view.size());
+        int outside = 0;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                outside += !meter.contains(x, y) && image.pixel(x, y) != chrome.rgb() ? 1 : 0;
+            }
+        }
+        QVERIFY2(outside == 0, qPrintable(QStringLiteral("%1 lanes: %2 pixels drawn outside the meter")
+                                              .arg(lanes).arg(outside)));
+        // In the meter: the seam on its left, the keyline beside it and the
+        // trough of each lane.
+        for (int lane = 0; lane < lanes; ++lane) {
+            const auto [top, bottom] = LevelMeterItem::laneRows(lane, lanes, meter.height());
+            const int y = meter.top() + int((top + bottom) / 2);
+            QCOMPARE(image.pixelColor(meter.left(), y).red(), 0x20);
+            QCOMPARE(image.pixelColor(meter.left() + 1, y).red(), 0xb0);
+            QCOMPARE(image.pixelColor(meter.left() + int(LevelMeterItem::kBodyLeft) + 3, y).red(), 0x30);
         }
     }
 }
