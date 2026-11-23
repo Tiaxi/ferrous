@@ -6650,13 +6650,16 @@ void SpectrogramItem::hoverMoveEvent(QHoverEvent *event) {
     QMutexLocker lock(&m_stateMutex);
     m_hoverActive = true;
     m_hoverPosition = event->position();
-    if (m_crosshairEnabled) {
+    const bool shown = m_crosshairEnabled;
+    if (shown) {
         m_crosshairDirty = true;
     }
     lock.unlock();
     publishPointerOn();
-    if (m_crosshairEnabled) {
-        emit crosshairHoverChanged(event->position().x());
+    // Told while the crosshair is hidden too, so that the line it shows
+    // again is where the pointer is in every lane.
+    emit crosshairHoverChanged(event->position().x());
+    if (shown) {
         update();
     }
 }
@@ -6665,13 +6668,16 @@ void SpectrogramItem::hoverEnterEvent(QHoverEvent *event) {
     QMutexLocker lock(&m_stateMutex);
     m_hoverActive = true;
     m_hoverPosition = event->position();
-    if (m_crosshairEnabled) {
+    const bool shown = m_crosshairEnabled;
+    if (shown) {
         m_crosshairDirty = true;
     }
     lock.unlock();
     publishPointerOn();
-    if (m_crosshairEnabled) {
-        emit crosshairHoverChanged(event->position().x());
+    // Told while the crosshair is hidden too, so that the line it shows
+    // again is where the pointer is in every lane.
+    emit crosshairHoverChanged(event->position().x());
+    if (shown) {
         update();
     }
 }
@@ -6679,13 +6685,14 @@ void SpectrogramItem::hoverEnterEvent(QHoverEvent *event) {
 void SpectrogramItem::hoverLeaveEvent(QHoverEvent *) {
     QMutexLocker lock(&m_stateMutex);
     m_hoverActive = false;
-    if (m_crosshairEnabled) {
+    const bool shown = m_crosshairEnabled;
+    if (shown) {
         m_crosshairDirty = true;
     }
     lock.unlock();
     publishPointerOn();
-    if (m_crosshairEnabled) {
-        emit crosshairHoverChanged(-1.0);
+    emit crosshairHoverChanged(-1.0);
+    if (shown) {
         update();
     }
 }
@@ -6919,21 +6926,24 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
 }
 
 void SpectrogramItem::moveDraggedCrosshair(QPointF pointer) {
+    bool shown = false;
     {
         QMutexLocker lock(&m_stateMutex);
         if (!pointerOnLocked() || m_hoverPosition == pointer) {
             return;
         }
         m_hoverPosition = pointer;
-        if (!m_crosshairEnabled) {
-            return;
+        shown = m_crosshairEnabled;
+        if (shown) {
+            m_crosshairDirty = true;
         }
-        m_crosshairDirty = true;
     }
     // The lane that has the button gets no hover while it is held: it tells
-    // the others, and the time under them, where the pointer is itself.
+    // the plot where the pointer is itself.
     emit crosshairHoverChanged(pointer.x());
-    update();
+    if (shown) {
+        update();
+    }
 }
 
 void SpectrogramItem::mouseReleaseEvent(QMouseEvent *event) {
@@ -7212,9 +7222,11 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     m_crosshairCachedDrawX = logicalDrawX;
     m_crosshairCachedRollingMode = rollingMode;
     m_crosshairCachedBinsPerColumn = m_binsPerColumn;
-    // Determine the effective X for the vertical crosshair line.
-    // Hovered pane uses its own mouse position; non-hovered panes
-    // use the shared X coordinate propagated from the hovered pane.
+    // The vertical line is at the plot's one x in every lane, the pointer's
+    // own too, so that all draw it on one column in every frame: the lane
+    // with the pointer drew its own, which the others' shared x was not in
+    // every frame (2 px apart at a drag's start, H15). A lane on its own,
+    // with none shared, draws it at its pointer.
     const bool localHover = pointerOnLocked();
     const bool hasSharedX = m_crosshairSharedX >= 0.0;
     if (!m_crosshairEnabled || (!localHover && !hasSharedX)
@@ -7225,7 +7237,7 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
 
     // The crosshair is on the device column and row under the pointer.
     const int deviceX = crosshairDeviceColumnLocked(
-        localHover ? m_hoverPosition.x() : m_crosshairSharedX, width);
+        hasSharedX ? m_crosshairSharedX : m_hoverPosition.x(), width);
     const int deviceY = crosshairDeviceColumnLocked(m_hoverPosition.y(), height);
     const int lineWidth = deviceLineWidth(scale);
     m_crosshair.valid = true;

@@ -367,6 +367,11 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // mode. False again until a new session's columns fill it.
     Q_PROPERTY(bool viewFilled READ viewFilled NOTIFY viewFilledChanged)
     Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
+    // Where the crosshair's line is, in logical x, for every lane of a plot
+    // alike, the pointer's own too; -1 for none, where a lane on its own
+    // draws it at its pointer. A plot sets it from crosshairHoverChanged,
+    // which tells the pointer's x on the lane, or -1 as it leaves it, also
+    // while the crosshair is hidden.
     Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
     Q_PROPERTY(bool channelMuted READ channelMuted WRITE setChannelMuted NOTIFY channelMutedChanged)
     // Whether the playhead is drawn: the plot going out under another as
