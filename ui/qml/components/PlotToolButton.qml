@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
+import "." as Components
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
@@ -36,6 +37,9 @@ import "../logic/KeyUtils.js" as KeyUtils
 // Keyboard focus is a separate 2 px ring 1 px outside the button, with a
 // 1 px gap in the plate's colour, so it reads on the plate and around a
 // checked fill alike; both show together.
+//
+// Its tooltip stands above its `plate`, the style's gap clear of the
+// plate's 1 px outer edge (above the button alone, it ran over the edge).
 ToolButton {
     id: root
 
@@ -47,6 +51,23 @@ ToolButton {
     property real glyphPointSize: root.uiPalette.smallPointSize
     // One of a plate's choices rather than a state that is on or off.
     property bool segment: false
+    // The PlotPlate it sits on, in whose row it is.
+    property Item plate: null
+    // How far above the button the plate's outer edge is: its place in the
+    // plate's row, the row's in the plate, and the 1 px edge outside it.
+    readonly property real plateEdgeAbove: root.plate && root.parent && root.parent.parent === root.plate
+        ? root.y + root.parent.y + 1 : 0
+    // Whether the pointer is on another button of its row: that one's
+    // tooltip shows rather than this one's for the keyboard's focus, as
+    // one tooltip at a time did (two overlapped over the plate).
+    readonly property bool anotherHovered: {
+        const row = root.parent ? root.parent.children : []
+        for (let i = 0; i < row.length; ++i) {
+            if (row[i] !== root && row[i].plateEdgeAbove !== undefined && row[i].hovered)
+                return true
+        }
+        return false
+    }
     // The plate under the button, opaque.
     readonly property color plateColor: Qt.tint(root.plotColors.plotBg, root.plotColors.plotPlate)
     // The least opacity of the plot's text colour, from `least` up in whole
@@ -148,9 +169,16 @@ ToolButton {
         event.accepted = KeyUtils.isPlainSpace(event)
     }
 
-    ToolTip.text: root.text
-    ToolTip.visible: (root.hovered || root.visualFocus) && root.text.length > 0
-    ToolTip.delay: Kirigami.Units.toolTipDelay
+    Components.PlainToolTip {
+        id: toolTip
+        objectName: "plotToolButtonToolTip"
+        message: root.text
+        visible: (root.hovered || (root.visualFocus && !root.anotherHovered)) && root.text.length > 0
+        delay: Kirigami.Units.toolTipDelay
+        // The style's 3 px over the plate's edge rather than over the
+        // button.
+        y: -toolTip.implicitHeight - 3 - root.plateEdgeAbove
+    }
 
     contentItem: Item {
         Kirigami.Icon {

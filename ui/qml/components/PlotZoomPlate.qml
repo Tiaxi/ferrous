@@ -274,6 +274,7 @@ Components.PlotPlate {
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         text: I18n.i18nc("@info:tooltip", "Reset Zoom")
+        plate: root
         icon.name: "zoom-original"
         onClicked: root.resetView()
     }

@@ -60,6 +60,7 @@ Components.PlotPlate {
             icon.name: modelData.iconName
             icon.source: modelData.iconSource
             segment: true
+            plate: root
             checked: root.selectedMode === index
             Accessible.onPressAction: root.setMode(index)
             onClicked: root.setMode(index)
