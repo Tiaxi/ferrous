@@ -60,6 +60,8 @@ private slots:
     void fullscreenVisualizationStripHoldsTheModeSwitch();
     void viewerButtonsRingOnlyForTheKeyboard_data();
     void viewerButtonsRingOnlyForTheKeyboard();
+    void viewerCornerPlateClearsTheLevelMeter_data();
+    void viewerCornerPlateClearsTheLevelMeter();
     void viewerResetIsTheSameGlyphWindowedAndInTheStrip();
     void viewerToolbarIsOneVocabularyWindowedAndInTheStrip();
     void viewerStripIsOnOneTypeScale_data();
@@ -3401,6 +3403,70 @@ void TransportInputSmokeTest::viewerButtonsRingOnlyForTheKeyboard() {
     QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
 
     autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    if (fullscreenMode == 1) {
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+}
+
+void TransportInputSmokeTest::viewerCornerPlateClearsTheLevelMeter_data() {
+    QTest::addColumn<int>("fullscreenMode");
+    QTest::newRow("window") << 0;
+    QTest::newRow("whole screen, no strip") << 1;
+}
+
+// The visualization viewer's corner plate, in the window and over the whole
+// screen with the strip turned off, keeps 8 px from the level meter's
+// column (at 5 px its edge all but met the meter's seam), and 5 px from the
+// plot's corner without the meter; what the plot keeps clear of follows it.
+void TransportInputSmokeTest::viewerCornerPlateClearsTheLevelMeter() {
+    QFETCH(int, fullscreenMode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide =
+        window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *meter = window->findChild<QQuickItem *>(QStringLiteral("levelMeter"));
+    QVERIFY(bridge && viewer && autoHide && surface && meter);
+    setPlayingTrack(bridge);
+    autoHide->setProperty("hideDelay", 600000);
+    bridge->setProperty("showFullscreenTitleStrip", false);
+    bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QQuickWindow *host = window;
+    if (fullscreenMode == 1) {
+        host = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+        QVERIFY(host != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(host));
+    } else {
+        QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+        QVERIFY(popup != nullptr);
+        QTRY_VERIFY(popup->property("opened").toBool());
+    }
+    QTRY_COMPARE(surface->window(), host);
+    QTRY_COMPARE(sceneRectOf(surface).top(), 0.0);
+    QQuickItem *plate = nullptr;
+    QTRY_VERIFY((plate = visibleItemNamed(host, fullscreenMode == 0 ? QStringLiteral("spectrogramPopupControls")
+                                                                    : QStringLiteral("spectrogramFullscreenCorner")))
+                != nullptr);
+    for (const bool meterShown : {true, false}) {
+        bridge->setProperty("showLevelMeter", meterShown);
+        QTRY_COMPARE(meter->isVisible(), meterShown);
+        const qreal edge = meterShown ? sceneRectOf(meter).left() : sceneRectOf(surface).right();
+        const qreal gap = meterShown ? 8.0 : 5.0;
+        QTRY_COMPARE(edge - sceneRectOf(plate).right(), gap);
+        QCOMPARE(sceneRectOf(plate).top() - sceneRectOf(surface).top(), 5.0);
+        // What the plot keeps clear of: the plate, its 1 px edge, the gap.
+        const QSizeF reserved = surface->property("reservedCorner").toSizeF();
+        QCOMPARE(reserved.width(), gap + plate->width() + 1.0);
+    }
+
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
     if (fullscreenMode == 1) {
