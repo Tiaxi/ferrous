@@ -1779,7 +1779,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport_data() {
 // plain text dump in a window 522 px tall for six lines): the
 // editor's summary, semibold, then each section's heading over its files,
 // what failed first, semibold in the negative colour, its file's name
-// Medium on a line of its own over the error, secondary, then what
+// semibold on a line of its own over the error, secondary, then what
 // succeeded quieter, each file 16 px in, more with a larger font, the lines
 // a long error wraps to under its own start; the window as tall as all that.
 // The save is a real one, into a folder the user may not write to.
@@ -1882,19 +1882,20 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     QCOMPARE(colourOf(4), palette->property("textSecondary").value<QColor>().rgb());
     QCOMPARE(weightOf(0), int(QFont::DemiBold));
     QCOMPARE(colourOf(0), palette->property("negative").value<QColor>().rgb());
-    // The files indented: the failed one's name Medium in the text's
+    // The files indented: the failed one's name semibold in the text's
     // colour, why under it, regular in the same colour, the system's text
-    // under that secondary, the other's name Medium too.
+    // under that secondary, the saved one's name regular in the text's
+    // colour.
     for (int index : {1, 2, 3, 5}) {
         QCOMPARE(blockAt(index).blockFormat().leftMargin(), indent);
     }
-    QCOMPARE(weightOf(1), int(QFont::Medium));
+    QCOMPARE(weightOf(1), int(QFont::DemiBold));
     QCOMPARE(colourOf(1), palette->property("text").value<QColor>().rgb());
     QVERIFY(weightOf(2) < int(QFont::DemiBold));
     QCOMPARE(colourOf(2), palette->property("text").value<QColor>().rgb());
     QVERIFY(weightOf(3) < int(QFont::DemiBold));
     QCOMPARE(colourOf(3), palette->property("textSecondary").value<QColor>().rgb());
-    QCOMPARE(weightOf(5), int(QFont::Medium));
+    QCOMPARE(weightOf(5), int(QFont::Normal));
     QCOMPARE(colourOf(5), palette->property("text").value<QColor>().rgb());
     // 12 px between the sections, more with a larger font, not a grid
     // unit, 18 px.
@@ -2568,10 +2569,12 @@ void TagEditorSmokeTest::saveDetailsSetFailedFilesApart() {
     QTRY_VERIFY(!details->property("visible").toBool());
 }
 
-// In the details, each file's name, failed or saved, ranks above the lines
-// under it: Medium, in the text's colour; why it failed regular in that
-// colour, and the system's text regular and secondary (a failed file's name
-// and its cause were alike, and a saved file's name was regular).
+// In the details, a failed file's name ranks above the lines under it:
+// semibold, in the text's colour; why it failed regular in that colour, and
+// the system's text regular and secondary (a failed file's name and its
+// cause were alike). A saved file's name is regular in the text's colour:
+// the report has two weights, with no Medium (the names were weight 500,
+// the one Medium on the surface).
 void TagEditorSmokeTest::saveDetailsSetFileNamesAboveWhyTheyFailed() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(3, true));
@@ -2607,8 +2610,14 @@ void TagEditorSmokeTest::saveDetailsSetFileNamesAboveWhyTheyFailed() {
     for (const int name : {1, 4, 7}) {
         const auto &[fileName, weight, colour] = blocks.at(name);
         QVERIFY2(fileName.endsWith(QStringLiteral(".flac")), qPrintable(fileName));
-        QCOMPARE(weight, int(QFont::Medium));
+        // Under Failed semibold; under Succeeded, the last, regular.
+        QCOMPARE(weight, name == 7 ? int(QFont::Normal) : int(QFont::DemiBold));
         QCOMPARE(colour, ink);
+    }
+    QCOMPARE(std::get<0>(blocks.at(6)), QStringLiteral("Succeeded:"));
+    // Two weights in the report, none of them Medium.
+    for (const auto &[line, weight, colour] : blocks) {
+        QVERIFY2(weight == int(QFont::Normal) || weight == int(QFont::DemiBold), qPrintable(line));
     }
     QCOMPARE(std::get<0>(blocks.at(2)), QStringLiteral("There isn’t enough free space on the disk."));
     QCOMPARE(std::get<1>(blocks.at(2)), int(QFont::Normal));
