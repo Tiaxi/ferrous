@@ -718,15 +718,17 @@ QString detailsColourProblem(QQuickWindow *window, QQuickItem *details) {
 // then the album's track total, then the year; the tooltip has the whole,
 // as it has every line's that is cut off (`lines`). Under the wide
 // cover the details have the year; the narrow lines have it with the
-// album. The panel measures them with tabular figures, every digit as wide
-// as the widest.
+// album, and their details are "Genre · n of m" on every track, never with
+// "Track" after the genre. The panel measures them with tabular figures,
+// every digit as wide as the widest.
 QString detailsCutProblem(QQuickItem *panel, QQuickItem *details, bool wide, const QString &genre,
                           const QList<QQuickItem *> &lines) {
     const QString year = wide ? QStringLiteral("2005 · ") : QString();
-    const QString whole = year + genre + QStringLiteral(" · Track 2 of 8");
-    const QStringList candidates{whole, year + genre + QStringLiteral(" · 2 of 8"),
-                                 year + QStringLiteral("Track 2 of 8"), year + QStringLiteral("Track 2"),
-                                 QStringLiteral("Track 2")};
+    const QString whole = year + genre + (wide ? QStringLiteral(" · Track 2 of 8") : QStringLiteral(" · 2 of 8"));
+    QStringList candidates{whole, year + genre + QStringLiteral(" · 2 of 8"),
+                           year + QStringLiteral("Track 2 of 8"), year + QStringLiteral("Track 2"),
+                           QStringLiteral("Track 2")};
+    candidates.removeDuplicates();
     const QString wholeText = panel->property(wide ? "detailsText" : "narrowDetailsText").toString();
     const QString shownText = details->property("text").toString();
     if (wholeText != whole) {
@@ -1656,7 +1658,7 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     bridge->setProperty("currentTrackGenre", QStringLiteral("Classical"));
     bridge->setProperty("currentTrackYear", 2005);
     QTRY_COMPARE(panel->property("narrowDetailsText").toString(),
-                 QStringLiteral("Classical · Track 2 of 8"));
+                 QStringLiteral("Classical · 2 of 8"));
     QCOMPARE(panel->property("narrowAlbumText").toString(), QStringLiteral("Small Hours (2005)"));
     bridge->setProperty("currentTrackTotal", 0);
     QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2"));
@@ -2436,7 +2438,7 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QTRY_VERIFY2(detailsColourProblem(window, details).isEmpty(), qPrintable(detailsColourProblem(window, details)));
     for (const QString &genre : {QStringLiteral("Classical"), kLongGenre}) {
         bridge->setProperty("currentTrackGenre", genre);
-        QTRY_COMPARE(panel->property("narrowDetailsText").toString(), genre + QStringLiteral(" · Track 2 of 8"));
+        QTRY_COMPARE(panel->property("narrowDetailsText").toString(), genre + QStringLiteral(" · 2 of 8"));
         QVERIFY(settled(panel));
         const QString cut = detailsCutProblem(panel, details, false, genre, {title, artist, album});
         QVERIFY2(cut.isEmpty(), qPrintable(QStringLiteral("%1: %2").arg(genre, cut)));
@@ -2877,8 +2879,12 @@ void UiMainWindowTest::nowPlayingTitleIsOneSizePerLayout() {
 // its total ("Classical · Track 1" lost it in the narrow sidebar, with the
 // room for "Classical · 1 of 4"): the whole, then "Genre · n of m", then
 // "Track n of m", then "Track n", each where the one before does not fit;
-// "n of m" only after a genre and with a total. In the narrow sidebar,
-// without a cover, the line shows the longest of them that fits.
+// "n of m" only after a genre and with a total. The narrow and compact
+// layouts' whole is "Genre · n of m" on every track, "Track n of m" with
+// no genre (dropping "Track" by width alone, the line read "Jazz · Track 1
+// of 8" on one track and "Classical · 1 of 4" on the next); the wide
+// layout's keeps "Track". In the narrow sidebar, without a cover, the line
+// shows the longest of them that fits.
 void UiMainWindowTest::nowPlayingNarrowDetailsKeepTheAlbumPosition() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
@@ -2893,7 +2899,7 @@ void UiMainWindowTest::nowPlayingNarrowDetailsKeepTheAlbumPosition() {
     QVERIFY(grown(window));
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
     QVERIFY(settled(panel));
-    QCOMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2 of 8"));
+    QCOMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · 2 of 8"));
 
     const QFontMetricsF metrics(details->property("font").value<QFont>());
     QChar widest = QLatin1Char('0');
@@ -2909,7 +2915,7 @@ void UiMainWindowTest::nowPlayingNarrowDetailsKeepTheAlbumPosition() {
         QVariant result;
         const bool called = QMetaObject::invokeMethod(panel, "_fittingDetails", Q_RETURN_ARG(QVariant, result),
                                                       Q_ARG(QVariant, QString()), Q_ARG(QVariant, QStringLiteral(" · ")),
-                                                      Q_ARG(QVariant, width));
+                                                      Q_ARG(QVariant, width), Q_ARG(QVariant, false));
         return called ? result.toString() : QStringLiteral("(no call)");
     };
     const QStringList candidates{QStringLiteral("Classical · Track 2 of 8"), QStringLiteral("Classical · 2 of 8"),
@@ -2929,10 +2935,21 @@ void UiMainWindowTest::nowPlayingNarrowDetailsKeepTheAlbumPosition() {
     QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2"));
     QCOMPARE(fitting(tabular(QStringLiteral("Classical · Track 2")) - 1.0), QStringLiteral("Track 2"));
 
-    // In the narrow sidebar, a genre whose whole line does not fit, but
-    // does without "Track": the album position stays.
+    // One grammar on every track: a short genre, whose line would fit
+    // with "Track", is as a long one's, "Genre · n of m".
     bridge->setProperty("currentTrackTotal", 8);
-    QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2 of 8"));
+    for (const QString &each : {QStringLiteral("Jazz"), QStringLiteral("Classical")}) {
+        bridge->setProperty("currentTrackGenre", each);
+        QTRY_COMPARE(panel->property("narrowDetailsText").toString(), each + QStringLiteral(" · 2 of 8"));
+        QVERIFY(settled(panel));
+        QCOMPARE(details->property("text").toString(), each + QStringLiteral(" · 2 of 8"));
+    }
+    QVERIFY(tabular(QStringLiteral("Jazz · Track 2 of 8")) <= details->width());
+    QCOMPARE(panel->property("shownNarrowDetailsText").toString(), panel->property("narrowDetailsText").toString());
+
+    // In the narrow sidebar, a genre whose line with "Track" would not fit,
+    // but does without: the same line, the album position kept.
+    QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · 2 of 8"));
     QVERIFY(settled(panel));
     const double width = details->width();
     QString genre;
@@ -2946,12 +2963,12 @@ void UiMainWindowTest::nowPlayingNarrowDetailsKeepTheAlbumPosition() {
     }
     QVERIFY2(!genre.isEmpty(), qPrintable(QString::number(width)));
     bridge->setProperty("currentTrackGenre", genre);
-    QTRY_COMPARE(panel->property("narrowDetailsText").toString(), genre + QStringLiteral(" · Track 2 of 8"));
+    QTRY_COMPARE(panel->property("narrowDetailsText").toString(), genre + QStringLiteral(" · 2 of 8"));
     QVERIFY(settled(panel));
     QCOMPARE(details->property("text").toString(), genre + QStringLiteral(" · 2 of 8"));
     QVERIFY(!details->property("elided").toBool());
-    // The whole in the tooltip.
-    QVERIFY(panel->property("textTruncated").toBool());
+    // Nothing of them left out.
+    QCOMPARE(panel->property("shownNarrowDetailsText").toString(), panel->property("narrowDetailsText").toString());
 }
 
 void UiMainWindowTest::nowPlayingEllipsisFollowsTheTextWithoutASpace() {

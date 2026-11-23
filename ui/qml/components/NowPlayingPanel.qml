@@ -583,8 +583,15 @@ Item {
         return at > 0 && /^[0-9]+$/.test(text.slice(at + format.between.length, end))
             ? [text.slice(0, at), text.slice(at)] : [text, ""]
     }
-    readonly property string narrowDetailsText: root._joined([root.genreText, root.trackNumberText],
-                                                             root.lineSeparators.narrowDetails)
+    // The narrow and compact layouts' details: one grammar for every track,
+    // the genre and the track's place, "Classical · 2 of 8", or "Track 2
+    // of 8" with no genre (dropping the word "Track" by width alone, the
+    // line read "Jazz · Track 1 of 8" on one track and "Classical · 1 of 4"
+    // on the next). The wide layout keeps "Track 2 of 8" after the genre.
+    readonly property bool narrowPositionAfterGenre: root.genreText.length > 0 && root.albumPositionText.length > 0
+    readonly property string narrowDetailsText: root._joined(
+        [root.genreText, root.narrowPositionAfterGenre ? root.albumPositionText : root.trackNumberText],
+        root.lineSeparators.narrowDetails)
     // A file without tags, with its file name for a title and no artist,
     // album or details, says where it is instead: the name of its folder,
     // in the artist's row, in textSecondary, as a fact of the file rather
@@ -634,9 +641,10 @@ Item {
     // then the year. The narrow sidebar dropped the total first, so
     // "Classical · Track 1" lost the album position the line had room for.
     // The whole of them is in the tooltip.
-    function _fittingDetails(year, separator, width) {
+    function _fittingDetails(year, separator, width, positionAfterGenre) {
         const candidates = [
-            [year, root.genreText, root.trackNumberText],
+            positionAfterGenre ? [year, root.genreText, root.albumPositionText]
+                               : [year, root.genreText, root.trackNumberText],
             root.genreText.length > 0 && root.albumPositionText.length > 0
                 ? [year, root.genreText, root.albumPositionText] : [],
             [year, root.trackNumberText],
@@ -670,9 +678,10 @@ Item {
         return widest
     }
     readonly property string shownDetailsText: root._fittingDetails(
-        root.yearText, root.lineSeparators.details, Math.max(0, root.width - 2 * root.textInset))
+        root.yearText, root.lineSeparators.details, Math.max(0, root.width - 2 * root.textInset), false)
     readonly property string shownNarrowDetailsText: root._fittingDetails(
-        "", root.lineSeparators.narrowDetails, root.largeHeader ? root.footLineWidth : narrowColumn.width)
+        "", root.lineSeparators.narrowDetails, root.largeHeader ? root.footLineWidth : narrowColumn.width,
+        root.narrowPositionAfterGenre)
 
     // The lines the panel shows, wide and narrow.
     readonly property var trackLines: ({

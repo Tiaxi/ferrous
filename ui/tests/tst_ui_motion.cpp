@@ -1715,7 +1715,7 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
     const QString title = narrow ? QStringLiteral("NarrowTitle") : QStringLiteral("Title");
     const QString details = narrow ? QStringLiteral("NarrowDetails") : QStringLiteral("Details");
     const QStringList stillDetails = narrow
-        ? QStringList{QStringLiteral("Classical · Track"), QStringLiteral("of 2")}
+        ? QStringList{QStringLiteral("Classical ·"), QStringLiteral("of 2")}
         : QStringList{QStringLiteral("2005 · Classical · Track"), QStringLiteral("of 2")};
     const QStringList stillLines = narrow
         ? QStringList{QStringLiteral("NarrowArtist"), QStringLiteral("NarrowAlbum")}
@@ -1785,9 +1785,9 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
     QCOMPARE(titleLine.outgoingText(), QStringLiteral("First"));
     QVERIFY(detailsLine.fades());
     QCOMPARE(detailsLine.text(),
-             narrow ? QStringLiteral("Classical · Track 2 of 2") : QStringLiteral("2005 · Classical · Track 2 of 2"));
+             narrow ? QStringLiteral("Classical · 2 of 2") : QStringLiteral("2005 · Classical · Track 2 of 2"));
     QCOMPARE(detailsLine.outgoingText(),
-             narrow ? QStringLiteral("Classical · Track 1 of 2") : QStringLiteral("2005 · Classical · Track 1 of 2"));
+             narrow ? QStringLiteral("Classical · 1 of 2") : QStringLiteral("2005 · Classical · Track 1 of 2"));
     QCOMPARE(detailsLine.stillTexts(), stillDetails);
     for (const QString &name : stillLines) {
         QVERIFY2(lineStill(panel, name), qPrintable(name));
@@ -1822,7 +1822,7 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
     bridge->setProperty("currentTrackGenre", QStringLiteral("Baroque"));
     QVERIFY(!handover->property("running").toBool());
     QCOMPARE(detailsLine.text(),
-             narrow ? QStringLiteral("Baroque · Track 2 of 2") : QStringLiteral("2005 · Baroque · Track 2 of 2"));
+             narrow ? QStringLiteral("Baroque · 2 of 2") : QStringLiteral("2005 · Baroque · Track 2 of 2"));
     QVERIFY(allLinesStill(panel));
 
     // Repeat-One: the same track again, its metadata told again, fades
@@ -5537,7 +5537,7 @@ void UiMotionTest::nowPlayingAnotherAlbumLeavesNoWordAlone() {
         QVERIFY2(panelLine(panel, name).fades(), qPrintable(name));
     }
     QCOMPARE(panelLine(panel, narrow ? QStringLiteral("NarrowDetails") : QStringLiteral("Details")).text(),
-             narrow ? QStringLiteral("Classical · Track 8 of 8") : QStringLiteral("2005 · Classical · Track 8 of 8"));
+             narrow ? QStringLiteral("Classical · 8 of 8") : QStringLiteral("2005 · Classical · Track 8 of 8"));
 
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     for (const double at : {0.0, 0.1, 0.2, 0.3, 0.39, 0.4, 0.41, 0.5, 0.7, 0.9}) {
