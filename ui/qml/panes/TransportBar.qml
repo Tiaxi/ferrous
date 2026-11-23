@@ -455,9 +455,13 @@ ToolBar {
         property string shortcutText: transportButton.action && transportButton.action.shortcut
             ? String(transportButton.action.shortcut)
             : ""
-        readonly property color glyphColor: transportButton.enabled
-            ? root.uiPalette.text
-            : Kirigami.Theme.disabledTextColor
+        // The text colour, also while the button is off: Kirigami draws a
+        // disabled icon's tint as a grey at half its alpha, Breeze's
+        // disabled look, once. Tinted the disabled text colour as well, the
+        // glyph was dimmed twice and all but vanished on the chrome (about
+        // 1.7:1 on Breeze Light's, 2.6:1 on Dark's; now about 2.9:1 and
+        // 4.6:1, against 11.5:1 and 13.7:1 while on).
+        readonly property color glyphColor: root.uiPalette.text
         // Whether it can act now. Off, the button is, and its action stays
         // on. Not a binding on `enabled`, which the button sets from its
         // action as it takes the action and at each change of the action's,

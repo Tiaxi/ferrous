@@ -906,8 +906,10 @@ void TransportStatusTest::transportToolTipsNameTheShortcut() {
 }
 
 // A button that cannot act shows Breeze's disabled state, as the Playback
-// menu's item of its action does: its glyph in the disabled text colour, no
-// hover, no click, no Tab stop; its action stays on for the shortcuts. It
+// menu's item of its action does: its glyph dimmed once, by Kirigami's
+// disabled icon, from the text colour (tinted the disabled text colour too,
+// it was dimmed twice and all but vanished), no hover, no click, no Tab
+// stop; its action stays on for the shortcuts. It
 // keeps that through a change of its action (Play to Pause) or of the
 // action's own state, which the button copies.
 void TransportStatusTest::transportButtonsAreOffWhereTheyCannotAct() {
@@ -927,11 +929,12 @@ void TransportStatusTest::transportButtonsAreOffWhereTheyCannotAct() {
     transport->setProperty("stopCanAct", false);
     QVERIFY(!stop->isEnabled());
     QVERIFY(stopAction->property("enabled").toBool());
-    // The theme's disabled text colour, of its Disabled group, as the
-    // menu's disabled items have.
+    // Off with its button, so Kirigami draws it disabled, in the text
+    // colour: dimmed once.
     const QColor disabled = evaluateOn(stop, QStringLiteral("Kirigami.Theme.disabledTextColor")).value<QColor>();
     QVERIFY(!sameColor(disabled, harness.token("text")));
-    QVERIFY(sameColor(glyph->property("color").value<QColor>(), disabled));
+    QVERIFY(!glyph->isEnabled());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("text")));
     // No hover tint and no click.
     QSignalSpy triggered(stopAction, SIGNAL(triggered(QObject *)));
     QTest::mouseMove(harness.window, sceneCentre(stop));
@@ -960,9 +963,17 @@ void TransportStatusTest::transportButtonsAreOffWhereTheyCannotAct() {
     QVERIFY(stopAction->setProperty("enabled", true));
     QVERIFY(stop->isEnabled());
 
-    // Play/Pause stays off as its action changes from Pause to Play.
+    // Play/Pause stays off as its action changes from Pause to Play, both
+    // its glyphs dimmed once.
     transport->setProperty("playPauseCanAct", false);
     QVERIFY(!playPause->isEnabled());
+    for (const QString &name : {QStringLiteral("transportPlayPauseGlyph_play"),
+                                QStringLiteral("transportPlayPauseGlyph_pause")}) {
+        QQuickItem *playPauseGlyph = harness.item(name);
+        QVERIFY2(playPauseGlyph != nullptr, qPrintable(name));
+        QVERIFY2(!playPauseGlyph->isEnabled(), qPrintable(name));
+        QVERIFY2(sameColor(playPauseGlyph->property("color").value<QColor>(), harness.token("text")), qPrintable(name));
+    }
     harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
     QTRY_COMPARE(buttonToolTipText(playPause), QStringLiteral("Play · Space"));
     QVERIFY(!playPause->isEnabled());
