@@ -2990,6 +2990,20 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
             QTRY_VERIFY2(marksProblem(meter, trough, tick).isEmpty(),
                          qPrintable(QStringLiteral("%1, mode %2: %3").arg(phase).arg(mode)
                                         .arg(marksProblem(meter, trough, tick))));
+            // Under the queue's seam the column draws no seam of its own:
+            // over the waveform's meter one made the seam 2 px thick there.
+            {
+                const Drawn drawn(window);
+                const QRectF rect = sceneRect(meter);
+                const QColor seam = palette->property("seam").value<QColor>();
+                const double x = rect.left() + LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth / 2;
+                QVERIFY2(near(drawn.at(x, rect.top() - 0.5), seam),
+                         qPrintable(QStringLiteral("%1, mode %2: over the meter %3")
+                                        .arg(phase).arg(mode).arg(hex(drawn.at(x, rect.top() - 0.5)))));
+                QVERIFY2(!near(drawn.at(x, rect.top() + 0.5), seam),
+                         qPrintable(QStringLiteral("%1, mode %2: the meter's top row %3, the seam's colour")
+                                        .arg(phase).arg(mode).arg(hex(drawn.at(x, rect.top() + 0.5)))));
+            }
         }
     };
 
