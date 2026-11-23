@@ -26,21 +26,32 @@ def tearDownModule():
     shutil.rmtree(_TMP)
 
 
-def frame(xs, seed=0, light=False, alpha=0.35):
-    """A plot of len(xs) noisy lanes with a transient and a solid playhead, and a dashed crosshair at each lane's x."""
+def frame(xs, seed=0, light=False, alpha=0.35, noise=12, gaps=1.0, crossings=()):
+    """A plot of len(xs) noisy lanes with a transient and a solid playhead, and a dashed crosshair at each lane's x.
+    gaps: what the line's gaps multiply the plot by (the app's light line has darker gaps); crossings: rows of the
+    top lane that horizontals cross, dashed the same way and drawn over the vertical line (the crosshair's other
+    hair, and bright partials where the hair's gap falls on them)."""
     rng = np.random.default_rng(seed)
     base = 240 if light else 60
     a = np.full((330, 640), float(base))
     x, y, w, h = PANE
-    a[y:y + h, x:x + w] += rng.normal(0, 12, size=(h, w))
+    a[y:y + h, x:x + w] += rng.normal(0, noise, size=(h, w))
     a[y:y + h, x + 200:x + 202] = 100.0  # a transient
     a[y:y + h, x + 410] = 10.0 if light else 250.0  # the playhead, solid
     lh = h // len(xs)
+    ink = 0.0 if light else 255.0
     for i, cx in enumerate(xs):
         if cx is None:
             continue
-        rows = y + i * lh + np.flatnonzero(np.arange(lh) % 7 < 4)
-        a[rows, x + cx] = a[rows, x + cx] * (1 - alpha) + (0.0 if light else 255.0) * alpha
+        drawn = np.arange(lh) % 7 < 4
+        rows, gap_rows = y + i * lh + np.flatnonzero(drawn), y + i * lh + np.flatnonzero(~drawn)
+        a[rows, x + cx] = a[rows, x + cx] * (1 - alpha) + ink * alpha
+        a[gap_rows, x + cx] *= gaps
+    drawn = np.arange(w) % 7 < 4
+    cols, gap_cols = x + np.flatnonzero(drawn), x + np.flatnonzero(~drawn)
+    for r in crossings:
+        a[y + r, cols] = a[y + r, cols] * (1 - alpha) + ink * alpha
+        a[y + r, gap_cols] *= gaps
     return Image.fromarray(a.clip(0, 255).astype(np.uint8)).convert("RGB")
 
 
@@ -74,6 +85,16 @@ class Lanes(unittest.TestCase):
     def test_a_darker_line_on_a_light_plot(self):
         self.assertIs(self.check((300, 300), (150, 150), light=True)["ok"], True)
         self.assertIs(self.check((300, 150), light=True)["ok"], False)
+
+    def test_rows_crossing_one_lanes_line_leave_it_where_it_is(self):
+        # (the h16 pan: where the other hair and bright partials crossed the top lane's line, their gaps over the
+        # line and the column 2 px left of it made the line's own column vary more than that copy of it, which
+        # then scored higher: the top lane read 2 px left of the bottom one, at the same x in the pixels)
+        app = dict(alpha=0.6, noise=6, gaps=0.4, crossings=(30, 58))
+        c = self.check(*[(300, 300)] * 6, **app)
+        self.assertEqual((c["ok"], c["frames"], c["split"]), (True, 6, 0), c.get("worst"))
+        c = self.check((300, 302), **app)  # (a real 2 px split still fails, at the lines' own x)
+        self.assertEqual((c["ok"], c["worst"]["xs"]), (False, [310, 312]))
 
     def test_without_a_crosshair_nothing_passes(self):
         c = self.check((None, None), (None, None))
