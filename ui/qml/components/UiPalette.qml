@@ -87,11 +87,18 @@ QtObject {
     // trough, it was the brightest mark of the Last.fm slot, over its
     // glyph's letters).
     readonly property color statusBarFill: root.textSecondary
-    // The trough: opaque, between the chrome and the fill, as far from
-    // either, so that both the whole and the share done of it read: 2.7:1
-    // / 2.5:1 on each in Breeze (at 3.1:1 on the chrome, the fill was
-    // 2.5:1 / 2:1 on it). #62666b / #959aa0.
-    readonly property color statusBarTrough: root._midwayBetween(root.chrome, root.statusBarFill)
+    // The trough is framed: its 1 px frame 3.2:1 on the status bar, a
+    // margin over 3:1, so that the whole reads as a shape of its own, and
+    // inside it the view, which the fill stands out on at its full
+    // contrast (9.3:1 / 7.1:1), so that the share done and the share to
+    // come read apart however much of it is filled. A solid trough could
+    // not be 3:1 on both the status bar and the fill: midway between them
+    // it was 2.7:1 / 2.5:1 on each, and listening at 0 % and almost done
+    // were hard to tell from the trough's end at 1x. The frame stays well
+    // under the fill, so the fill is still the bar's strongest mark and
+    // no louder than the glyph beside it. #6e7378 / #80868d.
+    readonly property color statusBarTroughFrame: root._drawnAt(root.text, root.chrome, 3.2)
+    readonly property color statusBarTrough: root.view
     // Text over the row: the hover tint. The least of it, in whole
     // percent, that is 1.3:1 on the view, so a hovered row stands out in
     // any theme: 10% (#2b2d2f) / 14% (#e0e1e1). It stays nearer to the view
@@ -233,22 +240,6 @@ QtObject {
     // `color`, or, where it is under `ratio` on any of the opaque
     // `backgrounds`, the nearest HSL lightness of it that reaches it on all
     // of them: darker on light backgrounds, lighter on dark ones.
-    // The mix of `a` and `b`, in whole percent, as far in contrast from the
-    // one as from the other: opaque.
-    function _midwayBetween(a, b) {
-        let best = a
-        let bestLeast = 0
-        for (let percent = 1; percent < 100; ++percent) {
-            const candidate = ColorUtils.mixColor(a, b, percent / 100)
-            const least = Math.min(ColorUtils.contrastRatio(candidate, a), ColorUtils.contrastRatio(candidate, b))
-            if (least > bestLeast) {
-                best = candidate
-                bestLeast = least
-            }
-        }
-        return best
-    }
-
     function readableOn(color, backgrounds, ratio) {
         const worst = function(candidate) {
             let lowest = Infinity

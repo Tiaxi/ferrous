@@ -513,15 +513,21 @@ void PlainTextSmokeTest::theMainWindowShowsMarkupLiterally() {
     ui.bridge->setProperty("lastFmScrobbleState", 4);
     ui.bridge->setProperty("lastFmScrobbleMessage", hostile(QStringLiteral("scrobbleerror")));
     ui.report(1, path, hostile(QStringLiteral("unreadable")));
-    ui.bridge->setProperty("backendFailure", hostile(QStringLiteral("backendfailure")));
-
+    // Last.fm's reason, while the engine runs: the Last.fm slot, whose
+    // scrobbler runs in the engine, shows only then.
+    ui.bridge->setProperty("connected", true);
     QTRY_COMPARE(ui.libraryModel.rowCount(), 2);
+    const QString scrobble = ui.check({QStringLiteral("scrobbleerror")});
+    QVERIFY2(scrobble.isEmpty(), qPrintable(scrobble));
+
+    // The rest once the engine has stopped, and says why.
+    ui.bridge->setProperty("backendFailure", hostile(QStringLiteral("backendfailure")));
     const QString wrong = ui.check({
         QStringLiteral("queuetitle"), QStringLiteral("queueartist"), QStringLiteral("queuealbum"),
         QStringLiteral("queuelength"), QStringLiteral("libraryartist"), QStringLiteral("libraryalbum"),
         QStringLiteral("nowtitle"), QStringLiteral("nowartist"), QStringLiteral("nowalbum"),
-        QStringLiteral("nowformat"), QStringLiteral("scanfolder"), QStringLiteral("scrobbleerror"),
-        QStringLiteral("unreadable"), QStringLiteral("backendfailure")});
+        QStringLiteral("nowformat"), QStringLiteral("scanfolder"), QStringLiteral("unreadable"),
+        QStringLiteral("backendfailure")});
     QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
 }
 
