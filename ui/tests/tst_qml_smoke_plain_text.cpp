@@ -216,6 +216,24 @@ Shown inspectWindows(QQuickWindow *main) {
             items << item;
         }
     }
+    // A popup of a list's row, such as an unreadable row's reason: the
+    // row's own child, not the window's, as delegates are the view's.
+    for (const QPointer<QQuickItem> &item : std::as_const(items)) {
+        if (item.isNull()) {
+            continue;
+        }
+        const auto children = item->findChildren<QObject *>(Qt::FindDirectChildrenOnly);
+        for (QObject *child : children) {
+            const auto popups = child->inherits("QQuickPopup")
+                ? QList<QObject *>{child}
+                : child->findChildren<QObject *>(Qt::FindDirectChildrenOnly);
+            for (QObject *popup : popups) {
+                if (popup->inherits("QQuickPopup") && !objects.contains(popup)) {
+                    inspect(qvariant_cast<QQuickItem *>(popup->property("contentItem")), shown);
+                }
+            }
+        }
+    }
     for (const QPointer<QQuickItem> &item : std::as_const(items)) {
         if (item.isNull() || qmlContext(item) == nullptr
             || idsIn(evaluateOn(item, QStringLiteral("ToolTip.text")).toString()).isEmpty()) {

@@ -219,6 +219,8 @@ private slots:
     void listRowHoverStandsOutAndApart();
     void selectionOutweighsRowHover_data();
     void selectionOutweighsRowHover();
+    void rowStatesStepApartInWeight_data();
+    void rowStatesStepApartInWeight();
     void hoverAndPressedTintsOnAnotherBackground_data();
     void hoverAndPressedTintsOnAnotherBackground();
     void selectedQueueRowAnswersHover_data();
@@ -309,15 +311,16 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         {"textTertiary", QStringLiteral("#91989f"), QStringLiteral("#59626d")},
         // Light: darkened from #5a5c5e to be 4.5:1 on a selected queue row
         // under the pointer.
-        {"textColumn", QStringLiteral("#c2c2c3"), QStringLiteral("#555759")},
+        {"textColumn", QStringLiteral("#c2c2c3"), QStringLiteral("#535557")},
         // The theme's placeholder colour, darkened on light to be 4.6:1 on
         // the view, which Breeze Light's 4.2:1 was not.
         {"placeholderText", QStringLiteral("#a1a9b1"), QStringLiteral("#697582")},
         {"seam", QStringLiteral("#383b40"), QStringLiteral("#d6d9dc")},
         {"hairline", QStringLiteral("#26292c"), QStringLiteral("#ebedef")},
         {"chromeLine", QStringLiteral("#383b40"), QStringLiteral("#c9cdd1")},
-        // Light: 38 %, 1.4:1 on the view, past a hovered row.
-        {"selection", QStringLiteral("#21475b"), QStringLiteral("#b5e0f7")},
+        // Light: 43 %, 1.47:1 on the view, a step past the inactive
+        // selection, which is a step past a hovered row.
+        {"selection", QStringLiteral("#21475b"), QStringLiteral("#acdcf6")},
         {"focusRing", QStringLiteral("#6cc5f2"), QStringLiteral("#1a74a8")},
         {"link", QStringLiteral("#3daee9"), QStringLiteral("#1b73a1")},
         {"negative", QStringLiteral("#ed5a6a"), QStringLiteral("#c4293b")},
@@ -325,7 +328,7 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         // Light: darkened from #955500 to be 4.5:1 on a hovered list row,
         // on the selection (#864c00 on the 1.44:1 hover), and on a selected
         // queue row under the pointer.
-        {"now", QStringLiteral("#f2b035"), QStringLiteral("#814900")},
+        {"now", QStringLiteral("#f2b035"), QStringLiteral("#7c4600")},
     };
     for (const Expected &entry : expected) {
         const QColor actual = colorOf(tokens, entry.token);
@@ -353,7 +356,7 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
     // The inactive selection: the view mixed with the accent, at 60 % of
     // that mix's saturation and the same luminance.
     {
-        const QColor mix = mixed(view, accent, dark ? 0.24 : 0.33);
+        const QColor mix = mixed(view, accent, dark ? 0.25 : 0.33);
         const QColor inactive = colorOf(tokens, "selectionInactive");
         QVERIFY2(std::abs(relativeLuminance(inactive) - relativeLuminance(mix)) <= 0.002,
                  qPrintable(inactive.name() + QStringLiteral(" vs ") + mix.name()));
@@ -361,7 +364,7 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
                  qPrintable(QStringLiteral("%1 %2 vs %3 %4").arg(inactive.name()).arg(inactive.hslSaturationF())
                                 .arg(mix.name()).arg(mix.hslSaturationF())));
         QVERIFY(std::abs(inactive.hslHueF() - mix.hslHueF()) <= 0.01);
-        QVERIFY2(channelDistance(inactive, QColor(dark ? QStringLiteral("#283a43") : QStringLiteral("#cde2ed"))) <= 2,
+        QVERIFY2(channelDistance(inactive, QColor(dark ? QStringLiteral("#293b45") : QStringLiteral("#cde2ed"))) <= 2,
                  qPrintable(inactive.name()));
     }
     const QColor dim = colorOf(tokens, "dim");
@@ -832,10 +835,11 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// The library's and the queue's hover tint is about 1.45:1 on a dark view
-// (at 1.3:1 a hovered row was faint across a wide list) and 1.31:1 on a
-// light one, where more outweighed the selection: the least of the text in
-// whole percent that reaches it, 13% / 14% in Breeze. It stays apart from
+// The library's and the queue's hover tint is about 1.35:1 on a dark view
+// (at 1.3:1 a hovered row was faint across a wide list) and 1.21:1 on a
+// light one: the least of the text in whole percent that reaches it, 11% /
+// 10% in Breeze, the bottom step of the rows' ladder (at 13% / 14% it was
+// the inactive selection's weight, 1.06:1 / 1.02:1 from it). It stays apart from
 // the selection and the inactive selection, and every text a row has, the
 // playing row's amber title among them, stays readable on it; tertiary text
 // steps up to 4.6:1 there, and only there, where it falls short.
@@ -853,21 +857,22 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
     const QColor text = colorOf(tokens, "text");
     const QColor rowHover = colorOf(tokens, "rowHover");
     QCOMPARE(channelDistance(rowHover, text), 0);
-    QVERIFY2(std::abs(rowHover.alphaF() - (dark ? 0.13 : 0.14)) < 0.002, qPrintable(QString::number(rowHover.alphaF())));
+    QVERIFY2(std::abs(rowHover.alphaF() - (dark ? 0.11 : 0.10)) < 0.002, qPrintable(QString::number(rowHover.alphaF())));
     const QColor hovered = colorOf(tokens, "hoveredRow");
     QVERIFY(sameColor(hovered, drawnOver(rowHover, view)));
-    const double target = dark ? 1.44 : 1.31;
+    const double target = dark ? 1.35 : 1.21;
     QVERIFY2(contrastRatio(hovered, view) >= target && contrastRatio(hovered, view) < target + 0.06,
              qPrintable(describeContrast(QStringLiteral("row hover"), hovered, view)));
     QColor lighter = rowHover;
     lighter.setAlphaF(rowHover.alphaF() - 0.01f);
     QVERIFY(contrastRatio(drawnOver(lighter, view), view) < target);
-    // A step past a button's hover tint on dark; as faint as it on light,
-    // never fainter.
+    // A step past a button's hover tint on dark, where a wide row at a
+    // button's 1.3:1 was faint; on light, where a wide grey band reads
+    // sooner, never under 1.2:1.
     if (dark) {
         QVERIFY(rowHover.alphaF() > colorOf(tokens, "hover").alphaF());
     } else {
-        QVERIFY(rowHover.alphaF() >= colorOf(tokens, "hover").alphaF());
+        QVERIFY(contrastRatio(hovered, view) >= 1.2);
     }
 
     // Apart from the selection, active or not: neutral where they are blue.
@@ -897,6 +902,11 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
         QVERIFY2(contrastRatio(colorOf(tokens, token), hovered) >= minimum,
                  qPrintable(describeContrast(QLatin1String(token), colorOf(tokens, token), hovered)));
     }
+    // And on a dialog's hovered list row, the buttons' tint, which is the
+    // stronger on light (its figures fell to 5.02:1 there).
+    const QColor dialogHovered = drawnOver(colorOf(tokens, "hover"), view);
+    QVERIFY2(contrastRatio(tertiaryHovered, dialogHovered) >= figureContrast,
+             qPrintable(describeContrast(QStringLiteral("tertiary on a dialog's hover"), tertiaryHovered, dialogHovered)));
     // The tertiary colour keeps its step below the secondary elsewhere:
     // only a hovered row's is stronger, where the plain one falls short of
     // the margin on it, as in both Breeze themes; it stays under the text.
@@ -1009,6 +1019,73 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
     }
 }
 
+void UiFoundationsTest::rowStatesStepApartInWeight_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// A row's states climb one ladder by luminance, not by hue alone: hover <
+// inactive selection < selection < the selection under the pointer, each
+// step at least 0.12 in contrast on the view and some 1.1:1 apart (the
+// hover and the inactive selection were 1.06:1 apart on dark and 1.02:1 on
+// light, one band to someone who tells the blue from the grey poorly, and a
+// selected row's hover was a barely seen 1.12:1). The inactive selection
+// answers the pointer by as much. Every text a selected row draws keeps its
+// floor on each state: the title 7:1, the secondary text and the playing
+// amber 4.5:1.
+void UiFoundationsTest::rowStatesStepApartInWeight() {
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, QString()), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QVERIFY(tokens != nullptr);
+
+    const QColor view = colorOf(tokens, "view");
+    const QList<std::pair<const char *, const char *>> steps{{"hoveredRow", "selectionInactive"},
+                                                             {"selectionInactive", "selection"},
+                                                             {"selection", "selectionHovered"},
+                                                             {"selectionInactive", "selectionInactiveHovered"}};
+    for (const auto &[lower, upper] : steps) {
+        const QColor below = colorOf(tokens, lower);
+        const QColor above = colorOf(tokens, upper);
+        const double step = contrastRatio(above, view) - contrastRatio(below, view);
+        QVERIFY2(step >= 0.12 && contrastRatio(above, below) >= 1.09,
+                 qPrintable(describeContrast(QLatin1String(upper), above, view) + QStringLiteral(" over ")
+                            + describeContrast(QLatin1String(lower), below, view)
+                            + QStringLiteral(": %1:1 apart").arg(contrastRatio(above, below))));
+    }
+    // On dark, another list's selection under the pointer stays under the
+    // focused list's selection in weight.
+    if (dark) {
+        QVERIFY(contrastRatio(colorOf(tokens, "selectionInactiveHovered"), view)
+                < contrastRatio(colorOf(tokens, "selection"), view));
+    }
+
+    const QList<std::pair<const char *, double>> floors{
+        {"text", 7.0}, {"textSecondarySelected", 4.5}, {"textColumn", 4.5}, {"now", 4.5}};
+    for (const char *under : {"selection", "selectionInactive", "selectionHovered", "selectionInactiveHovered",
+                              "selectionPressed"}) {
+        for (const auto &[token, minimum] : floors) {
+            QVERIFY2(contrastRatio(colorOf(tokens, token), colorOf(tokens, under)) >= minimum,
+                     qPrintable(describeContrast(QLatin1String(token) + QStringLiteral(" on ") + QLatin1String(under),
+                                                 colorOf(tokens, token), colorOf(tokens, under))));
+        }
+    }
+    // The amber is the theme's own on dark, so the hovered step stops
+    // where it would fall under 4.5:1: one more percent of the text does.
+    if (dark) {
+        const double share = tokens->property("_selectionHoverShare").toDouble();
+        const QColor more = mixed(colorOf(tokens, "selection"), colorOf(tokens, "text"), share + 0.01);
+        QVERIFY(contrastRatio(colorOf(tokens, "now"), more) < 4.5
+                || contrastRatio(mixed(colorOf(tokens, "selectionInactive"), colorOf(tokens, "text"), share + 0.01), view)
+                       >= contrastRatio(colorOf(tokens, "selection"), view));
+    }
+}
+
 void UiFoundationsTest::hoverAndPressedTintsOnAnotherBackground_data() {
     QTest::addColumn<bool>("dark");
     QTest::addColumn<QString>("background");
@@ -1057,9 +1134,9 @@ void UiFoundationsTest::selectedQueueRowAnswersHover_data() {
 // A selected queue row under the pointer steps its selection tint toward
 // the text colour, with the hover tint's own fade, active or not; the
 // library's does not (hover changed nothing on a selected row). The step is
-// the most text, in whole percent up to 4 % on dark and 6 % on light, that
-// the text keeps 4.5:1 on; the row's other texts and its mark are made
-// readable on it. It is visible yet under the hover's
+// the most text, in whole percent up to 7 %, that keeps the text 7:1 and,
+// on dark, the amber 4.5:1 (5 % / 7 % in Breeze); the row's other texts and
+// its mark are made readable on it. It is visible yet under the hover's
 // from the view, and every text a selected row draws, the column text and
 // the playing amber made readable on it, stays 4.5:1 on it.
 void UiFoundationsTest::selectedQueueRowAnswersHover() {
@@ -1092,7 +1169,7 @@ void UiFoundationsTest::selectedQueueRowAnswersHover() {
         {QStringLiteral("selected number"), number.value<QColor>()},
     };
     const double share = tokens->property("_selectionHoverShare").toDouble();
-    QVERIFY2(std::abs(share - (dark ? 0.04 : 0.06)) < 1e-9, qPrintable(QString::number(share)));
+    QVERIFY2(std::abs(share - (dark ? 0.05 : 0.07)) < 1e-9, qPrintable(QString::number(share)));
     for (const auto &[selectionToken, hoveredToken] : selections) {
         const QColor selected = colorOf(tokens, selectionToken);
         const QColor selectedHovered = colorOf(tokens, hoveredToken);
@@ -2859,7 +2936,7 @@ void UiFoundationsTest::activeSelectionIsUnmistakableInDark_data() {
 // On dark, the selection of the list with the keyboard is unmistakable
 // against another list's (they were 1.04:1 and 6 ΔE apart), and still under
 // the pointer, with every text and mark of a selected row keeping its
-// contrast on it. Light is as it was.
+// contrast on it. Light's is the 43 % mix, its marks the theme's own.
 void UiFoundationsTest::activeSelectionIsUnmistakableInDark() {
     QFETCH(bool, dark);
     QQmlEngine engine;
@@ -2873,7 +2950,9 @@ void UiFoundationsTest::activeSelectionIsUnmistakableInDark() {
     const QColor inactive = colorOf(tokens, "selectionInactive");
     const QColor inactiveHovered = colorOf(tokens, "selectionInactiveHovered");
     if (dark) {
-        QVERIFY2(contrastRatio(active, inactive) >= 1.17 && labDistance(active, inactive) >= 9.0,
+        // 1.16:1 in weight carries most of it (rowStatesStepApartInWeight
+        // holds the whole ladder), 8.5 ΔE with the hue.
+        QVERIFY2(contrastRatio(active, inactive) >= 1.16 && labDistance(active, inactive) >= 8.5,
                  qPrintable(describeContrast(QStringLiteral("active on inactive"), active, inactive)
                             + QStringLiteral(", %1 ΔE").arg(labDistance(active, inactive))));
         // Another list's under the pointer is still the less selected.
@@ -2881,8 +2960,7 @@ void UiFoundationsTest::activeSelectionIsUnmistakableInDark() {
                      && labDistance(active, inactiveHovered) >= 7.5,
                  qPrintable(inactiveHovered.name()));
     } else {
-        QVERIFY(sameColor(active, fromHex(QStringLiteral("#b5e0f7"))));
-        QVERIFY(sameColor(colorOf(tokens, "textSecondarySelected"), colorOf(tokens, "textSecondary")));
+        QVERIFY(sameColor(active, fromHex(QStringLiteral("#acdcf6"))));
         QVERIFY(sameColor(colorOf(tokens, "negativeSelected"), colorOf(tokens, "negative")));
     }
     const QList<std::pair<const char *, double>> drawn{

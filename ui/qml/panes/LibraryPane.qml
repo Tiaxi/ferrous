@@ -332,6 +332,24 @@ Rectangle {
                     objectName: "libraryScrollBar"
                     uiPalette: root.uiPalette
                 }
+                // Where the rows' states end on the right while the
+                // scrollbar shows: its lane and 2 px more, so the focus
+                // ring, which the tint ends with, keeps 3 px clear of the
+                // thumb at its widest, as the queue's does (at the lane,
+                // 1 px off it, the two read as touching). Without it, at
+                // the pane's edge.
+                readonly property real rowStatesEnd: libraryScrollBar.visible ? libraryScrollBar.lane + 2 : 0
+                // The row under the pointer, if any: while it shows why it
+                // is unreadable, the keyboard's row does not, so the list
+                // gives one reason at a time.
+                readonly property Item pointedRow: libraryPointer.hovered
+                    ? libraryAlbumView.itemAt(libraryPointer.point.position.x + libraryAlbumView.contentX,
+                                              libraryPointer.point.position.y + libraryAlbumView.contentY)
+                    : null
+
+                HoverHandler {
+                    id: libraryPointer
+                }
 
                 MouseArea {
                     anchors.fill: parent
@@ -436,6 +454,17 @@ Rectangle {
                     readonly property string unreadableReason: isTrackRow && root.errorController
                         ? (root.errorController.unreadablePaths[trackPathResolved] || "")
                         : ""
+                    // Why the track is unreadable shows for the pointer
+                    // anywhere on the row, unless it holds the row down,
+                    // and for the keyboard on it, unless the pointer shows
+                    // another row's, as the queue's.
+                    readonly property bool reasonPointed: unreadableReason.length > 0
+                        && libraryRowMouseArea.containsMouse
+                        && libraryRowMouseArea.pressedButtons === Qt.NoButton
+                    readonly property bool reasonShown: reasonPointed
+                        || (unreadableReason.length > 0 && rowCurrent
+                            && !(libraryAlbumView.pointedRow !== null && libraryAlbumView.pointedRow !== libraryRow
+                                 && libraryAlbumView.pointedRow.reasonPointed))
                     // A collapsed row that holds the playing track: its
                     // name is amber, quieter while the playback is paused.
                     readonly property bool holdsNow: hasChildren && !isExpanded
@@ -559,9 +588,9 @@ Rectangle {
                                 selected: libraryRow.rowSelected
                                 active: libraryAlbumView.activeFocus
                                 focused: libraryRow.rowCurrent
-                                // Every state ends at the scrollbar's lane
-                                // while it shows, clear of its thumb.
-                                scrollbarLane: libraryScrollBar.visible ? libraryScrollBar.lane : 0
+                                // Every state ends clear of the scrollbar's
+                                // lane while it shows, and of its thumb.
+                                scrollbarLane: libraryAlbumView.rowStatesEnd
                             }
 
                             Kirigami.Icon {
@@ -601,13 +630,22 @@ Rectangle {
                                     : !libraryRow.showsWarning ? root.uiPalette.textSecondary
                                     : libraryRow.rowSelected ? root.uiPalette.negativeSelected
                                     : root.uiPalette.negative
+                            }
 
-                                ToolTip.visible: stateHover.hovered && libraryRow.unreadableReason.length > 0
-                                ToolTip.delay: Kirigami.Units.toolTipDelay
-                                ToolTip.text: libraryRow.unreadableReason
-
-                                HoverHandler {
-                                    id: stateHover
+                            // Why an unreadable track is marked
+                            // (reasonShown), over the row from its name, as
+                            // the queue's: on the 16 px glyph alone, the
+                            // pointer had to find it, and the keyboard never
+                            // could. Only such a row makes one.
+                            Loader {
+                                active: libraryRow.unreadableReason.length > 0
+                                sourceComponent: Components.PlainToolTip {
+                                    objectName: "libraryRowReason"
+                                    parent: libraryRow
+                                    x: libraryRow.titleX
+                                    visible: libraryRow.reasonShown
+                                    delay: Kirigami.Units.toolTipDelay
+                                    message: libraryRow.unreadableReason
                                 }
                             }
 

@@ -677,6 +677,17 @@ Rectangle {
                 // read as touching). Without it, at the pane's edge.
                 readonly property real rowStatesEnd: playlistVerticalScrollBar.visible
                     ? playlistVerticalScrollBar.lane + 2 : 0
+                // The row under the pointer, if any: while it shows why it
+                // is unreadable, the keyboard's row does not, so the list
+                // gives one reason at a time.
+                readonly property Item pointedRow: playlistPointer.hovered
+                    ? playlistView.itemAt(playlistPointer.point.position.x + playlistView.contentX,
+                                          playlistPointer.point.position.y + playlistView.contentY)
+                    : null
+
+                HoverHandler {
+                    id: playlistPointer
+                }
 
                 MouseArea {
                     anchors.fill: parent
@@ -723,6 +734,17 @@ Rectangle {
                         ? (root.errorController.unreadablePaths[pathValue] || "")
                         : ""
                     readonly property bool unreadable: unreadableReason.length > 0
+                    // Why the row is unreadable shows for the pointer
+                    // anywhere on it, unless it holds the row down, and
+                    // for the keyboard on it, unless the pointer shows
+                    // another row's.
+                    readonly property bool reasonPointed: unreadable
+                        && playlistRowMouseArea.containsMouse
+                        && playlistRowMouseArea.pressedButtons === Qt.NoButton
+                    readonly property bool reasonShown: reasonPointed
+                        || (unreadable && rowCurrent
+                            && !(playlistView.pointedRow !== null && playlistView.pointedRow !== playlistRow
+                                 && playlistView.pointedRow.reasonPointed))
                     readonly property bool draggableQueueItem: true
                     readonly property int queueRowIndex: index
                     readonly property bool rowSelected: root.controller.isIndexSelected(index)
@@ -832,14 +854,6 @@ Rectangle {
                             // The amber glyph fades in as the old row's
                             // fades out.
                             opacity: playlistRow.isNow ? playlistRow.amberIn : 1
-
-                            ToolTip.visible: stateHover.hovered && playlistRow.unreadable
-                            ToolTip.delay: Kirigami.Units.toolTipDelay
-                            ToolTip.text: playlistRow.unreadableReason
-
-                            HoverHandler {
-                                id: stateHover
-                            }
                         }
 
                         // The glyph the row had while it was now, fading
@@ -855,6 +869,22 @@ Rectangle {
                             isMask: true
                             color: root.uiPalette.now
                             opacity: playlistRow.amberLeft
+                        }
+                    }
+
+                    // Why an unreadable row is marked (reasonShown), over
+                    // the row from its title: on the 16 px glyph alone,
+                    // the pointer had to find it, and the keyboard never
+                    // could. Only such a row makes one.
+                    Loader {
+                        active: playlistRow.unreadable
+                        sourceComponent: Components.PlainToolTip {
+                            objectName: "queueRowReason"
+                            parent: playlistRow
+                            x: titleCell.x
+                            visible: playlistRow.reasonShown
+                            delay: Kirigami.Units.toolTipDelay
+                            message: playlistRow.unreadableReason
                         }
                     }
 
