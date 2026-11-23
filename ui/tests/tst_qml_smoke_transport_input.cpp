@@ -5160,9 +5160,31 @@ void TransportInputSmokeTest::cornerHoldsWhileAutoscrollRuns() {
     QTRY_COMPARE(corner.modeSwitch->opacity(), 1.0);
     window->grabWindow();
 
+    // The lane under the pointer shows its head's buttons, but not while
+    // autoscroll runs, whose pointer steers its speed across the lanes:
+    // the buttons came and went as it crossed them (H17).
+    const QList<QQuickItem *> heads = itemsNamed(corner.layer, QStringLiteral("plotLaneHead"));
+    const auto laneHovered = [&]() {
+        for (QQuickItem *head : heads) {
+            if (head->property("laneHovered").toBool()) return true;
+        }
+        return false;
+    };
+    QVERIFY(!heads.isEmpty());
+    QTRY_VERIFY(laneHovered());
+
     SteppedAnimationDriver animations;
     middleClickPlot(plot, plot->width() / 2);
     QVERIFY(corner.surface->property("autoscrolling").toBool());
+    for (const double down : {0.2, 0.5, 0.8}) {
+        const QPoint onLane =
+            corner.layer->mapToScene(QPointF(corner.layer->width() / 2 + 20, corner.layer->height() * down)).toPoint();
+        QTest::mouseMove(window, onLane + QPoint(1, 0));
+        QTest::mouseMove(window, onLane);
+        (void)animations.step(16);
+        QVERIFY(corner.surface->property("autoscrolling").toBool());
+        QVERIFY2(!laneHovered(), qPrintable(QStringLiteral("lane at %1,%2").arg(onLane.x()).arg(onLane.y())));
+    }
     QTest::mouseMove(window, corner.away());
     for (int frame = 0; frame < 20; ++frame) {
         (void)animations.step(16);

@@ -357,7 +357,10 @@ Item {
             controlsShown: root.controlsVisible
             controlsLevel: root.controlsLevel
             revealedWithControls: root.controlsAutoHide
-            laneHovered: root.hoveredLane === index
+            // Not while autoscroll runs, whose pointer steers its speed
+            // across the lanes, not at their buttons: their plates came
+            // and went as it crossed them (H17).
+            laneHovered: root.hoveredLane === index && !root.viewAutoscrolling
             pointerPosition: root.pointerPosition
             pointerKnown: root.pointerKnown
             pointerActivity: root.pointerActivity
