@@ -338,6 +338,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/assets/lastfm.svg
         qml/assets/lastfm-paused.svg
         qml/assets/lastfm-strike.svg
+        qml/assets/status-error.svg
         qml/assets/status-offline.svg
         qml/assets/status-warning.svg
         qml/assets/transport-next.svg

@@ -718,6 +718,8 @@ private slots:
     void editTagsSummaryNamesTheChangedFields();
     void editTagsTrackColumnSaysWhatItNumbers_data();
     void editTagsTrackColumnSaysWhatItNumbers();
+    void editTagsMarksAFailedRowBesideItsName_data();
+    void editTagsMarksAFailedRowBesideItsName();
     void editTagsNumberRevertFollowsItsHeader_data();
     void editTagsNumberRevertFollowsItsHeader();
     void editTagsWordsItsWarningsAlike();
@@ -5541,7 +5543,7 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
     }
     checkColumns(1600, false, false);
     QVERIFY(!QTest::currentTestFailed());
-    // The mark: a dot of the text colour in the # cell's left padding,
+    // The mark: a dot of the text colour in the number cell's left padding,
     // clear of the number, which is unpadded, as the queue's (the file's
     // tag holds "01").
     QQuickItem *mark = shownMarks().first();
@@ -5552,7 +5554,9 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
     QCOMPARE(mark->property("color").value<QColor>(), paletteOf(window)->property("text").value<QColor>());
     const QRectF markRect = sceneRect(mark);
     const QRectF numberRect = sceneRect(number);
-    QVERIFY2(markRect.left() >= numberRect.left() && markRect.right() <= numberRect.left() + 8,
+    // In the marks' slot, which a failed row's error glyph shares.
+    QVERIFY2(markRect.left() >= numberRect.left()
+                 && markRect.right() <= numberRect.left() + dialog->property("markSlotWidth").toReal(),
              qPrintable(describeItem(mark) + describeItem(number)));
     QCOMPARE(markRect.center().y(), numberRect.center().y());
     // Three digits, the widest a track number gets, stay clear of it.
@@ -7299,6 +7303,101 @@ void UiDialogsTest::editTagsTrackColumnSaysWhatItNumbers() {
     QVERIFY2(sceneRect(revert).left() >= sceneRect(label).left() + label->property("contentWidth").toReal()
                  && sceneRect(revert).right() <= sceneRect(column).right() + 0.5,
              qPrintable(describeItem(revert) + describeItem(label) + describeItem(column)));
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsMarksAFailedRowBesideItsName_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// A row whose save or rename failed has Breeze's error glyph where an
+// unsaved edit's dot is, beside the file name, in the negative colour (it
+// had the dot of an edit not yet saved, and its failure only in Status at
+// the table's far end): its cell's tooltip and its description say what
+// failed, and Status still does. On the selection, the glyph's colour is
+// the one that reads there.
+void UiDialogsTest::editTagsMarksAFailedRowBesideItsName() {
+    QFETCH(qreal, pointSize);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(1600, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    TagEditorController &editor = main.editor;
+    QQuickWindow *tags = openTagEditor(main, tagRows(4));
+    QVERIFY(tags != nullptr);
+    QObject *dialog = object(main.window, QStringLiteral("tagEditorDialog"));
+    QObject *palette = paletteOf(main.window);
+    const QStringList paths = editor.loadedPaths();
+    QVERIFY(paths.size() == 4);
+    const QString saveError = QStringLiteral("The folder is read-only.");
+    const QString renameError = QStringLiteral("A file of that name is already there.");
+    editor.setCell(0, QStringLiteral("genre"), QStringLiteral("Jazz"));
+    editor.setCell(2, QStringLiteral("genre"), QStringLiteral("Jazz"));
+    editor.m_tableModel.applySaveResults({{paths.at(0), saveError}}, {});
+    editor.m_tableModel.applyRenameResults({}, {{paths.at(1), renameError}});
+    editor.setSelectedRows({});
+    const auto rowAt = [&](int index) -> QQuickItem * {
+        for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
+            if (row->property("index").toInt() == index) {
+                return row;
+            }
+        }
+        return nullptr;
+    };
+    const auto partOf = [](QQuickItem *row, const QString &name) -> QQuickItem * {
+        return row != nullptr ? itemsNamed(row, name).value(0) : nullptr;
+    };
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    QTRY_VERIFY(rowAt(2) != nullptr && !layoutPendingUnder(table));
+    const qreal glyphSize = dialog->property("failureGlyphSize").toReal();
+    const qreal rowHeight = palette->property("rowHeight").toReal();
+    QVERIFY(glyphSize >= 16 * pointSize / 10 - 2);
+    for (const auto &[index, status, error] : {std::tuple{0, QStringLiteral("Not saved"), saveError},
+                                               std::tuple{1, QStringLiteral("Not renamed"), renameError}}) {
+        QQuickItem *row = rowAt(index);
+        QQuickItem *glyph = partOf(row, QStringLiteral("tagEditorRowFailureMark"));
+        QQuickItem *dot = partOf(row, QStringLiteral("tagEditorRowModifiedMark"));
+        QQuickItem *number = partOf(row, QStringLiteral("tagEditorCell_trackNo"));
+        QQuickItem *statusCell = partOf(row, QStringLiteral("tagEditorCell_status"));
+        QVERIFY2(glyph != nullptr, qPrintable(status));
+        QVERIFY(dot != nullptr && number != nullptr && statusCell != nullptr);
+        const QString at = describeItem(glyph) + describeItem(number);
+        QVERIFY2(glyph->isVisible() && !dot->isVisible(), qPrintable(at));
+        QCOMPARE(glyph->property("source").toUrl().fileName(), QStringLiteral("status-error.svg"));
+        QVERIFY(glyph->property("isMask").toBool());
+        QCOMPARE(hex(glyph->property("color").value<QColor>()), hex(palette->property("negative").value<QColor>()));
+        QCOMPARE(glyph->width(), glyphSize);
+        // On the first line, within the number's column and clear of its
+        // digits (its square is three quarters of its size).
+        QVERIFY2(std::abs(sceneRect(glyph).center().y() - (sceneRect(row).top() + rowHeight / 2)) <= 1.0, qPrintable(at));
+        const qreal squareRight = sceneRect(glyph).right() - glyphSize / 8;
+        QVERIFY2(sceneRect(glyph).left() + glyphSize / 8 >= sceneRect(number).left() - 0.5, qPrintable(at));
+        const qreal digits = sceneRect(number).right() - number->property("rightPadding").toReal()
+            - number->property("contentWidth").toReal();
+        QVERIFY2(digits >= squareRight + 1, qPrintable(at));
+        // What failed: its cell's tooltip, and its description.
+        QCOMPARE(number->property("toolTipText").toString(), error);
+        QCOMPARE(evaluate(glyph, QStringLiteral("Accessible.name")).toString(), status);
+        QCOMPARE(evaluate(glyph, QStringLiteral("Accessible.description")).toString(), error);
+        QCOMPARE(evaluate(row, QStringLiteral("Accessible.description")).toString(), status);
+        QCOMPARE(statusCell->property("text").toString(), status);
+        QCOMPARE(statusCell->property("toolTipText").toString(), error);
+    }
+    // An edit not yet saved keeps its dot, in the glyph's slot.
+    QQuickItem *dot = partOf(rowAt(2), QStringLiteral("tagEditorRowModifiedMark"));
+    QVERIFY(dot != nullptr && dot->isVisible());
+    QVERIFY(!partOf(rowAt(2), QStringLiteral("tagEditorRowFailureMark"))->isVisible());
+    QVERIFY(std::abs(sceneRect(dot).center().x()
+                     - sceneRect(partOf(rowAt(0), QStringLiteral("tagEditorRowFailureMark"))).center().x()) <= 1.0);
+    QCOMPARE(partOf(rowAt(2), QStringLiteral("tagEditorCell_trackNo"))->property("toolTipText").toString(),
+             QStringLiteral("Modified"));
+    QVERIFY(!partOf(rowAt(3), QStringLiteral("tagEditorRowFailureMark"))->isVisible());
+    // Selected, in the colour that reads on the selection.
+    editor.setSelectedRows({0});
+    QTRY_COMPARE(hex(partOf(rowAt(0), QStringLiteral("tagEditorRowFailureMark"))->property("color").value<QColor>()),
+                 hex(palette->property("negativeSelected").value<QColor>()));
     QVERIFY(closeTagEditor(main));
 }
 

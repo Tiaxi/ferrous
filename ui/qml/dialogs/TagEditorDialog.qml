@@ -128,15 +128,24 @@ Components.DialogWindow {
     // a 6 px dot at the default font, clear of a three-digit number, whose
     // room the # column has beside its Revert's.
     readonly property int modifiedMarkSize: 2 * Math.round(root.uiPalette.scaledSize(6) / 2)
-    // The # column's padding before its numbers: 8 px, or what the mark,
-    // centred in those 8, takes as it outgrows them with the font.
-    readonly property real numberLeadingRoom: Math.max(Kirigami.Units.largeSpacing,
-        Math.ceil((Kirigami.Units.largeSpacing + root.modifiedMarkSize) / 2) + 1)
+    // In its place on a row whose save or rename failed: Breeze's
+    // dialog-error, its square 12 px at the default font, in the negative
+    // colour (the row had the dot of an edit not yet saved, and its failure
+    // only in Status, at the table's far end).
+    readonly property string failureGlyph: Qt.resolvedUrl("../assets/status-error.svg")
+    readonly property int failureGlyphSize: 2 * Math.round(root.uiPalette.scaledSize(16) / 2)
+    // The marks' slot, at the start of the # column's left padding: as
+    // wide as the error glyph's square, or 8 px; each mark is centred in it.
+    readonly property real markSlotWidth: Math.max(Kirigami.Units.largeSpacing,
+        Math.ceil(root.failureGlyphSize * 3 / 4))
+    // The # column's padding before its numbers: the marks' slot, and a
+    // pixel clear of it.
+    readonly property real numberLeadingRoom: root.markSlotWidth + 1
     readonly property real tableInset: Kirigami.Units.largeSpacing
     // The room a column's header keeps after its label for the column's
     // Revert, up to the column's edge, whether it shows or not, so that
-    // marking a change moves no column: "Title ↺", and "# ↺" alike, with
-    // the digits ending where the # does; its glyph is as large as a line of
+    // marking a change moves no column: "Title ↺", and "Track ↺" alike,
+    // with the digits ending where "Track" does; its glyph is as large as a line of
     // text holds, 14 px in a 20 px button with the default font.
     readonly property real columnRevertGlyph: root.uiPalette.labelIconSize - 2
     readonly property real columnRevertRoom: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
@@ -1812,9 +1821,12 @@ Components.DialogWindow {
                         }
                         return tallest
                     }
+                    // A save or rename failed for the file.
+                    readonly property bool failed: tableRow.errorText.length > 0
                     Accessible.role: Accessible.Row
                     Accessible.name: tableRow.fileName
-                    Accessible.description: tableRow.marked ? root.modifiedText : ""
+                    Accessible.description: tableRow.failed ? root.cellText("status", tableRow)
+                        : tableRow.marked ? root.modifiedText : ""
                     Accessible.selected: tableRow.selected
 
                     Components.RowBackground {
@@ -1984,7 +1996,9 @@ Components.DialogWindow {
                                 readonly property string toolTipText: tableCell.failureCell ? tableRow.errorText
                                     : tableCell.truncated
                                         ? (modelData.key === "directory" ? tableRow.directory : tableCell.text)
-                                        : (modelData.key === "trackNo" && tableRow.marked ? root.modifiedText : "")
+                                        : modelData.key !== "trackNo" ? ""
+                                        : tableRow.failed ? tableRow.errorText
+                                        : tableRow.marked ? root.modifiedText : ""
                                 Accessible.description: tableCell.failureCell ? tableRow.errorText : ""
 
                                 HoverHandler {
@@ -2004,14 +2018,37 @@ Components.DialogWindow {
                     // it moves nothing.
                     Rectangle {
                         objectName: "tagEditorRowModifiedMark"
-                        visible: tableRow.marked
-                        x: root.pinnedShift + root.tableInset + Math.round((Kirigami.Units.largeSpacing - width) / 2)
+                        visible: tableRow.marked && !tableRow.failed
+                        x: root.pinnedShift + root.tableInset + Math.round((root.markSlotWidth - width) / 2)
                         // On the first line, as the row's cells start.
                         y: Math.round((root.tableRowHeight - height) / 2)
                         width: root.modifiedMarkSize
                         height: width
                         radius: width / 2
                         color: root.uiPalette.text
+                    }
+
+                    // A failed save or rename: the error glyph in the dot's
+                    // place, beside the file name, in the negative colour,
+                    // readable on the selection too. What failed is its
+                    // cell's tooltip, as an edit's dot's is, and its
+                    // description; Status and Details… say it too.
+                    Kirigami.Icon {
+                        objectName: "tagEditorRowFailureMark"
+                        visible: tableRow.failed
+                        x: root.pinnedShift + root.tableInset + Math.round((root.markSlotWidth - width) / 2)
+                        // On the first line, as the row's cells start.
+                        y: Math.round((root.tableRowHeight - height) / 2)
+                        width: root.failureGlyphSize
+                        height: width
+                        // At its size, which grows with the font.
+                        roundToIconSize: false
+                        source: root.failureGlyph
+                        isMask: true
+                        color: tableRow.selected ? root.uiPalette.negativeSelected : root.uiPalette.negative
+                        Accessible.role: Accessible.Graphic
+                        Accessible.name: root.cellText("status", tableRow)
+                        Accessible.description: tableRow.errorText
                     }
                 }
             }
