@@ -547,11 +547,12 @@ void forEachDialogWithButtons(QQuickWindow *window,
 }
 
 // The window's issue history, with an entry reported.
-void report(QQuickWindow *window, int category, int severity, const QString &subject, const QString &message) {
+void report(QQuickWindow *window, int category, int severity, const QString &subject, const QString &message,
+            const QString &detail = {}) {
     QObject *errors = object(window, QStringLiteral("errorController"));
     QVERIFY(errors != nullptr);
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, category), Q_ARG(QVariant, severity),
-                                      Q_ARG(QVariant, subject), Q_ARG(QVariant, message)));
+                                      Q_ARG(QVariant, subject), Q_ARG(QVariant, message), Q_ARG(QVariant, detail)));
 }
 
 // The window's issue history, emptied.
@@ -3879,7 +3880,10 @@ void UiDialogsTest::checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(QQuick
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("queueRows", queueRowsOf({QStringLiteral("/music/a.flac"), kStaticPath})));
     QVERIFY(bridge->setProperty("queueLength", 2));
-    report(window, 6, 1, QString(), QStringLiteral("The settings could not be saved: disk full"));
+    const QString settingsPath = QStringLiteral("/fixture/config/settings.txt");
+    const QString systemText = QStringLiteral("failed to replace /fixture/config/settings.txt: No space left on device "
+                                              "(os error 28)");
+    report(window, 6, 1, settingsPath, QStringLiteral("Settings couldn\u2019t be saved"), systemText);
     report(window, 1, 0, kStaticPath, kEndsEarly);
     QVERIFY(openIssues(window));
     QList<QQuickItem *> rows;
@@ -3913,6 +3917,8 @@ void UiDialogsTest::checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(QQuick
     QVERIFY(sceneRect(time).right() > sceneRect(category).right() - 0.5);
     // The file is named in the title, so its path does not repeat.
     QVERIFY(!itemsNamed(first, QStringLiteral("errorHistorySubject")).at(0)->isVisible());
+    // There is no system's text for it.
+    QVERIFY(!itemsNamed(first, QStringLiteral("errorHistoryDetail")).at(0)->isVisible());
     // The severity glyph as large as a line of text holds.
     QQuickItem *glyph = itemsNamed(first, QStringLiteral("errorHistoryGlyph")).at(0);
     QCOMPARE(glyph->width(), paletteOf(window)->property("labelIconSize").toReal());
@@ -3941,14 +3947,27 @@ void UiDialogsTest::checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(QQuick
     QTest::mouseRelease(action->window(), Qt::LeftButton, Qt::NoModifier, sceneRect(heading).center().toPoint());
     QTRY_VERIFY(!action->property("down").toBool());
     QTRY_COMPARE(hex(actionText->property("color").value<QColor>()), hex(tokenOf(window, "link")));
-    // One sentence: it is the title, under its category, with nothing
-    // under it; no action for settings.
+    // A failed save: the title says in plain words what couldn't be saved,
+    // with no system's clause in it; under it the file, then the system's
+    // text, both small and secondary. No action for settings.
     QQuickItem *second = rows[1];
-    QCOMPARE(itemsNamed(second, QStringLiteral("errorHistoryHeading")).at(0)->property("text").toString(),
-             QStringLiteral("The settings could not be saved: disk full"));
+    QQuickItem *saveHeading = itemsNamed(second, QStringLiteral("errorHistoryHeading")).at(0);
+    QCOMPARE(saveHeading->property("text").toString(), QStringLiteral("Settings couldn\u2019t be saved"));
     QCOMPARE(itemsNamed(second, QStringLiteral("errorHistoryCategory")).at(0)->property("text").toString(),
              QStringLiteral("Settings and saving"));
     QVERIFY(!itemsNamed(second, QStringLiteral("errorHistoryMessage")).at(0)->isVisible());
+    QQuickItem *subject = itemsNamed(second, QStringLiteral("errorHistorySubject")).at(0);
+    QQuickItem *detail = itemsNamed(second, QStringLiteral("errorHistoryDetail")).at(0);
+    QVERIFY(subject->isVisible() && detail->isVisible());
+    QCOMPARE(subject->property("text").toString(), settingsPath);
+    QCOMPARE(detail->property("message").toString(), systemText);
+    QCOMPARE(detail->property("textFormat").toInt(), int(Qt::PlainText));
+    QCOMPARE(hex(detail->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
+    QCOMPARE(detail->property("font").value<QFont>().pointSizeF(), small);
+    QVERIFY(sceneRect(subject).top() >= sceneRect(saveHeading).bottom() - 0.5);
+    QVERIFY(sceneRect(detail).top() >= sceneRect(subject).bottom() - 0.5);
+    QCOMPARE(QAccessible::queryAccessibleInterface(second)->text(QAccessible::Description),
+             settingsPath + QLatin1Char('\n') + systemText);
     QVERIFY(!itemsNamed(second, QStringLiteral("errorHistoryActionButton")).at(0)->isVisible());
     // A file that left the queue is shown in the library instead.
     QVERIFY(bridge->setProperty("queueRows", queueRowsOf({QStringLiteral("/music/a.flac")})));
@@ -4339,7 +4358,7 @@ void UiDialogsTest::thePanesEndsEarlyLinkOpensItsIssue() {
     QVERIFY(bridge->setProperty("queueLength", 2));
     // The backend's warning for a cut-off file, as the analysis reports it.
     QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, kEndsEarly), Q_ARG(int, 1),
-                                      Q_ARG(int, 0), Q_ARG(QString, kStaticPath)));
+                                      Q_ARG(int, 0), Q_ARG(QString, kStaticPath), Q_ARG(QString, QString())));
     // The pane's message after the cut, and its way to Recent Issues.
     QVERIFY(bridge->setProperty("currentTrackPath", kStaticPath));
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));

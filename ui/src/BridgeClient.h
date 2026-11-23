@@ -640,7 +640,10 @@ signals:
     void backendFailureChanged();
     // An error for the user: the message, its BinaryBridgeCodec::ErrorCategory
     // and ErrorSeverity, and the file or folder it is about, or empty.
-    void bridgeError(const QString &message, int category, int severity, const QString &subject);
+    // `detail` is the system's text for it, or empty: Recent Issues shows it
+    // under the message, in secondary ink.
+    void bridgeError(const QString &message, int category, int severity, const QString &subject,
+                     const QString &detail);
     void queueUndoChanged();
     // An undo brought back these rows, or a redo moved them here, and the
     // queue view selects them; they are rows of the queue as it is when
@@ -917,10 +920,13 @@ private:
     // Tell the UI about an error, which Recent Issues shows, and add it to
     // the diagnostics log with its category and severity; see bridgeError.
     // What the user need not see goes to logDiagnostic only.
+    // `detail` is the system's text, which Recent Issues shows apart and
+    // the log after the message.
     void reportError(BinaryBridgeCodec::ErrorCategory category, const QString &message,
                      const QString &subject = {},
                      BinaryBridgeCodec::ErrorSeverity severity =
-                         BinaryBridgeCodec::ErrorSeverityError);
+                         BinaryBridgeCodec::ErrorSeverityError,
+                     const QString &detail = {});
     void sendPathListCommand(quint16 cmdId, const QStringList &paths,
                              const KLocalizedString &tooLargeMessage);
     void sendLibraryItems(

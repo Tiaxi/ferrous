@@ -411,6 +411,7 @@ private slots:
     void mprisExportsNoArtOfTheTrackBeforeAfterTheRowEndsTheHold();
     void mprisExportsNoArtOfTheTrackBeforeAfterAStopEndsTheHold();
     void playbackErrorPacketReachesBridgeError();
+    void anErrorsSystemTextReachesBridgeErrorApart();
     void backendFailurePacketShowsStoppedState();
     void requestedStopIsNotABackendFailure();
     void commandsToAStoppedBackendFailWithoutRepeatingWhy();
@@ -3288,9 +3289,10 @@ void BridgeClientTest::stringsPastTheOldLengthLimitCrossWhole() {
     QByteArray payload;
     QDataStream payloadStream(&payload, QIODevice::WriteOnly);
     payloadStream.setByteOrder(QDataStream::LittleEndian);
-    // A system error with no subject, then the message.
+    // A system error with no subject, then the message, and no system's text.
     payloadStream << quint8(0) << quint8(1) << quint32(0) << quint32(utf8.size());
     payload.append(utf8);
+    payload.append(QByteArray(4, '\0'));
     const auto packetWith = [](const QByteArray &section) {
         QByteArray packet;
         QDataStream header(&packet, QIODevice::WriteOnly);
@@ -8682,6 +8684,8 @@ void BridgeClientTest::playbackErrorPacketReachesBridgeError() {
         payloadStream.writeRawData(subjectText.constData(), static_cast<int>(subjectText.size()));
         payloadStream << quint32(text.size());
         payloadStream.writeRawData(text.constData(), static_cast<int>(text.size()));
+        // No system's text.
+        payloadStream << quint32(0);
         QByteArray packet;
         QDataStream header(&packet, QIODevice::WriteOnly);
         header.setByteOrder(QDataStream::LittleEndian);
@@ -8721,6 +8725,50 @@ void BridgeClientTest::playbackErrorPacketReachesBridgeError() {
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packetWith(0, 2), &decoded, &error));
 }
 
+// A failed save's title and the system's text come as fields of their own:
+// Recent Issues shows the text apart, and the log has both.
+void BridgeClientTest::anErrorsSystemTextReachesBridgeErrorApart() {
+    // Mirrored by ffi::error_packet_tests::an_errors_system_text_is_sent_apart_from_its_message.
+    const QString message = QStringLiteral("Settings couldn\u2019t be saved");
+    const QString subject = QStringLiteral("/c/settings.txt");
+    const QString detail = QStringLiteral("failed to replace /c/settings.txt: Permission denied (os error 13)");
+    QByteArray payload;
+    QDataStream payloadStream(&payload, QIODevice::WriteOnly);
+    payloadStream.setByteOrder(QDataStream::LittleEndian);
+    payloadStream << quint8(BinaryBridgeCodec::ErrorCategorySettings) << quint8(BinaryBridgeCodec::ErrorSeverityError);
+    for (const QString &text : {subject, message, detail}) {
+        const QByteArray utf8 = text.toUtf8();
+        payloadStream << quint32(utf8.size());
+        payloadStream.writeRawData(utf8.constData(), static_cast<int>(utf8.size()));
+    }
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(packetWithSection(BinaryBridgeCodec::SectionError, payload),
+                                                     &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.errorMessage, message);
+    QCOMPARE(decoded.errorDetail, detail);
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+    client.processBinarySnapshot(decoded);
+    QCOMPARE(errors.count(), 1);
+    QCOMPARE(errors.at(0).at(0).toString(), message);
+    QCOMPARE(errors.at(0).at(3).toString(), subject);
+    QCOMPARE(errors.at(0).at(4).toString(), detail);
+    // The log keeps the line it had: the title, the system's text, the file.
+    const QString logged = client.m_diagnosticsLines.join(QLatin1Char('\n'));
+    QVERIFY2(logged.contains(QStringLiteral("[settings] error: Settings couldn\u2019t be saved: failed to replace "
+                                            "/c/settings.txt: Permission denied (os error 13) (/c/settings.txt)")),
+             qPrintable(logged));
+
+    // A section without the system's text, as an older backend sent it, is refused.
+    payload.chop(4 + detail.toUtf8().size());
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packetWithSection(BinaryBridgeCodec::SectionError, payload),
+                                                     &decoded, &error));
+}
+
 namespace {
 
 // The packet the Rust relay encodes when the backend stops without being asked
@@ -8730,9 +8778,10 @@ QByteArray backendFailurePacket(const QString &message) {
     QByteArray payload;
     QDataStream payloadStream(&payload, QIODevice::WriteOnly);
     payloadStream.setByteOrder(QDataStream::LittleEndian);
-    // A system error with no subject.
+    // A system error with no subject, and no system's text.
     payloadStream << quint8(0) << quint8(1) << quint32(0) << quint32(text.size());
     payload.append(text);
+    payload.append(QByteArray(4, '\0'));
     QByteArray packet;
     QDataStream stream(&packet, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::LittleEndian);

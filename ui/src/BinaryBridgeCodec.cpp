@@ -1209,15 +1209,17 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
             quint8 severity = 0;
             QString subject;
             QString message;
+            QString detail;
             ok = sectionReader.readU8(&category) && category <= ErrorCategoryLast
                 && sectionReader.readU8(&severity) && severity <= ErrorSeverityError
                 && sectionReader.readUtf8(&subject) && sectionReader.readUtf8(&message)
-                && sectionReader.atEnd();
+                && sectionReader.readUtf8(&detail) && sectionReader.atEnd();
             if (ok) {
                 out->errorCategory = category;
                 out->errorSeverity = severity;
                 out->errorSubject = subject;
                 out->errorMessage = message;
+                out->errorDetail = detail;
             }
             break;
         }

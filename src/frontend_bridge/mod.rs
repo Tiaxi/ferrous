@@ -3029,12 +3029,9 @@ fn report_save(
         *reported = None;
         return true;
     };
-    if reported.as_ref() != Some(&failure.identity) {
-        let error = BridgeError::error(ErrorCategory::Settings, failure.message())
-            .about(failure.identity.0.to_string_lossy());
-        if send_error(event_tx, error) {
-            *reported = Some(failure.identity);
-        }
+    if reported.as_ref() != Some(&failure.identity) && send_error(event_tx, failure.bridge_error())
+    {
+        *reported = Some(failure.identity);
     }
     false
 }
@@ -3441,15 +3438,31 @@ mod tests {
             &mut reported,
             &event_tx
         ));
-        let messages = error_messages(&event_rx);
-        assert_eq!(messages.len(), 1, "{messages:?}");
+        let errors: Vec<BridgeError> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                BridgeEvent::Error(error) => Some(error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        // The title says what couldn't be saved; the system's text, apart,
+        // says why, for Recent Issues' detail line.
+        assert_eq!(errors[0].message, "Settings couldn\u{2019}t be saved");
+        assert_eq!(errors[0].subject, settings_path.display().to_string());
         assert!(
-            messages[0].starts_with(&format!(
-                "Settings could not be saved: {} links to {}, which cannot be reached: ",
+            errors[0].detail.starts_with(&format!(
+                "{} links to {}, which cannot be reached: ",
                 settings_path.display(),
                 target.display(),
             )),
-            "{messages:?}"
+            "{errors:?}"
+        );
+        assert!(
+            errors[0]
+                .logged_message()
+                .starts_with("Settings couldn\u{2019}t be saved: "),
+            "the log has both, as before"
         );
         assert_eq!(
             std::fs::read_link(&settings_path).expect("the link is kept"),
@@ -3879,10 +3892,7 @@ mod tests {
         runtime.settle_persistence(&event_tx);
         let messages = error_messages(&event_rx);
         assert_eq!(messages.len(), 1, "{messages:?}");
-        assert!(
-            messages[0].starts_with("Settings could not be saved"),
-            "{messages:?}"
-        );
+        assert_eq!(messages, ["Settings couldn\u{2019}t be saved"]);
         assert!(runtime.flags.settings_dirty);
         assert_eq!(
             runtime.flags.settings_save_timing,
@@ -4100,10 +4110,7 @@ mod tests {
         runtime.settle_persistence(&event_tx);
         let messages = error_messages(&event_rx);
         assert_eq!(messages.len(), 1, "{messages:?}");
-        assert!(
-            messages[0].starts_with("Settings could not be saved"),
-            "{messages:?}"
-        );
+        assert_eq!(messages, ["Settings couldn\u{2019}t be saved"]);
         assert!(runtime.flags.settings_dirty);
         assert_eq!(
             runtime.flags.settings_save_timing,

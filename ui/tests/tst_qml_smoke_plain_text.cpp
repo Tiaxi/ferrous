@@ -284,9 +284,10 @@ struct RecordedWindow {
         return bridge != nullptr;
     }
     QObject *child(const char *name) const { return window->findChild<QObject *>(QString::fromLatin1(name)); }
+    // The message is the system's text too, so that its line is checked.
     void report(int category, const QString &subject, const QString &message) const {
         QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, message), Q_ARG(int, category),
-                                  Q_ARG(int, 1), Q_ARG(QString, subject));
+                                  Q_ARG(int, 1), Q_ARG(QString, subject), Q_ARG(QString, message));
     }
     QString check(const QStringList &expected) {
         QTest::qWait(100);

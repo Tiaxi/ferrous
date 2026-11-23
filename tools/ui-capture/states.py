@@ -6192,7 +6192,7 @@ STATES = [
      "Last.fm indicator menu (Shift+F10)"),
     ("statusbar", "_", "_lastfm-off", '''esc | macro lastfm {"lastFmShowScrobbleProgress":false}''', ""),
     ("statusbar", "statusbar", "issues-new",
-     "away | js errorController.report(1, 1, '/music/Some Artist/Some Album/01 - Missing.flac', 'The file could not be opened: No such file or directory') | js errorController.report(2, 0, 'Fixtures', 'Could not read 2 files during the scan') | wait 0.8",
+     "away | js errorController.report(1, 1, '/music/Some Artist/Some Album/01 - Missing.flac', 'The file couldn\\u2019t be opened', 'No such file or directory') | js errorController.report(2, 0, 'Fixtures', 'Could not read 2 files during the scan') | wait 0.8",
      "Status bar: two new (unseen) issues"),
     ("statusbar", "statusbar", "issues-hover", "hover statusBarErrorsButton 1.4", "Issues button hovered (tooltip)"),
     # opened as a user does: a pointer click on the status bar's issues button (its focus as opened in dlg-*)
@@ -6406,7 +6406,7 @@ STATES = [
     # the walk with the status bar's indicators shown (Last.fm listening, one new issue), so they are in it
     ("focus", "_", "_setup", "queue | play Small_Hours 30 2 | js root.uiBridge.pause() | "
      '''macro lastfm {"lastFmScrobbleListenedMs":60000} | '''
-     "js errorController.report(1, 1, '/music/A/B/01 - Missing.flac', 'The file could not be opened') | away | unfocus", ""),
+     "js errorController.report(1, 1, '/music/A/B/01 - Missing.flac', 'The file couldn\\u2019t be opened', 'No such file or directory') | away | unfocus", ""),
 ] + [
     ("focus", "focus", f"tab-{i:02d}", f"macro tab {i}", "Focus walk") for i in range(1, 25)
 ] + [
@@ -6626,7 +6626,7 @@ STATES = [
     ("motion-ui", "motion", "search-typing", "js globalSearchController.openDialog() | settle 0.6 | strip 1.2 0.1 - :: type mer",
      "Search palette results appearing while typing"),
     ("motion-ui", "motion", "issue-indicator-appears",
-     "esc | strip 0.6 0.1 statusBar :: js errorController.report(1, 1, '/music/A/B/01 - X.flac', 'The file could not be opened')",
+     "esc | strip 0.6 0.1 statusBar :: js errorController.report(1, 1, '/music/A/B/01 - X.flac', 'The file couldn\\u2019t be opened', 'No such file or directory')",
      "Status bar issues indicator appearing"),
     ("motion-ui", "motion", "scrobble-ring-fill",
      'strip 3.4 0.1 statusBar:0.8,0,0.2,1 :: macro lastfm {"lastFmScrobbleListenedMs":0} ; wait 0.4 ; '
@@ -6739,7 +6739,7 @@ STATES = [
     ("bigfont", "statusbar", "lastfm-listening-half", 'macro lastfm {"lastFmScrobbleListenedMs":60000} | hover scrobbleIndicator 1.4',
      "Large font: Last.fm indicator hovered (injected)"),
     ("bigfont", "statusbar", "issues-new",
-     "away | macro lastfm {\"lastFmShowScrobbleProgress\":false} | js errorController.report(1, 1, '/music/A/B/01 - Missing.flac', 'The file could not be opened') | wait 0.3",
+     "away | macro lastfm {\"lastFmShowScrobbleProgress\":false} | js errorController.report(1, 1, '/music/A/B/01 - Missing.flac', 'The file couldn\\u2019t be opened', 'No such file or directory') | wait 0.3",
      "Large font: status bar with a new issue"),
     ("bigfont", "statusbar", "scanning-known",
      'macro fakebridge statusBar {"libraryScanInProgress":true,"libraryScanProcessed":57,"libraryScanTotal":180}',

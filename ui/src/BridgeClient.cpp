@@ -5575,17 +5575,22 @@ bool BridgeClient::openUrlInFileBrowser(const QString &path, bool containingFold
 }
 
 void BridgeClient::reportError(BinaryBridgeCodec::ErrorCategory category, const QString &message,
-                               const QString &subject, BinaryBridgeCodec::ErrorSeverity severity) {
-    // The log keeps every error Recent Issues shows, with what it concerns.
+                               const QString &subject, BinaryBridgeCodec::ErrorSeverity severity,
+                               const QString &detail) {
+    // The log keeps every error Recent Issues shows, with the system's text
+    // and what it concerns.
     QString line = QStringLiteral("%1: %2").arg(
         severity == BinaryBridgeCodec::ErrorSeverityWarning ? QStringLiteral("warning")
                                                             : QStringLiteral("error"),
         message);
+    if (!detail.isEmpty()) {
+        line += QStringLiteral(": %1").arg(detail);
+    }
     if (!subject.isEmpty()) {
         line += QStringLiteral(" (%1)").arg(subject);
     }
     logDiagnostic(errorCategoryLogName(category), line);
-    emit bridgeError(message, static_cast<int>(category), static_cast<int>(severity), subject);
+    emit bridgeError(message, static_cast<int>(category), static_cast<int>(severity), subject, detail);
 }
 
 void BridgeClient::reportUiError(int category, int severity, const QString &subject,
@@ -5713,7 +5718,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (!snapshot.errorMessage.trimmed().isEmpty()) {
         reportError(static_cast<BinaryBridgeCodec::ErrorCategory>(snapshot.errorCategory),
                     snapshot.errorMessage, snapshot.errorSubject,
-                    static_cast<BinaryBridgeCodec::ErrorSeverity>(snapshot.errorSeverity));
+                    static_cast<BinaryBridgeCodec::ErrorSeverity>(snapshot.errorSeverity),
+                    snapshot.errorDetail);
         return false;
     }
 

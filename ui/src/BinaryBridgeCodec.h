@@ -32,7 +32,8 @@ enum SnapshotSection : quint16 {
     SectionMetadata = 1u << 4,
     SectionSettings = 1u << 5,
     // An error for the user: a u8 ErrorCategory, a u8 ErrorSeverity, the
-    // subject (a file or folder path, or empty), and the message.
+    // subject (a file or folder path, or empty), the message, and the
+    // system's text (or empty), which Recent Issues shows apart.
     SectionError = 1u << 6,
     SectionStopped = 1u << 7,
     SectionLastFm = 1u << 8,
@@ -605,6 +606,8 @@ struct DecodedSnapshot {
     quint8 errorCategory{ErrorCategorySystem};
     quint8 errorSeverity{ErrorSeverityError};
     QString errorSubject;
+    // The system's text for the error, shown apart from its message.
+    QString errorDetail;
     bool hasStateSaved{false};
     quint32 stateSaveRequestId{0};
     bool stateSaved{false};

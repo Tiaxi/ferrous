@@ -35,13 +35,14 @@ private slots:
 
 namespace {
 
-// Sends an error from the bridge as BridgeClient does. The categories and
-// severities are BinaryBridgeCodec's.
+// Sends an error from the bridge as BridgeClient does, with the system's
+// text `detail`. The categories and severities are BinaryBridgeCodec's.
 bool sendBridgeError(QObject *bridge, const QString &message, int category = 1,
-                     int severity = 1, const QString &subject = QString()) {
+                     int severity = 1, const QString &subject = QString(),
+                     const QString &detail = QString()) {
     return QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, message),
                                      Q_ARG(int, category), Q_ARG(int, severity),
-                                     Q_ARG(QString, subject));
+                                     Q_ARG(QString, subject), Q_ARG(QString, detail));
 }
 
 // The content of the popup `popup`, which the error dialog's rows are under.
@@ -255,6 +256,18 @@ void ErrorsSmokeTest::errorHistoryCountsRepeatsAndKeepsTheLatest() {
     QVERIFY(sendBridgeError(ui.bridge, message, 1, 0, QStringLiteral("/music/other.flac")));
     QVERIFY(sendBridgeError(ui.bridge, message, 2, 0, subject));
     QCOMPARE(errorHistoryMessages(ui.errors).size(), 4);
+    // As is a failure the system tells another way; the same text again
+    // is a repeat. The entry keeps its system's text.
+    const QString denied = QStringLiteral("failed to replace /c/settings.txt: Permission denied (os error 13)");
+    const QString full = QStringLiteral("failed to replace /c/settings.txt: No space left on device (os error 28)");
+    const QString saving = QStringLiteral("Settings couldn\u2019t be saved");
+    QVERIFY(sendBridgeError(ui.bridge, saving, 6, 1, QStringLiteral("/c/settings.txt"), denied));
+    QVERIFY(sendBridgeError(ui.bridge, saving, 6, 1, QStringLiteral("/c/settings.txt"), full));
+    QVERIFY(sendBridgeError(ui.bridge, saving, 6, 1, QStringLiteral("/c/settings.txt"), full));
+    QCOMPARE(errorHistoryMessages(ui.errors).size(), 6);
+    QCOMPARE(entries->index(0, 0).data(entries->roleNames().key("detail")).toString(), full);
+    QCOMPARE(entries->index(0, 0).data(entries->roleNames().key("count")).toInt(), 2);
+    QCOMPARE(entries->index(1, 0).data(entries->roleNames().key("detail")).toString(), denied);
 
     // Of more than it keeps, the latest.
     QVERIFY(QMetaObject::invokeMethod(ui.errors, "clear"));

@@ -380,7 +380,7 @@ ApplicationWindow {
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
         signal diagnosticsChanged()
-        signal bridgeError(string message, int category, int severity, string subject)
+        signal bridgeError(string message, int category, int severity, string subject, string detail)
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
             int startIndex, int totalEstimate, int sampleRate, int hopSize,
             real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken, var generation)
@@ -578,7 +578,7 @@ ApplicationWindow {
         }
         // BridgeClient also logs it; there is no log here.
         function reportUiError(category, severity, subject, message) {
-            bridgeFallback.bridgeError(message, category, severity, subject)
+            bridgeFallback.bridgeError(message, category, severity, subject, "")
         }
         function toggleChannelMute(channelIndex) {}
         function soloChannel(channelIndex) {}
@@ -2539,8 +2539,8 @@ ApplicationWindow {
         function onGlobalSearchResultsChanged() {
             globalSearchController.syncSelectionAfterResultsChange()
         }
-        function onBridgeError(message, category, severity, subject) {
-            errorController.report(category, severity, subject, message)
+        function onBridgeError(message, category, severity, subject, detail) {
+            errorController.report(category, severity, subject, message, detail)
         }
         function onBackendFailureChanged() {
             root.reportBackendFailure()

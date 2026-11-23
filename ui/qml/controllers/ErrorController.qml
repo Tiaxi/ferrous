@@ -13,8 +13,9 @@ QtObject {
 
     // How many different errors the history keeps.
     property int historyLimit: 20
-    // Newest first: category, severity, subject, message, count, and the
-    // times it was first and last reported, in ms since the epoch.
+    // Newest first: category, severity, subject, message, the system's text
+    // for it (detail, or empty), count, and the times it was first and last
+    // reported, in ms since the epoch.
     property ListModel entries: ListModel {}
     readonly property int count: entries.count
     // Whether the user has yet to see the newest entry, until the user
@@ -62,11 +63,14 @@ QtObject {
     // An error arrived or repeated, and is the newest entry now.
     signal reported()
 
-    function report(category, severity, subject, message) {
+    // `detail` is the system's text for the error, which the history shows
+    // apart from its message; an error repeats one only with the same text.
+    function report(category, severity, subject, message, detail) {
         const text = String(message || "").trim()
         if (text.length === 0) {
             return
         }
+        const system = String(detail || "").trim()
         const kind = Number(category) || 0
         const level = Number(severity) === ErrorUtils.SeverityWarning
             ? ErrorUtils.SeverityWarning
@@ -75,7 +79,8 @@ QtObject {
         const now = Date.now()
         for (let i = 0; i < root.entries.count; ++i) {
             const entry = root.entries.get(i)
-            if (entry.category === kind && entry.subject === about && entry.message === text) {
+            if (entry.category === kind && entry.subject === about && entry.message === text
+                    && entry.detail === system) {
                 root.entries.setProperty(i, "count", entry.count + 1)
                 root.entries.setProperty(i, "lastSeenMs", now)
                 root.entries.setProperty(i, "severity", level)
@@ -94,6 +99,7 @@ QtObject {
             severity: level,
             subject: about,
             message: text,
+            detail: system,
             count: 1,
             firstSeenMs: now,
             lastSeenMs: now,
