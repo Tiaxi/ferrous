@@ -244,7 +244,7 @@ SCOPES = {
                ("transport", "at-rest", "subject", "right",
                 dict(variant="1600x1000_font24", theme=th, part=(0.5, 0, 0.5, 1), lh=16, gap=6))] for th in ("dark", "light")]
              + [[("transport", "at-rest", "subject", "Narrow (1000x720), 10 pt, dark", dict(variant="1000x720", lh=16, gap=6))],
-                [("main", "playing-spectrogram-centered", (0, 0.07, 1, 0.11), "Narrow (1000x720), 24 pt, dark",
+                [("main", "playing-spectrogram-centered", (0, 0.03, 1, 0.25), "Narrow (1000x720), 24 pt, dark",
                   dict(variant="1000x720_font24", lh=16, gap=6))]]),
             # the status bar: its right half (the indicators) per state, dark beside light
             ("focus-statusbar", "The status bar at 1:1, its left and right ends, per state: dark, then the "

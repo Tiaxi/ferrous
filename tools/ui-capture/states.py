@@ -6055,7 +6055,7 @@ STATES = [
         ("transport", "transport", f"{name}-pressed",
          f"press transportButton_{name} | wait 0.25", f"Transport: {name} held down (released off the button after)"),
         ("transport", "transport", f"{name}-focus",
-         f"dmove xy:900,500 | release xy:900,500 | away | focus transportButton_{name}",
+         f"dmove xy:900,500 | release xy:900,500 | away | focus transportButton_{name} | wait 1.0",
          f"Transport: {name} with keyboard focus (tooltip shows on focus)"),
     )
 ] + [
