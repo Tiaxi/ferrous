@@ -432,9 +432,10 @@ Item {
     QCOMPARE(waveform->backgroundColor(), palette->property("view").value<QColor>());
     QCOMPARE(waveform->waveformColor(), palette->property("paneWave").value<QColor>());
     QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
-    // In a viewer, the viewer's seam, which a light theme makes stronger.
+    // In a viewer, the pane's seam: one line between the lanes.
     QVERIFY(surface->setProperty("viewerMode", true));
-    QCOMPARE(waveform->laneSeamColor(), palette->property("viewerWaveformLaneSeam").value<QColor>());
+    QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
+    QVERIFY(palette->metaObject()->indexOfProperty("viewerWaveformLaneSeam") < 0);
     QVERIFY(surface->setProperty("viewerMode", false));
     QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
     QCOMPARE(waveform->playheadColor().alpha(), 255);

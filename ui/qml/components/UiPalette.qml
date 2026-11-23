@@ -437,7 +437,12 @@ QtObject {
         plotText: root.text
         plotTextSecondary: root.textSecondary
         plotOutline: root.view
-        plotLaneSeam: root.hairline
+        // The line between the waveform's lanes, in the pane and in a
+        // viewer alike: in a light theme #cdd2d6, 1.5:1 on white, a step
+        // stronger than the hairline (#ebedef, 1.17:1), which on a white
+        // screen all but vanished between the channels; in a dark one the
+        // hairline.
+        plotLaneSeam: root.themeIsDark ? root.hairline : "#cdd2d6"
         plotTick: root.textSecondary
         plotLink: root.link
         // The meter in the waveform's colour, so it reads as the plot's own
@@ -470,13 +475,6 @@ QtObject {
         segmentEdge: root.textTertiary
         plotFocusRing: root.focusRing
     }
-
-    // The line between the waveform's lanes in a viewer: in a light theme
-    // #cdd2d6, a step stronger than the pane's hairline, which on a white
-    // screen all but vanished between the channels; in a dark one the
-    // pane's.
-    readonly property color viewerWaveformLaneSeam: root.themeIsDark
-        ? root.waveformPlot.plotLaneSeam : "#cdd2d6"
 
     // The waveform's colour toward the view: 35 %, or by 5 % steps less,
     // the most of it that is 3:1 on `trough`.
