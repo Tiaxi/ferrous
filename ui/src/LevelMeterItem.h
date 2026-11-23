@@ -19,7 +19,10 @@
 #include "WaveformReaderLease.h"
 
 // The level meter of the visualization: a column at the right end of each
-// lane, with a 1 px seam on its left, out to the pane's edge. Each column
+// lane, with a 1 px seam on its left and beside it, on the meter's side, a
+// 1 px keyline the lane's height, out to the pane's edge: the keyline is
+// the meter's own edge, so it reads as an instrument beside the plot (with
+// the seam alone, the waveform's tips and the kHz ticks ran into it). Each column
 // is a vertical meter from -60 to 0 dBFS, with its listed levels evenly
 // spaced (-6, -12, -24 and -48 dB at 4/5 to 1/5 of the height): an 11 px
 // track the lane's height, and on it the meter's three readings, each of
@@ -78,6 +81,8 @@ class LevelMeterItem : public QQuickItem {
     Q_PROPERTY(QColor clipColor MEMBER m_clipColor WRITE setClipColor NOTIFY colorsChanged)
     // The marks' ticks beside the body.
     Q_PROPERTY(QColor tickColor MEMBER m_tickColor WRITE setTickColor NOTIFY colorsChanged)
+    // The meter's edge beside the seam.
+    Q_PROPERTY(QColor keylineColor MEMBER m_keylineColor WRITE setKeylineColor NOTIFY colorsChanged)
     // The line across the column's top; none while transparent.
     Q_PROPERTY(QColor topSeamColor MEMBER m_topSeamColor WRITE setTopSeamColor NOTIFY colorsChanged)
     // Whether something reads the levels, such as a tooltip: then
@@ -102,9 +107,12 @@ public:
     static constexpr double kClipHoldSeconds = 2.0;
     // A bin at full scale clips; its level is rounded to 0.001 of a dB.
     static constexpr double kClipDb = -0.001;
-    // The column: a 1 px seam and the track out to its right edge.
-    static constexpr double kColumnWidth = 12.0;
-    static constexpr double kTrackLeft = 1.0;
+    // The column: a 1 px seam, the meter's 1 px keyline and the track out
+    // to its right edge.
+    static constexpr double kColumnWidth = 13.0;
+    static constexpr double kKeylineLeft = 1.0;
+    static constexpr double kKeylineWidth = 1.0;
+    static constexpr double kTrackLeft = kKeylineLeft + kKeylineWidth;
     static constexpr double kTrackWidth = kColumnWidth - kTrackLeft;
     // The body on the track, 1 px in from its left: the fill, the lamp
     // and the held peak.
@@ -167,6 +175,7 @@ public:
     void setClipOffColor(const QColor &value) { setColor(m_clipOffColor, value); }
     void setClipColor(const QColor &value) { setColor(m_clipColor, value); }
     void setTickColor(const QColor &value) { setColor(m_tickColor, value); }
+    void setKeylineColor(const QColor &value) { setColor(m_keylineColor, value); }
 
     QString sourcePath() const { return m_sourcePath; }
     PlaybackClock *clock() const { return m_clock; }
@@ -291,6 +300,7 @@ private:
     QColor m_clipOffColor{QColor::fromRgbF(1, 1, 1, 0.2)};
     QColor m_clipColor{QStringLiteral("#ed5a6a")};
     QColor m_tickColor{QColor::fromRgbF(1, 1, 1, 0.4)};
+    QColor m_keylineColor{QStringLiteral("#5a5a5a")};
     QColor m_topSeamColor{Qt::transparent};
     // Tells readers of the levels of new ones, at most every 250 ms.
     QTimer m_readoutTimer;

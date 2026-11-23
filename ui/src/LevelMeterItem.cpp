@@ -32,8 +32,8 @@ constexpr double kMarksDb[] = {-6.0, -12.0, -24.0};
 constexpr double kShortLaneMarksDb[] = {-6.0, -24.0};
 // Per lane: the column's floor, the track, the lamp, the gap under it, the
 // unlit ladder, the fill, the three marks' ticks, the gap under the peak
-// tick and the peak tick.
-constexpr int kNodesPerLane = 11;
+// tick, the peak tick and the keyline.
+constexpr int kNodesPerLane = 12;
 // Which of a lane's nodes are the unlit ladder and the fill, textures of
 // their rungs; the others are rectangles of one colour.
 constexpr int kUnlitRampNode = 4;
@@ -738,7 +738,9 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
     const auto mark = [](double y) { return QRectF(kMarkLeft, y, kMarkWidth, kMarkGap); };
     for (int lane = 0; lane < m_laneCount; ++lane) {
         const auto [top, bottom] = laneRows(lane, m_laneCount, height());
-        next(QRectF(kTrackLeft, top, std::max(0.0, width() - kTrackLeft), bottom - top), m_backgroundColor);
+        next(QRectF(kKeylineLeft, top, std::max(0.0, width() - kKeylineLeft), bottom - top), m_backgroundColor);
+        // The meter's own edge, the lane's height, beside the seam.
+        const QRectF keyline(kKeylineLeft, top, kKeylineWidth, bottom - top);
         const double meterTop = top + kInset;
         const double meterBottom = std::max(meterTop, bottom - kInset);
         next(track(meterTop, meterBottom - meterTop), m_troughColor);
@@ -772,6 +774,7 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
             nextMarks();
             next(QRectF(), m_backgroundColor);
             next(QRectF(), m_backgroundColor);
+            next(keyline, m_keylineColor);
             continue;
         }
         next(body(meterTop, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
@@ -790,6 +793,7 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         const bool onFill = shown.peak >= 0 && meterBottom - fill < tickY + 3.0 && tickY + 3.0 <= meterBottom;
         next(onFill ? body(tickY + 2.0, 1.0) : QRectF(), m_gapColor);
         next(shown.peak >= 0 ? body(tickY, 2.0) : QRectF(), m_peakColor);
+        next(keyline, m_keylineColor);
     }
     setRect(node->lastChild(), m_topSeamColor.alpha() > 0 ? QRectF(0.0, 0.0, width(), 1.0) : QRectF(),
             m_topSeamColor);

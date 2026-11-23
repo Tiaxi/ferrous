@@ -337,6 +337,11 @@ QtObject {
         required property color meterPeak
         required property color meterClipOff
         required property color meterTick
+        // The meter's own edge: a 1 px keyline down the column beside the
+        // plot's seam, 3:1 on the trough, so the meter reads as an
+        // instrument of its own beside the plot (with the seam alone the
+        // waveform's tips and the kHz ticks ran into its column).
+        required property color meterKeyline
         // The ladder's rungs above the level, unlit: a step off the trough,
         // in the fill's hue.
         required property color meterUnlit
@@ -434,6 +439,8 @@ QtObject {
         // rungs' 3.2:1, so the references read at a glance beside them (at
         // 40 % they were 2.4:1 and receded behind the ladder, H26).
         meterTick: root._drawnAt(Qt.rgba(1, 1, 1, 1), spectrogramColors.meterTrough, 4)
+        // White as the marks are, over the violet trough: a muted lavender.
+        meterKeyline: root._drawnAt(Qt.rgba(1, 1, 1, 1), spectrogramColors.meterTrough, 3)
         meterUnlit: root._drawnAt(spectrogramColors.meterFill, spectrogramColors.meterTrough, 1.3)
         // The floor, and on it marks in white 20 %, #433858: a step over
         // the rest lines' 11 %, as a mark a few pixels long needs more
@@ -489,6 +496,9 @@ QtObject {
         // step over the rungs' 3:1 (at 30 % they were 1.8:1 in a light
         // theme and all but vanished, H26).
         meterTick: root._drawnAt(root.text, ColorUtils.drawnOver(waveformColors.meterTrough, root.view), 4)
+        // In the waveform's hue, as the rungs are, so the edge is the
+        // meter's and not the queue scrollbar's grey.
+        meterKeyline: root._drawnAt(root.paneWave, ColorUtils.drawnOver(waveformColors.meterTrough, root.view), 3)
         meterUnlit: root._drawnAt(waveformColors.meterFill,
                                   ColorUtils.drawnOver(waveformColors.meterTrough, root.view), 1.3)
         // The view, and on it marks a step over the waveform's rest lines
@@ -545,6 +555,7 @@ QtObject {
         meterPeak: spectrogramColors.meterPeak
         meterClipOff: spectrogramColors.meterClipOff
         meterTick: spectrogramColors.meterTick
+        meterKeyline: spectrogramColors.meterKeyline
         meterUnlit: spectrogramColors.meterUnlit
         meterRestTrough: spectrogramColors.meterRestTrough
         meterRestTick: spectrogramColors.meterRestTick

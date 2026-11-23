@@ -649,7 +649,21 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
             QVERIFY2(unlitRungs >= 1.3 && unlitRungs < 1.45,
                      qPrintable(describeContrast(QStringLiteral("unlit rungs"), unlit, plotTrough)));
             QVERIFY(contrastRatio(colorOf(plot, "meterFill"), plotTrough) > unlitRungs + 1.0);
+            // The meter's keyline, its own edge beside the plot's seam: 3:1
+            // on the trough, a step under the marks, so the column reads as
+            // an instrument beside the plot rather than its continuation
+            // (H27: the waveform's tips and the kHz ticks ran into it).
+            const QColor keyline = colorOf(plot, "meterKeyline");
+            QCOMPARE(keyline.alphaF(), 1.0f);
+            const double edge = contrastRatio(keyline, plotTrough);
+            QVERIFY2(edge >= 3.0 && edge < 3.4 && edge < marks,
+                     qPrintable(describeContrast(QStringLiteral("keyline"), keyline, plotTrough)));
         }
+        // On the waveform, in the waveform's hue, as its rungs are, not the
+        // queue scrollbar's grey; on the spectrogram, white as its marks.
+        QVERIFY2(std::abs(colorOf(waveform, "meterKeyline").hslHue() - wave.hslHue()) <= 6,
+                 qPrintable(colorOf(waveform, "meterKeyline").name() + QStringLiteral(" vs ") + wave.name()));
+        QVERIFY(sameColor(colorOf(media, "meterKeyline"), colorOf(spectrogram, "meterKeyline")));
         QVERIFY2(contrastRatio(colorOf(waveform, "meterFill"), trough) >= 3.0,
                  qPrintable(describeContrast(QStringLiteral("rungs on the trough"), colorOf(waveform, "meterFill"), trough)));
         // The pane's waveform: the seek bar's in light; in dark a quieter

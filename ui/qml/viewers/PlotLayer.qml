@@ -652,6 +652,8 @@ Item {
         clipOffColor: root.plotColors.meterClipOff
         clipColor: root.uiPalette.negative
         tickColor: root.beforeAudio ? root.plotColors.meterRestTick : root.plotColors.meterTick
+        // At rest, its edge as quiet as its marks.
+        keylineColor: root.beforeAudio ? root.plotColors.meterRestTick : root.plotColors.meterKeyline
         // One geometry in both modes; only the colours differ. Out to the
         // pane's edge, in the main window and in the viewers alike: its
         // column is far wider than the queue's scrollbar above it.
