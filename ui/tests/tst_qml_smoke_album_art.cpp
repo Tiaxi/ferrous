@@ -1049,10 +1049,12 @@ void checkInfoButtonTintedOnlyWhileChecked(AlbumArtWindow &ui) {
     QTRY_VERIFY(info->property("checked").toBool());
     QVERIFY(tint->isVisible());
     // The mode switch's chosen segment: the plot's text at 18 %, inside a
-    // 1 px edge of segmentEdge, rather than an accent tint.
+    // 1 px edge of segmentEdge, rather than an accent tint. Read with the
+    // pointer off the button: hovered, a checked toggle fades to 26 %.
+    QTest::mouseMove(fullscreen, QPoint(fullscreen->width() / 3, fullscreen->height() / 2));
     QColor neutral = QColor::fromRgba(colorOf(plot, "plotText"));
     neutral.setAlphaF(0.18);
-    QVERIFY(std::abs(qAlpha(colorOf(tint, "color")) - neutral.alpha()) <= 1);
+    QTRY_VERIFY(std::abs(qAlpha(colorOf(tint, "color")) - neutral.alpha()) <= 1);
     QCOMPARE(colorOf(tint, "color") & 0xffffff, neutral.rgba() & 0xffffff);
     QVERIFY(edge->isVisible());
     QCOMPARE(QQmlProperty(edge, QStringLiteral("border.width")).read().toReal(), 1.0);
