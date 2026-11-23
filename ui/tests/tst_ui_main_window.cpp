@@ -1446,9 +1446,9 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
     }
     QVERIFY(boxTop.has_value());
     const QRectF box = sceneRect(tipBox);
-    // 1 px clear of the bar's focus ring and of the buttons' (3 px outside
-    // them), with the ring shown.
-    QVERIFY(box.bottom() <= playPause->mapToScene(QPointF(0, 0)).y() - 3 - 1 + 0.5);
+    // 1 px clear of the bar's focus ring and 3 px of the buttons' (3 px
+    // outside them), with the ring shown.
+    QVERIFY(box.bottom() <= playPause->mapToScene(QPointF(0, 0)).y() - 3 - 3 + 0.5);
     seek->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(seekRing->isVisible());
     QVERIFY2(sceneRect(tipBox).bottom() <= sceneRect(seekRing).top() - 1 + 0.5,
@@ -1458,6 +1458,23 @@ void UiMainWindowTest::seekTimeStaysOverItsLine() {
     // its top where the room above the bar was too little for it.
     QVERIFY2(box.top() - band.top() <= std::max(2.0, bar.top() - band.top() - box.height()) + 1.0,
              qPrintable(describeRect(box) + QStringLiteral(" in ") + describeRect(band)));
+
+    // Mute's and the volume's tooltips share the lane: one line on the time
+    // box's line, as tall as it, in the band and the window (Mute's opened
+    // under the band, over the queue's header).
+    QObject *volumeTip = window->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QObject *muteTip = mute->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+    QVERIFY(volumeTip && muteTip);
+    for (const auto &[control, laneTip] : {std::pair{mute, muteTip}, std::pair{volume, volumeTip}}) {
+        control->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(laneTip->property("opened").toBool(), qPrintable(control->objectName()));
+        const QRectF drawn = sceneRect(laneTip->property("background").value<QQuickItem *>());
+        const QString where = control->objectName() + QLatin1Char(' ') + describeRect(drawn)
+            + QStringLiteral(", the time box ") + describeRect(box);
+        QVERIFY2(std::abs(drawn.bottom() - box.bottom()) <= 0.5 && std::abs(drawn.height() - box.height()) <= 0.5,
+                 qPrintable(where));
+        QVERIFY2(drawn.top() >= band.top() && drawn.left() >= 0 && drawn.right() <= windowWidth, qPrintable(where));
+    }
 }
 
 void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont_data() {

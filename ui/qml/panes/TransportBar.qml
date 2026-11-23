@@ -223,16 +223,20 @@ ToolBar {
     // them.
     readonly property real rowHeight: Math.max(48, root.buttonSize + 16)
     // The seek bar's time box has one place: a lane above the bar, in the
-    // transport's band. Under the bar it hung over the queue's header (H5)
+    // transport's band, which Mute's tooltip and the volume's share, so the
+    // bar's right end has one rail (Mute's opened under the band, over the
+    // queue's header, and the volume's above it). Under the bar the time
+    // box hung over the queue's header (H5)
     // and, at a large font, the now-playing title; above the band it met
     // the menu's titles; beside its line on the waveform it hid what the
     // scrub reads. The lane ends 1 px clear of the seek bar's focus ring
-    // and of the buttons' rings, and its boxes are a line of text and a
-    // little room above and below it, so the band grows by no more than
-    // the lane needs beyond the room above the bar. The lane's bottom, up
-    // from the row's centre line:
+    // and 3 px clear of the buttons' rings, as the buttons' tooltips under
+    // them are (Mute's, 1 px clear, met its ring), and its boxes are a line
+    // of text and a little room above and below it, so the band grows by
+    // no more than the lane needs beyond the room above the bar. The
+    // lane's bottom, up from the row's centre line:
     readonly property real laneClearance: Math.max(seekSlider.boxHeight / 2 + seekSlider.focusRingOutset + 1,
-        root.buttonSize / 2 + root.buttonFocusRingOutset + 1)
+        root.buttonSize / 2 + root.buttonFocusRingOutset + 3)
     // The line's own leading, which grows with the font, is most of the
     // room around its figures.
     readonly property real laneToolTipPadding: 2
@@ -404,6 +408,23 @@ ToolBar {
         visible: (button.hovered || button.visualFocus) && !button.down
         delay: Kirigami.Units.toolTipDelay
         y: button.height + root.buttonFocusRingOutset + 3
+    }
+
+    // A tooltip in the lane above the bar, of `rowItem`, an item of the
+    // row: one line, as the time box is (the style's label wrapped Mute's
+    // to two lines at a large font, past the lane's top).
+    component LaneToolTip: Components.PlainToolTip {
+        id: laneToolTip
+        required property Item rowItem
+        parent: rowItem
+        y: root.laneY(rowItem, height)
+        topPadding: root.laneToolTipPadding
+        bottomPadding: root.laneToolTipPadding
+        contentItem: Label {
+            textFormat: Text.PlainText
+            text: laneToolTip.text
+            font: laneToolTip.font
+        }
     }
 
     // A flat 32 px tool button of the transport with a theme icon. Its
@@ -1408,8 +1429,13 @@ ToolBar {
             // "Mute · Ctrl+Shift+M", as the other buttons name theirs.
             readonly property string toolTipText: root.actionToolTip(muteButton.text,
                 root.muteAction && root.muteAction.shortcut ? String(root.muteAction.shortcut) : "")
-            ButtonToolTip {
-                button: muteButton
+            // In the lane, as the volume's beside it, and as the buttons'
+            // are, not while held down.
+            LaneToolTip {
+                objectName: "transportButtonToolTip"
+                rowItem: muteButton
+                visible: (muteButton.hovered || muteButton.visualFocus) && !muteButton.down
+                delay: Kirigami.Units.toolTipDelay
                 message: muteButton.toolTipText
             }
             focusPolicy: Qt.TabFocus
@@ -1487,10 +1513,10 @@ ToolBar {
             // ends left at the volume it had ("Volume 100%" with the thumb
             // at 40%). A press shows it at once, a hover's still waiting
             // too.
-            Components.PlainToolTip {
+            LaneToolTip {
                 id: volumeToolTip
                 objectName: "volumeToolTip"
-                parent: volumeSlider
+                rowItem: volumeSlider
                 readonly property bool wanted: volumeSlider.hovered || volumeSlider.visualFocus
                     || volumeSlider.pressed
                 // Set together with the delay, which the tooltip reads as it
