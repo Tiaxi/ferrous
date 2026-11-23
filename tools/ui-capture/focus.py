@@ -225,7 +225,9 @@ SCOPES = {
                           (("next-focus", "Next focused"),))]),
             ("focus-transport-seek", "The seek bar and volume at 1:1: hover and its time box, drag, "
              "focus; mute and volume states; dark", "dark",
-             [[("seek", st, (0.094, 0, 0.906, 0.074), lb, dict(lh=16, gap=6))]
+             # (near its start the time box sits under the bar, over the sidebar, so it can't cover the menu's
+             # titles (H30 YA2): that tile reaches below the bar)
+             [[("seek", st, (0.094, 0, 0.906, 0.11 if st == "hover-start" else 0.074), lb, dict(lh=16, gap=6))]
               for st, lb in (("hover", "Seek bar hovered at 62 %: the time box"), ("hover-start", "Hovered near its start"),
                              ("dragging", "Dragged"), ("focus", "Keyboard focus"))]
              + [[("volume", st, (0.82, 0, 0.18, 0.1), lb, dict(lh=16, gap=6)) for st, lb in row]
