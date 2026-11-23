@@ -46,6 +46,9 @@ Item {
     // over to another place.
     property real labelLevel: 1
     property bool compact: false
+    // How much larger than the window's its text is: a viewer's over the
+    // whole screen, on its strip's type scale; 1 elsewhere.
+    property real textScale: 1
     // The height of the lane, which the label keeps within where that is
     // shorter than it, and how far the plate is moved from the label's
     // centre to stay in the plot, in lanes shorter than it.
@@ -88,9 +91,9 @@ Item {
     readonly property real buttonSize: root.compact
         ? Math.max(16, Math.ceil(labelMetrics.height) + Math.round(root.uiPalette.fontScale)) + 4
         : root.uiPalette.toolButtonSize
-    readonly property real glyphPointSize: root.compact
+    readonly property real glyphPointSize: (root.compact
         ? root.uiPalette.compactPointSize
-        : root.uiPalette.smallPointSize
+        : root.uiPalette.smallPointSize) * root.textScale
 
     // The plate's, around and between its buttons, as on the mode switch,
     // so that a button's focus ring, 3 px out from it, keeps 1 px of the
@@ -131,6 +134,7 @@ Item {
         uiPalette: root.uiPalette
         text: root.label
         compact: root.compact
+        textScale: root.textScale
         fadeLevel: root.labelLevel
         z: 1
         y: root.labelY

@@ -5,7 +5,8 @@ import FerrousUi 1.0
 import "." as Components
 import "../logic/ColorUtils.js" as ColorUtils
 
-// The controls of a viewer, as flat 24 px tool buttons 4 px apart on the
+// The controls of a viewer, as flat 24 px tool buttons (or a title strip's
+// size, `viewerButtonSize` with `viewerIconSize` glyphs) 4 px apart on the
 // window's colours, or with `plotColors` on the plot's: "Not following" while
 // the visualization's view is moved away from the playhead, a quiet zoom readout
 // and Reset's glyph while the view is zoomed, a button to Recent Issues while there
@@ -46,6 +47,11 @@ Item {
     property bool closeDivided: false
     // Close, unless the viewer has none here, as with its strip turned off.
     property bool closeShown: true
+    // Its buttons' size and their glyphs', which the viewer's own buttons
+    // declared inside take too (ViewerToolButton): the design's small tool
+    // button, or a title strip's, on its larger type.
+    property int viewerButtonSize: root.uiPalette.toolButtonSize
+    property int viewerIconSize: root.uiPalette.toolIconSize
     // What a plate under the controls has around them: the readout's text
     // and the dividers are 6 px in from a plate's edge, as on the plot's.
     property real platePadding: 2
@@ -61,7 +67,7 @@ Item {
 
     implicitWidth: root.closeShown ? closeButton.x + closeButton.width
                                    : viewerControlsRow.x + viewerControlsRow.implicitWidth
-    implicitHeight: root.uiPalette.toolButtonSize
+    implicitHeight: root.viewerButtonSize
 
     // First, so that it grows the controls to the left.
     Components.FollowNotice {
@@ -69,6 +75,7 @@ Item {
         objectName: "viewerFollowNotice"
         x: 0
         visible: root.noticeShown
+        height: root.viewerButtonSize
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         pointSize: root.readoutPointSize
@@ -86,6 +93,7 @@ Item {
         x: root.noticeShown ? notice.implicitWidth + root.platePadding : 0
         leftPadding: 6 - root.platePadding
         visible: root.readoutShown
+        height: root.viewerButtonSize
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         zoomLevel: root.zoomLevel
@@ -141,6 +149,10 @@ Item {
         toolTipText: I18n.i18nc("@info:tooltip %1 is the issue count", "%1: Show Recent Issues",
             text)
         icon.name: Qt.resolvedUrl("../assets/status-warning.svg")
+        // A click leaves the focus where it is: Recent Issues takes it, and
+        // the button goes once they are seen, so the focus would come back
+        // to a button that is no longer there.
+        focusPolicy: Qt.TabFocus
         // The window's negative is lightened on dark and darkened on light:
         // on a plot of the other brightness, such as the spectrogram's black
         // in a light theme, the glyph is the plot's text instead.
@@ -156,7 +168,7 @@ Item {
         id: viewerControlsRow
         x: issuesButton.x + (root.issuesShown ? issuesButton.width + root.spacing : 0)
         implicitWidth: childrenRect.width
-        implicitHeight: root.uiPalette.toolButtonSize
+        implicitHeight: root.viewerButtonSize
         width: implicitWidth
         height: implicitHeight
     }

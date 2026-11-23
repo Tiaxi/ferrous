@@ -38,6 +38,10 @@ Item {
     property real meterWidth: 0
     // The corner plate's inset from the plot's corner, as the lane heads'.
     readonly property int cornerInset: 5
+    // Its inset from the plot's right edge: the corner's, or beside the
+    // level meter's column, 8 px from it (at 5 px, its edge all but met the
+    // meter's seam).
+    readonly property int cornerRightInset: root.meterWidth > 0 ? 8 : root.cornerInset
     // Whether the title strip shows over the whole screen when the pointer
     // moves: the Preferences setting.
     property bool stripEnabled: true
@@ -121,7 +125,7 @@ Item {
     // meter's column apart: that plate, with the 1 px edge outside it. It
     // does not change as it auto-hides.
     readonly property size reservedCorner: root.cornerControls
-        ? Qt.size(root.cornerInset + root.cornerControls.width + 1,
+        ? Qt.size(root.cornerRightInset + root.cornerControls.width + 1,
                   root.cornerInset + root.cornerControls.height + 1)
         : Qt.size(0, 0)
     // How far the visualization's controls, such as the first lane's Mute
@@ -134,6 +138,11 @@ Item {
     readonly property real controlsTopInset: root.wholeScreenOpen && root.fullscreenWindow
             && root.stripEnabled
         ? root.fullscreenWindow.strip.implicitHeight : 0
+    // Where the strip's title starts, for the lane heads under it to start
+    // there too, while it can show; -1 without it.
+    readonly property real stripTextInset: root.wholeScreenOpen && root.fullscreenWindow
+            && root.stripEnabled
+        ? root.fullscreenWindow.strip.textInset : -1
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
     // Whether the pointer is on the corner plate, where the plot's crosshair
     // gives way as it does on the plot's own plates.
@@ -195,10 +204,12 @@ Item {
         id: fullscreenControlsAutoHide
         objectName: "spectrogramFullscreenControlsAutoHide"
         active: root.viewerOpen
-        // The controls stay while one of them has focus, however it got it:
-        // the keyboard, a click, or assistive technology.
+        // The controls stay while one of them has focus from the keyboard
+        // or assistive technology; the focus a click gives a button lets
+        // them hide after the pointer rests, as before the click.
         held: root.focusedItem !== root.viewFocus
             && root.isInside(root.focusedItem, root.viewerScope)
+            && root.focusedItem.focusReason !== Qt.MouseFocusReason
     }
 
     // Sees a press on the view and where it moves, whatever takes it, for a
@@ -366,7 +377,7 @@ Item {
                 anchors.top: parent.top
                 anchors.right: parent.right
                 anchors.topMargin: root.cornerInset
-                anchors.rightMargin: root.meterWidth + root.cornerInset
+                anchors.rightMargin: root.meterWidth + root.cornerRightInset
                 plotColors: root.uiPalette.plotColors(root.visualizationMode)
                 uiPalette: root.uiPalette
                 closeButtonName: "spectrogramPopupCloseButton"
@@ -518,7 +529,7 @@ Item {
                         anchors.top: parent.top
                         anchors.right: parent.right
                         anchors.topMargin: root.cornerInset
-                        anchors.rightMargin: root.meterWidth + root.cornerInset
+                        anchors.rightMargin: root.meterWidth + root.cornerRightInset
                         available: !root.stripEnabled
                         closeShown: false
                         closeButtonName: "spectrogramFullscreenCornerCloseButton"

@@ -239,6 +239,10 @@ private slots:
     void viewerToolButtonHoverReadsOnThePlot();
     void viewerToolButtonShowsAKeyPressAtOnce_data();
     void viewerToolButtonShowsAKeyPressAtOnce();
+    void viewerWaveformLaneSeamReadsOnWhite_data();
+    void viewerWaveformLaneSeamReadsOnWhite();
+    void viewerToolButtonCheckedToggleAnswersHover_data();
+    void viewerToolButtonCheckedToggleAnswersHover();
     void plotToolButtonDrawsCheckedAndFocusApart_data();
     void plotToolButtonDrawsCheckedAndFocusApart();
     void plotToolButtonIsAnAccessibleCheckableButton();
@@ -1876,6 +1880,137 @@ void UiFoundationsTest::viewerToolButtonShowsAKeyPressAtOnce() {
     QVERIFY2(channelDistance(drawnReleased, surface) <= 3,
              qPrintable(QStringLiteral("the first frame after the release is %1, not %2")
                             .arg(drawnReleased.name(), surface.name())));
+}
+
+void UiFoundationsTest::viewerWaveformLaneSeamReadsOnWhite_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// The line between the waveform's lanes in a viewer: in Breeze Light
+// #cdd2d6, a step stronger than the pane's hairline, which on a white
+// screen all but vanished between the channels; in Breeze Dark the pane's.
+void UiFoundationsTest::viewerWaveformLaneSeamReadsOnWhite() {
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, QString()), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QVERIFY(tokens != nullptr);
+    QObject *waveform = tokens->property("waveformPlot").value<QObject *>();
+    QVERIFY(waveform != nullptr);
+    const QColor seam = colorOf(tokens, "viewerWaveformLaneSeam");
+    if (dark) {
+        QVERIFY(sameColor(seam, colorOf(waveform, "plotLaneSeam")));
+    } else {
+        QVERIFY2(sameColor(seam, fromHex(QStringLiteral("#cdd2d6"))), qPrintable(seam.name()));
+        QVERIFY(contrastRatio(seam, colorOf(waveform, "plotBg"))
+                > contrastRatio(colorOf(waveform, "plotLaneSeam"), colorOf(waveform, "plotBg")));
+    }
+}
+
+void UiFoundationsTest::viewerToolButtonCheckedToggleAnswersHover_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<int>("plotMode");
+    QTest::newRow("spectrogram, dark") << true << 0;
+    QTest::newRow("waveform, light") << false << 1;
+}
+
+// A checked toggle on a plot, such as the album art viewer's Image Details,
+// which a click turns off, answers the pointer: its checked fill goes from
+// 18 % to 26 % of the plot's text colour while hovered, fading over
+// shortDuration, and back as the pointer leaves (at one fill it gave no
+// sign that a click would change it). The chosen segment of a choice, such
+// as the visualization's mode switch, which a click leaves chosen, stays at
+// 18 %.
+void UiFoundationsTest::viewerToolButtonCheckedToggleAnswersHover() {
+    QFETCH(bool, dark);
+    QFETCH(int, plotMode);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root = createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight,
+                                                                               kPlotItems + QStringLiteral(R"QML(
+        Rectangle {
+            objectName: "strip"
+            x: 16
+            y: 150
+            width: 120
+            height: 40
+            color: plot.plotColors.plotStrip
+
+            Components.ViewerToolButton {
+                objectName: "toggle"
+                x: 8
+                y: 8
+                uiPalette: tokens
+                plotColors: plot.plotColors
+                checked: true
+                text: "Image Details"
+                icon.name: "ferrous-fixture-square"
+            }
+
+            Components.ViewerToolButton {
+                objectName: "segment"
+                x: 60
+                y: 8
+                uiPalette: tokens
+                plotColors: plot.plotColors
+                checkable: true
+                autoExclusive: true
+                checked: true
+                text: "Spectrogram"
+                icon.name: "ferrous-fixture-square"
+            }
+        }
+)QML")),
+                                                       &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickItem *plot = itemNamed(root.get(), QStringLiteral("plot"));
+    QQuickItem *toggle = itemNamed(root.get(), QStringLiteral("toggle"));
+    QQuickItem *segment = itemNamed(root.get(), QStringLiteral("segment"));
+    QVERIFY(plot != nullptr && toggle != nullptr && segment != nullptr);
+    plot->setProperty("plotMode", plotMode);
+    QObject *plotColors = plot->property("plotColors").value<QObject *>();
+    QVERIFY(plotColors != nullptr);
+    const QColor text = colorOf(plotColors, "plotText");
+    QQuickItem *toggleFill = childNamed(toggle, QStringLiteral("viewerToolButtonChecked"));
+    QQuickItem *segmentFill = childNamed(segment, QStringLiteral("viewerToolButtonChecked"));
+    QVERIFY(toggleFill != nullptr && segmentFill != nullptr);
+    QVERIFY(toggleFill->isVisible() && segmentFill->isVisible());
+    const auto alphaOf = [](QQuickItem *fill) { return colorOf(fill, "color").alphaF(); };
+    QCOMPARE(colorOf(toggleFill, "color").rgb(), text.rgb());
+    QVERIFY2(std::abs(alphaOf(toggleFill) - 0.18) < 0.005, qPrintable(QString::number(alphaOf(toggleFill))));
+
+    SteppedAnimationDriver animations;
+    QTest::mouseMove(window, QPoint(2, 2));
+    QTest::mouseMove(window, toggle->mapToScene(QPointF(toggle->width() / 2, toggle->height() / 2)).toPoint());
+    QTRY_VERIFY(toggle->property("hovered").toBool());
+    // It fades: a moment in, between the two.
+    (void)animations.step(20);
+    const qreal halfway = alphaOf(toggleFill);
+    QVERIFY2(halfway > 0.185 && halfway < 0.255, qPrintable(QString::number(halfway)));
+    (void)animations.step(1000);
+    QCOMPARE(colorOf(toggleFill, "color").rgb(), text.rgb());
+    QVERIFY2(std::abs(alphaOf(toggleFill) - 0.26) < 0.005, qPrintable(QString::number(alphaOf(toggleFill))));
+    // The hover wash stays aside: the checked fill alone shows.
+    QQuickItem *toggleHover = childNamed(toggle, QStringLiteral("viewerToolButtonHover"));
+    QVERIFY(toggleHover != nullptr);
+    QVERIFY(!toggleHover->isVisible());
+
+    // The chosen segment stays as it is.
+    QTest::mouseMove(window, segment->mapToScene(QPointF(segment->width() / 2, segment->height() / 2)).toPoint());
+    QTRY_VERIFY(segment->property("hovered").toBool());
+    (void)animations.step(1000);
+    QVERIFY2(std::abs(alphaOf(segmentFill) - 0.18) < 0.005, qPrintable(QString::number(alphaOf(segmentFill))));
+    // And the toggle the pointer left is back at 18 %.
+    QVERIFY(!toggle->property("hovered").toBool());
+    QVERIFY2(std::abs(alphaOf(toggleFill) - 0.18) < 0.005, qPrintable(QString::number(alphaOf(toggleFill))));
 }
 
 void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart_data() {

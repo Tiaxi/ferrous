@@ -1858,6 +1858,10 @@ ApplicationWindow {
         // is open, so that the pane's last frame is laid out as the pane
         // showed it.
         readonly property bool inViewer: visualizationSurface.parent !== spectrogramPane.hostItem
+        // Whether the viewer over the whole screen shows them, where their
+        // text is on its strip's type scale.
+        readonly property bool inFullscreenViewer: spectrogramViewerShell.windowHost !== null
+            && visualizationSurface.parent === spectrogramViewerShell.windowHost
         // What the plot keeps clear of in its top right corner: the mode
         // switch in the pane, and in a viewer the plate of its own controls.
         readonly property size reservedCorner: visualizationSurface.inViewer
@@ -2119,6 +2123,7 @@ ApplicationWindow {
             visible: visualizationSurface.plotShown(1)
             opacity: visualizationSurface.plotOpacity(1)
             playheadVisible: visualizationSurface.playheadShown(1)
+            viewerMode: visualizationSurface.inViewer
             z: visualizationSurface.settledMode === 1 ? 0 : 1
             layer.enabled: opacity > 0 && opacity < 1
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
@@ -2172,6 +2177,9 @@ ApplicationWindow {
             controlsAutoHide: visualizationSurface.inViewer
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             topInset: spectrogramViewerShell.controlsTopInset
+            textScale: visualizationSurface.inFullscreenViewer ? root.uiPalette.fullscreenTextScale : 1
+            laneHeadInset: visualizationSurface.inFullscreenViewer && spectrogramViewerShell.stripTextInset >= 0
+                ? spectrogramViewerShell.stripTextInset : plotLayer.plateInset
             laneCount: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.laneCount : waveformSurface.laneCount
             laneLabels: visualizationSurface.spectrogramShown
