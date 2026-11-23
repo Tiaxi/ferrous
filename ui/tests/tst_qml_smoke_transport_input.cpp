@@ -52,6 +52,8 @@ private slots:
     void notFollowingLeavesOneWay_data();
     void notFollowingLeavesOneWay();
     void notFollowingComesInWithThePlate();
+    void seekBarBandGlidesAsTheViewFollowsAgain_data();
+    void seekBarBandGlidesAsTheViewFollowsAgain();
     void zoomPlateSpacesItsDividerEvenly();
     void movedViewSaysSoInTheViewers_data();
     void movedViewSaysSoInTheViewers();
@@ -4590,6 +4592,66 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
         QVERIFY(!corner.plate->isVisible());
     }
     QCOMPARE(corner.modeSwitch->opacity(), cornerWanted ? 1.0 : 0.0);
+}
+
+void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// On Follow Playhead the seek bar's band glides from the moved view's
+// place to the followed one's, in either plot, which say that it follows
+// and where it is in either order (TransportStatusTest has the rest). The
+// plot cuts.
+void TransportInputSmokeTest::seekBarBandGlidesAsTheViewFollowsAgain() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    auto *transport = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
+    auto *band = window->findChild<QQuickItem *>(QStringLiteral("seekViewBand"));
+    QVERIFY(transport && band);
+    QTest::mouseMove(window, corner.away());
+    corner.zoom(4.0);
+    QTRY_VERIFY(band->isVisible());
+    QVERIFY(corner.moveView());
+    QVERIFY(transport->property("viewDetached").toBool());
+    // A frame of the moved view, which the spectrogram says it shows as
+    // it draws it, and the events that come after it.
+    window->grabWindow();
+    QTest::qWait(50);
+    QVERIFY(band->isVisible());
+    const double movedLeft = sceneRectOf(band).left();
+
+    SteppedAnimationDriver animations;
+    QVERIFY(QMetaObject::invokeMethod(corner.surface, "followPlayhead"));
+    QVERIFY(!transport->property("viewDetached").toBool());
+    // Frame by frame: where the band is.
+    QList<double> lefts;
+    window->grabWindow();
+    lefts.append(sceneRectOf(band).left());
+    for (int frame = 1; frame <= 12; ++frame) {
+        QVERIFY(animations.step(16));
+        window->grabWindow();
+        lefts.append(sceneRectOf(band).left());
+    }
+    QString path;
+    for (const double left : lefts) path += QString::number(left) + QLatin1Char(' ');
+    // Where it was as the view came back, then on its way, then there.
+    QCOMPARE(lefts.first(), movedLeft);
+    const double followedLeft = lefts.last();
+    QVERIFY2(std::abs(followedLeft - movedLeft) > 20.0, qPrintable(path));
+    QCOMPARE(lefts.at(lefts.size() - 2), followedLeft);
+    qsizetype between = 0;
+    for (qsizetype frame = 1; frame < lefts.size(); ++frame) {
+        QVERIFY2((lefts.at(frame) - lefts.at(frame - 1)) * (followedLeft - movedLeft) >= 0, qPrintable(path));
+        if (lefts.at(frame) != movedLeft && lefts.at(frame) != followedLeft) ++between;
+    }
+    QVERIFY2(between >= 4, qPrintable(path));
 }
 
 // "Not following" and its divider come in over 100 ms, OutCubic, with
