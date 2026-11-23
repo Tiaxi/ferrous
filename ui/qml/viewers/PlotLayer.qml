@@ -211,9 +211,13 @@ Item {
     // the plot it shows on the plot's own state, the crosshair's, so that
     // the two show and hide together (on the lanes' hover, the row went at
     // the seam between the waveform's lanes while the crosshair stayed).
+    // It also holds while autoscroll runs, which the pointer started on
+    // the pane and takes to the window's edge: there it faded out, and in
+    // again as autoscroll stopped on the moved view (H16). It adds nothing
+    // to the row: "Not following" waits until autoscroll stops (#655).
     readonly property bool cornerWanted: root.controlsAutoHide || root.beforeAudio || root.plotPointerOn
         || root.paneHovered || modeSwitch.pointerHovered || modeSwitch.focusInside
-        || zoomPlate.focusInside
+        || zoomPlate.focusInside || root.viewAutoscrolling
 
     // As a view follows again, "Not following" leaves the plate one way,
     // whether the row stays or fades out with it (PlotZoomPlate's

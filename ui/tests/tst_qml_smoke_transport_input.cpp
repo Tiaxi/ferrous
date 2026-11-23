@@ -52,6 +52,8 @@ private slots:
     void notFollowingLeavesOneWay_data();
     void notFollowingLeavesOneWay();
     void notFollowingComesInWithThePlate();
+    void cornerHoldsWhileAutoscrollRuns_data();
+    void cornerHoldsWhileAutoscrollRuns();
     void plotsTellFollowingAgainInOneOrder_data();
     void plotsTellFollowingAgainInOneOrder();
     void seekBarBandLandsWithThePlot_data();
@@ -4900,6 +4902,64 @@ void TransportInputSmokeTest::notFollowingComesInWithThePlate() {
         (void)animations.step(300);
         QVERIFY(!corner.notice->isVisible());
     }
+}
+
+void TransportInputSmokeTest::cornerHoldsWhileAutoscrollRuns_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// While autoscroll runs, the corner's row stays as the pointer leaves the
+// pane for the window's edge, where autoscroll is fastest: it faded out
+// there and back in as autoscroll stopped on the moved view, mid-gesture
+// (H16). "Not following" stays absent while it runs (#655): the row shows
+// what it showed with the pointer on the pane, and nothing more.
+void TransportInputSmokeTest::cornerHoldsWhileAutoscrollRuns() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QQuickItem *plot = corner.waveform;
+    if (mode == 0) {
+        plot = itemNamed(corner.spectrogramSurface, QStringLiteral("spectrogramPaneItem"));
+        QVERIFY(plot != nullptr);
+    }
+    // A move onto the pane, wherever the last test left the pointer.
+    QTest::mouseMove(window, corner.onPane() + QPoint(1, 1));
+    QTest::mouseMove(window, corner.onPane());
+    corner.zoom(4.0);
+    QTRY_COMPARE(corner.plate->opacity(), 1.0);
+    QTRY_COMPARE(corner.modeSwitch->opacity(), 1.0);
+    window->grabWindow();
+
+    SteppedAnimationDriver animations;
+    middleClickPlot(plot, plot->width() / 2);
+    QVERIFY(corner.surface->property("autoscrolling").toBool());
+    QTest::mouseMove(window, corner.away());
+    for (int frame = 0; frame < 20; ++frame) {
+        (void)animations.step(16);
+        window->grabWindow();
+        QVERIFY(corner.surface->property("autoscrolling").toBool());
+        QVERIFY2(corner.plate->opacity() == 1.0 && corner.modeSwitch->opacity() == 1.0,
+                 qPrintable(QStringLiteral("frame %1: plate %2, switch %3")
+                                .arg(frame).arg(corner.plate->opacity()).arg(corner.modeSwitch->opacity())));
+        QVERIFY(!corner.moved() && !corner.notice->isVisible());
+    }
+    // Stopped there, on the moved view: the row stays, and says so.
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!corner.surface->property("autoscrolling").toBool());
+    QVERIFY(corner.moved());
+    for (int frame = 0; frame < 10; ++frame) {
+        (void)animations.step(16);
+        window->grabWindow();
+        QCOMPARE(corner.plate->opacity(), 1.0);
+        QCOMPARE(corner.modeSwitch->opacity(), 1.0);
+    }
+    QVERIFY(corner.notice->isVisible());
 }
 
 // The divider between "Not following" and the zoom has 6 px on each side
