@@ -53,6 +53,8 @@ private slots:
     void notFollowingLeavesOneWay_data();
     void notFollowingLeavesOneWay();
     void notFollowingComesInWithThePlate();
+    void notFollowingArrivesAsItLeaves_data();
+    void notFollowingArrivesAsItLeaves();
     void cornerHoldsWhileAutoscrollRuns_data();
     void cornerHoldsWhileAutoscrollRuns();
     void plotsTellFollowingAgainInOneOrder_data();
@@ -4328,12 +4330,11 @@ void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
     QTRY_VERIFY(toolTip->property("visible").toBool());
     QTest::mouseMove(window, away);
 
-    // Followed again with the pointer away, the notice's text goes in the
-    // frame the view comes back in, and the notice with the row
-    // (notFollowingLeavesOneWay).
+    // Followed again with the pointer away, the notice goes with the row's
+    // fade, its text with it (notFollowingLeavesOneWay).
     QVERIFY(QMetaObject::invokeMethod(surface, "followPlayhead"));
     QVERIFY(!moved());
-    QVERIFY(!text->isVisible());
+    QVERIFY(text->isVisible());
     QTRY_COMPARE(plate->opacity(), 0.0);
     QTRY_VERIFY(!notice->isVisible());
     QTRY_COMPARE(modeSwitch->opacity(), 0.0);
@@ -4508,15 +4509,18 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay_data() {
     }
 }
 
-// As the view follows again, "Not following" leaves one way in both plots,
-// whether the corner's row stays or fades out, over 120 ms, OutCubic.
-// Zoomed, its text goes in the frame the view comes back in, and the plate
-// narrows from its width to its new one at its left edge, Reset and the
-// switch staying (its edge jumped 89 px in a frame with the row staying,
-// H15); the room it gives up fades as it narrows, where it stood as blank
-// plate (H16). At the default zoom, with nothing else on it, the plate
-// fades at its width with its text, which went in a frame while the empty
-// plate faded on (H16).
+// As the view follows again, "Not following" leaves the same way in both
+// plots. With the corner's row staying, over 120 ms, OutCubic: zoomed, its
+// text goes in the frame the view comes back in, and the plate narrows
+// from its width to its new one at its left edge, Reset and the switch
+// staying (its edge jumped 89 px in a frame, H15); the room it gives up
+// fades as it narrows, where it stood as blank plate (H16), and the rest's
+// corners are round (H17). At the default zoom, with nothing else on it,
+// the plate fades at its width with its text, which went in a frame while
+// the empty plate faded on (H16). With the row fading out, the notice goes
+// with the plate's fade, at its width, on the row's curve: the plate
+// narrowed 15 ms ahead of the row's fade, its text gone at full opacity
+// (H17).
 void TransportInputSmokeTest::notFollowingLeavesOneWay() {
     QFETCH(int, mode);
     QFETCH(bool, cornerWanted);
@@ -4581,14 +4585,15 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
     SteppedAnimationDriver animations;
     QVERIFY(QMetaObject::invokeMethod(corner.surface, "followPlayhead"));
     QVERIFY(!corner.moved());
-    // The frame it follows in: the plate as it was, without its text when
-    // zoomed, and with it, as it was, at the default zoom.
-    QCOMPARE(corner.text->isVisible(), !zoomed);
-    QCOMPARE(corner.divider->isVisible(), false);
+    // The frame it follows in: the plate as it was, without its text as it
+    // narrows, and with it, as it was, otherwise.
+    const bool narrows = zoomed && cornerWanted;
+    QCOMPARE(corner.text->isVisible(), !narrows);
+    QCOMPARE(corner.divider->isVisible(), zoomed && !narrows);
     QImage image = window->grabWindow();
     QCOMPARE(sceneRectOf(corner.plate).left(), grownLeft);
     QCOMPARE(corner.plate->opacity(), 1.0);
-    if (zoomed) {
+    if (narrows) {
         // One plate, its room and the rest.
         const Fills f = fills(image);
         QVERIFY2(channelDistance(f.room, f.staying) <= 1, qPrintable(f.room.name() + u' ' + f.staying.name()));
@@ -4598,12 +4603,13 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
     double left = grownLeft;
     double step = std::numeric_limits<double>::infinity();
     double opacity = 1.0;
-    for (int frame = 1; frame * 16 < 120; ++frame) {
+    // Over 120 ms, or the row's 100 ms as it fades out.
+    for (int frame = 1; frame * 16 < (cornerWanted ? 120 : 100); ++frame) {
         QVERIFY(animations.step(16));
         image = window->grabWindow();
         const double now = sceneRectOf(corner.plate).left();
         const QString where = QStringLiteral("frame %1").arg(frame);
-        if (zoomed) {
+        if (narrows) {
             // Narrowing, more slowly as it goes, its right edge where it was.
             QVERIFY2((frame == 1 ? now > left && now < plainLeft : now >= left) && now <= plainLeft,
                      qPrintable(QStringLiteral("frame %1: %2 after %3, to %4").arg(frame).arg(now).arg(left).arg(plainLeft)));
@@ -4621,13 +4627,30 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
                          qPrintable(QStringLiteral("%1: room %2, plate %3, plot %4")
                                         .arg(where, f.room.name(), f.staying.name(), f.plot.name())));
             }
+            // As the room goes, the rest's left corner is round: cut
+            // square, its edge ran on to the corner (H17).
+            const double room = corner.notice->implicitWidth() + 4;
+            if (f.roomWidth >= 2 && f.roomWidth + 1 <= room / 4) {
+                const QColor cornerPixel = pixel(image, sceneRectOf(corner.plate).left() + f.roomWidth + 0.5,
+                                                 sceneRectOf(corner.plate).top() - 0.5);
+                QVERIFY2(channelDistance(cornerPixel, f.plot) < channelDistance(cornerPixel, f.staying),
+                         qPrintable(QStringLiteral("%1: corner %2, edge %3, plot %4")
+                                        .arg(where, cornerPixel.name(), f.staying.name(), f.plot.name())));
+            }
         } else {
-            // At its width, fading with its text.
+            // At its width, fading with its text, and with the row as it
+            // fades out.
             QCOMPARE(now, grownLeft);
             QVERIFY2(corner.text->isVisible() && corner.text->opacity() == 1.0, qPrintable(where));
+            QCOMPARE(corner.divider->isVisible(), zoomed);
             QVERIFY2(corner.plate->opacity() < opacity,
                      qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(corner.plate->opacity()).arg(opacity)));
             opacity = corner.plate->opacity();
+            if (!cornerWanted) {
+                QVERIFY2(corner.plate->opacity() == corner.modeSwitch->opacity(),
+                         qPrintable(QStringLiteral("%1: plate %2, switch %3")
+                                        .arg(where).arg(corner.plate->opacity()).arg(corner.modeSwitch->opacity())));
+            }
         }
         QCOMPARE(sceneRectOf(corner.plate).right() + 4, switchAt.left());
         QCOMPARE(sceneRectOf(corner.modeSwitch), switchAt);
@@ -4643,6 +4666,15 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
     QVERIFY(animations.step(32));
     image = window->grabWindow();
     QVERIFY(!corner.notice->isVisible());
+    // Nothing comes in again behind it: as the narrowing ended, the notice
+    // showed for an instant and its text started to arrive (H17).
+    for (int frame = 0; frame < 8; ++frame) {
+        QVERIFY2(corner.notice->property("arrivalLevel").toDouble() == 1.0,
+                 qPrintable(QStringLiteral("after it left, frame %1: %2")
+                                .arg(frame).arg(corner.notice->property("arrivalLevel").toDouble())));
+        QVERIFY(!corner.notice->isVisible());
+        (void)animations.step(16);
+    }
     if (zoomed) {
         QCOMPARE(sceneRectOf(corner.plate).left(), plainLeft);
         QCOMPARE(sceneRectOf(corner.reset), resetAt);
@@ -4953,14 +4985,146 @@ void TransportInputSmokeTest::notFollowingComesInWithThePlate() {
             gain = now - level;
             level = now;
         }
-        QVERIFY(animations.step(16));
+        // With the row showing, it comes in with the room the plate grows
+        // by, over 120 ms (notFollowingArrivesAsItLeaves).
+        QVERIFY(animations.step(cornerWanted ? 32 : 16));
         QCOMPARE(corner.text->opacity(), 1.0);
         QCOMPARE(corner.divider->opacity(), 1.0);
-        // It goes at once.
+        // It goes at once as the plate narrows, and with the plate's fade
+        // as the row fades out (notFollowingLeavesOneWay).
         QVERIFY(QMetaObject::invokeMethod(corner.surface, "followPlayhead"));
-        QVERIFY(!corner.text->isVisible());
+        QCOMPARE(corner.text->isVisible(), !cornerWanted);
         (void)animations.step(300);
         QVERIFY(!corner.notice->isVisible());
+    }
+}
+
+
+void TransportInputSmokeTest::notFollowingArrivesAsItLeaves_data() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<bool>("zoomed");
+    QTest::newRow("spectrogram, zoomed") << 0 << true;
+    QTest::newRow("waveform, zoomed") << 1 << true;
+    QTest::newRow("spectrogram, at the default zoom") << 0 << false;
+}
+
+// "Not following" comes as it goes while the corner's row shows, as the
+// view is dragged away or autoscroll stops on it: zoomed, the plate grows
+// to the left over 120 ms, OutCubic, Reset and the switch staying, its new
+// room fading in with the text and divider, which stay in their place and
+// in the room; its left corners stay round. It jumped 89 px wider in a
+// frame, an empty box, as the text faded in (H17). At the default zoom the
+// plate fades in at its width, its text with it.
+void TransportInputSmokeTest::notFollowingArrivesAsItLeaves() {
+    QFETCH(int, mode);
+    QFETCH(bool, zoomed);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QTest::mouseMove(window, corner.onPane() + QPoint(1, 1));
+    QTest::mouseMove(window, corner.onPane());
+    corner.zoom(zoomed ? 4.0 : 1.0);
+    QTRY_VERIFY(corner.layer->property("cornerWanted").toBool());
+    QTRY_COMPARE(corner.modeSwitch->opacity(), 1.0);
+    if (zoomed) {
+        QTRY_COMPARE(corner.plate->opacity(), 1.0);
+    }
+    window->grabWindow();
+    const QRectF resetAt = sceneRectOf(corner.reset);
+    const QRectF switchAt = sceneRectOf(corner.modeSwitch);
+    const double plainLeft = sceneRectOf(corner.plate).left();
+    const qreal ratio = window->effectiveDevicePixelRatio();
+    const auto pixel = [ratio](const QImage &image, double x, double y) {
+        return image.pixelColor(static_cast<int>(std::floor(x * ratio)), static_cast<int>(std::floor(y * ratio)));
+    };
+
+    SteppedAnimationDriver animations;
+    QVERIFY(corner.moveView());
+    QVERIFY(corner.moved());
+    QImage image = window->grabWindow();
+    // The frame it is moved in: the plate as it was, nothing on it yet.
+    // How far it has come: its text's, zoomed, and the plate's otherwise.
+    const auto came = [&]() { return zoomed ? corner.text->opacity() : corner.plate->opacity(); };
+    QCOMPARE(came(), 0.0);
+    if (zoomed) {
+        QCOMPARE(sceneRectOf(corner.plate).left(), plainLeft);
+        QCOMPARE(corner.plate->opacity(), 1.0);
+    }
+    const double room = corner.notice->implicitWidth() + 4;
+    double left = plainLeft;
+    double step = std::numeric_limits<double>::infinity();
+    double level = 0.0;
+    for (int frame = 1; frame * 16 < 120; ++frame) {
+        QVERIFY(animations.step(16));
+        image = window->grabWindow();
+        const QString where = QStringLiteral("frame %1").arg(frame);
+        const QRectF plate = sceneRectOf(corner.plate);
+        const double now = plate.left();
+        const double text = came();
+        QVERIFY2(text > level && text < 1.0, qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(text).arg(level)));
+        QCOMPARE(corner.divider->opacity(), corner.text->opacity());
+        level = text;
+        QCOMPARE(sceneRectOf(corner.modeSwitch), switchAt);
+        QCOMPARE(corner.modeSwitch->opacity(), 1.0);
+        QCOMPARE(plate.right() + 4, switchAt.left());
+        if (!zoomed) {
+            // At its width, fading in with its text, which is whole.
+            QCOMPARE(corner.text->opacity(), 1.0);
+            QCOMPARE(corner.notice->width(), corner.notice->implicitWidth());
+            if (frame == 1) left = now;
+            QCOMPARE(now, left);
+            continue;
+        }
+        QCOMPARE(corner.plate->opacity(), 1.0);
+        QCOMPARE(sceneRectOf(corner.reset), resetAt);
+        // Growing to the left, more slowly as it goes, by as much of its
+        // room as its text has come in.
+        QVERIFY2((frame == 1 ? now < left : now <= left) && now >= plainLeft - room - 1e-6,
+                 qPrintable(QStringLiteral("%1: %2 after %3, to %4").arg(where).arg(now).arg(left).arg(plainLeft - room)));
+        QVERIFY2(left - now <= step + 1, qPrintable(QStringLiteral("%1: %2 after %3").arg(where).arg(left - now).arg(step)));
+        step = left - now;
+        left = now;
+        QVERIFY2(std::abs((plainLeft - now) / room - text) <= 1.0 / room + 1e-6,
+                 qPrintable(QStringLiteral("%1: %2 of %3 px, text %4").arg(where).arg(plainLeft - now).arg(room).arg(text)));
+        // The text and divider in the plate, in their place.
+        const QRectF notice = sceneRectOf(corner.notice);
+        if (notice.width() > 0) {
+            QVERIFY2(notice.left() >= now + 4 && notice.right() <= boxOf(corner.readout).left() - 2 + 1e-6,
+                     qPrintable(QStringLiteral("%1: notice %2-%3").arg(where).arg(notice.left()).arg(notice.right())));
+            QCOMPARE(sceneRectOf(corner.divider).right(), boxOf(corner.readout).left() - 2);
+        }
+        // The new room is fading in, not the plate's fill as the rest is,
+        // and the plate's left corner is round.
+        const double readoutText = boxOf(corner.readout).left() + corner.readout->property("leftPadding").toDouble();
+        const double y = plate.top() - 0.5;
+        const QColor staying = pixel(image, readoutText - 3, y);
+        const QColor plot = pixel(image, now - 12, y);
+        const double roomWidth = plainLeft - now;
+        if (roomWidth >= 12 && text <= 0.7) {
+            const QColor roomEdge = pixel(image, now + roomWidth / 2, y);
+            QVERIFY2(channelDistance(roomEdge, plot) + 2 < channelDistance(staying, plot),
+                     qPrintable(QStringLiteral("%1: room %2, plate %3, plot %4")
+                                    .arg(where, roomEdge.name(), staying.name(), plot.name())));
+        }
+        const QColor corner0 = pixel(image, now - 0.5, y);
+        QVERIFY2(channelDistance(corner0, plot) <= 2,
+                 qPrintable(QStringLiteral("%1: corner %2, plot %3").arg(where, corner0.name(), plot.name())));
+    }
+    QVERIFY(animations.step(32));
+    image = window->grabWindow();
+    QCOMPARE(corner.text->opacity(), 1.0);
+    QCOMPARE(corner.divider->opacity(), 1.0);
+    QCOMPARE(corner.plate->opacity(), 1.0);
+    QCOMPARE(corner.notice->width(), corner.notice->implicitWidth());
+    if (zoomed) {
+        QCOMPARE(sceneRectOf(corner.plate).left(), plainLeft - room);
+        QCOMPARE(sceneRectOf(corner.reset), resetAt);
+        // One plate again, with its own fill and edge.
+        QQuickItem *fill = itemNamed(corner.plate, QStringLiteral("plotPlateFill"));
+        QVERIFY(fill != nullptr && fill->isVisible());
     }
 }
 
@@ -4996,9 +5160,31 @@ void TransportInputSmokeTest::cornerHoldsWhileAutoscrollRuns() {
     QTRY_COMPARE(corner.modeSwitch->opacity(), 1.0);
     window->grabWindow();
 
+    // The lane under the pointer shows its head's buttons, but not while
+    // autoscroll runs, whose pointer steers its speed across the lanes:
+    // the buttons came and went as it crossed them (H17).
+    const QList<QQuickItem *> heads = itemsNamed(corner.layer, QStringLiteral("plotLaneHead"));
+    const auto laneHovered = [&]() {
+        for (QQuickItem *head : heads) {
+            if (head->property("laneHovered").toBool()) return true;
+        }
+        return false;
+    };
+    QVERIFY(!heads.isEmpty());
+    QTRY_VERIFY(laneHovered());
+
     SteppedAnimationDriver animations;
     middleClickPlot(plot, plot->width() / 2);
     QVERIFY(corner.surface->property("autoscrolling").toBool());
+    for (const double down : {0.2, 0.5, 0.8}) {
+        const QPoint onLane =
+            corner.layer->mapToScene(QPointF(corner.layer->width() / 2 + 20, corner.layer->height() * down)).toPoint();
+        QTest::mouseMove(window, onLane + QPoint(1, 0));
+        QTest::mouseMove(window, onLane);
+        (void)animations.step(16);
+        QVERIFY(corner.surface->property("autoscrolling").toBool());
+        QVERIFY2(!laneHovered(), qPrintable(QStringLiteral("lane at %1,%2").arg(onLane.x()).arg(onLane.y())));
+    }
     QTest::mouseMove(window, corner.away());
     for (int frame = 0; frame < 20; ++frame) {
         (void)animations.step(16);
@@ -5009,17 +5195,27 @@ void TransportInputSmokeTest::cornerHoldsWhileAutoscrollRuns() {
                                 .arg(frame).arg(corner.plate->opacity()).arg(corner.modeSwitch->opacity())));
         QVERIFY(!corner.moved() && !corner.notice->isVisible());
     }
-    // Stopped there, on the moved view: the row stays, and says so.
+    // Stopped there, on the moved view: the row stays, and says so, the
+    // plate growing to the left for it rather than in a frame (H17).
+    const double before = sceneRectOf(corner.plate).left();
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!corner.surface->property("autoscrolling").toBool());
     QVERIFY(corner.moved());
+    QCOMPARE(sceneRectOf(corner.plate).left(), before);
+    double left = before;
     for (int frame = 0; frame < 10; ++frame) {
         (void)animations.step(16);
-        window->grabWindow();
+        const QImage image = window->grabWindow();
         QCOMPARE(corner.plate->opacity(), 1.0);
         QCOMPARE(corner.modeSwitch->opacity(), 1.0);
+        const double now = sceneRectOf(corner.plate).left();
+        QVERIFY2(frame == 0 ? now < before : now <= left,
+                 qPrintable(QStringLiteral("frame %1: %2 after %3").arg(frame).arg(now).arg(left)));
+        left = now;
     }
     QVERIFY(corner.notice->isVisible());
+    QCOMPARE(left, before - (corner.notice->implicitWidth() + 4));
+    QCOMPARE(corner.text->opacity(), 1.0);
 }
 
 // The divider between "Not following" and the zoom has 6 px on each side
