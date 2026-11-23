@@ -51,6 +51,7 @@ private slots:
     void crosshairStaysWholeThroughAMiddleDrag_data();
     void crosshairStaysWholeThroughAMiddleDrag();
     void crosshairTimeHoldsThroughAPan();
+    void panStartsFromTheTimeTheCrosshairShowed();
 };
 
 namespace {
@@ -1986,6 +1987,51 @@ void SpectrogramFollowSmokeTest::crosshairTimeHoldsThroughAPan() {
     }
     QVERIFY(plot.surface->property("detached").toBool());
     QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, QPoint(360, y));
+}
+
+// The pan holds the time the crosshair showed as it was pressed. A view
+// that follows the playhead is drawn a fraction of a column off its whole
+// columns, and the pan started from them: the time slipped a pixel as the
+// drag started (1:00.85, then 1:00.84 throughout).
+void SpectrogramFollowSmokeTest::panStartsFromTheTimeTheCrosshairShowed() {
+    SurfaceInAWindow plot;
+    const QString error = plot.load(2, 1);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    for (SpectrogramItem *lane : std::as_const(plot.lanes)) {
+        QMutexLocker lock(&lane->m_stateMutex);
+        lane->m_renderZoomLevel = 2.5;
+        lane->m_crosshairDirty = true;
+    }
+    QQuickWindow *window = plot.window;
+    SpectrogramItem *top = plot.lanes.first();
+    SpectrogramItem *lowest = plot.lanes.last();
+    const int y = static_cast<int>(top->mapToScene(QPointF(0.0, top->height() / 2)).y());
+    const auto timeShown = [lowest]() {
+        QMutexLocker lock(&lowest->m_stateMutex);
+        for (const SpectrogramOverlayImage &image : std::as_const(lowest->m_crosshair.images)) {
+            if (image.kind == SpectrogramOverlayImage::ReadoutPlate && image.text.contains(u':')) {
+                return image.text;
+            }
+        }
+        return QString();
+    };
+    QTest::mouseMove(window, QPoint(400, y));
+    QTRY_COMPARE(crosshairNotAt(plot, 400), QString());
+    const QString pressed = timeShown();
+    QVERIFY2(pressed.size() == 7, qPrintable(pressed));
+    {
+        // The view as drawn is off its whole columns, as in the app.
+        QMutexLocker lock(&top->m_stateMutex);
+        QVERIFY(top->m_crosshairCachedDrawX != 0.0);
+    }
+
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, QPoint(400, y));
+    for (const int x : {390, 380, 365}) {
+        QTest::mouseMove(window, QPoint(x, y));
+        QTRY_COMPARE(crosshairNotAt(plot, x), QString());
+        QCOMPARE(timeShown(), pressed);
+    }
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, QPoint(365, y));
 }
 
 // A closed hand from the pan's drag distance to its release, over any lane,

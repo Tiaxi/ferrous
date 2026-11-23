@@ -6842,7 +6842,15 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
             }
             m_panning = true;
             startsPan = true;
-            m_panOriginLeft = static_cast<double>(view.left);
+            // The time grabbed is the one the crosshair showed at the press:
+            // where the view was drawn, which a view that follows the
+            // playhead draws a fraction of a column off its whole columns
+            // (taking them, the time slipped a pixel as the drag started).
+            m_panOriginLeft = m_crosshair.valid && !m_crosshairCachedRollingMode
+                    && !m_zoomPreviewShown
+                ? static_cast<double>(m_crosshairCachedDisplayLeft)
+                    - m_crosshairCachedDrawX / std::max(1e-9, effectiveZoomLocked())
+                : static_cast<double>(view.left);
             m_panOriginX = m_panPressPosition.x();
         }
         // The column grabbed stays under the pointer. Held at an end of the
