@@ -6,7 +6,8 @@ import org.kde.kirigami 2.20 as Kirigami
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
-// A flat 24 px tool button, larger with a larger font, on the window's
+// A flat 24 px tool button, larger with a larger font, or the size of the
+// ViewerControls it is among (a title strip's are larger), on the window's
 // chrome or view colour, such as the viewers' info and close buttons: a
 // theme icon (`icon.name`), a symbolic mask of the app's own
 // (`icon.source`), or its text with `display:
@@ -60,17 +61,32 @@ ToolButton {
         ? ColorUtils.withAlpha(root.plotColors.plotText, root._checkedAmount) : root.uiPalette.selection
     readonly property color focusRingColor: root.plotColors
         ? root.plotColors.plotFocusRing : root.uiPalette.focusRing
+    // The ViewerControls it is among, whose size it takes, or null: the
+    // viewer's own buttons are declared inside them, at any depth, such as
+    // the mode switch's in its row.
+    readonly property Item _controls: {
+        for (let item = root.parent; item; item = item.parent) {
+            if (item.viewerButtonSize !== undefined) {
+                return item
+            }
+        }
+        return null
+    }
+    readonly property int buttonSize: root._controls
+        ? root._controls.viewerButtonSize : root.uiPalette.toolButtonSize
+    readonly property int glyphSize: root._controls
+        ? root._controls.viewerIconSize : root.uiPalette.toolIconSize
 
     implicitWidth: root.display === AbstractButton.TextOnly
-        ? Math.max(root.uiPalette.toolButtonSize, label.implicitWidth + 2 * 6)
-        : root.uiPalette.toolButtonSize
-    implicitHeight: root.uiPalette.toolButtonSize
+        ? Math.max(root.buttonSize, label.implicitWidth + 2 * 6)
+        : root.buttonSize
+    implicitHeight: root.buttonSize
     padding: 0
     flat: true
     hoverEnabled: true
     display: AbstractButton.IconOnly
-    icon.width: root.uiPalette.toolIconSize
-    icon.height: root.uiPalette.toolIconSize
+    icon.width: root.glyphSize
+    icon.height: root.glyphSize
     // A press takes the focus too, for the mouse: a button the keyboard
     // focused before lets it go, and with it its ring (with Tab focus
     // alone, Close kept its ring while the pointer pressed Info).

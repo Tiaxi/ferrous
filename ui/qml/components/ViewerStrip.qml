@@ -18,7 +18,9 @@ import "../logic/FormatUtils.js" as FormatUtils
 // "1:17 / 3:49", on the type scale of the viewer's text over the whole
 // screen (UiPalette.fullscreenTextScale), as the album art's details under
 // it are (at the window's size they were a second scale); on the
-// right, 8 px in from the edge, flat 24 px tool buttons: a zoom readout and
+// right, 8 px in from the edge, flat 30 px tool buttons with 22 px glyphs
+// (larger with a larger font: at the window's 24 and 16 px they were a size
+// too small beside the strip's type): a zoom readout and
 // Reset's glyph while the view is zoomed, the new issues while there are any, the
 // viewer's own buttons (declared inside the strip, from the left, each taking
 // the strip's `plotColors`) and Close: the album art's info toggle, or the
@@ -109,8 +111,12 @@ Rectangle {
             FormatUtils.clockText(root.positionText),
             FormatUtils.clockText(root.track.durationText))
 
+    // Its buttons' glyphs, smallMedium (22 px) with the default font, and
+    // the buttons, 8 px larger, so the band stays 38 px.
+    readonly property int iconSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.smallMedium)
+    readonly property int buttonSize: root.iconSize + 8
     // How far in from the strip's right edge Close's centre is.
-    readonly property real closeAxisInset: controls.anchors.rightMargin + root.uiPalette.toolButtonSize / 2
+    readonly property real closeAxisInset: controls.anchors.rightMargin + root.buttonSize / 2
     // Its text's size, as a factor of the window's.
     readonly property real textScale: root.uiPalette.fullscreenTextScale
     readonly property real textPointSize: root.uiPalette.basePointSize * root.textScale
@@ -217,6 +223,8 @@ Rectangle {
         y: Math.round((root.bandHeight - height) / 2)
         uiPalette: root.uiPalette
         plotColors: root.plotColors
+        viewerButtonSize: root.buttonSize
+        viewerIconSize: root.iconSize
         closeViewer: root.closeViewer
         zoomLevel: root.zoomLevel
         // On the strip's one type scale, as the time is (at the window's

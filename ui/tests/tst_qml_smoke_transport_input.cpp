@@ -64,6 +64,8 @@ private slots:
     void viewerCornerPlateClearsTheLevelMeter();
     void viewerResetIsTheSameGlyphWindowedAndInTheStrip();
     void viewerToolbarIsOneVocabularyWindowedAndInTheStrip();
+    void viewerStripButtonsFollowItsType_data();
+    void viewerStripButtonsFollowItsType();
     void viewerStripIsOnOneTypeScale_data();
     void viewerDragsCountAsPointerActivity_data();
     void viewerDragsCountAsPointerActivity();
@@ -1837,13 +1839,14 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
         QTRY_VERIFY(!title->property("truncated").toBool());
 
-        // A flat 24 px Close at the right, centred in the band, 8 px in (at
-        // 4 px its focus ring met the screen's corner), in the plot's
-        // colours; the view fills the window under the strip.
+        // A flat 30 px Close at the right, on the strip's type, centred in
+        // the band, 8 px in (at 4 px its focus ring met the screen's
+        // corner), in the plot's colours; the view fills the window under
+        // the strip.
         QQuickItem *close = visibleItemNamed(fullscreen, shown.closeName);
         QVERIFY2(close != nullptr, name.constData());
         QVERIFY(strip->isAncestorOf(close));
-        QCOMPARE(sceneRectOf(close).size(), QSizeF(24, 24));
+        QCOMPARE(sceneRectOf(close).size(), QSizeF(30, 30));
         QCOMPARE(sceneRectOf(close).right(), fullscreen->width() - 8.0);
         QCOMPARE(sceneRectOf(close).center().y(), band / 2);
         QQuickItem *closeIcon = itemNamed(close, QStringLiteral("viewerToolButtonIcon"));
@@ -4089,7 +4092,9 @@ void TransportInputSmokeTest::movedViewSaysSoInTheViewers() {
         for (const char *name : {"viewerStripTitle", "viewerStripContext", "viewerStripTime"}) {
             QQuickItem *label = itemNamed(controls, QString::fromLatin1(name));
             QVERIFY(label != nullptr);
-            if (label->isVisible()) {
+            // One with no room left, as at 24 pt in the test's 800 px
+            // screen beside the strip's buttons, draws nothing.
+            if (label->isVisible() && label->width() > 0) {
                 QVERIFY2(boxOf(label).right() <= sceneRectOf(notice).left(), name);
             }
         }
@@ -5027,6 +5032,120 @@ void TransportInputSmokeTest::viewerToolbarIsOneVocabularyWindowedAndInTheStrip(
     }
 }
 
+void TransportInputSmokeTest::viewerStripButtonsFollowItsType_data() {
+    QTest::addColumn<int>("points");
+    QTest::newRow("10 pt") << 10;
+    QTest::newRow("24 pt") << 24;
+}
+
+// The title strip's buttons follow its type, 1.2 times the window's: 22 px
+// glyphs (smallMedium) on 30 px buttons with the default font, larger with
+// a larger one, every one of them, the viewer's own as its zoom's and
+// Close; with the default font the band stays 38 px and its 1 px edge (at
+// the window's 24 px with 16 px glyphs they were a size too small beside
+// its title). The windowed viewer's plate keeps the window's 24 px.
+void TransportInputSmokeTest::viewerStripButtonsFollowItsType() {
+    QFETCH(int, points);
+    const ScopedApplicationFont font(points);
+    const auto scaled = [points](int size) {
+        return qMax(size, int(std::lround(size * qMax(1.0, points / 10.0))));
+    };
+    const int glyph = scaled(22);
+    const int button = glyph + 8;
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *art = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge && viewer && spectrogram && art);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    const auto checkButtons = [](QQuickItem *in, int size, int glyphSize) -> QString {
+        QList<QQuickItem *> items;
+        QList<QQuickItem *> pending{in};
+        while (!pending.isEmpty()) {
+            QQuickItem *next = pending.takeLast();
+            items.append(next);
+            pending.append(next->childItems());
+        }
+        int checked = 0;
+        for (QQuickItem *item : std::as_const(items)) {
+            QQuickItem *icon = itemNamed(item, QStringLiteral("viewerToolButtonIcon"));
+            if (!item->isVisible() || !item->inherits("QQuickAbstractButton") || icon == nullptr
+                || icon->parentItem() == nullptr || icon->parentItem()->parentItem() != item) {
+                continue;
+            }
+            ++checked;
+            if (item->width() != size || item->height() != size || icon->width() != glyphSize
+                || icon->height() != glyphSize) {
+                return QStringLiteral("%1 is %2x%3 with a %4 px glyph")
+                    .arg(item->objectName()).arg(item->width()).arg(item->height()).arg(icon->width());
+            }
+        }
+        return checked >= 2 ? QString() : QStringLiteral("only %1 buttons").arg(checked);
+    };
+
+    // Over the whole screen, zoomed, so the readout and Reset show.
+    bridge->setProperty("viewerFullscreenMode", 1);
+    for (const bool albumArt : {false, true}) {
+        QQuickItem *view = albumArt ? art : spectrogram;
+        QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "openAlbumArtViewer" : "openSpectrogramViewer"));
+        QTRY_VERIFY(view->window() != nullptr && view->window() != window);
+        QQuickWindow *host = view->window();
+        QVERIFY(QTest::qWaitForWindowExposed(host));
+        if (albumArt) {
+            art->setProperty("zoom", 2.0);
+        } else {
+            QTRY_VERIFY(spectrogram->property("viewerMode").toBool());
+            spectrogram->setProperty("_viewerZoomLevel", 2.0);
+        }
+        QQuickItem *reset = nullptr;
+        QTRY_VERIFY((reset = visibleItemNamed(host, QStringLiteral("viewerResetButton"))) != nullptr);
+        QQuickItem *strip = visibleItemNamed(host, albumArt ? QStringLiteral("albumArtFullscreenStrip")
+                                                            : QStringLiteral("spectrogramFullscreenStrip"));
+        QVERIFY(strip != nullptr);
+        QQuickItem *readout = visibleItemNamed(host, QStringLiteral("viewerZoomReadout"));
+        QVERIFY(readout != nullptr);
+        const QString wrong = checkButtons(strip, button, glyph);
+        QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+        // The readout on the buttons' line.
+        QCOMPARE(sceneRectOf(readout).center().y(), sceneRectOf(reset).center().y());
+        // The band: 38 px with the default font, and its edge.
+        if (points == 10) {
+            QCOMPARE(strip->height(), 39.0);
+        }
+        QVERIFY(strip->height() >= button + 8 + 1);
+        QCOMPARE(strip->property("closeAxisInset").toDouble(), 8.0 + button / 2.0);
+        if (albumArt) {
+            art->setProperty("zoom", 1.0);
+        } else {
+            spectrogram->setProperty("_viewerZoomLevel", 0.0);
+        }
+        QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "closeAlbumArtViewer" : "closeSpectrogramViewer"));
+        QTRY_VERIFY(!viewer->property(albumArt ? "albumArtViewerOpen" : "spectrogramViewerOpen").toBool());
+    }
+    window->requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(window));
+
+    // In the window, the plate's buttons are the window's.
+    bridge->setProperty("viewerFullscreenMode", 0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QQuickItem *plate = nullptr;
+    QTRY_VERIFY((plate = visibleItemNamed(window, QStringLiteral("spectrogramPopupControls"))) != nullptr);
+    const int windowButton = qMax(24, scaled(16) + 8);
+    const QString wrong = checkButtons(plate, windowButton, scaled(16));
+    QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
 void TransportInputSmokeTest::viewerStripIsOnOneTypeScale_data() {
     QTest::addColumn<int>("points");
     QTest::newRow("10 pt") << 10;
@@ -5083,6 +5202,14 @@ void TransportInputSmokeTest::viewerStripIsOnOneTypeScale() {
         QVERIFY(qAbs(size - points * 1.2) < 0.01);
         const qreal readoutSize = qvariant_cast<QFont>(readout->property("font")).pointSizeF();
         QVERIFY2(qAbs(readoutSize - size) < 0.01, qPrintable(QStringLiteral("the readout at %1").arg(readoutSize)));
+        // The gaps at the default zoom: at 24 pt in the test's 800 px screen,
+        // the zoom's readout and Reset leave the texts too little room.
+        if (albumArt) {
+            art->setProperty("zoom", 1.0);
+        } else {
+            spectrogram->setProperty("_viewerZoomLevel", 0.0);
+        }
+        QTRY_VERIFY(!readout->isVisible());
         // 14 px at 10 pt, as much more as the font is larger.
         const qreal gap = std::round(14.0 * points / 10.0);
         const auto between = [](QQuickItem *left, QQuickItem *right) {
@@ -5090,11 +5217,6 @@ void TransportInputSmokeTest::viewerStripIsOnOneTypeScale() {
         };
         QTRY_VERIFY2(qAbs(between(title, context) - gap) < 0.01 && qAbs(between(context, time) - gap) < 0.01,
                      qPrintable(QStringLiteral("gaps of %1 and %2").arg(between(title, context)).arg(between(context, time))));
-        if (albumArt) {
-            art->setProperty("zoom", 1.0);
-        } else {
-            spectrogram->setProperty("_viewerZoomLevel", 0.0);
-        }
         QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "closeAlbumArtViewer" : "closeSpectrogramViewer"));
         QTRY_VERIFY(!viewer->property(albumArt ? "albumArtViewerOpen" : "spectrogramViewerOpen").toBool());
     }
