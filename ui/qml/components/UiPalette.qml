@@ -380,8 +380,8 @@ QtObject {
     // lighter seam, #372b4d at 1.45:1, read as one more of the rest lines,
     // white 20 % at 1.78:1, which it is now 1.87:1 from), in the plot's own
     // hue (the playing seam's neutral grey stood apart from the violet
-    // floor and its lines). Playing, the seam is
-    // plotLaneSeam's neutral one, which shows between lanes of silence.
+    // floor and its lines). Playing, the seam is plotLaneSeam's lighter
+    // violet, which shows between lanes of silence.
     readonly property color plotRestLaneSeam: root.spectrogramPlot.meterSeam
     // The top 1 px of that cut, lit in the floor's violet: 2.6:1 on the
     // floor, twice the rest lines' 1.3:1, so the cut reads as the lanes'
@@ -415,11 +415,12 @@ QtObject {
         plotText: "#ececec"
         plotTextSecondary: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.72)
         plotOutline: "#000000"
-        // Neutral, as all that is drawn on the plot, and lighter than the
-        // floor: 1.41:1 on it, so the seam between lanes reads (at 1.18:1
-        // it did not), and it shows between lanes of black
-        // silence too.
-        plotLaneSeam: "#2e2e2e"
+        // In the plot's own violet, desaturated, and lighter than the
+        // floor: 1.5:1 on it, so the seam between lanes reads (at 1.18:1
+        // it did not), and 1.66:1 on black, so it shows between lanes of
+        // silence too (a neutral #2e2e2e was the one grey line inside the
+        // indigo plot).
+        plotLaneSeam: "#382d50"
         plotTick: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.75)
         plotLink: "#7cc8f0"
         // In the colour map's violet, not neutral grey, so the meter reads
@@ -463,11 +464,12 @@ QtObject {
         plotTextSecondary: root.textSecondary
         plotOutline: root.view
         // The line between the waveform's lanes, in the pane and in a
-        // viewer alike: in a light theme #cdd2d6, 1.5:1 on white, a step
-        // stronger than the hairline (#ebedef, 1.17:1), which on a white
-        // screen all but vanished between the channels; in a dark one the
-        // hairline.
-        plotLaneSeam: root.themeIsDark ? root.hairline : "#cdd2d6"
+        // viewer alike, 1.5:1 on the view, a step stronger than the
+        // hairline, which all but vanished between the channels (#ebedef,
+        // 1.17:1, on white; #26292c, 1.24:1, on dark): in a light theme
+        // #cdd2d6, in a dark one the text over the view at the least that
+        // is 1.5:1, #343638.
+        plotLaneSeam: root.themeIsDark ? root._drawnAt(root.text, root.view, 1.5) : "#cdd2d6"
         plotTick: root.textSecondary
         plotLink: root.link
         // The meter in the waveform's colour, so it reads as the plot's own

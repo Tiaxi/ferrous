@@ -515,7 +515,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     // The spectrogram's fixed set.
     QVERIFY2(sameColor(colorOf(spectrogram, "plotBg"), fromHex(QStringLiteral("#14062e"))), qPrintable(colorOf(spectrogram, "plotBg").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#000000")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotOutline"), fromHex(QStringLiteral("#000000"))), qPrintable(colorOf(spectrogram, "plotOutline").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#000000")).name(QColor::HexArgb)));
-    QVERIFY2(sameColor(colorOf(spectrogram, "plotLaneSeam"), fromHex(QStringLiteral("#2e2e2e"))), qPrintable(colorOf(spectrogram, "plotLaneSeam").name(QColor::HexArgb) + QStringLiteral(" vs #2e2e2e")));
+    QVERIFY2(sameColor(colorOf(spectrogram, "plotLaneSeam"), fromHex(QStringLiteral("#382d50"))), qPrintable(colorOf(spectrogram, "plotLaneSeam").name(QColor::HexArgb) + QStringLiteral(" vs #382d50")));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotText"), fromHex(QStringLiteral("#ececec"))), qPrintable(colorOf(spectrogram, "plotText").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#ececec")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotLink"), fromHex(QStringLiteral("#7cc8f0"))), qPrintable(colorOf(spectrogram, "plotLink").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#7cc8f0")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "meterTrough"), fromHex(QStringLiteral("#30244a"))), qPrintable(colorOf(spectrogram, "meterTrough").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#2b1f43")).name(QColor::HexArgb)));
@@ -535,18 +535,29 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(std::abs(colorOf(spectrogram, "meterClipOff").alphaF() - 0.2) < 0.002);
     QVERIFY(sameColor(colorOf(spectrogram, "meterSeam"), fromHex(QStringLiteral("#0a0318"))));
     // On the plot's floor, what is drawn is neutral, not tinted, except the
-    // level meter, which is in the colour map's violet.
-    for (const char *token : {"plotPlate", "plotStrip", "plotText", "plotTextSecondary", "plotLaneSeam",
-                              "plotTick"}) {
+    // level meter and the seam between lanes, which are in the plot's
+    // violet.
+    for (const char *token : {"plotPlate", "plotStrip", "plotText", "plotTextSecondary", "plotTick"}) {
         const QColor color = colorOf(spectrogram, token);
         QVERIFY2(color.red() == color.green() && color.green() == color.blue(),
                  qPrintable(QLatin1String(token) + QStringLiteral(" ") + color.name(QColor::HexArgb)));
     }
     // The lane seam and the meter's track stand out from the floor, and the
     // meter's gaps from its track. Its fill is quieter than the plot's text.
-    // The seam reads on the floor (at 1.18:1 it did not).
-    const double seamContrast = contrastRatio(colorOf(spectrogram, "plotLaneSeam"), colorOf(spectrogram, "plotBg"));
-    QVERIFY2(seamContrast >= 1.33, qPrintable(QString::number(seamContrast)));
+    // The seam reads on the floor (at 1.18:1 it did not), some 1.5:1, and
+    // between lanes of black silence; it is of the floor's violet family,
+    // desaturated (a neutral #2e2e2e was the one grey line in the plot).
+    {
+        const QColor seam = colorOf(spectrogram, "plotLaneSeam");
+        const double seamContrast = contrastRatio(seam, colorOf(spectrogram, "plotBg"));
+        QVERIFY2(seamContrast >= 1.45 && seamContrast <= 1.6, qPrintable(QString::number(seamContrast)));
+        QVERIFY2(contrastRatio(seam, QColor(Qt::black)) >= 1.6, qPrintable(seam.name()));
+        const int hueApart = std::abs(seam.hslHue() - colorOf(spectrogram, "plotBg").hslHue());
+        QVERIFY2(std::min(hueApart, 360 - hueApart) <= 15, qPrintable(seam.name()));
+        QVERIFY2(seam.blue() > seam.green() + 20 && seam.red() > seam.green(), qPrintable(seam.name()));
+        QVERIFY2(seam.hslSaturationF() < colorOf(spectrogram, "plotBg").hslSaturationF() - 0.2,
+                 qPrintable(seam.name()));
+    }
     // At rest, never played (the lines as drawn in
     // TransportInputSmokeTest::paneAtRestIsAStereoInstrument): the seam
     // between lanes is a cut, the plot's deep violet under the floor, the
@@ -2035,9 +2046,10 @@ void UiFoundationsTest::waveformLaneSeamReadsOnWhite_data() {
 }
 
 // The line between the waveform's lanes, one token for the main pane and
-// the viewers: in Breeze Light #cdd2d6, 1.5:1 on white, a step stronger than
-// the hairline (1.17:1), which on a white screen all but vanished between
-// the channels; in Breeze Dark the hairline. No viewer's seam of its own.
+// the viewers, 1.5:1 on the view in either theme, a step stronger than the
+// hairline, which all but vanished between the channels (1.17:1 on white,
+// 1.24:1 on Breeze Dark's view): in Breeze Light #cdd2d6, in Breeze Dark the
+// text over the view, #343638. No viewer's seam of its own.
 void UiFoundationsTest::waveformLaneSeamReadsOnWhite() {
     QFETCH(bool, dark);
     QQmlEngine engine;
@@ -2052,14 +2064,12 @@ void UiFoundationsTest::waveformLaneSeamReadsOnWhite() {
     QVERIFY(tokens->metaObject()->indexOfProperty("viewerWaveformLaneSeam") < 0);
     const QColor seam = colorOf(waveform, "plotLaneSeam");
     const QColor hairline = colorOf(tokens, "hairline");
-    if (dark) {
-        QVERIFY2(sameColor(seam, hairline), qPrintable(seam.name() + QStringLiteral(" vs ") + hairline.name()));
-    } else {
-        QVERIFY2(sameColor(seam, fromHex(QStringLiteral("#cdd2d6"))), qPrintable(seam.name()));
-        const double onView = contrastRatio(seam, colorOf(waveform, "plotBg"));
-        QVERIFY2(onView >= 1.45 && onView > contrastRatio(hairline, colorOf(waveform, "plotBg")),
-                 qPrintable(describeContrast(QStringLiteral("the lane seam"), seam, colorOf(waveform, "plotBg"))));
-    }
+    QVERIFY2(sameColor(seam, fromHex(dark ? QStringLiteral("#343638") : QStringLiteral("#cdd2d6"))),
+             qPrintable(seam.name()));
+    QCOMPARE(seam.alphaF(), 1.0f);
+    const double onView = contrastRatio(seam, colorOf(waveform, "plotBg"));
+    QVERIFY2(onView >= 1.45 && onView <= 1.6 && onView > contrastRatio(hairline, colorOf(waveform, "plotBg")),
+             qPrintable(describeContrast(QStringLiteral("the lane seam"), seam, colorOf(waveform, "plotBg"))));
 }
 
 void UiFoundationsTest::modeSwitchWaveformGlyphFillsWholePixels_data() {
