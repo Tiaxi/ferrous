@@ -156,13 +156,20 @@ QtObject {
     readonly property color selectionInactiveHovered: ColorUtils.mixColor(
         root.selectionInactive, root.text, root._selectionHoverShare)
     // A selected queue row held down by the pointer, until it is let go
-    // or dragged: the hovered selection at 1.6 times its saturation and the
-    // same luminance, a more intense blue, #1a516e / #85d2fd in Breeze, so
+    // or dragged: the hovered selection at a higher saturation and the
+    // same luminance, a more intense blue, #1a516e / #94d1f1 in Breeze, so
     // a press reads apart from the pointer resting on the row (it was the
     // hovered colour). Every text keeps its contrast on it: any darker
-    // put the light secondary text and the dark amber under 4.5:1. A
-    // pressed row's list has focus, so there is no inactive one.
-    readonly property color selectionPressed: root._desaturated(root.selectionHovered, 1.6)
+    // put the light secondary text and the dark amber under 4.5:1, and the
+    // light focus ring under 3:1. A pressed row's list has focus, so there
+    // is no inactive one.
+    readonly property color selectionPressed: root._desaturated(root.selectionHovered, root._pressedSaturation)
+    // How much more saturated the pressed selection is: some 6 ΔE from
+    // the hovered one in both themes. Light blues saturate sooner: at the
+    // dark theme's 1.6, Breeze Light's #84d3fc, 12 ΔE away, was the
+    // loudest fill of the list for a state that lasts while a button is
+    // held.
+    readonly property real _pressedSaturation: root.themeIsDark ? 1.6 : 1.3
     readonly property var _selectedRows: [root.selection, root.selectionInactive,
                                           root.selectionHovered, root.selectionInactiveHovered,
                                           root.selectionPressed]
@@ -306,7 +313,7 @@ QtObject {
             const hovered = selections.map(function(selection) {
                 return ColorUtils.mixColor(selection, root.text, percent / 100)
             })
-            const backgrounds = hovered.concat([root._desaturated(hovered[0], 1.6)])
+            const backgrounds = hovered.concat([root._desaturated(hovered[0], root._pressedSaturation)])
             let readable = true
             for (let b = 0; readable && b < backgrounds.length; ++b) {
                 readable = ColorUtils.contrastRatio(root.text, backgrounds[b]) >= 7

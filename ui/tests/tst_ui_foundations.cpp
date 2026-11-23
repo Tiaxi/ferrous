@@ -1271,6 +1271,17 @@ void UiFoundationsTest::pressedQueueRowIntensifiesItsSelection() {
     QVERIFY(labChroma(pressed) >= labChroma(selection) + 4.0);
     QVERIFY2(std::abs(relativeLuminance(pressed) - relativeLuminance(hovered)) < 0.002,
              qPrintable(pressed.name() + QStringLiteral(" vs ") + hovered.name()));
+    // A step past the hovered selection, not the loudest fill of the list:
+    // in both themes some 6 ΔE from it and no more than 6 in chroma over the
+    // selection (Breeze Light's #84d3fc was 12 ΔE from it, and 11 in chroma
+    // over the selection).
+    QVERIFY2(labDistance(pressed, hovered) <= 8.0 && labChroma(pressed) <= labChroma(selection) + 6.0,
+             qPrintable(QStringLiteral("%1 is %2 from %3; chroma %4, the selection's %5")
+                            .arg(pressed.name())
+                            .arg(labDistance(pressed, hovered))
+                            .arg(hovered.name())
+                            .arg(labChroma(pressed))
+                            .arg(labChroma(selection))));
 
     QVariant number;
     QVERIFY(QMetaObject::invokeMethod(tokens, "textTertiaryOn", Q_RETURN_ARG(QVariant, number),
