@@ -4911,18 +4911,18 @@ void SpectrogramCanvasSmokeTest::spectrogramDrawsAtDevicePixels() {
     };
 
     // The frequency scale's ticks are on device rows, on whole hundreds of
-    // hertz, 6 px at the right edge; its labels are drawn at device
+    // hertz, 4 px at the right edge; its labels are drawn at device
     // resolution.
     QVERIFY(item.m_freqGrid.valid);
     QCOMPARE(item.m_freqGrid.size, QSize(deviceWidth, deviceHeight));
     QVERIFY(!item.m_freqGrid.lines.isEmpty());
     const OverlayOnScreen freqGrid = overlayOnScreen(node, 5);
     QCOMPARE(freqGrid.lines.size(), item.m_freqGrid.lines.size());
-    const int tickWidth = static_cast<int>(std::floor(6 * scale + 1e-6));
+    const int tickWidth = static_cast<int>(std::floor(4 * scale + 1e-6));
     for (int i = 0; i < item.m_freqGrid.lines.size(); ++i) {
         const QRect line = item.m_freqGrid.lines[i];
         QCOMPARE(line, QRect(deviceWidth - tickWidth, line.y(), tickWidth, lineWidth));
-        // devicePixels() floors: whole device pixels within the 6 px.
+        // devicePixels() floors: whole device pixels within the 4 px.
         QVERIFY(nearlyEqual(freqGrid.lines[i],
             QRectF(line.x() / scale, line.y() / scale, tickWidth / scale, lineWidth / scale)));
         const double hz = item.pixelToFrequencyHzLocked(line.y(), deviceHeight);

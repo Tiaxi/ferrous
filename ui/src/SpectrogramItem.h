@@ -1000,7 +1000,7 @@ private:
     // logical pixels.
     int frequencyScaleTopClearanceLocked() const;
     // The logical pixels from the plot's right edge to a frequency label's
-    // end: its tick's 6 px and gaps, past scaleEdgeClearance.
+    // end: its tick's 4 px and the gap, past scaleEdgeClearance.
     int frequencyScaleLabelGapLocked() const;
     // The lane at rest, without columns: faint lines across it, evenly
     // spaced, or with the scale shown at each of its ticks, where a session

@@ -125,8 +125,9 @@ const QColor kOverlayColor(190, 190, 200, 150);
 // Scale text, 12 px plotText, in a 1 px outline of plotOutline.
 const QColor kScaleTextColor(0xec, 0xec, 0xec);
 const QColor kScaleOutlineColor(0, 0, 0);
-// plotTick.
-const QColor kScaleTickColor(236, 236, 236, 191);
+// plotTick: the scale's ink at 60 %, a step under its labels, so beside the
+// level meter its peak tick stays the one full-white mark at the edge.
+const QColor kScaleTickColor(236, 236, 236, 153);
 // The lane at rest, before it has columns: lines across it in white 11%,
 // #2e2145 and 1.3:1 on the floor, under the seam between lanes at rest,
 // whose lit edge (UiPalette's plotRestLaneSeamEdge, 2.6:1) outranks them so
@@ -1471,9 +1472,13 @@ constexpr int kScaleLabelOutline = 1;
 // The logical pixels between a rest line and its scale label's outline.
 constexpr double kRestLineLabelGap = 6.0;
 
-// The logical pixels from the scale's edge to a frequency label's end, with
-// the label's 6 px tick on the edge between them.
-constexpr int kFrequencyScaleLabelGap = 10;
+// A frequency label's tick, in logical pixels: 4 px long, on the label's
+// outer side.
+constexpr double kFrequencyScaleTickLength = 4.0;
+
+// The logical pixels from the scale's edge to a frequency label's end: its
+// tick, at the edge, and 4 px between the tick and the label.
+constexpr int kFrequencyScaleLabelGap = 8;
 
 // The logical size of a scale label of `text` at `textScale`, with its
 // outline.
@@ -7597,17 +7602,17 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
     m_freqGrid.valid = true;
 
     // The frequency scale, inside the plot on its right: for each label a
-    // 6 px tick on the label's outer side, and the label
+    // 4 px tick on the label's outer side, and the label
     // kFrequencyScaleLabelGap before the tick's end, centred on its tick:
     // "15 kHz -|". The ticks end flush at the plot's edge; beside the level
     // meter they end scaleEdgeClearance short of it, the labels moving
-    // with them (ticks that ended on the meter's seam ran into its column
-    // and read as its marks; a tick on the label's plot side read as a
-    // minus sign, "- 15 kHz"). Ticks on the canvas's device rows; labels
-    // laid out in logical pixels.
+    // with them (ticks 3 px from the meter's seam still read with its
+    // marks as one cluster of white ticks, H29; a tick on the label's plot
+    // side read as a minus sign, "- 15 kHz"). Ticks on the canvas's device
+    // rows; labels laid out in logical pixels.
     const double scale = m_canvasScale;
     const int lineWidth = deviceLineWidth(scale);
-    const int tickWidth = devicePixels(6.0, scale);
+    const int tickWidth = devicePixels(kFrequencyScaleTickLength, scale);
     const int tickEnd = std::max(
         0, width - (m_scaleEdgeClearance > 0 ? devicePixels(m_scaleEdgeClearance, scale) : 0));
     const int labelGap = frequencyScaleLabelGapLocked();

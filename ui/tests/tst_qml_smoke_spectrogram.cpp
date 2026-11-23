@@ -1137,7 +1137,7 @@ void SpectrogramSmokeTest::spectrogramOverlaysKeepClearOfTheReservedCorner() {
 
     // The frequency labels keep 34 px clear of the lane's top, where the
     // mode switch and the lane's label are, wherever the corner is; they
-    // end 10 px from the edge, each beside its 6 px tick.
+    // end 8 px from the edge, each beside its 4 px tick.
     for (const QSizeF cornerSize : {QSizeF(), reserved}) {
         item.setReservedCorner(cornerSize);
         layOut(5.0);
@@ -1145,11 +1145,11 @@ void SpectrogramSmokeTest::spectrogramOverlaysKeepClearOfTheReservedCorner() {
         QCOMPARE(item.m_freqGrid.images.size(), item.m_freqGrid.lines.size());
         for (const SpectrogramOverlayImage &image : item.m_freqGrid.images) {
             QVERIFY2(image.rect.top() >= 34.0, qPrintable(image.text));
-            QCOMPARE(image.rect.right(), width - 10.0);
+            QCOMPARE(image.rect.right(), width - 8.0);
             QVERIFY(image.text.endsWith(QStringLiteral("Hz")));
         }
         for (const QRect &line : item.m_freqGrid.lines) {
-            QCOMPARE(line.width(), 6);
+            QCOMPARE(line.width(), 4);
             QCOMPARE(line.right(), width - 1);
         }
     }
@@ -3605,18 +3605,19 @@ void SpectrogramSmokeTest::spectrogramScaleTicksAreOnTheLabelsOuterSide_data() {
     QTest::addColumn<int>("clearance");
     for (const double scale : {1.0, 2.0}) {
         QTest::addRow("%gx", scale) << scale << 0;
-        QTest::addRow("%gx, beside the meter", scale) << scale << 3;
+        QTest::addRow("%gx, beside the meter", scale) << scale << 8;
     }
 }
 
-// The frequency scale: each label's 6 px tick on its row, on the label's
-// outer side, and the label 10 px from the tick's end ("15 kHz -|"; a tick
+// The frequency scale: each label's 4 px tick on its row, on the label's
+// outer side, and the label 8 px from the tick's end ("15 kHz -|"; a tick
 // on the label's plot side read as a minus sign, "- 15 kHz"). Without the
 // level meter the ticks end flush at the plot's right edge; beside it they
-// end 3 px clear of it, the labels moving with them (ticks that met the
-// meter's seam ran into its column and read as its marks, H27). The
-// crosshair's readout keeps left of the labels; at rest, each line ends
-// 6 px before its label.
+// end 8 px clear of it, the labels moving with them (ticks that met the
+// meter's seam ran into its column and read as its marks, H27; 3 px clear
+// they still read with its marks as one cluster, H29). The crosshair's
+// readout keeps left of the labels; at rest, each line ends 6 px before its
+// label.
 void SpectrogramSmokeTest::spectrogramScaleTicksAreOnTheLabelsOuterSide() {
     QFETCH(double, scale);
     QFETCH(int, clearance);
@@ -3653,22 +3654,22 @@ void SpectrogramSmokeTest::spectrogramScaleTicksAreOnTheLabelsOuterSide() {
     double widest = 0.0;
     for (qsizetype index = 0; index < scaleShown.images.size(); ++index) {
         const QRectF label = scaleShown.images.at(index).rect;
-        QCOMPARE(label.right(), 590.0 - clearance);
+        QCOMPARE(label.right(), 592.0 - clearance);
         widest = std::max(widest, label.width());
         const QRect tick = scaleShown.lines.at(index);
-        QCOMPARE(tick.width(), qRound(6 * scale));
+        QCOMPARE(tick.width(), qRound(4 * scale));
         QCOMPARE(tick.x() + tick.width(), width - qRound(clearance * scale));
         // On the label's row, and past its end.
         QVERIFY(tick.y() >= qRound(label.top() * scale) && tick.y() < qRound(label.bottom() * scale));
-        QVERIFY(tick.x() >= qRound((label.right() + 3) * scale));
+        QCOMPARE(tick.x(), qRound((label.right() + 4) * scale));
     }
     // The crosshair's readout keeps clear of the clearance too.
-    QCOMPARE(double(scaleWidth), 10.0 + clearance + widest);
+    QCOMPARE(double(scaleWidth), 8.0 + clearance + widest);
     QVERIFY(!rest.images.isEmpty());
     QCOMPARE(rest.lines.size(), rest.images.size());
     for (qsizetype index = 0; index < rest.images.size(); ++index) {
         const QRectF label = rest.images.at(index).rect;
-        QCOMPARE(label.right(), 590.0 - clearance);
+        QCOMPARE(label.right(), 592.0 - clearance);
         QCOMPARE(rest.lines.at(index).x() + rest.lines.at(index).width(), qRound((label.left() - 6) * scale));
     }
 }
@@ -3676,13 +3677,13 @@ void SpectrogramSmokeTest::spectrogramScaleTicksAreOnTheLabelsOuterSide() {
 void SpectrogramSmokeTest::spectrogramScaleTickIsDrawnOnTheLabelsOuterSide_data() {
     QTest::addColumn<int>("clearance");
     QTest::newRow("at the edge") << 0;
-    QTest::newRow("beside the meter") << 3;
+    QTest::newRow("beside the meter") << 8;
 }
 
-// As drawn: each kHz label's tick in the scale's ink, on the label's row,
-// from 4 px past its end to the plot's edge, or beside the meter to 3 px
-// short of it, the plot's floor between, and nothing before the label,
-// where a tick read as a minus sign.
+// As drawn: each kHz label's 4 px tick in the scale's ink at 60 %, on the
+// label's row, from 4 px past its end to the plot's edge, or beside the
+// meter to 8 px short of it, the plot's floor between, and nothing before
+// the label, where a tick read as a minus sign.
 void SpectrogramSmokeTest::spectrogramScaleTickIsDrawnOnTheLabelsOuterSide() {
     QFETCH(int, clearance);
     QQuickWindow window;
@@ -3708,10 +3709,10 @@ void SpectrogramSmokeTest::spectrogramScaleTickIsDrawnOnTheLabelsOuterSide() {
     }()).images.size() >= 2);
     QCOMPARE(scaleShown.lines.size(), scaleShown.images.size());
     const auto grab = [&window]() { return window.grabWindow().convertToFormat(QImage::Format_RGB32); };
-    // plotTick, the scale's ink at 75 %, over black.
-    const QColor tickColor(177, 177, 177);
+    // plotTick, the scale's ink at 60 %, over black.
+    const QColor tickColor(142, 142, 142);
     const QRect firstTick = scaleShown.lines.constFirst();
-    QTRY_VERIFY(std::abs(grab().pixelColor(firstTick.x(), firstTick.y()).red() - 177) <= 1);
+    QTRY_VERIFY(std::abs(grab().pixelColor(firstTick.x(), firstTick.y()).red() - 142) <= 1);
     const QImage image = grab();
     QCOMPARE(image.width(), 400);
     const auto near = [](const QColor &drawn, const QColor &expected) {
@@ -3725,10 +3726,10 @@ void SpectrogramSmokeTest::spectrogramScaleTickIsDrawnOnTheLabelsOuterSide() {
             return qPrintable(QStringLiteral("x %1, row %2: %3").arg(x).arg(row).arg(image.pixelColor(x, row).name()));
         };
         const int tickEnd = 400 - clearance;
-        for (int x = tickEnd - 6; x < tickEnd; ++x) {
+        for (int x = tickEnd - 4; x < tickEnd; ++x) {
             QVERIFY2(near(image.pixelColor(x, row), tickColor), at(x));
         }
-        for (int x = qRound(label.right()); x < tickEnd - 6; ++x) {
+        for (int x = qRound(label.right()); x < tickEnd - 4; ++x) {
             QVERIFY2(image.pixelColor(x, row) == QColor(Qt::black), at(x));
         }
         for (int x = tickEnd; x < 400; ++x) {
@@ -3741,7 +3742,7 @@ void SpectrogramSmokeTest::spectrogramScaleTickIsDrawnOnTheLabelsOuterSide() {
 }
 
 // Beside the level meter, the pane's lanes end at the meter's seam, and the
-// frequency scale's ticks end 3 px clear of it; without the meter, the
+// frequency scale's ticks end 8 px clear of it; without the meter, the
 // lanes end at the window's edge and the ticks flush at it.
 void SpectrogramSmokeTest::spectrogramScaleFollowsTheMeterInThePane() {
     LibraryTreeModel libraryModel;
@@ -3768,7 +3769,7 @@ void SpectrogramSmokeTest::spectrogramScaleFollowsTheMeterInThePane() {
         QVERIFY(!panes.isEmpty());
         for (QQuickItem *pane : panes) {
             QTRY_COMPARE(sceneRect(pane).right(), edge);
-            QTRY_COMPARE(pane->property("scaleEdgeClearance").toDouble(), meter ? 3.0 : 0.0);
+            QTRY_COMPARE(pane->property("scaleEdgeClearance").toDouble(), meter ? 8.0 : 0.0);
         }
     }
 }
@@ -4127,7 +4128,7 @@ void SpectrogramSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
     QVERIFY(!item.m_freqGrid.lines.isEmpty());
     QCOMPARE(item.m_freqGrid.images.size(), item.m_freqGrid.lines.size());
     for (const QRect &line : item.m_freqGrid.lines) {
-        QCOMPARE(line.width(), 6);
+        QCOMPARE(line.width(), 4);
         QCOMPARE(line.height(), 1);
     }
     for (const SpectrogramOverlayImage &image : item.m_freqGrid.images) {

@@ -434,7 +434,10 @@ QtObject {
         // silence too (a neutral #2e2e2e was the one grey line inside the
         // indigo plot).
         plotLaneSeam: "#382d50"
-        plotTick: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.75)
+        // The scale's ticks: its ink at 60 %, a step under its labels, so
+        // the level meter's peak tick stays the one full-white mark beside
+        // the kHz scale (at 75 % the two read as one cluster, H29).
+        plotTick: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.6)
         plotLink: "#7cc8f0"
         // In the colour map's violet, not neutral grey, so the meter reads
         // as part of the plot. The trough is 1.3:1 on the floor; the rungs
