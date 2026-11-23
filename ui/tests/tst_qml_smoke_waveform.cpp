@@ -439,8 +439,13 @@ Item {
     QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
     QCOMPARE(waveform->playheadColor().alpha(), 255);
     // The crosshair's readout on the plot's plates, as the spectrogram's
-    // (not a translucent grey of its own, #5f5f65 on Breeze Light).
-    QCOMPARE(waveform->readoutPlateColor(), plotColors->property("plotPlate").value<QColor>());
+    // (not a translucent grey of its own, #5f5f65 on Breeze Light), and
+    // opaque as the spectrogram's are: the dashed line and the peaks showed
+    // through its digits (H22).
+    QColor plate = plotColors->property("plotPlate").value<QColor>();
+    QVERIFY(plate.alpha() < 255);
+    plate.setAlpha(255);
+    QCOMPARE(waveform->readoutPlateColor(), plate);
     QCOMPARE(waveform->readoutPlateEdgeColor(), plotColors->property("plotPlateEdge").value<QColor>());
     QCOMPARE(waveform->readoutTextColor(), plotColors->property("plotText").value<QColor>());
     QTRY_VERIFY(waveform->crosshairEnabled());
