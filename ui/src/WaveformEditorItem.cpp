@@ -4453,7 +4453,14 @@ void WaveformEditorItem::autoscrollStopped() {
 
 void WaveformEditorItem::wheelEvent(QWheelEvent *event) {
     if (!zoomEnabled()) { event->ignore(); return; }
-    const double steps = event->angleDelta().y() / 120.0;
+    // Touchpads and high-resolution wheels zoom by part of a notch, and
+    // pixel-only events, as some touchpads send, by 120 pixels a notch, as
+    // the spectrogram counts them.
+    constexpr double kWheelAngleUnitsPerNotch = 120.0;
+    constexpr double kWheelPixelsPerNotch = 120.0;
+    const double steps = event->angleDelta().y() != 0
+        ? event->angleDelta().y() / kWheelAngleUnitsPerNotch
+        : event->pixelDelta().y() / kWheelPixelsPerNotch;
     if (std::abs(steps) < 0.01) { event->ignore(); return; }
     event->accept();
     emit wheelZoomed(mapToScene(event->position()));

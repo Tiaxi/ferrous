@@ -21,6 +21,7 @@ private slots:
     void middleDragDetachesAndPans();
     void middleClickResetsNeitherVisualizationsZoom();
     void wheelZoomsAboutThePlayheadOrThePointer();
+    void pixelOnlyWheelZooms();
     void zoomOutHandoffKeepsTheDetachedView();
     void detachedViewGlidesBackFromItsReattachPoint_data();
     void detachedViewGlidesBackFromItsReattachPoint();
@@ -402,6 +403,27 @@ void WaveformFollowSmokeTest::middleClickResetsNeitherVisualizationsZoom() {
     QCOMPARE(resets.count(), 0);
     QCOMPARE(zooms.count(), 0);
     QCOMPARE(spectrogram.zoomLevel(), zoom);
+}
+
+// Regression (H21): a wheel event with only a pixel delta, as touchpads
+// and Wayland send, zoomed the spectrogram but not the waveform. It zooms
+// by 120 pixels a notch, as the spectrogram's; a horizontal one doesn't.
+void WaveformFollowSmokeTest::pixelOnlyWheelZooms() {
+    WaveformEditorItem item;
+    TestTime time;
+    playZoomed(item, time, 8.0, 30.0);
+    const auto pixelWheel = [&item](QPoint pixels) {
+        QWheelEvent wheel(QPointF(50.0, 40.0), QPointF(50.0, 40.0), pixels, QPoint(),
+            Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        item.wheelEvent(&wheel);
+        return wheel.isAccepted();
+    };
+    QVERIFY(pixelWheel(QPoint(0, 120)));
+    QCOMPARE(item.zoomLevel(), 10.0);
+    QVERIFY(pixelWheel(QPoint(0, -240)));
+    QCOMPARE(item.zoomLevel(), 6.4);
+    QVERIFY(!pixelWheel(QPoint(120, 0)));
+    QCOMPARE(item.zoomLevel(), 6.4);
 }
 
 // Following, the wheel zooms about the playhead and the view follows on;
