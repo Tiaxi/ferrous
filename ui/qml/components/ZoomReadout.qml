@@ -7,7 +7,9 @@ import FerrousUi 1.0
 // The quiet zoom readout, "Zoom 244 %", of the viewers and the main pane:
 // in the small font, or in a title strip at the strip's size, with tabular
 // figures, in the plot's secondary text colour, or without `plotColors` the
-// window's.
+// window's. It is as wide as its widest four-digit value, its text to the
+// right, so that it and what is left of it keep their places as the
+// digits' count changes in a wheel zoom.
 Label {
     id: root
 
@@ -18,13 +20,25 @@ Label {
     property real zoomLevel: 1.0
     property real pointSize: root.uiPalette.smallPointSize
 
+    function readout(percent) {
+        return I18n.i18nc("@info:status zoom of the view in percent", "Zoom %1%", percent)
+    }
+
+    width: Math.max(root.implicitWidth,
+        Math.ceil(widestReadout.advanceWidth) + root.leftPadding + root.rightPadding)
     height: root.uiPalette.toolButtonSize
+    horizontalAlignment: Text.AlignRight
     verticalAlignment: Text.AlignVCenter
     textFormat: Text.PlainText
-    text: I18n.i18nc("@info:status zoom of the view in percent", "Zoom %1%",
-        Math.round(root.zoomLevel * 100))
+    text: root.readout(Math.round(root.zoomLevel * 100))
     font.family: root.uiPalette.baseFont.family
     font.pointSize: root.pointSize
     font.features: root.uiPalette.tabularFigures
     color: root.plotColors ? root.plotColors.plotTextSecondary : root.uiPalette.textSecondary
+
+    TextMetrics {
+        id: widestReadout
+        font: root.font
+        text: root.readout(8888)
+    }
 }

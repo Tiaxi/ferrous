@@ -26,6 +26,9 @@ Components.PlotPlate {
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
     // Whether it says that the view does not follow the playhead.
     property bool noticeShown: false
+    // Whether the notice is leaving as the row fades out, the view
+    // following again: its text is gone at once, its room kept.
+    property bool noticeLeaving: false
     property string followShortcut: ""
 
     visible: root.available && (root.zoomed || root.noticeShown)
@@ -54,6 +57,7 @@ Components.PlotPlate {
         plotColors: root.plotColors
         shortcut: root.followShortcut
         divided: root.zoomed
+        textShown: !root.noticeLeaving
         inset: 6 - root.horizontalPadding
     }
 

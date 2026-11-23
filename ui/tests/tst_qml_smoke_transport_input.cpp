@@ -41,6 +41,7 @@ private slots:
     void viewerZoomShowsAReadoutAndAResetButton();
     void mainPaneZoomShowsAReadoutBesideTheModeSwitch();
     void mainPaneCornerShowsAndHidesAsOneRow();
+    void zoomReadoutKeepsItsWidthAsItsDigitsChange();
     void resetZoomResetsOnlyTheShownPlotsZoom();
     void resetZoomIsOffAtAShortTracksStretchedDefault();
     void movedViewSaysSoInTheCorner_data();
@@ -2708,6 +2709,51 @@ void TransportInputSmokeTest::mainPaneCornerShowsAndHidesAsOneRow() {
     QCOMPARE(sceneRectOf(reset), resetShown);
 }
 
+// The zoom readout is as wide as its widest four-digit value, its text
+// to the right: the plate stepped 5 px each time the digits' count
+// changed, and "Not following" with it, in the middle of a wheel zoom
+// (H14).
+void TransportInputSmokeTest::zoomReadoutKeepsItsWidthAsItsDigitsChange() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QVERIFY(bridge && spectrogramSurface && layer);
+    setPlayingTrack(bridge);
+    QQuickItem *plate = itemNamed(layer, QStringLiteral("plotZoomPlate"));
+    QQuickItem *readout = itemNamed(layer, QStringLiteral("plotZoomReadout"));
+    QVERIFY(plate && readout);
+    QTest::mouseMove(window, layer->mapToScene(QPointF(layer->width() / 2, layer->height() / 2)).toPoint());
+
+    const auto showZoom = [&](double level) {
+        spectrogramSurface->setProperty("_widgetZoomLevel", level);
+        QTRY_VERIFY(readout->isVisible());
+        window->grabWindow();
+    };
+    // Its box; a Text's boundingRect, sceneRectOf's, is its text's alone.
+    const auto box = [readout]() { return readout->mapRectToScene(QRectF(QPointF(), readout->size())); };
+    showZoom(1.25);
+    QCOMPARE(readout->property("text").toString(), QStringLiteral("Zoom 125%"));
+    const QRectF plateAt = sceneRectOf(plate);
+    const QRectF readoutAt = box();
+    for (const double level : {9.99, 10.0, 16.0, 1.01}) {
+        showZoom(level);
+        QCOMPARE(sceneRectOf(plate), plateAt);
+        QCOMPARE(box(), readoutAt);
+        QVERIFY(readout->property("implicitWidth").toDouble() <= readout->width());
+        // To the right, its text ending at its right edge.
+        QCOMPARE(sceneRectOf(readout).right(), readoutAt.right() - readout->property("rightPadding").toDouble());
+    }
+    QCOMPARE(readout->property("text").toString(), QStringLiteral("Zoom 101%"));
+    QCOMPARE(readout->property("horizontalAlignment").toInt(), int(Qt::AlignRight));
+    QVERIFY2(readout->width() > readout->property("implicitWidth").toDouble() + 4,
+             qPrintable(QStringLiteral("%1 for %2").arg(readout->width())
+                            .arg(readout->property("implicitWidth").toDouble())));
+}
+
 // The main pane shows its zoom while it is zoomed (with the scale off,
 // nothing showed it): the viewers' readout and Reset, on a plate 4 px left
 // of the mode switch, in its place also while both hide. The plot keeps its
@@ -2858,12 +2904,16 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
              plot->property("plotTextSecondary").value<QColor>().rgba());
     QCOMPARE(viewerReset->property("display").toInt(), 0); // AbstractButton.IconOnly
     QVERIFY(!viewerReset->property("checked").toBool());
-    // The readout 6 px in from the plate, and 6 px from Reset's glyph box.
+    // The readout 6 px in from the plate, its widest value's room (its
+    // text is to the right of it), and 6 px from Reset's glyph box.
     QQuickItem *resetGlyph = itemNamed(viewerReset, QStringLiteral("viewerToolButtonIcon"));
     QVERIFY(resetGlyph != nullptr);
-    const double textLeft = sceneRectOf(viewerReadout).left() + viewerReadout->property("leftPadding").toDouble();
-    const double textRight = textLeft + viewerReadout->property("contentWidth").toDouble();
-    QCOMPARE(textLeft - sceneRectOf(cornerPlate).left(), 6.0);
+    const double roomLeft = viewerReadout->mapToScene(QPointF()).x()
+        + viewerReadout->property("leftPadding").toDouble();
+    const double textLeft = sceneRectOf(viewerReadout).left();
+    const double textRight = sceneRectOf(viewerReadout).right();
+    QCOMPARE(roomLeft - sceneRectOf(cornerPlate).left(), 6.0);
+    QVERIFY(textLeft >= roomLeft);
     QCOMPARE(sceneRectOf(resetGlyph).left() - textRight, 6.0);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
@@ -4065,12 +4115,25 @@ void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
     QTRY_VERIFY(toolTip->property("visible").toBool());
     QTest::mouseMove(window, away);
 
-    // Followed again with the pointer away, the notice fades out with the
-    // row rather than leave it to fade alone, and is gone with it.
-    QVERIFY(QMetaObject::invokeMethod(surface, "followPlayhead"));
-    QVERIFY(!moved());
-    if (plate->opacity() > 0.0) {
+    // Followed again with the pointer away, the notice's text goes in the
+    // frame the view comes back in: it said "Not following" over a view
+    // that followed for 40 ms (H14). The plate keeps its width while its
+    // fill fades out with the row, rather than leave the row to fade alone,
+    // and the notice is gone with it.
+    {
+        const double grownLeft = sceneRectOf(plate).left();
+        SteppedAnimationDriver animations;
+        QVERIFY(QMetaObject::invokeMethod(surface, "followPlayhead"));
+        QVERIFY(!moved());
         QVERIFY(notice->isVisible());
+        QVERIFY(!text->isVisible());
+        QVERIFY(!divider->isVisible());
+        QCOMPARE(sceneRectOf(plate).left(), grownLeft);
+        QVERIFY(animations.step(16));
+        QVERIFY2(plate->opacity() > 0.0 && plate->opacity() < 1.0, qPrintable(QString::number(plate->opacity())));
+        QVERIFY(!text->isVisible());
+        QCOMPARE(sceneRectOf(plate).left(), grownLeft);
+        (void)animations.step(1000);
     }
     QTRY_COMPARE(plate->opacity(), 0.0);
     QTRY_VERIFY(!notice->isVisible());
@@ -4102,6 +4165,7 @@ void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!surface->property("autoscrolling").toBool());
     QTRY_VERIFY(moved() && notice->isVisible());
+    QVERIFY(text->isVisible());
     middleClickPlot(plot, plot->width() / 2);
     QVERIFY(surface->property("autoscrolling").toBool());
     QVERIFY(!moved() && !notice->isVisible());
