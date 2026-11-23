@@ -138,6 +138,11 @@ Item {
     readonly property real controlsTopInset: root.wholeScreenOpen && root.fullscreenWindow
             && root.stripEnabled
         ? root.fullscreenWindow.strip.implicitHeight : 0
+    // Where the strip's title starts, for the lane heads under it to start
+    // there too, while it can show; -1 without it.
+    readonly property real stripTextInset: root.wholeScreenOpen && root.fullscreenWindow
+            && root.stripEnabled
+        ? root.fullscreenWindow.strip.textInset : -1
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
     // Whether the pointer is on the corner plate, where the plot's crosshair
     // gives way as it does on the plot's own plates.

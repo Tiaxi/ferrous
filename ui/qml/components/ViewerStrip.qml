@@ -115,6 +115,8 @@ Rectangle {
     // the buttons, 8 px larger, so the band stays 38 px.
     readonly property int iconSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.smallMedium)
     readonly property int buttonSize: root.iconSize + 8
+    // How far in from its left edge its title is.
+    readonly property real textInset: track.x
     // How far in from the strip's right edge Close's centre is.
     readonly property real closeAxisInset: controls.anchors.rightMargin + root.buttonSize / 2
     // Its text's size, as a factor of the window's.

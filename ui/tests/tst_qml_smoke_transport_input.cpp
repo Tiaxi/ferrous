@@ -64,6 +64,8 @@ private slots:
     void viewerCornerPlateClearsTheLevelMeter();
     void viewerResetIsTheSameGlyphWindowedAndInTheStrip();
     void viewerToolbarIsOneVocabularyWindowedAndInTheStrip();
+    void fullscreenLaneHeadsAreOnTheStripsTypeScale_data();
+    void fullscreenLaneHeadsAreOnTheStripsTypeScale();
     void viewerStripButtonsFollowItsType_data();
     void viewerStripButtonsFollowItsType();
     void viewerStripIsOnOneTypeScale_data();
@@ -5030,6 +5032,111 @@ void TransportInputSmokeTest::viewerToolbarIsOneVocabularyWindowedAndInTheStrip(
             QTRY_VERIFY(!spectrogram->property("viewerMode").toBool());
         }
     }
+}
+
+void TransportInputSmokeTest::fullscreenLaneHeadsAreOnTheStripsTypeScale_data() {
+    // 0 in the window, 1 over the whole screen, 2 there without the strip.
+    QTest::addColumn<int>("where");
+    QTest::newRow("window") << 0;
+    QTest::newRow("whole screen") << 1;
+    QTest::newRow("whole screen, no strip") << 2;
+}
+
+// Over the whole screen the plot's lane heads are on the strip's type scale,
+// 1.2 times the window's (they were the window's 12 px under the strip's
+// 16 px, two scales on one screen), and under the strip their left edge is
+// on its title's, the first lane's label at rest too, so its cross-fade
+// between its two places has no sideways step. In the window, and in the
+// main window, they keep the window's size and the plates' 5 px inset.
+void TransportInputSmokeTest::fullscreenLaneHeadsAreOnTheStripsTypeScale() {
+    QFETCH(int, where);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide =
+        window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QVERIFY(bridge && viewer && autoHide && layer);
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    const qreal small = palette->property("smallPointSize").toDouble();
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QVERIFY(spectrogramSurface != nullptr);
+    // A track plays, so its lanes have their labels.
+    setPlayingTrack(bridge);
+    QVERIFY(bridge->setProperty("spectrogramViewMode", 1));
+    setChannelCount(bridge, spectrogramSurface, 2);
+    autoHide->setProperty("hideDelay", 600000);
+    const auto firstHead = [layer]() -> QQuickItem * {
+        for (QQuickItem *item : visibleItemsNamed(layer, QStringLiteral("plotLaneHead"))) {
+            if (item->property("channelIndex").toInt() == 0) {
+                return item;
+            }
+        }
+        return nullptr;
+    };
+    const auto labelPoints = [](QQuickItem *head) {
+        QQuickItem *text = itemNamed(itemNamed(head, QStringLiteral("plotLaneLabel")),
+                                     QStringLiteral("plotPlateLabel"));
+        return text ? qvariant_cast<QFont>(text->property("font")).pointSizeF() : -1.0;
+    };
+
+    // The main window's, before and after.
+    QQuickItem *head = nullptr;
+    QTRY_VERIFY((head = firstHead()) != nullptr);
+    QVERIFY(qAbs(labelPoints(head) - small) < 0.01);
+    QCOMPARE(sceneRectOf(head).left() - sceneRectOf(layer).left(), 5.0);
+
+    bridge->setProperty("showFullscreenTitleStrip", where != 2);
+    bridge->setProperty("viewerFullscreenMode", where == 0 ? 0 : 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QQuickWindow *host = window;
+    if (where != 0) {
+        host = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+        QVERIFY(host != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(host));
+    } else {
+        QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+        QVERIFY(popup != nullptr);
+        QTRY_VERIFY(popup->property("opened").toBool());
+    }
+    QTRY_COMPARE(layer->window(), host);
+    QTRY_VERIFY((head = firstHead()) != nullptr);
+    const qreal points = where == 0 ? small : small * 1.2;
+    QTRY_VERIFY2(qAbs(labelPoints(head) - points) < 0.01, qPrintable(QString::number(labelPoints(head))));
+    // Mute and Solo's letters with it.
+    QQuickItem *mute = itemNamed(head, QStringLiteral("plotLaneMuteButton"));
+    QVERIFY(mute != nullptr);
+    QVERIFY(qAbs(mute->property("glyphPointSize").toDouble() - points) < 0.01);
+    if (where == 1) {
+        QQuickItem *title = visibleItemNamed(host, QStringLiteral("viewerStripTitle"));
+        QVERIFY(title != nullptr);
+        QTRY_COMPARE(sceneRectOf(head).left(), sceneRectOf(title).left());
+        // The first lane's label at rest, where the strip is hidden, at the
+        // same x, on the same scale.
+        QQuickItem *rest = itemNamed(head, QStringLiteral("plotLaneRestLabel"));
+        QVERIFY(rest != nullptr);
+        QCOMPARE(sceneRectOf(rest).left(), sceneRectOf(itemNamed(head, QStringLiteral("plotLaneLabel"))).left());
+        QVERIFY(qAbs(qvariant_cast<QFont>(itemNamed(rest, QStringLiteral("plotPlateLabel"))->property("font"))
+                         .pointSizeF() - points) < 0.01);
+    } else {
+        QTRY_COMPARE(sceneRectOf(head).left() - sceneRectOf(layer).left(), 5.0);
+    }
+
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    if (where != 0) {
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+    // Back in the main window, the window's again.
+    QTRY_COMPARE(layer->window(), window);
+    QTRY_VERIFY((head = firstHead()) != nullptr);
+    QTRY_VERIFY(qAbs(labelPoints(head) - small) < 0.01);
+    QTRY_COMPARE(sceneRectOf(head).left() - sceneRectOf(layer).left(), 5.0);
 }
 
 void TransportInputSmokeTest::viewerStripButtonsFollowItsType_data() {

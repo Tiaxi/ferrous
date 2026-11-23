@@ -45,6 +45,15 @@ Item {
     // the lane heads keep below it. Their labels do only while the controls
     // show; hidden, each is where its lane alone puts it.
     property real topInset: 0
+    // How much larger than the window's the plot's own text is, the lane
+    // heads': in a viewer over the whole screen, its strip's type scale
+    // (UiPalette.fullscreenTextScale), so the screen has one (at the
+    // window's size they were 12 px under the strip's 16 px); 1 elsewhere.
+    property real textScale: 1
+    // How far in from the plot's left edge the lane heads are: the plates'
+    // inset, or under a viewer's title strip its title's, so that their
+    // left edges are one line.
+    property real laneHeadInset: root.plateInset
     // Whether the plot waits for the track's analysis.
     property bool analysing: false
     // Where the plot draws markerSeconds, NaN while it does not.
@@ -140,7 +149,8 @@ Item {
     FontMetrics {
         id: laneLabelMetrics
         font.family: root.uiPalette.baseFont.family
-        font.pointSize: root.headsCompact() ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize
+        font.pointSize: (root.headsCompact() ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize)
+            * root.textScale
         font.weight: Font.DemiBold
     }
     // The plates' inset from the plot's corners: the lane heads' and the
@@ -310,7 +320,7 @@ Item {
             // Over the other lanes' labels while its plate shows, which in
             // lanes shorter than it lies on theirs.
             z: buttonsRevealed ? 1.5 : 1
-            x: root.plateInset
+            x: root.laneHeadInset
             laneRoom: root.shortestLane()
             plateShift: Math.max(root.topInset - y, Math.min(0, root.height - y - height))
             // The plate 5 px in, as the mode switch, whose height it has,
@@ -323,6 +333,7 @@ Item {
             label: root.laneLabels[index] || ""
             channelIndex: index
             compact: root.headsCompact()
+            textScale: root.textScale
             muted: (root.uiBridge.mutedChannels || [])[index] === true
             soloed: (root.uiBridge.soloedChannels || [])[index] === true
             // Before any audio the lanes at rest are named, with nothing
@@ -358,6 +369,7 @@ Item {
                 uiPalette: root.uiPalette
                 text: laneHead.label
                 compact: laneHead.compact
+                textScale: laneHead.textScale
                 // The head's label is the one that is read.
                 Accessible.ignored: true
             }

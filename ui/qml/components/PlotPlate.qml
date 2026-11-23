@@ -22,6 +22,12 @@ Item {
     property string text: ""
     readonly property bool isLabel: root.text.length > 0
     property bool compact: false
+    // How much larger than the window's its label's text is: the type scale
+    // of a viewer over the whole screen (UiPalette.fullscreenTextScale),
+    // whose plot's text is on its strip's scale; 1 elsewhere.
+    property real textScale: 1
+    readonly property real labelPointSize: (root.compact ? root.uiPalette.compactPointSize
+                                                          : root.uiPalette.smallPointSize) * root.textScale
     // The smallest the plate is either way: a label's height, and the
     // narrowest it is.
     readonly property real minimumSize: root.compact ? 16 : 20
@@ -125,7 +131,7 @@ Item {
     TextMetrics {
         id: capitalMetrics
         font.family: root.uiPalette.baseFont.family
-        font.pointSize: root.compact ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize
+        font.pointSize: root.labelPointSize
         font.weight: Font.DemiBold
         text: "E"
     }
@@ -150,7 +156,7 @@ Item {
             textFormat: Text.PlainText
             text: root.text
             font.family: root.uiPalette.baseFont.family
-            font.pointSize: root.compact ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize
+            font.pointSize: root.labelPointSize
             font.weight: Font.DemiBold
             color: root.plotColors.plotText
             height: root.labelHeight
