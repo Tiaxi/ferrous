@@ -1861,6 +1861,10 @@ QString BridgeClient::currentTrackCoverPath() const {
     return m_currentTrackCoverPath;
 }
 
+QVariant BridgeClient::currentTrackCoverNamed() const {
+    return m_currentTrackCoverNamed;
+}
+
 QString BridgeClient::currentTrackTitle() const {
     return m_currentTrackTitle;
 }
@@ -3848,6 +3852,9 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
         {QStringLiteral("artist"), artist},
         {QStringLiteral("coverPath"), m_currentTrackCoverPath},
     };
+    if (m_currentTrackCoverNamed.isValid()) {
+        m_itunesArtworkTarget.insert(QStringLiteral("coverNamed"), m_currentTrackCoverNamed);
+    }
 
     cancelItunesArtworkRequests();
     m_itunesArtworkGeneration++;
@@ -3994,7 +4001,8 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
                 m_itunesArtworkErrorText = aggregation->firstErrorDetail.isEmpty()
                     ? aggregation->firstError : aggregation->firstErrorDetail;
             } else {
-                m_itunesArtworkStatusText = i18nc("@info:status", "No iTunes artwork suggestions found.");
+                m_itunesArtworkStatusText = i18nc("@info:status under the heading No artwork found",
+                                                  "iTunes has no suggestions for this album.");
             }
             emit itunesArtworkChanged();
             return;
@@ -6262,16 +6270,28 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     // The track whose cover it is: the current track's, or the track
     // before's while it stays.
     QString currentCoverTrackPath;
+    // Whether the cover has a cover's name, which only the metadata's cover
+    // tells; unknown for the queue row's.
+    QVariant currentCoverNamed;
     if (!currentPath.isEmpty()) {
         currentCover = metadataCoverUrl.isEmpty() ? queueTrackCover : metadataCoverUrl;
         currentCoverTrackPath = currentPath;
+        if (!metadataCoverUrl.isEmpty()) {
+            currentCoverNamed = snapshot.metadata.coverNamed;
+        }
         if (currentCover.isEmpty() && !metadataMatchesCurrentPath) {
             currentCover = m_currentTrackCoverPath;
             currentCoverTrackPath = m_currentTrackCoverTrackPath;
+            currentCoverNamed = m_currentTrackCoverNamed;
         }
     }
     if (m_currentTrackCoverPath != currentCover) {
         m_currentTrackCoverPath = currentCover;
+        changed = true;
+        trackMetadataSignalChanged = true;
+    }
+    if (m_currentTrackCoverNamed != currentCoverNamed) {
+        m_currentTrackCoverNamed = currentCoverNamed;
         changed = true;
         trackMetadataSignalChanged = true;
     }

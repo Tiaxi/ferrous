@@ -46,8 +46,8 @@ private slots:
     void itunesArtworkActionsFollowTheTextFont();
     void itunesReplaceShowsWhatWasChosen_data();
     void itunesReplaceShowsWhatWasChosen();
-    void itunesReplaceGivesEachCaseARow_data();
-    void itunesReplaceGivesEachCaseARow();
+    void itunesReplaceStatesTheOutcomeThatApplies_data();
+    void itunesReplaceStatesTheOutcomeThatApplies();
     void itunesArtworkCountLineHoldsAtLargeFonts();
     void itunesArtworkDialogOpensWithItsRowsWhole();
     void itunesArtworkListIsAsTallAsItsRows();
@@ -2082,6 +2082,11 @@ QtObject {
     property var appliedItunesArtwork: []
     readonly property string currentTrackPath: fake.real.currentTrackPath
     readonly property string currentTrackCoverPath: fake.real.currentTrackCoverPath
+    // The backend's word on whether the cover has a cover's name, and the
+    // cover's details, when a test sets them; else unknown, and the real
+    // bridge's.
+    property var currentTrackCoverNamed: undefined
+    property var coverDetails: null
     signal itunesArtworkChanged()
     signal snapshotChanged()
     signal imageFileDetailsChanged(string path)
@@ -2097,7 +2102,9 @@ QtObject {
         fake.itunesArtworkTarget = ({})
     }
     function requestImageFileDetails(path) { fake.real.requestImageFileDetails(path) }
-    function cachedImageFileDetails(path) { return fake.real.cachedImageFileDetails(path) }
+    function cachedImageFileDetails(path) {
+        return fake.coverDetails !== null ? fake.coverDetails : fake.real.cachedImageFileDetails(path)
+    }
     property Connections forward: Connections {
         target: fake.real
         function onSnapshotChanged() { fake.snapshotChanged() }
@@ -2775,9 +2782,12 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     // a placeholder message where the results would be, a little above
     // their middle, with no frame or well around it, and a running busy
     // indicator above it while searching, under the current art, which stays
-    // the dialog's first line. A failed search says so in a semibold
-    // heading, with the system's words under it, so it does not read as
-    // finding nothing, and a warning glyph in the spinner's place.
+    // the dialog's first line. A search that ends without results says how
+    // in a semibold heading, the window's whole answer, with a line under
+    // it: "No artwork found" under the search's glyph, and a failure, with
+    // the system's words, under a warning glyph, so it does not read as
+    // finding nothing. The glyph is 48 px in the spinner's place (32 px
+    // and a lone line were under-scaled for the window's answer).
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
@@ -2805,7 +2815,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     QQuickItem *busy = itemNamed(content, QStringLiteral("itunesArtworkBusyIndicator"));
     QQuickItem *results = itemNamed(content, QStringLiteral("itunesArtworkResultsView"));
     QQuickItem *currentRow = itemNamed(content, QStringLiteral("itunesArtworkCurrentRow"));
-    QQuickItem *heading = itemNamed(content, QStringLiteral("itunesArtworkFailureHeading"));
+    QQuickItem *heading = itemNamed(content, QStringLiteral("itunesArtworkPlaceholderHeading"));
     QVERIFY(frame != nullptr && placeholder != nullptr && message != nullptr && busy != nullptr
             && results != nullptr && currentRow != nullptr && heading != nullptr);
     QObject *palette = qvariant_cast<QObject *>(dialog->property("uiPalette"));
@@ -2826,8 +2836,8 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             auto *spinner = qvariant_cast<QQuickItem *>(busy->property("contentItem"));
             QVERIFY2(spinner != nullptr && spinner->isVisible(), at.constData());
             QTRY_COMPARE(spinner->opacity(), 1.0);
-            QCOMPARE(busy->width(), 32.0);
-            QCOMPARE(busy->height(), 32.0);
+            QCOMPARE(busy->width(), 48.0);
+            QCOMPARE(busy->height(), 48.0);
         }
         // No frame or well: the dialog's own colour behind the message.
         QCOMPARE(frame->property("color").value<QColor>().alpha(), 0);
@@ -2843,9 +2853,10 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         // the text's, brighter than searching).
         QCOMPARE(message->property("color").value<QColor>().rgba(),
                  palette->property("textSecondary").value<QColor>().rgba());
-        QCOMPARE(heading->isVisible(), failed);
-        if (failed) {
-            QCOMPARE(heading->property("text").toString(), QStringLiteral("Couldn\u2019t search iTunes"));
+        QCOMPARE(heading->isVisible(), !searching);
+        if (!searching) {
+            QCOMPARE(heading->property("text").toString(), failed ? QStringLiteral("Couldn\u2019t search iTunes")
+                                                                  : QStringLiteral("No artwork found"));
             QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
             QCOMPARE(heading->property("color").value<QColor>().rgba(),
                      palette->property("text").value<QColor>().rgba());
@@ -2867,7 +2878,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             QVERIFY(warning->property("isMask").toBool());
             QCOMPARE(warning->property("color").value<QColor>().rgba(),
                      palette->property("negative").value<QColor>().rgba());
-            QTRY_COMPARE(sceneRectOf(warning).size(), QSizeF(32, 32));
+            QTRY_COMPARE(sceneRectOf(warning).size(), QSizeF(48, 48));
             QCOMPARE(sceneRectOf(warning).top(), sceneRectOf(placeholder).top());
             QCOMPARE(sceneRectOf(warning).center().x(), sceneRectOf(placeholder).center().x());
             QVERIFY2(sceneRectOf(warning).bottom() < sceneRectOf(heading).top(), at.constData());
@@ -2885,10 +2896,10 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             QVERIFY(found->property("isMask").toBool());
             QCOMPARE(found->property("color").value<QColor>().rgba(),
                      palette->property("textSecondary").value<QColor>().rgba());
-            QTRY_COMPARE(sceneRectOf(found).size(), QSizeF(32, 32));
+            QTRY_COMPARE(sceneRectOf(found).size(), QSizeF(48, 48));
             QCOMPARE(sceneRectOf(found).top(), sceneRectOf(placeholder).top());
             QCOMPARE(sceneRectOf(found).center().x(), sceneRectOf(placeholder).center().x());
-            QVERIFY2(sceneRectOf(found).bottom() <= sceneRectOf(message).top(), at.constData());
+            QVERIFY2(sceneRectOf(found).bottom() < sceneRectOf(heading).top(), at.constData());
         }
         // The only glyph: the busy indicator's while searching, the
         // warning's when the search failed, the search's with nothing found.
@@ -2949,8 +2960,8 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
              qPrintable(describeRect(sceneRectOf(currentPreview))));
 
     bridge->setProperty("itunesArtworkLoading", false);
-    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
-    checkState(State::NothingFound, QStringLiteral("No iTunes artwork suggestions found."));
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("iTunes has no suggestions for this album."));
+    checkState(State::NothingFound, QStringLiteral("iTunes has no suggestions for this album."));
     QCOMPARE(sceneRectOf(currentPreview).left(), columnX);
 
     // As BridgeClient tells a failed search (BridgeClientTest::
@@ -3009,7 +3020,7 @@ void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
     QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
     QQuickItem *preview = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkCurrentPreviewButton"));
     QQuickItem *message = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkPlaceholderMessage"));
-    QQuickItem *heading = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkFailureHeading"));
+    QQuickItem *heading = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkPlaceholderHeading"));
     QQuickItem *results = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkResultsView"));
     QVERIFY(preview != nullptr && message != nullptr && heading != nullptr && results != nullptr);
     const auto baselineOf = [](QQuickItem *label) { return sceneRectOf(label).top() + label->baselineOffset(); };
@@ -3018,6 +3029,13 @@ void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
     QVERIFY(dialogWindow->grabWindow().width() > 0);
     const qreal previewX = sceneRectOf(preview).left();
     const qreal baseline = baselineOf(message);
+    // The glyph's slot: 48 px at 10 pt, scaled with a larger font, in every
+    // state.
+    QQuickItem *slot = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkGlyphSlot"));
+    QVERIFY(slot != nullptr);
+    const QSizeF slotSize(std::round(48 * std::max(1.0, pointSize / 10)), std::round(48 * std::max(1.0, pointSize / 10)));
+    QCOMPARE(slot->size(), slotSize);
+    const qreal slotY = sceneRectOf(slot).top();
     // The dialog's lead in each of its states, as the other dialogs' first
     // line is (it had the weight of every result's title).
     QQuickItem *lead = itemNamed(dialogWindow->contentItem(), QStringLiteral("itunesArtworkCurrentTitle"));
@@ -3025,11 +3043,16 @@ void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
     const auto weightOf = [](QQuickItem *label) { return label->property("font").value<QFont>().weight(); };
     QCOMPARE(weightOf(lead), QFont::DemiBold);
 
+    // Finding nothing's heading, and a failure's, take searching's line.
     bridge->setProperty("itunesArtworkLoading", false);
-    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("iTunes has no suggestions for this album."));
+    QTRY_VERIFY(heading->isVisible());
     QVERIFY(dialogWindow->grabWindow().width() > 0);
     QCOMPARE(sceneRectOf(preview).left(), previewX);
-    QTRY_COMPARE(baselineOf(message), baseline);
+    QTRY_VERIFY2(qAbs(baselineOf(heading) - baseline) <= 1.0,
+                 qPrintable(QStringLiteral("heading %1, searching %2").arg(baselineOf(heading)).arg(baseline)));
+    QCOMPARE(slot->size(), slotSize);
+    QCOMPARE(sceneRectOf(slot).top(), slotY);
     QCOMPARE(weightOf(lead), QFont::DemiBold);
 
     bridge->setProperty("itunesArtworkErrorText", QStringLiteral("Connection refused"));
@@ -3039,6 +3062,8 @@ void AlbumArtSmokeTest::itunesArtworkHoldsStillBetweenItsStates() {
     QCOMPARE(sceneRectOf(preview).left(), previewX);
     QTRY_VERIFY2(qAbs(baselineOf(heading) - baseline) <= 1.0,
                  qPrintable(QStringLiteral("heading %1, searching %2").arg(baselineOf(heading)).arg(baseline)));
+    QCOMPARE(slot->size(), slotSize);
+    QCOMPARE(sceneRectOf(slot).top(), slotY);
 
     QCOMPARE(weightOf(lead), QFont::DemiBold);
     bridge->setProperty("itunesArtworkFailed", false);
@@ -3156,32 +3181,96 @@ private:
 // The line over the results that says how many there are is one line in
 // the dialog at 24 pt, as wide as it opens on a 1600 px screen ("it."
 // wrapped alone onto a second line).
-void AlbumArtSmokeTest::itunesReplaceGivesEachCaseARow_data() {
+void AlbumArtSmokeTest::itunesReplaceStatesTheOutcomeThatApplies_data() {
     QTest::addColumn<qreal>("pointSize");
-    QTest::newRow("10 pt") << 10.0;
-    QTest::newRow("24 pt") << 24.0;
+    // The cover's file name, whether the backend says it has a cover's name
+    // (invalid: not said), and whether its details say it is embedded art
+    // (invalid: no details yet).
+    QTest::addColumn<QString>("fileName");
+    QTest::addColumn<QVariant>("named");
+    QTest::addColumn<QVariant>("embedded");
+    // Whether the suggestions are for a track playback has moved on from,
+    // whose word on the name the search kept.
+    QTest::addColumn<bool>("movedOn");
+    // What the question says, or empty for both cases.
+    QTest::addColumn<QString>("outcome");
+    QTest::addColumn<bool>("warns");
+    const QString embed = QStringLiteral("Ferrous writes the new art into this album’s tracks in this folder.");
+    const QString overwrite = QStringLiteral("Ferrous overwrites cover.png, this folder’s cover image.");
+    const QString add = QStringLiteral("Ferrous adds a cover file beside back.png, which stays.");
+    for (const qreal pointSize : {10.0, 24.0}) {
+        const QByteArray at = QByteArray::number(pointSize) + " pt";
+        QTest::newRow(("embedded art, " + at).constData())
+            << pointSize << QStringLiteral("0123456789abcdef0123456789abcdef.png") << QVariant(false)
+            << QVariant(true) << false << embed << false;
+        QTest::newRow(("folder cover, " + at).constData())
+            << pointSize << QStringLiteral("cover.png") << QVariant(true) << QVariant(false) << false << overwrite
+            << true;
+        QTest::newRow(("other folder image, " + at).constData())
+            << pointSize << QStringLiteral("back.png") << QVariant(false) << QVariant(false) << false << add << false;
+        QTest::newRow(("not known yet, " + at).constData())
+            << pointSize << QStringLiteral("cover.png") << QVariant() << QVariant(false) << false << QString()
+            << true;
+    }
+    // A cover's name settles it before its details come.
+    QTest::newRow("folder cover, no details")
+        << 10.0 << QStringLiteral("cover.png") << QVariant(true) << QVariant() << false << overwrite << true;
+    // Not a cover's name, without details: embedded art or another image.
+    QTest::newRow("other name, no details")
+        << 10.0 << QStringLiteral("back.png") << QVariant(false) << QVariant() << false << QString() << true;
+    QTest::newRow("folder cover, moved on")
+        << 10.0 << QStringLiteral("cover.png") << QVariant(true) << QVariant(false) << true << overwrite << true;
 }
 
-// Replace Album Art says what it does in each case on a row of its own:
-// what the folder holds, semibold in the text's ink, then what Replace does
-// there, secondary, 6 px from the next case with the default font. It was
-// one paragraph whose conditions the reader had to carry into the warning.
-// The warning stays under them in the text's ink, and all of it is whole.
-void AlbumArtSmokeTest::itunesReplaceGivesEachCaseARow() {
+// Replace Album Art states the one outcome that applies, as the backend
+// applies the art (artwork::apply_artwork_to_track): it embeds the art when
+// the shown art is embedded, overwrites a folder image with a cover's name,
+// and adds a cover file beside another folder image. One paragraph in the
+// secondary ink under the question, the only semibold line, and the loss
+// line only when a file is overwritten. When the dialog can't tell, both
+// cases as regular conditions, 12 px apart at 10 pt, with the loss line
+// (two semibold conditions outranked the question and made the reader work
+// out the case).
+void AlbumArtSmokeTest::itunesReplaceStatesTheOutcomeThatApplies() {
     QFETCH(qreal, pointSize);
+    QFETCH(QString, fileName);
+    QFETCH(QVariant, named);
+    QFETCH(QVariant, embedded);
+    QFETCH(bool, movedOn);
+    QFETCH(QString, outcome);
+    QFETCH(bool, warns);
     const ScopedApplicationFont font(pointSize);
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
-    const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
+    const QString coverPath = dir.filePath(fileName);
+    QVERIFY(QFile::rename(savedCover(dir), coverPath) || coverPath == dir.filePath(QStringLiteral("cover.png")));
+    const QString coverUrl = QUrl::fromLocalFile(coverPath).toString();
     const QVariantList rows = itunesArtworkFixture(dir, 2);
     ItunesWindow ui(coverUrl);
     QVERIFY2(ui.loaded(), "Main.qml failed to show");
-    const QVariantMap target{
-        {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
+    QVariantMap target{
+        {QStringLiteral("trackPath"), movedOn ? QStringLiteral("/music/Elsewhere/01 Lantern Rows.flac")
+                                              : QStringLiteral("/music/Morning Tide Field.flac")},
         {QStringLiteral("album"), QStringLiteral("Small Hours")},
         {QStringLiteral("artist"), QStringLiteral("The Quiet Meridian")},
         {QStringLiteral("coverPath"), coverUrl},
     };
+    if (movedOn) {
+        // The playing track's own word is about another cover.
+        target.insert(QStringLiteral("coverNamed"), named);
+        ui.fake->setProperty("currentTrackCoverNamed", QVariant(!named.toBool()));
+    } else if (named.isValid()) {
+        ui.fake->setProperty("currentTrackCoverNamed", named);
+    }
+    if (embedded.isValid()) {
+        ui.fake->setProperty("coverDetails", QVariantMap{
+            {QStringLiteral("path"), coverPath},
+            {QStringLiteral("fileName"), fileName},
+            {QStringLiteral("embeddedCover"), embedded},
+            {QStringLiteral("width"), 120},
+            {QStringLiteral("height"), 120},
+        });
+    }
     QVERIFY(openItunesArtworkDialog(ui.window, ui.dialog, ui.fake, rows, target));
     QQuickWindow *question = replaceQuestion(ui.window);
     QVERIFY(question != nullptr);
@@ -3193,56 +3282,75 @@ void AlbumArtSmokeTest::itunesReplaceGivesEachCaseARow() {
 
     const QRgb ink = palette->property("text").value<QColor>().rgba();
     const QRgb secondary = palette->property("textSecondary").value<QColor>().rgba();
-    const std::array<std::pair<QString, QString>, 2> cases{{
-        {QStringLiteral("Folder has JPEG or PNG images"),
-         QStringLiteral("Overwrites the image named as a cover, or adds a cover file beside them")},
-        {QStringLiteral("No JPEG or PNG images in the folder"),
-         QStringLiteral("Embeds the album art in this album’s tracks in that folder")},
-    }};
-    const std::array<QString, 2> names{QStringLiteral("replaceCoverFolderCase"),
-                                       QStringLiteral("replaceCoverEmbedCase")};
+    QQuickItem *message = visibleItemNamed(question, QStringLiteral("confirmDialogMessage"));
+    QQuickItem *chosen = visibleItemNamed(question, QStringLiteral("replaceCoverChosen"));
+    QQuickItem *paragraph = visibleItemNamed(question, QStringLiteral("replaceCoverOutcome"));
+    QQuickItem *cases = visibleItemNamed(question, QStringLiteral("replaceCoverConsequence"));
     QQuickItem *warning = visibleItemNamed(question, QStringLiteral("replaceCoverWarning"));
-    QVERIFY(warning != nullptr);
-    QList<QQuickItem *> outcomes;
-    for (std::size_t i = 0; i < cases.size(); ++i) {
-        QQuickItem *lead = visibleItemNamed(question, names[i] + QStringLiteral("Lead"));
-        QQuickItem *outcome = visibleItemNamed(question, names[i] + QStringLiteral("Outcome"));
-        QVERIFY2(lead != nullptr && outcome != nullptr, qPrintable(names[i]));
-        QCOMPARE(lead->property("text").toString(), cases[i].first);
-        QCOMPARE(outcome->property("text").toString(), cases[i].second);
-        QCOMPARE(lead->property("font").value<QFont>().weight(), QFont::DemiBold);
-        QCOMPARE(outcome->property("font").value<QFont>().weight(), QFont::Normal);
-        QCOMPARE(lead->property("color").value<QColor>().rgba(), ink);
-        QCOMPARE(outcome->property("color").value<QColor>().rgba(), secondary);
-        QTRY_VERIFY(sceneRectOf(outcome).top() >= sceneRectOf(lead).bottom());
-        QCOMPARE(sceneRectOf(outcome).left(), sceneRectOf(lead).left());
-        QCOMPARE(sceneRectOf(lead).left(), sceneRectOf(warning).left());
-        for (QQuickItem *line : {lead, outcome}) {
-            QCOMPARE(line->property("textFormat").toInt(), int(Qt::PlainText));
-            QTRY_VERIFY2(!line->property("truncated").toBool() && sceneRectOf(line).right() <= question->width(),
-                         qPrintable(line->objectName()));
-        }
-        if (!outcomes.isEmpty()) {
-            // 6 px between the cases at 10 pt, more with a larger font.
-            QVariant scaled;
-            QVERIFY(QMetaObject::invokeMethod(palette, "scaledSize", Q_RETURN_ARG(QVariant, scaled),
-                                              Q_ARG(QVariant, 6)));
-            const qreal gap = sceneRectOf(lead).top() - sceneRectOf(outcomes.last()).bottom();
-            QCOMPARE(gap, scaled.toReal());
-            if (pointSize == 10.0) {
-                QCOMPARE(gap, 6.0);
-            }
-        }
-        outcomes.append(outcome);
-    }
-    QTRY_VERIFY(sceneRectOf(warning).top() > sceneRectOf(outcomes.last()).bottom());
-    QCOMPARE(warning->property("color").value<QColor>().rgba(), ink);
-    QCOMPARE(warning->property("font").value<QFont>().weight(), QFont::Normal);
-    // The window holds it all over its buttons.
     QQuickItem *cancel = visibleItemNamed(question, QStringLiteral("confirmDialogCancelButton"));
-    QVERIFY(cancel != nullptr);
-    QTRY_VERIFY(sceneRectOf(warning).bottom() <= sceneRectOf(cancel).top());
+    QVERIFY(message != nullptr && chosen != nullptr && cancel != nullptr);
+    QCOMPARE(message->property("font").value<QFont>().weight(), QFont::DemiBold);
+    QCOMPARE(warning != nullptr, warns);
+    QList<QQuickItem *> lines;
+    if (!outcome.isEmpty()) {
+        QVERIFY(paragraph != nullptr);
+        QVERIFY(cases == nullptr);
+        QCOMPARE(paragraph->property("text").toString(), outcome);
+        QCOMPARE(paragraph->property("color").value<QColor>().rgba(), secondary);
+        lines.append(paragraph);
+    } else {
+        QVERIFY(paragraph == nullptr);
+        QVERIFY(cases != nullptr);
+        const std::array<std::pair<QString, QString>, 2> conditions{{
+            {QStringLiteral("If the folder has a JPEG or PNG image"),
+             QStringLiteral("Ferrous overwrites its cover file, such as cover.jpg, or adds one beside its images.")},
+            {QStringLiteral("If it has none"),
+             QStringLiteral("Ferrous writes the new art into this album’s tracks in this folder.")},
+        }};
+        const std::array<QString, 2> names{QStringLiteral("replaceCoverFolderCase"),
+                                           QStringLiteral("replaceCoverEmbedCase")};
+        QQuickItem *previous = nullptr;
+        for (std::size_t i = 0; i < conditions.size(); ++i) {
+            QQuickItem *lead = visibleItemNamed(question, names[i] + QStringLiteral("Lead"));
+            QQuickItem *result = visibleItemNamed(question, names[i] + QStringLiteral("Outcome"));
+            QVERIFY2(lead != nullptr && result != nullptr, qPrintable(names[i]));
+            QCOMPARE(lead->property("text").toString(), conditions[i].first);
+            QCOMPARE(result->property("text").toString(), conditions[i].second);
+            QCOMPARE(lead->property("color").value<QColor>().rgba(), ink);
+            QCOMPARE(result->property("color").value<QColor>().rgba(), secondary);
+            QTRY_VERIFY(sceneRectOf(result).top() >= sceneRectOf(lead).bottom());
+            if (previous != nullptr) {
+                // 12 px between the cases at 10 pt, more with a larger font.
+                const qreal gap = sceneRectOf(lead).top() - sceneRectOf(previous).bottom();
+                QCOMPARE(gap, std::round(12 * std::max(1.0, pointSize / 10)));
+            }
+            previous = result;
+            lines << lead << result;
+        }
+    }
+    if (warning != nullptr) {
+        QCOMPARE(warning->property("text").toString(), QStringLiteral("Ferrous keeps no copy of what it overwrites."));
+        QCOMPARE(warning->property("color").value<QColor>().rgba(), ink);
+        QTRY_VERIFY(sceneRectOf(warning).top() > sceneRectOf(lines.last()).bottom());
+        lines.append(warning);
+    }
+    // The question is the only semibold line; all of it is whole, plain
+    // text, on one left edge, under what was chosen and over the buttons.
+    for (QQuickItem *line : lines) {
+        QCOMPARE(line->property("font").value<QFont>().weight(), QFont::Normal);
+        QCOMPARE(line->property("textFormat").toInt(), int(Qt::PlainText));
+        QTRY_VERIFY2(!line->property("truncated").toBool() && sceneRectOf(line).right() <= question->width(),
+                     qPrintable(line->objectName()));
+        QCOMPARE(sceneRectOf(line).left(), sceneRectOf(message).left());
+    }
+    QTRY_VERIFY(sceneRectOf(lines.first()).top() > sceneRectOf(chosen).bottom());
+    QTRY_VERIFY(sceneRectOf(lines.last()).bottom() <= sceneRectOf(cancel).top());
     QVERIFY(sceneRectOf(cancel).bottom() <= question->height());
+    // It fits a 1000 px screen whole, with room for the window's frame.
+    QVERIFY2(question->property("fittedHeight").toInt() <= 1000 - 2 * 18 - 28,
+             qPrintable(QString::number(question->property("fittedHeight").toInt())));
+    // Display only: nothing is written until Replace.
+    QVERIFY(ui.applied().isEmpty());
     QVERIFY(QMetaObject::invokeMethod(question, "reject"));
     QTRY_VERIFY(!question->isVisible());
 }
@@ -3563,13 +3671,14 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
              qPrintable(loadingAt));
 
     // The search's glyph, the spinner or a failure's warning mark, is
-    // 32 px with the default font and scaled with a larger one, as the
-    // text under it (it was 32 px over 24 pt text).
+    // 48 px with the default font and scaled with a larger one, as the
+    // text under it (it was 32 px over 24 pt text, and 32 px was small for
+    // the window's whole answer).
     const qreal fontScale = qvariant_cast<QObject *>(opened.dialog->property("uiPalette"))
         ->property("fontScale").toReal();
-    const qreal stateGlyph = std::max(32.0, qreal(std::round(32 * fontScale)));
+    const qreal stateGlyph = std::max(48.0, qreal(std::round(48 * fontScale)));
     if (!large) {
-        QCOMPARE(stateGlyph, 32.0);
+        QCOMPARE(stateGlyph, 48.0);
     }
     bridge->setProperty("itunesArtworkResults", QVariantList());
     bridge->setProperty("itunesArtworkLoading", true);

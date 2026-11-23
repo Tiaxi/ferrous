@@ -79,6 +79,12 @@ class BridgeClient : public QObject {
     // pause or a queue edit that keeps the playing track leaves it.
     Q_PROPERTY(double currentPlaySerial READ currentPlaySerial NOTIFY trackIdentityChanged)
     Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY trackMetadataChanged)
+    // Whether the cover is a folder image under a name that holds a cover,
+    // such as cover.jpg, by the backend's rule: applying artwork overwrites
+    // it, and adds a cover file beside another folder image. False also for
+    // embedded art; undefined while the backend has not said, as for a
+    // cover from the queue row.
+    Q_PROPERTY(QVariant currentTrackCoverNamed READ currentTrackCoverNamed NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackTitle READ currentTrackTitle NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackArtist READ currentTrackArtist NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackAlbum READ currentTrackAlbum NOTIFY trackMetadataChanged)
@@ -223,7 +229,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString itunesArtworkErrorText READ itunesArtworkErrorText NOTIFY itunesArtworkChanged)
     // The track the suggestions were searched for, which applying one
     // changes: its trackPath, album, artist and the coverPath it had then
-    // (empty without art). It stays that track while playback moves on.
+    // (empty without art), with coverNamed as currentTrackCoverNamed had it
+    // when known. It stays that track while playback moves on.
     Q_PROPERTY(QVariantMap itunesArtworkTarget READ itunesArtworkTarget NOTIFY itunesArtworkChanged)
     Q_PROPERTY(QString diagnosticsText READ diagnosticsText NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString diagnosticsLogPath READ diagnosticsLogPath NOTIFY diagnosticsChanged)
@@ -287,6 +294,7 @@ public:
     // before (empty when there was none). MPRIS exports this track.
     QString currentTrackTextPath() const { return m_currentTrackTextPath; }
     QString currentTrackCoverPath() const;
+    QVariant currentTrackCoverNamed() const;
     // The track the cover is of: the current track, or while its own cover
     // is not known yet, the track before (see processBinarySnapshot()).
     QString currentTrackCoverTrackPath() const { return m_currentTrackCoverTrackPath; }
@@ -980,6 +988,8 @@ private:
     QString m_currentTrackCoverPath;
     // The track m_currentTrackCoverPath is of; see currentTrackCoverTrackPath().
     QString m_currentTrackCoverTrackPath;
+    // See currentTrackCoverNamed().
+    QVariant m_currentTrackCoverNamed;
     // The track the title, artist, album, genre, year and number describe:
     // the current track's, or while its own are not known yet, the track
     // before's (see processBinarySnapshot()).
