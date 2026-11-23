@@ -80,6 +80,17 @@ QtObject {
     // The 1 px line between chrome and content. #383b40 / #c9cdd1.
     readonly property color chromeLine: ColorUtils.mixColor(
         root.chrome, root._inactiveText, root.themeIsDark ? 0.18 : 0.30)
+    // The status bar's progress bars, the library scan's and the Last.fm
+    // slot's. The trough: the text at 35% on chrome, opaque, darkened or
+    // lightened to 3.1:1 on it, so that the whole reads as a whole (the
+    // scan's text at 15% was 1.6:1 / 1.3:1). #6d6f71 / #86888b.
+    readonly property color statusBarTrough: root.readableOn(
+        ColorUtils.mixColor(root.chrome, root.text, 0.35), [root.chrome], 3.1)
+    // The fill: the secondary text, lightened or darkened to 3.1:1 on the
+    // trough, so that the share done reads against the rest at a glance
+    // (the secondary text was 2.5:1 / 2:1 on it). It stays under the text.
+    // #c4cbd2 / #353e46.
+    readonly property color statusBarFill: root.readableOn(root.textSecondary, [root.statusBarTrough], 3.1)
     // Text over the row: the hover tint. The least of it, in whole
     // percent, that is 1.3:1 on the view, so a hovered row stands out in
     // any theme: 10% (#2b2d2f) / 14% (#e0e1e1). It stays nearer to the view

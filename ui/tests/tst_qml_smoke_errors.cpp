@@ -431,8 +431,7 @@ void ErrorsSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
     QVERIFY(!mainSplit->property("enabled").toBool());
     // Recent Issues lists it, and the status bar's tooltip gives it.
     QCOMPARE(errorHistoryMessages(ui.errors), QStringList{reason});
-    QCOMPARE(evaluateOn(ui.item("statusBarBackendStoppedLabel"), QStringLiteral("ToolTip.text")).toString(),
-             reason);
+    QCOMPARE(ui.item("statusBarEngineError")->property("toolTipText").toString(), reason);
 }
 
 namespace {

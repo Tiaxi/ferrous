@@ -1717,8 +1717,10 @@ void WindowSmokeTest::aBackendThatCannotStartShowsWhyInRecentErrorsAndTheStatusB
     QVERIFY(stopped != nullptr && notRunning != nullptr);
     QTRY_VERIFY(stopped->isVisible());
     QVERIFY(!notRunning->isVisible());
-    QCOMPARE(evaluateOn(stopped, QStringLiteral("ToolTip.text")).toString(), failure);
-    QCOMPARE(evaluateOn(stopped, QStringLiteral("Accessible.description")).toString(), failure);
+    auto *engineError = window->findChild<QQuickItem *>(QStringLiteral("statusBarEngineError"));
+    QVERIFY(engineError != nullptr);
+    QCOMPARE(engineError->property("toolTipText").toString(), failure);
+    QCOMPARE(evaluateOn(engineError, QStringLiteral("Accessible.description")).toString(), failure);
     auto *transportBar = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
     QVERIFY(transportBar != nullptr);
     QVERIFY(!transportBar->isEnabled());

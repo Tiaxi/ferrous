@@ -40,8 +40,11 @@ ToolBar {
     readonly property bool narrow: root.width < 1200
 
     // The bar under its 1 px seam: 24 px, or the small text's line and 4 px
-    // above and below it when that is more.
-    readonly property real barHeight: Math.max(24, Math.round(smallMetrics.height) + 8)
+    // above and below it when that is more, or the Last.fm glyph and its bar
+    // clear of the slot's focus ring, with 1 px above and below, at a font
+    // where that is more (at 24 pt the bar sat on the window's edge).
+    readonly property real barHeight: Math.max(24, Math.round(smallMetrics.height) + 8,
+        scrobbleIndicator.minimumBlockHeight + 2)
 
     implicitHeight: root.topPadding + root.barHeight
     leftPadding: 12
@@ -215,53 +218,89 @@ ToolBar {
 
         // The playback engine, the app's backend, has stopped with a
         // failure, or has not started or has stopped without one to report:
-        // an error, in the user's words, with what to do in the tooltip.
-        Row {
+        // an error, in the user's words, with why and what to do in the
+        // tooltip. The glyph and the words are one: the pointer over either
+        // shows the tooltip (over the glyph it showed none), and keyboard
+        // focus shows it too, in the status bar's focus ring, 6 px outside
+        // them as the issues button's is.
+        Control {
+            id: engineError
             objectName: "statusBarEngineError"
             visible: root.backendStopped || root.isDisconnected
-            spacing: 6
             Layout.alignment: Qt.AlignVCenter
-
-            StatusGlyph {
-                objectName: "statusBarEngineErrorGlyph"
-                anchors.verticalCenter: parent.verticalCenter
-                size: root.errorGlyphSize
-                source: Qt.resolvedUrl("../assets/status-warning.svg")
-                color: root.uiPalette.negative
-            }
-
-            StatusLabel {
-                objectName: "statusBarBackendStoppedLabel"
-                anchors.verticalCenter: parent.verticalCenter
-                visible: root.backendStopped
-                text: I18n.i18nc("@info:status", "Playback engine stopped")
-                color: root.uiPalette.text
-
-                HoverHandler {
-                    id: stoppedHover
-                }
-                // Why it stopped or could not start, and what to do.
-                ToolTip.visible: stoppedHover.hovered
-                ToolTip.delay: Kirigami.Units.toolTipDelay
-                ToolTip.text: root.backendFailure
-                Accessible.description: ToolTip.text
-            }
-
-            StatusLabel {
-                objectName: "statusBarDisconnectedLabel"
-                anchors.verticalCenter: parent.verticalCenter
-                visible: root.isDisconnected
-                text: I18n.i18nc("@info:status", "Playback engine not running")
-                color: root.uiPalette.text
-
-                HoverHandler {
-                    id: disconnectedHover
-                }
-                ToolTip.visible: disconnectedHover.hovered
-                ToolTip.delay: Kirigami.Units.toolTipDelay
-                ToolTip.text: I18n.i18nc("@info:tooltip",
+            implicitHeight: root.barHeight - 2
+            // None of the style's padding: the glyph where the playback
+            // state's is, and the ring outside them.
+            leftPadding: 0
+            rightPadding: 0
+            topPadding: 0
+            bottomPadding: 0
+            leftInset: -6
+            rightInset: -6
+            hoverEnabled: true
+            focusPolicy: Qt.TabFocus
+            readonly property string text: root.backendStopped
+                ? I18n.i18nc("@info:status", "Playback engine stopped")
+                : I18n.i18nc("@info:status", "Playback engine not running")
+            // Why it stopped, in the backend's words, or what to do.
+            readonly property string toolTipText: root.backendStopped
+                ? root.backendFailure
+                : I18n.i18nc("@info:tooltip",
                     "Ferrous can't play music until its playback engine runs. Restart Ferrous to try again.")
-                Accessible.description: ToolTip.text
+            Accessible.role: Accessible.StaticText
+            Accessible.name: engineError.text
+            Accessible.description: engineError.toolTipText
+
+            Components.PlainToolTip {
+                objectName: "statusBarEngineErrorToolTip"
+                message: engineError.toolTipText
+                visible: (engineError.hovered || engineError.visualFocus) && engineError.toolTipText.length > 0
+                delay: Kirigami.Units.toolTipDelay
+            }
+
+            background: Rectangle {
+                objectName: "statusBarEngineErrorBackground"
+                radius: 3
+                color: "transparent"
+                border.width: engineError.visualFocus ? 2 : 0
+                border.color: root.uiPalette.focusRing
+            }
+
+            contentItem: Item {
+                implicitWidth: engineErrorRow.implicitWidth
+                implicitHeight: engineErrorRow.implicitHeight
+
+                Row {
+                    id: engineErrorRow
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 6
+
+                    StatusGlyph {
+                        objectName: "statusBarEngineErrorGlyph"
+                        anchors.verticalCenter: parent.verticalCenter
+                        size: root.errorGlyphSize
+                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        color: root.uiPalette.negative
+                    }
+
+                    StatusLabel {
+                        objectName: "statusBarBackendStoppedLabel"
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.backendStopped
+                        text: I18n.i18nc("@info:status", "Playback engine stopped")
+                        color: root.uiPalette.text
+                        Accessible.ignored: true
+                    }
+
+                    StatusLabel {
+                        objectName: "statusBarDisconnectedLabel"
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.isDisconnected
+                        text: I18n.i18nc("@info:status", "Playback engine not running")
+                        color: root.uiPalette.text
+                        Accessible.ignored: true
+                    }
+                }
             }
         }
 
@@ -521,7 +560,11 @@ ToolBar {
                 width: root.uiPalette.scaledSize(72)
                 height: Math.max(4, Math.round(root.uiPalette.scaledSize(root.smallGlyphSize) / 5))
                 radius: height / 2
-                color: ColorUtils.withAlpha(root.uiPalette.text, 0.15)
+                // The status bar's progress trough and fill, the Last.fm
+                // bar's: the trough 3:1 on the status bar and the fill 3:1
+                // on it, so that the share scanned reads against the rest
+                // (its trough, the text at 15%, was 1.6:1 / 1.3:1).
+                color: root.uiPalette.statusBarTrough
 
                 Rectangle {
                     objectName: "statusBarScanBarFill"
@@ -532,7 +575,7 @@ ToolBar {
                     // batches, and is full only once the scan is.
                     width: Math.floor(parent.width * scanGroup.fraction)
                     radius: height / 2
-                    color: root.uiPalette.textSecondary
+                    color: root.uiPalette.statusBarFill
                 }
             }
 
@@ -567,6 +610,7 @@ ToolBar {
         }
 
         Components.ScrobbleIndicator {
+            id: scrobbleIndicator
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             // The issues button's height, so its glyph is centred on the
