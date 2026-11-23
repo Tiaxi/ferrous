@@ -405,6 +405,12 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // Whether a middle-drag on this lane pans the view: from the drag
     // distance to the release. The surface shows a closed hand meanwhile.
     Q_PROPERTY(bool panning READ panning NOTIFY panningChanged)
+    // Whether the pointer is on this lane: over it, out to its last pixel
+    // column, or holding a button it pressed on it, through a pan and out
+    // past its edges until the release. Its crosshair shows while it is;
+    // the plot layer's corner row takes it for the pointer on the pane, so
+    // that the two show and hide together.
+    Q_PROPERTY(bool pointerOn READ pointerOn NOTIFY pointerOnChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -504,6 +510,7 @@ public:
     SpectrogramViewFollow *viewFollow() const { return m_viewFollow; }
     void setViewFollow(SpectrogramViewFollow *value);
     bool panning() const { return m_panning; }
+    bool pointerOn() const { return m_pointerOnShown; }
     bool detached() const { return m_viewFollow != nullptr && m_viewFollow->detached(); }
     // The view follows the playhead again, at once.
     Q_INVOKABLE void followPlayhead();
@@ -611,6 +618,7 @@ signals:
     void viewFollowChanged();
     void detachedChanged();
     void panningChanged();
+    void pointerOnChanged();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -1481,7 +1489,16 @@ private:
     bool m_crosshairEnabled{false};
     double m_crosshairOpacity{1.0};
     bool m_hoverActive{false};
+    // Whether a button pressed on the lane is held: the item has the
+    // pointer's grab, and no hover, until the release.
+    bool m_pointerHeld{false};
     QPointF m_hoverPosition;
+    bool pointerOnLocked() const { return m_hoverActive || m_pointerHeld; }
+    // pointerOn as last told, on the GUI thread; publishPointerOn tells a
+    // change.
+    bool m_pointerOnShown{false};
+    void publishPointerOn();
+    void setPointerHeld(bool held);
     double m_crosshairSharedX{-1.0};
     // Its dotted lines are images; their rects below are in device pixels,
     // its labels' in logical ones.

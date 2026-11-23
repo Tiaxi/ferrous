@@ -137,6 +137,12 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // Whether a middle-drag pans the view: from the drag distance to the
     // release. The surface shows a closed hand meanwhile.
     Q_PROPERTY(bool panning READ panning NOTIFY panningChanged)
+    // Whether the pointer is on the plot: over it, out to its last pixel
+    // column, or holding a button it pressed on it, through a pan and out
+    // past its edges until the release. The crosshair shows while it is;
+    // the plot layer's corner row takes it for the pointer on the pane, so
+    // that the two show and hide together.
+    Q_PROPERTY(bool pointerOn READ pointerOn NOTIFY pointerOnChanged)
     // The part of the track the view shows, in seconds, from its left edge
     // to its right: following the playhead, where a middle-drag panned it
     // or gliding back, at the zoom it shows. Taken at each frame of the
@@ -231,6 +237,7 @@ public:
     bool detached() const { return m_detached; }
     bool autoscrolling() const { return m_autoscrollingShown; }
     bool panning() const { return m_panning; }
+    bool pointerOn() const { return m_pointerOnShown; }
     double visibleStartSeconds() const { return m_visibleStartSeconds; }
     double visibleEndSeconds() const { return m_visibleEndSeconds; }
 
@@ -276,6 +283,7 @@ signals:
     void detachedChanged();
     void autoscrollingChanged();
     void panningChanged();
+    void pointerOnChanged();
     void visibleRangeChanged();
     void seekRequested(double seconds);
 
@@ -887,7 +895,16 @@ private:
     int m_channelCount{0};
     int m_sampleRateHz{0};
     bool m_hoverActive{false};
+    // Whether a button pressed on the plot is held: the item has the
+    // pointer's grab, and no hover, until the release.
+    bool m_pointerHeld{false};
     QPointF m_hoverPosition;
+    bool pointerOnLocked() const { return m_hoverActive || m_pointerHeld; }
+    // pointerOn as last told, on the GUI thread; publishPointerOn tells a
+    // change.
+    bool m_pointerOnShown{false};
+    void publishPointerOn();
+    void setPointerHeld(bool held);
     DetailWindow m_detail;
     // Changes when the detail may hold other data for the same frames,
     // such as another file's: a sample chunk built from one window holds

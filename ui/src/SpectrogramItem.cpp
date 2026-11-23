@@ -6207,13 +6207,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // and on non-hovered panes when crosshairSharedX >= 0 (vertical
             // line + bottom time label).
             if (m_crosshairEnabled
-                && (m_hoverActive || m_crosshairSharedX >= 0.0)
+                && (pointerOnLocked() || m_crosshairSharedX >= 0.0)
                 && !zoomPreviewShown) {
                 // The readout reads the data under the crosshair, which
                 // the view moves on: the hovered pane's frequency and
                 // level, and the lowest pane's time.
                 bool crosshairTimeStale = false;
-                if (m_hoverActive || m_showCrosshairTime) {
+                if (pointerOnLocked() || m_showCrosshairTime) {
                     crosshairTimeStale =
                         displayLeft != m_crosshairCachedDisplayLeft
                         || !qFuzzyCompare(drawX / scale + 1.0, m_crosshairCachedDrawX + 1.0)
@@ -6654,6 +6654,7 @@ void SpectrogramItem::hoverMoveEvent(QHoverEvent *event) {
         m_crosshairDirty = true;
     }
     lock.unlock();
+    publishPointerOn();
     if (m_crosshairEnabled) {
         emit crosshairHoverChanged(event->position().x());
         update();
@@ -6668,6 +6669,7 @@ void SpectrogramItem::hoverEnterEvent(QHoverEvent *event) {
         m_crosshairDirty = true;
     }
     lock.unlock();
+    publishPointerOn();
     if (m_crosshairEnabled) {
         emit crosshairHoverChanged(event->position().x());
         update();
@@ -6681,8 +6683,39 @@ void SpectrogramItem::hoverLeaveEvent(QHoverEvent *) {
         m_crosshairDirty = true;
     }
     lock.unlock();
+    publishPointerOn();
     if (m_crosshairEnabled) {
         emit crosshairHoverChanged(-1.0);
+        update();
+    }
+}
+
+void SpectrogramItem::publishPointerOn() {
+    bool on = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        on = pointerOnLocked();
+    }
+    if (on == m_pointerOnShown) {
+        return;
+    }
+    m_pointerOnShown = on;
+    emit pointerOnChanged();
+}
+
+void SpectrogramItem::setPointerHeld(bool held) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_pointerHeld == held) {
+            return;
+        }
+        m_pointerHeld = held;
+        if (m_crosshairEnabled) {
+            m_crosshairDirty = true;
+        }
+    }
+    publishPointerOn();
+    if (m_crosshairEnabled) {
         update();
     }
 }
@@ -6695,6 +6728,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
     // stops it is its own (see ViewAutoscroll).
     if (event->button() == Qt::MiddleButton && m_zoomEnabled) {
         event->accept();
+        setPointerHeld(true);
         m_panPressed = m_displayMode == 1;
         endPan();
         m_panPressPosition = event->position();
@@ -6731,6 +6765,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
             return;
         }
         event->accept();
+        setPointerHeld(true);
         noteOwnSeek(seconds);
         emit seekRequested(seconds);
         return;
@@ -6778,6 +6813,7 @@ void SpectrogramItem::mousePressEvent(QMouseEvent *event) {
     }
 
     event->accept();
+    setPointerHeld(true);
     noteOwnSeek(seconds);
     emit seekRequested(seconds);
 }
@@ -6885,7 +6921,7 @@ void SpectrogramItem::mouseMoveEvent(QMouseEvent *event) {
 void SpectrogramItem::moveDraggedCrosshair(QPointF pointer) {
     {
         QMutexLocker lock(&m_stateMutex);
-        if (!m_hoverActive || m_hoverPosition == pointer) {
+        if (!pointerOnLocked() || m_hoverPosition == pointer) {
             return;
         }
         m_hoverPosition = pointer;
@@ -6901,6 +6937,11 @@ void SpectrogramItem::moveDraggedCrosshair(QPointF pointer) {
 }
 
 void SpectrogramItem::mouseReleaseEvent(QMouseEvent *event) {
+    // The button pressed on the lane is let go: from here the pointer is on
+    // it while it hovers it.
+    if (event->buttons() == Qt::NoButton) {
+        setPointerHeld(false);
+    }
     if (event->button() != Qt::MiddleButton || !m_panPressed) {
         event->ignore();
         return;
@@ -7023,6 +7064,7 @@ void SpectrogramItem::autoscrollStopped() {
 }
 
 void SpectrogramItem::mouseUngrabEvent() {
+    setPointerHeld(false);
     if (!m_panPressed) {
         return;
     }
@@ -7173,7 +7215,7 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     // Determine the effective X for the vertical crosshair line.
     // Hovered pane uses its own mouse position; non-hovered panes
     // use the shared X coordinate propagated from the hovered pane.
-    const bool localHover = m_hoverActive;
+    const bool localHover = pointerOnLocked();
     const bool hasSharedX = m_crosshairSharedX >= 0.0;
     if (!m_crosshairEnabled || (!localHover && !hasSharedX)
         || width <= 0 || height <= 0) {

@@ -27,8 +27,14 @@ Item {
     property var laneLabels: []
     // The lane under the pointer, from the plot, which takes hover; or -1.
     property int hoveredLane: -1
-    // Whether the pointer is over the pane, from the item that holds the
-    // plot and this layer: a handler here would take hover from the plot.
+    // Whether the pointer is on the plot, from the plot itself (its
+    // pointerOn): over it to its last pixel column, or holding a button
+    // pressed on it, through a pan. The plot's crosshair shows while it
+    // is, and the corner's row with it.
+    property bool plotPointerOn: false
+    // Whether the pointer is over the rest of the pane, from the item that
+    // holds the plot and this layer: a handler here would take hover from
+    // the plot.
     property bool paneHovered: false
     // Whether the viewer's controls show; the main pane's always do.
     property bool controlsVisible: true
@@ -201,9 +207,12 @@ Item {
 
     // The corner is one row, which shows and hides together: the zoom's
     // plate and the mode switch, while the pointer is on the pane or
-    // keyboard focus is on either, and at rest while the view is moved.
-    readonly property bool cornerWanted: root.controlsAutoHide || root.beforeAudio || root.paneHovered
-        || root.hoveredLane >= 0 || modeSwitch.pointerHovered || modeSwitch.focusInside
+    // keyboard focus is on either, and at rest while the view is moved. On
+    // the plot it shows on the plot's own state, the crosshair's, so that
+    // the two show and hide together (on the lanes' hover, the row went at
+    // the seam between the waveform's lanes while the crosshair stayed).
+    readonly property bool cornerWanted: root.controlsAutoHide || root.beforeAudio || root.plotPointerOn
+        || root.paneHovered || modeSwitch.pointerHovered || modeSwitch.focusInside
         || zoomPlate.focusInside
 
     // As a view follows again with nothing else showing the row, "Not
