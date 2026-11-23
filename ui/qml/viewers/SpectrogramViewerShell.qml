@@ -519,9 +519,11 @@ Item {
                         fullscreenControlsAutoHide.wake()
                     }
 
-                    // With the strip turned off, the modes and the zoom are
-                    // on a plate in the corner, the strip's own buttons; its
-                    // Close is the keys' and the double-click's then.
+                    // With the strip turned off, the modes, the zoom and
+                    // Close are on a plate in the corner, the strip's own
+                    // buttons, so the toolbar ends in Close as in the window
+                    // and the strip (without it, a pointer had no way out
+                    // in sight); Escape and a double-click close it too.
                     Components.ViewerCornerControls {
                         id: spectrogramFullscreenCorner
                         objectName: "spectrogramFullscreenCorner"
@@ -531,7 +533,6 @@ Item {
                         anchors.topMargin: root.cornerInset
                         anchors.rightMargin: root.meterWidth + root.cornerRightInset
                         available: !root.stripEnabled
-                        closeShown: false
                         closeButtonName: "spectrogramFullscreenCornerCloseButton"
                         plotColors: root.uiPalette.plotColors(root.visualizationMode)
                         uiPalette: root.uiPalette

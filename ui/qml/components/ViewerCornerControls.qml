@@ -10,10 +10,10 @@ import "." as Components
 // top right corner: [Not following | Zoom ↺] | [⚠] [modes] | [✕], the modes declared inside
 // it as they are inside the strip. So the viewer has one toolbar everywhere
 // (the corner's buttons were the plot's, with another checked fill, glyph
-// ink, warning colour and order than the strip's). Over the whole screen
-// without the strip, whose keys and double-click do what its Close does,
-// `closeShown` is false. The plate is as tall as the plot's, with 4 px
-// around the buttons, so its top and centre line are the lane heads'.
+// ink, warning colour and order than the strip's), and it ends in Close
+// there too, over the whole screen with the strip turned off. The plate is
+// as tall as the plot's, with 4 px around the buttons, so its top and
+// centre line are the lane heads'.
 Item {
     id: root
 

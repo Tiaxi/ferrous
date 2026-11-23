@@ -3720,7 +3720,9 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
     QVERIFY(bridge->setProperty("showFullscreenTitleStrip", false));
 
     // The visualization: the pointer brings the controls back, without the
-    // strip, and the mode switch sits on a plate at the top edge.
+    // strip, and the mode switch sits on a plate at the top edge, which
+    // ends in Close behind its divider, as the windowed plate and the strip
+    // do (it had no Close, and a pointer no way out in sight).
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
     QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
     QQuickWindow *fullscreen = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
@@ -3743,7 +3745,13 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
     QQuickItem *corner = itemNamed(fullscreen->contentItem(), QStringLiteral("spectrogramFullscreenCorner"));
     QVERIFY(corner != nullptr);
     QTRY_COMPARE(corner->opacity(), 1.0);
-    QVERIFY(visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenCornerCloseButton")) == nullptr);
+    QQuickItem *cornerClose = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenCornerCloseButton"));
+    QQuickItem *cornerDivider = itemNamed(corner, QStringLiteral("viewerControlsCloseDivider"));
+    QVERIFY(cornerClose != nullptr && cornerDivider != nullptr && cornerDivider->isVisible());
+    QCOMPARE(sceneRectOf(cornerDivider).left(), sceneRectOf(modeSwitch).right() + 8.0);
+    QCOMPARE(sceneRectOf(cornerClose).left(), sceneRectOf(cornerDivider).right() + 4.0);
+    QCOMPARE(sceneRectOf(cornerClose).center().y(), sceneRectOf(modeSwitch).center().y());
+    QVERIFY(sceneRectOf(corner).contains(sceneRectOf(cornerClose)));
     QVERIFY(sceneRectOf(modeSwitch).top() >= 0.0);
     QVERIFY2(sceneRectOf(modeSwitch).top() < strip->height(), qPrintable(QString::number(sceneRectOf(modeSwitch).top())));
     // They still hide as the pointer rests.
@@ -3763,13 +3771,14 @@ void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
     QVERIFY(stripModeSwitch != nullptr);
     QTRY_VERIFY(stripModeSwitch->isVisible());
     QVERIFY(!modeSwitch->isVisible());
-    // Turned off once more, the switch is on its plate again.
+    // Turned off once more, the switch is on its plate again, and its
+    // Close closes the viewer.
     QVERIFY(bridge->setProperty("showFullscreenTitleStrip", false));
     QTRY_VERIFY(modeSwitch->isVisible());
     QVERIFY(!strip->isVisible());
-    QVERIFY(bridge->setProperty("showFullscreenTitleStrip", true));
-    QTRY_VERIFY(!modeSwitch->isVisible());
-    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(cornerClose->isVisible() && corner->opacity() == 1.0);
+    QTest::mouseClick(fullscreen, Qt::LeftButton, Qt::NoModifier, centerInWindow(cornerClose));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
     QTRY_VERIFY(!fullscreen->isVisible());
     window->requestActivate();
     QVERIFY(QTest::qWaitForWindowActive(window));
