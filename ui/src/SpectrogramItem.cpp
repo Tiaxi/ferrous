@@ -1664,20 +1664,6 @@ QString crosshairFrequency(double hz) {
     return hertzFormat().arg(qRound(hz));
 }
 
-// The crosshair's readout of a time in the track: "1:46.0".
-QString crosshairTime(double seconds) {
-    const long tenths = std::lround(std::max(0.0, seconds) * 10.0);
-    const long whole = tenths / 10;
-    const long hours = whole / 3600;
-    const QString rest = QStringLiteral("%1.%2")
-        .arg(whole % 60, 2, 10, QLatin1Char('0'))
-        .arg(tenths % 10);
-    if (hours > 0) {
-        return QStringLiteral("%1:%2:%3").arg(hours).arg((whole / 60) % 60, 2, 10, QLatin1Char('0')).arg(rest);
-    }
-    return QStringLiteral("%1:%2").arg(whole / 60).arg(rest);
-}
-
 } // namespace
 
 // Shared across all SpectrogramItem instances so the ring-cap floor
@@ -7233,20 +7219,28 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
             lineX, displayLeft, rollingMode,
             m_rollingEpoch, columnsPerSecond, logicalDrawX, effectiveZoomLocked()));
         if (std::isfinite(trackTime)) {
-            timeText = crosshairTime(trackTime);
+            // As finely as the view resolves it, by the waveform's rule: a
+            // device pixel, or an analysis column where that is longer; at
+            // the default zoom, a column to a logical pixel, tenths.
+            const double zoom = effectiveZoomLocked();
+            const double secondsPerColumn = std::max(
+                1.0 / (columnsPerSecond * std::max(1e-9, zoom * scale)), 1.0 / columnsPerSecond);
+            timeText = CrosshairReadout::formatCrosshairTime(
+                trackTime, CrosshairReadout::crosshairTimeDecimals(secondsPerColumn, zoom));
         }
     }
 
     const QFontMetrics metrics(CrosshairReadout::font(m_textScale));
-    const auto plateFor = [&](const QString &text) {
+    const auto plateFor = [&](const QString &text, int textWidth) {
         return text.isEmpty()
             ? QSize()
-            : CrosshairReadout::plateSize(
-                  metrics.horizontalAdvance(text), metrics, m_readoutColors, m_textScale);
+            : CrosshairReadout::plateSize(textWidth, metrics, m_readoutColors, m_textScale);
     };
     const int logicalWidth = std::max(1, static_cast<int>(std::floor(width / scale + 1e-6)));
     const int logicalHeight = std::max(1, static_cast<int>(std::floor(height / scale + 1e-6)));
-    const QSize timePlate = plateFor(timeText);
+    // The time's plate is as wide as its widest digits, so it doesn't
+    // twitch as they change.
+    const QSize timePlate = plateFor(timeText, CrosshairReadout::widestDigitsWidth(timeText, metrics));
     // The frequency scale, and whether a label of it is beside the time.
     CrosshairReadout::RightScale rightScale;
     if (m_gridEnabled && m_freqGrid.valid) {
@@ -7265,7 +7259,7 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     const auto [valueRect, timeRect] = CrosshairReadout::plateRects(
         logicalWidth, logicalHeight,
         static_cast<int>(std::floor(lineX)), static_cast<int>(std::floor(lineY)),
-        plateFor(valueText), timePlate, m_reservedCorner, rightScale,
+        plateFor(valueText, metrics.horizontalAdvance(valueText)), timePlate, m_reservedCorner, rightScale,
         m_laneHeadBounds.isEmpty() ? QRect() : m_laneHeadBounds.toAlignedRect(),
         widestPlate(crosshairWidestValueWidthLocked()),
         timeText.isEmpty()

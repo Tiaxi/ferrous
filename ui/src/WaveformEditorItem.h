@@ -735,12 +735,6 @@ private:
         QPainter &painter, const QLineF &line,
         const QColor &foreground, const QColor &contrast);
     static QPainterPath buildSamplePath(const QPolygonF &samples);
-    // The crosshair's time, "1:46.0", with `decimals` decimals, 1 to 3.
-    static QString formatCrosshairTime(double seconds, int decimals);
-    // Its decimals: one at the default zoom, as the spectrogram's; zoomed
-    // in, as many as tell a column of `secondsPerColumn` from the next,
-    // up to milliseconds.
-    static int crosshairTimeDecimals(double secondsPerColumn, double zoomLevel);
     // The lowest lane's label and buttons, in a plot `height` tall of
     // `lanes` lanes.
     QRect lowestLaneHeadLocked(int height, int lanes) const;

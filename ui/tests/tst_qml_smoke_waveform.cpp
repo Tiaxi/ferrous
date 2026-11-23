@@ -1096,7 +1096,7 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
             QMutexLocker lock(&item->m_stateMutex);
             std::tie(viewStart, viewEnd) = item->visibleRangeLocked();
         }
-        const int decimals = WaveformEditorItem::crosshairTimeDecimals(
+        const int decimals = CrosshairReadout::crosshairTimeDecimals(
             (viewEnd - viewStart) / std::ceil(320 * scale - 1e-6), zoom);
         QCOMPARE(decimals, zoom == 1.0 ? 1 : 3);
         const QRegularExpression timeLabel(QStringLiteral("^\\d+:\\d\\d\\.\\d{%1}$").arg(decimals));
@@ -1110,7 +1110,7 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
         item->mousePressEvent(&press);
         QCOMPARE(seekSpy.count(), 1);
         const double seconds = seekSpy.at(0).at(0).toDouble();
-        QCOMPARE(WaveformEditorItem::formatCrosshairTime(seconds, decimals), shown.constFirst());
+        QCOMPARE(CrosshairReadout::formatCrosshairTime(seconds, decimals), shown.constFirst());
         double start = 0.0;
         double end = 0.0;
         {
@@ -2644,7 +2644,7 @@ void WaveformSmokeTest::waveformEditorReadoutFollowsTheTextScale() {
         return CrosshairReadout::plateSize(metrics.horizontalAdvance(text), metrics,
                                            CrosshairReadout::Colors{}, textScale);
     };
-    const QString timeText = WaveformEditorItem::formatCrosshairTime(5.0, 1);
+    const QString timeText = CrosshairReadout::formatCrosshairTime(5.0, 1);
     const auto [windowValue, windowTime] = plates();
     QVERIFY(windowValue.isValid() && windowTime.isValid());
     // The rounded corners leave a plate's corner pixels out: its middle
@@ -2671,19 +2671,19 @@ void WaveformSmokeTest::waveformEditorReadoutFollowsTheTextScale() {
 }
 
 void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(28.98, 3), QStringLiteral("0:28.980"));
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(3'723.004, 3), QStringLiteral("1:02:03.004"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(28.98, 3), QStringLiteral("0:28.980"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(3'723.004, 3), QStringLiteral("1:02:03.004"));
     // One decimal, as the spectrogram's: "1:46.0".
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(106.0, 1), QStringLiteral("1:46.0"));
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(28.98, 1), QStringLiteral("0:29.0"));
-    QCOMPARE(WaveformEditorItem::formatCrosshairTime(3'723.004, 2), QStringLiteral("1:02:03.00"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(106.0, 1), QStringLiteral("1:46.0"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(28.98, 1), QStringLiteral("0:29.0"));
+    QCOMPARE(CrosshairReadout::formatCrosshairTime(3'723.004, 2), QStringLiteral("1:02:03.00"));
     // One at the default zoom, whatever the track's length; zoomed in, as
     // many as a column needs, to milliseconds.
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.24, 1.0), 1);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.002, 1.0), 1);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.24, 2.0), 1);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.05, 4.0), 2);
-    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.0001, 64.0), 3);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.24, 1.0), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.002, 1.0), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.24, 2.0), 1);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.05, 4.0), 2);
+    QCOMPARE(CrosshairReadout::crosshairTimeDecimals(0.0001, 64.0), 3);
     // Padded as a lane's label, 6 px at either side of the text and 20 px
     // tall at the default font (it had 3 px around the text).
     const QFont applicationFont = QGuiApplication::font();

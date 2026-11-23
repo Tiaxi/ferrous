@@ -3647,30 +3647,6 @@ QPainterPath WaveformEditorItem::buildSamplePath(const QPolygonF &samples) {
     return path;
 }
 
-QString WaveformEditorItem::formatCrosshairTime(double seconds, int decimals) {
-    decimals = std::clamp(decimals, 1, 3);
-    const qint64 unit = decimals == 1 ? 10 : (decimals == 2 ? 100 : 1000);
-    // Halfway rounds up, also a rounding error short of it: a pan works out
-    // the one time it holds afresh, from another start, on each move.
-    constexpr double roundingError = 1e-6;
-    const qint64 ticks = std::llround(
-        std::max(0.0, seconds) * static_cast<double>(unit) + roundingError);
-    const qint64 whole = ticks / unit;
-    const qint64 hours = whole / 3600;
-    const QString rest = QStringLiteral("%1.%2")
-        .arg(whole % 60, 2, 10, QLatin1Char('0'))
-        .arg(ticks % unit, decimals, 10, QLatin1Char('0'));
-    if (hours > 0) {
-        return QStringLiteral("%1:%2:%3").arg(hours).arg((whole / 60) % 60, 2, 10, QLatin1Char('0')).arg(rest);
-    }
-    return QStringLiteral("%1:%2").arg(whole / 60).arg(rest);
-}
-
-int WaveformEditorItem::crosshairTimeDecimals(double secondsPerColumn, double zoomLevel) {
-    if (zoomLevel <= 1.0001 || !(secondsPerColumn > 0.0)) return 1;
-    return std::clamp(static_cast<int>(std::ceil(-std::log10(secondsPerColumn) - 1e-9)), 1, 3);
-}
-
 std::pair<QRect, QRect> WaveformEditorItem::crosshairLabelRects(
     int width, int height, int x, int y,
     int valueTextWidth, int timeTextWidth, int textHeight,
@@ -4200,17 +4176,21 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     const double localY = std::fmod(static_cast<double>(y), channelHeight);
     const double amplitude = std::clamp(std::abs((channelHeight * 0.5 - localY) / (channelHeight * 0.5)), 0.0, 1.0);
     const QString dbText = crosshairLevel(amplitude);
-    const QString timeText = formatCrosshairTime(
-        time, crosshairTimeDecimals((visibleEnd - visibleStart) / axis.columns(), m_presentedZoomLevel));
+    const QString timeText = CrosshairReadout::formatCrosshairTime(
+        time, CrosshairReadout::crosshairTimeDecimals(
+                  (visibleEnd - visibleStart) / axis.columns(), m_presentedZoomLevel));
     const QFont font = CrosshairReadout::font(m_textScale);
     const QFontMetrics metrics(font);
     // Whether a plate shows goes by the widest text it can have, so it
     // doesn't come and go as the level and time under the pointer change.
+    // The time's plate is as wide as its widest digits, so it doesn't
+    // twitch as they change.
+    const int timeWidth = CrosshairReadout::widestDigitsWidth(timeText, metrics);
     const auto [dbRect, timeRect] = crosshairLabelRects(
         width, height, x, y, metrics.horizontalAdvance(dbText),
-        metrics.horizontalAdvance(timeText), metrics.height(), m_reservedCorner,
+        timeWidth, metrics.height(), m_reservedCorner,
         lowestLaneHeadLocked(height, channels), crosshairWidestLevelWidthLocked(),
-        CrosshairReadout::widestDigitsWidth(timeText, metrics), colors, m_textScale);
+        timeWidth, colors, m_textScale);
     CrosshairReadout::drawPlate(painter, dbRect, dbText, font, colors);
     CrosshairReadout::drawPlate(painter, timeRect, timeText, font, colors);
 }

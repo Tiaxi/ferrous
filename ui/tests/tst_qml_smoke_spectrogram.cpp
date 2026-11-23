@@ -1653,12 +1653,13 @@ void layOutReadout(SpectrogramItem &item, const QSize &lane, double scale, const
 }
 
 // "1:46.0", as the readout shows a time under an hour.
-QString readoutTime(double seconds) {
-    const long tenths = std::lround(seconds * 10.0);
+QString readoutTime(double seconds, int decimals = 1) {
+    const qint64 unit = decimals == 1 ? 10 : (decimals == 2 ? 100 : 1'000);
+    const qint64 ticks = std::llround(seconds * static_cast<double>(unit));
     return QStringLiteral("%1:%2.%3")
-        .arg(tenths / 600)
-        .arg((tenths / 10) % 60, 2, 10, QLatin1Char('0'))
-        .arg(tenths % 10);
+        .arg(ticks / unit / 60)
+        .arg((ticks / unit) % 60, 2, 10, QLatin1Char('0'))
+        .arg(ticks % unit, decimals, 10, QLatin1Char('0'));
 }
 
 } // namespace
@@ -3108,10 +3109,13 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutReadsEachView() {
         layOutReadout(item, lane, scale, pointer, rolling, drawX);
         const QVector<SpectrogramOverlayImage> plates = readoutPlatesOf(item.m_crosshair);
         QCOMPARE(plates.size(), 2);
-        // The time of the column under the vertical line.
+        // The time of the column under the vertical line, as finely as the
+        // view resolves it, as the waveform's readout: tenths at the
+        // default zoom; zoomed, its columns, 21 ms, to hundredths (at
+        // tenths, the pointer crossed 16 px before the time changed).
         const double lineX = std::floor(pointer.x() * scale) / scale;
         const double seconds = (lineX - drawX) / effectiveZoom / kReadoutColumnsPerSecond;
-        QCOMPARE(plates[1].text, readoutTime(seconds));
+        QCOMPARE(plates[1].text, readoutTime(seconds, zoom > 1.0 ? 2 : 1));
         for (const SpectrogramOverlayImage &plate : plates) {
             QVERIFY(QRectF(QPointF(0.0, 0.0), QSizeF(lane)).contains(plate.rect));
             // Laid out in whole logical pixels: whole device pixels at any
