@@ -479,13 +479,17 @@ QtObject {
         // instrument rather than as a piece of the queue's scrollbar above
         // it, whose greys it had: the waveform's colour mixed about 35 %
         // toward the view, less where that would be under 3:1 on the
-        // trough (no seam across its top: under the queue's seam it made
+        // trough, or in a light theme under 4.4:1 (#4c6f82, 15 %: at 3:1
+        // the rungs and their gaps averaged 1.8:1 against the unlit ladder
+        // and the lit column read as a hatch continuing the queue's
+        // scrollbar, H27) (no seam across its top: under the queue's seam it made
         // one 2 px thick over the meter's column). From the pane's waveform
         // colour, so it stays the plot's own. The trough frames the body,
         // a step off the view, so the column reads as an instrument and not
         // as the waveform's tail (at 1.2:1 it did not show).
         meterTrough: root.themeIsDark ? "#2b2d2f" : "#e8e9ea"
-        meterFill: root._waveformMeterFill(ColorUtils.drawnOver(waveformColors.meterTrough, root.view))
+        meterFill: root._waveformMeterFill(ColorUtils.drawnOver(waveformColors.meterTrough, root.view),
+                                           root.themeIsDark ? 3 : 4.4)
         meterSeam: root.view
         meterPeak: ColorUtils.withAlpha(root.text, 0.95)
         // The unlit clip lamp, over the trough: in a light theme text at
@@ -515,11 +519,11 @@ QtObject {
     }
 
     // The waveform's colour toward the view: 35 %, or by 5 % steps less,
-    // the most of it that is 3:1 on `trough`.
-    function _waveformMeterFill(trough) {
+    // the most of it that is `ratio`:1 on `trough`.
+    function _waveformMeterFill(trough, ratio) {
         for (let amount = 0.35; amount > 0; amount -= 0.05) {
             const fill = ColorUtils.mixColor(root.paneWave, root.view, amount)
-            if (ColorUtils.contrastRatio(fill, trough) >= 3)
+            if (ColorUtils.contrastRatio(fill, trough) >= ratio)
                 return fill
         }
         return root.paneWave
