@@ -7782,16 +7782,17 @@ STATES += [
     ("viz-interaction", "main", "vi-autoscroll-stopped", f"move {_VW}@0.5,0.5 | mclick {_VW}@0.5,0.5 | wait 0.8 | away",
      "Autoscroll stopped by a second middle click: the view stays where it got to"),
     ("viz-interaction", "_", "_autoscroll-stop", "key F | wait 0.6 | away", ""),
-    ("viz-interaction", "motion", "vi-zoom-waveform",
-     f"js resetZoomAction.trigger() | wait 0.6 | hover {_VW}@0.5,0.4 0.4 | strip 2.0 0.1 spectrogramPane :: "
-     f"wheel {_VW}@0.5,0.4 120 3 ; wait 0.8 ; js resetZoomAction.trigger()",
-     "Waveform zoom in (3 notches) and Reset Zoom with the pointer resting on the plot: the crosshair, its readouts "
-     "and the zoom readout"),
     ("viz-interaction", "motion", "vi-autoscroll",
      f"strip 3.4 0.1 {_VI_CROP} :: mclick {_VW}@0.3,0.5 ; move {_VW}@0.5,0.5 ; wait 0.9 ; move xy:1598,760 ; wait 0.9 ; "
      f"leave ; wait 0.9 ; move {_VW}@0.5,0.5 ; mclick {_VW}@0.5,0.5",
      "Autoscroll from a middle click: the pointer a little right of the click (slow), at the window's edge (fast), "
      "outside the window (going on), then a second middle click stopping it"),
+    # (after the autoscroll, which starts from the zoomed view _autoscroll-from leaves)
+    ("viz-interaction", "motion", "vi-zoom-waveform",
+     f"key F | js resetZoomAction.trigger() | wait 0.6 | hover {_VW}@0.5,0.4 0.4 | strip 2.0 0.1 spectrogramPane :: "
+     f"wheel {_VW}@0.5,0.4 120 3 ; wait 0.8 ; js resetZoomAction.trigger()",
+     "Waveform zoom in (3 notches) and Reset Zoom with the pointer resting on the plot: the crosshair, its readouts "
+     "and the zoom readout"),
     ("viz-interaction", "_", "_to-spectrogram",
      "wait 0.3 | key F | js resetZoomAction.trigger() | js viewerController.setVisualizationMode(0) | "
      "js root.uiBridge.setSpectrogramDisplayMode(1) | click seekSlider@0.3,0.5 | ready 3 | away", ""),
