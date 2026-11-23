@@ -1217,6 +1217,8 @@ private slots:
     void queueStopMarkWeighsNoMoreThanPause_data();
     void queueStopMarkWeighsNoMoreThanPause();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
+    void queueRightPaddingIsTheLaneAndAnInset_data();
+    void queueRightPaddingIsTheLaneAndAnInset();
     void pressedQueueRowHasItsOwnColour();
     void queueNameKeepsTheTitleColumnsPlace_data();
     void queueNameKeepsTheTitleColumnsPlace();
@@ -6188,6 +6190,64 @@ void UiMainWindowTest::queueStopMarkWeighsNoMoreThanPause() {
     QCOMPARE(glyph->height(), glyph->width());
 }
 
+void UiMainWindowTest::queueRightPaddingIsTheLaneAndAnInset_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<int>("windowHeight");
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("10 pt, 1600 by 1000, dark") << 10.0 << 1600 << 1000 << true;
+    QTest::newRow("10 pt, 1000 by 720, light") << 10.0 << 1000 << 720 << false;
+    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false;
+    QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true;
+}
+
+// Right of Length, the queue keeps the scrollbar's lane, 8 px at any font,
+// and a 16 px inset that grows with the font to half as much again: 24 px
+// at 10 pt, 32 px at 24 pt. Scaled as one with the font, the two made a
+// 48 px gutter at 24 pt, twice the lane's beside Album and Artist dropped
+// for want of room. Length's text stays clear of the scrollbar's thumb by
+// the inset.
+void UiMainWindowTest::queueRightPaddingIsTheLaneAndAnInset() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
+    const ScopedApplicationFont font(pointSize);
+    MainWindowFixture fixture(sized(windowWidth, windowHeight));
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal(), pointSize);
+    setQueue(bridgeOf(window), sampleQueueRows(80));
+    QQuickItem *queue = named(window, "mainQueuePane");
+    QQuickItem *queueView = named(window, "playlistView");
+    QQuickItem *scrollBar = named(window, "queueScrollBar");
+    QVERIFY(queue && queueView && scrollBar);
+    QTRY_VERIFY(scrollBar->isVisible());
+    const qreal lane = scrollBar->property("lane").toReal();
+    QCOMPARE(lane, 8.0);
+    const qreal scale = queue->property("sizeScale").toReal();
+    const qreal inset = std::round(16 * std::min(scale, 1.5));
+    const qreal padding = queue->property("rightPadding").toReal();
+    QCOMPARE(padding, lane + inset);
+    QVERIFY2(padding <= lane + 24, qPrintable(QString::number(padding)));
+    if (pointSize > 20) {
+        QVERIFY2(scale > 1.5, qPrintable(QString::number(scale)));
+    } else {
+        QCOMPARE(padding, 24.0);
+    }
+    // The header's Length and a row's end where the padding starts, the
+    // inset clear of the scrollbar's lane.
+    QQuickItem *length = named(window, "queueHeader_length");
+    QVERIFY(shown(length));
+    QCOMPARE(sceneRect(queue).right() - sceneRect(length).right(), padding);
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = viewRowAt(queueView, 0)) != nullptr);
+    QQuickItem *cell = itemNamed(row, QStringLiteral("queueCell_length"));
+    QVERIFY(shown(cell));
+    QCOMPARE(sceneRect(scrollBar).left() - sceneRect(cell).right(), inset);
+}
+
 void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
@@ -6212,7 +6272,7 @@ void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
         QVERIFY2(header->childItems().isEmpty(), column);
     }
     // Artist, Album and Length: small labels in the secondary colour, Length
-    // right-aligned 24 px (at the default font) from the queue's right edge.
+    // right-aligned 24 px (at 10 pt) from the queue's right edge.
     QQuickItem *queue = named(window, "mainQueuePane");
     for (const char *column : {"queueHeader_artist", "queueHeader_album", "queueHeader_length"}) {
         QQuickItem *label = itemNamed(queueHeader, QString::fromLatin1(column));
@@ -6224,8 +6284,9 @@ void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     QQuickItem *length = itemNamed(queueHeader, QStringLiteral("queueHeader_length"));
     QCOMPARE(length->property("horizontalAlignment").toInt(), int(Qt::AlignRight));
     QCOMPARE(sceneRect(queue).right() - sceneRect(length).right(), queue->property("rightPadding").toReal());
+    // The scrollbar's lane and the inset (queueRightPaddingIsTheLaneAndAnInset).
     QCOMPARE(queue->property("rightPadding").toReal(),
-             std::round(24 * palette->property("rowHeight").toReal() / 26));
+             8 + std::round(16 * std::min(palette->property("rowHeight").toReal() / 26, 1.5)));
     // The resize handles show no line until the pointer or the keyboard
     // finds them.
     QQuickItem *handle = named(window, "queueColumnHandle_album");
@@ -6996,6 +7057,7 @@ void UiMainWindowTest::viewersInTheWindowFadeAsTheStylesPopupsDo() {
         QCOMPARE(fadeDuration(popup, "exit"), exitDuration);
     }
 }
+
 
 
 

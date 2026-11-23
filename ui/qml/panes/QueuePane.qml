@@ -64,9 +64,13 @@ Rectangle {
     // Between the number and the title, and between the other columns.
     readonly property real titleGap: Math.round(12 * root.sizeScale)
     readonly property real columnGap: Math.round(16 * root.sizeScale)
-    // From the length's right end to the queue's: the scrollbar lane and
-    // the inset.
-    readonly property real rightPadding: Math.round(24 * root.sizeScale)
+    // From the length's right end to the queue's: the scrollbar's lane,
+    // which keeps its 8 px at any font, and a 16 px inset that grows with
+    // the font to half as much again, 24 px at 24 pt. Scaled as one, the
+    // two made 48 px at 24 pt, a gutter twice the lane's beside a column
+    // set that dropped Album and Artist for want of room.
+    readonly property real rightPadding: playlistVerticalScrollBar.lane
+        + Math.round(16 * Math.min(root.sizeScale, 1.5))
     // The share of the text columns' room Artist and Album have by default;
     // the title has the rest, 45%. Half left a gap after short titles and
     // elided artists at a large font while the title had room; these give
