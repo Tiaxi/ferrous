@@ -471,6 +471,14 @@ public:
     // "visualizationMode", and "followCurrentTrack". Empty until it has
     // arrived.
     Q_INVOKABLE QVariantMap savedWindowLayout() const;
+    // A failed save before quitting as QuitSaveFailedDialog reads it:
+    // "settings", "queue" and "scrobbles", whether each could not be saved;
+    // "cause", a code the dialog puts in words ("permission",
+    // "readOnlyFileSystem", "noSpace", "busy", "engineStopped", or empty
+    // for none it can name); and "detail", the system's text, a line for
+    // each failed save. `subjects` and `cause` are BinaryBridgeCodec's
+    // QuitSaveSubject bits and QuitSaveCause.
+    static QVariantMap quitSaveFailureMap(quint8 subjects, quint8 cause, const QString &detail);
     // The layout the backend sent as a map, as savedWindowLayout gives it.
     static QVariantMap windowLayoutMap(
         const BinaryBridgeCodec::WindowLayout &saved, const QList<QRect> &screens);
@@ -632,16 +640,19 @@ signals:
     void backendFailureChanged();
     // An error for the user: the message, its BinaryBridgeCodec::ErrorCategory
     // and ErrorSeverity, and the file or folder it is about, or empty.
-    void bridgeError(const QString &message, int category, int severity, const QString &subject);
+    // `detail` is the system's text for it, or empty: Recent Issues shows it
+    // under the message, in secondary ink.
+    void bridgeError(const QString &message, int category, int severity, const QString &subject,
+                     const QString &detail);
     void queueUndoChanged();
     // An undo brought back these rows, or a redo moved them here, and the
     // queue view selects them; they are rows of the queue as it is when
     // this is emitted.
     void queueUndoRestored(const QVariantList &rows);
     // The answer to the saveStateBeforeQuit call that returned requestId:
-    // whether the settings and the queue were saved, and what to show the
-    // user if not.
-    void stateSaveFinished(quint32 requestId, bool saved, const QString &message);
+    // whether the settings and the queue were saved, and, if not, what
+    // could not be saved and why, as quitSaveFailureMap gives it.
+    void stateSaveFinished(quint32 requestId, bool saved, const QVariantMap &failure);
     // The backend sent the window layout saved in the settings.
     void savedWindowLayoutRead();
     void queueColumnWidthsChanged();
@@ -909,10 +920,13 @@ private:
     // Tell the UI about an error, which Recent Issues shows, and add it to
     // the diagnostics log with its category and severity; see bridgeError.
     // What the user need not see goes to logDiagnostic only.
+    // `detail` is the system's text, which Recent Issues shows apart and
+    // the log after the message.
     void reportError(BinaryBridgeCodec::ErrorCategory category, const QString &message,
                      const QString &subject = {},
                      BinaryBridgeCodec::ErrorSeverity severity =
-                         BinaryBridgeCodec::ErrorSeverityError);
+                         BinaryBridgeCodec::ErrorSeverityError,
+                     const QString &detail = {});
     void sendPathListCommand(quint16 cmdId, const QStringList &paths,
                              const KLocalizedString &tooLargeMessage);
     void sendLibraryItems(

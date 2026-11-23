@@ -26,6 +26,7 @@ use crate::playback::{
     PathRenames, PlaybackCommand, PlaybackEngine, PlaybackEvent, PlaybackSnapshot, PlaybackState,
     RepeatMode,
 };
+use crate::save_cause::{SaveCause, SaveProblem};
 use crate::worker_thread::{spawn_joinable, JoinableThread};
 
 mod commands;
@@ -47,6 +48,7 @@ mod queue_relay;
 mod queue_sync;
 mod queue_undo;
 mod queue_validation;
+mod quit_failure;
 mod search;
 mod search_query;
 mod search_suggest;
@@ -76,6 +78,7 @@ pub use keyboard_shortcuts::KeyboardShortcuts;
 pub use queue_columns::{QueueColumnSettings, QueueColumnWidths};
 pub use queue_sync::{QueueEdit, QueueUpdate};
 pub use queue_undo::{QueueUndoKind, QueueUndoRestored, QueueUndoState};
+pub use quit_failure::QuitSaveFailure;
 pub(crate) use search::is_main_album_disc_section;
 use search::{drain_search_results, process_search_results, SearchWorkerQuery};
 pub use window_layout::{WindowGeometry, WindowLayout};
@@ -488,7 +491,7 @@ pub enum BridgeEvent {
     /// to show the user if a save failed.
     StateSaved {
         request_id: u32,
-        result: Result<(), String>,
+        result: Result<(), QuitSaveFailure>,
     },
     /// The window layout saved in the settings, sent once at startup, for
     /// the UI to show the window with, the widths of the queue's columns,
@@ -2082,10 +2085,9 @@ impl BridgeLoopRuntime {
                 if let Some(request_id) = self.quit_save_waiting_for_lastfm() {
                     self.finish_quit_save(
                         request_id,
-                        Some(
-                            "Last.fm stopped unexpectedly; scrobbles it had not saved are lost."
-                                .to_string(),
-                        ),
+                        Some(QuitSaveFailure::scrobbles(SaveProblem::other(
+                            "Last.fm stopped unexpectedly; scrobbles it had not saved are lost",
+                        ))),
                         event_tx,
                     );
                 }
@@ -2438,7 +2440,11 @@ impl BridgeLoopRuntime {
                 urgency
             }
             LastFmEvent::SavedForQuit { request_id, result } => {
-                self.finish_quit_save(request_id, result.err(), event_tx);
+                self.finish_quit_save(
+                    request_id,
+                    result.err().map(QuitSaveFailure::scrobbles),
+                    event_tx,
+                );
                 SnapshotUrgency::None
             }
         }
@@ -2460,7 +2466,7 @@ impl BridgeLoopRuntime {
     fn answer_save_for_quit(
         &mut self,
         request_id: u32,
-        result: Result<(), String>,
+        result: Result<(), QuitSaveFailure>,
         event_tx: &Sender<BridgeEvent>,
     ) {
         if self.lastfm_may_hold_unsaved_scrobbles() && !self.quit_save.lastfm_stopped {
@@ -2516,16 +2522,23 @@ impl BridgeLoopRuntime {
             self.finish_quit_save(request_id, None, event_tx);
             return;
         }
-        let problem = format!(
-            "Last.fm: {at_risk} {} not saved and would be lost on quit. Last.fm is busy, \
-             possibly waiting for the network, and could not save {} in time.",
-            if at_risk == 1 {
-                "scrobble is"
-            } else {
-                "scrobbles are"
-            },
-            if at_risk == 1 { "it" } else { "them" }
+        // The dialog says why; the log keeps how many.
+        log_warning(
+            ErrorCategory::LastFm,
+            &format!(
+                "{at_risk} {} not saved before quitting: Last.fm is busy, possibly waiting \
+                 for the network",
+                if at_risk == 1 {
+                    "scrobble was"
+                } else {
+                    "scrobbles were"
+                }
+            ),
         );
+        let problem = QuitSaveFailure::scrobbles(SaveProblem {
+            cause: SaveCause::Busy,
+            detail: String::new(),
+        });
         self.finish_quit_save(request_id, Some(problem), event_tx);
     }
 
@@ -2541,7 +2554,7 @@ impl BridgeLoopRuntime {
     fn finish_quit_save(
         &mut self,
         request_id: u32,
-        lastfm_problem: Option<String>,
+        lastfm_problem: Option<QuitSaveFailure>,
         event_tx: &Sender<BridgeEvent>,
     ) {
         if self
@@ -2557,16 +2570,12 @@ impl BridgeLoopRuntime {
             return;
         };
         self.quit_save.deadline = None;
-        let failures: Vec<String> = saved.err().into_iter().chain(lastfm_problem).collect();
+        let failure = QuitSaveFailure::joined(saved.err().into_iter().chain(lastfm_problem));
         let _ = try_send_event(
             event_tx,
             BridgeEvent::StateSaved {
                 request_id,
-                result: if failures.is_empty() {
-                    Ok(())
-                } else {
-                    Err(failures.join("\n"))
-                },
+                result: failure.map_or(Ok(()), Err),
             },
         );
     }
@@ -2859,21 +2868,25 @@ impl BridgeLoopRuntime {
             return;
         }
         let mut failures = Vec::new();
-        for (result, reported) in [
-            (outcome.settings, &mut self.save_errors.settings),
-            (outcome.session, &mut self.save_errors.session),
+        for (result, reported, failed) in [
+            (
+                outcome.settings,
+                &mut self.save_errors.settings,
+                QuitSaveFailure::settings as fn(SaveProblem) -> QuitSaveFailure,
+            ),
+            (
+                outcome.session,
+                &mut self.save_errors.session,
+                QuitSaveFailure::queue,
+            ),
         ] {
             match result {
                 Some(Ok(())) => *reported = None,
-                Some(Err(failure)) => failures.push(failure.message),
+                Some(Err(failure)) => failures.push(failed(failure.problem)),
                 None => {}
             }
         }
-        let result = if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("\n"))
-        };
+        let result = QuitSaveFailure::joined(failures).map_or(Ok(()), Err);
         for request_id in quit_requests {
             self.answer_save_for_quit(request_id, result.clone(), event_tx);
         }
@@ -2883,17 +2896,13 @@ impl BridgeLoopRuntime {
     fn persist_stopped(&mut self, event_tx: &Sender<BridgeEvent>) {
         self.persist_failed();
         for (_, request_id) in std::mem::take(&mut self.quit_save.persisting) {
-            self.answer_save_for_quit(
-                request_id,
-                Err(PERSIST_STOPPED_MESSAGE.to_string()),
-                event_tx,
-            );
+            self.answer_save_for_quit(request_id, Err(persist_stopped_failure()), event_tx);
         }
     }
 
     /// Hand the settings and the session over to be saved for quitting.
     /// Returns the request to wait for, or why there is none to wait for.
-    fn request_save_for_quit(&mut self) -> Result<Option<u64>, String> {
+    fn request_save_for_quit(&mut self) -> Result<Option<u64>, QuitSaveFailure> {
         if !self.persisted_state_enabled {
             return Ok(None);
         }
@@ -2907,7 +2916,7 @@ impl BridgeLoopRuntime {
             .request(Some(self.state.settings.clone()), Some(session));
         requested.map(Some).map_err(|persist::PersistStopped| {
             self.persist_failed();
-            PERSIST_STOPPED_MESSAGE.to_string()
+            persist_stopped_failure()
         })
     }
 
@@ -2978,8 +2987,11 @@ impl BridgeLoopRuntime {
 }
 
 /// Why a save was not made: the thread that saves has stopped.
-const PERSIST_STOPPED_MESSAGE: &str =
-    "The settings and the queue could not be saved: the thread that saves them stopped.";
+fn persist_stopped_failure() -> QuitSaveFailure {
+    QuitSaveFailure::settings_and_queue(SaveProblem::other(
+        "the thread that saves the settings and the queue stopped",
+    ))
+}
 
 /// What a save before quitting waits for.
 #[derive(Default)]
@@ -2990,7 +3002,7 @@ struct QuitSave {
     /// A save that waits for Last.fm to save scrobbles it holds only in
     /// memory: its request ID, and how saving the settings and the session
     /// went.
-    waiting_for_lastfm: Option<(u32, Result<(), String>)>,
+    waiting_for_lastfm: Option<(u32, Result<(), QuitSaveFailure>)>,
     /// Set once the Last.fm service has stopped unexpectedly; nothing waits
     /// for it then.
     lastfm_stopped: bool,
@@ -3017,12 +3029,9 @@ fn report_save(
         *reported = None;
         return true;
     };
-    if reported.as_ref() != Some(&failure.identity) {
-        let error = BridgeError::error(ErrorCategory::Settings, failure.message)
-            .about(failure.identity.0.to_string_lossy());
-        if send_error(event_tx, error) {
-            *reported = Some(failure.identity);
-        }
+    if reported.as_ref() != Some(&failure.identity) && send_error(event_tx, failure.bridge_error())
+    {
+        *reported = Some(failure.identity);
     }
     false
 }
@@ -3429,15 +3438,31 @@ mod tests {
             &mut reported,
             &event_tx
         ));
-        let messages = error_messages(&event_rx);
-        assert_eq!(messages.len(), 1, "{messages:?}");
+        let errors: Vec<BridgeError> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                BridgeEvent::Error(error) => Some(error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        // The title says what couldn't be saved; the system's text, apart,
+        // says why, for Recent Issues' detail line.
+        assert_eq!(errors[0].message, "Settings couldn\u{2019}t be saved");
+        assert_eq!(errors[0].subject, settings_path.display().to_string());
         assert!(
-            messages[0].starts_with(&format!(
-                "Settings could not be saved: {} links to {}, which cannot be reached: ",
+            errors[0].detail.starts_with(&format!(
+                "{} links to {}, which cannot be reached: ",
                 settings_path.display(),
                 target.display(),
             )),
-            "{messages:?}"
+            "{errors:?}"
+        );
+        assert!(
+            errors[0]
+                .logged_message()
+                .starts_with("Settings couldn\u{2019}t be saved: "),
+            "the log has both, as before"
         );
         assert_eq!(
             std::fs::read_link(&settings_path).expect("the link is kept"),
@@ -3867,10 +3892,7 @@ mod tests {
         runtime.settle_persistence(&event_tx);
         let messages = error_messages(&event_rx);
         assert_eq!(messages.len(), 1, "{messages:?}");
-        assert!(
-            messages[0].starts_with("Settings could not be saved"),
-            "{messages:?}"
-        );
+        assert_eq!(messages, ["Settings couldn\u{2019}t be saved"]);
         assert!(runtime.flags.settings_dirty);
         assert_eq!(
             runtime.flags.settings_save_timing,
@@ -4088,10 +4110,7 @@ mod tests {
         runtime.settle_persistence(&event_tx);
         let messages = error_messages(&event_rx);
         assert_eq!(messages.len(), 1, "{messages:?}");
-        assert!(
-            messages[0].starts_with("Settings could not be saved"),
-            "{messages:?}"
-        );
+        assert_eq!(messages, ["Settings couldn\u{2019}t be saved"]);
         assert!(runtime.flags.settings_dirty);
         assert_eq!(
             runtime.flags.settings_save_timing,
@@ -4495,13 +4514,25 @@ mod tests {
         // The save does not wait for the network: past its deadline it
         // reports the loss, and the UI keeps the window open.
         runtime.expire_quit_save(Instant::now() + QUIT_SAVE_LASTFM_TIMEOUT, &event_tx);
-        match state_saved(&event_rx) {
-            Some((1, Err(message))) => assert!(
-                message.contains("1 scrobble is not saved and would be lost on quit"),
-                "{message}"
-            ),
-            other => panic!("expected the loss, got {other:?}"),
-        }
+        assert_eq!(
+            state_saved(&event_rx),
+            Some((
+                1,
+                Err(QuitSaveFailure::scrobbles(SaveProblem {
+                    cause: SaveCause::Busy,
+                    detail: String::new(),
+                }))
+            )),
+            "the scrobbles, which Last.fm was too busy to save"
+        );
+        assert_eq!(
+            test_log::lines_containing("not saved before quitting"),
+            [
+                "[ferrous] [lastfm] warning: 1 scrobble was not saved before quitting: \
+              Last.fm is busy, possibly waiting for the network"
+            ],
+            "the log keeps how many"
+        );
 
         // Last.fm's late answer settles nothing more.
         network.release.send(()).expect("release the request");
@@ -4605,15 +4636,21 @@ mod tests {
             "Last.fm saves them first"
         );
         assert_eq!(state_saved(&event_rx), None, "the answer waits for Last.fm");
-        let lost = "Last.fm: 2 scrobbles were not saved and would be lost on quit.";
+        let lost = SaveProblem::io(
+            std::io::ErrorKind::StorageFull,
+            "failed to save /data/lastfm_queue.json: No space left on device (os error 28)",
+        );
         runtime.handle_wake(
             BridgeLoopWake::LastFm(LastFmEvent::SavedForQuit {
                 request_id: 2,
-                result: Err(lost.to_string()),
+                result: Err(lost.clone()),
             }),
             &event_tx,
         );
-        assert_eq!(state_saved(&event_rx), Some((2, Err(lost.to_string()))));
+        assert_eq!(
+            state_saved(&event_rx),
+            Some((2, Err(QuitSaveFailure::scrobbles(lost))))
+        );
 
         // A retry replaces the save it retries; Last.fm's answer to the
         // older one is not taken for it.
@@ -4645,7 +4682,8 @@ mod tests {
         runtime.handle_wake(BridgeLoopWake::WorkerStopped(Worker::LastFm), &event_tx);
         assert!(matches!(
             state_saved(&event_rx),
-            Some((5, Err(message))) if message.contains("Last.fm stopped unexpectedly")
+            Some((5, Err(failure))) if failure.scrobbles
+                && failure.detail().contains("Last.fm stopped unexpectedly")
         ));
         runtime.handle_wake(
             BridgeLoopWake::Command(BridgeCommand::SaveState(6)),

@@ -4753,7 +4753,8 @@ void TransportInputSmokeTest::viewerToolbarIsOneVocabularyWindowedAndInTheStrip(
         if (warning) {
             QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, QStringLiteral("It failed.")),
                                               Q_ARG(int, 1), Q_ARG(int, 0),
-                                              Q_ARG(QString, QStringLiteral("/music/bad.flac"))));
+                                              Q_ARG(QString, QStringLiteral("/music/bad.flac")),
+                                              Q_ARG(QString, QString())));
         }
         struct Presentation {
             int fullscreenMode;

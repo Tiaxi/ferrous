@@ -22,7 +22,7 @@ use super::{
     BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand, BridgeSearchResultRowType,
     BridgeSearchResultsFrame, BridgeSettingsCommand, BridgeSnapshot, BridgeThread, ErrorCategory,
     FrontendBridgeHandle, LibraryQueueItem, LibrarySortMode, QueuePlacement, QueueUndoState,
-    RowsMove, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
+    QuitSaveFailure, RowsMove, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
     AnalysisEvent, ColumnPlacement, PrecomputedSpectrogramChunk, SpectrogramDisplayMode,
@@ -33,6 +33,7 @@ use crate::panic_guard;
 #[cfg(test)]
 use crate::panic_guard::test_hooks;
 use crate::playback::{PathRenames, PlaybackState, RepeatMode};
+use crate::save_cause::SaveCause;
 use crate::tag_editor;
 
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
@@ -2843,12 +2844,17 @@ fn encode_queue_undo_section(undo: &QueueUndoState) -> Vec<u8> {
 
 /// The error section: the category, the severity, the subject, and the
 /// message. `decodeErrorSection` in `ui/src/BinaryBridgeCodec.cpp` reads it.
+/// An error for the user: its category, its severity, then the subject,
+/// the message and the system's text. `BinaryBridgeCodec`'s `SectionError`
+/// reads it.
 fn encode_error_section(error: &BridgeError) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(10 + error.subject.len() + error.message.len());
+    let mut payload =
+        Vec::with_capacity(14 + error.subject.len() + error.message.len() + error.detail.len());
     push_u8(&mut payload, error.category as u8);
     push_u8(&mut payload, error.severity as u8);
     push_string(&mut payload, &error.subject);
     push_string(&mut payload, &error.message);
+    push_string(&mut payload, &error.detail);
     payload
 }
 
@@ -2869,13 +2875,23 @@ fn encode_earlier_errors_event(count: usize) -> Vec<u8> {
     ))
 }
 
-fn encode_state_saved_event(request_id: u32, result: &Result<(), String>) -> Vec<u8> {
+/// The answer to a save before quitting: the request ID, whether it
+/// saved, then what it could not save as bits, the cause they share and
+/// the system's text, which are zero and empty for a save that succeeded.
+/// `BinaryBridgeCodec`'s `SectionStateSaved` reads it.
+fn encode_state_saved_event(request_id: u32, result: &Result<(), QuitSaveFailure>) -> Vec<u8> {
     let mut payload = Vec::new();
     push_u32(&mut payload, request_id);
     push_u8(&mut payload, u8::from(result.is_ok()));
+    let failure = result.as_ref().err();
+    push_u8(&mut payload, failure.map_or(0, QuitSaveFailure::subjects));
+    push_u8(
+        &mut payload,
+        failure.map_or(SaveCause::Other, |failure| failure.cause) as u8,
+    );
     push_string(
         &mut payload,
-        result.as_ref().err().map_or("", String::as_str),
+        &failure.map(QuitSaveFailure::detail).unwrap_or_default(),
     );
     encode_packet(&[(SECTION_STATE_SAVED, payload)])
 }
@@ -3675,8 +3691,18 @@ mod error_packet_tests {
 
     /// The error section of `category`, `severity`, `subject`, and `message`.
     fn error_section(category: u8, severity: u8, subject: &str, message: &str) -> Vec<u8> {
+        error_section_with_detail(category, severity, subject, message, "")
+    }
+
+    fn error_section_with_detail(
+        category: u8,
+        severity: u8,
+        subject: &str,
+        message: &str,
+        detail: &str,
+    ) -> Vec<u8> {
         let mut section = vec![category, severity];
-        for text in [subject, message] {
+        for text in [subject, message, detail] {
             section.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
             section.extend_from_slice(text.as_bytes());
         }
@@ -3761,6 +3787,25 @@ mod error_packet_tests {
     }
 
     #[test]
+    fn an_errors_system_text_is_sent_apart_from_its_message() {
+        // Mirrored by BridgeClientTest::anErrorsSystemTextReachesBridgeErrorApart.
+        let error =
+            BridgeError::error(ErrorCategory::Settings, "Settings couldn\u{2019}t be saved")
+                .about("/c/settings.txt")
+                .with_detail("failed to replace /c/settings.txt: Permission denied (os error 13)");
+        assert_eq!(
+            &encode_error_event(&error)[16..],
+            error_section_with_detail(
+                6,
+                1,
+                "/c/settings.txt",
+                "Settings couldn\u{2019}t be saved",
+                "failed to replace /c/settings.txt: Permission denied (os error 13)"
+            )
+        );
+    }
+
+    #[test]
     fn every_category_and_severity_has_the_value_the_qt_decoder_reads() {
         // Mirrored by BinaryBridgeCodec::ErrorCategory and ErrorSeverity.
         use super::super::ErrorSeverity;
@@ -3782,6 +3827,7 @@ mod error_packet_tests {
                     severity,
                     subject: "s".to_string(),
                     message: "m".to_string(),
+                    detail: String::new(),
                 };
                 let packet = encode_error_event(&error);
                 assert_eq!(
@@ -8003,27 +8049,57 @@ mod tests {
         ));
     }
 
+    /// A failed save's answer as the UI reads it: what it could not save as
+    /// bits, the cause's value, and the system's text.
+    #[derive(Debug, PartialEq, Eq)]
+    struct DecodedQuitSaveFailure {
+        subjects: u8,
+        cause: u8,
+        detail: String,
+    }
+
     /// The next answer to a save request: its request ID, and `None` for
     /// success or what the user is shown.
-    fn ffi_next_state_saved(handle: *mut FerrousFfiBridge) -> (u32, Option<String>) {
+    fn ffi_next_state_saved(
+        handle: *mut FerrousFfiBridge,
+    ) -> (u32, Option<DecodedQuitSaveFailure>) {
         let packet = ffi_wait_for_mask(handle, SECTION_STATE_SAVED, Duration::from_secs(5))
             .expect("the bridge answers");
         let (_, _, mask) = parse_packet_header(&packet);
         assert_eq!(mask, SECTION_STATE_SAVED);
-        // The header and the section length, then the request ID, the
-        // success flag, and the message.
-        let request_id = u32::from_le_bytes(packet[16..20].try_into().expect("request ID"));
-        let saved = packet[20] != 0;
-        let len = u32::from_le_bytes(packet[21..25].try_into().expect("length")) as usize;
-        let message = String::from_utf8(packet[25..25 + len].to_vec()).expect("UTF-8");
-        assert_eq!(packet.len(), 25 + len);
-        assert_eq!(saved, message.is_empty());
-        (request_id, (!saved).then_some(message))
+        let payload = section(&packet, SECTION_STATE_SAVED).expect("the answer");
+        let (request_id, failure) = decode_state_saved_section(&payload);
+        (request_id, failure)
+    }
+
+    /// A save's answer, as `BinaryBridgeCodec` reads it: the request ID,
+    /// the success flag, the bits, the cause, and the text.
+    fn decode_state_saved_section(payload: &[u8]) -> (u32, Option<DecodedQuitSaveFailure>) {
+        let mut offset = 0;
+        let request_id = read_u32(payload, &mut offset);
+        let saved = payload[offset] != 0;
+        let failure = DecodedQuitSaveFailure {
+            subjects: payload[offset + 1],
+            cause: payload[offset + 2],
+            detail: {
+                offset += 3;
+                read_string(payload, &mut offset)
+            },
+        };
+        assert_eq!(offset, payload.len(), "nothing follows the text");
+        if saved {
+            assert_eq!(failure.subjects, 0);
+            assert_eq!(failure.cause, 0);
+            assert!(failure.detail.is_empty());
+        } else {
+            assert_ne!(failure.subjects, 0, "a failure says what it concerns");
+        }
+        (request_id, (!saved).then_some(failure))
     }
 
     /// Ask the bridge to save its state, and return its answer: `None` for
     /// success, or what the user is shown.
-    fn ffi_save_state(handle: *mut FerrousFfiBridge) -> Option<String> {
+    fn ffi_save_state(handle: *mut FerrousFfiBridge) -> Option<DecodedQuitSaveFailure> {
         ffi_send_save_state(handle, 7);
         let (request_id, message) = ffi_next_state_saved(handle);
         assert_eq!(request_id, 7);
@@ -8044,14 +8120,17 @@ mod tests {
         std::fs::remove_file(&settings_path).expect("remove the settings");
         std::fs::create_dir(&settings_path).expect("block the settings");
         ffi_set_db_range(handle, 102.0);
-        let message = ffi_save_state(handle).expect("the save fails");
+        let failure = ffi_save_state(handle).expect("the save fails");
+        // The settings alone, with no cause the UI can name: a directory is
+        // in the way. The system's text names the file.
+        assert_eq!(failure.subjects, 1, "{failure:?}");
+        assert_eq!(failure.cause, SaveCause::Other as u8, "{failure:?}");
         assert!(
-            message.starts_with("Settings could not be saved"),
-            "{message}"
-        );
-        assert!(
-            message.contains(&settings_path.display().to_string()),
-            "{message}"
+            failure.detail.starts_with("failed to replace ")
+                && failure
+                    .detail
+                    .contains(&settings_path.display().to_string()),
+            "{failure:?}"
         );
 
         // Retrying once the cause is gone saves the latest settings.
@@ -8061,6 +8140,87 @@ mod tests {
 
         // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
         assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+    }
+
+    #[test]
+    fn save_state_tells_a_folder_it_may_not_write_in_by_its_cause() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _config = crate::paths::TestConfigDir::new();
+        let handle = ffi_bridge_saving_state();
+        assert_eq!(ffi_save_state(handle), None);
+        let folder = config::settings_path()
+            .expect("settings path")
+            .parent()
+            .expect("the config folder")
+            .to_path_buf();
+        let before = std::fs::metadata(&folder).expect("folder").permissions();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555))
+            .expect("restrict the folder");
+        // Root may write whatever the permissions say.
+        let restricted = std::fs::write(folder.join("probe"), b"").is_err();
+        let failure = restricted.then(|| {
+            ffi_set_db_range(handle, 103.0);
+            ffi_save_state(handle)
+        });
+        std::fs::set_permissions(&folder, before).expect("restore the folder");
+        if let Some(failure) = failure {
+            let failure = failure.expect("the save fails");
+            // Both files, for the one cause, with a line of the system's
+            // text for each.
+            assert_eq!(failure.subjects, 0b011, "{failure:?}");
+            assert_eq!(failure.cause, SaveCause::Permission as u8, "{failure:?}");
+            assert_eq!(failure.detail.lines().count(), 2, "{failure:?}");
+            assert!(
+                failure
+                    .detail
+                    .lines()
+                    .all(|line| line.ends_with("Permission denied (os error 13)")),
+                "{failure:?}"
+            );
+        } else {
+            eprintln!("skipping: this user may write whatever the permissions say");
+        }
+
+        // SAFETY: `handle` came from `ffi_bridge_with` and is not used again.
+        assert!(unsafe { ferrous_ffi_bridge_destroy(handle) });
+    }
+
+    #[test]
+    fn a_save_before_quitting_is_answered_as_the_qt_decoder_reads_it() {
+        use crate::save_cause::SaveProblem;
+
+        // Mirrored by tst_binary_bridge_codec's decodeStateSavedSection.
+        let failure = QuitSaveFailure::settings(SaveProblem::io(
+            std::io::ErrorKind::PermissionDenied,
+            "a: denied",
+        ))
+        .and(QuitSaveFailure::scrobbles(SaveProblem::io(
+            std::io::ErrorKind::PermissionDenied,
+            "b: denied",
+        )));
+        let packet = encode_state_saved_event(5, &Err(failure));
+        let mut expected = vec![5, 0, 0, 0, 0, 0b101, 1];
+        expected.extend_from_slice(&19_u32.to_le_bytes());
+        expected.extend_from_slice(b"a: denied\nb: denied");
+        assert_eq!(section(&packet, SECTION_STATE_SAVED), Some(expected));
+
+        let packet = encode_state_saved_event(9, &Ok(()));
+        assert_eq!(
+            section(&packet, SECTION_STATE_SAVED),
+            Some(vec![9, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+        );
+
+        // Each cause has the value `QuitSaveCause` in BinaryBridgeCodec.h gives it.
+        for (cause, value) in [
+            (SaveCause::Other, 0),
+            (SaveCause::Permission, 1),
+            (SaveCause::ReadOnlyFileSystem, 2),
+            (SaveCause::NoSpace, 3),
+            (SaveCause::Busy, 4),
+        ] {
+            assert_eq!(cause as u8, value, "{cause:?}");
+        }
     }
 
     #[test]
@@ -8121,12 +8281,14 @@ mod tests {
         let mut offset = 2;
         let subject = read_string(payload, &mut offset);
         let message = read_string(payload, &mut offset);
-        assert_eq!(offset, payload.len(), "nothing follows the message");
+        let detail = read_string(payload, &mut offset);
+        assert_eq!(offset, payload.len(), "nothing follows the system's text");
         BridgeError {
             category,
             severity,
             subject,
             message,
+            detail,
         }
     }
 

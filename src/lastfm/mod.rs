@@ -14,6 +14,7 @@ use serde_json::Value;
 use queue_file::LoadOutcome;
 
 use crate::frontend_bridge::{log_info, log_undelivered, log_warning, BridgeError, ErrorCategory};
+use crate::save_cause::SaveProblem;
 
 pub const KEYRING_SERVICE: &str = "ferrous.lastfm";
 const API_ENDPOINT: &str = "https://ws.audioscrobbler.com/2.0/";
@@ -208,11 +209,12 @@ pub enum ShutdownOutcome {
 #[derive(Debug, Clone)]
 pub enum Event {
     State(RuntimeState),
-    /// The answer to [`Command::SaveForQuit`] with that request ID: what
-    /// quitting would lose, if the queue still could not be saved.
+    /// The answer to [`Command::SaveForQuit`] with that request ID: why
+    /// the scrobbles quitting would lose are not saved, if the queue still
+    /// could not be saved.
     SavedForQuit {
         request_id: u32,
-        result: Result<(), String>,
+        result: Result<(), SaveProblem>,
     },
 }
 
@@ -593,7 +595,7 @@ struct Service {
     /// not replaced, and every queued scrobble exists only in memory.
     queue_unreadable: Option<String>,
     /// Most recent failure to save the queue, until a save succeeds.
-    queue_save_error: Option<String>,
+    queue_save_error: Option<QueueSaveError>,
     session: Option<Session>,
     pending_auth: Option<PendingAuth>,
     state: RuntimeState,
@@ -899,7 +901,9 @@ impl Service {
             .saturating_sub(usize::from(self.latest_queued && self.latest_on_first_send));
         state.status_text = [
             self.queue_load_notice.as_deref(),
-            self.queue_save_error.as_deref(),
+            self.queue_save_error
+                .as_ref()
+                .map(|error| error.message.as_str()),
             Some(self.state.status_text.as_str()),
         ]
         .into_iter()
@@ -1596,23 +1600,21 @@ impl Service {
     /// [`Self::try_save_unsaved_queue`], as the service stops: fails with
     /// the scrobbles that are lost.
     fn save_unsaved_queue(&mut self) -> Result<(), String> {
-        self.try_save_unsaved_queue().map_err(|problem| {
+        self.try_save_unsaved_queue().map_err(|unsaved| {
             format!(
-                "Last.fm: {} lost on quit. {problem}",
-                self.unsaved_scrobbles_were()
+                "Last.fm: {} lost on quit. {}",
+                self.unsaved_scrobbles_were(),
+                unsaved.message
             )
         })
     }
 
     /// [`Self::try_save_unsaved_queue`], before the app quits: fails with
-    /// what quitting would lose, so that the user can retry or quit anyway.
-    fn save_for_quit(&mut self) -> Result<(), String> {
-        self.try_save_unsaved_queue().map_err(|problem| {
-            format!(
-                "Last.fm: {} not saved and would be lost on quit. {problem}",
-                self.unsaved_scrobbles_were()
-            )
-        })
+    /// why the scrobbles quitting would lose are not saved, so that the
+    /// user can retry or quit anyway.
+    fn save_for_quit(&mut self) -> Result<(), SaveProblem> {
+        self.try_save_unsaved_queue()
+            .map_err(|unsaved| unsaved.problem)
     }
 
     fn unsaved_scrobbles_were(&self) -> String {
@@ -1631,7 +1633,7 @@ impl Service {
     /// the queue file is unreadable. Every change to the queue is saved, so
     /// it differs from the file only then. Fails with why the scrobbles
     /// that exist only in memory still cannot be saved.
-    fn try_save_unsaved_queue(&mut self) -> Result<(), String> {
+    fn try_save_unsaved_queue(&mut self) -> Result<(), QueueSaveError> {
         if self.queue_unreadable.is_some() {
             self.save_beside_unreadable_queue();
         } else if self.queue_save_error.is_some() {
@@ -1639,12 +1641,19 @@ impl Service {
         }
         let problem = match (&self.queue_unreadable, &self.queue_save_error) {
             (_, Some(error)) => error.clone(),
-            (Some(error), None) if !self.queue.is_empty() => format!(
-                "Saved scrobbles in {} could not be read ({error}), so new ones were not saved.",
-                self.queue_path
+            (Some(error), None) if !self.queue.is_empty() => {
+                let path = self
+                    .queue_path
                     .as_deref()
-                    .map_or_else(String::new, |path| path.display().to_string())
-            ),
+                    .map_or_else(String::new, |path| path.display().to_string());
+                QueueSaveError {
+                    message: format!(
+                        "Saved scrobbles in {path} could not be read ({error}), so new ones \
+                         were not saved."
+                    ),
+                    problem: SaveProblem::other(format!("failed to read {path}: {error}")),
+                }
+            }
             _ => return Ok(()),
         };
         Err(problem)
@@ -1711,19 +1720,33 @@ impl Service {
     }
 
     fn record_save_error(&mut self, path: &Path, err: &std::io::Error) {
-        let error = format!(
-            "Pending scrobbles could not be saved to {} ({err}).",
-            path.display()
-        );
+        let error = QueueSaveError {
+            message: format!(
+                "Pending scrobbles could not be saved to {} ({err}).",
+                path.display()
+            ),
+            problem: SaveProblem::io(
+                err.kind(),
+                format!("failed to save {}: {err}", path.display()),
+            ),
+        };
         // A save that keeps failing the same way is told once, and Recent
         // Issues logs it then; the failures after it are only logged.
         if self.queue_save_error.as_ref() == Some(&error) {
-            log_warning(ErrorCategory::LastFm, &format!("{error} Again."));
+            log_warning(ErrorCategory::LastFm, &format!("{} Again.", error.message));
         } else {
-            self.report(&error, false);
+            self.report(&error.message, false);
         }
         self.queue_save_error = Some(error);
     }
+}
+
+/// Why the queue could not be saved: the message the user is told while
+/// it is not, and what failed, for a save before quitting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueueSaveError {
+    message: String,
+    problem: SaveProblem,
 }
 
 fn describe_delay(delay: Duration) -> String {
@@ -2537,6 +2560,7 @@ mod tests {
     use super::test_support::{MemorySessionKeys, ScriptedTransport};
     use super::*;
     use crate::frontend_bridge::test_log;
+    use crate::save_cause::SaveCause;
 
     const USERNAME: &str = "tester";
 
@@ -4718,10 +4742,14 @@ mod tests {
         }
         for (expected_id, (request_id, result)) in [7, 8].into_iter().zip(&answers) {
             assert_eq!(*request_id, expected_id);
-            let message = result.as_ref().expect_err("still unsaved");
+            let problem = result.as_ref().expect_err("still unsaved");
+            // A file in the way is no cause the UI can name; the system's
+            // text names the queue file.
+            assert_eq!(problem.cause, SaveCause::Other, "{problem:?}");
             assert!(
-                message.contains("1 scrobble was not saved and would be lost on quit"),
-                "{message}"
+                problem.detail.starts_with("failed to save ")
+                    && problem.detail.contains("lastfm_queue.json"),
+                "{problem:?}"
             );
         }
         let latest = states.last().expect("a state");

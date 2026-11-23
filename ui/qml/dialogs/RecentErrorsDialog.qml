@@ -392,6 +392,7 @@ Popup {
                         required property int severity
                         required property string subject
                         required property string message
+                        required property string detail
                         required property int count
                         required property double lastSeenMs
                         required property bool unseen
@@ -415,6 +416,7 @@ Popup {
                                 headingLabel.implicitWidth,
                                 historyRow.description.length > 0 ? messageLabel.implicitWidth : 0,
                                 historyRow.showsSubject ? subjectLabel.implicitWidth : 0,
+                                historyRow.detail.length > 0 ? detailLabel.implicitWidth : 0,
                                 historyRow.action !== null ? actionButton.implicitWidth : 0)
 
                         width: historyColumn.width
@@ -425,7 +427,9 @@ Popup {
                                 historyRow.title, historyRow.categoryText, historyRow.timeText, historyRow.description)
                             : I18n.i18nc("@info issue title, category, time", "%1 (%2, %3)",
                                 historyRow.title, historyRow.categoryText, historyRow.timeText)
-                        Accessible.description: historyRow.subject
+                        // The file, then the system's text, as the lines show them.
+                        Accessible.description: [historyRow.subject, historyRow.detail]
+                            .filter(function(text) { return text.length > 0 }).join("\n")
 
                         RowLayout {
                             id: rowLayout
@@ -537,6 +541,21 @@ Popup {
                                     font.pointSize: root.uiPalette.smallPointSize
                                     // What the action acts on: over the time
                                     // and the category (it had their ink).
+                                    color: root.uiPalette.textSecondary
+                                    Accessible.ignored: true
+                                }
+
+                                // The system's text, such as "failed to
+                                // replace …: Permission denied (os error
+                                // 13)", under the file, in its ink: the
+                                // title says in plain words what went wrong.
+                                Components.MessageLabel {
+                                    id: detailLabel
+                                    objectName: "errorHistoryDetail"
+                                    Layout.fillWidth: true
+                                    visible: historyRow.detail.length > 0
+                                    message: historyRow.detail
+                                    font.pointSize: root.uiPalette.smallPointSize
                                     color: root.uiPalette.textSecondary
                                     Accessible.ignored: true
                                 }

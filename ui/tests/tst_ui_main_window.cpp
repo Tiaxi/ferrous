@@ -5169,16 +5169,19 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
     // A warning, or an error about another kind of thing, marks nothing.
     // Category 1 is playback, 2 the library; severity 0 a warning, 1 an error.
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 0),
-                                      Q_ARG(QVariant, kTrackPath), Q_ARG(QVariant, QStringLiteral("Slow"))));
+                                      Q_ARG(QVariant, kTrackPath), Q_ARG(QVariant, QStringLiteral("Slow")),
+                                      Q_ARG(QVariant, QString())));
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 2), Q_ARG(QVariant, 1),
-                                      Q_ARG(QVariant, kTrackPath), Q_ARG(QVariant, QStringLiteral("Scan"))));
+                                      Q_ARG(QVariant, kTrackPath), Q_ARG(QVariant, QStringLiteral("Scan")),
+                                      Q_ARG(QVariant, QString())));
     QVERIFY(unreadablePaths().isEmpty());
     // A playback error about the file marks its rows: the status bar's
     // warning sign at its size, in the negative colour, centred where the
     // other marks are, and the title in the secondary colour.
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 1),
                                       Q_ARG(QVariant, kTrackPath),
-                                      Q_ARG(QVariant, QStringLiteral("The file cannot be read."))));
+                                      Q_ARG(QVariant, QStringLiteral("The file cannot be read.")),
+                                      Q_ARG(QVariant, QString())));
     QCOMPARE(unreadablePaths().value(kTrackPath).toString(), QStringLiteral("The file cannot be read."));
     QQuickItem *treeGlyph = itemNamed(track, QStringLiteral("libraryRowState"));
     QTRY_VERIFY(shown(treeGlyph));
@@ -5286,7 +5289,7 @@ void UiMainWindowTest::aTrackThatFailsToPlayShowsTheWarningWhileCurrent() {
     const QString reason = QStringLiteral("Couldn't play “02.flac” (No valid frames found before end of "
                                           "stream); playback stopped.");
     QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, reason), Q_ARG(int, 1), Q_ARG(int, 1),
-                                      Q_ARG(QString, kTrackPath)));
+                                      Q_ARG(QString, kTrackPath), Q_ARG(QString, QString())));
     bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QTRY_COMPARE(queueGlyph(3), QStringLiteral("status-warning"));
     QCOMPARE(treeGlyphName(), QStringLiteral("status-warning"));

@@ -350,6 +350,7 @@ fn playback_error(error: &crate::playback::PlaybackError) -> BridgeError {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
         message: error.message(),
+        detail: String::new(),
     }
 }
 

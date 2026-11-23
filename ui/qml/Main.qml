@@ -360,8 +360,9 @@ ApplicationWindow {
         property bool diagnosticsLoading: false
         property bool connected: false
         property string backendFailure: ""
-        // What saveStateBeforeQuit fails with; empty for a save that succeeds.
-        property string stateSaveError: ""
+        // What saveStateBeforeQuit fails with, as BridgeClient's
+        // quitSaveFailureMap gives it; null for a save that succeeds.
+        property var stateSaveFailure: null
         // Leaves saveStateBeforeQuit unanswered, so tests can answer it
         // with stateSaveFinished in the order they choose.
         property bool holdStateSaveAnswers: false
@@ -379,7 +380,7 @@ ApplicationWindow {
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
         signal diagnosticsChanged()
-        signal bridgeError(string message, int category, int severity, string subject)
+        signal bridgeError(string message, int category, int severity, string subject, string detail)
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
             int startIndex, int totalEstimate, int sampleRate, int hopSize,
             real coverage, bool complete, bool bufferReset, bool clearHistory, var trackToken, var generation)
@@ -557,13 +558,13 @@ ApplicationWindow {
             return true
         }
         function shutdown() {}
-        signal stateSaveFinished(int requestId, bool saved, string message)
+        signal stateSaveFinished(int requestId, bool saved, var failure)
         function saveStateBeforeQuit() {
             const requestId = ++bridgeFallback.lastStateSaveRequestId
-            const error = bridgeFallback.stateSaveError
+            const failure = bridgeFallback.stateSaveFailure
             if (!bridgeFallback.holdStateSaveAnswers) {
                 Qt.callLater(function() {
-                    bridgeFallback.stateSaveFinished(requestId, error.length === 0, error)
+                    bridgeFallback.stateSaveFinished(requestId, !failure, failure || ({}))
                 })
             }
             return requestId
@@ -577,7 +578,7 @@ ApplicationWindow {
         }
         // BridgeClient also logs it; there is no log here.
         function reportUiError(category, severity, subject, message) {
-            bridgeFallback.bridgeError(message, category, severity, subject)
+            bridgeFallback.bridgeError(message, category, severity, subject, "")
         }
         function toggleChannelMute(channelIndex) {}
         function soloChannel(channelIndex) {}
@@ -2380,7 +2381,7 @@ ApplicationWindow {
         root.quitStateRequestId = uiBridge.saveStateBeforeQuit()
     }
 
-    function finishStateSaveBeforeClosing(requestId, saved, message) {
+    function finishStateSaveBeforeClosing(requestId, saved, failure) {
         if (requestId === 0 || requestId !== root.quitStateRequestId) {
             // An earlier attempt, superseded by a retry, or one the user
             // has stopped waiting for.
@@ -2391,15 +2392,17 @@ ApplicationWindow {
             quitSaveFailedDialog.dismiss()
             root.closeNow()
         } else {
-            root.showQuitSaveFailedDialog(message)
+            root.showQuitSaveFailedDialog(failure)
         }
     }
 
-    function showQuitSaveFailedDialog(message) {
+    // `failure` says what could not be saved and why, as BridgeClient's
+    // quitSaveFailureMap gives it.
+    function showQuitSaveFailedDialog(failure) {
         // The choice blocks the window, which takes no answer to the popup
         // meanwhile.
         recentErrorsDialog.close()
-        quitSaveFailedDialog.message = message
+        quitSaveFailedDialog.failure = failure
         // The window first, then the dialog above it, which takes the
         // keyboard.
         root.bringWindowForward()
@@ -2445,8 +2448,8 @@ ApplicationWindow {
         // may be stuck, and the user decides whether to wait or quit. The
         // window still closes if the answer is a success that comes later.
         interval: 5000
-        onTriggered: root.showQuitSaveFailedDialog(
-            I18n.i18nc("@info", "The backend did not answer in time; settings and the queue may not have been saved."))
+        onTriggered: root.showQuitSaveFailedDialog({ settings: true, queue: true, scrobbles: false,
+                                                    cause: "notAnswered", detail: "" })
     }
 
     Dialogs.QuitSaveFailedDialog {
@@ -2461,8 +2464,8 @@ ApplicationWindow {
 
     Connections {
         target: uiBridge
-        function onStateSaveFinished(requestId, saved, message) {
-            root.finishStateSaveBeforeClosing(requestId, saved, message)
+        function onStateSaveFinished(requestId, saved, failure) {
+            root.finishStateSaveBeforeClosing(requestId, saved, failure)
         }
         function onLibraryChanged() {
             libraryController.tryApplyPersistedViewState()
@@ -2536,8 +2539,8 @@ ApplicationWindow {
         function onGlobalSearchResultsChanged() {
             globalSearchController.syncSelectionAfterResultsChange()
         }
-        function onBridgeError(message, category, severity, subject) {
-            errorController.report(category, severity, subject, message)
+        function onBridgeError(message, category, severity, subject, detail) {
+            errorController.report(category, severity, subject, message, detail)
         }
         function onBackendFailureChanged() {
             root.reportBackendFailure()

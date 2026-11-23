@@ -71,6 +71,16 @@
 
 namespace {
 
+// A failed save of the settings before quitting, as BridgeClient's
+// quitSaveFailureMap gives it, with the system's text `detail`.
+QVariantMap quitSaveFailure(const QString &detail, const QString &cause = {}) {
+    return {{QStringLiteral("settings"), true},
+            {QStringLiteral("queue"), false},
+            {QStringLiteral("scrobbles"), false},
+            {QStringLiteral("cause"), cause},
+            {QStringLiteral("detail"), detail}};
+}
+
 // Main.qml with its fallback bridge, About's version and components, and a
 // tag editor whose file operations the test answers, shown and active.
 // Each test loads its own: a test that checks several things loads it once.
@@ -537,11 +547,12 @@ void forEachDialogWithButtons(QQuickWindow *window,
 }
 
 // The window's issue history, with an entry reported.
-void report(QQuickWindow *window, int category, int severity, const QString &subject, const QString &message) {
+void report(QQuickWindow *window, int category, int severity, const QString &subject, const QString &message,
+            const QString &detail = {}) {
     QObject *errors = object(window, QStringLiteral("errorController"));
     QVERIFY(errors != nullptr);
     QVERIFY(QMetaObject::invokeMethod(errors, "report", Q_ARG(QVariant, category), Q_ARG(QVariant, severity),
-                                      Q_ARG(QVariant, subject), Q_ARG(QVariant, message)));
+                                      Q_ARG(QVariant, subject), Q_ARG(QVariant, message), Q_ARG(QVariant, detail)));
 }
 
 // The window's issue history, emptied.
@@ -2824,9 +2835,9 @@ void UiDialogsTest::compactDialogsHoldTheirText() {
     DialogsWindow main;
     QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
-    const QString error = QStringLiteral("Settings could not be saved: Permission denied (os error 13)");
+    const QString error = QStringLiteral("failed to create a temporary file: Permission denied (os error 13)");
     const QString path = QStringLiteral(
-        "Settings could not be saved: failed to create temporary file in /fixture/configuration/ferrous-settings/"
+        "failed to create temporary file in /fixture/configuration/ferrous-settings/"
         "2005 - Small Hours (Deluxe Edition)/read-only: Permission denied (os error 13)");
     runInTurn({[&] { checkQuitFailureBreaksItsPathOnlyBetweenFolders(window, pointSize, error); },
                [&] { checkQuitFailureBreaksItsPathOnlyBetweenFolders(window, pointSize, path); },
@@ -2868,8 +2879,8 @@ void UiDialogsTest::compactDialogStaysWithinASmallScreenAsItGrows() {
     dialogWindow->setPosition(small->geometry().topLeft() + QPoint(qCeil(gridUnit), qCeil(gridUnit)));
     const qreal room = small->geometry().height() - 2 * gridUnit;
 
-    const QString sentence = QStringLiteral("Settings could not be saved: Permission denied (os error 13). ");
-    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, sentence)));
+    const QString sentence = QStringLiteral("failed to replace /fixture/settings: Permission denied (os error 13). ");
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, quitSaveFailure(sentence))));
     QVERIFY(waitForDialogWindow(dialog));
     QCOMPARE(dialogWindow->screen(), small);
     QQuickItem *view = visibleNamed(dialogWindow, QStringLiteral("dialogBodyView"));
@@ -2910,7 +2921,7 @@ void UiDialogsTest::compactDialogStaysWithinASmallScreenAsItGrows() {
     for (int i = 0; i < 12; ++i) {
         longer += sentence;
     }
-    dialog->setProperty("message", longer);
+    dialog->setProperty("failure", quitSaveFailure(longer));
     QTRY_VERIFY(dialog->property("fittedHeight").toInt() > room);
     checkWithinTheScreen(QStringLiteral("grown while open"));
     if (QTest::currentTestFailed()) {
@@ -2920,7 +2931,8 @@ void UiDialogsTest::compactDialogStaysWithinASmallScreenAsItGrows() {
     // And again while it is closed: it reopens within the screen.
     QVERIFY(QMetaObject::invokeMethod(dialog, "dismiss"));
     QTRY_VERIFY(!dialogWindow->isVisible());
-    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, longer + longer)));
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog",
+                                      Q_ARG(QVariant, quitSaveFailure(longer + longer))));
     QVERIFY(waitForDialogWindow(dialog));
     // From the start of the new message, not where the last was scrolled to.
     QCOMPARE(view->property("contentY").toReal(), 0.0);
@@ -2937,7 +2949,7 @@ void UiDialogsTest::checkQuitFailureBreaksItsPathOnlyBetweenFolders(QQuickWindow
                                                                      const QString &message) {
     QObject *dialog = object(window, QStringLiteral("quitSaveFailedDialog"));
     QVERIFY(dialog != nullptr);
-    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, message)));
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, quitSaveFailure(message))));
     QVERIFY(waitForDialogWindow(dialog));
     QQuickWindow *dialogWindow = windowOf(dialog);
     QQuickItem *label = visibleNamed(dialogWindow, QStringLiteral("quitSaveFailedMessage"));
@@ -3872,7 +3884,10 @@ void UiDialogsTest::checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(QQuick
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("queueRows", queueRowsOf({QStringLiteral("/music/a.flac"), kStaticPath})));
     QVERIFY(bridge->setProperty("queueLength", 2));
-    report(window, 6, 1, QString(), QStringLiteral("The settings could not be saved: disk full"));
+    const QString settingsPath = QStringLiteral("/fixture/config/settings.txt");
+    const QString systemText = QStringLiteral("failed to replace /fixture/config/settings.txt: No space left on device "
+                                              "(os error 28)");
+    report(window, 6, 1, settingsPath, QStringLiteral("Settings couldn\u2019t be saved"), systemText);
     report(window, 1, 0, kStaticPath, kEndsEarly);
     QVERIFY(openIssues(window));
     QList<QQuickItem *> rows;
@@ -3906,6 +3921,8 @@ void UiDialogsTest::checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(QQuick
     QVERIFY(sceneRect(time).right() > sceneRect(category).right() - 0.5);
     // The file is named in the title, so its path does not repeat.
     QVERIFY(!itemsNamed(first, QStringLiteral("errorHistorySubject")).at(0)->isVisible());
+    // There is no system's text for it.
+    QVERIFY(!itemsNamed(first, QStringLiteral("errorHistoryDetail")).at(0)->isVisible());
     // The severity glyph as large as a line of text holds.
     QQuickItem *glyph = itemsNamed(first, QStringLiteral("errorHistoryGlyph")).at(0);
     QCOMPARE(glyph->width(), paletteOf(window)->property("labelIconSize").toReal());
@@ -3934,14 +3951,27 @@ void UiDialogsTest::checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(QQuick
     QTest::mouseRelease(action->window(), Qt::LeftButton, Qt::NoModifier, sceneRect(heading).center().toPoint());
     QTRY_VERIFY(!action->property("down").toBool());
     QTRY_COMPARE(hex(actionText->property("color").value<QColor>()), hex(tokenOf(window, "link")));
-    // One sentence: it is the title, under its category, with nothing
-    // under it; no action for settings.
+    // A failed save: the title says in plain words what couldn't be saved,
+    // with no system's clause in it; under it the file, then the system's
+    // text, both small and secondary. No action for settings.
     QQuickItem *second = rows[1];
-    QCOMPARE(itemsNamed(second, QStringLiteral("errorHistoryHeading")).at(0)->property("text").toString(),
-             QStringLiteral("The settings could not be saved: disk full"));
+    QQuickItem *saveHeading = itemsNamed(second, QStringLiteral("errorHistoryHeading")).at(0);
+    QCOMPARE(saveHeading->property("text").toString(), QStringLiteral("Settings couldn\u2019t be saved"));
     QCOMPARE(itemsNamed(second, QStringLiteral("errorHistoryCategory")).at(0)->property("text").toString(),
              QStringLiteral("Settings and saving"));
     QVERIFY(!itemsNamed(second, QStringLiteral("errorHistoryMessage")).at(0)->isVisible());
+    QQuickItem *subject = itemsNamed(second, QStringLiteral("errorHistorySubject")).at(0);
+    QQuickItem *detail = itemsNamed(second, QStringLiteral("errorHistoryDetail")).at(0);
+    QVERIFY(subject->isVisible() && detail->isVisible());
+    QCOMPARE(subject->property("text").toString(), settingsPath);
+    QCOMPARE(detail->property("message").toString(), systemText);
+    QCOMPARE(detail->property("textFormat").toInt(), int(Qt::PlainText));
+    QCOMPARE(hex(detail->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
+    QCOMPARE(detail->property("font").value<QFont>().pointSizeF(), small);
+    QVERIFY(sceneRect(subject).top() >= sceneRect(saveHeading).bottom() - 0.5);
+    QVERIFY(sceneRect(detail).top() >= sceneRect(subject).bottom() - 0.5);
+    QCOMPARE(QAccessible::queryAccessibleInterface(second)->text(QAccessible::Description),
+             settingsPath + QLatin1Char('\n') + systemText);
     QVERIFY(!itemsNamed(second, QStringLiteral("errorHistoryActionButton")).at(0)->isVisible());
     // A file that left the queue is shown in the library instead.
     QVERIFY(bridge->setProperty("queueRows", queueRowsOf({QStringLiteral("/music/a.flac")})));
@@ -4379,7 +4409,7 @@ void UiDialogsTest::thePanesEndsEarlyLinkOpensItsIssue() {
     QVERIFY(bridge->setProperty("queueLength", 2));
     // The backend's warning for a cut-off file, as the analysis reports it.
     QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, kEndsEarly), Q_ARG(int, 1),
-                                      Q_ARG(int, 0), Q_ARG(QString, kStaticPath)));
+                                      Q_ARG(int, 0), Q_ARG(QString, kStaticPath), Q_ARG(QString, QString())));
     // The pane's message after the cut, and its way to Recent Issues.
     QVERIFY(bridge->setProperty("currentTrackPath", kStaticPath));
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
@@ -9502,9 +9532,11 @@ void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont() {
                  QStringLiteral("Replace the album art of “Small Hours” by The Quiet Meridian?")));
     QVERIFY(fill("keyboardShortcutsReassignDialog", "message",
                  QStringLiteral("Reassign “Ctrl+F” to “Open Files…”?")));
-    QVERIFY(fill("quitSaveFailedDialog", "message",
-                 QStringLiteral("Settings could not be saved: failed to create temporary file in "
-                                "/fixture/configuration/ferrous-settings/read-only: Permission denied (os error 13)")));
+    QVERIFY(fill("quitSaveFailedDialog", "failure",
+                 quitSaveFailure(QStringLiteral("failed to create temporary file in "
+                                                "/fixture/configuration/ferrous-settings/read-only: "
+                                                "Permission denied (os error 13)"),
+                                 QStringLiteral("permission"))));
     QVERIFY(fill("replaceCoverConfirmDialog", "suggestion", QVariantMap{
         {QStringLiteral("albumTitle"), QStringLiteral("Small Hours (Twentieth Anniversary Deluxe Edition, "
                                                       "Remastered from the Original Tapes)")},
@@ -9564,15 +9596,18 @@ void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
 
     QObject *quit = object(window, QStringLiteral("quitSaveFailedDialog"));
     QVERIFY(quit != nullptr);
-    const QString system = QStringLiteral("Settings could not be saved: Permission denied (os error 13)");
-    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, system)));
+    const QString system = QStringLiteral("failed to replace /fixture/settings: Permission denied (os error 13)");
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog",
+                                      Q_ARG(QVariant, quitSaveFailure(system, QStringLiteral("permission")))));
     QVERIFY(waitForDialogWindow(quit));
     const auto textOf = [quit](const char *item) {
         QQuickItem *label = visibleNamed(windowOf(quit), QString::fromLatin1(item));
         return label != nullptr ? label->property("text").toString() : QString();
     };
-    QCOMPARE(textOf("quitSaveFailedHeading"), QStringLiteral("Some recent changes weren\u2019t saved."));
-    QCOMPARE(quit->property("message").toString(), system);
+    QCOMPARE(textOf("quitSaveFailedHeading"), QStringLiteral("Ferrous couldn\u2019t save its settings."));
+    QCOMPARE(textOf("quitSaveFailedCause"),
+             QStringLiteral("You don\u2019t have permission to write in this folder."));
+    QCOMPARE(quit->property("detailText").toString(), system);
     QCOMPARE(textOf("quitSaveFailedDetails"),
              QStringLiteral("Quit Anyway loses unsaved settings, queue changes and Last.fm scrobbles."));
     QVERIFY(QMetaObject::invokeMethod(quit, "dismiss"));

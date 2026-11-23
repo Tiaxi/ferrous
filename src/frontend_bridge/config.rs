@@ -12,9 +12,11 @@ use crate::playback::{
     volume_gain_to_level, volume_level_to_gain, FileStamp, PlaybackCommand, PlaybackEngine,
     PlaybackState, RepeatMode,
 };
+use crate::save_cause::SaveProblem;
 
 use super::{
-    BridgeSettings, BridgeState, KeyboardShortcuts, LibrarySortMode, ViewerFullscreenMode,
+    BridgeError, BridgeSettings, BridgeState, ErrorCategory, KeyboardShortcuts, LibrarySortMode,
+    ViewerFullscreenMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -490,8 +492,9 @@ pub(super) fn save_session_snapshot(session: &SessionSnapshot) -> Result<(), Sav
     let Some(path) = session_path() else {
         return Err(SaveFailure::no_config_dir());
     };
-    write_config_file(&path, format_session_text(session).as_bytes())
-        .map_err(|failure| failure.explained("The queue could not be saved for the next start"))
+    write_config_file(&path, format_session_text(session).as_bytes()).map_err(|failure| {
+        failure.explained("The queue couldn\u{2019}t be saved for the next start")
+    })
 }
 
 pub(super) fn load_settings_into(settings: &mut BridgeSettings) {
@@ -648,14 +651,17 @@ pub(super) fn save_settings(settings: &BridgeSettings) -> Result<(), SaveFailure
         return Err(SaveFailure::no_config_dir());
     };
     write_config_file(&path, format_settings_text(settings).as_bytes())
-        .map_err(|failure| failure.explained("Settings could not be saved"))
+        .map_err(|failure| failure.explained("Settings couldn\u{2019}t be saved"))
 }
 
 /// Why a file in the config directory could not be saved.
 #[derive(Debug)]
 pub(super) struct SaveFailure {
-    /// What the user is shown.
-    pub(super) message: String,
+    /// What could not be saved, such as "Settings couldn't be saved", with
+    /// no system's text in it.
+    what: &'static str,
+    /// Why, in plain words for the UI, and the system's text.
+    pub(super) problem: SaveProblem,
     /// The file and the kind of error, which stay the same while a save
     /// keeps failing the same way.
     pub(super) identity: (PathBuf, io::ErrorKind),
@@ -664,17 +670,22 @@ pub(super) struct SaveFailure {
 impl SaveFailure {
     fn no_config_dir() -> Self {
         Self {
-            message: "Settings and the queue cannot be saved: set HOME or XDG_CONFIG_HOME."
-                .to_string(),
+            what: "Settings and the queue can\u{2019}t be saved",
+            problem: SaveProblem::other("neither XDG_CONFIG_HOME nor HOME is set"),
             identity: (PathBuf::new(), io::ErrorKind::NotFound),
         }
     }
 
-    fn explained(self, what: &str) -> Self {
-        Self {
-            message: format!("{what}: {}", self.message),
-            ..self
-        }
+    fn explained(self, what: &'static str) -> Self {
+        Self { what, ..self }
+    }
+
+    /// What Recent Issues shows: what couldn't be saved as the title, the
+    /// system's text apart, about the file.
+    pub(super) fn bridge_error(&self) -> BridgeError {
+        BridgeError::error(ErrorCategory::Settings, self.what)
+            .about(self.identity.0.to_string_lossy())
+            .with_detail(self.problem.detail.clone())
     }
 }
 
@@ -683,12 +694,17 @@ impl SaveFailure {
 fn write_config_file(path: &Path, bytes: &[u8]) -> Result<(), SaveFailure> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| SaveFailure {
-            message: format!("failed to create {}: {error}", parent.display()),
+            what: "",
+            problem: SaveProblem::io(
+                error.kind(),
+                format!("failed to create {}: {error}", parent.display()),
+            ),
             identity: (parent.to_path_buf(), error.kind()),
         })?;
     }
     crate::safe_save::write_file(path, bytes).map_err(|failure| SaveFailure {
-        message: failure.to_string(),
+        what: "",
+        problem: SaveProblem::io(failure.error.kind(), failure.to_string()),
         identity: (failure.path, failure.error.kind()),
     })
 }
