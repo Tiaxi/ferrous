@@ -6829,9 +6829,10 @@ STATES = [
      "Large font (24 pt), 1920x1200: track change from a track without album art back to one with it: the now-playing column"),
 ] + [
     ("bigfont", "viewer", "spectrogram-windowed",
-     "esc | away | js root.uiBridge.play() | js root.uiBridge.setViewerFullscreenMode(0) | js root.uiBridge.setShowFullscreenTitleStrip(true) | "
+     "esc | away | js errorController.clear() | js root.uiBridge.play() | js root.uiBridge.setViewerFullscreenMode(0) | "
+     "js root.uiBridge.setShowFullscreenTitleStrip(true) | "
      "js viewerController.openSpectrogramViewer() | settle 1 | ready 3 | move xy:700,450 | wait 0.5",
-     "Large font: spectrogram viewer, windowed, pointer over the plot"),
+     "Large font: spectrogram viewer, windowed, pointer over the plot (the session's staged issues cleared first)"),
     ("bigfont", "viewer", "spectrogram-fullscreen",
      "js viewerController.closeSpectrogramViewer() | settle 1 | js root.uiBridge.setViewerFullscreenMode(1) | "
      "js viewerController.openSpectrogramViewer() | settle 1 | ready 3 | window spectrogramFullscreenWindow | move xy:700,450 | wait 0.5",
@@ -6843,7 +6844,8 @@ STATES = [
      "Large font: album art viewer, windowed, with the file info pane"),
     ("bigfont", "viewer", "albumart-fullscreen",
      "js viewerController.closeAlbumArtViewer() | settle 1 | js root.uiBridge.setViewerFullscreenMode(1) | "
-     "js viewerController.openAlbumArtViewer() | settle 2 | wait 0.4 | window albumArtFullscreenWindow",
+     "js viewerController.openAlbumArtViewer() | settle 2 | wait 0.4 | window albumArtFullscreenWindow | "
+     "move xy:800,500 | wait 0.3 | js viewerController.toggleAlbumArtInfoVisible(function(){}) | wait 0.4",
      "Large font: album art viewer, fullscreen, with the file info pane"),
     ("bigfont", "_", "_viewers-close", "window albumArtFullscreenWindow | esc | window  | js viewerController.closeAlbumArtViewer() | settle 1", ""),
     # (Last.fm on, as in the 10 pt walk's setup: its indicator is a Tab stop)
