@@ -32,6 +32,15 @@ ToolBar {
     // The action Space triggers, whose shortcut the Play/Pause tooltip
     // names: Play and Pause have none of their own.
     property var playPauseAction: null
+    // The action whose shortcut Mute's tooltip names.
+    property var muteAction: null
+    // Whether each button can act now: off, it shows Breeze's disabled
+    // state, as the Playback menu's item of its action does, while the
+    // action stays on for the shortcuts.
+    property bool playPauseCanAct: true
+    property bool stopCanAct: true
+    property bool previousCanAct: true
+    property bool nextCanAct: true
     required property bool volumeMuted
     // The volume a mute put aside, which the slider keeps showing while
     // muted.
@@ -57,6 +66,13 @@ ToolBar {
     // its waveform.
     property real viewStartSeconds: NaN
     property real viewEndSeconds: NaN
+    // Where the seek bar's time box may go, in the transport's coordinates,
+    // whose left edge is the window's, as the menu bar's is: the right edge
+    // of the menu bar's titles above the transport, which the box must not
+    // cover, and of what the box may cover under the transport (the
+    // sidebar's, and not the queue's header beside it).
+    property real menuTitlesRight: 0
+    property real belowClearRight: 0
     readonly property alias seekPressed: seekSlider.pressed
     // The time of one device pixel of the seek bar's playhead: the smallest
     // move of the position it shows, so the position needs to change no more
@@ -356,6 +372,19 @@ ToolBar {
         }
     }
 
+    // The tooltip of a transport button: under it, as the style's tooltip
+    // flipped there for want of room above, 3 px clear of the button's
+    // focus ring as the style's is of a button (it met the ring's bottom
+    // edge); and not while the button is held down.
+    component ButtonToolTip: Components.PlainToolTip {
+        required property Item button
+        objectName: "transportButtonToolTip"
+        parent: button
+        visible: (button.hovered || button.visualFocus) && !button.down
+        delay: Kirigami.Units.toolTipDelay
+        y: button.height + root.buttonFocusRingOutset + 3
+    }
+
     // A flat 32 px tool button of the transport with a theme icon. Its
     // tooltip names the action and its shortcut.
     component TransportButton: ToolButton {
@@ -378,6 +407,30 @@ ToolBar {
         readonly property color glyphColor: transportButton.enabled
             ? root.uiPalette.text
             : Kirigami.Theme.disabledTextColor
+        // Whether it can act now. Off, the button is, and its action stays
+        // on. Not a binding on `enabled`, which the button sets from its
+        // action as it takes the action and at each change of the action's,
+        // after the bindings that read them have run (ConditionalMenuItem):
+        // the button follows both after it has.
+        property bool canAct: true
+        property var followedAction: null
+        function followStates() {
+            transportButton.enabled = transportButton.canAct
+                && !!transportButton.action && transportButton.action.enabled
+        }
+        function followAction() {
+            if (transportButton.followedAction) {
+                transportButton.followedAction.enabledChanged.disconnect(transportButton.followStates)
+            }
+            transportButton.followedAction = transportButton.action
+            if (transportButton.followedAction) {
+                transportButton.followedAction.enabledChanged.connect(transportButton.followStates)
+            }
+            transportButton.followStates()
+        }
+        onCanActChanged: transportButton.followStates()
+        onActionChanged: transportButton.followAction()
+        Component.onCompleted: transportButton.followAction()
 
         objectName: "transportButton_" + name
         implicitWidth: root.buttonSize
@@ -391,9 +444,11 @@ ToolBar {
         // Space still plays or pauses after a click.
         focusPolicy: Qt.TabFocus
         Accessible.name: transportButton.label
-        ToolTip.visible: hovered || visualFocus
-        ToolTip.delay: Kirigami.Units.toolTipDelay
-        ToolTip.text: root.actionToolTip(transportButton.label, transportButton.shortcutText)
+        readonly property string toolTipText: root.actionToolTip(transportButton.label, transportButton.shortcutText)
+        ButtonToolTip {
+            button: transportButton
+            message: transportButton.toolTipText
+        }
         // Space presses the focused button rather than playing or pausing;
         // keys with modifiers stay the shortcuts'.
         Keys.onShortcutOverride: function(event) {
@@ -432,6 +487,7 @@ ToolBar {
 
             TransportButton {
                 name: "previous"
+                canAct: root.previousCanAct
                 glyphSource: Qt.resolvedUrl("../assets/transport-previous.svg")
                 action: root.previousAction
             }
@@ -446,6 +502,7 @@ ToolBar {
             TransportButton {
                 id: playPauseButton
                 name: "playPause"
+                canAct: root.playPauseCanAct
                 // A step above its neighbours, within the same button.
                 glyphSize: root.playPauseGlyphSize
                 action: root.playing ? root.pauseAction : root.playAction
@@ -521,12 +578,14 @@ ToolBar {
 
             TransportButton {
                 name: "stop"
+                canAct: root.stopCanAct
                 glyphSource: Qt.resolvedUrl("../assets/transport-stop.svg")
                 action: root.stopAction
             }
 
             TransportButton {
                 name: "next"
+                canAct: root.nextCanAct
                 glyphSource: Qt.resolvedUrl("../assets/transport-next.svg")
                 action: root.nextAction
             }
@@ -630,6 +689,8 @@ ToolBar {
             // handle's centre, which a press or drag moves under the
             // pointer, on the line's centre at every position.
             readonly property real grabTargetWidth: 10
+            // How far its focus ring reaches outside the bar.
+            readonly property int focusRingOutset: 5
             leftPadding: (playheadLineWidth - grabTargetWidth) / 2
             rightPadding: (playheadLineWidth - grabTargetWidth) / 2
 
@@ -775,7 +836,6 @@ ToolBar {
                 // as the gesture ends.
                 releasedOnBar = !heldByTouch && contains(heldPointerPosition)
                 handedToHover = true
-                restX = releasedOnBar ? heldPointerPosition.x : NaN
                 if (pressed) {
                     takePointer()
                 }
@@ -783,7 +843,6 @@ ToolBar {
             onPointerHeldChanged: {
                 if (pointerHeld) {
                     handedToHover = false
-                    restX = NaN
                 }
             }
             onAdjustingChanged: {
@@ -955,12 +1014,15 @@ ToolBar {
                 // It is under the playhead and shows only with a gap as wide
                 // as the playhead's line between them: on or beside it, the
                 // playhead alone marks the box's time. After a click or a
-                // drag it waits for the pointer to move (restX).
+                // drag released on the bar it is the box's line as at any
+                // hover, at the pointer, so the box never stands beside a
+                // playhead that playback moves on with no line under it
+                // (the line waited for the pointer to move, and the box
+                // stayed without it).
                 Rectangle {
                     id: seekHoverLine
                     objectName: "seekHoverLine"
                     opacity: seekTimeBox.showsHover && seekTimeBox.contentItem.visible
-                        && isNaN(seekSlider.restX)
                         && !seekHoverLine.atPlayhead() ? seekTimeBox.opacity : 0
                     visible: opacity > 0
                     antialiasing: false
@@ -1009,7 +1071,7 @@ ToolBar {
                     objectName: "seekFocusRing"
                     visible: seekSlider.visualFocus
                     anchors.fill: parent
-                    anchors.margins: -5
+                    anchors.margins: -seekSlider.focusRingOutset
                     radius: 5
                     color: "transparent"
                     border.width: 2
@@ -1059,21 +1121,6 @@ ToolBar {
             readonly property bool pointerOnBar: handedToHover ? releasedOnBar : seekHover.hovered
             readonly property real pointerX: handedToHover
                 ? heldPointerPosition.x : seekHover.point.position.x
-            // Where a click or a drag left the pointer, until it moves a
-            // device pixel from there or leaves the bar, or NaN: the
-            // playhead is there, and the hover's line came in beside it as
-            // playback took it on, a second one, with nothing moved.
-            property real restX: NaN
-            onPointerXChanged: {
-                if (Math.abs(pointerX - restX) >= root.devicePixelLine - 0.001) {
-                    restX = NaN
-                }
-            }
-            onPointerOnBarChanged: {
-                if (!pointerOnBar) {
-                    restX = NaN
-                }
-            }
             // The pointer has a time to show, which a gesture's goes before.
             // It doesn't follow `adjusting`: as that ended at a release, what
             // read both saw neither for a moment, and the box went out and
@@ -1107,8 +1154,8 @@ ToolBar {
             // hovering pointer's line. Its bottom edge is on the bar's top,
             // in the band the volume's tooltip takes, so it hides none of
             // the waveform it reads (beside the line it covered some 40 px
-            // of it where the pointer was; under the bar it hung over the
-            // queue's header).
+            // of it where the pointer was); near the menu's titles it is
+            // under the bar, over the sidebar.
             ToolTip {
                 id: seekTimeBox
                 objectName: "seekTimeBox"
@@ -1166,19 +1213,48 @@ ToolBar {
                         : seekSlider.pointerOnBar ? seekSlider.hoverX : seekTimeBox.anchorX
                     restoreMode: Binding.RestoreNone
                 }
-                // Centred on the line, within the bar at either end. Near
-                // the bar's start it may cover a menu bar's titles above
-                // it for a moment, which costs less than a time away from
-                // its line (kept right of them, it was up to 350 px from
-                // it).
+                // Centred on the line, within the bar at either end.
                 readonly property real centredX: anchorX - width / 2
                 readonly property real placedX: root.snapped(Math.max(0,
                     Math.min(seekSlider.width - width, centredX)))
-                x: placedX
-                // Its bottom edge on the bar's top. It may reach the
-                // window's top edge, which it nearly does at 24 pt: the
-                // style's 6 px margin there would flip it under the bar.
-                y: -height
+                // Above the bar it reaches into the menu bar, and near the
+                // bar's start it covered the titles there ("Pla[0:04]k").
+                // Where it would, it goes under the bar, over the sidebar,
+                // which holds nothing the scrub needs (under the bar over
+                // the queue, it hung over the queue's header, H5). Where
+                // neither is clear, as at a large font whose titles run
+                // past the sidebar, it is whichever of the two is nearer
+                // its line: under the bar ending at the sidebar's edge, or
+                // above it starting past the titles (kept right of them
+                // at every point, it was up to 350 px from its line).
+                readonly property real barLeft: root.contentItem.x + seekSlider.x
+                readonly property bool aboveMeetsMenu: barLeft + placedX < root.menuTitlesRight
+                readonly property bool belowIsClear: barLeft + placedX + width <= root.belowClearRight
+                readonly property real belowPinnedX: Math.min(placedX,
+                    Math.floor(root.belowClearRight - barLeft - width))
+                readonly property real aboveShiftedX: Math.max(placedX,
+                    Math.ceil(root.menuTitlesRight - barLeft))
+                readonly property bool belowPinnedFits: belowPinnedX >= 0
+                readonly property bool aboveShiftedFits: aboveShiftedX + width <= seekSlider.width
+                readonly property bool below: aboveMeetsMenu && (belowIsClear || (belowPinnedFits
+                    && (!aboveShiftedFits || placedX - belowPinnedX <= aboveShiftedX - placedX)))
+                x: !aboveMeetsMenu ? placedX
+                    : below ? belowPinnedX
+                    : aboveShiftedFits ? aboveShiftedX : placedX
+                // Its bottom edge on the bar's top, or its top edge on the
+                // bar's bottom, and 1 px clear of the bar's focus ring while
+                // that shows (it covered the ring's edge). Above, it may
+                // reach the window's top edge, which it nearly does at
+                // 24 pt, and clears the ring as far as the window lets it:
+                // the style's 6 px margin there, or more than the window
+                // has, would flip it under the bar.
+                readonly property real ringClearance: seekSlider.visualFocus
+                    ? seekSlider.focusRingOutset + 1 : 0
+                function roomAbove() {
+                    return Math.max(0, seekSlider.mapToItem(null, 0, 0).y - height)
+                }
+                y: below ? seekSlider.height + ringClearance
+                    : -height - Math.min(ringClearance, roomAbove())
                 topMargin: 0
                 // It comes in over the short duration of the window's other
                 // hovers, and goes as the style's tooltips do.
@@ -1292,9 +1368,16 @@ ToolBar {
                     font.features: root.uiPalette.tabularFigures
                     color: root.stopped ? root.uiPalette.textSecondary : root.uiPalette.text
                     textFormat: Text.PlainText
+                    // While a drag or held keys move the playhead, the
+                    // gesture's second, as the playhead and its time box
+                    // show it (the readout kept playback's, and the bar
+                    // contradicted it for the whole scrub); at the release
+                    // the seek lands and playback's takes over at once.
                     text: root.stopped
                         ? transportTime.noTime
-                        : FormatUtils.clockText(root.positionText)
+                        : !isNaN(seekSlider.gestureValue)
+                            ? FormatUtils.formatClockTime(Math.floor(seekSlider.gestureValue))
+                            : FormatUtils.clockText(root.positionText)
                 }
 
                 Label {
@@ -1332,9 +1415,13 @@ ToolBar {
             icon.color: root.uiPalette.text
             icon.width: root.smallGlyphSize
             icon.height: root.smallGlyphSize
-            ToolTip.visible: hovered || visualFocus
-            ToolTip.delay: Kirigami.Units.toolTipDelay
-            ToolTip.text: text
+            // "Mute · Ctrl+Shift+M", as the other buttons name theirs.
+            readonly property string toolTipText: root.actionToolTip(muteButton.text,
+                root.muteAction && root.muteAction.shortcut ? String(root.muteAction.shortcut) : "")
+            ButtonToolTip {
+                button: muteButton
+                message: muteButton.toolTipText
+            }
             focusPolicy: Qt.TabFocus
             Keys.onShortcutOverride: function(event) {
                 event.accepted = KeyUtils.isPlainSpace(event)
@@ -1408,13 +1495,29 @@ ToolBar {
             // Its own tooltip, rather than the shared one, whose text a
             // drag or a key that moves the slider before the hover's delay
             // ends left at the volume it had ("Volume 100%" with the thumb
-            // at 40%). A press shows it at once.
+            // at 40%). A press shows it at once, a hover's still waiting
+            // too.
             Components.PlainToolTip {
                 id: volumeToolTip
                 objectName: "volumeToolTip"
                 parent: volumeSlider
-                visible: volumeSlider.hovered || volumeSlider.visualFocus || volumeSlider.pressed
-                delay: volumeSlider.pressed ? 0 : Kirigami.Units.toolTipDelay
+                readonly property bool wanted: volumeSlider.hovered || volumeSlider.visualFocus
+                    || volumeSlider.pressed
+                // Set together with the delay, which the tooltip reads as it
+                // is made visible: a binding of each could see the other
+                // still unchanged, and a press within the hover's delay then
+                // waited the delay out again.
+                visible: false
+                delay: 0
+                function showOrHide() {
+                    delay = volumeSlider.pressed ? 0 : Kirigami.Units.toolTipDelay
+                    visible = wanted
+                }
+                onWantedChanged: showOrHide()
+                Connections {
+                    target: volumeSlider
+                    function onPressedChanged() { volumeToolTip.showOrHide() }
+                }
                 message: volumeSlider.toolTipText
             }
 

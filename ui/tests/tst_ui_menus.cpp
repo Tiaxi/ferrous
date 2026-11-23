@@ -2237,10 +2237,12 @@ void UiMenusTest::openFolderNamesWhereItGoes() {
     }
 }
 
-// Playback's Stop is off while stopped, Previous and Next while the queue
-// is empty, also as that changes with the menu open (all three read as
-// able to act). Only the items: the actions stay on, and with them the
-// transport's buttons and the shortcuts, which act as before.
+// Playback's Play/Pause is off with nothing to play, Stop while stopped,
+// Previous and Next while the queue is empty, also as that changes with the
+// menu open (all of them read as able to act). The transport's buttons are
+// off with the items (on first run they stayed lit beside the menu's
+// disabled items). The actions stay on, and with them the shortcuts, which
+// act as before.
 void UiMenusTest::playbackItemsAreOffWhereTheyCannotAct() {
     MainWindowFixture main(wideWindow());
     QQuickWindow *window = main.window;
@@ -2253,21 +2255,32 @@ void UiMenusTest::playbackItemsAreOffWhereTheyCannotAct() {
         Qt::Key key;
         Qt::KeyboardModifiers modifiers;
         QString text;
+        const char *button;
     };
     const QList<Command> commands{
-        {"stopAction", Qt::Key_Space, Qt::ControlModifier | Qt::ShiftModifier, QStringLiteral("Stop")},
-        {"previousAction", Qt::Key_Left, Qt::ControlModifier, QStringLiteral("Previous")},
-        {"nextAction", Qt::Key_Right, Qt::ControlModifier, QStringLiteral("Next")},
+        {"playPauseAction", Qt::Key_Space, Qt::NoModifier, QString(), "transportButton_playPause"},
+        {"stopAction", Qt::Key_Space, Qt::ControlModifier | Qt::ShiftModifier, QStringLiteral("Stop"),
+         "transportButton_stop"},
+        {"previousAction", Qt::Key_Left, Qt::ControlModifier, QStringLiteral("Previous"), "transportButton_previous"},
+        {"nextAction", Qt::Key_Right, Qt::ControlModifier, QStringLiteral("Next"), "transportButton_next"},
     };
     const struct {
         QString state;
         int queue;
+        bool playPause;
         bool stop;
         bool skip;
     } states[] = {
-        {QStringLiteral("Stopped"), 0, false, false}, {QStringLiteral("Stopped"), 3, false, true},
-        {QStringLiteral("Playing"), 3, true, true},   {QStringLiteral("Paused"), 3, true, true},
-        {QStringLiteral("Playing"), 0, true, false},  {QStringLiteral("Stopped"), 0, false, false},
+        {QStringLiteral("Stopped"), 0, false, false, false}, {QStringLiteral("Stopped"), 3, true, false, true},
+        {QStringLiteral("Playing"), 3, true, true, true},    {QStringLiteral("Paused"), 3, true, true, true},
+        {QStringLiteral("Playing"), 0, true, true, false},   {QStringLiteral("Stopped"), 0, false, false, false},
+    };
+    // Play/Pause's item names what it does now.
+    const auto textOf = [](const Command &command, const QString &state) {
+        if (!command.text.isEmpty()) {
+            return command.text;
+        }
+        return state == QStringLiteral("Playing") ? QStringLiteral("Pause") : QStringLiteral("Play");
     };
     for (const bool open : {false, true}) {
         if (open) {
@@ -2280,24 +2293,20 @@ void UiMenusTest::playbackItemsAreOffWhereTheyCannotAct() {
             const QByteArray at = QStringLiteral("%1, %2 queued, menu %3")
                                       .arg(state.state).arg(state.queue).arg(open).toUtf8();
             for (const Command &command : commands) {
-                QQuickItem *item = menuItemWithText(menu, command.text);
-                QVERIFY(item != nullptr);
-                const bool can = command.text == QStringLiteral("Stop") ? state.stop : state.skip;
+                QQuickItem *item = menuItemWithText(menu, textOf(command, state.state));
+                QVERIFY2(item != nullptr, command.action);
+                const bool can = command.button == QByteArrayLiteral("transportButton_playPause") ? state.playPause
+                    : command.text == QStringLiteral("Stop")                                    ? state.stop
+                                                                                                : state.skip;
                 // The item's own switch: a closed menu's items are in no
                 // window to be enabled in.
-                QVERIFY2(item->property("enabled").toBool() == can, (command.text.toUtf8() + ": " + at).constData());
+                QVERIFY2(item->property("enabled").toBool() == can, (command.action + QByteArray(": ") + at).constData());
                 QObject *action = child(window, command.action);
                 QVERIFY2(action->property("enabled").toBool(), at.constData());
-                // The transport's buttons of the same action.
-                int buttons = 0;
-                for (QQuickItem *button : window->findChildren<QQuickItem *>()) {
-                    if (button != item && !button->inherits("QQuickMenuItem")
-                        && qvariant_cast<QObject *>(button->property("action")) == action) {
-                        QVERIFY2(button->isEnabled(), at.constData());
-                        ++buttons;
-                    }
-                }
-                QVERIFY2(buttons > 0, command.action);
+                // The transport's button of the same action, off with it.
+                QQuickItem *button = named(window, command.button);
+                QVERIFY2(button != nullptr, command.button);
+                QVERIFY2(button->isEnabled() == can, (command.button + QByteArray(": ") + at).constData());
             }
         }
     }
@@ -2316,9 +2325,9 @@ void UiMenusTest::playbackItemsAreOffWhereTheyCannotAct() {
     QTRY_VERIFY(window->isActive());
     window->contentItem()->forceActiveFocus();
 
-    // The keys and the transport's buttons trigger their actions whether
-    // the items are off or on: what they then do is the backend's, as it
-    // is MPRIS's, which calls the bridge and no action.
+    // The keys trigger their actions whether the items and the buttons are
+    // off or on: what they then do is the backend's, as it is MPRIS's, which
+    // calls the bridge and no action. A button acts only while it is on.
     for (const int queued : {0, 3}) {
         bridge->setProperty("queueLength", queued);
         bridge->setProperty("playbackState", queued > 0 ? QStringLiteral("Playing") : QStringLiteral("Stopped"));
@@ -2327,16 +2336,15 @@ void UiMenusTest::playbackItemsAreOffWhereTheyCannotAct() {
             QSignalSpy triggered(action, SIGNAL(triggered(QObject *)));
             QTest::keyClick(window, command.key, command.modifiers);
             QTRY_COMPARE(triggered.count(), 1);
-            QQuickItem *button = nullptr;
-            for (QQuickItem *candidate : window->findChildren<QQuickItem *>()) {
-                if (!candidate->inherits("QQuickMenuItem") && candidate->isVisible()
-                    && qvariant_cast<QObject *>(candidate->property("action")) == action) {
-                    button = candidate;
-                }
-            }
+            QQuickItem *button = named(window, command.button);
             QVERIFY(button != nullptr);
+            // Play/Pause's button acts by Play or Pause, as it shows them.
+            auto *buttonAction = qvariant_cast<QObject *>(button->property("action"));
+            QVERIFY(buttonAction != nullptr);
+            QSignalSpy clicked(buttonAction, SIGNAL(triggered(QObject *)));
             QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(button).center().toPoint());
-            QTRY_COMPARE(triggered.count(), 2);
+            QCoreApplication::processEvents();
+            QTRY_COMPARE(clicked.count(), queued > 0 ? 1 : 0);
         }
     }
 }

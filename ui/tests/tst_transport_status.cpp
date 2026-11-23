@@ -174,6 +174,7 @@ ApplicationWindow {
     }
     Action { id: stopAction; text: "&Stop"; icon.name: "media-playback-stop"; shortcut: "Ctrl+Shift+Space" }
     Action { id: nextAction; text: "&Next"; icon.name: "media-skip-forward"; shortcut: "Ctrl+Right" }
+    Action { id: muteAction; text: "&Mute"; shortcut: "Ctrl+Shift+M" }
 
     Controllers.ErrorController {
         id: errors
@@ -215,6 +216,7 @@ ApplicationWindow {
                 stopAction: stopAction
                 nextAction: nextAction
                 playPauseAction: playPauseAction
+                muteAction: muteAction
                 volumeMuted: window.muted
                 mutedVolume: window.mutedVolume
                 keyboardSeekStepSeconds: 5
@@ -361,6 +363,16 @@ bool toolTipShown(QQuickItem *item) {
     return evaluateOn(item, QStringLiteral("ToolTip.visible")).toBool();
 }
 
+// The tooltip of a transport button or Mute, and its text.
+QObject *buttonToolTip(QQuickItem *button) {
+    return button->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+}
+
+QString buttonToolTipText(QQuickItem *button) {
+    QObject *tip = buttonToolTip(button);
+    return tip != nullptr ? tip->property("message").toString() : QString();
+}
+
 QString accessibleText(QQuickItem *item, QAccessible::Text text) {
     QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(item);
     return accessible != nullptr ? accessible->text(text) : QString();
@@ -490,6 +502,8 @@ private slots:
     void playPauseIsOneButtonThatShowsTheState();
     void playPauseGlyphsCrossFadeWithoutABlink();
     void transportToolTipsNameTheShortcut();
+    void transportButtonsAreOffWhereTheyCannotAct();
+    void transportToolTipsClearTheFocusRings();
     void seekWaveformMeetsItsContrastAsDrawn_data();
     void seekWaveformMeetsItsContrastAsDrawn();
     void seekViewBandMarksTheViewBehindTheWaveform_data();
@@ -502,8 +516,8 @@ private slots:
     void seekReleaseOffTheBarHidesTheTimeBox();
     void seekHoverLineLeavesThePlayheadWhole_data();
     void seekHoverLineLeavesThePlayheadWhole();
-    void seekHoverLineWaitsForThePointerToMoveAfterASeek_data();
-    void seekHoverLineWaitsForThePointerToMoveAfterASeek();
+    void seekHoverLineStaysWithTheBoxAfterASeek_data();
+    void seekHoverLineStaysWithTheBoxAfterASeek();
     void seekFocusDrawsOneRingAroundTheBar_data();
     void seekFocusDrawsOneRingAroundTheBar();
     void volumeGlyphHasTheTransportsWeight_data();
@@ -532,11 +546,13 @@ private slots:
     void seekPlayheadWaitsAtTheStartWithoutALength();
     void seekPlayheadThroughAZeroLengthFileThatFails();
     void timeReadoutShowsPositionAndLength();
+    void timeReadoutFollowsTheSeekGesture();
     void volumeDrawsGrooveHoverAndFocus_data();
     void volumeDrawsGrooveHoverAndFocus();
     void volumeMuteKeepsTheThumb_data();
     void volumeMuteKeepsTheThumb();
     void volumeToolTipFollowsTheDrag();
+    void volumeToolTipShowsAtOnceOnAPress();
     void statusBarShowsTheNeutralPlaybackState();
     void statusBarModeGlyphsAreDrawnAtTheirSize();
     void statusBarShowsRepeatAndShuffleInWords();
@@ -845,18 +861,159 @@ void TransportStatusTest::transportToolTipsNameTheShortcut() {
     QQuickItem *stop = harness.item(QStringLiteral("transportButton_stop"));
     QQuickItem *playPause = harness.item(QStringLiteral("transportButton_playPause"));
     QVERIFY(next && stop && playPause);
-    QCOMPARE(toolTipText(next), QStringLiteral("Next · Ctrl+Right"));
-    QCOMPARE(toolTipText(stop), QStringLiteral("Stop · Ctrl+Shift+Space"));
+    QQuickItem *mute = harness.item(QStringLiteral("muteButton"));
+    QVERIFY(mute != nullptr);
+    QCOMPARE(buttonToolTipText(next), QStringLiteral("Next · Ctrl+Right"));
+    QCOMPARE(buttonToolTipText(stop), QStringLiteral("Stop · Ctrl+Shift+Space"));
     // Play and Pause have no shortcut of their own: Space toggles them
     // (Previous named its shortcut and Pause none).
-    QCOMPARE(toolTipText(playPause), QStringLiteral("Pause · Space"));
+    QCOMPARE(buttonToolTipText(playPause), QStringLiteral("Pause · Space"));
     harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
-    QTRY_COMPARE(toolTipText(playPause), QStringLiteral("Play · Space"));
+    QTRY_COMPARE(buttonToolTipText(playPause), QStringLiteral("Play · Space"));
     harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    // Mute names its shortcut as the others do (it said "Mute" alone).
+    QCOMPARE(buttonToolTipText(mute), QStringLiteral("Mute · Ctrl+Shift+M"));
+    QVERIFY(QMetaObject::invokeMethod(mute, "clicked"));
+    QTRY_COMPARE(buttonToolTipText(mute), QStringLiteral("Unmute · Ctrl+Shift+M"));
     // Keyboard focus shows it, as hover does.
     showToolTipsAtOnce(next);
     next->forceActiveFocus(Qt::TabFocusReason);
-    QTRY_VERIFY(toolTipShown(next));
+    QTRY_VERIFY(buttonToolTip(next)->property("visible").toBool());
+}
+
+// A button that cannot act shows Breeze's disabled state, as the Playback
+// menu's item of its action does: its glyph in the disabled text colour, no
+// hover, no click, no Tab stop; its action stays on for the shortcuts. It
+// keeps that through a change of its action (Play to Pause) or of the
+// action's own state, which the button copies.
+void TransportStatusTest::transportButtonsAreOffWhereTheyCannotAct() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *stop = harness.item(QStringLiteral("transportButton_stop"));
+    QQuickItem *playPause = harness.item(QStringLiteral("transportButton_playPause"));
+    QVERIFY(transport && stop && playPause);
+    QObject *stopAction = qvariant_cast<QObject *>(stop->property("action"));
+    QVERIFY(stopAction != nullptr);
+    QQuickItem *glyph = glyphOf(stop);
+    QVERIFY(glyph != nullptr);
+    QVERIFY(stop->isEnabled());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("text")));
+
+    transport->setProperty("stopCanAct", false);
+    QVERIFY(!stop->isEnabled());
+    QVERIFY(stopAction->property("enabled").toBool());
+    // The theme's disabled text colour, of its Disabled group, as the
+    // menu's disabled items have.
+    const QColor disabled = evaluateOn(stop, QStringLiteral("Kirigami.Theme.disabledTextColor")).value<QColor>();
+    QVERIFY(!sameColor(disabled, harness.token("text")));
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), disabled));
+    // No hover tint and no click.
+    QSignalSpy triggered(stopAction, SIGNAL(triggered(QObject *)));
+    QTest::mouseMove(harness.window, sceneCentre(stop));
+    QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(stop));
+    QCoreApplication::processEvents();
+    QCOMPARE(triggered.count(), 0);
+    QQuickItem *hover = nullptr;
+    for (QQuickItem *child : stop->findChildren<QQuickItem *>()) {
+        hover = child->objectName() == QStringLiteral("transportButtonHover") ? child : hover;
+    }
+    QVERIFY(hover != nullptr);
+    QVERIFY(!hover->isVisible());
+    // The action's own state comes back: the button stays off.
+    QVERIFY(stopAction->setProperty("enabled", false));
+    QVERIFY(stopAction->setProperty("enabled", true));
+    QVERIFY(!stop->isEnabled());
+    // Back on: it acts.
+    transport->setProperty("stopCanAct", true);
+    QVERIFY(stop->isEnabled());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("text")));
+    QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(stop));
+    QTRY_COMPARE(triggered.count(), 1);
+    // Off with its action, as before.
+    QVERIFY(stopAction->setProperty("enabled", false));
+    QVERIFY(!stop->isEnabled());
+    QVERIFY(stopAction->setProperty("enabled", true));
+    QVERIFY(stop->isEnabled());
+
+    // Play/Pause stays off as its action changes from Pause to Play.
+    transport->setProperty("playPauseCanAct", false);
+    QVERIFY(!playPause->isEnabled());
+    harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QTRY_COMPARE(buttonToolTipText(playPause), QStringLiteral("Play · Space"));
+    QVERIFY(!playPause->isEnabled());
+    transport->setProperty("playPauseCanAct", true);
+    QVERIFY(playPause->isEnabled());
+}
+
+// The buttons' and Mute's tooltips open under them 3 px clear of their
+// focus rings, as the style's are of a button (they met the ring's bottom
+// edge), and not while the button is held down. The seek bar's time box
+// stands 1 px clear of the bar's focus ring (it covered the ring's top).
+void TransportStatusTest::transportToolTipsClearTheFocusRings() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    showToolTipsAtOnce(harness.item(QStringLiteral("transportBar")));
+    const auto ringOf = [](QQuickItem *button) -> QQuickItem * {
+        for (QQuickItem *child : button->findChildren<QQuickItem *>()) {
+            if (child->objectName() == QStringLiteral("transportButtonFocusRing")) {
+                return child;
+            }
+        }
+        return nullptr;
+    };
+    for (const QString &name : {QStringLiteral("transportButton_previous"), QStringLiteral("transportButton_playPause"),
+                                QStringLiteral("transportButton_stop"), QStringLiteral("transportButton_next"),
+                                QStringLiteral("muteButton")}) {
+        QQuickItem *button = harness.item(name);
+        QVERIFY2(button != nullptr, qPrintable(name));
+        QQuickItem *ring = ringOf(button);
+        QObject *tip = buttonToolTip(button);
+        QVERIFY2(ring && tip, qPrintable(name));
+        button->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(ring->isVisible(), qPrintable(name));
+        QTRY_VERIFY2(tip->property("opened").toBool(), qPrintable(name));
+        auto *box = tip->property("background").value<QQuickItem *>();
+        QVERIFY(box != nullptr);
+        const QRectF boxRect = sceneRect(box);
+        const QRectF ringRect = sceneRect(ring);
+        QVERIFY2(boxRect.top() >= ringRect.bottom() + 3 - 0.5,
+                 qPrintable(name + QLatin1Char(' ') + describeRect(boxRect) + QStringLiteral(" over ")
+                            + describeRect(ringRect)));
+        QVERIFY2(!boxRect.intersects(ringRect), qPrintable(name));
+        harness.root->property("startButton").value<QQuickItem *>()->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(!tip->property("visible").toBool(), qPrintable(name));
+    }
+
+    // Held down, a button shows no tooltip; let go, it does again.
+    QQuickItem *next = harness.item(QStringLiteral("transportButton_next"));
+    QObject *tip = buttonToolTip(next);
+    // Hover as on the desktop, which the offscreen platform's hints leave off.
+    next->setProperty("hoverEnabled", true);
+    QTest::mouseMove(harness.window, sceneCentre(next));
+    QTRY_VERIFY(tip->property("opened").toBool());
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(next));
+    QVERIFY(next->property("down").toBool());
+    QVERIFY(!tip->property("opened").toBool());
+    QTRY_VERIFY(!tip->property("visible").toBool());
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(next));
+    QTRY_VERIFY(tip->property("opened").toBool());
+
+    // The seek bar's box, at the playhead while a key is held, clear of the
+    // bar's ring.
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *seekRing = harness.item(QStringLiteral("seekFocusRing"));
+    QObject *seekTip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && seekRing && seekTip);
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(seekRing->isVisible());
+    QTest::keyPress(harness.window, Qt::Key_Right);
+    QTRY_VERIFY(seekTip->property("opened").toBool());
+    auto *seekBox = seekTip->property("background").value<QQuickItem *>();
+    QVERIFY(seekBox != nullptr);
+    QVERIFY2(sceneRect(seekBox).bottom() <= sceneRect(seekRing).top() - 1 + 0.5,
+             qPrintable(describeRect(sceneRect(seekBox)) + QStringLiteral(" over ") + describeRect(sceneRect(seekRing))));
+    QTest::keyRelease(harness.window, Qt::Key_Right);
 }
 
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {
@@ -1512,23 +1669,28 @@ void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole() {
     QTRY_VERIFY(!hoverLine->isVisible());
 }
 
-void TransportStatusTest::seekHoverLineWaitsForThePointerToMoveAfterASeek_data() {
+void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek_data() {
     QTest::addColumn<bool>("dragged");
     QTest::newRow("click") << false;
     QTest::newRow("drag") << true;
 }
 
-// A click leaves the pointer on the playhead, and as playback took that on
-// the hover's line came in beside it, a second playhead, with no pointer
-// moved. It waits for the pointer to move a pixel; the time stays.
-void TransportStatusTest::seekHoverLineWaitsForThePointerToMoveAfterASeek() {
+// A click or a drag released on the bar hands the time box to the hover at
+// the pointer, and its line comes with it: as playback takes the playhead on
+// from under the resting pointer, the line shows at the pointer under the
+// box once a gap opens (it waited for the pointer to move, and the box stood
+// beside the moving playhead with no line). The box never goes out.
+void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek() {
     QFETCH(bool, dragged);
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
     QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
     QQuickItem *hoverLine = harness.item(QStringLiteral("seekHoverLine"));
+    QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
     QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
-    QVERIFY(seek && hoverLine && tip);
+    QVERIFY(seek && hoverLine && playhead && tip);
+    auto *tipBox = tip->property("background").value<QQuickItem *>();
+    QVERIFY(tipBox != nullptr);
     const QRectF bar = sceneRect(seek);
     const QPoint from(qRound(bar.left() + 0.3 * bar.width()), qRound(bar.center().y()));
     const QPoint to = dragged ? from + QPoint(qRound(0.16 * bar.width()), 0) : from;
@@ -1544,30 +1706,48 @@ void TransportStatusTest::seekHoverLineWaitsForThePointerToMoveAfterASeek() {
     QCOMPARE(seeksOf(harness).size(), 1);
     const double landed = seeksOf(harness).first().toDouble();
 
-    bool lineShown = false;
+    // In every frame the box shows the hover's time, its line is drawn at
+    // the pointer, unless the playhead is there to mark it.
+    QString disagreed;
     bool boxHidden = false;
-    const FrameSampler sampler(harness.window, [&]() {
-        lineShown = lineShown || hoverLine->isVisible();
-        boxHidden = boxHidden || !tip->property("visible").toBool();
-    });
+    const auto lineIsTheBoxs = [&]() {
+        if (!tip->property("visible").toBool()) {
+            boxHidden = true;
+            return;
+        }
+        const QRectF head = sceneRect(playhead);
+        const qreal gap = 2.0;
+        const bool nearHead = to.x() + 1 > head.left() - gap && to.x() < head.right() + gap;
+        if (!nearHead && !hoverLine->isVisible() && disagreed.isEmpty()) {
+            disagreed = QStringLiteral("no line under the box %1, the playhead %2")
+                            .arg(describeRect(sceneRect(tipBox)), describeRect(head));
+        }
+    };
+    const FrameSampler sampler(harness.window, lineIsTheBoxs);
     // Playback takes the playhead on from under the pointer, which rests.
     for (int second = 0; second <= 8; ++second) {
         harness.root->setProperty("positionSeconds", landed + second);
         QVERIFY(!harness.window->grabWindow().isNull());
         QTest::qWait(20);
-        QVERIFY2(!hoverLine->isVisible(), qPrintable(QStringLiteral("%1 s after").arg(second)));
+        lineIsTheBoxs();
     }
-    QVERIFY(!lineShown);
+    QVERIFY2(disagreed.isEmpty(), qPrintable(disagreed));
     QVERIFY(!boxHidden);
-
-    // A pixel's move brings it, at the pointer.
-    QTest::mouseMove(harness.window, to - QPoint(1, 0));
-    QTRY_VERIFY(hoverLine->isVisible());
-    QVERIFY(std::abs(sceneRect(hoverLine).left() - (to.x() - 1)) <= 1.0);
-    // And back where it was, it is an ordinary hover's.
-    QTest::mouseMove(harness.window, to);
-    QTRY_VERIFY(std::abs(sceneRect(hoverLine).left() - to.x()) <= 1.0);
+    // Clear of the playhead by now: the line at the pointer, under the box,
+    // which names the pointer's time.
     QVERIFY(hoverLine->isVisible());
+    QVERIFY(std::abs(sceneRect(hoverLine).left() - to.x()) <= 1.0);
+    QVERIFY(std::abs(sceneRect(tipBox).center().x() - to.x()) <= 2.0);
+    QVERIFY(sceneRect(playhead).left() > to.x() + 2);
+    const int second = seek->property("hoverSecond").toInt();
+    QCOMPARE(tip->property("text").toString(),
+             QStringLiteral("%1:%2").arg(second / 60).arg(second % 60, 2, 10, QLatin1Char('0')));
+
+    // A move takes both along.
+    QTest::mouseMove(harness.window, to - QPoint(12, 0));
+    QTRY_VERIFY(std::abs(sceneRect(hoverLine).left() - (to.x() - 12)) <= 1.0);
+    QVERIFY(hoverLine->isVisible());
+    QTRY_VERIFY(std::abs(sceneRect(tipBox).center().x() - (to.x() - 12)) <= 2.0);
 }
 
 void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar_data() {
@@ -2459,6 +2639,59 @@ void TransportStatusTest::timeReadoutShowsPositionAndLength() {
     QTRY_VERIFY(time->width() >= time->childItems().first()->implicitWidth());
 }
 
+// While a drag or held keys move the playhead, the readout shows the
+// gesture's second, as the playhead and its time box do (it kept playback's,
+// 0:09 beside a box and a playhead at 1:43); at the release playback's
+// takes over at once, with no frame of the gesture's left.
+void TransportStatusTest::timeReadoutFollowsTheSeekGesture() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *position = harness.item(QStringLiteral("transportTimePosition"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && position && tip);
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:17"));
+    const auto clock = [](double seconds) {
+        const int second = int(std::floor(seconds));
+        return QStringLiteral("%1:%2").arg(second / 60).arg(second % 60, 2, 10, QLatin1Char('0'));
+    };
+
+    // A drag: the readout is the box's time, in the text colour, at every
+    // move.
+    const QRectF bar = sceneRect(seek);
+    const int y = qRound(bar.center().y());
+    const auto at = [&bar, y](double fraction) { return QPoint(qRound(bar.left() + fraction * bar.width()), y); };
+    QTest::mouseMove(harness.window, at(0.1));
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, at(0.1));
+    for (const double fraction : {0.2, 0.35, 0.46}) {
+        QTest::mouseMove(harness.window, at(fraction));
+        const double gesture = seek->property("gestureValue").toDouble();
+        QVERIFY(std::isfinite(gesture));
+        QCOMPARE(position->property("text").toString(), clock(gesture));
+        QTRY_COMPARE(tip->property("text").toString(), clock(gesture));
+    }
+    QVERIFY(position->property("text").toString() != QStringLiteral("1:17"));
+    QVERIFY(sameColor(position->property("color").value<QColor>(), harness.token("text")));
+    // The release seeks, and playback's position is the readout's at once.
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at(0.46));
+    QCOMPARE(seeksOf(harness).size(), 1);
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:17"));
+
+    // Held keys: each step's time while held, playback's at the release.
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyPress(harness.window, Qt::Key_Right);
+    QVERIFY(seek->property("adjusting").toBool());
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:22"));
+    QTest::keyPress(harness.window, Qt::Key_Right, Qt::NoModifier);
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:27"));
+    QTest::keyRelease(harness.window, Qt::Key_Right);
+    QVERIFY(!seek->property("adjusting").toBool());
+    QCOMPARE(seeksOf(harness).size(), 2);
+    QCOMPARE(seeksOf(harness).last().toDouble(), 87.0);
+    harness.root->setProperty("positionText", QStringLiteral("01:27"));
+    QCOMPARE(position->property("text").toString(), QStringLiteral("1:27"));
+}
+
 void TransportStatusTest::volumeDrawsGrooveHoverAndFocus_data() {
     addThemeRows();
 }
@@ -2831,6 +3064,38 @@ void TransportStatusTest::volumeToolTipFollowsTheDrag() {
     }
     QVERIFY2(drawn, qPrintable(expected));
     QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, end);
+}
+
+// A press on the volume shows its tooltip at once, also while a hover's
+// delay is still waiting (it waited the delay out, so a quick drag showed
+// no volume).
+void TransportStatusTest::volumeToolTipShowsAtOnceOnAPress() {
+    Harness harness;
+    QVERIFY2(harness.load(), qPrintable(harness.error));
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QQuickItem *thumb = harness.item(QStringLiteral("volumeThumb"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QVERIFY(volume && thumb && tip);
+    Kirigami::Platform::Units *units = unitsOf(volume);
+    QVERIFY(units != nullptr);
+    // A delay that the press comes well within.
+    units->setToolTipDelay(5000);
+    const QPoint at = sceneCentre(thumb);
+    QTest::mouseMove(harness.window, at);
+    QTRY_VERIFY(volume->property("hovered").toBool());
+    QTest::qWait(30);
+    QVERIFY(!tip->property("opened").toBool());
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, at);
+    QVERIFY(volume->property("pressed").toBool());
+    QTRY_VERIFY_WITH_TIMEOUT(tip->property("opened").toBool(), 2000);
+    QCOMPARE(tip->property("text").toString(),
+             QStringLiteral("Volume %1%").arg(std::lround(volume->property("value").toDouble())));
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at);
+    // Let go and still over the slider, it stays, as a hover's.
+    QVERIFY(tip->property("visible").toBool());
+    // Off the slider, it goes.
+    QTest::mouseMove(harness.window, QPoint(at.x(), at.y() + 80));
+    QTRY_VERIFY(!tip->property("visible").toBool());
 }
 
 void TransportStatusTest::statusBarShowsTheNeutralPlaybackState() {
