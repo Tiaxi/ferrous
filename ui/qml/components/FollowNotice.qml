@@ -24,8 +24,7 @@ Item {
     property string shortcut: ""
     property bool divided: false
     // Whether it says so: as the view follows again, its text goes in the
-    // frame the view comes back in, while the plate it is on fades out with
-    // its width kept.
+    // frame the view comes back in, while the plate it is on narrows.
     property bool textShown: true
     // The text's and the divider's 6 px from the plate's edge, less what
     // the plate has around them.
@@ -78,7 +77,7 @@ Item {
 
     Components.PlainToolTip {
         objectName: "followNoticeToolTip"
-        visible: noticeHover.hovered && root.visible
+        visible: noticeHover.hovered && root.visible && root.textShown
         delay: Kirigami.Units.toolTipDelay
         message: root.toolTipText
     }
