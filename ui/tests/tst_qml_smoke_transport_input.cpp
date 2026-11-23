@@ -6960,8 +6960,9 @@ void TransportInputSmokeTest::viewerToolbarIsOneVocabularyWindowedAndInTheStrip(
     QHash<QString, QList<double>> withoutWarning;
     for (const bool warning : {false, true}) {
         if (warning) {
+            // An error: its glyph, the status bar's ring with a cross.
             QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, QStringLiteral("It failed.")),
-                                              Q_ARG(int, 1), Q_ARG(int, 0),
+                                              Q_ARG(int, 1), Q_ARG(int, 1),
                                               Q_ARG(QString, QStringLiteral("/music/bad.flac")),
                                               Q_ARG(QString, QString())));
         }
@@ -7056,6 +7057,9 @@ void TransportInputSmokeTest::viewerToolbarIsOneVocabularyWindowedAndInTheStrip(
                                 == palette->property("themeIsDark").toBool();
                             QCOMPARE(partOf(issues, QStringLiteral("Icon"))->property("color").value<QColor>(),
                                      asTheWindow ? palette->property("negative").value<QColor>() : text);
+                            QVERIFY2(partOf(issues, QStringLiteral("Icon"))->property("source").toString()
+                                         .endsWith(QStringLiteral("status-error.svg")),
+                                     qPrintable(where));
                         }
                     }
                     if (mode == 0) {

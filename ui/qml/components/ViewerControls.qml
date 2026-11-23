@@ -60,6 +60,10 @@ Item {
 
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
+    // Whether an error, rather than warnings alone, is among them.
+    readonly property bool unseenIssuesIncludeError: root.errorController
+        ? (Number(root.errorController.unseenErrorCount) || 0) > 0
+        : false
     readonly property real spacing: 4
     // Between a divider and the viewer's own controls, whose chosen segment
     // has an edge of its own: 8 px, so that edge never stands 4 px from
@@ -154,18 +158,24 @@ Item {
             root.unseenIssueCount)
         toolTipText: I18n.i18nc("@info:tooltip %1 is the issue count", "%1: Show Recent Issues",
             text)
-        icon.name: Qt.resolvedUrl("../assets/status-warning.svg")
+        // The status bar's glyph for the most severe new issue: an error's
+        // ring with a cross, or the warning's triangle.
+        icon.name: root.unseenIssuesIncludeError
+            ? Qt.resolvedUrl("../assets/status-error.svg")
+            : Qt.resolvedUrl("../assets/status-warning.svg")
         // A click leaves the focus where it is: Recent Issues takes it, and
         // the button goes once they are seen, so the focus would come back
         // to a button that is no longer there.
         focusPolicy: Qt.TabFocus
-        // The window's negative is lightened on dark and darkened on light:
-        // on a plot of the other brightness, such as the spectrogram's black
-        // in a light theme, the glyph is the plot's text instead.
-        glyphColor: !root.plotColors
-                || (ColorUtils.colorLuma(root.plotColors.plotBg) < 0.45) === root.uiPalette.themeIsDark
+        // An error's in the negative colour, which the window lightens on
+        // dark and darkens on light: on a plot of the other brightness, such
+        // as the spectrogram's black in a light theme, the glyph is the
+        // plot's text instead. Warnings alone are in the words' colour, as
+        // the status bar never marks them red.
+        glyphColor: root.unseenIssuesIncludeError && (!root.plotColors
+                || (ColorUtils.colorLuma(root.plotColors.plotBg) < 0.45) === root.uiPalette.themeIsDark)
             ? root.uiPalette.negative
-            : root.plotColors.plotText
+            : issuesButton.baseTextColor
         onClicked: root.errorController.historyRequested()
     }
 

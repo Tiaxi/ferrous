@@ -9,30 +9,28 @@ import "../logic/FormatUtils.js" as FormatUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
 // The status bar's Last.fm slot (#373, #470): the Last.fm glyph, with a
-// short bar beneath it, and a few words before it when something needs
+// short bar beside it, and a few words before it when something needs
 // saying (a 10 px glyph inside a ring was a smudge at 1x, and its states
 // looked alike).
-// What the slot shows is centred on it, on whole pixels: the glyph's ink,
-// or the ink and the bar under it as one, clear of the slot's focus ring
-// by 2 px at any font (the bar hung under a centred glyph, over the ring's
-// lower edge, and at 24 pt on the window's bottom edge; with the bar's
-// place kept under a lone glyph, it sat 2.5 px above the middle). Its
-// glyphs are one family (a grid of squares for the "as", a staircase for
-// its strike and thin antialiased strokes for offline read as three
-// hands): outlines drawn for 16 px with their straight edges on whole
-// pixels and their corners as arcs, all 16 px.
-// The bar is the glyph's: as wide as the glyph, 3 px tall and 1 px under
-// its ink at the default font, with square ends (at 2 px its proportions
-// did not read at 1x). It is the listening done towards the scrobble, in
-// the status bar's progress fill over its opaque trough, the scan's: the
-// trough 3:1 on the status bar and the fill 3:1 on the trough, so that it
-// reads as a share of a whole at a glance (a bar alone, 6 to 14 px long and
-// brighter than its glyph, did not read as progress; in the glyph's
-// secondary colour it was 2.5:1 on the trough). It is a fifth of the scan
-// bar's length, with
+// The glyph's ink is centred on the slot, on whole pixels, clear of the
+// slot's focus ring by 2 px at any font. Its glyphs are one family (a grid
+// of squares for the "as", a staircase for its strike and thin
+// antialiased strokes for offline read as three hands): outlines drawn for
+// 16 px with their straight edges on whole pixels and their corners as
+// arcs, all 16 px.
+// The bar is beside the glyph, 6 px before it and centred on its ink: 28
+// by 3 px at the default font, with square ends, longer and thicker with a
+// larger one (16 px long under the glyph, it read as an underline, part of
+// the glyph, and its share was hard to make out at 1x). It is the
+// listening done towards the scrobble, in the status bar's progress fill,
+// the glyph's own ink, over its opaque trough, the scan's: the trough
+// midway in contrast between the status bar and the fill, so that the
+// whole and the share done both read, and the bar is never louder than
+// its glyph (in a fill brighter than the glyph's letters, being sent was
+// the slot's loudest mark). It is under half the scan bar's length, with
 // square ends where the scan bar's are round, and the scan bar has its
-// percent beside it (the scan bar is 72 by 4 px), so that it does not
-// read as a second scan or a download.
+// percent beside it (the scan bar is 72 by 4 px), so that it does not read
+// as a second scan or a download.
 // - Listening: the glyph in the secondary colour, and the bar filling its
 //   trough with the listening done towards the scrobble, from a short mark
 //   at the left; the tooltip says how much is left. Both come from the scrobbler's listened
@@ -131,27 +129,22 @@ AbstractButton {
     // 12, centred in it.
     readonly property int inkTop: Math.round(root.glyphSize * 3 / 16)
     readonly property int inkBottom: Math.round(root.glyphSize * 13 / 16)
-    // The bar's trough under it: the glyph's width, 3 px tall and 1 px
-    // below the ink at the default font, a little more of both with a
-    // larger one (2 px below, the ink and the bar did not fit the default
-    // status bar clear of the focus ring).
-    readonly property int barWidth: root.glyphSize
-    readonly property int barHeight: Math.max(3, Math.round(root.glyphSize * 3 / 20))
-    readonly property int barGap: Math.max(1, Math.round(root.glyphSize / 12))
-    // The bar's top, from the glyph's.
-    readonly property int barY: root.inkBottom + root.barGap
-    // What is centred on the slot: the ink, and the bar under it while it
-    // shows.
+    // The bar's trough beside it: 28 by 3 px at the default font, longer
+    // and thicker with a larger one, 6 px before the glyph's box.
+    readonly property int barWidth: root.uiPalette.scaledSize(28)
+    readonly property int barHeight: Math.max(3, Math.round(root.glyphSize * 3 / 16))
+    readonly property int barGap: root.uiPalette.scaledSize(6)
+    // The bar's top, from the glyph's: centred on its ink, on a whole pixel.
+    readonly property int barY: Math.round((root.inkTop + root.inkBottom - root.barHeight) / 2)
+    // What is centred on the slot: the ink.
     readonly property int unitHeight: root.inkBottom - root.inkTop
-        + (root.barShown ? root.barGap + root.barHeight : 0)
     // The focus ring's width, and the clear space inside it around the ink
     // and the bar.
     readonly property int focusRingWidth: 2
     readonly property int focusRingClearance: 2
-    // The least height of the slot: the ink and the bar, clear of the focus
-    // ring. The status bar is at least this and 1 px either side tall, so
-    // that the bar stays off the window's bottom edge at any font.
-    readonly property int minimumBlockHeight: root.inkBottom - root.inkTop + root.barGap + root.barHeight
+    // The least height of the slot: the ink, clear of the focus ring. The
+    // status bar is at least this and 1 px either side tall.
+    readonly property int minimumBlockHeight: root.inkBottom - root.inkTop
         + 2 * (root.focusRingWidth + root.focusRingClearance)
     // The slot's height when nothing in it needs more: the status bar sets
     // it to its controls' height, so the slot is centred in the bar on whole
@@ -181,7 +174,8 @@ AbstractButton {
         return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
     // The bar and its trough: the status bar's progress colours, the scan
-    // bar's (the trough at 20% text was 1.9:1 / 1.5:1 on the status bar).
+    // bar's: the fill is the glyph's ink (the trough at 20% text was
+    // 1.9:1 / 1.5:1 on the status bar).
     readonly property color barColor: root.uiPalette.statusBarFill
     readonly property color troughColor: root.uiPalette.statusBarTrough
     // While listening, the bar is never less than a short mark from the
@@ -307,7 +301,7 @@ AbstractButton {
     // glyph and its bar inside the focus ring.
     implicitHeight: Math.max(root.blockHeight, Math.round(slotLabel.implicitHeight) + 4,
         root.minimumBlockHeight)
-    // The glyph and its bar 2 px clear of the focus ring at the sides too
+    // The bar and the glyph 2 px clear of the focus ring at the sides too
     // (1 px, the ring ran against the bar's ends).
     leftPadding: root.labelText.length > 0 ? 6 : root.focusRingWidth + root.focusRingClearance
     rightPadding: root.focusRingWidth + root.focusRingClearance
@@ -321,10 +315,19 @@ AbstractButton {
         ? I18n.i18nc("@info", "Press to resume scrobbling.")
         : I18n.i18nc("@info", "Press to pause scrobbling.")
 
-    // Keyboard focus shows the same tooltip as hover.
-    ToolTip.visible: (root.hovered || root.visualFocus) && !menu.visible && root.stateText.length > 0
-    ToolTip.delay: Kirigami.Units.toolTipDelay
-    ToolTip.text: root.stateText
+    // How far above the status bar the tooltip ends, as the bar's other
+    // items' do: the status bar sets it.
+    property int toolTipClearance: 6
+
+    // Keyboard focus shows the same tooltip as hover. Its text as it is
+    // (Last.fm's reasons are in some), over the status bar.
+    Components.PlainToolTip {
+        objectName: "scrobbleIndicatorToolTip"
+        y: -root.roomToBarTop - height - root.toolTipClearance
+        message: root.stateText
+        visible: (root.hovered || root.visualFocus) && !menu.visible && root.stateText.length > 0
+        delay: Kirigami.Units.toolTipDelay
+    }
 
     onClicked: root.togglePaused()
     // Space presses the focused slot rather than playing or pausing; keys
@@ -390,7 +393,9 @@ AbstractButton {
         Row {
             id: slotRow
             height: parent.height
-            spacing: root.labelText.length > 0 ? Kirigami.Units.largeSpacing : 0
+            // The words and the bar never show together.
+            spacing: root.labelText.length > 0 ? Kirigami.Units.largeSpacing
+                : (root.barShown ? root.barGap : 0)
 
             Label {
                 id: slotLabel
@@ -407,9 +412,30 @@ AbstractButton {
                 Accessible.ignored: true
             }
 
-            // The glyph's cell: its ink, and the bar under it while it
-            // shows, centred on the slot on whole pixels.
+            // The whole the listening is a share of, centred on the
+            // glyph's ink.
+            Rectangle {
+                objectName: "scrobbleIndicatorTrough"
+                y: glyphBox.y + root.barY
+                width: root.barWidth
+                height: root.barHeight
+                visible: root.barShown
+                color: root.troughColor
+
+                // The listening done, from the left.
+                Rectangle {
+                    objectName: "scrobbleIndicatorBar"
+                    width: root.barLength
+                    height: parent.height
+                    visible: width > 0
+                    color: root.barColor
+                }
+            }
+
+            // The glyph's cell, its ink centred on the slot on whole
+            // pixels.
             Item {
+                id: glyphBox
                 objectName: "scrobbleIndicatorBox"
                 y: Math.round((parent.height - root.unitHeight) / 2) - root.inkTop
                 width: root.glyphSize
@@ -419,8 +445,7 @@ AbstractButton {
                     objectName: "scrobbleIndicatorGlyph"
                     width: root.glyphSize
                     height: width
-                    // At its size, as wide as the bar under it at a large
-                    // font, not rounded down to a theme icon size.
+                    // At its size, not rounded down to a theme icon size.
                     roundToIconSize: false
                     source: root.glyphSource
                     color: root.glyphColor
@@ -437,25 +462,6 @@ AbstractButton {
                     source: Qt.resolvedUrl("../assets/lastfm-strike.svg")
                     color: root.uiPalette.text
                     isMask: true
-                }
-
-                // The whole the listening is a share of.
-                Rectangle {
-                    objectName: "scrobbleIndicatorTrough"
-                    y: root.barY
-                    width: root.barWidth
-                    height: root.barHeight
-                    visible: root.barShown
-                    color: root.troughColor
-
-                    // The listening done, from the left.
-                    Rectangle {
-                        objectName: "scrobbleIndicatorBar"
-                        width: root.barLength
-                        height: parent.height
-                        visible: width > 0
-                        color: root.barColor
-                    }
                 }
             }
         }

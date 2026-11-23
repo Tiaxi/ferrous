@@ -2,6 +2,8 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QQmlProperty>
+
 // Error reporting, and saving before quitting.
 class ErrorsSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -374,6 +376,12 @@ void ErrorsSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
     QTRY_VERIFY(visibleItemNamed(fullscreen, QStringLiteral("viewerIssuesButton")) != nullptr);
     QQuickItem *issuesButton = visibleItemNamed(fullscreen, QStringLiteral("viewerIssuesButton"));
     QCOMPARE(issuesButton->property("text").toString(), QStringLiteral("1 new issue"));
+    // A warning alone: the status bar's triangle in the words' colour, not
+    // the negative an error has.
+    QVERIFY(QQmlProperty::read(issuesButton, QStringLiteral("icon.name")).toString()
+                .endsWith(QStringLiteral("status-warning.svg")));
+    QCOMPARE(issuesButton->property("glyphColor").value<QColor>(),
+             issuesButton->property("baseTextColor").value<QColor>());
     QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
     QQuickItem *close = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenCloseButton"));
     QVERIFY(strip != nullptr && close != nullptr);

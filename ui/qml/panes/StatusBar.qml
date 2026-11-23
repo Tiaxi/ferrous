@@ -19,7 +19,9 @@ import "../components" as Components
 // An error has one treatment here (it had three: red semibold words for a
 // stopped engine, plain words for one not running, and a glyph with words
 // for the issues and a failed scrobble): its words in the text colour
-// beside a 16 px glyph in the negative colour.
+// beside a 16 px glyph in the negative colour. Severity has one shape and
+// one colour wherever an issue shows: an error's ring with a cross in the
+// negative colour, a warning's triangle in the secondary one.
 ToolBar {
     id: root
 
@@ -40,9 +42,9 @@ ToolBar {
     readonly property bool narrow: root.width < 1200
 
     // The bar under its 1 px seam: 24 px, or the small text's line and 4 px
-    // above and below it when that is more, or the Last.fm glyph and its bar
-    // clear of the slot's focus ring, with 1 px above and below, at a font
-    // where that is more (at 24 pt the bar sat on the window's edge).
+    // above and below it when that is more, or the Last.fm glyph clear of
+    // the slot's focus ring, with 1 px above and below, at a font where
+    // that is more.
     readonly property real barHeight: Math.max(24, Math.round(smallMetrics.height) + 8,
         scrobbleIndicator.minimumBlockHeight + 2)
 
@@ -71,6 +73,16 @@ ToolBar {
         ? Math.max(0, Number(root.errorController.unseenCount) || 0)
         : 0
     readonly property bool hasUnseenError: root.unseenErrorCount > 0
+    // Whether an error, rather than warnings alone, is among the new
+    // issues, or among them all once they are seen.
+    readonly property bool unseenIncludesError: root.errorController
+        ? (Number(root.errorController.unseenErrorCount) || 0) > 0
+        : false
+    readonly property bool issuesIncludeError: root.hasUnseenError
+        ? root.unseenIncludesError
+        : (root.errorController ? (Number(root.errorController.errorEntryCount) || 0) > 0 : false)
+    readonly property url errorGlyph: Qt.resolvedUrl("../assets/status-error.svg")
+    readonly property url warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
     readonly property string backendFailure: root.uiBridge.backendFailure || ""
     readonly property bool backendStopped: root.backendFailure.length > 0
     readonly property bool isDisconnected: !root.uiBridge.connected && !root.backendStopped
@@ -204,6 +216,20 @@ ToolBar {
     // the default font and larger with a larger one, at that size rather
     // than rounded down to a theme icon size.
 
+    // How far above the status bar's seam every tooltip of its items ends:
+    // one line for all of them, as Recent Issues stands off it (the engine's
+    // tooltip floated over it, the others sat on it).
+    readonly property int toolTipClearance: Kirigami.Units.smallSpacing + 2
+
+    // A tooltip of one of the bar's items, `owner`, a child of its row: its
+    // text as it is, never as markup (a folder's name or Last.fm's words
+    // are in some), centred over the item and clear of the bar.
+    component StatusToolTip: Components.PlainToolTip {
+        required property Item owner
+        y: -(root.contentItem.y + owner.y) - height - root.toolTipClearance
+        delay: Kirigami.Units.toolTipDelay
+    }
+
     component StatusGlyph: Kirigami.Icon {
         property int size: 14
         implicitWidth: root.uiPalette.scaledSize(size)
@@ -251,11 +277,11 @@ ToolBar {
             Accessible.name: engineError.text
             Accessible.description: engineError.toolTipText
 
-            Components.PlainToolTip {
+            StatusToolTip {
                 objectName: "statusBarEngineErrorToolTip"
+                owner: engineError
                 message: engineError.toolTipText
                 visible: (engineError.hovered || engineError.visualFocus) && engineError.toolTipText.length > 0
-                delay: Kirigami.Units.toolTipDelay
             }
 
             background: Rectangle {
@@ -279,7 +305,7 @@ ToolBar {
                         objectName: "statusBarEngineErrorGlyph"
                         anchors.verticalCenter: parent.verticalCenter
                         size: root.errorGlyphSize
-                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        source: root.errorGlyph
                         color: root.uiPalette.negative
                     }
 
@@ -498,20 +524,23 @@ ToolBar {
             }
         }
 
-        // The library scan: "Scanning “Music”… 34%" and a bar that moves
-        // with the scan's batches; narrow: "Scanning… 34%". Its words say
+        // The library scan: "Scanning “Music”…", a bar that moves with the
+        // scan's batches, and "34%"; narrow: "Scanning… 34%". Its words say
         // what the bar is (a bare bar read as a twin of the
         // Last.fm slot's). Without a total: "Scanning “Music”… 412 files",
         // the count being the progress; the bar shows once there is a total
-        // to fill it against. The percent keeps the width of "100%", in
-        // tabular figures, so nothing in the status bar moves as it counts.
+        // to fill it against. The parts are one unit, 6 px apart, as a glyph
+        // and its words are (the percent, right-aligned in the room of
+        // "100%" after the words, stood some 16 px off them). The percent
+        // keeps the width of "100%" after it, in tabular figures, so nothing
+        // in the status bar moves as it counts.
         // Nothing in it moves on its own (#373: no indeterminate
         // animation), so it is still with the desktop's animations off.
         Row {
             id: scanGroup
             objectName: "statusBarScan"
             visible: root.scanning && root.showTrackSections
-            spacing: Kirigami.Units.largeSpacing
+            spacing: Kirigami.Units.smallSpacing + 2
             Layout.alignment: Qt.AlignVCenter
             readonly property real fraction: root.scanTotalKnown
                 ? Math.min(1, root.scanProcessed / root.scanTotal)
@@ -530,26 +559,6 @@ ToolBar {
                         : I18n.i18nc("@info:status", "Scanning library…")
             }
 
-            StatusLabel {
-                id: scanCount
-                objectName: "statusBarScanCount"
-                anchors.verticalCenter: parent.verticalCenter
-                visible: text.length > 0
-                text: root.scanCountText
-                // A percent keeps the room of the widest, on the right of
-                // it, beside the bar.
-                width: root.scanTotalKnown
-                    ? Math.max(Math.ceil(implicitWidth), Math.ceil(fullPercentMetrics.advanceWidth))
-                    : implicitWidth
-                horizontalAlignment: Text.AlignRight
-
-                TextMetrics {
-                    id: fullPercentMetrics
-                    font: scanCount.font
-                    text: root.percentText(100)
-                }
-            }
-
             Rectangle {
                 objectName: "statusBarScanBar"
                 anchors.verticalCenter: parent.verticalCenter
@@ -561,9 +570,10 @@ ToolBar {
                 height: Math.max(4, Math.round(root.uiPalette.scaledSize(root.smallGlyphSize) / 5))
                 radius: height / 2
                 // The status bar's progress trough and fill, the Last.fm
-                // bar's: the trough 3:1 on the status bar and the fill 3:1
-                // on it, so that the share scanned reads against the rest
-                // (its trough, the text at 15%, was 1.6:1 / 1.3:1).
+                // bar's: the fill the secondary text, never louder than the
+                // words beside it, on a trough midway between it and the
+                // status bar, so that the share scanned reads against the
+                // rest (its trough, the text at 15%, was 1.6:1 / 1.3:1).
                 color: root.uiPalette.statusBarTrough
 
                 Rectangle {
@@ -579,12 +589,35 @@ ToolBar {
                 }
             }
 
+            StatusLabel {
+                id: scanCount
+                objectName: "statusBarScanCount"
+                anchors.verticalCenter: parent.verticalCenter
+                visible: text.length > 0
+                text: root.scanCountText
+                // A percent keeps the room of the widest after it, the bar
+                // and the words before it staying where they are.
+                width: root.scanTotalKnown
+                    ? Math.max(Math.ceil(implicitWidth), Math.ceil(fullPercentMetrics.advanceWidth))
+                    : implicitWidth
+                horizontalAlignment: Text.AlignLeft
+
+                TextMetrics {
+                    id: fullPercentMetrics
+                    font: scanCount.font
+                    text: root.percentText(100)
+                }
+            }
+
             HoverHandler {
                 id: scanHover
             }
-            ToolTip.visible: scanHover.hovered
-            ToolTip.delay: Kirigami.Units.toolTipDelay
-            ToolTip.text: scanToolTipText.text
+            StatusToolTip {
+                objectName: "statusBarScanToolTip"
+                owner: scanGroup
+                message: scanToolTipText.text
+                visible: scanHover.hovered
+            }
 
             QtObject {
                 id: scanToolTipText
@@ -617,13 +650,19 @@ ToolBar {
             // status bar.
             blockHeight: root.barHeight - 2
             roomToBarTop: root.contentItem.y + y
+            toolTipClearance: root.toolTipClearance
             Layout.alignment: Qt.AlignVCenter
             onSettingsRequested: root.lastFmSettingsRequested()
         }
 
-        // The issues: "2 new issues" in the text colour with a negative
-        // warning glyph until the user has seen them, then "3 issues" and
-        // the glyph in the secondary colour, the glyph 16 px in both.
+        // The issues: "2 new issues" in the text colour until the user has
+        // seen them, then "3 issues" in the secondary colour. The 16 px
+        // glyph is the shape of the most severe of them, the new ones while
+        // there are any: an error's ring with a cross, in the negative
+        // colour while an error is new, otherwise the warning's triangle;
+        // in the secondary colour once seen, and for warnings alone, which
+        // the word "new" marks (every new issue was red, so a scan's
+        // notice raised the alarm of a stopped engine).
         // It opens Recent Issues; with none there is nothing to show.
         ToolButton {
             id: issuesButton
@@ -640,7 +679,7 @@ ToolBar {
             text: root.hasUnseenError
                 ? I18n.i18ncp("@action:button", "%1 new issue", "%1 new issues", root.unseenErrorCount)
                 : I18n.i18ncp("@action:button", "%1 issue", "%1 issues", root.errorCount)
-            readonly property color glyphColor: root.hasUnseenError
+            readonly property color glyphColor: root.hasUnseenError && root.unseenIncludesError
                 ? root.uiPalette.negative
                 : root.uiPalette.textSecondary
             readonly property color labelColor: root.hasUnseenError
@@ -653,9 +692,12 @@ ToolBar {
                 ? ErrorUtils.describe(root.errorController.latest)
                 : ""
             // Keyboard focus shows the same tooltip as hover.
-            ToolTip.visible: (hovered || visualFocus) && !root.issuesOpen
-            ToolTip.delay: Kirigami.Units.toolTipDelay
-            ToolTip.text: I18n.i18nc("@info:tooltip", "Show Recent Issues")
+            StatusToolTip {
+                objectName: "statusBarErrorsToolTip"
+                owner: issuesButton
+                message: I18n.i18nc("@info:tooltip", "Show Recent Issues")
+                visible: (issuesButton.hovered || issuesButton.visualFocus) && !root.issuesOpen
+            }
             onClicked: root.errorController.historyRequested()
             // Plain Space presses the focused button, not the window's
             // Play/Pause shortcut.
@@ -696,7 +738,7 @@ ToolBar {
                         objectName: "statusBarErrorsGlyph"
                         anchors.verticalCenter: parent.verticalCenter
                         size: root.errorGlyphSize
-                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        source: root.issuesIncludeError ? root.errorGlyph : root.warningGlyph
                         color: issuesButton.glyphColor
                     }
 
