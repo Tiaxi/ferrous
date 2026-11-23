@@ -177,7 +177,7 @@ Item {
     }
     // The same beside the large-font header's cover, which is at the inset.
     function _roomBesideHeader(side) {
-        return root.width - root.textInset - side - root.footGap - root.textInset
+        return root.width - root.textInset - side - root.besideGap - root.textInset
     }
     // Where the cover is in from the panel's corner: at the inset in the
     // large-font header, on its lines' left edge, and at the corner
@@ -617,7 +617,7 @@ Item {
 
     // A track change fades, line by line: a line that differs for the next
     // track changes in place, the one before going out before the next
-    // track's comes in (see _linesOutLevel), so the two texts never show
+    // track's comes in (see linesOutTime), so the two texts never show
     // together; where only a word or a number of it changes,
     // its fields, and the words of a field in which only a number changes,
     // that are the same for both and do not move stay still (#537), and
@@ -663,7 +663,7 @@ Item {
     // another cover or another album, even when the two look alike.
     property var outgoing: null
     // How far the fade has come in its time: 0 when it starts, 1 once the
-    // playing track alone shows. Every layer eases on it (see _linesOutLevel).
+    // playing track alone shows. Every layer eases on it (see linesOutTime).
     property real handover: 1
     readonly property NumberAnimation handoverAnimation: NumberAnimation {
         objectName: "nowPlayingHandoverAnimation"
@@ -680,34 +680,61 @@ Item {
         const rest = 1 - Math.min(1, Math.max(0, progress))
         return 1 - rest * rest * rest
     }
-    // At `at` of the fade, how much of their opacity the lines before keep
-    // and how far the playing track's lines have come in; and how much of
-    // their opacity the covers before keep, going out over all of it. A
-    // line that changes shows one text in every frame: the lines before go
-    // out first, OutCubic, over linesOutTime, 40 % of shortDuration, and
-    // only then the playing track's come in, OutCubic, over linesInTime, 60
-    // % of it; the lines' change takes shortDuration, ~100 ms, in the
-    // long fade too, while the cover cross-fades over all of it. (Out and
-    // in over the same time, even with the lines before gone over its first
-    // 40 %, showed two titles at once for ~50 ms, a ghost at real speed.)
-    // The spans are each the share of the fade that runs (handover).
-    readonly property real linesOutTime: 0.4 * Kirigami.Units.shortDuration
-    readonly property real linesInTime: 0.6 * Kirigami.Units.shortDuration
-    readonly property real linesOutSpan: root.handoverAnimation.duration > 0
-        ? Math.min(1, root.linesOutTime / root.handoverAnimation.duration) : 0
-    readonly property real linesInSpan: root.handoverAnimation.duration > 0
-        ? Math.min(1 - root.linesOutSpan, root.linesInTime / root.handoverAnimation.duration) : 0
-    function _linesOutLevel(at) {
-        return root.linesOutSpan > 0 ? 1 - root._eased(at / root.linesOutSpan) : 0
+    // A line that changes shows one text in every frame and keeps it
+    // readable: the text before goes out first, InQuad, so it holds its
+    // ink at the start, over linesOutTime, 30 % of shortDuration, and the
+    // playing track's comes in as it ends, OutCubic, over the rest, so the
+    // line is under half of a text's ink for ~23 ms of shortDuration's 100,
+    // under two frames. The lines' change takes shortDuration in the long
+    // fade too, while the cover cross-fades over all of it. (Out over 40 %
+    // with OutCubic left each line under half for ~45 ms, a blink; out and
+    // in over the same time showed two titles at once, a ghost.) Each line
+    // keeps its place on the two curves (`outAt`, `inAt`, see _fadingLine)
+    // when the fade starts again, as it does when the tags come after the
+    // path, so the line goes on from where it is: started again from the
+    // top, the text going out waited out a second linesOutTime from what
+    // was left of it, and the line stayed under half for ~75 ms.
+    readonly property real linesOutTime: 3 * Kirigami.Units.shortDuration / 10
+    readonly property real linesInTime: Kirigami.Units.shortDuration - root.linesOutTime
+    // How long the fade has run, in ms.
+    readonly property real handoverTime: root.handover * root.handoverAnimation.duration
+    // The InQuad curve of a text going out: how much of its opacity it
+    // keeps at `position`, and the position at which it keeps `level`.
+    function _outCurve(position) {
+        const at = Math.min(1, Math.max(0, position))
+        return 1 - at * at
     }
-    function _linesInLevel(at) {
-        return root.linesInSpan > 0 ? root._eased((at - root.linesOutSpan) / root.linesInSpan) : 1
+    function _outPosition(level) {
+        return Math.sqrt(1 - Math.min(1, Math.max(0, level)))
     }
+    // The position on the OutCubic curve at which a text has come in to
+    // `level`.
+    function _inPosition(level) {
+        return 1 - Math.cbrt(1 - Math.min(1, Math.max(0, level)))
+    }
+    // How much of their opacity the layers before of a fading `line` keep:
+    // the one that shows most follows the curve on from where it was when
+    // the fade started, the others under it alike.
+    function _lineOutLevel(line) {
+        if (line.outAt >= 1 || root.linesOutTime <= 0)
+            return 0
+        return root._outCurve(line.outAt + root.handoverTime / root.linesOutTime)
+            / root._outCurve(line.outAt)
+    }
+    // How far the playing track's text of a fading `line` has come in: on
+    // from where it was when the fade started, once the line's text before
+    // has gone.
+    function _lineInOpacity(line) {
+        if (root.linesInTime <= 0)
+            return 1
+        const start = root.linesOutTime * (1 - line.outAt)
+        return root._eased(line.inAt + Math.max(0, root.handoverTime - start) / root.linesInTime)
+    }
+    // How much of their opacity the covers before keep at `at` of the fade,
+    // going out over all of it.
     function _coversOutLevel(at) {
         return 1 - root._eased(at)
     }
-    readonly property real linesOutLevel: root._linesOutLevel(root.handover)
-    readonly property real linesInLevel: root._linesInLevel(root.handover)
     readonly property real coversOutLevel: root._coversOutLevel(root.handover)
     // The most layers a line, or the cover, fades out at once: those of
     // the two tracks before the playing one. Past that, a change adds no
@@ -728,9 +755,14 @@ Item {
     // the playing track's comes. The parts of a line before are cut where
     // its own text has gaps, which the playing track's text need not have
     // there, so that is cut only at the edges of what stays still, in gaps
-    // all share.
+    // all share. Where the line starts on the curves: the text before that
+    // shows most at the position on the out curve where it has the
+    // opacity it starts from (`outAt`, 1 with none), and the playing
+    // track's at the position on the in curve it has come in to (`inAt`).
     function _fadingLine(still, layers, incomingFrom, own) {
-        return { still: still, layers: layers, incomingFrom: incomingFrom, own: own }
+        const outFrom = layers.length > 0 ? Math.max(...layers.map(layer => root._layerFrom(layer))) : 0
+        return { still: still, layers: layers, incomingFrom: incomingFrom, own: own,
+                 outAt: root._outPosition(outFrom), inAt: root._inPosition(1 - incomingFrom) }
     }
 
     // A line before as it fades out (`text`), in parts that fade out from
@@ -755,13 +787,13 @@ Item {
         if (line === null || line.layers.length === 0)
             return 0
         return Math.max(...line.layers.map(layer => root._layerFrom(layer)))
-            * root._linesOutLevel(root.handover)
+            * root._lineOutLevel(line)
     }
 
     // How much of the playing track's text of `key` has still to come in.
     function _incomingLineRest(key) {
         const line = root._outgoingLine(key)
-        return line === null ? 0 : line.incomingFrom * (1 - root._linesInLevel(root.handover))
+        return line === null ? 0 : 1 - root._lineInOpacity(line)
     }
 
     function _layerFrom(layer) {
@@ -1023,7 +1055,7 @@ Item {
             return root._fadingLine(root._keptStill(key, whole, before, after),
                                     [root._layer(before, [{ at: 0, from: 1 }])], 1, true)
         }
-        const level = root._linesOutLevel(root.handover)
+        const level = root._lineOutLevel(line)
         const still = root._keptStill(key, line.still, before, after)
         const givenUp = root._givenUp(line.still, still, before)
         let layers = line.layers
@@ -1286,13 +1318,14 @@ Item {
     // some 264 px of it empty beside it, and the compact one cut the artist
     // off beside a 152 px cover): one block on one left edge, the panel's
     // inset. The cover, as high as two lines of the title (headerCoverSize),
-    // at the inset from the top too, and beside it, footGap after it as the
-    // lines are under it (12 px after the inset cover, "A Remarkably" was
-    // past the 408 px sidebar's first line, and a long title showed two
-    // words), the title, on up to two lines and centred on it either way
-    // (flush in the corner with the title on its foot, the header had three
-    // left edges and some 60 px of nothing over the title); then, footGap
-    // under the cover, on its left edge and to the panel's inset, the
+    // at the inset from the top too, and beside it, besideGap after it (12
+    // px after the inset cover, "A Remarkably" was past the 408 px
+    // sidebar's first line, and a long title showed two words), the title,
+    // on up to two lines and centred on it either way (flush in the corner
+    // with the title on its foot, the header had three left edges and some
+    // 60 px of nothing over the title); then, footGap, the panel's inset,
+    // under the cover (8 px there read tight under the 24 pt title and the
+    // cover over it), on its left edge and to the panel's inset, the
     // artist, "Album (Year)", the album cut off before its year, in
     // textSecondary, and the details, a line each, elided, stackedLineGap
     // apart. The block is one height for every track (largeHeaderHeight): a
@@ -1307,8 +1340,9 @@ Item {
     readonly property bool largeHeader: !root.wideRoom && root.largeFont
         && (!root.narrow || root.narrowLinesTall)
         && root._roomBesideHeader(root.headerCoverSize) >= root.narrowLineMinimum
-    readonly property int footGap: 8
-    readonly property int titleGapBeside: root.largeHeader ? root.footGap : root.textInset
+    readonly property int besideGap: 8
+    readonly property int footGap: root.textInset
+    readonly property int titleGapBeside: root.largeHeader ? root.besideGap : root.textInset
     readonly property real footLineWidth: Math.max(0, root.width - 2 * root.textInset)
     readonly property real largeHeaderHeight: root.textInset + root.headerCoverSize + root.footGap
         + 3 * narrowLineProbe.implicitHeight + 2 * root.stackedLineGap
@@ -1737,8 +1771,9 @@ Item {
         // Every text the line shows, the playing track's last.
         readonly property var texts: line.layers.map(layer => layer.text).concat([line.text])
         // The playing track's text where it does not stay still, fading in.
-        readonly property real incomingOpacity: line.fading
-            ? 1 - line.before.incomingFrom * (1 - root.linesInLevel) : 1
+        readonly property real incomingOpacity: line.fading ? root._lineInOpacity(line.before) : 1
+        // How much of their opacity the texts before keep.
+        readonly property real outgoingLevel: line.fading ? root._lineOutLevel(line.before) : 0
         // Where the line stays still while it fades, [left, right] for each
         // run of `still`: from the middle of the gap before it to the middle
         // of the gap after it, where no text has a glyph. A run whose gap
@@ -1938,7 +1973,7 @@ Item {
                         width: part.modelData.width
                         height: line.height
                         clip: true
-                        opacity: part.modelData.from * root.linesOutLevel
+                        opacity: part.modelData.from * line.outgoingLevel
 
                         LineText {
                             objectName: "nowPlayingOutgoing" + line.name

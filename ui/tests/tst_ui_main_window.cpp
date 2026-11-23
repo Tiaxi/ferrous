@@ -1948,12 +1948,13 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     const qreal seamAt = sceneRect(seam).top();
     if (headerRow) {
         // One block: the cover and the lines on one left edge, the title
-        // centred on the cover, within it; the artist 8 px under the cover,
-        // the album and the details 4 px apart, then 12 px.
+        // centred on the cover, within it; the artist the panel's 12 px
+        // inset under the cover, the album and the details 4 px apart, then
+        // 12 px.
         const QRectF titleRect = sceneRect(title);
         QCOMPARE(tile.left(), sceneRect(artist).left());
         QVERIFY(std::abs(titleRect.center().y() - tile.center().y()) <= 1.0 && titleRect.top() >= tile.top());
-        QTRY_COMPARE(sceneRect(artist).top(), tile.bottom() + 8);
+        QTRY_COMPARE(sceneRect(artist).top(), tile.bottom() + 12);
         QCOMPARE(sceneRect(album).top(), sceneRect(artist).bottom() + 4);
         QCOMPARE(sceneRect(details).top(), sceneRect(album).bottom() + 4);
         QCOMPARE(seamAt - sceneRect(details).bottom(), 12.0);
@@ -2098,7 +2099,7 @@ void UiMainWindowTest::nowPlayingNarrowBlockIsOneHeightForEveryTrack() {
     };
     const QString common = sample();
     // The large-font header's block, from the fonts alone: 12 px, its
-    // cover, as high as two lines of the title and never under 96 px, 8 px,
+    // cover, as high as two lines of the title and never under 96 px, 12 px,
     // the artist, the album and the details, 4 px apart, then 12 px and the
     // seam.
     if (arrangement == QStringLiteral("header")) {
@@ -2108,7 +2109,7 @@ void UiMainWindowTest::nowPlayingNarrowBlockIsOneHeightForEveryTrack() {
         QVERIFY2(side >= 96.0 && side >= std::round(2 * titleLine) - 1 && side <= std::max(96.0, 2 * titleLine + 6),
                  qPrintable(QStringLiteral("%1 for a title line of %2").arg(side).arg(titleLine)));
         QCOMPARE(named(window, "nowPlayingCover")->width(), side);
-        QCOMPARE(panel->height(), 12 + side + 8 + 3 * details->height() + 2 * 4 + 12 + 1);
+        QCOMPARE(panel->height(), 12 + side + 12 + 3 * details->height() + 2 * 4 + 12 + 1);
         QCOMPARE(panel->height(), panel->property("largeHeaderHeight").toReal() + 12 + 1);
     }
     // Ranked in every arrangement: the artist primary, the album secondary
@@ -2420,7 +2421,7 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QCOMPARE(cover->height(), side);
     const QRectF coverRect = sceneRect(cover);
     // One block at the panel's inset: 12 px from its top and left, and the
-    // title 8 px after the cover, as the lines are under it.
+    // title 8 px after the cover.
     QCOMPARE(coverRect.topLeft(), panelRect.topLeft() + QPointF(12, 12));
     QTRY_COMPARE(sceneRect(title).left(), coverRect.right() + 8);
     // Its two lines span the cover, or, at the base size beside a 96 px
@@ -2446,9 +2447,13 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
     // At least a dozen characters beside the cover.
     QVERIFY2(title->width() >= panel->property("narrowLineMinimum").toReal(), qPrintable(QString::number(title->width())));
-    // Under the cover, 8 px down, at the inset and on the whole width.
+    // Under the cover, the panel's 12 px inset down (8 px read tight under
+    // the 24 pt title and the cover), at the inset and on the whole width;
+    // beside it the title stays 8 px after it (seatedProblem), so a long
+    // title keeps its words on the line.
     const auto checkFootLines = [&]() {
-        QCOMPARE(sceneRect(artist).topLeft(), QPointF(panelRect.left() + 12, coverRect.bottom() + 8));
+        QCOMPARE(sceneRect(artist).topLeft(), QPointF(panelRect.left() + 12, coverRect.bottom() + 12));
+        QCOMPARE(sceneRect(artist).top() - coverRect.bottom(), coverRect.left() - panelRect.left());
         QCOMPARE(artist->width(), panelRect.width() - 24);
         QCOMPARE(sceneRect(album).topLeft(), QPointF(panelRect.left() + 12, sceneRect(artist).bottom() + 4));
         QCOMPARE(album->width(), panelRect.width() - 24);
@@ -2588,7 +2593,7 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QCOMPARE(colorOf(factsText), tokenHex(window, "textTertiary"));
     const QRectF folderRect = sceneRect(folderText);
     const QRectF factsRect = sceneRect(factsText);
-    const qreal over = folderRect.top() - (coverRect.bottom() + 8);
+    const qreal over = folderRect.top() - (coverRect.bottom() + 12);
     const qreal under = sceneRect(seam).top() - 12 - factsRect.bottom();
     QVERIFY2(std::abs(over) <= 0.5 && under >= folderRect.height(),
              qPrintable(QStringLiteral("%1 over and %2 under").arg(over).arg(under)));
