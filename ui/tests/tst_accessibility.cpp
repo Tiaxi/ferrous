@@ -4383,9 +4383,11 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
         QVERIFY2(contrastRatio(drawn, plate) >= 1.4,
                  qPrintable(QStringLiteral("%1 on %2").arg(drawn.name(), plate.name())));
     }
-    // The chosen one's 1 px edge, inside it, at 3:1 or more on the plate
-    // and on its fill, as drawn (the fill alone was 1.4 to 1.7:1), in both
-    // modes' plot colours; on a light plate the fill, 7:1 on the plate, is
+    // The chosen one's 1 px edge, inside it, as drawn, in both modes' plot
+    // colours: on a dark plate a quiet highlight over a fill that is 3:1 on
+    // the plate and carries the choice (the fill alone was 1.4 to 1.7:1
+    // once; an edge 3:1 on the fuller fill came to a near-white 10:1 wire
+    // box on the plate); on a light plate the fill, 7:1 on the plate, is
     // its own edge.
     const auto edgeProblem = [&](QQuickItem *chosen, QQuickItem *other) -> QString {
         QQuickItem *edge = chosen->findChild<QQuickItem *>(QStringLiteral("plotToolButtonCheckedEdge"));
@@ -4405,7 +4407,8 @@ void AccessibilityTest::checkModeSwitchIconFollowsTheMode(QQuickWindow *window) 
             }
             return {};
         }
-        if (contrastRatio(line, plate) < 3.0 || contrastRatio(line, fill) < 3.0) {
+        if (contrastRatio(fill, plate) < 3.0 || contrastRatio(line, plate) > 4.5
+            || contrastRatio(line, fill) < 1.15 || contrastRatio(line, fill) > 1.4) {
             return QStringLiteral("edge %1 on plate %2 and fill %3").arg(line.name(), plate.name(), fill.name());
         }
         return {};

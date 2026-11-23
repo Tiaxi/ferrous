@@ -716,8 +716,8 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     // edge that is 3:1 or more on the plate, over the floor, and on an 18 %
     // fill: the dark theme's tertiary text on the spectrogram's dark plot in
     // both themes, and the theme's on the waveform's. The mode switch's
-    // fuller fill takes the edge further where it needs it (PlotToolButton's
-    // segmentEdgeColor).
+    // fuller fill, 3:1 on its plate, carries the choice itself, with a
+    // quiet highlight of its own (PlotToolButton's segmentEdgeColor).
     QVERIFY(sameColor(colorOf(spectrogram, "segmentEdge"), fromHex(QStringLiteral("#8f959a"))));
     QVERIFY(sameColor(colorOf(media, "segmentEdge"), fromHex(QStringLiteral("#8f959a"))));
     QVERIFY(sameColor(colorOf(waveform, "segmentEdge"), colorOf(tokens, "textTertiary")));
@@ -1845,12 +1845,23 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     // Neutral: nothing of the accent's blue in it.
     QVERIFY2(std::abs(drawnChosen.blue() - drawnChosen.red()) <= 12 && std::abs(drawnChosen.green() - drawnChosen.red()) <= 12,
              qPrintable(drawnChosen.name()));
-    // The chosen one's edge, as drawn, 3:1 on the plate and, on a dark
-    // plate, on its fill; a light plate's fill is its own edge.
+    // The chosen one's edge, as drawn: on a dark plate a quiet highlight,
+    // a step lighter than its fill, some 1.25:1 on it, and no more than
+    // 4.5:1 on the plate (an edge 3:1 on the fill as well came to a
+    // near-white 10:1 wire box); a light plate's fill is its own edge.
     const QColor edge = at(chosen, QPointF(chosen->width() / 2, 0.5));
-    QVERIFY2(contrastRatio(edge, plate) >= 3.0
-                 && (lightPlate ? channelDistance(edge, drawnChosen) <= 3 : contrastRatio(edge, drawnChosen) >= 3.0),
-             qPrintable(QStringLiteral("edge %1 on plate %2 and fill %3").arg(edge.name(), plate.name(), drawnChosen.name())));
+    const QString edgeText =
+        QStringLiteral("edge %1 on plate %2 and fill %3").arg(edge.name(), plate.name(), drawnChosen.name());
+    if (lightPlate) {
+        QVERIFY2(channelDistance(edge, drawnChosen) <= 3, qPrintable(edgeText));
+    } else {
+        const double onFill = contrastRatio(edge, drawnChosen);
+        QVERIFY2(relativeLuminance(edge) > relativeLuminance(drawnChosen) && onFill >= 1.2 && onFill <= 1.35,
+                 qPrintable(edgeText));
+        QVERIFY2(contrastRatio(edge, plate) <= 4.5, qPrintable(edgeText));
+        QVERIFY2(std::abs(edge.blue() - edge.red()) <= 12 && std::abs(edge.green() - edge.red()) <= 12,
+                 qPrintable(edgeText));
+    }
 
     // Pressed, its glyph is whole.
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, other->mapToScene(QPointF(12, 12)).toPoint());

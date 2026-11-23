@@ -16,8 +16,8 @@ import "../logic/KeyUtils.js" as KeyUtils
 // as the visualization's mode switch, shows the chosen one as a neutral
 // plate instead (the accent's solid blue read as keyboard focus, and as
 // the loudest thing on the plot): the plot's text colour over the plate,
-// 3:1 on a dark one, inside a 1 px edge of the plot's segmentEdge, at
-// least 3:1 on the plate and on the fill, with its glyph in the text
+// 3:1 on a dark one, which carries the choice, inside a quiet 1 px
+// highlight a step lighter than the fill, with its glyph in the text
 // colour whole; on a light plate the plot's dark text, 7:1, its own edge,
 // with its glyph in the plate's colour whole. The others' glyphs are at
 // 72 %, whole only while pressed.
@@ -82,13 +82,23 @@ ToolButton {
                        ColorUtils.withAlpha(root.plotColors.plotText, root.segmentHoverOpacity), root.plateColor), 2))
     readonly property real segmentRestOpacity: 0.72
     readonly property real segmentHoverGlyphOpacity: 0.85
-    // The chosen segment's edge: the plot's, or lighter on a dark plate
-    // where it is under 3:1 on the plate or the fill. On a light plate the
-    // fill is its own edge.
-    readonly property color segmentEdgeColor: root.lightPlate
-        ? ColorUtils.drawnOver(root.checkedColor, root.plateColor)
-        : root.uiPalette.readableOn(root.plotColors.segmentEdge,
-                                    [root.plateColor, ColorUtils.drawnOver(root.checkedColor, root.plateColor)], 3.1)
+    // The chosen segment's edge. On a dark plate the fill, 3:1 on it,
+    // carries the choice, so the edge is a quiet highlight on it: the
+    // plot's text over the fill, the least in whole percent that is
+    // 1.25:1 on it (an edge 3:1 on the fill as well came to a near-white
+    // 10:1 wire box on the plate, and with the focus ring a stack of three
+    // rings). On a light plate the fill is its own edge.
+    readonly property color segmentEdgeColor: {
+        const fill = ColorUtils.drawnOver(root.checkedColor, root.plateColor)
+        if (root.lightPlate)
+            return fill
+        for (let percent = 1; percent < 100; ++percent) {
+            const edge = ColorUtils.drawnOver(ColorUtils.withAlpha(root.plotColors.plotText, percent / 100), fill)
+            if (ColorUtils.contrastRatio(edge, fill) >= 1.25)
+                return edge
+        }
+        return root.plotColors.plotText
+    }
     // The pointer's wash: a segment's, under its chosen plate, and a
     // button's, which checked turns into a solid fill.
     readonly property real hoverOpacity: root.segment ? root.segmentHoverOpacity : 0.12
@@ -200,8 +210,8 @@ ToolButton {
         }
 
         // A chosen segment's 1 px edge, inside it, over its neutral fill:
-        // the state at 3:1 or more, which the fill alone is not. The focus
-        // ring stays outside, 2 px and in the accent.
+        // a quiet highlight on a dark plate, the fill itself on a light one.
+        // The focus ring stays outside, 2 px and in the accent.
         Rectangle {
             objectName: "plotToolButtonCheckedEdge"
             anchors.fill: parent
