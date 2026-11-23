@@ -4065,12 +4065,25 @@ void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
     QTRY_VERIFY(toolTip->property("visible").toBool());
     QTest::mouseMove(window, away);
 
-    // Followed again with the pointer away, the notice fades out with the
-    // row rather than leave it to fade alone, and is gone with it.
-    QVERIFY(QMetaObject::invokeMethod(surface, "followPlayhead"));
-    QVERIFY(!moved());
-    if (plate->opacity() > 0.0) {
+    // Followed again with the pointer away, the notice's text goes in the
+    // frame the view comes back in: it said "Not following" over a view
+    // that followed for 40 ms (H14). The plate keeps its width while its
+    // fill fades out with the row, rather than leave the row to fade alone,
+    // and the notice is gone with it.
+    {
+        const double grownLeft = sceneRectOf(plate).left();
+        SteppedAnimationDriver animations;
+        QVERIFY(QMetaObject::invokeMethod(surface, "followPlayhead"));
+        QVERIFY(!moved());
         QVERIFY(notice->isVisible());
+        QVERIFY(!text->isVisible());
+        QVERIFY(!divider->isVisible());
+        QCOMPARE(sceneRectOf(plate).left(), grownLeft);
+        QVERIFY(animations.step(16));
+        QVERIFY2(plate->opacity() > 0.0 && plate->opacity() < 1.0, qPrintable(QString::number(plate->opacity())));
+        QVERIFY(!text->isVisible());
+        QCOMPARE(sceneRectOf(plate).left(), grownLeft);
+        (void)animations.step(1000);
     }
     QTRY_COMPARE(plate->opacity(), 0.0);
     QTRY_VERIFY(!notice->isVisible());
@@ -4102,6 +4115,7 @@ void TransportInputSmokeTest::movedViewSaysSoInTheCorner() {
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!surface->property("autoscrolling").toBool());
     QTRY_VERIFY(moved() && notice->isVisible());
+    QVERIFY(text->isVisible());
     middleClickPlot(plot, plot->width() / 2);
     QVERIFY(surface->property("autoscrolling").toBool());
     QVERIFY(!moved() && !notice->isVisible());

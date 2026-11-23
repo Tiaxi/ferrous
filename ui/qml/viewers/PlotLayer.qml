@@ -207,8 +207,10 @@ Item {
         || zoomPlate.focusInside
 
     // As a view follows again with nothing else showing the row, "Not
-    // following" fades out with it, rather than go and leave the row to
-    // fade without it. Autoscroll takes it at once.
+    // following" keeps its room on the plate as that fades out, rather
+    // than go and leave the row to fade without it; its text goes in the
+    // frame the view comes back in, which it would contradict. Autoscroll
+    // takes it at once.
     property bool _noticeLeaving: false
     onViewMovedChanged: root._noticeLeaving = !root.viewMoved && !root.viewAutoscrolling
         && !root.cornerWanted && !root.controlsInViewer && modeSwitch.revealLevel > 0
@@ -273,6 +275,7 @@ Item {
         zoomLevel: root.zoomLevel
         resetView: root.resetZoom
         noticeShown: root.viewMoved || root._noticeLeaving
+        noticeLeaving: root._noticeLeaving
         followShortcut: root.followShortcut
         pointerActivity: root.pointerActivity
     }

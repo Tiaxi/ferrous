@@ -23,6 +23,10 @@ Item {
     // Follow Playhead's shortcut as the user reads it, or "".
     property string shortcut: ""
     property bool divided: false
+    // Whether it says so: as the view follows again, its text goes in the
+    // frame the view comes back in, while the plate it is on fades out with
+    // its width kept.
+    property bool textShown: true
     // The text's and the divider's 6 px from the plate's edge, less what
     // the plate has around them.
     property real inset: 0
@@ -44,6 +48,7 @@ Item {
     Label {
         id: label
         objectName: "followNoticeText"
+        visible: root.textShown
         height: root.height
         verticalAlignment: Text.AlignVCenter
         leftPadding: root.inset
@@ -59,7 +64,7 @@ Item {
 
     Rectangle {
         objectName: "followNoticeDivider"
-        visible: root.divided
+        visible: root.divided && root.textShown
         x: label.width + 6
         y: root.inset
         width: 1
