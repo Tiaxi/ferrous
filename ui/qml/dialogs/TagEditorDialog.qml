@@ -90,10 +90,14 @@ Components.DialogWindow {
     // which may be `cut`, gives only what its values don't need at first,
     // then on down to its `least`. A table that scrolls has each of
     // them at its least and none wider than the view, but Title, whose new
-    // values are checked there before Save: it has all the room beside #
-    // and File Name, to the view's edge (it stayed at 190 px beside an
-    // unchanged Artist), or `holds` to scroll to where that would be less
-    // than its `least`. A committed change is whole
+    // values are checked there before Save: it has all the room beside #,
+    // File Name and Disc, which follows it, to the view's edge (it stayed
+    // at 190 px beside an unchanged Artist), or `holds` to scroll to where
+    // that would be less than its `least`. Disc is beside it so that a
+    // batch's new disc numbers are checked in the same view as its titles
+    // (at 24 pt Title took the view to its edge, and a changed Disc was
+    // out of it); with too little room for both, Title has it all. A
+    // committed change is whole
     // whatever its column's width: it wraps, and its row grows while that
     // column is in view. Where
     // the view is wider, Title, File Name and Folder, which `want` room,
@@ -112,11 +116,11 @@ Components.DialogWindow {
         { key: "trackNo", label: I18n.i18nc("@title:column track number", "Track"), width: 40, number: true, sample: "000" },
         { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, holds: 220, wants: 480, stretch: true, path: true },
         { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 160, holds: 160, wants: 400, wantsAtLeast: 240 },
+        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 40, sample: "00" },
         { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 100, holds: 160, fit: true },
         { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 100, holds: 160, fit: true },
         { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 100, give: 2, least: 70, holds: 160, fit: true },
         { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 52, sample: "0000" },
-        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 40, sample: "00" },
         { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 56, sample: "FLAC" },
         { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, holds: 156, wants: 320, cut: true, stretch: true, path: true },
         { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, samples: [root.modifiedText, root.notSavedText, root.notRenamedText], onlyWithStatus: true }
@@ -335,10 +339,12 @@ Components.DialogWindow {
             }
             const pinned = pins ? widths[number] + widths[name] : 0
             const title = root.tableColumns.findIndex(function(column) { return column.key === "title" })
+            const disc = root.tableColumns.findIndex(function(column) { return column.key === "discNo" })
             const beside = Math.floor(room - widths[number] - widths[name])
-            widths[title] = !pins && beside < root.uiPalette.scaledSize(root.tableColumns[title].least)
+            const titleLeast = root.uiPalette.scaledSize(root.tableColumns[title].least)
+            widths[title] = !pins && beside < titleLeast
                 ? root.uiPalette.scaledSize(root.tableColumns[title].holds)
-                : beside
+                : beside - widths[disc] >= titleLeast ? beside - widths[disc] : beside
             // Every other column whole, once scrolled to, in the view or
             // beside the pinned columns.
             root.tableColumns.forEach(function(column, i) {
@@ -366,6 +372,20 @@ Components.DialogWindow {
     // slivers of the next show beside the bar.
     readonly property real scrollBarClearance: Math.max(0,
         tagEditorDownBar.implicitWidth - root.tableInset - Kirigami.Units.largeSpacing)
+    // The column whose text keeps clear of the vertical bar where the table
+    // scrolls sideways: the one that ends at the view's edge as it opens,
+    // Disc beside Title, or else Title.
+    readonly property string scrollBarEdgeKey: {
+        const edge = tagEditorTable.width - 2 * root.tableInset
+        let end = 0
+        for (let i = 0; i < root.shownColumnWidths.length; ++i) {
+            end += root.shownColumnWidths[i]
+            if (root.shownColumnWidths[i] > 0 && Math.abs(end - edge) < 1) {
+                return root.tableColumns[i].key
+            }
+        }
+        return "title"
+    }
     readonly property bool tableScrolls: root.tableContentWidth > tagEditorTable.width
     // The rows' width: the view's, or the columns' where they are wider
     // still, when the table scrolls sideways.
@@ -1897,7 +1917,8 @@ Components.DialogWindow {
                                 leftPadding: modelData.number ? root.numberLeadingRoom : Kirigami.Units.largeSpacing
                                 rightPadding: modelData.number ? root.columnRevertRoom
                                     : Kirigami.Units.largeSpacing
-                                        + (modelData.key === "title" && root.tableScrolls ? root.scrollBarClearance : 0)
+                                        + (modelData.key === root.scrollBarEdgeKey && root.tableScrolls
+                                            ? root.scrollBarClearance : 0)
                                 textFormat: Text.PlainText
                                 readonly property bool typed: root.pendingEditKey === modelData.key
                                     && root.pendingEditRows[tableRow.index] === true

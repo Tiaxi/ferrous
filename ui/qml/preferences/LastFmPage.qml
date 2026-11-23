@@ -218,13 +218,15 @@ Preferences.PreferencesPage {
 
     // Scrobbles older than Last.fm accepts, or the oldest past the queue's
     // limit, are dropped unsent; this run's count. The diagnostics log says
-    // which.
+    // which. Worded as the line above it, without "queue", which everywhere
+    // else in Ferrous is the play queue ("discarded from the queue" read as
+    // tracks lost from it).
     Components.FormHelpText {
         id: droppedLabel
         objectName: "lastFmDroppedLabel"
         uiPalette: root.uiPalette
         visible: root.showsDropped
-        text: I18n.i18ncp("@info", "%1 old scrobble was discarded from the queue",
-            "%1 old scrobbles were discarded from the queue", root.uiBridge.lastFmDroppedScrobbleCount || 0)
+        text: I18n.i18ncp("@info", "%1 old scrobble was discarded unsent",
+            "%1 old scrobbles were discarded unsent", root.uiBridge.lastFmDroppedScrobbleCount || 0)
     }
 }

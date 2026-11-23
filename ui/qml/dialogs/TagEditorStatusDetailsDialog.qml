@@ -15,10 +15,12 @@ import "../logic/BreakableText.js" as BreakableText
 // it wraps to under its own start (it was the plain text, every line at
 // the heading's x past the first). The heading of what failed is semibold,
 // in the negative colour; that of what succeeded is regular, secondary, so
-// the summary leads (all three were semibold). A file's name is Medium in the
-// text's colour; a failed one's is on a line of its own, with why under it, in
-// plain words in the same colour where that is known, and the system's
-// text under that, secondary, as it gave it (the name ran straight into
+// the summary leads (all three were semibold). A file's name is in the
+// text's colour, semibold under what failed and regular under what
+// succeeded, so the report has two weights (both were Medium, the one
+// weight 500 in it); a failed one's is on a line of its own, with why under
+// it, in plain words in the same colour where that is known, and the
+// system's text under that, secondary, as it gave it (the name ran straight into
 // the error, in one ink, after what succeeded; then the error was all that
 // said why, and read as a log). It opens as tall as they are, up to a
 // limit.
@@ -76,11 +78,11 @@ Components.DialogWindow {
                 ? "font-weight:600; color:" + root.cssColor(root.uiPalette.negative)
                 : errorStyle
             html += root.paragraph(section.heading, i > 0 ? sectionGap : 0, 0, headingStyle)
-            // A file's name, under either heading, Medium in the text's
-            // colour: above why it failed, which is regular (both were
-            // regular for what succeeded, and nothing set the name apart
-            // from the line under it).
-            const nameStyle = "font-weight:500; color:" + textColor
+            // A file's name, in the text's colour: a failed one's semibold,
+            // above why it failed, which is regular (nothing set the name
+            // apart from the line under it); a saved one's regular, set
+            // apart from its secondary heading by its ink and indent.
+            const nameStyle = "font-weight:" + (failed ? "600" : "400") + "; color:" + textColor
             const items = section.items || []
             for (let j = 0; j < items.length; ++j) {
                 const file = items[j] || {}

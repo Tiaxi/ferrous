@@ -38,6 +38,7 @@
 #include <QtTest/QtTest>
 #include <qqml.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -647,6 +648,9 @@ private slots:
     void compactDialogsHoldTheirText_data();
     void compactDialogsHoldTheirText();
     void dialogsWordTheirSettingsAndFailures();
+    void quitFailureSaysWhatQuittingLosesAndWhere();
+    void quitFailureSetsEachSystemErrorApart_data();
+    void quitFailureSetsEachSystemErrorApart();
     void compactDialogsSpaceParagraphsWithTheFont_data();
     void compactDialogsSpaceParagraphsWithTheFont();
     void compactDialogStaysWithinASmallScreenAsItGrows();
@@ -722,6 +726,8 @@ private slots:
     void editTagsPinsWhatIdentifiesARowAsItScrolls_data();
     void editTagsPinsWhatIdentifiesARowAsItScrolls();
     void editTagsTitleMeetsTheEdgeUnderAWideScrollBar();
+    void editTagsShowsAChangedDiscBesideTheTitles_data();
+    void editTagsShowsAChangedDiscBesideTheTitles();
     void editTagsDetailsHasAGlyphAsItsPeers_data();
     void editTagsDetailsHasAGlyphAsItsPeers();
     void editTagsDetailsFollowsItsFailure_data();
@@ -2959,7 +2965,7 @@ void UiDialogsTest::checkQuitFailureBreaksItsPathOnlyBetweenFolders(QQuickWindow
     QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, quitSaveFailure(message))));
     QVERIFY(waitForDialogWindow(dialog));
     QQuickWindow *dialogWindow = windowOf(dialog);
-    QQuickItem *label = visibleNamed(dialogWindow, QStringLiteral("quitSaveFailedMessage"));
+    QQuickItem *label = visibleNamed(dialogWindow, QStringLiteral("quitSaveFailedMessageLine"));
     QVERIFY(label != nullptr);
     QTRY_VERIFY(!layoutPending(label) && label->width() > 0);
     // The lines as Qt lays out the label's text at its width, without the
@@ -3166,11 +3172,11 @@ void UiDialogsTest::checkLastFmStatusCountsDroppedScrobbles(QQuickWindow *window
     QVERIFY(bridge->setProperty("lastFmDroppedScrobbleCount", 1));
     QQuickItem *dropped = nullptr;
     QTRY_VERIFY((dropped = visibleNamed(prefs, QStringLiteral("lastFmDroppedLabel"))) != nullptr);
-    QCOMPARE(dropped->property("text").toString(),
-             QStringLiteral("1 old scrobble was discarded from the queue"));
+    // Worded without "queue", which elsewhere is the play queue.
+    QCOMPARE(dropped->property("text").toString(), QStringLiteral("1 old scrobble was discarded unsent"));
     QVERIFY(bridge->setProperty("lastFmDroppedScrobbleCount", 12));
-    QTRY_COMPARE(dropped->property("text").toString(),
-                 QStringLiteral("12 old scrobbles were discarded from the queue"));
+    QTRY_COMPARE(dropped->property("text").toString(), QStringLiteral("12 old scrobbles were discarded unsent"));
+    QVERIFY(!dropped->property("text").toString().contains(QStringLiteral("queue")));
     // It goes on from the waiting scrobbles' line, as one status.
     QTRY_VERIFY(sceneRect(dropped).top() >= sceneRect(pending).bottom() - 1);
     QCOMPARE(pending->property("trailingSpace").toReal(), 0.0);
@@ -5495,10 +5501,15 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
         if (scrolls) {
             QTRY_VERIFY2(table->property("contentWidth").toReal() > table->width(), qPrintable(at + describeColumns()));
             for (const auto &[key, preferred, least] : giving) {
-                // Title has all the room beside # and File Name.
+                // Title has all the room beside #, File Name and Disc, which
+                // follows it, or, with too little for both, Disc's too.
                 if (key == QStringLiteral("title")) {
-                    QCOMPARE(sceneRect(named(tags, QStringLiteral("tagEditorColumn_title"))).left() + columnWidth(key),
-                             std::floor(sceneRect(table).right() - dialog->property("tableInset").toReal()));
+                    const qreal edge = std::floor(sceneRect(table).right() - dialog->property("tableInset").toReal());
+                    const qreal titleEnd =
+                        sceneRect(named(tags, QStringLiteral("tagEditorColumn_title"))).left() + columnWidth(key);
+                    const qreal disc = columnWidth(QStringLiteral("discNo"));
+                    QVERIFY2((titleEnd + disc == edge && columnWidth(key) >= 160) || titleEnd == edge,
+                             qPrintable(at + describeColumns()));
                     continue;
                 }
                 // Genre's least also holds its header beside its Revert.
@@ -5919,8 +5930,8 @@ void UiDialogsTest::editTagsTitlesCanBeCheckedBeforeSaving_data() {
 }
 
 // The new titles can be checked before Save writes them: where the table
-// scrolls sideways anyway, Title has all the room beside # and File Name,
-// to the view's edge (it stayed 190 px beside an unchanged Artist), or
+// scrolls sideways anyway, Title has all the room beside #, File Name and
+// Disc, to the view's edge (it stayed 190 px beside an unchanged Artist), or
 // about 160 px to scroll to where that room is less than its least, 100 px
 // scaled with the font. An unchanged cell that is cut gives its whole
 // value in its tooltip. An edit of no field moves a column:
@@ -5954,7 +5965,10 @@ void UiDialogsTest::editTagsTitlesCanBeCheckedBeforeSaving() {
                                 ->property("tableInset").toReal();
         const qreal left = table->width() - 2 * inset - column(QStringLiteral("trackNo"))->width()
             - column(QStringLiteral("fileName"))->width();
-        const qreal expected = left < 100 * scale ? std::min(160 * scale, table->width() - 2 * inset) : left;
+        // Disc, beside it, keeps its room where Title still has its least.
+        const qreal disc = column(QStringLiteral("discNo"))->width();
+        const qreal expected = left - disc >= 160 * scale ? left - disc
+            : left < 100 * scale ? std::min(160 * scale, table->width() - 2 * inset) : left;
         QVERIFY2(std::abs(title->width() - expected) <= 1.5,
                  qPrintable(QStringLiteral("Title %1, expected %2, room left %3").arg(title->width()).arg(expected).arg(left)));
     }
@@ -7137,18 +7151,85 @@ void UiDialogsTest::editTagsTitleMeetsTheEdgeUnderAWideScrollBar() {
     QTRY_VERIFY(!layoutPendingUnder(table));
     const qreal inset = object(main.window, QStringLiteral("tagEditorDialog"))->property("tableInset").toReal();
     const qreal edge = sceneRect(table).right();
+    // Title, then Disc beside it, which meets the view's edge.
     QQuickItem *title = named(tags, QStringLiteral("tagEditorColumn_title"));
-    QVERIFY(title != nullptr);
-    QVERIFY2(std::abs(sceneRect(title).right() - (edge - inset)) <= 1.0, qPrintable(describeItem(title)));
+    QQuickItem *disc = named(tags, QStringLiteral("tagEditorColumn_discNo"));
+    QVERIFY(title != nullptr && disc != nullptr);
+    QVERIFY2(std::abs(sceneRect(disc).left() - sceneRect(title).right()) <= 1.0, qPrintable(describeItem(disc)));
+    QVERIFY2(std::abs(sceneRect(disc).right() - (edge - inset)) <= 1.0, qPrintable(describeItem(disc)));
     for (QQuickItem *cell : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorCell_artist"))) {
         QVERIFY2(sceneRect(cell).left() + cell->property("leftPadding").toReal() >= edge - 1.0,
                  qPrintable(describeItem(cell)));
     }
     for (QQuickItem *cell : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorCell_title"))) {
         QVERIFY2(!cell->property("truncated").toBool(), qPrintable(describeItem(cell)));
+    }
+    // The text at the edge, Disc's, clear of the bar.
+    for (QQuickItem *cell : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorCell_discNo"))) {
         QVERIFY2(sceneRect(cell).right() - cell->property("rightPadding").toReal() <= edge - barWidth + 0.5,
                  qPrintable(describeItem(cell)));
     }
+    QVERIFY(closeTagEditor(main));
+}
+
+void UiDialogsTest::editTagsShowsAChangedDiscBesideTheTitles_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("width");
+    QTest::newRow("24 pt, 1600 px") << 24.0 << 1600;
+    QTest::newRow("10 pt, 1000 px") << 10.0 << 1000;
+    QTest::newRow("10 pt, 1600 px") << 10.0 << 1600;
+}
+
+// Disc follows Title, so a batch's new disc numbers are checked in the
+// view it opens with, beside the new titles, while # and File Name stay
+// pinned at the left (at 24 pt from a 1600 px window, Title took the view
+// to its edge and the changed Disc was past it). Title keeps at least its
+// least, 160 px scaled with the font.
+void UiDialogsTest::editTagsShowsAChangedDiscBesideTheTitles() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, width);
+    const ScopedNotoSans font(pointSize);
+    DialogsWindow main(width, 1000);
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRowsOfTheBatch());
+    QVERIFY(tags != nullptr);
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    main.editor.selectAllRows();
+    for (int i = 0; i < retitledBatch().size(); ++i) {
+        main.editor.setCell(i, QStringLiteral("title"), retitledBatch().at(i).second);
+        main.editor.setCell(i, QStringLiteral("discNo"), i < 6 ? QStringLiteral("1") : QStringLiteral("2"));
+    }
+    main.editor.notifyRowMutation();
+    QTRY_VERIFY(!layoutPendingUnder(table));
+    QCOMPARE(table->property("contentX").toReal(), 0.0);
+    QObject *dialog = object(main.window, QStringLiteral("tagEditorDialog"));
+    const QStringList order = evaluate(dialog, QStringLiteral("tableColumns.map(c => c.key)")).toStringList();
+    QCOMPARE(order.mid(0, 4), (QStringList{QStringLiteral("trackNo"), QStringLiteral("fileName"),
+                                          QStringLiteral("title"), QStringLiteral("discNo")}));
+    QCOMPARE(dialog->property("pinnedColumnCount").toInt(), 2);
+    QQuickItem *title = named(tags, QStringLiteral("tagEditorColumn_title"));
+    QQuickItem *disc = named(tags, QStringLiteral("tagEditorColumn_discNo"));
+    QVERIFY(title != nullptr && disc != nullptr);
+    const QString at = describeItem(title) + describeItem(disc) + describeItem(table);
+    QVERIFY2(std::abs(sceneRect(disc).left() - sceneRect(title).right()) <= 1.0, qPrintable(at));
+    // Disc whole in the opening view, Title at its least or wider.
+    QVERIFY2(sceneRect(disc).right() <= sceneRect(table).right() + 0.5, qPrintable(at));
+    QVERIFY2(title->width() >= std::round(160 * std::max(1.0, pointSize / 10)) - 0.5, qPrintable(at));
+    if (table->property("contentWidth").toReal() > table->width() + 0.5) {
+        QVERIFY2(dialog->property("pinsColumns").toBool(), qPrintable(at));
+    }
+    // Each new disc number in view and whole, on its title's row.
+    int shown = 0;
+    for (QQuickItem *cell : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorCell_discNo"))) {
+        if (!cell->isVisible() || sceneRect(cell).bottom() > sceneRect(table).bottom()) {
+            continue;
+        }
+        ++shown;
+        QVERIFY2(!cell->property("truncated").toBool(), qPrintable(describeItem(cell)));
+        QVERIFY2(sceneRect(cell).right() <= sceneRect(table).right() + 0.5, qPrintable(describeItem(cell)));
+    }
+    QVERIFY(shown > 0);
     QVERIFY(closeTagEditor(main));
 }
 
@@ -7400,12 +7481,12 @@ void UiDialogsTest::editTagsMarksAFailedRowBesideItsName_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// A row whose save or rename failed has Breeze's error glyph where an
-// unsaved edit's dot is, beside the file name, in the negative colour (it
-// had the dot of an edit not yet saved, and its failure only in Status at
-// the table's far end): its cell's tooltip and its description say what
-// failed, and Status still does. On the selection, the glyph's colour is
-// the one that reads there.
+// A row whose save or rename failed has a light error mark, a ring with a
+// cross, where an unsaved edit's dot is, beside the file name, in the
+// negative colour (it had the dot of an edit not yet saved, and its failure
+// only in Status at the table's far end): its cell's tooltip and its
+// description say what failed, and Status still does. On the selection, the
+// glyph's colour is the one that reads there.
 void UiDialogsTest::editTagsMarksAFailedRowBesideItsName() {
     QFETCH(qreal, pointSize);
     const ScopedNotoSans font(pointSize);
@@ -7457,6 +7538,47 @@ void UiDialogsTest::editTagsMarksAFailedRowBesideItsName() {
         QVERIFY(glyph->property("isMask").toBool());
         QCOMPARE(hex(glyph->property("color").value<QColor>()), hex(palette->property("negative").value<QColor>()));
         QCOMPARE(glyph->width(), glyphSize);
+        // A light mark: a ring and a cross about a pixel in weight, as
+        // wide as the dot's slot, and not a filled square (Breeze's
+        // dialog-error, which outweighed the dot it stands for). Its ink,
+        // pixel by pixel, as a share of its strongest pixel's difference
+        // from the row, whatever the colour it is drawn in.
+        {
+            const QImage shown = tags->grabWindow().convertToFormat(QImage::Format_RGB32);
+            const QRect box = sceneRect(glyph).toAlignedRect() & shown.rect();
+            const QColor ground = shown.pixelColor(box.topLeft());
+            const auto difference = [&](int x, int y) {
+                const QColor pixel = shown.pixelColor(x, y);
+                return std::max({std::abs(pixel.red() - ground.red()), std::abs(pixel.green() - ground.green()),
+                                 std::abs(pixel.blue() - ground.blue())});
+            };
+            int strongest = 0;
+            for (int y = box.top(); y <= box.bottom(); ++y) {
+                for (int x = box.left(); x <= box.right(); ++x) {
+                    strongest = std::max(strongest, difference(x, y));
+                }
+            }
+            QVERIFY2(strongest > 40, qPrintable(at));
+            qreal coverage = 0;
+            int left = box.right();
+            int right = box.left();
+            for (int y = box.top(); y <= box.bottom(); ++y) {
+                for (int x = box.left(); x <= box.right(); ++x) {
+                    const qreal share = qreal(difference(x, y)) / strongest;
+                    coverage += share;
+                    if (share > 0.3) {
+                        left = std::min(left, x);
+                        right = std::max(right, x);
+                    }
+                }
+            }
+            const qreal slot = dialog->property("markSlotWidth").toReal();
+            const QString inkAt = at + QStringLiteral(" ink %1 of a %2 px slot, %3 px across")
+                                            .arg(coverage).arg(slot).arg(right - left + 1);
+            QVERIFY2(coverage <= 0.45 * slot * slot, qPrintable(inkAt));
+            QVERIFY2(coverage >= 0.15 * slot * slot, qPrintable(inkAt));
+            QVERIFY2(right - left + 1 <= slot + 1 && right - left + 1 >= slot - 2, qPrintable(inkAt));
+        }
         // On the first line, within the number's column and clear of its
         // digits (its square is three quarters of its size).
         QVERIFY2(std::abs(sceneRect(glyph).center().y() - (sceneRect(row).top() + rowHeight / 2)) <= 1.0, qPrintable(at));
@@ -9095,7 +9217,11 @@ void UiDialogsTest::editTagsColumnsHoldTheirValuesBeforeTheTableScrolls() {
             const qreal left = table->width() - 16 - column(QStringLiteral("trackNo"))->width()
                 - column(QStringLiteral("fileName"))->width();
             QVERIFY(left >= 150);
-            QVERIFY2(std::abs(width - left) <= 2, qPrintable(at));
+            // All the room beside # and File Name but Disc's, which follows
+            // it, where that leaves Title its least.
+            const qreal disc = column(QStringLiteral("discNo"))->width();
+            const qreal expected = left - disc >= 160 ? left - disc : left;
+            QVERIFY2(std::abs(width - expected) <= 2, qPrintable(at));
             continue;
         }
         // Its values whole, or as much of them as the most it holds.
@@ -9928,10 +10054,9 @@ void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
     };
     QCOMPARE(textOf("quitSaveFailedHeading"), QStringLiteral("Ferrous couldn\u2019t save its settings."));
     QCOMPARE(textOf("quitSaveFailedCause"),
-             QStringLiteral("You don\u2019t have permission to write in this folder."));
+             QStringLiteral("You don\u2019t have permission to write in Ferrous\u2019s settings folder."));
     QCOMPARE(quit->property("detailText").toString(), system);
-    QCOMPARE(textOf("quitSaveFailedDetails"),
-             QStringLiteral("Quit Anyway loses unsaved settings, queue changes and Last.fm scrobbles."));
+    QCOMPARE(textOf("quitSaveFailedDetails"), QStringLiteral("Quit Anyway loses unsaved settings."));
     QVERIFY(QMetaObject::invokeMethod(quit, "dismiss"));
 
     QObject *shortcuts = object(window, QStringLiteral("keyboardShortcutsDialog"));
@@ -9947,6 +10072,141 @@ void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
     QVERIFY(failed != nullptr);
     QVERIFY2(failed->property("text").toString().startsWith(QStringLiteral("Ferrous couldn\u2019t take")),
              qPrintable(failed->property("text").toString()));
+}
+
+// The quit failure's consequence names what the lead says wasn't saved,
+// from the same flags (one fixed sentence named Last.fm's scrobbles under a
+// lead that said only the settings and the queue had failed), and says
+// "may" where Ferrous can't tell. A denied or read-only folder is named:
+// the settings, the queue and the scrobbles are all saved in Ferrous's
+// settings folder ("this folder" named none).
+void UiDialogsTest::quitFailureSaysWhatQuittingLosesAndWhere() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *quit = object(window, QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(quit != nullptr);
+    struct Case {
+        bool settings;
+        bool queue;
+        bool scrobbles;
+        const char *cause;
+        const char *consequence;
+        const char *reason;
+    };
+    const QString settingsFolder = QStringLiteral("You don’t have permission to write in Ferrous’s settings folder.");
+    const Case cases[] = {
+        {true, true, false, "permission", "Quit Anyway loses unsaved settings and queue changes.", nullptr},
+        {false, false, true, "permission", "Quit Anyway loses unsent Last.fm scrobbles.", nullptr},
+        {true, true, true, "readOnlyFileSystem",
+         "Quit Anyway loses unsaved settings, queue changes and unsent Last.fm scrobbles.",
+         "Ferrous’s settings folder is on a read-only file system."},
+        {true, false, true, "noSpace", "Quit Anyway loses unsaved settings and unsent Last.fm scrobbles.",
+         "There isn’t enough free space on the disk."},
+        {false, true, true, "", "Quit Anyway loses unsaved queue changes and unsent Last.fm scrobbles.", ""},
+        {true, false, false, "", "Quit Anyway loses unsaved settings.", ""},
+        {false, true, false, "", "Quit Anyway loses unsaved queue changes.", ""},
+        {false, false, false, "", "Quit Anyway loses the changes that weren’t saved.", ""},
+        {true, true, false, "notAnswered", "Quit Anyway may lose unsaved settings and queue changes.",
+         "Saving didn’t finish in time."},
+        {true, true, false, "engineStopped", "Quit Anyway may lose unsaved settings and queue changes.",
+         "The playback engine has stopped."},
+    };
+    for (const Case &test : cases) {
+        const QVariantMap failure{{QStringLiteral("settings"), test.settings},
+                                  {QStringLiteral("queue"), test.queue},
+                                  {QStringLiteral("scrobbles"), test.scrobbles},
+                                  {QStringLiteral("cause"), QString::fromLatin1(test.cause)},
+                                  {QStringLiteral("detail"), QString()}};
+        QVERIFY(quit->setProperty("failure", failure));
+        const QString what = QStringLiteral("settings %1, queue %2, scrobbles %3, cause %4")
+                                 .arg(test.settings)
+                                 .arg(test.queue)
+                                 .arg(test.scrobbles)
+                                 .arg(QString::fromLatin1(test.cause));
+        QVERIFY2(quit->property("consequenceText").toString() == QString::fromUtf8(test.consequence),
+                 qPrintable(what + QStringLiteral(": ") + quit->property("consequenceText").toString()));
+        QVERIFY2(!quit->property("leadText").toString().isEmpty(), qPrintable(what));
+        QCOMPARE(quit->property("causeText").toString(),
+                 test.reason != nullptr ? QString::fromUtf8(test.reason) : settingsFolder);
+        // Scrobbles are named only where they weren't saved.
+        QCOMPARE(quit->property("consequenceText").toString().contains(QStringLiteral("scrobbles")),
+                 test.scrobbles);
+    }
+
+    // As the dialog shows them.
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog",
+                                      Q_ARG(QVariant, quitSaveFailure(QString(), QStringLiteral("permission")))));
+    QVERIFY(waitForDialogWindow(quit));
+    QQuickItem *details = visibleNamed(windowOf(quit), QStringLiteral("quitSaveFailedDetails"));
+    QVERIFY(details != nullptr);
+    QCOMPARE(details->property("text").toString(), QStringLiteral("Quit Anyway loses unsaved settings."));
+    QVERIFY(QMetaObject::invokeMethod(quit, "dismiss"));
+}
+
+void UiDialogsTest::quitFailureSetsEachSystemErrorApart_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Each of the system's errors under the quit failure's cause is a
+// paragraph of its own, in the small font and the secondary ink, 6 px
+// apart at 10 pt and further with a larger font, and set off from the cause
+// (two errors ran together as one grey block at the cause's size, one's
+// wrapped line starting on the next's edge).
+void UiDialogsTest::quitFailureSetsEachSystemErrorApart() {
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *quit = object(window, QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(quit != nullptr);
+    const QStringList errors{
+        QStringLiteral("failed to create a temporary file for /fixture/configuration/ferrous/settings.txt: "
+                       "Permission denied (os error 13)"),
+        QStringLiteral("failed to create a temporary file for /fixture/configuration/ferrous/session.txt: "
+                       "Permission denied (os error 13)")};
+    QVariantMap failure = quitSaveFailure(errors.join(QLatin1Char('\n')) + QLatin1Char('\n'),
+                                          QStringLiteral("permission"));
+    failure.insert(QStringLiteral("queue"), true);
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, failure)));
+    QVERIFY(waitForDialogWindow(quit));
+    QQuickWindow *dialogWindow = windowOf(quit);
+    QQuickItem *cause = visibleNamed(dialogWindow, QStringLiteral("quitSaveFailedCause"));
+    QQuickItem *message = visibleNamed(dialogWindow, QStringLiteral("quitSaveFailedMessage"));
+    QVERIFY(cause != nullptr && message != nullptr);
+    QTRY_VERIFY(!layoutPendingUnder(message));
+    QList<QQuickItem *> lines;
+    for (QQuickItem *item : itemsNamed(dialogWindow->contentItem(), QStringLiteral("quitSaveFailedMessageLine"))) {
+        if (item->isVisible()) {
+            lines << item;
+        }
+    }
+    std::sort(lines.begin(), lines.end(),
+              [](QQuickItem *a, QQuickItem *b) { return sceneRect(a).top() < sceneRect(b).top(); });
+    // One a line as the backend joins them; no empty paragraph for the
+    // trailing line break.
+    QCOMPARE(lines.size(), 2);
+    QObject *palette = paletteOf(window);
+    const qreal scale = std::max(1.0, pointSize / 10);
+    for (int i = 0; i < lines.size(); ++i) {
+        QQuickItem *line = lines.at(i);
+        QCOMPARE(line->property("message").toString(), errors.at(i));
+        QCOMPARE(line->property("font").value<QFont>().pointSizeF(), palette->property("smallPointSize").toReal());
+        QVERIFY(line->property("font").value<QFont>().pointSizeF()
+                < cause->property("font").value<QFont>().pointSizeF());
+        QCOMPARE(hex(line->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
+        QCOMPARE(sceneRect(line).left(), sceneRect(cause).left());
+    }
+    // 6 px between the errors at 10 pt, scaled with the font.
+    QCOMPARE(sceneRect(lines.at(1)).top() - sceneRect(lines.at(0)).bottom(), std::round(6 * scale));
+    // Set off from the cause by more than the lead's 2 px pitch: 6 px at
+    // 10 pt, the column's 2 and 4 of its own, scaled.
+    const qreal above = sceneRect(lines.at(0)).top() - sceneRect(cause).bottom();
+    QCOMPARE(above, 2 + std::round(4 * scale));
+    QVERIFY(QMetaObject::invokeMethod(quit, "dismiss"));
 }
 
 int main(int argc, char **argv) {
