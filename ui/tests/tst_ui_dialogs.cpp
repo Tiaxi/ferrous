@@ -6616,7 +6616,12 @@ void UiDialogsTest::editTagsDownBarStartsUnderTheHeader() {
         QVERIFY2(sceneRect(down).bottom() <= sceneRect(across).top() + 0.5,
                  qPrintable(at + QStringLiteral(" over ") + describeItem(across)));
     }
-    // Its thumb reaches the foot when the rows do.
+    // Its thumb reaches the foot when the rows do. Qt's ListView places
+    // the first jump to the end on an estimate of the rows not yet loaded
+    // (#751), so the bar's reach is checked after a second jump, with the
+    // end rows loaded.
+    evaluate(table, QStringLiteral("positionViewAtEnd()"));
+    QTRY_VERIFY(!layoutPendingUnder(table));
     evaluate(table, QStringLiteral("positionViewAtEnd()"));
     QTRY_VERIFY(!layoutPendingUnder(table));
     QTRY_VERIFY(std::abs(down->property("position").toReal() + down->property("size").toReal() - 1.0) < 0.01);
