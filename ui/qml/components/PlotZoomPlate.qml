@@ -25,19 +25,21 @@ Components.PlotPlate {
     // Whether it may show at all: not while a viewer's controls are hidden.
     property bool available: true
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
-    // Whether it says that the view does not follow the playhead.
-    property bool noticeShown: false
-    // Whether the notice is leaving, the view following again, over 120
-    // ms, OutCubic, whether the row stays or fades out with it, and in
-    // either plot; then noticeLeft. Zoomed, its text is gone in the frame
-    // the view comes back in, and the plate narrows to its width without
-    // it at its left edge, Reset staying where it is (its edge jumped 89 px
-    // in a frame with the row staying, H15): the room it gives up fades as
-    // it narrows, rather than stand as blank plate (H16). At the default
-    // zoom, with nothing else on it, the whole plate fades at its width,
-    // the text with it: the text went in a frame while the empty plate
-    // faded on (H16).
-    property bool noticeLeaving: false
+    // "Not following" (FollowNotice) on the plate, from the one state its
+    // view tells, so that what follows from it never reads one part of it
+    // changed and another not yet: 0 none, 1 shown, 2 leaving, the view
+    // following again, over 120 ms, OutCubic, whether the row stays or
+    // fades out with it, and in either plot; then noticeLeft. Zoomed, its
+    // text is gone in the frame the view comes back in, and the plate
+    // narrows to its width without it at its left edge, Reset staying
+    // where it is (its edge jumped 89 px in a frame with the row staying,
+    // H15): the room it gives up fades as it narrows, rather than stand as
+    // blank plate (H16). At the default zoom, with nothing else on it, the
+    // whole plate fades at its width, the text with it: the text went in a
+    // frame while the empty plate faded on (H16).
+    property int notice: 0
+    readonly property bool noticeShown: root.notice !== 0
+    readonly property bool noticeLeaving: root.notice === 2
     readonly property bool _narrowing: root.noticeLeaving && root.zoomed
     signal noticeLeft()
     property string followShortcut: ""
@@ -52,7 +54,7 @@ Components.PlotPlate {
     onNoticeLeavingChanged: {
         leavingMotion.stop()
         if (root.noticeLeaving) {
-            root._leavingRoom = notice.implicitWidth + (root.zoomed ? root.horizontalPadding : 0)
+            root._leavingRoom = followNotice.implicitWidth + (root.zoomed ? root.horizontalPadding : 0)
             root.leavingLevel = 1
             leavingMotion.start()
         } else {
@@ -171,15 +173,17 @@ Components.PlotPlate {
     // As it leaves, the readout keeps its room while the plate is zoomed,
     // and it keeps its own otherwise.
     Components.FollowNotice {
-        id: notice
+        id: followNotice
         objectName: "plotFollowNotice"
-        shown: root.noticeShown && !root._narrowing
-        width: root._narrowing ? root._roomLeft : implicitWidth
+        // From the state alone: read with the plate's narrowing, which
+        // ends with the state, it showed for an instant as that ended, and
+        // its text started to come in again behind the hidden plate (H17).
+        shown: root.notice === 1 || (root.notice === 2 && !root.zoomed)
+        width: implicitWidth
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         shortcut: root.followShortcut
         divided: root.zoomed
-        textShown: !root._narrowing
         inset: 6 - root.horizontalPadding
     }
 

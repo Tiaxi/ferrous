@@ -221,15 +221,20 @@ Item {
 
     // As a view follows again, "Not following" leaves the plate one way,
     // whether the row stays or fades out with it (PlotZoomPlate's
-    // noticeLeaving): its text goes in the frame the view comes back in,
-    // which it would contradict, and the plate narrows to its new width.
+    // notice): its text goes in the frame the view comes back in, which
+    // it would contradict, and the plate narrows to its new width.
     // Autoscroll takes it at once, and so does a plate that doesn't show.
-    property bool _noticeLeaving: false
-    onViewMovedChanged: root._noticeLeaving = !root.viewMoved && !root.viewAutoscrolling
-        && !root.controlsInViewer && modeSwitch.revealLevel > 0 && Kirigami.Units.shortDuration > 0
+    // One state, 0 none, 1 shown, 2 leaving, set here alone: the plate's
+    // two flags of it, each bound to its own of this layer's, changed one
+    // after the other as it ended, and its notice showed between them
+    // (H17).
+    property int _notice: 0
+    onViewMovedChanged: root._notice = root.viewMoved ? 1
+        : !root.viewAutoscrolling && !root.controlsInViewer && modeSwitch.revealLevel > 0
+            && Kirigami.Units.shortDuration > 0 ? 2 : 0
     onViewAutoscrollingChanged: {
-        if (root.viewAutoscrolling)
-            root._noticeLeaving = false
+        if (root.viewAutoscrolling && root._notice === 2)
+            root._notice = 0
     }
 
     // The mode switch comes first in the Tab order, then each lane's Mute
@@ -279,9 +284,8 @@ Item {
         uiPalette: root.uiPalette
         zoomLevel: root.zoomLevel
         resetView: root.resetZoom
-        noticeShown: root.viewMoved || root._noticeLeaving
-        noticeLeaving: root._noticeLeaving
-        onNoticeLeft: root._noticeLeaving = false
+        notice: root._notice
+        onNoticeLeft: root._notice = 0
         followShortcut: root.followShortcut
         pointerActivity: root.pointerActivity
     }
@@ -404,6 +408,7 @@ Item {
         onTriggered: root._analysingShown = root._awaiting
     }
     Component.onCompleted: {
+        root._notice = root.viewMoved ? 1 : 0
         if (root._awaiting) {
             analysingDelay.restart()
         }

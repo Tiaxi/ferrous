@@ -28,9 +28,6 @@ Item {
     // the plate it is on (they appeared in a frame as the plate faded in),
     // at once with animations off.
     property bool shown: true
-    // Whether it says so: as the view follows again, its text goes in the
-    // frame the view comes back in, while the plate it is on narrows.
-    property bool textShown: true
     // How far its text and divider have come in, from 0 to 1. They go at
     // once.
     property real arrivalLevel: 1
@@ -51,7 +48,7 @@ Item {
 
     function arrive() {
         arrival.stop()
-        if (Kirigami.Units.shortDuration > 0 && root.shown && root.textShown) {
+        if (Kirigami.Units.shortDuration > 0 && root.shown) {
             root.arrivalLevel = 0
             arrival.start()
         } else {
@@ -60,10 +57,6 @@ Item {
     }
     onShownChanged: {
         if (root.shown)
-            root.arrive()
-    }
-    onTextShownChanged: {
-        if (root.textShown)
             root.arrive()
     }
     NumberAnimation {
@@ -83,7 +76,6 @@ Item {
     Label {
         id: label
         objectName: "followNoticeText"
-        visible: root.textShown
         opacity: root.arrivalLevel
         height: root.height
         verticalAlignment: Text.AlignVCenter
@@ -100,7 +92,7 @@ Item {
 
     Rectangle {
         objectName: "followNoticeDivider"
-        visible: root.divided && root.textShown
+        visible: root.divided
         opacity: root.arrivalLevel
         x: label.width + 6
         y: root.inset
@@ -115,7 +107,7 @@ Item {
 
     Components.PlainToolTip {
         objectName: "followNoticeToolTip"
-        visible: noticeHover.hovered && root.visible && root.textShown
+        visible: noticeHover.hovered && root.visible
         delay: Kirigami.Units.toolTipDelay
         message: root.toolTipText
     }

@@ -4643,6 +4643,15 @@ void TransportInputSmokeTest::notFollowingLeavesOneWay() {
     QVERIFY(animations.step(32));
     image = window->grabWindow();
     QVERIFY(!corner.notice->isVisible());
+    // Nothing comes in again behind it: as the narrowing ended, the notice
+    // showed for an instant and its text started to arrive (H17).
+    for (int frame = 0; frame < 8; ++frame) {
+        QVERIFY2(corner.notice->property("arrivalLevel").toDouble() == 1.0,
+                 qPrintable(QStringLiteral("after it left, frame %1: %2")
+                                .arg(frame).arg(corner.notice->property("arrivalLevel").toDouble())));
+        QVERIFY(!corner.notice->isVisible());
+        (void)animations.step(16);
+    }
     if (zoomed) {
         QCOMPARE(sceneRectOf(corner.plate).left(), plainLeft);
         QCOMPARE(sceneRectOf(corner.reset), resetAt);
