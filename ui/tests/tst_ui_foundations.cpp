@@ -231,6 +231,8 @@ private slots:
     void regionHeaderGivesUpTheTotalsBeforeTheName_data();
     void regionHeaderGivesUpTheTotalsBeforeTheName();
     void plotPlateLabelHasAnEdgeOutside();
+    void plotPlateLabelHoldsItsLine_data();
+    void plotPlateLabelHoldsItsLine();
     void smallControlsScaleWithALargeFont_data();
     void smallControlsScaleWithALargeFont();
     void plotSegmentHoverStaysUnderTheChosenPlate_data();
@@ -1500,6 +1502,72 @@ void UiFoundationsTest::plotPlateLabelHasAnEdgeOutside() {
     QVERIFY2(sameColor(colorOf(fill, "color"), colorOf(waveform, "plotPlate")), qPrintable(colorOf(fill, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(waveform, "plotPlate").name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(edgeBorder, "color"), colorOf(waveform, "plotPlateEdge")), qPrintable(colorOf(edgeBorder, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(waveform, "plotPlateEdge").name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(text, "color"), colorOf(waveform, "plotText")), qPrintable(colorOf(text, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(waveform, "plotText").name(QColor::HexArgb)));
+}
+
+void UiFoundationsTest::plotPlateLabelHoldsItsLine_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<qreal>("textScale");
+    QTest::addColumn<bool>("compact");
+    for (const qreal points : {10.0, 16.0, 24.0}) {
+        for (const qreal scale : {1.0, 1.2}) {
+            for (const bool compact : {false, true}) {
+                QTest::addRow("%g pt, %g, %s", points, scale, compact ? "compact" : "label")
+                    << points << scale << compact;
+            }
+        }
+    }
+}
+
+// A lane label's box holds its text's line: as tall as its capitals and the
+// room around them, and never shorter than the line (over the whole screen
+// at 24 pt, the "L" and "R" were 3 px taller than their 45 px box). The
+// window's labels keep their height, 20 px and 16 px compact at 10 pt.
+void UiFoundationsTest::plotPlateLabelHoldsItsLine() {
+    QFETCH(qreal, pointSize);
+    QFETCH(qreal, textScale);
+    QFETCH(bool, compact);
+    const ScopedApplicationFont font(pointSize);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root = createWindow(engine, themedWindowQml(kBreezeDark, QStringLiteral(R"QML(
+        Components.PlotPlate {
+            objectName: "label"
+            x: 16
+            y: 16
+            plotColors: tokens.spectrogramPlot
+            uiPalette: tokens
+            text: "L"
+            compact: %1
+            textScale: %2
+        }
+)QML").arg(compact ? QStringLiteral("true") : QStringLiteral("false")).arg(textScale)),
+                                                       &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickItem *label = itemNamed(root.get(), QStringLiteral("label"));
+    QVERIFY(label != nullptr);
+    QQuickItem *text = childNamed(label, QStringLiteral("plotPlateLabel"));
+    QVERIFY(text != nullptr);
+    const QFont textFont = text->property("font").value<QFont>();
+    const QFontMetricsF metrics(textFont);
+    const QString at = QStringLiteral("%1 pt at %2: the box %3 px, its line %4 px")
+                           .arg(pointSize).arg(textScale).arg(text->height()).arg(text->implicitHeight());
+    // The line as the font gives it, whole; the text item's own rounds its
+    // ascent and its descent up apart, up to a pixel more.
+    QVERIFY2(std::ceil(metrics.height()) <= text->height(), qPrintable(at));
+    QVERIFY2(text->implicitHeight() <= text->height() + 1.0, qPrintable(at));
+    QCOMPARE(label->height(), text->height());
+    // Otherwise the capitals' room, as before.
+    const qreal fontScale = qMax(1.0, pointSize / 10.0);
+    const qreal capitals = qMax(compact ? 16.0 : 20.0,
+                                std::ceil(metrics.tightBoundingRect(QStringLiteral("E")).height())
+                                    + 2 * std::round((compact ? 3 : 4) * fontScale));
+    QCOMPARE(label->height(), qMax(capitals, std::ceil(metrics.height())));
+    if (pointSize == 10.0 && textScale == 1.0) {
+        QCOMPARE(label->height(), compact ? 16.0 : 20.0);
+    }
 }
 
 void UiFoundationsTest::smallControlsScaleWithALargeFont_data() {

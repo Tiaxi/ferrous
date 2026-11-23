@@ -6977,7 +6977,7 @@ void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
     Motion ui;
     QVERIFY(ui.loaded());
     const auto [window, bridge, panel, handover, units] = ui.parts();
-    // A slide would take 900 ms.
+    // A slide would take 1200 ms.
     units->setShortDuration(500);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QQuickItem *surface = named(window, "albumArtSurface");
@@ -6997,7 +6997,7 @@ void UiMotionTest::albumArtDetailsRestAsTheViewerOpens() {
     };
     const auto reveal = [surface]() { return surface->property("infoReveal").toDouble(); };
     const int slide = surface->property("infoRevealDuration").toInt();
-    QCOMPARE(slide, 900);
+    QCOMPARE(slide, 1200);
     QVERIFY(!viewer->property("albumArtInfoVisible").toBool());
 
     // Opened on the current art from Replace from iTunes, with its details,
@@ -7769,9 +7769,11 @@ void UiMotionTest::firstLanesLabelRestsWhereTheOtherLanesDo() {
     QCOMPARE(labels().at(0).size(), 1);
 }
 
-// The details' toggle is a glide, 180 ms InOutQuad, rather than a snap (the
-// art went 91 % of its way in 43 ms of 120 ms OutCubic, and the rest crept),
-// both ways, and instant with animations off.
+// The details' toggle is a glide, 2.4 short durations of OutCubic, rather
+// than a snap (the art went 91 % of its way in 43 ms of 120 ms OutCubic, and
+// the rest crept), so the art settles into its place (at 1.8 of InOutQuad it
+// stopped short), both ways, and instant with animations off. Its frames
+// stay under a fifth of the way each, so the art never moves in one.
 void UiMotionTest::albumArtDetailsToggleGlides() {
     Covers covers;
     Motion ui;
@@ -7790,8 +7792,9 @@ void UiMotionTest::albumArtDetailsToggleGlides() {
     const auto toggle = [&]() {
         return QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant()));
     };
-    constexpr int duration = 180;
-    const QEasingCurve curve(QEasingCurve::InOutQuad);
+    constexpr int duration = 240;
+    QCOMPARE(surface->property("infoRevealDuration").toInt(), duration);
+    const QEasingCurve curve(QEasingCurve::OutCubic);
     {
         SteppedAnimationDriver driver;
         for (const bool shows : {true, false}) {
