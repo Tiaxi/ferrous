@@ -471,6 +471,14 @@ public:
     // "visualizationMode", and "followCurrentTrack". Empty until it has
     // arrived.
     Q_INVOKABLE QVariantMap savedWindowLayout() const;
+    // A failed save before quitting as QuitSaveFailedDialog reads it:
+    // "settings", "queue" and "scrobbles", whether each could not be saved;
+    // "cause", a code the dialog puts in words ("permission",
+    // "readOnlyFileSystem", "noSpace", "busy", "engineStopped", or empty
+    // for none it can name); and "detail", the system's text, a line for
+    // each failed save. `subjects` and `cause` are BinaryBridgeCodec's
+    // QuitSaveSubject bits and QuitSaveCause.
+    static QVariantMap quitSaveFailureMap(quint8 subjects, quint8 cause, const QString &detail);
     // The layout the backend sent as a map, as savedWindowLayout gives it.
     static QVariantMap windowLayoutMap(
         const BinaryBridgeCodec::WindowLayout &saved, const QList<QRect> &screens);
@@ -639,9 +647,9 @@ signals:
     // this is emitted.
     void queueUndoRestored(const QVariantList &rows);
     // The answer to the saveStateBeforeQuit call that returned requestId:
-    // whether the settings and the queue were saved, and what to show the
-    // user if not.
-    void stateSaveFinished(quint32 requestId, bool saved, const QString &message);
+    // whether the settings and the queue were saved, and, if not, what
+    // could not be saved and why, as quitSaveFailureMap gives it.
+    void stateSaveFinished(quint32 requestId, bool saved, const QVariantMap &failure);
     // The backend sent the window layout saved in the settings.
     void savedWindowLayoutRead();
     void queueColumnWidthsChanged();

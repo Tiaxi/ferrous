@@ -26,6 +26,7 @@ pub mod playback;
 mod profile_logging;
 mod raw_audio;
 mod safe_save;
+pub mod save_cause;
 pub mod tag_editor;
 mod tag_write;
 #[cfg(test)]

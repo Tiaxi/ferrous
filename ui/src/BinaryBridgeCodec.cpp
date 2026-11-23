@@ -1261,14 +1261,20 @@ bool decodeSnapshotPacket(const QByteArray &packet, DecodedSnapshot *out, QStrin
             Reader sectionReader(sectionPayload);
             quint32 requestId = 0;
             quint8 saved = 0;
-            QString message;
+            quint8 subjects = 0;
+            quint8 cause = 0;
+            QString detail;
             ok = sectionReader.readU32(&requestId) && sectionReader.readU8(&saved) && saved <= 1
-                && sectionReader.readUtf8(&message) && sectionReader.atEnd();
+                && sectionReader.readU8(&subjects) && (subjects & ~QuitSaveSubjectsAll) == 0
+                && sectionReader.readU8(&cause) && cause <= QuitSaveCauseLast
+                && sectionReader.readUtf8(&detail) && sectionReader.atEnd();
             if (ok) {
                 out->hasStateSaved = true;
                 out->stateSaveRequestId = requestId;
                 out->stateSaved = saved == 1;
-                out->stateSaveError = message;
+                out->stateSaveSubjects = subjects;
+                out->stateSaveCause = cause;
+                out->stateSaveDetail = detail;
             }
             break;
         }

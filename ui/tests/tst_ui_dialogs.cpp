@@ -71,6 +71,16 @@
 
 namespace {
 
+// A failed save of the settings before quitting, as BridgeClient's
+// quitSaveFailureMap gives it, with the system's text `detail`.
+QVariantMap quitSaveFailure(const QString &detail, const QString &cause = {}) {
+    return {{QStringLiteral("settings"), true},
+            {QStringLiteral("queue"), false},
+            {QStringLiteral("scrobbles"), false},
+            {QStringLiteral("cause"), cause},
+            {QStringLiteral("detail"), detail}};
+}
+
 // Main.qml with its fallback bridge, About's version and components, and a
 // tag editor whose file operations the test answers, shown and active.
 // Each test loads its own: a test that checks several things loads it once.
@@ -2820,9 +2830,9 @@ void UiDialogsTest::compactDialogsHoldTheirText() {
     DialogsWindow main;
     QQuickWindow *window = main.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
-    const QString error = QStringLiteral("Settings could not be saved: Permission denied (os error 13)");
+    const QString error = QStringLiteral("failed to create a temporary file: Permission denied (os error 13)");
     const QString path = QStringLiteral(
-        "Settings could not be saved: failed to create temporary file in /fixture/configuration/ferrous-settings/"
+        "failed to create temporary file in /fixture/configuration/ferrous-settings/"
         "2005 - Small Hours (Deluxe Edition)/read-only: Permission denied (os error 13)");
     runInTurn({[&] { checkQuitFailureBreaksItsPathOnlyBetweenFolders(window, pointSize, error); },
                [&] { checkQuitFailureBreaksItsPathOnlyBetweenFolders(window, pointSize, path); },
@@ -2864,8 +2874,8 @@ void UiDialogsTest::compactDialogStaysWithinASmallScreenAsItGrows() {
     dialogWindow->setPosition(small->geometry().topLeft() + QPoint(qCeil(gridUnit), qCeil(gridUnit)));
     const qreal room = small->geometry().height() - 2 * gridUnit;
 
-    const QString sentence = QStringLiteral("Settings could not be saved: Permission denied (os error 13). ");
-    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, sentence)));
+    const QString sentence = QStringLiteral("failed to replace /fixture/settings: Permission denied (os error 13). ");
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, quitSaveFailure(sentence))));
     QVERIFY(waitForDialogWindow(dialog));
     QCOMPARE(dialogWindow->screen(), small);
     QQuickItem *view = visibleNamed(dialogWindow, QStringLiteral("dialogBodyView"));
@@ -2906,7 +2916,7 @@ void UiDialogsTest::compactDialogStaysWithinASmallScreenAsItGrows() {
     for (int i = 0; i < 12; ++i) {
         longer += sentence;
     }
-    dialog->setProperty("message", longer);
+    dialog->setProperty("failure", quitSaveFailure(longer));
     QTRY_VERIFY(dialog->property("fittedHeight").toInt() > room);
     checkWithinTheScreen(QStringLiteral("grown while open"));
     if (QTest::currentTestFailed()) {
@@ -2916,7 +2926,8 @@ void UiDialogsTest::compactDialogStaysWithinASmallScreenAsItGrows() {
     // And again while it is closed: it reopens within the screen.
     QVERIFY(QMetaObject::invokeMethod(dialog, "dismiss"));
     QTRY_VERIFY(!dialogWindow->isVisible());
-    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, longer + longer)));
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog",
+                                      Q_ARG(QVariant, quitSaveFailure(longer + longer))));
     QVERIFY(waitForDialogWindow(dialog));
     // From the start of the new message, not where the last was scrolled to.
     QCOMPARE(view->property("contentY").toReal(), 0.0);
@@ -2933,7 +2944,7 @@ void UiDialogsTest::checkQuitFailureBreaksItsPathOnlyBetweenFolders(QQuickWindow
                                                                      const QString &message) {
     QObject *dialog = object(window, QStringLiteral("quitSaveFailedDialog"));
     QVERIFY(dialog != nullptr);
-    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, message)));
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, quitSaveFailure(message))));
     QVERIFY(waitForDialogWindow(dialog));
     QQuickWindow *dialogWindow = windowOf(dialog);
     QQuickItem *label = visibleNamed(dialogWindow, QStringLiteral("quitSaveFailedMessage"));
@@ -9343,9 +9354,11 @@ void UiDialogsTest::compactDialogsSpaceParagraphsWithTheFont() {
                  QStringLiteral("Replace the album art of “Small Hours” by The Quiet Meridian?")));
     QVERIFY(fill("keyboardShortcutsReassignDialog", "message",
                  QStringLiteral("Reassign “Ctrl+F” to “Open Files…”?")));
-    QVERIFY(fill("quitSaveFailedDialog", "message",
-                 QStringLiteral("Settings could not be saved: failed to create temporary file in "
-                                "/fixture/configuration/ferrous-settings/read-only: Permission denied (os error 13)")));
+    QVERIFY(fill("quitSaveFailedDialog", "failure",
+                 quitSaveFailure(QStringLiteral("failed to create temporary file in "
+                                                "/fixture/configuration/ferrous-settings/read-only: "
+                                                "Permission denied (os error 13)"),
+                                 QStringLiteral("permission"))));
     QVERIFY(fill("replaceCoverConfirmDialog", "suggestion", QVariantMap{
         {QStringLiteral("albumTitle"), QStringLiteral("Small Hours (Twentieth Anniversary Deluxe Edition, "
                                                       "Remastered from the Original Tapes)")},
@@ -9405,15 +9418,18 @@ void UiDialogsTest::dialogsWordTheirSettingsAndFailures() {
 
     QObject *quit = object(window, QStringLiteral("quitSaveFailedDialog"));
     QVERIFY(quit != nullptr);
-    const QString system = QStringLiteral("Settings could not be saved: Permission denied (os error 13)");
-    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog", Q_ARG(QVariant, system)));
+    const QString system = QStringLiteral("failed to replace /fixture/settings: Permission denied (os error 13)");
+    QVERIFY(QMetaObject::invokeMethod(window, "showQuitSaveFailedDialog",
+                                      Q_ARG(QVariant, quitSaveFailure(system, QStringLiteral("permission")))));
     QVERIFY(waitForDialogWindow(quit));
     const auto textOf = [quit](const char *item) {
         QQuickItem *label = visibleNamed(windowOf(quit), QString::fromLatin1(item));
         return label != nullptr ? label->property("text").toString() : QString();
     };
-    QCOMPARE(textOf("quitSaveFailedHeading"), QStringLiteral("Some recent changes weren\u2019t saved."));
-    QCOMPARE(quit->property("message").toString(), system);
+    QCOMPARE(textOf("quitSaveFailedHeading"), QStringLiteral("Ferrous couldn\u2019t save its settings."));
+    QCOMPARE(textOf("quitSaveFailedCause"),
+             QStringLiteral("You don\u2019t have permission to write in this folder."));
+    QCOMPARE(quit->property("detailText").toString(), system);
     QCOMPARE(textOf("quitSaveFailedDetails"),
              QStringLiteral("Quit Anyway loses unsaved settings, queue changes and Last.fm scrobbles."));
     QVERIFY(QMetaObject::invokeMethod(quit, "dismiss"));

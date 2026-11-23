@@ -423,6 +423,7 @@ private slots:
     void theDynamicRangeKeepsTheBackendsWholeRange();
     void saveBeforeQuitReportsAFailedSaveAndSavesOnRetry();
     void saveBeforeQuitFailsWhenTheBackendHasStopped();
+    void aFailedSaveBeforeQuitDecodesWhatAndWhy();
     void aStoppedEngineIsNamedAnEngine();
     void spectrogramOverlaySettingsApplyFromSnapshot();
     void analysisFrameTellsAFileThatEndsEarly();
@@ -9013,9 +9014,9 @@ void BridgeClientTest::saveBeforeQuitReportsAFailedSaveAndSavesOnRetry() {
     QVERIFY(second != first);
     QTRY_COMPARE(finished.count(), 2);
     QCOMPARE(finished.at(0).at(0).value<quint32>(), first);
-    QVERIFY2(finished.at(0).at(1).toBool(), qPrintable(finished.at(0).at(2).toString()));
+    QVERIFY2(finished.at(0).at(1).toBool(), qPrintable(finished.at(0).at(2).toMap().value(QStringLiteral("detail")).toString()));
     QCOMPARE(finished.at(1).at(0).value<quint32>(), second);
-    QVERIFY2(finished.at(1).at(1).toBool(), qPrintable(finished.at(1).at(2).toString()));
+    QVERIFY2(finished.at(1).at(1).toBool(), qPrintable(finished.at(1).at(2).toMap().value(QStringLiteral("detail")).toString()));
     QVERIFY(QFileInfo(settingsPath).isFile());
     finished.clear();
 
@@ -9030,16 +9031,23 @@ void BridgeClientTest::saveBeforeQuitReportsAFailedSaveAndSavesOnRetry() {
     QTRY_COMPARE(finished.count(), 1);
     QCOMPARE(finished.at(0).at(0).value<quint32>(), failing);
     QVERIFY(!finished.at(0).at(1).toBool());
-    const QString message = finished.at(0).at(2).toString();
-    QVERIFY2(message.startsWith(QStringLiteral("Settings could not be saved")), qPrintable(message));
-    QVERIFY2(message.contains(settingsPath), qPrintable(message));
+    // The settings alone, with no cause the dialog can name, and the
+    // system's text, which names the file.
+    const QVariantMap failure = finished.at(0).at(2).toMap();
+    QCOMPARE(failure.value(QStringLiteral("settings")).toBool(), true);
+    QCOMPARE(failure.value(QStringLiteral("queue")).toBool(), false);
+    QCOMPARE(failure.value(QStringLiteral("scrobbles")).toBool(), false);
+    QCOMPARE(failure.value(QStringLiteral("cause")).toString(), QString());
+    const QString detail = failure.value(QStringLiteral("detail")).toString();
+    QVERIFY2(detail.startsWith(QStringLiteral("failed to replace ")), qPrintable(detail));
+    QVERIFY2(detail.contains(settingsPath), qPrintable(detail));
 
     // Retry once the cause is gone.
     QVERIFY(configDir.rmdir(QStringLiteral("settings.txt")));
     const quint32 retry = client.saveStateBeforeQuit();
     QTRY_COMPARE(finished.count(), 2);
     QCOMPARE(finished.at(1).at(0).value<quint32>(), retry);
-    QVERIFY2(finished.at(1).at(1).toBool(), qPrintable(finished.at(1).at(2).toString()));
+    QVERIFY2(finished.at(1).at(1).toBool(), qPrintable(finished.at(1).at(2).toMap().value(QStringLiteral("detail")).toString()));
     QFile settings(settingsPath);
     QVERIFY(settings.open(QIODevice::ReadOnly));
     const QByteArray saved = settings.readAll();
@@ -9061,8 +9069,88 @@ void BridgeClientTest::saveBeforeQuitFailsWhenTheBackendHasStopped() {
     QCOMPARE(finished.at(0).at(0).value<quint32>(), requestId);
     QVERIFY(requestId != 0);
     QVERIFY(!finished.at(0).at(1).toBool());
-    QCOMPARE(finished.at(0).at(2).toString(),
-        QStringLiteral("Settings and the queue couldn\u2019t be saved: the playback engine has stopped."));
+    const QVariantMap failure = finished.at(0).at(2).toMap();
+    QCOMPARE(failure.value(QStringLiteral("settings")).toBool(), true);
+    QCOMPARE(failure.value(QStringLiteral("queue")).toBool(), true);
+    QCOMPARE(failure.value(QStringLiteral("scrobbles")).toBool(), false);
+    QCOMPARE(failure.value(QStringLiteral("cause")).toString(), QStringLiteral("engineStopped"));
+    QCOMPARE(failure.value(QStringLiteral("detail")).toString(), QString());
+}
+
+// The answer to a save before quitting carries what could not be saved
+// and why as values, which the dialog puts in words; it never reads the
+// system's text for them.
+void BridgeClientTest::aFailedSaveBeforeQuitDecodesWhatAndWhy() {
+    // Mirrored by ffi::tests::a_save_before_quitting_is_answered_as_the_qt_decoder_reads_it.
+    const auto packetWith = [](quint8 saved, quint8 subjects, quint8 cause, const QByteArray &detail) {
+        QByteArray payload;
+        QDataStream payloadStream(&payload, QIODevice::WriteOnly);
+        payloadStream.setByteOrder(QDataStream::LittleEndian);
+        payloadStream << quint32(5) << saved << subjects << cause << quint32(detail.size());
+        payloadStream.writeRawData(detail.constData(), static_cast<int>(detail.size()));
+        return packetWithSection(BinaryBridgeCodec::SectionStateSaved, payload);
+    };
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                 packetWith(0, 0b101, 1, QByteArrayLiteral("a: denied\nb: denied")), &decoded, &error),
+             qPrintable(error));
+    QVERIFY(decoded.hasStateSaved);
+    QCOMPARE(decoded.stateSaveRequestId, quint32(5));
+    QVERIFY(!decoded.stateSaved);
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QSignalSpy finished(&client, &BridgeClient::stateSaveFinished);
+    client.processBinarySnapshot(decoded);
+    QCOMPARE(finished.count(), 1);
+    QCOMPARE(finished.at(0).at(0).value<quint32>(), quint32(5));
+    QCOMPARE(finished.at(0).at(1).toBool(), false);
+    const QVariantMap failure = finished.at(0).at(2).toMap();
+    QCOMPARE(failure.value(QStringLiteral("settings")).toBool(), true);
+    QCOMPARE(failure.value(QStringLiteral("queue")).toBool(), false);
+    QCOMPARE(failure.value(QStringLiteral("scrobbles")).toBool(), true);
+    QCOMPARE(failure.value(QStringLiteral("cause")).toString(), QStringLiteral("permission"));
+    QCOMPARE(failure.value(QStringLiteral("detail")).toString(), QStringLiteral("a: denied\nb: denied"));
+
+    // Each cause the backend sends has its code; none for Other.
+    const QList<QPair<quint8, QString>> causes{
+        {BinaryBridgeCodec::QuitSaveCauseOther, QString()},
+        {BinaryBridgeCodec::QuitSaveCausePermission, QStringLiteral("permission")},
+        {BinaryBridgeCodec::QuitSaveCauseReadOnlyFileSystem, QStringLiteral("readOnlyFileSystem")},
+        {BinaryBridgeCodec::QuitSaveCauseNoSpace, QStringLiteral("noSpace")},
+        {BinaryBridgeCodec::QuitSaveCauseBusy, QStringLiteral("busy")},
+    };
+    for (const auto &[cause, code] : causes) {
+        QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                     packetWith(0, BinaryBridgeCodec::QuitSaveSettings, cause, {}), &decoded, &error),
+                 qPrintable(error));
+        QCOMPARE(BridgeClient::quitSaveFailureMap(decoded.stateSaveSubjects, decoded.stateSaveCause,
+                                                  decoded.stateSaveDetail)
+                     .value(QStringLiteral("cause"))
+                     .toString(),
+                 code);
+    }
+
+    // A success says nothing failed.
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(packetWith(1, 0, 0, {}), &decoded, &error));
+    QVERIFY(decoded.stateSaved);
+    client.processBinarySnapshot(decoded);
+    QCOMPARE(finished.count(), 2);
+    QVERIFY(finished.at(1).at(2).toMap().isEmpty());
+
+    // Bits and causes past those Rust sends are refused, as is the old
+    // layout, a message alone.
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(packetWith(0, 0b1000, 0, {}), &decoded, &error));
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWith(0, 1, BinaryBridgeCodec::QuitSaveCauseLast + 1, {}), &decoded, &error));
+    QByteArray oldLayout;
+    QDataStream oldStream(&oldLayout, QIODevice::WriteOnly);
+    oldStream.setByteOrder(QDataStream::LittleEndian);
+    oldStream << quint32(5) << quint8(0) << quint32(1);
+    oldStream.writeRawData("x", 1);
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionStateSaved, oldLayout), &decoded, &error));
 }
 
 // The status bar says "Playback engine stopped": its tooltip's default,
@@ -9083,8 +9171,8 @@ void BridgeClientTest::aStoppedEngineIsNamedAnEngine() {
     QSignalSpy finished(&client, &BridgeClient::stateSaveFinished);
     (void)client.saveStateBeforeQuit();
     QTRY_COMPARE(finished.count(), 1);
-    QCOMPARE(finished.at(0).at(2).toString(),
-             QStringLiteral("Settings and the queue couldn\u2019t be saved: the playback engine has stopped."));
+    QCOMPARE(finished.at(0).at(2).toMap().value(QStringLiteral("cause")).toString(),
+             QStringLiteral("engineStopped"));
 }
 
 void BridgeClientTest::analysisFrameTellsAFileThatEndsEarly() {

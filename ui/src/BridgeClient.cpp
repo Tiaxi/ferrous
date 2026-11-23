@@ -4410,10 +4410,11 @@ quint32 BridgeClient::saveStateBeforeQuit() {
     QMetaObject::invokeMethod(
         this,
         [this, requestId]() {
-            emit stateSaveFinished(
-                requestId,
-                false,
-                i18nc("@info", "Settings and the queue couldn’t be saved: the playback engine has stopped."));
+            QVariantMap failure = quitSaveFailureMap(
+                BinaryBridgeCodec::QuitSaveSettings | BinaryBridgeCodec::QuitSaveQueue,
+                BinaryBridgeCodec::QuitSaveCauseOther, QString());
+            failure.insert(QStringLiteral("cause"), QStringLiteral("engineStopped"));
+            emit stateSaveFinished(requestId, false, failure);
         },
         Qt::QueuedConnection);
     return requestId;
@@ -4421,6 +4422,30 @@ quint32 BridgeClient::saveStateBeforeQuit() {
 
 void BridgeClient::shutdown() {
     shutdownBridgeGracefully();
+}
+
+QVariantMap BridgeClient::quitSaveFailureMap(quint8 subjects, quint8 cause, const QString &detail) {
+    const auto causeCode = [cause]() -> QString {
+        switch (cause) {
+        case BinaryBridgeCodec::QuitSaveCausePermission:
+            return QStringLiteral("permission");
+        case BinaryBridgeCodec::QuitSaveCauseReadOnlyFileSystem:
+            return QStringLiteral("readOnlyFileSystem");
+        case BinaryBridgeCodec::QuitSaveCauseNoSpace:
+            return QStringLiteral("noSpace");
+        case BinaryBridgeCodec::QuitSaveCauseBusy:
+            return QStringLiteral("busy");
+        default:
+            return {};
+        }
+    };
+    return {
+        {QStringLiteral("settings"), (subjects & BinaryBridgeCodec::QuitSaveSettings) != 0},
+        {QStringLiteral("queue"), (subjects & BinaryBridgeCodec::QuitSaveQueue) != 0},
+        {QStringLiteral("scrobbles"), (subjects & BinaryBridgeCodec::QuitSaveScrobbles) != 0},
+        {QStringLiteral("cause"), causeCode()},
+        {QStringLiteral("detail"), detail},
+    };
 }
 
 void BridgeClient::clearDiagnostics() {
@@ -5660,8 +5685,12 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     if (snapshot.hasStateSaved) {
-        emit stateSaveFinished(
-            snapshot.stateSaveRequestId, snapshot.stateSaved, snapshot.stateSaveError);
+        emit stateSaveFinished(snapshot.stateSaveRequestId, snapshot.stateSaved,
+                               snapshot.stateSaved
+                                   ? QVariantMap()
+                                   : quitSaveFailureMap(snapshot.stateSaveSubjects,
+                                                        snapshot.stateSaveCause,
+                                                        snapshot.stateSaveDetail));
         return false;
     }
 
