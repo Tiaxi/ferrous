@@ -42,11 +42,15 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   before any listening too.
 // - Not scrobbled: once playback has stopped, by the end of the queue or
 //   a stop, after a play that ended before its scrobble point. The glyph
-//   alone in the tertiary colour, without words or the bar; the tooltip
-//   says it was not scrobbled and how far the play got. A short play is
-//   routine, so words in the slot always mean scrobbles waiting or a
-//   failure ("Not scrobbled" read as a problem with Last.fm). A seek never
-//   decides it: the countdown goes on while the track plays.
+//   in the tertiary colour, and the bar held at the share of the scrobble
+//   point the play reached, its fill in the tertiary colour too, without a
+//   mark at either end; the tooltip says it was not scrobbled and how far
+//   the play got. So it differs from scrobbled, the glyph alone, by shape
+//   (by its tint alone, the two looked alike at 1x), and from listening,
+//   which shows only while playing, by its quieter fill. A short play is
+//   routine, so it has no words: words in the slot always mean scrobbles
+//   waiting or a failure ("Not scrobbled" read as a problem with Last.fm).
+//   A seek never decides it: the countdown goes on while the track plays.
 // - Being sent: the bar full, from the moment the play reaches its
 //   scrobble point, while the send goes on in the background. Only then:
 //   listening stops short of full.
@@ -173,19 +177,21 @@ AbstractButton {
     property real roomToBarTop: 0
     // Last.fm accepted the scrobble.
     readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
-    // The trough and the bar in it: while listening, and while the scrobble
-    // is being sent.
+    // The trough and the bar in it: while listening, after a play that
+    // ended short of its scrobble point, and while the scrobble is being
+    // sent.
     readonly property bool barShown: root.look === "listening"
+        || root.look === "notScrobbled"
         || (root.look === "scrobbled" && !root.scrobbleAccepted)
     // How much of the trough the bar fills, 0 to 1: the listening done, by
     // whole device pixels of the trough, so a long scrobble point redraws
-    // it more rarely still; full once the play has reached its scrobble
-    // point.
+    // it more rarely still, and held there once a play has ended short of
+    // its scrobble point; full once the play has reached it.
     readonly property real barProgress: {
         if (root.look === "scrobbled") {
             return root.barShown ? 1 : 0
         }
-        if (root.look !== "listening" || root.thresholdSeconds <= 0) {
+        if ((root.look !== "listening" && root.look !== "notScrobbled") || root.thresholdSeconds <= 0) {
             return 0
         }
         const steps = Math.max(1, Math.round(root.barWidth * Math.max(1, Screen.devicePixelRatio)))
@@ -193,8 +199,10 @@ AbstractButton {
     }
     // The bar and its framed trough: the status bar's progress colours,
     // the scan bar's: the fill is the glyph's ink (the trough at 20% text
-    // was 1.9:1 / 1.5:1 on the status bar).
-    readonly property color barColor: root.uiPalette.statusBarFill
+    // was 1.9:1 / 1.5:1 on the status bar), the tertiary text with the
+    // glyph's after a play that ended short.
+    readonly property color barColor: root.look === "notScrobbled"
+        ? root.uiPalette.textTertiary : root.uiPalette.statusBarFill
     readonly property color troughColor: root.uiPalette.statusBarTrough
     readonly property color troughFrameColor: root.uiPalette.statusBarTroughFrame
     // While listening, the bar is never less than a short mark from the
@@ -202,6 +210,8 @@ AbstractButton {
     // scrobble, which has no bar (at 0% it was the trough alone); and it
     // stops as short a mark before the trough's end, so that only a decided
     // scrobble fills it (the last of the listening looked like sending).
+    // Held after a play that ended short, it is the share reached as it
+    // is: the trough already sets it apart from a scrobble.
     readonly property int minimumBarLength: Math.max(3, Math.round(root.glyphSize * 3 / 16))
     readonly property real barLength: root.look === "listening"
         ? Math.max(root.minimumBarLength,
@@ -381,9 +391,10 @@ AbstractButton {
         MenuItem {
             objectName: "scrobbleIndicatorSettingsItem"
             text: I18n.i18nc("@action:inmenu", "Last.fm Settings…")
-            // Breeze's glyph for settings, as Configure Ferrous… has (the
-            // item had none, leaving a hole under Pause's check box).
-            icon.name: "configure"
+            // No glyph: its words line up with Pause Scrobbling's after the
+            // check box's column (Breeze gives a glyph a column of its own
+            // beside the check box's, so the two items' words were
+            // staggered).
             onTriggered: root.settingsRequested()
         }
     }

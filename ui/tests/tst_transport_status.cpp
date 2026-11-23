@@ -14,7 +14,6 @@
 #include <QFontInfo>
 #include <QFontMetricsF>
 #include <QHash>
-#include <QIcon>
 #include <QImage>
 #include <QImageReader>
 #include <QLocale>
@@ -594,8 +593,8 @@ private slots:
     void lastFmSlotShowsEachState();
     void lastFmSlotCountsTheTimeLeftFromTheListenedTime();
     void lastFmSlotHidesWithTheTrackSectionsWhileTheEngineIsDown();
-    void lastFmNotScrobbledIsTheQuietGlyphAlone_data();
-    void lastFmNotScrobbledIsTheQuietGlyphAlone();
+    void lastFmNotScrobbledHoldsTheShareThePlayReached_data();
+    void lastFmNotScrobbledHoldsTheShareThePlayReached();
     void lastFmSlotPausedLooksStruckThrough_data();
     void lastFmSlotPausedLooksStruckThrough();
     void lastFmPausedKeepsBothLettersAndTheStrike_data();
@@ -616,7 +615,7 @@ private slots:
     void lastFmListeningNeverFillsTheBar_data();
     void lastFmListeningNeverFillsTheBar();
     void lastFmGlyphsAreOneFamily();
-    void lastFmSettingsItemHasTheConfigureGlyph();
+    void lastFmMenuWordsShareOneColumn();
     void warningGlyphIsTheSizeOfItsNeighbours();
     void statusBarNamesAStoppedEngineInPlainWords();
     void statusBarEngineErrorShowsItsToolTipOverItsGlyphAndFromTheKeyboard();
@@ -3973,14 +3972,18 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
 
     // Once playback has stopped after a play that ended before its
-    // scrobble point: the glyph alone, quieter, without words or the bar,
-    // and the tooltip says it was not scrobbled and how far the play got.
+    // scrobble point: the glyph, quieter, without words, the bar held at
+    // the share the play reached in the glyph's quieter ink, and the
+    // tooltip says it was not scrobbled and how far the play got.
     bridge->setProperty("lastFmScrobbleState", 6);
     bridge->setProperty("lastFmScrobbleIneligibility", 3);
     QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("notScrobbled"));
     QVERIFY(slot->isVisible());
     QVERIFY(!label->isVisible());
-    QVERIFY(!bar->isVisible() && !trough->isVisible());
+    QVERIFY(trough->isVisible() && bar->isVisible());
+    QCOMPARE(trough->size(), QSizeF(28, 5));
+    QCOMPARE(bar->width(), std::floor(77.0 / 115.0 * 26));
+    QVERIFY(sameColor(bar->property("color").value<QColor>(), harness.token("textTertiary")));
     QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textTertiary")));
     QCOMPARE(toolTipText(slot),
@@ -4083,24 +4086,29 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
 // either way and a pause leave it, and only a new play, whose count starts
 // from zero, starts it over. The bar and the tooltip move by whole seconds
 // of listening, and not at all while the count holds.
-void TransportStatusTest::lastFmNotScrobbledIsTheQuietGlyphAlone_data() {
+void TransportStatusTest::lastFmNotScrobbledHoldsTheShareThePlayReached_data() {
     addThemeRows();
 }
 
 // A play that ended short, routine, is the slot's quietest state: the
-// glyph alone in the tertiary text, as narrow as a scrobble's, with no
-// words ("Not scrobbled" beside it read as a problem with Last.fm, and
-// looked like "3 scrobbles waiting (offline)"). Words in the slot mean
-// scrobbles waiting, in the secondary text, or a failure, a step louder
-// in the text colour. The glyph stays readable on the status bar.
-void TransportStatusTest::lastFmNotScrobbledIsTheQuietGlyphAlone() {
+// glyph in the tertiary text with no words ("Not scrobbled" beside it read
+// as a problem with Last.fm, and looked like "3 scrobbles waiting
+// (offline)"), and beside it the trough with the bar held at the share of
+// the scrobble point the play reached, in the glyph's tertiary ink, with no
+// mark at either end. So it differs from scrobbled, the glyph alone, by
+// shape: the glyph alone in either tint, the two looked alike at 1x. Words
+// in the slot mean scrobbles waiting, in the secondary text, or a failure,
+// a step louder in the text colour. The glyph and the bar stay readable.
+void TransportStatusTest::lastFmNotScrobbledHoldsTheShareThePlayReached() {
     QFETCH(bool, dark);
     Harness harness;
     QVERIFY2(harness.load(breeze(dark)), qPrintable(harness.error));
     QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
     QQuickItem *glyph = harness.item(QStringLiteral("scrobbleIndicatorGlyph"));
     QQuickItem *label = harness.item(QStringLiteral("scrobbleIndicatorLabel"));
-    QVERIFY(slot && glyph && label);
+    QQuickItem *bar = harness.item(QStringLiteral("scrobbleIndicatorBar"));
+    QQuickItem *trough = harness.item(QStringLiteral("scrobbleIndicatorTrough"));
+    QVERIFY(slot && glyph && label && bar && trough);
     QObject *bridge = harness.bridge;
     const QColor chrome = harness.token("chrome");
     const auto colours = [&]() {
@@ -4112,6 +4120,7 @@ void TransportStatusTest::lastFmNotScrobbledIsTheQuietGlyphAlone() {
     bridge->setProperty("lastFmScrobbleState", 3);
     QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("scrobbled"));
     QTRY_VERIFY(slot->isVisible());
+    QVERIFY(!trough->isVisible());
     const qreal scrobbledWidth = slot->width();
 
     bridge->setProperty("lastFmScrobbleIneligibility", 3);
@@ -4120,14 +4129,41 @@ void TransportStatusTest::lastFmNotScrobbledIsTheQuietGlyphAlone() {
     QVERIFY(slot->isVisible());
     QVERIFY(!label->isVisible());
     QCOMPARE(label->property("text").toString(), QString());
-    QTRY_COMPARE(slot->width(), scrobbledWidth);
+    // The trough and its 6 px gap beside the glyph that a scrobble lacks.
+    QVERIFY(trough->isVisible());
+    QCOMPARE(trough->size(), QSizeF(28, 5));
+    QTRY_COMPARE(slot->width(), scrobbledWidth + 28 + 6);
+    // A quarter of the 26 px inside the frame, by whole pixels, from the
+    // left, with no mark added.
+    QVERIFY(bar->isVisible());
+    QCOMPARE(bar->position(), QPointF(1, 1));
+    QCOMPARE(bar->size(), QSizeF(6, 3));
     const QColor shortGlyph = colours().second;
+    const QColor shortFill = bar->property("color").value<QColor>();
+    const QColor troughColor = trough->property("color").value<QColor>();
     QVERIFY(sameColor(shortGlyph, harness.token("textTertiary")));
+    QVERIFY(sameColor(shortFill, shortGlyph));
     QVERIFY2(contrastRatio(shortGlyph, chrome) >= 4.5,
              qPrintable(describeContrast(QStringLiteral("not scrobbled"), shortGlyph, chrome)));
+    QVERIFY2(contrastRatio(shortFill, troughColor) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("not scrobbled fill"), shortFill, troughColor)));
+    // Quieter than listening's fill, the secondary text.
+    QVERIFY2(contrastRatio(shortFill, troughColor) * 1.1
+                 < contrastRatio(harness.token("statusBarFill"), troughColor),
+             qPrintable(describeContrast(QStringLiteral("not scrobbled fill"), shortFill, troughColor)));
     QCOMPARE(toolTipText(slot),
              QStringLiteral("Last.fm: not scrobbled. The play ended after 0:30 of the 2:00 of listening it "
                             "needed."));
+    // The share as it is, with no mark at either end: 0 s leaves the
+    // trough empty, 119 s stops a part pixel short of full.
+    bridge->setProperty("lastFmScrobbleListenedMs", 0);
+    QTRY_VERIFY(!bar->isVisible());
+    QVERIFY(trough->isVisible());
+    QCOMPARE(bar->width(), 0.0);
+    bridge->setProperty("lastFmScrobbleListenedMs", 119000);
+    QTRY_COMPARE(bar->width(), std::floor(119.0 / 120.0 * 26));
+    QVERIFY(bar->isVisible());
+    bridge->setProperty("lastFmScrobbleListenedMs", 30000);
 
     bridge->setProperty("lastFmScrobbleIneligibility", 0);
     bridge->setProperty("lastFmScrobbleState", 5);
@@ -5284,10 +5320,11 @@ void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
     QCOMPARE(harness.root->property("playPauseCount").toInt(), 0);
 }
 
-// The menu's Last.fm Settings… has Breeze's glyph for settings, as
-// Configure Ferrous… has: without one it left a hole in the menu's glyph
-// column under Pause Scrobbling's check box.
-void TransportStatusTest::lastFmSettingsItemHasTheConfigureGlyph() {
+// The menu's items have no glyphs, so their words start on one column
+// after Pause Scrobbling's check box: Breeze gives a glyph a column of its
+// own beside the check box's, and with the configure glyph on Last.fm
+// Settings… the two items' marks and words were staggered.
+void TransportStatusTest::lastFmMenuWordsShareOneColumn() {
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
     QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
@@ -5299,10 +5336,29 @@ void TransportStatusTest::lastFmSettingsItemHasTheConfigureGlyph() {
     slot->forceActiveFocus(Qt::TabFocusReason);
     QTest::keyClick(harness.window, Qt::Key_F10, Qt::ShiftModifier);
     QTRY_VERIFY(menu->property("opened").toBool());
+    QQuickItem *pause = harness.item(QStringLiteral("scrobbleIndicatorPauseItem"));
     QQuickItem *settings = harness.item(QStringLiteral("scrobbleIndicatorSettingsItem"));
+    QVERIFY(pause != nullptr && pause->isVisible());
     QVERIFY(settings != nullptr && settings->isVisible());
-    QCOMPARE(evaluateOn(settings, QStringLiteral("icon.name")).toString(), QStringLiteral("configure"));
-    QVERIFY2(QIcon::hasThemeIcon(QStringLiteral("configure")), qPrintable(QIcon::themeName()));
+    for (QQuickItem *item : {pause, settings}) {
+        QVERIFY2(evaluateOn(item, QStringLiteral("icon.name")).toString().isEmpty(), qPrintable(item->objectName()));
+        QVERIFY2(evaluateOn(item, QStringLiteral("icon.source")).toUrl().isEmpty(), qPrintable(item->objectName()));
+    }
+    // Where each item's words start, in the menu.
+    const auto wordsLeft = [](QQuickItem *item) {
+        const QString text = item->property("text").toString();
+        const QList<QQuickItem *> descendants = item->findChildren<QQuickItem *>();
+        for (QQuickItem *child : descendants) {
+            if (child->inherits("QQuickText") && child->property("text").toString() == text && child->isVisible()) {
+                return child->mapToItem(nullptr, QPointF(0, 0)).x();
+            }
+        }
+        return -1.0;
+    };
+    const qreal pauseWords = wordsLeft(pause);
+    QVERIFY(pauseWords >= 0);
+    QCOMPARE(wordsLeft(settings), pauseWords);
+    QCOMPARE(settings->mapToItem(nullptr, QPointF(0, 0)).x(), pause->mapToItem(nullptr, QPointF(0, 0)).x());
     QVERIFY(QMetaObject::invokeMethod(menu, "close"));
     QTRY_VERIFY(!menu->property("visible").toBool());
 }
