@@ -127,8 +127,9 @@ Item {
         }
         return 0
     }
-    // The lane a pan last began on, which tells when it ends: the hand is
-    // the whole plot's, as the drag may go on over another lane.
+    // The lane a middle press last held the view on, which tells when its
+    // pan ends: the hand is the whole plot's, as the drag may go on over
+    // another lane.
     property SpectrogramItem _panLane: null
     // The pointer hides once the overlays have faded out, not as they start;
     // hidden, it stays so. While a pan holds the plot it is a closed hand,
@@ -207,6 +208,11 @@ Item {
     readonly property bool autoscrolling: sharedViewFollow.autoscrolling
     // Whether a middle-drag pans it, on whichever lane it began.
     readonly property bool panning: root._panLane !== null && root._panLane.panning
+    // Whether a middle press holds it, from the press to the release.
+    readonly property bool panPressed: root._panLane !== null && root._panLane.panPressed
+    // Where, in the scene, it was pressed, or let go.
+    readonly property point panScenePosition: root._panLane !== null
+        ? root._panLane.panScenePosition : Qt.point(0, 0)
     // The view follows the playhead again, at once.
     function followPlayhead() {
         sharedViewFollow.followPlayhead()
@@ -547,8 +553,11 @@ Item {
                             root.followedAgain(fromStartSeconds, fromEndSeconds)
                         }
                     }
-                    onPanningChanged: {
-                        if (spectrogramPaneItem.panning) {
+                    // A wheel zoom is the pointer's activity too, also
+                    // where it rests.
+                    onWheelZoomed: (scenePosition) => root.notePointerActivity(scenePosition.x, scenePosition.y)
+                    onPanPressedChanged: {
+                        if (spectrogramPaneItem.panPressed) {
                             root._panLane = spectrogramPaneItem
                         }
                     }

@@ -61,6 +61,10 @@ private slots:
     void cornerHoldsWhileAutoscrollRuns();
     void laneHeadsStayQuietThroughAPan_data();
     void laneHeadsStayQuietThroughAPan();
+    void laneHeadsCloseOnTheMiddlePress_data();
+    void laneHeadsCloseOnTheMiddlePress();
+    void wheelZoomIsPointerActivity_data();
+    void wheelZoomIsPointerActivity();
     void zoomPlateTextIsDrawnAsThePlotPlatesIs();
     void crosshairGivesWayToAutoscroll_data();
     void crosshairGivesWayToAutoscroll();
@@ -5007,7 +5011,7 @@ void TransportInputSmokeTest::notFollowingArrivesAsItLeaves_data() {
 
 // "Not following" comes as it goes while the corner's row shows, as the
 // view is dragged away or autoscroll stops on it: zoomed, the plate grows
-// to the left over 80 ms, OutCubic, Reset and the switch staying, and its
+// to the left over 50 ms, OutCubic, Reset and the switch staying, and its
 // left corners stay round; the text and divider fade in once it holds them
 // (notFollowingMovesAsOnePlate). It jumped 89 px wider in a frame, an
 // empty box, as the text faded in (H17). At the default zoom the plate
@@ -5058,7 +5062,7 @@ void TransportInputSmokeTest::notFollowingArrivesAsItLeaves() {
     double left = plainLeft;
     double step = std::numeric_limits<double>::infinity();
     double level = 0.0;
-    for (int frame = 1; frame * 16 < (zoomed ? 80 : 120); ++frame) {
+    for (int frame = 1; frame * 16 < (zoomed ? 50 : 120); ++frame) {
         QVERIFY(animations.step(16));
         image = window->grabWindow();
         const QString where = QStringLiteral("frame %1").arg(frame);
@@ -5130,7 +5134,10 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate_data() {
 // staying. The text and divider are never cut and never outside the plate,
 // drawn only once it holds them: clipped to the growing plate, the text
 // read "ing", "llowing", "t following" for 83 ms (H18). Coming, the plate
-// grows over 80 ms, OutCubic; going with the row staying, the text fades
+// grows over 50 ms, OutCubic, and stands empty for two frames at most
+// before its text fades in, as one arrival: grown over 80 ms, it stood
+// empty for 57 ms, a beat before the text (H20); going with the row
+// staying, the text fades
 // out as the plate narrows over 90 ms, InOutCubic, and no empty room
 // lingers: the text went in a frame while the empty plate narrowed for
 // 60 ms (H18). With the row fading out, it goes at the plate's width with
@@ -5248,7 +5255,8 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
                                     .arg(plate.left()).arg(plate.right()).arg(level)));
         }
         // No room standing empty: while the text is gone, the plate is
-        // narrower than the text within 3 frames, 48 ms.
+        // narrower than the text within 3 frames, 48 ms; coming, within
+        // 2, 32 ms.
         const double emptyRoom = plainLeft - plate.left();
         if (corner.plate->opacity() > 0 && level < 0.05 && emptyRoom > 4) {
             longestEmpty = std::max(longestEmpty, ++emptyFrames);
@@ -5267,14 +5275,14 @@ void TransportInputSmokeTest::notFollowingMovesAsOnePlate() {
                                         .arg(where, now.name()).arg(x).arg(first.name())));
             }
         }
-        // Timing: the plate grown over 80 ms, narrowed over 90 ms.
-        if (way == 0 && frame * 16 >= 80) {
+        // Timing: the plate grown over 50 ms, narrowed over 90 ms.
+        if (way == 0 && frame * 16 >= 50) {
             QCOMPARE(plate.left(), plainLeft - room);
         } else if (way == 1 && frame * 16 >= 96) {
             QCOMPARE(plate.left(), plainLeft);
         }
     }
-    QVERIFY2(longestEmpty <= 3, qPrintable(QStringLiteral("%1 frames").arg(longestEmpty)));
+    QVERIFY2(longestEmpty <= (way == 0 ? 2 : 3), qPrintable(QStringLiteral("%1 frames").arg(longestEmpty)));
     if (way == 0) {
         QCOMPARE(corner.text->opacity(), 1.0);
         QCOMPARE(corner.divider->opacity(), 1.0);
@@ -5575,6 +5583,86 @@ Window {
     QVERIFY(windows >= 0 && windows != curves);
     QCOMPARE(renderTypeOf(QStringLiteral("windowNotice"), QStringLiteral("followNoticeText")), windows);
     QCOMPARE(renderTypeOf(QStringLiteral("windowReadout")), windows);
+}
+
+void TransportInputSmokeTest::laneHeadsCloseOnTheMiddlePress_data() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<bool>("drags");
+    QTest::newRow("spectrogram, drag") << 0 << true;
+    QTest::newRow("spectrogram, click") << 0 << false;
+    QTest::newRow("waveform, drag") << 1 << true;
+    QTest::newRow("waveform, click") << 1 << false;
+}
+
+// The lane heads' hover reveal ends on the middle press itself, which leads
+// to a pan or to autoscroll, and nothing opens again on the release until
+// the pointer next moves: from the drag's threshold alone, the head under
+// the hand opened on the press, closed as the pan began and opened again
+// on the release (H20). The closed hand still waits for the pan.
+void TransportInputSmokeTest::laneHeadsCloseOnTheMiddlePress() {
+    QFETCH(int, mode);
+    QFETCH(bool, drags);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QQuickItem *plotSurface = mode == 0
+        ? corner.spectrogramSurface
+        : window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(plotSurface != nullptr);
+    corner.zoom(4.0);
+    const QList<QQuickItem *> heads = itemsNamed(corner.layer, QStringLiteral("plotLaneHead"));
+    QVERIFY2(!heads.isEmpty(), qPrintable(QString::number(heads.size())));
+    const auto laneHovered = [&]() {
+        for (QQuickItem *head : heads) {
+            if (head->property("laneHovered").toBool()) return true;
+        }
+        return false;
+    };
+    const QPoint from = corner.layer->mapToScene(
+        QPointF(corner.layer->width() / 2, corner.layer->height() * 0.25)).toPoint();
+    QTest::mouseMove(window, from + QPoint(1, 1));
+    QTest::mouseMove(window, from);
+    QTRY_VERIFY(laneHovered());
+
+    // Pressed, before any drag: no lane is hovered, and no hand is closed.
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, from);
+    QVERIFY(!laneHovered());
+    QVERIFY(corner.surface->property("panPressed").toBool());
+    QVERIFY(!corner.surface->property("panning").toBool());
+    QCOMPARE(plotSurface->property("pointerCursorShape").toInt(), int(Qt::ArrowCursor));
+    QPoint end = from;
+    if (drags) {
+        for (int step = 1; step <= 5; ++step) {
+            end = from + QPoint(-12 * step, 0);
+            QTest::mouseMove(window, end);
+            QVERIFY2(!laneHovered(), qPrintable(QStringLiteral("step %1").arg(step)));
+        }
+        QVERIFY(corner.surface->property("panning").toBool());
+        QCOMPARE(plotSurface->property("pointerCursorShape").toInt(), int(Qt::ClosedHandCursor));
+    }
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, end);
+    QVERIFY(!corner.surface->property("panPressed").toBool());
+    // Let go, still: nothing opens, also as the events the release brings
+    // are handled.
+    QTest::qWait(50);
+    QVERIFY(!laneHovered());
+    if (!drags) {
+        // The click started autoscroll; another click stops it, which is a
+        // middle press too.
+        QTRY_VERIFY(corner.surface->property("autoscrolling").toBool());
+        QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, end);
+        QVERIFY(!laneHovered());
+        QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, end);
+        QTRY_VERIFY(!corner.surface->property("autoscrolling").toBool());
+        QTest::qWait(50);
+        QVERIFY(!laneHovered());
+    }
+    // The pointer moves: the lane under it has its buttons again.
+    QTest::mouseMove(window, end + QPoint(1, 0));
+    QTRY_VERIFY(laneHovered());
 }
 
 // The divider between "Not following" and the zoom has 6 px on each side
@@ -7153,6 +7241,43 @@ void TransportInputSmokeTest::viewerDragsCountAsPointerActivity() {
     autoHide->setProperty("hideDelay", 600000);
     QVERIFY(QMetaObject::invokeMethod(viewer, albumArt ? "closeAlbumArtViewer" : "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property(albumArt ? "albumArtViewerOpen" : "spectrogramViewerOpen").toBool());
+}
+
+void TransportInputSmokeTest::wheelZoomIsPointerActivity_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// A wheel zoom is the pointer's activity, as a move is, though the pointer
+// rests where it is: a viewer whose controls hid as it rested wakes them,
+// with its zoom (H20). It zoomed with them hidden.
+void TransportInputSmokeTest::wheelZoomIsPointerActivity() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    PlotCorner corner;
+    const QString error = loadPlotCorner(engine, libraryModel, mode, corner);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QQuickWindow *window = corner.window;
+    QQuickItem *plotSurface = mode == 0
+        ? corner.spectrogramSurface
+        : window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(plotSurface != nullptr);
+    QVERIFY(zoomWithColumns(corner, 1.0));
+    // Rested on the plot since it came, the pointer turns the wheel.
+    QTest::mouseMove(window, corner.onPane());
+    QJSValue activity = engine.evaluate(QStringLiteral(
+        "(function() { const seen = []; const f = function(x, y) { seen.push([x, y]) };"
+        " f.seen = seen; return f })()"));
+    QVERIFY(activity.isCallable());
+    plotSurface->setProperty("pointerActivity", QVariant::fromValue(activity));
+    wheelAt(window, corner.onPane());
+    QTRY_VERIFY(corner.readout->property("zoomLevel").toDouble() > 1.0);
+    const QJSValue seen = activity.property(QStringLiteral("seen"));
+    QCOMPARE(seen.property(QStringLiteral("length")).toInt(), 1);
+    QCOMPARE(seen.property(0).property(0).toNumber(), double(corner.onPane().x()));
+    QCOMPARE(seen.property(0).property(1).toNumber(), double(corner.onPane().y()));
 }
 
 std::unique_ptr<QmlSmokeTest> makeTransportInputSmokeTest(const QString &userDirectoriesParent) {

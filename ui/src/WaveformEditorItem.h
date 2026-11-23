@@ -137,6 +137,14 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // Whether a middle-drag pans the view: from the drag distance to the
     // release. The surface shows a closed hand meanwhile.
     Q_PROPERTY(bool panning READ panning NOTIFY panningChanged)
+    // Whether a middle press holds the view, which leads to a pan or to
+    // autoscroll: from the press to its release. The lanes' heads open on
+    // no hover meanwhile.
+    Q_PROPERTY(bool panPressed READ panPressed NOTIFY panPressedChanged)
+    // Where, in the scene, that press was, and once it is released, where
+    // it was let go: the pointer's last place the plot knows, as hover goes
+    // to no one while the button is held.
+    Q_PROPERTY(QPointF panScenePosition READ panScenePosition NOTIFY panPressedChanged)
     // Whether the pointer is on the plot: over it, out to its last pixel
     // column, or holding a button it pressed on it, through a pan and out
     // past its edges until the release. The crosshair shows while it is;
@@ -237,6 +245,8 @@ public:
     bool detached() const { return m_detached; }
     bool autoscrolling() const { return m_autoscrollingShown; }
     bool panning() const { return m_panning; }
+    bool panPressed() const { return m_panPressed; }
+    QPointF panScenePosition() const { return m_panScenePosition; }
     bool pointerOn() const { return m_pointerOnShown; }
     double visibleStartSeconds() const { return m_visibleStartSeconds; }
     double visibleEndSeconds() const { return m_visibleEndSeconds; }
@@ -290,6 +300,10 @@ signals:
     void detachedChanged();
     void autoscrollingChanged();
     void panningChanged();
+    void panPressedChanged();
+    // A wheel zoomed the plot at `scenePosition`: the pointer acted there,
+    // as when it moves, though it rests where it is.
+    void wheelZoomed(QPointF scenePosition);
     void pointerOnChanged();
     void visibleRangeChanged();
     void seekRequested(double seconds);
@@ -568,9 +582,13 @@ private:
     void armReattachLocked(qint64 nowNs);
     // The view follows the playhead again.
     void reattachLocked();
+    // A middle press that held the view leads to nothing: it follows the
+    // playhead again.
+    void releasePressHold();
     // Autoscroll, the plot's second way to move its view, beside the
     // middle-drag: a middle click that did not drag, at `position`, starts
     // it on a zoomed view, which it detaches where it is.
+    void setPanPressed(bool pressed);
     void startAutoscroll(QPointF position);
     // Moves the detached view by `viewsPerSecond` of its width a second for
     // `seconds`, held within the track: whether it moved.
@@ -863,11 +881,20 @@ private:
     // enough to pan, where it was pressed, and where the pan last
     // started from, as the view's unrounded start and the pointer's x.
     bool m_panPressed{false};
+    QPointF m_panScenePosition;
     bool m_panning{false};
     QPointF m_panPressPosition;
     // Whether the press stopped autoscroll, so that its release starts
     // none.
     bool m_panStopsAutoscroll{false};
+    // Whether a middle press holds a view that followed the playhead where
+    // it was, for the pan or the autoscroll it leads to: the time under the
+    // pointer stays from the press, not only from the drag distance (it
+    // moved on by a tenth meanwhile, H20). Detached in all but name, as
+    // nothing moved it yet: the plot says it is moved once a pan or
+    // autoscroll moves it, so that a click to autoscroll says nothing
+    // (#655). Under the state mutex.
+    bool m_pressHolds{false};
     double m_panOriginStart{0.0};
     double m_panOriginX{0.0};
     // Whether autoscroll moves the view (see m_autoscroll): nothing glides

@@ -78,8 +78,13 @@ Item {
     // (#655). Follow Playhead's shortcut is for its tooltip.
     property bool viewMoved: false
     property bool viewAutoscrolling: false
-    // Whether a middle-drag pans the plot.
-    property bool viewPanning: false
+    // Whether a middle press holds the plot, from the press to its release:
+    // it leads to a pan or to autoscroll.
+    property bool viewPanPressed: false
+    // Where, in this layer, it was let go: hover goes to no one while the
+    // button is held, so `pointerPosition` is where it was pressed until the
+    // release brings the pointer's place.
+    property point viewPanLetGoAt: Qt.point(0, 0)
     property string followShortcut: ""
     // Whether a viewer shows the mode switch and the zoom in its own
     // controls, on its corner plate or in its title strip: then they are
@@ -235,6 +240,22 @@ Item {
     // after the other as it ended, and its notice showed between them
     // (H17).
     property int _notice: 0
+    // Whether the hand of a middle press holds the plot: from the press
+    // until the pointer next moves after the release. It holds the plot,
+    // not a lane's buttons, which no lane under it opens meanwhile: from
+    // the drag's threshold alone, the head under it opened on the press,
+    // closed as the pan began and opened again on the release (H20).
+    property bool _handHolds: false
+    onViewPanPressedChanged: {
+        if (root.viewPanPressed)
+            root._handHolds = true
+    }
+    onPointerPositionChanged: {
+        if (root._handHolds && !root.viewPanPressed
+                && (root.pointerPosition.x !== root.viewPanLetGoAt.x
+                    || root.pointerPosition.y !== root.viewPanLetGoAt.y))
+            root._handHolds = false
+    }
     onViewMovedChanged: root._notice = root.viewMoved ? 1
         : !root.viewAutoscrolling && !root.controlsInViewer && modeSwitch.revealLevel > 0
             && Kirigami.Units.shortDuration > 0 ? 2 : 0
@@ -367,11 +388,10 @@ Item {
             revealedWithControls: root.controlsAutoHide
             // Not while autoscroll runs, whose pointer steers its speed
             // across the lanes, not at their buttons: their plates came
-            // and went as it crossed them (H17). Nor while a middle-drag
-            // pans the plot, whose hand holds the plot, not a lane's
-            // buttons: they opened under it (H19).
+            // and went as it crossed them (H17). Nor while a middle press
+            // holds the plot (_handHolds): they opened under its drag (H19).
             laneHovered: root.hoveredLane === index && !root.viewAutoscrolling
-                && !root.viewPanning
+                && !root._handHolds
             pointerPosition: root.pointerPosition
             pointerKnown: root.pointerKnown
             pointerActivity: root.pointerActivity

@@ -42,6 +42,8 @@ private slots:
     void autoscrollInAWindow();
     void grabbedTimeHoldsStillThroughAPan_data();
     void grabbedTimeHoldsStillThroughAPan();
+    void grabbedTimeHoldsFromThePress_data();
+    void grabbedTimeHoldsFromThePress();
     void panShowsAClosedHand();
 };
 
@@ -1539,6 +1541,78 @@ void WaveformFollowSmokeTest::grabbedTimeHoldsStillThroughAPan() {
                  qPrintable(QStringLiteral("%1 at %2, grabbed %3").arg(shown).arg(x).arg(grabbed)));
     }
     sendMouse(item, QEvent::MouseButtonRelease, moves.last(), Qt::MiddleButton, Qt::NoButton);
+}
+
+void WaveformFollowSmokeTest::grabbedTimeHoldsFromThePress_data() {
+    QTest::addColumn<int>("then");
+    QTest::newRow("a drag pans") << 0;
+    QTest::newRow("a click starts autoscroll") << 1;
+    QTest::newRow("a press that leads nowhere") << 2;
+}
+
+// A middle press on a view that follows holds the view from the press, as
+// playback goes on: the time the crosshair shows under a pointer held still
+// stays the one pressed on until the drag pans from it (it moved on by a
+// tenth meanwhile, H20), and a click's autoscroll starts from it. Until
+// something moves it, the view says nothing of it, so that a click that
+// starts autoscroll does not show it moved (#655). A press that leads to
+// neither, as one taken away, leaves it to follow again.
+void WaveformFollowSmokeTest::grabbedTimeHoldsFromThePress() {
+    QFETCH(int, then);
+    WaveformEditorItem item;
+    TestTime time;
+    playZoomed(item, time, 8.0, 30.0);
+    QSignalSpy detachedChanges(&item, &WaveformEditorItem::detachedChanged);
+    const auto readout = [&](double x) {
+        const double seconds = rightClickAt(item, x);
+        const auto [start, end] = viewOf(item);
+        return CrosshairReadout::formatCrosshairTime(seconds,
+            CrosshairReadout::crosshairTimeDecimals((end - start) / kWidth));
+    };
+    const double pressX = 300.0;
+    const QString grabbed = readout(pressX);
+    const auto pressed = viewOf(item);
+    sendMouse(item, QEvent::MouseButtonPress, pressX, Qt::MiddleButton, Qt::MiddleButton);
+    // Held still for half a second of playback.
+    for (int step = 0; step < 30; ++step) {
+        time.advance(1.0 / 60.0);
+        frame(item);
+        QVERIFY2(sameView(viewOf(item), pressed),
+                 qPrintable(QStringLiteral("step %1: %2, pressed %3")
+                                .arg(step).arg(describe(viewOf(item)), describe(pressed))));
+        QVERIFY(!item.detached());
+    }
+    QVERIFY(item.positionSeconds() > 30.4);
+    QCOMPARE(detachedChanges.count(), 0);
+    if (then == 0) {
+        for (double x = pressX - 20.3; x > 100.0; x -= 6.3) {
+            sendMouse(item, QEvent::MouseMove, x, Qt::NoButton, Qt::MiddleButton);
+            time.advance(1.0 / 60.0);
+            frame(item);
+            const QString shown = readout(x);
+            QVERIFY2(shown == grabbed,
+                     qPrintable(QStringLiteral("%1 at %2, grabbed %3").arg(shown).arg(x).arg(grabbed)));
+        }
+        QVERIFY(item.panning());
+        QVERIFY(item.detached());
+        QCOMPARE(detachedChanges.count(), 1);
+        sendMouse(item, QEvent::MouseButtonRelease, 100.0, Qt::MiddleButton, Qt::NoButton);
+        QVERIFY(item.detached());
+    } else if (then == 1) {
+        sendMouse(item, QEvent::MouseButtonRelease, pressX, Qt::MiddleButton, Qt::NoButton);
+        QVERIFY(item.m_autoscroll.active());
+        QVERIFY(item.autoscrolling());
+        QVERIFY(item.detached());
+        QVERIFY2(sameView(viewOf(item), pressed), qPrintable(describe(viewOf(item))));
+        QCOMPARE(readout(pressX), grabbed);
+        item.m_autoscroll.stop();
+    } else {
+        item.mouseUngrabEvent();
+        QVERIFY(!item.detached());
+        QCOMPARE(detachedChanges.count(), 0);
+        QVERIFY2(sameView(viewOf(item), followingViewOf(item)), qPrintable(describe(viewOf(item))));
+        QVERIFY(!sameView(viewOf(item), pressed));
+    }
 }
 
 std::unique_ptr<QmlSmokeTest> makeWaveformFollowSmokeTest(const QString &userDirectoriesParent) {

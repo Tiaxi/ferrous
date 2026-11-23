@@ -43,6 +43,10 @@ Item {
     readonly property alias waveformItem: waveform
     // Whether a middle-drag pans the view.
     readonly property bool panning: waveform.panning
+    // Whether a middle press holds it, from the press to the release.
+    readonly property bool panPressed: waveform.panPressed
+    // Where, in the scene, it was pressed, or let go.
+    readonly property point panScenePosition: waveform.panScenePosition
     // The pointer hides once the overlays have faded out, and stays so.
     // While a pan holds the plot it is a closed hand, as over the album
     // art's.
@@ -106,6 +110,12 @@ Item {
     WaveformEditorItem {
         id: waveform
         objectName: "waveformEditorItem"
+        // A wheel zoom is the pointer's activity too, also where it rests.
+        onWheelZoomed: (scenePosition) => {
+            if (root.pointerActivity) {
+                root.pointerActivity(scenePosition.x, scenePosition.y)
+            }
+        }
         width: root.plotWidth
         height: root.height
         // Hidden too: the item decodes nothing while it is not shown, and

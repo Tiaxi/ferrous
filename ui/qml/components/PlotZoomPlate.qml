@@ -35,9 +35,11 @@ Components.PlotPlate {
     // plate grows and narrows at its left edge, Reset staying where it is,
     // and the text and divider stand in their place, drawn only while the
     // plate holds them: clipped to the growing plate, the text was cut
-    // mid-letter for 83 ms (H18). Coming, the plate grows over 80 ms,
+    // mid-letter for 83 ms (H18). Coming, the plate grows over 50 ms,
     // OutCubic, and the text and divider fade in whole over 60 ms, OutCubic,
-    // once it holds them; going, they fade out over 40 ms, OutCubic, as the
+    // as soon as it holds them, about 32 ms in, so that the plate and its
+    // text arrive as one (grown over 80 ms, it stood empty for 57 ms, H20);
+    // going, they fade out over 40 ms, OutCubic, as the
     // plate narrows over 90 ms, InOutCubic, slowly at first, so they are
     // gone before it is narrower than they are: gone in a frame, an empty
     // box narrowed for 60 ms (H18). At the default zoom, with nothing else
@@ -95,8 +97,8 @@ Components.PlotPlate {
                 root.noticeLevel = from
                 if (root.zoomed) {
                     root._textLevel = textFrom
-                    root._move(1, 0.8, Easing.OutCubic)
-                    root._fadeText(1, root._holdingTime(from, 0.8), 0.6)
+                    root._move(1, 0.5, Easing.OutCubic)
+                    root._fadeText(1, root._holdingTime(from, 0.5), 0.6)
                 } else {
                     root._textLevel = 1
                     root._move(1, 1.2, Easing.OutCubic)
