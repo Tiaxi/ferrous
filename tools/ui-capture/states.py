@@ -776,6 +776,7 @@ def m_onetoone(r, arg):
     col_b = thirds + [("Album art viewer (windowed): its info column", info_c),
                       ("Queue: its header and first rows (left part)", que_c)]
     H = sheet_height(qh)
+    top_h = max(sum(LH + c.height + GAP for _, c in col_a), sum(LH + c.height + GAP for _, c in col_b))
     if (W + 28) * (H + 64) > 1.15e6:  # as its sheet will be (a title above, a margin around)
         raise RuntimeError(f"onetoone: {W}x{H} is over 1.15 MP on its sheet")
     S = Image.new("RGB", (W, H), (78, 82, 88))
