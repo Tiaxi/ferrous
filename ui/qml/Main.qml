@@ -2188,6 +2188,8 @@ ApplicationWindow {
                 ? spectrogramSurface.laneLabels : waveformSurface.laneLabels
             hoveredLane: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.hoveredLane : waveformSurface.hoveredLane
+            plotPointerOn: visualizationSurface.spectrogramShown
+                ? spectrogramSurface.pointerOn : waveformSurface.pointerOn
             paneHovered: visualizationHover.hovered
             viewerPlateHovered: spectrogramViewerShell.cornerHovered
             pointerKnown: plotLayer.hoveredLane >= 0

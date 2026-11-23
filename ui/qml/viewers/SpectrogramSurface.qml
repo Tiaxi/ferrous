@@ -54,6 +54,17 @@ Item {
     property int hoveredLane: -1
     // Where the pointer is on the plot, in the scene, while a lane has it.
     property point pointerScenePosition: Qt.point(0, 0)
+    // Whether the pointer is on the plot, or holds a button pressed on it:
+    // while it does, the crosshair shows (SpectrogramItem's pointerOn).
+    readonly property bool pointerOn: {
+        for (let i = 0; i < spectrogramRepeater.count; ++i) {
+            const pane = spectrogramRepeater.itemAt(i)
+            if (pane && pane.spectrogramItem && pane.spectrogramItem.pointerOn) {
+                return true
+            }
+        }
+        return false
+    }
     // Whether the plot waits for the track's first columns.
     readonly property bool awaitingData: {
         const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null

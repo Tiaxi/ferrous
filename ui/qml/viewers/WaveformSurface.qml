@@ -74,6 +74,10 @@ Item {
     readonly property int hoveredChannel: waveform.viewMode === 1 ? root.hoveredLane : -1
     // Where the pointer is on the plot, in the scene, while it is on it.
     readonly property point pointerScenePosition: waveformHover.point.scenePosition
+    // Whether the pointer is on the plot, the seams between its lanes too,
+    // or holds a button pressed on it: while it does, the crosshair shows
+    // (WaveformEditorItem's pointerOn).
+    readonly property bool pointerOn: waveform.pointerOn
     // Whether the plot waits for the track's overview.
     readonly property bool awaitingData: !root.uiBridge.waveformComplete
         && root.uiBridge.waveformCoverageSeconds <= 0

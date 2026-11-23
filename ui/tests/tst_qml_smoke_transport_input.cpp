@@ -41,6 +41,8 @@ private slots:
     void viewerZoomShowsAReadoutAndAResetButton();
     void mainPaneZoomShowsAReadoutBesideTheModeSwitch();
     void mainPaneCornerShowsAndHidesAsOneRow();
+    void mainPaneCornerAndCrosshairShareOneHover_data();
+    void mainPaneCornerAndCrosshairShareOneHover();
     void zoomReadoutKeepsItsWidthAsItsDigitsChange();
     void resetZoomResetsOnlyTheShownPlotsZoom();
     void resetZoomIsOffAtAShortTracksStretchedDefault();
@@ -2707,6 +2709,158 @@ void TransportInputSmokeTest::mainPaneCornerShowsAndHidesAsOneRow() {
     QTRY_COMPARE(plate->opacity(), 1.0);
     QTRY_COMPARE(modeSwitch->opacity(), 1.0);
     QCOMPARE(sceneRectOf(reset), resetShown);
+}
+
+namespace {
+
+// Whether a lane of the spectrogram draws the crosshair: the pointer's
+// lane, and the others its line, from crosshairSharedX.
+bool spectrogramCrosshairShown(QQuickItem *spectrogramSurface) {
+    for (QQuickItem *lane : itemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem"))) {
+        if (lane->property("crosshairEnabled").toBool()
+            && (lane->property("pointerOn").toBool() || lane->property("crosshairSharedX").toDouble() >= 0.0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+void TransportInputSmokeTest::mainPaneCornerAndCrosshairShareOneHover_data() {
+    // 0 the spectrogram, 1 the waveform; 0 mixed, 1 per channel.
+    QTest::addColumn<int>("view");
+    QTest::addColumn<int>("viewMode");
+    QTest::newRow("spectrogram, mixed") << 0 << 0;
+    QTest::newRow("spectrogram, per channel") << 0 << 1;
+    QTest::newRow("waveform, mixed") << 1 << 0;
+    QTest::newRow("waveform, per channel") << 1 << 1;
+}
+
+// The corner's row and the plot's crosshair are one hover: the row went on
+// the lanes' hover handlers, which let go of the pointer where the plot
+// kept it, such as at the seam between the waveform's lanes, while the
+// crosshair stayed (H14). Both show wherever the pointer is on
+// the plot, through a middle-drag, and go together as it leaves.
+void TransportInputSmokeTest::mainPaneCornerAndCrosshairShareOneHover() {
+    QFETCH(int, view);
+    QFETCH(int, viewMode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QVERIFY(bridge && viewer && spectrogramSurface && waveformSurface && layer);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QQuickItem *modeSwitch = itemNamed(layer, QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(waveform && modeSwitch);
+    setPlayingTrack(bridge);
+    // The plot out to the pane's right edge.
+    QVERIFY(bridge->setProperty("showLevelMeter", false));
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    bridge->setProperty("spectrogramDisplayMode", 1);
+    bridge->setProperty("spectrogramViewMode", viewMode);
+    setChannelCount(bridge, spectrogramSurface, viewMode == 1 ? 2 : 1);
+    QQuickItem *surface = view == 1 ? waveformSurface : spectrogramSurface;
+    if (view == 1) {
+        viewer->setProperty("visualizationMode", 1);
+        QTRY_VERIFY(waveform->isVisible());
+        QTRY_COMPARE(waveformSurface->property("laneCount").toInt(), viewMode == 1 ? 2 : 1);
+        waveform->setZoomLevel(4.0);
+    } else {
+        QTRY_COMPARE(spectrogramSurface->property("laneCount").toInt(), viewMode == 1 ? 2 : 1);
+        spectrogramSurface->setProperty("_widgetZoomLevel", 4.0);
+    }
+    QTRY_VERIFY(waveform->crosshairEnabled() || view == 0);
+
+    // The crosshair the plot draws: for the waveform, what it paints at the
+    // pointer that it paints without one; for the spectrogram, its lanes'.
+    const auto crosshairShown = [&](QPointF scene) {
+        if (view == 0) {
+            return spectrogramCrosshairShown(spectrogramSurface);
+        }
+        const QSize size(int(waveform->width()), int(waveform->height()));
+        const auto painted = [&]() {
+            QImage image(size, QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::transparent);
+            QPainter painter(&image);
+            waveform->paint(&painter);
+            painter.end();
+            return image;
+        };
+        const QImage with = painted();
+        waveform->setCrosshairEnabled(false);
+        const QImage without = painted();
+        waveform->setCrosshairEnabled(true);
+        const int column = std::clamp(int(waveform->mapFromScene(scene).x()), 0, size.width() - 1);
+        for (int y = 0; y < size.height(); ++y) {
+            if (with.pixel(column, y) != without.pixel(column, y)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // The pointer where a test cannot put it, off whole pixels.
+    const auto moveTo = [&](QPointF scene, Qt::MouseButtons buttons = Qt::NoButton) {
+        QMouseEvent move(QEvent::MouseMove, scene, scene, window->mapToGlobal(scene), Qt::NoButton, buttons,
+                         Qt::NoModifier);
+        QGuiApplication::sendEvent(window, &move);
+    };
+    const auto agree = [&](QPointF scene, bool on) -> QString {
+        // The row's pane term: a view moved by the drag keeps the row at rest.
+        const bool corner = layer->property("cornerWanted").toBool();
+        const bool crosshair = crosshairShown(scene);
+        if (corner != on || crosshair != on) {
+            return QStringLiteral("at %1, %2: the corner %3, the crosshair %4")
+                .arg(scene.x()).arg(scene.y()).arg(corner ? "shown" : "hidden").arg(crosshair ? "shown" : "hidden");
+        }
+        return {};
+    };
+    const QRectF plot = sceneRectOf(view == 1 ? static_cast<QQuickItem *>(waveform) : surface);
+    QVERIFY2(qAbs(plot.right() - window->width()) < 1.0,
+             qPrintable(QStringLiteral("%1 in %2").arg(plot.right()).arg(window->width())));
+    const QPointF away(8, window->height() - 8);
+    moveTo(away);
+    QTRY_VERIFY(!modeSwitch->property("revealed").toBool());
+    QVERIFY(!layer->property("cornerWanted").toBool());
+
+    const double middleY = plot.top() + std::floor(plot.height() / 4);
+    QList<QPointF> onPlot{QPointF(plot.center().x(), middleY), QPointF(plot.left() + 0.5, middleY),
+                          QPointF(plot.right() - 0.4, middleY), QPointF(plot.right() - 0.4, plot.bottom() - 2.5)};
+    if (view == 1 && viewMode == 1) {
+        // The seam between the waveform's lanes, which is neither lane's
+        // but the plot item's, and its crosshair's.
+        onPlot.append(QPointF(plot.center().x(), plot.top() + std::round(plot.height() / 2) + 0.25));
+    }
+    for (const QPointF &at : onPlot) {
+        moveTo(at);
+        QTRY_VERIFY2(agree(at, true).isEmpty(), qPrintable(agree(at, true)));
+        moveTo(away);
+        QTRY_VERIFY2(agree(away, false).isEmpty(), qPrintable(agree(away, false)));
+    }
+
+    // A middle-drag keeps both, out past the plot's edge, and lets them go
+    // as it ends there.
+    const QPointF from(plot.center().x(), middleY);
+    moveTo(from);
+    QTRY_VERIFY2(agree(from, true).isEmpty(), qPrintable(agree(from, true)));
+    QTest::mousePress(window, Qt::MiddleButton, Qt::NoModifier, from.toPoint());
+    QPointF at = from.toPoint();
+    for (int step = 0; step < 12; ++step) {
+        at.rx() -= 30;
+        QTest::mouseMove(window, at.toPoint());
+        QVERIFY2(agree(at, true).isEmpty(), qPrintable(QStringLiteral("step %1: ").arg(step) + agree(at, true)));
+    }
+    at = QPointF(at.x(), plot.top() - 4);
+    QTest::mouseMove(window, at.toPoint());
+    QVERIFY2(agree(at, true).isEmpty(), qPrintable(QStringLiteral("past the edge: ") + agree(at, true)));
+    QTest::mouseRelease(window, Qt::MiddleButton, Qt::NoModifier, at.toPoint());
+    QTRY_VERIFY2(agree(at, false).isEmpty(), qPrintable(QStringLiteral("let go: ") + agree(at, false)));
 }
 
 // The zoom readout is as wide as its widest four-digit value, its text

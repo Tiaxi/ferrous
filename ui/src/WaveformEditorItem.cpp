@@ -678,7 +678,7 @@ void WaveformEditorItem::setTextScale(double value) {
         m_textScale = value;
         // Only the crosshair's readout is in it, which a frame lays out and
         // draws; the cached rasters and tiles are kept.
-        shown = m_crosshairEnabled && m_hoverActive;
+        shown = m_crosshairEnabled && pointerOnLocked();
     }
     emit textScaleChanged();
     if (shown) update();
@@ -691,7 +691,7 @@ void WaveformEditorItem::setReadoutColor(QColor CrosshairReadout::Colors::*membe
         if (m_readoutColors.*member == value) return;
         m_readoutColors.*member = value;
         // Only the crosshair's overlay is in them, which a frame draws.
-        shown = m_crosshairEnabled && m_hoverActive;
+        shown = m_crosshairEnabled && pointerOnLocked();
     }
     emit readoutColorsChanged();
     if (shown) update();
@@ -785,6 +785,28 @@ void WaveformEditorItem::setHoverPosition(double x, double y, bool active) {
         m_hoverActive = active;
         m_hoverPosition = QPointF(x, y);
     }
+    publishPointerOn();
+    if (crosshairEnabled()) update();
+}
+
+void WaveformEditorItem::publishPointerOn() {
+    bool on = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        on = pointerOnLocked();
+    }
+    if (on == m_pointerOnShown) return;
+    m_pointerOnShown = on;
+    emit pointerOnChanged();
+}
+
+void WaveformEditorItem::setPointerHeld(bool held) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_pointerHeld == held) return;
+        m_pointerHeld = held;
+    }
+    publishPointerOn();
     if (crosshairEnabled()) update();
 }
 
@@ -2780,7 +2802,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
             }
         }
         hover = m_hoverPosition;
-        hoverActive = m_hoverActive;
+        hoverActive = pointerOnLocked();
         crosshair = m_crosshairEnabled;
         crosshairOpacity = m_crosshairOpacity;
         scale = renderScaleLocked();
@@ -4207,9 +4229,9 @@ void WaveformEditorItem::drawFpsOverlay(
     painter.drawText(QPointF(counter.x(), counter.y() + metrics.ascent()), text);
 }
 
-void WaveformEditorItem::hoverMoveEvent(QHoverEvent *event) { { QMutexLocker lock(&m_stateMutex); m_hoverActive = true; m_hoverPosition = event->position(); } if (m_crosshairEnabled) update(); }
+void WaveformEditorItem::hoverMoveEvent(QHoverEvent *event) { { QMutexLocker lock(&m_stateMutex); m_hoverActive = true; m_hoverPosition = event->position(); } publishPointerOn(); if (m_crosshairEnabled) update(); }
 void WaveformEditorItem::hoverEnterEvent(QHoverEvent *event) { hoverMoveEvent(event); }
-void WaveformEditorItem::hoverLeaveEvent(QHoverEvent *) { { QMutexLocker lock(&m_stateMutex); m_hoverActive = false; } update(); }
+void WaveformEditorItem::hoverLeaveEvent(QHoverEvent *) { { QMutexLocker lock(&m_stateMutex); m_hoverActive = false; } publishPointerOn(); update(); }
 
 void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
     if (event->button() == Qt::MiddleButton) {
@@ -4219,6 +4241,7 @@ void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
         // stops it is its own (see ViewAutoscroll).
         event->accept();
         m_panPressed = true;
+        setPointerHeld(true);
         if (m_panning) {
             m_panning = false;
             emit panningChanged();
@@ -4245,7 +4268,7 @@ void WaveformEditorItem::mousePressEvent(QMouseEvent *event) {
             m_ownSeekLanded = false;
         }
     }
-    event->accept(); emit seekRequested(seconds);
+    event->accept(); setPointerHeld(true); emit seekRequested(seconds);
 }
 
 void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
@@ -4258,7 +4281,7 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
         QMutexLocker lock(&m_stateMutex);
         // The crosshair keeps to the pointer, which holds the time it
         // grabbed.
-        if (m_hoverActive) m_hoverPosition = pointer;
+        m_hoverPosition = pointer;
         const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
         // The whole track has nowhere to pan to.
         if (span <= 0.0 || span >= m_durationSeconds) return;
@@ -4300,6 +4323,9 @@ void WaveformEditorItem::mouseMoveEvent(QMouseEvent *event) {
 }
 
 void WaveformEditorItem::mouseReleaseEvent(QMouseEvent *event) {
+    // The button pressed on the plot is let go: from here the pointer is on
+    // it while it hovers it.
+    if (event->buttons() == Qt::NoButton) setPointerHeld(false);
     if (event->button() != Qt::MiddleButton || !m_panPressed) { event->ignore(); return; }
     event->accept();
     // A middle click that did not drag starts autoscroll, unless it stopped
@@ -4312,6 +4338,7 @@ void WaveformEditorItem::mouseReleaseEvent(QMouseEvent *event) {
 }
 
 void WaveformEditorItem::mouseUngrabEvent() {
+    setPointerHeld(false);
     if (!m_panPressed) return;
     m_panPressed = false;
     if (!m_panning) return;
