@@ -127,13 +127,14 @@ const QColor kScaleTextColor(0xec, 0xec, 0xec);
 const QColor kScaleOutlineColor(0, 0, 0);
 // plotTick.
 const QColor kScaleTickColor(236, 236, 236, 191);
-// The lane at rest, before it has columns: lines across all of it in
-// white 20%, #433858 and 1.78:1 on the floor (at 11%, 1.3:1, the
-// never-played pane read as an empty slab, and the seam between its lanes
-// as one more of its lines), over the lane seam at rest, which is darker
-// than the floor, evenly spaced, or while the scale shows, at its ticks,
-// with the scale's text in plotTextSecondary.
-const QColor kRestGridLineColor(255, 255, 255, 51);
+// The lane at rest, before it has columns: lines across it in white 11%,
+// #2e2145 and 1.3:1 on the floor, under the seam between lanes at rest,
+// whose lit edge (UiPalette's plotRestLaneSeamEdge, 2.6:1) outranks them so
+// it reads as the lanes' boundary (in white 20%, 1.78:1, the lines were
+// louder than the seam and the two lanes read as one grid), evenly spaced,
+// or while the scale shows, at its ticks, with the scale's text in
+// plotTextSecondary.
+const QColor kRestGridLineColor(255, 255, 255, 28);
 const QColor kRestScaleTextColor(236, 236, 236, 184);
 // The playhead: a 1 px light core cased in 1 px of black 60% on each side.
 // The core is all but opaque, as the playhead has always been translucent:

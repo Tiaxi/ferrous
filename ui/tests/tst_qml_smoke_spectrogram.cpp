@@ -3676,8 +3676,8 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsLabelsOnlyWithTheScale() {
     QVERIFY(rest.images.isEmpty());
     const auto grab = [&window]() { return window.grabWindow().convertToFormat(QImage::Format_RGB32); };
     const QColor black(0, 0, 0);
-    // The rest lines, white 20 % over the black floor.
-    const QColor line(51, 51, 51);
+    // The rest lines, white 11 % over the black floor.
+    const QColor line(28, 28, 28);
     // The rows of the column at x that are not the floor, and the
     // brightest pixel of them.
     const auto litRows = [&black](const QImage &image, int x) {
@@ -3701,7 +3701,7 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsLabelsOnlyWithTheScale() {
     QCOMPARE(linesOnly.height(), 200);
     QCOMPARE(litRows(linesOnly, 100), rest.lines.size());
     // No labels: nothing brighter than the lines.
-    QCOMPARE(brightest(linesOnly), 51);
+    QCOMPARE(brightest(linesOnly), 28);
 
     // The scale shown: its ticks' lines, and its labels.
     item->setGridEnabled(true);
@@ -3714,7 +3714,7 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsLabelsOnlyWithTheScale() {
 
     // Hidden again, the lines alone again.
     item->setGridEnabled(false);
-    QTRY_COMPARE(brightest(grab()), 51);
+    QTRY_COMPARE(brightest(grab()), 28);
     QCOMPARE(litRows(grab(), 100), rest.lines.size());
 }
 
@@ -3740,8 +3740,8 @@ void SpectrogramSmokeTest::spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty() {
     const QImage atRest = grab();
     QCOMPARE(atRest.width(), 400);
     const QColor black(0, 0, 0);
-    // The rest lines, white 20 % over the black floor.
-    const QColor line(51, 51, 51);
+    // The rest lines, white 11 % over the black floor.
+    const QColor line(28, 28, 28);
     for (const QRect &rule : std::as_const(rest.lines)) {
         QCOMPARE(atRest.pixelColor(100, rule.y()), line);
         QCOMPARE(atRest.pixelColor(100, rule.y() - 3), black);

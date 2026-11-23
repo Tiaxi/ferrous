@@ -556,6 +556,18 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         QVERIFY(sameColor(restSeam, colorOf(spectrogram, "meterSeam")));
         QVERIFY2(relativeLuminance(restSeam) < relativeLuminance(floor), qPrintable(restSeam.name()));
         QVERIFY2(restSeam.blue() > restSeam.green() + 10 && restSeam.red() > restSeam.green(), qPrintable(restSeam.name()));
+        // Its lit top edge, in the floor's violet, outranks the rest lines
+        // (white 11 % over the floor, 1.3:1), so the cut reads as the
+        // lanes' boundary rather than one more line.
+        const QColor edge = colorOf(tokens, "plotRestLaneSeamEdge");
+        QCOMPARE(edge.alphaF(), 1.0f);
+        const double edgeContrast = contrastRatio(edge, floor);
+        QVERIFY2(edgeContrast >= 2.3 && edgeContrast <= 2.8, qPrintable(QString::number(edgeContrast)));
+        const QColor restLine = QColor::fromRgbF(floor.redF() + (1.0f - floor.redF()) * 28.0f / 255.0f,
+                                                 floor.greenF() + (1.0f - floor.greenF()) * 28.0f / 255.0f,
+                                                 floor.blueF() + (1.0f - floor.blueF()) * 28.0f / 255.0f);
+        QVERIFY2(contrastRatio(edge, restLine) >= 1.8, qPrintable(restLine.name()));
+        QVERIFY2(edge.blue() > edge.green() + 20 && edge.red() > edge.green(), qPrintable(edge.name()));
     }
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "plotBg")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "meterSeam")) >= 1.3);

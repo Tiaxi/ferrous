@@ -2900,8 +2900,9 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks_data() {
 // the -6, -12 and -24 dB marks' ticks across it, 1 px each, where they are
 // while it plays, and no lamp, fill or peak tick (the blank trough of the
 // first run read as a scrollbar's): in either mode and theme. Before any
-// audio, the pane at rest, the trough is the plot's floor and the marks the
-// rest lines' colour, on the spectrogram #14062e and #433858 (the lit
+// audio, the pane at rest, the trough is the plot's floor and the marks
+// faint, on the spectrogram #14062e and #433858, a step over the rest
+// lines, as short marks need it to show (the lit
 // #30244a trough was the one instrument switched on); with a track, paused
 // or stopped, the lit trough and its ticks; and with the queue cleared, the
 // floor again.

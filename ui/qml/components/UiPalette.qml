@@ -368,6 +368,13 @@ QtObject {
     // floor and its lines). Playing, the seam is
     // plotLaneSeam's neutral one, which shows between lanes of silence.
     readonly property color plotRestLaneSeam: root.spectrogramPlot.meterSeam
+    // The top 1 px of that cut, lit in the floor's violet: 2.6:1 on the
+    // floor, twice the rest lines' 1.3:1, so the cut reads as the lanes'
+    // boundary and not as one more line (dark alone, at 1.05:1, the seam
+    // all but vanished between the louder lines; a single lighter seam read
+    // as a rest line; the edge over its dark groove is a shape the lines
+    // don't have).
+    readonly property color plotRestLaneSeamEdge: "#5d4d80"
     // The never-played waveform's centre lines, one to a lane: the text
     // over the view, the least in whole percent that is 1.3:1 on it, as the
     // spectrogram's rest lines are faint on its floor.
@@ -408,7 +415,10 @@ QtObject {
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)
         meterTick: Qt.rgba(1, 1, 1, 0.4)
         meterTopSeam: "transparent"
-        // The floor, and the rest lines' white 20 % on it: #433858.
+        // The floor, and on it marks in white 20 %, #433858: a step over
+        // the rest lines' 11 %, as a mark a few pixels long needs more
+        // than a line across the lane to show (a meter without marks read
+        // as a scrollbar's track).
         meterRestTrough: root.plotFloor
         meterRestTick: ColorUtils.drawnOver(Qt.rgba(1, 1, 1, 0.2), root.plotFloor)
         checkedFill: root.accent

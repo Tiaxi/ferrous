@@ -1400,15 +1400,22 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
         QCOMPARE(groove.width(), upper.width());
         QCOMPARE(groove.center().y(), upper.bottom() + 0.5);
         QCOMPARE(grooves().first()->property("color").value<QColor>().rgb(), restSeam.rgb());
-        // Drawn over the lanes: their rows beside the seam show it.
+        // Drawn over the lanes: their rows beside the seam show it, the
+        // upper one its lit edge.
         QTest::qWait(50);
         const QImage image = window->grabWindow();
         QVERIFY(!image.isNull());
         const double scale = double(image.width()) / window->width();
-        for (const double row : {upper.bottom() - 0.5, upper.bottom() + 0.5, lower.top() + 0.5}) {
-            const QColor drawn = image.pixelColor(int(pane.center().x() * scale), int(row * scale));
-            QVERIFY2(drawn.rgb() == restSeam.rgb(),
-                     qPrintable(QStringLiteral("row %1: %2").arg(row).arg(drawn.name())));
+        const QColor restSeamEdge = palette->property("plotRestLaneSeamEdge").value<QColor>();
+        const QList<std::pair<double, QColor>> grooveRows{
+            {upper.bottom() - 0.5, restSeamEdge}, {upper.bottom() + 0.5, restSeam}, {lower.top() + 0.5, restSeam}};
+        for (const auto &[row, expected] : grooveRows) {
+            // Every device row of it: at 2x the edge is 2 device rows.
+            for (int deviceRow = int(std::floor((row - 0.5) * scale)); deviceRow < int((row + 0.5) * scale); ++deviceRow) {
+                const QColor drawn = image.pixelColor(int(pane.center().x() * scale), deviceRow);
+                QVERIFY2(drawn.rgb() == expected.rgb(),
+                         qPrintable(QStringLiteral("row %1: %2, not %3").arg(deviceRow).arg(drawn.name(), expected.name())));
+            }
         }
         const QColor beyond = image.pixelColor(int(pane.center().x() * scale), int((lower.top() + 2.5) * scale));
         QVERIFY2(beyond.rgb() != restSeam.rgb(), qPrintable(beyond.name()));
@@ -1503,10 +1510,12 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QObject *spectrogramPlot = qvariant_cast<QObject *>(palette->property("spectrogramPlot"));
     QCOMPARE(seams->property("color").value<QColor>(), palette->property("plotRestLaneSeam").value<QColor>());
     QTRY_VERIFY2(restProblem(false).isEmpty(), qPrintable(restProblem(false)));
-    // As drawn (the lines at 1.3:1 left the never-played pane an empty
-    // slab, and the seam, at 1.45:1, read as one more line): the rest lines
-    // white 20 % over the floor, some 1.78:1 on it, and the seam between
-    // the lanes a cut, darker than the floor, well apart from them.
+    // As drawn: the rest lines white 11 % over the floor, some 1.3:1 on
+    // it, and the seam between the lanes a cut, darker than the floor,
+    // under a lit edge that outranks them (with the lines at 1.78:1 and the
+    // seam a dark cut alone, 1.05:1, the lines were the louder marks and
+    // the two lanes read as one grid; a single lighter seam, at 1.45:1,
+    // read as one more line).
     {
         const auto luminance = [](const QColor &color) {
             const auto channel = [](double value) {
@@ -1532,13 +1541,22 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
         const QPointF origin = upper.topLeft() * scale;
         const QColor drawnLine = image.pixelColor(int(origin.x()) + line.center().x(), int(origin.y()) + line.top());
         const double lineContrast = contrast(drawnLine, floor);
-        QVERIFY2(lineContrast >= 1.72 && lineContrast <= 1.84,
+        QVERIFY2(lineContrast >= 1.25 && lineContrast <= 1.36,
                  qPrintable(QStringLiteral("rest line %1, %2:1 on the floor").arg(drawnLine.name()).arg(lineContrast)));
         const QColor drawnSeam = image.pixelColor(int((pane.center().x()) * scale), int((upper.bottom() + 0.5) * scale));
         QCOMPARE(drawnSeam.rgb(), palette->property("plotRestLaneSeam").value<QColor>().rgb());
         QVERIFY2(luminance(drawnSeam) < luminance(floor), qPrintable(drawnSeam.name()));
-        QVERIFY2(contrast(drawnSeam, drawnLine) >= 1.8,
-                 qPrintable(QStringLiteral("seam %1 on the lines' %2").arg(drawnSeam.name(), drawnLine.name())));
+        // The groove's lit top edge: about 2.5:1 on the floor, in its
+        // violet, well over the lines.
+        const QColor drawnEdge = image.pixelColor(int((pane.center().x()) * scale), int((upper.bottom() - 0.5) * scale));
+        QCOMPARE(drawnEdge.rgb(), palette->property("plotRestLaneSeamEdge").value<QColor>().rgb());
+        const double edgeContrast = contrast(drawnEdge, floor);
+        QVERIFY2(edgeContrast >= 2.3 && edgeContrast <= 2.8,
+                 qPrintable(QStringLiteral("seam edge %1, %2:1 on the floor").arg(drawnEdge.name()).arg(edgeContrast)));
+        QVERIFY2(contrast(drawnEdge, drawnLine) >= 1.8,
+                 qPrintable(QStringLiteral("seam edge %1 on the lines' %2").arg(drawnEdge.name(), drawnLine.name())));
+        QVERIFY2(drawnEdge.blue() > drawnEdge.green() + 20 && drawnEdge.red() > drawnEdge.green(),
+                 qPrintable(drawnEdge.name()));
     }
     // The scale shown: its labels too.
     QVERIFY(bridge->setProperty("showSpectrogramScale", true));
