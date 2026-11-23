@@ -663,6 +663,7 @@ private slots:
     void recentIssuesOpenWithTheirFocusShown();
     void diagnosticsActionsShareOneRow_data();
     void diagnosticsActionsShareOneRow();
+    void diagnosticsLogFrameShowsFocusOnlyForTheKeyboard();
     void deletingTheLogPointsBugReportsAtTheCopyWithoutPaths();
     void recentIssuesAreSeenWhenThePopupCloses();
     void thePanesEndsEarlyLinkOpensItsIssue();
@@ -716,8 +717,11 @@ private slots:
     void editTagsNumberRevertFollowsItsHeader_data();
     void editTagsNumberRevertFollowsItsHeader();
     void editTagsWordsItsWarningsAlike();
+    void renameFilesOpensNoWiderThanEditTags_data();
+    void renameFilesOpensNoWiderThanEditTags();
     void autoNumberGroupsStandApartAtAnyFont_data();
     void autoNumberGroupsStandApartAtAnyFont();
+    void autoNumberTotalsSayWhichTheyWrite();
     void editTagsRevertToolTipsStandAboveTheirGlyphs_data();
     void editTagsRevertToolTipsStandAboveTheirGlyphs();
     void dialogsShareOneLook();
@@ -4227,6 +4231,53 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QVERIFY(reject(dialog));
 }
 
+// Diagnostics opens with the keyboard on its log, so that the keys scroll
+// it, and the log's frame takes the focus colour only while the keyboard is
+// in use, as the lists' rings: not at rest after opening, nor after a click
+// (it showed a focus frame round the whole log at rest).
+void UiDialogsTest::diagnosticsLogFrameShowsFocusOnlyForTheKeyboard() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QStringList lines;
+    for (int index = 0; index < 200; ++index) {
+        lines << QStringLiteral("[library] warning: fixture line %1").arg(index);
+    }
+    QVERIFY(bridge->setProperty("diagnosticsText", lines.join(QLatin1Char('\n'))));
+    QObject *dialog = object(window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *diagnostics = windowOf(dialog);
+    QQuickItem *frame = visibleNamed(diagnostics, QStringLiteral("diagnosticsLogFrame"));
+    QQuickItem *log = visibleNamed(diagnostics, QStringLiteral("diagnosticsLogView"));
+    QQuickItem *scrollView = visibleNamed(diagnostics, QStringLiteral("diagnosticsScrollView"));
+    QVERIFY(frame != nullptr && log != nullptr && scrollView != nullptr);
+    QObject *flickable = qvariant_cast<QObject *>(scrollView->property("contentItem"));
+    QVERIFY(flickable != nullptr);
+    const QColor focusColor = evaluate(frame, QStringLiteral("Kirigami.Theme.focusColor")).value<QColor>();
+    const auto frameColor = [&] { return QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>(); };
+    QTRY_VERIFY(log->hasActiveFocus());
+    QTRY_VERIFY(flickable->property("contentHeight").toReal() > scrollView->height());
+    QVERIFY(frameColor() != focusColor);
+
+    // The keyboard scrolls the log, and its frame shows that it has it.
+    QCOMPARE(flickable->property("contentY").toReal(), 0.0);
+    QTest::keyClick(diagnostics, Qt::Key_PageDown);
+    QTRY_VERIFY(flickable->property("contentY").toReal() > 0);
+    QVERIFY(log->hasActiveFocus());
+    QTRY_COMPARE(hex(frameColor()), hex(focusColor));
+
+    // A click in the log keeps it the keyboard's, at rest again.
+    QTest::mouseClick(diagnostics, Qt::LeftButton, Qt::NoModifier, sceneRect(log).center().toPoint());
+    QTRY_VERIFY(frameColor() != focusColor);
+    QVERIFY(log->hasActiveFocus());
+    QTest::keyClick(diagnostics, Qt::Key_Home);
+    QTRY_COMPARE(flickable->property("contentY").toReal(), 0.0);
+    QTRY_COMPARE(hex(frameColor()), hex(focusColor));    QVERIFY(reject(dialog));
+}
+
 // Recent Issues has the keyboard where it shows it: opened with the pointer,
 // it gave the newest action the keyboard for a popup's reason, which draws
 // no focus ring, and Enter pressed that unmarked action. Opened from the
@@ -7206,6 +7257,79 @@ void UiDialogsTest::editTagsWordsItsWarningsAlike() {
              QStringLiteral("The new names couldn’t be worked out: no such folder"));
 }
 
+void UiDialogsTest::renameFilesOpensNoWiderThanEditTags_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("editorWidth");
+    QTest::newRow("10 pt") << 10.0 << 700;
+    QTest::newRow("24 pt") << 24.0 << 1600;
+}
+
+// Rename Files opens no wider than Edit Tags under it, less a 24 px inset on
+// either side scaled with the font, where long new names wrap in their
+// column and the arrows keep theirs (at 24 pt, long new names opened it at
+// 1691 px over a 1600 px Edit Tags).
+void UiDialogsTest::renameFilesOpensNoWiderThanEditTags() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, editorWidth);
+    const ScopedApplicationFont font(pointSize);
+    DialogsWindow main;
+    QVERIFY2(main.window != nullptr, "Main.qml failed to show");
+    QQuickWindow *tags = openTagEditor(main, tagRows(4));
+    QVERIFY(tags != nullptr);
+    tags->resize(editorWidth, tags->height());
+    QTRY_COMPARE(tags->width(), editorWidth);
+    QObject *preview = object(main.window, QStringLiteral("renamePreviewDialog"));
+    QVERIFY(preview != nullptr);
+    QVariantList rows;
+    constexpr int kFiles = 4;
+    for (int i = 0; i < kFiles; ++i) {
+        const QString number = QStringLiteral("%1").arg(i + 1, 2, 10, QLatin1Char('0'));
+        rows << QVariantMap{
+            {QStringLiteral("oldName"), number + QStringLiteral(" Song.flac")},
+            {QStringLiteral("newName"),
+             number + QStringLiteral(" An Unusually Long Song Title for a Preview Row, Extended Remaster with "
+                                     "Bonus Material, Alternate Takes and a Live Encore.flac")},
+            {QStringLiteral("ok"), true},
+            {QStringLiteral("unchanged"), false},
+        };
+    }
+    QVERIFY(preview->setProperty("rows", rows));
+    const qreal inset = evaluate(preview, QStringLiteral("uiPalette.scaledSize(24)")).toReal();
+    // Its limit, once Edit Tags' resize has reached it: Edit Tags less the
+    // insets, within 42 grid units scaled with the font.
+    const qreal fontLimit = evaluate(preview, QStringLiteral("uiPalette.scaledSize(Kirigami.Units.gridUnit * 42)")).toReal();
+    QVERIFY(editorWidth - 2 * inset < fontLimit);
+    QTRY_COMPARE(preview->property("maximumDefaultWidth").toReal(), editorWidth - 2 * inset);
+    QVERIFY(QMetaObject::invokeMethod(preview, "open"));
+    QVERIFY(waitForDialogWindow(preview));
+    QQuickWindow *renames = windowOf(preview);
+    const int room = qFloor(editorWidth - 2 * inset);
+    const QString where = QStringLiteral("Rename Files %1 px wide over a %2 px Edit Tags")
+        .arg(renames->width()).arg(editorWidth);
+    QVERIFY2(renames->width() == std::max(room, renames->minimumWidth()), qPrintable(where));
+    QCOMPARE(preview->property("parentInset").toReal(), inset);
+    QQuickItem *list = visibleNamed(renames, QStringLiteral("renamePreviewList"));
+    QVERIFY(list != nullptr);
+    QTRY_COMPARE(list->property("count").toInt(), kFiles);
+    QList<QQuickItem *> arrows;
+    QTRY_VERIFY((arrows = itemsNamed(list, QStringLiteral("renamePreviewArrow"))).size() == kFiles);
+    const QList<QQuickItem *> newNames = itemsNamed(list, QStringLiteral("renamePreviewNewName"));
+    QCOMPARE(newNames.size(), kFiles);
+    QTRY_VERIFY(!layoutPendingUnder(list));
+    // The new names wrap, whole, in their column, which starts at one x
+    // after the arrows' one column, inside the list.
+    for (qsizetype i = 0; i < kFiles; ++i) {
+        QTRY_VERIFY2(newNames.at(i)->property("lineCount").toInt() > 1, qPrintable(where));
+        QVERIFY(!newNames.at(i)->property("truncated").toBool());
+        QCOMPARE(sceneRect(arrows.at(i)).left(), sceneRect(arrows.first()).left());
+        QCOMPARE(sceneRect(newNames.at(i)).left(), sceneRect(newNames.first()).left());
+        QVERIFY(sceneRect(newNames.at(i)).left() >= sceneRect(arrows.at(i)).right());
+        QVERIFY2(sceneRect(newNames.at(i)).right() <= sceneRect(list).right(), qPrintable(where));
+    }
+    QVERIFY(reject(preview));
+    QVERIFY(closeTagEditor(main));
+}
+
 void UiDialogsTest::autoNumberGroupsStandApartAtAnyFont_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::addColumn<qreal>("gap");
@@ -7240,6 +7364,40 @@ void UiDialogsTest::autoNumberGroupsStandApartAtAnyFont() {
                  qPrintable(QStringLiteral("%1: %2 px, not %3").arg(QLatin1String(below)).arg(between).arg(gap)));
     }
     QVERIFY2(numbers->height() <= 1000, qPrintable(QString::number(numbers->height())));
+    QVERIFY(reject(dialog));
+    QVERIFY(closeTagEditor(main));
+}
+
+// Auto Number's totals say which it writes, as the editor does: the tracks'
+// total, and the discs' too while it writes disc numbers ("Write totals"
+// left the reader to guess which).
+void UiDialogsTest::autoNumberTotalsSayWhichTheyWrite() {
+    DialogsWindow main;
+    QQuickWindow *window = main.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(openTagEditor(main, tagRows(4)) != nullptr);
+    QObject *dialog = object(window, QStringLiteral("autoNumberDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *numbers = windowOf(dialog);
+    QQuickItem *totals = visibleNamed(numbers, QStringLiteral("autoNumberWriteTotalsCheck"));
+    QQuickItem *discs = visibleNamed(numbers, QStringLiteral("autoNumberWriteDiscCheck"));
+    QVERIFY(totals != nullptr && discs != nullptr);
+    QVERIFY(!discs->property("checked").toBool());
+    QCOMPARE(totals->property("text").toString(), QStringLiteral("Write track totals"));
+    QTest::mouseClick(numbers, Qt::LeftButton, Qt::NoModifier, sceneRect(discs).center().toPoint());
+    QTRY_VERIFY(discs->property("checked").toBool());
+    QCOMPARE(totals->property("text").toString(), QStringLiteral("Write track and disc totals"));
+    // Whole, within the window.
+    QQuickItem *body = visibleNamed(numbers, QStringLiteral("dialogBody"));
+    QVERIFY(body != nullptr);
+    QTRY_VERIFY(!layoutPending(body));
+    QVERIFY2(sceneRect(totals).left() >= 0 && sceneRect(totals).left() + totals->implicitWidth() <= numbers->width(),
+             qPrintable(describeItem(totals)));
+    QTest::mouseClick(numbers, Qt::LeftButton, Qt::NoModifier, sceneRect(discs).center().toPoint());
+    QTRY_VERIFY(!discs->property("checked").toBool());
+    QCOMPARE(totals->property("text").toString(), QStringLiteral("Write track totals"));
     QVERIFY(reject(dialog));
     QVERIFY(closeTagEditor(main));
 }
@@ -8734,7 +8892,8 @@ void UiDialogsTest::configureWidthsFollowTheFont() {
 
 // At 24 pt on the reviews' 2000 × 1400 screen, Configure's Visualization
 // page says its help in as few lines as that allows: the crosshair's takes
-// one, and Default zoom, the last setting, shows at least most of its row
+// one, and names where a right-click seeks ("that point" had nothing to
+// refer to), and Default zoom, the last setting, shows at least most of its row
 // without a scroll (that help took two, and in Breeze the row was 58 px
 // under the page's foot, 14 px now; 31 px and none in the tests' style).
 // The window keeps its size rules.
@@ -8779,7 +8938,7 @@ void UiDialogsTest::configureVisualizationFitsTheReviewScreenAt24pt() {
         crosshair != nullptr ? itemsNamed(crosshair, QStringLiteral("formHelpTextLabel")).value(0) : nullptr;
     QVERIFY(crosshairLabel != nullptr);
     QCOMPARE(crosshairLabel->property("text").toString(),
-             QStringLiteral("In centered mode, right-click the spectrogram to seek to that point."));
+             QStringLiteral("In centered mode, a right-click seeks to the crosshair."));
     QVERIFY2(crosshairLabel->property("lineCount").toInt() == 1, qPrintable(describeItem(crosshairLabel)));
 
     QQuickItem *stretch = visibleNamed(prefs, QStringLiteral("stretchShortTracksCheckBox"));

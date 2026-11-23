@@ -261,22 +261,37 @@ Components.DialogWindow {
         root.setBindings(change.action, change.bindings)
     }
 
-    // The keys and the actions a reassignment takes them from, as the
-    // question names them.
+    // The keys a reassignment moves, as the question names them.
     function movedKeysText(change) {
         return change.moves.map(function(move) { return StandardKeys.nativeText(move.key) })
             .join(I18n.i18nc("@info separator of a list of keys", ", "))
     }
 
-    function movedFromText(change) {
-        const names = []
+    // What the other actions lose, each in a sentence of its own that names
+    // it first: "Play/Pause will lose its Space shortcut." (the loss was a
+    // relative clause at the end of a sentence about the key).
+    function lossText(change) {
+        const owners = []
+        const keys = []
         for (let i = 0; i < change.moves.length; ++i) {
-            const name = root.nameOf(change.moves[i].owner)
-            if (names.indexOf(name) < 0) {
-                names.push(name)
+            const move = change.moves[i]
+            let index = owners.indexOf(move.owner)
+            if (index < 0) {
+                index = owners.length
+                owners.push(move.owner)
+                keys.push([])
             }
+            keys[index].push(StandardKeys.nativeText(move.key))
         }
-        return names.join(I18n.i18nc("@info separator of a list of actions", ", "))
+        // An action has a shortcut and an alternate: it loses one or both.
+        return owners.map(function(owner, index) {
+            const lost = keys[index]
+            return I18n.i18ncp("@info %2 is an action, %3 a key or two",
+                "%2 will lose its %3 shortcut.", "%2 will lose its %3 shortcuts.", lost.length,
+                root.nameOf(owner), lost.length === 2
+                    ? I18n.i18nc("@info %1 and %2 are keys", "%1 and %2", lost[0], lost[1])
+                    : lost.join(I18n.i18nc("@info separator of a list of keys", ", ")))
+        }).join(" ")
     }
 
     // Default: its defaults, which another action may have been given
@@ -1004,15 +1019,7 @@ Components.DialogWindow {
             ? I18n.i18nc("@info %1 is a key, or a list of them, %2 an action", "Reassign “%1” to “%2”?",
                 root.movedKeysText(root.pendingReassignment), root.nameOf(root.pendingReassignment.action))
             : ""
-        details: root.pendingReassignment
-            ? (root.pendingReassignment.moves.length === 1
-                ? I18n.i18nc("@info %1 is a key, %2 an action",
-                    "The “%1” key combination is already assigned to the “%2” action, which will no longer have it.",
-                    root.movedKeysText(root.pendingReassignment), root.movedFromText(root.pendingReassignment))
-                : I18n.i18nc("@info %1 is a list of keys, %2 of actions",
-                    "The “%1” key combinations are already assigned to “%2”, which will no longer have them.",
-                    root.movedKeysText(root.pendingReassignment), root.movedFromText(root.pendingReassignment)))
-            : ""
+        details: root.pendingReassignment ? root.lossText(root.pendingReassignment) : ""
         confirmText: I18n.i18nc("@action:button", "Reassign")
         // Not Apply's: the change still waits for OK or Apply.
         confirmIcon: "dialog-ok"

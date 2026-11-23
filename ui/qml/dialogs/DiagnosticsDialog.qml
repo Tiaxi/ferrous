@@ -200,8 +200,10 @@ Components.DialogWindow {
 
         // The log on the view colour in a frame, its scroll bar inside the
         // frame, as the tag editor's table. Its records wrap (#735), so it
-        // scrolls one way. The frame takes the focus colour
-        // while the log has the focus, as a text area's.
+        // scrolls one way. The log has the keyboard from the start, so the
+        // keys scroll it, and its frame takes the focus colour while the
+        // keyboard is in use, as the lists' rings (at rest, a focus frame
+        // round the whole log marked nothing the user had done).
         Rectangle {
             objectName: "diagnosticsLogFrame"
             Layout.fillWidth: true
@@ -209,7 +211,7 @@ Components.DialogWindow {
             color: root.uiPalette.view
             radius: 3
             border.width: 1
-            border.color: diagnosticsLogView.activeFocus
+            border.color: diagnosticsLogView.activeFocus && InputModality.keyboard
                 ? Kirigami.Theme.focusColor
                 : Kirigami.ColorUtils.linearInterpolation(
                     root.uiPalette.view, root.uiPalette.text, Kirigami.Theme.frameContrast)

@@ -465,9 +465,9 @@ void KeyboardShortcutsSmokeTest::keysAnotherActionHasMoveOnlyWhenTheUserAgrees()
     QTRY_VERIFY(reassign->isVisible());
     QCOMPARE(reassign->title(), QStringLiteral("Shortcut Conflict"));
     QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign “Space” to “Stop”?"));
-    QCOMPARE(reassign->property("details").toString(),
-             QStringLiteral("The “Space” key combination is already assigned to the “Play/Pause” action, "
-                            "which will no longer have it."));
+    // The detail says what the other action loses, naming it first (it was
+    // a relative clause after the key).
+    QCOMPARE(reassign->property("details").toString(), QStringLiteral("Play/Pause will lose its Space shortcut."));
     // Until the user agrees, the editor shows the keys as they were.
     QCOMPARE(fixture.editorText("keyboardShortcutsShortcutEditor"), QStringLiteral("Ctrl+Shift+Space"));
     QVERIFY(clickVisibleButton(reassign, QStringLiteral("confirmDialogCancelButton")));
@@ -479,6 +479,8 @@ void KeyboardShortcutsSmokeTest::keysAnotherActionHasMoveOnlyWhenTheUserAgrees()
     // Reassigned, it moves; as the alternate, the shortcut stays.
     QVERIFY(fixture.capture("keyboardShortcutsAlternateEditor", Qt::Key_Space));
     QTRY_VERIFY(reassign->isVisible());
+    QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign “Space” to “Stop”?"));
+    QCOMPARE(reassign->property("details").toString(), QStringLiteral("Play/Pause will lose its Space shortcut."));
     QVERIFY(clickVisibleButton(reassign, QStringLiteral("confirmDialogConfirmButton")));
     QTRY_VERIFY(!reassign->isVisible());
     QCOMPARE(fixture.shownBindings(QStringLiteral("stop")),
@@ -496,9 +498,7 @@ void KeyboardShortcutsSmokeTest::keysAnotherActionHasMoveOnlyWhenTheUserAgrees()
     QVERIFY(clickVisibleButton(fixture.dialog, QStringLiteral("keyboardShortcutsDefaultRadio")));
     QTRY_VERIFY(reassign->isVisible());
     QCOMPARE(reassign->property("message").toString(), QStringLiteral("Reassign “Space” to “Play/Pause”?"));
-    QCOMPARE(reassign->property("details").toString(),
-             QStringLiteral("The “Space” key combination is already assigned to the “Stop” action, "
-                            "which will no longer have it."));
+    QCOMPARE(reassign->property("details").toString(), QStringLiteral("Stop will lose its Space shortcut."));
     QVERIFY(clickVisibleButton(reassign, QStringLiteral("confirmDialogCancelButton")));
     QTRY_VERIFY(!reassign->isVisible());
     QVERIFY(fixture.shownBindings(QStringLiteral("play_pause")).isEmpty());
@@ -509,6 +509,28 @@ void KeyboardShortcutsSmokeTest::keysAnotherActionHasMoveOnlyWhenTheUserAgrees()
     QTRY_VERIFY(!reassign->isVisible());
     QCOMPARE(fixture.shownBindings(QStringLiteral("play_pause")), QStringList{QStringLiteral("Space")});
     QVERIFY(fixture.shownBindings(QStringLiteral("stop")).isEmpty());
+    // Both of an action's keys, or keys of two actions: a sentence for
+    // each action that loses them.
+    QObject *playPause = fixture.action("playPauseAction");
+    QObject *stopAction = fixture.action("stopAction");
+    QVERIFY(playPause != nullptr && stopAction != nullptr);
+    const auto lossOf = [&](const QVariantList &moves) {
+        QVariant text;
+        const QVariantMap change{{QStringLiteral("moves"), moves}};
+        if (!QMetaObject::invokeMethod(fixture.dialog, "lossText", Q_RETURN_ARG(QVariant, text),
+                                       Q_ARG(QVariant, QVariant(change)))) {
+            return QStringLiteral("(lossText failed)");
+        }
+        return text.toString();
+    };
+    const auto move = [](const QString &key, QObject *owner) {
+        return QVariant(QVariantMap{{QStringLiteral("key"), key},
+                                    {QStringLiteral("owner"), QVariant::fromValue(owner)}});
+    };
+    QCOMPARE(lossOf({move(QStringLiteral("Space"), playPause), move(QStringLiteral("Ctrl+P"), playPause)}),
+             QStringLiteral("Play/Pause will lose its Space and Ctrl+P shortcuts."));
+    QCOMPARE(lossOf({move(QStringLiteral("Space"), playPause), move(QStringLiteral("Ctrl+P"), stopAction)}),
+             QStringLiteral("Play/Pause will lose its Space shortcut. Stop will lose its Ctrl+P shortcut."));
     // Back to Stop's Space for what follows.
     QVERIFY(fixture.select(QStringLiteral("stop")));
     QVERIFY(fixture.capture("keyboardShortcutsShortcutEditor", Qt::Key_Space));

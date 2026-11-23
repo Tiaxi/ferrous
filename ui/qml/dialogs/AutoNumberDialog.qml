@@ -154,13 +154,16 @@ Components.CompactDialogWindow {
         }
         // With the tracks (under the disc's start, it read as a
         // disc option): it writes each track's total, and the discs' too
-        // when it writes disc numbers.
+        // when it writes disc numbers, as it says ("Write totals" left the
+        // reader to guess which).
         CheckBox {
             id: writeTotalsCheck
             leftPadding: -root.checkBoxInset
             objectName: "autoNumberWriteTotalsCheck"
             checked: false
-            text: I18n.i18nc("@option:check", "Write totals")
+            text: writeDiscCheck.checked
+                ? I18n.i18nc("@option:check", "Write track and disc totals")
+                : I18n.i18nc("@option:check", "Write track totals")
         }
 
         Components.FormGroupGap {

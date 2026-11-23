@@ -86,13 +86,18 @@ Components.DialogWindow {
     minimumHeight: Kirigami.Units.gridUnit * 9
     // As wide as its widest line, each time it opens: a file's old name,
     // arrow and new name in their columns, a sentence of the summary, the
-    // message that nothing is renamed, or the buttons; no narrower than its minimum, and no
-    // wider than 42 grid units, which grow with a larger font, within the
-    // screen, where a longer name wraps in its column (a fixed
-    // 756 px held 390 px of lines, and 1814 px at 24 pt, wider than Edit
-    // Tags under it). Only the first rows are measured: more scroll, and a
-    // list that long opens at its limit anyway.
-    readonly property real maximumDefaultWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 42)
+    // message that nothing is renamed, or the buttons; no narrower than its
+    // minimum, and no wider than 42 grid units, which grow with a larger
+    // font, nor than Edit Tags under it less an inset on either side,
+    // within the screen, where a longer name wraps in its column (a fixed
+    // 756 px held 390 px of lines, and 1814 px at 24 pt; long new names
+    // opened it at 1691 px over a 1600 px Edit Tags). Only the first rows
+    // are measured: more scroll, and a list that long opens at its limit
+    // anyway.
+    readonly property real parentInset: root.uiPalette.scaledSize(Kirigami.Units.largeSpacing * 3)
+    readonly property real maximumDefaultWidth: Math.min(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 42),
+        root.windowRoot && root.windowRoot.width > 0
+            ? root.windowRoot.width - 2 * root.parentInset : Number.POSITIVE_INFINITY)
     readonly property int measuredRowLimit: 400
     // Between a renamed file's old name and its new one, with room on
     // either side: 8 px with the default font, more with a larger one.
