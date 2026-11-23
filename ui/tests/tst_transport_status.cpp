@@ -502,8 +502,8 @@ private slots:
     void seekReleaseOffTheBarHidesTheTimeBox();
     void seekHoverLineLeavesThePlayheadWhole_data();
     void seekHoverLineLeavesThePlayheadWhole();
-    void seekHoverLineWaitsForThePointerToMoveAfterASeek_data();
-    void seekHoverLineWaitsForThePointerToMoveAfterASeek();
+    void seekHoverLineStaysWithTheBoxAfterASeek_data();
+    void seekHoverLineStaysWithTheBoxAfterASeek();
     void seekFocusDrawsOneRingAroundTheBar_data();
     void seekFocusDrawsOneRingAroundTheBar();
     void volumeGlyphHasTheTransportsWeight_data();
@@ -1510,23 +1510,28 @@ void TransportStatusTest::seekHoverLineLeavesThePlayheadWhole() {
     QTRY_VERIFY(!hoverLine->isVisible());
 }
 
-void TransportStatusTest::seekHoverLineWaitsForThePointerToMoveAfterASeek_data() {
+void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek_data() {
     QTest::addColumn<bool>("dragged");
     QTest::newRow("click") << false;
     QTest::newRow("drag") << true;
 }
 
-// A click leaves the pointer on the playhead, and as playback took that on
-// the hover's line came in beside it, a second playhead, with no pointer
-// moved. It waits for the pointer to move a pixel; the time stays.
-void TransportStatusTest::seekHoverLineWaitsForThePointerToMoveAfterASeek() {
+// A click or a drag released on the bar hands the time box to the hover at
+// the pointer, and its line comes with it: as playback takes the playhead on
+// from under the resting pointer, the line shows at the pointer under the
+// box once a gap opens (it waited for the pointer to move, and the box stood
+// beside the moving playhead with no line). The box never goes out.
+void TransportStatusTest::seekHoverLineStaysWithTheBoxAfterASeek() {
     QFETCH(bool, dragged);
     Harness harness;
     QVERIFY2(harness.load(), qPrintable(harness.error));
     QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
     QQuickItem *hoverLine = harness.item(QStringLiteral("seekHoverLine"));
+    QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
     QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
-    QVERIFY(seek && hoverLine && tip);
+    QVERIFY(seek && hoverLine && playhead && tip);
+    auto *tipBox = tip->property("background").value<QQuickItem *>();
+    QVERIFY(tipBox != nullptr);
     const QRectF bar = sceneRect(seek);
     const QPoint from(qRound(bar.left() + 0.3 * bar.width()), qRound(bar.center().y()));
     const QPoint to = dragged ? from + QPoint(qRound(0.16 * bar.width()), 0) : from;
@@ -1542,30 +1547,48 @@ void TransportStatusTest::seekHoverLineWaitsForThePointerToMoveAfterASeek() {
     QCOMPARE(seeksOf(harness).size(), 1);
     const double landed = seeksOf(harness).first().toDouble();
 
-    bool lineShown = false;
+    // In every frame the box shows the hover's time, its line is drawn at
+    // the pointer, unless the playhead is there to mark it.
+    QString disagreed;
     bool boxHidden = false;
-    const FrameSampler sampler(harness.window, [&]() {
-        lineShown = lineShown || hoverLine->isVisible();
-        boxHidden = boxHidden || !tip->property("visible").toBool();
-    });
+    const auto lineIsTheBoxs = [&]() {
+        if (!tip->property("visible").toBool()) {
+            boxHidden = true;
+            return;
+        }
+        const QRectF head = sceneRect(playhead);
+        const qreal gap = 2.0;
+        const bool nearHead = to.x() + 1 > head.left() - gap && to.x() < head.right() + gap;
+        if (!nearHead && !hoverLine->isVisible() && disagreed.isEmpty()) {
+            disagreed = QStringLiteral("no line under the box %1, the playhead %2")
+                            .arg(describeRect(sceneRect(tipBox)), describeRect(head));
+        }
+    };
+    const FrameSampler sampler(harness.window, lineIsTheBoxs);
     // Playback takes the playhead on from under the pointer, which rests.
     for (int second = 0; second <= 8; ++second) {
         harness.root->setProperty("positionSeconds", landed + second);
         QVERIFY(!harness.window->grabWindow().isNull());
         QTest::qWait(20);
-        QVERIFY2(!hoverLine->isVisible(), qPrintable(QStringLiteral("%1 s after").arg(second)));
+        lineIsTheBoxs();
     }
-    QVERIFY(!lineShown);
+    QVERIFY2(disagreed.isEmpty(), qPrintable(disagreed));
     QVERIFY(!boxHidden);
-
-    // A pixel's move brings it, at the pointer.
-    QTest::mouseMove(harness.window, to - QPoint(1, 0));
-    QTRY_VERIFY(hoverLine->isVisible());
-    QVERIFY(std::abs(sceneRect(hoverLine).left() - (to.x() - 1)) <= 1.0);
-    // And back where it was, it is an ordinary hover's.
-    QTest::mouseMove(harness.window, to);
-    QTRY_VERIFY(std::abs(sceneRect(hoverLine).left() - to.x()) <= 1.0);
+    // Clear of the playhead by now: the line at the pointer, under the box,
+    // which names the pointer's time.
     QVERIFY(hoverLine->isVisible());
+    QVERIFY(std::abs(sceneRect(hoverLine).left() - to.x()) <= 1.0);
+    QVERIFY(std::abs(sceneRect(tipBox).center().x() - to.x()) <= 2.0);
+    QVERIFY(sceneRect(playhead).left() > to.x() + 2);
+    const int second = seek->property("hoverSecond").toInt();
+    QCOMPARE(tip->property("text").toString(),
+             QStringLiteral("%1:%2").arg(second / 60).arg(second % 60, 2, 10, QLatin1Char('0')));
+
+    // A move takes both along.
+    QTest::mouseMove(harness.window, to - QPoint(12, 0));
+    QTRY_VERIFY(std::abs(sceneRect(hoverLine).left() - (to.x() - 12)) <= 1.0);
+    QVERIFY(hoverLine->isVisible());
+    QTRY_VERIFY(std::abs(sceneRect(tipBox).center().x() - (to.x() - 12)) <= 2.0);
 }
 
 void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar_data() {

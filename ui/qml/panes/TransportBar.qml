@@ -782,7 +782,6 @@ ToolBar {
                 // as the gesture ends.
                 releasedOnBar = !heldByTouch && contains(heldPointerPosition)
                 handedToHover = true
-                restX = releasedOnBar ? heldPointerPosition.x : NaN
                 if (pressed) {
                     takePointer()
                 }
@@ -790,7 +789,6 @@ ToolBar {
             onPointerHeldChanged: {
                 if (pointerHeld) {
                     handedToHover = false
-                    restX = NaN
                 }
             }
             onAdjustingChanged: {
@@ -962,12 +960,15 @@ ToolBar {
                 // It is under the playhead and shows only with a gap as wide
                 // as the playhead's line between them: on or beside it, the
                 // playhead alone marks the box's time. After a click or a
-                // drag it waits for the pointer to move (restX).
+                // drag released on the bar it is the box's line as at any
+                // hover, at the pointer, so the box never stands beside a
+                // playhead that playback moves on with no line under it
+                // (the line waited for the pointer to move, and the box
+                // stayed without it).
                 Rectangle {
                     id: seekHoverLine
                     objectName: "seekHoverLine"
                     opacity: seekTimeBox.showsHover && seekTimeBox.contentItem.visible
-                        && isNaN(seekSlider.restX)
                         && !seekHoverLine.atPlayhead() ? seekTimeBox.opacity : 0
                     visible: opacity > 0
                     antialiasing: false
@@ -1066,21 +1067,6 @@ ToolBar {
             readonly property bool pointerOnBar: handedToHover ? releasedOnBar : seekHover.hovered
             readonly property real pointerX: handedToHover
                 ? heldPointerPosition.x : seekHover.point.position.x
-            // Where a click or a drag left the pointer, until it moves a
-            // device pixel from there or leaves the bar, or NaN: the
-            // playhead is there, and the hover's line came in beside it as
-            // playback took it on, a second one, with nothing moved.
-            property real restX: NaN
-            onPointerXChanged: {
-                if (Math.abs(pointerX - restX) >= root.devicePixelLine - 0.001) {
-                    restX = NaN
-                }
-            }
-            onPointerOnBarChanged: {
-                if (!pointerOnBar) {
-                    restX = NaN
-                }
-            }
             // The pointer has a time to show, which a gesture's goes before.
             // It doesn't follow `adjusting`: as that ended at a release, what
             // read both saw neither for a moment, and the box went out and
