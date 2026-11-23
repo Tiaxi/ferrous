@@ -4174,8 +4174,11 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     QPen dashes(lineColor);
     dashes.setWidthF(1.0);
     dashes.setCapStyle(Qt::FlatCap);
+    // Between them, the floor at 85 %: one dark dotted line through the
+    // fill (6.5:1; at 60 % a faint second line there, 3.6:1), nothing on the
+    // floor, where the light dashes carry it.
     QPen gaps = dashes;
-    gaps.setColor(CrosshairReadout::dashGapColor(m_colors.background, 0.6));
+    gaps.setColor(CrosshairReadout::dashGapColor(m_colors.background, 0.85));
     CrosshairReadout::setDashes(dashes, false);
     CrosshairReadout::setDashes(gaps, true);
     for (const QPen &pen : {gaps, dashes}) {

@@ -2548,9 +2548,11 @@ void WaveformSmokeTest::waveformEditorCrosshairReadsOverTheFill_data() {
 }
 
 void WaveformSmokeTest::waveformEditorCrosshairReadsOverTheFill() {
-    // The crosshair's dashes vanished over the waveform's fill, at 1.4:1.
-    // What is between them is the floor at 60 %: it reads on the fill, is
-    // nothing on the floor, and the line is a pixel wide as before.
+    // The crosshair's dashes vanished over the waveform's fill, at 1.4:1,
+    // and at 60 % of the floor what is between them was a faint second
+    // line there (3.6:1). At 85 % it is one dark dotted line through the
+    // fill (6.5:1; 6.3:1 in light), nothing on the floor, and the line is a
+    // pixel wide as before.
     QFETCH(QColor, floor);
     QFETCH(QColor, fill);
     QFETCH(QColor, text);
@@ -2590,7 +2592,7 @@ void WaveformSmokeTest::waveformEditorCrosshairReadsOverTheFill() {
                 ++gaps;
             }
         }
-        QVERIFY2(best >= 3.0, qPrintable(QStringLiteral("%1:1 over the fill").arg(best)));
+        QVERIFY2(best >= 6.0, qPrintable(QStringLiteral("%1:1 over the fill").arg(best)));
         QCOMPARE(touchedBeside, 0);
         // Still dashed on the floor, 4 on and 3 off.
         QVERIFY2(dashes >= 12 && gaps >= 8,
