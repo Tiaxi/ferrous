@@ -987,7 +987,9 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform_data() {
 // the unplayed opacity on the band as on the chrome, and the played part
 // under the view colour at 15 %, so the band's edge shows in the
 // waveform's ink on either side of the playhead: under the bright played
-// part alone, the band read as starting at the playhead (H14).
+// part alone, the band read as starting at the playhead (H14). On the
+// light theme's white band it is 10 %: at 15 % the played part there
+// paled away from its colour off the band (H15).
 void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1054,10 +1056,10 @@ void TransportStatusTest::seekViewBandMarksTheViewBehindTheWaveform() {
         }
     }
     // The bars on it: the unplayed part as on the chrome but on the band,
-    // the played part under the view colour at 15 %.
+    // the played part under the view colour at 15 %, 10 % in light.
     const QColor drawnPlayed = pixelAt(image, QPointF(playedX, middle), scale);
     const QColor drawnUnplayed = pixelAt(image, QPointF(unplayedX, middle), scale);
-    const QColor expectedPlayed = mixed(played, view, 0.15);
+    const QColor expectedPlayed = mixed(played, view, dark ? 0.15 : 0.10);
     QVERIFY2(channelDistance(drawnPlayed, expectedPlayed) <= 2,
              qPrintable(drawnPlayed.name() + QStringLiteral(" vs ") + expectedPlayed.name()));
     // Played and outside the band, the bars keep their colour.

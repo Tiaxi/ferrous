@@ -110,14 +110,17 @@ ToolBar {
     // chrome and lighter than the light one, away from the waveform's
     // tones, so the waveform on it keeps its contrast. The unplayed part
     // is the waveform at the unplayed opacity on the band as on the chrome.
-    // The played part is under the band's colour at 15 %, so the band's
-    // edge shows in the waveform's ink on either side of the playhead:
-    // under the bright played part alone, the band read as starting at the
-    // playhead rather than centred on it.
+    // The played part is under the band's colour at 15 %, at 10 % on the
+    // light theme's white band, so the band's edge shows in the waveform's
+    // ink on either side of the playhead: under the bright played part
+    // alone, the band read as starting at the playhead rather than centred
+    // on it. At 15 % the light played part paled to a tone of its own,
+    // away from its colour off the band (H15).
     readonly property color seekViewBandColor: root.uiPalette.view
     readonly property color seekViewBandUnplayedCover: ColorUtils.withAlpha(
         root.seekViewBandColor, 1 - root.seekUnplayedOpacity)
-    readonly property color seekViewBandPlayedCover: ColorUtils.withAlpha(root.seekViewBandColor, 0.15)
+    readonly property color seekViewBandPlayedCover: ColorUtils.withAlpha(
+        root.seekViewBandColor, root.themeIsDark ? 0.15 : 0.10)
     // The volume slider, in the seek bar's language: its groove filled up
     // to the thumb in the played colour and the rest in the unplayed one,
     // opaque, and a solid thumb in the played colour. While muted, the
@@ -850,7 +853,8 @@ ToolBar {
                 }
 
                 // The played part where the band is: the band's colour over
-                // the waveform before the playhead's line, at 15 %.
+                // the waveform before the playhead's line, at 15 % (10 % on
+                // the light theme).
                 Rectangle {
                     objectName: "seekViewBandPlayed"
                     readonly property real coverLeft: Math.min(seekSlider.viewBandLeft, seekSlider.playheadX)
