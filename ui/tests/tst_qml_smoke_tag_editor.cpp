@@ -69,6 +69,7 @@ private slots:
     void renamePreviewShowsANameThatStaysWhole_data();
     void renamePreviewShowsANameThatStaysWhole();
     void saveDetailsSetFailedFilesApart();
+    void saveDetailsSetFileNamesAboveWhyTheyFailed();
 };
 
 namespace {
@@ -1778,7 +1779,7 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport_data() {
 // plain text dump in a window 522 px tall for six lines): the
 // editor's summary, semibold, then each section's heading over its files,
 // what failed first, semibold in the negative colour, its file's name
-// semibold on a line of its own over the error, secondary, then what
+// Medium on a line of its own over the error, secondary, then what
 // succeeded quieter, each file 16 px in, more with a larger font, the lines
 // a long error wraps to under its own start; the window as tall as all that.
 // The save is a real one, into a folder the user may not write to.
@@ -1881,19 +1882,19 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
     QCOMPARE(colourOf(4), palette->property("textSecondary").value<QColor>().rgb());
     QCOMPARE(weightOf(0), int(QFont::DemiBold));
     QCOMPARE(colourOf(0), palette->property("negative").value<QColor>().rgb());
-    // The files indented: the failed one's name semibold in the text's
+    // The files indented: the failed one's name Medium in the text's
     // colour, why under it, regular in the same colour, the system's text
-    // under that secondary, the other's name regular.
+    // under that secondary, the other's name Medium too.
     for (int index : {1, 2, 3, 5}) {
         QCOMPARE(blockAt(index).blockFormat().leftMargin(), indent);
     }
-    QCOMPARE(weightOf(1), int(QFont::DemiBold));
+    QCOMPARE(weightOf(1), int(QFont::Medium));
     QCOMPARE(colourOf(1), palette->property("text").value<QColor>().rgb());
     QVERIFY(weightOf(2) < int(QFont::DemiBold));
     QCOMPARE(colourOf(2), palette->property("text").value<QColor>().rgb());
     QVERIFY(weightOf(3) < int(QFont::DemiBold));
     QCOMPARE(colourOf(3), palette->property("textSecondary").value<QColor>().rgb());
-    QVERIFY(weightOf(5) < int(QFont::DemiBold));
+    QCOMPARE(weightOf(5), int(QFont::Medium));
     QCOMPARE(colourOf(5), palette->property("text").value<QColor>().rgb());
     // 12 px between the sections, more with a larger font, not a grid
     // unit, 18 px.
@@ -2555,6 +2556,59 @@ void TagEditorSmokeTest::saveDetailsSetFailedFilesApart() {
     QGuiApplication::clipboard()->clear();
     evaluateOn(text, QStringLiteral("copy()"));
     QTRY_COMPARE(QGuiApplication::clipboard()->text(), blocks.join(QLatin1Char('\n')));
+    QVERIFY(clickVisibleButton(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton")));
+    QTRY_VERIFY(!details->property("visible").toBool());
+}
+
+// In the details, each file's name, failed or saved, ranks above the lines
+// under it: Medium, in the text's colour; why it failed regular in that
+// colour, and the system's text regular and secondary (a failed file's name
+// and its cause were alike, and a saved file's name was regular).
+void TagEditorSmokeTest::saveDetailsSetFileNamesAboveWhyTheyFailed() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(3, true));
+    fixture.saves->setResponse(QByteArray(
+        R"({"results":[{"path":"/fixture/Album 000/01 Song.flac","ok":true},)"
+        R"json({"path":"/fixture/Album 000/02 Song.flac","ok":false,"error":"disk full (os error 28)","cause":"noSpace"},)json"
+        R"json({"path":"/fixture/Album 000/03 Song.flac","ok":false,"error":"permission denied (os error 13)"}]})json"));
+    QSignalSpy saved(&fixture.editor, &TagEditorController::saveFinished);
+    QVERIFY(fixture.editor.save());
+    QTRY_COMPARE(saved.size(), 1);
+    QObject *details = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorStatusDetailsDialog"));
+    QObject *palette = qvariant_cast<QObject *>(fixture.window->property("uiPalette"));
+    QVERIFY(details != nullptr && palette != nullptr);
+    QTRY_VERIFY(clickVisibleButton(fixture.tags(), QStringLiteral("tagEditorDetailsButton")));
+    QTRY_VERIFY(details->property("opened").toBool());
+    QQuickWindow *detailsWindow = dialogWindowOf(details);
+    QVERIFY(QTest::qWaitForWindowExposed(detailsWindow));
+    QQuickItem *text = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsText"));
+    QVERIFY(text != nullptr);
+    auto *quickDocument = qvariant_cast<QQuickTextDocument *>(text->property("textDocument"));
+    QVERIFY(quickDocument != nullptr);
+    const QTextDocument *document = quickDocument->textDocument();
+    const QRgb ink = palette->property("text").value<QColor>().rgb();
+    const QRgb secondary = palette->property("textSecondary").value<QColor>().rgb();
+    // Each block's text, weight and colour.
+    QList<std::tuple<QString, int, QRgb>> blocks;
+    for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
+        const QTextCharFormat format = block.begin().fragment().charFormat();
+        blocks << std::tuple{block.text().replace(QChar(0x00a0), QLatin1Char(' ')), format.fontWeight(),
+                             format.foreground().color().rgb()};
+    }
+    QCOMPARE(blocks.size(), 8);
+    for (const int name : {1, 4, 7}) {
+        const auto &[fileName, weight, colour] = blocks.at(name);
+        QVERIFY2(fileName.endsWith(QStringLiteral(".flac")), qPrintable(fileName));
+        QCOMPARE(weight, int(QFont::Medium));
+        QCOMPARE(colour, ink);
+    }
+    QCOMPARE(std::get<0>(blocks.at(2)), QStringLiteral("There isn’t enough free space on the disk."));
+    QCOMPARE(std::get<1>(blocks.at(2)), int(QFont::Normal));
+    QCOMPARE(std::get<2>(blocks.at(2)), ink);
+    for (const int error : {3, 5}) {
+        QCOMPARE(std::get<1>(blocks.at(error)), int(QFont::Normal));
+        QCOMPARE(std::get<2>(blocks.at(error)), secondary);
+    }
     QVERIFY(clickVisibleButton(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton")));
     QTRY_VERIFY(!details->property("visible").toBool());
 }
