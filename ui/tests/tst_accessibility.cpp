@@ -649,6 +649,17 @@ void AccessibilityTest::checkScrobbleIndicatorIsNamedAndWorksByKeyboard(QQuickWi
              QStringLiteral("Press to resume scrobbling."));
 }
 
+namespace {
+
+// The text of a transport button's or Mute's own tooltip.
+QString transportToolTip(QQuickItem *button) {
+    QObject *tip = button->findChild<QObject *>(QStringLiteral("transportButtonToolTip"));
+    return tip != nullptr ? tip->property("message").toString() : QString();
+}
+
+} // namespace
+
+
 void AccessibilityTest::checkSlidersAndIconButtonsHaveNamesAndTooltips(QQuickWindow *window) {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     bridge->setProperty("durationSeconds", 200.0);
@@ -668,13 +679,13 @@ void AccessibilityTest::checkSlidersAndIconButtonsHaveNamesAndTooltips(QQuickWin
         QVERIFY2(button != nullptr, qPrintable(objectName));
         QCOMPARE(accessibleRole(button), QAccessible::Button);
         QCOMPARE(accessibleText(button, QAccessible::Name), name);
-        QVERIFY2(evaluateOn(button, QStringLiteral("ToolTip.text")).toString().startsWith(name),
-                 qPrintable(objectName));
+        QVERIFY2(transportToolTip(button).startsWith(name), qPrintable(objectName));
     }
     // The tooltips name the shortcuts too.
-    QCOMPARE(evaluateOn(visibleItemNamed(window, QStringLiteral("transportButton_stop")),
-                        QStringLiteral("ToolTip.text")).toString(),
+    QCOMPARE(transportToolTip(visibleItemNamed(window, QStringLiteral("transportButton_stop"))),
              QStringLiteral("Stop · Ctrl+Shift+Space"));
+    QCOMPARE(transportToolTip(visibleItemNamed(window, QStringLiteral("muteButton"))),
+             QStringLiteral("Mute · Ctrl+Shift+M"));
 
     // Tab reaches the buttons, and Space presses the focused one instead
     // of playing or pausing.
@@ -700,7 +711,7 @@ void AccessibilityTest::checkSlidersAndIconButtonsHaveNamesAndTooltips(QQuickWin
     QTRY_COMPARE(accessibleText(mute, QAccessible::Name), QStringLiteral("Mute"));
     QVERIFY(QMetaObject::invokeMethod(mute, "clicked"));
     QTRY_COMPARE(accessibleText(mute, QAccessible::Name), QStringLiteral("Unmute"));
-    QCOMPARE(evaluateOn(mute, QStringLiteral("ToolTip.text")).toString(), QStringLiteral("Unmute"));
+    QCOMPARE(transportToolTip(mute), QStringLiteral("Unmute · Ctrl+Shift+M"));
     QVERIFY(QMetaObject::invokeMethod(mute, "clicked"));
     QTRY_COMPARE(accessibleText(mute, QAccessible::Name), QStringLiteral("Mute"));
 
@@ -1510,9 +1521,13 @@ QString timeBoxPlacementError(QQuickItem *seek, const SeekTimeBox &box, qreal an
     if (!fuzzyEqual(drawn.left() * dpr, std::round(drawn.left() * dpr))) {
         errors.push_back(QStringLiteral("at %1 device pixels").arg(drawn.left() * dpr));
     }
-    if (std::abs(drawn.bottom() - bar.top()) > slack) {
-        errors.push_back(QStringLiteral("its bottom at %1, not on the bar's top at %2")
-                             .arg(drawn.bottom()).arg(bar.top()));
+    // On the bar's top, or 1 px clear of the bar's focus ring while that
+    // shows.
+    const qreal clearance =
+        seek->property("visualFocus").toBool() ? seek->property("focusRingOutset").toReal() + 1 : 0.0;
+    if (std::abs(drawn.bottom() - (bar.top() - clearance)) > slack) {
+        errors.push_back(QStringLiteral("its bottom at %1, not %2 over the bar's top at %3")
+                             .arg(drawn.bottom()).arg(clearance).arg(bar.top()));
     }
     return errors.join(QStringLiteral("; "));
 }

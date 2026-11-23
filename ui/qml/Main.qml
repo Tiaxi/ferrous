@@ -1703,6 +1703,7 @@ ApplicationWindow {
             stopAction: stopAction
             nextAction: nextAction
             playPauseAction: playPauseAction
+            muteAction: muteAction
             playPauseCanAct: root.playPauseCanAct
             stopCanAct: root.stopCanAct
             previousCanAct: root.skipCanAct

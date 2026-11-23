@@ -32,6 +32,8 @@ ToolBar {
     // The action Space triggers, whose shortcut the Play/Pause tooltip
     // names: Play and Pause have none of their own.
     property var playPauseAction: null
+    // The action whose shortcut Mute's tooltip names.
+    property var muteAction: null
     // Whether each button can act now: off, it shows Breeze's disabled
     // state, as the Playback menu's item of its action does, while the
     // action stays on for the shortcuts.
@@ -370,6 +372,19 @@ ToolBar {
         }
     }
 
+    // The tooltip of a transport button: under it, as the style's tooltip
+    // flipped there for want of room above, 3 px clear of the button's
+    // focus ring as the style's is of a button (it met the ring's bottom
+    // edge); and not while the button is held down.
+    component ButtonToolTip: Components.PlainToolTip {
+        required property Item button
+        objectName: "transportButtonToolTip"
+        parent: button
+        visible: (button.hovered || button.visualFocus) && !button.down
+        delay: Kirigami.Units.toolTipDelay
+        y: button.height + root.buttonFocusRingOutset + 3
+    }
+
     // A flat 32 px tool button of the transport with a theme icon. Its
     // tooltip names the action and its shortcut.
     component TransportButton: ToolButton {
@@ -429,9 +444,11 @@ ToolBar {
         // Space still plays or pauses after a click.
         focusPolicy: Qt.TabFocus
         Accessible.name: transportButton.label
-        ToolTip.visible: hovered || visualFocus
-        ToolTip.delay: Kirigami.Units.toolTipDelay
-        ToolTip.text: root.actionToolTip(transportButton.label, transportButton.shortcutText)
+        readonly property string toolTipText: root.actionToolTip(transportButton.label, transportButton.shortcutText)
+        ButtonToolTip {
+            button: transportButton
+            message: transportButton.toolTipText
+        }
         // Space presses the focused button rather than playing or pausing;
         // keys with modifiers stay the shortcuts'.
         Keys.onShortcutOverride: function(event) {
@@ -672,6 +689,8 @@ ToolBar {
             // handle's centre, which a press or drag moves under the
             // pointer, on the line's centre at every position.
             readonly property real grabTargetWidth: 10
+            // How far its focus ring reaches outside the bar.
+            readonly property int focusRingOutset: 5
             leftPadding: (playheadLineWidth - grabTargetWidth) / 2
             rightPadding: (playheadLineWidth - grabTargetWidth) / 2
 
@@ -1052,7 +1071,7 @@ ToolBar {
                     objectName: "seekFocusRing"
                     visible: seekSlider.visualFocus
                     anchors.fill: parent
-                    anchors.margins: -5
+                    anchors.margins: -seekSlider.focusRingOutset
                     radius: 5
                     color: "transparent"
                     border.width: 2
@@ -1223,10 +1242,19 @@ ToolBar {
                     : below ? belowPinnedX
                     : aboveShiftedFits ? aboveShiftedX : placedX
                 // Its bottom edge on the bar's top, or its top edge on the
-                // bar's bottom. Above, it may reach the window's top edge,
-                // which it nearly does at 24 pt: the style's 6 px margin
-                // there would flip it under the bar.
-                y: below ? seekSlider.height : -height
+                // bar's bottom, and 1 px clear of the bar's focus ring while
+                // that shows (it covered the ring's edge). Above, it may
+                // reach the window's top edge, which it nearly does at
+                // 24 pt, and clears the ring as far as the window lets it:
+                // the style's 6 px margin there, or more than the window
+                // has, would flip it under the bar.
+                readonly property real ringClearance: seekSlider.visualFocus
+                    ? seekSlider.focusRingOutset + 1 : 0
+                function roomAbove() {
+                    return Math.max(0, seekSlider.mapToItem(null, 0, 0).y - height)
+                }
+                y: below ? seekSlider.height + ringClearance
+                    : -height - Math.min(ringClearance, roomAbove())
                 topMargin: 0
                 // It comes in over the short duration of the window's other
                 // hovers, and goes as the style's tooltips do.
@@ -1387,9 +1415,13 @@ ToolBar {
             icon.color: root.uiPalette.text
             icon.width: root.smallGlyphSize
             icon.height: root.smallGlyphSize
-            ToolTip.visible: hovered || visualFocus
-            ToolTip.delay: Kirigami.Units.toolTipDelay
-            ToolTip.text: text
+            // "Mute · Ctrl+Shift+M", as the other buttons name theirs.
+            readonly property string toolTipText: root.actionToolTip(muteButton.text,
+                root.muteAction && root.muteAction.shortcut ? String(root.muteAction.shortcut) : "")
+            ButtonToolTip {
+                button: muteButton
+                message: muteButton.toolTipText
+            }
             focusPolicy: Qt.TabFocus
             Keys.onShortcutOverride: function(event) {
                 event.accepted = KeyUtils.isPlainSpace(event)
