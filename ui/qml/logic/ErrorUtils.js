@@ -41,6 +41,20 @@ function countSuffix(count) {
         : ""
 }
 
+// Why the file `subject` is marked unreadable on its rows, from a playback
+// error about it: the file and why it failed, the system's text of the
+// error, as of now, without what playback did then ("playback stopped"),
+// which is stale once another track plays; Recent Issues keeps that. An
+// error with no system text gives its message.
+function unreadableReason(subject, message, detail) {
+    const why = String(detail || "").trim()
+    if (why.length === 0) {
+        return String(message || "")
+    }
+    return FerrousUi.I18n.i18nc("@info:tooltip why a track could not be played; file name, system's reason",
+        "Couldn't play \u201c%1\u201d (%2).", String(subject || "").split("/").pop(), why)
+}
+
 // The heading and message of an entry, for one line of text.
 function describe(entry) {
     if (!entry) {

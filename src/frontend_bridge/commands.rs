@@ -2938,7 +2938,7 @@ mod tests {
             .collect();
         assert_eq!(
             errors,
-            ["Couldn't play \u{201c}gone.flac\u{201d} (Resource not found); playback stopped."]
+            ["Couldn't play \u{201c}gone.flac\u{201d}; playback stopped."]
         );
     }
 
@@ -3130,8 +3130,9 @@ mod tests {
             Ok(BridgeEvent::Error(error)) => {
                 assert_eq!(
                     error.message,
-                    "Couldn't play \u{201c}next.flac\u{201d} (Resource not found); skipped it."
+                    "Couldn't play \u{201c}next.flac\u{201d}; skipped it."
                 );
+                assert_eq!(error.detail, "Resource not found");
                 assert_eq!(error.category, super::super::ErrorCategory::Playback);
                 assert_eq!(error.severity, super::super::ErrorSeverity::Warning);
                 assert!(error.subject.ends_with("next.flac"), "{}", error.subject);

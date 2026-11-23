@@ -633,18 +633,39 @@ Rectangle {
                             }
 
                             // Why an unreadable track is marked
-                            // (reasonShown), over the row from its name, as
-                            // the queue's: on the 16 px glyph alone, the
-                            // pointer had to find it, and the keyboard never
-                            // could. Only such a row makes one.
+                            // (reasonShown), from its name, below the row
+                            // unless near the view's bottom, and clear of
+                            // the playing row, as the queue's: on the 16 px
+                            // glyph alone, the pointer had to find it, and
+                            // the keyboard never could. Only such a row
+                            // makes one.
                             Loader {
                                 active: libraryRow.unreadableReason.length > 0
-                                sourceComponent: Components.PlainToolTip {
+                                sourceComponent: Components.RowReasonToolTip {
                                     objectName: "libraryRowReason"
-                                    parent: libraryRow
+                                    row: libraryRow
                                     x: libraryRow.titleX
+                                    rowTop: libraryRow.y - libraryAlbumView.contentY
+                                    viewHeight: libraryAlbumView.height
+                                    room: libraryRow.width - libraryAlbumView.rowStatesEnd - libraryRow.titleX
+                                        - Kirigami.Units.smallSpacing
+                                    // The rows are alike in height: the
+                                    // rows it would cover follow from its
+                                    // index. The playing track's, or the
+                                    // collapsed row that holds it.
+                                    coversNow: function(top, bottom) {
+                                        const rowHeight = libraryAlbumView.rowHeight
+                                        const first = Math.floor(top / rowHeight)
+                                        const last = Math.ceil(bottom / rowHeight) - 1
+                                        for (let step = first; step <= last; ++step) {
+                                            const other = step !== 0 ? libraryAlbumView.itemAtIndex(index + step) : null
+                                            if (other !== null && (other.isNow || other.holdsNow)) {
+                                                return true
+                                            }
+                                        }
+                                        return false
+                                    }
                                     visible: libraryRow.reasonShown
-                                    delay: Kirigami.Units.toolTipDelay
                                     message: libraryRow.unreadableReason
                                 }
                             }

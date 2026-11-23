@@ -877,18 +877,33 @@ Rectangle {
                         }
                     }
 
-                    // Why an unreadable row is marked (reasonShown), over
-                    // the row from its title: on the 16 px glyph alone,
-                    // the pointer had to find it, and the keyboard never
-                    // could. Only such a row makes one.
+                    // Why an unreadable row is marked (reasonShown), from
+                    // its title, below it unless near the view's bottom,
+                    // and clear of the playing row: on the 16 px glyph
+                    // alone, the pointer had to find it, and the keyboard
+                    // never could. Only such a row makes one.
                     Loader {
                         active: playlistRow.unreadable
-                        sourceComponent: Components.PlainToolTip {
+                        sourceComponent: Components.RowReasonToolTip {
                             objectName: "queueRowReason"
-                            parent: playlistRow
+                            row: playlistRow
                             x: titleCell.x
+                            rowTop: playlistRow.y - playlistView.contentY
+                            viewHeight: playlistView.height
+                            room: playlistRow.width - playlistView.rowStatesEnd - titleCell.x
+                                - Kirigami.Units.smallSpacing
+                            // The rows are alike in height: the playing
+                            // row is where its index puts it.
+                            coversNow: function(top, bottom) {
+                                if (root.uiBridge.playbackState === "Stopped"
+                                        || root.uiBridge.playingQueueIndex < 0) {
+                                    return false
+                                }
+                                const nowTop = (root.uiBridge.playingQueueIndex - playlistRow.queueRowIndex)
+                                    * playlistRow.height
+                                return nowTop < bottom && nowTop + playlistRow.height > top
+                            }
                             visible: playlistRow.reasonShown
-                            delay: Kirigami.Units.toolTipDelay
                             message: playlistRow.unreadableReason
                         }
                     }

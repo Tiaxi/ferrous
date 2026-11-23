@@ -283,6 +283,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/PopupClosing.qml
         qml/components/RegionHeader.qml
         qml/components/RowBackground.qml
+        qml/components/RowReasonToolTip.qml
         qml/components/ScrobbleIndicator.qml
         qml/components/ShortcutAction.qml
         qml/components/TextToolButton.qml

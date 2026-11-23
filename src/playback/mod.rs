@@ -270,16 +270,15 @@ pub struct PlaybackError {
 }
 
 impl PlaybackError {
-    /// The message shown to the user.
+    /// The message shown to the user: for a track that failed, what failed
+    /// and what playback did then, with why it failed apart from it, in
+    /// [`Self::reason`].
     #[must_use]
     pub fn message(&self) -> String {
         let detail = self.detail.trim().trim_end_matches('.');
         let failure = || match self.path.as_deref().and_then(std::path::Path::file_name) {
-            Some(name) => format!(
-                "Couldn't play \u{201c}{}\u{201d} ({detail})",
-                name.to_string_lossy()
-            ),
-            None => format!("Playback failed ({detail})"),
+            Some(name) => format!("Couldn't play \u{201c}{}\u{201d}", name.to_string_lossy()),
+            None => "Playback failed".to_string(),
         };
         match self.outcome {
             PlaybackErrorOutcome::Skipped => format!("{}; skipped it.", failure()),
@@ -307,6 +306,25 @@ impl PlaybackError {
                 ),
                 None => format!("Can't release a file: {detail}."),
             },
+        }
+    }
+
+    /// Why a track failed, such as "Resource not found", when the message
+    /// leaves it out; empty for the other outcomes, whose messages give it.
+    /// Recent Issues shows it under the message, and the queue and the
+    /// library tell it on the file's rows, without what playback did then,
+    /// which is stale once another track plays.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        match self.outcome {
+            PlaybackErrorOutcome::Skipped
+            | PlaybackErrorOutcome::Stopped
+            | PlaybackErrorOutcome::StoppedAfterFailures(_) => {
+                self.detail.trim().trim_end_matches('.')
+            }
+            PlaybackErrorOutcome::EngineUnavailable
+            | PlaybackErrorOutcome::NotReleased
+            | PlaybackErrorOutcome::NotResumed => "",
         }
     }
 }
@@ -532,38 +550,55 @@ mod shared_tests {
 
     #[test]
     fn playback_errors_name_the_track_and_what_playback_did() {
-        let error = |path: Option<&str>, detail: &str, outcome| {
-            PlaybackError {
-                path: path.map(PathBuf::from),
-                detail: detail.to_string(),
-                outcome,
-            }
-            .message()
+        let failed = |path: Option<&str>, detail: &str, outcome| PlaybackError {
+            path: path.map(PathBuf::from),
+            detail: detail.to_string(),
+            outcome,
         };
-        assert_eq!(
-            error(
-                Some("/music/b.flac"),
-                "Resource not found.",
-                PlaybackErrorOutcome::Skipped
-            ),
-            "Couldn't play \u{201c}b.flac\u{201d} (Resource not found); skipped it."
+        let error =
+            |path: Option<&str>, detail: &str, outcome| failed(path, detail, outcome).message();
+        // A track that failed: what failed and what playback did then, with
+        // why it failed apart, for the file's rows, where what playback did
+        // is stale once another track plays.
+        let skipped = failed(
+            Some("/music/b.flac"),
+            "Resource not found.",
+            PlaybackErrorOutcome::Skipped,
         );
         assert_eq!(
-            error(
-                Some("/music/b.flac"),
-                "missing GStreamer plugin: FLAC decoder",
-                PlaybackErrorOutcome::Stopped
-            ),
-            "Couldn't play \u{201c}b.flac\u{201d} (missing GStreamer plugin: FLAC decoder); \
-             playback stopped."
+            skipped.message(),
+            "Couldn't play \u{201c}b.flac\u{201d}; skipped it."
+        );
+        assert_eq!(skipped.reason(), "Resource not found");
+        let stopped = failed(
+            Some("/music/b.flac"),
+            " missing GStreamer plugin: FLAC decoder ",
+            PlaybackErrorOutcome::Stopped,
         );
         assert_eq!(
-            error(
+            stopped.message(),
+            "Couldn't play \u{201c}b.flac\u{201d}; playback stopped."
+        );
+        assert_eq!(stopped.reason(), "missing GStreamer plugin: FLAC decoder");
+        let in_a_row = failed(
+            None,
+            "decoder failed",
+            PlaybackErrorOutcome::StoppedAfterFailures(5),
+        );
+        assert_eq!(
+            in_a_row.message(),
+            "Playback failed; playback stopped after 5 tracks in a row failed."
+        );
+        assert_eq!(in_a_row.reason(), "decoder failed");
+        // The other outcomes give why in their messages.
+        assert_eq!(
+            failed(
                 None,
-                "decoder failed",
-                PlaybackErrorOutcome::StoppedAfterFailures(5)
-            ),
-            "Playback failed (decoder failed); playback stopped after 5 tracks in a row failed."
+                "no audio output",
+                PlaybackErrorOutcome::EngineUnavailable
+            )
+            .reason(),
+            ""
         );
         assert_eq!(
             error(

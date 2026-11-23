@@ -69,7 +69,8 @@ pub struct BridgeError {
     /// The system's text for it, such as "failed to replace
     /// /path/settings.txt: Permission denied (os error 13)", which Recent
     /// Issues shows under the title in secondary ink; empty for none. The
-    /// UI never reads it for anything else.
+    /// UI reads it for nothing else but a failed track's reason, which the
+    /// file's rows in the queue and the library tell.
     pub detail: String,
 }
 
