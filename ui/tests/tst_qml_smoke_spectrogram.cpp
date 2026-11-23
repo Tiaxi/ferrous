@@ -1409,45 +1409,83 @@ void SpectrogramSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
 void SpectrogramSmokeTest::spectrogramCrosshairReadsOverBrightData() {
     // The dashed white lines vanished on a bright harmonic, and at 35 %
     // they were lost in mid-bright texture (2.3:1). The dashes are white at
-    // 55 % and what is between them the plot's floor at 80 %, so one or the
+    // 62 % (at 55 % the time line faded over the brighter parts of both
+    // lanes) and what is between them the plot's floor at 80 %, so one or the
     // other carries the line over any data, and the lines are no thicker.
+    const QColor floor(0x0a, 0x03, 0x18);
+    // Over data of `level` throughout, and with the crosshair at (20, 50):
+    // the data, and what shows with the crosshair.
+    const auto showCrosshair = [&floor](QQuickWindow &window, char level) {
+        window.setColor(floor);
+        window.resize(200, 100);
+        window.show();
+        if (!QTest::qWaitForWindowExposed(&window, 5000)) {
+            return std::pair<QColor, QImage>();
+        }
+        auto &item = *new SpectrogramItem(window.contentItem());
+        item.setWidth(200);
+        item.setHeight(100);
+        item.setDisplayMode(1);
+        item.setPlaying(false);
+        item.setFloorColor(floor);
+        item.setCrosshairEnabled(true);
+        item.setAcceptHoverEvents(false);
+        constexpr int bins = 64;
+        item.feedPrecomputedChunk(QByteArray(bins * 200, level), bins, 0, 200, 0, 200, 48000,
+            1024, true, true, 1, false);
+        setTestPosition(item, 4.0, 1);
+        const auto grab = [&]() {
+            item.update();
+            return window.grabWindow().convertToFormat(QImage::Format_RGB32);
+        };
+        QImage shown;
+        if (!QTest::qWaitFor([&]() {
+                return (shown = grab()).pixelColor(20, 50) != floor
+                    && !spectrogramRasterPending(item);
+            }, 5000)) {
+            return std::pair<QColor, QImage>();
+        }
+        const QColor data = shown.pixelColor(20, 50);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.m_hoverActive = true;
+            item.m_hoverPosition = QPointF(20.0, 50.0);
+            item.m_crosshairDirty = true;
+        }
+        return std::pair<QColor, QImage>(data, grab());
+    };
+    // Its dashes and its gaps, each over the data: 4 on and 3 off, over 28
+    // pixels.
+    const auto dashesAndGaps = [&floor](const QColor &data, const QImage &shown) {
+        const auto over = [&data](const QColor &top, double alpha) {
+            return QColor::fromRgbF(
+                static_cast<float>(alpha * top.redF() + (1.0 - alpha) * data.redF()),
+                static_cast<float>(alpha * top.greenF() + (1.0 - alpha) * data.greenF()),
+                static_cast<float>(alpha * top.blueF() + (1.0 - alpha) * data.blueF()));
+        };
+        const QColor dash = over(Qt::white, 158.0 / 255.0);
+        const QColor gap = over(floor, 0.8);
+        int dashes = 0;
+        int gaps = 0;
+        for (int i = 4; i < 32; ++i) {
+            const QColor at = shown.pixelColor(20, i);
+            dashes += channelDistance(at, dash) <= 2 ? 1 : 0;
+            gaps += channelDistance(at, gap) <= 2 ? 1 : 0;
+        }
+        return dashes >= 12 && gaps >= 8
+            ? QString()
+            : QStringLiteral("%1 dashes of %2, %3 gaps of %4, as %5 and %6 over %7")
+                  .arg(dashes).arg(dash.name(), QString::number(gaps), gap.name(),
+                      shown.pixelColor(20, 4).name(), shown.pixelColor(20, 8).name(), data.name());
+    };
+
     QQuickWindow window;
     if (window.rendererInterface()->graphicsApi() == QSGRendererInterface::Null) {
         QSKIP("The null renderer draws no pixels");
     }
-    const QColor floor(0x0a, 0x03, 0x18);
-    window.setColor(floor);
-    window.resize(200, 100);
-    window.show();
-    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
-    auto &item = *new SpectrogramItem(window.contentItem());
-    item.setWidth(200);
-    item.setHeight(100);
-    item.setDisplayMode(1);
-    item.setPlaying(false);
-    item.setFloorColor(floor);
-    item.setCrosshairEnabled(true);
-    item.setAcceptHoverEvents(false);
-    constexpr int bins = 64;
-    item.feedPrecomputedChunk(QByteArray(bins * 200, '\xff'), bins, 0, 200, 0, 200, 48000, 1024,
-        true, true, 1, false);
-    setTestPosition(item, 4.0, 1);
-    const auto grab = [&]() {
-        item.update();
-        return window.grabWindow().convertToFormat(QImage::Format_RGB32);
-    };
-    QImage shown;
-    QTRY_VERIFY_WITH_TIMEOUT(
-        contrastRatio((shown = grab()).pixelColor(20, 50), floor) > 8.0
-            && !spectrogramRasterPending(item), 5000);
-    const QColor data = shown.pixelColor(20, 50);
-    {
-        QMutexLocker lock(&item.m_stateMutex);
-        item.m_hoverActive = true;
-        item.m_hoverPosition = QPointF(20.0, 50.0);
-        item.m_crosshairDirty = true;
-    }
-    shown = grab();
+    const auto [data, shown] = showCrosshair(window, '\xff');
+    QVERIFY(!shown.isNull());
+    QVERIFY2(contrastRatio(data, floor) > 8.0, qPrintable(data.name()));
     for (const bool column : {true, false}) {
         double best = 1.0;
         for (int i = 4; i < 16; ++i) {
@@ -1457,26 +1495,13 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadsOverBrightData() {
         }
         QVERIFY2(best >= 3.0, qPrintable(QStringLiteral("%1:1 over the data").arg(best)));
     }
-    // Its dashes and its gaps, each over the data.
-    const auto over = [&data](const QColor &top, double alpha) {
-        return QColor::fromRgbF(
-            static_cast<float>(alpha * top.redF() + (1.0 - alpha) * data.redF()),
-            static_cast<float>(alpha * top.greenF() + (1.0 - alpha) * data.greenF()),
-            static_cast<float>(alpha * top.blueF() + (1.0 - alpha) * data.blueF()));
-    };
-    const QColor dash = over(Qt::white, 140.0 / 255.0);
-    const QColor gap = over(floor, 0.8);
-    int dashes = 0;
-    int gaps = 0;
-    for (int i = 4; i < 32; ++i) {
-        const QColor at = shown.pixelColor(20, i);
-        dashes += channelDistance(at, dash) <= 2 ? 1 : 0;
-        gaps += channelDistance(at, gap) <= 2 ? 1 : 0;
-    }
-    // 4 on and 3 off, over 28 pixels.
-    QVERIFY2(dashes >= 12 && gaps >= 8, qPrintable(QStringLiteral("%1 dashes of %2, %3 gaps of %4, as %5 and %6")
-        .arg(dashes).arg(dash.name(), QString::number(gaps), gap.name(),
-             shown.pixelColor(20, 4).name(), shown.pixelColor(20, 8).name())));
+    QCOMPARE(dashesAndGaps(data, shown), QString());
+
+    // Over mid-bright texture, where white at 55 % and at 62 % differ.
+    QQuickWindow midWindow;
+    const auto [midData, midShown] = showCrosshair(midWindow, '\x90');
+    QVERIFY(!midShown.isNull());
+    QCOMPARE(dashesAndGaps(midData, midShown), QString());
 }
 
 // A seek on the plot lands the playhead under the pointer, where the

@@ -141,10 +141,11 @@ const QColor kRestScaleTextColor(236, 236, 236, 184);
 // the canvas fragments a zoom preview scales (spectrogramSceneGraphDrawsTheCanvas).
 const QColor kPlayheadColor(0xe8, 0xe8, 0xe8, 254);
 const QColor kPlayheadCasingColor(0, 0, 0, 153);
-// The crosshair: dashed white 55%, with the floor at 80% between the
+// The crosshair: dashed white 62%, with the floor at 80% between the
 // dashes. One carries the 1 px line over dark texture, the other over bright
-// harmonics; at 35% and 60% it was lost in mid-bright texture (2.3:1).
-const QColor kCrosshairLineColor(255, 255, 255, 140);
+// harmonics; at 35% and 60% it was lost in mid-bright texture (2.3:1), and
+// at 55% the shared time line faded over the brighter parts of both lanes.
+const QColor kCrosshairLineColor(255, 255, 255, 158);
 constexpr double kCrosshairGapOpacity = 0.8;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 std::atomic<quint64> g_lastLoggedSeekProfileIncidentGeneration{0};
@@ -5853,6 +5854,27 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 columnsToNextPixel = (unsnapped - snapped + 1.0 - kScrollPixelEpsilon) / canvasZoom;
             }
 
+            // A jump the canvas cannot follow, as Follow Playhead or a seek
+            // makes within the columns the ring holds, leaves the canvas of
+            // the view before it where it was until the new view's
+            // rasterization lands (see staleCanvasAlignmentLocked). Until
+            // then the frame is that view's: the playhead, the time scale,
+            // the marker and the crosshair stay as it placed them, rather
+            // than show the new view over its columns, and they move with
+            // the columns, in one frame.
+            const bool frameHeld = !rollingMode && hasCanvas && !canvasIsView && !preview.active
+                && m_canvas.width() == cw && m_canvas.height() == ch
+                && std::abs(canvasZoom - m_precomputedCanvasZoomLevel) <= 0.001
+                && m_shownFrame.valid
+                && m_shownFrame.canvasLeft == m_precomputedCanvasDisplayLeft
+                && m_shownFrame.trackToken == m_precomputedCanvasTrackToken
+                && m_precomputedCanvasTrackToken == m_precomputedTrackToken
+                && m_shownFrame.displayLeft != displayLeft;
+            // Where the overlays are placed: the view's start, and where
+            // its first column is drawn.
+            const qint64 overlayLeft = frameHeld ? m_shownFrame.displayLeft : displayLeft;
+            const double overlayDrawX = frameHeld ? m_shownFrame.drawX : drawX;
+
             if (zoomPreviewShown && !rollingMode) {
                 // The playhead, as the preview places the time it scales
                 // about.
@@ -6068,13 +6090,22 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // A view the user moved shows the playhead only while it is in it.
             const bool playheadOutside = playheadPixel < 0
                 || (followMode == ViewFollow::Mode::Detached && playheadPixel >= cw);
-            if (!rollingMode && !playheadOutside) {
+            if (frameHeld) {
+                showPlayhead = m_shownFrame.showPlayhead;
+                playheadRect = m_shownFrame.playheadRect;
+            } else if (!rollingMode && !playheadOutside) {
                 showPlayhead = true;
                 playheadRect = QRectF(
                     static_cast<double>(std::clamp(playheadPixel, 0, cw - 1)) / scale,
                     0.0,
                     static_cast<double>(deviceLineWidth(scale)) / scale,
                     static_cast<double>(ch) / scale);
+            }
+            if (!rollingMode && hasCanvas && canvasIsView && !preview.active) {
+                m_shownFrame = {true, m_precomputedCanvasDisplayLeft, m_precomputedCanvasTrackToken,
+                    displayLeft, drawX, showPlayhead, playheadRect};
+            } else if (!frameHeld) {
+                m_shownFrame.valid = false;
             }
 
             // With its canvas in place, a view that scrolls changes only
@@ -6185,8 +6216,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 // and drawX changes (critical in rolling mode where drawX
                 // varies during the initial canvas fill phase).
                 const double rawShift =
-                    static_cast<double>(displayLeft - m_timeGridRenderDisplayLeft) * canvasZoom
-                    - (drawX - m_timeGridRenderDrawX);
+                    static_cast<double>(overlayLeft - m_timeGridRenderDisplayLeft) * canvasZoom
+                    - (overlayDrawX - m_timeGridRenderDrawX);
                 int shift = static_cast<int>(std::round(rawShift));
                 const bool timeStale = m_timeGridDirty
                     || !m_timeGrid.valid
@@ -6197,7 +6228,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const double cps =
                         static_cast<double>(m_precomputedSampleRateHz)
                         / static_cast<double>(m_precomputedHopSize);
-                    updateTimeGridOverlayLocked(cw, ch, timeGridPadding, displayLeft, rollingMode, cps, drawX);
+                    updateTimeGridOverlayLocked(
+                        cw, ch, timeGridPadding, overlayLeft, rollingMode, cps, overlayDrawX);
                     shift = 0;
                 }
                 // Within 48 px of the left edge, and of the mode switch and
@@ -6213,8 +6245,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const double cps = static_cast<double>(m_precomputedSampleRateHz)
                     / static_cast<double>(m_precomputedHopSize);
                 const double deviceX = timeToPixelX(
-                    m_markerSeconds + m_gaplessPositionOffset, displayLeft, rollingMode,
-                    m_rollingEpoch, cps, drawX, canvasZoomLocked());
+                    m_markerSeconds + m_gaplessPositionOffset, overlayLeft, rollingMode,
+                    m_rollingEpoch, cps, overlayDrawX, canvasZoomLocked());
                 markerX = std::round(deviceX / scale);
             }
 
@@ -6231,8 +6263,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 bool crosshairTimeStale = false;
                 if (pointerOnLocked() || m_showCrosshairTime) {
                     crosshairTimeStale =
-                        displayLeft != m_crosshairCachedDisplayLeft
-                        || !qFuzzyCompare(drawX / scale + 1.0, m_crosshairCachedDrawX + 1.0)
+                        overlayLeft != m_crosshairCachedDisplayLeft
+                        || !qFuzzyCompare(overlayDrawX / scale + 1.0, m_crosshairCachedDrawX + 1.0)
                         || rollingMode != m_crosshairCachedRollingMode;
                 }
                 const bool crosshairStale = m_crosshairDirty
@@ -6244,7 +6276,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     const double cps =
                         static_cast<double>(m_precomputedSampleRateHz)
                         / static_cast<double>(m_precomputedHopSize);
-                    updateCrosshairOverlayLocked(cw, ch, displayLeft, rollingMode, cps, drawX);
+                    updateCrosshairOverlayLocked(cw, ch, overlayLeft, rollingMode, cps, overlayDrawX);
                 }
                 // The playhead is above the crosshair: where a seek on the
                 // plot lands it under the pointer, the dashes over it read

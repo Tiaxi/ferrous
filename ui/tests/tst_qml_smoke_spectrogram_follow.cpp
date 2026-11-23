@@ -34,6 +34,7 @@ private slots:
     void ownSeekKeepsTheViewAndOthersBringItBack();
     void followPlayheadReattachesAtOnce_data();
     void followPlayheadReattachesAtOnce();
+    void followPlayheadMovesThePlayheadWithTheColumns();
     void movedViewKeepsWhatItShowsWhileItsColumnsCome();
     void staleChunksAfterFastPansAreDiscarded();
     void secondRefillKeepsTheColumnsTheFirstDrew();
@@ -850,6 +851,127 @@ void SpectrogramFollowSmokeTest::followPlayheadReattachesAtOnce() {
     QCOMPARE(detachedChanges.count(), 2);
     QCOMPARE(viewOf(item).left, followingLeftOf(item));
     QVERIFY(std::abs(playheadFraction(item) - 0.5) <= 1.0 / kWindow);
+}
+
+// Follow Playhead on a view moved away from the playhead jumps further
+// than the canvas can be moved: the canvas of the view before stays on
+// screen until the rasterization of the new view lands. The playhead, the
+// time scale and the crosshair's readout showed the new view at once, over
+// the old view's columns, for a frame or two (#753); they stay as that view
+// placed them, and all of them move with the columns, in one frame.
+void SpectrogramFollowSmokeTest::followPlayheadMovesThePlayheadWithTheColumns() {
+    QQuickWindow window;
+    window.resize(400, 100);
+    presentWithoutDrawing(window);
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    TestTime time;
+    item.setGridEnabled(true);
+    item.setShowTimeLabels(true);
+    prepare(item, time, 60.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    // Moved back by most of a view: the playhead, right of it, is not in
+    // it, and the time scale shows 0:50 in it, and 1:00 in the view that
+    // follows the playhead.
+    middleDrag(item, 0.0, 390.0);
+    QVERIFY(item.detached());
+    QCoreApplication::processEvents();
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = true;
+        item.m_hoverPosition = QPointF(200.0, 40.0);
+        item.m_crosshairDirty = true;
+    }
+    node = paintSettled(item, node);
+    QVERIFY(!spectrogramRasterPending(item));
+    const qint64 movedLeft = viewOf(item).left;
+    const auto canvasLeft = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        return item.m_precomputedCanvasDisplayLeft;
+    };
+    QCOMPARE(canvasLeft(), movedLeft);
+    QVERIFY(columnAt(positionOf(item)) > movedLeft + kWindow);
+
+    // What a frame shows besides the columns.
+    struct Shown {
+        QRectF playhead;
+        QVector<QRectF> timeScale;
+        QString readout;
+    };
+    const auto shown = [&item, &node]() {
+        Shown frame;
+        frame.playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(kPlayheadChild))->rect();
+        // The time scale, two layers above the playhead.
+        frame.timeScale = overlayOnScreen(node, kPlayheadChild + 2).lines;
+        // The crosshair's readouts, as laid out for the frame.
+        QMutexLocker lock(&item.m_stateMutex);
+        for (const SpectrogramOverlayImage &image : std::as_const(item.m_crosshair.images)) {
+            if (image.kind == SpectrogramOverlayImage::ReadoutPlate) {
+                frame.readout += image.text + u'|';
+            }
+        }
+        return frame;
+    };
+    const Shown moved = shown();
+    QVERIFY(moved.playhead.isEmpty());
+    QVERIFY(!moved.timeScale.isEmpty());
+    QVERIFY(!moved.readout.isEmpty());
+
+    item.followPlayhead();
+    // The view's change, queued to the lane.
+    QCoreApplication::processEvents();
+    const qint64 following = followingLeftOf(item);
+    QCOMPARE(viewOf(item).left, following);
+    // The frame that asks for the new view's canvas shows the old one.
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(spectrogramRasterPending(item));
+    QCOMPARE(canvasLeft(), movedLeft);
+    const Shown held = shown();
+    QVERIFY2(held.playhead.isEmpty(),
+        qPrintable(QStringLiteral("the playhead at %1 over the moved view's columns")
+            .arg(held.playhead.left())));
+    QCOMPARE(held.readout, moved.readout);
+    QCOMPARE(held.timeScale, moved.timeScale);
+
+    // The frame that shows the new view's canvas shows all of it.
+    QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.markCanvasDirtyLocked();
+    }
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(!spectrogramRasterPending(item));
+    QCOMPARE(canvasLeft(), following);
+    const Shown followed = shown();
+    QCOMPARE(followed.playhead.left(), static_cast<double>(columnAt(positionOf(item)) - following));
+    QVERIFY(followed.readout != moved.readout);
+    QVERIFY(followed.timeScale != moved.timeScale);
+
+    // A seek within the columns the ring holds is such a jump too: the
+    // playhead stays where it was, rather than blink out, until all of the
+    // view moves.
+    setTestPosition(item, 87.0, 1);
+    QCoreApplication::processEvents();
+    const qint64 sought = followingLeftOf(item);
+    QCOMPARE(viewOf(item).left, sought);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(spectrogramRasterPending(item));
+    QCOMPARE(canvasLeft(), following);
+    const Shown seeking = shown();
+    QCOMPARE(seeking.playhead, followed.playhead);
+    QCOMPARE(seeking.readout, followed.readout);
+    QCOMPARE(seeking.timeScale, followed.timeScale);
+    QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.markCanvasDirtyLocked();
+    }
+    node = item.updatePaintNode(node, nullptr);
+    QCOMPARE(canvasLeft(), sought);
+    const Shown landed = shown();
+    QCOMPARE(landed.playhead.left(), static_cast<double>(columnAt(positionOf(item)) - sought));
+    QVERIFY(landed.readout != followed.readout);
+    QVERIFY(landed.timeScale != followed.timeScale);
+    delete node;
 }
 
 // While the analysis decodes a view the user moved, the canvas stays under
