@@ -115,6 +115,9 @@ Item {
             ? root.fullscreenWindow !== null && root.fullscreenWindow.strip.focusInside
             : albumArtViewer.visible && root.windowRoot !== null
                 && root.isInside(root.windowRoot.activeFocusItem, albumArtPopupControls)
+                // Focus from a click doesn't hold them, as in the
+                // visualization viewer's plate.
+                && root.windowRoot.activeFocusItem.focusReason !== Qt.MouseFocusReason
     }
 
     // Made the first time the viewer opens over the whole screen and kept,
