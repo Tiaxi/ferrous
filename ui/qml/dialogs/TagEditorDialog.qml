@@ -57,17 +57,17 @@ Components.DialogWindow {
     // that ask the editor which fields changed.
     property int summaryRevision: 0
     readonly property var editorFields: [
-        { key: "title", label: I18n.i18nc("@label tag field", "Title"), formLabel: I18n.i18nc("@label:textbox tag field", "Title:"), allowTitleCase: true, allowCapitalize: true },
-        { key: "artist", label: I18n.i18nc("@label tag field", "Artist"), formLabel: I18n.i18nc("@label:textbox tag field", "Artist:"), allowTitleCase: true, allowCapitalize: true },
-        { key: "album", label: I18n.i18nc("@label tag field", "Album"), formLabel: I18n.i18nc("@label:textbox tag field", "Album:"), allowTitleCase: true, allowCapitalize: true },
-        { key: "albumArtist", label: I18n.i18nc("@label tag field", "Album Artist"), formLabel: I18n.i18nc("@label:textbox tag field", "Album artist:"), allowTitleCase: true, allowCapitalize: true },
-        { key: "genre", label: I18n.i18nc("@label tag field", "Genre"), formLabel: I18n.i18nc("@label:textbox tag field", "Genre:"), allowTitleCase: false, allowCapitalize: true },
-        { key: "year", label: I18n.i18nc("@label tag field", "Year"), formLabel: I18n.i18nc("@label:textbox tag field", "Year:"), allowTitleCase: false, allowCapitalize: false },
-        { key: "trackNo", label: I18n.i18nc("@label tag field", "Track"), formLabel: I18n.i18nc("@label:textbox tag field", "Track:"), allowTitleCase: false, allowCapitalize: false },
-        { key: "totalTracks", label: I18n.i18nc("@label tag field", "Tracks"), formLabel: "", allowTitleCase: false, allowCapitalize: false },
-        { key: "discNo", label: I18n.i18nc("@label tag field", "Disc"), formLabel: I18n.i18nc("@label:textbox tag field", "Disc:"), allowTitleCase: false, allowCapitalize: false },
-        { key: "totalDiscs", label: I18n.i18nc("@label tag field", "Discs"), formLabel: "", allowTitleCase: false, allowCapitalize: false },
-        { key: "comment", label: I18n.i18nc("@label tag field", "Comment"), formLabel: I18n.i18nc("@label:textbox tag field", "Comment:"), allowTitleCase: false, allowCapitalize: false }
+        { key: "title", label: I18n.i18nc("@label tag field", "Title"), rowLabel: I18n.i18nc("@item:intext tag field, as its row in the form is labelled", "Title"), formLabel: I18n.i18nc("@label:textbox tag field", "Title:"), allowTitleCase: true, allowCapitalize: true },
+        { key: "artist", label: I18n.i18nc("@label tag field", "Artist"), rowLabel: I18n.i18nc("@item:intext tag field, as its row in the form is labelled", "Artist"), formLabel: I18n.i18nc("@label:textbox tag field", "Artist:"), allowTitleCase: true, allowCapitalize: true },
+        { key: "album", label: I18n.i18nc("@label tag field", "Album"), rowLabel: I18n.i18nc("@item:intext tag field, as its row in the form is labelled", "Album"), formLabel: I18n.i18nc("@label:textbox tag field", "Album:"), allowTitleCase: true, allowCapitalize: true },
+        { key: "albumArtist", label: I18n.i18nc("@label tag field", "Album Artist"), rowLabel: I18n.i18nc("@item:intext tag field, as its row in the form is labelled", "Album artist"), formLabel: I18n.i18nc("@label:textbox tag field", "Album artist:"), allowTitleCase: true, allowCapitalize: true },
+        { key: "genre", label: I18n.i18nc("@label tag field", "Genre"), rowLabel: I18n.i18nc("@item:intext tag field, as its row in the form is labelled", "Genre"), formLabel: I18n.i18nc("@label:textbox tag field", "Genre:"), allowTitleCase: false, allowCapitalize: true },
+        { key: "year", label: I18n.i18nc("@label tag field", "Year"), rowLabel: I18n.i18nc("@item:intext tag field, as its row in the form is labelled", "Year"), formLabel: I18n.i18nc("@label:textbox tag field", "Year:"), allowTitleCase: false, allowCapitalize: false },
+        { key: "trackNo", label: I18n.i18nc("@label tag field", "Track"), rowLabel: I18n.i18nc("@item:intext tag field, as its row in the form is labelled", "Track"), formLabel: I18n.i18nc("@label:textbox tag field", "Track:"), allowTitleCase: false, allowCapitalize: false },
+        { key: "totalTracks", label: I18n.i18nc("@label tag field", "Tracks"), row: "trackNo", formLabel: "", allowTitleCase: false, allowCapitalize: false },
+        { key: "discNo", label: I18n.i18nc("@label tag field", "Disc"), rowLabel: I18n.i18nc("@item:intext tag field, as its row in the form is labelled", "Disc"), formLabel: I18n.i18nc("@label:textbox tag field", "Disc:"), allowTitleCase: false, allowCapitalize: false },
+        { key: "totalDiscs", label: I18n.i18nc("@label tag field", "Discs"), row: "discNo", formLabel: "", allowTitleCase: false, allowCapitalize: false },
+        { key: "comment", label: I18n.i18nc("@label tag field", "Comment"), rowLabel: I18n.i18nc("@item:intext tag field, as its row in the form is labelled", "Comment"), formLabel: I18n.i18nc("@label:textbox tag field", "Comment:"), allowTitleCase: false, allowCapitalize: false }
     ]
     // The table's columns, each at its width with the default 10 pt font,
     // scaled with a larger one, or wider when its header or sample needs
@@ -107,7 +107,9 @@ Components.DialogWindow {
     // too little room for them all, either the tags or the paths were cut
     // short).
     readonly property var tableColumns: [
-        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "000" },
+        // "Track", which says what it numbers: "#" read as the rows' own
+        // numbering, in a batch numbered in order, beside a changed Disc.
+        { key: "trackNo", label: I18n.i18nc("@title:column track number", "Track"), width: 40, number: true, sample: "000" },
         { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, holds: 220, wants: 480, stretch: true, path: true },
         { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 100, holds: 160, wants: 400, wantsAtLeast: 240 },
         { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 100, holds: 160, fit: true },
@@ -126,15 +128,24 @@ Components.DialogWindow {
     // a 6 px dot at the default font, clear of a three-digit number, whose
     // room the # column has beside its Revert's.
     readonly property int modifiedMarkSize: 2 * Math.round(root.uiPalette.scaledSize(6) / 2)
-    // The # column's padding before its numbers: 8 px, or what the mark,
-    // centred in those 8, takes as it outgrows them with the font.
-    readonly property real numberLeadingRoom: Math.max(Kirigami.Units.largeSpacing,
-        Math.ceil((Kirigami.Units.largeSpacing + root.modifiedMarkSize) / 2) + 1)
+    // In its place on a row whose save or rename failed: Breeze's
+    // dialog-error, its square 12 px at the default font, in the negative
+    // colour (the row had the dot of an edit not yet saved, and its failure
+    // only in Status, at the table's far end).
+    readonly property string failureGlyph: Qt.resolvedUrl("../assets/status-error.svg")
+    readonly property int failureGlyphSize: 2 * Math.round(root.uiPalette.scaledSize(16) / 2)
+    // The marks' slot, at the start of the # column's left padding: as
+    // wide as the error glyph's square, or 8 px; each mark is centred in it.
+    readonly property real markSlotWidth: Math.max(Kirigami.Units.largeSpacing,
+        Math.ceil(root.failureGlyphSize * 3 / 4))
+    // The # column's padding before its numbers: the marks' slot, and a
+    // pixel clear of it.
+    readonly property real numberLeadingRoom: root.markSlotWidth + 1
     readonly property real tableInset: Kirigami.Units.largeSpacing
     // The room a column's header keeps after its label for the column's
     // Revert, up to the column's edge, whether it shows or not, so that
-    // marking a change moves no column: "Title ↺", and "# ↺" alike, with
-    // the digits ending where the # does; its glyph is as large as a line of
+    // marking a change moves no column: "Title ↺", and "Track ↺" alike,
+    // with the digits ending where "Track" does; its glyph is as large as a line of
     // text holds, 14 px in a 20 px button with the default font.
     readonly property real columnRevertGlyph: root.uiPalette.labelIconSize - 2
     readonly property real columnRevertRoom: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
@@ -411,7 +422,27 @@ Components.DialogWindow {
         return labels
     }
 
-    // "8 files selected. Genre changed from Classical."
+    // The form's rows that hold the changed fields, in the form's order, by
+    // the form's labels: a total is its number's row, "Track".
+    function changedRowLabels(changed) {
+        const labels = []
+        for (let i = 0; i < changed.length; ++i) {
+            const label = root.fieldAt(changed[i].row || changed[i].key).rowLabel
+            if (labels.indexOf(label) < 0) {
+                labels.push(label)
+            }
+        }
+        return labels
+    }
+
+    // The most rows the summary names; past that, the first of them and
+    // how many more ("Title, Track, Disc and 2 more").
+    readonly property int summaryNamedRows: 4
+
+    // "8 files selected. Genre changed from Classical.", or, for more than
+    // one field, "12 files selected. Changed: Title, Track, Disc.": which
+    // fields to check before Save ("5 fields changed." named none of them,
+    // and some were out of view in the table).
     function summaryText() {
         const count = root.selectedCount > 0 ? root.selectedCount : root.totalRows
         let text = root.selectedCount > 0
@@ -426,7 +457,17 @@ Components.DialogWindow {
                 ? I18n.i18nc("@info:status tag field, value it had", "%1 changed from %2.", changed[0].label, original)
                 : I18n.i18nc("@info:status tag field", "%1 changed.", changed[0].label))
         } else if (changed.length > 1) {
-            text += " " + I18n.i18ncp("@info:status", "%1 field changed.", "%1 fields changed.", changed.length)
+            const rows = root.changedRowLabels(changed)
+            const separator = I18n.i18nc("@info:status separator between the tag fields of a list", ", ")
+            if (rows.length <= root.summaryNamedRows) {
+                text += " " + I18n.i18nc("@info:status %1 is a list of tag fields", "Changed: %1.",
+                    rows.join(separator))
+            } else {
+                const named = root.summaryNamedRows - 1
+                text += " " + I18n.i18ncp("@info:status %2 is a list of tag fields, %1 how many more fields changed",
+                    "Changed: %2 and %1 more.", "Changed: %2 and %1 more.",
+                    rows.length - named, rows.slice(0, named).join(separator))
+            }
         }
         return text
     }
@@ -471,9 +512,10 @@ Components.DialogWindow {
         return width
     }
     readonly property real fieldsWidth: Math.max(Kirigami.Units.gridUnit * 19, root.fieldsMinimumWidth)
-    // The fields' narrowest: 16 grid units, or what their labels and a
-    // field need.
-    readonly property real fieldsLeastWidth: Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
+    // The fields' narrowest: 15 grid units, or what their labels and a
+    // field need (at 16, the table scrolled on a 1400 px screen once the
+    // track numbers' column read "Track").
+    readonly property real fieldsLeastWidth: Math.max(Kirigami.Units.gridUnit * 15, root.fieldsMinimumWidth)
     // The fields' width as shown: narrower, down to their least, where
     // that gives Title and File Name what they want (from a 1600 px main
     // window, the batch's longest file name was cut by 47 px beside titles
@@ -499,12 +541,18 @@ Components.DialogWindow {
     // table at its width, clear of its scroll bar.
     readonly property real fittedWidth: Math.ceil(2 * root.contentPadding + root.fieldsWidth
         + root.contentSpacing + root.tableWidthThrough("directory") + Kirigami.Units.gridUnit)
-    // As wide as what it holds and no wider, within the screen and no wider
-    // than the window it opens from, frame and all, as the two have the
-    // same frame (not 1624 px from a 1600 px main window): with less room,
-    // File Name and Folder give way first, then the tags.
-    defaultWidth: Math.min(root.fittedWidth,
-        root.windowRoot && root.windowRoot.width > 0 ? root.windowRoot.width : Number.POSITIVE_INFINITY)
+    // As wide as what it holds and no wider, within the screen's room: from
+    // a narrow main window too (no wider than a 1000 px one, its table
+    // showed three of its columns, the changed Disc out of view, on a
+    // screen with room to spare). Only a window that falls short of it by
+    // less than 2 grid units is a width to keep, frame and all, as the two
+    // have the same frame (not 1624 px from a 1600 px main window). With
+    // less room, File Name and Folder give way first, then the tags.
+    readonly property real parentWindowWidth: root.windowRoot && root.windowRoot.width > 0
+        ? root.windowRoot.width : 0
+    defaultWidth: root.parentWindowWidth > 0 && root.fittedWidth > root.parentWindowWidth
+            && root.fittedWidth - root.parentWindowWidth < 2 * Kirigami.Units.gridUnit
+        ? root.parentWindowWidth : root.fittedWidth
     // As tall as the fields, or a table of 12 rows, whichever is taller,
     // and no taller than 46 grid units, scaled with the font: a few files
     // leave no wide empty table, and the user may make it taller.
@@ -1375,32 +1423,48 @@ Components.DialogWindow {
             Layout.preferredHeight: root.uiPalette.labelIconSize
         }
 
-        Label {
-            id: statusLabel
-            objectName: "tagEditorStatusLabel"
-            readonly property bool failure: root.statusHasFailure && !root.busy
+        // The status, in a slot as tall as the buttons, whatever its
+        // lines: the summary's second line, as it wraps to name the fields
+        // an edit changed, stands over the row's edges evenly and moves
+        // nothing (the buttons keep the dialogs' inset from the bottom).
+        Item {
             Layout.fillWidth: true
             // As wide as its text, for what follows it, and elided in less.
-            Layout.maximumWidth: Math.ceil(implicitWidth)
+            Layout.maximumWidth: Math.ceil(statusLabel.implicitWidth)
+            Layout.preferredHeight: toolsButton.implicitHeight
             Layout.bottomMargin: dialogButtons.bottomPadding
             Layout.leftMargin: Kirigami.Units.smallSpacing
-            textFormat: Text.PlainText
-            text: root.statusLine()
-            font.pointSize: statusLabel.failure ? root.uiPalette.basePointSize : root.uiPalette.smallPointSize
-            color: statusLabel.failure ? root.uiPalette.negative : root.uiPalette.textSecondary
-            elide: Text.ElideRight
-            Accessible.role: Accessible.StatusBar
 
-            HoverHandler {
-                id: statusHover
-            }
+            Label {
+                id: statusLabel
+                objectName: "tagEditorStatusLabel"
+                readonly property bool failure: root.statusHasFailure && !root.busy
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: root.statusLine()
+                font.pointSize: statusLabel.failure ? root.uiPalette.basePointSize : root.uiPalette.smallPointSize
+                color: statusLabel.failure ? root.uiPalette.negative : root.uiPalette.textSecondary
+                // The summary takes a second line where one is too short
+                // for the fields it names, and elides past that; a failure
+                // keeps to one, beside its Details….
+                wrapMode: statusLabel.failure ? Text.NoWrap : Text.Wrap
+                maximumLineCount: statusLabel.failure ? 1 : 2
+                elide: Text.ElideRight
+                Accessible.role: Accessible.StatusBar
 
-            // All of it while it is cut, as a cell's.
-            Components.PlainToolTip {
-                objectName: "tagEditorStatusToolTip"
-                message: statusLabel.text
-                delay: Kirigami.Units.toolTipDelay
-                visible: statusHover.hovered && statusLabel.truncated
+                HoverHandler {
+                    id: statusHover
+                }
+
+                // All of it while it is cut, as a cell's.
+                Components.PlainToolTip {
+                    objectName: "tagEditorStatusToolTip"
+                    message: statusLabel.text
+                    delay: Kirigami.Units.toolTipDelay
+                    visible: statusHover.hovered && statusLabel.truncated
+                }
             }
         }
 
@@ -1684,7 +1748,7 @@ Components.DialogWindow {
                                         icon.width: root.columnRevertGlyph
                                         icon.height: root.columnRevertGlyph
                                         display: AbstractButton.IconOnly
-                                        // By its field: the # column is Track's.
+                                        // By its field: the track number's column is Track's.
                                         text: headerCell.editable
                                             ? I18n.i18nc("@action:button %1 is a tag field", "Revert %1 in Every File",
                                                 root.fieldAt(headerCell.modelData.key).label)
@@ -1757,9 +1821,12 @@ Components.DialogWindow {
                         }
                         return tallest
                     }
+                    // A save or rename failed for the file.
+                    readonly property bool failed: tableRow.errorText.length > 0
                     Accessible.role: Accessible.Row
                     Accessible.name: tableRow.fileName
-                    Accessible.description: tableRow.marked ? root.modifiedText : ""
+                    Accessible.description: tableRow.failed ? root.cellText("status", tableRow)
+                        : tableRow.marked ? root.modifiedText : ""
                     Accessible.selected: tableRow.selected
 
                     Components.RowBackground {
@@ -1929,7 +1996,9 @@ Components.DialogWindow {
                                 readonly property string toolTipText: tableCell.failureCell ? tableRow.errorText
                                     : tableCell.truncated
                                         ? (modelData.key === "directory" ? tableRow.directory : tableCell.text)
-                                        : (modelData.key === "trackNo" && tableRow.marked ? root.modifiedText : "")
+                                        : modelData.key !== "trackNo" ? ""
+                                        : tableRow.failed ? tableRow.errorText
+                                        : tableRow.marked ? root.modifiedText : ""
                                 Accessible.description: tableCell.failureCell ? tableRow.errorText : ""
 
                                 HoverHandler {
@@ -1949,14 +2018,37 @@ Components.DialogWindow {
                     // it moves nothing.
                     Rectangle {
                         objectName: "tagEditorRowModifiedMark"
-                        visible: tableRow.marked
-                        x: root.pinnedShift + root.tableInset + Math.round((Kirigami.Units.largeSpacing - width) / 2)
+                        visible: tableRow.marked && !tableRow.failed
+                        x: root.pinnedShift + root.tableInset + Math.round((root.markSlotWidth - width) / 2)
                         // On the first line, as the row's cells start.
                         y: Math.round((root.tableRowHeight - height) / 2)
                         width: root.modifiedMarkSize
                         height: width
                         radius: width / 2
                         color: root.uiPalette.text
+                    }
+
+                    // A failed save or rename: the error glyph in the dot's
+                    // place, beside the file name, in the negative colour,
+                    // readable on the selection too. What failed is its
+                    // cell's tooltip, as an edit's dot's is, and its
+                    // description; Status and Details… say it too.
+                    Kirigami.Icon {
+                        objectName: "tagEditorRowFailureMark"
+                        visible: tableRow.failed
+                        x: root.pinnedShift + root.tableInset + Math.round((root.markSlotWidth - width) / 2)
+                        // On the first line, as the row's cells start.
+                        y: Math.round((root.tableRowHeight - height) / 2)
+                        width: root.failureGlyphSize
+                        height: width
+                        // At its size, which grows with the font.
+                        roundToIconSize: false
+                        source: root.failureGlyph
+                        isMask: true
+                        color: tableRow.selected ? root.uiPalette.negativeSelected : root.uiPalette.negative
+                        Accessible.role: Accessible.Graphic
+                        Accessible.name: root.cellText("status", tableRow)
+                        Accessible.description: tableRow.errorText
                     }
                 }
             }

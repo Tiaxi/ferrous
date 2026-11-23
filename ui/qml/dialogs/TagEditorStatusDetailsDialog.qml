@@ -15,8 +15,8 @@ import "../logic/BreakableText.js" as BreakableText
 // it wraps to under its own start (it was the plain text, every line at
 // the heading's x past the first). The heading of what failed is semibold,
 // in the negative colour; that of what succeeded is regular, secondary, so
-// the summary leads (all three were semibold). A failed file's name is on a
-// line of its own, semibold in the text's colour, with why under it, in
+// the summary leads (all three were semibold). A file's name is Medium in the
+// text's colour; a failed one's is on a line of its own, with why under it, in
 // plain words in the same colour where that is known, and the system's
 // text under that, secondary, as it gave it (the name ran straight into
 // the error, in one ink, after what succeeded; then the error was all that
@@ -76,7 +76,11 @@ Components.DialogWindow {
                 ? "font-weight:600; color:" + root.cssColor(root.uiPalette.negative)
                 : errorStyle
             html += root.paragraph(section.heading, i > 0 ? sectionGap : 0, 0, headingStyle)
-            const nameStyle = "font-weight:" + (failed ? 600 : 400) + "; color:" + textColor
+            // A file's name, under either heading, Medium in the text's
+            // colour: above why it failed, which is regular (both were
+            // regular for what succeeded, and nothing set the name apart
+            // from the line under it).
+            const nameStyle = "font-weight:500; color:" + textColor
             const items = section.items || []
             for (let j = 0; j < items.length; ++j) {
                 const file = items[j] || {}
