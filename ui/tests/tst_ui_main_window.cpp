@@ -36,6 +36,7 @@
 #include <qqml.h>
 
 #include <algorithm>
+#include <utility>
 #include <cmath>
 #include <functional>
 #include <tuple>
@@ -511,7 +512,10 @@ QString compactRowProblem(QQuickWindow *window) {
     if (!at(glyphRect.left(), block.left() + 12) || !at(glyphRect.center().y(), rowRect.center().y())) {
         return QStringLiteral("glyph at %1, %2").arg(glyphRect.left() - block.left()).arg(glyphRect.top() - block.top());
     }
-    if (!glyph->property("source").toUrl().toString().endsWith(QStringLiteral("/ferrous-mark-symbolic.svg"))
+    // Drawn for its size: two traces at 20 px and under, three above.
+    const QString drawing = glyphSize <= 20 ? QStringLiteral("/ferrous-mark-small-symbolic.svg")
+                                            : QStringLiteral("/ferrous-mark-symbolic.svg");
+    if (!glyph->property("source").toUrl().toString().endsWith(drawing)
         || !glyph->property("isMask").toBool() || colorOf(glyph) != tokenHex(window, "textSecondary")) {
         return QStringLiteral("glyph %1 in %2").arg(glyph->property("source").toString(), colorOf(glyph));
     }
@@ -531,11 +535,13 @@ QString compactRowProblem(QQuickWindow *window) {
 }
 
 // Why the compact row's glyph, at 16 px, does not read as Ferrous's mark,
-// or "" (the stock disc was unreadable at 16 px): as drawn at 1:1, three
-// traces across its right half, three runs of ink apart in each column,
-// each rising to the right and fanning apart, solid where they are, and no
-// ink outside its box.
+// or "" (the stock disc was unreadable at 16 px): as drawn at 1:1, two
+// traces across its right half, the glide and its 3rd harmonic (three 1.5 px
+// strokes read as a slanted hatch at 16 px), two runs of ink apart in each
+// column with 2 clear rows or more between them, each rising to the right
+// and fanning apart, solid where they are, and no ink outside its box.
 QString idleGlyphProblem(QQuickWindow *window) {
+    constexpr int traces = 2;
     QQuickItem *glyph = named(window, "nowPlayingIdleGlyph");
     if (glyph == nullptr) {
         return QStringLiteral("no glyph");
@@ -576,33 +582,40 @@ QString idleGlyphProblem(QQuickWindow *window) {
         }
         rows += QLatin1Char('\n');
     }
-    // Each column of its right half: three runs of ink, with clear rows
-    // between them; their middles in each column.
+    // Each column of its right half: two runs of ink, with 2 clear rows or
+    // more between them; their middles in each column.
     QList<QList<double>> middles;
     for (int x = 8; x < 16; ++x) {
         QList<double> runs;
         int start = -1;
+        int end = -1;
+        int leastClear = 16;
         for (int y = 0; y <= 16; ++y) {
             const bool on = y < 16 && coverage(x, y) > 0.25;
             if (on && start < 0) {
+                if (end >= 0) {
+                    leastClear = std::min(leastClear, y - end);
+                }
                 start = y;
             } else if (!on && start >= 0) {
                 runs.push_back((start + y - 1) / 2.0);
                 start = -1;
+                end = y;
             }
         }
-        if (runs.size() != 3) {
+        if (runs.size() != traces || leastClear < 2) {
             return QStringLiteral("column %1:\n%2").arg(x).arg(rows);
         }
         middles.push_back(runs);
     }
     // Rising to the right, each trace, and fanning apart.
-    for (int trace = 0; trace < 3; ++trace) {
+    for (int trace = 0; trace < traces; ++trace) {
         if (middles.last().at(trace) >= middles.first().at(trace)) {
             return QStringLiteral("trace %1 does not rise:\n%2").arg(trace).arg(rows);
         }
     }
-    if (middles.last().at(2) - middles.last().at(0) <= middles.first().at(2) - middles.first().at(0) - 0.01) {
+    if (middles.last().at(traces - 1) - middles.last().at(0)
+        <= middles.first().at(traces - 1) - middles.first().at(0) - 0.01) {
         return QStringLiteral("the traces do not fan apart:\n%1").arg(rows);
     }
     // Solid where the strokes are, not a haze.
@@ -1477,14 +1490,20 @@ void UiMainWindowTest::nothingPlayingIsACompactRow() {
     QFETCH(bool, narrow);
     QFETCH(bool, dark);
     QFETCH(qreal, pointSize);
-    QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/ferrous-mark-symbolic.svg"));
-    QVERIFY(file.open(QIODevice::ReadOnly));
-    const QString svg = QString::fromUtf8(file.readAll());
-    // Three round-capped strokes in a 16 px box, the glide the heaviest.
-    QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
-    QCOMPARE(svg.count(QStringLiteral("<path ")), 3);
-    QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 3);
-    QVERIFY(svg.contains(QStringLiteral("stroke-width=\"1.75\"")));
+    // The mark follows one rule for its optical size: two round-capped
+    // strokes of 1.75 px for 20 px and under, the glide and its 3rd
+    // harmonic, as the library's 20 px tile; three for 24 px and up, the
+    // glide the heaviest.
+    for (const auto &[name, strokes] : {std::pair{"ferrous-mark-small-symbolic.svg", 2},
+                                        std::pair{"ferrous-mark-symbolic.svg", 3}}) {
+        QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/") + QLatin1String(name));
+        QVERIFY2(file.open(QIODevice::ReadOnly), name);
+        const QString svg = QString::fromUtf8(file.readAll());
+        QVERIFY2(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")), name);
+        QCOMPARE(svg.count(QStringLiteral("<path ")), strokes);
+        QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), strokes);
+        QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.75\"")), strokes == 2 ? 2 : 1);
+    }
 
     const auto restorePalette = useDarkPalette(dark);
     const ScopedApplicationFont font(pointSize);

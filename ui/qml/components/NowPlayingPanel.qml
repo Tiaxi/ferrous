@@ -424,6 +424,14 @@ Item {
     // pressed against the 32 px glyph at 24 pt).
     readonly property real idleRowHeight: root.uiPalette.rowHeight
     readonly property int idleGlyphSize: root.uiPalette.toolIconSize
+    // Ferrous's mark drawn for the idle glyph's size, by one rule for every
+    // drawing of it: 20 px and under, the glide and its 3rd harmonic, as
+    // the library's 20 px tile draws them (three 1.5 px strokes read as a
+    // slanted hatch at 16 px); 24 to 108 px, three traces; the 360 px
+    // stand-in, four.
+    readonly property url idleGlyphSource: root.idleGlyphSize <= 20
+        ? Qt.resolvedUrl("../assets/ferrous-mark-small-symbolic.svg")
+        : Qt.resolvedUrl("../assets/ferrous-mark-symbolic.svg")
     readonly property int idleGlyphGap: root.uiPalette.scaledSize(6)
     // The panel's height with nothing loaded: the row and the seam.
     readonly property real restHeight: root.idleRowHeight + root.seamHeight
@@ -2213,9 +2221,9 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             width: root.idleGlyphSize
             height: width
-            // Ferrous's mark, the stand-in's traces drawn for 16 px, rather
-            // than a stock disc, which read as noise at this size.
-            source: Qt.resolvedUrl("../assets/ferrous-mark-symbolic.svg")
+            // Ferrous's mark, the stand-in's traces drawn for its size,
+            // rather than a stock disc, which read as noise at this size.
+            source: root.idleGlyphSource
             roundToIconSize: false
             isMask: true
             color: root.uiPalette.textSecondary
