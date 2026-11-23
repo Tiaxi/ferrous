@@ -53,6 +53,7 @@ private slots:
     void spectrogramCrosshairReadoutKeepsItsPlatesAsTheLevelChanges();
     void crosshairReadoutWidestWidthsFollowTheFont();
     void crosshairReadoutTextIsTheSmallTextOfTheDesign();
+    void crosshairReadoutAndScaleFollowTheTextScale();
     void spectrogramSurfaceFollowsTheStretchedDefaultZoom();
     void spectrogramCrosshairWidestValueCoversRoundedHertz();
     void spectrogramCrosshairReadoutReadsEachView_data();
@@ -2318,6 +2319,196 @@ ApplicationWindow {
         QVERIFY(plate.isValid());
         QVERIFY(QRect(0, 0, 400, 200).contains(plate));
     }
+}
+
+void SpectrogramSmokeTest::crosshairReadoutAndScaleFollowTheTextScale() {
+    // In a viewer over the whole screen the plot's text is on its strip's
+    // type scale, 1.2 times the window's, as its lane heads' are: the
+    // readout's text 14 px for 12, its padding and plate a lane label's at
+    // that scale, and the scale's labels with them (they were the window's
+    // 12 px under the strip's 16 px). A change lays the overlays out again,
+    // not the columns.
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    const auto setPoints = [](qreal points) {
+        QFont font = QGuiApplication::font();
+        font.setPointSizeF(points);
+        QGuiApplication::setFont(font);
+    };
+    const CrosshairReadout::Colors colors{Qt::black, Qt::white, Qt::transparent};
+    // A lane label's height at `textScale` (PlotPlate.labelHeight).
+    const auto labelHeightAt = [](qreal textScale, qreal &height) {
+        QQmlEngine engine;
+        QString errorText;
+        const QUrl base = QUrl::fromLocalFile(
+            QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+        QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+
+ApplicationWindow {
+    id: window
+    font: Qt.application.font
+    property alias textScale: label.textScale
+    property real labelHeight: label.labelHeight
+
+    Components.UiPalette { id: tokens; windowRoot: window }
+    Components.PlotPlate {
+        id: label
+        uiPalette: tokens
+        plotColors: tokens.spectrogramPlot
+        text: "L"
+    }
+}
+)QML"), base, &errorText));
+        QVERIFY2(root != nullptr, qPrintable(errorText));
+        QVERIFY(root->setProperty("textScale", textScale));
+        height = root->property("labelHeight").toReal();
+    };
+    const QString time = QStringLiteral("1:23.4");
+    for (const qreal points : {10.0, 16.0, 24.0}) {
+        setPoints(points);
+        const QByteArray where = QByteArray::number(points) + " pt";
+        const QFont window = CrosshairReadout::font();
+        const QFont screen = CrosshairReadout::font(1.2);
+        QCOMPARE(screen.pixelSize(), static_cast<int>(std::lround(points * 0.9 * 1.2 * 96.0 / 72.0)));
+        QVERIFY2(screen.pixelSize() > window.pixelSize(), where.constData());
+        if (points == 10.0) {
+            QCOMPARE(window.pixelSize(), 12);
+            QCOMPARE(screen.pixelSize(), 14);
+            QCOMPARE(CrosshairReadout::padding(), 6);
+            QCOMPARE(CrosshairReadout::padding(1.2), 7);
+        }
+        QVERIFY2(CrosshairReadout::padding(1.2) > CrosshairReadout::padding(), where.constData());
+        // As tall as a lane label at the scale, which only past the 20 px
+        // the smallest has grows with it; at a larger font, where its line
+        // is taller than a label's capitals and their room, its line.
+        const QFontMetrics metrics(screen);
+        const QSize plate = CrosshairReadout::plateSize(
+            metrics.horizontalAdvance(time), metrics, colors, 1.2);
+        QCOMPARE(plate.width(), metrics.horizontalAdvance(time) + 2 * CrosshairReadout::padding(1.2));
+        QCOMPARE(plate.height(), CrosshairReadout::plateHeight(metrics.height(), 1.2));
+        qreal labelHeight = 0.0;
+        labelHeightAt(1.2, labelHeight);
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        QVERIFY2(std::abs(plate.height() - std::max<qreal>(labelHeight, metrics.height())) <= 1.0,
+                 qPrintable(QStringLiteral("%1 pt: %2 tall, a label %3, the line %4")
+                                .arg(points).arg(plate.height()).arg(labelHeight).arg(metrics.height())));
+        if (points == 10.0) {
+            QCOMPARE(qreal(plate.height()), labelHeight);
+        }
+        const QFontMetrics windowMetrics(window);
+        const int windowHeight = CrosshairReadout::plateHeight(windowMetrics.height());
+        if (points == 10.0) {
+            QCOMPARE(windowHeight, 20);
+            QVERIFY(plate.height() >= windowHeight);
+        } else {
+            QVERIFY2(plate.height() > windowHeight, where.constData());
+        }
+    }
+    QGuiApplication::setFont(applicationFont);
+
+    SpectrogramItem item;
+    feedReadoutFixture(item);
+    item.setGridEnabled(true);
+    // The first lane's, which has the time scale.
+    item.setShowTimeLabels(true);
+    QCOMPARE(item.textScale(), 1.0);
+    QSignalSpy changed(&item, &SpectrogramItem::textScaleChanged);
+    const QSize lane(400, 160);
+    struct Layout {
+        QVector<SpectrogramOverlayImage> frequencies;
+        QVector<SpectrogramOverlayImage> times;
+        QVector<SpectrogramOverlayImage> plates;
+    };
+    const auto layOut = [&item, &lane]() {
+        layOutReadout(item, lane, 1.0, QPointF(200.0, 80.0));
+        QMutexLocker lock(&item.m_stateMutex);
+        // Wide enough for a label 240 px from the next.
+        item.updateTimeGridOverlayLocked(2'000, lane.height(), 0, 0, false,
+                                         kReadoutColumnsPerSecond, 0.0);
+        Layout layout;
+        layout.frequencies = item.m_freqGrid.images;
+        layout.times = item.m_timeGrid.images;
+        for (const SpectrogramOverlayImage &image : item.m_crosshair.images) {
+            if (image.kind == SpectrogramOverlayImage::ReadoutPlate) {
+                layout.plates.push_back(image);
+            }
+        }
+        return layout;
+    };
+    const Layout atWindow = layOut();
+    QVERIFY(!atWindow.frequencies.isEmpty());
+    QVERIFY(!atWindow.times.isEmpty());
+    QCOMPARE(atWindow.plates.size(), 2);
+
+    // The change lays out the scale and the readout again, and keeps the
+    // canvas the columns are drawn in.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_canvasDirty = false;
+        item.m_precomputedCanvasDirty = false;
+        item.m_freqGridDirty = false;
+        item.m_timeGridDirty = false;
+        item.m_crosshairDirty = false;
+    }
+    item.setTextScale(1.2);
+    QCOMPARE(changed.count(), 1);
+    QCOMPARE(item.textScale(), 1.2);
+    item.setTextScale(1.2);
+    QCOMPARE(changed.count(), 1);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_freqGridDirty);
+        QVERIFY(item.m_timeGridDirty);
+        QVERIFY(item.m_crosshairDirty);
+        QVERIFY(!item.m_canvasDirty);
+        QVERIFY(!item.m_precomputedCanvasDirty);
+    }
+    const Layout atScreen = layOut();
+    QCOMPARE(atScreen.plates.size(), 2);
+
+    // The scale's labels in its text at 1.2 times the window's.
+    QFont scaleFont = QGuiApplication::font();
+    const qreal points = scaleFont.pointSizeF() > 0.0 ? scaleFont.pointSizeF() : scaleFont.pixelSize() * 0.75;
+    scaleFont.setPointSizeF(points * 0.9 * 1.2);
+    const QFontMetrics scaleMetrics(scaleFont);
+    const auto checkLabels = [&](const QVector<SpectrogramOverlayImage> &labels,
+                                 const QVector<SpectrogramOverlayImage> &windowLabels) {
+        QVERIFY(!labels.isEmpty());
+        for (const SpectrogramOverlayImage &label : labels) {
+            QCOMPARE(label.rect.height(), static_cast<qreal>(scaleMetrics.height() + 2));
+            QCOMPARE(label.rect.width(), static_cast<qreal>(scaleMetrics.horizontalAdvance(label.text) + 2));
+            QVERIFY2(label.rect.height() > windowLabels.first().rect.height(), qPrintable(label.text));
+            // Its texture is not the window's.
+            for (const SpectrogramOverlayImage &windowLabel : windowLabels) {
+                QVERIFY(label.key != windowLabel.key);
+            }
+        }
+    };
+    checkLabels(atScreen.frequencies, atWindow.frequencies);
+    checkLabels(atScreen.times, atWindow.times);
+    // The readout's plates in its text at the scale.
+    const QFontMetrics readoutMetrics(CrosshairReadout::font(1.2));
+    for (int index = 0; index < 2; ++index) {
+        const SpectrogramOverlayImage &plate = atScreen.plates[index];
+        QCOMPARE(plate.text, atWindow.plates[index].text);
+        QCOMPARE(plate.rect.size().toSize(),
+                 CrosshairReadout::plateSize(readoutMetrics.horizontalAdvance(plate.text), readoutMetrics,
+                                             item.m_readoutColors, 1.2));
+        QVERIFY(plate.rect.width() > atWindow.plates[index].rect.width());
+        QVERIFY(plate.key != atWindow.plates[index].key);
+    }
+    // Back at the window's, the window's again.
+    item.setTextScale(1.0);
+    const Layout again = layOut();
+    QCOMPARE(again.frequencies.first().rect, atWindow.frequencies.first().rect);
+    QCOMPARE(again.times.first().rect, atWindow.times.first().rect);
+    QCOMPARE(again.plates.first().rect, atWindow.plates.first().rect);
+    QCOMPARE(again.plates.first().key, atWindow.plates.first().key);
 }
 
 void SpectrogramSmokeTest::crosshairReadoutWidestWidthsFollowTheFont() {

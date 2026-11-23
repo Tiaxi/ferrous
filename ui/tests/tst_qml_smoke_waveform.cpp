@@ -84,6 +84,7 @@ private slots:
     void waveformEditorCrosshairLabelsStayReadableInNarrowPlots();
     void waveformEditorDrawsNoCrosshairLabelItLeavesOut();
     void waveformEditorLevelReadoutUsesTheMinusSign();
+    void waveformEditorReadoutFollowsTheTextScale();
     void waveformOverlaysKeepClearOfTheReservedCorner();
     void waveformEditorSampleViewRepaintsCrosshairCleanly();
     void waveformEditorSampleViewUsesSmoothInterpolation();
@@ -2595,6 +2596,75 @@ void WaveformSmokeTest::waveformEditorCrosshairReadsOverTheFill() {
         QVERIFY2(dashes >= 12 && gaps >= 8,
             qPrintable(QStringLiteral("%1 on, %2 off").arg(dashes).arg(gaps)));
     }
+}
+
+void WaveformSmokeTest::waveformEditorReadoutFollowsTheTextScale() {
+    // In a viewer over the whole screen the readout is on its strip's type
+    // scale, as the lane heads are: its plates drawn for its text at 1.2
+    // times the window's, padded at that scale, and the window's at 1.
+    WaveformEditorItem item;
+    item.setWidth(400);
+    item.setHeight(200);
+    item.setDurationSeconds(10.0);
+    const QColor floor(0x14, 0x16, 0x18);
+    const QColor plateFill(0xff, 0x00, 0x00);
+    item.setBackgroundColor(floor);
+    item.setReadoutPlateColor(plateFill);
+    item.setReadoutPlateEdgeColor(Qt::transparent);
+    item.setReadoutTextColor(plateFill);
+    item.m_hoverPosition = QPointF(200.0, 60.0);
+    QCOMPARE(item.textScale(), 1.0);
+    QSignalSpy changed(&item, &WaveformEditorItem::textScaleChanged);
+    // The plates' rects, from the pixels of their fill.
+    const auto plates = [&item, &floor, &plateFill]() {
+        QImage plot(400, 200, QImage::Format_ARGB32_Premultiplied);
+        plot.fill(floor);
+        QPainter painter(&plot);
+        item.drawCrosshair(painter, 400, 200, 0.0, 10.0);
+        painter.end();
+        // The value's above the time's, which is on the bottom edge.
+        QRect value;
+        QRect time;
+        for (int y = 0; y < plot.height(); ++y) {
+            for (int x = 0; x < plot.width(); ++x) {
+                if (plot.pixelColor(x, y) != plateFill) {
+                    continue;
+                }
+                QRect &rect = y >= 150 ? time : value;
+                rect = rect.isNull() ? QRect(x, y, 1, 1) : rect.united(QRect(x, y, 1, 1));
+            }
+        }
+        return std::pair{value, time};
+    };
+    const auto expected = [](const QString &text, double textScale) {
+        const QFontMetrics metrics(CrosshairReadout::font(textScale));
+        return CrosshairReadout::plateSize(metrics.horizontalAdvance(text), metrics,
+                                           CrosshairReadout::Colors{}, textScale);
+    };
+    const QString timeText = WaveformEditorItem::formatCrosshairTime(5.0, 1);
+    const auto [windowValue, windowTime] = plates();
+    QVERIFY(windowValue.isValid() && windowTime.isValid());
+    // The rounded corners leave a plate's corner pixels out: its middle
+    // row and column are its size.
+    QCOMPARE(windowTime.width(), expected(timeText, 1.0).width());
+    QCOMPARE(windowTime.height(), expected(timeText, 1.0).height());
+
+    item.setTextScale(1.2);
+    QCOMPARE(changed.count(), 1);
+    QCOMPARE(item.textScale(), 1.2);
+    item.setTextScale(1.2);
+    QCOMPARE(changed.count(), 1);
+    const auto [screenValue, screenTime] = plates();
+    QVERIFY(screenValue.isValid() && screenTime.isValid());
+    QCOMPARE(screenTime.width(), expected(timeText, 1.2).width());
+    QCOMPARE(screenTime.height(), expected(timeText, 1.2).height());
+    QVERIFY(screenTime.width() > windowTime.width());
+    QVERIFY(screenValue.width() > windowValue.width());
+
+    item.setTextScale(1.0);
+    const auto [againValue, againTime] = plates();
+    QCOMPARE(againValue, windowValue);
+    QCOMPARE(againTime, windowTime);
 }
 
 void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {

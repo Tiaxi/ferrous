@@ -60,12 +60,15 @@ private slots:
     void fullscreenVisualizationStripHoldsTheModeSwitch();
     void viewerButtonsRingOnlyForTheKeyboard_data();
     void viewerButtonsRingOnlyForTheKeyboard();
+    void albumArtViewerClickedDetailsLetTheControlsHide();
     void viewerCornerPlateClearsTheLevelMeter_data();
     void viewerCornerPlateClearsTheLevelMeter();
     void viewerResetIsTheSameGlyphWindowedAndInTheStrip();
     void viewerToolbarIsOneVocabularyWindowedAndInTheStrip();
     void fullscreenLaneHeadsAreOnTheStripsTypeScale_data();
     void fullscreenLaneHeadsAreOnTheStripsTypeScale();
+    void fullscreenPlotTextIsOnTheStripsTypeScale_data();
+    void fullscreenPlotTextIsOnTheStripsTypeScale();
     void viewerStripButtonsFollowItsType_data();
     void viewerStripButtonsFollowItsType();
     void viewerStripIsOnOneTypeScale_data();
@@ -3416,6 +3419,72 @@ void TransportInputSmokeTest::viewerButtonsRingOnlyForTheKeyboard() {
     }
 }
 
+// In the album art viewer in the window, a click on Image Details, which
+// takes the focus for the mouse, doesn't hold its controls: they hide after
+// the pointer rests, as the visualization viewer's do (they stayed for as
+// long as the button had the focus). The keyboard's focus on it still holds
+// them.
+void TransportInputSmokeTest::albumArtViewerClickedDetailsLetTheControlsHide() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("albumArtFullscreenControlsAutoHide"));
+    auto *art = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge && viewer && autoHide && art);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("viewerFullscreenMode", 0);
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTRY_COMPARE(art->property("imageStatus").toInt(), 1);
+    const QPoint onArt = sceneRectOf(art).center().toPoint();
+    QTest::mouseMove(window, onArt + QPoint(1, 1));
+    QTest::mouseMove(window, onArt);
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    QQuickItem *details = nullptr;
+    QTRY_VERIFY((details = visibleItemNamed(window, QStringLiteral("albumArtPopupInfoButton"))) != nullptr);
+
+    // A click on Image Details: its focus is the mouse's, and the controls
+    // hide once the pointer rests.
+    const QPoint inside = centerInWindow(details);
+    QTest::mouseMove(window, inside);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, inside);
+    QTRY_VERIFY(details->hasActiveFocus());
+    QCOMPARE(details->property("focusReason").toInt(), int(Qt::MouseFocusReason));
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+
+    // Back, and the keyboard on it: they stay while it has the focus.
+    autoHide->setProperty("hideDelay", 600000);
+    QTest::mouseMove(window, onArt + QPoint(1, 1));
+    QTest::mouseMove(window, onArt);
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    for (int press = 0; press < 12 && !(details->hasActiveFocus()
+             && details->property("focusReason").toInt() == int(Qt::TabFocusReason)); ++press) {
+        QTest::keyClick(window, Qt::Key_Tab);
+    }
+    QVERIFY(details->hasActiveFocus());
+    QCOMPARE(details->property("focusReason").toInt(), int(Qt::TabFocusReason));
+    QTRY_VERIFY(autoHide->property("held").toBool());
+    autoHide->setProperty("hideDelay", 1);
+    QTest::qWait(100);
+    QVERIFY(autoHide->property("controlsVisible").toBool());
+
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+}
+
 void TransportInputSmokeTest::viewerCornerPlateClearsTheLevelMeter_data() {
     QTest::addColumn<int>("fullscreenMode");
     QTest::newRow("window") << 0;
@@ -5137,6 +5206,82 @@ void TransportInputSmokeTest::fullscreenLaneHeadsAreOnTheStripsTypeScale() {
     QTRY_VERIFY((head = firstHead()) != nullptr);
     QTRY_VERIFY(qAbs(labelPoints(head) - small) < 0.01);
     QTRY_COMPARE(sceneRectOf(head).left() - sceneRectOf(layer).left(), 5.0);
+}
+
+void TransportInputSmokeTest::fullscreenPlotTextIsOnTheStripsTypeScale_data() {
+    // 0 in the window, 1 over the whole screen, 2 there without the strip.
+    QTest::addColumn<int>("where");
+    QTest::newRow("window") << 0;
+    QTest::newRow("whole screen") << 1;
+    QTest::newRow("whole screen, no strip") << 2;
+}
+
+// Over the whole screen the plots' own text, the crosshair's readout and the
+// scale's labels, is on the strip's type scale with the lane heads, 1.2
+// times the window's (it was the window's 12 px under the strip's 16 px). In
+// the window, and in the main window before and after, it is the window's.
+void TransportInputSmokeTest::fullscreenPlotTextIsOnTheStripsTypeScale() {
+    QFETCH(int, where);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveform = window->findChild<QQuickItem *>(QStringLiteral("waveformEditorItem"));
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(bridge && viewer && layer && spectrogramSurface && waveform && palette);
+    const qreal fullscreenScale = palette->property("fullscreenTextScale").toDouble();
+    QCOMPARE(fullscreenScale, 1.2);
+    setPlayingTrack(bridge);
+    QVERIFY(bridge->setProperty("spectrogramViewMode", 1));
+    setChannelCount(bridge, spectrogramSurface, 2);
+    // Every lane's, and the waveform's, and the lane heads' with them.
+    const auto checkScale = [&](qreal expected) {
+        const QList<QQuickItem *> lanes =
+            visibleItemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem"));
+        QVERIFY(lanes.size() == 2);
+        for (QQuickItem *lane : lanes) {
+            QTRY_COMPARE(lane->property("textScale").toDouble(), expected);
+        }
+        QTRY_COMPARE(waveform->property("textScale").toDouble(), expected);
+        QCOMPARE(layer->property("textScale").toDouble(), expected);
+    };
+    QTRY_COMPARE(visibleItemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem")).size(), 2);
+    checkScale(1.0);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    bridge->setProperty("showFullscreenTitleStrip", where != 2);
+    bridge->setProperty("viewerFullscreenMode", where == 0 ? 0 : 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QQuickWindow *host = window;
+    if (where != 0) {
+        host = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+        QVERIFY(host != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(host));
+    } else {
+        QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+        QVERIFY(popup != nullptr);
+        QTRY_VERIFY(popup->property("opened").toBool());
+    }
+    QTRY_COMPARE(layer->window(), host);
+    checkScale(where == 0 ? 1.0 : fullscreenScale);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    if (where != 0) {
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+    QTRY_COMPARE(layer->window(), window);
+    checkScale(1.0);
 }
 
 void TransportInputSmokeTest::viewerStripButtonsFollowItsType_data() {

@@ -101,6 +101,10 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     Q_PROPERTY(QColor readoutPlateColor READ readoutPlateColor WRITE setReadoutPlateColor NOTIFY readoutColorsChanged)
     Q_PROPERTY(QColor readoutPlateEdgeColor READ readoutPlateEdgeColor WRITE setReadoutPlateEdgeColor NOTIFY readoutColorsChanged)
     Q_PROPERTY(QColor readoutTextColor READ readoutTextColor WRITE setReadoutTextColor NOTIFY readoutColorsChanged)
+    // How much larger than the window's the readout's text is: in a viewer
+    // over the whole screen, its strip's type scale
+    // (UiPalette.fullscreenTextScale), as its lane heads'; 1 elsewhere.
+    Q_PROPERTY(double textScale READ textScale WRITE setTextScale NOTIFY textScaleChanged)
     // Whether the playhead is drawn: the plot going out under another as
     // the visualization mode switches draws none, so only one shows.
     Q_PROPERTY(bool playheadVisible READ playheadVisible WRITE setPlayheadVisible NOTIFY playheadVisibleChanged)
@@ -219,6 +223,8 @@ public:
     void setReadoutPlateEdgeColor(const QColor &value);
     QColor readoutTextColor() const;
     void setReadoutTextColor(const QColor &value);
+    double textScale() const;
+    void setTextScale(double value);
     bool playheadVisible() const;
     void setPlayheadVisible(bool value);
 
@@ -262,6 +268,7 @@ signals:
     void samplePointsVisibleChanged();
     void colorsChanged();
     void readoutColorsChanged();
+    void textScaleChanged();
     void playheadVisibleChanged();
     void pictureReadyChanged();
     void markerSecondsChanged();
@@ -437,6 +444,8 @@ private:
     // The readout's plates: the spectrogram's plot colours until set.
     CrosshairReadout::Colors m_readoutColors{
         QColor(20, 20, 20, 224), QColor(0xec, 0xec, 0xec), QColor(255, 255, 255, 36)};
+    // textScale, under the state mutex.
+    double m_textScale{1.0};
 
     // What the workers that make playback tiles share with the item: they
     // hand a tile over only while the item lives, and only for the tiles
@@ -740,7 +749,7 @@ private:
         int valueTextWidth, int timeTextWidth, int textHeight,
         const QSizeF &reservedCorner = QSizeF(), const QRect &laneHead = QRect(),
         int widestValueTextWidth = 0, int widestTimeTextWidth = 0,
-        const CrosshairReadout::Colors &colors = CrosshairReadout::Colors());
+        const CrosshairReadout::Colors &colors = CrosshairReadout::Colors(), double textScale = 1.0);
     // These draw in the painter's pixels, pixelScale to a logical pixel
     // and deviceScale device pixels to one of the painter's.
     void drawOverviewLocked(QPainter &painter, int width, int height,

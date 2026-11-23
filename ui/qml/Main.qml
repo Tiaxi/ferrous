@@ -2087,6 +2087,7 @@ ApplicationWindow {
             Accessible.description: I18n.i18nc("@info", "Frequencies of the playing track over time")
             anchors.fill: parent
             plotWidth: plotLayer.plotWidth
+            textScale: plotLayer.textScale
             // Live while the waveform shows, at 0, so that its analysis runs
             // and its view is drawn for the switch back; then it takes no
             // pointer or keys, and assistive technology skips it.
@@ -2120,6 +2121,7 @@ ApplicationWindow {
             objectName: "mainWaveformSurface"
             anchors.fill: parent
             plotWidth: plotLayer.plotWidth
+            textScale: plotLayer.textScale
             visible: visualizationSurface.plotShown(1)
             opacity: visualizationSurface.plotOpacity(1)
             playheadVisible: visualizationSurface.playheadShown(1)

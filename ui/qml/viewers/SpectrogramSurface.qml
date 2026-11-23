@@ -19,6 +19,9 @@ Item {
     property bool viewerMode: false
     // The plot's width: the level meter's column takes the rest.
     property real plotWidth: root.width
+    // How much larger than the window's its own text is, the crosshair's
+    // readout and the scale's: as the lane heads' (PlotLayer.textScale).
+    property real textScale: 1
     // A time of the track to follow, such as where its file is cut off, or
     // -1; markerX is where the plot draws it, NaN while it does not.
     property real markerSeconds: -1
@@ -456,6 +459,7 @@ Item {
                     readoutPlateColor: root.uiPalette.spectrogramPlot.plotPlate
                     readoutPlateEdgeColor: root.uiPalette.spectrogramPlot.plotPlateEdge
                     readoutTextColor: root.uiPalette.spectrogramPlot.plotText
+                    textScale: root.textScale
                     gridEnabled: root.uiBridge.showSpectrogramScale
                     // Beside the meter's column, the scale is the plot's,
                     // clear of the meter's seam by 8 px.

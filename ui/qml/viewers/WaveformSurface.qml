@@ -33,6 +33,9 @@ Item {
     property rect laneHeadBounds: Qt.rect(0, 0, 0, 0)
     // The plot's width: the level meter's column takes the rest.
     property real plotWidth: root.width
+    // How much larger than the window's the crosshair's readout is: as the
+    // lane heads' (PlotLayer.textScale).
+    property real textScale: 1
     // A time of the track to follow, such as where its file is cut off, or
     // -1; markerX is where the plot draws it, NaN while it does not.
     property real markerSeconds: -1
@@ -141,6 +144,7 @@ Item {
         readoutPlateColor: root.plotColors.plotPlate
         readoutPlateEdgeColor: root.plotColors.plotPlateEdge
         readoutTextColor: root.plotColors.plotText
+        textScale: root.textScale
         // Dark: a light core in a black casing; light: a dark core in white.
         playheadColor: root.uiPalette.themeIsDark ? "#e8e8e8" : "#202326"
         playheadCasingColor: root.uiPalette.themeIsDark

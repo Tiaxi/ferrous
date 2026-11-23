@@ -336,6 +336,11 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // a column there, such as the level meter's: its labels end there, with
     // no ticks to the edge. 0 without one: its ticks are on the edge.
     Q_PROPERTY(double scaleEndInset READ scaleEndInset WRITE setScaleEndInset NOTIFY scaleEndInsetChanged)
+    // How much larger than the window's its text is, the crosshair's readout
+    // and the scale's labels: in a viewer over the whole screen, its strip's
+    // type scale (UiPalette.fullscreenTextScale), as its lane heads'; 1
+    // elsewhere. A change lays out its overlays again, not its columns.
+    Q_PROPERTY(double textScale READ textScale WRITE setTextScale NOTIFY textScaleChanged)
     // The readout's plates, in the plot's colours (UiPalette's PlotColors).
     // The floor, where the item has no column to draw: before any audio,
     // while a track is analysed, and the part of a rolling view not yet
@@ -449,6 +454,8 @@ public:
     void setRestTopClearance(double value);
     double scaleEndInset() const;
     void setScaleEndInset(double value);
+    double textScale() const;
+    void setTextScale(double value);
     QColor floorColor() const;
     void setFloorColor(const QColor &value);
     QColor readoutPlateColor() const;
@@ -576,6 +583,7 @@ signals:
     void restLineCountChanged();
     void restTopClearanceChanged();
     void scaleEndInsetChanged();
+    void textScaleChanged();
     void readoutColorsChanged();
     void floorColorChanged();
     void markerSecondsChanged();
@@ -1490,6 +1498,8 @@ private:
     int m_restLineCount{3};
     double m_restTopClearance{0.0};
     double m_scaleEndInset{0.0};
+    // textScale, under the state mutex.
+    double m_textScale{1.0};
     // UiPalette's spectrogramPlot plates, until QML sets them.
     // floorColor, under the state mutex.
     QColor m_floorColor{0, 0, 0};
