@@ -3966,8 +3966,10 @@ void UiDialogsTest::checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(QQuick
     QTRY_VERIFY(!action->property("down").toBool());
     QTRY_COMPARE(hex(actionText->property("color").value<QColor>()), hex(tokenOf(window, "link")));
     // A failed save: the title says in plain words what couldn't be saved,
-    // with no system's clause in it; under it the file, then the system's
-    // text, both small and secondary. No action for settings.
+    // with no system's clause in it; under it the file, small and
+    // secondary, then the system's text, small and a step quieter, in the
+    // tertiary colour (in one tone the two read as one block). No action
+    // for settings.
     QQuickItem *second = rows[1];
     QQuickItem *saveHeading = itemsNamed(second, QStringLiteral("errorHistoryHeading")).at(0);
     QCOMPARE(saveHeading->property("text").toString(), QStringLiteral("Settings couldn\u2019t be saved"));
@@ -3980,7 +3982,12 @@ void UiDialogsTest::checkRecentIssuesRowsSplitTheMessageAndOfferOneAction(QQuick
     QCOMPARE(subject->property("text").toString(), settingsPath);
     QCOMPARE(detail->property("message").toString(), systemText);
     QCOMPARE(detail->property("textFormat").toInt(), int(Qt::PlainText));
-    QCOMPARE(hex(detail->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
+    QCOMPARE(hex(subject->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
+    QCOMPARE(hex(detail->property("color").value<QColor>()), hex(tokenOf(window, "textTertiary")));
+    QVERIFY2(contrastRatio(detail->property("color").value<QColor>(), chrome) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("detail"), detail->property("color").value<QColor>(), chrome)));
+    QVERIFY(contrastRatio(detail->property("color").value<QColor>(), chrome)
+            < contrastRatio(subject->property("color").value<QColor>(), chrome));
     QCOMPARE(detail->property("font").value<QFont>().pointSizeF(), small);
     QVERIFY(sceneRect(subject).top() >= sceneRect(saveHeading).bottom() - 0.5);
     QVERIFY(sceneRect(detail).top() >= sceneRect(subject).bottom() - 0.5);
@@ -9104,7 +9111,11 @@ void UiDialogsTest::dialogListNumbersReadAsDrawn() {
 // for new and seen). Scrobbles that wait keep the Last.fm slot's offline
 // glyph. Each glyph sits beside the entry's title, centred on its
 // lowercase, not beside the quiet category line over it; and a hairline
-// sets the header apart from the list, as one sets the footer apart.
+// sets the header apart from the list, as one sets the footer apart. A
+// quieter hairline, in the seam's colour, sets each entry but the first
+// apart from the one above it, from the text's left edge past the glyph
+// column to the text's right edge (space alone ran entries of several
+// lines together).
 void UiDialogsTest::recentIssuesMarkSeverityByShapeAndColour() {
     DialogsWindow main;
     QQuickWindow *window = main.window;
@@ -9169,6 +9180,47 @@ void UiDialogsTest::recentIssuesMarkSeverityByShapeAndColour() {
     QVERIFY2(sceneRect(line).top() >= sceneRect(header).bottom() - 0.5
                  && sceneRect(line).bottom() <= sceneRect(list).top() + 0.5,
              qPrintable(describeItem(header) + describeItem(line) + describeItem(list)));
+    // Between the entries, by their place in the list.
+    std::sort(rows.begin(), rows.end(),
+              [](QQuickItem *a, QQuickItem *b) { return sceneRect(a).top() < sceneRect(b).top(); });
+    const QColor chrome = tokenOf(window, "chrome");
+    const QColor rule = footerLine->property("color").value<QColor>();
+    for (qsizetype i = 0; i < rows.size(); ++i) {
+        QQuickItem *row = rows[i];
+        QQuickItem *entryLine = itemsNamed(row, QStringLiteral("errorHistoryEntryLine")).value(0);
+        QVERIFY(entryLine != nullptr);
+        if (i == 0) {
+            // The header's rule is over the first.
+            QVERIFY(!entryLine->isVisible());
+            continue;
+        }
+        QVERIFY2(entryLine->isVisible(), qPrintable(QString::number(i)));
+        QQuickItem *glyph = itemsNamed(row, QStringLiteral("errorHistoryGlyph")).value(0);
+        QQuickItem *heading = itemsNamed(row, QStringLiteral("errorHistoryHeading")).value(0);
+        QQuickItem *category = itemsNamed(row, QStringLiteral("errorHistoryCategory")).value(0);
+        const QRectF lineRect = sceneRect(entryLine);
+        QCOMPARE(lineRect.height(), 1.0);
+        QCOMPARE(lineRect.left(), sceneRect(heading).left());
+        QCOMPARE(lineRect.right(), sceneRect(heading).right());
+        QVERIFY2(lineRect.left() > sceneRect(glyph).right(), qPrintable(describeItem(entryLine) + describeItem(glyph)));
+        // Under everything of the entry above, over this one's first line.
+        QQuickItem *above = rows[i - 1];
+        for (QQuickItem *item : above->findChildren<QQuickItem *>()) {
+            if (item->isVisible() && item->objectName().startsWith(QStringLiteral("errorHistory"))
+                && item->objectName() != QStringLiteral("errorHistoryEntryLine")) {
+                QVERIFY2(sceneRect(item).bottom() <= lineRect.top() + 0.5,
+                         qPrintable(describeItem(item) + describeItem(entryLine)));
+            }
+        }
+        QVERIFY2(lineRect.bottom() <= sceneRect(category).top() + 0.5,
+                 qPrintable(describeItem(entryLine) + describeItem(category)));
+        // In the seam's colour: seen, and a step quieter than the rules.
+        const QColor seam = entryLine->property("color").value<QColor>();
+        QCOMPARE(hex(seam), hex(tokenOf(window, "seam")));
+        QVERIFY2(contrastRatio(seam, chrome) > 1.15 && contrastRatio(seam, chrome) < contrastRatio(rule, chrome),
+                 qPrintable(describeContrast(QStringLiteral("entry line"), seam, chrome)
+                            + describeContrast(QStringLiteral(", rule"), rule, chrome)));
+    }
     QTest::keyClick(window, Qt::Key_Escape);
 }
 

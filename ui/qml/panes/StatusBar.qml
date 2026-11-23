@@ -74,13 +74,10 @@ ToolBar {
         : 0
     readonly property bool hasUnseenError: root.unseenErrorCount > 0
     // Whether an error, rather than warnings alone, is among the new
-    // issues, or among them all once they are seen.
+    // issues.
     readonly property bool unseenIncludesError: root.errorController
         ? (Number(root.errorController.unseenErrorCount) || 0) > 0
         : false
-    readonly property bool issuesIncludeError: root.hasUnseenError
-        ? root.unseenIncludesError
-        : (root.errorController ? (Number(root.errorController.errorEntryCount) || 0) > 0 : false)
     readonly property url errorGlyph: Qt.resolvedUrl("../assets/status-error.svg")
     readonly property url warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
     readonly property string backendFailure: root.uiBridge.backendFailure || ""
@@ -156,9 +153,15 @@ ToolBar {
     readonly property string scanCountText: root.scanTotalKnown
         ? root.percentText(root.scanPercent)
         : root.scanProcessed > 0
-            ? I18n.i18ncp("@info:status %2 is the files scanned so far", "%2 file", "%2 files",
-                root.scanProcessed, root.formatCount(root.scanProcessed))
+            ? root.scannedFilesText(root.scanProcessed)
             : ""
+
+    // The files scanned so far, as the scan without a total counts them:
+    // "412 files".
+    function scannedFilesText(count) {
+        return I18n.i18ncp("@info:status %2 is the files scanned so far", "%2 file", "%2 files",
+            count, root.formatCount(count))
+    }
 
     // A percent as the status bar shows it: "42%".
     function percentText(percent) {
@@ -532,8 +535,10 @@ ToolBar {
         // to fill it against. The parts are one unit, 6 px apart, as a glyph
         // and its words are (the percent, right-aligned in the room of
         // "100%" after the words, stood some 16 px off them). The percent
-        // keeps the width of "100%" after it, in tabular figures, so nothing
-        // in the status bar moves as it counts.
+        // keeps the width of "100%" after it, and the count without a total
+        // that of "99,999 files", in tabular figures, so nothing in the
+        // status bar moves as it counts (the count's own width moved the
+        // words left at 10, 100 and 1,000 files).
         // Nothing in it moves on its own (#373: no indeterminate
         // animation), so it is still with the desktop's animations off.
         Row {
@@ -604,17 +609,18 @@ ToolBar {
                 anchors.verticalCenter: parent.verticalCenter
                 visible: text.length > 0
                 text: root.scanCountText
-                // A percent keeps the room of the widest after it, the bar
-                // and the words before it staying where they are.
-                width: root.scanTotalKnown
-                    ? Math.max(Math.ceil(implicitWidth), Math.ceil(fullPercentMetrics.advanceWidth))
-                    : implicitWidth
+                // The count keeps the room of the widest after it, the
+                // bar and the words before it staying where they are: a
+                // percent that of "100%", the files scanned that of
+                // "99,999 files", past which a count grows (a first scan
+                // of a larger folder moves the words once more).
+                width: Math.max(Math.ceil(implicitWidth), Math.ceil(widestCountMetrics.advanceWidth))
                 horizontalAlignment: Text.AlignLeft
 
                 TextMetrics {
-                    id: fullPercentMetrics
+                    id: widestCountMetrics
                     font: scanCount.font
-                    text: root.percentText(100)
+                    text: root.scanTotalKnown ? root.percentText(100) : root.scannedFilesText(99999)
                 }
             }
 
@@ -667,14 +673,15 @@ ToolBar {
             onSettingsRequested: root.lastFmSettingsRequested()
         }
 
-        // The issues: "2 new issues" in the text colour until the user has
-        // seen them, then "3 issues" in the secondary colour. The 16 px
-        // glyph is the shape of the most severe of them, the new ones while
-        // there are any: an error's ring with a cross, in the negative
-        // colour while an error is new, otherwise the warning's triangle;
-        // in the secondary colour once seen, and for warnings alone, which
-        // the word "new" marks (every new issue was red, so a scan's
-        // notice raised the alarm of a stopped engine).
+        // The issues: "2 new issues" in the text colour beside a 16 px
+        // glyph until the user has seen them, then "3 issues" alone in the
+        // secondary colour. The glyph is the shape of the most severe new
+        // issue: an error's ring with a cross in the negative colour, or
+        // for warnings alone the warning's triangle in the secondary
+        // colour, which the word "new" marks (every new issue was red, so
+        // a scan's notice raised the alarm of a stopped engine). Once all
+        // are seen there is no glyph: a grey ring with a cross beside a
+        // count read as "dismiss these", so a glyph here always means new.
         // It opens Recent Issues; with none there is nothing to show.
         ToolButton {
             id: issuesButton
@@ -691,7 +698,7 @@ ToolBar {
             text: root.hasUnseenError
                 ? I18n.i18ncp("@action:button", "%1 new issue", "%1 new issues", root.unseenErrorCount)
                 : I18n.i18ncp("@action:button", "%1 issue", "%1 issues", root.errorCount)
-            readonly property color glyphColor: root.hasUnseenError && root.unseenIncludesError
+            readonly property color glyphColor: root.unseenIncludesError
                 ? root.uiPalette.negative
                 : root.uiPalette.textSecondary
             readonly property color labelColor: root.hasUnseenError
@@ -749,8 +756,9 @@ ToolBar {
                     StatusGlyph {
                         objectName: "statusBarErrorsGlyph"
                         anchors.verticalCenter: parent.verticalCenter
+                        visible: root.hasUnseenError
                         size: root.errorGlyphSize
-                        source: root.issuesIncludeError ? root.errorGlyph : root.warningGlyph
+                        source: root.unseenIncludesError ? root.errorGlyph : root.warningGlyph
                         color: issuesButton.glyphColor
                     }
 

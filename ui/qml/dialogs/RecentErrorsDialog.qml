@@ -444,6 +444,22 @@ Popup {
                         Accessible.description: [historyRow.subject, historyRow.detail]
                             .filter(function(text) { return text.length > 0 }).join("\n")
 
+                        // A hairline over each entry but the first, from the
+                        // text's left edge, past the glyph column, to the
+                        // row's right margin: entries of several lines read
+                        // apart without crossing the glyphs' column (space
+                        // alone ran them together, while the header and the
+                        // footer have rules). The seam's colour, a step
+                        // quieter than those rules.
+                        Rectangle {
+                            objectName: "errorHistoryEntryLine"
+                            visible: historyRow.index > 0
+                            x: rowLayout.anchors.leftMargin + severityGlyph.width + rowLayout.spacing
+                            width: historyRow.width - x - rowLayout.anchors.rightMargin
+                            height: 1
+                            color: root.uiPalette.seam
+                        }
+
                         RowLayout {
                             id: rowLayout
                             anchors.left: parent.left
@@ -569,8 +585,11 @@ Popup {
 
                                 // The system's text, such as "failed to
                                 // replace …: Permission denied (os error
-                                // 13)", under the file, in its ink: the
-                                // title says in plain words what went wrong.
+                                // 13)", under the file, a step quieter than
+                                // it: the title says in plain words what
+                                // went wrong, and the file is what the
+                                // action acts on (in the file's ink, the
+                                // two read as one block).
                                 Components.MessageLabel {
                                     id: detailLabel
                                     objectName: "errorHistoryDetail"
@@ -578,7 +597,7 @@ Popup {
                                     visible: historyRow.detail.length > 0
                                     message: historyRow.detail
                                     font.pointSize: root.uiPalette.smallPointSize
-                                    color: root.uiPalette.textSecondary
+                                    color: root.uiPalette.textTertiary
                                     Accessible.ignored: true
                                 }
 
