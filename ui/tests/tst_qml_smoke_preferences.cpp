@@ -45,9 +45,12 @@ ApplicationWindow {
         id: bridge
         property string diagnosticsText: "a line worth keeping"
         property string diagnosticsLogPath: "/fixture/diagnostics.log"
+        property bool diagnosticsShown: false
         signal diagnosticsChanged()
+        signal diagnosticsLinesAdded(string lines, int lineCount)
         function reloadDiagnosticsFromDisk() {}
-        function clearDiagnostics() { window.clears++; diagnosticsText = "" }
+        function clearDiagnostics() { window.clears++; diagnosticsText = ""; diagnosticsChanged() }
+        function flushDiagnostics() {}
         function openContainingFolder(path) {}
     }
     Dialogs.DiagnosticsDialog {

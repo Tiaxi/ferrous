@@ -112,11 +112,22 @@ ApplicationWindow {
         property bool diagnosticsLoading: false
         property string diagnosticsLogPath: "/fixture/state/diagnostics.log"
         property int copiesWithoutPaths: 0
+        property bool diagnosticsShown: false
+        // Logged and not yet brought to the dialog, as BridgeClient batches.
+        property string pendingLines: ""
         signal diagnosticsChanged()
+        signal diagnosticsLinesAdded(string lines, int lineCount)
         function reloadDiagnosticsFromDisk() {}
         function clearDiagnostics() {}
         function openContainingFolder(path) {}
         function copyDiagnosticsWithoutPaths() { copiesWithoutPaths += 1 }
+        function flushDiagnostics() {
+            if (diagnosticsShown && pendingLines.length > 0) {
+                const lines = pendingLines
+                pendingLines = ""
+                diagnosticsLinesAdded(lines, 0)
+            }
+        }
     }
     Dialogs.DiagnosticsDialog {
         id: dialog
@@ -165,6 +176,35 @@ ApplicationWindow {
     void setLog(const QString &text) const {
         bridge->setProperty("diagnosticsText", text);
         QMetaObject::invokeMethod(bridge, "diagnosticsChanged");
+    }
+
+    // Lines logged while it is open, as the bridge brings them, of which
+    // the log keeps `lineCount`, or all for 0.
+    void addLines(const QString &lines, int lineCount) const {
+        QMetaObject::invokeMethod(bridge, "diagnosticsLinesAdded", Q_ARG(QString, lines), Q_ARG(int, lineCount));
+    }
+
+    // Whether the rows are those that laying out the whole text places.
+    bool rowsAsLaidOutAfresh() const {
+        DiagnosticsLogLayout &layout = view->m_layout;
+        std::vector<DiagnosticsLogLayout::Row> rows;
+        for (int index = 0; index < layout.rowCount(); ++index) {
+            rows.push_back(layout.row(index));
+        }
+        layout.layOut(view->width() - view->leftPadding() - view->rightPadding());
+        if (static_cast<int>(rows.size()) != layout.rowCount()) {
+            qWarning("%d rows, laid out afresh %d", static_cast<int>(rows.size()), layout.rowCount());
+            return false;
+        }
+        for (int index = 0; index < layout.rowCount(); ++index) {
+            const DiagnosticsLogLayout::Row fresh = layout.row(index);
+            const DiagnosticsLogLayout::Row &kept = rows[static_cast<std::size_t>(index)];
+            if (kept.start != fresh.start || kept.length != fresh.length || kept.continuation != fresh.continuation) {
+                qWarning("row %d differs", index);
+                return false;
+            }
+        }
+        return true;
     }
 
     bool open() const {
@@ -268,6 +308,7 @@ private slots:
     void selectsAllByKeyboard();
     void scrollsByKeysAndWheel();
     void opensAndReloadsAtTheTop();
+    void linesLoggedWhileOpenKeepThePlaceAndTheSelection();
     void showsMarkupAsText();
     void selectionIsDrawnInTheThemesColours();
     void readsAsTextToAssistiveTechnology();
@@ -580,6 +621,92 @@ void DiagnosticsLogViewTest::opensAndReloadsAtTheTop() {
     QTRY_VERIFY(!log.window->isVisible());
     QVERIFY(log.open());
     QCOMPARE(log.contentY(), 0.0);
+}
+
+// #743: lines logged while Diagnostics is open come at the end of the log,
+// a batch at a time, without laying out or shaping again what is there.
+// The reader's place and selection stay with their text, also as the log
+// drops its first lines, and a reader at the end stays there.
+void DiagnosticsLogViewTest::linesLoggedWhileOpenKeepThePlaceAndTheSelection() {
+    Diagnostics log;
+    QVERIFY(log.loaded());
+    QStringList lines = records(300, 500);
+    log.setLog(lines.join(QLatin1Char('\n')));
+    QVERIFY(log.open());
+    QVERIFY(log.bridge->property("diagnosticsShown").toBool());
+    const qreal rowHeight = log.view->m_layout.rowHeight();
+    const int topRow = log.view->m_layout.rowAt(120 * 501);
+    int top = log.view->m_layout.row(topRow).start;
+    const qreal y = log.view->topPadding() + topRow * rowHeight;
+    log.scrollTo(y);
+    QVERIFY(log.frame());
+    log.view->select(top + 10, top + 2000);
+    QVERIFY(log.frame());
+    const QString selected = log.view->selectedText();
+    const int passes = log.view->layoutPasses();
+    const int shaped = log.view->shapedRows();
+    const auto topIsHeld = [&log](int position) {
+        const QRectF held = log.view->positionToRectangle(position);
+        return held.top() <= 0.5 && held.bottom() >= 0.5;
+    };
+
+    const QStringList added{QStringLiteral("[app] info: added 1"), record(301, 900)};
+    log.addLines(added.join(QLatin1Char('\n')), 0);
+    QVERIFY(log.frame());
+    lines += added;
+    QCOMPARE(log.view->text(), lines.join(QLatin1Char('\n')));
+    QCOMPARE(log.contentY(), y);
+    QCOMPARE(log.view->selectedText(), selected);
+    QCOMPARE(log.view->layoutPasses(), passes);
+    QCOMPARE(log.view->shapedRows(), shaped);
+    QVERIFY(log.view->contentHeight() >= log.view->topPadding() + log.view->m_layout.rowCount() * rowHeight);
+    QVERIFY(log.rowsAsLaidOutAfresh());
+
+    // The bridge's whole text, the same, changes nothing.
+    log.setLog(lines.join(QLatin1Char('\n')));
+    QVERIFY(log.frame());
+    QCOMPARE(log.contentY(), y);
+    QCOMPARE(log.view->selectedText(), selected);
+
+    // The log keeps its last 250 lines.
+    const int dropped = static_cast<int>(lines.size()) + 1 - 250;
+    const int droppedCharacters = static_cast<int>(lines.mid(0, dropped).join(QLatin1Char('\n')).size()) + 1;
+    lines += QStringLiteral("[app] info: added 2");
+    lines = lines.mid(dropped);
+    log.addLines(QStringLiteral("[app] info: added 2"), 250);
+    QVERIFY(log.frame());
+    QCOMPARE(log.view->text(), lines.join(QLatin1Char('\n')));
+    top -= droppedCharacters;
+    QVERIFY2(topIsHeld(top), qPrintable(QString::number(log.view->positionToRectangle(top).top())));
+    QCOMPARE(log.view->selectionStart(), top + 10);
+    QCOMPARE(log.view->selectedText(), selected);
+    QCOMPARE(log.view->layoutPasses(), passes);
+    QVERIFY(log.rowsAsLaidOutAfresh());
+
+    // At the end, it stays at the end.
+    log.scrollTo(log.view->contentHeight() - log.view->height());
+    QVERIFY(log.frame());
+    lines += QStringLiteral("[app] info: added 3");
+    lines.removeFirst();
+    log.addLines(QStringLiteral("[app] info: added 3"), 250);
+    QVERIFY(log.frame());
+    QCOMPARE(log.view->text(), lines.join(QLatin1Char('\n')));
+    QVERIFY(qAbs(log.contentY() - (log.view->contentHeight() - log.view->height())) < 1);
+    QCOMPARE(log.view->layoutPasses(), passes);
+
+    // Copy With Paths has what was logged before the click.
+    log.bridge->setProperty("pendingLines", QStringLiteral("[app] info: logged before the click"));
+    QQuickItem *copyAll = itemNamed(log.window->contentItem(), QStringLiteral("diagnosticsCopyAllButton"));
+    QVERIFY(copyAll != nullptr && QMetaObject::invokeMethod(copyAll, "click"));
+    lines += QStringLiteral("[app] info: logged before the click");
+    QCOMPARE(clipboardText(), lines.join(QLatin1Char('\n')));
+
+    // Closed, it takes none.
+    log.close();
+    QTRY_VERIFY(!log.window->isVisible());
+    QVERIFY(!log.bridge->property("diagnosticsShown").toBool());
+    log.addLines(QStringLiteral("[app] info: logged while closed"), 0);
+    QCOMPARE(log.view->length(), 0);
 }
 
 void DiagnosticsLogViewTest::showsMarkupAsText() {

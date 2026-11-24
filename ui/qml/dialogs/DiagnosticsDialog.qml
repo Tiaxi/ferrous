@@ -15,7 +15,8 @@ Components.DialogWindow {
 
     required property var uiBridge
 
-    property string diagnosticsText: ""
+    // The log as it shows.
+    readonly property string diagnosticsText: diagnosticsLogView.text
 
     objectName: "diagnosticsDialog"
     title: I18n.i18nc("@title:window", "Diagnostics")
@@ -33,16 +34,30 @@ Components.DialogWindow {
     defaultHeight: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 38)
 
     function syncDiagnosticsText() {
-        root.diagnosticsText = root.uiBridge.diagnosticsText || ""
+        diagnosticsLogView.text = root.uiBridge.diagnosticsText || ""
+    }
+
+    // Copied whole, it has every line logged before the click (#743).
+    function copyWholeLog() {
+        root.uiBridge.flushDiagnostics()
+        if (diagnosticsLogView.length > 0) {
+            diagnosticsLogView.selectAll()
+            diagnosticsLogView.copy()
+        }
     }
 
     onAboutToShow: {
+        // From now on the bridge brings the lines logged (#743).
+        root.uiBridge.diagnosticsShown = true
         root.uiBridge.reloadDiagnosticsFromDisk()
         syncDiagnosticsText()
         diagnosticsLogView.forceActiveFocus(Qt.PopupFocusReason)
     }
 
-    onClosed: diagnosticsText = ""
+    onClosed: {
+        root.uiBridge.diagnosticsShown = false
+        diagnosticsLogView.text = ""
+    }
 
     footer: Components.DialogButtons {
         id: dialogButtons
@@ -64,6 +79,13 @@ Components.DialogWindow {
         function onDiagnosticsChanged() {
             if (root.visible) {
                 root.syncDiagnosticsText()
+            }
+        }
+
+        // A batch of the lines logged while it shows, after the rest.
+        function onDiagnosticsLinesAdded(lines, lineCount) {
+            if (root.visible) {
+                diagnosticsLogView.appendRecords(lines, lineCount)
             }
         }
     }
@@ -128,10 +150,8 @@ Components.DialogWindow {
                     icon.height: dialogButtons.glyphSize
                     icon.name: "view-refresh"
                     text: I18n.i18nc("@action:button", "Reload")
-                    onClicked: {
-                        root.uiBridge.reloadDiagnosticsFromDisk()
-                        root.syncDiagnosticsText()
-                    }
+                    // diagnosticsChanged brings what it reads.
+                    onClicked: root.uiBridge.reloadDiagnosticsFromDisk()
                 }
 
                 // One verb for one act: it deletes the log, as its question
@@ -144,7 +164,7 @@ Components.DialogWindow {
                     icon.height: dialogButtons.glyphSize
                     icon.name: "edit-delete"
                     text: I18n.i18nc("@action:button", "Delete Log")
-                    enabled: (root.diagnosticsText || "").length > 0
+                    enabled: diagnosticsLogView.length > 0
                     onClicked: clearDiagnosticsConfirmDialog.open()
                 }
             }
@@ -173,12 +193,7 @@ Components.DialogWindow {
                     icon.height: dialogButtons.glyphSize
                     icon.name: "edit-copy"
                     text: I18n.i18nc("@action:button", "Copy With Paths")
-                    onClicked: {
-                        if (diagnosticsLogView.length > 0) {
-                            diagnosticsLogView.selectAll()
-                            diagnosticsLogView.copy()
-                        }
-                    }
+                    onClicked: root.copyWholeLog()
                 }
 
                 Button {
@@ -187,7 +202,7 @@ Components.DialogWindow {
                     icon.height: dialogButtons.glyphSize
                     icon.name: "edit-copy"
                     text: I18n.i18nc("@action:button", "Copy Without Paths")
-                    enabled: (root.diagnosticsText || "").length > 0
+                    enabled: diagnosticsLogView.length > 0
                     ToolTip.visible: hovered
                     ToolTip.delay: Kirigami.Units.toolTipDelay
                     ToolTip.text: I18n.i18nc("@info:tooltip",
@@ -247,7 +262,6 @@ Components.DialogWindow {
                         focus: true
                         Kirigami.Theme.colorSet: Kirigami.Theme.View
                         Kirigami.Theme.inherit: false
-                        text: root.diagnosticsText
                         // As a control has it: what the monospaced font
                         // leaves open, such as its size, is the window's.
                         font: diagnosticsLogPlaceholder.font
@@ -321,10 +335,7 @@ Components.DialogWindow {
                                 objectName: "diagnosticsCopyWithPathsMenuItem"
                                 text: I18n.i18nc("@action:inmenu", "Copy With Paths")
                                 enabled: diagnosticsLogView.length > 0
-                                onTriggered: {
-                                    diagnosticsLogView.selectAll()
-                                    diagnosticsLogView.copy()
-                                }
+                                onTriggered: root.copyWholeLog()
                             }
 
                             Components.AppMenuItem {
@@ -355,9 +366,7 @@ Components.DialogWindow {
         confirmText: I18n.i18nc("@action:button", "Delete Log")
         confirmIcon: "edit-delete"
         destructive: true
-        onConfirmed: {
-            root.uiBridge.clearDiagnostics()
-            root.syncDiagnosticsText()
-        }
+        // diagnosticsChanged brings the new log.
+        onConfirmed: root.uiBridge.clearDiagnostics()
     }
 }

@@ -372,6 +372,7 @@ ApplicationWindow {
         property string diagnosticsText: ""
         property string diagnosticsLogPath: ""
         property bool diagnosticsLoading: false
+        property bool diagnosticsShown: false
         property bool connected: false
         property string backendFailure: ""
         // What saveStateBeforeQuit fails with, as BridgeClient's
@@ -394,6 +395,7 @@ ApplicationWindow {
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
         signal diagnosticsChanged()
+        signal diagnosticsLinesAdded(string lines, int lineCount)
         signal bridgeError(string message, int category, int severity, string subject, string detail,
             bool failedToPlay)
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
@@ -586,6 +588,7 @@ ApplicationWindow {
         }
         function clearDiagnostics() {}
         function reloadDiagnosticsFromDisk() {}
+        function flushDiagnostics() {}
         // Counts the copies, for tests; there is no log here.
         property int diagnosticsCopiesWithoutPaths: 0
         function copyDiagnosticsWithoutPaths() {

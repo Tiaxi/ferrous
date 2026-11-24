@@ -244,6 +244,11 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString diagnosticsLogPath READ diagnosticsLogPath NOTIFY diagnosticsChanged)
     // Whether reloadDiagnosticsFromDisk is still reading the log.
     Q_PROPERTY(bool diagnosticsLoading READ diagnosticsLoading NOTIFY diagnosticsChanged)
+    // Whether Diagnostics shows the log: it takes diagnosticsText as it
+    // opens and at each diagnosticsChanged, and diagnosticsLinesAdded brings
+    // the lines logged after. Closed, the log costs it nothing.
+    Q_PROPERTY(bool diagnosticsShown READ diagnosticsShown WRITE setDiagnosticsShown NOTIFY
+                   diagnosticsShownChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
     // Why the backend stopped without being asked to; empty while it runs.
     Q_PROPERTY(QString backendFailure READ backendFailure NOTIFY backendFailureChanged)
@@ -414,6 +419,8 @@ public:
     QString diagnosticsText() const;
     QString diagnosticsLogPath() const;
     bool diagnosticsLoading() const { return m_diagnosticsLoading; }
+    bool diagnosticsShown() const { return m_diagnosticsShown; }
+    void setDiagnosticsShown(bool shown);
     bool connected() const;
     QString backendFailure() const;
     bool profileLogsEnabled() const { return m_profileUiEnabled; }
@@ -601,6 +608,10 @@ public:
     Q_INVOKABLE void reloadDiagnosticsFromDisk();
     // Puts diagnosticsTextWithoutPaths on the clipboard, for a bug report.
     Q_INVOKABLE void copyDiagnosticsWithoutPaths();
+    // Hands the lines logged so far to the log's writer, and to a shown
+    // Diagnostics, now rather than with the next batch: before a copy of
+    // what it shows, which then has every line logged before.
+    Q_INVOKABLE void flushDiagnostics();
     // Show an error from the UI in Recent Issues, as the bridge's are: it is
     // logged, then sent with bridgeError. `category` and `severity` are
     // BinaryBridgeCodec's; an unknown one counts as a system error.
@@ -652,7 +663,12 @@ signals:
     void globalSearchResultsChanged();
     void itunesArtworkChanged();
     void imageFileDetailsChanged(const QString &path);
+    // The log changed as a whole, so diagnosticsText is to take again.
     void diagnosticsChanged();
+    // While diagnosticsShown, a batch of lines logged, joined by newlines,
+    // and the lines the log keeps, the last `lineCount`.
+    void diagnosticsLinesAdded(const QString &lines, int lineCount);
+    void diagnosticsShownChanged();
     void connectedChanged();
     void backendFailureChanged();
     // An error for the user: the message, its BinaryBridgeCodec::ErrorCategory
@@ -904,7 +920,8 @@ private:
     void applyDiagnosticsRead(quint64 generation, quint64 loggedBefore, const QString &logPath,
                               QStringList lines);
     void flushPendingDiagnosticDiskLines();
-    void rebuildDiagnosticsText();
+    void showPendingDiagnosticLines();
+    void notifyDiagnosticsChanged();
     static QString resolveDiagnosticsLogPath();
     void schedulePlaybackChanged();
     void scheduleTrackIdentityChanged();
@@ -1158,10 +1175,11 @@ private:
     std::unique_ptr<QTemporaryDir> m_itunesArtworkTempDir;
     QHash<QString, QVariantMap> m_imageFileDetailsCache;
     QSet<QString> m_pendingImageFileDetailsPaths;
-    QString m_diagnosticsText;
     QString m_diagnosticsLogPath;
     QStringList m_diagnosticsLines;
     QStringList m_pendingDiagnosticsDiskLines;
+    // Logged while Diagnostics is shown, for its next diagnosticsLinesAdded.
+    QStringList m_pendingDiagnosticsShownLines;
     // Writes the log's lines off the GUI thread. Destroyed after the
     // destructor's last flush, it writes what still waits.
     std::unique_ptr<DiagnosticsLog::Writer> m_diagnosticsWriter;
@@ -1172,6 +1190,7 @@ private:
     // reload's read does not have.
     quint64 m_diagnosticsLinesLogged{0};
     bool m_diagnosticsLoading{false};
+    bool m_diagnosticsShown{false};
     QString m_libraryLastError;
     // The roots, with their reasons, already reported or logged as not watched.
     QSet<QString> m_reportedUnwatchedRoots;
