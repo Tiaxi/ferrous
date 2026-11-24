@@ -6,6 +6,7 @@ import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
+import "../logic/ErrorUtils.js" as ErrorUtils
 import "../logic/PathUtils.js" as PathUtils
 import "../components" as Components
 import "." as Dialogs
@@ -810,8 +811,8 @@ Components.DialogWindow {
             // results says how in a semibold heading, the window's whole
             // answer, with the words under it in the secondary colour:
             // finding nothing under the search's glyph in the secondary
-            // colour, and a failure, with the system's words, under a
-            // warning glyph in the negative colour (a lone secondary line
+            // colour, and a failure, with the system's words, under
+            // the error glyph in the negative colour (a lone secondary line
             // under a 32 px glyph was under-scaled for the window's
             // answer). No frame, as no results are there. Built from its
             // parts: Kirigami.PlaceholderMessage's selectable text brings
@@ -857,16 +858,17 @@ Components.DialogWindow {
                     }
 
                     // A failed search's glyph, in the spinner's place and
-                    // size: the app's own warning mark, as the status bar
-                    // and the queue draw it (Breeze's dialog-warning as a
-                    // mask fills its "!", leaving a plain triangle).
+                    // size: an error's, the ring with a cross in the
+                    // negative colour, as the status bar and Recent Issues
+                    // draw every error (the warning's triangle in that
+                    // colour told the two apart by colour alone).
                     Kirigami.Icon {
                         objectName: "itunesArtworkFailureIcon"
                         anchors.fill: parent
                         visible: placeholder.failed
-                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        source: Qt.resolvedUrl("../assets/" + ErrorUtils.glyphAsset(ErrorUtils.GlyphError))
                         isMask: true
-                        color: root.uiPalette.negative
+                        color: ErrorUtils.glyphColor(ErrorUtils.GlyphError, root.uiPalette)
                         Accessible.ignored: true
                     }
 
