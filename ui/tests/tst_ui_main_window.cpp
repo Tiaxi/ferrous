@@ -1252,7 +1252,7 @@ private slots:
     void visualizationTakesNearlyHalfTheRightColumn();
     void firstRunShowsOneMessage();
     void nothingSaysFirstRunBeforeTheLibraryLoads();
-    void tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles();
+    void tabGoesThroughTheQueueHeadersHandlesBeforeItsRows();
     void focusedColumnHandleHasAFrameAndSaysItsKeys_data();
     void focusedColumnHandleHasAFrameAndSaysItsKeys();
     void columnHandlesShowAQuietMarkAtRest_data();
@@ -7902,10 +7902,12 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     QVERIFY(named(window, "queueColumnHandle_artist")->activeFocusOnTab());
 }
 
-// Tab goes from the library to the queue's rows: the column handles over
-// the queue's header come after them in the Tab chain, not before, and
-// still take the keyboard there.
-void UiMainWindowTest::tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles() {
+// Tab goes through the queue in reading order: from the library to the
+// column handles of the queue's header, in the columns' order, then to its
+// rows, and on to the visualization. The handles came after the rows, so
+// the focus went down to the rows and back up to the header, and three
+// stops stood between the rows and the plot.
+void UiMainWindowTest::tabGoesThroughTheQueueHeadersHandlesBeforeItsRows() {
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
@@ -7919,25 +7921,41 @@ void UiMainWindowTest::tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles() {
     QQuickItem *artistHandle = named(window, "queueColumnHandle_artist");
     QVERIFY(library && queue && artistHandle);
     QTRY_VERIFY(artistHandle->activeFocusOnTab());
+    const auto focusName = [window]() {
+        return window->activeFocusItem() != nullptr ? window->activeFocusItem()->objectName() : QStringLiteral("nothing");
+    };
 
     library->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(library->hasActiveFocus());
-    QTest::keyClick(window, Qt::Key_Tab);
-    QTRY_VERIFY2(queue->hasActiveFocus(),
-                 qPrintable(QStringLiteral("Tab went to %1")
-                                .arg(window->activeFocusItem() ? window->activeFocusItem()->objectName()
-                                                               : QStringLiteral("nothing"))));
-    // Then the handles, in the columns' order, which Left and Right still
-    // move.
+    // The handles, in the columns' order, which Left and Right still move.
     for (const char *column : {"queueColumnHandle_artist", "queueColumnHandle_album", "queueColumnHandle_length"}) {
         QTest::keyClick(window, Qt::Key_Tab);
-        QTRY_VERIFY2(named(window, column)->hasActiveFocus(), column);
+        QTRY_VERIFY2(named(window, column)->hasActiveFocus(),
+                     qPrintable(QStringLiteral("%1: Tab went to %2").arg(QLatin1String(column), focusName())));
     }
-    // And Shift+Tab goes back from the rows to the library.
+    const qreal lengthWidth = named(window, "queueHeader_length")->width();
+    QTest::keyClick(window, Qt::Key_Left);
+    QTRY_VERIFY(named(window, "queueHeader_length")->width() > lengthWidth);
+    QTest::keyClick(window, Qt::Key_Home);
+    QTRY_COMPARE(named(window, "queueHeader_length")->width(), lengthWidth);
+    // Then the rows,
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY2(queue->hasActiveFocus(), qPrintable(QStringLiteral("Tab went to %1").arg(focusName())));
+    // and on to the visualization, past the queue.
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY2(!queue->hasActiveFocus() && !named(window, "queueColumnHandles")->isAncestorOf(window->activeFocusItem())
+                     && !library->hasActiveFocus(),
+                 qPrintable(QStringLiteral("Tab went to %1").arg(focusName())));
+    // Shift+Tab goes back from the rows to the last handle, and from the
+    // first handle to the library.
     queue->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(queue->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
-    QTRY_VERIFY(library->hasActiveFocus());
+    QTRY_VERIFY(named(window, "queueColumnHandle_length")->hasActiveFocus());
+    artistHandle->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(artistHandle->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
+    QTRY_VERIFY2(library->hasActiveFocus(), qPrintable(QStringLiteral("Shift+Tab went to %1").arg(focusName())));
 }
 
 void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest_data() {
