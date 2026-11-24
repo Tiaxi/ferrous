@@ -1208,6 +1208,8 @@ private slots:
     void libraryTreeChevronsGrowWithALargeFont();
     void libraryThumbnailsFollowTheFont_data();
     void libraryThumbnailsFollowTheFont();
+    void libraryChevronsKeepBreezesStroke_data();
+    void libraryChevronsKeepBreezesStroke();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
     void collapsedRowNameElidesBeforeTheYear();
     void libraryRowShowsItsCutTitleWholeInItsToolTip();
@@ -5266,9 +5268,11 @@ void UiMainWindowTest::libraryTreeHasOneIndentStep() {
              QStringLiteral("arrow-right"));
 }
 
-// At 24 pt the tree's chevrons and state glyphs grow with the font, as the
-// palette scales its 16 and 12 px glyphs, and the indent step with the
-// chevrons, so that each level's chevron is where its parent's ends.
+// At 24 pt the tree's chevron columns and state glyphs grow with the font,
+// as the palette scales its 16 and 12 px glyphs, and the indent step with
+// the columns, so that each level's chevron is where its parent's ends. The
+// chevron itself stops at Breeze's 22 px arrow, centred in its column
+// (libraryChevronsKeepBreezesStroke).
 void UiMainWindowTest::libraryTreeChevronsGrowWithALargeFont() {
     const ScopedApplicationFont font(24.0);
     MainWindowFixture fixture(sized());
@@ -5289,7 +5293,7 @@ void UiMainWindowTest::libraryTreeChevronsGrowWithALargeFont() {
     // 2.4 times the default font's: 38 and 29 px.
     const qreal chevronSize = scaledSize(window, 16);
     QCOMPARE(chevronSize, std::round(16 * 2.4));
-    QCOMPARE(artistChevron->size(), QSizeF(chevronSize, chevronSize));
+    QCOMPARE(artistChevron->size(), QSizeF(22, 22));
     QCOMPARE(albumChevron->x() - artistChevron->x(), chevronSize);
     QTRY_VERIFY(state->isVisible());
     QCOMPARE(state->size(), QSizeF(scaledSize(window, 12), scaledSize(window, 12)));
@@ -5300,7 +5304,8 @@ void UiMainWindowTest::libraryTreeChevronsGrowWithALargeFont() {
         QVERIFY(item->y() >= 0 && item->y() + item->height() <= row->height());
     }
     // The title after the chevron and its gap, clear of it.
-    QVERIFY(itemNamed(artist, QStringLiteral("libraryRowTitle"))->x() >= artistChevron->x() + chevronSize + 6);
+    QVERIFY(itemNamed(artist, QStringLiteral("libraryRowTitle"))->x()
+            >= artist->property("chevronX").toReal() + chevronSize + 6);
     // A collapsed album that holds the playing track has its name amber at
     // a large font too.
     fixture.libraryModel.toggleKey(kAlbumKey);
@@ -5354,7 +5359,8 @@ void UiMainWindowTest::libraryThumbnailsFollowTheFont() {
     const qreal radius = thumbnail->property("radius").toReal();
     QCOMPARE(radius, std::max(2.0, std::round(size / 10)));
     const qreal thumbnailX = xIn(album, "libraryRowThumbnail");
-    QCOMPARE(thumbnailX, xIn(album, "libraryRowChevron") + chevron->width() + scaledSize(window, 6));
+    // After the chevron's column, which the chevron is centred in.
+    QCOMPARE(thumbnailX, album->property("chevronX").toReal() + scaledSize(window, 16) + scaledSize(window, 6));
     const qreal nameX = thumbnailX + size + scaledSize(window, 8);
     QCOMPARE(xIn(album, "libraryRowTitle"), nameX);
     QCOMPARE(xIn(track, "libraryRowTitle"), nameX);
@@ -5372,6 +5378,70 @@ void UiMainWindowTest::libraryThumbnailsFollowTheFont() {
     QCOMPARE(mark->size(), QSizeF(size, size));
     QCOMPARE(QQmlProperty(mark, QStringLiteral("sourceSize.width")).read().toReal(), size);
     QCOMPARE(mark->property("smooth").toBool(), size != 20.0);
+}
+
+void UiMainWindowTest::libraryChevronsKeepBreezesStroke_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("14 pt") << 14.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The tree's chevrons are Breeze's arrows at one of Breeze's sizes, at most
+// its 22 px one, centred in their column, which grows with the font as the
+// indent step: Breeze draws its arrows in a 1 px stroke at every size, and
+// the 32 px arrow a 24 pt font rounded to was a wide hairline V beside text
+// of a heavier stroke. The default font's 16 px chevron is as it was.
+void UiMainWindowTest::libraryChevronsKeepBreezesStroke() {
+    QFETCH(qreal, points);
+    const ScopedApplicationFont font(points);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    showTree(fixture.libraryModel, kAllExpanded);
+    QQuickItem *artist = nullptr;
+    QQuickItem *album = nullptr;
+    QTRY_VERIFY((artist = libraryRow(window, QStringLiteral("artist"))) != nullptr
+                && (album = libraryRow(window, QStringLiteral("album"))) != nullptr);
+    const qreal column = scaledSize(window, 16);
+    const qreal glyph = std::min<qreal>(column, 22);
+    if (points == 24.0) QCOMPARE(glyph, 22.0);
+    for (QQuickItem *row : {artist, album}) {
+        QQuickItem *chevron = itemNamed(row, QStringLiteral("libraryRowChevron"));
+        QVERIFY(shown(chevron));
+        QCOMPARE(chevron->width(), glyph);
+        QCOMPARE(chevron->height(), glyph);
+        // A size Breeze draws, at that size.
+        QVERIFY(chevron->property("roundToIconSize").toBool());
+        const qreal columnX = row->property("chevronX").toReal();
+        QCOMPARE(xIn(row, "libraryRowChevron"), columnX + std::round((column - glyph) / 2));
+        QVERIFY(std::abs(chevron->mapToItem(row, QPointF(0, glyph / 2)).y() - row->height() / 2) <= 0.5);
+        if (points <= 10.0) QCOMPARE(xIn(row, "libraryRowChevron"), columnX);
+    }
+    // The indent step is still the column.
+    QCOMPARE(album->property("chevronX").toReal() - artist->property("chevronX").toReal(), column);
+
+    // As drawn: the arrow's ink no wider than Breeze's 22 px drawing.
+    const auto inkWidth = [&]() {
+        const QImage image = window->grabWindow();
+        const qreal scale = qreal(image.width()) / window->width();
+        const QRectF box = sceneRect(artist);
+        const qreal columnLeft = artist->mapToScene(QPointF(artist->property("chevronX").toReal(), 0)).x();
+        const QColor background = image.pixelColor(QPointF((box.right() - 30) * scale, (box.top() + 2) * scale).toPoint());
+        int left = image.width();
+        int right = -1;
+        for (int y = qFloor(box.top() * scale); y < qFloor(box.bottom() * scale); ++y) {
+            for (int x = qFloor(columnLeft * scale); x < qFloor((columnLeft + column) * scale); ++x) {
+                if (channelDistance(image.pixelColor(x, y), background) > 40) {
+                    left = std::min(left, x);
+                    right = std::max(right, x);
+                }
+            }
+        }
+        return right < left ? 0.0 : (right - left + 1) / scale;
+    };
+    QTRY_VERIFY(inkWidth() > 0);
+    QVERIFY2(inkWidth() <= glyph, qPrintable(QStringLiteral("%1 px of ink").arg(inkWidth())));
 }
 
 void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors() {

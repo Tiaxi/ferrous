@@ -53,6 +53,11 @@ Rectangle {
     readonly property int rowInset: 12
     readonly property int indentStep: root.chevronSize
     readonly property int chevronSize: root.uiPalette.scaledSize(16)
+    // The chevron as drawn, centred in its column: as large as the column,
+    // up to Breeze's 22 px arrow. Breeze draws its arrows in a 1 px stroke
+    // at every size (16, 22, 24 and 32 px), so the 32 px one a larger font
+    // rounded to was a wide hairline beside text of a heavier stroke.
+    readonly property int chevronGlyphSize: Math.min(root.chevronSize, 22)
     readonly property int chevronGap: root.uiPalette.scaledSize(6)
     readonly property int thumbnailSize: 2 * Math.floor(Math.max(20,
         Math.min(root.uiPalette.scaledSize(20), root.uiPalette.rowHeight - 6)) / 2)
@@ -649,10 +654,10 @@ Rectangle {
                                 id: expanderIcon
                                 objectName: "libraryRowChevron"
                                 visible: libraryRow.hasChildren
-                                x: libraryRow.chevronX
+                                x: libraryRow.chevronX + Math.round((root.chevronSize - width) / 2)
                                 y: Math.round((libraryRow.height - height) / 2)
-                                width: root.chevronSize
-                                height: root.chevronSize
+                                width: root.chevronGlyphSize
+                                height: root.chevronGlyphSize
                                 source: !libraryRow.hasChildren
                                     ? ""
                                     : (libraryRow.isExpanded
