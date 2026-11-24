@@ -6,7 +6,7 @@ Colours and sizes come from `ui/qml/components/UiPalette.qml`. The comments next
 
 ## Platform fit
 
-- **KDE-native on Breeze and Kirigami.** Use QQC2 and Kirigami controls, Kirigami units, platform menus, KDE focus and Enter behaviour, and Breeze icons. Ferrous is a Plasma app, and it should look like Dolphin and Kate do.
+- **KDE-native on Breeze and Kirigami.** Use QQC2 and Kirigami controls, Kirigami units, Breeze-styled menus in the window's own menu bar, KDE focus and Enter behaviour, and Breeze icons. Ferrous is a Plasma app, and it should look like Dolphin and Kate do.
 - **Configure and About are real top-level windows** (`DialogWindow`), as KConfigDialog and KAboutApplicationDialog are. KWin draws their title bars, and they move and resize beyond the main window. The other dialogs use the same window. Two surfaces stay inside the main window: the search palette and the Recent Issues popup, which opens from the status bar.
 - **Public Qt API only.** The private API pins the package to one exact Qt version and blocks Plasma updates.
 - **A quiet main window.** Routine events go to the status bar's indicators. Problems go to Recent Issues. A dialog appears only when the user must act. Banners and notices compete with the music for attention.
@@ -52,7 +52,7 @@ The transport uses Breeze's Header colour set, as Breeze's toolbars and the menu
 | `textSecondarySelected` / `textColumnSelected` | secondary and column text on a selected row: `rowSecondaryContrast` (6:1) on every selection tint | never weaker than the row's figures, which are held at 5.4:1 |
 | `placeholderText` | a field's placeholder, such as Edit Tags' "Mixed" | Breeze Light's own placeholder colour is 4.2:1 on white |
 | `link` | link-coloured text and actions | 4.5:1 on both the window and the view colours; a pressed link on a fill takes `readableOn` |
-| `negative` | error words, the warning glyph, the clip lamp, a failed section's heading | the theme's negative colour, adjusted for text contrast |
+| `negative` | error words, the error glyph, the clip lamp, a failed section's heading | the theme's negative colour, adjusted for text contrast |
 
 ### Row and button states
 
@@ -80,7 +80,7 @@ The transport uses Breeze's Header colour set, as Breeze's toolbars and the menu
 
 ### Plot colours
 
-Overlays drawn on a visualization take their colours from the plot under it, not from the window: use `plotColors(mode)`, which returns `spectrogramPlot` or `waveformPlot`. The spectrogram's colour map is dark in both themes, so most of its set is fixed; its checked fill and focus ring still derive from the theme's accent. The waveform is drawn on the view colour, so its set follows the theme. `mediaPlot` is the spectrogram set on black, for the album art viewer. Exceptions in the current code: the level meter's clip lamp uses `negative`, the waveform's centre line and neutral playhead use the text colour and theme-dependent colours, and the viewer's new-issues glyph uses `negative` when the plot and the window theme are equally dark or light, and `plotText` otherwise. Each set holds:
+Overlays drawn on a visualization take their colours from the plot under it, not from the window: use `plotColors(mode)`, which returns `spectrogramPlot` or `waveformPlot`. The spectrogram's colour map is dark in both themes, so most of its set is fixed; its checked fill and focus ring still derive from the theme's accent. The waveform is drawn on the view colour, so its set follows the theme. `mediaPlot` is the spectrogram set on black, for the album art viewer. Exceptions in the current code: the level meter's clip lamp uses `negative`, the waveform's centre line and neutral playhead use the text colour and theme-dependent colours, and the viewer's new-issues glyph, when an error is among them, uses `negative` when the plot and the window theme are equally dark or light, and `plotText` otherwise. Each set holds:
 - `plotBg`, `plotPlate`, `plotPlateEdge`, `plotStrip`;
 - `plotText`, `plotTextSecondary`, `plotOutline`;
 - `plotLaneSeam`, `plotTick`, `plotLink`;
@@ -110,7 +110,7 @@ The `ui*` colours at the end of the file come from before these tokens. Don't us
 ## The one font rule
 
 Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs, viewers and the main window:
-- **A glyph beside text follows the font.** Button glyphs, page-list icons and dialog severity marks use `labelIconSize` (`Kirigami.Units.iconSizes.sizeForLabels`): 16 px at 10 pt, 32 px at 24 pt. A glyph that is deliberately smaller or larger than a label scales its 10 pt size with `scaledSize()` instead: for example the library's state and warning marks, the queue's warning mark and the status bar's glyphs. The album art viewer's detail buttons scale their 16 px glyph with the viewer's own scale, which is larger in fullscreen. A 16 px glyph beside 32 px text becomes the smallest thing in its row.
+- **A glyph beside text follows the font.** Button glyphs, page-list icons and dialog severity marks use `labelIconSize` (`Kirigami.Units.iconSizes.sizeForLabels`): 16 px at 10 pt, 32 px at 24 pt. A glyph that is deliberately smaller or larger than a label scales its 10 pt size with `scaledSize()` instead: for example the library's state and error marks, the queue's error mark and the status bar's glyphs. The album art viewer's detail buttons scale their 16 px glyph with the viewer's own scale, which is larger in fullscreen. A 16 px glyph beside 32 px text becomes the smallest thing in its row.
 - **A pixel measure tuned at 10 pt goes through `scaledSize()`.** This includes widths that bound text, thumbnails, gutters, insets and caps. Exception: the album art viewer's gutter around the art stays 16 or 24 px at any font, because it frames the image, not text. `scaledSize()` leaves 10 pt unchanged and grows with a larger font. A fixed width at 24 pt cuts text beside empty room. A cover in a list row grows with the row and stays inside it: the library's is 20 px at 10 pt and 46 px at 24 pt, where 20 px read as a bullet.
 - **A text measure is counted in characters.** A compact dialog is about 46 average characters wide, help text at most about 63, and the art details about 40. A fixed width holds fewer words at a larger font.
 - **Check at 24 pt.** Nothing may elide or wrap a lead sentence while there is room beside it, and no window may run wider than the screen.
@@ -137,12 +137,12 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
 - **Buttons follow KDE order** (`DialogButtons`, `DialogButtonBox.KdeLayout`): the affirmative button, Apply, a destructive one, then Cancel. Configure's Defaults sits on the left. The buttons sit one grid unit in from the window's sides and bottom, at the same inset as the content. The style's own 9 px footer inset pushed them into the corner.
 - **The safe choice is the default.** Enter presses the button marked `primary`. When the action destroys data (delete, remove, replace), Cancel is the default and has focus when the dialog opens, so neither Enter nor Space destroys anything until the user moves to the action. This follows the KDE HIG: a stray Enter once removed a library folder.
 - **Enter works as in KDE:** in a text field, it accepts the text; on a focused button, it presses that button; elsewhere, it presses the default button. Escape and the title bar's close button cancel.
-- **Dialog buttons carry a Breeze glyph** at `labelIconSize`, in footers and in action rows alike: `dialog-cancel`, `dialog-ok-apply`, `edit-delete`, `edit-rename` and so on. A glyphless caption in a row of glyphs reads as a label. Current exceptions: Last.fm's Complete Connection, Reconnect… and Disconnect / Cancel Connection buttons (Connect… has its glyph).
+- **Dialog buttons carry a Breeze glyph** at `labelIconSize`, in footers and in action rows alike: `dialog-cancel`, `dialog-ok-apply`, `edit-delete`, `edit-rename` and so on. A glyphless caption in a row of glyphs reads as a label.
 - **The colour of a destructive glyph comes from Breeze's own icon.** `edit-delete` and `edit-delete-remove` are red in Breeze, and Ferrous never tints them. Red belongs to removing and deleting only: Replace Album Art uses `document-swap`, because `document-replace` has a red × and read as Delete.
 - **Dialogs size to their content, with caps.** A compact dialog (`CompactDialogWindow`) is as tall as its content and follows it as it wraps. Its width is the measure, or the width its form and buttons need. Lists such as Rename Files open as wide as their widest line, up to a cap. Configure asks for the height of its tallest page, so no page scrolls when there is room. Dialogs open within the screen, and stay within it as a compact dialog's content grows; a page, or a compact dialog's content above its buttons, scrolls when the screen, or a size the user chose, leaves too little room. A fixed size left either a scrollbar or an empty band.
 - **Configure has one grouping rule.** Only a page with three or more groups (Visualization) gives them DemiBold subheadings (`FormGroupGap.heading`). Two-group pages separate them with the form label and a `FormGroupGap`, 16 px. Help text (`FormHelpText`) sits under its control in `textSecondary`, under a check box from where the box's text is drawn (`checkBox`). Where the build can't offer what it explains, the page's first line says why and the help is hidden. Three grouping styles in one dialog read as assembled work.
 - **Lists that compare entries share columns.** In Configure, every library folder's path starts at one x, and Rename Files shows its rows as old | → | new. The things being compared need one left edge.
-- **Empty and failed states keep their place.** "Nothing found" is quiet, secondary text. A failure gets a warning glyph in the spinner's slot and the system's words under it, so a network failure doesn't read as a routine empty result.
+- **Empty and failed states keep their place.** "Nothing found" is quiet, secondary text. A failure gets the error glyph in the spinner's slot and the system's words under it, so a network failure doesn't read as a routine empty result.
 - **Configure's page title outranks its groups.** It is 1.3 times the text, DemiBold, over subheadings of the text's size. At 1.125 times, only their x told the two ranks apart.
 - **About keeps KDE's About layout,** with its tabs standing on the frame of their pages.
 
@@ -171,7 +171,7 @@ Every surface must hold up at 24 pt as well as at 10 pt. One rule covers dialogs
   - The playing row has an amber play glyph (pause glyph while paused) and a DemiBold amber title.
   - A collapsed tree row that holds the playing track has an amber name and no glyph, because a glyph there reads as a play button. While paused, the name drops to `nowPausedOpacity`.
   - A stopped current row gets a neutral stop mark.
-  - An unreadable file gets the status bar's warning sign, in `negative`.
+  - An unreadable file gets the status bar's error glyph, a ring with a cross, in `negative`.
   - The status bar's Playing glyph stays neutral.
   - Use Breeze icons or Ferrous's own SVGs, never text glyphs such as ▶ or ⏸.
 

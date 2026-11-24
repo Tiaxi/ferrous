@@ -337,6 +337,44 @@ class LibrarySearchPack(unittest.TestCase):
         self.assertIn(("sheet", "lib-density"), [i[:2] for i in self.sc["images"]])
 
 
+class ShowcasePack(unittest.TestCase):
+    """The README's and AppStream's screenshots: each a whole window of its own state, in both themes."""
+    sc = focus.SCOPES["showcase"]
+    WANT = {("main", "showcase"), ("viewer", "showcase-spectrogram-fullscreen"), ("main", "showcase-waveform"),
+            ("dialog", "showcase-edit-tags"), ("dialog", "showcase-itunes")}
+
+    def test_each_image_is_a_whole_window_in_both_themes(self):
+        tiles = [c for _nm, _t, _th, rows in self.sc["sheets"] for row in rows for c in cells(row)]
+        self.assertEqual({(c[0], c[1]) for c in tiles}, self.WANT)
+        for area, state in self.WANT:
+            got = [c for c in tiles if (c[0], c[1]) == (area, state)]
+            self.assertEqual(sorted(c[4]["theme"] for c in got), ["dark", "light"], state)
+            self.assertTrue(all(c[2] is None for c in got), f"{state}: cropped")
+
+    def test_its_sessions_run_in_both_themes_from_the_showcase_library(self):
+        for name in self.sc["sessions"]:
+            kw = states.SESSIONS[name]
+            self.assertNotIn("themes", kw, name)
+            self.assertIs(kw.get("db"), False, name)  # (its one root is the showcase library, added by the macro)
+            first = next(l for l in states.STATES if l[0] == name)
+            self.assertIn("macro showcase", first[3], name)
+
+    def test_the_fullscreen_viewer_is_1600_by_1000(self):
+        self.assertEqual(shotlib.kwin_output_size(states.SESSIONS["showcase-fs"]["size"]), (1600, 1000))
+
+    def test_the_dialog_shots_are_checked_to_be_of_their_dialog(self):
+        for st in ("showcase-edit-tags", "showcase-itunes"):
+            self.assertIn(st, states.DIALOG_EXPECT)
+
+    def test_the_itunes_stand_ins_are_the_showcase_albums_and_all_ready(self):
+        jpgs = [f"/x/{k}.jpg" for k in range(5)]
+        rows = states.itunes_rows(jpgs, [states.SC_ALBUM] + states.SC_ITUNES[1:], states.SC_ARTIST, loading=None)
+        self.assertTrue(all(states.SC_ALBUM in r["albumTitle"] for r in rows), [r["albumTitle"] for r in rows])
+        self.assertFalse(any(r["assetLoading"] for r in rows))
+        self.assertEqual({r["artistName"] for r in rows}, {states.SC_ARTIST})
+        self.assertIn(states.DIALOG_EXPECT["showcase-itunes"][1], [r["albumTitle"] for r in rows])
+
+
 class ChangeCrop(unittest.TestCase):
     """A recording's frames cut around all that changes after the action, with an item of a dialog shot's layout."""
 

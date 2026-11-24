@@ -2,10 +2,12 @@
 Type=Application
 Version=1.0
 Name=Ferrous
-Comment=High-performance Linux audio player
+GenericName=Music Player
+Comment=Play, browse and inspect your music library
 Exec=ferrous %U
 Icon=ferrous
 Terminal=false
 Categories=AudioVideo;Audio;Player;
+Keywords=music;player;audio;spectrogram;waveform;tags;flac;gapless;
 MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/mp4;audio/m4a;audio/x-m4a;audio/aac;audio/x-aac;audio/ogg;audio/x-ogg;audio/x-opus+ogg;audio/x-vorbis+ogg;audio/vnd.wave;audio/wav;audio/x-wav;audio/ac3;audio/vnd.dts;audio/x-dts;audio/x-mpegurl;application/vnd.apple.mpegurl;
 StartupNotify=true

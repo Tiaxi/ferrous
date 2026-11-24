@@ -1,0 +1,81 @@
+# Feature guide
+
+What each part of Ferrous does, in more detail than the [README](../README.md). For keys and mouse gestures, see [keyboard and mouse](SHORTCUTS.md); for search syntax, see [search](SEARCH.md).
+
+## Playback
+
+- GStreamer plays the queue with seeking, repeat, shuffle and volume. A track goes on gaplessly into the next one when their file name extensions match, such as two `.flac` files.
+- The queue comes back on the next launch, with the current track where you left it.
+- Clearing the queue, removing, moving or replacing tracks can be undone and redone until the queue changes another way ([details](SHORTCUTS.md#library-and-queue)).
+- Open files, add folders, import M3U and M3U8 playlists, and drag tracks to reorder them.
+
+## Library
+
+Your folder structure is the library: add one or more root folders in the Library page of **Settings › Configure Ferrous…**, and Ferrous shows them as a tree of artists, albums and tracks.
+
+- **Watched folders.** Ferrous watches the roots, so files that other programs add, change or remove appear without a rescan, and it rescans the roots at startup.
+- **Folders it can't watch** are rescanned every 30 minutes instead, and the Library page marks them: roots on network or FUSE file systems, network or FUSE mounts inside a root, and roots with more folders than `fs.inotify.max_user_watches` allows. Watching can be turned off there.
+- **Removing a root** asks first and says how many tracks leave the library. The files stay on disk.
+- **Search** spans the whole library, with ranked results in artist, album and track sections and `type:` filters. See [search](SEARCH.md).
+
+## Spectrogram and waveform
+
+The plot under the queue shows the playing track as a spectrogram or a waveform. The spectrogram is inspired by Adobe Audition's spectral view.
+
+- **Modes.** Rolling scrolls continuously with playback. Centred shows a zoomable window around the playhead, held at the track's ends.
+- **Spectrogram settings** (the Visualization page of Configure Ferrous): mono downmix or one lane per channel, a logarithmic or linear frequency scale, an optional limit to the audible band of high-resolution tracks (22.05 or 24 kHz), the dB range, and the FFT window size.
+- **Waveform.** Zoom in to sample level, and inspect each channel.
+- **Navigation.** Zoom with the wheel. A zoomed waveform, or a centred spectrogram that shows part of the track, can be dragged with the middle button to look at another part, or autoscrolled with a middle click; **View › Follow Playhead** (F) brings it back. A crosshair reads out the time and level under the pointer, and on the spectrogram the frequency too. See [keyboard and mouse](SHORTCUTS.md).
+- **Fullscreen viewers** show the plot or the album art on their own.
+- How the plot keeps up with playback, seeks and gapless transitions is in the [visualization architecture](VISUALIZATION_ARCHITECTURE.md).
+
+![The waveform, zoomed in](assets/screenshots/waveform-dark.png)
+
+## Tag editor
+
+**Edit Tags** edits the tags of one or many files at once.
+
+- A field whose files hold different values reads "Mixed" and keeps them as they are when you save. To clear it in every file on purpose, press Backspace or Delete in the empty field.
+- **Auto Number** numbers the selected tracks.
+- **Renaming files from their tags** lists each new name, and any that can't be used, before any file is renamed. Confirming renames only what the list showed, and nothing if that list no longer holds, for example because a file was moved or another name was taken since.
+- Files are saved atomically: a failed save leaves the file as it was, and says why.
+
+![Edit Tags with several files selected](assets/screenshots/edit-tags-light.png)
+
+## Album art
+
+- **Covers.** A folder's cover is its `cover`, `folder` or `front` image, in that order and in any letter case, or else its first JPEG or PNG image by name. The library and the now-playing view show the folder's cover before a track's embedded picture.
+- **Changes on disk.** Covers follow images that are added, renamed, removed or replaced, at the next scan, or at once while the library watches its folders.
+- **Replace from iTunes** searches the iTunes catalog for full-size album art. A suggestion can be previewed in the album art viewer and compared with the current art, then applied from there.
+
+![Replace from iTunes with suggestions](assets/screenshots/itunes-dark.png)
+
+How applied artwork is written:
+
+- It replaces the folder's named cover image in its current format, or adds a `cover.jpg` or `cover.png`, and leaves other images, such as back scans, untouched.
+- In folders without such images, the artwork is embedded in every track there with the same album tag. Every one of them is checked first, and nothing is written unless all can be; a write that still fails is reported for its track.
+- Ferrous keeps no copy of the art it replaces, so it asks before replacing a track's existing art.
+- Suggestions go to the album they were searched for, even if playback moves on before you apply them. Nothing is written if that track's file was moved, renamed, deleted or changed since the search.
+
+## Last.fm
+
+Connect an account in the Last.fm page of Configure Ferrous; Ferrous authenticates through the browser.
+
+- **Progress.** In the status bar, a short bar beside the Last.fm glyph fills with the time listened towards the scrobble. A seek doesn't move it, and only a new play starts it over; its tooltip gives the time left. When playback stops before the scrobble point, the bar keeps a mark where the play got to, and its tooltip says that play wasn't scrobbled.
+- **Pause.** Clicking the slot pauses scrobbling until you click it again or quit, and strikes the glyph through. A track that plays while paused, before its scrobble point, is never scrobbled, and Ferrous starts no Now Playing updates or scrobbles until you resume; queued scrobbles wait.
+- **Outages.** When Last.fm can't be reached or is busy, scrobbles stay queued, and Ferrous tries again on a schedule: after 30 seconds, then at doubling intervals of up to 30 minutes. A new scrobble or a Now Playing update that goes through can bring the next try forward. When Last.fm asks Ferrous to slow down, nothing is sent automatically until its wait is over, for at most a day, unless you reconnect the account.
+- **Limits.** Last.fm takes no scrobble older than 14 days, so Ferrous discards queued scrobbles of that age, and the oldest beyond 10,000 queued ones. The Last.fm page counts those discarded since Ferrous started.
+- **What you see.** The slot says when scrobbles wait or one failed, and the Last.fm page shows when the next retry is. Recent Issues lists only what needs you, such as reconnecting the account or scrobbles Last.fm refused. The diagnostics log records each Now Playing update, submission and failure. The Last.fm page can hide the slot.
+
+## Desktop integration
+
+- MPRIS media controls, so Plasma's media widget, the lock screen and media keys control playback.
+- One instance: files opened from Dolphin or the command line replace the queue in the window that is already open.
+- A `.desktop` file, an AppStream listing and MIME types for the formats below.
+- Breeze, your colour scheme and accent, and Plasma's animation speed, including animations turned off.
+
+## Supported formats
+
+MP3, FLAC, M4A/AAC, Ogg Vorbis, Opus, WAV, AC-3 and DTS, and M3U/M3U8 playlists. What actually plays depends on the GStreamer plugins installed.
+
+On Fedora, the base, good and bad-free GStreamer plugins that the RPM requires play every format above except AC-3 and DTS. Those need `gstreamer1-plugin-libav`, which the RPM recommends, so dnf installs it unless weak dependencies are turned off. Fedora builds that plugin against `ffmpeg-free`, which leaves out some codecs, such as E-AC-3. Replacing `ffmpeg-free` with the full FFmpeg from [RPM Fusion](https://rpmfusion.org/Howto/Multimedia) (`sudo dnf swap ffmpeg-free ffmpeg --allowerasing`) adds them. Ferrous does not require RPM Fusion.

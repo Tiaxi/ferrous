@@ -99,7 +99,9 @@ grades the whole app surface by surface:
 | `viewers` | album art and visualization viewers |
 | `whole-app` | the app as one system: spacing, type, colour, states, motion, consistency, identity, KDE fit, accessibility |
 
-`app-icon` is a scope outside the census.
+`app-icon` and `showcase` are scopes outside the census. `showcase` shoots the README's and AppStream's
+screenshots (`docs/assets/screenshots`): whole windows in both themes, from the showcase library (below). Its pack
+is fitted for a look; the images published are the full-size shots in `<round>-focus/shots/`.
 
 Of each session and theme, a focus capture runs the lines up to the last one that makes something any of the packs
 reads (`focus_select.py`), and none of a session they read nothing of. A state's lines before it always run, so it
@@ -150,8 +152,9 @@ Generated, never copied: `make_fixtures.py` (the main library: invented artists,
 tones and noise in FLAC, MP3 and Opus, mono to 7.1, up to 192 kHz, plain covers), `make_extra_fixtures.py` (a short
 track, a truncated FLAC, an untagged file), `make_cover_art.py` (generated landscape covers), `make_library2.py`
 (a second root), `make_broadband_fixtures.py` (bright, level-moving signals for the plot and meter),
-`make_standin_fixtures.py` (tracks without any art) and `make_large_library.py` (320 invented artists for the
-density shots). `shoot_round.sh` runs each when its output is missing; delete `$SHOT_WORK/fixtures` to regenerate.
+`make_standin_fixtures.py` (tracks without any art), `make_large_library.py` (320 invented artists for the
+density shots) and `make_showcase_fixtures.py` (the showcase library: hard links to the main library and one
+album of synthesized music with rich spectral content, chords, bass, drums and sweeps, for the showcase shots). `shoot_round.sh` runs each when its output is missing; delete `$SHOT_WORK/fixtures` to regenerate.
 
 ## Output
 

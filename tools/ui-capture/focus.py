@@ -635,6 +635,32 @@ SCOPES = {
         facts=["appicon", "motif"],
         contrast={},
     ),
+    # The README's and AppStream's screenshots: whole windows of the showcase sessions (states.py), in both themes. The
+    # pack is for a look at them; the images published are the full-size shots (docs/assets/screenshots).
+    "showcase": dict(
+        title="The showcase: the README's and AppStream's screenshots",
+        sessions=["showcase", "showcase-fs"],
+        sheets=[(f"sc-{nm}", f"{what}; Breeze Dark above Breeze Light (fitted)", "dark",
+                 [[(area, st, None, th, dict(theme=th, fit=fit, lh=16, gap=6, **({"variant": var} if var else {})))]
+                  for th in ("dark", "light")])
+                for nm, area, st, var, fit, what in (
+                    ("main", "main", "showcase", "", (880, 550), "The main window playing"),
+                    ("fullscreen", "viewer", "showcase-spectrogram-fullscreen", "1200x600", (880, 550),
+                     "The spectrogram's fullscreen viewer"),
+                    ("waveform", "main", "showcase-waveform", "", (880, 550), "The waveform, zoomed in a little"),
+                    ("edit-tags", "dialog", "showcase-edit-tags", "", (1100, 320), "Edit Tags, six tracks selected"),
+                    ("itunes", "dialog", "showcase-itunes", "", (700, 480), "Replace from iTunes, five results"))],
+        images=[
+            ("sheet", "sc-main", "dark", "The main window playing: library, queue, cover, spectrogram",
+             "nothing hovered, focused or announced; the plot filled"),
+            ("sheet", "sc-fullscreen", "dark", "The spectrogram's fullscreen viewer with its title strip", "the plot filled"),
+            ("sheet", "sc-waveform", "dark", "The waveform, zoomed in a little", "detail in the plot"),
+            ("sheet", "sc-edit-tags", "dark", "Edit Tags with six tracks selected", "the Mixed fields"),
+            ("sheet", "sc-itunes", "dark", "Replace from iTunes with five results", "the rows and their covers"),
+        ],
+        facts=[],
+        contrast={},
+    ),
 }
 
 # the seek bar in the transport's row at 1600x1000: from the buttons to the time
