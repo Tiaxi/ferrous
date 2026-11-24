@@ -1206,6 +1206,8 @@ private slots:
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
     void librarySelectedRowStepsUpItsChevron();
+    void librarySelectedRowAnswersHoverAsTheQueues_data();
+    void librarySelectedRowAnswersHoverAsTheQueues();
     void queueFocusRingStopsAtTheScrollBarLane_data();
     void queueFocusRingStopsAtTheScrollBarLane();
     void queueRowHoverIsTheListsTint();
@@ -5398,6 +5400,66 @@ void UiMainWindowTest::librarySelectedRowStepsUpItsChevron() {
     QCOMPARE(colorOf(albumChevron), tokenHex(window, "textSecondarySelected"));
     QCOMPARE(colorOf(artistChevron), tokenHex(window, "textSecondary"));
     QVERIFY(tokenHex(window, "textSecondarySelected") != tokenHex(window, "textSecondary"));
+}
+
+void UiMainWindowTest::librarySelectedRowAnswersHoverAsTheQueues_data() {
+    QTest::addColumn<bool>("queue");
+    QTest::addColumn<bool>("focused");
+    QTest::newRow("library") << false << true;
+    QTest::newRow("library, without focus") << false << false;
+    QTest::newRow("queue") << true << true;
+    QTest::newRow("queue, without focus") << true << false;
+}
+
+// A selected library row under the pointer steps its selection tint toward
+// the text colour, as a selected queue row does, in the same colours, with
+// focus and without it (the library's kept the plain tint, so the pointer
+// went unanswered on it); off it, the plain tint again.
+void UiMainWindowTest::librarySelectedRowAnswersHoverAsTheQueues() {
+    QFETCH(bool, queue);
+    QFETCH(bool, focused);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *view = named(window, queue ? "playlistView" : "libraryView");
+    QQuickItem *other = named(window, queue ? "libraryView" : "playlistView");
+    QObject *controller = window->findChild<QObject *>(queue ? QStringLiteral("queueController")
+                                                             : QStringLiteral("libraryController"));
+    QVERIFY(view && other && controller);
+    if (queue) {
+        setQueue(bridgeOf(window), sampleQueueRows(3));
+        QTRY_COMPARE(view->property("count").toInt(), 3);
+    } else {
+        showTree(fixture.libraryModel, kAllExpanded);
+        QTRY_COMPARE(view->property("count").toInt(), 3);
+    }
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = viewRowAt(view, 1)) != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(controller, queue ? "setSingleSelection" : "selectIndex",
+                                      Q_ARG(QVariant, 1)));
+    QTRY_VERIFY(rowTinted(view, 1));
+    if (focused) {
+        view->forceActiveFocus();
+        QTRY_VERIFY(view->hasActiveFocus());
+    } else {
+        other->forceActiveFocus();
+        QTRY_VERIFY(!view->hasActiveFocus());
+    }
+    QQuickItem *tint = itemNamed(row, QStringLiteral("rowBackgroundTint"));
+    QVERIFY(tint != nullptr);
+    const QString plain = tokenHex(window, focused ? "selection" : "selectionInactive");
+    const QString hovered = tokenHex(window, focused ? "selectionHovered" : "selectionInactiveHovered");
+    QVERIFY(plain != hovered);
+    QTRY_COMPARE(colorOf(tint), plain);
+    QTest::mouseMove(window, sceneRect(row).center().toPoint());
+    QTRY_COMPARE(colorOf(tint), hovered);
+    // As drawn, at the row's left end, where it has no text.
+    const QPointF corner = sceneRect(row).topLeft() + QPointF(2.5, 2.5);
+    const QColor drawnHovered = tokenOf(window, focused ? "selectionHovered" : "selectionInactiveHovered");
+    QTRY_VERIFY2(near(Drawn(window).at(corner), drawnHovered),
+                 qPrintable(Drawn(window).at(corner).name() + QStringLiteral(" for ") + drawnHovered.name()));
+    QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
+    QTRY_COMPARE(colorOf(tint), plain);
 }
 
 void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane_data() {

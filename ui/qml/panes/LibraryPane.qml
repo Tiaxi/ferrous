@@ -620,6 +620,9 @@ Rectangle {
                                 hovered: libraryRowMouseArea.containsMouse
                                 hoverColor: root.uiPalette.rowHover
                                 selected: libraryRow.rowSelected
+                                // A selected row answers the pointer too,
+                                // as the queue's.
+                                selectedHover: true
                                 active: libraryAlbumView.activeFocus
                                 focused: libraryRow.rowCurrent
                                 // Every state ends clear of the scrollbar's
