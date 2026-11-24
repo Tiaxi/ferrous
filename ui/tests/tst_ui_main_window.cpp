@@ -1190,6 +1190,7 @@ private slots:
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void nowPlayingCoverIsAKeyboardStop();
     void libraryFoldersAreFolderHeaders();
+    void libraryFoldersAfterTheFirstHaveARuleOnTop();
     void regionHeadersNameTheRegionAndItsTotals();
     void selectedRowsDrawTheirMarksForTheSelection();
     void libraryTreeHasOneIndentStep();
@@ -4632,6 +4633,74 @@ void UiMainWindowTest::libraryFoldersAreFolderHeaders() {
     QVERIFY(folder != nullptr);
     QTRY_VERIFY2(nameMarksNow(window, folder, false).isEmpty(), qPrintable(nameMarksNow(window, folder, false)));
     QVERIFY(shown(itemNamed(folder, QStringLiteral("libraryRowCount"))));
+}
+
+// A library folder's row after the first has a 1 px rule in the hairline
+// colour across its top, inside its row, as wide as the row's states: the
+// rows keep their height and places. The first folder's row and the other
+// rows have none; the selection covers it.
+void UiMainWindowTest::libraryFoldersAfterTheFirstHaveARuleOnTop() {
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music"), QStringLiteral("/shelf")});
+    const QString first = QStringLiteral("/music/Artist A/Album A/01.flac");
+    const QString second = QStringLiteral("/shelf/Artist B/Album B/01.flac");
+    fixture.libraryModel.setExpandedKeys({kRootKey, QStringLiteral("root|/shelf"), kArtistKey});
+    fixture.libraryModel.setLibraryTreeFromBinary(treeOf({
+        {0, 0, 0, 1, 0, QStringLiteral("Music"), kRootKey, QString(), QStringLiteral("/music"), {}},
+        {1, 1, 0, 1, 0, QStringLiteral("Artist A (1)"), kArtistKey, QStringLiteral("Artist A"),
+         QStringLiteral("/music/Artist A"), {}},
+        {2, 2, 0, 1, 2005, QStringLiteral("Album A"), kAlbumKey, QStringLiteral("Artist A"),
+         QStringLiteral("/music/Artist A/Album A"), {}},
+        {4, 3, 1, 0, 0, QStringLiteral("First"), QStringLiteral("track|") + first, QStringLiteral("Artist A"), first,
+         first},
+        {0, 0, 0, 1, 0, QStringLiteral("Shelf"), QStringLiteral("root|/shelf"), QString(), QStringLiteral("/shelf"), {}},
+        {1, 1, 0, 1, 0, QStringLiteral("Artist B (1)"), QStringLiteral("artist|Artist B"), QStringLiteral("Artist B"),
+         QStringLiteral("/shelf/Artist B"), {}},
+        {2, 2, 0, 1, 2010, QStringLiteral("Album B"), QStringLiteral("album|Artist B|Album B"),
+         QStringLiteral("Artist B"), QStringLiteral("/shelf/Artist B/Album B"), {}},
+        {4, 3, 1, 0, 0, QStringLiteral("Other"), QStringLiteral("track|") + second, QStringLiteral("Artist B"), second,
+         second},
+    }));
+    QQuickItem *view = named(window, "libraryView");
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(view && controller);
+    QTRY_COMPARE(view->property("count").toInt(), 5);
+    QTRY_VERIFY(viewRowAt(view, 4) != nullptr);
+    QQuickItem *shelf = viewRowAt(view, 3);
+    QVERIFY(shelf != nullptr && shelf->property("isRootRow").toBool());
+    const qreal rowHeight = view->property("rowHeight").toReal();
+    const auto rule = [](QQuickItem *row) { return itemNamed(row, QStringLiteral("rowBackgroundRule")); };
+    QQuickItem *music = viewRowAt(view, 0);
+    QVERIFY(music != nullptr && music->property("isRootRow").toBool());
+    QVERIFY(!shown(rule(music)));
+    QVERIFY(!shown(rule(viewRowAt(view, 1))) && !shown(rule(viewRowAt(view, 2))) && !shown(rule(viewRowAt(view, 4))));
+    QQuickItem *shelfRule = rule(shelf);
+    QVERIFY(shown(shelfRule));
+    QCOMPARE(colorOf(shelfRule), tokenHex(window, "hairline"));
+    QCOMPARE(shelfRule->height(), 1.0);
+    QCOMPARE(sceneRect(shelfRule).top(), sceneRect(shelf).top());
+    QCOMPARE(sceneRect(shelfRule).left(), sceneRect(shelf).left());
+    QCOMPARE(sceneRect(shelfRule).right(), sceneRect(itemNamed(shelf, QStringLiteral("rowBackgroundTint"))).right());
+    // The rows keep their height and their places on the grid.
+    for (int index = 0; index < 5; ++index) {
+        QCOMPARE(viewRowAt(view, index)->height(), rowHeight);
+        QCOMPARE(viewRowAt(view, index)->y(), index * rowHeight);
+    }
+    // As drawn, at the row's left end, where it has no text: the rule, and
+    // the view under it.
+    const QPointF onRule = sceneRect(shelf).topLeft() + QPointF(4.5, 0.5);
+    QTRY_VERIFY2(near(Drawn(window).at(onRule), tokenOf(window, "hairline")),
+                 qPrintable(Drawn(window).at(onRule).name()));
+    QVERIFY(near(Drawn(window).at(onRule + QPointF(0, 1)), tokenOf(window, "view")));
+    QVERIFY(tokenHex(window, "hairline") != tokenHex(window, "view"));
+    // Selected: the selection covers it.
+    QVERIFY(QMetaObject::invokeMethod(controller, "selectIndex", Q_ARG(QVariant, 3)));
+    QTRY_VERIFY(rowTinted(view, 3));
+    const QColor tint = itemNamed(shelf, QStringLiteral("rowBackgroundTint"))->property("color").value<QColor>();
+    QTRY_VERIFY2(near(Drawn(window).at(onRule), tint), qPrintable(Drawn(window).at(onRule).name()));
 }
 
 void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {

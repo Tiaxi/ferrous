@@ -623,6 +623,8 @@ Rectangle {
                                 // A selected row answers the pointer too,
                                 // as the queue's.
                                 selectedHover: true
+                                // A rule between library folders.
+                                topRule: libraryRow.isRootRow && index > 0
                                 active: libraryAlbumView.activeFocus
                                 focused: libraryRow.rowCurrent
                                 // Every state ends clear of the scrollbar's
