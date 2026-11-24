@@ -579,8 +579,16 @@ Rectangle {
                     ListView.onReused: {
                         libraryRow.z = 1
                         libraryRow.folded = false
+                        libraryRow.visible = true
                     }
+                    // A pooled row is hidden by the row itself: Qt leaves
+                    // one drawn where it was when the view marked it to
+                    // move before pooling it, as it does for the rows of a
+                    // later removed run, such as a second library folder's
+                    // under Collapse All (the view has transitions, so it
+                    // marks them even while they are off).
                     ListView.onPooled: {
+                        libraryRow.visible = false
                         if (libraryAlbumView.titleTipRow === libraryRow) {
                             libraryAlbumView.titleTipRow = null
                         }
