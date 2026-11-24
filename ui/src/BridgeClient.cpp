@@ -1658,6 +1658,7 @@ void BridgeClient::resetPollChanges() {
     m_pollTrackIdentityChanged = false;
     m_pollTrackMetadataChanged = false;
     m_pollSnapshotChanged = false;
+    m_pollQueueChanged = false;
     m_pollLibraryChanged = false;
     m_pollLibraryScanChanged = false;
     m_pollLastFmScrobbleChanged = false;
@@ -1675,6 +1676,13 @@ void BridgeClient::schedulePollChanges() {
     }
     if (m_pollSnapshotChanged) {
         scheduleSnapshotChanged();
+    }
+    // The rows changed in this poll, and its views draw them at the next
+    // frame, so the count and totals that go with them are told now. A
+    // burst of snapshots in one poll still tells them once.
+    if (m_pollQueueChanged) {
+        m_pollQueueChanged = false;
+        emit queueChanged();
     }
     if (m_pollLibraryChanged) {
         scheduleLibraryChanged();
@@ -5810,6 +5818,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     bool trackIdentitySignalChanged = false;
     bool trackMetadataSignalChanged = false;
     bool snapshotSignalChanged = false;
+    bool queueSignalChanged = false;
     bool librarySignalChanged = false;
     bool libraryScanSignalChanged = false;
     const bool currentPathChanged = m_currentTrackPath != currentPath;
@@ -6002,6 +6011,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             m_queueDurationText = nextQueueDurationText;
             changed = true;
             snapshotSignalChanged = true;
+            queueSignalChanged = true;
         }
 
         const int previousLength = m_queueLength;
@@ -6019,6 +6029,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             || !queue.ops.isEmpty()) {
             changed = true;
             snapshotSignalChanged = true;
+        }
+        if (m_queueLength != previousLength) {
+            queueSignalChanged = true;
         }
     }
     finishSnapshotSection(snapshotQueueMs);
@@ -6050,6 +6063,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_playingQueueLengthText = playingLengthText;
         changed = true;
         snapshotSignalChanged = true;
+        queueSignalChanged = true;
     }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profileUiEnabled) {
@@ -6843,6 +6857,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (snapshotSignalChanged) {
         m_pollSnapshotChanged = true;
+    }
+    if (queueSignalChanged) {
+        m_pollQueueChanged = true;
     }
     if (librarySignalChanged) {
         m_pollLibraryChanged = true;

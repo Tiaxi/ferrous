@@ -55,8 +55,10 @@ class BridgeClient : public QObject {
     // The volume asked for last, from the time it is asked for, or the
     // backend's once it has taken every request: see setVolume.
     Q_PROPERTY(double volume READ volume NOTIFY volumeChanged)
-    Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
-    Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
+    // The queue's count and totals change with its rows, in the same
+    // turn of the event loop: see queueChanged.
+    Q_PROPERTY(int queueLength READ queueLength NOTIFY queueChanged)
+    Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY queueChanged)
     Q_PROPERTY(QObject* queueRows READ queueRows CONSTANT)
     Q_PROPERTY(int selectedQueueIndex READ selectedQueueIndex NOTIFY snapshotChanged)
     // The queue change the user can undo: an ID that changes with each new
@@ -72,7 +74,7 @@ class BridgeClient : public QObject {
     // The length its queue row gives the current track, as the row shows
     // it, or empty without a row: for a track that is stopped, whose
     // length the engine may not have.
-    Q_PROPERTY(QString playingQueueLengthText READ playingQueueLengthText NOTIFY snapshotChanged)
+    Q_PROPERTY(QString playingQueueLengthText READ playingQueueLengthText NOTIFY queueChanged)
     Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY trackIdentityChanged)
     // Changes whenever a play starts: on every track change, also when the
     // same file plays again, and when a stopped track plays again. A seek, a
@@ -612,6 +614,12 @@ signals:
     void trackIdentityChanged();
     void trackMetadataChanged();
     void snapshotChanged();
+    // The queue's count or totals changed: at the end of the poll that
+    // changed its rows, not with the coalesced snapshotChanged, so nothing
+    // bound to them draws a frame behind the rows (an empty queue's message
+    // over its first rows, or none over a cleared list). snapshotChanged
+    // follows as well, for its handlers.
+    void queueChanged();
     // The volume changed: at once for a request of the UI's, and with the
     // snapshot for one of the backend's, such as a change made outside the
     // app.
@@ -1192,6 +1200,7 @@ private:
     bool m_pollTrackIdentityChanged{false};
     bool m_pollTrackMetadataChanged{false};
     bool m_pollSnapshotChanged{false};
+    bool m_pollQueueChanged{false};
     bool m_pollLibraryChanged{false};
     bool m_pollLibraryScanChanged{false};
     bool m_pollLastFmScrobbleChanged{false};

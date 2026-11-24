@@ -295,6 +295,7 @@ private slots:
     void queueTotalReadsAsAClockTime();
     void queuePathFallbackUsesCachedFirstIndex();
     void queueDeltasChangeOnlyTheirRowsWithoutAReset();
+    void queueCountAndTotalsAreToldInThePollThatChangesTheRows();
     void queueRowRangeMovesDecodeAndMoveTheirRowsOnce();
     void movedQueueRowsTravelAsOneCommandWithTheRustLayout();
     void libraryItemsTravelAsOneCommandWithTheRustLayout();
@@ -4603,6 +4604,87 @@ void BridgeClientTest::queueDeltasChangeOnlyTheirRowsWithoutAReset() {
     QCOMPARE(client.queueLength(), 5);
     QCOMPARE(client.selectedQueueIndex(), 4);
     QVERIFY(!client.m_queueResyncRequested);
+}
+
+// The queue's count and totals are told at the end of the poll that changed
+// its rows, not with the coalesced snapshotChanged up to 33 ms later: the
+// views drew an empty queue's message over its first rows, a cleared list
+// without it, and the header's "N tracks · duration" behind the rows, for a
+// frame or two. A burst of snapshots in one poll tells them once, and the
+// rest of the snapshot is still told on the timer.
+void BridgeClientTest::queueCountAndTotalsAreToldInThePollThatChangesTheRows() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QMetaMethod queueChanged = QMetaMethod::fromSignal(&BridgeClient::queueChanged);
+    for (const char *name : {"queueLength", "queueDurationText", "playingQueueLengthText"}) {
+        const QMetaProperty property =
+            client.metaObject()->property(client.metaObject()->indexOfProperty(name));
+        QVERIFY2(property.notifySignal() == queueChanged, name);
+    }
+    client.m_snapshotNotifyTimer.stop();
+    client.m_snapshotChangedPending = false;
+
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QVERIFY(model != nullptr);
+    QSignalSpy told(&client, &BridgeClient::queueChanged);
+    QSignalSpy snapshotTold(&client, &BridgeClient::snapshotChanged);
+    // The count that bindings have last been told, against the rows a view
+    // draws at the end of each poll.
+    int toldLength = client.queueLength();
+    QString toldDuration = client.queueDurationText();
+    connect(&client, &BridgeClient::queueChanged, &client, [&]() {
+        toldLength = client.queueLength();
+        toldDuration = client.queueDurationText();
+    });
+    const auto poll = [&client](const QVector<BinaryBridgeCodec::DecodedSnapshot> &snapshots) {
+        client.resetPollChanges();
+        for (const BinaryBridgeCodec::DecodedSnapshot &snapshot : snapshots) {
+            client.processBinarySnapshot(snapshot);
+        }
+        client.schedulePollChanges();
+    };
+    const auto withTotal = [](BinaryBridgeCodec::DecodedSnapshot snapshot, double seconds) {
+        snapshot.queue.totalDurationSeconds = seconds;
+        return snapshot;
+    };
+
+    // The first tracks, added to an empty queue.
+    poll({withTotal(fullQueueSnapshot(1, numberedPaths(3)), 180.0)});
+    QCOMPARE(model->rowCount(), 3);
+    QCOMPARE(told.size(), 1);
+    QCOMPARE(toldLength, 3);
+    QCOMPARE(toldDuration, QStringLiteral("3:00"));
+    // The rest of the snapshot waits for the timer, as before.
+    QCOMPARE(snapshotTold.size(), 0);
+    QVERIFY(client.m_snapshotNotifyTimer.isActive());
+
+    // A burst of additions in one poll is told once, with its last rows.
+    QVector<BinaryBridgeCodec::DecodedSnapshot> burst;
+    for (int i = 0; i < 4; ++i) {
+        burst.push_back(withTotal(
+            queueDeltaSnapshot(1 + i, 2 + i, 4 + i,
+                {queueOp(BinaryBridgeCodec::QueueOpInsert, 3 + i, 0,
+                    {queueTrack(QStringLiteral("/music/burst%1.flac").arg(i))})}),
+            240.0 + 60.0 * i));
+    }
+    poll(burst);
+    QCOMPARE(model->rowCount(), 7);
+    QCOMPARE(told.size(), 2);
+    QCOMPARE(toldLength, 7);
+    QCOMPARE(toldDuration, QStringLiteral("7:00"));
+
+    // A move changes neither the count nor the totals, and tells nothing.
+    poll({withTotal(queueDeltaSnapshot(5, 6, 7, {queueOp(BinaryBridgeCodec::QueueOpMove, 6, 0)}), 420.0)});
+    QCOMPARE(told.size(), 2);
+
+    // Clear Queue.
+    poll({queueDeltaSnapshot(6, 7, 0, {queueOp(BinaryBridgeCodec::QueueOpRemove, 0, 7)})});
+    QCOMPARE(model->rowCount(), 0);
+    QCOMPARE(told.size(), 3);
+    QCOMPARE(toldLength, 0);
+    QCOMPARE(toldDuration, QStringLiteral("0:00"));
+    QCOMPARE(snapshotTold.size(), 0);
+    QTRY_COMPARE(snapshotTold.size(), 1);
 }
 
 void BridgeClientTest::queueRowRangeMovesDecodeAndMoveTheirRowsOnce() {
