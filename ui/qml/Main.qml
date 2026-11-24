@@ -1220,7 +1220,10 @@ ApplicationWindow {
         shortcutId: "volume_up"
         overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Volume &Up")
-        icon.name: "audio-volume-high"
+        // No glyph, nor Volume Down: Breeze's loud and quiet speakers differ
+        // only in how faint their waves are, which 16 px does not show, and
+        // its plus and minus do not say volume. The two read as words, as
+        // Mute beside them.
         defaultKeyBindings: ["Alt+Up"]
         onTriggered: playbackController.changeVolumeBy(root.keyboardVolumeStep)
     }
@@ -1230,7 +1233,6 @@ ApplicationWindow {
         shortcutId: "volume_down"
         overrides: root.keyboardShortcutOverrides
         text: I18n.i18nc("@action:inmenu", "Volume &Down")
-        icon.name: "audio-volume-low"
         defaultKeyBindings: ["Alt+Down"]
         onTriggered: playbackController.changeVolumeBy(-root.keyboardVolumeStep)
     }

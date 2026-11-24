@@ -1566,8 +1566,10 @@ void UiMenusTest::checkMenusListTheirItemsInOrder(QQuickWindow *window) {
                  QStringLiteral("radio|One Track||"),
                  QStringLiteral("radio|Whole Queue||"),
                  QStringLiteral("sep"),
-                 QStringLiteral("item|Volume Up|Alt+Up|audio-volume-high"),
-                 QStringLiteral("item|Volume Down|Alt+Down|audio-volume-low"),
+                 // No glyphs: Breeze has no pair that names volume and
+                 // reads apart at 16 px.
+                 QStringLiteral("item|Volume Up|Alt+Up|"),
+                 QStringLiteral("item|Volume Down|Alt+Down|"),
                  QStringLiteral("check|Mute|Ctrl+Shift+M|"),
              }));
     QCOMPARE(rowsOf(menuNamed(window, "settingsMenu")),
