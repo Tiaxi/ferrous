@@ -1678,8 +1678,8 @@ void BridgeClient::schedulePollChanges() {
         scheduleSnapshotChanged();
     }
     // The rows changed in this poll, and its views draw them at the next
-    // frame, so the count and totals that go with them are told now. A
-    // burst of snapshots in one poll still tells them once.
+    // frame, so the count, totals and playing row that go with them are
+    // told now. A burst of snapshots in one poll still tells them once.
     if (m_pollQueueChanged) {
         m_pollQueueChanged = false;
         emit queueChanged();
@@ -6054,6 +6054,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         m_playingQueueIndex = playing;
         changed = true;
         trackIdentitySignalChanged = true;
+        // The rows applied above are drawn at the next frame, and they read
+        // the playing row as they are made: told before that frame.
+        queueSignalChanged = true;
     }
     const QueueRowData *playingRow = m_queueRowsModel.rowAt(playing);
     const QString playingLengthText = playingRow != nullptr && !currentPath.isEmpty()

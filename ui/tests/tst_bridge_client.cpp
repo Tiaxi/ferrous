@@ -296,6 +296,7 @@ private slots:
     void queuePathFallbackUsesCachedFirstIndex();
     void queueDeltasChangeOnlyTheirRowsWithoutAReset();
     void queueCountAndTotalsAreToldInThePollThatChangesTheRows();
+    void playingRowIsToldInThePollThatChangesTheRows();
     void queueRowRangeMovesDecodeAndMoveTheirRowsOnce();
     void movedQueueRowsTravelAsOneCommandWithTheRustLayout();
     void libraryItemsTravelAsOneCommandWithTheRustLayout();
@@ -4685,6 +4686,76 @@ void BridgeClientTest::queueCountAndTotalsAreToldInThePollThatChangesTheRows() {
     QCOMPARE(toldDuration, QStringLiteral("0:00"));
     QCOMPARE(snapshotTold.size(), 0);
     QTRY_COMPARE(snapshotTold.size(), 1);
+}
+
+// The playing row is told at the end of the poll that applied it, with the
+// queue's count and totals, not with the queued trackIdentityChanged: rows
+// that came with it were made reading the row before it, and drew a frame
+// without the playing row's mark (on First Play, the first row; after a
+// track put before the playing one, the mark on the row it left). A burst
+// tells it once, and trackIdentityChanged still follows for its handlers.
+void BridgeClientTest::playingRowIsToldInThePollThatChangesTheRows() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QMetaProperty property = client.metaObject()->property(
+        client.metaObject()->indexOfProperty("playingQueueIndex"));
+    QVERIFY(property.notifySignal() == QMetaMethod::fromSignal(&BridgeClient::queueChanged));
+    client.m_snapshotNotifyTimer.stop();
+    client.m_snapshotChangedPending = false;
+
+    auto *model = qobject_cast<QueueRowsModel *>(client.queueRows());
+    QVERIFY(model != nullptr);
+    QSignalSpy told(&client, &BridgeClient::queueChanged);
+    QSignalSpy identityTold(&client, &BridgeClient::trackIdentityChanged);
+    // The playing row bindings have last been told.
+    int toldPlaying = client.playingQueueIndex();
+    connect(&client, &BridgeClient::queueChanged, &client, [&]() {
+        toldPlaying = client.playingQueueIndex();
+    });
+    const auto poll = [&client](const QVector<BinaryBridgeCodec::DecodedSnapshot> &snapshots) {
+        client.resetPollChanges();
+        for (const BinaryBridgeCodec::DecodedSnapshot &snapshot : snapshots) {
+            client.processBinarySnapshot(snapshot);
+        }
+        client.schedulePollChanges();
+    };
+    const auto playing = [](BinaryBridgeCodec::DecodedSnapshot snapshot, int index, const QString &path) {
+        snapshot.playback.present = true;
+        snapshot.playback.state = 1;
+        snapshot.playback.currentQueueIndex = index;
+        snapshot.playback.currentPath = path;
+        snapshot.playback.trackToken = 1;
+        return snapshot;
+    };
+    const QStringList paths = numberedPaths(3);
+
+    // First Play: the rows and their playing row in one snapshot.
+    poll({playing(fullQueueSnapshot(1, paths), 0, paths[0])});
+    QCOMPARE(model->rowCount(), 3);
+    QCOMPARE(told.size(), 1);
+    QCOMPARE(toldPlaying, 0);
+    QCOMPARE(identityTold.size(), 0);
+    QTRY_COMPARE(identityTold.size(), 1);
+
+    // A track put before the playing one: the playing row moves down with
+    // the rows, in the same poll.
+    poll({playing(queueDeltaSnapshot(1, 2, 4,
+                      {queueOp(BinaryBridgeCodec::QueueOpInsert, 0, 0,
+                               {queueTrack(QStringLiteral("/music/first.flac"))})}),
+                  1, paths[0])});
+    QCOMPARE(model->rowCount(), 4);
+    QCOMPARE(told.size(), 2);
+    QCOMPARE(toldPlaying, 1);
+
+    // The next track, in a burst of snapshots: told once, with the last.
+    poll({playing(BinaryBridgeCodec::DecodedSnapshot{}, 2, paths[1]),
+          playing(BinaryBridgeCodec::DecodedSnapshot{}, 3, paths[2])});
+    QCOMPARE(told.size(), 3);
+    QCOMPARE(toldPlaying, 3);
+
+    // A poll that leaves the playing row tells nothing.
+    poll({playing(BinaryBridgeCodec::DecodedSnapshot{}, 3, paths[2])});
+    QCOMPARE(told.size(), 3);
 }
 
 void BridgeClientTest::queueRowRangeMovesDecodeAndMoveTheirRowsOnce() {

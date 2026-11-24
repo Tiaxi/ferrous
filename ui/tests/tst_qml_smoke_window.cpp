@@ -68,6 +68,7 @@ private slots:
     void drawingWritesNoShaderCache();
     void nowPlayingFollowsBridgeClientsSnapshots();
     void theQueuesMessageAndTotalsChangeWithItsRows();
+    void theQueueRowsStateMarkChangesWithItsSnapshot();
     void aBackendThatCannotStartShowsWhyInRecentErrorsAndTheStatusBar();
 };
 
@@ -1744,6 +1745,97 @@ void WindowSmokeTest::theQueuesMessageAndTotalsChangeWithItsRows() {
     QCOMPARE(view->property("count").toInt(), 0);
     QVERIFY(message->isVisible());
     QCOMPARE(header->property("totals").toString(), QString());
+}
+
+// A queue row's state mark (play, pause or stop) is drawn from the
+// snapshot that brings the row, in the frame in which the row shows, and a
+// row that moves carries the mark with the playing track in its frame. The
+// rows were made before the playing row was told, which followed with the
+// queued trackIdentityChanged: on First Play from idle the first row drew a
+// frame without its mark, and a track put before the playing one left the
+// mark on the row it took.
+void WindowSmokeTest::theQueueRowsStateMarkChangesWithItsSnapshot() {
+    BridgeClient bridge;
+    detachFromTheBackend(bridge);
+    const NowPlayingWindow ui(bridge, QSize(1200, 800));
+    QVERIFY2(ui.window != nullptr, "Main.qml failed to show");
+    QQuickItem *view = ui.item("playlistView");
+    QVERIFY(view != nullptr);
+
+    BinaryBridgeCodec::DecodedSnapshot empty;
+    empty.library.present = true;
+    empty.library.loaded = true;
+    empty.library.rootCount = 1;
+    empty.queue.present = true;
+    empty.queue.kind = BinaryBridgeCodec::QueueFull;
+    empty.queue.revision = 1;
+    empty.playback.present = true;
+    QVERIFY(ui.deliver(empty));
+    QTRY_VERIFY(ui.item("queueEmptyMessage")->isVisible());
+
+    // A grab draws the next frame without letting queued notifications or
+    // timers run.
+    const auto drawFrame = [&ui]() { (void)ui.window->grabWindow(); };
+    const auto markAt = [view](int index) -> QString {
+        QQuickItem *row = nullptr;
+        QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, index));
+        QQuickItem *mark = row != nullptr ? itemNamed(row, QStringLiteral("queueRowState")) : nullptr;
+        if (mark == nullptr) {
+            return QStringLiteral("<no row>");
+        }
+        return mark->isVisible() ? mark->property("glyph").toString() : QString();
+    };
+    const auto pathOf = [](int i) { return QStringLiteral("/music/%1.flac").arg(i); };
+    const auto track = [&pathOf](int i) {
+        BinaryBridgeCodec::DecodedQueueTrack row;
+        row.title = QStringLiteral("Track %1").arg(i);
+        row.path = pathOf(i);
+        row.lengthSeconds = 60.0f;
+        return row;
+    };
+
+    // The rows, their playing row and its state in one snapshot: the play
+    // mark in the rows' first frame.
+    BinaryBridgeCodec::DecodedSnapshot started;
+    started.queue.present = true;
+    started.queue.kind = BinaryBridgeCodec::QueueFull;
+    started.queue.revision = 2;
+    started.queue.len = 3;
+    for (int i = 1; i <= 3; ++i) {
+        started.queue.tracks.push_back(track(i));
+    }
+    started.playback.present = true;
+    started.playback.state = 1;
+    started.playback.currentPath = pathOf(1);
+    started.playback.currentQueueIndex = 0;
+    started.playback.trackToken = 1;
+    ui.deliver(started);
+    drawFrame();
+    QCOMPARE(view->property("count").toInt(), 3);
+    QCOMPARE(markAt(0), QStringLiteral("media-playback-start"));
+    QCOMPARE(markAt(1), QString());
+
+    // A track put before the playing one moves its row down, in the
+    // snapshot that says where it plays now: the mark goes with it in the
+    // same frame, and the row it left has none.
+    BinaryBridgeCodec::DecodedSnapshot inserted;
+    inserted.queue.present = true;
+    inserted.queue.kind = BinaryBridgeCodec::QueueDelta;
+    inserted.queue.baseRevision = 2;
+    inserted.queue.revision = 3;
+    inserted.queue.len = 4;
+    BinaryBridgeCodec::DecodedQueueOp insert;
+    insert.type = BinaryBridgeCodec::QueueOpInsert;
+    insert.index = 0;
+    insert.tracks.push_back(track(4));
+    inserted.queue.ops.push_back(insert);
+    inserted.playback = started.playback;
+    inserted.playback.currentQueueIndex = 1;
+    ui.deliver(inserted);
+    drawFrame();
+    QCOMPARE(view->property("count").toInt(), 4);
+    QCOMPARE(markAt(0), QString());
+    QCOMPARE(markAt(1), QStringLiteral("media-playback-start"));
 }
 
 // A backend that could not start fails before the window is made: the
