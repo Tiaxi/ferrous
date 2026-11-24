@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <QDateTime>
+#include <QHash>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
+
+#include <atomic>
+#include <thread>
+#include <vector>
 
 #include "DiagnosticsLog.h"
 #include "TestSessionIsolation.h"
@@ -29,6 +36,7 @@ private slots:
     void noLibraryPathOrFileNameIsLeft();
     void pathsAreQuotedWithTheirQuotesEscaped();
     void writerKeepsTheOrderAndWritesWhatWaitsWhenDestroyed();
+    void lineQueueKeepsTheStampsInOrderAcrossThreads();
 };
 
 void DiagnosticsLogTest::pathsBecomePlaceholders_data() {
@@ -229,6 +237,68 @@ void DiagnosticsLogTest::writerKeepsTheOrderAndWritesWhatWaitsWhenDestroyed() {
     const QStringList lines = read();
     QCOMPARE(lines.size(), 101);
     QCOMPARE(lines.last(), QStringLiteral("waiting 99"));
+}
+
+// #730: lines queued on several threads, and the consumer's own, come out
+// in the order of their stamps, each thread's in its own order.
+void DiagnosticsLogTest::lineQueueKeepsTheStampsInOrderAcrossThreads() {
+    DiagnosticsLog::LineQueue queue;
+    std::atomic<int> wakes{0};
+    queue.setWake([&wakes]() { ++wakes; });
+    constexpr int kLines = 500;
+    std::atomic<int> refused{0};
+    std::vector<std::thread> writers;
+    for (int w = 0; w < 2; ++w) {
+        writers.emplace_back([&queue, &refused, w]() {
+            for (int n = 0; n < kLines; ++n) {
+                if (!queue.post(QStringLiteral("thread %1").arg(w), QStringList{QString::number(n)})) {
+                    ++refused;
+                }
+            }
+        });
+    }
+    QStringList taken;
+    for (int n = 0; n < kLines; ++n) {
+        taken += queue.takeWith(QStringLiteral("own"), QString::number(n));
+    }
+    for (std::thread &writer : writers) {
+        writer.join();
+    }
+    taken += queue.take();
+    QCOMPARE(refused.load(), 0);
+    QVERIFY(wakes.load() > 0);
+
+    const QRegularExpression pattern(QStringLiteral("^\\[([^\\]]+)\\] \\[([^\\]]+)\\] (\\d+)$"));
+    QDateTime previous;
+    QHash<QString, int> next;
+    for (const QString &line : std::as_const(taken)) {
+        const QRegularExpressionMatch match = pattern.match(line);
+        QVERIFY2(match.hasMatch(), qPrintable(line));
+        const QDateTime stamp = QDateTime::fromString(match.captured(1), Qt::ISODateWithMs);
+        QVERIFY2(stamp.isValid(), qPrintable(line));
+        QVERIFY2(!previous.isValid() || previous <= stamp, qPrintable(line));
+        previous = stamp;
+        QCOMPARE(match.captured(3).toInt(), next.value(match.captured(2)));
+        next[match.captured(2)] = match.captured(3).toInt() + 1;
+    }
+    QCOMPARE(next.value(QStringLiteral("own")), kLines);
+    QCOMPARE(next.value(QStringLiteral("thread 0")), kLines);
+    QCOMPARE(next.value(QStringLiteral("thread 1")), kLines);
+
+    // Closed, it hands over what waits, then refuses lines and wakes no one.
+    QVERIFY(queue.post(QStringLiteral("thread 0"), QStringList{QStringLiteral("left")}));
+    QStringList rest;
+    queue.close([&rest](const QStringList &lines) { rest = lines; });
+    QCOMPARE(rest.size(), 1);
+    QVERIFY(rest.first().endsWith(QStringLiteral("[thread 0] left")));
+    const int wakesBefore = wakes.load();
+    QVERIFY(!queue.post(QStringLiteral("thread 0"), QStringList{QStringLiteral("too late")}));
+    QCOMPARE(wakes.load(), wakesBefore);
+    QVERIFY(queue.take().isEmpty());
+    // The consumer's own lines still come back to it.
+    const QStringList own = queue.takeWith(QStringLiteral("own"), QStringLiteral("last"));
+    QCOMPARE(own.size(), 1);
+    QVERIFY(own.first().endsWith(QStringLiteral("[own] last")));
 }
 
 int main(int argc, char **argv) {

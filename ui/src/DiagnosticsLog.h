@@ -25,6 +25,51 @@ QStringList readLastLines(const QString &logPath, qsizetype maxLines);
 // withoutPaths can tell where it ends.
 QString quotedPath(const QString &path);
 
+// `messages` as lines of the log, "[stamp] [tag] message", stamped now.
+QStringList stampedLines(const QString &tag, const QStringList &messages);
+
+// The lines logged on any thread on their way to the log, in the order of
+// their stamps: a line is stamped as it is queued, under the queue's lock,
+// so a line stamped earlier never comes after it. The app's BridgeClient
+// takes them on the GUI thread, for the log and Diagnostics, and logs its
+// own lines through it; ConsoleTee queues the console's on its threads.
+// Lines wait until a consumer takes them, from the first.
+class LineQueue {
+public:
+    // Asks the consumer to take what waits. Called, under the queue's lock,
+    // on the thread that queued, so it must only post, as
+    // QMetaObject::invokeMethod does with a queued connection.
+    using Wake = std::function<void()>;
+    using Rest = std::function<void(const QStringList &lines)>;
+
+    // Queues `messages` with `tag`, stamped now, and wakes the consumer if
+    // nothing waited. False, queuing nothing, once the queue is closed: the
+    // caller writes them itself.
+    bool post(const QString &tag, const QStringList &messages);
+    // What waits, in order.
+    QStringList take();
+    // What waits, then `message` with `tag`, stamped now, as the consumer
+    // logs a line of its own.
+    QStringList takeWith(const QString &tag, const QString &message);
+    // Wakes the consumer with `wake` from now on, and now if lines wait.
+    void setWake(Wake wake);
+    // Closes the queue, once, as the consumer stops: hands what still waits
+    // to `rest` under the lock, so a line queued meanwhile waits for `rest`
+    // to return and is then refused, and stops waking the consumer.
+    void close(const Rest &rest);
+    // Closes the queue as close does, unless a consumer has set a wake: it
+    // takes the lines and closes the queue itself.
+    void closeUnlessConsumed(const Rest &rest);
+
+private:
+    void closeLocked(const Rest &rest);
+
+    std::mutex m_mutex;
+    QStringList m_lines;
+    Wake m_wake;
+    bool m_closed{false};
+};
+
 // Writes lines to the log on a thread of its own, in the order they were
 // posted, so that the thread that logs never waits for the disk: the GUI
 // thread logs through it. The destructor writes what is still waiting.

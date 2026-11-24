@@ -42,6 +42,7 @@ class QSocketNotifier;
 class QTemporaryDir;
 class QQuickWindow;
 namespace DiagnosticsLog {
+class LineQueue;
 class Writer;
 }
 
@@ -256,6 +257,11 @@ class BridgeClient : public QObject {
 
 public:
     explicit BridgeClient(QObject *parent = nullptr);
+    // Takes and logs the lines of `diagnosticsQueue` as well, such as the
+    // console's (ConsoleTee), in order with its own, and closes it as it
+    // goes.
+    explicit BridgeClient(std::shared_ptr<DiagnosticsLog::LineQueue> diagnosticsQueue,
+                          QObject *parent = nullptr);
     ~BridgeClient() override;
 
     // Finds the name of the desktop's file manager. It runs on a thread of
@@ -913,6 +919,10 @@ private:
     bool processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame);
     void flushGlobalSearchQuery();
     void logProfileDiagnostic(const QString &category, const QString &message) const;
+    // Logs `lines`, taken from the queue in order, to the log and
+    // Diagnostics, a batch at a time.
+    void addDiagnosticLines(const QStringList &lines);
+    void takeQueuedDiagnosticLines();
     void appendDiagnosticLine(const QString &line);
     // Shows `lines`, the log as read for the reload numbered `generation`
     // from `logPath`, with the lines logged since `loggedBefore`, unless a
@@ -1182,13 +1192,16 @@ private:
     QStringList m_pendingDiagnosticsShownLines;
     // The lines Diagnostics shows that the log dropped since the last batch.
     int m_pendingDiagnosticsShownDrops{0};
+    // Every line on its way to the log, the app's and the console's, in
+    // the order of their stamps.
+    std::shared_ptr<DiagnosticsLog::LineQueue> m_diagnosticsQueue;
     // Writes the log's lines off the GUI thread. Destroyed after the
     // destructor's last flush, it writes what still waits.
     std::unique_ptr<DiagnosticsLog::Writer> m_diagnosticsWriter;
     // Numbers the reloads; a read of an earlier one, or from before a
     // clear, is dropped.
     quint64 m_diagnosticsReadGeneration{0};
-    // The lines logDiagnostic has added in all, which tells the lines a
+    // The lines addDiagnosticLines has added in all, which tells the lines a
     // reload's read does not have.
     quint64 m_diagnosticsLinesLogged{0};
     bool m_diagnosticsLoading{false};

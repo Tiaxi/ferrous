@@ -112,6 +112,7 @@ qt_add_library(ferrous_ui_core STATIC
     src/AboutComponents.cpp
     src/BinaryBridgeCodec.cpp
     src/BridgeClient.cpp
+    src/ConsoleTee.cpp
     src/QueueRows.cpp
     src/CoverImageProvider.cpp
     src/DiagnosticsLog.cpp
@@ -200,7 +201,6 @@ cmake_language(DEFER CALL ferrous_check_core_sources_compile_once)
 
 qt_add_executable(ferrous
     src/AppInstanceController.cpp
-    src/ConsoleTee.cpp
     src/HeapAllocator.cpp
     src/HeapTrimmer.cpp
     src/main.cpp

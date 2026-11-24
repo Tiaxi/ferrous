@@ -7,6 +7,7 @@
 #include <mutex>
 #include <utility>
 
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -531,6 +532,77 @@ QString quotedPath(const QString &path) {
     }
     out += QLatin1Char('"');
     return out;
+}
+
+QStringList stampedLines(const QString &tag, const QStringList &messages) {
+    const QString stamp = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+    QStringList lines;
+    lines.reserve(messages.size());
+    for (const QString &message : messages) {
+        lines.push_back(QStringLiteral("[%1] [%2] %3").arg(stamp, tag, message));
+    }
+    return lines;
+}
+
+bool LineQueue::post(const QString &tag, const QStringList &messages) {
+    if (messages.isEmpty()) {
+        return true;
+    }
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_closed) {
+        return false;
+    }
+    const bool waited = !m_lines.isEmpty();
+    m_lines += stampedLines(tag, messages);
+    // Under the lock, so that close stops it for good.
+    if (!waited && m_wake) {
+        m_wake();
+    }
+    return true;
+}
+
+QStringList LineQueue::take() {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    return std::exchange(m_lines, {});
+}
+
+QStringList LineQueue::takeWith(const QString &tag, const QString &message) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    QStringList lines = std::exchange(m_lines, {});
+    lines += stampedLines(tag, QStringList{message});
+    return lines;
+}
+
+void LineQueue::setWake(Wake wake) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_closed) {
+        return;
+    }
+    m_wake = std::move(wake);
+    if (!m_lines.isEmpty() && m_wake) {
+        m_wake();
+    }
+}
+
+void LineQueue::close(const Rest &rest) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    closeLocked(rest);
+}
+
+void LineQueue::closeUnlessConsumed(const Rest &rest) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_wake) {
+        closeLocked(rest);
+    }
+}
+
+void LineQueue::closeLocked(const Rest &rest) {
+    if (m_closed) {
+        return;
+    }
+    m_closed = true;
+    m_wake = nullptr;
+    rest(std::exchange(m_lines, {}));
 }
 
 Writer::Writer(Append append)

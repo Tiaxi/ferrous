@@ -19,6 +19,7 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QSignalSpy>
 #include <QSemaphore>
 #include <QThreadPool>
@@ -32,6 +33,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <QTemporaryDir>
@@ -40,10 +42,13 @@
 #include <QGuiApplication>
 #include <QtTest/QtTest>
 
+#include <fcntl.h>
 #include <poll.h>
+#include <unistd.h>
 
 #define private public
 #include "../src/BridgeClient.h"
+#include "../src/ConsoleTee.h"
 #include "../src/DiagnosticsLog.h"
 #include "../src/MprisController.h"
 #include "../src/TagEditorController.h"
@@ -409,6 +414,7 @@ private slots:
     void loggingDoesNotWaitForAStalledDisk();
     void readingTheLogDoesNotWaitForAStalledDisk();
     void diagnosticsShowsAndCopiesLinesLoggedWhileItIsOpen();
+    void diagnosticsKeepsTheConsoleAndTheAppInTheOrderTheyLogged();
     void mprisSeekedReportsEachSeekWhereItLanded();
     void mprisCannotSeekAStoppedTrack();
     void mprisReportsAReplayOfTheSameFileAsSeeked();
@@ -6449,6 +6455,110 @@ void BridgeClientTest::reportedErrorsAreLoggedWithTheirCategoryAndSeverity() {
              qPrintable(lines[2]));
     // The Diagnostics window shows them at once.
     QCOMPARE(client.m_diagnosticsLines, lines);
+}
+
+// #730: the console's lines, which ConsoleTee copies on a thread of its
+// own, went to the file at once, and the app's a batch later, so the file
+// and Diagnostics listed a line stamped later above earlier ones. Both
+// writers' lines reach the file, the dialog and its copy in the order of
+// their stamps.
+void BridgeClientTest::diagnosticsKeepsTheConsoleAndTheAppInTheOrderTheyLogged() {
+    // As main wires them.
+    const auto queue = std::make_shared<DiagnosticsLog::LineQueue>();
+    BridgeClient client(queue);
+    isolateBridgeClient(client);
+    QTRY_VERIFY(!client.diagnosticsLoading());
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString logPath = dir.filePath(QStringLiteral("diagnostics.log"));
+    client.m_diagnosticsLogPath = logPath;
+    client.m_diagnosticsLines.clear();
+    // A stream of the test's own, which the tee redirects as it does stderr.
+    const int console = ::open(QFile::encodeName(dir.filePath(QStringLiteral("console.txt"))).constData(),
+                               O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    QVERIFY(console >= 0);
+    const auto writeConsole = [console](const QByteArray &text) {
+        return ::write(console, text.constData(), static_cast<size_t>(text.size())) == text.size();
+    };
+    const auto readLog = [&logPath]() {
+        QFile file(logPath);
+        return file.open(QIODevice::ReadOnly | QIODevice::Text)
+            ? QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts)
+            : QStringList();
+    };
+    QSignalSpy shown(&client, &BridgeClient::diagnosticsLinesAdded);
+    client.setDiagnosticsShown(true);
+    {
+        ConsoleTee tee(logPath, queue);
+        QVERIFY(tee.install(console, QStringLiteral("stderr")));
+
+        client.logInfo(QStringLiteral("app"), QStringLiteral("app 0"));
+        QVERIFY(writeConsole("console 0\n"));
+        // Once the app has the tee's line, it logs again; the file has
+        // them a batch later.
+        QTRY_VERIFY(client.diagnosticsText().contains(QStringLiteral("[stderr] console 0")));
+        client.logInfo(QStringLiteral("app"), QStringLiteral("app 1"));
+
+        // And both at once, from two threads.
+        std::thread writer([&writeConsole]() {
+            for (int n = 1; n <= 200; ++n) {
+                if (!writeConsole(QByteArrayLiteral("console ") + QByteArray::number(n) + '\n')) {
+                    return;
+                }
+            }
+        });
+        for (int n = 2; n <= 200; ++n) {
+            client.logInfo(QStringLiteral("app"), QStringLiteral("app %1").arg(n));
+            QCoreApplication::processEvents();
+        }
+        writer.join();
+        tee.shutdown();
+    }
+    ::close(console);
+    client.flushDiagnostics();
+    client.m_diagnosticsWriter->waitUntilWritten();
+
+    const QRegularExpression pattern(
+        QStringLiteral("^\\[([^\\]]+)\\] \\[(app|stderr)\\] (?:info: )?(app|console) (\\d+)$"));
+    const auto checkOrder = [&pattern](const QStringList &lines, const char *where) {
+        QDateTime previous;
+        QHash<QString, int> next;
+        for (const QString &line : lines) {
+            const QRegularExpressionMatch match = pattern.match(line);
+            if (!match.hasMatch()) {
+                continue;
+            }
+            const QDateTime stamp = QDateTime::fromString(match.captured(1), Qt::ISODateWithMs);
+            QVERIFY2(stamp.isValid(), qPrintable(line));
+            QVERIFY2(!previous.isValid() || previous <= stamp,
+                     qPrintable(QStringLiteral("%1: %2 after %3")
+                                    .arg(QLatin1String(where), line, previous.toString(Qt::ISODateWithMs))));
+            previous = stamp;
+            // Each writer's own lines in their order, none lost.
+            const QString source = match.captured(3);
+            QCOMPARE(match.captured(4).toInt(), next.value(source));
+            next[source] = match.captured(4).toInt() + 1;
+        }
+        QCOMPARE(next.value(QStringLiteral("app")), 201);
+        QCOMPARE(next.value(QStringLiteral("console")), 201);
+    };
+    const QStringList logged = readLog();
+    checkOrder(logged, "the file");
+    // The first three as they were logged.
+    const QStringList firstThree = logged.filter(pattern).mid(0, 3);
+    QCOMPARE(firstThree.size(), 3);
+    QVERIFY2(firstThree[0].endsWith(QStringLiteral("[app] info: app 0")), qPrintable(firstThree[0]));
+    QVERIFY2(firstThree[1].endsWith(QStringLiteral("[stderr] console 0")), qPrintable(firstThree[1]));
+    QVERIFY2(firstThree[2].endsWith(QStringLiteral("[app] info: app 1")), qPrintable(firstThree[2]));
+    // Diagnostics shows the same lines, as they came, and copies them so.
+    checkOrder(client.diagnosticsText().split(QLatin1Char('\n')), "the dialog");
+    QStringList added;
+    for (const QList<QVariant> &batch : std::as_const(shown)) {
+        added += batch.at(0).toString().split(QLatin1Char('\n'));
+    }
+    checkOrder(added, "the lines added while shown");
+    checkOrder(client.diagnosticsTextWithoutPaths().split(QLatin1Char('\n')), "the copy");
+    client.setDiagnosticsShown(false);
 }
 
 void BridgeClientTest::profileDiagnosticsBypassUiThreadDiskQueue() {

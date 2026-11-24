@@ -6,13 +6,16 @@
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
 
+#include <atomic>
 #include <chrono>
+#include <memory>
 #include <thread>
 
 #include <fcntl.h>
 #include <unistd.h>
 
 #include "ConsoleTee.h"
+#include "DiagnosticsLog.h"
 #include "TestSessionIsolation.h"
 
 namespace {
@@ -129,6 +132,8 @@ private slots:
     void shutdownCopiesEverythingWrittenBeforeItInOrder();
     void idleStreamsDoNotWakeTheirThreads();
     void shutdownDoesNotWaitForOtherWriters();
+    void linesGoThroughTheAppsQueueWhileItRuns();
+    void linesNoAppTookReachTheLog();
 };
 
 void ConsoleTeeTest::initTestCase() {
@@ -222,6 +227,68 @@ void ConsoleTeeTest::shutdownDoesNotWaitForOtherWriters() {
     QCOMPARE(readFile(console.consolePath), QByteArrayLiteral("from the child\nfrom the app\n"));
     QCOMPARE(loggedMessages(console.logPath, QStringLiteral("out")),
              (QStringList{QStringLiteral("from the child"), QStringLiteral("from the app")}));
+}
+
+// #730: the console's lines go through the queue the app logs its own
+// through, so the log has both in the order they were logged.
+void ConsoleTeeTest::linesGoThroughTheAppsQueueWhileItRuns() {
+    Console console = openConsole(QStringLiteral("queued"));
+    QVERIFY(console.fd >= 0);
+    const auto queue = std::make_shared<DiagnosticsLog::LineQueue>();
+    std::atomic<int> wakes{0};
+    const QRegularExpression line(QStringLiteral("^\\[[^\\]]+\\] \\[out\\] (.*)$"));
+    const auto messages = [&line](const QStringList &lines) {
+        QStringList out;
+        for (const QString &text : lines) {
+            out.push_back(line.match(text).captured(1));
+        }
+        return out;
+    };
+    {
+        ConsoleTee tee(console.logPath, queue);
+        QVERIFY(tee.install(console.fd, QStringLiteral("out")));
+        // Before the app takes them, the lines wait for it.
+        writeText(console.fd, QByteArrayLiteral("before the app\n"));
+        queue->setWake([&wakes]() { ++wakes; });
+        QTRY_COMPARE(wakes.load(), 1);
+        QCOMPARE(messages(queue->take()), QStringList{QStringLiteral("before the app")});
+        writeText(console.fd, QByteArrayLiteral("while it runs\n"));
+        QTRY_COMPARE(wakes.load(), 2);
+        QCOMPARE(messages(queue->take()), QStringList{QStringLiteral("while it runs")});
+        QVERIFY(loggedMessages(console.logPath, QStringLiteral("out")).isEmpty());
+
+        // Once the app has closed it, they go straight to the log.
+        QStringList rest{QStringLiteral("not called")};
+        queue->close([&rest](const QStringList &lines) { rest = lines; });
+        QVERIFY(rest.isEmpty());
+        writeText(console.fd, QByteArrayLiteral("after the app\n"));
+        tee.shutdown();
+    }
+    ::close(console.fd);
+    QCOMPARE(wakes.load(), 2);
+    QCOMPARE(loggedMessages(console.logPath, QStringLiteral("out")),
+             QStringList{QStringLiteral("after the app")});
+    QCOMPARE(readFile(console.consolePath),
+             QByteArrayLiteral("before the app\nwhile it runs\nafter the app\n"));
+}
+
+// When no app takes the lines, as when it hands its files to the instance
+// already running and quits, the log has them all the same.
+void ConsoleTeeTest::linesNoAppTookReachTheLog() {
+    Console console = openConsole(QStringLiteral("unclaimed"));
+    QVERIFY(console.fd >= 0);
+    const auto queue = std::make_shared<DiagnosticsLog::LineQueue>();
+    {
+        ConsoleTee tee(console.logPath, queue);
+        QVERIFY(tee.install(console.fd, QStringLiteral("out")));
+        writeText(console.fd, QByteArrayLiteral("first\nsecond\n"));
+        tee.shutdown();
+        QCOMPARE(loggedMessages(console.logPath, QStringLiteral("out")),
+                 (QStringList{QStringLiteral("first"), QStringLiteral("second")}));
+        // Later lines, from no one, are refused.
+        QVERIFY(!queue->post(QStringLiteral("out"), QStringList{QStringLiteral("later")}));
+    }
+    ::close(console.fd);
 }
 
 int main(int argc, char **argv) {

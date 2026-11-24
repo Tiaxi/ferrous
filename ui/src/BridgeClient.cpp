@@ -644,8 +644,14 @@ QString formatLabelFromPath(const QString &path) {
 } // namespace
 
 BridgeClient::BridgeClient(QObject *parent)
+    : BridgeClient(nullptr, parent) {}
+
+BridgeClient::BridgeClient(std::shared_ptr<DiagnosticsLog::LineQueue> diagnosticsQueue,
+                           QObject *parent)
     : QObject(parent),
-      m_playbackClock(new PlaybackClock(this)) {
+      m_playbackClock(new PlaybackClock(this)),
+      m_diagnosticsQueue(diagnosticsQueue ? std::move(diagnosticsQueue)
+                                          : std::make_shared<DiagnosticsLog::LineQueue>()) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profileUiEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
@@ -664,6 +670,12 @@ BridgeClient::BridgeClient(QObject *parent)
     connect(&m_queueRowsModel, &QAbstractItemModel::dataChanged, this, followQueueRows);
     m_diagnosticsWriter = std::make_unique<DiagnosticsLog::Writer>();
     m_diagnosticsLogPath = resolveDiagnosticsLogPath();
+    // Lines queued on other threads are taken here, where they join this
+    // object's. The destructor closes the queue, so no wake comes after.
+    m_diagnosticsQueue->setWake([this]() {
+        QMetaObject::invokeMethod(this, &BridgeClient::takeQueuedDiagnosticLines,
+                                  Qt::QueuedConnection);
+    });
     m_diagnosticsFlushTimer.setSingleShot(true);
     m_diagnosticsFlushTimer.setInterval(readEnvMillis("FERROUS_DIAGNOSTICS_FLUSH_MS", 25));
     connect(
@@ -827,7 +839,15 @@ BridgeClient::~BridgeClient() {
         m_ffiBridge = nullptr;
     }
     m_diagnosticsFlushTimer.stop();
-    flushPendingDiagnosticDiskLines();
+    // The lines still queued, then those the console writes later, which
+    // wait until these are in the file and then go straight to it.
+    m_diagnosticsQueue->close([this](const QStringList &lines) {
+        if (!m_diagnosticsLogPath.isEmpty()) {
+            m_pendingDiagnosticsDiskLines += lines;
+        }
+        flushPendingDiagnosticDiskLines();
+        m_diagnosticsWriter->waitUntilWritten();
+    });
 }
 
 BridgeClient::FileBrowserNameDetector BridgeClient::s_fileBrowserNameDetector =
@@ -4462,6 +4482,8 @@ QVariantMap BridgeClient::quitSaveFailureMap(quint8 subjects, quint8 cause, cons
 
 void BridgeClient::clearDiagnostics() {
     m_diagnosticsFlushTimer.stop();
+    // Lines logged before the clear go with it.
+    (void)m_diagnosticsQueue->take();
     m_pendingDiagnosticsDiskLines.clear();
     m_diagnosticsLines.clear();
     // A read asked for before is of the old log.
@@ -4474,6 +4496,7 @@ void BridgeClient::clearDiagnostics() {
 }
 
 void BridgeClient::reloadDiagnosticsFromDisk() {
+    takeQueuedDiagnosticLines();
     flushPendingDiagnosticDiskLines();
     const quint64 generation = ++m_diagnosticsReadGeneration;
     const quint64 loggedBefore = m_diagnosticsLinesLogged;
@@ -4516,16 +4539,24 @@ void BridgeClient::applyDiagnosticsRead(quint64 generation, quint64 loggedBefore
 }
 
 void BridgeClient::logDiagnostic(const QString &category, const QString &message) {
-    const QString ts = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
     const QString cat = category.trimmed().isEmpty() ? QStringLiteral("app") : category.trimmed();
     QString msg = message;
     msg.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
     msg.replace(QLatin1Char('\r'), QStringLiteral("\\r"));
-    const QString line = QStringLiteral("[%1] [%2] %3").arg(ts, cat, msg);
+    // After the lines other threads queued, which were stamped before it.
+    addDiagnosticLines(m_diagnosticsQueue->takeWith(cat, msg));
+}
 
-    appendDiagnosticLine(line);
-    if (!m_diagnosticsLogPath.isEmpty()) {
-        m_pendingDiagnosticsDiskLines.push_back(line);
+void BridgeClient::takeQueuedDiagnosticLines() {
+    addDiagnosticLines(m_diagnosticsQueue->take());
+}
+
+void BridgeClient::addDiagnosticLines(const QStringList &lines) {
+    for (const QString &line : lines) {
+        appendDiagnosticLine(line);
+        if (!m_diagnosticsLogPath.isEmpty()) {
+            m_pendingDiagnosticsDiskLines.push_back(line);
+        }
     }
     // The file and Diagnostics take the lines a batch at a time.
     if ((!m_pendingDiagnosticsDiskLines.isEmpty() || !m_pendingDiagnosticsShownLines.isEmpty())
@@ -4581,6 +4612,7 @@ void BridgeClient::copyDiagnosticsWithoutPaths() {
 }
 
 void BridgeClient::flushDiagnostics() {
+    takeQueuedDiagnosticLines();
     showPendingDiagnosticLines();
     flushPendingDiagnosticDiskLines();
 }

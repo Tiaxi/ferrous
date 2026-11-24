@@ -3,7 +3,6 @@
 #include "ConsoleTee.h"
 
 #include <QByteArray>
-#include <QDateTime>
 #include <QList>
 #include <QStringList>
 
@@ -53,8 +52,9 @@ void writeAll(int fd, const char *data, ssize_t size) {
 
 } // namespace
 
-ConsoleTee::ConsoleTee(QString logPath)
-    : m_logPath(std::move(logPath)) {
+ConsoleTee::ConsoleTee(QString logPath, std::shared_ptr<DiagnosticsLog::LineQueue> queue)
+    : m_logPath(std::move(logPath)),
+      m_queue(std::move(queue)) {
 #if defined(Q_OS_UNIX)
     int fds[2] = {-1, -1};
     if (::pipe(fds) == 0) {
@@ -78,21 +78,32 @@ ConsoleTee::~ConsoleTee() {
 }
 
 void ConsoleTee::appendLines(const QString &tag, const QList<QByteArray> &lineBytesList) const {
-    QStringList lines;
-    lines.reserve(lineBytesList.size());
+    QStringList messages;
+    messages.reserve(lineBytesList.size());
     for (const QByteArray &lineBytes : lineBytesList) {
-        const QString line = QString::fromUtf8(lineBytes).trimmed();
-        if (line.isEmpty()) {
-            continue;
+        QString message = QString::fromUtf8(lineBytes).trimmed();
+        if (!message.isEmpty()) {
+            messages.push_back(std::move(message));
         }
-        const QString timestamp = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
-        lines.push_back(QStringLiteral("[%1] [%2] %3").arg(timestamp, tag, line));
     }
-    if (lines.isEmpty()) {
+    if (messages.isEmpty() || (m_queue && m_queue->post(tag, messages))) {
         return;
     }
     // The console still has the output when the log cannot be written.
-    (void)DiagnosticsLog::appendLines(m_logPath, lines);
+    (void)DiagnosticsLog::appendLines(m_logPath, DiagnosticsLog::stampedLines(tag, messages));
+}
+
+void ConsoleTee::closeQueue() {
+    if (!m_queue) {
+        return;
+    }
+    // When no app takes the lines, as when it never started, the log has
+    // them all the same.
+    m_queue->closeUnlessConsumed([this](const QStringList &lines) {
+        if (!lines.isEmpty()) {
+            (void)DiagnosticsLog::appendLines(m_logPath, lines);
+        }
+    });
 }
 
 #if defined(Q_OS_UNIX)
@@ -212,6 +223,7 @@ void ConsoleTee::shutdown() {
     }
     m_shutDown = true;
     if (m_streams.empty()) {
+        closeQueue();
         return;
     }
 
@@ -234,6 +246,7 @@ void ConsoleTee::shutdown() {
         closeFd(stream.readFd);
     }
     m_streams.clear();
+    closeQueue();
 }
 
 #else
@@ -246,6 +259,7 @@ void ConsoleTee::forward(int, int, const QString &) const {}
 
 void ConsoleTee::shutdown() {
     m_shutDown = true;
+    closeQueue();
 }
 
 #endif
