@@ -347,6 +347,11 @@ Rectangle {
                                               libraryPointer.point.position.y + libraryAlbumView.contentY)
                     : null
 
+                // The row whose whole title shows to the pointer, or showed
+                // last: its tooltip stays made, so that it fades out as the
+                // style's do, and the view makes one at a time.
+                property Item titleTipRow: null
+
                 HoverHandler {
                     id: libraryPointer
                 }
@@ -466,10 +471,28 @@ Rectangle {
                     readonly property bool reasonPointed: unreadableReason.length > 0
                         && libraryRowMouseArea.containsMouse
                         && libraryRowMouseArea.pressedButtons === Qt.NoButton
+                    // The keyboard's row gives way to the pointer's
+                    // tooltip, its reason's or its title's, so the list
+                    // shows one at a time.
                     readonly property bool reasonShown: reasonPointed
                         || (unreadableReason.length > 0 && rowCurrent
                             && !(libraryAlbumView.pointedRow !== null && libraryAlbumView.pointedRow !== libraryRow
-                                 && libraryAlbumView.pointedRow.reasonPointed))
+                                 && (libraryAlbumView.pointedRow.reasonPointed
+                                     || libraryAlbumView.pointedRow.titlePointed)))
+                    // A title cut short shows whole for the pointer anywhere
+                    // on the row, unless it holds the row down, in the
+                    // reason's tooltip, at its place; an unreadable row's
+                    // reason takes its place.
+                    readonly property bool titleElided: rowTitleText.truncated
+                    readonly property bool titlePointed: titleElided
+                        && unreadableReason.length === 0
+                        && libraryRowMouseArea.containsMouse
+                        && libraryRowMouseArea.pressedButtons === Qt.NoButton
+                    onTitlePointedChanged: {
+                        if (titlePointed) {
+                            libraryAlbumView.titleTipRow = libraryRow
+                        }
+                    }
                     // A collapsed row that holds the playing track: its
                     // name is amber, quieter while the playback is paused.
                     readonly property bool holdsNow: hasChildren && !isExpanded
@@ -555,6 +578,11 @@ Rectangle {
                     ListView.onReused: {
                         libraryRow.z = 1
                         libraryRow.folded = false
+                    }
+                    ListView.onPooled: {
+                        if (libraryAlbumView.titleTipRow === libraryRow) {
+                            libraryAlbumView.titleTipRow = null
+                        }
                     }
 
                     Accessible.role: Accessible.TreeItem
@@ -643,11 +671,16 @@ Rectangle {
                             // the playing row, as the queue's: on the 16 px
                             // glyph alone, the pointer had to find it, and
                             // the keyboard never could. Only such a row
-                            // makes one.
+                            // makes one, and a row whose title is cut short,
+                            // for its whole title (titlePointed), from the
+                            // pointer's coming until another row's comes.
                             Loader {
+                                id: rowToolTipLoader
                                 active: libraryRow.unreadableReason.length > 0
+                                    || (libraryRow.titleElided && libraryAlbumView.titleTipRow === libraryRow)
                                 sourceComponent: Components.RowReasonToolTip {
-                                    objectName: "libraryRowReason"
+                                    objectName: libraryRow.unreadableReason.length > 0
+                                        ? "libraryRowReason" : "libraryRowTitleToolTip"
                                     row: libraryRow
                                     x: libraryRow.titleX
                                     rowTop: libraryRow.y - libraryAlbumView.contentY
@@ -670,8 +703,13 @@ Rectangle {
                                         }
                                         return false
                                     }
-                                    visible: libraryRow.reasonShown
-                                    message: libraryRow.unreadableReason
+                                    // Once it is made, so that it waits
+                                    // the style's delay, which it has then.
+                                    visible: rowToolTipLoader.status === Loader.Ready
+                                        && (libraryRow.reasonShown || libraryRow.titlePointed)
+                                    message: libraryRow.unreadableReason.length > 0
+                                        ? libraryRow.unreadableReason
+                                        : libraryRow.rowTitle
                                 }
                             }
 
