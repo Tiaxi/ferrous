@@ -155,6 +155,10 @@ Dialog {
         const highest = (menuBar ? Math.ceil(menuBar.mapToItem(windowItem, 0, menuBar.height).y) : 0) + 8
         root.paletteTop = Math.max(highest, Math.min(underTransport, Math.floor(windowItem.height - 32 - leastHeight)))
     }
+    // The selection is the inactive one while a result's menu is open,
+    // which has the keys then, as the library's and the queue's is while
+    // theirs is, until the menu has closed.
+    readonly property bool selectionActive: !resultMenu.visible
     // Counts the result rows' changes, for what depends on the selected
     // row's data rather than on its index.
     property int rowsRevision: 0
@@ -857,7 +861,7 @@ Dialog {
                         visible: resultRow.selectable
                         hovered: resultRow.hovered && resultRow.isResult
                         selected: resultRow.selected
-                        active: true
+                        active: root.selectionActive
                         focused: false
                         scrollbarLane: resultsView.scrollbarLane
                     }
@@ -1206,7 +1210,7 @@ Dialog {
                             uiPalette: root.uiPalette
                             hovered: auxMouse.containsMouse
                             selected: auxRow.selected
-                            active: true
+                            active: root.selectionActive
                             focused: false
                             scrollbarLane: 0
                         }

@@ -543,6 +543,7 @@ private slots:
     void mouseSelectsAndActs();
     void menuKeyOpensTheSelectedResultsMenu();
     void resultMenuNamesWhatItActsOn();
+    void resultMenuLeavesItsRowTheInactiveSelection();
     void staleAndBusyResultsDoNotAct();
     void typingKeepsTheResultsInPlaceAsTheyAre();
     void onlyASlowSearchDimsTheResults();
@@ -2178,6 +2179,52 @@ void SearchPaletteTest::resultMenuNamesWhatItActsOn() {
 
 // Results kept from an earlier query, or shown while a newer one runs, do
 // nothing; a new query drops the selection and the pending expansion.
+// While a result's menu is open, which has the keys, its row has the
+// inactive selection, as a library or queue row under its menu does
+// (it kept the active one, as if the list still had the keys), and the
+// active one again once the menu has closed.
+void SearchPaletteTest::resultMenuLeavesItsRowTheInactiveSelection() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    SteppedAnimationDriver animations;
+    const auto settle = [&animations] { (void)animations.step(1000); };
+    QQmlExpression menuVisible(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.visible"));
+    QVERIFY(hex(harness.token("selection")) != hex(harness.token("selectionInactive")));
+    const auto tintOf = [&harness](int index) -> QString {
+        QQuickItem *tint = visibleChildNamed(harness.row(index), QStringLiteral("rowBackgroundTint"));
+        return tint == nullptr ? QString() : hex(colorOf(tint));
+    };
+    const int first = harness.selection();
+    QCOMPARE(tintOf(first), hex(harness.token("selection")));
+
+    // By the pointer, on another result: it is selected, inactive.
+    const int index = harness.model.indexOfResult(QStringLiteral("album"), 0);
+    QVERIFY(index != first);
+    QTest::mouseClick(harness.window, Qt::RightButton, Qt::NoModifier, sceneCentre(harness.row(index)));
+    settle();
+    QTRY_VERIFY(menuVisible.evaluate().toBool());
+    QCOMPARE(harness.selection(), index);
+    QCOMPARE(tintOf(index), hex(harness.token("selectionInactive")));
+    QTest::keyClick(harness.window, Qt::Key_Escape);
+    settle();
+    QTRY_VERIFY(!menuVisible.evaluate().toBool());
+    QCOMPARE(tintOf(index), hex(harness.token("selection")));
+
+    // By the Menu key.
+    QTest::keyClick(harness.window, Qt::Key_Menu);
+    settle();
+    QTRY_VERIFY(menuVisible.evaluate().toBool());
+    QCOMPARE(tintOf(index), hex(harness.token("selectionInactive")));
+    QTest::keyClick(harness.window, Qt::Key_Escape);
+    settle();
+    QTRY_VERIFY(!menuVisible.evaluate().toBool());
+    QCOMPARE(tintOf(index), hex(harness.token("selection")));
+}
+
 void SearchPaletteTest::staleAndBusyResultsDoNotAct() {
     Harness harness;
     QString errorText;
