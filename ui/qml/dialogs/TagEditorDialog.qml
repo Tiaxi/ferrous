@@ -1154,11 +1154,17 @@ Components.DialogWindow {
         required property var field
         // Its files hold different values, which saving keeps.
         property bool mixed: false
+        // The user erased "Mixed" (Backspace or Delete in the empty
+        // field): leaving the field clears the tag in its files.
+        property bool erased: false
         property bool touched: false
         // The text it shows for the tracks, before the user types.
         property string committedText: ""
         // Typed and not yet applied: see the dialog's pendingEditField.
-        readonly property bool pendingEdit: fieldEditor.touched && fieldEditor.text !== fieldEditor.committedText
+        // A Mixed field shows no text, so its empty text is an edit only
+        // once "Mixed" is erased.
+        readonly property bool pendingEdit: fieldEditor.touched
+            && (fieldEditor.text !== fieldEditor.committedText || fieldEditor.erased)
         onPendingEditChanged: {
             if (fieldEditor.pendingEdit) {
                 root.pendingEditField = fieldEditor
@@ -1192,6 +1198,7 @@ Components.DialogWindow {
             text = mixed ? "" : value
             committedText = text
             fieldEditor.mixed = mixed
+            erased = false
             editRowsSnapshot = []
             touched = false
         }
@@ -1204,7 +1211,7 @@ Components.DialogWindow {
         hoverEnabled: !root.formFieldFocused && !Kirigami.Settings.tabletMode
         selectByMouse: true
         persistentSelection: true
-        placeholderText: fieldEditor.mixed ? root.keepText : ""
+        placeholderText: fieldEditor.mixed && !fieldEditor.erased ? root.keepText : ""
         placeholderTextColor: root.uiPalette.placeholderText
         rightPadding: fieldEditor.changed
             ? revertButton.width + Kirigami.Units.smallSpacing
@@ -1217,20 +1224,43 @@ Components.DialogWindow {
                 captureEditRowsSnapshot()
             }
         }
+        // Backspace or Delete in an empty Mixed field erases "Mixed": a
+        // press of its own, so a held Backspace stops at the empty field,
+        // and not Shift+Delete, which cuts.
+        Keys.onPressed: function(event) {
+            if ((event.key === Qt.Key_Backspace || event.key === Qt.Key_Delete)
+                    && !event.isAutoRepeat && KeyUtils.isUnmodified(event)
+                    && fieldEditor.mixed && !fieldEditor.erased
+                    && fieldEditor.length === 0 && fieldEditor.preeditText.length === 0) {
+                if (!touched) {
+                    captureEditRowsSnapshot()
+                }
+                touched = true
+                erased = true
+                event.accepted = true
+            }
+        }
         onTextEdited: {
             if (!touched) {
                 captureEditRowsSnapshot()
             }
             touched = true
+            // Typed text replaces the erased "Mixed", and erased in turn,
+            // leaves the field as it was.
+            erased = false
         }
         onEditingFinished: {
             if (!touched) {
                 return
             }
-            root.tagEditorApi.applyBulkFieldToRows(
-                editRowsSnapshot,
-                fieldEditor.field.key,
-                text)
+            // Typed back to what it held, it applies nothing: a Mixed
+            // field cleared the tag in every file it went to (#746).
+            if (pendingEdit) {
+                root.tagEditorApi.applyBulkFieldToRows(
+                    editRowsSnapshot,
+                    fieldEditor.field.key,
+                    text)
+            }
             editRowsSnapshot = []
             touched = false
             syncFromController()
