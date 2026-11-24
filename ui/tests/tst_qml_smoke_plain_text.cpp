@@ -144,26 +144,6 @@ void inspect(QQuickItem *root, Shown &shown) {
             }
             continue;
         }
-        if (item->objectName() == QLatin1String("globalSearchResultContext")) {
-            // The same, in a search result's styled context: without the
-            // tags of its matches, and with the entities read, it is the
-            // value.
-            static const QRegularExpression tag(QStringLiteral("<[^>]*>"));
-            QString read = text;
-            read.remove(tag);
-            read.replace(QLatin1String("&lt;"), QLatin1String("<"))
-                .replace(QLatin1String("&gt;"), QLatin1String(">"))
-                .replace(QLatin1String("&amp;"), QLatin1String("&"));
-            for (const QString &id : idsIn(read)) {
-                shown.literally.insert(id);
-            }
-            // A value that went in unescaped has its own tags.
-            static const QRegularExpression foreign(QStringLiteral("<(?!/?font\\b)"));
-            if (text.contains(foreign)) {
-                shown.asMarkup << QStringLiteral("styled text %1 holds markup of a value").arg(item->objectName());
-            }
-            continue;
-        }
         // An editor that took a value for markup gives it back as HTML.
         if (editor && format != Qt::PlainText && text.contains(QStringLiteral("example.invalid"))) {
             shown.asMarkup << QStringLiteral("editor %1 took a value for markup").arg(item->objectName());
@@ -896,8 +876,6 @@ void PlainTextSmokeTest::everyTextItemStatesASafeFormat() {
         {QStringLiteral("components/AppMenuItem.qml"), {QStringLiteral("Text.StyledText")}},
         // The forms' own labels, underlined in the same way.
         {QStringLiteral("preferences/PreferencesForm.qml"), {QStringLiteral("Text.AutoText")}},
-        // A search result's context, whose matches are in the text's colour; escaped() escapes every part.
-        {QStringLiteral("dialogs/GlobalSearchDialog.qml"), {QStringLiteral("Text.StyledText")}},
         // KDE's description, a message of the app's own with no arguments.
         {QStringLiteral("dialogs/AboutKdeDialog.qml"), {QStringLiteral("Text.StyledText")}},
         // The details and their sizer, whose values escaped() escapes.

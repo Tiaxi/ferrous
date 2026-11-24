@@ -153,8 +153,11 @@ private:
     qreal m_scale;
 };
 
-// The no-cover mark's one colour at a list's size (no-art-mark.svg).
+// The no-cover mark's one colour at a list's size: a quiet violet grey on
+// the plot's floor in a dark theme (no-art-mark.svg), a darker indigo on
+// the light tile in a light one (no-art-mark-light.svg).
 const QColor kNoCoverMark = QColor::fromRgb(0x8c, 0x82, 0xa3);
+const QColor kNoCoverMarkLight = QColor::fromRgb(0x57, 0x4a, 0x7a);
 
 // Whether two drawn colours are the same, give or take the rounding of
 // blending.
@@ -1194,6 +1197,8 @@ private slots:
     void libraryCollapseAllIsEnabledOnlyWithAnExpandedRow();
     void libraryCollapseAllLeavesNoRowDrawn();
     void regionHeadersNameTheRegionAndItsTotals();
+    void libraryHeaderSaysItHasNoFolders_data();
+    void libraryHeaderSaysItHasNoFolders();
     void selectedRowsDrawTheirMarksForTheSelection();
     void libraryTreeHasOneIndentStep();
     void libraryAlbumWithoutACoverShowsAPlaceholderTile();
@@ -1203,6 +1208,8 @@ private slots:
     void libraryTreeChevronsGrowWithALargeFont();
     void libraryThumbnailsFollowTheFont_data();
     void libraryThumbnailsFollowTheFont();
+    void libraryChevronsKeepBreezesStroke_data();
+    void libraryChevronsKeepBreezesStroke();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
     void collapsedRowNameElidesBeforeTheYear();
     void libraryRowShowsItsCutTitleWholeInItsToolTip();
@@ -4915,6 +4922,56 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     QVERIFY(!libraryTitle->property("truncated").toBool());
 }
 
+void UiMainWindowTest::libraryHeaderSaysItHasNoFolders_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::addColumn<bool>("narrow");
+    QTest::newRow("10 pt") << 10.0 << false;
+    QTest::newRow("10 pt, narrow") << 10.0 << true;
+    QTest::newRow("24 pt") << 24.0 << false;
+}
+
+// Without a library folder the library's header says so where its totals
+// go, in their quiet colour, and nothing else: no line under it and no
+// button (the empty header read as a library that had not loaded); the
+// queue's first-run message stays the one call to action. With a folder,
+// the totals as ever, none while it has no tracks.
+void UiMainWindowTest::libraryHeaderSaysItHasNoFolders() {
+    QFETCH(qreal, points);
+    QFETCH(bool, narrow);
+    const ScopedApplicationFont font(points);
+    MainWindowFixture fixture(narrow ? sized(1000, 720) : sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QCOMPARE(bridge->property("libraryRootCount").toInt(), 0);
+    QQuickItem *header = named(window, "libraryHeader");
+    QVERIFY(header != nullptr);
+    QQuickItem *title = itemNamed(header, QStringLiteral("regionHeaderTitle"));
+    QQuickItem *totals = itemNamed(header, QStringLiteral("regionHeaderTotals"));
+    QVERIFY(title && totals);
+    QTRY_VERIFY(shown(totals));
+    QCOMPARE(totals->property("text").toString(), QStringLiteral("No folders"));
+    QVERIFY(!totals->property("truncated").toBool());
+    QVERIFY(!title->property("truncated").toBool());
+    QCOMPARE(colorOf(totals), tokenHex(window, "textTertiary"));
+    QVERIFY(!named(window, "libraryEmptyStateLabel")->isVisible());
+    QVERIFY(shown(named(window, "queueFirstRunMessage")));
+
+    // A folder, scanning: no totals until it has tracks.
+    bridge->setProperty("libraryRootCount", 1);
+    QTRY_COMPARE(totals->property("text").toString(), QString());
+    bridge->setProperty("libraryArtistCount", 1);
+    bridge->setProperty("libraryAlbumCount", 2);
+    bridge->setProperty("libraryTrackCount", 9);
+    // (At 24 pt the header shows as many of them as fit.)
+    QTRY_COMPARE(header->property("totals").toString(),
+                 narrow ? QStringLiteral("9 tracks") : QStringLiteral("1 artist · 2 albums · 9 tracks"));
+    // The folder removed again.
+    bridge->setProperty("libraryRootCount", 0);
+    bridge->setProperty("libraryTrackCount", 0);
+    QTRY_COMPARE(totals->property("text").toString(), QStringLiteral("No folders"));
+}
+
 // A selected row of the queue draws its length in the selected row's
 // secondary colour and its artist and album in its column colour, which
 // stay over its number's contrast on the selection, under the pointer as
@@ -4979,7 +5036,9 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     QVERIFY(album->property("coverPath").toString().isEmpty());
     QQuickItem *glyph = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholder"));
     QVERIFY(glyph != nullptr);
-    const QColor floor = tokenOf(window, "plotFloor");
+    // The app's default palette is light: the light tile.
+    QVERIFY(!paletteOf(window)->property("themeIsDark").toBool());
+    const QColor floor = tokenOf(window, "noCoverTile");
 
     // The thumbnail's place and size, and the name after it, with a cover
     // or without: 6 px after the chevron, centred in the row, the name
@@ -5002,26 +5061,26 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     QVERIFY(shown(glyph));
     QCOMPARE(sceneRect(glyph), sceneRect(thumbnail));
     QCOMPARE(glyph->property("radius").toReal(), 2.0);
-    QCOMPARE(colorOf(glyph), tokenHex(window, "plotFloor"));
+    QCOMPARE(colorOf(glyph), tokenHex(window, "noCoverTile"));
     QCOMPARE(QQmlProperty(glyph, QStringLiteral("border.width")).read().toReal(), 1.0);
     QCOMPARE(hex(QQmlProperty(glyph, QStringLiteral("border.color")).read().value<QColor>()),
-             tokenHex(window, "plotFloorEdge"));
+             tokenHex(window, "noCoverTileEdge"));
     QQuickItem *mark = itemNamed(glyph, QStringLiteral("noCoverTileMark"));
     QVERIFY(shown(mark));
     QCOMPARE(mark->size(), QSizeF(20, 20));
-    QVERIFY(mark->property("source").toUrl().toString().endsWith(QStringLiteral("/no-art-mark-20.svg")));
+    QVERIFY(mark->property("source").toUrl().toString().endsWith(QStringLiteral("/no-art-mark-20-light.svg")));
     QTRY_COMPARE(mark->property("status").toInt(), 1); // Image.Ready
     // As drawn: the edge, the floor inside it, the glide and the harmonic
     // in the mark's colour, on their pixels (no-art-mark-20.svg); both run
     // out to the tile's inner edge, as the app icon's traces run out to
     // its tile's: the column inside the edge has them, crisp, on their
     // rows.
-    const QColor edge = tokenOf(window, "plotFloorEdge");
+    const QColor edge = tokenOf(window, "noCoverTileEdge");
     const auto markProblem = [&]() -> QString {
         const Drawn drawn(window);
         const QPointF origin = sceneRect(thumbnail).topLeft();
         const auto at = [&](qreal x, qreal y) { return drawn.at(origin + QPointF(x, y)); };
-        const auto marked = [](const QColor &c) { return channelDistance(c, kNoCoverMark) <= 3; };
+        const auto marked = [](const QColor &c) { return channelDistance(c, kNoCoverMarkLight) <= 3; };
         const struct {
             qreal x;
             qreal y;
@@ -5063,29 +5122,56 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
 
 void UiMainWindowTest::libraryNoCoverMarkIsOneQuietColour_data() {
     QTest::addColumn<qreal>("points");
-    QTest::newRow("10 pt, the stepped mark") << 10.0;
-    QTest::newRow("24 pt, the curved mark") << 24.0;
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("dark, 10 pt, the stepped mark") << 10.0 << true;
+    QTest::newRow("dark, 24 pt, the curved mark") << 24.0 << true;
+    QTest::newRow("light, 10 pt, the stepped mark") << 10.0 << false;
+    QTest::newRow("light, 24 pt, the curved mark") << 24.0 << false;
 }
 
 // At a list's size the no-cover mark is one quiet colour on its floor, at
 // full strength and at least 4.5:1 on it, in both drawings: no amber, which
 // is only what is playing, and no magenta (repeated down a run of albums
 // without covers, the two outshone everything in the tree). Every pixel
-// inside the tile's edge is the floor, the mark or a blend of them.
+// inside the tile's edge is the floor, the mark or a blend of them. In
+// Breeze Dark the floor is the plot's, with its edge; in a light theme a
+// light indigo tile with a darker rim (the plot's floor there made a run of
+// albums without covers a column of near-black squares down a white list).
 void UiMainWindowTest::libraryNoCoverMarkIsOneQuietColour() {
     QFETCH(qreal, points);
+    QFETCH(bool, dark);
+    const auto palette = useDarkPalette(dark);
     const ScopedApplicationFont font(points);
     MainWindowFixture fixture(sized());
     QQuickWindow *window = fixture.window;
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QCOMPARE(paletteOf(window)->property("themeIsDark").toBool(), dark);
     showTree(fixture.libraryModel, kAllExpanded);
     QQuickItem *album = nullptr;
     QTRY_VERIFY((album = libraryRow(window, QStringLiteral("album"))) != nullptr);
     QQuickItem *tile = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholder"));
     QVERIFY(shown(tile));
-    const QColor floor = tokenOf(window, "plotFloor");
-    QVERIFY2(contrastRatio(kNoCoverMark, floor) >= 4.5,
-             qPrintable(describeContrast(QStringLiteral("mark"), kNoCoverMark, floor)));
+    const QColor floor = tokenOf(window, "noCoverTile");
+    const QColor edge = QQmlProperty(tile, QStringLiteral("border.color")).read().value<QColor>();
+    const QColor view = tokenOf(window, "view");
+    if (dark) {
+        // As it was: the plot's floor and edge.
+        QCOMPARE(hex(floor), tokenHex(window, "plotFloor"));
+        QCOMPARE(hex(edge), tokenHex(window, "plotFloorEdge"));
+    } else {
+        QCOMPARE(hex(floor), QStringLiteral("#ffebe7f4"));
+        QCOMPARE(hex(edge), QStringLiteral("#ffc9c2dc"));
+        // A light tile on the light view, its rim darker than it.
+        QVERIFY2(contrastRatio(floor, view) < 1.5, qPrintable(describeContrast(QStringLiteral("tile"), floor, view)));
+        QVERIFY(relativeLuminance(edge) < relativeLuminance(floor));
+    }
+    const QColor markColor = dark ? kNoCoverMark : kNoCoverMarkLight;
+    QVERIFY2(contrastRatio(markColor, floor) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("mark"), markColor, floor)));
+    QQuickItem *mark = itemNamed(tile, QStringLiteral("noCoverTileMark"));
+    QVERIFY(shown(mark));
+    QVERIFY2(mark->property("source").toUrl().toString().endsWith(dark ? QStringLiteral(".svg") : QStringLiteral("-light.svg")),
+             qPrintable(mark->property("source").toUrl().toString()));
 
     const auto problem = [&]() -> QString {
         const Drawn drawn(window);
@@ -5095,11 +5181,11 @@ void UiMainWindowTest::libraryNoCoverMarkIsOneQuietColour() {
             for (qreal x = 2.5; x < box.width() - 2; ++x) {
                 const QColor pixel = drawn.at(box.topLeft() + QPointF(x, y));
                 const double amount =
-                    std::clamp((pixel.greenF() - floor.greenF()) / double(kNoCoverMark.greenF() - floor.greenF()), 0.0, 1.0);
-                if (channelDistance(pixel, mixed(floor, kNoCoverMark, amount)) > 6) {
+                    std::clamp((pixel.greenF() - floor.greenF()) / double(markColor.greenF() - floor.greenF()), 0.0, 1.0);
+                if (channelDistance(pixel, mixed(floor, markColor, amount)) > 6) {
                     return QStringLiteral("%1 at %2, %3").arg(pixel.name()).arg(x).arg(y);
                 }
-                marked += channelDistance(pixel, kNoCoverMark) <= 3 ? 1 : 0;
+                marked += channelDistance(pixel, markColor) <= 3 ? 1 : 0;
             }
         }
         return marked >= box.width() / 2 ? QString() : QStringLiteral("%1 pixels of the mark").arg(marked);
@@ -5182,9 +5268,11 @@ void UiMainWindowTest::libraryTreeHasOneIndentStep() {
              QStringLiteral("arrow-right"));
 }
 
-// At 24 pt the tree's chevrons and state glyphs grow with the font, as the
-// palette scales its 16 and 12 px glyphs, and the indent step with the
-// chevrons, so that each level's chevron is where its parent's ends.
+// At 24 pt the tree's chevron columns and state glyphs grow with the font,
+// as the palette scales its 16 and 12 px glyphs, and the indent step with
+// the columns, so that each level's chevron is where its parent's ends. The
+// chevron itself stops at Breeze's 22 px arrow, centred in its column
+// (libraryChevronsKeepBreezesStroke).
 void UiMainWindowTest::libraryTreeChevronsGrowWithALargeFont() {
     const ScopedApplicationFont font(24.0);
     MainWindowFixture fixture(sized());
@@ -5205,7 +5293,7 @@ void UiMainWindowTest::libraryTreeChevronsGrowWithALargeFont() {
     // 2.4 times the default font's: 38 and 29 px.
     const qreal chevronSize = scaledSize(window, 16);
     QCOMPARE(chevronSize, std::round(16 * 2.4));
-    QCOMPARE(artistChevron->size(), QSizeF(chevronSize, chevronSize));
+    QCOMPARE(artistChevron->size(), QSizeF(22, 22));
     QCOMPARE(albumChevron->x() - artistChevron->x(), chevronSize);
     QTRY_VERIFY(state->isVisible());
     QCOMPARE(state->size(), QSizeF(scaledSize(window, 12), scaledSize(window, 12)));
@@ -5216,7 +5304,8 @@ void UiMainWindowTest::libraryTreeChevronsGrowWithALargeFont() {
         QVERIFY(item->y() >= 0 && item->y() + item->height() <= row->height());
     }
     // The title after the chevron and its gap, clear of it.
-    QVERIFY(itemNamed(artist, QStringLiteral("libraryRowTitle"))->x() >= artistChevron->x() + chevronSize + 6);
+    QVERIFY(itemNamed(artist, QStringLiteral("libraryRowTitle"))->x()
+            >= artist->property("chevronX").toReal() + chevronSize + 6);
     // A collapsed album that holds the playing track has its name amber at
     // a large font too.
     fixture.libraryModel.toggleKey(kAlbumKey);
@@ -5270,7 +5359,8 @@ void UiMainWindowTest::libraryThumbnailsFollowTheFont() {
     const qreal radius = thumbnail->property("radius").toReal();
     QCOMPARE(radius, std::max(2.0, std::round(size / 10)));
     const qreal thumbnailX = xIn(album, "libraryRowThumbnail");
-    QCOMPARE(thumbnailX, xIn(album, "libraryRowChevron") + chevron->width() + scaledSize(window, 6));
+    // After the chevron's column, which the chevron is centred in.
+    QCOMPARE(thumbnailX, album->property("chevronX").toReal() + scaledSize(window, 16) + scaledSize(window, 6));
     const qreal nameX = thumbnailX + size + scaledSize(window, 8);
     QCOMPARE(xIn(album, "libraryRowTitle"), nameX);
     QCOMPARE(xIn(track, "libraryRowTitle"), nameX);
@@ -5281,12 +5371,77 @@ void UiMainWindowTest::libraryThumbnailsFollowTheFont() {
     // The mark is drawn at its size: on its 20 px grid, crisp, and in
     // smooth curves above it, where the grid's steps made a staircase.
     const QString drawing = mark->property("source").toUrl().toString();
-    QVERIFY2(drawing.endsWith(size == 20.0 ? QStringLiteral("/no-art-mark-20.svg") : QStringLiteral("/no-art-mark.svg")),
+    // The app's default palette is light: the light drawings.
+    QVERIFY2(drawing.endsWith(size == 20.0 ? QStringLiteral("/no-art-mark-20-light.svg") : QStringLiteral("/no-art-mark-light.svg")),
              qPrintable(drawing));
     QTRY_COMPARE(mark->property("status").toInt(), 1); // Image.Ready
     QCOMPARE(mark->size(), QSizeF(size, size));
     QCOMPARE(QQmlProperty(mark, QStringLiteral("sourceSize.width")).read().toReal(), size);
     QCOMPARE(mark->property("smooth").toBool(), size != 20.0);
+}
+
+void UiMainWindowTest::libraryChevronsKeepBreezesStroke_data() {
+    QTest::addColumn<qreal>("points");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("14 pt") << 14.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The tree's chevrons are Breeze's arrows at one of Breeze's sizes, at most
+// its 22 px one, centred in their column, which grows with the font as the
+// indent step: Breeze draws its arrows in a 1 px stroke at every size, and
+// the 32 px arrow a 24 pt font rounded to was a wide hairline V beside text
+// of a heavier stroke. The default font's 16 px chevron is as it was.
+void UiMainWindowTest::libraryChevronsKeepBreezesStroke() {
+    QFETCH(qreal, points);
+    const ScopedApplicationFont font(points);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    showTree(fixture.libraryModel, kAllExpanded);
+    QQuickItem *artist = nullptr;
+    QQuickItem *album = nullptr;
+    QTRY_VERIFY((artist = libraryRow(window, QStringLiteral("artist"))) != nullptr
+                && (album = libraryRow(window, QStringLiteral("album"))) != nullptr);
+    const qreal column = scaledSize(window, 16);
+    const qreal glyph = std::min<qreal>(column, 22);
+    if (points == 24.0) QCOMPARE(glyph, 22.0);
+    for (QQuickItem *row : {artist, album}) {
+        QQuickItem *chevron = itemNamed(row, QStringLiteral("libraryRowChevron"));
+        QVERIFY(shown(chevron));
+        QCOMPARE(chevron->width(), glyph);
+        QCOMPARE(chevron->height(), glyph);
+        // A size Breeze draws, at that size.
+        QVERIFY(chevron->property("roundToIconSize").toBool());
+        const qreal columnX = row->property("chevronX").toReal();
+        QCOMPARE(xIn(row, "libraryRowChevron"), columnX + std::round((column - glyph) / 2));
+        QVERIFY(std::abs(chevron->mapToItem(row, QPointF(0, glyph / 2)).y() - row->height() / 2) <= 0.5);
+        if (points <= 10.0) QCOMPARE(xIn(row, "libraryRowChevron"), columnX);
+    }
+    // The indent step is still the column.
+    QCOMPARE(album->property("chevronX").toReal() - artist->property("chevronX").toReal(), column);
+
+    // As drawn: the arrow's ink no wider than Breeze's 22 px drawing.
+    const auto inkWidth = [&]() {
+        const QImage image = window->grabWindow();
+        const qreal scale = qreal(image.width()) / window->width();
+        const QRectF box = sceneRect(artist);
+        const qreal columnLeft = artist->mapToScene(QPointF(artist->property("chevronX").toReal(), 0)).x();
+        const QColor background = image.pixelColor(QPointF((box.right() - 30) * scale, (box.top() + 2) * scale).toPoint());
+        int left = image.width();
+        int right = -1;
+        for (int y = qFloor(box.top() * scale); y < qFloor(box.bottom() * scale); ++y) {
+            for (int x = qFloor(columnLeft * scale); x < qFloor((columnLeft + column) * scale); ++x) {
+                if (channelDistance(image.pixelColor(x, y), background) > 40) {
+                    left = std::min(left, x);
+                    right = std::max(right, x);
+                }
+            }
+        }
+        return right < left ? 0.0 : (right - left + 1) / scale;
+    };
+    QTRY_VERIFY(inkWidth() > 0);
+    QVERIFY2(inkWidth() <= glyph, qPrintable(QStringLiteral("%1 px of ink").arg(inkWidth())));
 }
 
 void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors() {
@@ -7562,15 +7717,16 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     // Centred in the queue.
     QQuickItem *queue = named(window, "playlistView");
     QVERIFY(std::abs(sceneRect(message).center().x() - sceneRect(queue).center().x()) <= 1);
-    // No other message: the library shows its header with nothing under it,
-    // and the queue no empty line; the pane, before any audio, is its
-    // mode's floor, the spectrogram's black.
+    // No other message: the library shows its header, whose totals say
+    // it has no folders (libraryHeaderSaysItHasNoFolders), with nothing
+    // under it, and the queue no empty line; the pane, before any audio, is
+    // its mode's floor, the spectrogram's black.
     QVERIFY(!named(window, "libraryEmptyStateLabel")->isVisible());
     QVERIFY(!named(window, "queueEmptyLabel")->isVisible());
     QVERIFY(shown(named(window, "libraryHeader")));
     QCOMPARE(itemNamed(named(window, "libraryHeader"), QStringLiteral("regionHeaderTotals"))
                  ->property("text").toString(),
-             QString());
+             QStringLiteral("No folders"));
     QCOMPARE(itemNamed(named(window, "queueHeader"), QStringLiteral("regionHeaderTotals"))
                  ->property("text").toString(),
              QString());
@@ -7935,9 +8091,6 @@ void UiMainWindowTest::viewersInTheWindowFadeAsTheStylesPopupsDo() {
         QCOMPARE(fadeDuration(popup, "exit"), exitDuration);
     }
 }
-
-
-
 
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault(argc, argv);

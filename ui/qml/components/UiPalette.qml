@@ -465,6 +465,13 @@ QtObject {
     // thumbnail's: lighter than the floor, towards the app icon's rim, as
     // the icon's tile has one, so it reads as a cover rather than a hole.
     readonly property color plotFloorEdge: ColorUtils.mixColor(root.plotFloor, Qt.color("#6a4ad0"), 0.45)
+    // The no-cover tile of the library and the search (NoCoverTile): the
+    // floor with that edge in a dark theme. In a light one a light indigo
+    // tile with a darker indigo rim and mark (no-art-mark-light.svg, 6.5:1
+    // on it), so a run of albums without covers is no column of
+    // near-black squares down a white list.
+    readonly property color noCoverTile: root.themeIsDark ? root.plotFloor : "#ebe7f4"
+    readonly property color noCoverTileEdge: root.themeIsDark ? root.plotFloorEdge : "#c9c2dc"
     // The seam between the lanes at rest, never played: a cut, the plot's
     // deep violet under the floor, as the level meter's seams are (a
     // lighter seam, #372b4d at 1.45:1, read as one more of the rest lines,

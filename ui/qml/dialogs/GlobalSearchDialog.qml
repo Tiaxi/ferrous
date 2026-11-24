@@ -109,6 +109,12 @@ Dialog {
     // buttons 8 px of the field's. All are even, so a glyph centres on
     // whole pixels in its button and over a cover.
     readonly property int glyphSize: 2 * Math.round(root.uiPalette.toolIconSize / 2)
+    // The glyphs in the lead column (an artist's, a recent search's, the
+    // suggestion's): about 3/4 of the lead at a large font, so they fill
+    // it as a cover does, and the field's 16 px at the default font. They
+    // and the field's glyph draw at their own size (roundToIconSize:
+    // false): rounded down to an icon size, they were 32 px at 24 pt.
+    readonly property int leadGlyphSize: Math.min(root.glyphSize, 2 * Math.round(root.leadSize * 0.75 / 2))
     readonly property int nowGlyphSize: 2 * Math.round(root.uiPalette.scaledSize(12) / 2)
     readonly property int leadSize: 2 * Math.floor(Math.min(root.uiPalette.scaledSize(24), root.resultHeight - 8) / 2)
     readonly property int fieldButtonSize: 2 * Math.floor(Math.min(root.uiPalette.scaledSize(28), root.fieldHeight - 16) / 2)
@@ -268,9 +274,6 @@ Dialog {
     onOpened: root.controller.handleDialogOpened()
     onClosed: root.controller.endOpen(true)
 
-    function escaped(value) {
-        return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    }
     // `value` cut where the matches of the results' query start and end.
     function querySegments(value) {
         const text = String(value || "")
@@ -278,8 +281,7 @@ Dialog {
             ? root.controller.globalSearchModelApi.highlightSegments(text, root.resultsQuery)
             : [{ text: text, match: false }]
     }
-    // From the segments rather than by comparing markup: the model escapes
-    // a quote, so text with one always differed from escaped(), a match.
+    // Whether `value` has a match of the results' query, from its segments.
     function queryMatches(value) {
         return !!value && root.querySegments(value).some(function(segment) { return segment.match })
     }
@@ -341,24 +343,49 @@ Dialog {
         const oneFolder = (root.controller.uiBridge.libraryRootCount || 0) <= 1
         return root.rowContextParts(row, true, oneFolder).join(root.contextSeparator)
     }
-    // Why a row whose title has no match was found: its context as styled
-    // text, the matches in the text colour at the regular weight, the
-    // metadata escaped. "" for any other row. An artist's count of albums
-    // is counted, not searched, so it is no match.
-    function matchedContext(row) {
-        if (root.queryMatches(row.label)) return ""
+    // Why a row whose title has no match was found: its context in runs
+    // (root.maxContextRuns of them), the matches semibold in the row's own
+    // secondary colour, so weight alone marks them and the titles stay the
+    // brightest column. [] for any other row, whose context is one text,
+    // and for the playing track, whose title is all semibold. An artist's
+    // count of albums is counted, not searched, so it is no match. The last
+    // run drawn takes the rest of the room, so the context's column ends
+    // where a whole context's does.
+    readonly property int maxContextRuns: 5
+    function contextRuns(row, room, isNow) {
+        if (isNow || root.queryMatches(row.label)) return []
         const parts = root.rowContextParts(row, false)
         const counted = row.rowType === "artist" && (row.count || 0) > 0 ? 1 : 0
-        const open = '<font color="' + root.uiPalette.text + '">'
+        let segments = []
         let matched = false
-        const styled = parts.map(function(part, index) {
-            if (index < counted) return root.escaped(part)
-            return root.querySegments(part).map(function(segment) {
-                matched = matched || !!segment.match
-                return segment.match ? open + root.escaped(segment.text) + "</font>" : root.escaped(segment.text)
-            }).join("")
+        // Text next to text joins one run.
+        const add = function(text, match) {
+            if (text.length === 0) return
+            const last = segments.length > 0 ? segments[segments.length - 1] : null
+            if (last && !last.match && !match) {
+                last.text += text
+            } else {
+                segments.push({ text: text, match: match })
+            }
+            matched = matched || match
+        }
+        parts.forEach(function(part, index) {
+            if (index > 0) add(root.contextSeparator, false)
+            if (index < counted) {
+                add(part, false)
+                return
+            }
+            root.querySegments(part).forEach(function(segment) { add(String(segment.text), !!segment.match) })
         })
-        return matched ? styled.join(root.contextSeparator) : ""
+        if (!matched) return []
+        const runs = root.layOutRuns(segments, root.maxContextRuns, room, smallMetrics, smallSemiboldMetrics)
+        for (let i = runs.length - 1; i >= 0; --i) {
+            if (runs[i].width > 0) {
+                runs[i].width = Math.max(0, room - runs[i].x)
+                break
+            }
+        }
+        return runs
     }
     // Translated once rather than in every row.
     readonly property var typeLabels: ({
@@ -403,10 +430,10 @@ Dialog {
         const segments = allEmphasized ? [{ text: text, match: true }] : root.querySegments(text)
         return root.layOutRuns(segments, root.maxTitleRuns, root.titleWidth, regularMetrics, semiboldMetrics)
     }
-    // A result's semibold matches are in its title only: its context, such
-    // as the artist an album was found by, stays whole and regular, so it
-    // never outweighs the title. Without a match in the title, the match
-    // in the context is in the text colour (matchedContext).
+    // A result's semibold matches are in its title: its context, such as
+    // the artist an album was found by, stays whole and regular. Without a
+    // match in the title, the match in the context is semibold
+    // (contextRuns).
     // `segments` as at most `maxRuns` runs side by side in `room`: matches
     // past the last run but one stay regular in the last.
     function layOutRuns(segments, maxRuns, room, regular, semibold) {
@@ -428,6 +455,7 @@ Dialog {
     FontMetrics { id: regularMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize }
     FontMetrics { id: semiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize; font.weight: Font.DemiBold }
     FontMetrics { id: smallMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.smallPointSize }
+    FontMetrics { id: smallSemiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.smallPointSize; font.weight: Font.DemiBold }
     TextMetrics {
         id: lengthMetrics
         text: "00:00"
@@ -573,6 +601,7 @@ Dialog {
                 height: root.glyphSize
                 source: "search"
                 isMask: true
+                roundToIconSize: false
                 color: root.uiPalette.textSecondary
             }
             TextField {
@@ -818,12 +847,12 @@ Dialog {
                     readonly property color secondaryColor: selected
                         ? root.uiPalette.textSecondarySelected : root.uiPalette.textSecondary
                     readonly property string context: isResult ? root.rowContext(model, false) : ""
-                    readonly property string matchedContext: isResult ? root.matchedContext(model) : ""
                     // The context's room: up to the length's column, or the
                     // row's end.
                     readonly property real contextWidth: Math.max(0, (lengthText.visible
                         ? lengthText.x - root.columnGap
                         : width - root.sideInset - resultsView.reservedLane) - root.contextX)
+                    readonly property var contextRuns: isResult ? root.contextRuns(model, contextWidth, isNow) : []
                     // Asked for only when the shared tooltip shows.
                     function toolTipText() {
                         return [model.label, root.toolTipContext(model)].filter(function(line) {
@@ -834,6 +863,7 @@ Dialog {
                     // row is elided, or there is more.
                     function toolTipAdds() {
                         return resultContext.truncated
+                            || resultRow.contextRuns.some(function(run) { return run.cut })
                             || resultRow.titleRuns.some(function(run) { return run.cut })
                             || root.toolTipContext(model) !== resultRow.context
                     }
@@ -916,8 +946,8 @@ Dialog {
                     // changes, which recycled rows would do on every query.
                     Loader {
                         id: artistGlyphLoader
-                        x: root.sideInset + (root.leadSize - root.glyphSize) / 2
-                        y: Math.round((parent.height - root.glyphSize) / 2)
+                        x: root.sideInset + (root.leadSize - root.leadGlyphSize) / 2
+                        y: Math.round((parent.height - root.leadGlyphSize) / 2)
                         active: resultRow.isResult && resultRow.rowType === "artist"
                         sourceComponent: artistGlyph
                     }
@@ -933,19 +963,30 @@ Dialog {
                         x: root.sideInset
                         y: Math.round((parent.height - root.leadSize) / 2)
                         active: resultRow.isResult && resultRow.rowType !== "artist"
-                            && (model.coverUrl || "").length === 0
+                            && ((model.coverUrl || "").length === 0 || thumbnail.failed)
                         sourceComponent: noCoverTile
                     }
+                    // A cover that has not loaded yet has the library's
+                    // loading tint, so that rows coming into view do not
+                    // show an empty lead before their covers; one that
+                    // fails has the no-cover tile under it, as in the
+                    // library.
                     Kirigami.ShadowedImage {
                         id: thumbnail
                         objectName: "globalSearchThumbnail"
+                        readonly property bool failed: status === Image.Error
                         visible: resultRow.isResult && resultRow.rowType !== "artist" && (model.coverUrl || "").length > 0
                         x: root.sideInset
                         y: Math.round((parent.height - height) / 2)
                         width: root.leadSize
                         height: root.leadSize
                         radius: 2
-                        color: "transparent"
+                        // Wholly transparent rather than "transparent" once
+                        // loaded or failed, so the fill changes as a cover
+                        // loads, which the thumbnail repaints on (as the
+                        // library's thumbnails).
+                        color: status === Image.Loading || status === Image.Null
+                            ? root.uiPalette.hover : ColorUtils.withAlpha(root.uiPalette.hover, 0)
                         source: visible ? model.coverUrl : ""
                         fillMode: Image.PreserveAspectCrop
                         asynchronous: true
@@ -973,6 +1014,7 @@ Dialog {
                             source: (root.controller.uiBridge.playbackState || "") === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                             isMask: true
+                            roundToIconSize: false
                             // Over the dark scrim on the cover or the tile,
                             // the colour map's bright amber in both themes
                             // (fixed, like the plot's colours): the light
@@ -1066,21 +1108,53 @@ Dialog {
                         color: resultRow.titleColor
                     }
                     // The context, whole and regular; where the title has
-                    // no match, its matches are in the text colour.
+                    // no match, in runs, its matches semibold
+                    // (root.contextRuns). The first run, or the whole.
                     Text {
                         id: resultContext
+                        readonly property var run: resultRow.contextRuns.length > 0 ? resultRow.contextRuns[0] : null
                         objectName: "globalSearchResultContext"
-                        visible: resultRow.isResult
-                        x: root.contextX
-                        width: resultRow.contextWidth
+                        visible: resultRow.isResult && (!run || run.width > 0)
+                        x: root.contextX + (run ? run.x : 0)
+                        width: run ? run.width : resultRow.contextWidth
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
-                        // Always styled and always escaped: a format that
-                        // followed the text changed after it, so a reused
-                        // row read its metadata as markup for a moment.
-                        text: resultRow.matchedContext || root.escaped(resultRow.context)
-                        textFormat: Text.StyledText
+                        text: run ? run.text : resultRow.context
+                        textFormat: Text.PlainText
                         elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
+                        color: resultRow.secondaryColor
+                    }
+                    ContextRun {
+                        run: resultRow.contextRuns.length > 1 ? resultRow.contextRuns[1] : null
+                        x: root.contextX + (run ? run.x : 0)
+                        height: parent.height
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        color: resultRow.secondaryColor
+                    }
+                    ContextRun {
+                        run: resultRow.contextRuns.length > 2 ? resultRow.contextRuns[2] : null
+                        x: root.contextX + (run ? run.x : 0)
+                        height: parent.height
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        color: resultRow.secondaryColor
+                    }
+                    ContextRun {
+                        run: resultRow.contextRuns.length > 3 ? resultRow.contextRuns[3] : null
+                        x: root.contextX + (run ? run.x : 0)
+                        height: parent.height
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        color: resultRow.secondaryColor
+                    }
+                    ContextRun {
+                        run: resultRow.contextRuns.length > 4 ? resultRow.contextRuns[4] : null
+                        x: root.contextX + (run ? run.x : 0)
+                        height: parent.height
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
                         color: resultRow.secondaryColor
@@ -1220,12 +1294,14 @@ Dialog {
                             scrollbarLane: 0
                         }
                         Kirigami.Icon {
+                            objectName: "globalSearchAuxGlyph"
                             x: root.sideInset + (root.leadSize - width) / 2
                             y: Math.round((parent.height - height) / 2)
-                            width: root.glyphSize
-                            height: root.glyphSize
+                            width: root.leadGlyphSize
+                            height: root.leadGlyphSize
                             source: auxRow.modelData.kind === "recent" ? "view-history" : "search"
                             isMask: true
+                            roundToIconSize: false
                             color: root.uiPalette.textSecondary
                         }
                         Text {
@@ -1487,14 +1563,27 @@ Dialog {
     // "no cover". (Breeze's album and track glyphs were no mark at a large
     // font: their larger drawings, a green disc and a solid sheet, masked
     // to a blob at 24 pt.)
+    // A run of a result's context after its first.
+    component ContextRun: Text {
+        property var run: null
+        objectName: "globalSearchResultContext"
+        visible: !!run && run.width > 0
+        width: run ? run.width : 0
+        verticalAlignment: Text.AlignVCenter
+        text: run ? run.text : ""
+        textFormat: Text.PlainText
+        elide: Text.ElideRight
+        font.weight: run && run.match ? Font.DemiBold : Font.Normal
+    }
     Component {
         id: artistGlyph
         Kirigami.Icon {
             objectName: "globalSearchArtistGlyph"
-            width: root.glyphSize
-            height: root.glyphSize
+            width: root.leadGlyphSize
+            height: root.leadGlyphSize
             source: "view-media-artist"
             isMask: true
+            roundToIconSize: false
             color: root.uiPalette.textSecondary
         }
     }
