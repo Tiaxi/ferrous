@@ -67,6 +67,7 @@ private slots:
     void drawsOffscreenUnlessAPlatformIsChosen();
     void drawingWritesNoShaderCache();
     void nowPlayingFollowsBridgeClientsSnapshots();
+    void theQueuesMessageAndTotalsChangeWithItsRows();
     void aBackendThatCannotStartShowsWhyInRecentErrorsAndTheStatusBar();
 };
 
@@ -1672,6 +1673,77 @@ void WindowSmokeTest::nowPlayingFollowsBridgeClientsSnapshots() {
     const NowPlayingWindow ui(bridge, QSize(1000, 720));
     QVERIFY2(ui.panel != nullptr, "Main.qml failed to show");
     checkTaglessFileFacts(ui, true);
+}
+
+// The queue's empty message and its header's totals change in the frame in
+// which BridgeClient's rows do. They followed the coalesced snapshot
+// notification, up to 33 ms behind the rows: "The queue is empty" drew over
+// the first tracks added to an empty queue, a cleared queue showed an empty
+// list without it, and the totals lagged the rows.
+void WindowSmokeTest::theQueuesMessageAndTotalsChangeWithItsRows() {
+    BridgeClient bridge;
+    detachFromTheBackend(bridge);
+    const NowPlayingWindow ui(bridge, QSize(1200, 800));
+    QVERIFY2(ui.window != nullptr, "Main.qml failed to show");
+    QQuickItem *message = ui.item("queueEmptyMessage");
+    QQuickItem *view = ui.item("playlistView");
+    QQuickItem *header = ui.item("queueRegionHeader");
+    QVERIFY(message != nullptr && view != nullptr && header != nullptr);
+
+    // A loaded library with a folder, and nothing queued.
+    BinaryBridgeCodec::DecodedSnapshot empty;
+    empty.library.present = true;
+    empty.library.loaded = true;
+    empty.library.rootCount = 1;
+    empty.queue.present = true;
+    empty.queue.kind = BinaryBridgeCodec::QueueFull;
+    empty.queue.revision = 1;
+    QVERIFY(ui.deliver(empty));
+    QTRY_VERIFY(message->isVisible());
+    QCOMPARE(header->property("totals").toString(), QString());
+
+    // A grab draws the next frame without letting the timers run.
+    const auto drawFrame = [&ui]() { (void)ui.window->grabWindow(); };
+
+    BinaryBridgeCodec::DecodedSnapshot added;
+    added.queue.present = true;
+    added.queue.kind = BinaryBridgeCodec::QueueFull;
+    added.queue.revision = 2;
+    added.queue.len = 3;
+    added.queue.totalDurationSeconds = 180.0;
+    for (int i = 0; i < 3; ++i) {
+        BinaryBridgeCodec::DecodedQueueTrack track;
+        track.title = QStringLiteral("Track %1").arg(i + 1);
+        track.path = QStringLiteral("/music/%1.flac").arg(i + 1);
+        track.lengthSeconds = 60.0f;
+        added.queue.tracks.push_back(track);
+    }
+    ui.deliver(added);
+    drawFrame();
+    QCOMPARE(view->property("count").toInt(), 3);
+    QVERIFY(!message->isVisible());
+    QVERIFY2(header->property("totals").toString().startsWith(QStringLiteral("3 tracks")),
+             qPrintable(header->property("totals").toString()));
+    QVERIFY2(header->property("totals").toString().endsWith(QStringLiteral("3:00")),
+             qPrintable(header->property("totals").toString()));
+
+    // Clear Queue.
+    BinaryBridgeCodec::DecodedSnapshot cleared;
+    cleared.queue.present = true;
+    cleared.queue.kind = BinaryBridgeCodec::QueueDelta;
+    cleared.queue.baseRevision = 2;
+    cleared.queue.revision = 3;
+    cleared.queue.len = 0;
+    BinaryBridgeCodec::DecodedQueueOp removeAll;
+    removeAll.type = BinaryBridgeCodec::QueueOpRemove;
+    removeAll.index = 0;
+    removeAll.count = 3;
+    cleared.queue.ops.push_back(removeAll);
+    ui.deliver(cleared);
+    drawFrame();
+    QCOMPARE(view->property("count").toInt(), 0);
+    QVERIFY(message->isVisible());
+    QCOMPARE(header->property("totals").toString(), QString());
 }
 
 // A backend that could not start fails before the window is made: the
