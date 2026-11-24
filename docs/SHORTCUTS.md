@@ -60,7 +60,7 @@ Tab and Shift+Tab move between the controls, including the transport buttons, th
 
 In **Configure Ferrous** (**Settings › Configure Ferrous…**), the page list has the keyboard first: Up and Down move between the pages, and so do Ctrl+Tab and Ctrl+Shift+Tab, or Ctrl+PageDown and Ctrl+PageUp, from anywhere in the dialog. Tab goes on to the page's controls and the buttons. Changes to the settings take effect with OK or Apply, and Escape cancels them; changes to the library folders and the Last.fm account take effect at once.
 
-In **Edit Tags**, Tab and Shift+Tab move from field to field, past an edited field's Revert. After the last field, Tab goes through the edited fields' Revert buttons, then to the files and on through the Revert buttons in their column headings. Space or Enter presses a Revert.
+In **Edit Tags**, Tab and Shift+Tab move from field to field, past an edited field's Revert. After the last field, Tab goes through the edited fields' Revert buttons, then to the files and on through the Revert buttons in their column headings. Space or Enter presses a Revert. A field that reads "Mixed" keeps the selected files' different values; Backspace or Delete in it erases "Mixed", and the tag is cleared in every selected file once you leave the field. Text typed into it and erased again changes nothing.
 
 In **Recent Issues**, the arrow and Page keys scroll the list, and Tab reaches each issue's action, Open Diagnostics… and Clear All.
 

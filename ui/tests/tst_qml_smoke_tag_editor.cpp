@@ -6,6 +6,7 @@
 
 #include <QAccessible>
 #include <QJSValue>
+#include <QKeyEvent>
 #include <QQmlContext>
 #include <QQmlExpression>
 #include <QQuickTextDocument>
@@ -29,6 +30,9 @@ private slots:
     void typedTextCanBeSavedBeforeTheFieldIsLeft();
     void typedTextMarksItsChangeAtOnce();
     void typedTextShowsInItsRowsCells();
+    void typingAndErasingAFieldAppliesNothing_data();
+    void typingAndErasingAFieldAppliesNothing();
+    void erasingMixedClearsTheFieldInEveryFile();
     void closingTheTagEditorKeepsTheFieldBeingTyped();
     void tagEditorStaysOpenWhileSavingAndShowsTheResult();
     void closingTheWindowWithTagEditsAsksAndCancelKeepsThem();
@@ -585,6 +589,186 @@ void TagEditorSmokeTest::typedTextShowsInItsRowsCells() {
     QTest::keyClick(fixture.tags(), '0');
     QTest::keyClick(fixture.tags(), '7');
     QTRY_COMPARE(cells(QStringLiteral("trackNo")).at(2), QStringLiteral("7"));
+}
+
+// A field typed in and typed back to the text it had applies nothing,
+// however it is left: Tab, Return, a click in another field, Save, or
+// closing the editor. In a field whose files held different values
+// ("Mixed"), the text it had is none, and leaving it cleared the tag in
+// every selected file, which Save then wrote (#746).
+void TagEditorSmokeTest::typingAndErasingAFieldAppliesNothing_data() {
+    QTest::addColumn<QString>("key");
+    QTest::addColumn<QString>("placeholder");
+    QTest::newRow("mixed") << QStringLiteral("title") << QStringLiteral("Mixed");
+    QTest::newRow("one value") << QStringLiteral("artist") << QString();
+}
+
+void TagEditorSmokeTest::typingAndErasingAFieldAppliesNothing() {
+    QFETCH(QString, key);
+    QFETCH(QString, placeholder);
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(3, false));
+    fixture.editor.selectRange(0, 1);
+    QQuickItem *content = fixture.tags()->contentItem();
+    const auto item = [content](const QString &name) {
+        return qobject_cast<QQuickItem *>(findQuickItemByObjectName(content, name));
+    };
+    QQuickItem *field = item(QStringLiteral("tagEditorField_") + key);
+    QQuickItem *other = item(QStringLiteral("tagEditorField_album"));
+    QQuickItem *save = item(QStringLiteral("tagEditorSaveButton"));
+    QVERIFY(field != nullptr && other != nullptr && save != nullptr);
+    QTRY_COMPARE(field->property("placeholderText").toString(), placeholder);
+    const QString shown = field->property("text").toString();
+    const auto values = [&]() {
+        QStringList texts;
+        for (int row = 0; row < 3; ++row) {
+            texts << fixture.editor.m_tableModel.fieldValue(row, key);
+        }
+        return texts;
+    };
+    const QStringList loaded = values();
+
+    const auto pendingEdit = [&]() {
+        return fixture.dialog->property("pendingEditField").value<QObject *>() != nullptr;
+    };
+    const auto typeAndErase = [&]() {
+        field->forceActiveFocus();
+        QTRY_VERIFY(field->hasActiveFocus());
+        QTest::keyClick(fixture.tags(), 'x');
+        QVERIFY(pendingEdit());
+        QVERIFY(save->isEnabled());
+        QTest::keyClick(fixture.tags(), Qt::Key_Backspace);
+        QVERIFY(!pendingEdit());
+        QCOMPARE(save->isEnabled(), fixture.editor.dirty());
+    };
+    const QList<std::pair<const char *, std::function<void()>>> leaves{
+        {"Tab", [&]() { QTest::keyClick(fixture.tags(), Qt::Key_Tab); }},
+        {"Return", [&]() { QTest::keyClick(fixture.tags(), Qt::Key_Return); }},
+        {"a click elsewhere",
+         [&]() {
+             QTest::mouseClick(fixture.tags(), Qt::LeftButton, Qt::NoModifier,
+                               other->mapToScene(QPointF(other->width() / 2, other->height() / 2)).toPoint());
+             QTRY_VERIFY(other->hasActiveFocus());
+         }},
+        {"Save", [&]() { QTest::keyClick(fixture.tags(), Qt::Key_S, Qt::ControlModifier); }},
+    };
+    for (const auto &[name, leave] : leaves) {
+        typeAndErase();
+        leave();
+        QCoreApplication::processEvents();
+        QVERIFY2(!fixture.editor.dirty(), name);
+        QVERIFY2(values() == loaded, name);
+        QVERIFY2(field->property("text").toString() == shown, name);
+        QVERIFY2(field->property("placeholderText").toString() == placeholder, name);
+    }
+    QCOMPARE(fixture.saves->saveCount(), 0);
+
+    // Saved with another edit, the field keeps its values too.
+    fixture.editor.setCell(0, QStringLiteral("album"), QStringLiteral("Other"));
+    QVERIFY(fixture.editor.dirty());
+    typeAndErase();
+    QVERIFY(save->isEnabled());
+    QTest::keyClick(fixture.tags(), Qt::Key_S, Qt::ControlModifier);
+    QTRY_COMPARE(fixture.saves->saveCount(), 1);
+    QTRY_VERIFY(!fixture.editor.saving());
+    QCOMPARE(values(), loaded);
+    QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("album")), QStringLiteral("Other"));
+    QVERIFY(!fixture.editor.dirty());
+
+    // Closing asks nothing, as there is nothing to save.
+    typeAndErase();
+    QTest::keyClick(fixture.tags(), Qt::Key_Escape);
+    QTRY_VERIFY(!fixture.editorShown());
+    QVERIFY(!fixture.confirmShown());
+    QCOMPARE(fixture.saves->saveCount(), 1);
+}
+
+// Erasing "Mixed" (Backspace or Delete in the empty field) clears the tag
+// in every selected file: a change, marked at once, that Save writes.
+// Typing after it, and erasing that, brings "Mixed" back.
+void TagEditorSmokeTest::erasingMixedClearsTheFieldInEveryFile() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(3, false));
+    fixture.editor.selectRange(0, 1);
+    QQuickItem *content = fixture.tags()->contentItem();
+    const auto item = [content](const QString &name) {
+        return qobject_cast<QQuickItem *>(findQuickItemByObjectName(content, name));
+    };
+    QQuickItem *title = item(QStringLiteral("tagEditorField_title"));
+    QQuickItem *revert = item(QStringLiteral("tagEditorRevert_title"));
+    QQuickItem *save = item(QStringLiteral("tagEditorSaveButton"));
+    QVERIFY(title != nullptr && revert != nullptr && save != nullptr);
+    const QString key = QStringLiteral("title");
+    const QString mixed = QStringLiteral("Mixed");
+    const auto titles = [&]() {
+        return QStringList{fixture.editor.m_tableModel.fieldValue(0, key),
+                           fixture.editor.m_tableModel.fieldValue(1, key),
+                           fixture.editor.m_tableModel.fieldValue(2, key)};
+    };
+    const QStringList loaded{QStringLiteral("Song 0"), QStringLiteral("Song 1"), QStringLiteral("Song 2")};
+    QTRY_COMPARE(title->property("placeholderText").toString(), mixed);
+    QCOMPARE(titles(), loaded);
+
+    title->forceActiveFocus();
+    QTRY_VERIFY(title->hasActiveFocus());
+    QTest::keyClick(fixture.tags(), Qt::Key_Backspace);
+    // Marked before it is applied: "Mixed" goes, Revert shows, Save is on.
+    QCOMPARE(title->property("placeholderText").toString(), QString());
+    QTRY_VERIFY(revert->isVisible());
+    QVERIFY(save->isEnabled());
+    QVERIFY(!fixture.editor.dirty());
+
+    // Typed after, and erased, it keeps the files' titles again.
+    QTest::keyClick(fixture.tags(), 'x');
+    QTest::keyClick(fixture.tags(), Qt::Key_Backspace);
+    QCOMPARE(title->property("placeholderText").toString(), mixed);
+    QVERIFY(!save->isEnabled());
+    QTest::keyClick(fixture.tags(), Qt::Key_Tab);
+    QCoreApplication::processEvents();
+    QVERIFY(!fixture.editor.dirty());
+    QCOMPARE(titles(), loaded);
+
+    // A held Backspace stops at the empty field, and Shift+Delete, which
+    // cuts, erases nothing either.
+    title->forceActiveFocus();
+    QTRY_VERIFY(title->hasActiveFocus());
+    QTest::keyClick(fixture.tags(), 'x');
+    QTest::keyClick(fixture.tags(), Qt::Key_Backspace);
+    QKeyEvent held(QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier, QString(), true);
+    QCoreApplication::sendEvent(fixture.tags(), &held);
+    QTest::keyClick(fixture.tags(), Qt::Key_Delete, Qt::ShiftModifier);
+    QCOMPARE(title->property("placeholderText").toString(), mixed);
+    QVERIFY(!save->isEnabled());
+    QTest::keyClick(fixture.tags(), Qt::Key_Tab);
+    QCoreApplication::processEvents();
+    QVERIFY(!fixture.editor.dirty());
+    QCOMPARE(titles(), loaded);
+
+    // Erased and left, both titles are empty, still marked.
+    title->forceActiveFocus();
+    QTRY_VERIFY(title->hasActiveFocus());
+    QTest::keyClick(fixture.tags(), Qt::Key_Backspace);
+    QTest::keyClick(fixture.tags(), Qt::Key_Tab);
+    QTRY_VERIFY(fixture.editor.dirty());
+    QCOMPARE(titles(), (QStringList{QString(), QString(), loaded.at(2)}));
+    QVERIFY(revert->isVisible());
+    QCOMPARE(title->property("placeholderText").toString(), QString());
+
+    // Revert gives "Mixed" back.
+    QVERIFY(QMetaObject::invokeMethod(revert, "clicked"));
+    QTRY_VERIFY(!fixture.editor.dirty());
+    QCOMPARE(titles(), loaded);
+    QCOMPARE(title->property("placeholderText").toString(), mixed);
+
+    // Delete erases it too, and Save writes the cleared titles.
+    title->forceActiveFocus();
+    QTRY_VERIFY(title->hasActiveFocus());
+    QTest::keyClick(fixture.tags(), Qt::Key_Delete);
+    QVERIFY(save->isEnabled());
+    QTest::keyClick(fixture.tags(), Qt::Key_S, Qt::ControlModifier);
+    QTRY_COMPARE(fixture.saves->saveCount(), 1);
+    QCOMPARE(titles(), (QStringList{QString(), QString(), loaded.at(2)}));
+    QTRY_VERIFY(!fixture.editor.saving());
 }
 
 void TagEditorSmokeTest::closingTheTagEditorKeepsTheFieldBeingTyped() {
