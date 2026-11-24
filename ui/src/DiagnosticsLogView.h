@@ -52,6 +52,12 @@ public:
 
     QString text() const { return m_layout.text(); }
     void setText(const QString &text);
+    // Adds `text` after the last line, on lines of its own, and drops the
+    // first `drop` lines (see DiagnosticsLogLayout::dropLines). Unlike setText, it keeps the place in
+    // the log and the selection with their text, and a place at the end of
+    // a log that scrolls at its end; it lays out and shapes nothing that was
+    // there.
+    Q_INVOKABLE void appendRecords(const QString &text, int drop = 0);
     int length() const { return m_layout.length(); }
 
     QFont font() const { return m_font; }
@@ -152,6 +158,7 @@ private:
     void invalidateLayout();
     void invalidateDrawing();
     void ensureLayout();
+    void updateContentHeight();
     bool handlesKey(const QKeyEvent *event) const;
     bool scrollForKey(const QKeyEvent *event);
     void requestScroll(qreal y);

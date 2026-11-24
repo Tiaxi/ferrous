@@ -246,8 +246,10 @@ Item {
         property var mutedChannelsMask: 0
         property string diagnosticsText: ""
         property string diagnosticsLogPath: ""
+        property bool diagnosticsShown: false
         property int sampleRateHz: 48000
         signal diagnosticsChanged()
+        signal diagnosticsLinesAdded(string lines, int droppedLines)
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
         signal precomputedSpectrogramChunkReady(var data, int bins, int channelCount, int columns,
@@ -308,6 +310,7 @@ Item {
         function reloadDiagnosticsFromDisk() {}
         function clearDiagnostics() {}
         function copyDiagnosticsWithoutPaths() {}
+        function flushDiagnostics() {}
         function libraryThumbnailSource(path, stamp) { return "" }
         function queuePathAt(index) { return "" }
         function playAt(index) {}

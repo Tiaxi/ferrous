@@ -17,6 +17,7 @@
 #include <QNetworkProxy>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QQuickItem>
 #include <QQuickWindow>
 #include <QSignalSpy>
 #include <QSemaphore>
@@ -52,9 +53,12 @@
 #include "../src/MprisController.h"
 #include "../src/SpectrogramItem.h"
 #include "../src/WindowPresence.h"
+#include "../src/DiagnosticsLogView.h"
 #undef private
 
 #include "../src/FerrousBridgeFfi.h"
+#include "../src/Localization.h"
+#include "../src/QmlTypes.h"
 #include "../src/BinaryBridgeCodec.h"
 #include <QtEndian>
 #include "../src/SpectrogramTraceLogging.h"
@@ -404,6 +408,7 @@ private slots:
     void eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths();
     void loggingDoesNotWaitForAStalledDisk();
     void readingTheLogDoesNotWaitForAStalledDisk();
+    void diagnosticsShowsAndCopiesLinesLoggedWhileItIsOpen();
     void mprisSeekedReportsEachSeekWhereItLanded();
     void mprisCannotSeekAStoppedTrack();
     void mprisReportsAReplayOfTheSameFileAsSeeked();
@@ -6252,6 +6257,139 @@ void BridgeClientTest::readingTheLogDoesNotWaitForAStalledDisk() {
     QCOMPARE(text.count(QStringLiteral("[app] info: before the reload")), 1);
     QCOMPARE(text.count(QStringLiteral("[app] info: during the reload")), 1);
     QVERIFY(text.indexOf(QStringLiteral("before the reload")) < text.indexOf(QStringLiteral("during the reload")));
+}
+
+// #743: a line logged while Diagnostics is open was in neither the dialog
+// nor Copy Without Paths until Reload. The dialog shows it where the reader
+// is, with what they selected, and both copies have every line logged
+// before the click.
+void BridgeClientTest::diagnosticsShowsAndCopiesLinesLoggedWhileItIsOpen() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QTRY_VERIFY(!client.diagnosticsLoading());
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    client.m_diagnosticsLogPath = dir.filePath(QStringLiteral("diagnostics.log"));
+    for (int n = 0; n < 300; ++n) {
+        client.logInfo(QStringLiteral("app"), QStringLiteral("line %1").arg(n));
+    }
+    // A line that the view breaks in two still counts as one of the log's.
+    client.logInfo(QStringLiteral("library"), QStringLiteral("Scanning \"/fixture/a\u2028b.flac\"."));
+    const auto asShown = [&client]() {
+        return client.diagnosticsText().replace(QChar::LineSeparator, QLatin1Char('\n'));
+    };
+    // Closed, Diagnostics costs the log nothing.
+    QVERIFY(!client.diagnosticsShown());
+    QVERIFY(client.m_pendingDiagnosticsShownLines.isEmpty());
+
+    static const bool registered = []() {
+        FerrousLocalization::setUpApplicationDomain();
+        registerFerrousQmlTypes();
+        return true;
+    }();
+    Q_UNUSED(registered);
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(R"QML(
+import QtQuick
+import QtQuick.Controls
+import "components" as Components
+import "dialogs" as Dialogs
+ApplicationWindow {
+    id: window
+    required property var bridge
+    width: 1000
+    height: 700
+    visible: true
+    property alias dialog: dialog
+    Components.UiPalette { id: uiPalette; windowRoot: window }
+    Dialogs.DiagnosticsDialog {
+        id: dialog
+        uiBridge: window.bridge
+        uiPalette: uiPalette
+        windowRoot: window
+    }
+}
+)QML",
+                      QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR)
+                                          + QStringLiteral("/qml/DiagnosticsHarness.qml")));
+    std::unique_ptr<QObject> root(
+        component.createWithInitialProperties({{QStringLiteral("bridge"), QVariant::fromValue(&client)}}));
+    QVERIFY2(root != nullptr, qPrintable(component.errorString()));
+    auto *dialog = qobject_cast<QQuickWindow *>(root->property("dialog").value<QObject *>());
+    QVERIFY(dialog != nullptr);
+    auto *view = root->findChild<DiagnosticsLogView *>();
+    auto *copyAll = root->findChild<QQuickItem *>(QStringLiteral("diagnosticsCopyAllButton"));
+    auto *copyWithoutPaths = root->findChild<QQuickItem *>(QStringLiteral("diagnosticsCopyWithoutPathsButton"));
+    QVERIFY(view != nullptr && copyAll != nullptr && copyWithoutPaths != nullptr);
+    QQuickItem *flickable = view->parentItem();
+    QVERIFY(flickable != nullptr && flickable->inherits("QQuickFlickable"));
+
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(QTest::qWaitForWindowExposed(dialog));
+    QTRY_VERIFY(!client.diagnosticsLoading());
+    QTRY_VERIFY(view->text().contains(QStringLiteral("[app] info: line 299")));
+
+    // The reader is down the log, with some of it selected.
+    QTRY_VERIFY(view->contentHeight() > view->height() + 400);
+    flickable->setProperty("contentY", 300.0);
+    QTRY_COMPARE(view->contentY(), 300.0);
+    const int from = static_cast<int>(view->text().indexOf(QStringLiteral("line 120")));
+    view->select(from, from + 200);
+    const QString selected = view->selectedText();
+
+    client.logInfo(QStringLiteral("playback"), QStringLiteral("logged while it is open"));
+    QVERIFY(client.diagnosticsTextWithoutPaths().endsWith(QStringLiteral("[playback] info: logged while it is open")));
+    QTRY_VERIFY(view->text().endsWith(QStringLiteral("[playback] info: logged while it is open")));
+    QCOMPARE(view->contentY(), 300.0);
+    QCOMPARE(view->selectionStart(), from);
+    QCOMPARE(view->selectedText(), selected);
+    QCOMPARE(view->text(), asShown());
+
+    // A line logged just before a click is in its copy.
+    client.logInfo(QStringLiteral("playback"), QStringLiteral("logged before Copy With Paths"));
+    QGuiApplication::clipboard()->clear();
+    QVERIFY(QMetaObject::invokeMethod(copyAll, "click"));
+    QString copied = QGuiApplication::clipboard()->text();
+    QVERIFY(copied.contains(QStringLiteral("[app] info: line 0\n")));
+    QVERIFY(copied.contains(QStringLiteral("[playback] info: logged while it is open\n")));
+    QVERIFY(copied.endsWith(QStringLiteral("[playback] info: logged before Copy With Paths")));
+    QCOMPARE(copied.count(QStringLiteral("logged while it is open")), 1);
+
+    client.logInfo(QStringLiteral("playback"), QStringLiteral("logged before Copy Without Paths"));
+    QGuiApplication::clipboard()->clear();
+    QVERIFY(QMetaObject::invokeMethod(copyWithoutPaths, "click"));
+    copied = QGuiApplication::clipboard()->text();
+    QVERIFY(copied.contains(QStringLiteral("[app] info: line 0\n")));
+    QCOMPARE(copied.count(QStringLiteral("[playback] info: logged while it is open\n")), 1);
+    QCOMPARE(copied.count(QStringLiteral("[playback] info: logged before Copy With Paths\n")), 1);
+    QVERIFY(copied.endsWith(QStringLiteral("[playback] info: logged before Copy Without Paths")));
+    QTRY_VERIFY(view->text().endsWith(QStringLiteral("[playback] info: logged before Copy Without Paths")));
+    QCOMPARE(view->text(), asShown());
+
+    // At its 2000 lines, the log drops its first ones, and the view each of
+    // them whole, the line it breaks in two too.
+    for (const int count : {1900, 200}) {
+        for (int n = 0; n < count; ++n) {
+            client.logInfo(QStringLiteral("app"), QStringLiteral("more %1").arg(n));
+        }
+        QCOMPARE(client.m_diagnosticsLines.size(), qsizetype(2000));
+        QVERIFY(QMetaObject::invokeMethod(copyAll, "click"));
+        QCOMPARE(view->text(), asShown());
+        QCOMPARE(QGuiApplication::clipboard()->text(), asShown());
+    }
+    QVERIFY(!view->text().contains(QStringLiteral("b.flac")));
+
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!dialog->isVisible());
+    QVERIFY(!client.diagnosticsShown());
+    QSignalSpy added(&client, &BridgeClient::diagnosticsLinesAdded);
+    client.logInfo(QStringLiteral("app"), QStringLiteral("logged while it is closed"));
+    QVERIFY(client.m_pendingDiagnosticsShownLines.isEmpty());
+    client.flushDiagnostics();
+    QCOMPARE(added.count(), 0);
+    QCOMPARE(view->length(), 0);
+    QVERIFY(client.diagnosticsTextWithoutPaths().endsWith(QStringLiteral("[app] info: logged while it is closed")));
 }
 
 void BridgeClientTest::reportedErrorsAreLoggedWithTheirCategoryAndSeverity() {

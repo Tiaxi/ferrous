@@ -670,7 +670,7 @@ BridgeClient::BridgeClient(QObject *parent)
         &m_diagnosticsFlushTimer,
         &QTimer::timeout,
         this,
-        &BridgeClient::flushPendingDiagnosticDiskLines);
+        &BridgeClient::flushDiagnostics);
     reloadDiagnosticsFromDisk();
     logDiagnostic(QStringLiteral("ui"), QStringLiteral("BridgeClient started"));
 
@@ -2307,7 +2307,7 @@ QString BridgeClient::itunesArtworkErrorText() const {
 }
 
 QString BridgeClient::diagnosticsText() const {
-    return m_diagnosticsText;
+    return m_diagnosticsLines.join(QLatin1Char('\n'));
 }
 
 QString BridgeClient::diagnosticsLogPath() const {
@@ -4464,13 +4464,12 @@ void BridgeClient::clearDiagnostics() {
     m_diagnosticsFlushTimer.stop();
     m_pendingDiagnosticsDiskLines.clear();
     m_diagnosticsLines.clear();
-    m_diagnosticsText.clear();
     // A read asked for before is of the old log.
     ++m_diagnosticsReadGeneration;
     m_diagnosticsLoading = false;
     // After the lines already handed to the writer.
     m_diagnosticsWriter->removeLog(m_diagnosticsLogPath);
-    emit diagnosticsChanged();
+    notifyDiagnosticsChanged();
     logDiagnostic(QStringLiteral("ui"), QStringLiteral("diagnostics cleared"));
 }
 
@@ -4481,7 +4480,7 @@ void BridgeClient::reloadDiagnosticsFromDisk() {
     const QString logPath = m_diagnosticsLogPath;
     if (!m_diagnosticsLoading) {
         m_diagnosticsLoading = true;
-        emit diagnosticsChanged();
+        notifyDiagnosticsChanged();
     }
     // The writer reads after the lines it was given before, and the GUI
     // thread never waits for the disk. The writer is this object's, and
@@ -4513,8 +4512,7 @@ void BridgeClient::applyDiagnosticsRead(quint64 generation, quint64 loggedBefore
     }
     m_diagnosticsLines = std::move(lines);
     m_diagnosticsLoading = false;
-    rebuildDiagnosticsText();
-    emit diagnosticsChanged();
+    notifyDiagnosticsChanged();
 }
 
 void BridgeClient::logDiagnostic(const QString &category, const QString &message) {
@@ -4526,12 +4524,12 @@ void BridgeClient::logDiagnostic(const QString &category, const QString &message
     const QString line = QStringLiteral("[%1] [%2] %3").arg(ts, cat, msg);
 
     appendDiagnosticLine(line);
-
-    if (m_diagnosticsLogPath.isEmpty()) {
-        return;
+    if (!m_diagnosticsLogPath.isEmpty()) {
+        m_pendingDiagnosticsDiskLines.push_back(line);
     }
-    m_pendingDiagnosticsDiskLines.push_back(line);
-    if (!m_diagnosticsFlushTimer.isActive()) {
+    // The file and Diagnostics take the lines a batch at a time.
+    if ((!m_pendingDiagnosticsDiskLines.isEmpty() || !m_pendingDiagnosticsShownLines.isEmpty())
+        && !m_diagnosticsFlushTimer.isActive()) {
         m_diagnosticsFlushTimer.start();
     }
 }
@@ -4569,7 +4567,7 @@ QString BridgeClient::diagnosticsTextWithoutPaths() const {
     if (!m_diagnosticsLogPath.isEmpty()) {
         redaction.keptFolders.push_back(QFileInfo(m_diagnosticsLogPath).absolutePath());
     }
-    return DiagnosticsLog::withoutPaths(m_diagnosticsText, redaction);
+    return DiagnosticsLog::withoutPaths(diagnosticsText(), redaction);
 }
 
 void BridgeClient::copyDiagnosticsWithoutPaths() {
@@ -4580,6 +4578,23 @@ void BridgeClient::copyDiagnosticsWithoutPaths() {
     if (QClipboard *clipboard = QGuiApplication::clipboard()) {
         clipboard->setText(diagnosticsTextWithoutPaths());
     }
+}
+
+void BridgeClient::flushDiagnostics() {
+    showPendingDiagnosticLines();
+    flushPendingDiagnosticDiskLines();
+}
+
+void BridgeClient::setDiagnosticsShown(bool shown) {
+    if (m_diagnosticsShown == shown) {
+        return;
+    }
+    m_diagnosticsShown = shown;
+    // Opening, it takes diagnosticsText, which has them; closed, it takes
+    // none.
+    m_pendingDiagnosticsShownLines.clear();
+    m_pendingDiagnosticsShownDrops = 0;
+    emit diagnosticsShownChanged();
 }
 
 void BridgeClient::logProfileDiagnostic(const QString &category, const QString &message) const {
@@ -4602,6 +4617,18 @@ void BridgeClient::appendDiagnosticLine(const QString &line) {
         m_diagnosticsLines.erase(
             m_diagnosticsLines.begin(),
             m_diagnosticsLines.begin() + removeCount);
+        if (m_diagnosticsShown) {
+            m_pendingDiagnosticsShownDrops += removeCount;
+        }
+    }
+    if (m_diagnosticsShown) {
+        m_pendingDiagnosticsShownLines.push_back(line);
+        // Of a burst, the lines the log keeps: the one dropped was never
+        // shown.
+        if (m_pendingDiagnosticsShownLines.size() > kMaxDiagnosticsLines) {
+            m_pendingDiagnosticsShownLines.removeFirst();
+            --m_pendingDiagnosticsShownDrops;
+        }
     }
 }
 
@@ -4615,8 +4642,22 @@ void BridgeClient::flushPendingDiagnosticDiskLines() {
     m_diagnosticsWriter->post(m_diagnosticsLogPath, std::move(lines));
 }
 
-void BridgeClient::rebuildDiagnosticsText() {
-    m_diagnosticsText = m_diagnosticsLines.join(QLatin1Char('\n'));
+void BridgeClient::showPendingDiagnosticLines() {
+    if (m_pendingDiagnosticsShownLines.isEmpty()) {
+        return;
+    }
+    const QString lines = m_pendingDiagnosticsShownLines.join(QLatin1Char('\n'));
+    const int dropped = m_pendingDiagnosticsShownDrops;
+    m_pendingDiagnosticsShownLines.clear();
+    m_pendingDiagnosticsShownDrops = 0;
+    emit diagnosticsLinesAdded(lines, dropped);
+}
+
+void BridgeClient::notifyDiagnosticsChanged() {
+    // diagnosticsText has the lines that were still to show.
+    m_pendingDiagnosticsShownLines.clear();
+    m_pendingDiagnosticsShownDrops = 0;
+    emit diagnosticsChanged();
 }
 
 QString BridgeClient::resolveDiagnosticsLogPath() {

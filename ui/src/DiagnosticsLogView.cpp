@@ -111,6 +111,72 @@ void DiagnosticsLogView::setText(const QString &text) {
     }
 }
 
+void DiagnosticsLogView::appendRecords(const QString &text, int drop) {
+    if (text.isEmpty()) {
+        return;
+    }
+    // Laid out, only the new records' rows are placed.
+    if (width() > 0) {
+        ensureLayout();
+    }
+    const bool laidOut = !m_layoutDirty;
+    // A reader at the end of a log that scrolls follows it, as in a
+    // terminal; anywhere else the rows in view stay where they are.
+    const bool atEnd = laidOut && m_contentHeight > height() && m_contentY + height() >= m_contentHeight - 1;
+    const bool announces = QAccessible::isActive();
+    const int before = length();
+    m_layout.append(text);
+    if (announces) {
+        QAccessibleTextInsertEvent inserted(this, before, m_layout.text().mid(before));
+        QAccessible::updateAccessibility(&inserted);
+    }
+    DiagnosticsLogLayout::Dropped dropped;
+    if (drop > 0) {
+        const QString shown = announces ? m_layout.text() : QString();
+        dropped = m_layout.dropLines(drop);
+        if (announces && dropped.characters > 0) {
+            QAccessibleTextRemoveEvent removal(this, 0, shown.left(dropped.characters));
+            QAccessible::updateAccessibility(&removal);
+        }
+    }
+    // Shares the layout's text: setting it again changes nothing.
+    m_source = m_layout.text();
+
+    const auto moved = [&dropped](int position) { return std::max(0, position - dropped.characters); };
+    const bool selectionMoved = dropped.characters > 0 && (m_anchor > 0 || m_caret > 0);
+    m_anchor = moved(m_anchor);
+    m_caret = moved(m_caret);
+    m_dragOrigin = {moved(m_dragOrigin.start), moved(m_dragOrigin.end)};
+    if (m_held.position >= 0) {
+        m_held.position = moved(m_held.position);
+    }
+    if (dropped.rows > 0) {
+        // The rows that show keep their layouts, under their new numbers.
+        std::map<int, ShownRow> shown;
+        for (auto &[index, row] : m_shown) {
+            if (index >= dropped.rows) {
+                shown.emplace(index - dropped.rows, std::move(row));
+            }
+        }
+        m_shown = std::move(shown);
+    }
+    if (laidOut) {
+        updateContentHeight();
+        const qreal bottom = std::max(0.0, m_contentHeight - height());
+        const qreal y = atEnd ? bottom
+                              : std::clamp(m_contentY - dropped.rows * m_layout.rowHeight(), 0.0, bottom);
+        if (y != m_contentY) {
+            requestScroll(y);
+        }
+    }
+    polish();
+    update();
+    emit textChanged();
+    if (selectionMoved) {
+        emit selectionChanged();
+    }
+}
+
 void DiagnosticsLogView::setFont(const QFont &font) {
     if (m_font == font) {
         return;
@@ -222,11 +288,7 @@ void DiagnosticsLogView::ensureLayout() {
 
     // Scrolling forgets it, and the new height may itself scroll.
     const Held held = m_held;
-    const qreal contentHeight = m_topPadding + m_layout.rowCount() * m_layout.rowHeight() + m_bottomPadding;
-    if (m_contentHeight != contentHeight) {
-        m_contentHeight = contentHeight;
-        emit contentHeightChanged();
-    }
+    updateContentHeight();
     if (held.end || held.position >= 0) {
         const qreal bottom = std::max(0.0, m_contentHeight - height());
         const qreal y = held.end
@@ -235,6 +297,14 @@ void DiagnosticsLogView::ensureLayout() {
                          bottom);
         requestScroll(y);
         m_held = held;
+    }
+}
+
+void DiagnosticsLogView::updateContentHeight() {
+    const qreal contentHeight = m_topPadding + m_layout.rowCount() * m_layout.rowHeight() + m_bottomPadding;
+    if (m_contentHeight != contentHeight) {
+        m_contentHeight = contentHeight;
+        emit contentHeightChanged();
     }
 }
 
