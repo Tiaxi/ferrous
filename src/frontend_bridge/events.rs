@@ -3147,7 +3147,14 @@ mod tests {
             !state.snapshot(false).library_status.loaded,
             "the empty start is not the library"
         );
-        let read = || LibraryEvent::with_library(crate::library::LibrarySnapshot::default());
+        // The worker sends no roots it has not changed: the status alone.
+        let read = || LibraryEvent {
+            status: crate::library::LibraryStatus {
+                loaded: true,
+                ..crate::library::LibraryStatus::default()
+            },
+            ..LibraryEvent::default()
+        };
 
         let applied = apply_library_events([read()], &mut state);
 

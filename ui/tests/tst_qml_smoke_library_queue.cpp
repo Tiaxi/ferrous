@@ -3464,7 +3464,20 @@ void LibraryQueueSmokeTest::aLibraryThatCannotBeOpenedOffersNoFirstRun() {
     QTRY_VERIFY_WITH_TIMEOUT(openFailureReported(), 10000);
     QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
     QVERIFY(errors != nullptr);
-    QTRY_VERIFY(errors->property("unseenErrorCount").toInt() > 0);
+    auto *entries = qvariant_cast<QAbstractItemModel *>(errors->property("entries"));
+    QVERIFY(entries != nullptr);
+    const int messageRole = entries->roleNames().key("message", -1);
+    QVERIFY(messageRole >= 0);
+    const auto inRecentIssues = [entries, messageRole]() {
+        for (int row = 0; row < entries->rowCount(); ++row) {
+            if (entries->data(entries->index(row, 0), messageRole).toString().contains(
+                    QStringLiteral("could not open the library database"))) {
+                return true;
+            }
+        }
+        return false;
+    };
+    QTRY_VERIFY(inRecentIssues());
     QQuickItem *statusButton = window->findChild<QQuickItem *>(QStringLiteral("statusBarErrorsButton"));
     QVERIFY(statusButton != nullptr);
     QTRY_VERIFY(statusButton->isVisible());
