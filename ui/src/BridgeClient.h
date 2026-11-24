@@ -70,7 +70,9 @@ class BridgeClient : public QObject {
     // queueUndoKind name the change to undo.
     Q_PROPERTY(double queueRedoId READ queueRedoId NOTIFY queueUndoChanged)
     Q_PROPERTY(int queueRedoKind READ queueRedoKind NOTIFY queueUndoChanged)
-    Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY trackIdentityChanged)
+    // The playing row changes with the rows as well, such as when a track
+    // is put before it: see queueChanged. trackIdentityChanged follows.
+    Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY queueChanged)
     // The length its queue row gives the current track, as the row shows
     // it, or empty without a row: for a track that is stopped, whose
     // length the engine may not have.
@@ -614,11 +616,13 @@ signals:
     void trackIdentityChanged();
     void trackMetadataChanged();
     void snapshotChanged();
-    // The queue's count or totals changed: at the end of the poll that
-    // changed its rows, not with the coalesced snapshotChanged, so nothing
-    // bound to them draws a frame behind the rows (an empty queue's message
-    // over its first rows, or none over a cleared list). snapshotChanged
-    // follows as well, for its handlers.
+    // The queue's count, totals or playing row changed: at the end of the
+    // poll that changed them, not with the coalesced snapshotChanged or the
+    // queued trackIdentityChanged, so nothing bound to them draws a frame
+    // behind the rows (an empty queue's message over its first rows, none
+    // over a cleared list, or new rows without the playing row's mark).
+    // snapshotChanged, and trackIdentityChanged for a new playing row,
+    // follow as well, for their handlers.
     void queueChanged();
     // The volume changed: at once for a request of the UI's, and with the
     // snapshot for one of the backend's, such as a change made outside the
