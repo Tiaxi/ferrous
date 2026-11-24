@@ -4172,6 +4172,35 @@ void SpectrogramItem::feedPrecomputedChunk(
     }
 
     bool appliedReset = false;
+    // The first columns of the session a waiting reset starts, which came
+    // under the gapless successor's token rather than the reset's: a session
+    // that starts at the end of a track, as a rolling zoom's restart there
+    // does, can have no whole column of it before it goes on into the next
+    // file, whose rows complete its last interval (#714). Its generation
+    // tells they are its columns: the reset starts them, and the token's
+    // change is the gapless continuation it is (#742).
+    const bool resetContinuesIntoSuccessor = m_precomputedResetPending
+        && !bufferReset
+        && generation != 0
+        && generation == m_precomputedPendingResetGeneration
+        && trackToken != 0
+        && m_precomputedPendingResetTrackToken != 0
+        && trackToken != m_precomputedPendingResetTrackToken;
+    if (resetContinuesIntoSuccessor && columns <= 0) {
+        // The successor's token alone, which the worker sends when the
+        // track switches to it: the continuation waits for the columns,
+        // which carry the token too, so that the reset comes first.
+        return;
+    }
+    if (resetContinuesIntoSuccessor
+        && m_awaitingZoomData
+        && m_clockState.trackToken == trackToken
+        && m_zoomClockEpoch == m_previousTrackClockState.epoch) {
+        // The clock plays the successor already: the zoom's restart, which
+        // went on into it, is of the playback the zoom was asked in, as
+        // continueGaplessLocked has it, and keeps the history it previews.
+        m_zoomClockEpoch = m_clockState.epoch;
+    }
 
     // The analysis thread's reset, without a format, which ends the
     // session before the worker's own reset starts the next: on a refill
@@ -4404,7 +4433,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         && bins == m_precomputedPendingResetBins
         && (m_precomputedPendingResetTrackToken == 0
             || trackToken == 0
-            || trackToken == m_precomputedPendingResetTrackToken)
+            || trackToken == m_precomputedPendingResetTrackToken
+            || resetContinuesIntoSuccessor)
         && (m_precomputedPendingResetGeneration == 0
             || generation == 0
             || generation == m_precomputedPendingResetGeneration)) {
@@ -4439,11 +4469,14 @@ void SpectrogramItem::feedPrecomputedChunk(
         appliedReset = true;
     }
 
+    // A reset whose columns go on into the successor is applied first, as
+    // if its own had come before theirs.
+    const bool gaplessAfterReset = !appliedReset || resetContinuesIntoSuccessor;
     if (trackToken != 0
         && m_precomputedTrackToken != 0
         && trackToken != m_precomputedTrackToken
         && !bufferReset
-        && !appliedReset
+        && gaplessAfterReset
         && !appliedImplicitReset) {
         // New track token — reset per-track max column index so it
         // reflects the new track's range, not the old one's.
@@ -4500,7 +4533,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         trackToken != 0
         && m_precomputedTrackToken != 0
         && trackToken != m_precomputedTrackToken
-        && !bufferReset && !appliedReset && !appliedImplicitReset;
+        && !bufferReset && gaplessAfterReset && !appliedImplicitReset;
     // Centered same-track seeks outside the current window restart the
     // worker with the SAME track token but a non-zero start column.
     // Fresh SpectrogramItem instances can miss the prior synthetic clear,
@@ -4509,6 +4542,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     // otherwise a same-track seek at max zoom-out gets misclassified as a
     // fresh-track backend/hop desync and forces zoom back to 1.0.
     const bool isTrackChange = appliedReset
+        && !resetContinuesIntoSuccessor
         && startIndex == 0
         && trackToken != 0
         && (m_precomputedTrackToken == 0 || trackToken != m_precomputedTrackToken);
@@ -4581,9 +4615,11 @@ void SpectrogramItem::feedPrecomputedChunk(
                 m_precomputedHopSize, dataIsForZoom ? backendZoomForRequestLocked() : 1.0);
             m_crosshairDirty = true;
         }
-        if (appliedReset) {
+        if (appliedReset && !resetContinuesIntoSuccessor) {
             // The worker's data for the new position has arrived, so the
-            // playhead follows the clock again.
+            // playhead follows the clock again. Columns that go on into a
+            // gapless successor leave the playhead to the continuation,
+            // which has placed it.
             const auto now = m_now();
             releasePositionHoldLocked(now);
             if (m_displayMode == 0
@@ -5182,7 +5218,10 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     // centered-mode monotonic clamp doesn't stick at old positions. The
     // times from here on start over at the track's: the layers' times are
     // counted from the offset's sum (m_streamOrigin).
+    // So are those of the track the clock has left, which a continuation
+    // into its successor, after a zoom's restart of it, goes on from.
     m_streamOrigin += m_gaplessPositionOffset;
+    m_previousTrackPositionOffset -= m_gaplessPositionOffset;
     m_gaplessPositionOffset = 0.0;
     m_gaplessContinuationPending = continuesGapless;
     m_gaplessContinuationRebased = continuesGapless;
