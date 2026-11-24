@@ -119,8 +119,22 @@ ToolBar {
     function bitrateText(kbps) {
         return I18n.i18nc("@info:status bitrate", "%1 kbps", kbps)
     }
-    // The room of a bitrate of four digits, in tabular figures.
+    // The room a bitrate keeps, in tabular figures: that of the most digits
+    // the track's bitrate has had, and at least three. The bitrate changes
+    // as the track plays, and its digits held for the track keep the modes
+    // after it still while a lossless one goes over 1,000 kbps and back;
+    // a new track starts again from the digits of its bitrate as it is.
+    // (The room of four digits for every track left some 15 px after
+    // "514 kbps", so the groups stood 20, 33 and 20 px apart.)
     readonly property real bitrateRoom: Math.ceil(bitrateMetrics.advanceWidth)
+    property int bitrateDigits: 3
+    readonly property string bitrateTrack: root.uiBridge.currentTrackPath || ""
+    function bitrateDigitsOf(kbps) {
+        return Math.max(3, String(kbps).length)
+    }
+    onBitrateTrackChanged: root.bitrateDigits = root.bitrateDigitsOf(root.bitrateKbps)
+    onBitrateKbpsChanged: root.bitrateDigits = Math.max(root.bitrateDigits, root.bitrateDigitsOf(root.bitrateKbps))
+    Component.onCompleted: root.bitrateDigits = root.bitrateDigitsOf(root.bitrateKbps)
 
     readonly property bool scanning: root.uiBridge.libraryScanInProgress === true
     readonly property int scanProcessed: Math.max(0, Number(root.uiBridge.libraryScanProcessed) || 0)
@@ -155,6 +169,14 @@ ToolBar {
         : root.scanProcessed > 0
             ? root.scannedFilesText(root.scanProcessed)
             : ""
+
+    // The widest count of files scanned with as many digits as the count,
+    // and at least three: 999, 9,999, 99,999 and so on. The count only
+    // grows through a scan, so the room it keeps after the words grows at
+    // 1,000 and 10,000 files and never shrinks while the scan goes on
+    // (the room of "99,999 files" from the first file left a hole of some
+    // 30 px after "57 files").
+    readonly property int scanCountReserve: Math.pow(10, Math.max(3, String(root.scanProcessed).length)) - 1
 
     // The files scanned so far, as the scan without a total counts them:
     // "412 files".
@@ -196,8 +218,9 @@ ToolBar {
         font.family: root.uiPalette.baseFont.family
         font.pointSize: root.uiPalette.smallPointSize
         font.features: root.uiPalette.tabularFigures
-        // As a number, which is written as a bitrate is.
-        text: root.bitrateText(8888)
+        // As a number of the held digits, which is written as a bitrate
+        // is.
+        text: root.bitrateText(Math.pow(10, root.bitrateDigits) - 1)
     }
 
     // A 12 px label of the status bar.
@@ -380,8 +403,8 @@ ToolBar {
             // modes leave, dropping them from the end (it went by the
             // window's width, and showed "FLAC" alone with most of the bar
             // empty), and is as wide as those. A bitrate has the room of
-            // four digits, so that one that changes doesn't move the modes
-            // after it.
+            // the most digits it has had in the track, so that one that
+            // changes doesn't move the modes after it.
             Item {
                 id: formatGroup
                 objectName: "statusBarFormat"
@@ -392,17 +415,17 @@ ToolBar {
                 clip: formatRow.implicitWidth > width
                 readonly property real room: Math.max(0, Math.floor(leadingGroups.width - leadingGroups.modesRoom))
                 // Where each part ends, after the first with the separator
-                // before it, and the bitrate with its room.
+                // before it, and the bitrate with its room: the parts up to
+                // it measured as one, so the gap after them is the 16 px
+                // the modes keep (each part in whole pixels left up to 7 px
+                // more).
                 readonly property var partEnds: {
-                    const parts = root.formatParts
-                    const dot = formatGroup.widthOf(FormatUtils.fieldSeparator)
-                    const bitrateAt = root.bitrateKbps > 0 ? parts.length - 1 : -1
-                    let end = 0
-                    return parts.map((part, i) => {
-                        const width = formatGroup.widthOf(part)
-                        end += (i === bitrateAt ? Math.max(root.bitrateRoom, width) : width) + (i > 0 ? dot : 0)
-                        return end
-                    })
+                    const bitrateAt = root.bitrateKbps > 0 ? root.formatParts.length - 1 : -1
+                    const measured = root.formatParts.map((part, i) => i === bitrateAt
+                        ? root.bitrateText(Math.max(root.bitrateKbps, Math.pow(10, root.bitrateDigits) - 1))
+                        : part)
+                    return measured.map((part, i) =>
+                        formatGroup.widthOf(measured.slice(0, i + 1).join(FormatUtils.fieldSeparator)))
                 }
                 // All of it, with a bitrate's room also while none is known.
                 readonly property real wholeWidth: formatGroup.partEnds.length === 0 ? 0
@@ -536,8 +559,9 @@ ToolBar {
         // and its words are (the percent, right-aligned in the room of
         // "100%" after the words, stood some 16 px off them). The percent
         // keeps the width of "100%" after it, and the count without a total
-        // that of "99,999 files", in tabular figures, so nothing in the
-        // status bar moves as it counts (the count's own width moved the
+        // that of the widest count of its digits, at least "999 files", in
+        // tabular figures, so nothing in the status bar moves as it counts
+        // but at 1,000 and 10,000 files (the count's own width moved the
         // words left at 10, 100 and 1,000 files).
         // Nothing in it moves on its own (#373: no indeterminate
         // animation), so it is still with the desktop's animations off.
@@ -611,16 +635,17 @@ ToolBar {
                 text: root.scanCountText
                 // The count keeps the room of the widest after it, the
                 // bar and the words before it staying where they are: a
-                // percent that of "100%", the files scanned that of
-                // "99,999 files", past which a count grows (a first scan
-                // of a larger folder moves the words once more).
+                // percent that of "100%", the files scanned that of the
+                // widest count of their digits, from "999 files".
                 width: Math.max(Math.ceil(implicitWidth), Math.ceil(widestCountMetrics.advanceWidth))
                 horizontalAlignment: Text.AlignLeft
 
                 TextMetrics {
                     id: widestCountMetrics
                     font: scanCount.font
-                    text: root.scanTotalKnown ? root.percentText(100) : root.scannedFilesText(99999)
+                    text: root.scanTotalKnown
+                        ? root.percentText(100)
+                        : root.scannedFilesText(root.scanCountReserve)
                 }
             }
 

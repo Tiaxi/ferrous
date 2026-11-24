@@ -42,12 +42,14 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   before any listening too.
 // - Not scrobbled: once playback has stopped, by the end of the queue or
 //   a stop, after a play that ended before its scrobble point. The glyph
-//   in the tertiary colour, and the bar held at the share of the scrobble
-//   point the play reached, its fill in the tertiary colour too, without a
-//   mark at either end; the tooltip says it was not scrobbled and how far
-//   the play got. So it differs from scrobbled, the glyph alone, by shape
-//   (by its tint alone, the two looked alike at 1x), and from listening,
-//   which shows only while playing, by its quieter fill. A short play is
+//   in the tertiary colour, and the trough empty, its frame quieter than
+//   listening's, with a short upright mark in the tertiary colour across
+//   it at the share of the scrobble point the play reached; the tooltip
+//   says it was not scrobbled and how far the play got. So it differs from
+//   scrobbled, the glyph alone, by shape (by its tint alone, the two looked
+//   alike at 1x), and from listening by shape too: nothing fills the
+//   trough, so it never reads as progress going on (held as a quieter
+//   fill, it read as listening at a glance). A short play is
 //   routine, so it has no words: words in the slot always mean scrobbles
 //   waiting or a failure ("Not scrobbled" read as a problem with Last.fm).
 //   A seek never decides it: the countdown goes on while the track plays.
@@ -185,8 +187,8 @@ AbstractButton {
         || (root.look === "scrobbled" && !root.scrobbleAccepted)
     // How much of the trough the bar fills, 0 to 1: the listening done, by
     // whole device pixels of the trough, so a long scrobble point redraws
-    // it more rarely still, and held there once a play has ended short of
-    // its scrobble point; full once the play has reached it.
+    // it more rarely still, and where the end mark stands once a play has
+    // ended short of its scrobble point; full once the play has reached it.
     readonly property real barProgress: {
         if (root.look === "scrobbled") {
             return root.barShown ? 1 : 0
@@ -199,24 +201,37 @@ AbstractButton {
     }
     // The bar and its framed trough: the status bar's progress colours,
     // the scan bar's: the fill is the glyph's ink (the trough at 20% text
-    // was 1.9:1 / 1.5:1 on the status bar), the tertiary text with the
-    // glyph's after a play that ended short.
-    readonly property color barColor: root.look === "notScrobbled"
-        ? root.uiPalette.textTertiary : root.uiPalette.statusBarFill
+    // was 1.9:1 / 1.5:1 on the status bar). After a play that ended short,
+    // the trough's frame is the quieter one and the end mark the glyph's
+    // tertiary ink.
+    readonly property color barColor: root.uiPalette.statusBarFill
     readonly property color troughColor: root.uiPalette.statusBarTrough
-    readonly property color troughFrameColor: root.uiPalette.statusBarTroughFrame
+    readonly property color troughFrameColor: root.look === "notScrobbled"
+        ? root.uiPalette.statusBarTroughFrameQuiet : root.uiPalette.statusBarTroughFrame
+    // After a play that ended short: an upright mark across the empty
+    // trough where the play stopped, its centre at the share reached, kept
+    // inside the trough's ends. Twice the frame wide, and a frame taller
+    // than the trough at each side, so it reads as a mark on the trough
+    // rather than a fill in it.
+    readonly property bool endMarkShown: root.look === "notScrobbled"
+    readonly property int endMarkWidth: 2 * root.troughFrame
+    readonly property int endMarkX: Math.max(0, Math.min(root.troughWidth - root.endMarkWidth,
+        Math.round(root.troughFrame + root.barWidth * root.barProgress - root.endMarkWidth / 2)))
     // While listening, the bar is never less than a short mark from the
     // left, so that listening that has just started reads apart from a
     // scrobble, which has no bar (at 0% it was the trough alone); and it
     // stops as short a mark before the trough's end, so that only a decided
     // scrobble fills it (the last of the listening looked like sending).
-    // Held after a play that ended short, it is the share reached as it
-    // is: the trough already sets it apart from a scrobble.
+    // After a play that ended short, there is no bar: the end mark stands
+    // for the share reached.
     readonly property int minimumBarLength: Math.max(3, Math.round(root.glyphSize * 3 / 16))
-    readonly property real barLength: root.look === "listening"
-        ? Math.max(root.minimumBarLength,
-            Math.min(root.barWidth - root.minimumBarLength, root.barWidth * root.barProgress))
-        : root.barWidth * root.barProgress
+    readonly property real barLength: {
+        if (root.look === "listening") {
+            return Math.max(root.minimumBarLength,
+                Math.min(root.barWidth - root.minimumBarLength, root.barWidth * root.barProgress))
+        }
+        return root.look === "scrobbled" ? root.barWidth * root.barProgress : 0
+    }
 
     // The slot's words, before the glyph.
     readonly property string labelText: {
@@ -464,6 +479,17 @@ AbstractButton {
                     height: root.barHeight
                     visible: width > 0
                     color: root.barColor
+                }
+
+                // Where a play that ended short stopped.
+                Rectangle {
+                    objectName: "scrobbleIndicatorEndMark"
+                    x: root.endMarkX
+                    y: -root.troughFrame
+                    width: root.endMarkWidth
+                    height: root.troughHeight + 2 * root.troughFrame
+                    visible: root.endMarkShown
+                    color: root.uiPalette.textTertiary
                 }
             }
 

@@ -1229,8 +1229,8 @@ private slots:
     void narrowQueueDropsAlbumBeforeTitle();
     void queueColumnsGiveTheirSlackToTheTitle();
     void narrowWindowAtALargeFontFitsTheQueue();
-    void narrowQueueAtALargeFontKeepsArtist_data();
-    void narrowQueueAtALargeFontKeepsArtist();
+    void narrowQueueAtALargeFontGivesTheNamesTheRoom_data();
+    void narrowQueueAtALargeFontGivesTheNamesTheRoom();
     void queueKeepsArtistAtALargeFont_data();
     void queueKeepsArtistAtALargeFont();
     void visualizationTakesNearlyHalfTheRightColumn_data();
@@ -6740,7 +6740,8 @@ void UiMainWindowTest::queueColumnsGiveTheirSlackToTheTitle() {
 // within the queue, 24 px clear of its sides. In 1000 px at 24 pt the
 // title at its minimum leaves Artist less than the least it is shown at
 // (queueKeepsArtistAtALargeFont) with the gaps of the font, so the
-// compact columns keep it (narrowQueueAtALargeFontKeepsArtist).
+// columns are compact, and Artist, short of ten characters there too,
+// gives the title its room (narrowQueueAtALargeFontGivesTheNamesTheRoom).
 void UiMainWindowTest::narrowWindowAtALargeFontFitsTheQueue() {
     const ScopedApplicationFont font(24.0);
     MainWindowFixture fixture(sized(1000, 720));
@@ -6768,9 +6769,9 @@ void UiMainWindowTest::narrowWindowAtALargeFontFitsTheQueue() {
     QVERIFY2(explanation->property("lineCount").toInt() > 1,
              qPrintable(QString::number(explanation->property("lineCount").toInt())));
 
-    // Fifty tracks: Title, Artist and Length fit in the compact columns;
-    // Album drops, as the sidebar is wider at a large font, and the title
-    // keeps its compact minimum.
+    // Fifty tracks: Title and Length fit in the compact columns; Album
+    // and Artist drop, as the sidebar is wider at a large font, and the
+    // title keeps more than its minimum.
     setQueue(bridge, sampleQueueRows(50));
     QQuickItem *view = named(window, "playlistView");
     QTRY_VERIFY(viewRowAt(view, 0) != nullptr);
@@ -6779,27 +6780,26 @@ void UiMainWindowTest::narrowWindowAtALargeFontFitsTheQueue() {
     QQuickItem *artist = named(window, "queueHeader_artist");
     QQuickItem *length = named(window, "queueHeader_length");
     QVERIFY(title && artist && length);
-    QVERIFY(shown(length) && shown(artist));
+    QVERIFY(shown(length) && !shown(artist));
     QVERIFY(queue->property("compactColumns").toBool());
     const qreal titleMinimum = queue->property("minimumTitleColumnWidth").toReal();
     QVERIFY2(queue->width() - queue->property("standardReservedColumnsWidth").toReal() - titleMinimum
                      - queue->property("standardColumnGap").toReal()
                  < queue->property("minimumShownTextColumnWidth").toReal(),
              qPrintable(QString::number(queue->width())));
-    const qreal compactTitleMinimum = queue->property("compactMinimumTitleColumnWidth").toReal();
-    QVERIFY2(title->width() >= compactTitleMinimum - 1, qPrintable(QString::number(title->width())));
+    QVERIFY2(title->width() > titleMinimum, qPrintable(QString::number(title->width())));
     QVERIFY(length->width() >= queue->property("minimumLengthColumnWidth").toReal() - 0.5);
-    QVERIFY(sceneRect(artist).left() >= sceneRect(title).right());
-    QVERIFY(sceneRect(length).left() >= sceneRect(artist).right());
+    QVERIFY(sceneRect(length).left() >= sceneRect(title).right());
     QVERIFY2(sceneRect(length).right() <= pane.right() - 8 + 0.5,
              qPrintable(QStringLiteral("%1 > %2").arg(sceneRect(length).right()).arg(pane.right() - 8)));
     // The row's cells are where the header's columns are.
     QQuickItem *row = viewRowAt(view, 0);
-    for (const char *cell : {"queueCell_title", "queueCell_artist", "queueCell_length"}) {
+    for (const char *cell : {"queueCell_title", "queueCell_length"}) {
         QQuickItem *item = itemNamed(row, QString::fromLatin1(cell));
         QVERIFY2(shown(item) && sceneRect(item).right() <= pane.right() - 8 + 0.5, cell);
     }
     QVERIFY(!shown(itemNamed(row, QStringLiteral("queueCell_album"))));
+    QVERIFY(!shown(itemNamed(row, QStringLiteral("queueCell_artist"))));
 
     // At the window's minimum, the queue at its own: Length still fits.
     window->resize(window->minimumWidth(), 720);
@@ -6810,7 +6810,7 @@ void UiMainWindowTest::narrowWindowAtALargeFontFitsTheQueue() {
     QVERIFY(shown(length));
     QVERIFY2(sceneRect(length).right() <= narrowPane.right() - 8 + 0.5,
              qPrintable(QStringLiteral("%1 > %2").arg(sceneRect(length).right()).arg(narrowPane.right() - 8)));
-    QVERIFY2(title->width() >= compactTitleMinimum - 1, qPrintable(QString::number(title->width())));
+    QVERIFY2(title->width() >= titleMinimum - 1, qPrintable(QString::number(title->width())));
     // The window's minimum is the panes' and fits 1000 px beside the wider
     // sidebar: the queue's counts Length at its least width, as Length
     // gives up the two characters' room before it in a queue that narrow,
@@ -6823,7 +6823,7 @@ void UiMainWindowTest::narrowWindowAtALargeFontFitsTheQueue() {
     QCOMPARE(window->minimumWidth(), static_cast<int>(std::ceil(panesMinimum)));
 }
 
-void UiMainWindowTest::narrowQueueAtALargeFontKeepsArtist_data() {
+void UiMainWindowTest::narrowQueueAtALargeFontGivesTheNamesTheRoom_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::addColumn<int>("windowWidth");
     QTest::addColumn<int>("windowHeight");
@@ -6834,17 +6834,21 @@ void UiMainWindowTest::narrowQueueAtALargeFontKeepsArtist_data() {
     QTest::newRow("24 pt, 1000 by 720, dark") << 24.0 << 1000 << 720 << true << true;
     QTest::newRow("24 pt, 1000 by 720, light") << 24.0 << 1000 << 720 << false << true;
     QTest::newRow("24 pt, 1600 by 1000, dark") << 24.0 << 1600 << 1000 << true << false;
+    QTest::newRow("24 pt, 1600 by 1000, light") << 24.0 << 1600 << 1000 << false << false;
 }
 
-// In the narrow window at 24 pt the queue showed titles alone: with gaps
-// of 32 px and Length's room of the font, 146 px, the title at its
-// minimum left Artist under the least it shows at, so tracks of one title
-// could not be told apart by artist. There the columns are compact: 16 px
-// gaps, Length at its least width (its heading or its longest value), the
-// title at least 208 px and Artist at least 120 px, the header and the
-// rows on the same widths. Elsewhere, at 10 pt or in a wider window, the
-// columns keep the gaps and Length of the font.
-void UiMainWindowTest::narrowQueueAtALargeFontKeepsArtist() {
+// In the narrow window at 24 pt, the state glyph's column, the number's
+// and the gap before the title took 132 px for a one-digit number, and
+// Artist, kept at 120 px, showed "The Q…" on every row beside elided
+// titles. There the columns are compact and the room goes to the names:
+// the state glyph's column is the error mark's with 2 px at either side,
+// the number's its widest number of two digits or more with 6 px before
+// it, the gaps 12 px and Length its least width. The title keeps its
+// usual minimum, and Artist shows only where it has ten characters of a
+// name; otherwise the title has the row. The header and the rows share
+// the widths. Elsewhere, at 10 pt or in a wider window, the columns keep
+// the gaps and widths of the font.
+void UiMainWindowTest::narrowQueueAtALargeFontGivesTheNamesTheRoom() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
     QFETCH(int, windowHeight);
@@ -6861,44 +6865,74 @@ void UiMainWindowTest::narrowQueueAtALargeFontKeepsArtist() {
     QQuickItem *queue = named(window, "mainQueuePane");
     QQuickItem *view = named(window, "playlistView");
     QVERIFY(queue && view);
+    QQuickItem *indicator = named(window, "queueHeader_indicator");
+    QQuickItem *order = named(window, "queueHeader_order");
     QQuickItem *title = named(window, "queueHeader_title");
     QQuickItem *artist = named(window, "queueHeader_artist");
     QQuickItem *length = named(window, "queueHeader_length");
-    QVERIFY(title && artist && length);
+    QVERIFY(indicator && order && title && artist && length);
     QTRY_VERIFY(viewRowAt(view, 0) != nullptr);
-    QTRY_VERIFY(shown(artist));
-    QCOMPARE(queue->property("compactColumns").toBool(), compact);
+    QTRY_COMPARE(queue->property("compactColumns").toBool(), compact);
 
     const qreal scale = queue->property("sizeScale").toReal();
     const qreal gap = queue->property("columnGap").toReal();
-    const QString widths = QStringLiteral("queue %1: title %2, artist %3, length %4, gap %5")
-        .arg(queue->width()).arg(title->width()).arg(artist->width()).arg(length->width()).arg(gap);
     const QRectF pane = sceneRect(queue);
     const qreal padding = queue->property("rightPadding").toReal();
-    QVERIFY2(std::abs(pane.right() - sceneRect(length).right() - padding) <= 0.5, qPrintable(widths));
-    QVERIFY2(std::abs(sceneRect(artist).left() - sceneRect(title).right() - gap) <= 1, qPrintable(widths));
+    const qreal titleMinimum = queue->property("minimumTitleColumnWidth").toReal();
+    const auto widths = [&] {
+        return QStringLiteral("queue %1: state %2, number %3, title %4, artist %5, length %6, gap %7")
+            .arg(queue->width()).arg(indicator->width()).arg(order->width()).arg(title->width())
+            .arg(shown(artist) ? artist->width() : 0.0).arg(length->width()).arg(gap);
+    };
+    QTRY_VERIFY2(std::abs(pane.right() - sceneRect(length).right() - padding) <= 0.5, qPrintable(widths()));
+    const qreal leading = sceneRect(title).left() - pane.left();
     if (compact) {
-        // 16 px gaps, where the font's were 32; Length at its least width;
-        // the floors met.
+        // The gutters of the names' columns: 132 px before the title at
+        // 24 pt with the font's, under 100 px here.
         QVERIFY2(scale >= 2, qPrintable(QString::number(scale)));
-        QCOMPARE(gap, 16.0);
+        const qreal errorGlyph = queue->property("errorGlyphSize").toReal();
+        QCOMPARE(indicator->width(), errorGlyph + 4);
+        const qreal widestNumber = QFontMetricsF(itemNamed(viewRowAt(view, 0), QStringLiteral("queueCell_order"))
+                                                     ->property("font").value<QFont>())
+                                       .horizontalAdvance(QStringLiteral("50"));
+        QCOMPARE(order->width(), std::ceil(widestNumber) + 6);
+        QCOMPARE(gap, 12.0);
+        QCOMPARE(queue->property("titleGap").toReal(), 12.0);
+        QCOMPARE(leading, indicator->width() + order->width() + 12);
+        QVERIFY2(leading < 100, qPrintable(widths()));
         QCOMPARE(length->width(), queue->property("minimumLengthColumnWidth").toReal());
-        QVERIFY2(title->width() >= 208 - 0.5, qPrintable(widths));
-        QVERIFY2(artist->width() >= 120 - 0.5, qPrintable(widths));
-        QVERIFY2(std::abs(sceneRect(length).left() - sceneRect(artist).right() - gap) <= 1, qPrintable(widths));
-        // Artist gives the title its usual minimum back first: the title
-        // goes under it only as far as Artist's floor needs.
-        QVERIFY2(title->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1
-                     || artist->width() <= 120 + 0.5,
-                 qPrintable(widths));
+        // Artist would have under ten characters: the title has the row.
+        QVERIFY2(!shown(artist), qPrintable(widths()));
+        QCOMPARE(sceneRect(length).left() - sceneRect(title).right(), gap);
+        QVERIFY2(title->width() >= titleMinimum + 120, qPrintable(widths()));
+
+        // Wider, where ten characters fit beside the title at its usual
+        // minimum, Artist shows with them, still compact.
+        window->resize(windowWidth + 100, windowHeight);
+        QTRY_COMPARE(window->width(), windowWidth + 100);
+        QTRY_VERIFY2(shown(artist), qPrintable(widths()));
+        QVERIFY(queue->property("compactColumns").toBool());
+        const qreal tenCharacters = std::ceil(QFontMetricsF(QGuiApplication::font()).averageCharWidth() * 10);
+        QVERIFY2(artist->width() >= std::max(120.0, tenCharacters) - 0.5, qPrintable(widths()));
+        QVERIFY2(title->width() >= titleMinimum - 0.5, qPrintable(widths()));
+        QTRY_VERIFY2(std::abs(sceneRect(artist).left() - sceneRect(title).right() - gap) <= 1, qPrintable(widths()));
+        QVERIFY2(std::abs(sceneRect(length).left() - sceneRect(artist).right() - gap) <= 1, qPrintable(widths()));
     } else {
+        QTRY_VERIFY(shown(artist));
         QCOMPARE(gap, std::round(16 * scale));
+        QCOMPARE(indicator->width(), queue->property("playlistIndicatorColumnWidth").toReal());
+        QCOMPARE(order->width(), queue->property("playlistOrderColumnWidth").toReal());
         QCOMPARE(length->width(), queue->property("measuredLengthColumnWidth").toReal());
-        QVERIFY2(title->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1, qPrintable(widths));
+        QVERIFY2(title->width() >= titleMinimum - 1, qPrintable(widths()));
+        QVERIFY2(std::abs(sceneRect(artist).left() - sceneRect(title).right() - gap) <= 1, qPrintable(widths()));
     }
     // The rows' cells on the header's columns.
     QQuickItem *row = viewRowAt(view, 0);
-    for (const char *column : {"title", "artist", "length"}) {
+    QList<const char *> columns{"indicator", "order", "title", "length"};
+    if (shown(artist)) {
+        columns.append("artist");
+    }
+    for (const char *column : columns) {
         QQuickItem *cell = itemNamed(row, QStringLiteral("queueCell_%1").arg(QString::fromLatin1(column)));
         QQuickItem *header = named(window, QStringLiteral("queueHeader_%1").arg(QString::fromLatin1(column)));
         QVERIFY2(shown(cell), column);
@@ -6907,9 +6941,7 @@ void UiMainWindowTest::narrowQueueAtALargeFontKeepsArtist() {
                  qPrintable(QStringLiteral("%1: %2 under %3").arg(QString::fromLatin1(column),
                      describeRect(sceneRect(cell)), describeRect(sceneRect(header)))));
     }
-    // Artist's resize handle sits in the gap before it.
-    QQuickItem *handle = named(window, "queueColumnHandle_artist");
-    QVERIFY(handle && handle->isVisible());
+    QCOMPARE(shown(itemNamed(row, QStringLiteral("queueCell_artist"))), shown(artist));
     // The window's least width is the same with the compact columns: they
     // change the widths inside the queue, not its minimum.
     QVERIFY2(window->minimumWidth() <= 1000, qPrintable(QString::number(window->minimumWidth())));
