@@ -7,6 +7,7 @@
 // columns, and the first run.
 
 #include <QAccessible>
+#include <QHash>
 #include <QApplication>
 #include <QColor>
 #include <QDir>
@@ -1202,6 +1203,8 @@ private slots:
     void libraryHeaderShortensToItsTrackTotal_data();
     void libraryHeaderShortensToItsTrackTotal();
     void selectedRowsDrawTheirMarksForTheSelection();
+    void selectedQueueRowsNumberIsReadableAsDrawn_data();
+    void selectedQueueRowsNumberIsReadableAsDrawn();
     void libraryTreeHasOneIndentStep();
     void libraryAlbumWithoutACoverShowsAPlaceholderTile();
     void libraryNoCoverMarkIsOneQuietColour_data();
@@ -5019,6 +5022,86 @@ void UiMainWindowTest::libraryHeaderShortensToItsTrackTotal() {
     QVERIFY(accessible != nullptr);
     QVERIFY2(accessible->text(QAccessible::Name).endsWith(width > 1000 ? all : shortened),
              qPrintable(accessible->text(QAccessible::Name)));
+}
+
+void UiMainWindowTest::selectedQueueRowsNumberIsReadableAsDrawn_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("light") << false;
+    QTest::newRow("dark") << true;
+}
+
+// A selected queue row's track number, measured on the window as drawn,
+// on the focused list's selection and on the selection of a list without
+// the focus: its strongest pixel is over 4.5:1 on the row's tint. (A
+// review measured 3.40:1, the plain tertiary colour on the selection: the
+// queue row it read was under the search palette's selected result.)
+void UiMainWindowTest::selectedQueueRowsNumberIsReadableAsDrawn() {
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
+    MainWindowFixture fixture(sized());
+    QQuickWindow *window = fixture.window;
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    setQueue(bridgeOf(window), sampleQueueRows(3));
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QQuickItem *view = named(window, "playlistView");
+    QQuickItem *library = named(window, "libraryView");
+    QVERIFY(controller && view && library);
+    QTRY_VERIFY(viewRowAt(view, 2) != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(controller, "setSingleSelection", Q_ARG(QVariant, 1)));
+    QTRY_VERIFY(rowTinted(view, 1));
+
+    const auto measure = [&](const QString &what) {
+        QQuickItem *cell = itemNamed(viewRowAt(view, 1), QStringLiteral("queueCell_order"));
+        QVERIFY(cell != nullptr);
+        QCOMPARE(colorOf(cell), tokenHex(window, "textTertiarySelected"));
+        QCOMPARE(cell->property("text").toString(), QStringLiteral("2"));
+        const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal scale = static_cast<qreal>(image.width()) / window->width();
+        const QRectF rect = cell->mapRectToScene(QRectF(0, 0, cell->width(), cell->height()));
+        const QRect device(QPoint(static_cast<int>(std::ceil(rect.left() * scale)),
+                                  static_cast<int>(std::ceil(rect.top() * scale))),
+                           QPoint(static_cast<int>(std::floor(rect.right() * scale)) - 1,
+                                  static_cast<int>(std::floor(rect.bottom() * scale)) - 1));
+        // The row's tint is the colour most of the cell is drawn in.
+        QHash<QRgb, int> counts;
+        for (int y = device.top(); y <= device.bottom(); ++y) {
+            for (int x = device.left(); x <= device.right(); ++x) {
+                ++counts[image.pixel(x, y)];
+            }
+        }
+        QRgb tint = 0;
+        int most = 0;
+        for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
+            if (it.value() > most) {
+                most = it.value();
+                tint = it.key();
+            }
+        }
+        const QColor background = QColor::fromRgb(tint);
+        QVERIFY2(!near(background, tokenOf(window, "view")),
+                 qPrintable(what + QStringLiteral(": the row is not tinted")));
+        QColor strongest = background;
+        for (int y = device.top(); y <= device.bottom(); ++y) {
+            for (int x = device.left(); x <= device.right(); ++x) {
+                const QColor candidate = image.pixelColor(x, y);
+                if (contrastRatio(candidate, background) > contrastRatio(strongest, background)) {
+                    strongest = candidate;
+                }
+            }
+        }
+        qInfo("%s", qPrintable(describeContrast(what, strongest, background)));
+        QVERIFY2(contrastRatio(strongest, background) >= 4.5,
+                 qPrintable(describeContrast(what, strongest, background)));
+    };
+
+    // The queue has the focus: the selection's own tint.
+    view->forceActiveFocus(Qt::MouseFocusReason);
+    QTRY_VERIFY(view->hasActiveFocus());
+    measure(QStringLiteral("focused list"));
+    // Another list has it: the inactive selection's tint.
+    library->forceActiveFocus(Qt::MouseFocusReason);
+    QTRY_VERIFY(!view->hasActiveFocus());
+    measure(QStringLiteral("list without the focus"));
 }
 
 // A selected row of the queue draws its length in the selected row's
