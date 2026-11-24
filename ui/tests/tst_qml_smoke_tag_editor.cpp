@@ -2295,10 +2295,15 @@ void checkRenamePreviewShowsTheNewNamesInAColumn(TagEditorWindow &fixture, QObje
                                                  const QByteArray &loadResponse, qreal pointSize) {
     constexpr int kFiles = 8;
     // Old names of several lengths; every third file keeps its name, and
-    // the last can't be renamed.
+    // the last can't be renamed. At 24 pt the short ones' lines fit the
+    // smoke tests' 800 px screen with room to spare, whatever font draws
+    // the arrow: Noto Sans has none, and the fallback's width depends on
+    // the fonts installed ("04 - Fourth Song Here.flac" needed a 768 px
+    // window with Adwaita Sans's arrow, where the screen holds 764 px, and
+    // its old name gave way and wrapped).
     const auto previewOf = [](bool longNames) {
         const QStringList oldNames{QStringLiteral("track01.flac"), QStringLiteral("02 A Song.flac"),
-                                   QStringLiteral("03.flac"), QStringLiteral("04 - Fourth Song Here.flac"),
+                                   QStringLiteral("03.flac"), QStringLiteral("04 - Fourth Song.flac"),
                                    QStringLiteral("05 Fifth.flac"), QStringLiteral("06 - Kept.flac"),
                                    QStringLiteral("x7.flac"), QStringLiteral("08 Last.flac")};
         QJsonArray results;
@@ -2409,7 +2414,13 @@ void checkRenamePreviewShowsTheNewNamesInAColumn(TagEditorWindow &fixture, QObje
 
         const qreal oldColumn = previewDialog->property("oldNameColumnWidth").toReal();
         if (!longOpening) {
-            // The window holds every name whole.
+            // The window opens as wide as its lines, within the screen...
+            const qreal lines = 2 * previewDialog->property("contentPadding").toReal()
+                + previewDialog->property("widestContentLine").toReal();
+            QVERIFY2(previewWindow->width() >= lines,
+                     qPrintable(at + QStringLiteral(": %1 px of lines in a %2 px window")
+                                         .arg(lines).arg(previewWindow->width())));
+            // ...and holds every name whole.
             for (QQuickItem *name : oldNames + newNames) {
                 QTRY_VERIFY2(name->property("lineCount").toInt() == 1,
                              qPrintable(at + QStringLiteral(": ") + name->property("text").toString()));
