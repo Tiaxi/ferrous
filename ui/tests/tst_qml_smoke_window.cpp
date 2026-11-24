@@ -68,6 +68,8 @@ private slots:
     void drawingWritesNoShaderCache();
     void nowPlayingFollowsBridgeClientsSnapshots();
     void theQueuesMessageAndTotalsChangeWithItsRows();
+    void theEmptyQueuesHeaderKeepsItsColumns_data();
+    void theEmptyQueuesHeaderKeepsItsColumns();
     void aBackendThatCannotStartShowsWhyInRecentErrorsAndTheStatusBar();
 };
 
@@ -1744,6 +1746,99 @@ void WindowSmokeTest::theQueuesMessageAndTotalsChangeWithItsRows() {
     QCOMPARE(view->property("count").toInt(), 0);
     QVERIFY(message->isVisible());
     QCOMPARE(header->property("totals").toString(), QString());
+}
+
+void WindowSmokeTest::theEmptyQueuesHeaderKeepsItsColumns_data() {
+    QTest::addColumn<int>("rootCount");
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("first run") << 0 << 10.0;
+    QTest::newRow("idle") << 1 << 10.0;
+    QTest::newRow("idle, 24 pt") << 1 << 24.0;
+}
+
+// An empty queue's header, at the first run and idle, has the column labels
+// and dividers of a full one, so "Queue" heads its column as in every other
+// state, and only its count is left out. The labels and dividers came only
+// with the first track, so "Queue" read as a lone title over nothing. The
+// first tracks change nothing in the header but the count, in the frame
+// that draws them.
+void WindowSmokeTest::theEmptyQueuesHeaderKeepsItsColumns() {
+    QFETCH(int, rootCount);
+    QFETCH(qreal, pointSize);
+    const ScopedApplicationFont font(pointSize);
+    BridgeClient bridge;
+    detachFromTheBackend(bridge);
+    const NowPlayingWindow ui(bridge, QSize(1600, 900));
+    QVERIFY2(ui.window != nullptr, "Main.qml failed to show");
+    QQuickItem *header = ui.item("queueRegionHeader");
+    QVERIFY(header != nullptr);
+
+    BinaryBridgeCodec::DecodedSnapshot empty;
+    empty.library.present = true;
+    empty.library.loaded = true;
+    empty.library.rootCount = rootCount;
+    empty.queue.present = true;
+    empty.queue.kind = BinaryBridgeCodec::QueueFull;
+    empty.queue.revision = 1;
+    QVERIFY(ui.deliver(empty));
+    QTRY_VERIFY(ui.item(rootCount == 0 ? "queueFirstRunMessage" : "queueEmptyMessage")->isVisible());
+    QCOMPARE(header->property("totals").toString(), QString());
+
+    // "Queue", each label, and each column's divider and handle: whether
+    // shown and where, and whether Tab stops on the handle.
+    const auto columns = [&ui, header]() {
+        const auto describe = [](const QQuickItem *item) {
+            return item == nullptr ? QStringLiteral("missing")
+                                   : QStringLiteral("%1 %2 %3").arg(item->isVisible()).arg(item->opacity()).arg(
+                                         describeRect(sceneRectOf(item)));
+        };
+        QStringList shown{describe(header->findChild<QQuickItem *>(QStringLiteral("regionHeaderTitle")))};
+        for (const QByteArray &column : {QByteArray("artist"), QByteArray("album"), QByteArray("length")}) {
+            QQuickItem *handle = ui.item(("queueColumnHandle_" + column).constData());
+            shown << column + ' ' + describe(ui.item(("queueHeader_" + column).constData()))
+                  << describe(handle ? handle->findChild<QQuickItem *>(QStringLiteral("queueColumnHandleRest"))
+                                     : nullptr)
+                  << QString::number(handle != nullptr && handle->activeFocusOnTab());
+        }
+        return shown;
+    };
+    const QStringList before = columns();
+    for (const QByteArray &column : {QByteArray("artist"), QByteArray("album"), QByteArray("length")}) {
+        QQuickItem *label = ui.item(("queueHeader_" + column).constData());
+        QQuickItem *handle = ui.item(("queueColumnHandle_" + column).constData());
+        QVERIFY2(label && handle, column.constData());
+        // A narrow queue drops Album, and at a large font Artist.
+        if (column != "length" && !label->isVisible()) {
+            QVERIFY2(!handle->activeFocusOnTab(), column.constData());
+            continue;
+        }
+        QVERIFY2(label->isVisible() && label->opacity() == 1.0, column.constData());
+        QVERIFY2(handle->activeFocusOnTab(), column.constData());
+        QVERIFY2(handle->findChild<QQuickItem *>(QStringLiteral("queueColumnHandleRest"))->isVisible(),
+                 column.constData());
+    }
+
+    // The first tracks: in the frame that draws them, the count, and
+    // nothing else in the header has changed.
+    BinaryBridgeCodec::DecodedSnapshot added;
+    added.queue.present = true;
+    added.queue.kind = BinaryBridgeCodec::QueueFull;
+    added.queue.revision = 2;
+    added.queue.len = 3;
+    added.queue.totalDurationSeconds = 180.0;
+    for (int i = 0; i < 3; ++i) {
+        BinaryBridgeCodec::DecodedQueueTrack track;
+        track.title = QStringLiteral("Track %1").arg(i + 1);
+        track.path = QStringLiteral("/music/%1.flac").arg(i + 1);
+        track.lengthSeconds = 60.0f;
+        added.queue.tracks.push_back(track);
+    }
+    ui.deliver(added);
+    (void)ui.window->grabWindow();
+    QCOMPARE(ui.item("playlistView")->property("count").toInt(), 3);
+    QVERIFY2(header->property("totals").toString().startsWith(QStringLiteral("3 tracks")),
+             qPrintable(header->property("totals").toString()));
+    QCOMPARE(columns(), before);
 }
 
 // A backend that could not start fails before the window is made: the

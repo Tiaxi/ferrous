@@ -7778,12 +7778,12 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     QVERIFY(!shown(named(window, "plotAnalysingText")));
     QVERIFY(named(window, "nowPlayingPanel")->property("idle").toBool());
     QTRY_VERIFY2(compactRowProblem(window).isEmpty(), qPrintable(compactRowProblem(window)));
-    // The empty queue's header shows only its name, and Tab skips its
-    // resize handles.
+    // The empty queue's header keeps its column labels and handles, with
+    // only its count left out (theEmptyQueuesHeaderKeepsItsColumns).
     for (const char *column : {"queueHeader_artist", "queueHeader_album", "queueHeader_length"}) {
-        QCOMPARE(named(window, column)->opacity(), 0.0);
+        QCOMPARE(named(window, column)->opacity(), 1.0);
     }
-    QVERIFY(!named(window, "queueColumnHandle_artist")->activeFocusOnTab());
+    QVERIFY(named(window, "queueColumnHandle_artist")->activeFocusOnTab());
 
     // With a library folder, the first run is over: the library's quiet
     // line, and the queue's two-line hint, centred as the first-run
@@ -7820,7 +7820,7 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
                                       Q_ARG(QVariant, QByteArray())));
     QTRY_COMPARE(libraryEmpty->property("text").toString(),
                  QStringLiteral("No music found in the library folders"));
-    // Queued tracks replace the line, and the columns get their labels.
+    // Queued tracks replace the line; the columns keep their labels.
     setQueue(bridge, sampleQueueRows(1));
     QTRY_VERIFY(!queueEmpty->isVisible());
     QCOMPARE(named(window, "queueHeader_artist")->opacity(), 1.0);
@@ -7875,8 +7875,8 @@ void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest_data() {
 // rest, so a pointer user can see where to resize (it showed nothing until
 // hovered): a 1 px stroke in the seam colour, 10 px at 10 pt and growing with
 // the font, centred on the labels, where the divider is. It gives way to the
-// divider under the pointer and with focus; an empty queue's header, with
-// nothing to resize, shows none.
+// divider under the pointer and with focus. An empty queue's header, with
+// its labels, shows it too.
 void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest() {
     QFETCH(qreal, pointSize);
     const ScopedApplicationFont font(pointSize);
@@ -7890,7 +7890,7 @@ void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest() {
                          QStringLiteral("queueColumnHandleRest"));
     };
     QVERIFY(restOf("length") != nullptr);
-    QVERIFY(!restOf("length")->isVisible());
+    QVERIFY(restOf("length")->isVisible());
 
     setQueue(bridgeOf(window), sampleQueueRows(3));
     for (const char *column : {"artist", "album", "length"}) {
@@ -7942,11 +7942,11 @@ void UiMainWindowTest::columnHandlesShowAQuietMarkAtRest() {
     QTRY_VERIFY(line->isVisible());
     QVERIFY(!restOf("length")->isVisible());
 
-    // Emptied, nothing to resize.
+    // Emptied, the header keeps its marks.
     named(window, "playlistView")->forceActiveFocus(Qt::TabFocusReason);
     setQueue(bridgeOf(window), QVariantList{});
-    QTRY_VERIFY(!restOf("length")->isVisible());
-    QVERIFY(!restOf("artist")->isVisible());
+    QTRY_VERIFY(restOf("length")->isVisible());
+    QVERIFY(restOf("artist")->isVisible());
 }
 
 void UiMainWindowTest::focusedColumnHandleHasAFrameAndSaysItsKeys_data() {

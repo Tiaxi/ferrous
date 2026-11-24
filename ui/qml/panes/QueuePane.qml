@@ -561,9 +561,11 @@ Rectangle {
                 // Above the region header's hairline.
                 anchors.bottomMargin: 1
                 spacing: 0
-                // An empty queue shows only its name; the columns keep their
-                // places, so nothing moves when tracks arrive.
-                readonly property real labelOpacity: root.uiBridge.queueLength > 0 ? 1 : 0
+                // An empty queue keeps its column labels and dividers, so
+                // "Queue" heads its column as in every other state and
+                // nothing changes in the header when tracks arrive but the
+                // count (the labels and dividers only came with the first
+                // track, and "Queue" read as a lone title over nothing).
 
                 Item {
                     id: indicatorHeader
@@ -596,7 +598,6 @@ Rectangle {
 
                 Label {
                     id: artistHeader
-                    opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_artist"
                     visible: root.artistColumnVisible
                     textFormat: Text.PlainText
@@ -611,7 +612,6 @@ Rectangle {
                 }
                 Label {
                     id: albumHeader
-                    opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_album"
                     visible: root.albumColumnVisible
                     textFormat: Text.PlainText
@@ -626,7 +626,6 @@ Rectangle {
                 }
                 Label {
                     id: lengthHeader
-                    opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_length"
                     elide: Text.ElideRight
                     textFormat: Text.PlainText
@@ -1547,8 +1546,8 @@ Rectangle {
                 x: Math.round(queueHeaderRow.x + modelData.header.x - root.columnGap / 2) - resizeHandle.lineX
                 width: Kirigami.Units.largeSpacing
                 height: parent.height
-                // An empty queue's columns have no labels to resize.
-                activeFocusOnTab: visible && root.uiBridge.queueLength > 0
+                // An empty queue's columns resize as a full one's do.
+                activeFocusOnTab: visible
 
                 Accessible.role: Accessible.Separator
                 readonly property string actionText: I18n.i18nc("@action %1 is a column title",
@@ -1589,10 +1588,10 @@ Rectangle {
                     color: resizeMouseArea.pressed ? root.uiPalette.focusRing : root.uiPalette.textTertiary
                 }
 
-                // At rest, over a populated header: a short stroke in the
-                // seam colour where the divider is, centred on the labels,
-                // so a pointer user can see where to resize (the boundary
-                // had nothing to aim at). It gives way to the divider
+                // At rest: a short stroke in the seam colour where the
+                // divider is, centred on the labels, so a pointer user can
+                // see where to resize (the boundary had nothing to aim at).
+                // It gives way to the divider
                 // under the pointer, while dragged and with focus.
                 Rectangle {
                     objectName: "queueColumnHandleRest"
@@ -1601,7 +1600,7 @@ Rectangle {
                     y: Math.round((resizeHandle.height - 1 - height) / 2)
                     width: 1
                     height: root.uiPalette.scaledSize(10)
-                    visible: !resizeHandle.highlighted && root.uiBridge.queueLength > 0
+                    visible: !resizeHandle.highlighted
                     color: root.uiPalette.seam
                 }
 
@@ -1634,7 +1633,7 @@ Rectangle {
                 MouseArea {
                     id: resizeMouseArea
                     anchors.fill: parent
-                    hoverEnabled: root.uiBridge.queueLength > 0
+                    hoverEnabled: true
                     preventStealing: true
                     cursorShape: Qt.SplitHCursor
 
