@@ -4,18 +4,26 @@
 
 #include <QString>
 
+#include <memory>
 #include <thread>
 #include <vector>
 
+#include "DiagnosticsLog.h"
+
 // Copies what the process writes to its console streams to the diagnostics
 // log, line by line, and on to where the streams went before.
+//
+// With a queue, the lines go through it, as the app's own do, so that the
+// log has both in the order they were logged; without one, or once it is
+// closed, straight to the log. Shutdown writes what waits in it when no
+// one takes from it.
 //
 // Each stream's thread sleeps until there is output or shutdown, so an idle
 // app has no wakeups for it. Shutdown copies everything written before it,
 // in order, and puts the streams back.
 class ConsoleTee {
 public:
-    explicit ConsoleTee(QString logPath);
+    explicit ConsoleTee(QString logPath, std::shared_ptr<DiagnosticsLog::LineQueue> queue = {});
     ~ConsoleTee();
 
     ConsoleTee(const ConsoleTee &) = delete;
@@ -37,8 +45,10 @@ private:
 
     void forward(int readFd, int savedFd, const QString &tag) const;
     void appendLines(const QString &tag, const QList<QByteArray> &lineBytesList) const;
+    void closeQueue();
 
     QString m_logPath;
+    const std::shared_ptr<DiagnosticsLog::LineQueue> m_queue;
     std::vector<Stream> m_streams;
     // Readable once shutdown starts; never read, so every thread sees it.
     int m_shutdownReadFd{-1};

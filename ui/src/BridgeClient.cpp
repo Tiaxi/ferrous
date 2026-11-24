@@ -644,8 +644,14 @@ QString formatLabelFromPath(const QString &path) {
 } // namespace
 
 BridgeClient::BridgeClient(QObject *parent)
+    : BridgeClient(nullptr, parent) {}
+
+BridgeClient::BridgeClient(std::shared_ptr<DiagnosticsLog::LineQueue> diagnosticsQueue,
+                           QObject *parent)
     : QObject(parent),
-      m_playbackClock(new PlaybackClock(this)) {
+      m_playbackClock(new PlaybackClock(this)),
+      m_diagnosticsQueue(diagnosticsQueue ? std::move(diagnosticsQueue)
+                                          : std::make_shared<DiagnosticsLog::LineQueue>()) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profileUiEnabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE");
@@ -664,6 +670,22 @@ BridgeClient::BridgeClient(QObject *parent)
     connect(&m_queueRowsModel, &QAbstractItemModel::dataChanged, this, followQueueRows);
     m_diagnosticsWriter = std::make_unique<DiagnosticsLog::Writer>();
     m_diagnosticsLogPath = resolveDiagnosticsLogPath();
+    // Lines queued on other threads are taken here, where they join this
+    // object's. The destructor closes the queue, so no wake comes after.
+    // The log's writer and path are set here, and the destructor closes the
+    // queue before they go, so the sink, which runs on the thread that
+    // queued, reads them safely; nor does a wake come after.
+    m_diagnosticsQueue->setConsumer(
+        [this]() {
+            QMetaObject::invokeMethod(this, &BridgeClient::takeQueuedDiagnosticLines,
+                                      Qt::QueuedConnection);
+        },
+        [this](const QStringList &lines) {
+            if (!m_diagnosticsLogPath.isEmpty()) {
+                // The disk is the writer's: no thread that logs waits for it.
+                m_diagnosticsWriter->post(m_diagnosticsLogPath, lines);
+            }
+        });
     m_diagnosticsFlushTimer.setSingleShot(true);
     m_diagnosticsFlushTimer.setInterval(readEnvMillis("FERROUS_DIAGNOSTICS_FLUSH_MS", 25));
     connect(
@@ -827,7 +849,14 @@ BridgeClient::~BridgeClient() {
         m_ffiBridge = nullptr;
     }
     m_diagnosticsFlushTimer.stop();
-    flushPendingDiagnosticDiskLines();
+    // The lines still to write, then those the console writes later, which
+    // wait until these are in the file and then go straight to it.
+    m_diagnosticsQueue->close([this](const QStringList &lines) {
+        if (!m_diagnosticsLogPath.isEmpty() && !lines.isEmpty()) {
+            m_diagnosticsWriter->post(m_diagnosticsLogPath, lines);
+        }
+        m_diagnosticsWriter->waitUntilWritten();
+    });
 }
 
 BridgeClient::FileBrowserNameDetector BridgeClient::s_fileBrowserNameDetector =
@@ -4462,39 +4491,45 @@ QVariantMap BridgeClient::quitSaveFailureMap(quint8 subjects, quint8 cause, cons
 
 void BridgeClient::clearDiagnostics() {
     m_diagnosticsFlushTimer.stop();
-    m_pendingDiagnosticsDiskLines.clear();
+    // The lines logged before the clear go with it, and those already
+    // handed to the writer are removed with the log; none logged after.
+    m_diagnosticsQueue->discard([this]() { m_diagnosticsWriter->removeLog(m_diagnosticsLogPath); });
     m_diagnosticsLines.clear();
     // A read asked for before is of the old log.
     ++m_diagnosticsReadGeneration;
     m_diagnosticsLoading = false;
-    // After the lines already handed to the writer.
-    m_diagnosticsWriter->removeLog(m_diagnosticsLogPath);
     notifyDiagnosticsChanged();
     logDiagnostic(QStringLiteral("ui"), QStringLiteral("diagnostics cleared"));
 }
 
 void BridgeClient::reloadDiagnosticsFromDisk() {
-    flushPendingDiagnosticDiskLines();
     const quint64 generation = ++m_diagnosticsReadGeneration;
-    const quint64 loggedBefore = m_diagnosticsLinesLogged;
     const QString logPath = m_diagnosticsLogPath;
+    QStringList queued;
+    // The writer reads after the lines queued before, which this object
+    // takes at the same time, so the read and the lines logged since have
+    // each line once; and the GUI thread never waits for the disk. The
+    // writer is this object's, and stops before it is gone, so `this`
+    // outlives the task; the result is posted to it, and dropped with it.
+    m_diagnosticsQueue->flushAndTake([&](QStringList lines) {
+        queued = std::move(lines);
+        const quint64 loggedBefore = m_diagnosticsLinesLogged + static_cast<quint64>(queued.size());
+        m_diagnosticsWriter->then([this, generation, loggedBefore, logPath]() {
+            QStringList read = DiagnosticsLog::readLastLines(logPath, kMaxDiagnosticsLines);
+            QMetaObject::invokeMethod(
+                this,
+                [this, generation, loggedBefore, logPath, read = std::move(read)]() mutable {
+                    applyDiagnosticsRead(generation, loggedBefore, logPath, std::move(read));
+                },
+                Qt::QueuedConnection);
+        });
+    });
+    addDiagnosticLines(queued);
     if (!m_diagnosticsLoading) {
         m_diagnosticsLoading = true;
         notifyDiagnosticsChanged();
     }
-    // The writer reads after the lines it was given before, and the GUI
-    // thread never waits for the disk. The writer is this object's, and
-    // stops before it is gone, so `this` outlives the task; the result is
-    // posted to it, and dropped with it.
-    m_diagnosticsWriter->then([this, generation, loggedBefore, logPath]() {
-        QStringList lines = DiagnosticsLog::readLastLines(logPath, kMaxDiagnosticsLines);
-        QMetaObject::invokeMethod(
-            this,
-            [this, generation, loggedBefore, logPath, lines = std::move(lines)]() mutable {
-                applyDiagnosticsRead(generation, loggedBefore, logPath, std::move(lines));
-            },
-            Qt::QueuedConnection);
-    });
+    scheduleDiagnosticsFlush(false);
 }
 
 void BridgeClient::applyDiagnosticsRead(quint64 generation, quint64 loggedBefore,
@@ -4516,19 +4551,30 @@ void BridgeClient::applyDiagnosticsRead(quint64 generation, quint64 loggedBefore
 }
 
 void BridgeClient::logDiagnostic(const QString &category, const QString &message) {
-    const QString ts = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
     const QString cat = category.trimmed().isEmpty() ? QStringLiteral("app") : category.trimmed();
     QString msg = message;
     msg.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
     msg.replace(QLatin1Char('\r'), QStringLiteral("\\r"));
-    const QString line = QStringLiteral("[%1] [%2] %3").arg(ts, cat, msg);
+    // After the lines other threads queued, which were stamped before it.
+    addDiagnosticLines(m_diagnosticsQueue->takeWith(cat, msg));
+    // The file takes it, and Diagnostics the lines, a batch at a time.
+    scheduleDiagnosticsFlush(true);
+}
 
-    appendDiagnosticLine(line);
-    if (!m_diagnosticsLogPath.isEmpty()) {
-        m_pendingDiagnosticsDiskLines.push_back(line);
+void BridgeClient::takeQueuedDiagnosticLines() {
+    // The file has them already.
+    addDiagnosticLines(m_diagnosticsQueue->take());
+    scheduleDiagnosticsFlush(false);
+}
+
+void BridgeClient::addDiagnosticLines(const QStringList &lines) {
+    for (const QString &line : lines) {
+        appendDiagnosticLine(line);
     }
-    // The file and Diagnostics take the lines a batch at a time.
-    if ((!m_pendingDiagnosticsDiskLines.isEmpty() || !m_pendingDiagnosticsShownLines.isEmpty())
+}
+
+void BridgeClient::scheduleDiagnosticsFlush(bool forTheLog) {
+    if ((forTheLog || !m_pendingDiagnosticsShownLines.isEmpty())
         && !m_diagnosticsFlushTimer.isActive()) {
         m_diagnosticsFlushTimer.start();
     }
@@ -4575,12 +4621,15 @@ void BridgeClient::copyDiagnosticsWithoutPaths() {
     if (qobject_cast<QGuiApplication *>(QCoreApplication::instance()) == nullptr) {
         return;
     }
+    // With the lines other threads logged before the click.
+    takeQueuedDiagnosticLines();
     if (QClipboard *clipboard = QGuiApplication::clipboard()) {
         clipboard->setText(diagnosticsTextWithoutPaths());
     }
 }
 
 void BridgeClient::flushDiagnostics() {
+    addDiagnosticLines(m_diagnosticsQueue->take());
     showPendingDiagnosticLines();
     flushPendingDiagnosticDiskLines();
 }
@@ -4633,13 +4682,7 @@ void BridgeClient::appendDiagnosticLine(const QString &line) {
 }
 
 void BridgeClient::flushPendingDiagnosticDiskLines() {
-    if (m_diagnosticsLogPath.isEmpty() || m_pendingDiagnosticsDiskLines.isEmpty()) {
-        return;
-    }
-    QStringList lines = std::move(m_pendingDiagnosticsDiskLines);
-    m_pendingDiagnosticsDiskLines.clear();
-    // The disk is the writer's: the GUI thread never waits for it.
-    m_diagnosticsWriter->post(m_diagnosticsLogPath, std::move(lines));
+    m_diagnosticsQueue->flush();
 }
 
 void BridgeClient::showPendingDiagnosticLines() {

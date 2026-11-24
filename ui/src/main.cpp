@@ -14,6 +14,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 
 #if defined(Q_OS_UNIX)
 #include <unistd.h>
@@ -96,7 +97,9 @@ int main(int argc, char *argv[]) {
     if (hasInstalledDesktopEntry(QStringLiteral("ferrous.desktop"))) {
         QApplication::setDesktopFileName(QStringLiteral("ferrous"));
     }
-    ConsoleTee consoleTee(DiagnosticsLog::defaultLogPath());
+    // The console's lines go through the app's log, in order with its own.
+    const auto diagnosticsQueue = std::make_shared<DiagnosticsLog::LineQueue>();
+    ConsoleTee consoleTee(DiagnosticsLog::defaultLogPath(), diagnosticsQueue);
 #if defined(Q_OS_UNIX)
     consoleTee.install(STDOUT_FILENO, QStringLiteral("stdout"));
     consoleTee.install(STDERR_FILENO, QStringLiteral("stderr"));
@@ -117,7 +120,7 @@ int main(int argc, char *argv[]) {
     case AppInstanceController::StartupResult::ContinuePrimary:
         break;
     }
-    BridgeClient bridge;
+    BridgeClient bridge(diagnosticsQueue);
     instanceController.setOpenHandler([&bridge](const QStringList &paths) {
         bridge.replaceWithPaths(paths);
     });

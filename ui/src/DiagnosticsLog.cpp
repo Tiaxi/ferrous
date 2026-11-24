@@ -7,6 +7,7 @@
 #include <mutex>
 #include <utility>
 
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -448,13 +449,10 @@ bool appendLine(const QString &logPath, const QString &line) {
     return appendLines(logPath, QStringList{line});
 }
 
-bool appendLines(const QString &logPath, const QStringList &lines) {
-    if (logPath.trimmed().isEmpty() || lines.isEmpty()) {
-        return false;
-    }
+namespace {
 
-    std::lock_guard<std::mutex> lock(logMutex());
-
+// Appends `lines` to the log; the caller holds logMutex.
+bool appendLinesLocked(const QString &logPath, const QStringList &lines) {
     const QFileInfo info(logPath);
     const QString dirPath = info.absolutePath();
     if (!dirPath.isEmpty()) {
@@ -478,6 +476,24 @@ bool appendLines(const QString &logPath, const QStringList &lines) {
         file.write("\n", 1);
     }
     return true;
+}
+
+} // namespace
+
+bool appendLines(const QString &logPath, const QStringList &lines) {
+    if (logPath.trimmed().isEmpty() || lines.isEmpty()) {
+        return false;
+    }
+    const std::lock_guard<std::mutex> lock(logMutex());
+    return appendLinesLocked(logPath, lines);
+}
+
+bool appendStampedLines(const QString &logPath, const QString &tag, const QStringList &messages) {
+    if (logPath.trimmed().isEmpty() || messages.isEmpty()) {
+        return false;
+    }
+    const std::lock_guard<std::mutex> lock(logMutex());
+    return appendLinesLocked(logPath, stampedLines(tag, messages));
 }
 
 QString withoutPaths(const QString &text, const PathRedaction &redaction) {
@@ -531,6 +547,113 @@ QString quotedPath(const QString &path) {
     }
     out += QLatin1Char('"');
     return out;
+}
+
+QStringList stampedLines(const QString &tag, const QStringList &messages) {
+    const QString stamp = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
+    QStringList lines;
+    lines.reserve(messages.size());
+    for (const QString &message : messages) {
+        lines.push_back(QStringLiteral("[%1] [%2] %3").arg(stamp, tag, message));
+    }
+    return lines;
+}
+
+bool LineQueue::post(const QString &tag, const QStringList &messages) {
+    if (messages.isEmpty()) {
+        return true;
+    }
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_closed) {
+        return false;
+    }
+    const QStringList lines = stampedLines(tag, messages);
+    const bool waited = !m_consumerLines.isEmpty();
+    m_consumerLines += lines;
+    m_logLines += lines;
+    // Under the lock, so that the log has the lines in their order and close
+    // stops both for good.
+    flushLocked();
+    if (!waited && m_wake) {
+        m_wake();
+    }
+    return true;
+}
+
+QStringList LineQueue::take() {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    return std::exchange(m_consumerLines, {});
+}
+
+QStringList LineQueue::takeWith(const QString &tag, const QString &message) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    const QStringList own = stampedLines(tag, QStringList{message});
+    if (!m_closed) {
+        m_logLines += own;
+    }
+    QStringList lines = std::exchange(m_consumerLines, {});
+    lines += own;
+    return lines;
+}
+
+void LineQueue::flush() {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    flushLocked();
+}
+
+void LineQueue::flushAndTake(const std::function<void(QStringList lines)> &then) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    flushLocked();
+    then(std::exchange(m_consumerLines, {}));
+}
+
+void LineQueue::discard(const std::function<void()> &then) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    m_consumerLines.clear();
+    m_logLines.clear();
+    then();
+}
+
+void LineQueue::setConsumer(Wake wake, Sink sink) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_closed) {
+        return;
+    }
+    m_wake = std::move(wake);
+    m_sink = std::move(sink);
+    flushLocked();
+    if (!m_consumerLines.isEmpty() && m_wake) {
+        m_wake();
+    }
+}
+
+void LineQueue::close(const Rest &rest) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    closeLocked(rest);
+}
+
+void LineQueue::closeUnlessConsumed(const Rest &rest) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_sink) {
+        closeLocked(rest);
+    }
+}
+
+void LineQueue::flushLocked() {
+    if (m_sink && !m_logLines.isEmpty()) {
+        m_sink(std::exchange(m_logLines, {}));
+    }
+}
+
+void LineQueue::closeLocked(const Rest &rest) {
+    if (m_closed) {
+        return;
+    }
+    m_closed = true;
+    m_wake = nullptr;
+    m_sink = nullptr;
+    m_consumerLines.clear();
+    rest(std::exchange(m_logLines, {}));
 }
 
 Writer::Writer(Append append)

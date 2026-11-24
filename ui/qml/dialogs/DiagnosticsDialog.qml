@@ -47,9 +47,10 @@ Components.DialogWindow {
     }
 
     onAboutToShow: {
-        // From now on the bridge brings the lines logged (#743).
-        root.uiBridge.diagnosticsShown = true
+        // The reload takes the lines still queued into the text it opens
+        // with; from then on the bridge brings the lines logged (#743).
         root.uiBridge.reloadDiagnosticsFromDisk()
+        root.uiBridge.diagnosticsShown = true
         syncDiagnosticsText()
         diagnosticsLogView.forceActiveFocus(Qt.PopupFocusReason)
     }
